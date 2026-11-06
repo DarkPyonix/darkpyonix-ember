@@ -18,6 +18,7 @@ struct Shared {
     tree_sel: Signal<Option<(String, bool)>>,
     prompt: Signal<Option<crate::ui::editor::TreePrompt>>,
     prompt_text: Signal<String>,
+    prompt_at: Signal<u64>,
     theme: Signal<crate::ui::theme::ThemePref>,
     position: Signal<(usize, usize)>,
     stripes: Signal<Stripes>,
@@ -58,6 +59,7 @@ fn init(target: EditorTarget) {
     let theme = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().theme, root));
     let tree_sel = use_hook(|| Signal::new_in_scope(None::<(String, bool)>, root));
     let prompt = use_hook(|| Signal::new_in_scope(None::<crate::ui::editor::TreePrompt>, root));
+    let prompt_at = use_hook(|| Signal::new_in_scope(0u64, root));
     let prompt_text = use_hook(|| Signal::new_in_scope(String::new(), root));
     let bottom_max = use_hook(|| Signal::new_in_scope(false, root));
     let position = use_hook(|| Signal::new_in_scope((1, 1), root));
@@ -66,11 +68,24 @@ fn init(target: EditorTarget) {
     let keymap = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().keymap, root));
     let bridge = use_hook(|| Rc::new(RefCell::new(WidgetBridge::new())));
     let uris = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
     if dir == "/" { format!("/{name}") } else if dir.is_empty() { name.to_string() } else { format!("{}/{name}", dir.trim_end_matches('/')) }
+}
+
+/// The open files whose edits are not saved.
+fn unsaved_open_paths(s: &Shared) -> Vec<String> {
+    let bridge = s.bridge.borrow();
+    let uris = s.uris.borrow();
+    s.tabs
+        .read()
+        .paths()
+        .into_iter()
+        .filter(|p| uris.get(*p).and_then(|u| bridge.document(u)).is_some_and(|d| d.dirty))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn pos(p: compose_rust::code::Position) -> WidgetPos { WidgetPos::new(p.line, p.column) }
@@ -194,10 +209,29 @@ pub mod page {
     fn workbench_page() -> Element {
         let s = shared();
         let _ = *s.revision.read();
-        let (error, updates, edit_errors, gone) = {
+        let (error, updates, edit_errors, gone, renamed) = {
             let mut state = s.host.state.lock().unwrap();
-            (state.error.clone(), std::mem::take(&mut state.updates), std::mem::take(&mut state.edit_errors), std::mem::take(&mut state.gone))
+            (state.error.clone(), std::mem::take(&mut state.updates), std::mem::take(&mut state.edit_errors), std::mem::take(&mut state.gone), std::mem::take(&mut state.renamed))
         };
+        for (old, new) in renamed {
+            // The tabs below the renamed path follow it (clean ones only: a rename with unsaved
+            // changes is refused before it is sent); the session reopens them under the new name.
+            let current = s.tabs.read().current_path().map(str::to_owned);
+            let moved = { let mut tabs = s.tabs; tabs.write().rename_prefix(&old, &new) };
+            for (from, to) in moved {
+                s.host.send(HostCommand::Close(from.clone()));
+                s.host.send(HostCommand::Open(to.clone()));
+                if current.as_deref() == Some(from.as_str()) { s.host.send(HostCommand::Focus(to)); }
+            }
+            let mut expanded = s.expanded;
+            let remapped: Vec<String> = expanded.read().iter().filter(|p| crate::ui::editor::is_at_or_below(p, &old)).cloned().collect();
+            for p in remapped {
+                expanded.write().remove(&p);
+                expanded.write().insert(format!("{}{}", new.trim_end_matches('/'), &p[old.trim_end_matches('/').len()..]));
+            }
+            let mut tree_sel = s.tree_sel;
+            tree_sel.set(None);
+        }
         for message in edit_errors { notice(message); }
         for path in gone {
             let doomed: Vec<String> = s.tabs.read().paths().into_iter().filter(|tab| crate::ui::editor::is_at_or_below(tab, &path)).map(str::to_owned).collect();
@@ -206,6 +240,8 @@ pub mod page {
                 tabs.write().close(&tab);
                 s.host.send(HostCommand::Close(tab));
             }
+            let mut expanded = s.expanded;
+            expanded.write().retain(|p| !crate::ui::editor::is_at_or_below(p, &path));
             let mut tree_sel = s.tree_sel;
             tree_sel.set(None);
         }
@@ -471,6 +507,8 @@ pub mod page {
         let mut tree_sel = s.tree_sel;
         let mut prompt = s.prompt;
         let mut prompt_text = s.prompt_text;
+        let mut prompt_at = s.prompt_at;
+        let unsaved = super::unsaved_open_paths(s);
         let root = s.folder.clone();
         let rows = {
             let state = s.host.state.lock().unwrap();
@@ -506,13 +544,20 @@ pub mod page {
         let prompt_row = match pending.clone() {
             None => rsx! {},
             Some(TreePrompt::Delete { path, is_dir }) => {
-                let message = crate::ui::editor::delete_confirmation(&path, &root, is_dir);
+                let affected: Vec<String> = unsaved.iter().filter(|p| crate::ui::editor::is_at_or_below(p, &path)).cloned().collect();
+                let message = crate::ui::editor::delete_confirmation(&path, &root, is_dir, &affected);
                 let confirm = TreePrompt::Delete { path, is_dir };
+                // A deletion cannot be undone: the answer that is safe is the one a stray key or an early
+                // double click gives. Cancel is the default (Enter and Escape cancel), and a click on
+                // the delete button is ignored for the first 600 ms after the question appears.
                 rsx! {
-                    div { class: "ed-tn", role: "alertdialog", style: "--d:0; height:auto; flex-wrap:wrap; padding:var(--sp2); white-space:normal; background:var(--c-red-soft); color:var(--c-red);",
+                    div { class: "ed-tn", role: "alertdialog", tabindex: "0", style: "--d:0; height:auto; flex-wrap:wrap; padding:var(--sp2); white-space:normal; background:var(--c-red-soft); color:var(--c-red);",
+                        onkeydown: move |event| { if matches!(event.key(), Key::Enter | Key::Escape) { event.stop_propagation(); prompt.set(None); } },
                         div { style: "flex:1 1 100%;", "{message}" }
-                        button { class: "ed-pj", style: "background:var(--c-red); color:var(--ink-text);", onclick: move |_| submit_ok(confirm.clone()), "삭제" }
-                        button { class: "ed-pj", style: "border:1px solid var(--line); background:var(--surface);", onclick: move |_| prompt.set(None), "취소" }
+                        button { class: "ed-pj", style: "border:1px solid var(--line); background:var(--surface); color:var(--text);", autofocus: true, onclick: move |_| prompt.set(None), "취소" }
+                        button { class: "ed-pj", style: "background:var(--c-red); color:var(--ink-text);", onclick: move |_| {
+                            if crate::ui::editor::delete_click_allowed(*prompt_at.read(), now_ms()) { submit_ok(confirm.clone()); }
+                        }, "삭제" }
                     }
                 }
             }
@@ -562,6 +607,7 @@ pub mod page {
                             let rename_path = row.path.clone();
                             let delete_path = row.path.clone();
                             let rename_name = row.name.clone();
+                            let unsaved_for_rename = unsaved.clone();
                             rsx! { div { key: "{row.path}", class, role: "treeitem", style: "--d:{depth};",
                                 "aria-expanded": if is_dir { "{row.open}" } else { "" },
                                 onclick: move |_| {
@@ -578,9 +624,18 @@ pub mod page {
                                 if chosen {
                                     div { class: "spacer" }
                                     button { class: "ed-ib", title: "이름 변경", style: "width:22px; height:22px;",
-                                        onclick: move |event| { event.stop_propagation(); prompt_text.set(rename_name.clone()); prompt.set(Some(TreePrompt::Rename { path: rename_path.clone() })); }, {icon_px("edit", 13)} }
+                                        onclick: move |event| {
+                                            event.stop_propagation();
+                                            let blocked: Vec<String> = unsaved_for_rename.iter().filter(|p| crate::ui::editor::is_at_or_below(p, &rename_path)).cloned().collect();
+                                            if !blocked.is_empty() {
+                                                notice(format!("저장하지 않은 변경이 있어 이름을 바꿀 수 없습니다. 먼저 저장하세요: {}", blocked.iter().map(|p| base_name(p).to_string()).collect::<Vec<_>>().join(", ")));
+                                                return;
+                                            }
+                                            prompt_text.set(rename_name.clone());
+                                            prompt.set(Some(TreePrompt::Rename { path: rename_path.clone() }));
+                                        }, {icon_px("edit", 13)} }
                                     button { class: "ed-ib", title: "삭제", style: "width:22px; height:22px; color:var(--c-red);",
-                                        onclick: move |event| { event.stop_propagation(); prompt.set(Some(TreePrompt::Delete { path: delete_path.clone(), is_dir })); }, {icon_px("close", 13)} }
+                                        onclick: move |event| { event.stop_propagation(); prompt_at.set(now_ms()); prompt.set(Some(TreePrompt::Delete { path: delete_path.clone(), is_dir })); }, {icon_px("close", 13)} }
                                 }
                             } }
                         }

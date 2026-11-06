@@ -441,7 +441,50 @@ mod problems {
 
 // FR-L31 (D38, #438): explorer edits: where a new item goes, the delete wording, which tabs go.
 mod explorer_edit {
-    use ember_app::ui::editor::{delete_confirmation, is_at_or_below, new_item_parent};
+    use ember_app::ui::editor::{delete_click_allowed, delete_confirmation, edit_failure_text, is_at_or_below, new_item_parent, EditorTabs};
+
+    #[test]
+    fn fr_l31_delete_confirmation_warns_about_unsaved_changes_of_open_files() {
+        let text = delete_confirmation("/w/p/src", "/w/p", true, &["/w/p/src/a.rs".to_string(), "/w/p/src/deep/b.rs".to_string()]);
+        assert!(text.contains("저장하지 않은 변경이 있는 파일: src/a.rs, src/deep/b.rs"), "{text}");
+        assert!(text.contains("편집도 사라집니다"), "{text}");
+        assert!(!delete_confirmation("/w/p/a.rs", "/w/p", false, &[]).contains("저장하지 않은"));
+    }
+
+    #[test]
+    fn fr_l31_the_delete_button_ignores_clicks_in_the_first_600_ms() {
+        assert!(!delete_click_allowed(1_000, 1_000));
+        assert!(!delete_click_allowed(1_000, 1_599));
+        assert!(delete_click_allowed(1_000, 1_600));
+        assert!(!delete_click_allowed(5_000, 4_000), "a clock that went backwards does not allow it");
+    }
+
+    #[test]
+    fn fr_l31_failures_are_shown_in_korean_without_the_servers_english_text() {
+        let text = edit_failure_text("새 파일", "remote error: EntryExists (FileSystemError): File already exists");
+        assert_eq!(text, "새 파일 실패: 같은 이름이 이미 있습니다");
+        assert!(!edit_failure_text("삭제", "remote error: something odd happened").contains("odd"));
+        assert_eq!(edit_failure_text("이름 변경", "EACCES: permission denied"), "이름 변경 실패: 권한이 없습니다");
+    }
+
+    #[test]
+    fn fr_l31_renaming_a_directory_moves_the_tabs_below_it_in_place_with_their_dirty_marks() {
+        let mut tabs = EditorTabs::default();
+        tabs.open("/w/p/src/a.rs");
+        tabs.open("/w/p/other.rs");
+        tabs.open("/w/p/src/deep/b.rs");
+        tabs.set_dirty("/w/p/src/deep/b.rs", true);
+        tabs.activate("/w/p/src/a.rs");
+        let moved = tabs.rename_prefix("/w/p/src", "/w/p/lib");
+        assert_eq!(moved, vec![
+            ("/w/p/src/a.rs".to_string(), "/w/p/lib/a.rs".to_string()),
+            ("/w/p/src/deep/b.rs".to_string(), "/w/p/lib/deep/b.rs".to_string()),
+        ]);
+        assert_eq!(tabs.paths(), vec!["/w/p/lib/a.rs", "/w/p/other.rs", "/w/p/lib/deep/b.rs"]);
+        assert!(tabs.is_dirty("/w/p/lib/deep/b.rs"));
+        assert_eq!(tabs.current_path(), Some("/w/p/lib/a.rs"));
+        assert!(tabs.rename_prefix("/w/p/src2", "/w/p/x").is_empty(), "a sibling that shares a prefix is not touched");
+    }
 
     #[test]
     fn fr_l31_new_item_goes_in_the_selected_directory_or_beside_the_selected_file() {
@@ -453,9 +496,9 @@ mod explorer_edit {
 
     #[test]
     fn fr_l31_delete_confirmation_says_it_cannot_be_undone_and_names_the_contents_of_a_folder() {
-        let file = delete_confirmation("/w/p/src/a.rs", "/w/p", false);
+        let file = delete_confirmation("/w/p/src/a.rs", "/w/p", false, &[]);
         assert!(file.contains("src/a.rs") && file.contains("되돌릴 수 없습니다"), "{file}");
-        let dir = delete_confirmation("/w/p/src", "/w/p", true);
+        let dir = delete_confirmation("/w/p/src", "/w/p", true, &[]);
         assert!(dir.contains("그 안의 모든 파일") && dir.contains("되돌릴 수 없습니다"), "{dir}");
     }
 

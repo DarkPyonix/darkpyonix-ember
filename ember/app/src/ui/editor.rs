@@ -85,6 +85,21 @@ impl EditorTabs {
         };
     }
 
+    /// A path was renamed: every tab at or below `old` takes the matching path below `new`, keeping its
+    /// place and its dirty mark. Returns the (old, new) pairs of the tabs that moved.
+    pub fn rename_prefix(&mut self, old: &str, new: &str) -> Vec<(String, String)> {
+        let old = old.trim_end_matches('/');
+        let new = new.trim_end_matches('/');
+        let mut moved = Vec::new();
+        for (path, _) in &mut self.tabs {
+            if is_at_or_below(path, old) {
+                let renamed = format!("{new}{}", &path[old.len()..]);
+                moved.push((std::mem::replace(path, renamed.clone()), renamed));
+            }
+        }
+        moved
+    }
+
     pub fn set_dirty(&mut self, path: &str, dirty: bool) {
         if let Some(i) = self.index(path) {
             self.tabs[i].1 = dirty;
@@ -225,14 +240,47 @@ pub fn new_item_parent(selected: Option<(&str, bool)>, root: &str) -> String {
 }
 
 /// What the delete confirmation says. There is no trash, so it says the deletion cannot be undone,
-/// and a directory is deleted with everything in it.
-pub fn delete_confirmation(path: &str, folder: &str, is_dir: bool) -> String {
+/// a directory goes with everything in it, and which open files have unsaved changes that go too.
+pub fn delete_confirmation(path: &str, folder: &str, is_dir: bool, unsaved: &[String]) -> String {
     let name = breadcrumb_segments(path, folder).join("/");
-    if is_dir {
+    let mut text = if is_dir {
         format!("폴더 {name}와 그 안의 모든 파일을 삭제할까요? 휴지통이 없어 되돌릴 수 없습니다.")
     } else {
         format!("파일 {name}을 삭제할까요? 휴지통이 없어 되돌릴 수 없습니다.")
+    };
+    if !unsaved.is_empty() {
+        let names: Vec<String> = unsaved.iter().map(|p| breadcrumb_segments(p, folder).join("/")).collect();
+        text.push_str(&format!(" 저장하지 않은 변경이 있는 파일: {}. 삭제하면 그 편집도 사라집니다.", names.join(", ")));
     }
+    text
+}
+
+/// Why an explorer edit failed, in Korean: the server's own English text is not shown, only what kind
+/// of failure it was.
+pub fn edit_failure_text(action: &str, detail: &str) -> String {
+    let d = detail.to_lowercase();
+    let reason = if d.contains("exists") || d.contains("eexist") {
+        "같은 이름이 이미 있습니다"
+    } else if d.contains("not found") || d.contains("enoent") || d.contains("does not exist") {
+        "대상을 찾을 수 없습니다"
+    } else if d.contains("permission") || d.contains("eacces") || d.contains("eperm") {
+        "권한이 없습니다"
+    } else if d.contains("not empty") || d.contains("enotempty") {
+        "폴더가 비어 있지 않습니다"
+    } else if d.contains("closed") || d.contains("timed out") || d.contains("connection") {
+        "서버와의 연결이 끊겼습니다"
+    } else {
+        "서버가 요청을 처리하지 못했습니다"
+    };
+    format!("{action} 실패: {reason}")
+}
+
+/// The delete button answers only once the question has been on screen for 600 ms, so a stray double
+/// click that opened it cannot also confirm it.
+pub const DELETE_GUARD_MS: u64 = 600;
+
+pub fn delete_click_allowed(opened_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(opened_ms) >= DELETE_GUARD_MS
 }
 
 /// Whether closing `tab` is needed after `gone` was deleted or renamed: it is that path or below it.

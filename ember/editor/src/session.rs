@@ -279,10 +279,20 @@ impl EditorSession {
         self.fs.stat(uri).await.map_err(Error::Conn)
     }
 
+    /// Refuses a directory that is a symbolic link: an item made in it would land wherever the link points.
+    async fn refuse_symlink_parent(&self, parent: &str) -> Result<(), Error> {
+        let stat = self.fs.stat(&self.uri(parent)).await.map_err(Error::Conn)?;
+        if stat.file_type & ember_editor_conn::remote_fs::file_type::SYMBOLIC_LINK != 0 {
+            return Err(Error::Path(crate::paths::PathError::Symlink));
+        }
+        Ok(())
+    }
+
     /// Creates an empty file named `name` in the directory `parent`. Never overwrites: an existing
     /// file is an error. Returns the new path.
     pub async fn create_file(&self, parent: &str, name: &str) -> Result<String, Error> {
         let path = crate::paths::child_path(&self.workspace_path, parent, name).map_err(Error::Path)?;
+        self.refuse_symlink_parent(parent).await?;
         let opts = WriteOptions { create: true, overwrite: false, unlock: false, atomic: false };
         self.fs.write_file(&self.uri(&path), Vec::new(), &opts).await.map_err(Error::Conn)?;
         Ok(path)
@@ -291,11 +301,13 @@ impl EditorSession {
     /// Creates a directory named `name` in the directory `parent`. Returns the new path.
     pub async fn create_dir(&self, parent: &str, name: &str) -> Result<String, Error> {
         let path = crate::paths::child_path(&self.workspace_path, parent, name).map_err(Error::Path)?;
+        self.refuse_symlink_parent(parent).await?;
         self.fs.mkdir(&self.uri(&path)).await.map_err(Error::Conn)?;
         Ok(path)
     }
 
-    /// Renames `path` to `new_name` in the same directory. Never overwrites. Returns the new path.
+    /// Renames `path` to `new_name` in the same directory. Never overwrites. A symbolic link is
+    /// renamed itself. Returns the new path.
     pub async fn rename_path(&self, path: &str, new_name: &str) -> Result<String, Error> {
         let to = crate::paths::renamed_path(&self.workspace_path, path, new_name).map_err(Error::Path)?;
         let from = crate::paths::target_path(&self.workspace_path, path).map_err(Error::Path)?;
@@ -304,10 +316,12 @@ impl EditorSession {
     }
 
     /// Deletes one file or directory (a directory with everything in it). There is no trash: it
-    /// cannot be undone.
+    /// cannot be undone. A symbolic link is removed itself and never recursed into.
     pub async fn delete_path(&self, path: &str, is_dir: bool) -> Result<(), Error> {
         let path = crate::paths::target_path(&self.workspace_path, path).map_err(Error::Path)?;
-        let opts = ember_editor_conn::remote_fs::DeleteOptions { recursive: is_dir, use_trash: false, atomic: false };
+        let stat = self.fs.stat(&self.uri(&path)).await.map_err(Error::Conn)?;
+        let is_link = stat.file_type & ember_editor_conn::remote_fs::file_type::SYMBOLIC_LINK != 0;
+        let opts = ember_editor_conn::remote_fs::DeleteOptions { recursive: is_dir && !is_link, use_trash: false, atomic: false };
         self.fs.delete(&self.uri(&path), &opts).await.map_err(Error::Conn)
     }
 

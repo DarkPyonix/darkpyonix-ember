@@ -287,6 +287,25 @@ async fn live_session_explorer_create_rename_delete() {
     session.delete_path(&dir, true).await.expect("delete directory");
     assert!(!ws.join("sub").exists());
 
+    // Symbolic links: a link is renamed and deleted as itself, never followed, and nothing is made inside one.
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("precious.txt"), "do not touch").unwrap();
+    let link = ws.join("link");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    let link_str = link.to_str().unwrap().to_string();
+    assert!(
+        matches!(session.create_file(&link_str, "x.txt").await, Err(ember_editor::Error::Path(ember_editor::paths::PathError::Symlink))),
+        "nothing is created inside a symlinked directory"
+    );
+    assert!(!outside.join("x.txt").exists());
+    let moved = session.rename_path(&link_str, "link2").await.expect("rename the link itself");
+    assert!(std::fs::symlink_metadata(ws.join("link2")).unwrap().file_type().is_symlink());
+    assert!(!ws.join("link").exists() && outside.join("precious.txt").is_file());
+    session.delete_path(&moved, true).await.expect("delete the link");
+    assert!(std::fs::symlink_metadata(ws.join("link2")).is_err(), "the link is gone");
+    assert_eq!(std::fs::read_to_string(outside.join("precious.txt")).unwrap(), "do not touch", "what the link pointed at is untouched");
+
     // Paths the explorer must not touch are refused before anything is sent.
     use ember_editor::paths::PathError;
     let refused = |r: Result<String, ember_editor::Error>| matches!(r, Err(ember_editor::Error::Path(_)));

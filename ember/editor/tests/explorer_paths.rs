@@ -24,7 +24,8 @@ fn child_path_joins_a_valid_name_below_a_directory_inside_the_folder() {
 
 #[test]
 fn child_path_rejects_bad_names() {
-    for name in ["", " ", ".", "..", "a/b", "a\0b", "../x"] {
+    let long = "x".repeat(256);
+    for name in ["", " ", ".", "..", "a/b", "a\0b", "../x", "a\\b", "a.", " a", "a ", "a\nb", long.as_str()] {
         assert_eq!(child_path(FOLDER, "/w/p", name), Err(PathError::BadName), "name {name:?}");
     }
 }
@@ -52,4 +53,16 @@ fn renamed_path_keeps_the_directory_and_changes_the_name() {
     assert_eq!(renamed_path(FOLDER, "/w/p/src", "lib"), Ok("/w/p/lib".to_string()));
     assert_eq!(renamed_path(FOLDER, "/w/p", "x"), Err(PathError::FolderRoot));
     assert_eq!(renamed_path(FOLDER, "/w/p/a.rs", "../b.rs"), Err(PathError::BadName));
+}
+
+#[test]
+fn renamed_path_refuses_the_same_name() {
+    assert_eq!(renamed_path(FOLDER, "/w/p/a.rs", "a.rs"), Err(PathError::SameName));
+}
+
+#[test]
+fn child_path_allows_ordinary_names_with_dots_and_spaces_inside() {
+    for name in [".gitignore", "a b.txt", "한글.md", "x.tar.gz", "a-b_c"] {
+        assert!(child_path(FOLDER, "/w/p", name).is_ok(), "name {name:?}");
+    }
 }

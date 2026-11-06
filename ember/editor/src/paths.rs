@@ -14,6 +14,10 @@ pub enum PathError {
     OutsideFolder,
     /// The path is the project folder itself.
     FolderRoot,
+    /// The directory is a symbolic link: an item made in it would land wherever the link points.
+    Symlink,
+    /// The new name is the old name.
+    SameName,
 }
 
 impl std::fmt::Display for PathError {
@@ -22,6 +26,8 @@ impl std::fmt::Display for PathError {
             PathError::BadName => "이름이 올바르지 않습니다. 비어 있거나 / 가 들어 있으면 안 됩니다",
             PathError::OutsideFolder => "프로젝트 폴더 밖의 경로입니다",
             PathError::FolderRoot => "프로젝트 폴더 자체는 바꿀 수 없습니다",
+            PathError::Symlink => "심볼릭 링크 폴더 안에는 만들 수 없습니다",
+            PathError::SameName => "이름이 그대로입니다",
         })
     }
 }
@@ -52,7 +58,13 @@ fn inside(folder: &str, path: &str) -> bool {
 
 fn valid_name(name: &str) -> bool {
     let trimmed = name.trim();
-    !(trimmed.is_empty() || trimmed == "." || trimmed == ".." || name.contains('/') || name.contains('\0'))
+    !(trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || name.len() > 255
+        || name != trimmed
+        || name.ends_with('.')
+        || name.chars().any(|c| c == '/' || c == '\\' || c.is_control()))
 }
 
 /// `name` below the directory `parent`, which must be the project `folder` or inside it.
@@ -87,6 +99,9 @@ pub fn renamed_path(folder: &str, path: &str, new_name: &str) -> Result<String, 
     if !valid_name(new_name) {
         return Err(PathError::BadName);
     }
-    let parent = path.rsplit_once('/').map(|(p, _)| if p.is_empty() { "/" } else { p }).unwrap_or("/");
+    let (parent, old_name) = path.rsplit_once('/').map(|(p, n)| (if p.is_empty() { "/" } else { p }, n)).unwrap_or(("/", ""));
+    if new_name == old_name {
+        return Err(PathError::SameName);
+    }
     child_path(folder, parent, new_name)
 }

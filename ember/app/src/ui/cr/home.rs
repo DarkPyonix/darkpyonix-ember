@@ -16,7 +16,7 @@ use compose_rust::{Alignment, ButtonVariant, Color, DrawList, Paint, IconRole, S
 
 pub use crate::ui::home::{
     apply_suggestion, can_send, computers_line, default_mode, effective_message, filter_models,
-    harness_block, kpis, mode_after_harness_change, mode_header, mode_picker_rows_pending, mode_tap, popover_width, model_catalog, modes_for, needs_approve_all,
+    harness_block, kpis, mode_after_harness_change, composer_chip_budget, composer_chip_rows, composer_chip_width, mode_header, mode_picker_rows_pending, mode_tap, popover_width, model_catalog, modes_for, needs_approve_all,
     project_options, project_tile_line, resolve_cwd, shortcut_label, split_chip_rows,
     success_percent, title_from_message, CrewMember, Dash, Harness, HarnessBar, Kpi, ModelOption,
     ModeRow, PermMode, ProjectTile, Selection, StatusCounts, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
@@ -42,7 +42,6 @@ pub type Part<'a> = Box<dyn FnOnce() + 'a>;
 /// The width of the option popups of the composer's chips.
 const POPUP_WIDTH: f32 = 280.0;
 /// The permission popup is wider: each row carries a description line.
-const MODE_POPUP_WIDTH: f32 = 340.0;
 /// The permission popover (mockup `.mp-pop.mp-mode`).
 const MODE_POPOVER_WIDTH: f32 = 340.0;
 /// The model popover: a rail of harnesses beside the search and the rows.
@@ -56,9 +55,11 @@ const MODEL_RAIL_WIDTH: f32 = 128.0;
 fn ModeBody(header: &str, rows: &[ModeRow], width: f32, on_tap: impl FnMut(usize) + Clone + 'static) {
     let p = ember_theme().palette;
     cu::Column().modifier(Modifier::new().width(width)).content(|| {
-        cu::Row().modifier(Modifier::new().width(width).padding(SP[2])).content(|| {
-            Label(header, Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1));
-        });
+        if !header.is_empty() {
+            cu::Row().modifier(Modifier::new().width(width).padding(SP[2])).content(|| {
+                Label(header, Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1));
+            });
+        }
         for (i, r) in rows.iter().enumerate() {
             let mut tap = on_tap.clone();
             let bg = if r.chosen { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
@@ -88,28 +89,19 @@ fn ModeBody(header: &str, rows: &[ModeRow], width: f32, on_tap: impl FnMut(usize
     });
 }
 
-/// The permission picker as a modal (compact widths: the spec's bottom sheet).
+/// The permission picker as a bottom sheet at 560 and below (the shared sheet, FR-L32), with
+/// the same header, rows and bypass confirmation as the popover.
 fn ModeSheet(
     open: bool,
     header: &str,
     rows: &[ModeRow],
-    width: f32,
     on_dismiss: impl FnMut() + Clone + 'static,
     on_tap: impl FnMut(usize) + Clone + 'static,
 ) {
-    let theme = ember_theme();
-    let p = theme.palette;
-    cu::Dialog(open)
-        .modifier(
-            with_shadows(Modifier::new(), theme.shadow_lg())
-                .width(width + 2.0 * SP[0])
-                .background(paint(p.surface))
-                .border(1.0, paint(p.line))
-                .corner_radius(CORNER_MD)
-                .padding(SP[0]),
-        )
-        .on_dismiss(on_dismiss)
-        .content(|| ModeBody(header, rows, width, on_tap));
+    let width = (compose_rust::runtime::current_window_size().width_dp - 2.0 * SP[3]).max(240.0);
+    EmberSheet(header, open, on_dismiss, None, || {
+        cu::Box().modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| ModeBody("", rows, width - 2.0 * SP[1], on_tap));
+    });
 }
 
 macro_rules! line_icon {
@@ -652,7 +644,6 @@ impl Composer {
                 open == Some(Pick::Mode),
                 &mode_header(sel.option.harness),
                 &mode_picker_rows_pending(sel.option.harness, sel.mode, self.mode_pending.get()),
-                MODE_POPUP_WIDTH,
                 dismiss,
                 move |i| me.tap_mode(i),
             );
@@ -980,7 +971,9 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     let mode_text = sel.mode.label().to_string();
     let chip = |text: &str, icon: IconRole, pick: Pick, selected: bool| {
         let open = c.open.clone();
-        ComposerChip(text, icon, selected, icon_only && pick != Pick::Project, !icon_only || pick == Pick::Project, move || open.set(Some(pick)));
+        // Wide chips are content-sized, their text cut to the budget; only the compact project
+        // chip takes the rest of the row.
+        ComposerChip(text, icon, selected, icon_only && pick != Pick::Project, icon_only && pick == Pick::Project, move || open.set(Some(pick)));
     };
     let add = || {
         // TODO(FR-L11): attachments need the file picker and an upload API.
@@ -1035,32 +1028,62 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                 }
                 cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                     cu::Box().modifier(Modifier::new().size(36.0, 36.0)).content(add);
-                    cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().weight(1.0).clip(true)).content(|| {
-                        chip(&sel.project, IconRole::Library, Pick::Project, false);
-                        if l.compact {
-                            chip(&model_text, IconRole::Compose, Pick::Model, false);
-                        } else {
-                            let close = {
-                                let o = c.open.clone();
-                                move || o.set(None)
-                            };
-                            c.model_popover(ui, &sel, || chip(&model_text, IconRole::Compose, Pick::Model, false), close);
-                        }
+                    cu::Column().spacing(SP[0]).modifier(Modifier::new().weight(1.0).clip(true)).content(|| {
                         // Bypass draws the chip in the warning state (mockup `.mdpick.warn`).
-                        let mode_chip = || {
-                            if sel.mode.is_bypass() {
-                                let open = c.open.clone();
-                                WarnChip(&mode_text, icon_only, move || open.set(Some(Pick::Mode)));
-                            } else {
-                                chip(&mode_text, IconRole::Settings, Pick::Mode, false);
+                        let chip_at = |i: usize, text: &str| match i {
+                            0 => chip(text, IconRole::Library, Pick::Project, false),
+                            1 => {
+                                let close = {
+                                    let o = c.open.clone();
+                                    move || o.set(None)
+                                };
+                                let one = || chip(text, IconRole::Compose, Pick::Model, false);
+                                if l.compact {
+                                    one();
+                                } else {
+                                    c.model_popover(ui, &sel, one, close);
+                                }
                             }
+                            2 => {
+                                let one = || {
+                                    if sel.mode.is_bypass() {
+                                        let open = c.open.clone();
+                                        WarnChip(text, icon_only, move || open.set(Some(Pick::Mode)));
+                                    } else {
+                                        chip(text, IconRole::Settings, Pick::Mode, false);
+                                    }
+                                };
+                                if l.compact {
+                                    one();
+                                } else {
+                                    c.mode_popover(&sel, one);
+                                }
+                            }
+                            _ => chip(text, IconRole::Sidebar, Pick::Computer, false),
                         };
+                        let texts = [sel.project.clone(), model_text.clone(), mode_text.clone(), computer_text.clone()];
                         if l.compact {
-                            mode_chip();
+                            cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                                for (i, t) in texts.iter().enumerate() {
+                                    chip_at(i, t);
+                                }
+                            });
                         } else {
-                            c.mode_popover(&sel, mode_chip);
+                            let fitted: Vec<String> = texts
+                                .iter()
+                                .zip(composer_chip_budget(w))
+                                .map(|(t, b)| crate::ui::files::fit_chip_text(t, b))
+                                .collect();
+                            let widths: Vec<f32> = fitted.iter().map(|t| composer_chip_width(t)).collect();
+                            // A line per row of chips: a narrow card wraps rather than drops a chip.
+                            for row in composer_chip_rows(&widths, w) {
+                                cu::Row().spacing(gap).alignment(Alignment::CenterStart).content(|| {
+                                    for i in row {
+                                        chip_at(i, &fitted[i]);
+                                    }
+                                });
+                            }
                         }
-                        chip(&computer_text, IconRole::Sidebar, Pick::Computer, false);
                     });
                     if c.busy.get() {
                         cu::IndeterminateProgressIndicator().circular(true).modifier(Modifier::new().size(18.0, 18.0));

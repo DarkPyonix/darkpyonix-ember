@@ -60,10 +60,12 @@ pub enum Action {
     Ask,
     NewTerminal,
     MaximizeTool,
+    /// Find (and replace) in the open file.
+    FindInFile,
 }
 
 impl Action {
-    pub const ALL: [Action; 19] = [
+    pub const ALL: [Action; 20] = [
         Action::Project,
         Action::Commit,
         Action::Git,
@@ -83,6 +85,7 @@ impl Action {
         Action::Ask,
         Action::NewTerminal,
         Action::MaximizeTool,
+        Action::FindInFile,
     ];
 
     pub fn label(self) -> &'static str {
@@ -106,6 +109,7 @@ impl Action {
             Action::Ask => "에이전트에게 묻기",
             Action::NewTerminal => "새 터미널",
             Action::MaximizeTool => "최대화",
+            Action::FindInFile => "문서에서 찾기",
         }
     }
 }
@@ -233,7 +237,7 @@ impl Chord {
 /// `(action, macOS chord, other chord)`; an empty chord means no default binding.
 type Row = (Action, &'static str, &'static str);
 
-const VSCODE: [Row; 19] = [
+const VSCODE: [Row; 20] = [
     (Action::Project, "\u{21E7}\u{2318}E", "Ctrl+Shift+E"),
     // VS Code has no default for a commit window; the source control view shares Git's chord.
     (Action::Commit, "", ""),
@@ -254,9 +258,10 @@ const VSCODE: [Row; 19] = [
     (Action::Ask, "\u{2303}\u{2318}I", "Ctrl+Alt+I"),
     (Action::NewTerminal, "\u{2303}\u{21E7}`", "Ctrl+Shift+`"),
     (Action::MaximizeTool, "", ""),
+    (Action::FindInFile, "\u{2318}F", "Ctrl+F"),
 ];
 
-const JETBRAINS: [Row; 19] = [
+const JETBRAINS: [Row; 20] = [
     (Action::Project, "\u{2318}1", "Alt+1"),
     (Action::Commit, "\u{2318}0", "Alt+0"),
     (Action::Git, "\u{2318}9", "Alt+9"),
@@ -276,6 +281,7 @@ const JETBRAINS: [Row; 19] = [
     (Action::Ask, "", ""),
     (Action::NewTerminal, "\u{2318}T", "Ctrl+Shift+T"),
     (Action::MaximizeTool, "\u{21E7}\u{2318}'", "Ctrl+Shift+'"),
+    (Action::FindInFile, "\u{2318}F", "Ctrl+F"),
 ];
 
 impl Keymap {
@@ -303,7 +309,7 @@ impl Keymap {
         }
     }
 
-    fn table(self) -> &'static [Row; 19] {
+    fn table(self) -> &'static [Row; 20] {
         match self {
             Keymap::VsCode => &VSCODE,
             Keymap::JetBrains => &JETBRAINS,

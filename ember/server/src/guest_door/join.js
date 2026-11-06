@@ -9,6 +9,7 @@
   var STORE_KEY = "ember.guest";
   var MAX_BYTES = 8192;
   var POLL_MS = 3000;
+  var MAX_NODES = 500;
   var memorySession = null;
 
   var S = { cred: null, channelId: null, guestId: null, after: 0, timer: null, ended: false, busy: false };
@@ -120,16 +121,20 @@
     var who = document.createElement("span");
     who.classList.add("who");
     var when = typeof m.at === "number" ? new Date(m.at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }) : "";
-    who.textContent = String(m.name) + (when ? "  " + when : "");
+    who.textContent = String(m.name === undefined ? "?" : m.name) + (when ? "  " + when : "");
     var text = document.createElement("span");
-    text.textContent = String(m.text);
+    text.textContent = String(m.text === undefined ? "" : m.text);
     box.appendChild(who);
     box.appendChild(text);
     var log = $("log");
     var atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
     log.appendChild(box);
+    while (log.childElementCount > MAX_NODES) { log.removeChild(log.firstElementChild); }
     if (atBottom || m.you === true) { log.scrollTop = log.scrollHeight; }
   }
+
+  // Error back-off with 0..25% random jitter, bounded to 150 s.
+  function jitter(ms) { return Math.min(Math.floor(ms * (1 + 0.25 * Math.random())), 150000); }
 
   function schedule(ms) {
     stopPolling();
@@ -142,20 +147,24 @@
     if (S.ended) { return; }
     call("GET", "/api/guest/channels/" + encodeURIComponent(S.channelId) + "/messages?after=" + S.after, null, S.cred).then(function (r) {
       if (r.status === 401) { endInvitation(); return; }
-      if (r.status === 404) { S.ended = true; showEnded("채널을 찾을 수 없습니다."); return; }
-      if (r.status === 429) { schedule(backoffMs(r.retry)); return; }
+      if (r.status === 404) { S.ended = true; S.cred = null; clearSession(); showEnded("채널을 찾을 수 없습니다."); return; }
+      if (r.status === 429) { schedule(jitter(backoffMs(r.retry))); return; }
       if (r.status === 200 && Array.isArray(r.data)) {
         r.data.forEach(function (m) {
-          if (typeof m.seq === "number" && m.seq > S.after) { S.after = m.seq; addMessage(m); }
+          // A damaged item is skipped; one bad item never stops the poll loop.
+          try {
+            if (m === null || typeof m !== "object" || typeof m.seq !== "number") { return; }
+            if (m.seq > S.after) { S.after = m.seq; addMessage(m); }
+          } catch (e) { /* skip */ }
         });
         $("chaterr").textContent = "";
         schedule(POLL_MS);
         return;
       }
-      schedule(POLL_MS * 2);
+      schedule(jitter(POLL_MS * 2));
     }, function () {
       $("chaterr").textContent = "서버에 연결할 수 없습니다. 다시 시도하는 중입니다.";
-      schedule(POLL_MS * 2);
+      schedule(jitter(POLL_MS * 2));
     });
   }
 
@@ -164,6 +173,7 @@
   function enterChat() {
     call("GET", "/api/guest/channels/" + encodeURIComponent(S.channelId), null, S.cred).then(function (r) {
       if (r.status === 401) { endInvitation(); return; }
+      if (r.status === 404) { S.ended = true; S.cred = null; clearSession(); showEnded("채널을 찾을 수 없습니다."); return; }
       if (r.status !== 200 || !r.data) { showEnded("채널을 열 수 없습니다."); return; }
       $("chname").textContent = String(r.data.name);
       var members = Array.isArray(r.data.members) ? r.data.members : [];

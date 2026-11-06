@@ -1,4 +1,4 @@
-//! FR-T14: the guest page served at `GET /join` (written test first, not yet compiled or run).
+//! FR-T14: the guest page served at `GET /join` (written test first; compiled by CI; browser behaviour is UNVERIFIED until the owner checks it).
 //! The page is one inline script and one style block; the policy allows exactly those by SHA-256.
 //! Browser behaviour is checked by the owner by hand (see the PR text), not here.
 
@@ -13,7 +13,7 @@ use base64::Engine;
 use ember_server::agents::scripted::ScriptedAdapter;
 use ember_server::agents::AgentAdapter;
 use ember_server::channels::guest::{guest_router, GUEST_ROUTES};
-use ember_server::guest_door::{join_page, GuestDoor, JOIN_ROUTE};
+use ember_server::guest_door::{build_join_page_from, join_page, GuestDoor, JOIN_ROUTE};
 use ember_server::session::Sessions;
 use ember_server::store::Store;
 use http_body_util::BodyExt;
@@ -216,4 +216,31 @@ async fn fr_t14_join_page_stays_get_only_and_in_the_route_table() {
         let req = Request::builder().method(method).uri(path).header("host", "127.0.0.1:9000").body(Body::empty()).unwrap();
         assert_eq!(a.clone().oneshot(req).await.unwrap().status(), want, "{method} {path}");
     }
+}
+
+#[test]
+fn fr_t14_join_hash_is_of_the_lf_text_whatever_the_checkout_endings() {
+    let html = "<html><style>\na{b:c}\n</style><script>__JOIN_JS__</script></html>\n";
+    let js = "var a = 1;\nvar b = 2;\n";
+    let lf = build_join_page_from(html, js);
+    let crlf = build_join_page_from(&html.replace('\n', "\r\n"), &js.replace('\n', "\r\n"));
+    let cr = build_join_page_from(&html.replace('\n', "\r"), &js.replace('\n', "\r"));
+    assert_eq!(lf.csp, crlf.csp);
+    assert_eq!(lf.csp, cr.csp);
+    assert_eq!(lf.html, crlf.html);
+    assert!(!crlf.html.contains('\r') && !crlf.script.contains('\r'));
+    assert!(lf.csp.contains(&format!("script-src {};", source(js))));
+}
+
+#[tokio::test]
+async fn fr_t14_join_script_survives_bad_items_and_bounds_its_work() {
+    let (_, _, page) = get_join().await;
+    let script = between(&page, "<script>", "</script>");
+    // Damaged items are skipped, a 404 clears the credential, errors back off with jitter,
+    // and the log keeps at most 500 nodes.
+    assert!(script.contains("typeof m !== \"object\""));
+    assert!(script.contains("MAX_NODES = 500") && script.contains("removeChild"));
+    assert!(script.contains("function jitter") && script.contains("Math.random"));
+    let at404 = script.find("r.status === 404").unwrap();
+    assert!(script[at404..].contains("clearSession()"));
 }

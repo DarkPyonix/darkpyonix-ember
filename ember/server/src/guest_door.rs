@@ -109,7 +109,19 @@ fn sha256_source(text: &str) -> String {
 /// cannot drift from the content. `script-src` and `style-src` allow exactly those two texts and
 /// nothing else (no `unsafe-inline`, no `unsafe-eval`); requests go to the door itself only.
 fn build_join_page() -> JoinPage {
-    let html = JOIN_HTML.replacen(SCRIPT_MARK, JOIN_JS, 1);
+    build_join_page_from(JOIN_HTML, JOIN_JS)
+}
+
+/// Line endings as a browser sees them: CRLF and a lone CR become LF (the HTML parser does this
+/// to inline script text, so the hash must be of the LF text whatever the checkout's endings).
+pub fn normalize_eol(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// [`build_join_page`] over given texts (public so a test can feed CRLF input).
+pub fn build_join_page_from(html_template: &str, js: &str) -> JoinPage {
+    let js = normalize_eol(js);
+    let html = normalize_eol(html_template).replacen(SCRIPT_MARK, &js, 1);
     let style = {
         let s = html.find("<style>").expect("join.html has a style block") + "<style>".len();
         let e = html[s..].find("</style>").expect("style block closes") + s;
@@ -117,10 +129,10 @@ fn build_join_page() -> JoinPage {
     };
     let csp = format!(
         "default-src 'none'; script-src {}; style-src {}; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-        sha256_source(JOIN_JS),
+        sha256_source(&js),
         sha256_source(&style),
     );
-    JoinPage { html, script: JOIN_JS.to_string(), style, csp }
+    JoinPage { html, script: js, style, csp }
 }
 
 /// The `/join` page, built on first use (the door builds it at startup).

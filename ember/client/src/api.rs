@@ -1486,6 +1486,29 @@ mod project_patch_tests {
     }
 
     #[test]
+    fn fr_l26_profile_overrides_decode_with_tolerant_defaults() {
+        let p: Project = serde_json::from_value(json!({"name": "p", "profile_overrides": {"codex": "acc-1", "claude-code": null}})).unwrap();
+        assert_eq!(p.profile_overrides.get("codex"), Some(&Some("acc-1".to_string())));
+        assert_eq!(p.profile_overrides.get("claude-code"), Some(&None), "a deleted account reads as null");
+        let missing: Project = serde_json::from_value(json!({"name": "p"})).unwrap();
+        assert!(missing.profile_overrides.is_empty());
+        let null: Project = serde_json::from_value(json!({"name": "p", "profile_overrides": null})).unwrap();
+        assert!(null.profile_overrides.is_empty());
+    }
+
+    #[test]
+    fn fr_l26_profile_overrides_patch_sends_the_whole_object_or_nothing() {
+        assert_eq!(serde_json::to_value(ProjectPatch::default()).unwrap(), json!({}));
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("codex".to_string(), Some("acc-1".to_string()));
+        let p = ProjectPatch { profile_overrides: Some(m), ..Default::default() };
+        assert!(!p.is_empty());
+        assert_eq!(serde_json::to_value(&p).unwrap(), json!({"profile_overrides": {"codex": "acc-1"}}));
+        let p = ProjectPatch { profile_overrides: Some(Default::default()), ..Default::default() };
+        assert_eq!(serde_json::to_value(&p).unwrap(), json!({"profile_overrides": {}}), "an empty map clears all");
+    }
+
+    #[test]
     fn fr_l26_a_refusal_keeps_status_and_code() {
         let e = ProjectPatchError::from_answer(409, br#"{"error":"name taken","code":"name_taken"}"#);
         assert_eq!((e.status(), e.code()), (Some(409), Some("name_taken")));

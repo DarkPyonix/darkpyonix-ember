@@ -32,6 +32,7 @@ fn descriptions() -> Vec<Value> {
                     {"language": "typescript", "scopeName": "source.ts", "path": "./TypeScript.tmLanguage.json"},
                     {"language": "python", "scopeName": "source.python", "path": "./MagicPython.tmLanguage.json"},
                     {"scopeName": "source.regexp.python", "path": "./MagicRegExp.tmLanguage.json"},
+                    {"scopeName": "documentation.injection.ts", "path": "./jsdoc.ts.injection.tmLanguage.json", "injectTo": ["source.ts", "source.tsx"]},
                 ]
             }
         }),
@@ -200,6 +201,7 @@ fn build_job(key: &str, seq: u64, text: &str) -> HighlightJob {
         seq,
         root_scope: "source.ts".to_owned(),
         grammars: vec![("source.ts".to_owned(), "/g/TypeScript.tmLanguage.json".to_owned(), read("TypeScript.tmLanguage.json"))],
+        injectors: Vec::new(),
         text: text.to_owned(),
         version: 0,
         window: (0, 300),
@@ -240,6 +242,7 @@ fn fr_e6_a_grammar_that_is_missing_turns_highlighting_off_without_a_crash() {
         seq: 1,
         root_scope: "source.none".into(),
         grammars: Vec::new(),
+        injectors: Vec::new(),
         text: "x".into(),
         version: 0,
         window: (0, 10),
@@ -345,10 +348,26 @@ fn fr_e6_a_grammar_that_failed_to_read_is_tried_again_when_the_next_file_opens()
     };
     let effects = core.handle(t0, Input::FileRead { uri: uri("/w/a.ts"), purpose: ReadPurpose::Open, result: Ok(b"let a;\n".to_vec()) });
     let first = reads(&effects);
-    assert_eq!(first.len(), 1);
-    // The read fails.
-    core.handle(t0, Input::FileRead { uri: first[0].0.clone(), purpose: ReadPurpose::Grammar { scope: first[0].1.clone() }, result: Err("busy".into()) });
-    // The next file of the language asks again.
+    // The language's grammar and the JSDoc grammar injected into it are both asked for.
+    let root = first.iter().find(|(_, scope)| scope == "source.ts").expect("the language's own grammar is read").clone();
+    assert_eq!(first.len(), 2, "{first:?}");
+    // The read of the language's grammar fails.
+    core.handle(t0, Input::FileRead { uri: root.0.clone(), purpose: ReadPurpose::Grammar { scope: root.1.clone() }, result: Err("busy".into()) });
+    // The next file of the language asks again for what failed.
     let effects = core.handle(t0, Input::FileRead { uri: uri("/w/b.ts"), purpose: ReadPurpose::Open, result: Ok(b"let b;\n".to_vec()) });
-    assert_eq!(reads(&effects).len(), 1, "the failed grammar is requested again");
+    let again = reads(&effects);
+    assert!(again.iter().any(|(_, scope)| scope == "source.ts"), "the failed grammar is requested again: {again:?}");
+}
+
+#[test]
+fn fr_e6_the_grammars_injected_into_a_language_are_read_and_sent_with_the_build() {
+    let mut d = Driver::new();
+    d.open("/w/a.ts", "/** doc */\nlet a;\n");
+    assert!(d.reads.contains(&"documentation.injection.ts".to_owned()), "reads: {:?}", d.reads);
+    let injectors = d.jobs.iter().find_map(|j| match j {
+        HighlightJob::Build { injectors, .. } => Some(injectors.clone()),
+        _ => None,
+    });
+    assert_eq!(injectors, Some(vec!["documentation.injection.ts".to_owned()]));
+    assert_eq!(role_at(d.last_runs(), 1, 0), Some(SyntaxRole::Keyword), "and the file is coloured");
 }

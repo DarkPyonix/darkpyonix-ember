@@ -36,6 +36,7 @@ pub mod hub;
 pub mod jobs;
 pub mod metrics;
 pub mod policy;
+pub mod ports;
 pub mod proto;
 pub mod term;
 pub mod transport;

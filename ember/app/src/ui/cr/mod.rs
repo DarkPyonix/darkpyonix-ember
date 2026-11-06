@@ -14,6 +14,7 @@ pub mod new_session;
 pub mod ko;
 pub mod characters;
 pub mod monitor;
+pub mod channel_owner;
 pub mod channels;
 pub mod home;
 pub mod project;

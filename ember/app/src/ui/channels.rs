@@ -31,6 +31,10 @@ pub struct Message {
     pub text: String,
     pub at: i64,
     pub unread: u32,
+    /// The server's display name of the author (FR-T15); empty on an older server.
+    pub author_name: String,
+    /// `person`, `agent`, `guest` or `system`; empty on an older server.
+    pub author_kind: String,
 }
 
 /// One channel.
@@ -154,7 +158,15 @@ pub fn member_from(m: &ember_client::channels::Member) -> Member {
 
 pub fn message_from(m: &ember_client::channels::ChannelMessage) -> Message {
     let id = if m.id.is_empty() { m.seq.to_string() } else { m.id.clone() };
-    Message { id, from: m.from.clone(), text: m.text.clone(), at: m.at, unread: m.unread }
+    Message {
+        id,
+        from: m.from.clone(),
+        text: m.text.clone(),
+        at: m.at,
+        unread: m.unread,
+        author_name: m.author_name.clone(),
+        author_kind: m.author_kind.clone(),
+    }
 }
 
 /// A server channel as a room. A list answer has no `messages`; its `last_message` stands in so
@@ -339,6 +351,8 @@ pub struct BubbleView {
     /// Draw the picture (the first bubble of a run from someone else).
     pub show_avatar: bool,
     pub is_agent: bool,
+    /// A guest's message (FR-T15): the name is the guest's display name and a 게스트 tag shows.
+    pub guest: bool,
     pub text: String,
     pub time: String,
     pub unread: Option<u32>,
@@ -396,14 +410,19 @@ pub fn feed(room: &Room, me: &str, tz: i64) -> Vec<FeedItem> {
         let continues = !new_day
             && prev.is_some_and(|p| p.from == m.from && p.at.div_euclid(60) == m.at.div_euclid(60));
         let member = room.member(&m.from);
+        let guest_name = crate::ui::channel_owner::guest_author_label(&m.from, &m.author_name, &m.author_kind);
         let first_of_other = side == Side::Left && !continues;
         out.push(FeedItem::Bubble(BubbleView {
             id: m.id.clone(),
             side,
             from: m.from.clone(),
-            name: first_of_other.then(|| member.map(|x| x.name.clone()).unwrap_or(m.from.clone())),
+            name: first_of_other.then(|| match &guest_name {
+                Some(g) => g.clone(),
+                None => member.map(|x| x.name.clone()).unwrap_or(m.from.clone()),
+            }),
             show_avatar: first_of_other,
             is_agent: member.is_some_and(|x| x.is_agent),
+            guest: guest_name.is_some(),
             text: m.text.clone(),
             time: time_label(m.at, tz),
             unread: (m.unread > 0).then_some(m.unread),
@@ -465,6 +484,8 @@ mod tests {
             text: text.into(),
             at,
             unread,
+            author_name: String::new(),
+            author_kind: String::new(),
         }
     }
 
@@ -657,6 +678,21 @@ mod tests {
     #[test]
     fn fr_l12_no_rooms_are_invented() {
         assert!(rooms_snapshot().is_empty());
+    }
+
+    #[test]
+    fn fr_t15_a_guest_bubble_shows_the_name_and_tag_never_the_id() {
+        let mut m = msg("m1", "guest:g7", "안녕하세요", 100, 0);
+        m.author_name = "민수".into();
+        m.author_kind = "guest".into();
+        let mut nameless = msg("m2", "guest:g8", "저도요", 4000, 0);
+        nameless.author_kind = "guest".into();
+        let r = room("c", "ember", 0, vec![m, nameless]);
+        let items = feed(&r, USER_ID, 0);
+        let bubbles: Vec<&BubbleView> = items.iter().filter_map(|i| if let FeedItem::Bubble(b) = i { Some(b) } else { None }).collect();
+        assert_eq!(bubbles[0].name.as_deref(), Some("민수"));
+        assert_eq!(bubbles[1].name.as_deref(), Some("게스트"));
+        assert!(bubbles.iter().all(|b| b.guest && !b.name.clone().unwrap_or_default().contains("guest:")));
     }
 }
 

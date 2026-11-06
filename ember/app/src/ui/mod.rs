@@ -10,6 +10,7 @@ pub mod coexist;
 pub mod cr;
 pub mod compat;
 pub mod agents;
+pub mod channel_owner;
 pub mod channels;
 pub mod components;
 pub mod conversation;

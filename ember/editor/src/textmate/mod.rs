@@ -4,10 +4,16 @@
 //! none is bundled. This module reads them: [`catalog`] lists which extension offers which grammar
 //! (scope name, language id, file, injection targets) from the `scanExtensions` descriptions, and
 //! [`grammar`] parses one grammar file into the raw rule model. The interpreter that runs the rules
-//! builds on this model and comes in a later change.
+//! builds on this model: [`interpreter`] compiles grammars and tokenizes a line at a time.
 
 pub mod catalog;
 pub mod grammar;
+pub mod interpreter;
+pub mod roles;
+pub mod tokens;
 
 pub use catalog::{GrammarCatalog, GrammarEntry};
-pub use grammar::{parse_grammar, read_grammar, GrammarError, RawGrammar, RawRule, MAX_DEPTH, MAX_GRAMMAR_BYTES, MAX_RULES};
+pub use roles::{role_for_scopes, SyntaxRole};
+pub use tokens::{Changed, ColorRun, DocRun, DocumentTokens, EditError, TooLarge, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_LINES};
+pub use interpreter::{Grammar, GrammarSet, LineTokens, Scope, StateStack, Token, MAX_COMPILED_RULES, MAX_LINE_BYTES, MAX_STACK_DEPTH};
+pub use grammar::{parse_grammar, read_grammar, GrammarError, RawGrammar, RawRule, MAX_GRAMMAR_BYTES, MAX_RULES};

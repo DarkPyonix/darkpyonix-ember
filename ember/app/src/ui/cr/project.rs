@@ -19,7 +19,7 @@ use ember_client::wire::Project;
 use ember_client::LauncherStatus;
 
 pub use crate::ui::project::{
-    agent_options, build_patch, chip_line, computer_chips, danger_allowed, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
+    agent_options, build_patch, deck_avatars, deck_names, DECK_AVATARS, DECK_NAMES, strip_arrows_visible, strip_scroll_target, chip_line, computer_chips, danger_allowed, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
     is_default_project, leader_choice_visible, part_supported, project_boxes, project_boxes_with_archived,
     reach_pill, status_pill, validate_settings, visible_tiles, ComputerChip, Member, MemberFilter,
     effective_style, follow_rename, override_harnesses, override_label, override_options, pick_override, AccountsState, CloseAction, SettingsGuard, DISCARD_QUESTION,
@@ -173,6 +173,13 @@ struct Ui {
     expanded: MutableState<Vec<String>>,
     filter: MutableState<MemberFilter>,
     member_query: MutableState<String>,
+    /// The inline search row opened by the header icon at 900 dp and below (FR-L26).
+    search_open: MutableState<bool>,
+}
+
+/// `EMBER_CR_PROJECT_SEARCH=open` starts with the inline search row open. Debug builds only.
+fn search_hook_open(debug: bool, value: Option<&str>) -> bool {
+    debug && value == Some("open")
 }
 
 impl Ui {
@@ -185,6 +192,10 @@ impl Ui {
         };
         let sheet = std::env::var("EMBER_CR_PROJECT_SHEET").ok();
         let expand = std::env::var("EMBER_CR_PROJECT_EXPAND").as_deref() == Ok("1");
+        let search = search_hook_open(
+            cfg!(debug_assertions),
+            std::env::var("EMBER_CR_PROJECT_SEARCH").ok().as_deref(),
+        );
         Ui {
             settings: mutable_state_of((sheet.as_deref() == Some("settings")).then(|| full.clone().or(first.clone())).flatten()),
             computer: mutable_state_of((sheet.as_deref() == Some("computer")).then(|| chips.first().map(|c| c.id.clone())).flatten()),
@@ -199,6 +210,7 @@ impl Ui {
             expanded: mutable_state_of(if expand { boxes.iter().map(|b| b.id.clone()).collect() } else { Vec::new() }),
             filter: mutable_state_of(MemberFilter::All),
             member_query: mutable_state_of(String::new()),
+            search_open: mutable_state_of(search),
         }
     }
 }
@@ -315,9 +327,29 @@ pub fn ThemeButton(ui: &SharedUi) {
     );
 }
 
-/// The list header's actions: search, 새 프로젝트, the theme toggle and 새 팀원. Up to 900 px
-/// the search is a button, up to 900 the labels of the first two drop, and on a phone 새 팀원
-/// is a round button too (`hide-md`).
+/// The icon toggles the filter row. Closing it clears the query, so the list is never left
+/// filtered by a field nobody can see.
+pub fn toggle_search(open: bool, query: &str) -> (bool, String) {
+    if open {
+        (false, String::new())
+    } else {
+        (true, query.to_string())
+    }
+}
+
+/// Whether the inline project filter is drawn: always above 900 dp, else when the icon opened it.
+pub fn search_field_visible(w: f32, open: bool) -> bool {
+    w > 900.0 || open
+}
+
+/// Whether the search icon button is drawn: only at 900 dp and below (the mockup hides it above).
+pub fn search_icon_visible(w: f32) -> bool {
+    w <= 900.0
+}
+
+/// The list header's actions: the inline filter (above 900 dp), 새 프로젝트, the theme toggle and
+/// 새 팀원. At 900 dp and below a search icon toggles the filter row under the header. The global
+/// search is the 검색 row of the sidebar tools (FR-L10).
 fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
     if w > 900.0 {
         let q = st.query.clone();
@@ -326,8 +358,16 @@ fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
             SearchField("팀원 검색", H_BTN, move |v| q.set(v));
         });
     }
-    let u_search = ui.clone();
-    IconButton(IconRole::Search, false, move || u_search.go(crate::ui::Route::Search));
+    if search_icon_visible(w) {
+        let o = st.search_open.clone();
+        let q = st.query.clone();
+        // TODO(compose-rust#428, #429): a name "팀원 검색 열기/닫기" and the expanded state.
+        IconButton(IconRole::Search, false, move || {
+            let (open, query) = toggle_search(o.get_untracked(), &q.get_untracked());
+            o.set(open);
+            q.set(query);
+        });
+    }
     let n = st.new_project.clone();
     // Enabled in the demo only: it makes a local project there (#218).
     let can_create = services().demo.is_some();
@@ -368,6 +408,13 @@ fn Grid(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi, w:
     let query = st.query.get();
     let shown: Vec<&ProjectBox> = boxes.iter().filter(|b| box_matches(b, &query)).collect();
     Header("프로젝트", "프로젝트를 누르면 세션으로 들어가 팀원들의 대화를 함께 봅니다.", w <= 560.0, || ListActions(st, ui, w));
+    if w <= 900.0 && search_field_visible(w, st.search_open.get()) {
+        // TODO: focus the field on open once the toolkit exposes focus (compose-rust#374).
+        let q = st.query.clone();
+        cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+            SearchField("팀원 검색", H_BTN, move |v| q.set(v));
+        });
+    }
     ComputerStrip(chips, st);
     if shown.is_empty() {
         let text = if boxes.is_empty() { "아직 프로젝트가 없습니다" } else { "일치하는 프로젝트가 없습니다" };
@@ -393,24 +440,61 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
         Label("등록된 컴퓨터가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
         return;
     }
-    cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(64.0)).content(|| {
-        for c in chips {
-            let (open, id) = (st.computer.clone(), c.id.clone());
-            ComputerChipView(c, move || open.set(Some(id.clone())));
-            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+    let scroll = compose_rust::ui::remember_scroll_state();
+    let viewport = content_width(compose_rust::runtime::current_window_size().width_dp, SP[6]);
+    let (offset, max) = (scroll.offset(), scroll.max_offset());
+    let arrows = strip_arrows_visible(max);
+    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(64.0)).content(|| {
+        if arrows {
+            let s = scroll.clone();
+            StripArrow(ICON_ARROW_LEFT_SVG, offset > 0.0, move || s.animate_scroll_to(strip_scroll_target(offset, viewport, max + viewport, -1.0)));
         }
-        // The hub's devices, registered with the node's token (FR-X7, #490).
-        let add = Modifier::new().height(56.0).border(1.0, paint(p.line)).corner_radius(CORNER_MD);
-        let ui = st.add.clone();
-        Clickable(add, Alignment::CenterStart, move || ui.show(), || {
-            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                NavIcon(shell::ICON_PLUS_SVG, p.text_2.to_argb(), 18.0);
-                Label("컴퓨터 추가", Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
-                cu::Spacer().modifier(Modifier::new().width(SP[3]));
+        cu::ScrollRow().scroll_state(&scroll).modifier(Modifier::new().weight(1.0).height(64.0)).content(|| {
+            for c in chips {
+                let (open, id) = (st.computer.clone(), c.id.clone());
+                ComputerChipView(c, move || open.set(Some(id.clone())));
+                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            }
+            // The hub's devices, registered with the node's token (FR-X7, #490).
+            // TODO(compose-rust, #671): no dashed border or stroke-dash API, so the add chip keeps a solid 1 px border.
+            let add = Modifier::new().height(56.0).border(1.0, paint(p.line)).corner_radius(CORNER_MD);
+            let ui = st.add.clone();
+            Clickable(add, Alignment::CenterStart, move || ui.show(), || {
+                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                    cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                    NavIcon(shell::ICON_PLUS_SVG, p.text_2.to_argb(), 18.0);
+                    Label("컴퓨터 추가", Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                    cu::Spacer().modifier(Modifier::new().width(SP[3]));
+                });
             });
         });
+        if arrows {
+            let s = scroll.clone();
+            StripArrow(ICON_ARROW_RIGHT_SVG, offset < max, move || s.animate_scroll_to(strip_scroll_target(offset, viewport, max + viewport, 1.0)));
+        }
     });
+}
+
+const ICON_ARROW_LEFT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>"#;
+const ICON_ARROW_RIGHT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>"#;
+
+/// A scroll arrow of the computer strip. Dimmed and inert at the end it points to.
+/// TODO(compose-rust, #671): no label modifier for icon-only controls, so this control has no accessible name.
+fn StripArrow(svg: &'static str, enabled: bool, mut on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let color = if enabled { p.text_2 } else { p.line };
+    Clickable(
+        Modifier::new().size(H_CTL, H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        move || {
+            if enabled {
+                on_click()
+            }
+        },
+        move || {
+            NavIcon(svg, color.to_argb(), 16.0);
+        },
+    );
 }
 
 /// `.cchip`: 56 px, an icon tile with a status dot, the name and the status line.
@@ -519,9 +603,9 @@ fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
                                 .collect();
                             Cols(team_cols(w), SP[1], tiles);
                             if deck > 0 {
-                                let e = st.expanded.clone();
-                                let id = b.id.clone();
-                                AppButton(&deck_label(deck), None, ButtonKind::Default, true, true, true, move || {
+                                let rest = &b.members[shown..];
+                                let (e, id) = (st.expanded.clone(), b.id.clone());
+                                DeckCard(rest, &b.id, deck, move || {
                                     let mut v = e.get_untracked();
                                     v.push(id.clone());
                                     e.set(v);
@@ -539,6 +623,36 @@ fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
                     });
             });
         });
+}
+
+/// The deck: overlapped avatars of the first hidden members, `외 N명` and the first three names.
+/// Clicking it expands the box. TODO(compose-rust#372): a pointer-up `Clickable`.
+fn DeckCard(rest: &[Member], project_id: &str, count: usize, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    const AV: f32 = 26.0;
+    const STEP: f32 = 16.0;
+    Clickable(
+        Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_MD).padding(10.0),
+        Alignment::CenterStart,
+        on_click,
+        || {
+            cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                let avatars = deck_avatars(rest, DECK_AVATARS);
+                let width = AV + STEP * avatars.len().saturating_sub(1) as f32;
+                cu::Box().modifier(Modifier::new().size(width, AV)).content(|| {
+                    for (i, m) in avatars.iter().enumerate() {
+                        cu::Box().modifier(Modifier::new().size(AV, AV).offset(STEP * i as f32, 0.0)).content(|| {
+                            Character(&m.agent, m.leader, AV, &m.name, project_id, CharState::from_status(m.status), None);
+                        });
+                    }
+                });
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label(&deck_label(count), Fs::Sm, Weight::Semibold, None, Some(1));
+                    Label(&deck_names(rest, DECK_NAMES), Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                });
+            });
+        },
+    );
 }
 
 /// 세션 열기: the first member's conversation, or a new session when the project has none.
@@ -1704,7 +1818,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l9_wide_header_renders_global_search_icon_button_beside_inline_filter() {
+    fn fr_l26_wide_header_has_inline_search_and_no_icon_button() {
         use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
         let _guard = crate::services::test_guard();
         let ui = shared_ui();
@@ -1732,11 +1846,41 @@ mod tests {
             matches!(m, Mutation::SetProp { value: PropertyValue::String(s), .. } if *s == "팀원 검색")
         });
         let has_search_icon = batch.iter().any(|m| {
-            matches!(m, Mutation::SetProp { property: compose_rust::schema::PropertyKind::Icon, .. })
+            matches!(m, Mutation::SetProp { property: compose_rust::schema::PropertyKind::Icon, .. }) && format!("{m:?}").contains("Search")
         });
         assert!(has_placeholder, "expected inline filter field at 1440dp");
-        assert!(has_search_icon, "expected global search icon button at 1440dp");
+        assert!(!has_search_icon, "no search icon button above 900dp");
         compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l26_header_search_icon_toggles_field_at_900_and_below() {
+        assert!(search_icon_visible(900.0));
+        assert!(search_icon_visible(390.0));
+        assert!(!search_field_visible(800.0, false));
+        assert!(search_field_visible(800.0, true));
+        assert!(search_field_visible(1440.0, false));
+    }
+
+    #[test]
+    fn fr_l26_header_has_no_icon_above_900() {
+        assert!(!search_icon_visible(901.0));
+        assert!(!search_icon_visible(1440.0));
+    }
+
+    #[test]
+    fn fr_l26_project_search_hook_is_debug_only() {
+        assert!(search_hook_open(true, Some("open")));
+        assert!(!search_hook_open(false, Some("open")));
+        assert!(!search_hook_open(true, Some("1")));
+        assert!(!search_hook_open(true, None));
+    }
+
+    #[test]
+    fn fr_l26_closing_the_filter_clears_the_query() {
+        assert_eq!(toggle_search(true, "abc"), (false, String::new()));
+        assert_eq!(toggle_search(false, "abc"), (true, "abc".to_string()));
+        assert_eq!(toggle_search(false, ""), (true, String::new()));
     }
 
     #[test]

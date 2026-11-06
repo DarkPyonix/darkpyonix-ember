@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use ember_server::agents::claude_code::ClaudeCodeAdapter;
 use ember_server::agents::{AgentAdapter, AgentRun, StartRequest};
-use ember_server::events::{AgentEvent, ApprovalDecision, TurnOutcome};
+use ember_server::events::{AgentEvent, ApprovalDecision, QuestionAnswer, TurnOutcome};
 use tokio::sync::mpsc;
 
 fn fake_bin() -> PathBuf {
@@ -257,4 +257,195 @@ async fn real_claude_read_edit_run_then_resume() {
     let events = run_turn(&mut run, &mut rx, ApprovalDecision::AllowAlways, Some("Bash")).await;
     assert_eq!(events.last(), Some(&AgentEvent::TurnEnded { outcome: TurnOutcome::Interrupted }));
     run.shutdown().await.unwrap();
+}
+
+fn start_req(cwd: &Path) -> StartRequest {
+    StartRequest {
+        cwd: cwd.to_path_buf(),
+        resume_native_id: None,
+        model: None,
+        env: Vec::new(),
+        instructions: None,
+        remote: None,
+        mcp_servers: Vec::new(),
+        computer: None,
+        fork_from: None,
+        mem_limit_mb: None,
+        allowed_tools: Vec::new(),
+    }
+}
+
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude").join(name)
+}
+
+fn stdin_log(dir: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(dir.join("stdin.log"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+fn answer_for(q: &str, value: &str) -> Vec<QuestionAnswer> {
+    vec![QuestionAnswer { question_id: q.into(), values: vec![value.into()] }]
+}
+
+/// FR-A5: a question is its own event; answering it never enters the "allow always" memory, and an
+/// ordinary tool (Write) still does.
+#[tokio::test]
+async fn fr_a5_a_question_is_a_question_event_and_allow_always_does_not_apply_to_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut run = ClaudeCodeAdapter::new(fixture("fake-claude-question.sh"))
+        .start(start_req(dir.path()), tx)
+        .await
+        .unwrap();
+    run.send("hello").await.unwrap();
+    loop {
+        if let AgentEvent::QuestionAsked { question_id, questions } = next(&mut rx, 10).await {
+            assert_eq!(question_id, "q1");
+            assert_eq!(questions[0].text, "Which?");
+            break;
+        }
+    }
+    // The approval route cannot answer a question.
+    assert!(run.answer("q1", ApprovalDecision::AllowAlways).await.is_err());
+    run.answer_question("q1", &answer_for("q0", "a")).await.unwrap();
+    // q2 is a question again: it asks, it is not answered from any memory.
+    loop {
+        if let AgentEvent::QuestionAsked { question_id, .. } = next(&mut rx, 10).await {
+            assert_eq!(question_id, "q2");
+            break;
+        }
+    }
+    run.decline_question("q2").await.unwrap();
+    // w1 (Write) asks; after allow-always, w2 (Write) is answered without an event.
+    loop {
+        if let AgentEvent::ApprovalRequested { approval_id, tool, needs_person, .. } = next(&mut rx, 10).await {
+            assert_eq!((approval_id.as_str(), tool.as_str()), ("w1", "Write"));
+            assert!(!needs_person);
+            break;
+        }
+    }
+    run.answer("w1", ApprovalDecision::AllowAlways).await.unwrap();
+    loop {
+        match next(&mut rx, 10).await {
+            AgentEvent::ApprovalRequested { approval_id, .. } => panic!("{approval_id} should auto-allow"),
+            AgentEvent::TurnEnded { outcome } => {
+                assert_eq!(outcome, TurnOutcome::Completed);
+                break;
+            }
+            _ => {}
+        }
+    }
+    run.shutdown().await.unwrap();
+    let lines: Vec<serde_json::Value> = std::fs::read_to_string(dir.path().join("stdin.log"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let ids: Vec<_> = lines[1..].iter().map(|l| l["response"]["request_id"].as_str().unwrap().to_string()).collect();
+    assert_eq!(ids, ["q1", "q2", "w1", "w2"], "{lines:?}");
+}
+
+/// FR-A5: the recorded question reaches the session as `QuestionAsked`, and the person's answer
+/// goes to the CLI as the frame measured on Claude Code 2.1.319.
+#[tokio::test]
+async fn fr_a5_a_recorded_question_is_answered_with_the_measured_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut run = ClaudeCodeAdapter::new(fixture("fake-claude-question-reply.sh"))
+        .start(start_req(dir.path()), tx)
+        .await
+        .unwrap();
+    run.send("which colour?").await.unwrap();
+    let id = loop {
+        match next(&mut rx, 10).await {
+            AgentEvent::QuestionAsked { question_id, questions } => {
+                assert_eq!(question_id, "364602b5-0a1e-4b36-9dc1-8910841b10ac");
+                assert_eq!(questions[0].text, "Which colour do you prefer?");
+                break question_id;
+            }
+            AgentEvent::ApprovalRequested { .. } => panic!("a question must not be an approval"),
+            _ => {}
+        }
+    };
+    // A bad answer is refused and leaves the question pending.
+    assert!(run.answer_question(&id, &[]).await.is_err());
+    run.answer_question(&id, &answer_for("q0", "blue")).await.unwrap();
+    loop {
+        if let AgentEvent::TurnEnded { outcome } = next(&mut rx, 10).await {
+            assert_eq!(outcome, TurnOutcome::Completed);
+            break;
+        }
+    }
+    run.shutdown().await.unwrap();
+    let lines = stdin_log(dir.path());
+    let reply = &lines[1];
+    assert_eq!(reply["type"], "control_response");
+    assert_eq!(reply["response"]["request_id"], id.as_str());
+    assert_eq!(reply["response"]["response"]["behavior"], "allow");
+    assert_eq!(
+        reply["response"]["response"]["updatedInput"]["answers"],
+        serde_json::json!({"Which colour do you prefer?": "blue"})
+    );
+    assert_eq!(lines.len(), 2, "exactly one reply: {lines:?}");
+}
+
+/// FR-A5: skipping a question replies allow without `answers`.
+#[tokio::test]
+async fn fr_a5_a_declined_question_replies_allow_without_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut run = ClaudeCodeAdapter::new(fixture("fake-claude-question-reply.sh"))
+        .start(start_req(dir.path()), tx)
+        .await
+        .unwrap();
+    run.send("which colour?").await.unwrap();
+    let id = loop {
+        if let AgentEvent::QuestionAsked { question_id, .. } = next(&mut rx, 10).await {
+            break question_id;
+        }
+    };
+    run.decline_question(&id).await.unwrap();
+    assert!(run.decline_question(&id).await.is_err(), "no longer pending");
+    loop {
+        if let AgentEvent::TurnEnded { .. } = next(&mut rx, 10).await {
+            break;
+        }
+    }
+    run.shutdown().await.unwrap();
+    let reply = &stdin_log(dir.path())[1];
+    assert_eq!(reply["response"]["response"]["behavior"], "allow");
+    assert!(reply["response"]["response"]["updatedInput"].get("answers").is_none());
+}
+
+/// FR-A5: a plan approval (`requires_user_interaction`, measured on 2.1.319) carries the mark, and
+/// "allow always" on it is an allow once: the next plan asks again.
+#[tokio::test]
+async fn fr_a5_allow_always_on_a_plan_is_not_remembered() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut run = ClaudeCodeAdapter::new(fixture("fake-claude-plan.sh"))
+        .start(start_req(dir.path()), tx)
+        .await
+        .unwrap();
+    run.send("plan it").await.unwrap();
+    for want in ["p1", "p2"] {
+        loop {
+            if let AgentEvent::ApprovalRequested { approval_id, tool, needs_person, .. } = next(&mut rx, 10).await {
+                assert_eq!((approval_id.as_str(), tool.as_str()), (want, "ExitPlanMode"));
+                assert!(needs_person);
+                break;
+            }
+        }
+        run.answer(want, ApprovalDecision::AllowAlways).await.unwrap();
+    }
+    run.shutdown().await.unwrap();
+    let ids: Vec<_> = stdin_log(dir.path())[1..]
+        .iter()
+        .map(|l| l["response"]["request_id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, ["p1", "p2"]);
 }

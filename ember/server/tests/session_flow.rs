@@ -7,7 +7,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use ember_server::agents::scripted::ScriptedAdapter;
 use ember_server::agents::{AgentAdapter, AgentKind};
-use ember_server::events::{AgentEvent, ApprovalDecision, SessionStatus, TurnOutcome};
+use ember_server::events::{
+    AgentEvent, ApprovalDecision, Question, QuestionAnswer, QuestionOption, SessionStatus, TurnOutcome,
+};
 use ember_server::session::{NewSession, Push, Sessions};
 use ember_server::store::Store;
 use http_body_util::BodyExt;
@@ -321,4 +323,485 @@ async fn approve_all_http_toggle_and_session_detail() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+/// A fake agent that asks one question (`AskUserQuestion`, id `q1`) and one Bash approval (`b1`)
+/// per message, and records the ids it was answered for.
+struct AsksQuestion {
+    answered: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl AgentAdapter for AsksQuestion {
+    fn kind(&self) -> AgentKind {
+        AgentKind::Scripted
+    }
+
+    async fn detect(&self) -> ember_server::agents::Detected {
+        ember_server::agents::Detected { kind: AgentKind::Scripted, installed: true, version: None }
+    }
+
+    async fn start(
+        &self,
+        _req: ember_server::agents::StartRequest,
+        events: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> anyhow::Result<Box<dyn ember_server::agents::AgentRun>> {
+        Ok(Box::new(AsksQuestionRun { events, answered: self.answered.clone() }))
+    }
+}
+
+struct AsksQuestionRun {
+    events: tokio::sync::mpsc::Sender<AgentEvent>,
+    answered: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl ember_server::agents::AgentRun for AsksQuestionRun {
+    async fn send(&mut self, _text: &str) -> anyhow::Result<()> {
+        let q = serde_json::json!({"questions": [{"question": "Which?", "header": "H",
+            "options": [{"label": "a", "description": ""}, {"label": "b", "description": ""}],
+            "multiSelect": false}]});
+        self.events
+            .send(AgentEvent::ApprovalRequested {
+                approval_id: "q1".into(),
+                tool: "AskUserQuestion".into(),
+                input: q,
+                needs_person: true,
+            })
+            .await?;
+        self.events
+            .send(AgentEvent::ApprovalRequested {
+                approval_id: "b1".into(),
+                tool: "Bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+                needs_person: false,
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn answer(&mut self, approval_id: &str, _decision: ApprovalDecision) -> anyhow::Result<()> {
+        self.answered.lock().unwrap().push(approval_id.to_string());
+        Ok(())
+    }
+
+    async fn interrupt(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+fn asks_question_sessions() -> (Arc<Sessions>, Arc<std::sync::Mutex<Vec<String>>>) {
+    let answered: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let adapters: Vec<Arc<dyn AgentAdapter>> = vec![Arc::new(AsksQuestion { answered: answered.clone() })];
+    (Sessions::new(Arc::new(Store::open_in_memory().unwrap()), adapters), answered)
+}
+
+async fn wait_answered(answered: &Arc<std::sync::Mutex<Vec<String>>>, n: usize) {
+    for _ in 0..200 {
+        if answered.lock().unwrap().len() >= n {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("the agent was never answered {n} times");
+}
+
+fn notices(s: &Sessions, id: &str) -> Vec<String> {
+    s.store()
+        .events_after(id, 0)
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.event {
+            AgentEvent::Notice { message } => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+const QUESTION_NOTICE: &str = "질문에는 자동으로 답하지 않습니다. 직접 답해 주세요.";
+
+/// FR-A5: with approve-everything on, a question waits for a person while a Bash approval in the
+/// same turn is allowed.
+#[tokio::test]
+async fn fr_a5_approve_all_does_not_answer_a_question_but_answers_a_normal_approval() {
+    let (s, answered) = asks_question_sessions();
+    let id = new_session(&s);
+    s.set_approve_all(&id, true).await.unwrap();
+    s.send(&id, "go").await.unwrap();
+    wait_answered(&answered, 1).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(*answered.lock().unwrap(), vec!["b1".to_string()], "the question was not answered");
+    let n: Vec<_> = notices(&s, &id).into_iter().filter(|m| m == QUESTION_NOTICE).collect();
+    assert_eq!(n.len(), 1, "one notice says why the question waits");
+    // A person can still answer it.
+    s.answer(&id, "q1", ApprovalDecision::AllowOnce).await.unwrap();
+    assert_eq!(*answered.lock().unwrap(), vec!["b1".to_string(), "q1".to_string()]);
+}
+
+/// FR-A5: switching approve-everything on answers the pending Bash approval, not the question.
+#[tokio::test]
+async fn fr_a5_switching_approve_all_on_skips_a_pending_question() {
+    let (s, answered) = asks_question_sessions();
+    let id = new_session(&s);
+    s.send(&id, "go").await.unwrap();
+    for _ in 0..200 {
+        let both = s
+            .store()
+            .events_after(&id, 0)
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e.event, AgentEvent::ApprovalRequested { .. }))
+            .count()
+            == 2;
+        if both {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    s.set_approve_all(&id, true).await.unwrap();
+    wait_answered(&answered, 1).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(*answered.lock().unwrap(), vec!["b1".to_string()]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tool policy (one table) and question events. Written test first, not yet compiled.
+// ---------------------------------------------------------------------------------------------
+
+/// A fake agent that emits `script` on every message and logs how it was answered:
+/// `a:<id>:<decision>`, `q:<id>:<question id>=<values>;...`, `d:<id>`.
+struct Scripted {
+    script: Vec<AgentEvent>,
+    log: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl AgentAdapter for Scripted {
+    fn kind(&self) -> AgentKind {
+        AgentKind::Scripted
+    }
+
+    async fn detect(&self) -> ember_server::agents::Detected {
+        ember_server::agents::Detected { kind: AgentKind::Scripted, installed: true, version: None }
+    }
+
+    async fn start(
+        &self,
+        _req: ember_server::agents::StartRequest,
+        events: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> anyhow::Result<Box<dyn ember_server::agents::AgentRun>> {
+        Ok(Box::new(ScriptedRun { script: self.script.clone(), events, log: self.log.clone() }))
+    }
+}
+
+struct ScriptedRun {
+    script: Vec<AgentEvent>,
+    events: tokio::sync::mpsc::Sender<AgentEvent>,
+    log: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl ember_server::agents::AgentRun for ScriptedRun {
+    async fn send(&mut self, _text: &str) -> anyhow::Result<()> {
+        for e in self.script.clone() {
+            self.events.send(e).await?;
+        }
+        Ok(())
+    }
+
+    async fn answer(&mut self, approval_id: &str, decision: ApprovalDecision) -> anyhow::Result<()> {
+        self.log.lock().unwrap().push(format!("a:{approval_id}:{decision:?}"));
+        Ok(())
+    }
+
+    async fn answer_question(&mut self, question_id: &str, answers: &[QuestionAnswer]) -> anyhow::Result<()> {
+        let a: Vec<String> = answers.iter().map(|a| format!("{}={}", a.question_id, a.values.join("|"))).collect();
+        self.log.lock().unwrap().push(format!("q:{question_id}:{}", a.join(";")));
+        Ok(())
+    }
+
+    async fn decline_question(&mut self, question_id: &str) -> anyhow::Result<()> {
+        self.log.lock().unwrap().push(format!("d:{question_id}"));
+        Ok(())
+    }
+
+    async fn interrupt(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+fn scripted_sessions(script: Vec<AgentEvent>) -> (Arc<Sessions>, Arc<std::sync::Mutex<Vec<String>>>) {
+    let log: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let adapters: Vec<Arc<dyn AgentAdapter>> = vec![Arc::new(Scripted { script, log: log.clone() })];
+    (Sessions::new(Arc::new(Store::open_in_memory().unwrap()), adapters), log)
+}
+
+fn approval(id: &str, tool: &str, needs_person: bool) -> AgentEvent {
+    AgentEvent::ApprovalRequested {
+        approval_id: id.into(),
+        tool: tool.into(),
+        input: serde_json::json!({}),
+        needs_person,
+    }
+}
+
+async fn wait_log(log: &Arc<std::sync::Mutex<Vec<String>>>, n: usize) {
+    for _ in 0..200 {
+        if log.lock().unwrap().len() >= n {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("the agent was never answered {n} times: {:?}", log.lock().unwrap());
+}
+
+async fn wait_events(s: &Sessions, id: &str, n: usize) {
+    for _ in 0..200 {
+        if s.store().events_after(id, 0).unwrap().len() >= n {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("session {id} never stored {n} events");
+}
+
+const PLAN_NOTICE: &str = "계획을 자동 승인했습니다.";
+
+/// FR-A5: approve-everything still allows a plan (ExitPlanMode) and says so in the transcript; an
+/// unknown tool carrying the agent's own mark waits for a person.
+#[tokio::test]
+async fn fr_a5_approve_all_allows_a_plan_with_a_notice_and_never_a_flagged_unknown_tool() {
+    let (s, log) = scripted_sessions(vec![
+        approval("p1", "ExitPlanMode", true),
+        approval("n1", "SomeNewTool", true),
+        approval("b1", "Bash", false),
+    ]);
+    let id = new_session(&s);
+    s.set_approve_all(&id, true).await.unwrap();
+    s.send(&id, "go").await.unwrap();
+    wait_log(&log, 2).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let mut got = log.lock().unwrap().clone();
+    got.sort();
+    // Allowed once each, never "always"; the flagged unknown tool was not answered.
+    assert_eq!(got, vec!["a:b1:AllowOnce".to_string(), "a:p1:AllowOnce".to_string()]);
+    let n = notices(&s, &id);
+    assert_eq!(n.iter().filter(|m| *m == PLAN_NOTICE).count(), 1, "{n:?}");
+    assert_eq!(n.iter().filter(|m| *m == QUESTION_NOTICE).count(), 1, "{n:?}");
+    // A person can still answer the unknown tool.
+    s.answer(&id, "n1", ApprovalDecision::AllowOnce).await.unwrap();
+}
+
+/// FR-A5: switching approve-everything on answers a pending plan (with the notice) and skips a
+/// pending flagged unknown tool.
+#[tokio::test]
+async fn fr_a5_switching_approve_all_on_allows_a_pending_plan_and_skips_a_flagged_tool() {
+    let (s, log) = scripted_sessions(vec![approval("p1", "ExitPlanMode", true), approval("n1", "SomeNewTool", true)]);
+    let id = new_session(&s);
+    s.send(&id, "go").await.unwrap();
+    wait_events(&s, &id, 3).await;
+    s.set_approve_all(&id, true).await.unwrap();
+    wait_log(&log, 1).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(*log.lock().unwrap(), vec!["a:p1:AllowOnce".to_string()]);
+    assert_eq!(notices(&s, &id).iter().filter(|m| *m == PLAN_NOTICE).count(), 1);
+}
+
+fn colour_question() -> AgentEvent {
+    AgentEvent::QuestionAsked {
+        question_id: "r1".into(),
+        questions: vec![
+            Question {
+                id: "q0".into(),
+                header: Some("Colour".into()),
+                text: "Which colour?".into(),
+                options: vec![QuestionOption { label: "Red".into(), description: None }],
+                multi_select: false,
+                secret: false,
+                allow_other: true,
+            },
+            Question {
+                id: "q1".into(),
+                header: None,
+                text: "Token?".into(),
+                options: Vec::new(),
+                multi_select: false,
+                secret: true,
+                allow_other: true,
+            },
+        ],
+    }
+}
+
+fn ans(q: &str, v: &str) -> QuestionAnswer {
+    QuestionAnswer { question_id: q.into(), values: vec![v.into()] }
+}
+
+/// FR-A5: a question waits in the store, approve-everything does not touch it, an answer is
+/// validated, recorded (a secret value as `***`) and sent to the agent with the real values.
+#[tokio::test]
+async fn fr_a5_a_question_is_answered_recorded_and_its_secret_is_not_stored() {
+    let (s, log) = scripted_sessions(vec![colour_question()]);
+    let id = new_session(&s);
+    s.set_approve_all(&id, true).await.unwrap();
+    s.send(&id, "go").await.unwrap();
+    wait_status(&s, &id, SessionStatus::WaitingForApproval).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(log.lock().unwrap().is_empty(), "approve-everything did not answer the question");
+    let pending = s.pending_questions(&id).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].0, "r1");
+
+    // Invalid answers change nothing.
+    use ember_server::events::AnswerInvalid;
+    use ember_server::session::QuestionError;
+    let e = s.answer_question(&id, "r1", vec![ans("q0", "Red")]).await.unwrap_err();
+    assert!(matches!(e, QuestionError::Invalid(AnswerInvalid::MissingAnswer)), "{e:?}");
+    let e = s.answer_question(&id, "nope", vec![]).await.unwrap_err();
+    assert!(matches!(e, QuestionError::NotPending(_)), "{e:?}");
+    let e = s.answer_question("no-session", "r1", vec![]).await.unwrap_err();
+    assert!(matches!(e, QuestionError::NoSession(_)), "{e:?}");
+    assert!(log.lock().unwrap().is_empty());
+
+    s.answer_question(&id, "r1", vec![ans("q0", "Red"), ans("q1", "hunter2")]).await.unwrap();
+    assert_eq!(*log.lock().unwrap(), vec!["q:r1:q0=Red;q1=hunter2".to_string()]);
+    wait_status(&s, &id, SessionStatus::Running).await;
+    let stored = s
+        .store()
+        .events_after(&id, 0)
+        .unwrap()
+        .into_iter()
+        .find_map(|e| match e.event {
+            AgentEvent::QuestionAnswered { question_id, answers } => Some((question_id, answers)),
+            _ => None,
+        })
+        .expect("QuestionAnswered stored");
+    assert_eq!(stored.0, "r1");
+    assert_eq!(stored.1, vec![ans("q0", "Red"), ans("q1", "***")]);
+    assert!(!serde_json::to_string(&s.store().events_after(&id, 0).unwrap()).unwrap().contains("hunter2"));
+    assert!(s.pending_questions(&id).unwrap().is_empty());
+    // A second answer finds nothing pending.
+    let e = s.answer_question(&id, "r1", vec![ans("q0", "Red"), ans("q1", "x")]).await.unwrap_err();
+    assert!(matches!(e, QuestionError::NotPending(_)), "{e:?}");
+}
+
+/// FR-A5: skipping a question is recorded with no answers and tells the agent.
+#[tokio::test]
+async fn fr_a5_declining_a_question_is_recorded_without_answers() {
+    let (s, log) = scripted_sessions(vec![colour_question()]);
+    let id = new_session(&s);
+    s.send(&id, "go").await.unwrap();
+    wait_status(&s, &id, SessionStatus::WaitingForApproval).await;
+    s.decline_question(&id, "r1").await.unwrap();
+    assert_eq!(*log.lock().unwrap(), vec!["d:r1".to_string()]);
+    wait_events(&s, &id, 3).await;
+    assert!(s.store().events_after(&id, 0).unwrap().iter().any(|e| matches!(
+        &e.event,
+        AgentEvent::QuestionAnswered { question_id, answers } if question_id == "r1" && answers.is_empty()
+    )));
+    assert!(s.pending_questions(&id).unwrap().is_empty());
+}
+
+/// FR-A5: a turn end withdraws a pending question.
+#[tokio::test]
+async fn fr_a5_a_turn_end_withdraws_a_pending_question() {
+    let (s, _log) = scripted_sessions(vec![colour_question(), AgentEvent::TurnEnded { outcome: TurnOutcome::Interrupted }]);
+    let id = new_session(&s);
+    s.send(&id, "go").await.unwrap();
+    wait_events(&s, &id, 3).await;
+    assert!(s.pending_questions(&id).unwrap().is_empty());
+}
+
+/// FR-A5: an agent without question support refuses (the trait default).
+#[tokio::test]
+async fn fr_a5_an_agent_without_questions_refuses_to_answer_one() {
+    let s = sessions_with(Arc::new(Store::open_in_memory().unwrap()));
+    let id = new_session(&s);
+    s.store()
+        .append(&id, &colour_question())
+        .unwrap();
+    s.send(&id, "hello").await.unwrap();
+    wait_status(&s, &id, SessionStatus::WaitingForApproval).await;
+    let e = s
+        .answer_question(&id, "r1", vec![ans("q0", "Red"), ans("q1", "x")])
+        .await
+        .unwrap_err();
+    assert!(format!("{e}").contains("does not support questions"), "{e}");
+}
+
+async fn post_json(app: &axum::Router, uri: &str, body: &str) -> (StatusCode, serde_json::Value) {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post(uri).header("content-type", "application/json").body(Body::from(body.to_string())).unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+}
+
+/// FR-A5: `POST /api/sessions/{id}/questions/{question_id}/answer`: 404, 400, 422 and 200.
+#[tokio::test]
+async fn fr_a5_question_route_statuses() {
+    let (s, log) = scripted_sessions(vec![colour_question()]);
+    let app = ember_server::api::router(s.clone());
+    let id = new_session(&s);
+    s.send(&id, "go").await.unwrap();
+    wait_status(&s, &id, SessionStatus::WaitingForApproval).await;
+    let url = |q: &str| format!("/api/sessions/{id}/questions/{q}/answer");
+
+    let (st, _) = post_json(&app, "/api/sessions/nope/questions/r1/answer", r#"{"decline":true}"#).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, _) = post_json(&app, &url("not-asked"), r#"{"decline":true}"#).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    // Validation: a fixed message, nothing sent to the agent.
+    let (st, body) = post_json(&app, &url("r1"), r#"{"answers":[{"question_id":"q0","values":["Red"]}]}"#).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "every question needs an answer");
+    // Exactly one of answers and decline.
+    for b in [r#"{}"#, r#"{"decline":false}"#, r#"{"decline":true,"answers":[]}"#] {
+        let (st, _) = post_json(&app, &url("r1"), b).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+    }
+    // Unknown fields are refused.
+    for b in [
+        r#"{"decline":true,"extra":1}"#,
+        r#"{"answers":[{"question_id":"q0","values":["a"],"extra":1}]}"#,
+    ] {
+        let (st, _) = post_json(&app, &url("r1"), b).await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{b}");
+    }
+    assert!(log.lock().unwrap().is_empty());
+
+    let ok = r#"{"answers":[{"question_id":"q0","values":["Red"]},{"question_id":"q1","values":["tok"]}]}"#;
+    let (st, body) = post_json(&app, &url("r1"), ok).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body, serde_json::json!({"status": "answered"}));
+    assert_eq!(*log.lock().unwrap(), vec!["q:r1:q0=Red;q1=tok".to_string()]);
+    // Answered once: no longer pending.
+    let (st, _) = post_json(&app, &url("r1"), ok).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn fr_a5_question_route_declines() {
+    let (s, log) = scripted_sessions(vec![colour_question()]);
+    let app = ember_server::api::router(s.clone());
+    let id = new_session(&s);
+    s.send(&id, "go").await.unwrap();
+    wait_status(&s, &id, SessionStatus::WaitingForApproval).await;
+    let (st, body) = post_json(&app, &format!("/api/sessions/{id}/questions/r1/answer"), r#"{"decline":true}"#).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body, serde_json::json!({"status": "declined"}));
+    assert_eq!(*log.lock().unwrap(), vec!["d:r1".to_string()]);
 }

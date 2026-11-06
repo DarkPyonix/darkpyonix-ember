@@ -9,7 +9,9 @@
 //! Like `ember-a2a channel post`, this server sends the runtime token over plain HTTP to the host
 //! `EMBER_URL` names. It does not refuse a non-loopback host (an operator may publish a LAN
 //! address); [`run_stdio`] prints one warning line to stderr naming the host (see
-//! [`non_loopback_host`]). The CLI has the same property and is unchanged.
+//! [`non_loopback_host`]). The CLI has the same property. Both build their client with
+//! `Client::new`, which refuses a URL with userinfo, `\`, `?` or `#` before the path, so the host
+//! it connects to is the host the warning names.
 //!
 //! Measured on 2026-11-06 (Claude Code 2.1.319, Codex 0.164.0): Claude Code sends
 //! `server/discover` first and `initialize` with protocol 2025-11-25; Codex sends `initialize`
@@ -107,7 +109,9 @@ fn sentence_for_status(status: u16) -> &'static str {
 
 /// The host of `url` when it is not this machine, else `None`. Loopback is `localhost` (any
 /// case), 127.0.0.0/8 and `::1`; a name is never resolved. Parses `scheme://[userinfo@]host[:port]
-/// [/path]` with IPv6 in brackets; userinfo is dropped and never returned. A string that is not
+/// [/path]` with IPv6 in brackets. As in WHATWG URL parsing, the authority ends at the first
+/// `/`, `\`, `?` or `#`, and only then is userinfo split off at the last `@`; userinfo is dropped
+/// and never returned. A string that is not
 /// such a URL gives `None` (the client refuses it before any token is sent). The host is shown
 /// with every character other than letters, digits, `.`, `-`, `_` and `:` replaced by `?`.
 pub fn non_loopback_host(url: &str) -> Option<String> {
@@ -115,7 +119,7 @@ pub fn non_loopback_host(url: &str) -> Option<String> {
     if scheme.is_empty() {
         return None;
     }
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or("");
     let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
     let host = if let Some(inner) = host_port.strip_prefix('[') {
         inner.split_once(']')?.0
@@ -900,6 +904,12 @@ mod tests {
         assert_eq!(h, "ember.example");
         let h = non_loopback_host("http://a@b@host.example").unwrap();
         assert_eq!(h, "host.example");
+        // The authority ends at the first `/`, `\`, `?` or `#`, before userinfo is split off.
+        assert_eq!(non_loopback_host("http://evil.com\\@127.0.0.1"), Some("evil.com".into()));
+        assert_eq!(non_loopback_host("http://127.0.0.1\\@evil.com"), None);
+        assert_eq!(non_loopback_host("http://127.0.0.1#@evil.com"), None);
+        assert_eq!(non_loopback_host("http://127.0.0.1?x@evil.com"), None);
+        assert_eq!(non_loopback_host("http://user:pw@evil.com:80/"), Some("evil.com".into()));
         // Garbage gives None (the client refuses it before any token is sent).
         for junk in ["", "garbage", "http://", "http://:80", "http://[::1", "://x", "host:80"] {
             assert_eq!(non_loopback_host(junk), None, "{junk:?}");

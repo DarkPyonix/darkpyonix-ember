@@ -32,6 +32,15 @@ pub struct DocumentWidgetState {
     /// `EditCode` commands queued for the widget.
     pub pending_edits: Vec<WidgetCommand>,
     pub external_change: Option<ExternalChange>,
+    /// The coloured runs of the syntax and the document version they were written against.
+    pub syntax: SyntaxRuns,
+}
+
+/// The coloured runs the session last reported for a document.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SyntaxRuns {
+    pub version: u32,
+    pub runs: Vec<crate::textmate::DocRun>,
 }
 
 /// Action the caller should take after [`WidgetBridge::apply`].
@@ -129,6 +138,7 @@ impl WidgetBridge {
                         hover: None,
                         pending_edits: Vec::new(),
                         external_change: None,
+                        syntax: SyntaxRuns::default(),
                     },
                 );
                 self.active = Some(key);
@@ -146,6 +156,7 @@ impl WidgetBridge {
                             doc.hover = None;
                             doc.pending_edits.clear();
                             doc.external_change = None;
+                            doc.syntax = SyntaxRuns::default();
                         }
                          edit @ WidgetCommand::EditCode { .. } => {
                             doc.pending_edits.push(edit);
@@ -159,6 +170,14 @@ impl WidgetBridge {
                     if doc.generation == generation {
                         doc.decoration_bytes = Decoration::encode_records(&decorations);
                         doc.decorations = decorations;
+                    }
+                }
+                BridgeAction::None
+            }
+            SessionUpdate::Syntax { uri, generation, version, runs, .. } => {
+                if let Some(doc) = self.docs.get_mut(&uri.key()) {
+                    if doc.generation == generation {
+                        doc.syntax = SyntaxRuns { version, runs };
                     }
                 }
                 BridgeAction::None

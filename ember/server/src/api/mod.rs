@@ -20,6 +20,7 @@
 //! | PATCH  | `/api/sessions/{id}` | `{title?, pinned?, archived?}` → `SessionRecord` |
 //! | GET    | `/api/search?q=&limit=` | → `[SearchHit]` (`{session_id, seq, kind, snippet, title, project, archived}`) |
 //! | GET    | `/api/sessions/{id}/export` | → transcript file (JSON, `Content-Disposition: attachment`) |
+//! | POST   | `/api/sessions/{id}/questions/{question_id}/answer` | `{answers:[{question_id, values}]}` or `{decline:true}` (exactly one; unknown field 422) → `{status: "answered"\|"declined"}`; 404 unknown session or question not pending, 400 invalid answers or both/neither, 409 no running agent (FR-A5; owner token only) |
 //! | PUT    | `/api/sessions/{id}/approve-all` | `{enabled}` → `{approve_all}` (FR-A5; `GET /sessions/{id}` carries `approve_all`; push `approve_all`) |
 //! | POST   | `/api/sessions/{id}/fork` | `{turn_seq?, title?}` → 201 new session; 409 without a completed turn |
 //! | GET    | `/api/agents/settings` | → `{settings: {<agent>: {mem_limit_mb}}}`, only harnesses with a stored value (FR-L20, FR-S8) |
@@ -63,10 +64,10 @@ use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::agents::AgentKind;
-use crate::events::ApprovalDecision;
+use crate::events::{ApprovalDecision, QuestionAnswer};
 use crate::projects::ProjectError;
 use crate::session::{
-    NewSession, Push, SessionError, Sessions, MEM_LIMIT_KEY, MEM_LIMIT_MAX_MB, MEM_LIMIT_MIN_MB,
+    NewSession, Push, QuestionError, SessionError, Sessions, MEM_LIMIT_KEY, MEM_LIMIT_MAX_MB, MEM_LIMIT_MIN_MB,
     MEM_LIMIT_RANGE_MESSAGE,
 };
 use crate::store::{now_ms, SessionPatch};
@@ -91,6 +92,7 @@ pub fn router(sessions: Arc<Sessions>) -> Router {
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/messages", post(send_message))
         .route("/api/sessions/{id}/approvals/{approval_id}", post(answer))
+        .route("/api/sessions/{id}/questions/{question_id}/answer", post(answer_question))
         .route("/api/sessions/{id}/approve-all", put(set_approve_all))
         .route("/api/sessions/{id}/interrupt", post(interrupt))
         .route("/api/sessions/{id}/lease", post(lease))
@@ -505,6 +507,61 @@ async fn answer(
 ) -> ApiResult<impl IntoResponse> {
     s.answer(&id, &approval_id, b.decision).await?;
     Ok(StatusCode::ACCEPTED)
+}
+
+/// One answer in the body of the question route.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuestionAnswerItem {
+    question_id: String,
+    values: Vec<String>,
+}
+
+/// `{"answers":[{"question_id":"q0","values":["blue"]}]}` or `{"decline":true}`: exactly one.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuestionAnswerBody {
+    answers: Option<Vec<QuestionAnswerItem>>,
+    decline: Option<bool>,
+}
+
+impl From<QuestionError> for ApiError {
+    fn from(e: QuestionError) -> Self {
+        let code = match &e {
+            QuestionError::NoSession(_) | QuestionError::NotPending(_) => StatusCode::NOT_FOUND,
+            QuestionError::Invalid(_) => StatusCode::BAD_REQUEST,
+            QuestionError::NoAgent(_) => StatusCode::CONFLICT,
+            QuestionError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError(code, format!("{e:#}"))
+    }
+}
+
+/// FR-A5: answer or skip a pending question. Only the owner's server token reaches it (the
+/// route is not exempt in `auth.rs`), so no team leader or A2A runtime token can answer.
+async fn answer_question(
+    State(s): State<Arc<Sessions>>,
+    Path((id, question_id)): Path<(String, String)>,
+    Json(b): Json<QuestionAnswerBody>,
+) -> ApiResult<impl IntoResponse> {
+    match (b.answers, b.decline) {
+        (Some(items), None) => {
+            let answers = items
+                .into_iter()
+                .map(|a| QuestionAnswer { question_id: a.question_id, values: a.values })
+                .collect();
+            s.answer_question(&id, &question_id, answers).await?;
+            Ok(Json(json!({ "status": "answered" })))
+        }
+        (None, Some(true)) => {
+            s.decline_question(&id, &question_id).await?;
+            Ok(Json(json!({ "status": "declined" })))
+        }
+        _ => Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "send either answers or decline: true, not both".into(),
+        )),
+    }
 }
 
 #[derive(Deserialize)]

@@ -278,6 +278,41 @@ pub fn usage_summary(now: i64) -> ember_client::api::UsageSummary {
     }
 }
 
+/// The second project's team: every demo member has its own name, so the box's deck card reads
+/// `김하늘, 이서연` and not the repeated `second-project-codex`. Demo data only; ids stay stable.
+pub fn second_team() -> ember_client::wire::TeamView {
+    use ember_client::wire::{TeamMember, TeamRole, TeamView};
+    let names = [
+        ("demo-s3", "박도윤", "codex"),
+        ("demo-s4", "최민준", "claude-code"),
+        ("demo-s5", "정수아", "codex"),
+        ("demo-s6", "한지우", "claude-code"),
+        ("demo-s7", "김하늘", "codex"),
+        ("demo-s8", "이서연", "claude-code"),
+        ("demo-s9", "오준서", "codex"),
+    ];
+    TeamView {
+        id: "demo-team-second".into(),
+        project: "second-project".into(),
+        leader: "demo-s3".into(),
+        created_at: 0,
+        members: names
+            .iter()
+            .map(|(id, name, agent)| TeamMember {
+                session_id: (*id).into(),
+                name: (*name).into(),
+                role: if *id == "demo-s3" { TeamRole::Leader } else { TeamRole::Teammate },
+                joined_at: 0,
+                ended_at: None,
+                title: String::new(),
+                agent: (*agent).into(),
+                status: None,
+            })
+            .collect(),
+        tasks: Vec::new(),
+    }
+}
+
 pub fn projects() -> Vec<Project> {
     vec![
         Project {
@@ -808,6 +843,7 @@ impl DemoSource {
             Input::SessionsLoaded(self.sessions(now)),
             Input::ProjectsLoaded(projects()),
             Input::ComputersLoaded(computers()),
+            Input::TeamLoaded { session_id: "demo-s3".into(), team: Some(second_team()) },
             Input::Connection(ConnectionState::Connected),
         ]
     }

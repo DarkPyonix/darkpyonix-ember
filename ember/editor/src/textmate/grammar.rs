@@ -26,13 +26,13 @@ use serde_json::{Map, Value};
 pub const MAX_GRAMMAR_BYTES: u64 = 4 * 1024 * 1024;
 /// The most rules (every nested rule and capture counts) one grammar may hold.
 pub const MAX_RULES: usize = 100_000;
-/// The deepest nesting of rules. serde_json refuses documents nested deeper than 128 as well.
-pub const MAX_DEPTH: usize = 128;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GrammarError {
     /// `at` is the line and column; the text of the file is never part of the message.
-    #[error("grammar is not valid JSON (line {line}, column {column})")]
+    /// Also what a document nested more than 128 levels deep (about 64 rules) is refused with: the JSON
+    /// reader's own recursion limit, which comes first.
+    #[error("grammar is not valid JSON or is nested too deeply (line {line}, column {column})")]
     Json { line: usize, column: usize },
     #[error("grammar has no scopeName")]
     MissingScopeName,
@@ -42,8 +42,6 @@ pub enum GrammarError {
     TooLarge,
     #[error("grammar has more than {MAX_RULES} rules")]
     TooManyRules,
-    #[error("grammar rules are nested deeper than {MAX_DEPTH} levels")]
-    TooDeep,
     #[error("grammar file is outside the extension folder")]
     OutsideExtension,
     #[error("grammar file could not be read: {0}")]
@@ -103,12 +101,12 @@ fn flag(obj: &Map<String, Value>, key: &str) -> bool {
 }
 
 /// An object of rules (`repository`, a capture map): entries that are not objects are dropped.
-fn rule_map(obj: &Map<String, Value>, key: &str, depth: usize, budget: &mut Budget) -> Result<BTreeMap<String, RawRule>, GrammarError> {
+fn rule_map(obj: &Map<String, Value>, key: &str, budget: &mut Budget) -> Result<BTreeMap<String, RawRule>, GrammarError> {
     let mut out = BTreeMap::new();
     if let Some(Value::Object(map)) = obj.get(key) {
         for (name, value) in map {
             if let Value::Object(rule) = value {
-                out.insert(name.clone(), rule_from(rule, depth + 1, budget)?);
+                out.insert(name.clone(), rule_from(rule, budget)?);
             }
         }
     }
@@ -116,22 +114,19 @@ fn rule_map(obj: &Map<String, Value>, key: &str, depth: usize, budget: &mut Budg
 }
 
 /// A list of rules (`patterns`): entries that are not objects are dropped.
-fn rule_list(obj: &Map<String, Value>, key: &str, depth: usize, budget: &mut Budget) -> Result<Vec<RawRule>, GrammarError> {
+fn rule_list(obj: &Map<String, Value>, key: &str, budget: &mut Budget) -> Result<Vec<RawRule>, GrammarError> {
     let mut out = Vec::new();
     if let Some(Value::Array(items)) = obj.get(key) {
         for value in items {
             if let Value::Object(rule) = value {
-                out.push(rule_from(rule, depth + 1, budget)?);
+                out.push(rule_from(rule, budget)?);
             }
         }
     }
     Ok(out)
 }
 
-fn rule_from(obj: &Map<String, Value>, depth: usize, budget: &mut Budget) -> Result<RawRule, GrammarError> {
-    if depth > MAX_DEPTH {
-        return Err(GrammarError::TooDeep);
-    }
+fn rule_from(obj: &Map<String, Value>, budget: &mut Budget) -> Result<RawRule, GrammarError> {
     budget.rules += 1;
     if budget.rules > MAX_RULES {
         return Err(GrammarError::TooManyRules);
@@ -143,16 +138,46 @@ fn rule_from(obj: &Map<String, Value>, depth: usize, budget: &mut Budget) -> Res
         begin: text(obj, "begin"),
         end: text(obj, "end"),
         while_: text(obj, "while"),
-        captures: rule_map(obj, "captures", depth, budget)?,
-        begin_captures: rule_map(obj, "beginCaptures", depth, budget)?,
-        end_captures: rule_map(obj, "endCaptures", depth, budget)?,
-        while_captures: rule_map(obj, "whileCaptures", depth, budget)?,
-        patterns: rule_list(obj, "patterns", depth, budget)?,
+        captures: rule_map(obj, "captures", budget)?,
+        begin_captures: rule_map(obj, "beginCaptures", budget)?,
+        end_captures: rule_map(obj, "endCaptures", budget)?,
+        while_captures: rule_map(obj, "whileCaptures", budget)?,
+        patterns: rule_list(obj, "patterns", budget)?,
         include: text(obj, "include"),
-        repository: rule_map(obj, "repository", depth, budget)?,
+        repository: rule_map(obj, "repository", budget)?,
         apply_end_pattern_last: flag(obj, "applyEndPatternLast"),
         disabled: flag(obj, "disabled"),
     })
+}
+
+impl RawGrammar {
+    /// The scope names of the other grammars this one includes (`source.js.regexp`, or the part before the `#`
+    /// of `source.css#rule-list`), in order of first use, without `$self`, `$base` and local `#name` includes.
+    pub fn referenced_scopes(&self) -> Vec<String> {
+        fn walk(rule: &RawRule, own: &str, out: &mut Vec<String>, seen: &mut std::collections::HashSet<String>) {
+            if let Some(include) = &rule.include {
+                let scope = include.split('#').next().unwrap_or("");
+                if !scope.is_empty() && !scope.starts_with('$') && scope != own && seen.insert(scope.to_owned()) {
+                    out.push(scope.to_owned());
+                }
+            }
+            let maps = [&rule.captures, &rule.begin_captures, &rule.end_captures, &rule.while_captures, &rule.repository];
+            for map in maps {
+                for r in map.values() {
+                    walk(r, own, out, seen);
+                }
+            }
+            for r in &rule.patterns {
+                walk(r, own, out, seen);
+            }
+        }
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for r in self.patterns.iter().chain(self.repository.values()).chain(self.injections.values()) {
+            walk(r, &self.scope_name, &mut out, &mut seen);
+        }
+        out
+    }
 }
 
 /// Parses the text of a grammar file. `path` is only used to refuse formats that are not JSON.
@@ -173,9 +198,9 @@ pub fn parse_grammar(path: &str, content: &str) -> Result<RawGrammar, GrammarErr
     Ok(RawGrammar {
         name: text(&root, "name"),
         scope_name,
-        patterns: rule_list(&root, "patterns", 0, &mut budget)?,
-        repository: rule_map(&root, "repository", 0, &mut budget)?,
-        injections: rule_map(&root, "injections", 0, &mut budget)?,
+        patterns: rule_list(&root, "patterns", &mut budget)?,
+        repository: rule_map(&root, "repository", &mut budget)?,
+        injections: rule_map(&root, "injections", &mut budget)?,
         injection_selector: text(&root, "injectionSelector"),
     })
 }
@@ -185,18 +210,20 @@ pub fn parse_grammar(path: &str, content: &str) -> Result<RawGrammar, GrammarErr
 /// the folder that leads out of it is refused), and its size is checked before it is read.
 ///
 /// This reads the machine the editor runs on. A grammar on a server must be read through a reader that
-/// makes the same checks on the server's side.
+/// makes the same checks on the server's side. A path component swapped for a link between the check
+/// and the open is not guarded against: the extension folder belongs to the user running the editor.
 pub fn read_grammar(extension_dir: &Path, path: &Path) -> Result<RawGrammar, GrammarError> {
     let dir = std::fs::canonicalize(extension_dir).map_err(|e| GrammarError::Io(e.kind().to_string()))?;
     let file = std::fs::canonicalize(path).map_err(|e| GrammarError::Io(e.kind().to_string()))?;
     if !file.starts_with(&dir) {
         return Err(GrammarError::OutsideExtension);
     }
-    let f = std::fs::File::open(&file).map_err(|e| GrammarError::Io(e.kind().to_string()))?;
-    let meta = f.metadata().map_err(|e| GrammarError::Io(e.kind().to_string()))?;
+    // A regular file only, checked before opening: opening a named pipe would wait for a writer.
+    let meta = std::fs::metadata(&file).map_err(|e| GrammarError::Io(e.kind().to_string()))?;
     if !meta.is_file() {
         return Err(GrammarError::Io("not a regular file".to_owned()));
     }
+    let f = std::fs::File::open(&file).map_err(|e| GrammarError::Io(e.kind().to_string()))?;
     if meta.len() > MAX_GRAMMAR_BYTES {
         return Err(GrammarError::TooLarge);
     }

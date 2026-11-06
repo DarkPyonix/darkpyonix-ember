@@ -82,6 +82,37 @@ pub fn row_click_closes_prompt(prompt: &TreePrompt, typed: &str) -> bool {
     }
 }
 
+/// The widget's colour role for a syntax role: the design system resolves it, light and dark.
+pub fn colour_role(role: ember_editor::textmate::SyntaxRole) -> compose_rust::ColorRole {
+    use compose_rust::ColorRole as C;
+    use ember_editor::textmate::SyntaxRole as R;
+    match role {
+        R::Keyword => C::SyntaxKeyword,
+        R::String => C::SyntaxString,
+        R::Comment => C::SyntaxComment,
+        R::Number => C::SyntaxNumber,
+        R::Constant => C::SyntaxConstant,
+        R::Type => C::SyntaxType,
+        R::Function => C::SyntaxFunction,
+        R::Variable => C::SyntaxVariable,
+        R::Property => C::SyntaxProperty,
+        R::Operator => C::SyntaxOperator,
+        R::Punctuation => C::SyntaxPunctuation,
+        R::Tag => C::SyntaxTag,
+        R::Attribute => C::SyntaxAttribute,
+        R::Escape => C::SyntaxEscape,
+        R::Macro => C::SyntaxMacro,
+    }
+}
+
+/// The `syntax_spans` prop for the coloured runs the session reported.
+pub fn syntax_spans(syntax: &ember_editor::SyntaxRuns) -> compose_rust::code::SyntaxSpans {
+    use compose_rust::code::{CodeRange, SyntaxSpan, SyntaxSpans};
+    SyntaxSpans::new(
+        syntax.runs.iter().map(|r| SyntaxSpan::role(syntax.version, CodeRange::of(r.line, r.start, r.line, r.end), colour_role(r.role))),
+    )
+}
+
 /// The open files. A tab holds its unsaved mark, so closing a tab drops it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EditorTabs {
@@ -630,6 +661,33 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_e6_every_syntax_role_has_its_own_widget_colour_role() {
+        use ember_editor::textmate::SyntaxRole as R;
+        let roles = [
+            R::Keyword, R::String, R::Comment, R::Number, R::Constant, R::Type, R::Function, R::Variable, R::Property, R::Operator,
+            R::Punctuation, R::Tag, R::Attribute, R::Escape, R::Macro,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for r in roles {
+            assert!(seen.insert(format!("{:?}", colour_role(r))), "{r:?} shares a colour role");
+        }
+        assert_eq!(seen.len(), 15);
+    }
+
+    #[test]
+    fn fr_e6_the_syntax_spans_prop_carries_each_run_with_the_version_it_was_written_against() {
+        use ember_editor::textmate::{DocRun, SyntaxRole};
+        let syntax = ember_editor::SyntaxRuns {
+            version: 7,
+            runs: vec![DocRun { line: 2, start: 1, end: 5, role: SyntaxRole::Keyword }, DocRun { line: 3, start: 0, end: 2, role: SyntaxRole::Comment }],
+        };
+        let spans = syntax_spans(&syntax).spans();
+        assert_eq!(spans.len(), 2);
+        assert!(spans.iter().all(|s| s.version == 7));
+        assert!(syntax_spans(&ember_editor::SyntaxRuns::default()).is_empty());
+    }
 
     #[test]
     fn fr_l31_failure_reasons_are_korean_and_never_the_server_text() {

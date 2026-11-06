@@ -193,3 +193,41 @@ whose node is unreachable fails with "computer … is unreachable".
 - Codex `additionalContext` (keyed context on `turn/start`) may be a cleaner carrier for the
   environment block than `developerInstructions`; not tried.
 - Switch is refused mid-turn; whether a user should be able to force it is open (`INTENT.md` Q2).
+
+## Adding a computer with an enrol code
+
+`FR-C1` and `FR-C2`, `INTENT.md` D39, issue #491. All [provisional]. Today a computer is added by pasting a long-lived node token into `POST /api/computers`. The enrol code replaces the paste: the server mints a one-time code, the user runs one command on the other machine, and the machine registers itself.
+
+### What this unit does
+
+Code: `ember/server/src/computers/enrol.rs`. Written, not compiled.
+
+- Store migration `crate::computers::enrol::MIGRATION` (appended last to `store::MIGRATIONS`): `enrol_codes(id, code_hash BLOB UNIQUE, name, created_ms, expires_ms, used_ms, computer_id)`. The code is never stored, only its SHA-256 digest.
+- `Enrol::mint(name, now, ttl, base_url)` returns `{id, code, expires_ms, command}`. The code is `dpe_` plus 244 random bits made like the channel invite secrets (`channels::invites::new_secret`). The lifetime defaults to 10 minutes and is clamped to 10 minutes; zero is refused. The name is checked like a computer name (not empty, not `local` or `this server`) plus the guest-name shape rules. Expired rows older than one hour are deleted on mint.
+- `command` is `ember-node enrol <code> --server <base_url>`. The server does not know its own externally reachable URL, so the caller passes it: `main.rs` reads `EMBER_PUBLIC_URL` and falls back to `http://<EMBER_LISTEN>`. The mint answer carries a warning to check that this address is reachable from the other machine, like the guest door. The URL is checked to be plain http(s) with no shell characters, because it lands in a command line.
+- `Enrol::redeem(code, now, source_key)` runs one `UPDATE ... WHERE code_hash = ? AND used_ms IS NULL AND expires_ms > now RETURNING id, name`. Unknown, used, expired, cancelled and malformed codes all return the same `Refused::Generic` ("this enrol code cannot be used"). Two concurrent redeems cannot both win, because the statement is the check and the mark. The compare happens inside SQLite on the digest, so no secret is compared in Rust and no constant-time compare crate is needed.
+- Rate limit: 10 failed redeems from one source key in 60 seconds, then `Refused::RateLimited` for that source, decided before the code is looked at, so it says nothing about the code. The guest door's `AddrLimiter` counts accepts by kind and cannot be reused for failures without a refactor, so `enrol.rs` has a small failure window (at most 4096 sources tracked). Success is not counted.
+- `Enrol::status(id, now)` gives `waiting`, `joined` or `expired` by enrol id, never by code. `joined` needs `Enrol::complete(enrol_id, computer_id)`, which the later registration step calls. `Enrol::cancel(id)` deletes an unredeemed code.
+- Admin routes, merged into the local token-protected router only (not the transport `app`, not the guest door): `POST /api/computers/enrol-codes {name, ttl_secs?}` answers 201 `{id, code, expires_ms, command, warning}` with `Cache-Control: no-store`; `GET /api/computers/enrol-codes/{id}` answers `{status}`; `DELETE /api/computers/enrol-codes/{id}` answers 204, or 409 when the code was already redeemed.
+- The code is in no log: `EnrolCode` and `Minted` print a redacted `Debug`, and the mint log line names the enrol id only.
+
+### What is not done
+
+- Redeem is not exposed. There is no route and no listener for it.
+- `ember-node enrol <code> --server <url>` does not exist.
+- The registration step (credential issue, `Computers::register*`, calling `Enrol::complete`) does not exist.
+- The project screen does not poll the status route.
+
+### Open security decision: where does redeem live?
+
+A redeem route must be reachable by a machine that has no credential yet, so it cannot sit behind `auth::protect`. Adding a `token_exempt` path to the local listener would put an unauthenticated write route next to every admin route. Options:
+
+- **(a) A dedicated enrol door**, like the guest door: its own router that holds only the redeem route, its own listener, default OFF (`EMBER_ENROL_LISTEN`), its own per-address and global limits, no shared routes with the owner server. The owner turns it on, mints a code, and turns it off. Cost: a second listener and its limits to build and test. Benefit: the exposure is one route on a port that is closed by default, and the guest door already shows the pattern.
+- **(b) Over the FR-N5 transport**, as an unauthenticated `enrol` stream that the device gate lets through for this one operation. Benefit: no new port. Cost: the gate (FR-N7) assumes every stream comes from an allowed device, so an exception inside it weakens the invariant that all transport callers are authenticated, and the new machine needs the server's peer address before it has anything.
+- **(c) Require the new machine to be signed in to the account** (hub device-link, no code). Benefit: no unauthenticated route at all. Cost: it is the existing first step and does not cover headless machines that are not signed in, which is the reason for the code.
+
+Recommendation: (a). It keeps the one unauthenticated route off the owner listener and off the transport gate, it is off until the owner asks, and the limits can be tuned without touching the admin surface. Keep (c) as the path for machines that are already signed in. Needs the supervisor's decision before the redeem route is written.
+
+### Not verified
+
+Nothing in this unit is compiled or run. The migration, the `UPDATE ... RETURNING` statement (needs SQLite 3.35, bundled by `rusqlite`), the route merge with `/api/computers/{id}` (a static segment should win over a parameter) and the tracing capture test need a builder run. No real second machine or network was involved.

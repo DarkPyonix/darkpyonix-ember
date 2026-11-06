@@ -15,6 +15,7 @@ pub mod devices;
 pub mod egress_proxy;
 pub mod events;
 pub mod fork;
+pub mod guest_door;
 pub mod history;
 pub mod mcp;
 pub mod members;

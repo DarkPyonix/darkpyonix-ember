@@ -1689,6 +1689,93 @@ pub fn stash_after_action(shown: StashLoad, result: &Result<(), String>, fresh: 
     if result.is_ok() { fresh } else { shown }
 }
 
+/// Milliseconds an armed stash button waits for its second tap before it disarms (#350).
+pub const STASH_ARM_TIMEOUT_MS: i64 = 4000;
+
+/// What a tap on a stash button that asks twice does (#350).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteTap {
+    /// Arm this button (a first tap, or a tap on another button than the armed one).
+    Arm,
+    /// The label has not had time to show yet (under 600 ms): ignore the tap, stay armed.
+    Wait,
+    /// The second tap, 600 ms to 4000 ms after arming: do it.
+    Confirm,
+    /// The armed state ran out (4000 ms or more): the caller arms again, as for `Arm`.
+    Expired,
+}
+
+/// `armed` is the key and arm time (ms) of the armed button. The key is the entry index for 삭제,
+/// or `stash_tap_key` for the buttons that act on a dirty tree. Like `amend_tap`, a second tap
+/// counts only after `AMEND_CONFIRM_DELAY_MS`, so a fast double click cannot skip the question.
+pub fn delete_tap(armed: Option<(usize, i64)>, index: usize, now: i64) -> DeleteTap {
+    match armed {
+        Some((i, at)) if i == index => {
+            let age = now - at;
+            if age >= STASH_ARM_TIMEOUT_MS {
+                DeleteTap::Expired
+            } else if age < AMEND_CONFIRM_DELAY_MS {
+                DeleteTap::Wait
+            } else {
+                DeleteTap::Confirm
+            }
+        }
+        _ => DeleteTap::Arm,
+    }
+}
+
+/// Whether the armed label ("정말 삭제합니다") shows. Nothing re-renders on a timer, so the label
+/// may stay on screen until the next recomposition after the timeout; `delete_tap` is the
+/// authority for what a tap does.
+pub fn armed_label_visible(armed: Option<(usize, i64)>, index: usize, now: i64) -> bool {
+    matches!(armed, Some((i, at)) if i == index && now - at < STASH_ARM_TIMEOUT_MS)
+}
+
+/// The key of one button of one entry in the armed state: three buttons per entry.
+pub fn stash_tap_key(action: StashAction, index: u32) -> usize {
+    let slot = match action {
+        StashAction::Apply => 0,
+        StashAction::Pop => 1,
+        StashAction::Drop => 2,
+    };
+    index as usize * 3 + slot
+}
+
+/// 삭제 always asks; 적용 and 꺼내기 ask once when the work tree has changes.
+pub fn stash_needs_confirm(action: StashAction, dirty: bool) -> bool {
+    action == StashAction::Drop || dirty
+}
+
+/// What a tap on a stash button does. A clean tree acts at once for 적용 and 꺼내기.
+pub fn stash_tap(action: StashAction, dirty: bool, armed: Option<(usize, i64)>, index: u32, now: i64) -> DeleteTap {
+    if stash_needs_confirm(action, dirty) {
+        delete_tap(armed, stash_tap_key(action, index), now)
+    } else {
+        DeleteTap::Confirm
+    }
+}
+
+/// The visible text of a stash button; the armed second tap reads differently.
+pub fn stash_button_text(action: StashAction, armed: bool) -> &'static str {
+    match (action, armed) {
+        (StashAction::Apply, false) => "적용",
+        (StashAction::Apply, true) => "그래도 적용합니다",
+        (StashAction::Pop, false) => "꺼내기",
+        (StashAction::Pop, true) => "그래도 꺼냅니다",
+        (StashAction::Drop, false) => "삭제",
+        (StashAction::Drop, true) => "정말 삭제합니다",
+    }
+}
+
+/// The line under an entry whose 적용 or 꺼내기 is armed on a dirty tree.
+pub const STASH_DIRTY_WARNING: &str = "작업 중인 변경이 있습니다. 충돌할 수 있습니다.";
+
+/// The accessible name of one entry's button: it names the entry, so a screen reader hears more
+/// than three identical "적용" buttons (#350).
+pub fn stash_button_label(index: u32, message: &str, verb: &str) -> String {
+    format!("스태시 {index} {verb}: {message}")
+}
+
 /// One call that brings the index to the staging the user chose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StageOp {
@@ -3256,6 +3343,53 @@ rename to new.txt
     fn fr_g6_a_non_korean_failure_gets_a_korean_prefix() {
         let e = ApiError::Status { status: 500, message: "boom".into(), code: None };
         assert_eq!(failure_text(StashAction::Apply.what(), &e), "스태시를 적용하지 못했습니다: boom");
+    }
+
+    #[test]
+    fn fr_g6_delete_arms_then_confirms() {
+        assert_eq!(delete_tap(None, 1, 10_000), DeleteTap::Arm);
+        assert_eq!(delete_tap(Some((1, 10_000)), 1, 10_100), DeleteTap::Wait);
+        assert_eq!(delete_tap(Some((1, 10_000)), 1, 10_600), DeleteTap::Confirm);
+        assert_eq!(delete_tap(Some((1, 10_000)), 1, 13_999), DeleteTap::Confirm);
+        assert!(armed_label_visible(Some((1, 10_000)), 1, 10_000));
+    }
+
+    #[test]
+    fn fr_g6_delete_disarms_after_the_timeout() {
+        assert_eq!(delete_tap(Some((1, 10_000)), 1, 14_000), DeleteTap::Expired);
+        assert!(!armed_label_visible(Some((1, 10_000)), 1, 14_000));
+        assert!(armed_label_visible(Some((1, 10_000)), 1, 13_999));
+        assert!(!armed_label_visible(None, 1, 0));
+    }
+
+    #[test]
+    fn fr_g6_delete_on_another_row_rearms() {
+        assert_eq!(delete_tap(Some((1, 10_000)), 2, 10_900), DeleteTap::Arm);
+        assert!(!armed_label_visible(Some((1, 10_000)), 2, 10_900));
+    }
+
+    #[test]
+    fn fr_g6_apply_asks_once_when_the_tree_is_dirty() {
+        let key = stash_tap_key(StashAction::Apply, 0);
+        assert_eq!(stash_tap(StashAction::Apply, true, None, 0, 1_000), DeleteTap::Arm);
+        assert_eq!(stash_tap(StashAction::Apply, true, Some((key, 1_000)), 0, 1_700), DeleteTap::Confirm);
+        assert_eq!(stash_tap(StashAction::Pop, true, Some((key, 1_000)), 0, 1_700), DeleteTap::Arm, "pop is its own button");
+        assert_eq!(stash_button_text(StashAction::Apply, true), "그래도 적용합니다");
+        assert_eq!(stash_button_text(StashAction::Pop, true), "그래도 꺼냅니다");
+        assert_eq!(STASH_DIRTY_WARNING, "작업 중인 변경이 있습니다. 충돌할 수 있습니다.");
+    }
+
+    #[test]
+    fn fr_g6_apply_is_immediate_when_the_tree_is_clean() {
+        assert_eq!(stash_tap(StashAction::Apply, false, None, 0, 1_000), DeleteTap::Confirm);
+        assert_eq!(stash_tap(StashAction::Pop, false, None, 3, 1_000), DeleteTap::Confirm);
+        assert_eq!(stash_tap(StashAction::Drop, false, None, 3, 1_000), DeleteTap::Arm, "delete always asks");
+    }
+
+    #[test]
+    fn fr_g6_stash_button_labels_name_the_entry() {
+        assert_eq!(stash_button_label(0, "작업 중", "적용"), "스태시 0 적용: 작업 중");
+        assert_ne!(stash_button_label(1, "a", "삭제"), stash_button_label(2, "a", "삭제"));
     }
 
     fn block(ours: &str, theirs: &str) -> GitConflictBlock {

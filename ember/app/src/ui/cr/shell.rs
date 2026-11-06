@@ -612,7 +612,7 @@ pub fn shell() {
     });
 
     let content = || {
-        cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
+        cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width().fill_max_height()).content(|| {
             if cfg!(target_os = "windows") {
                 // Caption strip: an empty drag region, then the width the caption buttons cover.
                 cu::Row()
@@ -891,6 +891,25 @@ mod tests {
         compose_rust::window::reset_window_size();
     }
 
+    #[test]
+    fn fr_l12_the_shell_content_column_has_fill_max_width_in_the_bottom_tabs_layout() {
+        // In the 390 bottom-tabs layout width is the cross axis of the content column, which a
+        // weight does not fill: without `fill_max_width` the page was sized to its content (about
+        // 230 dp, #496). The decoded modifier batch does not expose weight and fill together, so
+        // this checks the production source of the shell: the content column and the screen
+        // column inside it both carry `fill_max_width`.
+        let src = include_str!("shell.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            production.contains("cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width().fill_max_height())"),
+            "the shell content column must fill the width"
+        );
+        assert!(
+            production.contains("cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width())"),
+            "the screen column inside it must fill the width"
+        );
+    }
+
     #[composable]
     fn sidebar_probe() {
         Sidebar(false, NavMenu::Sessions, NavCounts::default(), || {}, || {});
@@ -928,11 +947,12 @@ mod tests {
         // Verify `services().reset_demo()` genuinely restores demo state after a mutation.
         let s = crate::services::services();
         let d = s.demo.as_ref().expect("test_services installs DemoSource");
+        let initial = d.events_for("demo-s1").len();
         d.send_message(&s.client, "demo-s1", "mutated message");
         let len_after_send = d.events_for("demo-s1").len();
-        assert!(len_after_send > 6);
+        assert!(len_after_send > initial);
         assert!(s.reset_demo());
-        assert_eq!(d.events_for("demo-s1").len(), 6);
+        assert_eq!(d.events_for("demo-s1").len(), initial);
     }
 
     #[test]

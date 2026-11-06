@@ -13,6 +13,8 @@ use ember_transport::PeerGate;
 /// - `EMBER_NODE_TOKEN` (required): bearer token ember server presents
 /// - `EMBER_NODE_LISTEN`: listen address (default `127.0.0.1:8741`)
 /// - `EMBER_NODE_ROOTS`: colon-separated allowed roots (default `$HOME`)
+/// - `EMBER_NODE_DENY`: colon-separated paths inside the roots that the file API refuses (default
+///   none; a node refuses nothing beyond its roots unless asked)
 /// - `EMBER_NODE_STATE_DIR`: persistent terminal metadata and `local.json` (default
 ///   `$HOME/.ember/node`)
 /// - `EMBER_NODE_KEEP_PTY=0`: do not start PTY keepers (terminal sessions end with the daemon)

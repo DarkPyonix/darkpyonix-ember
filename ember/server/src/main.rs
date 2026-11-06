@@ -190,6 +190,7 @@ async fn main() -> anyhow::Result<()> {
     let store_for_mcp = store.clone();
     let store_for_channels = store.clone();
     let store_for_guest = store.clone();
+    let store_for_enrol = store.clone();
     let sessions = Sessions::new(store, adapters);
     accounts.install(&sessions);
     ember_server::members::install(&sessions);
@@ -237,6 +238,9 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = std::env::var("EMBER_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8740".into())
         .parse()?;
+    // The server's own externally reachable URL is not known to it: EMBER_PUBLIC_URL, else the
+    // listen address (FR-C1). The enrol command and its owner warning print it.
+    let enrol_base_url = std::env::var("EMBER_PUBLIC_URL").unwrap_or_else(|_| format!("http://{addr}"));
     // The guest door (FR-T14): off unless EMBER_GUEST_LISTEN is set. A bad value is a startup error.
     let guest_door = ember_server::guest_door::GuestDoor::from_env(addr)?;
     // This server as seen from this machine (an unspecified address replaced by loopback).
@@ -434,7 +438,10 @@ async fn main() -> anyhow::Result<()> {
     let local_app = app
         .merge(devices::api::router(devices.clone()))
         .merge(antigravity::router(agy_hooks))
-        .merge(ember_server::hub::api::admin_router(hub.clone(), computers.clone()));
+        .merge(ember_server::hub::api::admin_router(hub.clone(), computers.clone()))
+        // FR-C1: minting an enrol code is an admin act, local and token-protected only. There is
+        // no redeem route (docs/design/COMPUTERS.md, "Adding a computer with an enrol code").
+        .merge(computers::enrol::router(computers::enrol::Enrol::new(store_for_enrol), enrol_base_url));
     // FR-S9, FR-S10: the token and the Origin/Host check on the local listener, every route.
     // The transport above serves `app` unwrapped: its callers passed the device gate (FR-N7).
     let local_app = {

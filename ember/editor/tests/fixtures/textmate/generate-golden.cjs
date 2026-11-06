@@ -29,6 +29,13 @@ for (const file of fs.readdirSync(grammarsDir).filter((f) => f.endsWith(".json")
   byScope[JSON.parse(fs.readFileSync(full, "utf8")).scopeName] = full;
 }
 
+// Grammars injected into a scope (what an extension's `injectTo` says).
+const injections = {
+  "source.ts": ["documentation.injection.ts"],
+  "source.js": ["documentation.injection.js.jsx"],
+  "source.host": ["source.guest"],
+};
+
 const samples = {
   "sample.ts": "source.ts",
   "sample.js": "source.js",
@@ -36,6 +43,7 @@ const samples = {
   "sample.py": "source.python",
   "sample.json": "source.json",
   "sample.md": "text.html.markdown",
+  "sample.host": "source.host",
 };
 
 async function main() {
@@ -46,6 +54,7 @@ async function main() {
       createOnigScanner: (sources) => new oniguruma.OnigScanner(sources),
       createOnigString: (s) => new oniguruma.OnigString(s),
     }),
+    getInjections: (scope) => injections[scope],
     loadGrammar: async (scope) => {
       const file = byScope[scope];
       if (!file) return null;

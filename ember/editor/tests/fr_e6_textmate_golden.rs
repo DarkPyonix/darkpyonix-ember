@@ -24,6 +24,10 @@ fn grammar_set() -> GrammarSet {
             set.add(parse_grammar(&path.to_string_lossy(), &text).unwrap_or_else(|e| panic!("{}: {e}", path.display())));
         }
     }
+    // What the extensions' `injectTo` says: the JSDoc grammars are injected into TypeScript and JavaScript.
+    set.add_injector("source.ts", "documentation.injection.ts");
+    set.add_injector("source.js", "documentation.injection.js.jsx");
+    set.add_injector("source.host", "source.guest");
     set
 }
 
@@ -138,4 +142,11 @@ fn fr_e6_golden_json_matches_vscode_textmate() {
 #[test]
 fn fr_e6_golden_markdown_matches_vscode_textmate() {
     check("md");
+}
+
+#[test]
+fn fr_e6_golden_injections_match_vscode_textmate() {
+    // A small host grammar with injections of every kind (L: and R: priority, a path, `-`, `,`, `|`, grouping)
+    // and a grammar injected into it through `injectTo`/`injectionSelector`.
+    check("host");
 }

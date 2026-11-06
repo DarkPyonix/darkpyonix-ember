@@ -34,6 +34,8 @@ pub enum HighlightJob {
         seq: u64,
         root_scope: String,
         grammars: Vec<(String, String, Arc<str>)>,
+        /// Scopes of the grammars injected into the root (from their `injectTo`); their text is in `grammars`.
+        injectors: Vec<String>,
         text: String,
         version: u32,
         window: (u32, u32),
@@ -106,7 +108,7 @@ impl Worker {
         Self::default()
     }
 
-    fn grammar_for(&mut self, root: &str, sources: &[(String, String, Arc<str>)]) -> Result<Arc<Grammar>, String> {
+    fn grammar_for(&mut self, root: &str, sources: &[(String, String, Arc<str>)], injectors: &[String]) -> Result<Arc<Grammar>, String> {
         // A language compiled once serves every document of it: the sources are not parsed again.
         if let Some(g) = self.grammars.get(root) {
             return Ok(g.clone());
@@ -117,6 +119,9 @@ impl Worker {
                 Ok(g) => set.add(g),
                 Err(e) => tracing::warn!("ember-editor: grammar {scope} ({path}) not usable: {e}"),
             }
+        }
+        for injector in injectors {
+            set.add_injector(root, injector);
         }
         if !set.contains(root) {
             return Err(format!("the grammar {root} could not be read"));
@@ -151,11 +156,11 @@ impl Worker {
         };
         for job in jobs {
             match job {
-                HighlightJob::Build { key, seq, root_scope, grammars, text, version, window } => {
+                HighlightJob::Build { key, seq, root_scope, grammars, injectors, text, version, window } => {
                     self.docs.remove(&key);
                     touched.retain(|k| *k != key);
                     let built = self
-                        .grammar_for(&root_scope, &grammars)
+                        .grammar_for(&root_scope, &grammars, &injectors)
                         .and_then(|g| DocumentTokens::new(g, &text).map_err(|_| "the document is too large to colour".to_owned()));
                     match built {
                         Ok(tokens) => {
@@ -303,6 +308,8 @@ impl Highlights {
         let mut order: Vec<String> = Vec::new();
         let mut missing: Vec<String> = Vec::new();
         let mut queue = vec![root.to_owned()];
+        // The grammars injected into the root are loaded with it (after what it includes, in a fixed order).
+        queue.splice(0..0, self.catalog.injections_into(root).iter().rev().map(|e| e.scope_name.clone()));
         let mut seen: HashSet<String> = HashSet::new();
         while let Some(scope) = queue.pop() {
             if order.len() + missing.len() >= MAX_GRAMMARS_PER_LANGUAGE || !seen.insert(scope.clone()) {
@@ -370,7 +377,8 @@ impl Highlights {
                 Some((scope.clone(), path, self.texts.get(scope)?.clone()))
             })
             .collect();
-        Some(HighlightJob::Build { key: key.to_owned(), seq: doc.seq, root_scope: doc.root.clone(), grammars, text, version, window: doc.window })
+        let injectors: Vec<String> = self.catalog.injections_into(&doc.root).iter().map(|e| e.scope_name.clone()).collect();
+        Some(HighlightJob::Build { key: key.to_owned(), seq: doc.seq, root_scope: doc.root.clone(), grammars, injectors, text, version, window: doc.window })
     }
 
     /// A grammar file arrived (or failed). Returns the reads it leads to and the documents that are now ready

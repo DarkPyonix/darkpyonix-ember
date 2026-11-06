@@ -12,7 +12,8 @@
 //! The poll limiter is per router (it lives in the routes' state). A test that polls one
 //! enrolment several times builds a fresh door router over the SAME `Arc<Enrol>` for each poll
 //! (`Fx::app`), so the 2 s limit does not get in its way and nothing sleeps; the tests of the limit
-//! itself use one router, or `PollLimiter` with an injected clock.
+//! itself use one router, or `PollLimiter` with an injected clock. The handler verifies the poll
+//! secret before it asks the limiter, so only a poll with a valid secret can take a slot.
 //!
 //! Not written, and why:
 //! - A 408 on the redeem route: the request timeout is the fixed `ENROL_REQUEST_TIMEOUT` (10 s)
@@ -503,6 +504,145 @@ async fn fr_c2_redeem_oversized_body_is_413_with_or_without_content_length() {
     assert_eq!(json_of(&r.2), json!({ "error": "body too large", "code": "too_large" }));
 }
 
+/// A body that fails midway (a client that aborts) is a 400 with the fixed bad-request text, not
+/// the 413 of an oversized body. Only the size limit is 413.
+#[tokio::test]
+async fn fr_c2_redeem_a_body_stream_that_errors_midway_is_400_not_413() {
+    use axum::body::Bytes;
+    let f = fx();
+    let app = f.open_app();
+    let stream = futures::stream::iter([
+        Ok::<Bytes, std::io::Error>(Bytes::from_static(b"{\"code\":")),
+        Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "client went away")),
+    ]);
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/enrol/redeem")
+        .header("host", HOST)
+        .header("content-type", "application/json")
+        .body(Body::from_stream(stream))
+        .unwrap();
+    req.extensions_mut().insert(ConnectInfo(SocketAddr::new(PEER.parse::<IpAddr>().unwrap(), 40000)));
+    let res = app.clone().oneshot(req).await.unwrap();
+    let (parts, body) = res.into_parts();
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST);
+    assert_eq!(json_of(&body.collect().await.unwrap().to_bytes()), json!({ "error": "bad request", "code": "bad_request" }));
+}
+
+/// The guard answers HEAD with 405 before the router, so the poll route's `Allow: GET,HEAD` is never
+/// reached: the answer has an empty body and only the two door headers, no `allow`.
+#[tokio::test]
+async fn fr_c2_head_on_the_poll_route_is_405() {
+    let f = fx();
+    for app in [f.open_app(), f.app()] {
+        for uri in ["/enrol/status/x", "/enrol/redeem"] {
+            let r = send(&app, PEER, "HEAD", uri, &[], Vec::new()).await;
+            assert_eq!(r.0, StatusCode::METHOD_NOT_ALLOWED, "HEAD {uri}");
+            assert!(r.2.is_empty(), "HEAD {uri}: {:?}", String::from_utf8_lossy(&r.2));
+            let mut names: Vec<String> =
+                r.1.keys().map(|k| k.as_str().to_string()).filter(|k| k != "content-length").collect();
+            names.sort();
+            {
+                // Measured, not read: the author READ guard_layer (a bare 405 before the router, so no
+                // `allow`) and CI showed `allow` on HEAD /enrol/redeem (#591, run 42188136645). Straight
+                // to the real stdout, the only way a line of a passing test reaches the CI log.
+                use std::io::Write;
+                let allow = r.1.get("allow").and_then(|v| v.to_str().ok()).unwrap_or("-");
+                let _ = writeln!(std::io::stdout(), "HEAD_MATRIX|HEAD|{uri}|{}|{names:?}|allow={allow}", r.0.as_u16());
+            }
+            // Pinned after the measurement; until then only what the code makes certain: the guard's
+            // bare 405 plus the two door headers, `allow` or not.
+            let without_allow: Vec<&str> = names.iter().map(String::as_str).filter(|n| *n != "allow").collect();
+            assert_eq!(without_allow, ["cache-control", "x-content-type-options"], "HEAD {uri}");
+        }
+    }
+}
+
+/// Does the Host and Origin guard also cover the method-not-allowed path? YES, MEASURED in CI on
+/// #591 (run on head 7d62d63, 42 requests): a foreign Host, or a good Host with a foreign Origin,
+/// is a 403 for EVERY wrong method on both registered paths and for the two real routes; with a good
+/// Host a wrong method is a 404, except HEAD, which is a 405 (the guard's bare answer). `Allow` is
+/// added by axum's `RouteFuture` after the fallback answered, whatever its status (axum 0.8.9
+/// route.rs 163-164), so it is on the 403s too; it is `POST` for the redeem path and `GET,HEAD` for
+/// the poll path, and absent where a route matched (the two real routes, and HEAD on the poll route,
+/// which axum routes to the GET route where the guard answers). The values below are what CI
+/// printed, not what was read: reading this table got it wrong twice before it was measured. One
+/// `GUARD_MATRIX` line per request still goes to the real stdout (the only way a line of a passing
+/// test reaches the CI log), so a change in axum shows up in the log as well as in an assertion.
+#[tokio::test]
+async fn fr_c2_guard_matrix_is_measured() {
+    use std::io::Write;
+    let f = fx();
+    let app = f.open_app();
+    let body = json!({ "code": unknown_code('q'), "node_public_info": node_info() }).to_string();
+    let redeem_methods = ["GET", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"];
+    let status_methods = ["POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"];
+    let mut cases: Vec<(&str, &str)> = Vec::new();
+    for m in redeem_methods {
+        cases.push((m, "/enrol/redeem"));
+    }
+    for m in status_methods {
+        cases.push((m, "/enrol/status/x"));
+    }
+    // Controls: the two requests that reach a handler.
+    cases.push(("POST", "/enrol/redeem"));
+    cases.push(("GET", "/enrol/status/x"));
+    let variants: [(&str, &str, Option<&str>); 3] = [
+        ("good_host", HOST, None),
+        ("foreign_host", "evil.example", None),
+        ("good_host_foreign_origin", HOST, Some("http://evil.example")),
+    ];
+    for (method, uri) in &cases {
+        for (variant, host, origin) in variants {
+            let mut req = Request::builder()
+                .method(*method)
+                .uri(*uri)
+                .header("host", host)
+                .header("content-type", "application/json");
+            if let Some(o) = origin {
+                req = req.header("origin", o);
+            }
+            let mut req = req.body(Body::from(body.clone())).unwrap();
+            req.extensions_mut().insert(ConnectInfo(SocketAddr::new(PEER.parse::<IpAddr>().unwrap(), 40000)));
+            let res = app.clone().oneshot(req).await.unwrap();
+            let (parts, _) = res.into_parts();
+            let mut names: Vec<String> = parts.headers.keys().map(|k| k.as_str().to_string()).collect();
+            names.sort();
+            names.dedup();
+            let allow = parts.headers.get("allow").and_then(|v| v.to_str().ok()).unwrap_or("-");
+            let _ = writeln!(
+                std::io::stdout(),
+                "GUARD_MATRIX|{method}|{uri}|{variant}|{}|{names:?}|allow={allow}",
+                parts.status.as_u16()
+            );
+            // Pinned to the CI measurement (see the doc comment).
+            let is_route = (*method == "POST" && *uri == "/enrol/redeem") || (*method == "GET" && *uri == "/enrol/status/x");
+            let want_status = if variant != "good_host" {
+                StatusCode::FORBIDDEN // the GUARD refused: a foreign Host or Origin, on every path and method
+            } else if *method == "POST" && *uri == "/enrol/redeem" {
+                // ALSO a 403, but NOT the guard's: the Host and Origin are good here, the request reaches the
+                // `redeem` handler, which refuses the unknown code in the body (`unknown_code`) with the
+                // generic "this enrol code cannot be used". Same status, different layer: do not read the
+                // good_host column of this row as a guard result.
+                StatusCode::FORBIDDEN
+            } else if *method == "HEAD" {
+                StatusCode::METHOD_NOT_ALLOWED // the guard's bare 405
+            } else {
+                StatusCode::NOT_FOUND // a wrong method, or the poll without a secret
+            };
+            assert_eq!(parts.status, want_status, "{method} {uri} {variant}");
+            let want_allow = if is_route || (*method == "HEAD" && *uri == "/enrol/status/x") {
+                "-"
+            } else if *uri == "/enrol/redeem" {
+                "POST"
+            } else {
+                "GET,HEAD"
+            };
+            assert_eq!(allow, want_allow, "{method} {uri} {variant}: Allow");
+        }
+    }
+}
+
 #[tokio::test]
 async fn fr_c2_redeem_bad_node_info_is_400_and_does_not_burn_the_code() {
     let f = fx();
@@ -784,12 +924,17 @@ async fn fr_c2_the_second_immediate_poll_on_the_door_is_429_with_retry_after() {
     assert_eq!(json_of(&second.2), json!({ "error": "too many requests", "code": "rate_limited" }));
     let wait: u64 = second.1["retry-after"].to_str().unwrap().parse().unwrap();
     assert!((1..=2).contains(&wait), "{wait}");
-    // The limit is per enrolment: another id on the same router is answered (404 for an unknown one).
-    let other = poll(&app, "5b0f2c2e-9a53-4a53-8f0e-2f9d2c1d0a11", Some(&o.secret)).await;
-    assert_eq!(other.0, StatusCode::NOT_FOUND);
-    // An unknown id is limited like a real one, so the limiter does not tell them apart.
-    let again = poll(&app, "5b0f2c2e-9a53-4a53-8f0e-2f9d2c1d0a11", Some(&o.secret)).await;
-    assert_eq!(again.0, StatusCode::TOO_MANY_REQUESTS);
+    // The limit is per enrolment: another enrolment on the same router is answered.
+    let o2 = open(&f, "second", PEER).await;
+    assert_eq!(poll(&app, &o2.id, Some(&o2.secret)).await.0, StatusCode::OK);
+    // An unknown id is never limited (it takes no slot): the same 404 every time, never a 429.
+    for _ in 0..3 {
+        let unknown = poll(&app, "5b0f2c2e-9a53-4a53-8f0e-2f9d2c1d0a11", Some(&o.secret)).await;
+        assert_eq!(unknown.0, StatusCode::NOT_FOUND);
+    }
+    // A wrong secret on the limited enrolment is the 404, not the 429: it is refused before the limiter.
+    let wrong = format!("dps_{}", "0".repeat(96));
+    assert_eq!(poll(&app, &o.id, Some(&wrong)).await.0, StatusCode::NOT_FOUND);
     // The refused poll did not touch the enrolment: the secret still works on a fresh router.
     assert_eq!(poll(&f.open_app(), &o.id, Some(&o.secret)).await.0, StatusCode::OK);
 }
@@ -822,6 +967,63 @@ fn fr_c2_the_poll_limiter_is_bounded_and_fails_closed() {
     assert_eq!(l.check_at("extra2", t0 + Duration::from_millis(61_100)), Ok(()));
     assert!(l.len() < ENROL_POLL_MAX_ENTRIES, "{}", l.len());
     assert!(l.len() <= 3, "only the recent entries are left: {}", l.len());
+}
+
+#[tokio::test]
+async fn fr_c2_wrong_secret_polls_never_take_a_poll_limiter_slot() {
+    let f = fx();
+    let o = open(&f, "laptop", PEER).await;
+    // One router for everything, so one limiter. 1500 invented ids (more than the 1024 slots),
+    // alternately with a wrong secret and with none: every one is the same 404 and none is a 429.
+    let app = f.open_app();
+    let wrong = format!("dps_{}", "0".repeat(96));
+    for i in 0..1500 {
+        let id = format!("invented-{i}");
+        let secret = if i % 2 == 0 { Some(wrong.as_str()) } else { None };
+        let r = poll(&app, &id, secret).await;
+        assert_eq!(r.0, StatusCode::NOT_FOUND, "{i}");
+        assert_eq!(json_of(&r.2), not_found_body(), "{i}");
+    }
+    // A wrong secret on the real id takes no slot either.
+    assert_eq!(poll(&app, &o.id, Some(&wrong)).await.0, StatusCode::NOT_FOUND);
+    // The legitimate node's first poll is admitted (the table is not full of invented ids; with
+    // the old order it would be a 429), and only now does the real id take its slot.
+    let first = poll(&app, &o.id, Some(&o.secret)).await;
+    assert_eq!(first.0, StatusCode::OK, "{}", text(&first.2));
+    assert_eq!(json_of(&first.2), json!({ "status": "waiting" }));
+    assert_eq!(poll(&app, &o.id, Some(&o.secret)).await.0, StatusCode::TOO_MANY_REQUESTS);
+    // The limiter's len() is not reachable from the door (it lives in the private routes state),
+    // so the property is asserted by behaviour: see above.
+}
+
+#[tokio::test]
+async fn fr_c2_a_rate_limited_poll_does_not_consume_the_credential() {
+    let f = fx();
+    let o = open(&f, "laptop", PEER).await;
+    let app = f.open_app();
+    // An admitted poll before the confirm takes the slot.
+    assert_eq!(poll(&app, &o.id, Some(&o.secret)).await.0, StatusCode::OK);
+    let (st, c) = owner(&f, "POST", &api(&o.id, "/confirm"), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::OK, "{c}");
+    // Inside the interval, on the same router: 429, with Retry-After and no credential.
+    let limited = poll(&app, &o.id, Some(&o.secret)).await;
+    assert_eq!(limited.0, StatusCode::TOO_MANY_REQUESTS);
+    assert!(limited.1.contains_key("retry-after"));
+    assert!(!text(&limited.2).contains("node_token"), "{}", text(&limited.2));
+    let again = poll(&app, &o.id, Some(&o.secret)).await;
+    assert_eq!(again.0, StatusCode::TOO_MANY_REQUESTS);
+    // The credential was not taken: the owner still sees awaiting_confirmation, not joined.
+    let (_, s) = owner(&f, "GET", &api(&o.id, ""), None).await;
+    assert_eq!(s["status"], "awaiting_confirmation", "{s}");
+    // The clock cannot be injected into the handler, so "after 2 s" is a second router (a fresh
+    // limiter): the next admitted poll delivers the credential, once.
+    let token = f.fake.token(0);
+    let (st, _, body) = poll(&f.open_app(), &o.id, Some(&o.secret)).await;
+    assert_eq!(st, StatusCode::OK);
+    let b = json_of(&body);
+    assert_eq!(b["status"], "joined", "{b}");
+    assert_eq!(b["credential"]["node_token"], token.as_str());
+    assert_eq!(f.fake.count(), 1);
 }
 
 // ---- the route table and the classes of the limiter ----

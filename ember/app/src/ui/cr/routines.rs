@@ -1592,7 +1592,10 @@ fn RoutineForm(
         Trigger::Event => "이벤트가 일어날 때 실행됩니다".to_string(),
     };
 
-    let body_height = (current_window_size().height_dp - 32.0 - 60.0 - 65.0).clamp(240.0, 600.0);
+    let body_height = {
+        let w = current_window_size();
+        super::components::sheet_body_max_height(w.width_dp, w.height_dp, false, 60.0 + 65.0).min(600.0)
+    };
     let comp_list = computers.to_vec();
 
     EmberSheet(title, true, on_close.clone(), None, move || {

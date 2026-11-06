@@ -53,6 +53,11 @@ struct GitState {
     local: Arc<Mutex<Option<Router>>>,
 }
 
+/// A fresh slot for the in-process node used by [`local_call`].
+pub(crate) fn new_local() -> Arc<Mutex<Option<Router>>> {
+    Arc::new(Mutex::new(None))
+}
+
 pub fn router(sessions: Arc<Sessions>, computers: Arc<Computers>) -> Router {
     Router::new()
         .route("/api/projects/{name}/git/{*op}", post(relay))
@@ -117,7 +122,7 @@ async fn relay(
     let path = format!("/git/{op}");
 
     let (status, bytes) = if computer_id == LOCAL {
-        match local_call(&s, &path, &body).await {
+        match local_call(&s.local, &path, &body).await {
             Ok(r) => r,
             Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
         }
@@ -138,10 +143,10 @@ async fn relay(
 }
 
 /// This server as a computer: an in-process node rooted at `$HOME`, built on first use.
-async fn local_call(s: &GitState, path: &str, body: &Value) -> anyhow::Result<(u16, Vec<u8>)> {
+pub(crate) async fn local_call(local: &Mutex<Option<Router>>, path: &str, body: &Value) -> anyhow::Result<(u16, Vec<u8>)> {
     const TOKEN: &str = "local";
     let app = {
-        let mut slot = s.local.lock().unwrap();
+        let mut slot = local.lock().unwrap();
         if slot.is_none() {
             let roots = std::env::var_os("HOME").map(std::path::PathBuf::from).into_iter().collect();
             *slot = Some(ember_node::api::router(Node::new(NodeConfig::new(TOKEN, roots))?));

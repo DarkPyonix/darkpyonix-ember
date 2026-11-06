@@ -13,6 +13,8 @@
 
 #[path = "git_branches.rs"]
 pub mod git_branches;
+#[path = "git_github.rs"]
+pub mod git_github;
 #[path = "git_log.rs"]
 pub mod git_log;
 #[path = "git_prs.rs"]

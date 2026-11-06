@@ -214,6 +214,42 @@ async fn fr_g9_branches_call_decodes_the_nodes_shape_with_defaults() {
     assert!(m.is_default && m.upstream.is_none() && m.worktree.is_none() && (m.ahead, m.behind) == (0, 0));
 }
 
+// FR-G13: the GitHub card's summary, with null numbers and defaults.
+#[tokio::test]
+async fn fr_g13_github_summary_decodes_null_numbers_and_defaults() {
+    use ember_client::api::GithubState;
+    async fn handler() -> Json<Value> {
+        Json(json!({
+            "state": "warn", "reason": "gh에 로그인되어 있지 않습니다 (터미널에서 gh auth login)", "account": null,
+            "repos": [
+                {"name_with_owner": "o/r", "default_branch": "main", "open_prs": null, "review_requested": null,
+                 "capped": true, "ci": ["success", "failure", "cancelled", "pending"], "error": "GitHub에 연결하지 못했습니다.", "projects": ["a"]},
+                {"name_with_owner": null}
+            ],
+            "totals": {"repos": 2, "open_prs": null, "review_requested": 3, "ci_pass_percent": null},
+            "checked_at": 1760000000
+        }))
+    }
+    let app = Router::new().route("/api/integrations/github", axum::routing::get(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let api = Api::new(&format!("http://{addr}")).unwrap();
+    let g = api.github_summary().await.unwrap();
+    assert_eq!(g.state, GithubState::Warn);
+    assert!(g.reason.as_deref().unwrap().contains("gh auth login"));
+    assert_eq!(g.account, None);
+    assert_eq!(g.repos.len(), 2);
+    assert_eq!(g.repos[0].open_prs, None);
+    assert!(g.repos[0].capped);
+    assert_eq!(g.repos[0].ci.as_ref().unwrap().len(), 4);
+    assert_eq!(g.repos[1].ci, None);
+    assert_eq!(g.totals.open_prs, None);
+    assert_eq!(g.totals.review_requested, Some(3));
+    assert_eq!(g.totals.ci_pass_percent, None);
+    assert_eq!(g.checked_at, 1760000000);
+}
+
 #[tokio::test]
 async fn fr_g10_pr_detail_call_decodes_the_nodes_shape() {
     use ember_client::api::{GitPrCheckState, GitPrReviewState};

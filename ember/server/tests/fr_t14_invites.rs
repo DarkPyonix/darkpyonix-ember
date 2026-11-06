@@ -171,21 +171,3 @@ async fn fr_t14_an_unknown_channel_is_404_on_every_invite_route() {
         assert_eq!(status, StatusCode::NOT_FOUND, "{m} {uri}");
     }
 }
-
-#[tokio::test]
-async fn fr_t14_the_migration_applies_to_an_old_database() {
-    let dir = tempfile::tempdir().unwrap();
-    let (store, _, _, path) = fixture(dir.path());
-    let latest = store.schema_version().unwrap();
-    drop(store);
-    {
-        let db = rusqlite::Connection::open(&path).unwrap();
-        db.execute_batch("DROP TABLE channel_guests; DROP TABLE channel_invites;").unwrap();
-        db.pragma_update(None, "user_version", latest - 1).unwrap();
-    }
-    let store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), latest);
-    let ch = store.channels(None).unwrap().remove(0).id;
-    assert!(store.create_invite(&ch, "user", None).is_ok());
-    assert!(store.list_invites(&ch).unwrap().len() == 1);
-}

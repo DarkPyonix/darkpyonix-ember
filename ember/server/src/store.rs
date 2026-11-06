@@ -550,6 +550,31 @@ mod tests {
         assert_eq!(stored, None, "existing rows hold NULL");
     }
 
+    /// FR-T14: a database from before the invite tables gains them in place. The old database
+    /// stops just before the invite migration, found by position, so a migration appended after it
+    /// does not change what this test means (a test that drops the tables and rewinds
+    /// `user_version` by one breaks as soon as another migration is appended).
+    #[test]
+    fn fr_t14_the_migration_applies_to_an_old_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ember.db");
+        let before = MIGRATIONS.iter().position(|m| *m == crate::channels::invites::MIGRATION).unwrap();
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            for (i, sql) in MIGRATIONS.iter().enumerate().take(before) {
+                let tx = conn.transaction().unwrap();
+                tx.execute_batch(sql).unwrap();
+                tx.pragma_update(None, "user_version", (i + 1) as i64).unwrap();
+                tx.commit().unwrap();
+            }
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        let ch = store.channels(None).unwrap().remove(0).id;
+        assert!(store.create_invite(&ch, "user", None).is_ok());
+        assert_eq!(store.list_invites(&ch).unwrap().len(), 1);
+    }
+
     /// FR-L26: a database from before the project settings columns gains them in place, with
     /// empty values, and keeps its projects.
     #[test]

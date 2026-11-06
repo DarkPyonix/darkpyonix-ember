@@ -40,8 +40,49 @@ pub fn server_token(env_token: Option<&str>, data_dir: Option<&Path>, home: Opti
 /// open and the check is caught by comparing the path's own `symlink_metadata` (a symlink, or a
 /// different dev/inode, is refused) with the handle's.
 fn read_token_file(path: &Path) -> Option<String> {
+    read_token_file_with(path, || {})
+}
+
+/// `O_NONBLOCK` for the platforms the client runs on, so opening a FIFO at the token path returns
+/// at once instead of waiting for a writer (the kind is refused right after). `ember-client` has no
+/// `libc`, so the value is spelled here; an unknown platform opens without the flag and relies on
+/// the kind check made before the open.
+#[cfg(unix)]
+const O_NONBLOCK: Option<i32> = if cfg!(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly")) {
+    Some(0x0004)
+} else if cfg!(any(target_os = "linux", target_os = "android")) {
+    Some(0x0800)
+} else {
+    None
+};
+
+/// [`read_token_file`] with `between` run after the open and before the path is checked, so a test
+/// can swap the path in that window (FR-S11).
+fn read_token_file_with(path: &Path, between: impl FnOnce()) -> Option<String> {
     use std::io::Read;
-    let mut file = std::fs::File::open(path).ok()?;
+    // A FIFO, a device or a symlink at the path is refused before anything is opened, so an open
+    // cannot block on it.
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            tracing::warn!("ignoring server token file {}: not a regular file (symlinks are refused)", path.display());
+            return None;
+        }
+        Ok(m) if !m.is_file() => {
+            tracing::warn!("ignoring server token file {}: not a regular file", path.display());
+            return None;
+        }
+        Ok(_) => {}
+        Err(_) => return None,
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    if let Some(flag) = O_NONBLOCK {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(flag);
+    }
+    let mut file = options.open(path).ok()?;
+    between();
     let handle = file.metadata().ok()?;
     let refuse = |why: &str| {
         tracing::warn!("ignoring server token file {}: {why}", path.display());
@@ -84,8 +125,10 @@ fn owner_matches(file_uid: u32, dir_uid: Option<u32>) -> bool {
 }
 
 /// Whether the token may be sent to `base_url` (FR-S11): its host is loopback (`127.0.0.0/8`,
-/// `::1`, `localhost`) or listed in `EMBER_TOKEN_HOSTS` (comma separated). Any other server is
-/// reached by device key, not by this token.
+/// `::1`, `localhost`) or listed in `EMBER_TOKEN_HOSTS` (comma separated). A listed bare host
+/// receives the token over `https` only; plain `http` to a non-loopback host needs an explicit
+/// entry with the scheme (`http://host:8740`), so the token never crosses a network in clear by
+/// accident. Any other server is reached by device key, not by this token.
 pub fn token_allowed_for(base_url: &str) -> bool {
     let extra = std::env::var("EMBER_TOKEN_HOSTS").unwrap_or_default();
     token_allowed_for_hosts(base_url, &extra)
@@ -102,15 +145,15 @@ pub fn token_allowed_for_hosts(base_url: &str, extra_hosts: &str) -> bool {
     extra_hosts.split(',').map(str::trim).any(|entry| entry_matches(entry, &url, &host))
 }
 
-/// One `EMBER_TOKEN_HOSTS` entry against the target. A bare `host` matches that host on any
-/// scheme and port. An entry with a scheme (`https://host:8740`) matches only that scheme, host
+/// One `EMBER_TOKEN_HOSTS` entry against the target. A bare `host` matches that host on any port
+/// over `https` only. An entry with a scheme (`https://host:8740`) matches only that scheme, host
 /// and port; a missing port means the scheme's default port.
 fn entry_matches(entry: &str, url: &reqwest::Url, host: &str) -> bool {
     if entry.is_empty() {
         return false;
     }
     if !entry.contains("://") {
-        return entry.to_ascii_lowercase() == host;
+        return url.scheme() == "https" && entry.to_ascii_lowercase() == host;
     }
     let Ok(listed) = reqwest::Url::parse(entry) else { return false };
     let Some(listed_host) = listed.host_str() else { return false };
@@ -226,9 +269,9 @@ mod tests {
         assert!(token_allowed_for_hosts("https://dev.example.com", "https://dev.example.com"));
         assert!(token_allowed_for_hosts("https://dev.example.com:443", "https://dev.example.com"));
         assert!(!token_allowed_for_hosts("https://dev.example.com:8740", "https://dev.example.com"));
-        // A bare host still matches any scheme and port; entries mix freely.
-        assert!(token_allowed_for_hosts("http://dev.example.com:1", "dev.example.com"));
-        assert!(token_allowed_for_hosts("http://b.org:1", "https://a.org:2, b.org"));
+        // A bare host matches any port over https; entries mix freely.
+        assert!(token_allowed_for_hosts("https://dev.example.com:1", "dev.example.com"));
+        assert!(token_allowed_for_hosts("https://b.org:1", "https://a.org:2, b.org"));
         // An entry that is not a URL never matches; loopback is unchanged.
         assert!(!token_allowed_for_hosts("https://dev.example.com", "https://"));
         assert!(token_allowed_for_hosts("http://127.0.0.1:5", "https://a.org:2"));
@@ -301,5 +344,65 @@ mod tests {
         assert!(owner_matches(501, Some(501)));
         assert!(!owner_matches(0, Some(501)));
         assert!(!owner_matches(501, None));
+    }
+
+    #[test]
+    fn fr_s11_plain_http_to_a_listed_host_needs_an_explicit_entry() {
+        // A bare listed host gets the token over https only.
+        assert!(!token_allowed_for_hosts("http://dev.example.com:8740", "dev.example.com"));
+        assert!(token_allowed_for_hosts("https://dev.example.com:8740", "dev.example.com"));
+        // Plain http is allowed only by an entry that names the scheme and port.
+        assert!(token_allowed_for_hosts("http://dev.example.com:8740", "http://dev.example.com:8740"));
+        assert!(!token_allowed_for_hosts("http://dev.example.com:9", "http://dev.example.com:8740"));
+        // Loopback is unchanged: plain http is fine there.
+        assert!(token_allowed_for_hosts("http://127.0.0.1:8740", ""));
+        assert!(token_allowed_for_hosts("http://localhost:8740", ""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_s11_a_fifo_at_the_token_path_is_refused_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("server-token");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if !matches!(made, Ok(s) if s.success()) {
+            return; // no mkfifo on this machine
+        }
+        // Run the read on a thread: a regression would block here, so the test gives it 5 s.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_token_file(&path));
+        });
+        let got = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the read of a FIFO must not block");
+        assert_eq!(got, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_s11_a_path_swapped_after_the_open_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = token_in(dir.path(), 0o600);
+        // The token file is replaced by another 0600 file between the open and the check: the
+        // handle and the path name different inodes, so the read is refused.
+        let swapped = read_token_file_with(&path, || {
+            let other = dir.path().join("other");
+            std::fs::write(&other, "attacker\n").unwrap();
+            std::fs::rename(&other, dir.path().join("server-token")).unwrap();
+        });
+        assert_eq!(swapped, None);
+        // Swapped for a symlink after the open: refused too.
+        let path = token_in(dir.path(), 0o600);
+        let target = dir.path().join("elsewhere");
+        std::fs::write(&target, "attacker\n").unwrap();
+        let swapped = read_token_file_with(&path, || {
+            std::fs::remove_file(dir.path().join("server-token")).unwrap();
+            std::os::unix::fs::symlink(&target, dir.path().join("server-token")).unwrap();
+        });
+        assert_eq!(swapped, None);
+        // No swap: a fresh folder's file reads fine.
+        let dir = tempfile::tempdir().unwrap();
+        let path = token_in(dir.path(), 0o600);
+        assert_eq!(read_token_file_with(&path, || {}).as_deref(), Some("filetok\n"));
     }
 }

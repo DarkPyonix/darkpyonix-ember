@@ -86,7 +86,7 @@ pub fn find_matches_capped(text: &str, query: &str, options: FindOptions) -> (Ve
 
 /// [`find_matches_capped`] computed once per text, query and options: the find bar asks on every render
 /// and on every button, and the answer only changes when one of the three does. The text is compared by
-/// its hash and length, which costs one pass over it and no allocation.
+/// its hash and length: one pass over it per call. The caller's own copy of the text (the find bar clones it on every render) is a separate cost this does not remove.
 pub fn cached_matches(text: &str, query: &str, options: FindOptions) -> (Vec<Match>, bool) {
     use std::cell::RefCell;
     use std::hash::{Hash, Hasher};

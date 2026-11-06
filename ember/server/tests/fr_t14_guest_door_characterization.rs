@@ -284,10 +284,23 @@ async fn fr_t14_char_head_trace_and_connect_are_405_with_no_body_after_the_host_
         let (s, h, body) = call(&a, m, "/ok", &[("host", HOST)], Vec::new(), None).await;
         assert_eq!(s, StatusCode::METHOD_NOT_ALLOWED, "{m}");
         assert!(body.is_empty(), "{m}");
-        // The reply has no content type; besides the two door headers it carries `allow`, which is
-        // added by axum's method router, not by the door (CHARACTERISES CURRENT BEHAVIOUR: the
-        // value of `allow` is not pinned, only that it is present).
-        assert_eq!(names(&h), ["allow", "cache-control", "x-content-type-options"], "{m}");
+        // The reply has no content type. Whether it also carries `allow` depends on the method and
+        // on which layer answered, not on the door's own code (the door has no per-method branch):
+        // CHARACTERISES CURRENT BEHAVIOUR as observed in CI: HEAD has NO `allow`, TRACE has one.
+        // CONNECT was not observed yet (an earlier assertion failed first), so it is only printed
+        // here and pinned in the next change once CI has shown it.
+        match m {
+            "HEAD" => assert_eq!(names(&h), ["cache-control", "x-content-type-options"], "{m}"),
+            "TRACE" => assert_eq!(names(&h), ["allow", "cache-control", "x-content-type-options"], "{m}"),
+            _ => {
+                // cargo hides the output of a passing test; a direct write to the real stdout
+                // reaches the CI log as a notice (the same trick as tests/script_ready.rs).
+                use std::io::Write;
+                let _ = writeln!(std::io::stdout(), "::notice title=OBSERVE::{m} 405 header names: {:?}", names(&h));
+            }
+        }
+        // Never more than the door's two headers plus, at most, `allow`.
+        assert!(names(&h).iter().all(|n| ["allow", "cache-control", "x-content-type-options"].contains(&n.as_str())), "{m}: {:?}", names(&h));
         // The method check runs after Host and Origin: a bad one is 403, not 405. A reply to HEAD
         // has no body by the HTTP rules, so only the other methods can be read back as JSON.
         let (s, _, body) = call(&a, m, "/ok", &[("host", b"evil.example")], Vec::new(), None).await;

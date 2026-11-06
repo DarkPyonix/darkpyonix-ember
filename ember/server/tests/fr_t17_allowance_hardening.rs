@@ -419,6 +419,63 @@ async fn fr_t17_a_revoke_between_two_sends_stops_the_second() {
     assert!(notes[0].contains("@beta") && !notes[0].contains("@alpha"), "{notes:?}");
 }
 
+/// #416: the original setup of the revoke test: allow, clear, post with no allowance (the live path
+/// sends nothing and posts one note), allow again, then deliver by hand with a revoke at `i == 1`.
+///
+/// Cause of the CI failure of that setup (not a product bug): the failing line was the immediate
+/// `w.user_messages(&w.alpha).len() == 1` read (left 0, right 1), not the row count. A2A stores the
+/// row first and then `Sessions::send` pushes the `UserMessage` into the agent's event channel
+/// (`session.rs`, `live.events.send`), which the event pump records in the store on its own task. So
+/// the delivery has returned while the event is not yet in the store. Every other test here waits
+/// with `wait_user_messages`; the original read at once. The clear and set path itself is covered
+/// by the assertions below on `allow_until`, the rows and the notes.
+#[tokio::test]
+async fn fr_t17_reallow_after_clear_delivers() {
+    let w = world().await;
+    let (gid, cred) = w.join("Mina").await;
+    let (st, _) = w.allow(&gid, json!(5)).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _) = call(&w.owner, "DELETE", &w.allow_uri(&gid), None, None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert!(w.store.channel_guests(&w.channel).unwrap()[0].allow_until.is_none(), "cleared");
+    assert_eq!(w.guest_post(&cred, "@alpha @beta both").await.0, StatusCode::CREATED);
+    let first = w.wait_notes(1).await; // the live path found no allowance
+    assert!(first[0].contains("no active allowance"), "{first:?}");
+    assert_eq!(w.a2a_rows(), 0, "the live post without an allowance sent nothing");
+    let msg = w
+        .store
+        .read_channel_messages(&w.channel, 0)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.from.starts_with("guest:"))
+        .unwrap();
+    let (st, set) = w.allow(&gid, json!(5)).await;
+    assert_eq!(st, StatusCode::OK, "{set}");
+    let until = w.store.channel_guests(&w.channel).unwrap()[0].allow_until;
+    assert!(until.is_some_and(|u| u > now_ms()), "allowed again: {until:?}");
+    let rows_before = w.a2a_rows();
+    let (store, channel, g) = (w.store.clone(), w.channel.clone(), gid.clone());
+    let hook = move |i: usize| {
+        if i == 1 {
+            store.revoke_guest(&channel, &g).unwrap();
+        }
+    };
+    deliver_guest_mentions_hooked(&w.store, &w.sessions, &w.a2a, &gid, &msg, now_ms(), &hook).await;
+    let notes = w.system_notes();
+    assert_eq!(w.a2a_rows(), rows_before + 1, "only the first send went out; notes: {notes:?}");
+    // The event reaches the store on the pump's task: wait for it, as every other test here does.
+    let got = w.wait_user_messages(&w.alpha, 1).await;
+    assert_eq!(got.len(), 1, "{got:?}; notes: {notes:?}");
+    // Let a wrongly delivered beta message arrive before asserting its absence.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(w.user_messages(&w.beta).is_empty(), "beta must not be reached; notes: {:?}", w.system_notes());
+    assert_eq!(w.a2a_rows(), rows_before + 1, "still one row");
+    let notes = w.system_notes();
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert!(notes[1].ends_with("was not delivered (the allowance ended)"), "{notes:?}");
+    assert!(notes[1].contains("@beta") && !notes[1].contains("@alpha"), "{notes:?}");
+}
+
 #[tokio::test]
 async fn fr_t17_an_allowance_that_expires_between_two_sends_stops_the_second() {
     let w = world().await;

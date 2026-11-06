@@ -873,7 +873,7 @@ mod tests {
     #[test]
     fn fr_l22_a_project_answer_replaces_the_character_style() {
         let mut s = State::default();
-        let mut p = proj("alpha", &[]);
+        let mut p = Project { name: "alpha".into(), created_at: 0, ..Default::default() };
         p.character_style = Some("crew".into());
         s.apply(Input::Push(Push::ProjectUpdated { project: p.clone() }));
         p.character_style = Some("cream".into());

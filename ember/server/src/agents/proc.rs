@@ -198,7 +198,8 @@ pub fn find_shim_bin() -> Option<PathBuf> {
 pub struct AgentCommand {
     pub program: PathBuf,
     pub args: Vec<String>,
-    /// Applied on top of the server's environment. May contain [`SESSION_ENV`].
+    /// Applied on top of the server's environment. May contain [`SESSION_ENV`], and
+    /// [`session_shim::ENV_CLEAR`] to start from an empty environment.
     pub env: Vec<(String, String)>,
     pub cwd: PathBuf,
     /// A live shim of the same session may be attached instead of starting a new agent. Only for
@@ -285,8 +286,9 @@ fn safe_id(id: &str) -> bool {
 }
 
 fn spawn_direct(cmd: AgentCommand) -> anyhow::Result<AgentProc> {
-    let mut child = Command::new(&cmd.program)
-        .envs(cmd.env.iter().map(|(k, v)| (k, v)))
+    let mut command = Command::new(&cmd.program);
+    session_shim::apply_env(&mut command, &cmd.env);
+    let mut child = command
         .args(&cmd.args)
         .current_dir(&cmd.cwd)
         .stdin(Stdio::piped())

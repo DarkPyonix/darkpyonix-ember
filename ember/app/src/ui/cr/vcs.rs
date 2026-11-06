@@ -10,9 +10,10 @@
 #![allow(non_snake_case)]
 
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, MemberCwd, TeamRow, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState};
+use crate::ui::vcs::{commit_action_branch_line, commit_failure_reloads_snapshot, commit_action_gate, commit_action_key, commit_detail_from, commit_detail_view, commit_files_shown, fetch_commit_detail, file_stat_text, run_branch_from, run_commit_cherry_pick, run_commit_revert, snapshot_dirty, CommitAction, CommitDetailLoad, CommitDetailView, choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, MemberCwd, TeamRow, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState};
 use ember_client::api::{GitPrMergeMethod, GitPrReviewAction};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
@@ -1479,7 +1480,7 @@ fn SectionContent(
             );
         }
         (Some(s), Section::Conflicts) => ConflictsPane(&s.conflicts, actions, layout),
-        (Some(_), Section::History) => HistoryPane(actions.as_ref().map(|a| (a.project.clone(), a.reload.get())), layout),
+        (Some(s), Section::History) => HistoryPane(actions, layout, snapshot_dirty(s), s.branch.clone()),
         (Some(s), Section::Stash) => StashPane(actions, stash_count, layout, !s.changes.is_empty()),
         (Some(s), Section::PullRequests) => PullRequestsPane(actions, pr_count, pr_list, layout, Some(s.branch.clone())),
         (Some(_), Section::Team) => TeamPane(actions, team_count, pr_list, layout),
@@ -1788,30 +1789,38 @@ fn history_meta(e: &HistoryEntry) -> String {
     format!("{} \u{00b7} {} \u{00b7} {}", e.short, e.author, e.time_text)
 }
 
-/// One commit of the history list. The row has no click yet (the 상세 pane comes with the lane
-/// graph).
-fn HistoryRow(e: &HistoryEntry, layout: PaneLayout) {
+/// One commit of the history list: a tap selects it (the detail card shows it).
+fn HistoryRow(e: &HistoryEntry, layout: PaneLayout, selected: bool, on_select: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let limit = chip_limit(layout);
-    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
-        // TODO(compose-rust#308): lane graph (a `Canvas` column of dots and edges) goes left of the text.
-        Txt(&e.subject, TypeRole::BodyStrong, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
-        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-            Txt(&history_meta(e), TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), Some(1.0), None);
-        });
-        if e.is_merge || !e.refs.is_empty() {
+    let fill = if selected { p.surface_2 } else { p.surface };
+    let mut frame = Modifier::new().fill_max_width().background(paint(fill));
+    if selected {
+        frame = frame.border(2.0, paint(p.ink));
+    }
+    cu::Box().modifier(frame).content(move || {
+        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+            // TODO(compose-rust#308): lane graph
+            // A `Canvas` column of dots and edges goes left of the text.
+            Txt(&e.subject, TypeRole::BodyStrong, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                if e.is_merge {
-                    Pill("병합", PillTone::Sky, true);
-                }
-                for r in e.refs.iter().take(limit) {
-                    Pill(&chip_text(&r.label), ref_tone(r), true);
-                }
-                if e.refs.len() > limit {
-                    Pill(&format!("+{}", e.refs.len() - limit), PillTone::Grey, true);
-                }
+                Txt(&history_meta(e), TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), Some(1.0), None);
             });
-        }
+            if e.is_merge || !e.refs.is_empty() {
+                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    if e.is_merge {
+                        Pill("병합", PillTone::Sky, true);
+                    }
+                    for r in e.refs.iter().take(limit) {
+                        Pill(&chip_text(&r.label), ref_tone(r), true);
+                    }
+                    if e.refs.len() > limit {
+                        Pill(&format!("+{}", e.refs.len() - limit), PillTone::Grey, true);
+                    }
+                });
+            }
+        });
+        FocusOverlay(&format!("커밋 {} {}", e.short, e.subject), on_select);
     });
 }
 
@@ -1839,80 +1848,508 @@ fn sample_history() -> HistoryLoad {
     }
 }
 
-/// 히스토리: the commits of the current branch as a list, newest first. `project` is the project
-/// and the screen's reload counter (a commit or a branch change reads the list again); `None`
-/// shows sample commits.
-fn HistoryPane(project: Option<(String, u64)>, layout: PaneLayout) {
+/// The sample detail of a sample commit (captures and a screen without a server).
+fn sample_commit_detail(sha: &str) -> CommitDetailLoad {
+    use ember_client::api::{GitCommitDetail, GitCommitFile, GitCommitFileStatus as S, GitLogRef};
+    let HistoryLoad::Ready { entries, .. } = sample_history() else { return CommitDetailLoad::Idle };
+    let Some(e) = entries.iter().find(|e| e.sha == sha) else {
+        return CommitDetailLoad::Failed("커밋을 찾을 수 없습니다".to_string());
+    };
+    let f = |path: &str, status, add, del, binary| GitCommitFile { path: path.to_string(), old_path: None, status, additions: add, deletions: del, binary };
+    let files = match e.short.as_str() {
+        "a1b2c3d" => vec![
+            f("ember/proxy/src/shim.rs", S::Modified, 14, 3, false),
+            f("ember/proxy/tests/shim_attach.rs", S::Added, 22, 0, false),
+            f("docs/assets/shim.png", S::Added, 0, 0, true),
+        ],
+        "8f90123" => vec![f("ember/node/src/egress.rs", S::Modified, 9, 4, false), f("ember/node/src/legacy_egress.rs", S::Deleted, 0, 31, false)],
+        _ => vec![f("docs/SPEC.md", S::Modified, 2, 1, false)],
+    };
+    let d = GitCommitDetail {
+        sha: e.sha.clone(),
+        short: e.short.clone(),
+        subject: e.subject.clone(),
+        body: format!("{}\n\n세션이 붙기 전에 shim을 연결합니다.\n연결이 끊기면 egress도 멈춥니다.", e.subject),
+        author: e.author.clone(),
+        time: String::new(),
+        parents: if e.is_merge { vec!["1111111".to_string(), "2222222".to_string()] } else { vec!["9d8c7b6".to_string()] },
+        refs: e.refs.iter().map(|r| GitLogRef { name: r.label.clone(), kind: r.kind.clone() }).collect(),
+        files_total: files.len(),
+        files,
+        truncated: false,
+    };
+    let mut v = commit_detail_view(&d, 0);
+    v.time_text = e.time_text.clone();
+    CommitDetailLoad::Ready(v)
+}
+
+/// What the detail card does: the armed button, the busy guard, the branch form and the
+/// callbacks. Built by `HistoryPane`, read by `CommitDetailBody`.
+#[derive(Clone)]
+struct CommitCtl {
+    busy: bool,
+    armed: Option<CommitAction>,
+    form_open: bool,
+    name: MutableState<String>,
+    name_gen: u64,
+    show_sha: bool,
+    branch: String,
+    on_revert: Rc<dyn Fn()>,
+    on_pick: Rc<dyn Fn()>,
+    on_toggle_form: Rc<dyn Fn()>,
+    on_create: Rc<dyn Fn()>,
+    on_copy: Rc<dyn Fn()>,
+}
+
+fn status_tone(letter: &str) -> (Paint, Paint) {
     let p = ember_theme().palette;
-    let key_project = project.as_ref().map(|(name, _)| name.clone());
-    let state = remember_with_key(key_project, || mutable_state_of(HistoryLoad::Loading));
+    match letter {
+        "A" => (paint(p.green.soft), paint(p.green.strong)),
+        "D" => (paint(p.red.soft), paint(p.red.strong)),
+        "R" | "C" => (paint(p.blue.soft), paint(p.blue.strong)),
+        _ => (paint(p.orange.soft), paint(p.orange.strong)),
+    }
+}
+
+/// The selected commit: message, author, time, sha, refs, the changed files and the actions.
+fn CommitDetailBody(v: &CommitDetailView, ctl: &CommitCtl) {
+    let p = ember_theme().palette;
+    VcsCard(|| {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                Txt(&v.subject, TypeRole::BodyStrong, Some(paint(p.text)), None, None, Some(1.0), None);
+                Txt(&v.short, TypeRole::Mono, Some(paint(p.text_2)), Some(1), None, None, None);
+            });
+            for line in &v.body_lines {
+                Label(line, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            }
+            let parents = if v.is_merge {
+                format!("병합 커밋 (부모 {})", v.parents.iter().map(|x| x.chars().take(7).collect::<String>()).collect::<Vec<_>>().join(", "))
+            } else {
+                match v.parents.first() {
+                    Some(x) => format!("부모 {}", x.chars().take(7).collect::<String>()),
+                    None => "부모 없음".to_string(),
+                }
+            };
+            Label(&format!("{} \u{00b7} {} \u{00b7} {parents}", v.author, v.time_text), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(2));
+            Txt(&v.sha, TypeRole::Mono, Some(paint(p.text_2)), Some(2), None, None, None);
+            if !v.refs.is_empty() {
+                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    for r in v.refs.iter().take(6) {
+                        Pill(&chip_text(&r.label), ref_tone(r), true);
+                    }
+                    if v.refs.len() > 6 {
+                        Pill(&format!("+{}", v.refs.len() - 6), PillTone::Grey, true);
+                    }
+                });
+            }
+
+            let (shown, more) = commit_files_shown(v);
+            InsetPanel(true, || {
+                cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    Label(&format!("변경한 파일 {}", v.files_total), Fs::Md, Weight::Semibold, None, Some(1));
+                    if shown.is_empty() {
+                        Label("변경한 파일이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    }
+                    for f in shown {
+                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                            let (bg, fg) = status_tone(f.status_letter);
+                            cu::Box().modifier(Modifier::new().size(20.0, 20.0).background(bg).corner_radius(CORNER_XS)).alignment(Alignment::Center).content(|| {
+                                Label(f.status_letter, Fs::Xs2, Weight::Semibold, Some(fg.clone()), Some(1));
+                            });
+                            let name = match &f.old_path {
+                                Some(old) => format!("{old} \u{2192} {}", f.path),
+                                None => f.path.clone(),
+                            };
+                            Txt(&name, TypeRole::Mono, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), Some(1.0), None);
+                            if f.binary {
+                                Label(&file_stat_text(f.additions, f.deletions, true), Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                            } else {
+                                Label(&format!("+{}", f.additions), Fs::Xs, Weight::Medium, Some(paint(p.green.strong)), Some(1));
+                                Label(&format!("-{}", f.deletions), Fs::Xs, Weight::Medium, Some(paint(p.red.strong)), Some(1));
+                            }
+                        });
+                    }
+                    if let Some(line) = more {
+                        Label(&line, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    }
+                });
+            });
+
+            // Two rows: four buttons side by side do not fit at 390 (Cherry-pick was cut).
+            cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    let toggle = ctl.on_toggle_form.clone();
+                    AppButton("여기서 브랜치", None, ButtonKind::Default, true, !ctl.busy, false, move || toggle());
+                    let copy = ctl.on_copy.clone();
+                    AppButton("SHA 복사", None, ButtonKind::Default, true, true, false, move || copy());
+                });
+                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    let revert = ctl.on_revert.clone();
+                    let label = if ctl.armed == Some(CommitAction::Revert) { CommitAction::Revert.armed_label() } else { CommitAction::Revert.label() };
+                    AppButton(label, None, ButtonKind::Destructive, true, !ctl.busy, false, move || revert());
+                    let pick = ctl.on_pick.clone();
+                    let label = if ctl.armed == Some(CommitAction::CherryPick) { CommitAction::CherryPick.armed_label() } else { CommitAction::CherryPick.label() };
+                    AppButton(label, None, ButtonKind::Default, true, !ctl.busy, false, move || pick());
+                });
+            });
+
+            if let Some(action) = ctl.armed {
+                Label(&commit_action_branch_line(action, &ctl.branch), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            }
+
+            if ctl.show_sha {
+                // TODO(compose-rust#471): no clipboard facility, so the full SHA is shown selectable
+                // (Cmd+C / Ctrl+C); replace with a real copy when the clipboard can be written.
+                Label("아래에서 선택해 복사해 주세요", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
+                key(v.sha.clone(), || {
+                    EmberField(FieldOptions { fill_max_width: true, text: Some(v.sha.clone()), type_role: Some(TypeRole::Mono), ..Default::default() });
+                });
+            }
+
+            if ctl.form_open {
+                Label(&format!("{} 에서 새 브랜치를 만들고 전환합니다", v.short), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(2));
+                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    let name = ctl.name.clone();
+                    key((v.sha.clone(), ctl.name_gen), || {
+                        cu::TextField().modifier(Modifier::new().weight(1.0).height(H_BTN))
+                            .text(ctl.name.get()).placeholder("feat/새-브랜치")
+                            .on_value_change(move |value| name.set(value));
+                    });
+                    let create = ctl.on_create.clone();
+                    AppButton("만들고 전환", None, ButtonKind::Primary, true, !ctl.busy, false, move || create());
+                });
+            }
+        });
+    });
+}
+
+/// 히스토리: the commits of the current branch as a list, newest first, and the selected commit
+/// in full (changed files, 여기서 브랜치, 되돌리기, Cherry-pick, SHA 복사; FR-G14, FR-G15, #484).
+/// `actions` is the project and the screen's reload counter (a commit or a branch change reads
+/// the list again); `None` shows sample commits. `dirty` is whether the work tree has tracked
+/// changes (the node refuses a revert or cherry-pick then). The wide layout shows the list and
+/// the detail side by side, each with its own scroll (the first commit selected until a tap); the
+/// compact one shows one at a time, with 목록으로.
+fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool, branch: String) {
+    let p = ember_theme().palette;
+    let key_project = actions.as_ref().map(|a| a.project.clone());
+    let two = layout == PaneLayout::Two;
+    let state = remember_with_key(key_project.clone(), || mutable_state_of(HistoryLoad::Loading));
     let retry = remember(|| mutable_state_of(0_u64));
-    if let Some((name, reload)) = project.clone() {
-        let (st, again) = (state.clone(), retry.get());
-        launched_effect((name.clone(), reload, again), move || async move {
+    // `EMBER_CR_VCS_COMMIT=<n>` opens the n-th commit of the list directly, for captures without clicks.
+    let env_index = std::env::var("EMBER_CR_VCS_COMMIT").ok().and_then(|v| v.parse::<usize>().ok());
+    let sample_pick = if actions.is_none() {
+        env_index.and_then(|i| match sample_history() {
+            HistoryLoad::Ready { entries, .. } => entries.get(i).map(|e| e.sha.clone()),
+            _ => None,
+        })
+    } else {
+        None
+    };
+    let selected = remember_with_key(key_project.clone(), || mutable_state_of(sample_pick));
+    let env_done = remember_with_key(key_project.clone(), || mutable_state_of(false));
+    let detail = remember_with_key(key_project, || mutable_state_of(CommitDetailLoad::Idle));
+    let wanted = remember(|| mutable_state_of(None::<String>));
+    let busy = remember(|| mutable_state_of(false));
+    // The armed button as (key from `commit_action_key`, arm time in ms); cleared by a reload or a timeout.
+    let armed = remember(|| mutable_state_of(None::<(usize, i64)>));
+    let form_open = remember(|| mutable_state_of(false));
+    let name = remember(|| mutable_state_of(String::new()));
+    let name_gen = remember(|| mutable_state_of(0_u64));
+    let show_sha = remember(|| mutable_state_of(false));
+
+    if let Some(a) = actions.clone() {
+        let (st, sel, done) = (state.clone(), selected.clone(), env_done.clone());
+        launched_effect((a.project.clone(), a.reload.get(), retry.get()), move || async move {
             if crate::services::try_services().is_some() {
                 st.set(HistoryLoad::Loading);
-                let now = crate::demo::now_ms() / 1000;
-                crate::services::run_shared(async move { history_from(fetch_history(&name, 0).await, now) }, move |result| st.set(result));
+                let (name, now) = (a.project.clone(), crate::demo::now_ms() / 1000);
+                crate::services::run_shared(async move { history_from(fetch_history(&name, 0).await, now) }, move |result| {
+                    if !done.get() {
+                        done.set(true);
+                        if let (Some(i), HistoryLoad::Ready { entries, .. }) = (env_index, &result) {
+                            if let Some(e) = entries.get(i) {
+                                sel.set(Some(e.sha.clone()));
+                            }
+                        }
+                    }
+                    st.set(result);
+                });
             } else {
                 st.set(HistoryLoad::Failed("서버에 연결되어 있지 않아 히스토리를 불러올 수 없습니다.".to_string()));
             }
         });
     }
-    let current = if project.is_some() { state.get() } else { sample_history() };
-
-    let more_state = state.clone();
-    let more_project = project.as_ref().map(|(name, _)| name.clone());
-    let load_more = move || {
-        let (Some(name), HistoryLoad::Ready { entries, more: true, loading_more: false }) = (more_project.clone(), more_state.get()) else {
-            return;
-        };
-        let skip = entries.len() as u64;
-        more_state.set(HistoryLoad::Ready { entries, more: true, loading_more: true });
-        let st = more_state.clone();
-        let now = crate::demo::now_ms() / 1000;
-        crate::services::run_shared(async move { fetch_history(&name, skip).await }, move |result| {
-            let (next, error) = history_append(st.get(), result, now);
-            st.set(next);
-            if let Some(line) = error {
-                notice::post(line);
-            }
-        });
+    let current = if actions.is_some() { state.get() } else { sample_history() };
+    let first_sha = match &current {
+        HistoryLoad::Ready { entries, .. } if two => entries.first().map(|e| e.sha.clone()),
+        _ => None,
     };
+    let effective = selected.get().or(first_sha);
 
-    let list = move || {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || match current {
-            HistoryLoad::Loading => {
-                Label("히스토리를 불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-            }
-            HistoryLoad::Failed(text) => {
-                Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-                AppButton("다시 시도", None, ButtonKind::Primary, false, true, true, move || retry.set(retry.get() + 1));
-            }
-            HistoryLoad::Ready { entries, more, loading_more } => {
-                if entries.is_empty() {
-                    EmberCard(false, true, None, Some(SP[3]), None, || {
-                        Label("커밋이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-                    });
-                    return;
+    if let Some(a) = actions.clone() {
+        let (det, disarm, wanted, form, sha_shown) = (detail.clone(), armed.clone(), wanted.clone(), form_open.clone(), show_sha.clone());
+        let sha = effective.clone();
+        launched_effect((a.project.clone(), effective.clone(), a.reload.get(), retry.get()), move || async move {
+            disarm.set(None);
+            sha_shown.set(false);
+            wanted.set(sha.clone());
+            let Some(sha) = sha else {
+                det.set(CommitDetailLoad::Idle);
+                return;
+            };
+            if crate::services::try_services().is_some() {
+                if !matches!(det.get(), CommitDetailLoad::Ready(ref v) if v.sha == sha) {
+                    det.set(CommitDetailLoad::Loading);
+                    form.set(false);
                 }
-                VcsCard(|| {
-                    for (i, e) in entries.iter().enumerate() {
-                        if i > 0 {
-                            cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-                        }
-                        HistoryRow(e, layout);
+                let (name, now) = (a.project.clone(), crate::demo::now_ms() / 1000);
+                let want = sha.clone();
+                crate::services::run_shared(async move { commit_detail_from(fetch_commit_detail(&name, &sha).await, now) }, move |result| {
+                    if wanted.get().as_deref() == Some(want.as_str()) {
+                        det.set(result);
                     }
                 });
-                if more {
-                    let label = if loading_more { "불러오는 중입니다" } else { "더 보기" };
-                    AppButton(label, None, ButtonKind::Default, false, !loading_more, true, load_more);
-                }
+            } else {
+                det.set(CommitDetailLoad::Failed("서버에 연결되어 있지 않아 커밋을 불러올 수 없습니다.".to_string()));
             }
         });
+    }
+    let detail_now = if actions.is_some() {
+        detail.get()
+    } else {
+        effective.as_deref().map(sample_commit_detail).unwrap_or(CommitDetailLoad::Idle)
     };
-    if layout == PaneLayout::Two {
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(list);
+    let is_busy = busy.get();
+    let ready = match &detail_now {
+        CommitDetailLoad::Ready(v) => Some((v.sha.clone(), v.is_merge)),
+        _ => None,
+    };
+    let now_ms = crate::demo::now_ms();
+    let armed_action = ready.as_ref().and_then(|(sha, _)| {
+        [CommitAction::Revert, CommitAction::CherryPick]
+            .into_iter()
+            .find(|&act| armed_label_visible(armed.get(), commit_action_key(sha, act), now_ms))
+    });
+
+    // 되돌리기 and Cherry-pick ask twice: the gate first, then the first tap arms, the second
+    // counts after 600 ms and before 4 s. The busy guard is set before the request leaves.
+    let on_apply = {
+        let (actions, busy, armed, ready, branch) = (actions.clone(), busy.clone(), armed.clone(), ready.clone(), branch.clone());
+        move |action: CommitAction| {
+            let Some(a) = actions.clone() else { return };
+            let Some((sha, is_merge)) = ready.clone() else { return };
+            if busy.get() {
+                return;
+            }
+            if let Err(line) = commit_action_gate(action, dirty, is_merge) {
+                armed.set(None);
+                notice::post(line.to_string());
+                return;
+            }
+            let now = crate::demo::now_ms();
+            match delete_tap(armed.get(), commit_action_key(&sha, action), now) {
+                DeleteTap::Arm | DeleteTap::Expired => armed.set(Some((commit_action_key(&sha, action), now))),
+                DeleteTap::Wait => {}
+                DeleteTap::Confirm => {
+                    armed.set(None);
+                    busy.set(true);
+                    let (busy, reload, branch) = (busy.clone(), a.reload.clone(), branch.clone());
+                    crate::services::run_shared(
+                        async move {
+                            match action {
+                                CommitAction::Revert => run_commit_revert(&a.project, &sha, &branch).await,
+                                CommitAction::CherryPick => run_commit_cherry_pick(&a.project, &sha, &branch).await,
+                            }
+                        },
+                        move |result| {
+                            match result {
+                                Ok(line) => {
+                                    notice::post(line);
+                                    reload.set(reload.get() + 1);
+                                }
+                                Err(line) => {
+                                    // The node found changes the snapshot did not show: reload so the dirty flag corrects itself.
+                                    if commit_failure_reloads_snapshot(&line) {
+                                        reload.set(reload.get() + 1);
+                                    }
+                                    notice::post(line);
+                                }
+                            }
+                            busy.set(false);
+                        },
+                    );
+                }
+            }
+        }
+    };
+    let on_revert: Rc<dyn Fn()> = {
+        let apply = on_apply.clone();
+        Rc::new(move || apply(CommitAction::Revert))
+    };
+    let on_pick: Rc<dyn Fn()> = {
+        let apply = on_apply.clone();
+        Rc::new(move || apply(CommitAction::CherryPick))
+    };
+    let on_toggle_form: Rc<dyn Fn()> = {
+        let (form_open, armed) = (form_open.clone(), armed.clone());
+        Rc::new(move || {
+            armed.set(None);
+            form_open.set(!form_open.get());
+        })
+    };
+    let on_create: Rc<dyn Fn()> = {
+        let (actions, busy, ready, name, name_gen, form_open) = (actions.clone(), busy.clone(), ready.clone(), name.clone(), name_gen.clone(), form_open.clone());
+        Rc::new(move || {
+            let Some(a) = actions.clone() else { return };
+            let Some((sha, _)) = ready.clone() else { return };
+            if busy.get() {
+                return;
+            }
+            let branch = name.get().trim().to_string();
+            if !valid_branch_name(&branch) {
+                notice::post("브랜치 이름을 확인해 주세요. 공백이나 쓸 수 없는 문자가 있습니다".to_string());
+                return;
+            }
+            busy.set(true);
+            let (busy, reload, name, name_gen, form_open) = (busy.clone(), a.reload.clone(), name.clone(), name_gen.clone(), form_open.clone());
+            crate::services::run_shared(async move { run_branch_from(&a.project, &branch, &sha).await }, move |result| {
+                match result {
+                    Ok(line) => {
+                        notice::post(line);
+                        name.set(String::new());
+                        name_gen.set(name_gen.get() + 1);
+                        form_open.set(false);
+                        reload.set(reload.get() + 1);
+                    }
+                    Err(line) => notice::post(line),
+                }
+                busy.set(false);
+            });
+        })
+    };
+    let on_copy: Rc<dyn Fn()> = {
+        let show_sha = show_sha.clone();
+        Rc::new(move || {
+            show_sha.set(true);
+            notice::post("SHA를 아래에서 복사해 주세요".to_string());
+        })
+    };
+    let ctl = CommitCtl {
+        busy: is_busy,
+        armed: armed_action,
+        form_open: form_open.get(),
+        name: name.clone(),
+        name_gen: name_gen.get(),
+        show_sha: show_sha.get(),
+        branch: branch.clone(),
+        on_revert,
+        on_pick,
+        on_toggle_form,
+        on_create,
+        on_copy,
+    };
+
+    let load_more = {
+        let more_state = state.clone();
+        let more_project = actions.as_ref().map(|a| a.project.clone());
+        move || {
+            let (Some(name), HistoryLoad::Ready { entries, more: true, loading_more: false }) = (more_project.clone(), more_state.get()) else {
+                return;
+            };
+            let skip = entries.len() as u64;
+            more_state.set(HistoryLoad::Ready { entries, more: true, loading_more: true });
+            let st = more_state.clone();
+            let now = crate::demo::now_ms() / 1000;
+            crate::services::run_shared(async move { fetch_history(&name, skip).await }, move |result| {
+                let (next, error) = history_append(st.get(), result, now);
+                st.set(next);
+                if let Some(line) = error {
+                    notice::post(line);
+                }
+            });
+        }
+    };
+
+    let list = {
+        let (selected, retry, effective) = (selected.clone(), retry.clone(), effective.clone());
+        move || {
+            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || match current {
+                HistoryLoad::Loading => {
+                    Label("히스토리를 불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                }
+                HistoryLoad::Failed(text) => {
+                    Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    AppButton("다시 시도", None, ButtonKind::Primary, false, true, true, move || retry.set(retry.get() + 1));
+                }
+                HistoryLoad::Ready { entries, more, loading_more } => {
+                    if entries.is_empty() {
+                        EmberCard(false, true, None, Some(SP[3]), None, || {
+                            Label("커밋이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                        });
+                        return;
+                    }
+                    VcsCard(|| {
+                        for (i, e) in entries.iter().enumerate() {
+                            if i > 0 {
+                                cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                            }
+                            let pick = selected.clone();
+                            let sha = e.sha.clone();
+                            HistoryRow(e, layout, effective.as_deref() == Some(e.sha.as_str()), move || pick.set(Some(sha.clone())));
+                        }
+                    });
+                    if more {
+                        let label = if loading_more { "불러오는 중입니다" } else { "더 보기" };
+                        AppButton(label, None, ButtonKind::Default, false, !loading_more, true, load_more);
+                    }
+                }
+            });
+        }
+    };
+
+    let detail_view = {
+        let (selected, retry) = (selected.clone(), retry.clone());
+        move || {
+            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                if !two {
+                    let back = selected.clone();
+                    AppButton("목록으로", None, ButtonKind::Default, true, true, false, move || back.set(None));
+                }
+                match detail_now {
+                    CommitDetailLoad::Idle => {
+                        EmberCard(false, true, None, Some(SP[3]), None, || {
+                            Label("커밋을 선택해 주세요", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                        });
+                    }
+                    CommitDetailLoad::Loading => {
+                        Label("커밋을 불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    }
+                    CommitDetailLoad::Failed(text) => {
+                        Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                        AppButton("다시 시도", None, ButtonKind::Primary, false, true, true, move || retry.set(retry.get() + 1));
+                    }
+                    CommitDetailLoad::Ready(v) => CommitDetailBody(&v, &ctl),
+                }
+            });
+        }
+    };
+
+    if two {
+        cu::Row()
+            .modifier(Modifier::new().fill_max_width().fill_max_height())
+            .alignment(Alignment::TopStart)
+            .spacing(GAP_CARD)
+            .content(move || {
+                cu::ScrollColumn().modifier(Modifier::new().weight(1.0).fill_max_height()).content(list);
+                cu::ScrollColumn().modifier(Modifier::new().weight(1.4).fill_max_height()).content(detail_view);
+            });
+    } else if selected.get().is_some() {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+            detail_view();
+            cu::Spacer().modifier(Modifier::new().height(super::routines::compact_bottom_clearance()));
+        });
     } else {
         list();
     }
@@ -3928,12 +4365,12 @@ mod tests {
 
     #[compose_rust::runtime::composable]
     fn history_sample_wide() {
-        HistoryPane(None, PaneLayout::Two);
+        HistoryPane(None, PaneLayout::Two, false, "develop".to_string());
     }
 
     #[compose_rust::runtime::composable]
     fn history_sample_compact() {
-        HistoryPane(None, PaneLayout::Tabs);
+        HistoryPane(None, PaneLayout::Tabs, false, "develop".to_string());
     }
 
     #[test]
@@ -3950,6 +4387,68 @@ mod tests {
             assert!(text.contains("병합"));
             assert!(!text.contains(SOON));
         }
+    }
+
+    #[test]
+    fn fr_l19_history_detail_shows_message_files_and_the_four_actions() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        for content in [history_sample_wide as fn(), history_detail_body_sample as fn()] {
+            let text = text_of(content);
+            assert!(text.contains("ember/proxy/src/shim.rs"));
+            assert!(text.contains("+14"));
+            assert!(text.contains("바이너리"));
+            assert!(text.contains("여기서 브랜치"));
+            assert!(text.contains("되돌리기"));
+            assert!(text.contains("Cherry-pick"));
+            assert!(text.contains("SHA 복사"));
+        }
+    }
+
+    #[compose_rust::runtime::composable]
+    fn history_detail_body_sample() {
+        let noop: Rc<dyn Fn()> = Rc::new(|| {});
+        let ctl = CommitCtl {
+            busy: false,
+            armed: None,
+            form_open: true,
+            name: mutable_state_of(String::new()),
+            name_gen: 0,
+            show_sha: true,
+            branch: "develop".to_string(),
+            on_revert: noop.clone(),
+            on_pick: noop.clone(),
+            on_toggle_form: noop.clone(),
+            on_create: noop.clone(),
+            on_copy: noop,
+        };
+        let CommitDetailLoad::Ready(v) = sample_commit_detail(&sample_sha(0)) else { return };
+        CommitDetailBody(&v, &ctl);
+    }
+
+    fn sample_sha(i: usize) -> String {
+        let HistoryLoad::Ready { entries, .. } = sample_history() else { panic!() };
+        entries[i].sha.clone()
+    }
+
+    #[test]
+    fn fr_l19_history_the_sample_detail_exists_for_each_sample_commit_and_names_a_missing_one() {
+        let HistoryLoad::Ready { entries, .. } = sample_history() else { panic!() };
+        for e in &entries {
+            let CommitDetailLoad::Ready(v) = sample_commit_detail(&e.sha) else { panic!("{}", e.short) };
+            assert_eq!(v.sha, e.sha);
+            assert_eq!(v.is_merge, e.is_merge);
+            assert_eq!(v.time_text, e.time_text);
+            assert!(!v.files.is_empty());
+        }
+        assert!(matches!(sample_commit_detail("nope"), CommitDetailLoad::Failed(_)));
+    }
+
+    #[test]
+    fn fr_l19_history_a_merge_commit_cannot_arm_cherry_pick() {
+        // The gate runs before the arm: a merge never reaches the second tap.
+        assert!(commit_action_gate(CommitAction::CherryPick, false, true).is_err());
+        assert!(commit_action_gate(CommitAction::Revert, false, true).is_ok());
     }
 
     #[test]

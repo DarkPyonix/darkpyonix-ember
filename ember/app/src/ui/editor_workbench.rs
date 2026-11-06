@@ -506,7 +506,7 @@ pub mod page {
     fn menu(s: &Shared, keymap: Keymap) -> Element {
         let os = Os::current();
         rsx! {
-            div { class: "ed-menu", role: "menu",
+            div { class: "ed-menu", role: "menu", "aria-label": "편집기 메뉴",
                 for a in [Action::Save, Action::Recent, Action::Format, Action::GotoLine, Action::Palette] {
                     {
                         let s = s.clone();
@@ -641,7 +641,7 @@ pub mod page {
                 // double click gives. Cancel is the default (Enter and Escape cancel), and a click on
                 // the delete button is ignored for the first 600 ms after the question appears.
                 rsx! {
-                    div { class: "ed-tn", role: "alertdialog", tabindex: "0", style: "--d:0; height:auto; flex-wrap:wrap; padding:var(--sp2); white-space:normal; background:var(--c-red-soft); color:var(--c-red);",
+                    div { class: "ed-tn", role: "alertdialog", "aria-label": "삭제 확인", tabindex: "0", style: "--d:0; height:auto; flex-wrap:wrap; padding:var(--sp2); white-space:normal; background:var(--c-red-soft); color:var(--c-red);",
                         onkeydown: move |event| { if matches!(event.key(), Key::Enter | Key::Escape) { event.stop_propagation(); prompt.set(None); } },
                         div { style: "flex:1 1 100%;", "{message}" }
                         button { class: "ed-pj", style: "border:1px solid var(--line); background:var(--surface); color:var(--text);", autofocus: true, onclick: move |_| prompt.set(None), "취소" }
@@ -683,8 +683,8 @@ pub mod page {
                     button { class: "ed-ib", title: "파일 검색", onclick: move |_| notice(format!("파일 검색: {SOON}")), {icon("search")} }
                     button { class: "ed-ib", title: "숨기기", onclick: move |_| stripes.write().hide(Side::Left), {icon("close")} }
                 }
-                div { class: "ed-tree", role: "tree",
-                    div { class: "ed-tn", style: "--d:0;", {icon_px("chev-dn", 12)} {icon_px("folder", 15)} "{root_name}" }
+                div { class: "ed-tree", role: "tree", "aria-label": "프로젝트 트리",
+                    div { class: "ed-tn", role: "treeitem", "aria-expanded": "true", "aria-label": "{root_name} 폴더", style: "--d:0;", {icon_px("chev-dn", 12)} {icon_px("folder", 15)} "{root_name}" }
                     {prompt_row}
                     for row in rows {
                         {
@@ -697,8 +697,10 @@ pub mod page {
                             let rename_path = row.path.clone();
                             let delete_path = row.path.clone();
                             let rename_name = row.name.clone();
+                            let rename_label = row.name.clone();
                             let unsaved_for_rename = unsaved.clone();
-                            rsx! { div { key: "{row.path}", class, role: "treeitem", style: "--d:{depth};",
+                            let row_label = crate::ui::editor::tree_item_aria_label(&row.name, is_dir);
+                            rsx! { div { key: "{row.path}", class, role: "treeitem", "aria-label": "{row_label}", style: "--d:{depth};",
                                 "aria-expanded": if is_dir { "{row.open}" } else { "" },
                                 onclick: move |_| {
                                     tree_sel.set(Some((path.clone(), is_dir)));
@@ -713,7 +715,7 @@ pub mod page {
                                 "{row.name}"
                                 if chosen {
                                     div { class: "spacer" }
-                                    button { class: "ed-ib", title: "이름 변경", style: "width:22px; height:22px;",
+                                    button { class: "ed-ib", title: "이름 변경: {rename_label}", style: "width:22px; height:22px;",
                                         onclick: move |event| {
                                             event.stop_propagation();
                                             let blocked: Vec<String> = unsaved_for_rename.iter().filter(|p| crate::ui::editor::is_at_or_below(p, &rename_path)).cloned().collect();
@@ -724,7 +726,7 @@ pub mod page {
                                             prompt_text.set(rename_name.clone());
                                             prompt.set(Some(TreePrompt::Rename { path: rename_path.clone() }));
                                         }, {icon_px("edit", 13)} }
-                                    button { class: "ed-ib", title: "삭제", style: "width:22px; height:22px; color:var(--c-red);",
+                                    button { class: "ed-ib", title: "삭제: {rename_label}", style: "width:22px; height:22px; color:var(--c-red);",
                                         onclick: move |event| { event.stop_propagation(); prompt_at.set(now_ms()); prompt.set(Some(TreePrompt::Delete { path: delete_path.clone(), is_dir })); }, {icon_px("close", 13)} }
                                 }
                             } }
@@ -739,7 +741,7 @@ pub mod page {
         let mut tabs = s.tabs;
         let mut menu_open = s.menu_open;
         rsx! {
-            div { class: "ed-tabs", role: "tablist",
+            div { class: "ed-tabs", role: "tablist", "aria-label": "열린 파일",
                 for (i, path) in paths.iter().enumerate() {
                     {
                         let path = path.clone(); let close_path = path.clone();
@@ -747,10 +749,12 @@ pub mod page {
                         let selected = current == Some(path.as_str());
                         let label = base_name(&path).to_string();
                                                 let class = if selected { "ed-tab on" } else { "ed-tab" };
-                        rsx! { div { class, role: "tab", "aria-selected": "{selected}", onclick: move |_| {
+                        let tab_label = crate::ui::editor::tab_aria_label(&label, dirty[i]);
+                        let close_label = format!("닫기: {label}");
+                        rsx! { div { class, role: "tab", "aria-selected": "{selected}", "aria-label": "{tab_label}", onclick: move |_| {
                             tabs.write().activate(&path);
                             host.send(HostCommand::Focus(path.clone()));
-                        }, {icon_px(if selected { "file-w" } else { "file" }, 14)} "{label}" if dirty[i] { span { class: "ed-dirty" } } button { class: "ed-tx", "aria-label": "닫기", onclick: move |event| { event.stop_propagation(); tabs.write().close(&close_path); close_host.send(HostCommand::Close(close_path.clone())); if let Some(next) = tabs.read().current_path() { close_host.send(HostCommand::Focus(next.to_string())); } }, {icon_px(if selected { "close-w" } else { "close" }, 12)} } } }
+                        }, {icon_px(if selected { "file-w" } else { "file" }, 14)} "{label}" if dirty[i] { span { class: "ed-dirty" } } button { class: "ed-tx", "aria-label": "{close_label}", onclick: move |event| { event.stop_propagation(); tabs.write().close(&close_path); close_host.send(HostCommand::Close(close_path.clone())); if let Some(next) = tabs.read().current_path() { close_host.send(HostCommand::Focus(next.to_string())); } }, {icon_px(if selected { "close-w" } else { "close" }, 12)} } } }
                     }
                 }
                 div { class: "spacer" }
@@ -762,7 +766,7 @@ pub mod page {
     fn breadcrumbs(path: &str, folder: &str) -> Element {
         let segments = crate::ui::editor::breadcrumb_segments(path, folder);
         let last = segments.len().saturating_sub(1);
-        rsx! { div { class: "ed-crumbs",
+        rsx! { div { class: "ed-crumbs", role: "navigation", "aria-label": "경로",
             for (i, seg) in segments.iter().enumerate() {
                 if i > 0 { {icon_px("chev", 11)} }
                 span { key: "{i}", class: if i == last { "cur" } else { "" }, "{seg}" }
@@ -898,12 +902,13 @@ pub mod page {
             return rsx! { div { class: "ed-term", style: "color:var(--muted);", "문제가 없습니다." } };
         }
         rsx! {
-            div { class: "ed-plist", role: "list",
+            div { class: "ed-plist", role: "list", "aria-label": "문제 목록",
                 for (i, (path, severity, message, location, source)) in rows.into_iter().enumerate() {
                     {
                         let host = s.host.clone();
                         let dot = match severity { Severity::Error => "ed-pdot err", Severity::Warning => "ed-pdot warn", _ => "ed-pdot" };
-                        rsx! { div { key: "{i}", class: "ed-prow", role: "listitem", onclick: move |_| {
+                        let row_label = crate::ui::editor::problem_aria_label(match severity { Severity::Error => "오류", Severity::Warning => "경고", _ => "정보" }, &message, &location);
+                        rsx! { div { key: "{i}", class: "ed-prow", role: "listitem", "aria-label": "{row_label}", onclick: move |_| {
                             tabs.write().open(&path);
                             host.send(HostCommand::Open(path.clone()));
                         },
@@ -937,12 +942,12 @@ pub mod page {
         rsx! {
             section { class: "ed-tw ed-bottom", style: if max { "grid-row:2 / 4;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "아래 도구 창",
                 div { class: "ed-twh",
-                    div { class: "ed-btabs", role: "tablist",
+                    div { class: "ed-btabs", role: "tablist", "aria-label": "아래 도구 창 탭",
                         for b in ToolWindow::BOTTOM {
                             {
                                 let class = if b == w { "on" } else { "" };
                                 let label = if b == ToolWindow::Problems { crate::ui::editor::problems_tab_label(problem_count) } else { b.label().to_string() };
-                                rsx! { button { key: "{b.label()}", class, role: "tab", onclick: move |_| { if !stripes.read().is_selected(b) { stripes.write().toggle(b); } }, "{label}" } }
+                                rsx! { button { key: "{b.label()}", class, role: "tab", "aria-selected": "{b == w}", onclick: move |_| { if !stripes.read().is_selected(b) { stripes.write().toggle(b); } }, "{label}" } }
                             }
                         }
                     }
@@ -969,7 +974,7 @@ pub mod page {
         let branch = branch.to_string();
         let has_file = current.is_some();
         rsx! {
-            footer { class: "ed-status",
+            footer { class: "ed-status", role: "group", "aria-label": "상태 표시줄",
                 span { class: "ed-sbi crumbs-s", "{crumbs}" }
                 div { class: "spacer" }
                 span { class: "ed-sbi", span { class: "{dot}" } "{agent}" }

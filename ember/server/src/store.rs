@@ -570,6 +570,8 @@ mod tests {
         }
         let store = Store::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        // A project's default channel exists once it has a session.
+        store.create_session("core", crate::agents::AgentKind::Scripted, "/tmp/x", None, "alpha").unwrap();
         let ch = store.channels(None).unwrap().remove(0).id;
         assert!(store.create_invite(&ch, "user", None).is_ok());
         assert_eq!(store.list_invites(&ch).unwrap().len(), 1);

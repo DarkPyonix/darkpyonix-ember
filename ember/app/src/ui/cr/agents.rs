@@ -127,6 +127,8 @@ pub struct AgentsLive {
     pub accounts: Vec<AccountInfo>,
     pub chatgpt: Vec<ChatGptAccount>,
     pub default_ids: Vec<String>,
+    /// Review-capture sample data (`EMBER_CR_ROUTE=agents`): numbers are flagged 예시.
+    pub sample: bool,
 }
 
 fn account_infos(accounts: &[Account]) -> Vec<AccountInfo> {
@@ -184,6 +186,7 @@ pub fn AgentsScreen() {
             accounts,
             chatgpt: chatgpt.clone(),
             default_ids,
+            sample: false,
         };
         let computers = s.client.read(|st| {
             st.computers()
@@ -835,15 +838,48 @@ fn harness_shim_desc(h: AgentHarness) -> &'static str {
 fn HarnessSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: bool) {
     let profiles = effective_profiles(&store.get(), live);
 
-    // KPI Strip
-    let installed_count = live.detected.iter().filter(|d| d.installed).count().max(4);
-    let shim_count = 4;
-    let mem_sum = 17;
+    // KPI strip: every value comes from the detected agents, this device's limits or the
+    // detection clock; a value with no source says 아직 정보가 없습니다 (FR-L20).
+    let installed_count = crate::ui::agents::kpi_installed(&live.detected);
+    let installed_h: Vec<AgentHarness> = AgentHarness::ALL
+        .iter()
+        .copied()
+        .filter(|h| live.detected.iter().any(|d| d.installed && AgentHarness::of_kind(&d.kind) == Some(*h)))
+        .collect();
+    let limits: Vec<Option<u32>> = installed_h.iter().map(|h| store.get().settings(*h).mem_limit_mb).collect();
+    let mem_total = crate::ui::agents::kpi_mem_total_mb(&limits).map(crate::ui::agents::mem_total_label);
+    // TODO(server): no shim or session-process count reaches the client; samples count the
+    // harnesses that support a shim, flagged 예시.
+    let shim_count = if live.sample {
+        Some(installed_h.iter().filter(|h| h.shim_supported()).count())
+    } else {
+        crate::ui::agents::kpi_shim(None)
+    };
+    let checked = crate::services::try_services().and_then(|s| s.ui.live.agents_checked_ms.get());
+    let last_detect = if live.sample {
+        "방금".to_string()
+    } else {
+        crate::ui::agents::last_detect_label(crate::demo::now_ms().max(0) as u64, checked)
+    };
+    let sample_pill = |on: bool| on.then_some(("예시", PillTone::Orange));
+    let total = format!("전체 {}", AgentHarness::ALL.len());
     cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-        KpiItem("설치된 하네스", &installed_count.to_string(), Some((&format!("전체 {}", AgentHarness::ALL.len()), PillTone::Grey)));
-        KpiItem("상주 shim", &shim_count.to_string(), Some(("켜짐", PillTone::Blue)));
-        KpiItem("세션 메모리 한도 합", &mem_sum.to_string(), Some(("GB", PillTone::Grey)));
-        KpiItem("마지막 감지", "방금", None);
+        KpiItem(
+            "설치된 하네스",
+            &crate::ui::agents::kpi_text(installed_count.map(|n| n.to_string())),
+            installed_count.map(|_| (total.as_str(), PillTone::Grey)),
+        );
+        KpiItem(
+            "상주 shim",
+            &crate::ui::agents::kpi_text(shim_count.map(|n| n.to_string())),
+            sample_pill(live.sample && shim_count.is_some()),
+        );
+        KpiItem(
+            "세션 메모리 한도 합",
+            &crate::ui::agents::kpi_text(mem_total),
+            None,
+        );
+        KpiItem("마지막 감지", &last_detect, sample_pill(live.sample));
     });
 
     let harnesses = [
@@ -894,6 +930,7 @@ fn HarnessCard(
 ) {
     let p = ember_theme().palette;
     let (state, tone, version) = harness_status(h, detected);
+    let rescan = crate::services::try_services().map(|s| s.ui.live.agents_rescan.get());
     let settings = store.get().settings(h).clone();
     let of_h: Vec<Profile> = profiles
         .iter()
@@ -917,7 +954,7 @@ fn HarnessCard(
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                     Label(h.label(), Fs::Md, Weight::Semibold, None, Some(1));
                     cu::Spacer().modifier(Modifier::new().height(2.0));
-                    let sub = format!("{} · v{}", h.run_mode(), version.as_deref().unwrap_or("1.0.0"));
+                    let sub = crate::ui::agents::harness_subtitle(h.run_mode(), version.as_deref());
                     Label(&sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 });
                 if h == AgentHarness::Antigravity {
@@ -933,22 +970,25 @@ fn HarnessCard(
                 harness_path(h),
                 || {
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
-                        if let Some(v) = &version {
-                            Pill(&format!("v{v}"), PillTone::Grey, true);
-                        } else {
-                            Pill("v1.0.0", PillTone::Grey, true);
+                        match crate::ui::agents::version_pill(version.as_deref()) {
+                            Some(v) => Pill(&v, PillTone::Grey, true),
+                            None => Pill(crate::ui::agents::NO_INFO, PillTone::Grey, true),
                         }
-                        let h_name = h.label().to_string();
-                        let ver_str = version.clone().unwrap_or_else(|| "1.0.0".to_string());
+                        let running = matches!(rescan, Some(crate::ui::agents::Rescan::Running));
+                        let label = crate::ui::agents::rescan_label(&rescan.clone().unwrap_or_default());
                         AppButton(
-                            "다시 찾기",
+                            &label,
                             Some(IconRole::History),
                             ButtonKind::Default,
                             true,
-                            true,
+                            !running,
                             false,
-                            move || {
-                                post_notice(&format!("{h_name} v{ver_str}을 찾았습니다"));
+                            || {
+                                // Runs the detection again (`GET /agents`) and reports its real
+                                // result; without services (a capture) there is nothing to ask.
+                                if crate::services::try_services().is_some() {
+                                    crate::bridge::rescan_agents();
+                                }
                             },
                         );
                     });
@@ -2207,6 +2247,7 @@ pub fn sample_live() -> AgentsLive {
         accounts,
         chatgpt,
         default_ids,
+        sample: true,
     }
 }
 

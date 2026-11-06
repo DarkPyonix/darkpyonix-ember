@@ -578,6 +578,126 @@ pub fn harness_status(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Harness KPI row, version and re-detection (FR-L20, FR-A6)
+// ---------------------------------------------------------------------------------------------
+
+/// Said where a value has no source. Never a made-up number.
+pub const NO_INFO: &str = "아직 정보가 없습니다";
+
+/// Harnesses the server reported as installed; `None` until the server answered (an empty
+/// list is "not asked yet", as in [`harness_status`]).
+pub fn kpi_installed(detected: &[DetectedAgent]) -> Option<usize> {
+    if detected.is_empty() {
+        None
+    } else {
+        Some(detected.iter().filter(|d| d.installed).count())
+    }
+}
+
+/// Running shims. TODO(server): the client holds no shim or session-process count, so there is
+/// never a source yet; the argument is where one will come from.
+pub fn kpi_shim(running: Option<usize>) -> Option<usize> {
+    running
+}
+
+/// The sum of the memory limits set on the installed harnesses, in MB. `None` when no
+/// installed harness has a limit (the limits are this device's settings, `LOCAL_STORE_NOTE`).
+pub fn kpi_mem_total_mb(limits_of_installed: &[Option<u32>]) -> Option<u64> {
+    let set: Vec<u64> = limits_of_installed.iter().flatten().map(|m| u64::from(*m)).collect();
+    if set.is_empty() {
+        None
+    } else {
+        Some(set.iter().sum())
+    }
+}
+
+/// `"4 GB"` or `"512 MB"`; whole gigabytes drop the fraction, others keep one decimal.
+pub fn mem_total_label(mb: u64) -> String {
+    if mb >= 1024 {
+        if mb % 1024 == 0 {
+            format!("{} GB", mb / 1024)
+        } else {
+            format!("{:.1} GB", mb as f64 / 1024.0)
+        }
+    } else {
+        format!("{mb} MB")
+    }
+}
+
+/// A KPI value: the number, or [`NO_INFO`] when there is no source.
+pub fn kpi_text(value: Option<String>) -> String {
+    value.unwrap_or_else(|| NO_INFO.to_string())
+}
+
+/// When the detection last ran, relative to `now_ms`. `None` (never ran in this run of the
+/// app) says [`NO_INFO`].
+pub fn last_detect_label(now_ms: u64, at_ms: Option<u64>) -> String {
+    let Some(at) = at_ms else { return NO_INFO.to_string() };
+    let secs = now_ms.saturating_sub(at) / 1000;
+    if secs < 10 {
+        "방금".to_string()
+    } else if secs < 60 {
+        format!("{secs}초 전")
+    } else if secs < 3600 {
+        format!("{}분 전", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}시간 전", secs / 3600)
+    } else {
+        format!("{}일 전", secs / 86_400)
+    }
+}
+
+/// The version pill of a card: only a version the server reported.
+pub fn version_pill(version: Option<&str>) -> Option<String> {
+    version.map(str::trim).filter(|v| !v.is_empty()).map(|v| format!("v{v}"))
+}
+
+/// The line under a harness name: the run mode, plus the version when the server reported one.
+pub fn harness_subtitle(run_mode: &str, version: Option<&str>) -> String {
+    match version_pill(version) {
+        Some(v) => format!("{run_mode} · {v}"),
+        None => run_mode.to_string(),
+    }
+}
+
+/// The state of the 다시 찾기 buttons.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Rescan {
+    #[default]
+    Idle,
+    Running,
+    /// The sentence the last run ended with.
+    Done(String),
+}
+
+/// The sentence a finished re-detection ends with. `after` is `Err` when the server could not
+/// be asked or answered nothing.
+pub fn rescan_sentence(before: &[DetectedAgent], after: Result<&[DetectedAgent], ()>) -> String {
+    let Ok(after) = after else {
+        return "찾지 못했습니다".to_string();
+    };
+    let found = after.iter().filter(|d| d.installed).count();
+    let was = |kind: &str| before.iter().any(|d| d.kind == kind && d.installed);
+    let new = after.iter().filter(|d| d.installed && !was(&d.kind)).count();
+    if found == 0 {
+        "찾지 못했습니다".to_string()
+    } else if new == 0 {
+        "새로 찾은 하네스가 없습니다".to_string()
+    } else {
+        format!("찾았습니다: {new}개")
+    }
+}
+
+/// What the 다시 찾기 button says while it is `Idle`, `Running` or `Done`.
+pub fn rescan_label(state: &Rescan) -> String {
+    match state {
+        Rescan::Idle => "다시 찾기".to_string(),
+        Rescan::Running => "찾는 중입니다".to_string(),
+        Rescan::Done(s) => s.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Network (FR-X6) and usage (FR-U7)
 // ---------------------------------------------------------------------------------------------
 
@@ -662,6 +782,81 @@ impl Default for LocalStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn det(kind: &str, installed: bool, version: Option<&str>) -> DetectedAgent {
+        DetectedAgent { kind: kind.into(), installed, version: version.map(String::from) }
+    }
+
+    #[test]
+    fn fr_l20_kpi_installed_counts_only_reported_installs() {
+        assert_eq!(kpi_installed(&[]), None);
+        let d = [det("claude-code", true, Some("2.1.4")), det("codex", false, None)];
+        assert_eq!(kpi_installed(&d), Some(1));
+        assert_eq!(kpi_installed(&[det("codex", false, None)]), Some(0));
+    }
+
+    #[test]
+    fn fr_l20_kpi_without_source_says_no_info() {
+        assert_eq!(kpi_text(kpi_shim(None).map(|n| n.to_string())), "아직 정보가 없습니다");
+        assert_eq!(kpi_text(kpi_installed(&[]).map(|n| n.to_string())), NO_INFO);
+        assert_eq!(kpi_mem_total_mb(&[None, None]), None);
+        assert_eq!(kpi_mem_total_mb(&[]), None);
+        assert_eq!(kpi_text(kpi_installed(&[det("codex", true, None)]).map(|n| n.to_string())), "1");
+    }
+
+    #[test]
+    fn fr_l20_kpi_memory_total_sums_set_limits() {
+        assert_eq!(kpi_mem_total_mb(&[Some(2048), None, Some(4096)]), Some(6144));
+        assert_eq!(mem_total_label(6144), "6 GB");
+        assert_eq!(mem_total_label(1536), "1.5 GB");
+        assert_eq!(mem_total_label(512), "512 MB");
+    }
+
+    #[test]
+    fn fr_l20_last_detect_label_is_relative_or_no_info() {
+        assert_eq!(last_detect_label(1_000_000, None), NO_INFO);
+        assert_eq!(last_detect_label(1_005_000, Some(1_000_000)), "방금");
+        assert_eq!(last_detect_label(1_030_000, Some(1_000_000)), "30초 전");
+        assert_eq!(last_detect_label(1_000_000 + 5 * 60_000, Some(1_000_000)), "5분 전");
+        assert_eq!(last_detect_label(1_000_000 + 3 * 3_600_000, Some(1_000_000)), "3시간 전");
+        assert_eq!(last_detect_label(1_000_000, Some(2_000_000)), "방금");
+    }
+
+    #[test]
+    fn fr_l20_version_shown_only_when_reported() {
+        assert_eq!(version_pill(None), None);
+        assert_eq!(version_pill(Some("  ")), None);
+        assert_eq!(version_pill(Some("2.1.4")).as_deref(), Some("v2.1.4"));
+        assert_eq!(harness_subtitle("stream-json", None), "stream-json");
+        assert_eq!(harness_subtitle("stream-json", Some("2.1.4")), "stream-json · v2.1.4");
+    }
+
+    #[test]
+    fn fr_l20_not_detected_harness_has_no_version() {
+        let d = [det("codex", false, Some("0.1.0"))];
+        let (_, _, v) = harness_status(AgentHarness::Codex, &d);
+        assert_eq!(version_pill(v.as_deref()), None);
+    }
+
+    #[test]
+    fn fr_l21_rescan_sentence_per_outcome() {
+        let before = [det("claude-code", true, None), det("codex", false, None)];
+        let same = [det("claude-code", true, None), det("codex", false, None)];
+        assert_eq!(rescan_sentence(&before, Ok(&same)), "새로 찾은 하네스가 없습니다");
+        let more = [det("claude-code", true, None), det("codex", true, Some("0.48.0"))];
+        assert_eq!(rescan_sentence(&before, Ok(&more)), "찾았습니다: 1개");
+        let none = [det("claude-code", false, None)];
+        assert_eq!(rescan_sentence(&before, Ok(&none)), "찾지 못했습니다");
+        assert_eq!(rescan_sentence(&before, Err(())), "찾지 못했습니다");
+        assert_eq!(rescan_sentence(&[], Ok(&more)), "찾았습니다: 2개");
+    }
+
+    #[test]
+    fn fr_l21_rescan_label_follows_state() {
+        assert_eq!(rescan_label(&Rescan::Idle), "다시 찾기");
+        assert_eq!(rescan_label(&Rescan::Running), "찾는 중입니다");
+        assert_eq!(rescan_label(&Rescan::Done("찾았습니다: 1개".into())), "찾았습니다: 1개");
+    }
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()

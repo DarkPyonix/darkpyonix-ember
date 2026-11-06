@@ -278,6 +278,36 @@ pub fn request_usage_summary() {
     s.spawn(async move { fetch_usage_summary(services()).await });
 }
 
+/// Run the agent detection again (`GET /agents`, FR-A6) and say how it ended in
+/// `agents_rescan` (FR-L21). Nothing is reported before the answer arrived.
+pub fn rescan_agents() {
+    let s = services();
+    if matches!(s.ui.live.agents_rescan.get_untracked(), crate::ui::agents::Rescan::Running) {
+        return;
+    }
+    s.ui.live.agents_rescan.set(crate::ui::agents::Rescan::Running);
+    s.spawn(async move {
+        let s = services();
+        let before = s.ui.live.agents.get_untracked();
+        let got = match &s.demo {
+            Some(_) => Ok(crate::demo::agents()),
+            None => s.client.agents().await.map_err(|e| e.to_string()),
+        };
+        let sentence = match &got {
+            Ok(a) => crate::ui::agents::rescan_sentence(&before, Ok(a)),
+            Err(e) => {
+                tracing::debug!("agents rescan failed: {e}");
+                crate::ui::agents::rescan_sentence(&before, Err(()))
+            }
+        };
+        if let Ok(a) = got {
+            s.ui.live.agents_checked_ms.set(Some(crate::demo::now_ms().max(0) as u64));
+            s.ui.live.agents.set(a);
+        }
+        s.ui.live.agents_rescan.set(crate::ui::agents::Rescan::Done(sentence));
+    });
+}
+
 /// Ask for today's tokens of `project` (the Session status tile). Only the first call per
 /// project starts a request; the slow timer refreshes it.
 pub fn request_project_day(project: &str) {
@@ -412,6 +442,7 @@ async fn refresh_slow(s: &'static Services, live: Option<Live>, first: bool) {
     fetch_project_days(s).await;
     match s.client.agents().await {
         Ok(a) => {
+            s.ui.live.agents_checked_ms.set(Some(crate::demo::now_ms().max(0) as u64));
             s.ui.live.agents.set(a.clone());
             if let Some(mut live) = live {
                 if *live.agents.peek() != a {

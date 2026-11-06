@@ -77,7 +77,7 @@ impl AddUi {
         }
     }
 
-    /// The debug review hook (`EMBER_CR_PROJECT_SHEET=add-computer|enrol-waiting|enrol-confirm|enrol-joined`).
+    /// The debug review hook (`EMBER_CR_PROJECT_SHEET=add-computer|enrol-name|enrol-waiting|enrol-confirm|enrol-joined`).
     pub fn for_review() -> AddUi {
         let sheet = std::env::var("EMBER_CR_PROJECT_SHEET").ok();
         let debug = cfg!(debug_assertions);
@@ -106,6 +106,12 @@ impl AddUi {
             server_fp: Some("12ab 34cd 56ef 7890".to_string()),
         }));
         self.armed_at.set(0);
+        if stage == Stage::Name {
+            self.run.set(None);
+        }
+        if stage == Stage::Joined {
+            self.name.set("연구실 컴퓨터".to_string());
+        }
         self.view.set(Some(flow::demo_view(stage, now_ms())));
     }
 
@@ -132,10 +138,18 @@ impl AddUi {
         self.confirmed.set(false);
     }
 
+    /// True while `id` is the run on screen. An answer for an older run (the sheet was closed and
+    /// a new code minted while the call was in flight) must change nothing.
+    fn is_current(&self, id: &str) -> bool {
+        self.run.get_untracked().is_some_and(|r| r.id == id)
+    }
+
     /// Closing drops the code. A code nobody redeemed is cancelled on the server.
     fn leave(&self) {
-        let waiting = matches!(self.view.get_untracked(), Some(EnrolView::WaitingForNode { .. }));
-        if let (true, Some(run), false) = (waiting, self.run.get_untracked(), self.sample()) {
+        // A code nobody redeemed, or one still awaiting the owner's decision, is cancelled so it
+        // does not sit on the server until it expires.
+        let open_request = matches!(self.view.get_untracked(), Some(EnrolView::WaitingForNode { .. } | EnrolView::AwaitingConfirm { .. }));
+        if let (true, Some(run), false) = (open_request, self.run.get_untracked(), self.sample()) {
             run_shared(async move { services().client.api().enrol_cancel(&run.id).await }, |_| {});
         }
         self.reset_flow();
@@ -192,6 +206,9 @@ async fn fetch_status(id: String) -> Result<ember_client::api::EnrolStatus, embe
 /// Puts a poll answer into the sheet. A new confirm card arms the 600 ms delay; a join refreshes
 /// the computer list.
 fn apply_poll(ui: &AddUi, run: &Run, r: Result<ember_client::api::EnrolStatus, ember_client::api::EnrolCallError>) {
+    if !ui.is_current(&run.id) {
+        return;
+    }
     let cur = ui.view.get_untracked();
     let Some(cur) = cur else { return };
     let next = match r {
@@ -204,6 +221,10 @@ fn apply_poll(ui: &AddUi, run: &Run, r: Result<ember_client::api::EnrolStatus, e
     if next == EnrolView::Joined && cur != EnrolView::Joined {
         refresh_computers();
         notice::post("컴퓨터를 추가했습니다".to_string());
+    }
+    // The code and the command are secrets: drop them as soon as the enrolment ends.
+    if matches!(next, EnrolView::Joined | EnrolView::Denied | EnrolView::Expired | EnrolView::Failed(_)) {
+        ui.run.set(None);
     }
     if next != cur {
         ui.view.set(Some(next));
@@ -230,7 +251,11 @@ fn confirm(ui: AddUi, run: Run, rows: ConfirmRows) {
     let name = flow::confirm_name(&ui.confirm_name.get_untracked(), &rows.chosen_name);
     ui.busy.set(true);
     ui.failure.set(None);
+    let id = run.id.clone();
     run_shared(async move { services().client.api().enrol_confirm(&run.id, &name).await }, move |r| {
+        if !ui.is_current(&id) {
+            return;
+        }
         ui.busy.set(false);
         match r {
             Ok(_) => ui.confirmed.set(true),
@@ -246,10 +271,17 @@ fn deny(ui: AddUi, run: Run) {
     }
     ui.busy.set(true);
     ui.failure.set(None);
+    let id = run.id.clone();
     run_shared(async move { services().client.api().enrol_deny(&run.id).await }, move |r| {
+        if !ui.is_current(&id) {
+            return;
+        }
         ui.busy.set(false);
         match r {
-            Ok(()) => ui.view.set(Some(EnrolView::Denied)),
+            Ok(()) => {
+                ui.run.set(None);
+                ui.view.set(Some(EnrolView::Denied));
+            }
             Err(e) => ui.failure.set(Some(flow::confirm_error_text(&e).to_string())),
         }
     });
@@ -392,16 +424,25 @@ fn WaitingBody(ui: &AddUi, code: &str, expires_ms: i64, sample: bool) {
     if sample {
         Pill("예시", super::components::PillTone::Grey, true);
     }
+    // Past its time the code and the command leave the screen at once, before the next poll.
+    if left == 0 {
+        Label(flow::EXPIRED_LINE, Fs::Sm, Weight::Medium, Some(paint(p.red.strong)), Some(3));
+        return;
+    }
     // The code, large and in the mono face. Copy needs the clipboard.
     // TODO(compose-rust#471): a copy button waits for clipboard support; the text is selectable.
-    super::components::MonoLabel(code, Fs::Xl3, Weight::Semibold, Some(paint(p.text)));
+    let w = compose_rust::runtime::current_window_size();
+    let avail = w.width_dp.min(760.0) - 2.0 * SP[4];
+    super::components::MonoLabel(code, flow::code_font_size(code.chars().count(), avail), Weight::Semibold, Some(paint(p.text)));
 
     Label(flow::CODE_ONCE, Fs::Xs, Weight::Regular, muted, Some(2));
     Label(&flow::countdown_text(left), Fs::Sm, Weight::Medium, Some(paint(if left == 0 { p.red.strong } else { p.text_2 })), Some(1));
     if let Some(run) = ui.run.get() {
         match &run.command {
             CommandView::Command { text, plain_http } => {
-                EmberField(FieldOptions { fill_max_width: true, multiline: true, text: Some(text.clone()), ..Default::default() });
+                super::components::MonoLabel(text, Fs::Xs, Weight::Regular, Some(paint(p.text)));
+                Label(flow::NODE_CMD_PENDING, Fs::Xs, Weight::Regular, muted, Some(3));
+                Label(flow::ZSH_QUOTE_NOTE, Fs::Xs, Weight::Regular, muted, Some(2));
                 Label(flow::STDIN_NOTE, Fs::Xs, Weight::Regular, muted, Some(3));
                 if *plain_http {
                     Label(flow::HTTP_WARNING, Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), Some(3));
@@ -467,7 +508,7 @@ fn ConfirmBody(ui: &AddUi, rows: &ConfirmRows) {
     let Some(run) = ui.run.get() else { return };
     cu::Row().spacing(SP[1]).content(|| {
         let (u, r) = (ui.clone(), run.clone());
-        AppButton("취소/거부", None, ButtonKind::Default, true, !busy && !confirmed, false, move || deny(u.clone(), r.clone()));
+        AppButton(flow::DENY_LABEL, None, ButtonKind::Default, true, !busy && !confirmed, false, move || deny(u.clone(), r.clone()));
         let (u, r, rows) = (ui.clone(), run.clone(), rows.clone());
         let ok = !busy && !confirmed && flow::validate_name(&chosen).is_ok();
         AppButton(if busy { "추가하는 중" } else { "확인하고 추가" }, None, ButtonKind::Primary, true, ok, false, move || {
@@ -482,6 +523,15 @@ fn ConfirmBody(ui: &AddUi, rows: &ConfirmRows) {
 fn Outcome(ui: &AddUi, line: &str, again: bool) {
     let p = ember_theme().palette;
     Label(line, Fs::Md, Weight::Medium, None, Some(4));
+    if line == flow::JOINED_LINE {
+        let typed = ui.confirm_name.get();
+        let name = if typed.trim().is_empty() { ui.name.get() } else { typed };
+        let name = Some(name.trim().to_string()).filter(|n| !n.is_empty());
+        if let Some(n) = name {
+            Label(&n, Fs::Lg, Weight::Semibold, None, Some(1));
+        }
+        Label(flow::JOINED_NEXT, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(3));
+    }
     if again {
         let u = ui.clone();
         AppButton("새 코드 만들기", None, ButtonKind::Default, true, true, false, move || {

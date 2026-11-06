@@ -44,6 +44,10 @@ pub const PROPOSED_ADDR: &str = "제안 주소";
 pub const NODE_FINGERPRINT: &str = "기기 지문 (노드 화면과 대조)";
 pub const CONFIRMED_WAIT: &str = "확인했습니다. 기기가 응답하기를 기다리고 있습니다";
 pub const JOINED_LINE: &str = "컴퓨터가 추가되었습니다";
+pub const JOINED_NEXT: &str = "이제 프로젝트의 컴퓨터 목록에서 고를 수 있습니다";
+pub const NODE_CMD_PENDING: &str = "노드의 enrol 명령은 개발 중입니다. 노드 쪽이 준비되면 이 명령으로 가입합니다";
+pub const ZSH_QUOTE_NOTE: &str = "주소에 [ ]가 있으면 따옴표로 감싸 실행하세요";
+pub const DENY_LABEL: &str = "거부";
 pub const DENIED_LINE: &str = "요청을 거부했습니다. 컴퓨터는 추가되지 않았습니다";
 pub const EXPIRED_LINE: &str = "코드가 만료되었습니다. 새 코드를 만드세요";
 pub const GONE_LINE: &str = "이 요청을 서버에서 찾을 수 없습니다. 새 코드를 만드세요";
@@ -57,7 +61,7 @@ pub const WARN_INFORMS: &str = "경고는 알려 줄 뿐 추가를 막지 않습
 /// Every sentence of the code flow, for the NFR-L4 ending check in `ui::session`.
 pub const FLOW_STRINGS: &[&str] = &[
     NAME_HELP, STDIN_NOTE, WAITING_LINE, CODE_ONCE, DOOR_OFF, DOOR_URL_UNKNOWN, NO_COMMAND, HTTP_WARNING, CONFIRM_QUESTION, CONFIRM_CHECK,
-    CONFIRMED_WAIT, JOINED_LINE, DENIED_LINE, EXPIRED_LINE, GONE_LINE, DEMO_LINE, WARN_ADDR_DIFFERS, WARN_NAME_DIFFERS,
+    CONFIRMED_WAIT, JOINED_LINE, JOINED_NEXT, NODE_CMD_PENDING, ZSH_QUOTE_NOTE, DENIED_LINE, EXPIRED_LINE, GONE_LINE, DEMO_LINE, WARN_ADDR_DIFFERS, WARN_NAME_DIFFERS,
     WARN_PUBLIC_ADDR, NOTE_PROPOSED, WARN_INFORMS,
 ];
 
@@ -321,6 +325,7 @@ pub fn confirm_error_text(e: &EnrolCallError) -> &'static str {
 /// The stage a debug capture opens (`EMBER_CR_PROJECT_SHEET=enrol-waiting|enrol-confirm|enrol-joined`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
+    Name,
     Waiting,
     Confirm,
     Joined,
@@ -332,6 +337,7 @@ pub fn review_stage(sheet: Option<&str>, debug: bool) -> Option<Stage> {
         return None;
     }
     match sheet? {
+        "enrol-name" => Some(Stage::Name),
         "enrol-waiting" => Some(Stage::Waiting),
         "enrol-confirm" => Some(Stage::Confirm),
         "enrol-joined" => Some(Stage::Joined),
@@ -358,8 +364,21 @@ pub fn demo_view(stage: Stage, now_ms: i64) -> EnrolView {
                 deadline_ms: Some(now_ms + 9 * 60_000),
             },
         },
+        Stage::Name => EnrolView::Naming,
         Stage::Joined => EnrolView::Joined,
     }
+}
+
+/// The largest code size (Xl3, Xl2, Xl, Lg) whose whole code fits one line in `avail` dp. A mono
+/// glyph is about 0.62 of the size wide. The code never breaks inside a group.
+pub fn code_font_size(len: usize, avail: f32) -> crate::ui::cr::theme::Fs {
+    use crate::ui::cr::theme::Fs;
+    for fs in [Fs::Xl3, Fs::Xl2, Fs::Xl] {
+        if len as f32 * fs.size() * 0.62 <= avail {
+            return fs;
+        }
+    }
+    Fs::Lg
 }
 
 /// Whether a node info carries anything worth showing.
@@ -517,6 +536,29 @@ mod tests {
         assert_eq!(review_stage(Some("enrol-confirm"), false), None);
         assert_eq!(review_stage(Some("add-computer"), true), None);
         assert!(matches!(demo_view(Stage::Confirm, 0), EnrolView::AwaitingConfirm { .. }));
+    }
+
+    #[test]
+    fn fr_c2_enrol_code_size_fits_one_line() {
+        use crate::ui::cr::theme::Fs;
+        assert_eq!(code_font_size(17, 320.0), Fs::Xl2);
+        assert_eq!(code_font_size(10, 320.0), Fs::Xl3);
+        assert_eq!(code_font_size(17, 200.0), Fs::Xl);
+        assert_eq!(code_font_size(17, 150.0), Fs::Lg);
+        for len in 8..=24usize {
+            let fs = code_font_size(len, 320.0);
+            assert!(fs == Fs::Lg || len as f32 * fs.size() * 0.62 <= 320.0);
+        }
+    }
+
+    #[test]
+    fn fr_c2_enrol_name_stage_and_new_lines() {
+        assert_eq!(review_stage(Some("enrol-name"), true), Some(Stage::Name));
+        assert_eq!(review_stage(Some("enrol-name"), false), None);
+        assert_eq!(demo_view(Stage::Name, 0), EnrolView::Naming);
+        assert_eq!(DENY_LABEL, "거부");
+        assert!(ZSH_QUOTE_NOTE.contains("따옴표") && NODE_CMD_PENDING.contains("개발 중"));
+        assert!(JOINED_NEXT.contains("컴퓨터 목록"));
     }
 
     #[test]

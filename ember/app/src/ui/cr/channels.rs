@@ -290,7 +290,7 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
                 .content(|| {
                     // The mockup opens the first room, so its only empty wording is the list's
                     // "채널이 없습니다". A filter that hides every room keeps the old prompt.
-                    let text = if rooms.is_empty() { "채널이 없습니다" } else { "채널을 선택하세요" };
+                    let text = if rooms.is_empty() { "채널이 없습니다" } else { "선택한 채널이 없습니다" };
                     Label(text, Fs::Md, Weight::Regular, Some(paint(p.muted)), None)
                 });
         }

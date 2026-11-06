@@ -218,7 +218,11 @@ fn fr_e6_rules_that_nest_without_end_stop_at_the_stack_limit() {
     let g = grammar(r#"{"scopeName":"source.t","patterns":[{"begin":"a","end":"z","name":"r","patterns":[{"include":"$self"}]}]}"#);
     let line = "a".repeat(MAX_STACK_DEPTH * 4);
     let r = g.tokenize_line(&line, None);
-    assert!(r.end_state.depth() <= MAX_STACK_DEPTH + 2, "depth {}", r.end_state.depth());
+    assert!(r.end_state.depth() <= MAX_STACK_DEPTH, "depth {}", r.end_state.depth());
+    assert!(r.skipped, "the caller can see that highlighting stopped");
+    // The state is usable: the next line is not stuck at the limit for good, it can close what is open.
+    let next = g.tokenize_line("zzzz", Some(&r.end_state));
+    assert!(next.end_state.depth() < r.end_state.depth(), "closing rules still works at the limit");
     assert!(r.tokens.iter().all(|t| t.end <= line.len()));
 }
 
@@ -244,4 +248,28 @@ fn fr_e6_a_pattern_with_catastrophic_backtracking_gives_up_instead_of_hanging() 
     let r = g.tokenize_line(&line, None);
     assert!(started.elapsed() < std::time::Duration::from_secs(20), "took {:?}", started.elapsed());
     assert!(r.tokens.iter().all(|t| t.end <= line.len()));
+}
+
+#[test]
+fn fr_e6_a_long_capture_does_not_fill_the_pattern_cache_but_still_ends_the_region() {
+    let g = grammar(r#"{"scopeName":"source.t","patterns":[{"begin":"<<(\\S+)","end":"^\\1$","name":"h"}]}"#);
+    let tag = "T".repeat(5000);
+    let mut state = g.tokenize_line(&format!("<<{tag}"), None).end_state;
+    assert!(state.depth() > 1);
+    state = g.tokenize_line(&tag, Some(&state)).end_state;
+    assert_eq!(state.depth(), 1, "the long end pattern matched");
+}
+
+#[test]
+fn fr_e6_emoji_and_crlf_keep_their_offsets() {
+    let g = grammar(r#"{"scopeName":"source.t","patterns":[{"match":"b","name":"b"},{"match":"\\r","name":"cr"}]}"#);
+    // An emoji is four bytes and, in UTF-16, a surrogate pair: offsets here are bytes of the line.
+    let r = g.tokenize_line("a\u{1F600}b", None);
+    let spans: Vec<(usize, usize)> = r.tokens.iter().map(|t| (t.start, t.end)).collect();
+    assert_eq!(spans, vec![(0, 5), (5, 6)]);
+    assert_eq!(&*r.tokens[1].scopes.last().unwrap().to_string(), "b");
+    // A carriage return stays part of the line (the editor splits on line feeds only).
+    let r = g.tokenize_line("ab\r", None);
+    assert_eq!(r.tokens.last().map(|t| t.end), Some(3));
+    assert_eq!(r.tokens.last().and_then(|t| t.scopes.last()).map(|s| s.to_string()), Some("cr".to_owned()));
 }

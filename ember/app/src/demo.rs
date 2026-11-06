@@ -934,6 +934,42 @@ impl DemoSource {
         all.entry(project.to_string()).or_insert_with(GitState::seed).run(op, body)
     }
 
+    /// The GitHub card's data (`GET /api/integrations/github`, FR-G13): two repositories, one
+    /// with a failing run, the numbers a connected `gh` would give.
+    pub fn github_summary(&self) -> ember_client::api::GithubSummary {
+        use ember_client::api::{GithubRepo, GithubState, GithubSummary, GithubTotals};
+        let ci = |runs: &[&str]| Some(runs.iter().map(|r| r.to_string()).collect::<Vec<_>>());
+        GithubSummary {
+            state: GithubState::On,
+            reason: None,
+            account: Some("demo-user".into()),
+            repos: vec![
+                GithubRepo {
+                    name_with_owner: Some("demo-user/ember".into()),
+                    default_branch: Some("develop".into()),
+                    open_prs: Some(4),
+                    review_requested: Some(1),
+                    capped: false,
+                    ci: ci(&["success", "success", "failure", "success", "pending", "success", "cancelled", "success"]),
+                    error: None,
+                    projects: vec!["ember".into()],
+                },
+                GithubRepo {
+                    name_with_owner: Some("demo-user/notes".into()),
+                    default_branch: Some("main".into()),
+                    open_prs: Some(1),
+                    review_requested: Some(0),
+                    capped: false,
+                    ci: ci(&["success", "success", "success", "failure"]),
+                    error: None,
+                    projects: vec!["notes".into()],
+                },
+            ],
+            totals: GithubTotals { repos: Some(2), open_prs: Some(5), review_requested: Some(1), ci_pass_percent: Some(80) },
+            checked_at: 0,
+        }
+    }
+
     /// Rename, pin or archive in this run only.
     pub fn patch_session(&self, client: &Client, id: &str, patch: &SessionPatch) {
         let Some(mut rec) = client.read(|s| s.session(id).map(|v| v.record.clone())) else {
@@ -2028,6 +2064,27 @@ mod tests {
         assert_eq!(wt.worktree.as_deref(), Some("/Users/demo/worktrees/ui-phase-6"));
         assert!(wt.upstream.is_none());
         assert!(decoded.branches.iter().all(|b| b.last_time.as_deref().is_some_and(|t| t.contains('T')) && !b.last_sha.is_empty()));
+    }
+
+    #[test]
+    fn fr_g13_demo_github_summary_is_connected_with_two_repos_and_a_ci_mix() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let g = d.github_summary();
+        assert_eq!(g.state, ember_client::api::GithubState::On);
+        assert_eq!(g.account.as_deref(), Some("demo-user"));
+        assert_eq!(g.repos.len(), 2);
+        assert_eq!(g.totals.repos, Some(2));
+        let sum = |f: fn(&ember_client::api::GithubRepo) -> Option<u64>| g.repos.iter().filter_map(f).sum::<u64>();
+        assert_eq!(g.totals.open_prs, Some(sum(|r| r.open_prs)));
+        assert_eq!(g.totals.review_requested, Some(sum(|r| r.review_requested)));
+        let runs: Vec<&str> = g.repos.iter().flat_map(|r| r.ci.iter().flatten().map(String::as_str)).collect();
+        let ok = runs.iter().filter(|r| **r == "success").count() as u64;
+        let bad = runs.iter().filter(|r| **r == "failure").count() as u64;
+        assert!(bad > 0 && ok > bad);
+        assert_eq!(g.totals.ci_pass_percent, Some((100.0 * ok as f64 / (ok + bad) as f64).round() as u64));
+        // It decodes as the server's JSON would.
+        let back: ember_client::api::GithubSummary = serde_json::from_value(serde_json::to_value(&g).unwrap()).unwrap();
+        assert_eq!(back, g);
     }
 
     fn prs(d: &DemoSource, body: Value) -> Vec<Value> {

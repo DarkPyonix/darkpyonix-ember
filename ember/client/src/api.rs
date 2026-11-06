@@ -300,6 +300,9 @@ pub struct GitPrDetail {
     pub deletions: u64,
     #[serde(default)]
     pub changed_files: u64,
+    /// The head commit (40 hex characters) the fields describe; pass it to `git_pr_merge`.
+    #[serde(default)]
+    pub head_sha: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -866,9 +869,15 @@ impl Api {
     }
 
     /// Merge (FR-G11). A closed merge gate answers 409 with the Korean reason. The call sends
-    /// `confirm: true`, so call it only after the person confirmed.
-    pub async fn git_pr_merge(&self, project: &str, number: u64, method: GitPrMergeMethod, delete_branch: bool) -> ApiResult<GitPrMerged> {
-        Self::decode(self.git_post(project, "pr/merge", json!({ "number": number, "method": method, "delete_branch": delete_branch, "confirm": true })).await?)
+    /// `confirm: true`, so call it only after the person confirmed. `head_sha` is the
+    /// `GitPrDetail::head_sha` the person saw: when the head moved since, the node answers 409
+    /// ("풀 리퀘스트가 바뀌었습니다...") and merges nothing.
+    pub async fn git_pr_merge(&self, project: &str, number: u64, method: GitPrMergeMethod, delete_branch: bool, head_sha: Option<&str>) -> ApiResult<GitPrMerged> {
+        let mut body = json!({ "number": number, "method": method, "delete_branch": delete_branch, "confirm": true });
+        if let Some(sha) = head_sha {
+            body["head_sha"] = json!(sha);
+        }
+        Self::decode(self.git_post(project, "pr/merge", body).await?)
     }
 
     /// Create a pull request from a branch that already exists on the remote (FR-G12).

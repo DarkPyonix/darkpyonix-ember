@@ -326,7 +326,7 @@ pub async fn list(policy: &PathPolicy, r: &GitPrsRequest) -> Result<GitPrsRespon
 
 // ---- FR-G10 to FR-G12: detail, review, merge, create ----
 
-const DETAIL_FIELDS: &str = "number,title,body,state,isDraft,author,headRefName,baseRefName,url,reviewDecision,mergeable,reviews,comments,statusCheckRollup,reviewRequests,additions,deletions,changedFiles,updatedAt";
+const DETAIL_FIELDS: &str = "number,title,body,state,isDraft,author,headRefName,headRefOid,baseRefName,url,reviewDecision,mergeable,reviews,comments,statusCheckRollup,reviewRequests,additions,deletions,changedFiles,updatedAt";
 /// A review or comment body is cut at this many characters.
 const MAX_ITEM_CHARS: usize = 2000;
 /// The pull request's own body is cut at this many characters.
@@ -390,6 +390,8 @@ pub struct GitPrDetail {
     pub additions: u64,
     pub deletions: u64,
     pub changed_files: u64,
+    /// The head commit (40 hex characters) the other fields describe; merge pins it.
+    pub head_sha: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -433,6 +435,8 @@ struct RawDetail {
     deletions: u64,
     #[serde(rename = "changedFiles")]
     changed_files: u64,
+    #[serde(rename = "headRefOid")]
+    head_ref_oid: Option<String>,
 }
 
 fn cut(text: Option<String>, max: usize) -> String {
@@ -491,6 +495,7 @@ fn map_detail(raw: RawDetail) -> GitPrDetail {
         additions: raw.additions,
         deletions: raw.deletions,
         changed_files: raw.changed_files,
+        head_sha: raw.head_ref_oid.unwrap_or_default(),
     }
 }
 
@@ -553,6 +558,9 @@ fn check_input_body(body: &str) -> Result<(), GitError> {
     if body.chars().count() > MAX_INPUT_BODY_CHARS {
         return Err(GitError::Bad(format!("본문은 {MAX_INPUT_BODY_CHARS}자를 넘을 수 없습니다.")));
     }
+    if body.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')) {
+        return Err(GitError::Bad("본문에 사용할 수 없는 제어 문자가 있습니다.".into()));
+    }
     Ok(())
 }
 
@@ -594,6 +602,10 @@ pub struct GitPrMergeRequest {
     pub method: GitPrMergeMethod,
     #[serde(default)]
     pub delete_branch: bool,
+    /// The head commit the user saw (40 hex characters). When it differs from the current head
+    /// the merge is refused with 409.
+    #[serde(default)]
+    pub head_sha: Option<String>,
     #[serde(default)]
     pub confirm: bool,
 }
@@ -603,7 +615,12 @@ pub struct GitPrMergeResponse { pub number: u64, pub merged: bool, pub method: G
 
 /// FR-G11: merge. The pull request is read again first and the merge gate is never bypassed:
 /// a closed gate answers 409 with its reason and `gh pr merge` is not run. No `--admin`, no
-/// `--auto`.
+/// `--auto`. The merge always carries `--match-head-commit=<sha>` (the sha the caller saw, else
+/// the one just read), so a push after the read cannot be merged unreviewed.
+///
+/// `--delete-branch` is gh's: it deletes the remote branch, and when the merged branch is the one
+/// checked out in the project's working directory gh may also delete the local branch and switch
+/// the checkout to the base branch. The UI offers it only when the user chooses it.
 pub async fn merge(policy: &PathPolicy, r: &GitPrMergeRequest) -> Result<GitPrMergeResponse, GitError> {
     need_confirm(r.confirm)?;
     let number = check_number(r.number)?;
@@ -611,6 +628,23 @@ pub async fn merge(policy: &PathPolicy, r: &GitPrMergeRequest) -> Result<GitPrMe
     if !current.pr.merge.can_merge {
         return Err(GitError::Conflict(current.pr.merge.reason));
     }
+    let sha = match r.head_sha.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(given) => {
+            if !is_sha(given) {
+                return Err(GitError::Bad("head_sha는 40자리 16진수여야 합니다.".into()));
+            }
+            if !current.head_sha.eq_ignore_ascii_case(given) {
+                return Err(GitError::Conflict("풀 리퀘스트가 바뀌었습니다. 다시 불러온 뒤 병합하세요.".into()));
+            }
+            given.to_ascii_lowercase()
+        }
+        None => {
+            if !is_sha(&current.head_sha) {
+                return Err(GitError::Internal("gh가 헤드 커밋을 알려주지 않았습니다.".into()));
+            }
+            current.head_sha.to_ascii_lowercase()
+        }
+    };
     let mut args = argv(["pr", "merge"]);
     args.push(number.into());
     args.push(match r.method {
@@ -618,6 +652,7 @@ pub async fn merge(policy: &PathPolicy, r: &GitPrMergeRequest) -> Result<GitPrMe
         GitPrMergeMethod::Squash => "--squash",
         GitPrMergeMethod::Rebase => "--rebase",
     }.into());
+    args.push(flag_value("--match-head-commit", &sha));
     if r.delete_branch {
         args.push("--delete-branch".into());
     }
@@ -644,9 +679,40 @@ pub struct GitPrCreateRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct GitPrCreateResponse { pub number: u64, pub url: String }
 
-fn branch_arg(label: &str, v: &Option<String>) -> Result<Option<String>, GitError> {
+fn is_sha(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// git check-ref-format rules for a branch name.
+fn valid_ref(v: &str) -> bool {
+    !(v.is_empty()
+        || v.chars().count() > 256
+        || v.starts_with('-')
+        || v.starts_with('/')
+        || v.ends_with('/')
+        || v.ends_with('.')
+        || v.ends_with(".lock")
+        || v.contains("..")
+        || v.contains("@{")
+        || v.contains("//")
+        || v == "@"
+        || v.split('/').any(|part| part.starts_with('.') || part.ends_with(".lock"))
+        || v.chars().any(|c| c.is_control() || c.is_whitespace() || "~^:?*[\\".contains(c)))
+}
+
+/// `base` is a plain branch; `head` may also be `owner:branch` (a fork).
+fn branch_arg(label: &str, v: &Option<String>, allow_owner: bool) -> Result<Option<String>, GitError> {
     let Some(v) = v.as_deref().map(str::trim).filter(|v| !v.is_empty()) else { return Ok(None) };
-    if v.chars().any(|c| c.is_control() || c.is_whitespace()) || v.chars().count() > 256 {
+    let ok = match v.split_once(':') {
+        Some((owner, branch)) if allow_owner => {
+            !owner.is_empty()
+                && owner.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                && !owner.starts_with('-')
+                && valid_ref(branch)
+        }
+        _ => valid_ref(v),
+    };
+    if !ok {
         return Err(GitError::Bad(format!("{label} 브랜치 이름이 올바르지 않습니다.")));
     }
     Ok(Some(v.to_string()))
@@ -674,8 +740,19 @@ pub async fn create(policy: &PathPolicy, r: &GitPrCreateRequest) -> Result<GitPr
     }
     let body = r.body.as_deref().unwrap_or("");
     check_input_body(body)?;
-    let base = branch_arg("기준", &r.base)?;
-    let head = branch_arg("작업", &r.head)?;
+    let base = branch_arg("기준", &r.base, false)?;
+    let head = branch_arg("작업", &r.head, true)?;
+    if let Some(h) = &head {
+        // Cheap duplicate check, only for an explicit head (gh itself refuses a duplicate otherwise).
+        let mut list = argv(["pr", "list"]);
+        list.push(flag_value("--head", h));
+        list.extend(argv(["--state", "open", "--json", "number"]));
+        let out = run_gh(policy, &r.repo, list).await?;
+        let open: Vec<RawPr> = serde_json::from_str(out.stdout.trim()).unwrap_or_default();
+        if let Some(first) = open.first() {
+            return Err(GitError::Conflict(format!("이미 열린 풀 리퀘스트가 있습니다: #{}", first.number)));
+        }
+    }
     let mut args = argv(["pr", "create"]);
     args.push(flag_value("--title", title));
     // Always given, so gh never opens an editor or asks.

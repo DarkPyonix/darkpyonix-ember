@@ -1,7 +1,7 @@
 //! FR-G10 to FR-G12 over HTTP: pull request detail, review, merge and create, with temp
 //! repositories under `.scratch/` and a fake `gh` script. The script appends one tab-separated
 //! line per call to `.gh-calls` in the repository it runs in, answers `pr view` from `.gh-json`
-//! and `pr create` from `.gh-create`, and fails with `.gh-fail` when that file exists.
+//! `pr create` from `.gh-create` and `pr list` from `.gh-list` (default `[]`), and fails with `.gh-fail` when that file exists.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Once;
@@ -21,7 +21,7 @@ fn install_fake_gh() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let script = scratch().join("fake-gh.sh");
-        common::write_exec_ready(&script, "#!/bin/sh\n{ printf CALL; for a in \"$@\"; do printf '\\t%s' \"$a\"; done; printf '\\n'; } >> .gh-calls\nif [ -f .gh-fail ]; then cat .gh-fail >&2; exit 1; fi\ncase \"$2\" in view) cat .gh-json;; create) cat .gh-create;; esac\n");
+        common::write_exec_ready(&script, "#!/bin/sh\n{ printf CALL; for a in \"$@\"; do printf '\\t%s' \"$a\"; done; printf '\\n'; } >> .gh-calls\nif [ -f .gh-fail ]; then cat .gh-fail >&2; exit 1; fi\ncase \"$2\" in view) cat .gh-json;; create) cat .gh-create;; list) if [ -f .gh-list ]; then cat .gh-list; else echo '[]'; fi;; esac\n");
         std::env::set_var("EMBER_GH_BIN", &script);
         std::env::set_var("GIT_CEILING_DIRECTORIES", scratch());
     });
@@ -72,10 +72,12 @@ fn run(conclusion: &str, name: &str) -> Value {
     json!({"__typename":"CheckRun", "status":"COMPLETED", "conclusion":conclusion, "name":name, "detailsUrl":format!("https://ci/{name}")})
 }
 
+const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+
 fn detail(review: &str, checks: Vec<Value>) -> Value {
     json!({
         "number": 7, "title": "change 7", "body": "the body", "state": "OPEN", "isDraft": false,
-        "author": {"login": "octo"}, "headRefName": "feat/7", "baseRefName": "develop",
+        "author": {"login": "octo"}, "headRefName": "feat/7", "headRefOid": HEAD, "baseRefName": "develop",
         "url": "https://github.com/o/r/pull/7", "reviewDecision": review, "mergeable": "MERGEABLE",
         "updatedAt": "2026-11-05T10:00:00Z", "statusCheckRollup": checks,
         "reviews": [], "comments": [], "reviewRequests": [],
@@ -235,7 +237,7 @@ async fn fr_g11_merge_squash_with_branch_delete_when_allowed() {
     assert_eq!(body, json!({"number": 7, "merged": true, "method": "squash"}));
     let calls = f.calls();
     assert_eq!(calls.len(), 2);
-    assert_eq!(calls[1], vec!["pr", "merge", "7", "--squash", "--delete-branch"]);
+    assert_eq!(calls[1], vec!["pr", "merge", "7", "--squash", &format!("--match-head-commit={HEAD}"), "--delete-branch"]);
     for call in &calls {
         assert!(!call.iter().any(|a| a == "--admin" || a == "--auto"), "{call:?}");
     }
@@ -245,8 +247,8 @@ async fn fr_g11_merge_squash_with_branch_delete_when_allowed() {
     let (status, _) = f.post("merge", json!({"number": 7, "method": "merge", "delete_branch": false, "confirm": true})).await;
     assert_eq!(status, 200);
     let calls = f.calls();
-    assert_eq!(calls[3], vec!["pr", "merge", "7", "--rebase"]);
-    assert_eq!(calls[5], vec!["pr", "merge", "7", "--merge"]);
+    assert_eq!(calls[3], vec!["pr", "merge", "7", "--rebase", &format!("--match-head-commit={HEAD}")]);
+    assert_eq!(calls[5], vec!["pr", "merge", "7", "--merge", &format!("--match-head-commit={HEAD}")]);
 }
 
 #[tokio::test]
@@ -268,7 +270,9 @@ async fn fr_g12_create_passes_title_body_draft_and_branches() {
     })).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body, json!({"number": 42, "url": "https://github.com/o/r/pull/42"}));
-    assert_eq!(f.calls(), vec![vec!["pr", "create", "--title=Add x", "--body=why", "--base=develop", "--head=feat/x", "--draft"]]);
+    let calls = f.calls();
+    assert_eq!(calls[0], vec!["pr", "list", "--head=feat/x", "--state", "open", "--json", "number"]);
+    assert_eq!(calls[1], vec!["pr", "create", "--title=Add x", "--body=why", "--base=develop", "--head=feat/x", "--draft"]);
 }
 
 #[tokio::test]
@@ -309,4 +313,85 @@ async fn fr_g12_create_shows_gh_errors_in_korean_and_needs_a_url() {
     std::fs::write(f.repo.join(".gh-create"), "done, no url\n").unwrap();
     let (status, _) = f.post("create", json!({"title": "T", "confirm": true})).await;
     assert_eq!(status, 500);
+}
+
+#[tokio::test]
+async fn fr_g11_merge_with_a_stale_head_sha_is_409_and_never_calls_merge() {
+    let f = setup().await;
+    f.set_pr(detail("APPROVED", vec![run("SUCCESS", "build")]));
+    let stale = "f".repeat(40);
+    let (status, body) = f.post("merge", json!({"number": 7, "method": "squash", "head_sha": stale, "confirm": true})).await;
+    assert_eq!(status, 409, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("풀 리퀘스트가 바뀌었습니다"), "{body}");
+    assert!(!f.calls().iter().any(|c| c.get(1).map(String::as_str) == Some("merge")), "pr merge was not called");
+    let (status, _) = f.post("merge", json!({"number": 7, "method": "squash", "head_sha": "not-hex", "confirm": true})).await;
+    assert_eq!(status, 400);
+    assert!(!f.calls().iter().any(|c| c.get(1).map(String::as_str) == Some("merge")));
+}
+
+#[tokio::test]
+async fn fr_g11_merge_passes_match_head_commit() {
+    let f = setup().await;
+    f.set_pr(detail("APPROVED", vec![run("SUCCESS", "build")]));
+    let (status, body) = f.post("merge", json!({"number": 7, "method": "merge", "head_sha": HEAD, "confirm": true})).await;
+    assert_eq!(status, 200, "{body}");
+    let calls = f.calls();
+    assert_eq!(calls[1], vec!["pr", "merge", "7", "--merge", &format!("--match-head-commit={HEAD}")]);
+    let (_, body) = f.post("", json!({"number": 7})).await;
+    assert_eq!(body["head_sha"], HEAD);
+}
+
+#[tokio::test]
+async fn fr_g12_bad_refs_are_400() {
+    let f = setup().await;
+    for bad in ["a..b", "a@{1}", "-x", "x/", "x.lock", "a b", "a\tb", "a~1", "a^", "a?", "a*", "a[b", "a\\b", "x/.hidden", "a//b"] {
+        let (status, _) = f.post("create", json!({"title": "T", "head": bad, "confirm": true})).await;
+        assert_eq!(status, 400, "head {bad:?}");
+        let (status, _) = f.post("create", json!({"title": "T", "base": bad, "confirm": true})).await;
+        assert_eq!(status, 400, "base {bad:?}");
+    }
+    let (status, _) = f.post("create", json!({"title": "T", "head": "o:a:b", "confirm": true})).await;
+    assert_eq!(status, 400);
+    let (status, _) = f.post("create", json!({"title": "T", "head": "-o:b", "confirm": true})).await;
+    assert_eq!(status, 400);
+    assert!(!f.calls().iter().any(|c| c.get(1).map(String::as_str) == Some("create")));
+}
+
+#[tokio::test]
+async fn fr_g12_owner_colon_branch_is_allowed_for_head() {
+    let f = setup().await;
+    std::fs::write(f.repo.join(".gh-create"), "https://github.com/o/r/pull/11\n").unwrap();
+    let (status, body) = f.post("create", json!({"title": "T", "head": "some-user.x:feat/y", "confirm": true})).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, _) = f.post("create", json!({"title": "T", "base": "some-user:feat", "confirm": true})).await;
+    assert_eq!(status, 400, "the owner form is for head only");
+}
+
+#[tokio::test]
+async fn fr_g12_control_characters_in_a_body_are_400() {
+    let f = setup().await;
+    let (status, body) = f.post("create", json!({"title": "T", "body": "a\u{0}b", "confirm": true})).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("제어 문자"));
+    let (status, _) = f.post("review", json!({"number": 7, "action": "comment", "body": "x\u{7}", "confirm": true})).await;
+    assert_eq!(status, 400);
+    assert!(f.calls().is_empty());
+    std::fs::write(f.repo.join(".gh-create"), "https://github.com/o/r/pull/12\n").unwrap();
+    let (status, _) = f.post("create", json!({"title": "T", "body": "line1\r\n\tline2", "confirm": true})).await;
+    assert_eq!(status, 200);
+}
+
+#[tokio::test]
+async fn fr_g12_create_with_an_open_pr_for_the_head_is_409() {
+    let f = setup().await;
+    std::fs::write(f.repo.join(".gh-list"), "[{\"number\": 33}]").unwrap();
+    let (status, body) = f.post("create", json!({"title": "T", "head": "feat/x", "confirm": true})).await;
+    assert_eq!(status, 409, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("이미 열린 풀 리퀘스트가 있습니다: #33"), "{body}");
+    assert!(!f.calls().iter().any(|c| c.get(1).map(String::as_str) == Some("create")));
+    // Without an explicit head the check is skipped.
+    std::fs::write(f.repo.join(".gh-create"), "https://github.com/o/r/pull/13\n").unwrap();
+    let (status, _) = f.post("create", json!({"title": "T", "confirm": true})).await;
+    assert_eq!(status, 200);
+    assert!(!f.calls().iter().skip(1).any(|c| c.get(1).map(String::as_str) == Some("list")));
 }

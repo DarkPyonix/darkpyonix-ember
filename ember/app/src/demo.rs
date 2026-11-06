@@ -1340,6 +1340,7 @@ impl GitState {
                 "merge": gate, "url": url,
                 "body": str_of(body, "body").unwrap_or(""), "check_runs": [], "reviews": [], "comments": [],
                 "requested_reviewers": [], "additions": 0, "deletions": 0, "changed_files": 0,
+                "head_sha": demo_head_sha(number),
             }));
             return Ok(json!({ "number": number, "url": url }));
         }
@@ -1365,6 +1366,14 @@ impl GitState {
             }
             if pr["merge"]["can_merge"] != true {
                 return Err(GitError::conflict(pr["merge"]["reason"].as_str().unwrap_or("병합할 수 없습니다.")));
+            }
+            if let Some(sha) = str_of(body, "head_sha").map(str::trim).filter(|s| !s.is_empty()) {
+                if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(GitError::bad("head_sha는 40자리 16진수여야 합니다."));
+                }
+                if !pr["head_sha"].as_str().unwrap_or("").eq_ignore_ascii_case(sha) {
+                    return Err(GitError::conflict("풀 리퀘스트가 바뀌었습니다. 다시 불러온 뒤 병합하세요."));
+                }
             }
             pr["state"] = json!("merged");
             pr["merge"] = demo_gate("merged", false, "approved", (0, 0, 0));
@@ -1696,7 +1705,12 @@ fn demo_prs(now: i64) -> Vec<Value> {
 }
 
 /// Keys the detail has and the list does not.
-const PR_DETAIL_KEYS: &[&str] = &["body", "check_runs", "reviews", "comments", "requested_reviewers", "additions", "deletions", "changed_files"];
+const PR_DETAIL_KEYS: &[&str] = &["body", "check_runs", "reviews", "comments", "requested_reviewers", "additions", "deletions", "changed_files", "head_sha"];
+
+/// The fixed fake head commit of a demo pull request: 40 hex characters.
+fn demo_head_sha(number: u64) -> String {
+    format!("{:040x}", 0xdec0de00_0000_0000u64 + number)
+}
 
 /// The merge gate of FR-L19 with the node's Korean texts (`ember/node/src/git_prs.rs`).
 fn demo_gate(state: &str, draft: bool, review: &str, checks: (u32, u32, u32)) -> Value {
@@ -1778,6 +1792,7 @@ fn demo_pr_details(now: i64) -> Vec<Value> {
             o.insert("additions".into(), json!(40 + number % 90));
             o.insert("deletions".into(), json!(number % 30));
             o.insert("changed_files".into(), json!(2 + number % 7));
+            o.insert("head_sha".into(), json!(demo_head_sha(number)));
             pr
         })
         .collect()
@@ -2118,10 +2133,23 @@ mod tests {
         let out = gs(&d, "pr/merge", json!({ "number": 412, "method": "squash", "delete_branch": true, "confirm": true })).unwrap();
         assert_eq!(out, json!({ "number": 412, "merged": true, "method": "squash" }));
         assert_eq!(pr_detail(&d, 412)["state"], "merged");
+        assert_eq!(pr_detail(&d, 405)["head_sha"].as_str().unwrap().len(), 40);
         assert_eq!(prs(&d, json!({})).len(), 2, "the open list lost it");
         assert_eq!(prs(&d, json!({ "state": "merged" })).len(), 2);
         let again = gs(&d, "pr/merge", json!({ "number": 412, "method": "merge", "confirm": true })).unwrap_err();
         assert!(again.message.contains("병합"));
+    }
+
+    #[test]
+    fn fr_g11_demo_merge_with_a_stale_head_sha_is_409() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let stale = gs(&d, "pr/merge", json!({ "number": 412, "method": "squash", "head_sha": "f".repeat(40), "confirm": true })).unwrap_err();
+        assert_eq!(stale.status, 409);
+        assert!(stale.message.contains("풀 리퀘스트가 바뀌었습니다"), "{}", stale.message);
+        assert_eq!(pr_detail(&d, 412)["state"], "open", "nothing merged");
+        let sha = pr_detail(&d, 412)["head_sha"].as_str().unwrap().to_string();
+        gs(&d, "pr/merge", json!({ "number": 412, "method": "squash", "head_sha": sha, "confirm": true })).unwrap();
+        assert_eq!(pr_detail(&d, 412)["state"], "merged");
     }
 
     #[test]

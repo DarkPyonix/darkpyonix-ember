@@ -59,7 +59,8 @@ async fn handle(
             "check_runs": [{"name":"build", "state":"passed", "detail_url":"https://ci/build"}, {"name":"e2e", "state":"pending"}],
             "reviews": [{"author":"a", "state":"changes_requested", "body":"fix", "submitted_at":"2026-11-05T09:00:00Z"}],
             "comments": [{"author":"b", "body":"hi", "created_at":"2026-11-05T09:30:00Z"}],
-            "requested_reviewers": ["rev1"], "additions": 10, "deletions": 3, "changed_files": 2}))),
+            "requested_reviewers": ["rev1"], "additions": 10, "deletions": 3, "changed_files": 2,
+            "head_sha": "0123456789abcdef0123456789abcdef01234567"}))),
         "pr/review" => (StatusCode::OK, Json(json!({"number": body["number"], "action": body["action"]}))),
         "pr/merge" if body["number"] == 9 => (StatusCode::CONFLICT, Json(json!({"error": "CI 체크가 실패했습니다 (실패 1개). 통과해야 병합할 수 있습니다."}))),
         "pr/merge" => (StatusCode::OK, Json(json!({"number": body["number"], "merged": true, "method": body["method"]}))),
@@ -228,6 +229,7 @@ async fn fr_g10_pr_detail_call_decodes_the_nodes_shape() {
     assert_eq!(d.comments[0].body, "hi");
     assert_eq!(d.requested_reviewers, vec!["rev1"]);
     assert_eq!((d.additions, d.deletions, d.changed_files), (10, 3, 2));
+    assert_eq!(d.head_sha, "0123456789abcdef0123456789abcdef01234567");
 }
 
 #[tokio::test]
@@ -237,10 +239,13 @@ async fn fr_g11_pr_review_and_merge_calls_send_confirm_and_carry_the_gate_reason
     let r = api.git_pr_review("ember", 7, GitPrReviewAction::RequestChanges, Some("fix")).await.unwrap();
     assert_eq!(r.action, GitPrReviewAction::RequestChanges);
     assert_eq!((last(&seen).1, last(&seen).2), ("pr/review".into(), json!({"number":7, "action":"request_changes", "body":"fix", "confirm":true})));
-    let m = api.git_pr_merge("ember", 7, GitPrMergeMethod::Squash, true).await.unwrap();
+    let m = api.git_pr_merge("ember", 7, GitPrMergeMethod::Squash, true, None).await.unwrap();
     assert!(m.merged && m.method == GitPrMergeMethod::Squash);
     assert_eq!(last(&seen).2, json!({"number":7, "method":"squash", "delete_branch":true, "confirm":true}));
-    let err = api.git_pr_merge("ember", 9, GitPrMergeMethod::Merge, false).await.unwrap_err();
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    api.git_pr_merge("ember", 7, GitPrMergeMethod::Merge, false, Some(sha)).await.unwrap();
+    assert_eq!(last(&seen).2, json!({"number":7, "method":"merge", "delete_branch":false, "head_sha":sha, "confirm":true}));
+    let err = api.git_pr_merge("ember", 9, GitPrMergeMethod::Merge, false, None).await.unwrap_err();
     assert!(err.to_string().contains("CI"), "{err}");
 }
 

@@ -1452,6 +1452,8 @@ pub fn file_stat_text(additions: u64, deletions: u64, binary: bool) -> String {
 
 /// The detail card's data for a node answer. `now` is unix seconds.
 pub fn commit_detail_view(d: &GitCommitDetail, now: i64) -> CommitDetailView {
+    let author = clip_line(&d.author, COMMIT_TEXT_MAX);
+    let subject = clip_line(&d.subject, COMMIT_TEXT_MAX);
     let files: Vec<CommitFileView> = d
         .files
         .iter()
@@ -1478,13 +1480,13 @@ pub fn commit_detail_view(d: &GitCommitDetail, now: i64) -> CommitDetailView {
     if first.is_some_and(|l| l.trim() == d.subject.trim()) {
         lines.next();
     }
-    let body_lines: Vec<String> = lines.filter(|l| !l.trim().is_empty()).take(COMMIT_BODY_LINES).map(String::from).collect();
+    let body_lines: Vec<String> = lines.filter(|l| !l.trim().is_empty()).take(COMMIT_BODY_LINES).map(|l| clip_line(l, COMMIT_TEXT_MAX)).collect();
     CommitDetailView {
         sha: d.sha.clone(),
         short: if d.short.is_empty() { d.sha.chars().take(7).collect() } else { d.short.clone() },
-        subject: d.subject.clone(),
+        subject,
         body_lines,
-        author: d.author.clone(),
+        author,
         time_text: iso_to_unix(&d.time).map(|t| history_time_text(now, t)).unwrap_or_else(|| d.time.clone()),
         parents: d.parents.clone(),
         refs,
@@ -1508,11 +1510,41 @@ pub fn commit_detail_from(result: Result<GitCommitDetail, ApiError>, now: i64) -
     }
 }
 
-/// The files shown and the line under them ("N개 더 있습니다") for the rest.
+/// The most characters of one displayed line of commit text (subject, author, one body line).
+pub const COMMIT_TEXT_MAX: usize = 200;
+
+/// The node lists at most this many files of one commit.
+pub const COMMIT_NODE_FILES_MAX: usize = 500;
+
+/// Commit text is untrusted: control characters are dropped (a tab becomes a space) and a line
+/// past `max` characters ends in an ellipsis, so one commit cannot fill the screen.
+pub fn clip_line(text: &str, max: usize) -> String {
+    let clean: String = text.chars().filter_map(|c| if c == '\t' { Some(' ') } else if c.is_control() { None } else { Some(c) }).collect();
+    if clean.chars().count() <= max {
+        return clean;
+    }
+    let mut out: String = clean.chars().take(max.saturating_sub(1)).collect();
+    out.push('\u{2026}');
+    out
+}
+
+/// The line under the file list. `shown` files are on screen of `total`; `truncated` says the
+/// node cut its own list. The cut files are part of the "more" count, so they are not counted twice.
+pub fn commit_files_notice(shown: usize, total: usize, truncated: bool) -> Option<String> {
+    let more = total.saturating_sub(shown);
+    let cut = format!("파일 목록이 {COMMIT_NODE_FILES_MAX}개에서 잘렸습니다 (전체 {total}개)");
+    match (more > 0, truncated) {
+        (false, false) => None,
+        (true, false) => Some(format!("{more}개 더 있습니다")),
+        (true, true) => Some(format!("{more}개 더 있습니다. {cut}")),
+        (false, true) => Some(cut),
+    }
+}
+
+/// The files shown and the line under them for the rest.
 pub fn commit_files_shown(v: &CommitDetailView) -> (&[CommitFileView], Option<String>) {
     let shown = &v.files[..v.files.len().min(COMMIT_FILES_SHOWN)];
-    let more = v.files_total.saturating_sub(shown.len());
-    (shown, if more > 0 { Some(format!("{more}개 더 있습니다")) } else { None })
+    (shown, commit_files_notice(shown.len(), v.files_total, v.truncated))
 }
 
 /// A Korean line for a failed commit call: the node's Korean message as it is; anything else
@@ -1520,6 +1552,7 @@ pub fn commit_files_shown(v: &CommitDetailView) -> (&[CommitFileView], Option<St
 pub fn commit_failure(what: &str, e: &ApiError) -> String {
     match e {
         ApiError::Status { message, .. } if is_korean(message) => message.clone(),
+        ApiError::Status { status: 409, .. } => "작업을 하지 못했습니다. 저장소 상태를 확인해 주세요.".to_string(),
         ApiError::Status { .. } => format!("{what}에 실패했습니다. 잠시 후 다시 시도해 주세요"),
         ApiError::Unauthorized(_) => format!("{what}에 실패했습니다. 서버 인증에 실패했습니다. 서버 토큰을 확인해 주세요"),
         _ => format!("{what}에 실패했습니다. 서버에 닿지 않습니다"),
@@ -1587,33 +1620,50 @@ pub fn commit_action_key(sha: &str, action: CommitAction) -> usize {
     (h >> 1).wrapping_mul(2) + usize::from(action == CommitAction::CherryPick)
 }
 
-/// The notice after a revert or cherry-pick: the new commit's short sha.
-pub fn commit_applied_notice(action: CommitAction, new_sha: &str) -> String {
-    let short: String = new_sha.chars().take(7).collect();
-    if short.is_empty() {
-        format!("{}. 새 커밋이 만들어졌습니다", action.done_text())
+/// The line under the actions while one is armed: which branch gets the new commit.
+pub fn commit_action_branch_line(_action: CommitAction, branch: &str) -> String {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        "현재 브랜치에 새 커밋을 만듭니다".to_string()
     } else {
-        format!("{}. 새 커밋 {short}", action.done_text())
+        format!("현재 브랜치 {branch}에 새 커밋을 만듭니다")
     }
 }
 
-async fn run_commit_apply(project: &str, sha: &str, action: CommitAction) -> Result<String, String> {
+/// The notice after a revert or cherry-pick: the branch and the new commit's short sha.
+pub fn commit_applied_notice(_action: CommitAction, branch: &str, short: &str) -> String {
+    let branch = if branch.trim().is_empty() { "현재 브랜치" } else { branch.trim() };
+    let short: String = short.chars().take(7).collect();
+    if short.is_empty() {
+        format!("{branch}에 새 커밋을 만들었습니다")
+    } else {
+        format!("{branch}에 새 커밋 {short}을 만들었습니다")
+    }
+}
+
+/// Whether a failure line says the snapshot's dirty flag was wrong (the node found changes the
+/// client did not see): the detail then reloads the snapshot so the flag corrects itself.
+pub fn commit_failure_reloads_snapshot(line: &str) -> bool {
+    line.contains("작업 중인 변경") || line.contains("진행 중인 git 작업")
+}
+
+async fn run_commit_apply(project: &str, sha: &str, action: CommitAction, branch: &str) -> Result<String, String> {
     let op = if action == CommitAction::Revert { "revert" } else { "cherry-pick" };
     git_call::<GitCommitApplied>(project, op, json!({ "sha": sha, "confirm": true }))
         .await
-        .map(|a| commit_applied_notice(action, &a.new_sha))
+        .map(|a| commit_applied_notice(action, branch, &a.new_sha))
         .map_err(|e| commit_failure(action.label(), &e))
 }
 
 /// Revert a commit on the current branch. `Ok` is the notice, `Err` a Korean line (the node's
 /// conflict answer is Korean and shown as it is).
-pub async fn run_commit_revert(project: &str, sha: &str) -> Result<String, String> {
-    run_commit_apply(project, sha, CommitAction::Revert).await
+pub async fn run_commit_revert(project: &str, sha: &str, branch: &str) -> Result<String, String> {
+    run_commit_apply(project, sha, CommitAction::Revert, branch).await
 }
 
 /// Cherry-pick a commit onto the current branch. Same answers as `run_commit_revert`.
-pub async fn run_commit_cherry_pick(project: &str, sha: &str) -> Result<String, String> {
-    run_commit_apply(project, sha, CommitAction::CherryPick).await
+pub async fn run_commit_cherry_pick(project: &str, sha: &str, branch: &str) -> Result<String, String> {
+    run_commit_apply(project, sha, CommitAction::CherryPick, branch).await
 }
 
 /// Create `name` at `sha` and switch to it (the node's `branch` op with `from`).
@@ -5009,7 +5059,7 @@ mod commit_detail_tests {
         d.files_total = 500;
         d.truncated = true;
         let v = commit_detail_view(&d, 0);
-        assert_eq!(commit_files_shown(&v).1.as_deref(), Some("499개 더 있습니다"));
+        assert_eq!(commit_files_shown(&v).1.as_deref(), Some("499개 더 있습니다. 파일 목록이 500개에서 잘렸습니다 (전체 500개)"));
         let small = commit_detail_view(&detail(&["p"], vec![file("a", GitCommitFileStatus::Added, 1, 0, false)]), 0);
         assert_eq!(commit_files_shown(&small).1, None);
     }
@@ -5074,8 +5124,8 @@ mod commit_detail_tests {
     fn fr_g15_labels_and_notices_are_korean_without_a_plain_da_ending() {
         assert_eq!(CommitAction::Revert.armed_label(), "정말 되돌립니다");
         assert_eq!(CommitAction::CherryPick.armed_label(), "정말 가져옵니다");
-        assert_eq!(commit_applied_notice(CommitAction::Revert, "abcdef0123"), "되돌렸습니다. 새 커밋 abcdef0");
-        assert_eq!(commit_applied_notice(CommitAction::CherryPick, ""), "가져왔습니다. 새 커밋이 만들어졌습니다");
+        assert_eq!(commit_applied_notice(CommitAction::Revert, "develop", "abcdef0123"), "develop에 새 커밋 abcdef0을 만들었습니다");
+        assert_eq!(commit_applied_notice(CommitAction::CherryPick, "", ""), "현재 브랜치에 새 커밋을 만들었습니다");
     }
 
     #[test]
@@ -5086,5 +5136,88 @@ mod commit_detail_tests {
         let line = commit_failure("Cherry-pick", &en);
         assert!(!line.contains("could not"));
         assert!(line.ends_with("다시 시도해 주세요"));
+    }
+
+    #[test]
+    fn fr_g15_the_armed_action_names_the_branch_that_gets_the_commit() {
+        assert_eq!(commit_action_branch_line(CommitAction::Revert, "develop"), "현재 브랜치 develop에 새 커밋을 만듭니다");
+        assert_eq!(commit_action_branch_line(CommitAction::CherryPick, " "), "현재 브랜치에 새 커밋을 만듭니다");
+        assert_eq!(commit_applied_notice(CommitAction::CherryPick, "feat/x", "1234567890"), "feat/x에 새 커밋 1234567을 만들었습니다");
+    }
+
+    #[test]
+    fn fr_g14_the_files_notice_counts_the_cut_files_once() {
+        assert_eq!(commit_files_notice(10, 10, false), None);
+        assert_eq!(commit_files_notice(100, 130, false).as_deref(), Some("30개 더 있습니다"));
+        assert_eq!(commit_files_notice(500, 500, true).as_deref(), Some("파일 목록이 500개에서 잘렸습니다 (전체 500개)"));
+        assert_eq!(commit_files_notice(100, 800, true).as_deref(), Some("700개 더 있습니다. 파일 목록이 500개에서 잘렸습니다 (전체 800개)"));
+    }
+
+    #[test]
+    fn fr_g15_a_dirty_tree_answer_is_shown_as_is() {
+        let text = "작업 중인 변경이 있어 되돌릴 수 없습니다. 먼저 커밋하거나 스태시해 주세요.";
+        let e = ApiError::Status { status: 409, message: text.to_string(), code: None };
+        let line = commit_failure("되돌리기", &e);
+        assert_eq!(line, text);
+        assert!(!line.contains("잠시 후"));
+        // The client's dirty flag was wrong: the snapshot reloads.
+        assert!(commit_failure_reloads_snapshot(&line));
+        assert!(!commit_failure_reloads_snapshot("충돌이 발생해 취소했습니다."));
+    }
+
+    #[test]
+    fn fr_g15_an_in_progress_answer_is_shown_as_is() {
+        for text in ["진행 중인 git 작업이 있습니다. 먼저 마무리해 주세요.", "다른 git 작업이 진행 중입니다. 잠시 후 다시 시도해 주세요."] {
+            let e = ApiError::Status { status: 409, message: text.to_string(), code: None };
+            assert_eq!(commit_failure("Cherry-pick", &e), text);
+        }
+    }
+
+    #[test]
+    fn fr_g15_an_unknown_error_gets_a_korean_line() {
+        let e = ApiError::Status { status: 409, message: "error: could not revert".to_string(), code: None };
+        assert_eq!(commit_failure("되돌리기", &e), "작업을 하지 못했습니다. 저장소 상태를 확인해 주세요.");
+    }
+
+    #[test]
+    fn fr_g14_displayed_commit_text_is_clipped_and_cleaned() {
+        assert_eq!(clip_line("짧은 줄", 200), "짧은 줄");
+        assert_eq!(clip_line("a\u{1b}[31mb\tc", 200), "a[31mb c");
+        let long = "x".repeat(300);
+        let out = clip_line(&long, COMMIT_TEXT_MAX);
+        assert_eq!(out.chars().count(), COMMIT_TEXT_MAX);
+        assert!(out.ends_with('\u{2026}'));
+        let mut d = detail(&["p"], vec![]);
+        d.subject = long.clone();
+        d.author = long;
+        let v = commit_detail_view(&d, 0);
+        assert_eq!(v.subject.chars().count(), COMMIT_TEXT_MAX);
+        assert_eq!(v.author.chars().count(), COMMIT_TEXT_MAX);
+    }
+
+    #[test]
+    fn fr_g15_revert_arms_then_confirms_after_600ms() {
+        let k = commit_action_key("abc1234", CommitAction::Revert);
+        assert_eq!(delete_tap(None, k, 10_000), DeleteTap::Arm);
+        assert_eq!(delete_tap(Some((k, 10_000)), k, 10_599), DeleteTap::Wait);
+        assert_eq!(delete_tap(Some((k, 10_000)), k, 10_600), DeleteTap::Confirm);
+    }
+
+    #[test]
+    fn fr_g15_an_armed_revert_expires_after_4s() {
+        let k = commit_action_key("abc1234", CommitAction::Revert);
+        assert!(armed_label_visible(Some((k, 10_000)), k, 13_999));
+        assert!(!armed_label_visible(Some((k, 10_000)), k, 14_000));
+        assert_eq!(delete_tap(Some((k, 10_000)), k, 14_000), DeleteTap::Expired);
+    }
+
+    #[test]
+    fn fr_g15_arming_cherry_pick_disarms_revert() {
+        let (rv, cp) = (commit_action_key("abc1234", CommitAction::Revert), commit_action_key("abc1234", CommitAction::CherryPick));
+        // Revert is armed; a tap on Cherry-pick arms Cherry-pick instead of confirming Revert.
+        assert_eq!(delete_tap(Some((rv, 10_000)), cp, 11_000), DeleteTap::Arm);
+        let armed = Some((cp, 11_000));
+        assert!(!armed_label_visible(armed, rv, 11_100));
+        assert!(armed_label_visible(armed, cp, 11_100));
     }
 }

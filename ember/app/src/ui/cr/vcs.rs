@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{commit_action_gate, commit_action_key, commit_detail_from, commit_detail_view, commit_files_shown, fetch_commit_detail, file_stat_text, run_branch_from, run_commit_cherry_pick, run_commit_revert, snapshot_dirty, CommitAction, CommitDetailLoad, CommitDetailView, choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, MemberCwd, TeamRow, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState};
+use crate::ui::vcs::{commit_action_branch_line, commit_failure_reloads_snapshot, commit_action_gate, commit_action_key, commit_detail_from, commit_detail_view, commit_files_shown, fetch_commit_detail, file_stat_text, run_branch_from, run_commit_cherry_pick, run_commit_revert, snapshot_dirty, CommitAction, CommitDetailLoad, CommitDetailView, choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, MemberCwd, TeamRow, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState};
 use ember_client::api::{GitPrMergeMethod, GitPrReviewAction};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
@@ -1480,7 +1480,7 @@ fn SectionContent(
             );
         }
         (Some(s), Section::Conflicts) => ConflictsPane(&s.conflicts, actions, layout),
-        (Some(s), Section::History) => HistoryPane(actions, layout, snapshot_dirty(s)),
+        (Some(s), Section::History) => HistoryPane(actions, layout, snapshot_dirty(s), s.branch.clone()),
         (Some(s), Section::Stash) => StashPane(actions, stash_count, layout, !s.changes.is_empty()),
         (Some(s), Section::PullRequests) => PullRequestsPane(actions, pr_count, pr_list, layout, Some(s.branch.clone())),
         (Some(_), Section::Team) => TeamPane(actions, team_count, pr_list, layout),
@@ -1893,6 +1893,7 @@ struct CommitCtl {
     name: MutableState<String>,
     name_gen: u64,
     show_sha: bool,
+    branch: String,
     on_revert: Rc<dyn Fn()>,
     on_pick: Rc<dyn Fn()>,
     on_toggle_form: Rc<dyn Fn()>,
@@ -1915,7 +1916,10 @@ fn CommitDetailBody(v: &CommitDetailView, ctl: &CommitCtl) {
     let p = ember_theme().palette;
     VcsCard(|| {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
-            Txt(&v.subject, TypeRole::BodyStrong, Some(paint(p.text)), None, None, None, None);
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                Txt(&v.subject, TypeRole::BodyStrong, Some(paint(p.text)), None, None, Some(1.0), None);
+                Txt(&v.short, TypeRole::Mono, Some(paint(p.text_2)), Some(1), None, None, None);
+            });
             for line in &v.body_lines {
                 Label(line, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
             }
@@ -1990,6 +1994,10 @@ fn CommitDetailBody(v: &CommitDetailView, ctl: &CommitCtl) {
                 });
             });
 
+            if let Some(action) = ctl.armed {
+                Label(&commit_action_branch_line(action, &ctl.branch), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            }
+
             if ctl.show_sha {
                 // TODO(compose-rust#471): no clipboard facility, so the full SHA is shown selectable
                 // (Cmd+C / Ctrl+C); replace with a real copy when the clipboard can be written.
@@ -2023,7 +2031,7 @@ fn CommitDetailBody(v: &CommitDetailView, ctl: &CommitCtl) {
 /// changes (the node refuses a revert or cherry-pick then). The wide layout shows the list and
 /// the detail side by side, each with its own scroll (the first commit selected until a tap); the
 /// compact one shows one at a time, with 목록으로.
-fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool) {
+fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool, branch: String) {
     let p = ember_theme().palette;
     let key_project = actions.as_ref().map(|a| a.project.clone());
     let two = layout == PaneLayout::Two;
@@ -2128,7 +2136,7 @@ fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool) {
     // 되돌리기 and Cherry-pick ask twice: the gate first, then the first tap arms, the second
     // counts after 600 ms and before 4 s. The busy guard is set before the request leaves.
     let on_apply = {
-        let (actions, busy, armed, ready) = (actions.clone(), busy.clone(), armed.clone(), ready.clone());
+        let (actions, busy, armed, ready, branch) = (actions.clone(), busy.clone(), armed.clone(), ready.clone(), branch.clone());
         move |action: CommitAction| {
             let Some(a) = actions.clone() else { return };
             let Some((sha, is_merge)) = ready.clone() else { return };
@@ -2147,12 +2155,12 @@ fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool) {
                 DeleteTap::Confirm => {
                     armed.set(None);
                     busy.set(true);
-                    let (busy, reload) = (busy.clone(), a.reload.clone());
+                    let (busy, reload, branch) = (busy.clone(), a.reload.clone(), branch.clone());
                     crate::services::run_shared(
                         async move {
                             match action {
-                                CommitAction::Revert => run_commit_revert(&a.project, &sha).await,
-                                CommitAction::CherryPick => run_commit_cherry_pick(&a.project, &sha).await,
+                                CommitAction::Revert => run_commit_revert(&a.project, &sha, &branch).await,
+                                CommitAction::CherryPick => run_commit_cherry_pick(&a.project, &sha, &branch).await,
                             }
                         },
                         move |result| {
@@ -2161,7 +2169,13 @@ fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool) {
                                     notice::post(line);
                                     reload.set(reload.get() + 1);
                                 }
-                                Err(line) => notice::post(line),
+                                Err(line) => {
+                                    // The node found changes the snapshot did not show: reload so the dirty flag corrects itself.
+                                    if commit_failure_reloads_snapshot(&line) {
+                                        reload.set(reload.get() + 1);
+                                    }
+                                    notice::post(line);
+                                }
                             }
                             busy.set(false);
                         },
@@ -2229,6 +2243,7 @@ fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool) {
         name: name.clone(),
         name_gen: name_gen.get(),
         show_sha: show_sha.get(),
+        branch: branch.clone(),
         on_revert,
         on_pick,
         on_toggle_form,
@@ -4251,12 +4266,12 @@ mod tests {
 
     #[compose_rust::runtime::composable]
     fn history_sample_wide() {
-        HistoryPane(None, PaneLayout::Two, false);
+        HistoryPane(None, PaneLayout::Two, false, "develop".to_string());
     }
 
     #[compose_rust::runtime::composable]
     fn history_sample_compact() {
-        HistoryPane(None, PaneLayout::Tabs, false);
+        HistoryPane(None, PaneLayout::Tabs, false, "develop".to_string());
     }
 
     #[test]
@@ -4301,6 +4316,7 @@ mod tests {
             name: mutable_state_of(String::new()),
             name_gen: 0,
             show_sha: true,
+            branch: "develop".to_string(),
             on_revert: noop.clone(),
             on_pick: noop.clone(),
             on_toggle_form: noop.clone(),

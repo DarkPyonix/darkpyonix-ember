@@ -36,7 +36,7 @@ use crate::ui::shell::NavMenu;
 use crate::ui::Route;
 
 use super::components::{
-    AppButton, ButtonKind, EmberCard, EmberField, FieldOptions, InsetPanel, Label, MenuRow, OptionSheet,
+    AppButton, ButtonKind, EmberCard, EmberField, EmberSheetSized, FieldOptions, InsetPanel, Label, MenuRow, OptionSheet,
     PickChip, Pill, PillTone, Txt,
 };
 use super::notice;
@@ -3253,7 +3253,7 @@ pub fn VcsScreen() {
     let current = pick_project(selected.as_deref(), &boxes);
     if is_sample_route {
         let reload = remember(|| mutable_state_of(0_u64));
-        VcsScreenWithLoad(Load::Ready(sample_snapshot()), boxes, current, reload, true);
+        VcsScreenWithLoad(Load::Ready(sample_snapshot()), boxes, current, reload, true, false);
         return;
     }
     let load = remember_with_key(current.clone(), || mutable_state_of(Load::Loading));
@@ -3268,7 +3268,7 @@ pub fn VcsScreen() {
         }
     });
     let state = load.get();
-    VcsScreenWithLoad(state, boxes, current, reload, false);
+    VcsScreenWithLoad(state, boxes, current, reload, false, false);
 }
 
 /// VCS screen with explicit snapshot and projects.
@@ -3279,7 +3279,7 @@ pub fn VcsScreenWith(
 ) {
     let state = snap.map(Load::Ready).unwrap_or_else(|| Load::Unavailable(String::new()));
     let reload = remember(|| mutable_state_of(0_u64));
-    VcsScreenWithLoad(state, boxes, current_id, reload, false);
+    VcsScreenWithLoad(state, boxes, current_id, reload, false, false);
 }
 
 fn VcsScreenWithLoad(
@@ -3288,13 +3288,15 @@ fn VcsScreenWithLoad(
     current_id: Option<String>,
     reload: MutableState<u64>,
     sample: bool,
+    sheet: bool,
 ) {
     let snap = load.snapshot().cloned();
     let p = ember_theme().palette;
     let window = current_window_size();
     let class = window.class;
-    let layout = pane_layout(class);
-    let wide = section_nav(class) == SectionNav::List;
+    // The sheet scrolls as one page at every width, so it never takes the two-pane layout (#495).
+    let layout = if sheet { vcs_sheet_layout(class) } else { pane_layout(class) };
+    let wide = !sheet && section_nav(class) == SectionNav::List;
     let compact = class == WindowSizeClass::Compact;
     let pad = if compact { SP[2] } else { 32.0 };
 
@@ -3311,8 +3313,10 @@ fn VcsScreenWithLoad(
 
     let current = selected_proj.get();
     let project = current.as_ref().and_then(|id| boxes.iter().find(|b| &b.id == id).cloned());
+    // The sheet shows the session's project only: no project switcher (#495).
     let projects: Vec<(String, String)> = repo_projects(&boxes)
         .into_iter()
+        .filter(|b| !sheet || Some(&b.id) == current.as_ref())
         .map(|b| (b.id.clone(), b.name.clone()))
         .collect();
 
@@ -3321,7 +3325,10 @@ fn VcsScreenWithLoad(
 
     let body = || {
         cu::Column().modifier(Modifier::new().fill_max_width()).spacing(4.0).content(|| {
-            Label("버전 관리", Fs::Xl3, Weight::Semibold, None, None);
+            // The sheet header carries the title (#495).
+            if !sheet {
+                Label("버전 관리", Fs::Xl3, Weight::Semibold, None, None);
+            }
             if let Some(ref proj) = project {
                 let subtitle = screen_subtitle(proj, snap.as_ref(), sample);
                 Label(&subtitle, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -3338,8 +3345,10 @@ fn VcsScreenWithLoad(
                         compact,
                         move |id: String| {
                             sel_proj.set(Some(id.clone()));
-                            if let Some(s) = crate::services::try_services() {
-                                s.ui.set_selected_project(Some(id));
+                            if !sheet {
+                                if let Some(s) = crate::services::try_services() {
+                                    s.ui.set_selected_project(Some(id));
+                                }
                             }
                         },
                         actions.clone(),
@@ -3396,13 +3405,58 @@ fn VcsScreenWithLoad(
     }
 }
 
+/// The pane layout inside the 버전 관리 sheet (FR-L18, #495): the sheet body scrolls as a page, so
+/// the pinned two-pane layout is never used. Compact windows keep the tabs.
+pub fn vcs_sheet_layout(class: WindowSizeClass) -> PaneLayout {
+    match class {
+        WindowSizeClass::Compact => PaneLayout::Tabs,
+        _ => PaneLayout::Stacked,
+    }
+}
+
+/// 버전 관리 as a modal sheet over the session (FR-L18, #495): the same screen body and git data
+/// as the page, for the session's project, without changing the selected project or the menu.
+pub fn VcsSheet(project_id: &str, open: bool, on_close: impl FnMut() + Clone + 'static) {
+    if !open {
+        return;
+    }
+    let boxes = if let Some(s) = crate::services::try_services() {
+        let _ = s.ui.live.launcher.get();
+        s.client.read(project_boxes)
+    } else {
+        Vec::new()
+    };
+    let sample = crate::services::try_services().is_none();
+    let current = Some(project_id.to_string());
+    let load = remember_with_key(project_id.to_string(), || mutable_state_of(Load::Loading));
+    let reload = remember_with_key(project_id.to_string(), || mutable_state_of(0_u64));
+    let load_effect = load.clone();
+    let project_effect = project_id.to_string();
+    launched_effect((project_id.to_string(), reload.get()), move || async move {
+        if crate::services::try_services().is_some() {
+            load_effect.set(Load::Loading);
+            crate::services::run_shared(async move { load_from(fetch_snapshot(&project_effect).await) }, move |result| load_effect.set(result));
+        }
+    });
+    let window = current_window_size();
+    let body_height = super::components::sheet_body_max_height(window.width_dp, window.height_dp, true, 60.0).min(1200.0);
+    let state = if sample { Load::Ready(sample_snapshot()) } else { load.get() };
+    let boxes = if sample { sample_projects() } else { boxes };
+    let current = if sample { Some("ember".to_string()) } else { current };
+    EmberSheetSized("버전 관리", true, super::components::SHEET_WIDTH_MONITOR, true, on_close, None, || {
+        cu::Box().modifier(Modifier::new().fill_max_width().height(body_height)).content(|| {
+            VcsScreenWithLoad(state, boxes, current, reload, sample, true);
+        });
+    });
+}
+
 /// A review window (`EMBER_CR_ROUTE=vcs`): sample repository view in compose-rust.
 #[compose_rust::runtime::composable]
 pub fn preview() {
     let p = ember_theme().palette;
     cu::Box().modifier(Modifier::new().fill_max_size().background(paint(p.bg))).content(|| {
         let reload = remember(|| mutable_state_of(0_u64));
-        VcsScreenWithLoad(Load::Ready(sample_snapshot()), sample_projects(), Some("ember".into()), reload, true);
+        VcsScreenWithLoad(Load::Ready(sample_snapshot()), sample_projects(), Some("ember".into()), reload, true, false);
     });
 }
 
@@ -4090,6 +4144,40 @@ mod tests {
         assert_eq!(drop_label(true), "정말 삭제합니다");
         let StashLoad::Ready(list) = sample_stashes() else { panic!() };
         assert_eq!(stash_meta(&list[0]), "stash@{0} \u{00b7} feat/session-shim \u{00b7} 40분 전");
+    }
+
+    #[test]
+    fn fr_l18_vcs_sheet_layout_scrolls_as_a_page() {
+        assert_eq!(vcs_sheet_layout(WindowSizeClass::Expanded), PaneLayout::Stacked);
+        assert_eq!(vcs_sheet_layout(WindowSizeClass::Medium), PaneLayout::Stacked);
+        assert_eq!(vcs_sheet_layout(WindowSizeClass::Compact), PaneLayout::Tabs);
+    }
+
+    #[compose_rust::runtime::composable]
+    fn open_vcs_sheet() {
+        VcsSheet("ember", true, || {});
+    }
+
+    #[compose_rust::runtime::composable]
+    fn closed_vcs_sheet() {
+        VcsSheet("ember", false, || {});
+    }
+
+    #[test]
+    fn fr_l18_vcs_sheet_shows_title_and_close_when_open() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let text = text_of(open_vcs_sheet);
+        assert!(text.contains("버전 관리"), "{text}");
+        // The header close button is the round icon button of every sheet (`CloseButton`).
+        assert!(text.contains("Clickable") || text.contains("click") || text.contains("Click"), "{text}");
+    }
+
+    #[test]
+    fn fr_l18_vcs_sheet_draws_nothing_when_closed() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        assert!(!text_of(closed_vcs_sheet).contains("버전 관리"));
     }
 
     #[compose_rust::runtime::composable]

@@ -709,6 +709,78 @@ pub fn send_blocker(
     None
 }
 
+/// Shown when the chosen device is not online.
+pub const TARGET_OFFLINE: &str = "이 장비는 지금 연결되어 있지 않습니다";
+
+/// The files line of the send sheet: says what to do when nothing is chosen.
+pub fn files_line(count: usize, picker_available: bool) -> String {
+    match (count, picker_available) {
+        (0, true) => "선택한 파일이 없습니다. 파일 고르기를 눌러 추가합니다".to_string(),
+        (0, false) => "선택한 파일이 없습니다. 파일을 고르는 기능은 준비 중입니다".to_string(),
+        (n, _) => format!("파일 {n}개 선택됨"),
+    }
+}
+
+/// A target can be chosen when it is an agent or an online device (an unknown id cannot).
+pub fn target_selectable(devices: &[Device], target: &SendTarget) -> bool {
+    match target {
+        SendTarget::Agent(_) => true,
+        SendTarget::Device(id) => devices
+            .iter()
+            .any(|x| x.id == *id && x.presence == Presence::Online),
+    }
+}
+
+/// The draft after choosing `target`, or the notice to show when it cannot be chosen.
+pub fn choose_target(
+    d: &SendDraft,
+    devices: &[Device],
+    target: SendTarget,
+) -> Result<SendDraft, String> {
+    if target_selectable(devices, &target) {
+        let mut next = d.clone();
+        next.target = Some(target);
+        Ok(next)
+    } else {
+        let name = match &target {
+            SendTarget::Device(id) => devices
+                .iter()
+                .find(|x| x.id == *id)
+                .map(|x| x.name.clone())
+                .unwrap_or_else(|| id.clone()),
+            SendTarget::Agent(id) => id.clone(),
+        };
+        Err(format!("{name}은(는) 지금 연결되어 있지 않습니다"))
+    }
+}
+
+/// The send state from the real draft: the reason it cannot send (`None` when it can) and
+/// whether the button is enabled. A chosen device that went offline blocks, and so does an agent
+/// target, because the service sends to a device id only.
+pub fn send_state(
+    d: &SendDraft,
+    devices: &[Device],
+    picker_available: bool,
+    service_ready: bool,
+) -> (Option<&'static str>, bool) {
+    let mut blocker = send_blocker(d, picker_available, service_ready);
+    if blocker.is_none() {
+        if let Some(t) = &d.target {
+            if !target_selectable(devices, t) {
+                blocker = Some(TARGET_OFFLINE);
+            }
+        }
+    }
+    let can = blocker.is_none() && matches!(d.target, Some(SendTarget::Device(_)));
+    (blocker, can)
+}
+
+/// The widest a chip's text may be so the whole chip stays within the mockup's 200 px
+/// (`.fl-tg{max-width:200px}`): 12 padding, the glyph, 8, the text, 12 padding.
+pub fn chip_text_max(glyph: f32) -> f32 {
+    200.0 - 12.0 - glyph - 8.0 - 12.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1139,6 +1211,69 @@ mod tests {
         assert_eq!(send_blocker(&d, true, true), Some(PICK_FILES));
         d.files.push("/a.txt".into());
         assert_eq!(send_blocker(&d, true, true), None);
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_an_offline_device_cannot_be_chosen() {
+        let devs = vec![
+            dev("on", "a", Presence::Online),
+            dev("off", "스튜디오 PC", Presence::Offline),
+            dev("zz", "b", Presence::Sleeping),
+        ];
+        let d = SendDraft::default();
+        let ok = choose_target(&d, &devs, SendTarget::Device("on".into())).unwrap();
+        assert_eq!(ok.target, Some(SendTarget::Device("on".into())));
+        let err = choose_target(&d, &devs, SendTarget::Device("off".into())).unwrap_err();
+        assert_eq!(err, "스튜디오 PC은(는) 지금 연결되어 있지 않습니다");
+        assert!(choose_target(&d, &devs, SendTarget::Device("zz".into())).is_err());
+        assert!(choose_target(&d, &devs, SendTarget::Device("missing".into())).is_err());
+        assert!(choose_target(&d, &devs, SendTarget::Agent("s1".into())).is_ok());
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_the_send_button_follows_the_real_selection() {
+        let devs = vec![
+            dev("on", "a", Presence::Online),
+            dev("off", "b", Presence::Offline),
+        ];
+        let mut d = SendDraft::default();
+        assert_eq!(send_state(&d, &devs, true, true), (Some(PICK_RECEIVER), false));
+        d.target = Some(SendTarget::Device("on".into()));
+        assert_eq!(send_state(&d, &devs, true, true), (Some(PICK_FILES), false));
+        d.files.push("/a.txt".into());
+        assert_eq!(send_state(&d, &devs, true, true), (None, true));
+        assert_eq!(send_state(&d, &devs, true, false), (Some(UNAVAILABLE), false));
+        // The device went offline after it was chosen.
+        d.target = Some(SendTarget::Device("off".into()));
+        assert_eq!(send_state(&d, &devs, true, true), (Some(TARGET_OFFLINE), false));
+        // An agent target has files but the service sends to a device id only.
+        d.target = Some(SendTarget::Agent("s1".into()));
+        assert_eq!(send_state(&d, &devs, true, true), (None, false));
+        // Without a picker the draft never has files, so it never sends.
+        let d = SendDraft { target: Some(SendTarget::Device("on".into())), files: vec![] };
+        assert_eq!(send_state(&d, &devs, false, true), (Some(FILE_PICK_UNAVAILABLE), false));
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_zero_files_says_what_to_do() {
+        assert_eq!(files_line(0, true), "선택한 파일이 없습니다. 파일 고르기를 눌러 추가합니다");
+        assert!(files_line(0, false).contains("준비 중"));
+        assert_eq!(files_line(3, true), "파일 3개 선택됨");
+        for t in [files_line(0, true), files_line(0, false), files_line(2, false), TARGET_OFFLINE.to_string()] {
+            assert!(t.ends_with("니다") || t.ends_with("됨"), "{t}");
+            assert!(!t.contains('\u{2014}'));
+        }
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_a_chip_never_exceeds_the_mockup_width() {
+        assert_eq!(chip_text_max(16.0), 152.0);
+        assert_eq!(chip_text_max(22.0), 146.0);
+        assert_eq!(12.0 + 16.0 + 8.0 + chip_text_max(16.0) + 12.0, 200.0);
     }
 
     #[test]

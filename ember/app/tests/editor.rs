@@ -510,3 +510,25 @@ mod explorer_edit {
         assert!(!is_at_or_below("/w/p/a.rs", "/w/p/src"));
     }
 }
+
+// #302 (D38): the names the accessibility tree shows for tabs, tree rows and problems.
+mod aria {
+    use ember_app::ui::editor::{problem_aria_label, tab_aria_label, tree_item_aria_label};
+
+    #[test]
+    fn fr_l31_a_tab_is_named_by_its_file_and_says_when_it_is_not_saved() {
+        assert_eq!(tab_aria_label("lib.rs", false), "lib.rs");
+        assert_eq!(tab_aria_label("lib.rs", true), "lib.rs (저장 안 됨)");
+    }
+
+    #[test]
+    fn fr_l31_a_tree_row_is_named_by_its_name_and_says_when_it_is_a_folder() {
+        assert_eq!(tree_item_aria_label("src", true), "src 폴더");
+        assert_eq!(tree_item_aria_label("main.rs", false), "main.rs");
+    }
+
+    #[test]
+    fn fr_l31_a_problem_row_says_what_where_and_how_bad() {
+        assert_eq!(problem_aria_label("오류", "Value expected", "package.json:2"), "오류: Value expected (package.json:2)");
+    }
+}

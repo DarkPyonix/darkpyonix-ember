@@ -142,7 +142,8 @@ async fn main() -> anyhow::Result<()> {
         )),
         None => None,
     };
-    // The peer-to-peer transport (FR-N1), opt-in.
+    // The peer-to-peer transport (FR-N1), opt-in. `server_peer_id` stays None when it is off.
+    let mut server_peer_id: Option<String> = None;
     let net = if server_transport::enabled_from_env() {
         let key = server_transport::load_key(&data_dir)?;
         let registered = hub.as_ref().is_some_and(|h| h.is_registered());
@@ -179,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
         t.wait_online(std::time::Duration::from_secs(5)).await;
         // Printed (not only logged): the peer id goes into each node's allowed peers.
         println!("ember server peer id: {}", t.peer_id());
+        server_peer_id = Some(t.peer_id().to_string());
         println!("ember server peer addr: {}", serde_json::to_string(&t.local_addr())?);
         Some(ServerTransport::new(t))
     } else {
@@ -193,7 +195,7 @@ async fn main() -> anyhow::Result<()> {
     let store_for_guest = store.clone();
     // One `Enrol` for the whole process: the owner's routes (mint, confirm, deny) and the enrol door
     // (redeem, poll, from step C3a) share its failure windows and its pending-token map, which live per instance.
-    let enrol = computers::enrol::Enrol::new(store.clone());
+    let enrol = computers::enrol::Enrol::with_server_peer_id(store.clone(), server_peer_id);
     let sessions = Sessions::new(store, adapters);
     accounts.install(&sessions);
     ember_server::members::install(&sessions);

@@ -276,11 +276,14 @@ struct Routes {
 }
 
 /// One poll per [`ENROL_POLL_INTERVAL`] per enrol id, in a table of at most
-/// [`ENROL_POLL_MAX_ENTRIES`] ids. The core has no poll limit, so the door keeps it. The key is
-/// the id as given in the path, before any secret check, so an unknown id is limited like a real
-/// one and the limiter says nothing about which ids exist. When the table is full after pruning,
-/// a new id is refused (fail closed): the trade is that a flood of distinct ids can make polls
-/// for new ids wait, never that the table grows.
+/// [`ENROL_POLL_MAX_ENTRIES`] ids. The core has no poll limit, so the door keeps it. The handler
+/// asks the limiter only after `Enrol::verify_poll` accepted the secret, so the key space is only
+/// the enrolments whose poll secret the caller holds: an attacker without a valid secret cannot
+/// occupy a slot, and the limiter never learns an invented id. The residual risk is that probes
+/// with a wrong secret are no longer limited per id; they are bounded by the per-address loose
+/// limit and the global bucket of the door. When the table is full after pruning, a new id is
+/// refused (fail closed): the trade is that a flood of enrolments the caller holds secrets for
+/// can make polls for new ids wait, never that the table grows.
 pub struct PollLimiter {
     last: Mutex<HashMap<String, Instant>>,
 }
@@ -330,6 +333,14 @@ impl PollLimiter {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// An id taken from a request, made safe for a log line (FR-C2g): at most 64 characters, and
+/// every character that is not an ASCII letter, digit, `-` or `_` becomes `_`, so no control
+/// character, newline or escape sequence an attacker put in the path can reach a log. Used at
+/// every place the door logs an id, including the ids the core generated, for one uniform rule.
+fn log_id(id: &str) -> String {
+    id.chars().take(64).map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
 }
 
 /// FR-C2g: a refused redeem is logged at warn at most once per address per minute. Bounded;
@@ -400,7 +411,31 @@ fn is_json(headers: &HeaderMap) -> bool {
     v.to_str().is_ok_and(|v| v.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/json"))
 }
 
+/// True when `e`, or an error in its `source()` chain, is `http_body_util::LengthLimitError`, the
+/// size-limit error of `axum::body::to_bytes` (axum's wrapper keeps it as its `source()`; the
+/// documented way to detect it). It is matched by TYPE, not by its text: no other error can be
+/// taken for the limit.
+fn is_length_limit(e: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = cur {
+        if err.is::<http_body_util::LengthLimitError>() {
+            return true;
+        }
+        cur = err.source();
+    }
+    false
+}
+
+/// Calls of the two handlers, counted in unit tests only (compiled out of production), so a test
+/// can prove a wrong method never reaches a handler.
+#[cfg(test)]
+pub(crate) static REDEEM_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(crate) static POLL_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 async fn redeem(State(st): State<Arc<Routes>>, req: Request) -> Response {
+    #[cfg(test)]
+    REDEEM_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     // 1. The content type, before the body is read or parsed and before the code is looked at.
     if !is_json(req.headers()) {
         return unsupported();
@@ -414,7 +449,9 @@ async fn redeem(State(st): State<Arc<Routes>>, req: Request) -> Response {
     let (_, body) = req.into_parts();
     let bytes = match axum::body::to_bytes(body, ENROL_MAX_BODY_BYTES).await {
         Ok(b) => b,
-        Err(_) => return reply(StatusCode::PAYLOAD_TOO_LARGE, "body too large", "too_large"),
+        Err(e) if is_length_limit(&e) => return reply(StatusCode::PAYLOAD_TOO_LARGE, "body too large", "too_large"),
+        // A client that aborts or breaks the stream is a bad request, not an oversized one.
+        Err(_) => return bad_request(),
     };
     // 2. A fixed text for every parse failure: serde's message could echo the input.
     let Ok(b) = serde_json::from_slice::<RedeemBody>(&bytes) else { return bad_request() };
@@ -422,7 +459,7 @@ async fn redeem(State(st): State<Arc<Routes>>, req: Request) -> Response {
     let source = ip.to_string();
     match st.enrol.redeem(&b.code, &b.node_public_info, crate::store::now_ms(), &source) {
         Ok(r) => {
-            tracing::info!(enrol = %r.enrol_id, addr = %ip, "enrol code redeemed");
+            tracing::info!(enrol = %log_id(&r.enrol_id), addr = %ip, "enrol code redeemed");
             let mut res = (
                 StatusCode::OK,
                 axum::Json(json!({
@@ -465,20 +502,33 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 }
 
 async fn poll(State(st): State<Arc<Routes>>, id: Result<Path<String>, PathRejection>, headers: HeaderMap) -> Response {
+    #[cfg(test)]
+    POLL_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     // The query string is never read: this handler has no extractor for it.
     let Ok(Path(id)) = id else { return poll_not_found() };
     if id.chars().count() > ENROL_MAX_ID_CHARS {
         return poll_not_found();
     }
+    // Verify first, limit second, deliver third. A missing or bad header runs the same work with
+    // an empty secret, which matches no stored hash. `verify_poll` has no side effect, so a
+    // refused or rate-limited poll never consumes the credential.
+    let secret = bearer(&headers).unwrap_or("");
+    match st.enrol.verify_poll(&id, secret, crate::store::now_ms()) {
+        Ok(true) => {}
+        Ok(false) => return poll_not_found(),
+        Err(_) => {
+            tracing::warn!(enrol = %log_id(&id), "enrol poll failed");
+            return poll_not_found();
+        }
+    }
+    // Only a poll whose secret verified reaches the limiter and can take a slot.
     if let Err(wait) = st.polls.check_at(&id, Instant::now()) {
         return too_many(wait);
     }
-    // A missing or bad header runs the same work with an empty secret, which matches no stored hash.
-    let secret = bearer(&headers).unwrap_or("");
     let delivery = match st.enrol.take_delivery(&id, secret, crate::store::now_ms()) {
         Ok(d) => d,
         Err(_) => {
-            tracing::warn!(enrol = ?id, "enrol poll failed");
+            tracing::warn!(enrol = %log_id(&id), "enrol poll failed");
             return poll_not_found();
         }
     };
@@ -489,16 +539,16 @@ async fn poll(State(st): State<Arc<Routes>>, id: Result<Path<String>, PathReject
         Delivery::Denied => status("denied"),
         Delivery::Expired => status("expired"),
         Delivery::Unknown => poll_not_found(),
-        Delivery::Joined { token, name, computer_id } => {
-            tracing::info!(enrol = ?id, "enrol credential delivered");
-            let mut res = (
-                StatusCode::OK,
-                axum::Json(json!({
-                    "status": "joined",
-                    "credential": { "node_token": token.expose(), "name": name, "computer_id": computer_id },
-                })),
-            )
-                .into_response();
+        Delivery::Joined { token, name, computer_id, server_peer_id } => {
+            tracing::info!(enrol = %log_id(&id), "enrol credential delivered");
+            let mut credential = json!({ "node_token": token.expose(), "name": name, "computer_id": computer_id });
+            // The server's public transport id, only when the transport is on: the key is absent
+            // otherwise, never null and never empty (FR-C2). No other answer carries it.
+            if let (Some(sid), Some(map)) = (server_peer_id, credential.as_object_mut()) {
+                map.insert("server_peer_id".into(), json!(sid));
+            }
+            let mut res =
+                (StatusCode::OK, axum::Json(json!({ "status": "joined", "credential": credential }))).into_response();
             res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
             res
         }
@@ -508,6 +558,46 @@ async fn poll(State(st): State<Arc<Routes>>, id: Result<Path<String>, PathReject
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn is_length_limit_tells_the_size_limit_from_a_broken_stream() {
+        use axum::body::{Body, Bytes};
+        let over = axum::body::to_bytes(Body::from(vec![0u8; 16]), 8).await.unwrap_err();
+        assert!(is_length_limit(&over), "the real over-limit error: {over}");
+        let broken = Body::from_stream(futures::stream::iter([Err::<Bytes, std::io::Error>(std::io::Error::new(
+            std::io::ErrorKind::ConnectionAborted,
+            "client went away",
+        ))]));
+        let other = axum::body::to_bytes(broken, 8).await.unwrap_err();
+        assert!(!is_length_limit(&other), "a stream error is not the limit: {other}");
+        let within = axum::body::to_bytes(Body::from(vec![0u8; 8]), 8).await;
+        assert!(within.is_ok(), "exactly the limit passes");
+    }
+
+    #[test]
+    fn log_id_keeps_only_a_short_safe_charset() {
+        let safe = |s: &str| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        assert_eq!(log_id("5b0f2c2e-9a53_X"), "5b0f2c2e-9a53_X");
+        for (what, raw) in [
+            ("newline", "a\nINFO forged line".to_string()),
+            ("esc", "a\x1b[31mred\x1b[0m".to_string()),
+            ("nul", "a\0b".to_string()),
+            ("long", "x".repeat(200)),
+            ("unicode", "\u{ac00}\u{1f600}e\u{301}".to_string()),
+            ("quote", "a\"b'c\\d".to_string()),
+        ] {
+            let out = log_id(&raw);
+            assert!(safe(&out), "{what}: {out:?}");
+            assert!(out.chars().count() <= 64, "{what}: {}", out.chars().count());
+        }
+        assert_eq!(log_id("a\nb"), "a_b");
+        assert_eq!(log_id("a\x1bb"), "a_b");
+        assert_eq!(log_id("a\0b"), "a_b");
+        assert_eq!(log_id("a\"b"), "a_b");
+        assert_eq!(log_id(&"x".repeat(200)), "x".repeat(64));
+        assert_eq!(log_id("\u{ac00}\u{1f600}"), "__", "one underscore per character");
+        assert_eq!(log_id(""), "");
+    }
 
     #[test]
     fn warn_once_is_once_per_address_per_minute_and_bounded() {
@@ -525,5 +615,73 @@ mod tests {
         }
         assert!(!w.due(a, t0), "full of recent addresses: nothing more is logged");
         assert!(w.due(a, t0 + Duration::from_secs(60)), "they aged out");
+    }
+
+    /// A HEAD, or any wrong method, never runs the redeem or poll handler (`take_delivery`
+    /// delivers and wipes the credential in one call). The handlers count their calls in test
+    /// builds; a legitimate request of each route must count exactly once, so the zero of the
+    /// others is meaningful. Driven through the full stack, real limits and open limits, one fresh
+    /// app per request so no limiter answers in place of the router.
+    #[tokio::test]
+    async fn no_wrong_method_runs_a_handler() {
+        use std::sync::atomic::Ordering::SeqCst;
+        use tower::ServiceExt;
+
+        let store = Arc::new(crate::store::Store::open_in_memory().unwrap());
+        let enrol = Enrol::new(store);
+        let owner: SocketAddr = "127.0.0.1:8740".parse().unwrap();
+        let d = EnrolDoor::from_lookup(
+            |k| (k == ENROL_LISTEN_VAR).then(|| "127.0.0.1:9300".to_string()),
+            owner,
+            None,
+        )
+        .unwrap()
+        .expect("door on");
+        let big = LimitConfig {
+            accept_per_minute: 100_000,
+            accept_per_hour: 100_000,
+            other_per_minute: 100_000,
+            global_per_second: 1_000_000.0,
+            global_burst: 1_000_000.0,
+            max_in_flight: ENROL_MAX_IN_FLIGHT,
+            max_addrs: ENROL_MAX_TRACKED_ADDRS,
+        };
+        let real = |d: &EnrolDoor, e: &Arc<Enrol>| d.app(e.clone());
+        let open = |d: &EnrolDoor, e: &Arc<Enrol>| {
+            d.wrap_limited(
+                d.routes_for(e.clone()),
+                Arc::new(DoorLimits::with_strict_path(big.clone(), Vec::new(), ENROL_REDEEM_PATH)),
+            )
+        };
+        let send = |app: Router, method: &str, uri: &str| {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("host", "127.0.0.1:9300")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from("{}"))
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 50], 40000))));
+            async move { app.oneshot(req).await.unwrap().status() }
+        };
+        let calls = || (REDEEM_CALLS.load(SeqCst), POLL_CALLS.load(SeqCst));
+
+        let builders: [(&str, &dyn Fn() -> Router); 2] =
+            [("app", &|| real(&d, &enrol)), ("open_app", &|| open(&d, &enrol))];
+        for (name, build) in builders {
+            let before = calls();
+            for m in ["HEAD", "GET", "PUT", "DELETE", "PATCH", "OPTIONS", "TRACE"] {
+                let _ = send(build(), m, "/enrol/redeem").await;
+            }
+            for m in ["HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "TRACE"] {
+                let _ = send(build(), m, "/enrol/status/x").await;
+            }
+            assert_eq!(calls(), before, "{name}: a wrong method ran a handler");
+            // The counters are alive: the legitimate request of each route counts exactly once.
+            let _ = send(build(), "POST", "/enrol/redeem").await;
+            assert_eq!(calls(), (before.0 + 1, before.1), "{name}: POST /enrol/redeem counts once");
+            let _ = send(build(), "GET", "/enrol/status/x").await;
+            assert_eq!(calls(), (before.0 + 1, before.1 + 1), "{name}: GET /enrol/status/x counts once");
+        }
     }
 }

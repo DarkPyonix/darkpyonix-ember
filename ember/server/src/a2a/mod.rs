@@ -181,7 +181,9 @@ pub struct A2a {
     /// Claude Code configuration already names that server (FR-T12). The prompt builders read it
     /// through [`A2a::channel_reply_by_tool`]. It lives in memory: after a server restart it is
     /// empty, so a surviving agent is again told "by tool" (its prompt already carries the CLI
-    /// fallback sentence) until its next start runs the check again.
+    /// fallback sentence) until its next start runs the check again. An entry is removed when the
+    /// session's start finds the name free, when the session's team membership ends (end hook)
+    /// and when the session moves to another computer.
     channel_fallback: StdMutex<HashSet<String>>,
     /// Where the collision check looks outside the session directory.
     claude_sources: StdMutex<ClaudeConfigSources>,
@@ -218,39 +220,67 @@ const KIND_PROJECT: &str = "project .mcp.json";
 const KIND_USER: &str = "user config";
 const KIND_LOCAL: &str = "local config";
 const KIND_MANAGED: &str = "managed";
+const KIND_REQUEST: &str = "start request";
 const REASON_TAKEN: &str = "a server with this name is already configured";
 
-/// The fixed log reason for a file of `kind` that could not be read. Static on purpose: nothing
-/// read from a file reaches a log line.
-fn reason_unreadable(kind: &'static str) -> &'static str {
-    match kind {
-        KIND_PROJECT => "could not read project .mcp.json",
-        KIND_USER => "could not read user config",
-        KIND_LOCAL => "could not read local config",
-        _ => "could not read managed",
-    }
+/// The closed set of reasons a configuration file could not be checked. Static on purpose:
+/// nothing read from a file reaches a log line or a notice.
+const WHY_UNREADABLE: &str = "unreadable";
+const WHY_NOT_JSON: &str = "not valid JSON";
+const WHY_TOO_BIG: &str = "larger than 4 MiB";
+const WHY_NOT_REGULAR: &str = "not a regular file";
+
+/// What the collision check found (FR-T12). `Taken` and `Unsure` both skip the registration (the
+/// check fails closed); they differ in what the session notice and the log say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameCheck {
+    /// Sure that no configuration source names the server.
+    Free,
+    /// A source defines a server of that name. `kind` is the kind of source.
+    Taken { kind: &'static str },
+    /// A source exists but could not be checked. `why` is one of the `WHY_*` texts.
+    Unsure { kind: &'static str, why: &'static str },
+}
+
+/// The notice for a start that skipped the registration because a file could not be checked.
+fn unsure_notice(kind: &str, why: &str) -> String {
+    format!(
+        "The channel tool was not registered because the Claude Code configuration ({kind}) could not be checked ({why}); replies use the ember-a2a command."
+    )
 }
 
 /// `Ok(None)` for a missing file, `Ok(Some(json))` for a regular JSON file of at most
-/// [`MAX_CONFIG_BYTES`], `Err(())` for everything else (cannot be sure).
-fn read_config_json(path: &Path) -> Result<Option<serde_json::Value>, ()> {
+/// [`MAX_CONFIG_BYTES`], `Err(why)` for everything else (cannot be sure). The file is opened
+/// without blocking and judged by `fstat` on the open handle, so a path swapped for a FIFO
+/// between a check and the open cannot stall the session start. A symlink is followed on purpose
+/// (dotfile managers link these files).
+fn read_config_json(path: &Path) -> Result<Option<serde_json::Value>, &'static str> {
     use std::io::Read;
-    let meta = match std::fs::metadata(path) {
-        Ok(m) => m,
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = match opts.open(path) {
+        Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(()),
+        Err(_) => return Err(WHY_UNREADABLE),
     };
-    if !meta.is_file() || meta.len() > MAX_CONFIG_BYTES {
-        return Err(());
+    let meta = file.metadata().map_err(|_| WHY_UNREADABLE)?;
+    if !meta.is_file() {
+        return Err(WHY_NOT_REGULAR);
+    }
+    if meta.len() > MAX_CONFIG_BYTES {
+        return Err(WHY_TOO_BIG);
     }
     let mut buf = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|f| f.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut buf))
-        .map_err(|_| ())?;
+    file.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut buf).map_err(|_| WHY_UNREADABLE)?;
     if buf.len() as u64 > MAX_CONFIG_BYTES {
-        return Err(());
+        return Err(WHY_TOO_BIG);
     }
-    serde_json::from_slice(&buf).map(Some).map_err(|_| ())
+    serde_json::from_slice(&buf).map(Some).map_err(|_| WHY_NOT_JSON)
 }
 
 /// Whether the `mcpServers` object `servers` has a key equal to [`CHANNEL_MCP_SERVER`], ignoring
@@ -262,9 +292,9 @@ fn names_channel_server(servers: Option<&serde_json::Value>) -> bool {
 }
 
 /// Whether the user's own Claude Code configuration already defines an MCP server named
-/// `ember-channels` (FR-T12). Returns the kind of file and a static reason, or `None` when it is
-/// sure there is no such server. It fails closed: a file that exists but cannot be read, is not
-/// valid JSON, is over 4 MiB or is not a regular file counts as "cannot be sure".
+/// `ember-channels` (FR-T12). [`NameCheck::Free`] only when it is sure there is no such server. It
+/// fails closed: a file that exists but cannot be read, is not valid JSON, is over 4 MiB or is
+/// not a regular file gives [`NameCheck::Unsure`]; a missing file is fine.
 ///
 /// Sources: `.mcp.json` in `cwd` and every ancestor; `<config_dir>/.claude.json` and
 /// `<home>/.claude.json` (Claude Code keeps its user file at `$CLAUDE_CONFIG_DIR/.claude.json`
@@ -276,7 +306,7 @@ pub fn channel_server_name_taken(
     home: Option<&Path>,
     config_dir: Option<&Path>,
     managed: &[PathBuf],
-) -> Option<(&'static str, &'static str)> {
+) -> NameCheck {
     let cwd = if cwd.is_absolute() {
         cwd.to_path_buf()
     } else {
@@ -292,9 +322,9 @@ pub fn channel_server_name_taken(
     }
     for d in &dirs {
         match read_config_json(&d.join(".mcp.json")) {
-            Err(()) => return Some((KIND_PROJECT, reason_unreadable(KIND_PROJECT))),
+            Err(why) => return NameCheck::Unsure { kind: KIND_PROJECT, why },
             Ok(Some(v)) if names_channel_server(v.get("mcpServers")) => {
-                return Some((KIND_PROJECT, REASON_TAKEN));
+                return NameCheck::Taken { kind: KIND_PROJECT };
             }
             Ok(_) => {}
         }
@@ -302,17 +332,17 @@ pub fn channel_server_name_taken(
     let user_files = config_dir.iter().chain(home.iter()).map(|d| d.join(".claude.json"));
     for file in user_files {
         match read_config_json(&file) {
-            Err(()) => return Some((KIND_USER, reason_unreadable(KIND_USER))),
+            Err(why) => return NameCheck::Unsure { kind: KIND_USER, why },
             Ok(None) => {}
             Ok(Some(v)) => {
                 if names_channel_server(v.get("mcpServers")) {
-                    return Some((KIND_USER, REASON_TAKEN));
+                    return NameCheck::Taken { kind: KIND_USER };
                 }
                 if let Some(projects) = v.get("projects").and_then(|p| p.as_object()) {
                     for d in &dirs {
                         let hit = d.to_str().and_then(|k| projects.get(k));
                         if names_channel_server(hit.and_then(|p| p.get("mcpServers"))) {
-                            return Some((KIND_LOCAL, REASON_TAKEN));
+                            return NameCheck::Taken { kind: KIND_LOCAL };
                         }
                     }
                 }
@@ -321,14 +351,14 @@ pub fn channel_server_name_taken(
     }
     for file in managed {
         match read_config_json(file) {
-            Err(()) => return Some((KIND_MANAGED, reason_unreadable(KIND_MANAGED))),
+            Err(why) => return NameCheck::Unsure { kind: KIND_MANAGED, why },
             Ok(Some(v)) if names_channel_server(v.get("mcpServers")) => {
-                return Some((KIND_MANAGED, REASON_TAKEN));
+                return NameCheck::Taken { kind: KIND_MANAGED };
             }
             Ok(_) => {}
         }
     }
-    None
+    NameCheck::Free
 }
 
 const NOTICE_EVERY: Duration = Duration::from_secs(60);
@@ -384,6 +414,7 @@ impl A2a {
             }
             Ok(())
         }));
+        self.install_end_hook();
         // Mentions in user messages (FR-T6).
         let weak = Arc::downgrade(self);
         self.sessions.add_user_message_hook(Arc::new(move |session: String, text: String| {
@@ -400,6 +431,18 @@ impl A2a {
         tokio::spawn(watch_turns(Arc::downgrade(self), rx));
         let this = self.clone();
         tokio::spawn(async move { this.flush_all().await });
+    }
+
+    /// Drop a session's `channel_fallback` entry when the session ends (its team member is ended),
+    /// so the set does not keep ids of sessions that are gone. The sessions API has no other
+    /// end or delete path to hook. A later start decides again.
+    fn install_end_hook(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        self.sessions.add_end_hook(Arc::new(move |id: &str| {
+            if let Some(a) = weak.upgrade() {
+                a.channel_fallback.lock().unwrap().remove(id);
+            }
+        }));
     }
 
     pub fn store(&self) -> &A2aStore {
@@ -464,23 +507,33 @@ impl A2a {
         let (Some(url), Some(token)) = (env_value("EMBER_URL"), env_value("EMBER_RUNTIME_TOKEN")) else {
             return;
         };
-        let taken = if req.mcp_servers.iter().any(|s| s.name == CHANNEL_MCP_SERVER) {
-            Some(("start request", REASON_TAKEN))
+        let check = if req.mcp_servers.iter().any(|s| s.name == CHANNEL_MCP_SERVER) {
+            NameCheck::Taken { kind: KIND_REQUEST }
         } else {
             let sources = self.claude_sources.lock().unwrap().clone();
             let config_dir = env_value("CLAUDE_CONFIG_DIR").map(PathBuf::from).or(sources.config_dir.clone());
             channel_server_name_taken(&req.cwd, sources.home.as_deref(), config_dir.as_deref(), &sources.managed)
         };
-        if let Some((kind, reason)) = taken {
-            // Never the file contents: `kind` and `reason` are static strings.
-            tracing::warn!(session = %rec.id, source = kind, "not registering {CHANNEL_MCP_SERVER}: {reason}");
+        // Never the file contents: `kind`, `why` and the reason are static strings.
+        let skip_notice = match check {
+            NameCheck::Free => None,
+            NameCheck::Taken { kind } => {
+                tracing::warn!(session = %rec.id, source = kind, "not registering {CHANNEL_MCP_SERVER}: {REASON_TAKEN}");
+                Some(CHANNEL_FALLBACK_NOTICE.to_string())
+            }
+            NameCheck::Unsure { kind, why } => {
+                tracing::warn!(session = %rec.id, source = kind, "not registering {CHANNEL_MCP_SERVER}: the configuration could not be checked ({why})");
+                Some(unsure_notice(kind, why))
+            }
+        };
+        if let Some(notice) = skip_notice {
             let first = self.channel_fallback.lock().unwrap().insert(rec.id.clone());
             // The instructions hook ran before this one and named the tool: put the command back.
             if let Some(text) = req.instructions.as_mut() {
                 *text = text.replace(&self.instructions_with(true), &self.instructions_with(false));
             }
             if first {
-                let event = AgentEvent::Notice { message: CHANNEL_FALLBACK_NOTICE.to_string() };
+                let event = AgentEvent::Notice { message: notice };
                 if let Err(e) = self.sessions.record_event(&rec.id, &event) {
                     tracing::warn!(session = %rec.id, "recording the channel fallback notice failed: {e:#}");
                 }
@@ -1370,7 +1423,7 @@ mod channel_tool_tests {
         format!(r#"{{"mcpServers":{{"{key}":{{"command":"x"}}}}}}"#)
     }
 
-    fn taken(cwd: &Path, home: Option<&Path>, cfg: Option<&Path>, managed: &[PathBuf]) -> Option<(&'static str, &'static str)> {
+    fn taken(cwd: &Path, home: Option<&Path>, cfg: Option<&Path>, managed: &[PathBuf]) -> NameCheck {
         channel_server_name_taken(cwd, home, cfg, managed)
     }
 
@@ -1380,11 +1433,11 @@ mod channel_tool_tests {
         let cwd = d.path().join("a/b");
         std::fs::create_dir_all(&cwd).unwrap();
         put(&cwd.join(".mcp.json"), &with_server("ember-channels"));
-        assert_eq!(taken(&cwd, None, None, &[]).unwrap().0, "project .mcp.json");
+        assert_eq!(taken(&cwd, None, None, &[]), NameCheck::Taken { kind: KIND_PROJECT });
         std::fs::remove_file(cwd.join(".mcp.json")).unwrap();
-        assert_eq!(taken(&cwd, None, None, &[]), None);
+        assert_eq!(taken(&cwd, None, None, &[]), NameCheck::Free);
         put(&d.path().join("a/.mcp.json"), &with_server("ember-channels"));
-        assert_eq!(taken(&cwd, None, None, &[]).unwrap().0, "project .mcp.json");
+        assert_eq!(taken(&cwd, None, None, &[]), NameCheck::Taken { kind: KIND_PROJECT });
     }
 
     #[test]
@@ -1394,12 +1447,12 @@ mod channel_tool_tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let (home, cfg) = (d.path().join("home"), d.path().join("cfgdir"));
         put(&cfg.join(".claude.json"), &with_server("ember-channels"));
-        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[]).unwrap().0, "user config");
+        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[]), NameCheck::Taken { kind: KIND_USER });
         std::fs::remove_file(cfg.join(".claude.json")).unwrap();
-        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[]), None);
+        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[]), NameCheck::Free);
         put(&home.join(".claude.json"), &with_server("ember-channels"));
-        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[]).unwrap().0, "user config");
-        assert_eq!(taken(&cwd, Some(&home), None, &[]).unwrap().0, "user config");
+        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[]), NameCheck::Taken { kind: KIND_USER });
+        assert_eq!(taken(&cwd, Some(&home), None, &[]), NameCheck::Taken { kind: KIND_USER });
     }
 
     #[test]
@@ -1410,11 +1463,11 @@ mod channel_tool_tests {
         let home = d.path().join("home");
         let key = cwd.to_str().unwrap();
         put(&home.join(".claude.json"), &format!(r#"{{"projects":{{"{key}":{}}}}}"#, with_server("Ember-Channels")));
-        assert_eq!(taken(&cwd, Some(&home), None, &[]).unwrap().0, "local config");
+        assert_eq!(taken(&cwd, Some(&home), None, &[]), NameCheck::Taken { kind: KIND_LOCAL });
         let parent = d.path().join("proj");
         let pkey = parent.to_str().unwrap();
         put(&home.join(".claude.json"), &format!(r#"{{"projects":{{"{pkey}":{}}}}}"#, with_server("ember-channels")));
-        assert_eq!(taken(&cwd, Some(&home), None, &[]).unwrap().0, "local config");
+        assert_eq!(taken(&cwd, Some(&home), None, &[]), NameCheck::Taken { kind: KIND_LOCAL });
     }
 
     #[test]
@@ -1424,9 +1477,9 @@ mod channel_tool_tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let m = d.path().join("managed-mcp.json");
         put(&m, &with_server("EMBER-CHANNELS"));
-        assert_eq!(taken(&cwd, None, None, &[m.clone()]).unwrap().0, "managed");
+        assert_eq!(taken(&cwd, None, None, &[m.clone()]), NameCheck::Taken { kind: KIND_MANAGED });
         put(&cwd.join(".mcp.json"), &with_server("Ember-Channels"));
-        assert_eq!(taken(&cwd, None, None, &[]).unwrap().0, "project .mcp.json");
+        assert_eq!(taken(&cwd, None, None, &[]), NameCheck::Taken { kind: KIND_PROJECT });
     }
 
     #[test]
@@ -1436,13 +1489,17 @@ mod channel_tool_tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let (home, cfg) = (d.path().join("home"), d.path().join("cfg"));
         let m = d.path().join("none.json");
-        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[m.clone()]), None, "absent files");
+        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[m.clone()]), NameCheck::Free, "absent files");
         put(&cwd.join(".mcp.json"), &with_server("github"));
         put(&home.join(".claude.json"), &with_server("ember-channels-2"));
         let other = d.path().join("elsewhere");
         let okey = other.to_str().unwrap();
         put(&cfg.join(".claude.json"), &format!(r#"{{"projects":{{"{okey}":{}}}}}"#, with_server("ember-channels")));
-        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[m]), None);
+        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[m]), NameCheck::Free);
+    }
+
+    fn unsure(kind: &'static str, why: &'static str) -> NameCheck {
+        NameCheck::Unsure { kind, why }
     }
 
     #[test]
@@ -1452,21 +1509,47 @@ mod channel_tool_tests {
         std::fs::create_dir_all(&cwd).unwrap();
         // Invalid JSON.
         put(&cwd.join(".mcp.json"), "{ not json");
-        assert_eq!(taken(&cwd, None, None, &[]), Some(("project .mcp.json", "could not read project .mcp.json")));
+        assert_eq!(taken(&cwd, None, None, &[]), unsure(KIND_PROJECT, "not valid JSON"));
         // Oversized.
         std::fs::remove_file(cwd.join(".mcp.json")).unwrap();
         let home = d.path().join("home");
         let big = format!(r#"{{"pad":"{}"}}"#, "x".repeat(MAX_CONFIG_BYTES as usize));
         put(&home.join(".claude.json"), &big);
-        assert_eq!(taken(&cwd, Some(&home), None, &[]), Some(("user config", "could not read user config")));
+        assert_eq!(taken(&cwd, Some(&home), None, &[]), unsure(KIND_USER, "larger than 4 MiB"));
         // Not a regular file (a directory).
         std::fs::remove_file(home.join(".claude.json")).unwrap();
         std::fs::create_dir_all(home.join(".claude.json")).unwrap();
-        assert_eq!(taken(&cwd, Some(&home), None, &[]).unwrap().1, "could not read user config");
+        assert_eq!(taken(&cwd, Some(&home), None, &[]), unsure(KIND_USER, "not a regular file"));
         // Managed file with invalid JSON.
         let m = d.path().join("m.json");
         put(&m, "[");
-        assert_eq!(taken(&cwd, None, None, &[m]), Some(("managed", "could not read managed")));
+        assert_eq!(taken(&cwd, None, None, &[m]), unsure(KIND_MANAGED, "not valid JSON"));
+    }
+
+    #[test]
+    fn fr_t12_collision_each_unsure_reason_and_a_missing_file_is_free() {
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        // Missing: free.
+        assert_eq!(taken(&cwd, None, None, &[d.path().join("absent.json")]), NameCheck::Free);
+        // A `.mcp.json` that is a directory (in an ancestor too) is "not a regular file".
+        let parent = d.path().to_path_buf();
+        std::fs::create_dir_all(parent.join(".mcp.json")).unwrap();
+        assert_eq!(taken(&cwd, None, None, &[]), unsure(KIND_PROJECT, WHY_NOT_REGULAR));
+        std::fs::remove_dir(parent.join(".mcp.json")).unwrap();
+        // A non-JSON file in an ancestor.
+        put(&parent.join(".mcp.json"), "plain text");
+        assert_eq!(taken(&cwd, None, None, &[]), unsure(KIND_PROJECT, WHY_NOT_JSON));
+        std::fs::remove_file(parent.join(".mcp.json")).unwrap();
+        // Exactly at the limit is read; one byte over is too large.
+        let m = d.path().join("m.json");
+        let pad = |n: usize| format!(r#"{{"pad":"{}"}}"#, "x".repeat(n - 10));
+        put(&m, &pad(MAX_CONFIG_BYTES as usize));
+        assert_eq!(std::fs::metadata(&m).unwrap().len(), MAX_CONFIG_BYTES);
+        assert_eq!(taken(&cwd, None, None, &[m.clone()]), NameCheck::Free);
+        put(&m, &pad(MAX_CONFIG_BYTES as usize + 1));
+        assert_eq!(taken(&cwd, None, None, &[m]), unsure(KIND_MANAGED, WHY_TOO_BIG));
     }
 
     #[cfg(unix)]
@@ -1482,7 +1565,43 @@ mod channel_tool_tests {
         std::fs::set_permissions(cwd.join(".mcp.json"), std::fs::Permissions::from_mode(0o000)).unwrap();
         let r = taken(&cwd, None, None, &[]);
         std::fs::set_permissions(cwd.join(".mcp.json"), std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(r, Some(("project .mcp.json", "could not read project .mcp.json")));
+        assert_eq!(r, unsure(KIND_PROJECT, WHY_UNREADABLE));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_t12_collision_a_fifo_is_not_a_regular_file_and_does_not_block() {
+        use std::os::unix::ffi::OsStrExt;
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let fifo = cwd.join(".mcp.json");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cwd2 = cwd.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(taken(&cwd2, None, None, &[]));
+        });
+        let r = rx.recv_timeout(Duration::from_secs(5)).expect("the check blocked on a FIFO");
+        assert_eq!(r, unsure(KIND_PROJECT, WHY_NOT_REGULAR));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_t12_collision_a_symlink_to_a_regular_file_is_still_read() {
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let real = d.path().join("dotfiles/mcp.json");
+        put(&real, &with_server("ember-channels"));
+        std::os::unix::fs::symlink(&real, cwd.join(".mcp.json")).unwrap();
+        assert_eq!(taken(&cwd, None, None, &[]), NameCheck::Taken { kind: KIND_PROJECT });
+        put(&real, &with_server("other"));
+        assert_eq!(taken(&cwd, None, None, &[]), NameCheck::Free);
+        // A dangling link is a missing file.
+        std::fs::remove_file(&real).unwrap();
+        assert_eq!(taken(&cwd, None, None, &[]), NameCheck::Free);
     }
 
     #[test]
@@ -1490,15 +1609,71 @@ mod channel_tool_tests {
         let d = tempfile::tempdir().unwrap();
         let cwd = d.path().join("proj");
         put(&cwd.join(".mcp.json"), "SECRET-CONTENT-123 {");
-        let (kind, reason) = taken(&cwd, None, None, &[]).unwrap();
-        for text in [kind, reason] {
+        let NameCheck::Unsure { kind, why } = taken(&cwd, None, None, &[]) else { panic!("unsure expected") };
+        for text in [kind, why] {
             assert!(!text.contains("SECRET"), "{text}");
         }
-        let all = [KIND_PROJECT, KIND_USER, KIND_LOCAL, KIND_MANAGED].map(reason_unreadable);
+        assert!(!unsure_notice(kind, why).contains("SECRET"));
+        assert_eq!([WHY_UNREADABLE, WHY_NOT_JSON, WHY_TOO_BIG, WHY_NOT_REGULAR], ["unreadable", "not valid JSON", "larger than 4 MiB", "not a regular file"]);
+        assert_eq!([KIND_PROJECT, KIND_USER, KIND_LOCAL, KIND_MANAGED], ["project .mcp.json", "user config", "local config", "managed"]);
+    }
+
+    #[test]
+    fn fr_t12_collision_unsure_notice_text() {
         assert_eq!(
-            all,
-            ["could not read project .mcp.json", "could not read user config", "could not read local config", "could not read managed"]
+            unsure_notice("user config", "larger than 4 MiB"),
+            "The channel tool was not registered because the Claude Code configuration (user config) could not be checked (larger than 4 MiB); replies use the ember-a2a command."
         );
+    }
+
+    #[test]
+    fn fr_t12_collision_hook_unsure_skips_with_its_own_notice_and_taken_keeps_the_old_text() {
+        let d = tempfile::tempdir().unwrap();
+        let a = world(Some(CLI));
+        let notices = |r: &SessionRecord| -> Vec<String> {
+            a.sessions.store().events_after(&r.id, 0).unwrap().into_iter()
+                .filter_map(|e| match e.event { AgentEvent::Notice { message } => Some(message), _ => None })
+                .collect()
+        };
+        let r = rec(&a, AgentKind::ClaudeCode);
+        let cwd = d.path().join("proj");
+        put(&cwd.join(".mcp.json"), "{ nope");
+        let mut req = request(&a, &r);
+        req.cwd = cwd.clone();
+        a.channel_tool_config(&r, &mut req);
+        assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty(), "fail closed");
+        assert!(a.channel_fallback.lock().unwrap().contains(&r.id));
+        assert_eq!(notices(&r), [unsure_notice(KIND_PROJECT, "not valid JSON")]);
+        // Taken: the old text, byte for byte.
+        let r2 = rec(&a, AgentKind::ClaudeCode);
+        put(&cwd.join(".mcp.json"), &with_server("ember-channels"));
+        let mut req = request(&a, &r2);
+        req.cwd = cwd;
+        a.channel_tool_config(&r2, &mut req);
+        assert_eq!(
+            notices(&r2),
+            ["The channel tool could not be registered because a MCP server named ember-channels is already configured; replies use the ember-a2a command."]
+        );
+    }
+
+    #[test]
+    fn fr_t12_the_end_hook_drops_the_fallback_entry_and_the_set_does_not_grow() {
+        let a = world(Some(CLI));
+        a.install_end_hook();
+        let r = rec(&a, AgentKind::ClaudeCode);
+        let keep = rec(&a, AgentKind::ClaudeCode);
+        a.channel_fallback.lock().unwrap().insert(r.id.clone());
+        a.channel_fallback.lock().unwrap().insert(keep.id.clone());
+        a.sessions.session_ended(&r.id);
+        let set = a.channel_fallback.lock().unwrap().clone();
+        assert!(!set.contains(&r.id) && set.contains(&keep.id));
+        // Many start/skip/end cycles leave nothing behind.
+        for i in 0..1000 {
+            let id = format!("s{i}");
+            a.channel_fallback.lock().unwrap().insert(id.clone());
+            a.sessions.session_ended(&id);
+        }
+        assert_eq!(a.channel_fallback.lock().unwrap().len(), 1);
     }
 
     fn set_sources(a: &A2a, home: &Path) {

@@ -522,10 +522,10 @@ pub enum DraftError {
 impl DraftError {
     pub fn text(self) -> &'static str {
         match self {
-            DraftError::EmptyName => "채널 이름을 입력하십시오",
+            DraftError::EmptyName => "채널 이름을 입력해 주세요",
             DraftError::BadChar => "채널 이름에 쓸 수 없는 문자가 있습니다",
             DraftError::Taken => TAKEN_TEXT,
-            DraftError::NoProject => "프로젝트를 선택하십시오",
+            DraftError::NoProject => "프로젝트를 선택해 주세요",
         }
     }
 }
@@ -682,10 +682,10 @@ pub fn create_error_text(status: Option<u16>, code: Option<&str>) -> &'static st
     match (status, code) {
         (_, Some("invalid_name")) => DraftError::BadChar.text(),
         (Some(409), _) | (_, Some("name_taken")) | (_, Some("conflict")) => TAKEN_TEXT,
-        (Some(404), _) => "프로젝트나 에이전트를 찾을 수 없습니다. 목록을 새로 고친 뒤 다시 시도하십시오",
-        (Some(400), _) => "입력한 내용을 서버가 받아들이지 않았습니다. 이름과 에이전트를 확인하십시오",
-        (Some(429), _) => "요청이 너무 많습니다. 잠시 뒤 다시 시도하십시오",
-        _ => "채널을 만들지 못했습니다. 연결을 확인한 뒤 다시 시도하십시오",
+        (Some(404), _) => "프로젝트나 에이전트를 찾을 수 없습니다. 목록을 새로 고친 뒤 다시 시도해 주세요",
+        (Some(400), _) => "입력한 내용을 서버가 받아들이지 않았습니다. 이름과 에이전트를 확인해 주세요",
+        (Some(429), _) => "요청이 너무 많습니다. 잠시 뒤 다시 시도해 주세요",
+        _ => "채널을 만들지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요",
     }
 }
 
@@ -1236,7 +1236,7 @@ mod layout_tests {
         assert_eq!(create_error_text(Some(400), Some("name_taken")), "이미 있는 채널 이름입니다");
         assert_eq!(create_error_text(Some(400), Some("invalid_name")), DraftError::BadChar.text());
         assert!(create_error_text(Some(404), Some("not_found")).contains("찾을 수 없습니다"));
-        assert!(create_error_text(Some(400), Some("bad_request")).contains("확인하십시오"));
+        assert!(create_error_text(Some(400), Some("bad_request")).contains("확인해 주세요"));
         assert!(create_error_text(Some(429), Some("rate_limited")).contains("잠시"));
         for (s, c) in [(Some(500), Some("internal")), (None, None)] {
             let t = create_error_text(s, c);

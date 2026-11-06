@@ -209,7 +209,9 @@ pub struct Token {
 pub struct LineTokens {
     pub tokens: Vec<Token>,
     pub end_state: StateStack,
-    /// The line was longer than [`MAX_LINE_BYTES`]: it has one token and the state is unchanged.
+    /// Highlighting stopped on this line: it was longer than [`MAX_LINE_BYTES`] (one token, the state
+    /// unchanged), or [`MAX_STACK_DEPTH`] rules were open and another would have been entered (the rest of
+    /// the line keeps the scopes in force).
     pub skipped: bool,
 }
 
@@ -551,6 +553,11 @@ impl Grammar {
     }
 
     fn dynamic_pattern(&self, source: &str) -> Arc<Pattern> {
+        // A pattern built from a long capture is used once: caching it would let a document fill the cache
+        // with long keys.
+        if source.len() > 1024 {
+            return Arc::new(Pattern::new(source.to_owned()));
+        }
         let mut cache = self.dynamic.lock().unwrap_or_else(|e| e.into_inner());
         if cache.len() > 4096 {
             cache.clear();
@@ -577,9 +584,10 @@ impl Grammar {
             f.enter_pos = None;
             f.anchor_pos = None;
         }
-        let mut out = Out { tokens: Vec::new(), last_end: 0 };
+        let mut out = Out { tokens: Vec::new(), last_end: 0, stack_limit_hit: false };
         let mut guard = Guard { steps: 0, limit: 20 * (text.len() + 1) + 2000 };
         self.tokenize_string(&text, first_line, 0, &mut stack, &mut out, true, &mut guard);
+        let out_limit = out.stack_limit_hit;
         // The appended line break is not part of the line.
         let len = line.len();
         let mut tokens: Vec<Token> = Vec::with_capacity(out.tokens.len());
@@ -589,7 +597,7 @@ impl Grammar {
                 tokens.push(Token { start, end, scopes });
             }
         }
-        LineTokens { tokens, end_state: stack, skipped: false }
+        LineTokens { tokens, end_state: stack, skipped: out_limit }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -614,11 +622,6 @@ impl Grammar {
         loop {
             guard.steps += 1;
             if guard.steps > guard.limit {
-                out.produce(stack, len);
-                return;
-            }
-            if stack.frames.len() > MAX_STACK_DEPTH {
-                // Too many rules open: leave the rest of the line as it is.
                 out.produce(stack, len);
                 return;
             }
@@ -650,6 +653,13 @@ impl Grammar {
                 }
             } else {
                 let rule = &self.rules[found.rule];
+                if stack.frames.len() >= MAX_STACK_DEPTH && !matches!(rule.kind, Kind::Match { .. }) {
+                    // Too many rules open: do not open another. The rest of the line keeps the scopes in force
+                    // and the line is reported as skipped, so a caller can show that highlighting stopped.
+                    out.produce(stack, len);
+                    out.stack_limit_hit = true;
+                    return;
+                }
                 out.produce(stack, m_start);
                 let before = stack.frames.last().expect("a frame").clone();
                 let name_scopes = push_scopes(&before.content_scopes, rule.name.as_ref().map(|n| expand_name(n, text, caps)));
@@ -904,6 +914,7 @@ struct Guard {
 struct Out {
     tokens: Vec<(usize, usize, Vec<Scope>)>,
     last_end: usize,
+    stack_limit_hit: bool,
 }
 
 impl Out {

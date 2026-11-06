@@ -37,6 +37,7 @@ pub mod fallback;
 pub mod diagnostics;
 pub mod paths;
 pub mod document;
+pub mod highlight;
 pub mod hover;
 pub mod ids;
 pub mod inline;
@@ -48,7 +49,7 @@ pub mod textmate;
 pub mod session;
 pub mod widget;
 
-pub use crate::bridge::{BridgeAction, DocumentWidgetState, WidgetBridge};
+pub use crate::bridge::{BridgeAction, DocumentWidgetState, SyntaxRuns, WidgetBridge};
 pub use crate::fallback::{fallback_for, vscode_fallback_url, ConnectOutcome, Fallback, FallbackTarget};
 pub use crate::engine::{CoreOptions, Effect, ExternalChange, Input, SessionCore, SessionUpdate};
 pub use crate::coords::{WidgetPos, WidgetRange};

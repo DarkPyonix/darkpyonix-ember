@@ -41,6 +41,7 @@ use tokio::task::JoinHandle;
 use crate::coords::WidgetPos;
 use crate::engine::{CoreOptions, Effect, Input, SessionCore, SessionUpdate, Token};
 use crate::fallback::{ConnectOutcome, FallbackTarget};
+use crate::highlight::{HighlightJob, Worker};
 use crate::languages::LanguageRegistry;
 use crate::widget::WidgetEvent;
 use crate::Error;
@@ -243,9 +244,11 @@ impl EditorSession {
         // two bootstrap calls below are outstanding.
         let (tx, rx) = mpsc::unbounded_channel();
         let (updates_tx, updates_rx) = mpsc::unbounded_channel();
-        let core = SessionCore::new(LanguageRegistry::from_extensions(&extensions), config.core.clone(), Instant::now());
+        let mut core = SessionCore::new(LanguageRegistry::from_extensions(&extensions), config.core.clone(), Instant::now());
+        core.set_grammar_catalog(crate::textmate::GrammarCatalog::from_extensions(&extensions));
         let driver = Driver {
             core,
+            highlight: None,
             peer: peer.clone(),
             fs: Arc::clone(&fs),
             ipc,
@@ -396,6 +399,8 @@ impl Drop for EditorSession {
 
 struct Driver {
     core: SessionCore,
+    /// Jobs for the highlighting thread (started in [`Driver::run`]).
+    highlight: Option<std::sync::mpsc::Sender<HighlightJob>>,
     peer: RpcPeer,
     fs: Arc<RemoteFs>,
     ipc: IpcClient,
@@ -404,6 +409,28 @@ struct Driver {
     reqs: HashMap<Token, u32>,
     /// uri key → watch request id.
     watches: Arc<Mutex<HashMap<String, String>>>,
+}
+
+/// The thread that tokenizes documents: a first pass over a long file takes a second, which the session's own
+/// task must not spend. Jobs arrive in order; the ones that queued up while it worked are run as one batch.
+fn spawn_highlighter(answers: mpsc::UnboundedSender<Input>) -> std::sync::mpsc::Sender<HighlightJob> {
+    let (tx, rx) = std::sync::mpsc::channel::<HighlightJob>();
+    let spawned = std::thread::Builder::new().name("ember-highlight".into()).spawn(move || {
+        let mut worker = Worker::new();
+        while let Ok(first) = rx.recv() {
+            let mut batch = vec![first];
+            batch.extend(rx.try_iter());
+            for output in worker.run(batch) {
+                if answers.send(Input::Highlighted(output)).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("ember-editor: cannot start the highlighting thread: {e}");
+    }
+    tx
 }
 
 async fn recv_opt<T>(rx: &mut Option<mpsc::UnboundedReceiver<T>>) -> Option<T> {
@@ -422,6 +449,7 @@ impl Driver {
         ipc_lifecycle: mpsc::UnboundedReceiver<IpcLifecycle>,
     ) {
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<Input>();
+        self.highlight = Some(spawn_highlighter(internal_tx.clone()));
         let mut changes = Some(changes);
         let mut lifecycle = Some(ipc_lifecycle);
         loop {
@@ -526,6 +554,11 @@ impl Driver {
                     }
                 }
                 Effect::Respond { req, result } => self.peer.respond(req, result),
+                Effect::Highlight(job) => {
+                    if let Some(tx) = &self.highlight {
+                        let _ = tx.send(job);
+                    }
+                }
                 Effect::ReadFile { uri, purpose } => {
                     let (fs, tx) = (Arc::clone(&self.fs), internal.clone());
                     tokio::spawn(async move {

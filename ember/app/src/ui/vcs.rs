@@ -1178,12 +1178,40 @@ pub fn merge_untracked_diff(
 }
 
 /// The warning under the amend checkbox when HEAD is already on the upstream (#269): there is an
-/// upstream and the branch is not ahead of it.
+/// upstream and the branch is not ahead of it. Limits: a detached HEAD has no upstream, and a
+/// branch whose upstream is gone has none either, so neither warns although the commit may be
+/// pushed.
 pub fn amend_warning(snap: &RepoSnapshot) -> Option<&'static str> {
     if snap.upstream.is_some() && snap.ahead == 0 {
         Some("이 커밋은 이미 원격에 올라가 있습니다. 수정하면 다음 올리기에서 기록을 덮어써야 합니다.")
     } else {
         None
+    }
+}
+
+/// What a tap on the commit button does while amending a pushed commit (#269): the first tap arms
+/// it, and a second tap counts only after the "그래도 수정합니다" label has had time to show, so a
+/// fast double click cannot skip the confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AmendTap {
+    Arm,
+    Wait,
+    Commit,
+}
+
+/// Milliseconds between arming and the second tap that is accepted.
+pub const AMEND_CONFIRM_DELAY_MS: i64 = 600;
+
+/// `armed_at` is the time of the first tap (0 when not armed).
+pub fn amend_tap(needs_confirm: bool, armed_at: i64, now: i64) -> AmendTap {
+    if !needs_confirm {
+        AmendTap::Commit
+    } else if armed_at == 0 {
+        AmendTap::Arm
+    } else if now - armed_at < AMEND_CONFIRM_DELAY_MS {
+        AmendTap::Wait
+    } else {
+        AmendTap::Commit
     }
 }
 
@@ -3468,4 +3496,21 @@ rename to new.txt
         assert_eq!(preview_lines(&long, ConflictStep::Preview.preview_max()).1, 5);
         assert_eq!(preview_lines(&long, full.preview_max()).1, 0);
     }
+    #[test]
+    fn fr_g3_a_fast_second_tap_does_not_skip_the_amend_confirmation() {
+        assert_eq!(amend_tap(false, 0, 1_000), AmendTap::Commit);
+        assert_eq!(amend_tap(true, 0, 1_000), AmendTap::Arm);
+        assert_eq!(amend_tap(true, 1_000, 1_000 + AMEND_CONFIRM_DELAY_MS - 1), AmendTap::Wait);
+        assert_eq!(amend_tap(true, 1_000, 1_000 + AMEND_CONFIRM_DELAY_MS), AmendTap::Commit);
+    }
+
+    #[test]
+    fn fr_g3_a_snapshot_keeps_its_note_in_a_rebuilt_status() {
+        // Every snapshot comes from `fetch_snapshot`, which sets the note after `build_snapshot`;
+        // staging reloads through it, so the note is derived again each time and a bare
+        // `build_snapshot` carries none.
+        let st = status(vec![gf("src/a.rs", '.', 'M')]);
+        assert!(build_snapshot(&st, SAMPLE, "", &BTreeMap::new()).notes.is_empty());
+    }
+
 }

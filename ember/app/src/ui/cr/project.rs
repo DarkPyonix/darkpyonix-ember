@@ -157,7 +157,7 @@ pub fn chip_sub(c: &ComputerChip) -> String {
 
 /// What the screen has open and typed. `EMBER_CR_ROUTE=project-detail` opens the first
 /// project's full view (`EMBER_CR_PROJECT=<id>` another), `EMBER_CR_PROJECT_SHEET=settings|
-/// computer|new|add-computer` a sheet (`EMBER_CR_ADD_COMPUTER=confirm` its confirm view), `EMBER_CR_PROJECT_EXPAND=1` expands every box's deck.
+/// computer|new|add-computer` a sheet, `EMBER_CR_PROJECT_EXPAND=1` expands every box's deck.
 #[derive(Clone)]
 struct Ui {
     full: MutableState<Option<String>>,
@@ -1555,7 +1555,7 @@ mod tests {
     use compose_rust::{Host, Recomposer};
 
     #[test]
-    fn fr_x7_add_computer_chip_sub_is_short_enough_to_show_whole() {
+    fn fr_c2_add_computer_chip_sub_is_short_enough_to_show_whole() {
         let c = ComputerChip {
             id: "a".into(),
             name: "a".into(),

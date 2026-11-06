@@ -1914,7 +1914,7 @@ mod detect_tests {
     }
 }
 
-// ---- hub devices and adding a computer from one (FR-X7 / FR-N2, #490) ------------------------
+// ---- hub devices, read only (FR-C1 / FR-C2, D39, #490) ------------------------
 
 /// What a device says it runs (`app` of the hub's device). Tolerant: a hint only.
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
@@ -1935,8 +1935,9 @@ pub struct HubDevice {
     /// `main_server`, `computer` or `client`; empty when the server did not say.
     #[serde(default)]
     pub role: String,
+    /// `None` when the hub did not report it.
     #[serde(default)]
-    pub online: bool,
+    pub online: Option<bool>,
     #[serde(default)]
     pub last_seen: Option<i64>,
     #[serde(default)]
@@ -1950,15 +1951,6 @@ pub struct HubDevice {
     /// On this server's devices allow-list.
     #[serde(default)]
     pub allowed: bool,
-}
-
-/// The `Computer` answer of `POST /api/hub/devices/{id}/computer`, read tolerantly.
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
-pub struct AddedComputer {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub name: String,
 }
 
 /// A hub call failed. 503 means the server runs with the hub off, which is a state and not a
@@ -1993,35 +1985,10 @@ pub(crate) fn hub_devices_path() -> &'static str {
     "/hub/devices"
 }
 
-/// `/hub/devices/{endpoint_id}/computer`, below `/api`.
-pub(crate) fn hub_add_computer_path(endpoint_id: &str) -> String {
-    format!("/hub/devices/{}/computer", seg(endpoint_id))
-}
-
-/// The body of the add call: `name` only when it is not blank. The token is sent as given.
-pub(crate) fn hub_add_computer_body(name: Option<&str>, token: &str) -> serde_json::Value {
-    match name.map(str::trim).filter(|n| !n.is_empty()) {
-        Some(n) => json!({ "name": n, "token": token }),
-        None => json!({ "token": token }),
-    }
-}
-
 impl Api {
     /// The account's devices as the hub integration lists them.
     pub async fn hub_devices(&self) -> Result<Vec<HubDevice>, HubCallError> {
         Ok(self.get(hub_devices_path()).await?)
-    }
-
-    /// Register a hub device as a computer. `token` is the node's token: it is sent once and
-    /// never logged or kept here.
-    pub async fn add_hub_computer(
-        &self,
-        endpoint_id: &str,
-        name: Option<&str>,
-        token: &str,
-    ) -> Result<AddedComputer, HubCallError> {
-        let raw = self.post(&hub_add_computer_path(endpoint_id), hub_add_computer_body(name, token)).await?;
-        serde_json::from_slice(&raw.body).map_err(|e| HubCallError::Api(ApiError::Decode(e.to_string())))
     }
 }
 
@@ -2030,7 +1997,7 @@ mod hub_device_tests {
     use super::*;
 
     #[test]
-    fn fr_x7_hub_devices_decode_the_server_shape_and_missing_fields() {
+    fn fr_c2_hub_devices_decode_the_server_shape_and_missing_fields() {
         let v: Vec<HubDevice> = serde_json::from_value(json!([
             {"endpoint_id": "abc", "name": "studio", "role": "computer", "created_at": 1, "last_seen": 5,
              "online": true, "app": {"kind": "ember-node", "version": "0.9", "services": []},
@@ -2040,25 +2007,18 @@ mod hub_device_tests {
         .unwrap();
         assert_eq!(v[0].computer_id.as_deref(), Some("studio"));
         assert_eq!(v[0].app.as_ref().map(|a| a.kind.as_str()), Some("ember-node"));
-        assert!(v[0].online && v[0].allowed && !v[0].this_server);
+        assert!(v[0].online == Some(true) && v[0].allowed && !v[0].this_server);
         assert_eq!(v[1], HubDevice { endpoint_id: "def".into(), ..Default::default() });
+        assert_eq!(v[1].online, None);
     }
 
     #[test]
-    fn fr_x7_hub_paths_escape_the_endpoint_id() {
+    fn fr_c2_hub_devices_path_is_fixed() {
         assert_eq!(hub_devices_path(), "/hub/devices");
-        assert_eq!(hub_add_computer_path("a/b c"), "/hub/devices/a%2Fb%20c/computer");
     }
 
     #[test]
-    fn fr_x7_the_add_body_omits_a_blank_name() {
-        assert_eq!(hub_add_computer_body(None, "t"), json!({"token": "t"}));
-        assert_eq!(hub_add_computer_body(Some("  "), "t"), json!({"token": "t"}));
-        assert_eq!(hub_add_computer_body(Some(" lab "), "t"), json!({"name": "lab", "token": "t"}));
-    }
-
-    #[test]
-    fn fr_x7_a_503_is_the_typed_hub_off_error() {
+    fn fr_c2_a_503_is_the_typed_hub_off_error() {
         let raw = Raw {
             status: StatusCode::SERVICE_UNAVAILABLE,
             body: Bytes::from_static(br#"{"error":"the hub is off"}"#),

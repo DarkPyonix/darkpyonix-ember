@@ -1,7 +1,7 @@
-//! The pure model of the add-computer sheet (FR-X7 / FR-N2, #490): the account's hub devices as
-//! rows, the state pill of each, the check of the typed token and name, and the fixed Korean
-//! sentence for each failure. The server's own error text never reaches the screen. The node
-//! token is typed by the owner, sent once and never logged or kept.
+//! The pure model of the add-computer sheet (FR-C1 / FR-C2, D39, #490): the account's hub devices
+//! as read-only rows, the state pill and the online state of each, the cleaning of what the hub
+//! returned, and the fixed Korean sentence for each failure. The sheet takes no secret: a new
+//! computer joins with a one-time enrol code (D39), and that screen is later.
 
 use ember_client::api::{HubCallError, HubDevice};
 
@@ -19,14 +19,43 @@ pub enum DevicesState {
 
 pub const HUB_OFF: &str = "허브가 꺼져 있어 기기를 불러올 수 없습니다";
 pub const NO_DEVICES: &str = "계정에 등록된 기기가 없습니다";
-pub const DEMO_CANNOT_ADD: &str = "데모에서는 컴퓨터를 추가할 수 없습니다";
-pub const TOKEN_LABEL: &str = "노드 토큰";
-/// Where the token comes from, as far as `docs/design/COMPUTERS.md` says: the node serves its API
-/// with a token, so the owner copies it from the machine that runs ember node.
-pub const TOKEN_HELP: &str = "컴퓨터에서 실행 중인 ember node의 토큰입니다. 그 컴퓨터에서 확인해 붙여 넣으세요";
-pub const NAME_LABEL: &str = "이름 (선택)";
+/// Under the list: the honest status of adding a computer (D39).
+pub const ENROL_NOTE: &str = "새 컴퓨터는 1회용 코드로 추가합니다. 이 화면의 코드 방식은 준비 중입니다.";
 
-/// How a device row is described.
+pub const MAX_NAME_CHARS: usize = 64;
+pub const MAX_ADDRESS_CHARS: usize = 80;
+
+/// Text from the hub made safe to show: whitespace runs (and line breaks) become one space,
+/// control characters and Unicode bidi or format characters (U+202A..202E, U+2066..2069,
+/// U+200B..200F, U+FEFF) are dropped, and text over `max` characters is cut to `max` with an
+/// ellipsis. The hub is not trusted to send clean text.
+pub fn sanitize_device_text(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut pending_space = false;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        let hidden = c.is_control()
+            || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200F}' | '\u{FEFF}');
+        if hidden {
+            continue;
+        }
+        if pending_space && !out.is_empty() {
+            out.push(' ');
+        }
+        pending_space = false;
+        out.push(c);
+    }
+    if out.chars().count() > max {
+        let cut: String = out.chars().take(max.saturating_sub(1)).collect();
+        return format!("{}\u{2026}", cut.trim_end());
+    }
+    out
+}
+
+/// How a device row is described. Every text is already sanitised.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceRow {
     pub endpoint_id: String,
@@ -34,8 +63,8 @@ pub struct DeviceRow {
     /// Role and app, e.g. `컴퓨터 · ember-node 0.9`; only what the hub said.
     pub kind: String,
     pub pill: (&'static str, PillTone),
-    /// A computer can be added from this device.
-    pub can_add: bool,
+    /// 온라인, 오프라인, or 상태 알 수 없음 when the hub did not say.
+    pub online: (&'static str, PillTone),
     /// Shown as a sample (demo mode).
     pub sample: bool,
 }
@@ -50,6 +79,15 @@ pub fn device_state_pill(d: &HubDevice) -> (&'static str, PillTone) {
         ("허용됨", PillTone::Sky)
     } else {
         ("등록 안 됨", PillTone::Grey)
+    }
+}
+
+/// The online state as the hub reported it.
+pub fn online_label(online: Option<bool>) -> (&'static str, PillTone) {
+    match online {
+        Some(true) => ("온라인", PillTone::Green),
+        Some(false) => ("오프라인", PillTone::Grey),
+        None => ("상태 알 수 없음", PillTone::Grey),
     }
 }
 
@@ -68,8 +106,10 @@ pub fn device_kind(d: &HubDevice) -> String {
     if let Some(r) = role_label(&d.role) {
         parts.push(r.to_string());
     }
-    if let Some(a) = d.app.as_ref().filter(|a| !a.kind.is_empty()) {
-        parts.push(if a.version.is_empty() { a.kind.clone() } else { format!("{} {}", a.kind, a.version) });
+    if let Some(a) = d.app.as_ref().filter(|a| !sanitize_device_text(&a.kind, MAX_NAME_CHARS).is_empty()) {
+        let kind = sanitize_device_text(&a.kind, MAX_NAME_CHARS);
+        let version = sanitize_device_text(&a.version, MAX_NAME_CHARS);
+        parts.push(if version.is_empty() { kind } else { format!("{kind} {version}") });
     }
     if parts.is_empty() {
         "종류 알 수 없음".to_string()
@@ -78,130 +118,26 @@ pub fn device_kind(d: &HubDevice) -> String {
     }
 }
 
-/// Rows in the hub's order, this server first; a nameless device is shown by a short id.
+/// Rows in the hub's order, this server first. The name is cut to 64 characters and the address
+/// to 80; a device with no usable name is shown by the first 8 characters of its id.
 pub fn device_rows(devices: &[HubDevice], sample: bool) -> Vec<DeviceRow> {
     let mut rows: Vec<DeviceRow> = devices
         .iter()
-        .map(|d| DeviceRow {
-            endpoint_id: d.endpoint_id.clone(),
-            name: if d.name.trim().is_empty() { d.endpoint_id.chars().take(8).collect() } else { d.name.clone() },
-            kind: device_kind(d),
-            pill: device_state_pill(d),
-            can_add: !d.this_server && d.computer_id.is_none(),
-            sample,
+        .map(|d| {
+            let endpoint_id = sanitize_device_text(&d.endpoint_id, MAX_ADDRESS_CHARS);
+            let name = sanitize_device_text(&d.name, MAX_NAME_CHARS);
+            DeviceRow {
+                name: if name.is_empty() { endpoint_id.chars().take(8).collect() } else { name },
+                endpoint_id,
+                kind: device_kind(d),
+                pill: device_state_pill(d),
+                online: online_label(d.online),
+                sample,
+            }
         })
         .collect();
     rows.sort_by_key(|r| r.pill.0 != "이 서버");
     rows
-}
-
-/// Why the typed values cannot be sent yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AddError {
-    TokenMissing,
-    NameTooLong,
-}
-
-impl AddError {
-    pub fn message(self) -> &'static str {
-        match self {
-            AddError::TokenMissing => "노드 토큰을 입력하세요",
-            AddError::NameTooLong => "이름은 64자 이하로 입력하세요",
-        }
-    }
-}
-
-pub const MAX_NAME_CHARS: usize = 64;
-
-/// The token must not be blank; a name is optional and short. Returns the values to send.
-pub fn validate_add<'a>(token: &'a str, name: &'a str) -> Result<(&'a str, Option<&'a str>), AddError> {
-    let token = token.trim();
-    if token.is_empty() {
-        return Err(AddError::TokenMissing);
-    }
-    let name = name.trim();
-    if name.chars().count() > MAX_NAME_CHARS {
-        return Err(AddError::NameTooLong);
-    }
-    Ok((token, (!name.is_empty()).then_some(name)))
-}
-
-pub const CONFIRM_QUESTION: &str = "이 기기를 컴퓨터로 추가합니다. 추가한 컴퓨터는 서버 사용자와 같은 권한으로 쓰입니다.";
-
-/// Where the sheet is in adding: the form, or the confirmation before the POST. The token is
-/// not in this state, so the confirm view cannot show it.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum AddStep {
-    #[default]
-    Form,
-    Confirm { device_id: String, name: Option<String> },
-}
-
-/// What the confirm view shows: the device name, its address and the name the computer gets.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConfirmRows {
-    pub device_name: String,
-    pub address: String,
-    pub address_short: String,
-    pub computer_name: String,
-}
-
-/// The address shortened for a row (first 8 and last 6 characters); the full value is shown too.
-pub fn short_address(id: &str) -> String {
-    let n = id.chars().count();
-    if n <= 16 {
-        return id.to_string();
-    }
-    let head: String = id.chars().take(8).collect();
-    let tail: String = id.chars().skip(n - 6).collect();
-    format!("{head}...{tail}")
-}
-
-/// 컴퓨터로 추가: checks the typed values and opens the confirmation. It never sends.
-pub fn request_confirm(device: &DeviceRow, token: &str, name: &str) -> Result<AddStep, AddError> {
-    let (_, name) = validate_add(token, name)?;
-    Ok(AddStep::Confirm { device_id: device.endpoint_id.clone(), name: name.map(str::to_string) })
-}
-
-impl AddStep {
-    pub fn is_confirm(&self) -> bool {
-        matches!(self, AddStep::Confirm { .. })
-    }
-
-    /// The rows of the confirm view; none in the form.
-    pub fn rows(&self, device: &DeviceRow) -> Option<ConfirmRows> {
-        let AddStep::Confirm { name, .. } = self else { return None };
-        Some(ConfirmRows {
-            device_name: device.name.clone(),
-            address: device.endpoint_id.clone(),
-            address_short: short_address(&device.endpoint_id),
-            computer_name: name.clone().unwrap_or_else(|| device.name.clone()),
-        })
-    }
-
-    /// A tap on 확인하고 추가, armed at `armed_at_ms`: true only after the delay, so a fast second
-    /// tap cannot skip the confirmation.
-    pub fn confirm_counts(&self, armed_at_ms: i64, now_ms: i64) -> bool {
-        self.is_confirm() && crate::ui::channel_owner::confirm_tap(armed_at_ms, now_ms)
-    }
-
-    /// Cancel or close: back to an empty form.
-    pub fn cleared() -> AddStep {
-        AddStep::Form
-    }
-}
-
-/// The fixed sentence of a failed add, by status (the hub routes carry no `code`).
-pub fn add_error_text(status: Option<u16>) -> &'static str {
-    match status {
-        Some(503) => HUB_OFF,
-        Some(400) => "토큰이 올바르지 않거나 컴퓨터에 연결하지 못했습니다. 토큰을 확인하세요",
-        Some(401) | Some(403) => "이 서버에서 컴퓨터를 추가할 권한이 없습니다",
-        Some(404) => "계정에서 이 기기를 찾을 수 없습니다. 목록을 다시 불러오세요",
-        Some(409) => "이미 컴퓨터로 등록되어 있습니다",
-        Some(s) if s >= 500 => "서버가 요청을 처리하지 못했습니다. 잠시 뒤 다시 시도하세요",
-        _ => "컴퓨터를 추가하지 못했습니다. 연결을 확인하고 다시 시도하세요",
-    }
 }
 
 /// The fixed sentence for a failed device list.
@@ -224,8 +160,8 @@ pub fn devices_state(r: Result<Vec<HubDevice>, HubCallError>) -> DevicesState {
 /// Sample devices for the demo, shown marked 예시.
 pub fn demo_devices() -> Vec<HubDevice> {
     vec![
-        HubDevice { endpoint_id: "demo-server".into(), name: "이 서버".into(), role: "main_server".into(), online: true, this_server: true, allowed: true, ..Default::default() },
-        HubDevice { endpoint_id: "demo-lab".into(), name: "연구실 컴퓨터".into(), role: "computer".into(), online: true, ..Default::default() },
+        HubDevice { endpoint_id: "demo-server".into(), name: "이 서버".into(), role: "main_server".into(), online: Some(true), this_server: true, allowed: true, ..Default::default() },
+        HubDevice { endpoint_id: "demo-lab".into(), name: "연구실 컴퓨터".into(), role: "computer".into(), online: Some(true), ..Default::default() },
     ]
 }
 
@@ -235,31 +171,16 @@ pub enum ReviewMode {
     Off,
     /// `EMBER_CR_PROJECT_SHEET=add-computer`: the sheet open with sample devices.
     List,
-    /// `EMBER_CR_ADD_COMPUTER=confirm` as well: the free device chosen and the confirm view open.
-    Confirm,
 }
 
-/// Decides the review mode from the two env values and the debug flag; a release build is always
+/// Decides the review mode from the env value and the debug flag; a release build is always
 /// `Off`, so the hook cannot open a sheet or skip the server for a user.
-pub fn review_mode(sheet: Option<&str>, step: Option<&str>, debug: bool) -> ReviewMode {
-    if !debug || sheet != Some("add-computer") {
-        return ReviewMode::Off;
-    }
-    if step == Some("confirm") {
-        ReviewMode::Confirm
-    } else {
+pub fn review_mode(sheet: Option<&str>, debug: bool) -> ReviewMode {
+    if debug && sheet == Some("add-computer") {
         ReviewMode::List
+    } else {
+        ReviewMode::Off
     }
-}
-
-/// The sample device the confirm view of a review capture is about (the free one).
-pub const REVIEW_DEVICE_ID: &str = "demo-lab";
-/// A sample token for the review capture; the confirm view never shows it.
-pub const REVIEW_TOKEN: &str = "sample-token";
-
-/// The unsaved-changes guard input: something typed.
-pub fn is_blank(token: &str, name: &str) -> bool {
-    token.trim().is_empty() && name.trim().is_empty()
 }
 
 #[cfg(test)]
@@ -271,51 +192,31 @@ mod tests {
         HubDevice { endpoint_id: id.into(), name: id.into(), ..Default::default() }
     }
 
-    fn row(id: &str, name: &str) -> DeviceRow {
-        DeviceRow { endpoint_id: id.into(), name: name.into(), kind: String::new(), pill: ("등록 안 됨", PillTone::Grey), can_add: true, sample: false }
+    #[test]
+    fn fr_c2_device_text_is_sanitised_and_capped() {
+        assert_eq!(sanitize_device_text("a\u{0}b\u{7}c\u{1b}[31m", 64), "abc[31m");
+        assert_eq!(sanitize_device_text("  lab \n\t  pc  ", 64), "lab pc");
+        assert_eq!(sanitize_device_text("evil\u{202E}txt.exe\u{2066}x\u{2069}\u{200B}\u{FEFF}\u{200F}", 64), "eviltxt.exex");
+        assert_eq!(sanitize_device_text("\u{202E}\u{200B}", 64), "");
+        assert_eq!(sanitize_device_text("가나다", 64), "가나다");
+        let long = "가".repeat(100);
+        let cut = sanitize_device_text(&long, MAX_NAME_CHARS);
+        assert_eq!(cut.chars().count(), 64);
+        assert!(cut.ends_with('\u{2026}'));
+        assert_eq!(sanitize_device_text(&"a".repeat(64), 64), "a".repeat(64));
+        assert_eq!(sanitize_device_text(&"b".repeat(200), MAX_ADDRESS_CHARS).chars().count(), 80);
+        // Empty names become the short id; hidden characters in the id are dropped too.
+        let nameless = HubDevice { name: "\u{202E} \n".into(), ..dev("0123\u{200B}456789") };
+        let rows = device_rows(&[nameless], false);
+        assert_eq!(rows[0].name, "01234567");
+        assert_eq!(rows[0].endpoint_id, "0123456789");
+        let big = HubDevice { name: "n".repeat(500), ..dev(&"i".repeat(500)) };
+        let rows = device_rows(&[big], false);
+        assert_eq!((rows[0].name.chars().count(), rows[0].endpoint_id.chars().count()), (64, 80));
     }
 
     #[test]
-    fn fr_x7_add_computer_needs_a_confirm_step_before_the_post() {
-        let d = row("abcdef0123456789abcdef", "연구실");
-        assert_eq!(request_confirm(&d, " ", ""), Err(AddError::TokenMissing));
-        assert_eq!(request_confirm(&d, "t", &"가".repeat(65)), Err(AddError::NameTooLong));
-        let step = request_confirm(&d, "t", " lab ").unwrap();
-        assert_eq!(step, AddStep::Confirm { device_id: d.endpoint_id.clone(), name: Some("lab".into()) });
-        assert!(step.is_confirm() && !AddStep::Form.is_confirm());
-    }
-
-    #[test]
-    fn fr_x7_add_computer_confirm_shows_name_and_address_not_the_token() {
-        let d = row("abcdef0123456789abcdef", "연구실");
-        let step = request_confirm(&d, "SECRET-TOKEN", "").unwrap();
-        let r = step.rows(&d).unwrap();
-        assert_eq!((r.device_name.as_str(), r.computer_name.as_str()), ("연구실", "연구실"));
-        assert_eq!(r.address, d.endpoint_id);
-        assert_eq!(r.address_short, "abcdef01...abcdef");
-        assert!(!format!("{step:?}{r:?}").contains("SECRET"));
-        let named = request_confirm(&d, "t", "lab").unwrap().rows(&d).unwrap();
-        assert_eq!(named.computer_name, "lab");
-        assert!(AddStep::Form.rows(&d).is_none());
-    }
-
-    #[test]
-    fn fr_x7_add_computer_fast_second_tap_does_not_confirm() {
-        let step = AddStep::Confirm { device_id: "a".into(), name: None };
-        assert!(!step.confirm_counts(1_000, 1_000));
-        assert!(!step.confirm_counts(1_000, 1_599));
-        assert!(step.confirm_counts(1_000, 1_600));
-        assert!(!AddStep::Form.confirm_counts(0, 10_000));
-    }
-
-    #[test]
-    fn fr_x7_add_computer_state_is_cleared_on_close() {
-        assert_eq!(AddStep::cleared(), AddStep::Form);
-        assert!(!AddStep::cleared().is_confirm());
-    }
-
-    #[test]
-    fn fr_x7_add_computer_state_pill_by_device() {
+    fn fr_c2_add_computer_state_pill_by_device() {
         let mut d = dev("a");
         assert_eq!(device_state_pill(&d).0, "등록 안 됨");
         d.allowed = true;
@@ -327,7 +228,16 @@ mod tests {
     }
 
     #[test]
-    fn fr_x7_add_computer_rows_put_this_server_first_and_offer_add_only_when_free() {
+    fn fr_c2_add_computer_online_state_is_shown_only_as_reported() {
+        assert_eq!(online_label(Some(true)).0, "온라인");
+        assert_eq!(online_label(Some(false)).0, "오프라인");
+        assert_eq!(online_label(None).0, "상태 알 수 없음");
+        let rows = device_rows(&[dev("a")], false);
+        assert_eq!(rows[0].online.0, "상태 알 수 없음");
+    }
+
+    #[test]
+    fn fr_c2_add_computer_rows_put_this_server_first_and_mark_samples() {
         let mut me = dev("me");
         me.this_server = true;
         let mut reg = dev("reg");
@@ -337,67 +247,47 @@ mod tests {
         assert_eq!(rows[0].endpoint_id, "me");
         // The sort is stable: this server first, then the input order (free, reg).
         assert_eq!(rows[1].endpoint_id, "0123456789");
-        assert!(!rows[0].can_add && rows[1].can_add && !rows[2].can_add);
         assert_eq!(rows[1].name, "01234567");
         assert!(rows.iter().all(|r| !r.sample));
         assert!(device_rows(&[dev("x")], true)[0].sample);
     }
 
     #[test]
-    fn fr_x7_add_computer_kind_line_has_only_what_the_hub_said() {
+    fn fr_c2_add_computer_kind_line_has_only_what_the_hub_said() {
         let mut d = dev("a");
         assert_eq!(device_kind(&d), "종류 알 수 없음");
         d.role = "computer".into();
         d.app = Some(HubDeviceApp { kind: "ember-node".into(), version: "0.9".into() });
         assert_eq!(device_kind(&d), "컴퓨터 \u{b7} ember-node 0.9");
+        d.app = Some(HubDeviceApp { kind: "ember\u{202E}-node".into(), version: String::new() });
+        assert_eq!(device_kind(&d), "컴퓨터 \u{b7} ember-node");
     }
 
     #[test]
-    fn fr_x7_add_computer_validate_requires_a_token_and_trims() {
-        assert_eq!(validate_add("  ", "x"), Err(AddError::TokenMissing));
-        assert_eq!(validate_add(" t ", " "), Ok(("t", None)));
-        assert_eq!(validate_add("t", " lab "), Ok(("t", Some("lab"))));
-        assert_eq!(validate_add("t", &"가".repeat(65)), Err(AddError::NameTooLong));
-        assert!(validate_add("t", &"가".repeat(64)).is_ok());
-        assert!(is_blank(" ", "") && !is_blank("t", ""));
-    }
-
-    #[test]
-    fn fr_x7_add_computer_error_text_is_fixed_by_status() {
-        assert_eq!(add_error_text(Some(503)), HUB_OFF);
-        assert!(add_error_text(Some(400)).contains("토큰"));
-        assert!(add_error_text(Some(409)).contains("이미"));
-        assert_ne!(add_error_text(Some(500)), add_error_text(None));
-        for s in [None, Some(400), Some(404), Some(409), Some(500), Some(502)] {
-            assert!(!add_error_text(s).is_empty() && !add_error_text(s).contains("server answered"));
-        }
-    }
-
-    #[test]
-    fn fr_x7_add_computer_list_states_are_honest() {
+    fn fr_c2_add_computer_list_states_are_honest() {
         assert_eq!(devices_state(Err(HubCallError::Off)), DevicesState::HubOff);
         assert_eq!(devices_state(Ok(vec![])), DevicesState::Ready(vec![]));
         match devices_state(Err(HubCallError::Api(ember_client::api::ApiError::Peer("raw text".into())))) {
             DevicesState::Failed(m) => assert!(!m.contains("raw text")),
             other => panic!("{other:?}"),
         }
+        assert_ne!(list_error_text(Some(500)), list_error_text(None));
+        assert!(ENROL_NOTE.contains("1회용 코드") && ENROL_NOTE.contains("준비 중"));
     }
 
     #[test]
-    fn fr_x7_add_computer_review_hook_is_debug_only() {
-        let (s, c) = (Some("add-computer"), Some("confirm"));
-        assert_eq!(review_mode(s, None, true), ReviewMode::List);
-        assert_eq!(review_mode(s, c, true), ReviewMode::Confirm);
-        assert_eq!(review_mode(s, c, false), ReviewMode::Off);
-        assert_eq!(review_mode(Some("settings"), c, true), ReviewMode::Off);
-        assert_eq!(review_mode(None, c, true), ReviewMode::Off);
-        assert!(demo_devices().iter().any(|d| d.endpoint_id == REVIEW_DEVICE_ID));
+    fn fr_c2_add_computer_review_hook_is_debug_only() {
+        assert_eq!(review_mode(Some("add-computer"), true), ReviewMode::List);
+        assert_eq!(review_mode(Some("add-computer"), false), ReviewMode::Off);
+        assert_eq!(review_mode(Some("settings"), true), ReviewMode::Off);
+        assert_eq!(review_mode(None, true), ReviewMode::Off);
     }
 
     #[test]
-    fn fr_x7_add_computer_demo_devices_include_this_server_and_a_free_device() {
+    fn fr_c2_add_computer_demo_devices_include_this_server_and_a_computer() {
         let rows = device_rows(&demo_devices(), true);
         assert_eq!(rows[0].pill.0, "이 서버");
-        assert!(rows.iter().any(|r| r.can_add));
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.sample && r.online.0 == "온라인"));
     }
 }

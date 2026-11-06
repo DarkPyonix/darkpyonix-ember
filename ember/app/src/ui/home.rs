@@ -27,56 +27,109 @@ pub const INTEGRATIONS_TITLE: &str = "연동";
 pub const GITHUB_NAME: &str = "GitHub";
 pub const GITHUB_NO_INFO: &str = "아직 정보가 없습니다";
 pub const GITHUB_NO_ACTIVITY: &str = "연동이 만든 일이 아직 없습니다";
-pub const GITHUB_LOGIN_HINT: &str =
-    "이 컴퓨터에서 gh auth login 을 실행하면 연결됩니다. Ember는 토큰을 저장하지 않습니다.";
+pub const GITHUB_LOGIN_HINT: &str = "이 컴퓨터의 터미널에서 gh auth login을 실행하십시오";
+pub const GITHUB_INSTALL_HINT: &str = "gh를 설치하고 로그인하십시오";
 pub const GITHUB_UNAVAILABLE_HINT: &str = "연결 상태를 확인할 수 없습니다";
+pub const GITHUB_CONNECT: &str = "연결";
+pub const GITHUB_RELOGIN: &str = "다시 로그인";
+/// Repositories listed on the card; the server may send more.
+pub const GITHUB_MAX_REPOS: usize = 3;
+/// CI cells per repository, newest first.
+pub const GITHUB_MAX_CI: usize = 14;
 pub const LATER_PILL: &str = "준비 중입니다";
 pub const LATER_LINE: &str = "12월 이후에 지원합니다";
 /// The services that come after GitHub, in the mockup order.
 pub const LATER_INTEGRATIONS: [&str; 5] = ["Slack", "Discord", "Linear", "캘린더", "메일"];
 
-/// `GET /api/integrations/github` `state` (proposed, the server API does not exist yet).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `GET /api/integrations/github` `state` (INTENT D41, FR-L35).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum GithubConn {
-    Unavailable,
-    Unauthenticated,
-    Ready,
+    /// Connected.
+    On,
+    /// Connected before, needs a new login.
+    Warn,
+    /// Not connected (no `gh`, or not logged in).
+    #[default]
+    Off,
 }
 
-/// One thing the integration did, e.g. a CI failure linked to a routine.
-#[derive(Clone, Debug, PartialEq)]
-pub struct GithubActivity {
-    pub id: String,
-    pub title: String,
-    pub at: String,
-    pub result: String,
-    pub kind: String,
-    pub link: Option<String>,
+/// One CI run result of a repository.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CiResult {
+    Success,
+    Failure,
+    Cancelled,
+    #[serde(other)]
+    Pending,
 }
 
-/// Mirror of the proposed `GET /api/integrations/github` body. Every number is nullable.
-#[derive(Clone, Debug, PartialEq)]
-pub struct GithubState {
-    pub state: GithubConn,
-    pub reason: Option<String>,
-    pub account: Option<String>,
+/// One repository of the body. A null number is unknown; `error` replaces the numbers.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(default)]
+pub struct GithubRepo {
+    pub name_with_owner: String,
+    pub default_branch: String,
+    pub open_prs: Option<u32>,
+    pub review_requested: Option<u32>,
+    /// Newest first, up to 14.
+    pub ci: Option<Vec<CiResult>>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(default)]
+pub struct GithubTotals {
     pub repos: Option<u32>,
     pub open_prs: Option<u32>,
     pub review_requested: Option<u32>,
-    /// Percent, 0 to 100.
-    pub ci_pass_rate: Option<f32>,
-    pub updated_at: Option<String>,
-    pub activity: Vec<GithubActivity>,
+    /// Percent, 0 to 100; null when no run is known.
+    pub ci_pass_percent: Option<f32>,
+}
+
+/// Mirror of the `GET /api/integrations/github` body. The server gives no activity list.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(default)]
+pub struct GithubState {
+    pub state: GithubConn,
+    /// Korean sentence, set for `warn` and `off`.
+    pub reason: Option<String>,
+    pub account: Option<String>,
+    pub repos: Vec<GithubRepo>,
+    pub totals: GithubTotals,
+    /// Epoch seconds.
+    pub checked_at: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GithubPill {
     /// Grey: the server cannot say yet.
     Soon,
-    /// Orange: not connected.
+    /// Grey: not connected.
     Off,
+    /// Orange: needs a new login.
+    Warn,
     /// Green: connected.
     On,
+}
+
+/// One repository row: either numbers and CI cells, or the server's error.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GithubRepoRow {
+    pub name: String,
+    pub open_prs: String,
+    pub review_requested: String,
+    /// At most [`GITHUB_MAX_CI`], newest first.
+    pub ci: Vec<CiResult>,
+    pub error: Option<String>,
+}
+
+/// The 연결 / 다시 로그인 control. Pressing it only shows `guidance`; Ember never logs in itself.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GithubAction {
+    pub label: &'static str,
+    pub guidance: String,
 }
 
 /// What the GitHub card draws. Pure, so the honest states are testable.
@@ -86,11 +139,13 @@ pub struct GithubCard {
     pub tone: GithubPill,
     /// The count line under the area header.
     pub header_line: String,
-    /// A line under the title (account, reason or how to connect).
+    /// The server's reason under the title (warn and off).
     pub note: Option<String>,
+    pub account: Option<String>,
+    pub action: Option<GithubAction>,
     /// Repositories, open PRs, review requests, CI pass rate.
     pub kpis: [(&'static str, String); 4],
-    pub activity: Vec<String>,
+    pub repos: Vec<GithubRepoRow>,
     pub activity_empty: &'static str,
 }
 
@@ -104,56 +159,67 @@ impl GithubCard {
                 tone: GithubPill::Soon,
                 header_line: "GitHub 연결 확인 전".to_string(),
                 note: None,
+                account: None,
+                action: None,
                 kpis: labels.map(|l| (l, none())),
-                activity: Vec::new(),
+                repos: Vec::new(),
                 activity_empty: GITHUB_NO_ACTIVITY,
             };
         };
-        let count = |v: Option<u32>| v.map(|n| n.to_string()).unwrap_or_else(none);
-        let (pill, tone, header_line, note) = match g.state {
-            GithubConn::Ready => (
-                "연결됨",
-                GithubPill::On,
-                "GitHub 연결됨".to_string(),
-                g.account.clone(),
-            ),
-            GithubConn::Unauthenticated => (
-                "연결 안 됨",
-                GithubPill::Off,
-                "GitHub 연결 안 됨".to_string(),
-                Some(GITHUB_LOGIN_HINT.to_string()),
-            ),
-            GithubConn::Unavailable => (
-                "연결 안 됨",
-                GithubPill::Off,
-                "GitHub 연결 확인 전".to_string(),
-                Some(g.reason.clone().unwrap_or_else(|| GITHUB_UNAVAILABLE_HINT.to_string())),
-            ),
+        let (pill, tone, header_line, label) = match g.state {
+            GithubConn::On => ("연결됨", GithubPill::On, "GitHub 연결됨", None),
+            GithubConn::Warn => ("재인증 필요", GithubPill::Warn, "GitHub 재인증 필요", Some(GITHUB_RELOGIN)),
+            GithubConn::Off => ("연결 안 됨", GithubPill::Off, "GitHub 연결 안 됨", Some(GITHUB_CONNECT)),
         };
-        let ready = g.state == GithubConn::Ready;
-        let num = |v: Option<u32>| if ready { count(v) } else { none() };
-        let rate = if ready {
-            g.ci_pass_rate.map(|r| format!("{}%", r.round() as i64)).unwrap_or_else(none)
-        } else {
-            none()
+        let note = (g.state != GithubConn::On)
+            .then(|| g.reason.clone().unwrap_or_else(|| GITHUB_UNAVAILABLE_HINT.to_string()));
+        let action = label.map(|label| GithubAction {
+            label,
+            guidance: if g.reason.as_deref().is_some_and(|r| r.contains("설치")) {
+                GITHUB_INSTALL_HINT.to_string()
+            } else {
+                GITHUB_LOGIN_HINT.to_string()
+            },
+        });
+        let shows_numbers = g.state != GithubConn::Off;
+        let count = |v: Option<u32>| match v {
+            Some(n) if shows_numbers => n.to_string(),
+            _ => none(),
         };
-        let activity = if ready {
-            g.activity.iter().map(|a| format!("{} ({})", a.title, a.result)).collect()
+        let t = &g.totals;
+        let rate = match t.ci_pass_percent {
+            Some(r) if shows_numbers => format!("{}%", r.round() as i64),
+            _ => none(),
+        };
+        let repos = if shows_numbers {
+            g.repos
+                .iter()
+                .take(GITHUB_MAX_REPOS)
+                .map(|r| GithubRepoRow {
+                    name: r.name_with_owner.clone(),
+                    open_prs: count(r.open_prs),
+                    review_requested: count(r.review_requested),
+                    ci: r.ci.iter().flatten().take(GITHUB_MAX_CI).copied().collect(),
+                    error: r.error.clone(),
+                })
+                .collect()
         } else {
             Vec::new()
         };
         GithubCard {
             pill,
             tone,
-            header_line,
+            header_line: header_line.to_string(),
             note,
+            account: g.account.clone(),
+            action,
             kpis: [
-                (labels[0], num(g.repos)),
-                (labels[1], num(g.open_prs)),
-                (labels[2], num(g.review_requested)),
+                (labels[0], count(t.repos)),
+                (labels[1], count(t.open_prs)),
+                (labels[2], count(t.review_requested)),
                 (labels[3], rate),
             ],
-            activity,
+            repos,
             activity_empty: GITHUB_NO_ACTIVITY,
         }
     }
@@ -1145,17 +1211,30 @@ pub fn read_dash(state: &State) -> Dash {
 mod tests {
     use super::*;
 
+    fn repo(name: &str) -> GithubRepo {
+        GithubRepo {
+            name_with_owner: name.into(),
+            default_branch: "main".into(),
+            open_prs: Some(2),
+            review_requested: Some(0),
+            ci: Some(vec![CiResult::Success, CiResult::Failure]),
+            error: None,
+        }
+    }
+
     fn ready_github() -> GithubState {
         GithubState {
-            state: GithubConn::Ready,
+            state: GithubConn::On,
             reason: None,
             account: Some("octo".into()),
-            repos: Some(3),
-            open_prs: None,
-            review_requested: Some(0),
-            ci_pass_rate: None,
-            updated_at: None,
-            activity: Vec::new(),
+            repos: vec![repo("octo/a")],
+            totals: GithubTotals {
+                repos: Some(3),
+                open_prs: None,
+                review_requested: Some(0),
+                ci_pass_percent: None,
+            },
+            checked_at: Some(1_700_000_000),
         }
     }
 
@@ -1166,32 +1245,107 @@ mod tests {
         assert_eq!(c.tone, GithubPill::Soon);
         assert_eq!(c.header_line, "GitHub 연결 확인 전");
         assert!(!c.header_line.chars().any(|ch| ch.is_ascii_digit()), "no count");
+        assert!(c.kpis.iter().all(|(_, v)| v == "아직 정보가 없습니다"));
+        assert!(c.repos.is_empty() && c.action.is_none());
+        assert_eq!(c.activity_empty, "연동이 만든 일이 아직 없습니다");
     }
 
     #[test]
-    fn fr_l23_github_card_nulls_are_no_information() {
-        let c = GithubCard::from_state(None);
-        assert!(c.kpis.iter().all(|(_, v)| v == "아직 정보가 없습니다"));
-        assert!(c.activity.is_empty());
-        assert_eq!(c.activity_empty, "연동이 만든 일이 아직 없습니다");
+    fn fr_l23_github_card_on_shows_numbers_and_null_is_no_information() {
         let g = ready_github();
         let c = GithubCard::from_state(Some(&g));
         assert_eq!(c.pill, "연결됨");
+        assert_eq!(c.tone, GithubPill::On);
+        assert_eq!(c.account.as_deref(), Some("octo"));
+        assert!(c.note.is_none() && c.action.is_none());
         assert_eq!(c.kpis[0].1, "3");
-        assert_eq!(c.kpis[1].1, "아직 정보가 없습니다");
+        assert_eq!(c.kpis[1].1, "아직 정보가 없습니다", "null is not 0");
         assert_eq!(c.kpis[2].1, "0", "a real zero is shown as 0");
         assert_eq!(c.kpis[3].1, "아직 정보가 없습니다");
+        let mut g = ready_github();
+        g.totals.ci_pass_percent = Some(87.6);
+        assert_eq!(GithubCard::from_state(Some(&g)).kpis[3].1, "88%");
     }
 
     #[test]
-    fn fr_l23_github_card_unauthenticated_says_how() {
+    fn fr_l23_github_card_warn_shows_relogin_and_the_hint() {
         let mut g = ready_github();
-        g.state = GithubConn::Unauthenticated;
+        g.state = GithubConn::Warn;
+        g.reason = Some("로그인이 만료되었습니다".into());
+        let c = GithubCard::from_state(Some(&g));
+        assert_eq!(c.pill, "재인증 필요");
+        assert_eq!(c.tone, GithubPill::Warn);
+        assert_eq!(c.note.as_deref(), Some("로그인이 만료되었습니다"));
+        let a = c.action.unwrap();
+        assert_eq!(a.label, "다시 로그인");
+        assert_eq!(a.guidance, "이 컴퓨터의 터미널에서 gh auth login을 실행하십시오");
+    }
+
+    #[test]
+    fn fr_l23_github_card_off_says_how_and_shows_no_numbers() {
+        let mut g = ready_github();
+        g.state = GithubConn::Off;
         let c = GithubCard::from_state(Some(&g));
         assert_eq!(c.pill, "연결 안 됨");
-        assert!(c.note.as_deref().unwrap().contains("gh auth login"));
-        assert!(c.kpis.iter().all(|(_, v)| v == "아직 정보가 없습니다"), "no numbers while unconnected");
+        assert_eq!(c.action.as_ref().unwrap().label, "연결");
+        assert!(c.action.as_ref().unwrap().guidance.contains("gh auth login"));
+        assert!(c.kpis.iter().all(|(_, v)| v == "아직 정보가 없습니다"));
+        assert!(c.repos.is_empty());
         assert!(!c.header_line.contains("연결됨"));
+        g.reason = Some("gh가 설치되어 있지 않습니다. 설치해 주십시오".into());
+        let c = GithubCard::from_state(Some(&g));
+        assert_eq!(c.action.unwrap().guidance, "gh를 설치하고 로그인하십시오");
+        assert_eq!(c.note.as_deref(), Some("gh가 설치되어 있지 않습니다. 설치해 주십시오"));
+    }
+
+    #[test]
+    fn fr_l23_github_card_repo_error_row_replaces_numbers() {
+        let mut g = ready_github();
+        g.repos[0].error = Some("저장소를 읽지 못했습니다".into());
+        let c = GithubCard::from_state(Some(&g));
+        assert_eq!(c.repos[0].error.as_deref(), Some("저장소를 읽지 못했습니다"));
+        assert_eq!(c.repos[0].name, "octo/a");
+    }
+
+    #[test]
+    fn fr_l23_github_card_ci_cells_newest_first_and_at_most_14() {
+        let mut g = ready_github();
+        g.repos[0].ci = Some((0..20).map(|i| if i == 0 { CiResult::Failure } else { CiResult::Success }).collect());
+        let c = GithubCard::from_state(Some(&g));
+        assert_eq!(c.repos[0].ci.len(), 14);
+        assert_eq!(c.repos[0].ci[0], CiResult::Failure, "newest first");
+        g.repos[0].ci = None;
+        assert!(GithubCard::from_state(Some(&g)).repos[0].ci.is_empty());
+    }
+
+    #[test]
+    fn fr_l23_github_card_lists_at_most_three_repos() {
+        let mut g = ready_github();
+        g.repos = (0..5).map(|i| repo(&format!("octo/r{i}"))).collect();
+        let c = GithubCard::from_state(Some(&g));
+        assert_eq!(c.repos.len(), 3);
+        assert_eq!(c.repos[2].name, "octo/r2");
+        assert_eq!(c.repos[0].open_prs, "2");
+    }
+
+    #[test]
+    fn fr_l35_github_state_decodes_the_server_body() {
+        let g: GithubState = serde_json::from_str(
+            r#"{"state":"warn","reason":"재로그인","account":null,
+            "repos":[{"name_with_owner":"o/r","default_branch":"main","open_prs":null,
+            "review_requested":1,"ci":["success","failure","cancelled","pending"],"error":null}],
+            "totals":{"repos":1,"open_prs":0,"review_requested":1,"ci_pass_percent":null},
+            "checked_at":1700000000}"#,
+        )
+        .unwrap();
+        assert_eq!(g.state, GithubConn::Warn);
+        assert_eq!(g.repos[0].open_prs, None);
+        assert_eq!(
+            g.repos[0].ci.as_deref(),
+            Some(&[CiResult::Success, CiResult::Failure, CiResult::Cancelled, CiResult::Pending][..])
+        );
+        assert_eq!(g.totals.ci_pass_percent, None);
+        assert_eq!(g.checked_at, Some(1_700_000_000));
     }
 
     #[test]
@@ -1200,7 +1354,7 @@ mod tests {
         assert_eq!(LATER_PILL, "준비 중입니다");
         assert_eq!(LATER_LINE, "12월 이후에 지원합니다");
         assert_eq!(INTEGRATIONS_TITLE, "연동");
-        for s in [LATER_LINE, GITHUB_LOGIN_HINT, GITHUB_NO_INFO, GITHUB_NO_ACTIVITY] {
+        for s in [LATER_LINE, GITHUB_LOGIN_HINT, GITHUB_INSTALL_HINT, GITHUB_NO_INFO, GITHUB_NO_ACTIVITY] {
             assert!(!s.contains('\u{2014}'));
         }
     }

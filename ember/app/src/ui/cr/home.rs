@@ -20,7 +20,7 @@ pub use crate::ui::home::{
     project_options, project_tile_line, resolve_cwd, shortcut_label, split_chip_rows,
     success_percent, title_from_message, CrewMember, Dash, Harness, HarnessBar, Kpi, ModelOption,
     ModeRow, PermMode, ProjectTile, Selection, StatusCounts, ATTACH_UNSUPPORTED, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
-    EMPTY_CREW, EMPTY_HARNESS_USAGE, GithubCard, GithubPill, INTEGRATIONS_TITLE, LATER_INTEGRATIONS, LATER_LINE, LATER_PILL, GITHUB_NAME, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
+    EMPTY_CREW, EMPTY_HARNESS_USAGE, CiResult, GithubCard, GithubPill, INTEGRATIONS_TITLE, LATER_INTEGRATIONS, LATER_LINE, LATER_PILL, GITHUB_NAME, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
 };
 use super::components::{
     AppButton, ButtonKind, Clickable, EmberField, EmberSheet, FieldOptions, FilterChip, Label,
@@ -1202,6 +1202,7 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
 fn IntegrationsArea() {
     let p = ember_theme().palette;
     let card = GithubCard::from_state(None);
+    let guidance = remember(|| mutable_state_of(false));
     cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
         Label(INTEGRATIONS_TITLE, Fs::Lg, Weight::Semibold, None, Some(1));
         Label(&card.header_line, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -1215,13 +1216,25 @@ fn IntegrationsArea() {
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                 let tone = match card.tone {
                     GithubPill::Soon => PillTone::Grey,
-                    GithubPill::Off => PillTone::Orange,
+                    GithubPill::Off => PillTone::Grey,
+                    GithubPill::Warn => PillTone::Orange,
                     GithubPill::On => PillTone::Green,
                 };
                 Pill(card.pill, tone, true);
             });
+            if let Some(account) = &card.account {
+                Label(account, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+            }
             if let Some(note) = &card.note {
                 Label(note, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+            }
+            if let Some(action) = &card.action {
+                // Pressing only shows how to log in; Ember runs nothing and stores no token.
+                let g = guidance.clone();
+                AppButton(action.label, None, ButtonKind::Default, true, true, false, move || g.set(true));
+                if guidance.get() {
+                    Label(&action.guidance, Fs::Md, Weight::Regular, None, None);
+                }
             }
             for (label, value) in &card.kpis {
                 cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -1230,13 +1243,24 @@ fn IntegrationsArea() {
                     Label(value, Fs::Md, Weight::Regular, None, Some(1));
                 });
             }
-            if card.activity.is_empty() {
-                Label(card.activity_empty, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
-            } else {
-                for line in &card.activity {
-                    Label(line, Fs::Md, Weight::Regular, None, Some(2));
-                }
+            for r in &card.repos {
+                cu::Column().spacing(4.0).modifier(Modifier::new().fill_max_width()).content(|| {
+                    cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        Label(&r.name, Fs::Md, Weight::Medium, None, Some(1));
+                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                        if r.error.is_none() {
+                            Label(&format!("PR {} · 리뷰 {}", r.open_prs, r.review_requested), Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        }
+                    });
+                    if let Some(e) = &r.error {
+                        Label(e, Fs::Md, Weight::Regular, Some(paint(p.red.strong)), None);
+                    } else if !r.ci.is_empty() {
+                        CiBar(&r.ci);
+                    }
+                });
             }
+            // The server sends no list of what the integration did, so none is drawn.
+            Label(card.activity_empty, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
         });
         for name in LATER_INTEGRATIONS {
             Tile(|| {
@@ -1247,6 +1271,22 @@ fn IntegrationsArea() {
                 });
                 Label(LATER_LINE, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
             });
+        }
+    });
+}
+
+/// Recent CI results of one repository: small cells, newest first (left).
+fn CiBar(results: &[CiResult]) {
+    let p = ember_theme().palette;
+    cu::Row().spacing(2.0).content(|| {
+        for r in results {
+            let c = match r {
+                CiResult::Success => p.green.strong,
+                CiResult::Failure => p.red.strong,
+                CiResult::Cancelled => p.grey.strong,
+                CiResult::Pending => p.track,
+            };
+            cu::Spacer().modifier(Modifier::new().size(8.0, 14.0).background(paint(c)).corner_radius(2.0));
         }
     });
 }

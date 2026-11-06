@@ -498,3 +498,45 @@ fn exthost_open_document_and_other_requests() {
     let fx = c.handle(t0, request(8, "MainThreadCommands", "$executeCommand", vec![json!("setContext"), json!(["k", true]), json!(false)]));
     assert_eq!(fx, vec![Effect::Respond { req: 8, result: Ok(Reply::Empty) }]);
 }
+
+fn problems(effects: &[Effect]) -> Option<&Vec<ember_editor::diagnostics::Problem>> {
+    updates(effects).into_iter().rev().find_map(|u| match u {
+        SessionUpdate::Problems { problems } => Some(problems),
+        _ => None,
+    })
+}
+
+// FR-E2 (D38 problems list): the markers of every file the extension host reports are listed as
+// problems, errors first, then by file and position, and the list follows `$changeMany` and `$clear`.
+#[test]
+fn problems_list_every_reported_marker_errors_first_and_follows_clear() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+    let a = uri("/w/a.json");
+    let b = uri("/w/b.json");
+    open(&mut c, t0, "/w/a.json", "{\n  \"ok\": true,,\n}\n");
+    let fx = c.handle(
+        t0,
+        request(
+            1,
+            "MainThreadDiagnostics",
+            "$changeMany",
+            vec![json!("json"), json!([[a, [marker(4, "Trailing comma", 2, 14, 15), marker(8, "Value expected", 2, 14, 15)]], [b, [marker(8, "Unexpected end", 1, 1, 2)]]])],
+        ),
+    );
+    let list = problems(&fx).expect("a Problems update");
+    let seen: Vec<(&str, Severity, &str, u32)> =
+        list.iter().map(|p| (p.uri.path.as_str(), p.severity, p.message.as_str(), p.range.start.line)).collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("/w/a.json", Severity::Error, "Value expected", 1),
+            ("/w/b.json", Severity::Error, "Unexpected end", 0),
+            ("/w/a.json", Severity::Warning, "Trailing comma", 1),
+        ]
+    );
+    assert_eq!(list[0].source.as_deref(), Some("json"));
+
+    let fx = c.handle(t0, request(2, "MainThreadDiagnostics", "$clear", vec![json!("json")]));
+    assert_eq!(problems(&fx), Some(&Vec::new()));
+}

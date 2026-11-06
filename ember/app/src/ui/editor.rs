@@ -202,6 +202,16 @@ pub fn breadcrumb_text(path: &str, folder: &str) -> String {
     breadcrumb_segments(path, folder).join(" \u{203A} ")
 }
 
+/// The problems tab's label: the tool window's name, with the count when there is one.
+pub fn problems_tab_label(count: usize) -> String {
+    if count == 0 { ToolWindow::Problems.label().to_string() } else { format!("{} {count}", ToolWindow::Problems.label()) }
+}
+
+/// Where a problem is, as a row shows it: the file below the project folder and the 1-based line.
+pub fn problem_location(path: &str, folder: &str, line: u32) -> String {
+    format!("{}:{}", breadcrumb_segments(path, folder).join("/"), line + 1)
+}
+
 /// The status bar's agent dot: orange while waiting for approval, blue while running, green otherwise.
 pub fn agent_dot_class(state: &str) -> &'static str {
     match state {

@@ -86,7 +86,7 @@ impl ClaudeCodeAdapter {
     /// The CLI arguments; `mcp_file` is a private file holding the `--mcp-config` JSON, used
     /// instead of the inline JSON when an MCP server has environment (possibly secrets, which
     /// must not appear on a command line other local users can read).
-    fn args_with(req: &StartRequest, mcp_file: Option<&std::path::Path>) -> Vec<String> {
+    pub(crate) fn args_with(req: &StartRequest, mcp_file: Option<&std::path::Path>) -> Vec<String> {
         let mut args: Vec<String> = [
             "--print",
             "--input-format",
@@ -118,6 +118,15 @@ impl ClaudeCodeAdapter {
             args.push(format!("--resume={}", fork.native_id));
             args.push("--fork-session".into());
         }
+        // `--allowedTools <tools...>` is variadic: it must be followed by another flag or by the
+        // end of the arguments, never by a positional. It stays right before `--mcp-config=` (or
+        // last). Measured on claude 2.1.319 (FR-T12): the call of an MCP tool is denied in `-p`
+        // mode without the rule and passes with the exact tool name.
+        let allowed: Vec<&String> = req.allowed_tools.iter().filter(|t| allowed_tool_ok(t)).collect();
+        if !allowed.is_empty() {
+            args.push("--allowedTools".into());
+            args.extend(allowed.into_iter().cloned());
+        }
         // `--mcp-config <configs...>` takes JSON files or strings (claude 2.1.288 --help) and is
         // variadic: the equals form keeps it to exactly this one value. Without
         // `--strict-mcp-config` the user's own MCP servers stay.
@@ -130,8 +139,22 @@ impl ClaudeCodeAdapter {
     }
 }
 
+/// Whether `tool` may be passed as an `--allowedTools` rule: one exact MCP tool name. A wildcard,
+/// whitespace (which would split into several rules) or a non-MCP rule (`Bash`, ...) is refused,
+/// so this field can never widen what the agent may do unasked.
+fn allowed_tool_ok(tool: &str) -> bool {
+    let ok = tool.starts_with("mcp__")
+        && tool.len() > "mcp__".len()
+        && !tool.contains('*')
+        && !tool.chars().any(char::is_whitespace);
+    if !ok {
+        tracing::warn!(len = tool.len(), "ignoring an allowed tool that is not one exact MCP tool name");
+    }
+    ok
+}
+
 /// Whether any MCP server in `req` carries environment (which goes through a private file).
-fn mcp_needs_file(req: &StartRequest) -> bool {
+pub(crate) fn mcp_needs_file(req: &StartRequest) -> bool {
     req.mcp_servers.iter().any(|s| !s.env.is_empty())
 }
 
@@ -971,6 +994,7 @@ mod tests {
             computer: None,
             fork_from: None,
             mem_limit_mb: None,
+            allowed_tools: Vec::new(),
         };
         let args = ClaudeCodeAdapter::args(&req);
         assert!(!args.iter().any(|a| a.starts_with("--mcp-config")));
@@ -1052,5 +1076,74 @@ mod tests {
         let path = file.path().to_path_buf();
         drop(file);
         assert!(!path.exists(), "removed with the run");
+    }
+
+    /// FR-T12: without allowed tools there is no `--allowedTools` (byte-for-byte as before).
+    #[test]
+    fn fr_t12_no_allowed_tools_means_no_flag() {
+        let args = ClaudeCodeAdapter::args(&StartRequest { cwd: ".".into(), ..Default::default() });
+        assert!(!args.iter().any(|a| a.starts_with("--allowedTools")), "{args:?}");
+    }
+
+    /// FR-T12: the flag, then exactly the one tool, then a flag (it is variadic) or the end.
+    #[test]
+    fn fr_t12_allowed_tools_is_the_flag_then_the_one_tool_then_a_flag_or_the_end() {
+        let tool = "mcp__ember-channels__channel_post".to_string();
+        let mut req = StartRequest {
+            cwd: ".".into(),
+            instructions: Some("hello".into()),
+            resume_native_id: Some("abc".into()),
+            allowed_tools: vec![tool.clone()],
+            ..Default::default()
+        };
+        let args = ClaudeCodeAdapter::args(&req);
+        let i = args.iter().position(|a| a == "--allowedTools").expect("--allowedTools");
+        assert_eq!(args[i + 1], tool);
+        assert_eq!(args.len(), i + 2, "last argument when there is no MCP config: {args:?}");
+        req.mcp_servers = vec![crate::agents::McpServer {
+            name: "ember-channels".into(),
+            command: "/bin/ember-a2a".into(),
+            args: vec!["mcp".into()],
+            startup_timeout_secs: Some(10),
+            env: Vec::new(),
+        }];
+        let args = ClaudeCodeAdapter::args(&req);
+        let i = args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert_eq!(args[i + 1], tool);
+        assert!(args[i + 2].starts_with("--"), "a flag follows the tools: {args:?}");
+    }
+
+    /// FR-T12: a wildcard or a non-MCP rule never reaches the command line.
+    #[test]
+    fn fr_t12_allowed_tools_rejects_wildcards_and_non_mcp_rules() {
+        for bad in [
+            "mcp__*",
+            "*",
+            "Bash",
+            "Bash(rm -rf /)",
+            "mcp__ember-channels__*",
+            "mcp__a b",
+            "mcp__a\tb",
+            "mcp__",
+            "",
+            "--dangerously-skip-permissions",
+        ] {
+            let req = StartRequest {
+                cwd: ".".into(),
+                allowed_tools: vec![bad.to_string()],
+                ..Default::default()
+            };
+            let args = ClaudeCodeAdapter::args(&req);
+            assert!(!args.iter().any(|a| a == "--allowedTools"), "{bad:?} gave {args:?}");
+            assert!(!args.iter().any(|a| a == bad && !bad.is_empty()), "{bad:?} reached argv");
+        }
+        let req = StartRequest {
+            cwd: ".".into(),
+            allowed_tools: vec!["Bash".into(), "mcp__ember-channels__channel_post".into(), "mcp__x*".into()],
+            ..Default::default()
+        };
+        let args = ClaudeCodeAdapter::args(&req);
+        let i = args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert_eq!(args[i..], ["--allowedTools", "mcp__ember-channels__channel_post"]);
     }
 }

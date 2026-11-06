@@ -39,6 +39,7 @@ fn router(dir: &std::path::Path) -> Router {
     let sessions = Sessions::new(store.clone(), adapters);
     let computers = Computers::new(Registry::new(store.clone()), computers::default_connector());
     let accounts = Accounts::open(store.clone(), dir).unwrap();
+    let enrol = computers::enrol::Enrol::new(store.clone());
     let mcp = McpRegistry::open(store, dir).unwrap();
     let scheduler = Scheduler::new(sessions.clone(), Arc::new(SystemClock));
     let a2a = A2a::new(
@@ -50,6 +51,7 @@ fn router(dir: &std::path::Path) -> Router {
     ember_server::api::router(sessions.clone())
         .merge(computers::api::router(computers.clone(), sessions.clone()))
         .merge(computers::terms::router(computers.clone()))
+        .merge(computers::enrol::router(enrol, "http://127.0.0.1:8740".into()))
         .merge(ember_server::api::git::router(sessions.clone(), computers))
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
         .merge(ember_server::schedules::api::router(scheduler))
@@ -95,6 +97,9 @@ const FAMILIES: &[(&str, &str)] = &[
     ("GET", "/api/agents"),
     ("GET", "/api/computers"),
     ("GET", "/api/computers/c1/terms"),
+    ("POST", "/api/computers/enrol-codes"),
+    ("GET", "/api/computers/enrol-codes/e1"),
+    ("DELETE", "/api/computers/enrol-codes/e1"),
     ("GET", "/api/accounts"),
     ("GET", "/api/mcp"),
     ("GET", "/api/schedules"),

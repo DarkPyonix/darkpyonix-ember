@@ -72,7 +72,7 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | FR-N2, FR-N3, FR-N5 on letify-link | Implemented (#229): letify is the default, with sessions, main-server relay, QAD observer, pkarr rendezvous, revocation and power states. TCP paths and relay are implemented; UDP hole punching and real-network acceptance remain open. | #229 |
 | FR-L27, FR-L27.1 to L27.6 (Files screen) | Implemented on `compose-rust` (#174, #220): `ember/app/src/ui/cr/files.rs` (pure model in `ember/app/src/ui/files.rs`) wired as 파일 against a `TransferService` trait with no implementation; shows the real computers, agent tiles (send or open conversation) and "준비 중입니다" for the rest, CI tests. | #174, #220 |
 | FR-F1 to FR-F10 | Draft, specified only (`INTENT.md` D24). Not built. First unit: `ember/transfer` state machine over the fake transport. | #152, #487 |
-| FR-C1, FR-C2 | Draft, specified only (`INTENT.md` D39). Not built. | #491 |
+| FR-C1, FR-C2 | Draft (`INTENT.md` D39). First unit written, not compiled: the admin side of FR-C1 (`ember/server/src/computers/enrol.rs`: migration, mint, redeem core, status, cancel, local admin routes `/api/computers/enrol-codes`; tests `fr_c1_*`) and the redeem core WITHOUT a route. Not done: the redeem route (open security decision, `docs/design/COMPUTERS.md`), `ember-node enrol`, the registration step, status polling UI (FR-C2). | #491 |
 | PR-1 | Implemented without a version field (D15 implemented, #63). | #63 |
 | FR-W1–W3 | `ember/proxy/` (#1). FR-W3 not verified per platform. | #83 |
 | FR-W4 | OSE builds in CI (#24, #39); the manual Pi and Mac step is not recorded. | #83 |

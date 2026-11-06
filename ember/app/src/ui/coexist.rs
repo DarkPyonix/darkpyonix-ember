@@ -57,6 +57,8 @@ pub struct SharedLive {
     pub usage: MutableState<Vec<DailyUsage>>,
     /// Tokens per UTC day over the last 14 days, all harnesses (FR-U7, #332).
     pub usage_summary: MutableState<crate::ui::usage::Load<UsageSummary>>,
+    /// The Home GitHub card's last answer (FR-L35).
+    pub github: MutableState<crate::ui::home::GithubFetch>,
     /// Today's tokens per project, keyed by project name (the Session status tile, FR-L18).
     pub project_day: MutableState<std::collections::HashMap<String, crate::ui::usage::Load<UsageSummary>>>,
 }
@@ -81,6 +83,7 @@ impl SharedLive {
             agents_checked_ms: mutable_state_of(None),
             usage: mutable_state_of(Vec::new()),
             usage_summary: mutable_state_of(Default::default()),
+            github: mutable_state_of(Default::default()),
             project_day: mutable_state_of(Default::default()),
         }
     }

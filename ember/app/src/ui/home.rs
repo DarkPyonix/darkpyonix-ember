@@ -26,6 +26,10 @@ pub const DEFAULT_PROJECT: &str = "기본 프로젝트";
 pub const INTEGRATIONS_TITLE: &str = "연동";
 pub const GITHUB_NAME: &str = "GitHub";
 pub const GITHUB_NO_INFO: &str = "아직 정보가 없습니다";
+/// A value the server gave as null while GitHub is connected (FR-L35): asked, not known.
+pub const GITHUB_UNKNOWN: &str = "알 수 없음";
+/// Appended to the card header in the demo, whose numbers are a fixed sample (FR-L35).
+pub const GITHUB_SAMPLE_MARK: &str = "(예시)";
 pub const GITHUB_NO_ACTIVITY: &str = "연동이 만든 일이 아직 없습니다";
 pub const GITHUB_LOGIN_HINT: &str = "이 컴퓨터의 터미널에서 gh auth login을 실행하십시오";
 pub const GITHUB_INSTALL_HINT: &str = "gh를 설치하고 로그인하십시오";
@@ -76,6 +80,8 @@ pub struct GithubRepo {
     /// Newest first, up to 14.
     pub ci: Option<Vec<CiResult>>,
     pub error: Option<String>,
+    /// `open_prs` stopped at the server's 100 limit: the real number is at least that.
+    pub capped: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
@@ -100,6 +106,106 @@ pub struct GithubState {
     pub totals: GithubTotals,
     /// Epoch seconds.
     pub checked_at: Option<i64>,
+}
+
+/// The live slot of the GitHub card: nothing asked yet, the last good answer, or a first call
+/// that failed (a later failure keeps the last answer).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum GithubFetch {
+    #[default]
+    NotAsked,
+    Loaded(GithubState),
+    Failed,
+}
+
+impl GithubFetch {
+    /// What the card draws from: `None` until the server answered.
+    pub fn state(&self) -> Option<&GithubState> {
+        match self {
+            GithubFetch::Loaded(g) => Some(g),
+            _ => None,
+        }
+    }
+
+    /// The slot after a call: a failure keeps a held answer, else becomes `Failed`.
+    pub fn settle(old: &GithubFetch, got: Result<GithubState, String>) -> GithubFetch {
+        match got {
+            Ok(g) => GithubFetch::Loaded(g),
+            Err(_) if matches!(old, GithubFetch::Loaded(_)) => old.clone(),
+            Err(_) => GithubFetch::Failed,
+        }
+    }
+}
+
+/// The card header line in the demo: the sample is marked, never shown as real.
+pub fn sample_header(line: &str) -> String {
+    format!("{line} {GITHUB_SAMPLE_MARK}")
+}
+
+/// Server text shown on the card: control and bidi characters removed, whitespace collapsed,
+/// capped at `max` characters with an ellipsis (FR-L35).
+pub fn clean_text(s: &str, max: usize) -> String {
+    let kept: String = s
+        .chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(*c as u32, 0x200B..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069 | 0xFEFF)
+                || c.is_whitespace() && *c != '\u{85}'
+        })
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    let one = kept.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.chars().count() <= max {
+        one
+    } else {
+        let mut cut: String = one.chars().take(max.saturating_sub(1)).collect();
+        cut.push('\u{2026}');
+        cut
+    }
+}
+
+/// Map the client's `GET /api/integrations/github` body to the card's state. Nulls stay null.
+pub fn github_state_from(s: &ember_client::api::GithubSummary) -> GithubState {
+    use ember_client::api::GithubState as Conn;
+    let n = |v: Option<u64>| v.map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+    GithubState {
+        state: match s.state {
+            Conn::On => GithubConn::On,
+            Conn::Warn => GithubConn::Warn,
+            Conn::Off => GithubConn::Off,
+        },
+        reason: s.reason.as_deref().map(|r| clean_text(r, 120)),
+        account: s.account.clone(),
+        repos: s
+            .repos
+            .iter()
+            .map(|r| GithubRepo {
+                name_with_owner: clean_text(r.name_with_owner.as_deref().unwrap_or_default(), 80),
+                default_branch: r.default_branch.clone().unwrap_or_default(),
+                open_prs: n(r.open_prs),
+                review_requested: n(r.review_requested),
+                ci: r.ci.as_ref().map(|v| {
+                    v.iter()
+                        .map(|c| match c.as_str() {
+                            "success" => CiResult::Success,
+                            "failure" => CiResult::Failure,
+                            "cancelled" => CiResult::Cancelled,
+                            _ => CiResult::Pending,
+                        })
+                        .collect()
+                }),
+                error: r.error.clone(),
+                capped: r.capped,
+            })
+            .collect(),
+        totals: GithubTotals {
+            repos: n(s.totals.repos),
+            open_prs: n(s.totals.open_prs),
+            review_requested: n(s.totals.review_requested),
+            ci_pass_percent: s.totals.ci_pass_percent.map(|p| p as f32),
+        },
+        checked_at: (s.checked_at > 0).then_some(s.checked_at),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,14 +298,21 @@ impl GithubCard {
             },
         });
         let shows_numbers = g.state != GithubConn::Off;
+        // Connected: a null is asked and not known (알 수 없음). Not connected: nothing was read.
+        let unknown = || if shows_numbers { GITHUB_UNKNOWN.to_string() } else { none() };
         let count = |v: Option<u32>| match v {
             Some(n) if shows_numbers => n.to_string(),
-            _ => none(),
+            _ => unknown(),
+        };
+        let any_capped = g.repos.iter().any(|r| r.capped);
+        let prs = |v: Option<u32>, capped: bool| match v {
+            Some(n) if shows_numbers && capped => format!("{n}+"),
+            other => count(other),
         };
         let t = &g.totals;
         let rate = match t.ci_pass_percent {
             Some(r) if shows_numbers => format!("{}%", r.round() as i64),
-            _ => none(),
+            _ => unknown(),
         };
         let repos = if shows_numbers {
             g.repos
@@ -207,7 +320,7 @@ impl GithubCard {
                 .take(GITHUB_MAX_REPOS)
                 .map(|r| GithubRepoRow {
                     name: r.name_with_owner.clone(),
-                    open_prs: count(r.open_prs),
+                    open_prs: prs(r.open_prs, r.capped),
                     review_requested: count(r.review_requested),
                     ci: r.ci.iter().flatten().take(GITHUB_MAX_CI).copied().collect(),
                     error: r.error.clone(),
@@ -226,7 +339,7 @@ impl GithubCard {
             action,
             kpis: [
                 (labels[0], count(t.repos)),
-                (labels[1], count(t.open_prs)),
+                (labels[1], prs(t.open_prs, any_capped)),
                 (labels[2], count(t.review_requested)),
                 (labels[3], rate),
             ],
@@ -1231,6 +1344,7 @@ mod tests {
             review_requested: Some(0),
             ci: Some(vec![CiResult::Success, CiResult::Failure]),
             error: None,
+            capped: false,
         }
     }
 
@@ -1271,9 +1385,9 @@ mod tests {
         assert_eq!(c.account.as_deref(), Some("octo"));
         assert!(c.note.is_none() && c.action.is_none());
         assert_eq!(c.kpis[0].1, "3");
-        assert_eq!(c.kpis[1].1, "아직 정보가 없습니다", "null is not 0");
+        assert_eq!(c.kpis[1].1, "알 수 없음", "null is not 0");
         assert_eq!(c.kpis[2].1, "0", "a real zero is shown as 0");
-        assert_eq!(c.kpis[3].1, "아직 정보가 없습니다");
+        assert_eq!(c.kpis[3].1, "알 수 없음");
         let mut g = ready_github();
         g.totals.ci_pass_percent = Some(87.6);
         assert_eq!(GithubCard::from_state(Some(&g)).kpis[3].1, "88%");
@@ -1291,6 +1405,28 @@ mod tests {
         let a = c.action.unwrap();
         assert_eq!(a.label, "방법 보기");
         assert_eq!(a.guidance, "이 컴퓨터의 터미널에서 gh auth login을 실행하십시오");
+    }
+
+    #[test]
+    fn fr_l35_github_card_warn_kpis_read_unknown() {
+        let mut g = ready_github();
+        g.state = GithubConn::Warn;
+        g.totals = GithubTotals::default();
+        let c = GithubCard::from_state(Some(&g));
+        assert_eq!(c.pill, "재인증 필요");
+        assert!(c.kpis.iter().all(|(_, v)| v == "알 수 없음"));
+    }
+
+    #[test]
+    fn fr_l35_github_text_is_cleaned_and_capped() {
+        assert_eq!(clean_text("a\u{202E}b\u{0007}c\n\t d", 80), "abc d");
+        assert_eq!(clean_text("  x   y ", 80), "x y");
+        let long = "가".repeat(200);
+        let r = clean_text(&long, 120);
+        assert_eq!(r.chars().count(), 120);
+        assert!(r.ends_with('\u{2026}'));
+        assert_eq!(clean_text(&"n".repeat(80), 80).chars().count(), 80);
+        assert_eq!(clean_text(&"n".repeat(81), 80).chars().count(), 80);
     }
 
     #[test]
@@ -1353,6 +1489,76 @@ mod tests {
         assert_eq!(GithubCard::from_state(Some(&g)).more_repos.as_deref(), Some("외 2개"));
         g.repos.truncate(2);
         assert_eq!(GithubCard::from_state(Some(&g)).more_repos, None);
+    }
+
+    fn summary() -> ember_client::api::GithubSummary {
+        use ember_client::api as a;
+        a::GithubSummary {
+            state: a::GithubState::Warn,
+            reason: Some("재로그인".into()),
+            account: Some("octo".into()),
+            repos: vec![a::GithubRepo {
+                name_with_owner: Some("o/r".into()),
+                default_branch: Some("main".into()),
+                open_prs: Some(100),
+                review_requested: None,
+                capped: true,
+                ci: Some(vec!["success".into(), "failure".into(), "cancelled".into(), "queued".into()]),
+                error: None,
+                projects: vec![],
+            }],
+            totals: a::GithubTotals { repos: Some(1), open_prs: Some(100), review_requested: None, ci_pass_percent: None },
+            checked_at: 1_700_000_000,
+        }
+    }
+
+    #[test]
+    fn fr_l35_github_mapping_keeps_state_ci_and_nulls() {
+        let g = github_state_from(&summary());
+        assert_eq!(g.state, GithubConn::Warn);
+        assert_eq!(g.reason.as_deref(), Some("재로그인"));
+        assert_eq!(g.repos[0].name_with_owner, "o/r");
+        assert_eq!(g.repos[0].review_requested, None);
+        assert_eq!(
+            g.repos[0].ci.as_deref(),
+            Some(&[CiResult::Success, CiResult::Failure, CiResult::Cancelled, CiResult::Pending][..])
+        );
+        assert_eq!(g.totals.ci_pass_percent, None);
+        assert_eq!(g.checked_at, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn fr_l35_github_mapping_capped_reads_100_plus_and_null_reads_unknown() {
+        let g = github_state_from(&summary());
+        let c = GithubCard::from_state(Some(&g));
+        assert_eq!(c.repos[0].open_prs, "100+");
+        assert_eq!(c.kpis[1].1, "100+");
+        assert_eq!(c.repos[0].review_requested, "알 수 없음");
+        assert_eq!(c.kpis[3].1, "알 수 없음");
+    }
+
+    #[test]
+    fn fr_l35_github_mapping_off_keeps_no_information() {
+        let mut s = summary();
+        s.state = ember_client::api::GithubState::Off;
+        s.repos.clear();
+        s.totals = Default::default();
+        let c = GithubCard::from_state(Some(&github_state_from(&s)));
+        assert!(c.kpis.iter().all(|(_, v)| v == "아직 정보가 없습니다"));
+    }
+
+    #[test]
+    fn fr_l35_github_fetch_failure_keeps_the_last_value() {
+        let held = GithubFetch::Loaded(ready_github());
+        assert_eq!(GithubFetch::settle(&held, Err("x".into())), held);
+        assert_eq!(GithubFetch::settle(&GithubFetch::NotAsked, Err("x".into())), GithubFetch::Failed);
+        assert!(GithubFetch::Failed.state().is_none());
+        assert!(GithubCard::from_state(GithubFetch::Failed.state()).kpis.iter().all(|(_, v)| v == "아직 정보가 없습니다"));
+    }
+
+    #[test]
+    fn fr_l35_github_sample_header_is_marked() {
+        assert_eq!(sample_header("GitHub 연결됨"), "GitHub 연결됨 (예시)");
     }
 
     #[test]

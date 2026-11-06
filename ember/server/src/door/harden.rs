@@ -28,9 +28,11 @@ use crate::door::limits::{limit_layer, DoorLimits};
 /// 6. the routes.
 ///
 /// A copy that reorders these loses a property; one function keeps every door in the same order.
-/// `max_body` and `guard.max_body` are the same number (the guard refuses by `Content-Length`,
-/// the body limit stops a body that has none).
-pub(crate) fn stack(app: Router, guard: Guard, max_body: usize, timeout: Duration, limits: Option<Arc<DoorLimits>>) -> Router {
+/// The body limit is `guard.max_body`, the same number the guard checks the declared `Content-Length`
+/// against (the guard refuses by the header, the body limit stops a body that has none): taking it
+/// from the guard makes it impossible to pass two different numbers.
+pub(crate) fn stack(app: Router, guard: Guard, timeout: Duration, limits: Option<Arc<DoorLimits>>) -> Router {
+    let max_body = guard.max_body;
     let app = app
         .layer(DefaultBodyLimit::max(max_body))
         .layer(middleware::from_fn_with_state(guard, guard_layer));

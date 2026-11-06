@@ -106,6 +106,8 @@ pub const UI_STRINGS: &[&str] = &[
     crate::ui::enrol_flow::PEER_ONLY_NOTE,
     crate::ui::enrol_flow::TYPED_FINGERPRINT_HELP,
     crate::ui::enrol_flow::FINGERPRINT_MISMATCH,
+    crate::ui::enrol_flow::FINGERPRINT_REQUIRED,
+    crate::ui::enrol_flow::FINGERPRINT_PENDING_HINT,
     crate::ui::enrol_flow::UNKNOWN_STATE,
     crate::ui::add_computer::ENROL_NOTE,
     crate::ui::home::GITHUB_NO_INFO,

@@ -59,9 +59,11 @@ pub const NOTE_PROPOSED: &str = "기기가 주소를 알리지 않아 서버가 
 pub const PEER_ID_UNUSED: &str = "노드가 주소와 peer id를 함께 알렸습니다. 이 컴퓨터는 주소로 등록되며 peer id는 쓰이지 않습니다";
 pub const PEER_ONLY_NOTE: &str = "노드가 주소 없이 peer id만 알렸습니다. 아래 지문을 노드 화면의 지문과 대조해 직접 입력해야 추가됩니다";
 pub const TYPED_FINGERPRINT_LABEL: &str = "노드 화면에 표시된 지문";
-pub const TYPED_FINGERPRINT_HELP: &str = "노드 화면에 표시된 16자리 지문을 직접 입력합니다. 서버가 알려 준 값은 채워 주지 않습니다";
+pub const TYPED_FINGERPRINT_HELP: &str = "노드 화면의 지문을 직접 읽어 입력합니다. 이 카드의 값은 복사하지 않습니다";
 pub const NODE_FINGERPRINT_PEER: &str = "노드가 보고한 지문";
-pub const FINGERPRINT_MISMATCH: &str = "입력한 지문이 노드가 보고한 지문과 다릅니다. 확인하지 않았습니다";
+pub const FINGERPRINT_MISMATCH: &str = "입력한 지문이 노드가 보고한 지문과 다릅니다. 아무것도 추가되지 않았습니다. 노드 화면의 지문을 다시 확인하세요";
+pub const FINGERPRINT_REQUIRED: &str = "이 노드는 지문 확인이 필요합니다. 노드 화면의 지문을 입력하세요";
+pub const FINGERPRINT_PENDING_HINT: &str = "노드 화면의 지문과 같아질 때까지 추가할 수 없습니다";
 pub const WARN_INFORMS: &str = "경고는 알려 줄 뿐 추가를 막지 않습니다";
 
 /// Every sentence of the code flow, for the NFR-L4 ending check in `ui::session`.
@@ -69,6 +71,7 @@ pub const FLOW_STRINGS: &[&str] = &[
     NAME_HELP, STDIN_NOTE, WAITING_LINE, CODE_ONCE, DOOR_OFF, DOOR_URL_UNKNOWN, NO_COMMAND, HTTP_WARNING, CONFIRM_QUESTION, CONFIRM_CHECK,
     CONFIRMED_WAIT, JOINED_LINE, JOINED_NEXT, NODE_CMD_NOTE, ZSH_QUOTE_NOTE, DENIED_LINE, EXPIRED_LINE, GONE_LINE, DEMO_LINE, WARN_ADDR_DIFFERS, WARN_NAME_DIFFERS,
     WARN_PUBLIC_ADDR, NOTE_PROPOSED, WARN_INFORMS, PEER_ID_UNUSED, PEER_ONLY_NOTE, TYPED_FINGERPRINT_HELP, FINGERPRINT_MISMATCH,
+    FINGERPRINT_REQUIRED, FINGERPRINT_PENDING_HINT,
 ];
 
 /// What the owner decides on: the node's own words next to the server's observation. Every
@@ -94,10 +97,25 @@ pub struct ConfirmRows {
     pub registered_by: Option<String>,
 }
 
-/// A node that reported a peer id and no address: the owner must type its fingerprint from the
-/// node's own screen before the confirm counts.
+/// The card asks for a typed fingerprint. The server's `registered_by` decides: only `peer`
+/// does. An older server sends none, and then a node with a peer id and no address is read as
+/// peer-only (the safe side: the owner types the fingerprint).
 pub fn peer_only(rows: &ConfirmRows) -> bool {
-    rows.peer_reported && rows.reported_addr.is_none()
+    match rows.registered_by.as_deref() {
+        Some(by) => by == "peer",
+        None => rows.peer_reported && rows.reported_addr.is_none(),
+    }
+}
+
+/// The proposed address row is hidden only when the server registers by peer id.
+pub fn hide_proposed(rows: &ConfirmRows) -> bool {
+    rows.registered_by.as_deref() == Some("peer")
+}
+
+/// The hint under the disabled confirm button: shown while the card wants a fingerprint and the
+/// typed text does not match yet.
+pub fn fingerprint_hint(rows: &ConfirmRows, typed: &str) -> Option<&'static str> {
+    (!fingerprint_ok(rows, typed)).then_some(FINGERPRINT_PENDING_HINT)
 }
 
 /// Whether the line "the peer id is not used" shows: the node reported both and the server
@@ -189,7 +207,6 @@ pub fn confirm_rows(st: &EnrolStatus) -> Option<ConfirmRows> {
     let opt = |s: &Option<String>| s.as_deref().map(|s| clean(s, MAX_ADDRESS_CHARS)).filter(|s| !s.is_empty());
     let peer_reported = info.peer_id.as_deref().is_some_and(|p| !p.trim().is_empty());
     let reported_addr = opt(&info.url);
-    let peer_only_node = peer_reported && reported_addr.is_none();
     Some(ConfirmRows {
         peer_reported,
         registered_by: st.registered_by.clone(),
@@ -197,8 +214,7 @@ pub fn confirm_rows(st: &EnrolStatus) -> Option<ConfirmRows> {
         system,
         observed_addr: opt(&st.observed_addr).unwrap_or_default(),
         reported_addr,
-        // A peer-only node is not registered by address, so no address is proposed.
-        proposed_addr: if peer_only_node { None } else { opt(&st.proposed_url) },
+        proposed_addr: opt(&st.proposed_url),
         fingerprint: opt(&st.fingerprint),
         chosen_name: clean(&st.name, MAX_NAME_CHARS),
         deadline_ms: st.confirm_deadline_ms,
@@ -365,6 +381,7 @@ pub fn confirm_error_text(e: &EnrolCallError) -> &'static str {
     match e {
         EnrolCallError::NameTaken => "같은 이름의 컴퓨터가 이미 있습니다. 다른 이름을 입력하세요",
         EnrolCallError::FingerprintMismatch => FINGERPRINT_MISMATCH,
+        EnrolCallError::FingerprintRequired => FINGERPRINT_REQUIRED,
         EnrolCallError::WrongState => "이 요청은 더 이상 확인을 기다리지 않습니다",
         EnrolCallError::Expired => EXPIRED_LINE,
         EnrolCallError::NotFound => GONE_LINE,
@@ -738,13 +755,68 @@ mod tests {
     fn fr_c2_enrol_peer_only_needs_a_peer_id_and_no_url() {
         let only = confirm_rows(&peer_status(None, "peer")).unwrap();
         assert!(peer_only(&only));
-        // The proposed address is hidden for a peer-only node.
-        assert_eq!(only.proposed_addr, None);
+        // The row stays in the data; the card hides it only for registered_by peer.
+        assert!(hide_proposed(&only));
         let both = confirm_rows(&peer_status(Some("http://10.0.0.5:8741"), "url")).unwrap();
         assert!(!peer_only(&both));
         // No peer id at all: not peer-only, and the proposal stays.
         let none = confirm_rows(&awaiting()).unwrap();
         assert!(!peer_only(&none));
+    }
+
+    fn status_by(url: Option<&str>, registered_by: Option<&str>) -> EnrolStatus {
+        let mut v = serde_json::json!({
+            "status": "awaiting_confirmation", "name": "lab",
+            "node_info": {"hostname": "lab-pc", "peer_id": "12D3KooWabc"},
+            "observed_addr": "10.0.0.5:4000", "proposed_url": "http://10.0.0.5:8741", "fingerprint": "ab12 cd34 ef56 7890"
+        });
+        if let Some(u) = url {
+            v["node_info"]["url"] = u.into();
+        }
+        if let Some(b) = registered_by {
+            v["registered_by"] = b.into();
+        }
+        st(v)
+    }
+
+    #[test]
+    fn fr_c2_enrol_registered_by_observed_keeps_the_proposed_address_and_needs_no_typing() {
+        let r = confirm_rows(&status_by(None, Some("observed"))).unwrap();
+        assert!(!peer_only(&r) && !hide_proposed(&r));
+        assert_eq!(r.proposed_addr.as_deref(), Some("http://10.0.0.5:8741"));
+        assert!(fingerprint_ok(&r, ""));
+        assert_eq!(expect_fingerprint(&r, "ab12cd34ef567890"), None);
+        assert_eq!(fingerprint_hint(&r, ""), None);
+    }
+
+    #[test]
+    fn fr_c2_enrol_registered_by_peer_needs_the_typed_value_and_hides_the_proposal() {
+        let r = confirm_rows(&status_by(None, Some("peer"))).unwrap();
+        assert!(peer_only(&r) && hide_proposed(&r));
+        assert!(!fingerprint_ok(&r, "ab12"));
+        assert_eq!(fingerprint_hint(&r, "ab12"), Some(FINGERPRINT_PENDING_HINT));
+        assert_eq!(fingerprint_hint(&r, "ab12cd34ef567890"), None);
+        // Server says peer even though a url was reported: the server wins.
+        assert!(peer_only(&confirm_rows(&status_by(Some("http://h:1"), Some("peer"))).unwrap()));
+        // Server says url: no typing, even without a reported url.
+        assert!(!peer_only(&confirm_rows(&status_by(None, Some("url"))).unwrap()));
+    }
+
+    #[test]
+    fn fr_c2_enrol_absent_registered_by_reads_peer_id_without_url_as_peer_only_but_keeps_the_proposal() {
+        let r = confirm_rows(&status_by(None, None)).unwrap();
+        assert!(peer_only(&r) && !hide_proposed(&r));
+        assert_eq!(r.proposed_addr.as_deref(), Some("http://10.0.0.5:8741"));
+        assert!(!fingerprint_ok(&r, ""));
+        let with_url = confirm_rows(&status_by(Some("http://h:1"), None)).unwrap();
+        assert!(!peer_only(&with_url));
+    }
+
+    #[test]
+    fn fr_c2_enrol_a_whitespace_only_url_counts_as_no_url() {
+        let r = confirm_rows(&status_by(Some("  \t "), None)).unwrap();
+        assert_eq!(r.reported_addr, None);
+        assert!(peer_only(&r));
     }
 
     #[test]
@@ -785,8 +857,10 @@ mod tests {
 
     #[test]
     fn fr_c2_enrol_registered_by_mismatch_error_is_a_fixed_line_that_keeps_the_request() {
-        assert_eq!(confirm_error_text(&EnrolCallError::FingerprintMismatch), "입력한 지문이 노드가 보고한 지문과 다릅니다. 확인하지 않았습니다");
+        assert_eq!(confirm_error_text(&EnrolCallError::FingerprintMismatch), "입력한 지문이 노드가 보고한 지문과 다릅니다. 아무것도 추가되지 않았습니다. 노드 화면의 지문을 다시 확인하세요");
         assert_eq!(view_after_confirm_error(&EnrolCallError::FingerprintMismatch), None);
+        assert_eq!(confirm_error_text(&EnrolCallError::FingerprintRequired), "이 노드는 지문 확인이 필요합니다. 노드 화면의 지문을 입력하세요");
+        assert_eq!(view_after_confirm_error(&EnrolCallError::FingerprintRequired), None);
         assert_eq!(review_stage(Some("enrol-confirm-peer"), true), Some(Stage::ConfirmPeer));
         assert_eq!(review_stage(Some("enrol-confirm-peer"), false), None);
         match demo_view(Stage::ConfirmPeer, 0) {

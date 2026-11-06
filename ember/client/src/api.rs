@@ -2347,6 +2347,8 @@ pub enum EnrolCallError {
     /// 409 `fingerprint_mismatch`: the typed fingerprint differs from the node's (or the node has
     /// no peer id). Nothing changed; the enrolment stays awaiting confirmation.
     FingerprintMismatch,
+    /// 409 `fingerprint_required`: the node has only a peer id and no fingerprint was sent.
+    FingerprintRequired,
     /// 410: the enrolment expired.
     Expired,
     Api(ApiError),
@@ -2357,7 +2359,7 @@ impl EnrolCallError {
         match self {
             EnrolCallError::Off => Some(503),
             EnrolCallError::NotFound => Some(404),
-            EnrolCallError::NameTaken | EnrolCallError::WrongState | EnrolCallError::FingerprintMismatch | EnrolCallError::DoorOff | EnrolCallError::DoorUrlUnknown => Some(409),
+            EnrolCallError::NameTaken | EnrolCallError::WrongState | EnrolCallError::FingerprintMismatch | EnrolCallError::FingerprintRequired | EnrolCallError::DoorOff | EnrolCallError::DoorUrlUnknown => Some(409),
             EnrolCallError::Expired => Some(410),
             EnrolCallError::Api(e) => e.status(),
         }
@@ -2375,6 +2377,7 @@ impl From<ApiError> for EnrolCallError {
             ApiError::Status { status: 409, message, .. } if message == "name_taken" => EnrolCallError::NameTaken,
             ApiError::Status { status: 409, message, .. } if message == "wrong_state" => EnrolCallError::WrongState,
             ApiError::Status { status: 409, message, .. } if message == "fingerprint_mismatch" => EnrolCallError::FingerprintMismatch,
+            ApiError::Status { status: 409, message, .. } if message == "fingerprint_required" => EnrolCallError::FingerprintRequired,
             _ => EnrolCallError::Api(e),
         }
     }
@@ -2511,6 +2514,8 @@ mod enrol_tests {
         assert!(matches!(EnrolCallError::from(st(409, "wrong_state")), EnrolCallError::WrongState));
         assert!(matches!(EnrolCallError::from(st(409, "fingerprint_mismatch")), EnrolCallError::FingerprintMismatch));
         assert_eq!(EnrolCallError::FingerprintMismatch.status(), Some(409));
+        assert!(matches!(EnrolCallError::from(st(409, "fingerprint_required")), EnrolCallError::FingerprintRequired));
+        assert_eq!(EnrolCallError::FingerprintRequired.status(), Some(409));
         assert!(matches!(EnrolCallError::from(st(409, "door_off")), EnrolCallError::DoorOff));
         assert!(matches!(EnrolCallError::from(st(409, "door_url_unknown")), EnrolCallError::DoorUrlUnknown));
         assert_eq!(EnrolCallError::from(st(400, "bad")).status(), Some(400));

@@ -164,6 +164,7 @@ impl AddUi {
     fn end_run(&self, view: EnrolView) {
         self.run.set(None);
         self.with_guard(|g| g.clear());
+        self.typed_fp.set(String::new());
         self.view.set(Some(view));
     }
 
@@ -519,7 +520,7 @@ fn ConfirmBody(ui: &AddUi, rows: &ConfirmRows) {
     if flow::peer_id_unused(rows) {
         Label(flow::PEER_ID_UNUSED, Fs::Xs, Weight::Regular, muted, Some(3));
     }
-    if let Some(a) = rows.proposed_addr.as_ref().filter(|_| !peer_only) {
+    if let Some(a) = rows.proposed_addr.as_ref().filter(|_| !flow::hide_proposed(rows)) {
         KV(flow::PROPOSED_ADDR, a);
         Label(flow::NOTE_PROPOSED, Fs::Xs, Weight::Regular, muted, Some(3));
     }
@@ -527,7 +528,7 @@ fn ConfirmBody(ui: &AddUi, rows: &ConfirmRows) {
         Label(flow::PEER_ONLY_NOTE, Fs::Xs, Weight::Medium, Some(paint(p.red.strong)), Some(4));
         if let Some(fp) = &rows.fingerprint {
             Label(flow::NODE_FINGERPRINT_PEER, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
-            Label(fp, Fs::Xl, Weight::Semibold, None, Some(1));
+            Label(fp, Fs::Xs, Weight::Regular, muted, Some(1));
         }
         Label(flow::TYPED_FINGERPRINT_LABEL, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
         let (t, f) = (ui.typed_fp.clone(), ui.failure.clone());
@@ -571,6 +572,9 @@ fn ConfirmBody(ui: &AddUi, rows: &ConfirmRows) {
     });
     if confirmed {
         Label(flow::CONFIRMED_WAIT, Fs::Sm, Weight::Medium, None, Some(3));
+    }
+    if let Some(h) = flow::fingerprint_hint(rows, &ui.typed_fp.get()).filter(|_| !confirmed) {
+        Label(h, Fs::Xs, Weight::Regular, muted, Some(3));
     }
     FailureLine(ui);
     let busy = ui.busy.get();

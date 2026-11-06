@@ -187,3 +187,88 @@ pub fn move_selection(selected: usize, len: usize, down: bool) -> usize {
         selected.saturating_sub(1)
     }
 }
+
+/// What the palette lists: commands (the palette action), files (find in a keymap that means "go to
+/// file"), or both (find in a keymap that means "search everywhere").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Commands,
+    Files,
+    Everything,
+}
+
+/// The mode an action opens the palette in. `Find` follows the keymap's own meaning of it.
+pub fn mode_for(action: Action, keymap: Keymap) -> Option<Mode> {
+    match (action, keymap) {
+        (Action::Palette, _) => Some(Mode::Commands),
+        (Action::Find, Keymap::VsCode) => Some(Mode::Files),
+        (Action::Find, Keymap::JetBrains) => Some(Mode::Everything),
+        _ => None,
+    }
+}
+
+/// The hint the empty field shows: the keymap's own name for what opened it.
+pub fn placeholder(mode: Mode, keymap: Keymap) -> &'static str {
+    match mode {
+        Mode::Commands => keymap.palette_label(),
+        Mode::Files | Mode::Everything => keymap.find_label(),
+    }
+}
+
+/// A directory the file index does not enter: version control internals, dependencies and build
+/// output. `target` is build output only beside a `Cargo.toml` or a `pom.xml`; in any other project it
+/// is an ordinary directory. `siblings` are the entries of the directory that holds `name`.
+pub fn skipped_directory(name: &str, siblings: &[(String, u32)]) -> bool {
+    match name {
+        ".git" | ".hg" | ".svn" | "node_modules" | "__pycache__" => true,
+        "target" => siblings.iter().any(|(n, _)| n == "Cargo.toml" || n == "pom.xml"),
+        _ => false,
+    }
+}
+
+/// The files of the index as palette items: the path below the project folder, sorted, the file's
+/// full path as the payload. A path outside the folder keeps its full path.
+pub fn file_items(folder: &str, paths: &[String]) -> Vec<Item> {
+    let root = folder.trim_end_matches('/');
+    let mut items: Vec<Item> = paths
+        .iter()
+        .map(|path| {
+            let title = path.strip_prefix(root).and_then(|rest| rest.strip_prefix('/')).unwrap_or(path).to_string();
+            Item { payload: Payload::File(path.clone()), title, hint: String::new(), enabled: true }
+        })
+        .collect();
+    items.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    items
+}
+
+/// The items for a mode: commands, files, or commands then files. `files` are the indexed files as
+/// [`file_items`] makes them.
+pub fn items_for(mode: Mode, keymap: Keymap, os: Os, files: &[Item]) -> Vec<Item> {
+    match mode {
+        Mode::Commands => action_items(keymap, os),
+        Mode::Files => files.to_vec(),
+        Mode::Everything => {
+            let mut items = action_items(keymap, os);
+            items.extend_from_slice(files);
+            items
+        }
+    }
+}
+
+/// The accessible name of the search field.
+pub fn search_label(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Commands => "명령 검색",
+        Mode::Files => "파일 검색",
+        Mode::Everything => "파일과 명령 검색",
+    }
+}
+
+/// What the list says when nothing is listed: the index is still being built, or nothing matches.
+pub fn empty_text(mode: Mode, index_running: bool) -> &'static str {
+    if index_running && mode != Mode::Commands {
+        "파일을 찾는 중입니다…"
+    } else {
+        "일치하는 항목이 없습니다."
+    }
+}

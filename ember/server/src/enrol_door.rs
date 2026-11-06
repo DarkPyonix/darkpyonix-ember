@@ -259,6 +259,20 @@ impl EnrolDoor {
         crate::door::serve::serve_capped("enrol door", listener, app, shutdown, header_read_timeout, max_connections).await
     }
 
+    /// What the owner router prints in the enrol command (FR-C1): the door's public URL when set
+    /// (validated by `parse_public_url` when the environment was read), else `http://{listen}`
+    /// only when the listen address names one interface (not 0.0.0.0 or ::), else `Unknown`.
+    /// `None` (no door) is `Off`.
+    pub fn door_url(door: Option<&EnrolDoor>) -> crate::computers::enrol::DoorUrl {
+        use crate::computers::enrol::DoorUrl;
+        let Some(d) = door else { return DoorUrl::Off };
+        match (&d.public_url, d.listen.ip().is_unspecified()) {
+            (Some(u), _) => DoorUrl::Url(u.clone()),
+            (None, false) => DoorUrl::Url(format!("http://{}", d.listen)),
+            (None, true) => DoorUrl::Unknown,
+        }
+    }
+
     /// Whether the door binds an address other than loopback.
     pub fn is_remote(&self) -> bool {
         !self.listen.ip().is_loopback()
@@ -539,16 +553,16 @@ async fn poll(State(st): State<Arc<Routes>>, id: Result<Path<String>, PathReject
         Delivery::Denied => status("denied"),
         Delivery::Expired => status("expired"),
         Delivery::Unknown => poll_not_found(),
-        Delivery::Joined { token, name, computer_id } => {
+        Delivery::Joined { token, name, computer_id, server_peer_id } => {
             tracing::info!(enrol = %log_id(&id), "enrol credential delivered");
-            let mut res = (
-                StatusCode::OK,
-                axum::Json(json!({
-                    "status": "joined",
-                    "credential": { "node_token": token.expose(), "name": name, "computer_id": computer_id },
-                })),
-            )
-                .into_response();
+            let mut credential = json!({ "node_token": token.expose(), "name": name, "computer_id": computer_id });
+            // The server's public transport id, only when the transport is on: the key is absent
+            // otherwise, never null and never empty (FR-C2). No other answer carries it.
+            if let (Some(sid), Some(map)) = (server_peer_id, credential.as_object_mut()) {
+                map.insert("server_peer_id".into(), json!(sid));
+            }
+            let mut res =
+                (StatusCode::OK, axum::Json(json!({ "status": "joined", "credential": credential }))).into_response();
             res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
             res
         }
@@ -558,6 +572,45 @@ async fn poll(State(st): State<Arc<Routes>>, id: Result<Path<String>, PathReject
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::computers::enrol::DoorUrl;
+
+    fn door_from(vars: &[(&str, &str)]) -> Option<EnrolDoor> {
+        let owner: SocketAddr = "127.0.0.1:8740".parse().unwrap();
+        let get = |k: &str| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string());
+        EnrolDoor::from_lookup(get, owner, None).unwrap()
+    }
+
+    #[test]
+    fn fr_c2_door_url_is_off_when_there_is_no_door() {
+        assert_eq!(EnrolDoor::door_url(None), DoorUrl::Off);
+        assert_eq!(EnrolDoor::door_url(door_from(&[]).as_ref()), DoorUrl::Off);
+    }
+
+    #[test]
+    fn fr_c2_door_url_prefers_the_public_url() {
+        let d = door_from(&[
+            ("EMBER_ENROL_LISTEN", "0.0.0.0:8741"),
+            ("EMBER_ENROL_LISTEN_ALLOW_REMOTE", "1"),
+            ("EMBER_ENROL_PUBLIC_URL", "https://enrol.example.com/"),
+        ]);
+        assert_eq!(EnrolDoor::door_url(d.as_ref()), DoorUrl::Url("https://enrol.example.com".into()));
+    }
+
+    #[test]
+    fn fr_c2_door_url_falls_back_to_a_specific_listen_address() {
+        let d = door_from(&[("EMBER_ENROL_LISTEN", "127.0.0.1:8741")]);
+        assert_eq!(EnrolDoor::door_url(d.as_ref()), DoorUrl::Url("http://127.0.0.1:8741".into()));
+        let d = door_from(&[("EMBER_ENROL_LISTEN", "[::1]:8741")]);
+        assert_eq!(EnrolDoor::door_url(d.as_ref()), DoorUrl::Url("http://[::1]:8741".into()));
+    }
+
+    #[test]
+    fn fr_c2_door_url_is_unknown_for_an_unspecified_listen_without_a_public_url() {
+        for l in ["0.0.0.0:8741", "[::]:8741"] {
+            let d = door_from(&[("EMBER_ENROL_LISTEN", l), ("EMBER_ENROL_LISTEN_ALLOW_REMOTE", "1")]);
+            assert_eq!(EnrolDoor::door_url(d.as_ref()), DoorUrl::Unknown, "{l}");
+        }
+    }
 
     #[tokio::test]
     async fn is_length_limit_tells_the_size_limit_from_a_broken_stream() {

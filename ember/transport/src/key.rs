@@ -56,6 +56,19 @@ impl PeerId {
     }
 }
 
+/// The short, readable form of a peer id for a person to compare: the first 16 hex chars in four
+/// groups of four, separated by single spaces (`abab abab abab abab`). `None` unless `id` is
+/// exactly 64 lowercase hex chars. The app and the node both call this, so the owner compares
+/// equal strings (SPEC `FR-C2`).
+pub fn fingerprint_hex(id: &str) -> Option<String> {
+    let ok = id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if !ok {
+        return None;
+    }
+    let groups: Vec<&str> = (0..4).map(|i| &id[i * 4..i * 4 + 4]).collect();
+    Some(groups.join(" "))
+}
+
 /// Whether `bytes` is what compressing the decoded point gives back: the 255-bit y is below
 /// `p = 2^255 - 19`, and a zero x (y = 1 or y = p - 1) does not carry the sign bit.
 fn is_canonical(bytes: &[u8; 32]) -> bool {

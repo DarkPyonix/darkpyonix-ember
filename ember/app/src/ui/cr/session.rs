@@ -4334,6 +4334,11 @@ pub fn SessionScreen(focus: Option<String>) {
     let is_tablet_rail = window.width_dp > 560.0 && window.width_dp <= 900.0;
     let show_rail = is_tablet_rail || (!is_phone && rail_collapsed.get());
     let show_column = !is_phone && !show_rail;
+    // The drawer state resets once the list is a column again, so shrinking later does not
+    // reopen it (FR-L18). Written only while it is true, so there is no write loop.
+    if show_column && drawer.get() {
+        drawer.set(false);
+    }
     let chips_below = view_chips_below(window.width_dp);
     let hide_view_lbl = crate::ui::session::view_seg_icon_only(window.width_dp);
     let show_btn_lbl = window.width_dp >= 1400.0;
@@ -4460,6 +4465,7 @@ pub fn SessionScreen(focus: Option<String>) {
     let sub_line = sub_parts.join(" · ");
 
     cu::Box()
+        .alignment(Alignment::TopStart)
         .modifier(Modifier::new().fill_max_width().fill_max_height())
         .content(move || {
             let sections_col = sections.clone();
@@ -4727,37 +4733,55 @@ pub fn SessionScreen(focus: Option<String>) {
                         });
                 });
 
-            // Drawer sheet on compact/tablet
-            if !show_column {
-                let dr_d = drawer.clone();
+            // Left drawer with a scrim on compact/tablet (#582). The toolkit's Sheet picks its
+            // own edge and Dialog centres, so this is an in-tree overlay stacked in the screen's
+            // Box. It covers the session content area, not the phone tab bar or title strip
+            // (the shell is outside this screen).
+            // TODO(compose-rust#476): no Escape to the drawer (no key delivery or focus request
+            // in the Rust API); the scrim and the close button close it.
+            // TODO(compose-rust#429): no accessible name for the toggle, the scrim and the
+            // drawer yet.
+            if crate::ui::session::drawer_open_effective(show_column, drawer.get()) {
+                let dr_s = drawer.clone();
+                let dr_x = drawer.clone();
                 let sec_d = sections.clone();
                 let cur_d = current.clone();
                 let tgt_d = target.clone();
                 let q_d = query.clone();
                 let op_d = open_member.clone();
                 let is_m = view_now == SessionView::Multi;
-                EmberSheet(
-                    "세션 목록",
-                    drawer.get(),
-                    move || dr_d.set(false),
-                    None,
-                    move || {
-                        let q_st = q_d.clone();
+                let theme = ember_theme();
+                let pal = theme.palette;
+                let w = crate::ui::session::drawer_width(window.width_dp);
+                Clickable(
+                    Modifier::new()
+                        .fill_max_width()
+                        .fill_max_height()
+                        .background(paint(Color::argb(0x40000000))),
+                    Alignment::TopStart,
+                    move || dr_s.set(false),
+                    || {},
+                );
+                cu::Row()
+                    .modifier(with_shadows(Modifier::new(), theme.shadow_sm()).width(w).fill_max_height())
+                    .content(move || {
                         cu::Box()
-                            .modifier(Modifier::new().fill_max_width().height(PANE_H))
+                            .modifier(Modifier::new().weight(1.0).fill_max_height())
                             .content(move || {
                                 SideList(
                                     &sec_d,
                                     &cur_d,
                                     tgt_d.as_deref(),
                                     is_m,
-                                    None,
-                                    move |q| q_st.set(q),
+                                    Some(Box::new(move || dr_x.set(false))),
+                                    move |q| q_d.set(q),
                                     op_d.clone(),
                                 );
                             });
-                    },
-                );
+                        cu::Spacer().modifier(
+                            Modifier::new().width(1.0).fill_max_height().background(paint(pal.line)),
+                        );
+                    });
             }
 
             // New member sheet (#snew)
@@ -4845,6 +4869,19 @@ pub fn SessionScreen(focus: Option<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l18_drawer_state_resets_and_scrim_and_navigation_close_it() {
+        let src = include_str!("session.rs").split("mod tests {").next().unwrap();
+        assert!(src.contains("if show_column && drawer.get() {\n        drawer.set(false);"));
+        assert!(src.contains("drawer_open_effective(show_column, drawer.get())"));
+        // The scrim's Clickable closes the drawer.
+        assert!(src.contains("move || dr_s.set(false),"));
+        // open_member closes it.
+        let om = src.split("let open_member = {").nth(1).unwrap();
+        assert!(om.split("let same = proj == current;").next().unwrap().contains("drawer.set(false);"));
+        assert!(src.contains("TODO(compose-rust#429)"));
+    }
+
     #[test]
     fn fr_l18_pane_header_icon_toggle_at_420_and_below_segment_above() {
         assert!(super::pane_header_uses_icon_toggle(360.0));

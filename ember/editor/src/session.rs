@@ -98,6 +98,21 @@ enum Command {
 }
 
 /// A connected editor session. Cheap to share by reference; every method is a non-blocking send.
+/// Lists directories on the remote server: [`EditorSession::lister`].
+#[derive(Clone)]
+pub struct DirLister {
+    fs: Arc<RemoteFs>,
+    authority: String,
+}
+
+impl DirLister {
+    /// `(name, FileType)` entries of the directory at `path`.
+    pub async fn read_dir(&self, path: &str) -> Result<Vec<(String, u32)>, Error> {
+        let uri = UriComponents::remote(&self.authority, path);
+        self.fs.readdir(&uri).await.map_err(Error::Conn)
+    }
+}
+
 pub struct EditorSession {
     tx: mpsc::UnboundedSender<Command>,
     authority: String,
@@ -267,6 +282,12 @@ impl EditorSession {
     /// `vscode-remote://<authority><workspace_path>` for the root workspace folder.
     pub fn workspace_uri(&self) -> UriComponents {
         self.uri(&self.workspace_path)
+    }
+
+    /// A cheap handle that can list directories on its own, so a long walk runs in a task of its
+    /// own and does not hold the session's command loop.
+    pub fn lister(&self) -> DirLister {
+        DirLister { fs: Arc::clone(&self.fs), authority: self.authority.clone() }
     }
 
     /// List entries `(name, FileType)` in a directory on the remote server.

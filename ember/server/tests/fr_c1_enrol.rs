@@ -43,7 +43,7 @@ fn fx() -> Fx {
     let enrol = Enrol::new(store);
     let token = auth::load_or_create_token(dir.path()).unwrap();
     let a = ServerAuth::new(token.clone(), LISTEN.parse::<SocketAddr>().unwrap(), []);
-    let app = auth::protect(ember_server::computers::enrol::router(enrol.clone(), BASE.into(), Arc::new(NoRegistrar)), a);
+    let app = auth::protect(ember_server::computers::enrol::router(enrol.clone(), ember_server::computers::enrol::DoorUrl::Url(BASE.into()), Arc::new(NoRegistrar)), a);
     Fx { app, enrol, token, _dir: dir }
 }
 

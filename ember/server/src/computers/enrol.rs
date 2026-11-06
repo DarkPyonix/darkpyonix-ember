@@ -353,9 +353,8 @@ impl NodeInfo {
 
     /// A short, readable form of the peer id for the owner to compare, `None` without one.
     pub fn fingerprint(&self) -> Option<String> {
-        let p = self.peer_id.as_ref()?;
-        let head: Vec<&str> = (0..4).filter_map(|i| p.get(i * 4..i * 4 + 4)).collect();
-        Some(head.join(" "))
+        // `peer_id` passed validation as 64 hex digits of either case; the shared function wants lowercase.
+        ember_transport::fingerprint_hex(&self.peer_id.as_ref()?.to_ascii_lowercase())
     }
 }
 
@@ -519,7 +518,8 @@ pub enum Delivery {
     /// Still waiting for the owner.
     Pending,
     /// The credential, handed over once and wiped from the server's memory.
-    Joined { token: Secret, name: String, computer_id: String },
+    /// `server_peer_id` is the server's own public transport id, `None` when the transport is off.
+    Joined { token: Secret, name: String, computer_id: String, server_peer_id: Option<String> },
     /// The credential was already delivered.
     Delivered,
     Denied,
@@ -552,6 +552,12 @@ pub enum EnrolError {
     Expired(String),
     #[error("illegal enrolment transition {from} to {to}")]
     IllegalTransition { from: &'static str, to: &'static str },
+    /// The enrol door is off: no code is minted, because a command could not work.
+    #[error("The enrol door is off: set EMBER_ENROL_LISTEN (and EMBER_ENROL_PUBLIC_URL) and restart")]
+    DoorOff,
+    /// The door is on but the server has no address to print for it.
+    #[error("Set EMBER_ENROL_PUBLIC_URL to the address the other machine uses")]
+    DoorUrlUnknown,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -732,6 +738,9 @@ pub struct Enrol {
     /// Serializes every state change after the redeem (confirm, deny, delivery, expiry), so
     /// exactly one of two racing calls wins and no registration is made for the loser.
     gate: Mutex<()>,
+    /// The server's own transport peer id (public, 64 lowercase hex), set once at construction by
+    /// [`Enrol::with_server_peer_id`] and `None` when the transport is off. Never per request.
+    server_peer_id: Option<String>,
 }
 
 impl Enrol {
@@ -749,7 +758,25 @@ impl Enrol {
             registrar: Mutex::new(None),
             orphans: Mutex::new(Vec::new()),
             gate: Mutex::new(()),
+            server_peer_id: None,
         })
+    }
+
+    /// Like [`Enrol::new`] (default limits), with the server's transport peer id for the `joined` delivery
+    /// (FR-C2). The id is kept only when it is exactly 64 lowercase hex chars (the shape
+    /// [`ember_transport::fingerprint_hex`] accepts); a malformed value is dropped to `None`, never
+    /// stored. `None` is the transport being off.
+    pub fn with_server_peer_id(store: Arc<Store>, server_peer_id: Option<String>) -> Arc<Enrol> {
+        let server_peer_id = server_peer_id.filter(|id| ember_transport::fingerprint_hex(id).is_some());
+        let mut e = Self::new(store);
+        Arc::get_mut(&mut e).expect("a fresh Arc has one owner").server_peer_id = server_peer_id;
+        e
+    }
+
+    /// The server's transport peer id (64 lowercase hex), `None` when the transport is off. The
+    /// mint pins it in the command (`--server-fingerprint`).
+    pub fn server_peer_id(&self) -> Option<&str> {
+        self.server_peer_id.as_deref()
     }
 
     /// Give the service the registry, so a computer registered by a confirm whose credential was
@@ -771,8 +798,10 @@ impl Enrol {
     }
 
     /// Mint a code for a computer to be called `name`. `ttl` defaults to 10 minutes and is
-    /// clamped to 10 minutes; zero is refused. `base_url` is the server's externally reachable
-    /// URL, which the server does not know by itself: the caller passes it. Expired rows older
+    /// clamped to 10 minutes; zero is refused. `base_url` is the URL of the enrol DOOR as the other
+    /// machine reaches it (not the owner API address); the caller passes it. When the service
+    /// holds the server's peer id, the command ends in `--server-fingerprint <full 64 hex id>`
+    /// (the pin the node checks; the short form is for human screens only). Expired rows older
     /// than [`SWEEP_GRACE_MS`] are deleted.
     pub fn mint(&self, name: &str, now_ms: i64, ttl: Option<Duration>, base_url: &str) -> Result<Minted, EnrolError> {
         let name = check_name(name)?;
@@ -793,7 +822,11 @@ impl Enrol {
                 params![id, digest(&code), name, now_ms, expires_ms],
             )?;
         }
-        let command = format!("ember-node enrol {code} --server {base}");
+        let mut command = format!("ember-node enrol {code} --server {base}");
+        if let Some(id) = &self.server_peer_id {
+            command.push_str(" --server-fingerprint ");
+            command.push_str(id);
+        }
         Ok(Minted { id, code: EnrolCode(Zeroizing::new(code)), expires_ms, command })
     }
 
@@ -1186,6 +1219,7 @@ impl Enrol {
                             token,
                             name: row.final_name.unwrap_or(row.name),
                             computer_id: row.computer_id.unwrap_or_default(),
+                            server_peer_id: self.server_peer_id.clone(),
                         }
                     }
                     _ => {
@@ -1215,18 +1249,30 @@ impl Enrol {
 // Admin routes (local, token-protected router only; never the guest door, never the enrol door)
 // ---------------------------------------------------------------------------------------------
 
+/// What the owner router knows about the enrol door, to print a working command (FR-C1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DoorUrl {
+    /// `EMBER_ENROL_LISTEN` is unset: no door, so no code is minted.
+    Off,
+    /// The door is on, but its address is unspecified (0.0.0.0, ::) and `EMBER_ENROL_PUBLIC_URL`
+    /// is unset, so the server cannot know what the other machine should type.
+    Unknown,
+    /// The door URL the other machine uses (`http(s)://host[:port]`).
+    Url(String),
+}
+
 #[derive(Clone)]
 struct AppState {
     enrol: Arc<Enrol>,
-    base_url: String,
+    door: DoorUrl,
     registrar: Arc<dyn Registrar>,
 }
 
 /// `POST /api/computers/enrol-codes`, `GET` and `DELETE /api/computers/enrol-codes/{id}`, and
 /// the owner's `POST /api/computers/enrol-codes/{id}/confirm` and `.../deny`. `base_url` is the
-/// server's externally reachable URL for the printed command; `registrar` registers a confirmed
-/// computer. There is no redeem route. Merge it only into the token-protected local router.
-pub fn router(enrol: Arc<Enrol>, base_url: String, registrar: Arc<dyn Registrar>) -> Router {
+/// enrol door's URL for the printed command (the door port, not the owner API address; `Off` and
+/// `Unknown` make the mint answer 409); `registrar` registers a confirmed computer. There is no redeem route. Merge it only into the token-protected local router.
+pub fn router(enrol: Arc<Enrol>, door: DoorUrl, registrar: Arc<dyn Registrar>) -> Router {
     // The registry is needed to remove the computer of an enrolment that expires undelivered.
     // The first sweep covers a `confirmed` row left by a restart.
     enrol.set_registrar(registrar.clone());
@@ -1238,7 +1284,7 @@ pub fn router(enrol: Arc<Enrol>, base_url: String, registrar: Arc<dyn Registrar>
         .route("/api/computers/enrol-codes/{id}", get(status).delete(cancel))
         .route("/api/computers/enrol-codes/{id}/confirm", post(confirm))
         .route("/api/computers/enrol-codes/{id}/deny", post(deny))
-        .with_state(AppState { enrol, base_url, registrar })
+        .with_state(AppState { enrol, door, registrar })
 }
 
 struct ApiError(EnrolError);
@@ -1254,6 +1300,8 @@ impl IntoResponse for ApiError {
                 (StatusCode::CONFLICT, Some("wrong_state"))
             }
             EnrolError::Expired(_) => (StatusCode::GONE, Some("expired")),
+            EnrolError::DoorOff => (StatusCode::CONFLICT, Some("door_off")),
+            EnrolError::DoorUrlUnknown => (StatusCode::CONFLICT, Some("door_url_unknown")),
             EnrolError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),
         };
         // An internal error does not echo database text.
@@ -1284,20 +1332,37 @@ struct MintBody {
 }
 
 async fn mint(AxumState(s): AxumState<AppState>, Json(b): Json<MintBody>) -> Result<Response, ApiError> {
-    let m = s.enrol.mint(
-        &b.name,
-        crate::store::now_ms(),
-        b.ttl_secs.map(Duration::from_secs),
-        &s.base_url,
-    )?;
+    // No door, no code: the owner is never handed a secret that cannot be redeemed.
+    let door_url = match &s.door {
+        DoorUrl::Off => return Err(EnrolError::DoorOff.into()),
+        DoorUrl::Unknown => return Err(EnrolError::DoorUrlUnknown.into()),
+        DoorUrl::Url(u) => check_base_url(u)?,
+    };
+    let m = s.enrol.mint(&b.name, crate::store::now_ms(), b.ttl_secs.map(Duration::from_secs), &door_url)?;
     tracing::info!(enrol = %m.id, "enrol code minted");
-    let body = json!({
+    let mut warning = format!("The code is shown once. Check that {door_url} is reachable from the other machine.");
+    if door_url.starts_with("http://") {
+        warning.push_str(
+            " The enrol door speaks plain HTTP. Anyone on the network path can read the code and the credential. \
+             Use it on a trusted network, or put TLS in front of it and set EMBER_ENROL_PUBLIC_URL to the https address.",
+        );
+    }
+    let mut body = json!({
         "id": m.id,
         "code": m.code.expose(),
         "expires_ms": m.expires_ms,
         "command": m.command,
-        "warning": format!("The code is shown once. Check that {} is reachable from the other machine.", s.base_url.trim_end_matches('/')),
+        "warning": warning,
+        "door": "on",
+        "server": door_url,
     });
+    // Both keys are absent, never null, when the transport is off.
+    if let (Some(id), Some(map)) = (s.enrol.server_peer_id(), body.as_object_mut()) {
+        map.insert("server_peer_id".into(), json!(id));
+        if let Some(short) = ember_transport::fingerprint_hex(id) {
+            map.insert("server_fingerprint".into(), json!(short));
+        }
+    }
     let mut res = (StatusCode::CREATED, Json(body)).into_response();
     res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(res)
@@ -1417,6 +1482,76 @@ mod tests {
         (r.enrol_id, r.poll_secret.expose().to_string())
     }
 
+    // ---- C3b: the server peer id in the joined delivery ----
+
+    /// Confirm and take the delivery of one enrolment on `e`.
+    fn joined_of(e: &Enrol, now: i64) -> Delivery {
+        let fake = Fake::default();
+        let (id, secret) = open(e, now);
+        e.confirm(&id, None, now + 10, &fake).unwrap();
+        e.take_delivery(&id, &secret, now + 12).unwrap()
+    }
+
+    fn server_id_of(d: Delivery) -> Option<String> {
+        match d {
+            Delivery::Joined { server_peer_id, .. } => server_peer_id,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn enrol_with(id: Option<&str>) -> Arc<Enrol> {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        Enrol::with_server_peer_id(store, id.map(String::from))
+    }
+
+    #[test]
+    fn fr_c2_joined_carries_the_server_peer_id_when_set() {
+        let id = "ab".repeat(32);
+        let e = enrol_with(Some(&id));
+        assert_eq!(server_id_of(joined_of(&e, T0)), Some(id));
+    }
+
+    #[test]
+    fn fr_c2_joined_has_none_without_a_transport() {
+        let (_, e) = svc();
+        assert_eq!(server_id_of(joined_of(&e, T0)), None);
+        let e = enrol_with(None);
+        assert_eq!(server_id_of(joined_of(&e, T0)), None);
+    }
+
+    #[test]
+    fn fr_c2_a_malformed_server_peer_id_is_dropped_never_stored() {
+        for bad in ["zz".repeat(32), "a".repeat(63), "a".repeat(65), "AB".repeat(32), String::new(), " ".repeat(64)] {
+            let e = enrol_with(Some(&bad));
+            assert_eq!(e.server_peer_id, None, "{bad:?}");
+            assert_eq!(server_id_of(joined_of(&e, T0)), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn fr_c2_the_server_peer_id_is_not_per_request() {
+        let id = "cd".repeat(32);
+        let e1 = enrol_with(Some(&id));
+        let e2 = enrol_with(Some(&id));
+        let a = server_id_of(joined_of(&e1, T0));
+        let b = server_id_of(joined_of(&e2, T0));
+        assert_eq!(a, b);
+        assert_eq!(a, Some(id.clone()));
+        // A second delivery on the same instance gives the same value.
+        assert_eq!(server_id_of(joined_of(&e1, T0 + 1_000_000)), Some(id));
+    }
+
+    #[test]
+    fn fr_c2_fingerprint_of_hex_matches_nodeinfo_fingerprint() {
+        for id in ["ab".repeat(32), format!("0123456789abcdef{}", "e".repeat(48))] {
+            let mut i = info();
+            i.peer_id = Some(id.clone());
+            assert_eq!(ember_transport::fingerprint_hex(&id), i.fingerprint());
+            assert!(i.fingerprint().is_some());
+        }
+        assert_eq!(info().fingerprint(), None);
+    }
+
     #[test]
     fn fr_c1_migration_creates_the_table() {
         let (store, _) = svc();
@@ -1505,6 +1640,137 @@ mod tests {
         let other = mint(&e, T0);
         assert_ne!(c, other.code.expose());
         assert_eq!(m.command, format!("ember-node enrol {c} --server {BASE}"));
+    }
+
+    // ---- C3c: the command names the door and pins the full server peer id ----
+
+    #[test]
+    fn fr_c2_command_has_the_full_server_peer_id_as_the_pin() {
+        let id = "ab".repeat(32);
+        let e = enrol_with(Some(&id));
+        let m = mint(&e, T0);
+        let c = m.code.expose();
+        assert_eq!(m.command, format!("ember-node enrol {c} --server {BASE} --server-fingerprint {id}"));
+        // The full 64 hex, never the short human form.
+        let short = ember_transport::fingerprint_hex(&id).unwrap();
+        assert!(!m.command.contains(&short), "{}", m.command);
+        assert_eq!(m.command.rsplit(' ').next().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn fr_c2_command_is_the_old_string_without_a_server_peer_id() {
+        let e = enrol_with(None);
+        let m = mint(&e, T0);
+        assert_eq!(m.command, format!("ember-node enrol {} --server {BASE}", m.code.expose()));
+        assert!(!m.command.contains("--server-fingerprint"));
+        assert_eq!(e.server_peer_id(), None);
+    }
+
+    #[test]
+    fn fr_c2_server_peer_id_accessor_returns_the_stored_id() {
+        let id = "cd".repeat(32);
+        assert_eq!(enrol_with(Some(&id)).server_peer_id(), Some(id.as_str()));
+    }
+
+    /// The owner router with a given door state, plus the store to count rows.
+    fn owner_app(enrol: Arc<Enrol>, door: DoorUrl) -> Router {
+        struct Nop;
+        impl Registrar for Nop {
+            fn name_taken(&self, _n: &str) -> bool {
+                false
+            }
+            fn register(&self, _n: &str, _t: &str, _i: &NodeInfo, _o: &str) -> Result<String, RegisterError> {
+                Err(RegisterError::Failed("unused".into()))
+            }
+            fn remove(&self, _id: &str) {}
+        }
+        router(enrol, door, Arc::new(Nop))
+    }
+
+    async fn post_mint(app: &Router, body: serde_json::Value) -> (StatusCode, serde_json::Value, String, Option<String>) {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/computers/enrol-codes")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let r = app.clone().oneshot(req).await.unwrap();
+        let st = r.status();
+        let cc = r.headers().get(header::CACHE_CONTROL).and_then(|v| v.to_str().ok()).map(String::from);
+        let bytes = r.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        (st, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null), text, cc)
+    }
+
+    fn row_count(store: &Store) -> i64 {
+        store.conn().query_row("SELECT COUNT(*) FROM enrol_codes", [], |r| r.get(0)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn fr_c2_mint_answer_names_the_door_and_the_server_id() {
+        let id = "0f".repeat(32);
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let e = Enrol::with_server_peer_id(store.clone(), Some(id.clone()));
+        let door = "http://192.168.0.5:8741";
+        let app = owner_app(e, DoorUrl::Url(door.into()));
+        let (st, b, text, cc) = post_mint(&app, json!({"name": "laptop"})).await;
+        assert_eq!(st, StatusCode::CREATED, "{text}");
+        assert_eq!(cc.as_deref(), Some("no-store"));
+        assert_eq!(b["door"], "on");
+        assert_eq!(b["server"], door);
+        assert_eq!(b["server_peer_id"], id);
+        assert_eq!(b["server_fingerprint"], ember_transport::fingerprint_hex(&id).unwrap());
+        let cmd = b["command"].as_str().unwrap();
+        assert!(cmd.starts_with("ember-node enrol dpe_"), "{cmd}");
+        assert!(cmd.contains(&format!(" --server {door} ")), "{cmd}");
+        assert!(cmd.ends_with(&format!(" --server-fingerprint {id}")), "{cmd}");
+        let w = b["warning"].as_str().unwrap();
+        assert!(w.contains("shown once") && w.contains(door) && w.contains("plain HTTP"), "{w}");
+        assert_eq!(row_count(&store), 1);
+    }
+
+    #[tokio::test]
+    async fn fr_c2_mint_answer_omits_the_id_keys_without_a_transport() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let app = owner_app(Enrol::new(store), DoorUrl::Url("https://enrol.example.com".into()));
+        let (st, b, text, _) = post_mint(&app, json!({"name": "laptop"})).await;
+        assert_eq!(st, StatusCode::CREATED, "{text}");
+        assert!(b.get("server_peer_id").is_none() && b.get("server_fingerprint").is_none(), "{text}");
+        assert!(!text.contains("server_peer_id") && !text.contains("server_fingerprint"), "{text}");
+        assert_eq!(b["door"], "on");
+        assert_eq!(b["server"], "https://enrol.example.com");
+        // https: no plain-HTTP sentence.
+        assert!(!b["warning"].as_str().unwrap().contains("plain HTTP"));
+        assert!(!b["command"].as_str().unwrap().contains("--server-fingerprint"));
+    }
+
+    #[tokio::test]
+    async fn fr_c2_mint_with_the_door_off_is_409_and_creates_no_row() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let app = owner_app(Enrol::new(store.clone()), DoorUrl::Off);
+        let (st, b, text, _) = post_mint(&app, json!({"name": "laptop"})).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{text}");
+        assert_eq!(b["error"], "door_off");
+        assert_eq!(
+            b["message"],
+            "The enrol door is off: set EMBER_ENROL_LISTEN (and EMBER_ENROL_PUBLIC_URL) and restart"
+        );
+        assert!(!text.contains("dpe_") && b.get("code").is_none() && b.get("command").is_none(), "{text}");
+        assert_eq!(row_count(&store), 0);
+    }
+
+    #[tokio::test]
+    async fn fr_c2_mint_with_an_unknown_door_url_is_409_and_creates_no_row() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let app = owner_app(Enrol::new(store.clone()), DoorUrl::Unknown);
+        let (st, b, text, _) = post_mint(&app, json!({"name": "laptop"})).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{text}");
+        assert_eq!(b["error"], "door_url_unknown");
+        assert_eq!(b["message"], "Set EMBER_ENROL_PUBLIC_URL to the address the other machine uses");
+        assert!(!text.contains("dpe_") && b.get("code").is_none(), "{text}");
+        assert_eq!(row_count(&store), 0);
     }
 
     #[test]
@@ -1787,7 +2053,7 @@ mod tests {
         assert!(!dump(&store).contains(&token));
 
         match e.take_delivery(&id, &secret, T0 + 12).unwrap() {
-            Delivery::Joined { token: t, name, computer_id } => {
+            Delivery::Joined { token: t, name, computer_id, .. } => {
                 assert_eq!(t.expose(), token);
                 assert_eq!(name, "laptop");
                 assert_eq!(computer_id, "computer-1");

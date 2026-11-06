@@ -437,6 +437,58 @@ pub fn split_view(class: WindowSizeClass) -> bool {
     class != WindowSizeClass::Compact
 }
 
+/// Whether opening a room calls the read marker: only when the person clicked it (the
+/// auto-selected room of `initial_room` stays unread) and it has unread messages. FR-L12, #509.
+pub fn should_mark_read(user_clicked: bool, unread: u32) -> bool {
+    user_clicked && unread > 0
+}
+
+/// The room to show when none is open. Side by side (the split layout) the first room the list
+/// shows is opened for the person (`channels.js` opens the first room); a compact window keeps
+/// the list first, and no rooms leave the empty state. FR-L12, #509.
+pub fn initial_room(rooms: &[Room], project_order: &[String], filter: &ListFilter, split: bool) -> Option<String> {
+    if !split {
+        return None;
+    }
+    group_rooms(rooms, project_order, filter).into_iter().flat_map(|s| s.rooms).map(|r| r.id).next()
+}
+
+/// The mark of a channel: one of six motifs (`channels.js` `MOTIFS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomMotif {
+    Pulse,
+    Bars,
+    Radar,
+    Orbit,
+    Wave,
+    Spark,
+}
+
+/// The motif of a room. Ember's channel has no motif field, so it is derived from the room id
+/// the way the mockup does for rooms it has no fixed motif for: the sum of the id's characters
+/// modulo six. The same room always gets the same motif; nothing is stored on the server.
+pub fn room_motif(room_id: &str) -> RoomMotif {
+    const ALL: [RoomMotif; 6] = [RoomMotif::Pulse, RoomMotif::Bars, RoomMotif::Radar, RoomMotif::Orbit, RoomMotif::Wave, RoomMotif::Spark];
+    let sum: u32 = room_id.chars().fold(0u32, |a, c| a.wrapping_add(c as u32));
+    ALL[(sum % 6) as usize]
+}
+
+/// How a message sender's picture is drawn: the drawn character of an agent whose harness is
+/// known, the letter circle otherwise (a person, or an agent with no harness on record).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AvatarKind {
+    Character,
+    Letter,
+}
+
+pub fn avatar_kind(is_agent: bool, harness: &str) -> AvatarKind {
+    if is_agent && !harness.trim().is_empty() {
+        AvatarKind::Character
+    } else {
+        AvatarKind::Letter
+    }
+}
+
 /// What a compact window shows: the room when one is open, the list otherwise.
 pub fn compact_shows_room(open: &Option<String>) -> bool {
     open.is_some()
@@ -639,6 +691,14 @@ pub fn create_error_text(status: Option<u16>, code: Option<&str>) -> &'static st
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l12_only_a_click_on_an_unread_room_marks_it_read() {
+        assert!(super::should_mark_read(true, 3));
+        assert!(!super::should_mark_read(false, 3), "auto-selection never marks");
+        assert!(!super::should_mark_read(true, 0), "a read room needs no call");
+        assert!(!super::should_mark_read(false, 0));
+    }
+
     #[test]
     fn fr_t10_send_blocks_while_in_flight() {
         assert!(SendState::Idle.can_send("hi"));
@@ -902,6 +962,50 @@ mod layout_tests {
         assert!(split_view(WindowSizeClass::Expanded));
         assert!(!compact_shows_room(&None));
         assert!(compact_shows_room(&Some("a".into())));
+    }
+
+    fn room_of(id: &str, project: &str, at: i64) -> Room {
+        Room {
+            id: id.into(),
+            name: id.into(),
+            project: project.into(),
+            members: vec![],
+            messages: vec![Message { id: "m".into(), from: "x".into(), text: "t".into(), at, unread: 0, author_name: String::new(), author_kind: String::new() }],
+            unread: 0,
+        }
+    }
+
+    #[test]
+    fn fr_l12_initial_room_is_the_first_listed_room_when_split() {
+        let rooms = vec![room_of("old", "ember", 10), room_of("new", "ember", 20), room_of("other", "core", 30)];
+        let all = ListFilter::default();
+        assert_eq!(initial_room(&rooms, &[], &all, true), Some("new".to_string()));
+        let core = ListFilter { project: Some("core".into()), query: String::new() };
+        assert_eq!(initial_room(&rooms, &[], &core, true), Some("other".to_string()));
+    }
+
+    #[test]
+    fn fr_l12_initial_room_is_none_when_compact_or_no_rooms() {
+        let rooms = vec![room_of("a", "ember", 1)];
+        assert_eq!(initial_room(&rooms, &[], &ListFilter::default(), false), None);
+        assert_eq!(initial_room(&[], &[], &ListFilter::default(), true), None);
+        let none = ListFilter { project: Some("nope".into()), query: String::new() };
+        assert_eq!(initial_room(&rooms, &[], &none, true), None);
+    }
+
+    #[test]
+    fn fr_l12_room_motif_is_stable_and_spreads_over_the_six() {
+        assert_eq!(room_motif("r1"), room_motif("r1"));
+        let motifs: std::collections::HashSet<_> = ["r1", "r2", "r3", "r4", "r5", "r6"].iter().map(|i| format!("{:?}", room_motif(i))).collect();
+        assert_eq!(motifs.len(), 6);
+        assert_eq!(room_motif(""), RoomMotif::Pulse);
+    }
+
+    #[test]
+    fn fr_l12_agent_with_a_harness_gets_its_character_others_a_letter() {
+        assert_eq!(avatar_kind(true, "claude"), AvatarKind::Character);
+        assert_eq!(avatar_kind(true, " "), AvatarKind::Letter);
+        assert_eq!(avatar_kind(false, "claude"), AvatarKind::Letter);
     }
 
     fn blank() -> ember_client::channels::Channel {

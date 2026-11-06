@@ -12,7 +12,8 @@
 use std::collections::BTreeSet;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, MemberCwd, TeamRow};
+use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, MemberCwd, TeamRow, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState};
+use ember_client::api::{GitPrMergeMethod, GitPrReviewAction};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -35,7 +36,7 @@ use crate::ui::shell::NavMenu;
 use crate::ui::Route;
 
 use super::components::{
-    AppButton, ButtonKind, EmberCard, EmberField, FieldOptions, Label, MenuRow, OptionSheet,
+    AppButton, ButtonKind, EmberCard, EmberField, FieldOptions, InsetPanel, Label, MenuRow, OptionSheet,
     PickChip, Pill, PillTone, Txt,
 };
 use super::notice;
@@ -1480,7 +1481,7 @@ fn SectionContent(
         (Some(s), Section::Conflicts) => ConflictsPane(&s.conflicts, actions, layout),
         (Some(_), Section::History) => HistoryPane(actions.as_ref().map(|a| (a.project.clone(), a.reload.get())), layout),
         (Some(s), Section::Stash) => StashPane(actions, stash_count, layout, !s.changes.is_empty()),
-        (Some(_), Section::PullRequests) => PullRequestsPane(actions, pr_count, pr_list, layout),
+        (Some(s), Section::PullRequests) => PullRequestsPane(actions, pr_count, pr_list, layout, Some(s.branch.clone())),
         (Some(_), Section::Team) => TeamPane(actions, team_count, pr_list, layout),
         (Some(_), Section::Branches) => BranchesPane(actions, branch_count, layout),
         _ => Unavailable(sec),
@@ -1921,7 +1922,7 @@ fn HistoryPane(project: Option<(String, u64)>, layout: PaneLayout) {
 /// How many pull requests the sample list holds (the header and the tab count follow it).
 fn sample_pr_count() -> usize {
     match sample_prs() {
-        PrLoad::Ready(list) => list.len(),
+        PrLoad::Ready(list) => list.iter().filter(|e| e.state == ember_client::api::GitPrState::Open).count(),
         _ => 0,
     }
 }
@@ -1992,35 +1993,282 @@ fn pr_checks_tone(e: &PrEntry) -> PillTone {
     }
 }
 
-/// One pull request: number and title, meta line, the pills and the merge gate line. The row has
-/// no click yet (a 상세 pane and the merge button are not built).
-fn PullRequestRow(e: &PrEntry) {
+/// One pull request: number and title, meta line, the pills and the merge gate line. A tap on
+/// the row selects it for the detail; the selected row is highlighted.
+fn PullRequestRow(e: &PrEntry, selected: bool, on_select: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
-        Txt(&format!("#{} {}", e.number, e.title), TypeRole::BodyStrong, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
-        Txt(&pr_meta(e), TypeRole::Caption, Some(paint(p.text_2)), Some(2), Some(TextOverflow::Ellipsis), None, None);
-        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-            Pill(e.state_text, pr_state_tone(e), true);
-            if e.draft {
-                Pill("초안", PillTone::Grey, true);
-            }
-            Pill(e.review_text, pr_review_tone(e), true);
-            Pill(&e.checks_text, pr_checks_tone(e), true);
+    let fill = if selected { p.surface_2 } else { p.surface };
+    let mut frame = Modifier::new().fill_max_width().background(paint(fill));
+    if selected {
+        frame = frame.border(2.0, paint(p.ink));
+    }
+    cu::Box().modifier(frame).content(move || {
+        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+            Txt(&format!("#{} {}", e.number, e.title), TypeRole::BodyStrong, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
+            Txt(&pr_meta(e), TypeRole::Caption, Some(paint(p.text_2)), Some(2), Some(TextOverflow::Ellipsis), None, None);
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                Pill(e.state_text, pr_state_tone(e), true);
+                if e.draft {
+                    Pill("초안", PillTone::Grey, true);
+                }
+                Pill(e.review_text, pr_review_tone(e), true);
+                Pill(&e.checks_text, pr_checks_tone(e), true);
+            });
+            let gate = if e.can_merge { paint(p.green.strong) } else { paint(p.text_2) };
+            Label(&e.gate_text, Fs::Sm, Weight::Regular, Some(gate), None);
         });
-        let gate = if e.can_merge { paint(p.green.strong) } else { paint(p.text_2) };
-        Label(&e.gate_text, Fs::Sm, Weight::Regular, Some(gate), None);
+        FocusOverlay(&format!("풀 리퀘스트 #{} {}", e.number, e.title), on_select);
     });
 }
 
-/// 풀 리퀘스트: the repository's pull requests with checks, review and the merge gate. `actions`
-/// is the project and the screen's reload counter; `None` shows sample pull requests. `count` is
-/// written for the section list (the open ones).
-fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>, shared: MutableState<Vec<PrEntry>>, layout: PaneLayout) {
+/// The sample detail of a sample pull request (captures and a screen without a server).
+fn sample_pr_detail(number: u64) -> PrDetailLoad {
+    let PrLoad::Ready(list) = sample_prs() else { return PrDetailLoad::Idle };
+    let Some(e) = list.iter().find(|e| e.number == number) else {
+        return PrDetailLoad::Failed("풀 리퀘스트를 찾을 수 없습니다".to_string());
+    };
+    use CheckClass::*;
+    use ReviewerState as R;
+    let (files, checks, reviewers, comments): (&str, Vec<(&str, CheckClass)>, Vec<(&str, R)>, Vec<(&str, &str)>) = match number {
+        412 => (
+            "파일 3 +40 -2",
+            vec![("build", Passed), ("test", Passed), ("lint", Passed), ("clippy", Passed)],
+            vec![("Minji Kim", R::Approved)],
+            vec![("Minji Kim", "세션 shim 위치가 좋습니다. 병합해도 되겠습니다.")],
+        ),
+        409 => (
+            "파일 2 +18 -6",
+            vec![("build", Passed), ("test", Failed), ("lint", Passed), ("clippy", Passed)],
+            vec![("BREW", R::Waiting)],
+            vec![("Jisoo Park", "detach가 끝나기 전에 egress를 멈추면 어떻게 되나요?")],
+        ),
+        405 => (
+            "파일 7 +210 -14",
+            vec![("build", Passed), ("test", Pending), ("lint", Pending)],
+            Vec::new(),
+            Vec::new(),
+        ),
+        _ => (
+            "파일 1 +22 -0",
+            vec![("build", Passed), ("test", Passed), ("lint", Passed), ("clippy", Passed)],
+            vec![("BREW", R::Approved)],
+            Vec::new(),
+        ),
+    };
+    PrDetailLoad::Ready(PrDetailView {
+        number,
+        title: e.title.clone(),
+        state_text: e.state_text,
+        body_lines: vec!["요약과 변경 이유는 설명에 적습니다.".to_string()],
+        author: e.author.clone(),
+        head: e.head.clone(),
+        base: e.base.clone(),
+        files_text: files.to_string(),
+        checks: checks.into_iter().map(|(n, c)| (n.to_string(), c, c.label().to_string())).collect(),
+        ci_pill: e.checks_text.clone(),
+        checks_failed: e.checks_failed,
+        checks_pending: e.checks_pending,
+        review_pill: e.review_text,
+        review: e.review,
+        reviewers: reviewers.into_iter().map(|(n, s)| (n.to_string(), s)).collect(),
+        comments: comments.into_iter().map(|(a, t)| (a.to_string(), t.to_string())).collect(),
+        can_merge: e.can_merge,
+        merge_reason: e.gate_text.clone(),
+        open: e.state == ember_client::api::GitPrState::Open,
+        draft: e.draft,
+        head_sha: format!("{number:08x}").repeat(5),
+    })
+}
+
+fn reviewer_tone(s: ReviewerState) -> PillTone {
+    match s {
+        ReviewerState::Approved => PillTone::Green,
+        ReviewerState::ChangesRequested => PillTone::Red,
+        ReviewerState::Waiting => PillTone::Orange,
+        ReviewerState::Commented => PillTone::Grey,
+    }
+}
+
+fn detail_review_tone(r: ember_client::api::GitPrReview) -> PillTone {
+    use ember_client::api::GitPrReview::*;
+    match r {
+        Approved => PillTone::Green,
+        ChangesRequested => PillTone::Red,
+        ReviewRequired => PillTone::Orange,
+        None => PillTone::Grey,
+    }
+}
+
+fn detail_ci_tone(v: &PrDetailView) -> PillTone {
+    if v.checks_failed > 0 {
+        PillTone::Red
+    } else if v.checks_pending > 0 {
+        PillTone::Orange
+    } else if v.ci_pill == "체크 없음" {
+        PillTone::Grey
+    } else {
+        PillTone::Green
+    }
+}
+
+/// The meta line of the detail: author, head to base, and the file counts.
+fn pr_detail_meta(v: &PrDetailView) -> String {
+    format!("{} \u{00b7} {} \u{2192} {} \u{00b7} {}", v.author, v.head, v.base, v.files_text)
+}
+
+/// A filled 8 dp dot in the check's tone.
+fn StatusDot(class: CheckClass) {
+    let p = ember_theme().palette;
+    let color = match class {
+        CheckClass::Passed => p.green.strong,
+        CheckClass::Failed => p.red.strong,
+        CheckClass::Pending => p.orange.strong,
+    };
+    cu::Box().modifier(Modifier::new().size(8.0, 8.0).background(paint(color)).shape_role(ShapeRole::Full));
+}
+
+/// What the detail card asks of the pane: the review box text, the busy flag, whether the merge
+/// button is armed, and the two actions.
+struct DetailControls<R: Fn(GitPrReviewAction) + Clone + 'static, M: Fn() + Clone + 'static> {
+    review_text: MutableState<String>,
+    review_gen: MutableState<u64>,
+    /// The review action that is armed and asks again, if any.
+    armed_review: Option<GitPrReviewAction>,
+    busy: bool,
+    merge_armed: bool,
+    on_review: R,
+    on_merge: M,
+}
+
+/// The selected pull request, the part that scrolls: title, meta line, description, 검사, 리뷰
+/// and 리뷰 코멘트. The review box and 병합 are `PrDetailActions`, pinned below the scroll area.
+fn PrDetailBody(v: &PrDetailView) {
+    let p = ember_theme().palette;
+    VcsCard(|| {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+            Txt(&format!("#{} {}", v.number, v.title), TypeRole::BodyStrong, Some(paint(p.text)), Some(3), Some(TextOverflow::Ellipsis), None, None);
+            Txt(&pr_detail_meta(v), TypeRole::Caption, Some(paint(p.text_2)), Some(2), Some(TextOverflow::Ellipsis), None, None);
+            for line in &v.body_lines {
+                Label(line, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            }
+
+            InsetPanel(true, || {
+                cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        Label("검사", Fs::Md, Weight::Semibold, None, Some(1));
+                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                        Pill(&v.ci_pill, detail_ci_tone(v), true);
+                    });
+                    if v.checks.is_empty() {
+                        Label("검사가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    }
+                    for (name, class, label) in &v.checks {
+                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                            StatusDot(*class);
+                            Label(name, Fs::Sm, Weight::Regular, None, Some(1));
+                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            Label(label, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                        });
+                    }
+                });
+            });
+
+            InsetPanel(true, || {
+                cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        Label("리뷰", Fs::Md, Weight::Semibold, None, Some(1));
+                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                        Pill(v.review_pill, detail_review_tone(v.review), true);
+                    });
+                    if v.reviewers.is_empty() {
+                        Label("리뷰어 없음", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    }
+                    for (name, state) in &v.reviewers {
+                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                            Label(name, Fs::Sm, Weight::Regular, None, Some(1));
+                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            Pill(state.label(), reviewer_tone(*state), true);
+                        });
+                    }
+                });
+            });
+
+            Label("리뷰 코멘트", Fs::Md, Weight::Semibold, None, Some(1));
+            if v.comments.is_empty() {
+                Label("코멘트가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            }
+            for (author, text) in &v.comments {
+                cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    Label(author, Fs::Sm, Weight::Semibold, None, Some(1));
+                    Label(text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                });
+            }
+
+        });
+    });
+}
+
+/// The review box (the text, 코멘트, 변경 요청, 승인) and 병합 with its hint, for an open pull
+/// request. At the wide layout it sits below the scroll area, so it is always reachable.
+fn PrDetailActions<R: Fn(GitPrReviewAction) + Clone + 'static, M: Fn() + Clone + 'static>(v: &PrDetailView, ctl: DetailControls<R, M>) {
+    let p = ember_theme().palette;
+    let (merge_enabled, hint) = merge_button_state(v);
+    VcsCard(|| {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+            {
+                Label("리뷰 남기기", Fs::Md, Weight::Semibold, None, Some(1));
+                let text = ctl.review_text.clone();
+                key(ctl.review_gen.get(), || {
+                    cu::TextField().modifier(Modifier::new().fill_max_width().height(64.0))
+                        .text(text.get()).placeholder("코멘트나 변경 요청의 내용").multiline(true)
+                        .on_value_change(move |value| text.set(value));
+                });
+                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    for (action, kind) in [
+                        (GitPrReviewAction::Comment, ButtonKind::Default),
+                        (GitPrReviewAction::RequestChanges, ButtonKind::Destructive),
+                        (GitPrReviewAction::Approve, ButtonKind::Default),
+                    ] {
+                        let on_review = ctl.on_review.clone();
+                        let label = review_button_label(action, ctl.armed_review == Some(action));
+                        AppButton(label, None, kind, true, !ctl.busy, false, move || on_review(action));
+                    }
+                });
+                let on_merge = ctl.on_merge.clone();
+                AppButton(merge_button_text(ctl.merge_armed), None, ButtonKind::Primary, false, merge_enabled && !ctl.busy, true, move || on_merge());
+                match hint {
+                    Some(reason) => Label(&reason, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None),
+                    None => Label(MERGE_METHOD_TEXT, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None),
+                }
+            }
+        });
+    });
+}
+
+/// 풀 리퀘스트: the repository's pull requests with checks, review and the merge gate, and the
+/// selected one in full (checks, reviewers, comments, review box, merge; FR-G10 to FR-G12,
+/// #483). `actions` is the project and the screen's reload counter; `None` shows sample pull
+/// requests. `count` is written for the section list (the open ones). `branch` is the current
+/// branch, the head of a new pull request. The wide layout shows the list and the detail side by
+/// side (the first one selected until a tap); the compact one shows one at a time, with 목록으로.
+fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>, shared: MutableState<Vec<PrEntry>>, layout: PaneLayout, branch: Option<String>) {
     let p = ember_theme().palette;
     let key_project = actions.as_ref().map(|a| a.project.clone());
-    let state = remember_with_key(key_project, || mutable_state_of(PrLoad::Loading));
+    let state = remember_with_key(key_project.clone(), || mutable_state_of(PrLoad::Loading));
     let filter = remember(|| mutable_state_of(PrFilter::Open));
     let retry = remember(|| mutable_state_of(0_u64));
+    // `EMBER_CR_VCS_PR=<n>` opens that pull request directly, for captures without clicks.
+    let selected = remember_with_key(key_project.clone(), || mutable_state_of(std::env::var("EMBER_CR_VCS_PR").ok().and_then(|v| v.parse::<u64>().ok())));
+    let detail = remember_with_key(key_project, || mutable_state_of(PrDetailLoad::Idle));
+    let wanted = remember(|| mutable_state_of(None::<u64>));
+    let busy = remember(|| mutable_state_of(false));
+    // The merge button as (pull request number, arm time in ms); cleared by a reload or a timeout.
+    let armed = remember(|| mutable_state_of(None::<(usize, i64)>));
+    let form_open = remember(|| mutable_state_of(false));
+    let f_title = remember(|| mutable_state_of(String::new()));
+    let f_body = remember(|| mutable_state_of(String::new()));
+    let f_draft = remember(|| mutable_state_of(false));
+    let f_gen = remember(|| mutable_state_of(0_u64));
     if let Some(a) = actions.clone() {
         let (st, cnt, shown, shared) = (state.clone(), count.clone(), filter.get(), shared.clone());
         launched_effect((a.project.clone(), a.reload.get(), retry.get(), shown.arg()), move || async move {
@@ -2042,6 +2290,171 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
     }
     let shown = filter.get();
     let current = if actions.is_some() { state.get() } else { sample_prs() };
+    let two = layout == PaneLayout::Two;
+    let first = match &current {
+        PrLoad::Ready(list) if two => list.first().map(|e| e.number),
+        _ => None,
+    };
+    let effective = selected.get().or(first);
+    // The draft of the review box belongs to one pull request: another one starts empty.
+    let draft_key = review_draft_key(actions.as_ref().map(|a| a.project.as_str()).unwrap_or(""), effective);
+    let review_text = remember_with_key(draft_key.clone(), || mutable_state_of(String::new()));
+    let review_gen = remember_with_key(draft_key, || mutable_state_of(0_u64));
+    // 승인 and 변경 요청 as (key of the action, arm time in ms); only one is armed, and 병합 clears it.
+    let review_armed = remember(|| mutable_state_of(None::<(usize, i64)>));
+
+    if let Some(a) = actions.clone() {
+        let (det, disarm, disarm_review, wanted) = (detail.clone(), armed.clone(), review_armed.clone(), wanted.clone());
+        launched_effect((a.project.clone(), effective, a.reload.get(), retry.get()), move || async move {
+            disarm.set(None);
+            disarm_review.set(None);
+            wanted.set(effective);
+            let Some(number) = effective else {
+                det.set(PrDetailLoad::Idle);
+                return;
+            };
+            if crate::services::try_services().is_some() {
+                if !matches!(det.get(), PrDetailLoad::Ready(ref v) if v.number == number) {
+                    det.set(PrDetailLoad::Loading);
+                }
+                let name = a.project.clone();
+                crate::services::run_shared(async move { pr_detail_from(fetch_pr_detail(&name, number).await) }, move |result| {
+                    if wanted.get() == Some(number) {
+                        det.set(result);
+                    }
+                });
+            } else {
+                det.set(PrDetailLoad::Failed("서버에 연결되어 있지 않아 풀 리퀘스트를 불러올 수 없습니다.".to_string()));
+            }
+        });
+    }
+    let detail_now = if actions.is_some() {
+        detail.get()
+    } else {
+        effective.map(sample_pr_detail).unwrap_or(PrDetailLoad::Idle)
+    };
+    let is_busy = busy.get();
+    // The head the user sees; the merge carries it, and a view without one cannot merge.
+    let head_sha = match &detail_now {
+        PrDetailLoad::Ready(v) => v.head_sha.clone(),
+        _ => String::new(),
+    };
+    // The review box and 병합 are pinned below the scroll area, for an open pull request only.
+    let actions_view = match &detail_now {
+        PrDetailLoad::Ready(v) if v.open => Some(v.clone()),
+        _ => None,
+    };
+
+    // A review: busy before the request, then the notice, and the list and the detail again.
+    let on_review = {
+        let (actions, busy, retry, review_text, review_gen, armed, review_armed) =
+            (actions.clone(), busy.clone(), retry.clone(), review_text.clone(), review_gen.clone(), armed.clone(), review_armed.clone());
+        move |action: GitPrReviewAction| {
+            let Some(a) = actions.clone() else { return };
+            let Some(number) = effective else { return };
+            let body = clean_body(&review_text.get());
+            if let Err(line) = review_request_gate(action, &body) {
+                notice::post(line.to_string());
+                return;
+            }
+            // 승인 and 변경 요청 ask twice; any other tap disarms 병합 and the other review button.
+            let now = crate::demo::now_ms();
+            armed.set(None);
+            match review_tap(action, review_armed.get(), number, now) {
+                ReviewTap::Arm | ReviewTap::Expired => {
+                    review_armed.set(Some((pr_action_key(number, action), now)));
+                    return;
+                }
+                ReviewTap::Wait => return,
+                ReviewTap::Send => review_armed.set(None),
+            }
+            busy.set(true);
+            let (busy, retry, review_text, review_gen) = (busy.clone(), retry.clone(), review_text.clone(), review_gen.clone());
+            crate::services::run_shared(async move { run_pr_review(&a.project, number, action, &body).await }, move |result| {
+                match result {
+                    Ok(line) => {
+                        notice::post(line);
+                        review_text.set(String::new());
+                        review_gen.set(review_gen.get() + 1);
+                        retry.set(retry.get() + 1);
+                    }
+                    Err(line) => notice::post(line),
+                }
+                busy.set(false);
+            });
+        }
+    };
+    // 병합 asks twice: the first tap arms it, the second counts after 600 ms and before 4 s.
+    let on_merge = {
+        let (actions, busy, retry, armed, head_sha, review_armed) = (actions.clone(), busy.clone(), retry.clone(), armed.clone(), head_sha.clone(), review_armed.clone());
+        move || {
+            let Some(a) = actions.clone() else { return };
+            let Some(number) = effective else { return };
+            let now = crate::demo::now_ms();
+            review_armed.set(None);
+            match delete_tap(armed.get(), number as usize, now) {
+                DeleteTap::Arm | DeleteTap::Expired => armed.set(Some((number as usize, now))),
+                DeleteTap::Wait => {}
+                DeleteTap::Confirm => {
+                    armed.set(None);
+                    busy.set(true);
+                    let (busy, retry, head) = (busy.clone(), retry.clone(), head_sha.clone());
+                    crate::services::run_shared(async move { run_pr_merge(&a.project, number, GitPrMergeMethod::Squash, &head).await }, move |result| {
+                        match result {
+                            Ok(line) => {
+                                notice::post(line);
+                                retry.set(retry.get() + 1);
+                            }
+                            Err(line) => {
+                                // The head moved since the detail was read: show the Korean line and read it again.
+                                if is_stale_head(&line) {
+                                    retry.set(retry.get() + 1);
+                                }
+                                notice::post(line);
+                            }
+                        }
+                        busy.set(false);
+                    });
+                }
+            }
+        }
+    };
+    let armed_review = effective.and_then(|n| {
+        [GitPrReviewAction::Approve, GitPrReviewAction::RequestChanges]
+            .into_iter()
+            .find(|&act| armed_label_visible(review_armed.get(), pr_action_key(n, act), crate::demo::now_ms()))
+    });
+    let merge_armed = effective.is_some_and(|n| armed_label_visible(armed.get(), n as usize, crate::demo::now_ms()));
+
+    let create = {
+        let (actions, busy, retry, form_open, f_title, f_body, f_draft, f_gen, branch) =
+            (actions.clone(), busy.clone(), retry.clone(), form_open.clone(), f_title.clone(), f_body.clone(), f_draft.clone(), f_gen.clone(), branch.clone());
+        move || {
+            let Some(a) = actions.clone() else { return };
+            let (title, body, draft) = (f_title.get(), clean_body(&f_body.get()), f_draft.get());
+            if let Err(line) = pr_create_gate(&title) {
+                notice::post(line.to_string());
+                return;
+            }
+            busy.set(true);
+            let head = branch.clone().unwrap_or_default();
+            let (busy, retry, form_open, f_title, f_body, f_gen) = (busy.clone(), retry.clone(), form_open.clone(), f_title.clone(), f_body.clone(), f_gen.clone());
+            crate::services::run_shared(async move { run_pr_create(&a.project, &title, &body, "", &head, draft).await }, move |result| {
+                match result {
+                    Ok(line) => {
+                        notice::post(line);
+                        f_title.set(String::new());
+                        f_body.set(String::new());
+                        f_gen.set(f_gen.get() + 1);
+                        form_open.set(false);
+                        retry.set(retry.get() + 1);
+                    }
+                    Err(line) => notice::post(line),
+                }
+                busy.set(false);
+            });
+        }
+    };
 
     let chips = {
         let filter = filter.clone();
@@ -2054,39 +2467,148 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
             });
         }
     };
-    let retry_state = retry.clone();
-    let list = move || {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-            chips();
-            match current {
-                PrLoad::Loading => {
-                    Label("풀 리퀘스트를 불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-                }
-                PrLoad::Failed(text) => {
-                    Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-                    AppButton("다시 시도", None, ButtonKind::Primary, false, true, true, move || retry_state.set(retry_state.get() + 1));
-                }
-                PrLoad::Ready(entries) => {
-                    if entries.is_empty() {
-                        EmberCard(false, true, None, Some(SP[3]), None, || {
-                            Label(shown.empty_text(), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-                        });
-                        return;
-                    }
-                    VcsCard(|| {
-                        for (i, e) in entries.iter().enumerate() {
-                            if i > 0 {
-                                cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-                            }
-                            PullRequestRow(e);
-                        }
+    let open_count = if actions.is_some() { count.get() } else { Some(sample_pr_count()) };
+    let new_form = {
+        let (form_open, f_title, f_body, f_draft, f_gen, branch) = (form_open.clone(), f_title.clone(), f_body.clone(), f_draft.clone(), f_gen.clone(), branch.clone());
+        move || {
+            VcsCard(move || {
+                cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(move || {
+                    Label("새 풀 리퀘스트", Fs::Md, Weight::Semibold, None, Some(1));
+                    let t = f_title.clone();
+                    key((f_gen.get(), 0_u8), || {
+                        cu::TextField().modifier(Modifier::new().fill_max_width().height(H_BTN))
+                            .text(f_title.get()).placeholder("제목 (필수)")
+                            .on_value_change(move |v| t.set(v));
                     });
-                }
-            }
-        });
+                    let b = f_body.clone();
+                    key((f_gen.get(), 1_u8), || {
+                        cu::TextField().modifier(Modifier::new().fill_max_width().height(64.0))
+                            .text(f_body.get()).placeholder("설명 (선택)").multiline(true)
+                            .on_value_change(move |v| b.set(v));
+                    });
+                    let head_text = branch.clone().unwrap_or_else(|| "현재 브랜치".to_string());
+                    Label(&format!("{head_text} \u{2192} 기본 브랜치"), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(2));
+                    Label("원격에 올라가 있는 브랜치여야 합니다", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
+                    cu::Row().modifier(Modifier::new().fill_max_width().height(32.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                        let flag = f_draft.clone();
+                        // TODO(compose-rust#428): Checkbox has no ink fill or tick style, so it looks hollow.
+                        cu::Checkbox(f_draft.get())
+                            .modifier(Modifier::new().size(18.0, 18.0))
+                            .on_change(move |v| flag.set(v));
+                        Label("초안", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                    });
+                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        AppButton("만들기", None, ButtonKind::Primary, true, !is_busy, false, create.clone());
+                        let close = form_open.clone();
+                        AppButton("취소", None, ButtonKind::Default, true, true, false, move || close.set(false));
+                    });
+                });
+            });
+        }
     };
-    if layout == PaneLayout::Two {
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(list);
+
+    let list = {
+        let (selected, retry, form_open) = (selected.clone(), retry.clone(), form_open.clone());
+        move || {
+            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    Label("풀 리퀘스트", Fs::Lg, Weight::Semibold, None, Some(1));
+                    if let Some(n) = open_count {
+                        Pill(&format!("열림 {n}"), PillTone::Green, true);
+                    }
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    let open = form_open.clone();
+                    AppButton("새 PR", None, ButtonKind::Primary, true, true, false, move || open.set(!open.get()));
+                });
+                if form_open.get() {
+                    new_form();
+                }
+                chips();
+                match current {
+                    PrLoad::Loading => {
+                        Label("풀 리퀘스트를 불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    }
+                    PrLoad::Failed(text) => {
+                        Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                        let retry = retry.clone();
+                        AppButton("다시 시도", None, ButtonKind::Primary, false, true, true, move || retry.set(retry.get() + 1));
+                    }
+                    PrLoad::Ready(entries) => {
+                        if entries.is_empty() {
+                            EmberCard(false, true, None, Some(SP[3]), None, || {
+                                Label(shown.empty_text(), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                            });
+                            return;
+                        }
+                        VcsCard(|| {
+                            for (i, e) in entries.iter().enumerate() {
+                                if i > 0 {
+                                    cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                                }
+                                let pick = selected.clone();
+                                let number = e.number;
+                                PullRequestRow(e, effective == Some(number), move || pick.set(Some(number)));
+                            }
+                        });
+                    }
+                }
+            });
+        }
+    };
+
+    let detail_view = {
+        let (selected, retry) = (selected.clone(), retry.clone());
+        move || {
+            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                if !two {
+                    let back = selected.clone();
+                    AppButton("목록으로", None, ButtonKind::Default, true, true, false, move || back.set(None));
+                }
+                match detail_now {
+                    PrDetailLoad::Idle => {
+                        EmberCard(false, true, None, Some(SP[3]), None, || {
+                            Label("풀 리퀘스트를 선택해 주세요", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                        });
+                    }
+                    PrDetailLoad::Loading => {
+                        Label("풀 리퀘스트를 불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    }
+                    PrDetailLoad::Failed(text) => {
+                        Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                        AppButton("다시 시도", None, ButtonKind::Primary, false, true, true, move || retry.set(retry.get() + 1));
+                    }
+                    PrDetailLoad::Ready(v) => {
+                        PrDetailBody(&v);
+                    }
+                }
+            });
+        }
+    };
+
+    let ctl = DetailControls { review_text, review_gen, armed_review, busy: is_busy, merge_armed, on_review, on_merge };
+    if two {
+        cu::Row()
+            .modifier(Modifier::new().fill_max_width().fill_max_height())
+            .alignment(Alignment::TopStart)
+            .spacing(GAP_CARD)
+            .content(move || {
+                cu::ScrollColumn().modifier(Modifier::new().weight(1.0).fill_max_height()).content(list);
+                // Bounded column: the detail scrolls, the review box and 병합 stay below it.
+                cu::Column().spacing(SP[2]).modifier(Modifier::new().weight(1.4).fill_max_height()).content(move || {
+                    cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(detail_view);
+                    if let Some(v) = actions_view {
+                        PrDetailActions(&v, ctl);
+                    }
+                });
+            });
+    } else if selected.get().is_some() {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+            detail_view();
+            if let Some(v) = actions_view {
+                PrDetailActions(&v, ctl);
+            }
+            cu::Spacer().modifier(Modifier::new().height(super::routines::compact_bottom_clearance()));
+        });
     } else {
         list();
     }
@@ -3345,12 +3867,12 @@ mod tests {
 
     #[compose_rust::runtime::composable]
     fn prs_sample_wide() {
-        PullRequestsPane(None, mutable_state_of(None), mutable_state_of(Vec::new()), PaneLayout::Two);
+        PullRequestsPane(None, mutable_state_of(None), mutable_state_of(Vec::new()), PaneLayout::Two, Some("feat/x".to_string()));
     }
 
     #[compose_rust::runtime::composable]
     fn prs_sample_compact() {
-        PullRequestsPane(None, mutable_state_of(None), mutable_state_of(Vec::new()), PaneLayout::Tabs);
+        PullRequestsPane(None, mutable_state_of(None), mutable_state_of(Vec::new()), PaneLayout::Tabs, None);
     }
 
     #[test]
@@ -3374,6 +3896,47 @@ mod tests {
             assert!(!text.contains(SOON));
             assert!(!text.contains("병합 조건: CI 통과와 승인이 필요합니다."), "the placeholder is gone");
         }
+    }
+
+    #[test]
+    fn fr_l19_pr_wide_layout_shows_the_first_pull_request_in_full() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let text = text_of(prs_sample_wide);
+        for want in ["풀 리퀘스트", "열림 3", "새 PR", "검사", "build", "통과", "리뷰", "Minji Kim", "승인", "리뷰 코멘트", "리뷰 남기기", "코멘트", "변경 요청", "병합", "스쿼시로 병합합니다", "파일 3 +40 -2"] {
+            assert!(text.contains(want), "{want}");
+        }
+        assert!(!text.contains("목록으로"), "the wide layout has no back button");
+    }
+
+    #[test]
+    fn fr_l19_pr_wide_layout_pins_the_review_box_and_merge_below_the_scroll() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let text = text_of(prs_sample_wide);
+        assert!(text.contains("병합"));
+        assert!(text.contains("리뷰 남기기"));
+        let (body, pinned) = (text.find("리뷰 코멘트").expect("comments"), text.find("리뷰 남기기").expect("review box"));
+        assert!(body < pinned, "the review box follows the scrolling detail");
+    }
+
+    #[test]
+    fn fr_l19_pr_compact_layout_starts_on_the_list() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let text = text_of(prs_sample_compact);
+        assert!(text.contains("#409 Fix: stop egress when a session detaches"));
+        assert!(!text.contains("리뷰 남기기"));
+    }
+
+    #[test]
+    fn fr_l19_pr_sample_detail_covers_failed_pending_and_no_reviewers() {
+        let PrDetailLoad::Ready(v) = sample_pr_detail(409) else { panic!() };
+        assert!(v.checks.iter().any(|c| c.1 == CheckClass::Failed));
+        assert_eq!(merge_button_state(&v).0, false);
+        let PrDetailLoad::Ready(v) = sample_pr_detail(405) else { panic!() };
+        assert!(v.reviewers.is_empty());
+        assert!(matches!(sample_pr_detail(1), PrDetailLoad::Failed(_)));
     }
 
     #[test]

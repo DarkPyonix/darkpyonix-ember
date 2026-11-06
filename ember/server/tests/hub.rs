@@ -102,7 +102,11 @@ async fn register_server(f: &Fixture) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         let (_, status) = call(&f.app, Method::GET, "/api/hub", None).await;
-        if status["registered"] == true {
+        // `registered` turns true when the registration is saved; the server then asks the hub's
+        // /config (`ServerHub::complete`), and only after that does the status carry what the hub
+        // advertised (`long_poll`, issue #538). Wait for both, so a test that reads the status
+        // right after registering never sees the gap between the two.
+        if status["registered"] == true && status["long_poll"] == true {
             assert_eq!(status["device"]["role"], "main_server");
             assert_eq!(status["device"]["name"], "home server");
             assert!(status["pending"].is_null());

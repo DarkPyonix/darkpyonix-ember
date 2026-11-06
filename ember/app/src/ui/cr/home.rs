@@ -12,14 +12,14 @@
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, DrawList, IconRole, ShapeRole, TextOverflow};
+use compose_rust::{Alignment, ButtonVariant, Color, DrawList, Paint, IconRole, ShapeRole, TextOverflow};
 
 pub use crate::ui::home::{
     apply_suggestion, can_send, computers_line, default_mode, effective_message, filter_models,
-    harness_block, kpis, mode_after_harness_change, model_catalog, modes_for, needs_approve_all,
+    harness_block, kpis, mode_after_harness_change, composer_chip_budget, composer_chip_rows, composer_chip_width, mode_header, mode_picker_rows_pending, mode_tap, popover_width, model_catalog, modes_for, needs_approve_all,
     project_options, project_tile_line, resolve_cwd, shortcut_label, split_chip_rows,
     success_percent, title_from_message, CrewMember, Dash, Harness, HarnessBar, Kpi, ModelOption,
-    PermMode, ProjectTile, Selection, StatusCounts, ATTACH_UNSUPPORTED, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
+    ModeRow, PermMode, ProjectTile, Selection, StatusCounts, ATTACH_UNSUPPORTED, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
     EMPTY_CREW, EMPTY_HARNESS_USAGE, integrations_area, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
 };
 use super::components::{
@@ -41,6 +41,67 @@ pub type Part<'a> = Box<dyn FnOnce() + 'a>;
 
 /// The width of the option popups of the composer's chips.
 const POPUP_WIDTH: f32 = 280.0;
+/// The permission popover (mockup `.mp-pop.mp-mode`).
+const MODE_POPOVER_WIDTH: f32 = 340.0;
+/// The model popover: a rail of harnesses beside the search and the rows.
+const MODEL_POPOVER_WIDTH: f32 = 560.0;
+const MODEL_RAIL_WIDTH: f32 = 128.0;
+
+/// The permission-mode rows (FR-L16, mockup v8 `.md-row`): a header "권한 모드 · harness", then
+/// one row per mode with a shield (a warning triangle on the danger row), the title, a
+/// one-line description and a check on the chosen row. The bypass row is red. Tapping calls
+/// `on_tap(i)`; closing and the bypass confirmation belong to the caller.
+fn ModeBody(header: &str, rows: &[ModeRow], width: f32, on_tap: impl FnMut(usize) + Clone + 'static) {
+    let p = ember_theme().palette;
+    cu::Column().modifier(Modifier::new().width(width)).content(|| {
+        if !header.is_empty() {
+            cu::Row().modifier(Modifier::new().width(width).padding(SP[2])).content(|| {
+                Label(header, Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1));
+            });
+        }
+        for (i, r) in rows.iter().enumerate() {
+            let mut tap = on_tap.clone();
+            let bg = if r.chosen { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
+            let tone = if r.danger { p.red.strong } else { p.muted };
+            let title = if r.danger { p.red.strong } else { p.text };
+            let icon = if r.danger { ICON_WARN } else { ICON_SHIELD };
+            Clickable(
+                Modifier::new().width(width).background(bg).corner_radius(CORNER_SM).padding(SP[2]),
+                Alignment::CenterStart,
+                move || tap(i),
+                || {
+                    cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                        NavIcon(icon, tone.to_argb(), 16.0);
+                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                            Label(r.title, Fs::Sm, Weight::Medium, Some(paint(title)), Some(1));
+                            Label(r.description, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                        });
+                        if r.chosen {
+                            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                            NavIcon(ICON_CHECK, p.text.to_argb(), 16.0);
+                        }
+                    });
+                },
+            );
+        }
+    });
+}
+
+/// The permission picker as a bottom sheet at 560 and below (the shared sheet, FR-L32), with
+/// the same header, rows and bypass confirmation as the popover.
+fn ModeSheet(
+    open: bool,
+    header: &str,
+    rows: &[ModeRow],
+    on_dismiss: impl FnMut() + Clone + 'static,
+    on_tap: impl FnMut(usize) + Clone + 'static,
+) {
+    let width = (compose_rust::runtime::current_window_size().width_dp - 2.0 * SP[3]).max(240.0);
+    EmberSheet(header, open, on_dismiss, None, || {
+        cu::Box().modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| ModeBody("", rows, width - 2.0 * SP[1], on_tap));
+    });
+}
 
 macro_rules! line_icon {
     ($d:literal) => {
@@ -53,6 +114,8 @@ macro_rules! line_icon {
 }
 
 const ICON_ARROW: &str = line_icon!("M5 12h14M13 6l6 6-6 6");
+const ICON_SHIELD: &str = include_str!("../../../assets/nav/shield.svg");
+const ICON_WARN: &str = line_icon!("M12 9.5v4M12 16.75h.01M10.3 3.9L2.4 17.6a2 2 0 001.7 3h15.8a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z");
 const ICON_CHECK: &str = line_icon!("M5 12.5l4.5 4.5L19 7.5");
 const ICON_CLOCK: &str = line_icon!("M12 7v5l3 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z");
 const ICON_ZAP: &str = line_icon!("M13 3L5 13.5h6L10 21l8-10.5h-6z");
@@ -329,14 +392,34 @@ enum Pick {
     Computer,
 }
 
-/// `EMBER_CR_HOME_PICK=project|model|mode|computer` opens one list at the start, and
-/// `EMBER_CR_HOME_SUGGEST=0..2` takes a suggestion, for review captures.
+/// `EMBER_CR_HOME_PICK=project|model|mode|computer|mode_armed` opens one list at the start
+/// (`mode_armed` opens the permission picker with the bypass confirmation armed, so its row
+/// reads "다시 눌러 바이패스 적용"), `EMBER_CR_HOME_MODE=bypass` presets the permission mode so the
+/// composer shows the warning chip, and `EMBER_CR_HOME_SUGGEST=0..2` takes a suggestion, for
+/// review captures.
 fn initial_pick() -> Option<Pick> {
-    match std::env::var("EMBER_CR_HOME_PICK").ok().as_deref() {
-        Some("project") => Some(Pick::Project),
-        Some("model") => Some(Pick::Model),
-        Some("mode") => Some(Pick::Mode),
-        Some("computer") => Some(Pick::Computer),
+    pick_from(std::env::var("EMBER_CR_HOME_PICK").ok().as_deref()).0
+}
+
+/// The list a `EMBER_CR_HOME_PICK` value opens and whether it also arms the bypass confirm.
+fn pick_from(value: Option<&str>) -> (Option<Pick>, bool) {
+    match value {
+        Some("project") => (Some(Pick::Project), false),
+        Some("model") => (Some(Pick::Model), false),
+        Some("mode") => (Some(Pick::Mode), false),
+        Some("mode_armed") => (Some(Pick::Mode), true),
+        Some("computer") => (Some(Pick::Computer), false),
+        _ => (None, false),
+    }
+}
+
+/// The permission mode a `EMBER_CR_HOME_MODE` value presets.
+fn mode_from(value: Option<&str>) -> Option<PermMode> {
+    match value {
+        Some("bypass") => Some(PermMode::Bypass),
+        Some("edits") => Some(PermMode::Edits),
+        Some("plan") => Some(PermMode::Plan),
+        Some("ask") => Some(PermMode::Ask),
         _ => None,
     }
 }
@@ -423,6 +506,8 @@ struct Composer {
     suggestion: MutableState<Option<String>>,
     busy: MutableState<bool>,
     open: MutableState<Option<Pick>>,
+    /// The mode that waits for its confirming tap (bypass), if any.
+    mode_pending: MutableState<crate::ui::home::ModePending>,
     harness_filter: MutableState<Option<Harness>>,
     query: MutableState<String>,
 }
@@ -430,11 +515,17 @@ struct Composer {
 impl Composer {
     fn new() -> Self {
         Composer {
-            selection: mutable_state_of(Selection::initial()),
+            selection: mutable_state_of(match mode_from(std::env::var("EMBER_CR_HOME_MODE").ok().as_deref()) {
+                Some(m) => Selection::initial().with_mode(m),
+                None => Selection::initial(),
+            }),
             typed: mutable_state_of(String::new()),
             suggestion: mutable_state_of(initial_suggestion()),
             busy: mutable_state_of(false),
             open: mutable_state_of(initial_pick()),
+            mode_pending: mutable_state_of(
+                pick_from(std::env::var("EMBER_CR_HOME_PICK").ok().as_deref()).1.then(|| (PermMode::Bypass, now_ms())),
+            ),
             harness_filter: mutable_state_of(None),
             query: mutable_state_of(String::new()),
         }
@@ -567,21 +658,18 @@ impl Composer {
                 }
             });
         }
-        let modes = modes_for(sel.option.harness);
-        let mode_labels: Vec<String> = modes.iter().map(|m| m.label().to_string()).collect();
-        {
-            let selection = self.selection.clone();
-            OptionSheet(
+        // Compact widths keep the modal; wider ones use the popover under the chip, drawn in
+        // the composer card (`mode_popover`).
+        let compact = layout(compose_rust::runtime::current_window_size().width_dp).compact;
+        if compact {
+            let me = self.clone();
+            let dismiss = self.dismiss_mode();
+            ModeSheet(
                 open == Some(Pick::Mode),
-                &mode_labels,
-                modes.iter().position(|m| *m == sel.mode),
-                POPUP_WIDTH,
-                close.clone(),
-                move |i| {
-                    if let Some(m) = modes.get(i) {
-                        selection.set(selection.get_untracked().with_mode(*m));
-                    }
-                },
+                &mode_header(sel.option.harness),
+                &mode_picker_rows_pending(sel.option.harness, sel.mode, self.mode_pending.get().map(|(m, _)| m)),
+                dismiss,
+                move |i| me.tap_mode(i),
             );
         }
         let mut labels = vec![self.local_name(ui)];
@@ -595,11 +683,89 @@ impl Composer {
                 selection.set(s);
             });
         }
-        self.model_sheet(ui, &sel, open == Some(Pick::Model), close);
+        // Compact widths keep the modal (a bottom sheet in the spec); wider ones use the popover
+        // under the chip, drawn in the composer card.
+        let compact = layout(compose_rust::runtime::current_window_size().width_dp).compact;
+        self.model_sheet(ui, &sel, compact && open == Some(Pick::Model), close);
     }
 
-    /// The model picker: harness filter, search and the rows with their reasons (FR-L15).
+    /// Closing the permission picker also withdraws a waiting bypass confirmation.
+    fn dismiss_mode(&self) -> impl FnMut() + Clone + 'static {
+        let (o, pending) = (self.open.clone(), self.mode_pending.clone());
+        move || {
+            pending.set(None);
+            if o.get_untracked() == Some(Pick::Mode) {
+                o.set(None);
+            }
+        }
+    }
+
+    /// A tap on row `i` of the permission picker: bypass needs a second tap (`mode_tap`).
+    fn tap_mode(&self, i: usize) {
+        let sel = self.selection.get_untracked();
+        let Some(m) = modes_for(sel.option.harness).get(i).copied() else { return };
+        let (pending, applied) = mode_tap(sel.mode, self.mode_pending.get_untracked(), m, now_ms());
+        self.mode_pending.set(pending);
+        if let Some(m) = applied {
+            self.selection.set(sel.with_mode(m));
+            self.open.set(None);
+        }
+    }
+
+    /// The permission picker as a popover under the mode chip (mockup `.mp-pop.mp-mode`, 340 dp).
+    fn mode_popover(&self, sel: &Selection, anchor: impl FnOnce()) {
+        let theme = ember_theme();
+        let p = theme.palette;
+        let open = self.open.get() == Some(Pick::Mode);
+        let width = MODE_POPOVER_WIDTH;
+        let rows = mode_picker_rows_pending(sel.option.harness, sel.mode, self.mode_pending.get().map(|(m, _)| m));
+        let header = mode_header(sel.option.harness);
+        cu::Menu(open).on_dismiss(self.dismiss_mode()).anchor(anchor).content(|| {
+            let me = self.clone();
+            cu::Box()
+                .modifier(
+                    with_shadows(Modifier::new(), theme.shadow_lg())
+                        .width(width)
+                        .background(paint(p.surface))
+                        .border(1.0, paint(p.line))
+                        .corner_radius(CORNER_MD)
+                        .padding(SP[1]),
+                )
+                .content(|| ModeBody(&header, &rows, width - 2.0 * SP[1], move |i| me.tap_mode(i)));
+        });
+    }
+
+    /// The model picker as a modal (compact widths, where the spec asks for a bottom sheet):
+    /// harness chips on top, search and the rows with their reasons (FR-L15).
     fn model_sheet(&self, ui: &SharedUi, sel: &Selection, open: bool, close: impl FnMut() + Clone + 'static) {
+        EmberSheet("모델 선택", open, close.clone(), None, || {
+            self.model_body(ui, sel, false, close);
+        });
+    }
+
+    /// The model picker as a popover hanging under the model chip (FR-L15, mockup v8 `.mpick`):
+    /// a left rail of harnesses, then search and the rows. The toolkit `Menu` places its popup
+    /// below its anchor since compose-rust v0.0.5 (#383), with any content as its entries.
+    /// Not built: the rail's favourites group, favourite stars and profile names, which need
+    /// stored favourites and FR-L17 profiles (SPEC FR-L15 note).
+    fn model_popover(&self, ui: &SharedUi, sel: &Selection, anchor: impl FnOnce(), close: impl FnMut() + Clone + 'static) {
+        let open = self.open.get() == Some(Pick::Model);
+        let dismiss = {
+            let o = self.open.clone();
+            move || {
+                if o.get_untracked() == Some(Pick::Model) {
+                    o.set(None);
+                }
+            }
+        };
+        cu::Menu(open).on_dismiss(dismiss).anchor(anchor).content(|| {
+            self.model_body(ui, sel, true, close);
+        });
+    }
+
+    /// The picker's contents. With `rail` the harness filter is a vertical rail at the left
+    /// and the list is a fixed-width column beside it; without, chips run along the top.
+    fn model_body(&self, ui: &SharedUi, sel: &Selection, rail: bool, close: impl FnMut() + Clone + 'static) {
         let p = ember_theme().palette;
         let agents: Vec<(String, bool)> = ui.live.agents.get().iter().map(|a| (a.kind.clone(), a.installed)).collect();
         let limited: Vec<String> = {
@@ -618,17 +784,17 @@ impl Composer {
         let filter = self.harness_filter.get();
         let query = self.query.get();
         let rows = filter_models(&all, filter, &query);
-        EmberSheet("모델 선택", open, close.clone(), None, || {
-            cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[3])).content(|| {
-                cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
-                    let f = self.harness_filter.clone();
-                    FilterChip("전체", filter.is_none(), move || f.set(None));
-                    for h in Harness::ALL {
-                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                        let f = self.harness_filter.clone();
-                        FilterChip(h.label(), filter == Some(h), move || f.set(Some(h)));
-                    }
-                });
+        let filters = || {
+            let f = self.harness_filter.clone();
+            FilterChip("전체", filter.is_none(), move || f.set(None));
+            for h in Harness::ALL {
+                cu::Spacer().modifier(Modifier::new().width(SP[0]).height(SP[0]));
+                let f = self.harness_filter.clone();
+                FilterChip(h.label(), filter == Some(h), move || f.set(Some(h)));
+            }
+        };
+        let list = || {
+            cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                 let q = self.query.clone();
                 EmberField(FieldOptions {
                     fill_max_width: true,
@@ -681,7 +847,28 @@ impl Composer {
                     });
                 });
             });
-        });
+        };
+        if rail {
+            let surface = with_shadows(Modifier::new(), ember_theme().shadow_lg())
+                .width(popover_width(MODEL_POPOVER_WIDTH, compose_rust::runtime::current_window_size().width_dp))
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .corner_radius(CORNER_MD)
+                .padding(SP[1]);
+            cu::Row().modifier(surface).content(|| {
+                cu::Column().spacing(SP[0]).modifier(Modifier::new().width(MODEL_RAIL_WIDTH).padding(SP[1])).content(|| {
+                    filters();
+                });
+                cu::Box().modifier(Modifier::new().weight(1.0).padding(SP[1])).content(list);
+            });
+        } else {
+            cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[3])).content(|| {
+                cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
+                    filters();
+                });
+                list();
+            });
+        }
     }
 }
 
@@ -771,6 +958,27 @@ fn ComposerChip(text: &str, icon: IconRole, selected: bool, icon_only: bool, wei
         .on_click(on_click);
 }
 
+/// The composer's mode chip while bypass is on: `red-soft` fill, red text, the warning triangle.
+fn WarnChip(text: &str, icon_only: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    Clickable(
+        Modifier::new().height(H_CTL).background(paint(p.red.soft)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        on_click,
+        || {
+            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(if icon_only { SP[1] } else { SP[2] }));
+                NavIcon(ICON_WARN, p.red.strong.to_argb(), 16.0);
+                if !icon_only {
+                    cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                    Label(text, Fs::Sm, Weight::Medium, Some(paint(p.red.strong)), Some(1));
+                }
+                cu::Spacer().modifier(Modifier::new().width(if icon_only { SP[1] } else { SP[2] }));
+            });
+        },
+    );
+}
+
 fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     let theme = ember_theme();
     let p = theme.palette;
@@ -787,7 +995,9 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     let mode_text = sel.mode.label().to_string();
     let chip = |text: &str, icon: IconRole, pick: Pick, selected: bool| {
         let open = c.open.clone();
-        ComposerChip(text, icon, selected, icon_only && pick != Pick::Project, !icon_only || pick == Pick::Project, move || open.set(Some(pick)));
+        // Wide chips are content-sized, their text cut to the budget; only the compact project
+        // chip takes the rest of the row.
+        ComposerChip(text, icon, selected, icon_only && pick != Pick::Project, icon_only && pick == Pick::Project, move || open.set(Some(pick)));
     };
     let add = || {
         // TODO(compose-rust#483, #500): attachments need the file picker (planned for v0.0.8)
@@ -846,11 +1056,62 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                 }
                 cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                     cu::Box().modifier(Modifier::new().size(36.0, 36.0)).content(add);
-                    cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().weight(1.0).clip(true)).content(|| {
-                        chip(&sel.project, IconRole::Library, Pick::Project, false);
-                        chip(&model_text, IconRole::Compose, Pick::Model, false);
-                        chip(&mode_text, IconRole::Settings, Pick::Mode, sel.mode.is_bypass());
-                        chip(&computer_text, IconRole::Sidebar, Pick::Computer, false);
+                    cu::Column().spacing(SP[0]).modifier(Modifier::new().weight(1.0).clip(true)).content(|| {
+                        // Bypass draws the chip in the warning state (mockup `.mdpick.warn`).
+                        let chip_at = |i: usize, text: &str| match i {
+                            0 => chip(text, IconRole::Library, Pick::Project, false),
+                            1 => {
+                                let close = {
+                                    let o = c.open.clone();
+                                    move || o.set(None)
+                                };
+                                let one = || chip(text, IconRole::Compose, Pick::Model, false);
+                                if l.compact {
+                                    one();
+                                } else {
+                                    c.model_popover(ui, &sel, one, close);
+                                }
+                            }
+                            2 => {
+                                let one = || {
+                                    if sel.mode.is_bypass() {
+                                        let open = c.open.clone();
+                                        WarnChip(text, icon_only, move || open.set(Some(Pick::Mode)));
+                                    } else {
+                                        chip(text, IconRole::Settings, Pick::Mode, false);
+                                    }
+                                };
+                                if l.compact {
+                                    one();
+                                } else {
+                                    c.mode_popover(&sel, one);
+                                }
+                            }
+                            _ => chip(text, IconRole::Sidebar, Pick::Computer, false),
+                        };
+                        let texts = [sel.project.clone(), model_text.clone(), mode_text.clone(), computer_text.clone()];
+                        if l.compact {
+                            cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                                for (i, t) in texts.iter().enumerate() {
+                                    chip_at(i, t);
+                                }
+                            });
+                        } else {
+                            let fitted: Vec<String> = texts
+                                .iter()
+                                .zip(composer_chip_budget(w))
+                                .map(|(t, b)| crate::ui::home::composer_fit_text(t, b))
+                                .collect();
+                            let widths: Vec<f32> = fitted.iter().map(|t| composer_chip_width(t)).collect();
+                            // A line per row of chips: a narrow card wraps rather than drops a chip.
+                            for row in composer_chip_rows(&widths, w) {
+                                cu::Row().spacing(gap).alignment(Alignment::CenterStart).content(|| {
+                                    for i in row {
+                                        chip_at(i, &fitted[i]);
+                                    }
+                                });
+                            }
+                        }
                     });
                     if c.busy.get() {
                         cu::IndeterminateProgressIndicator().circular(true).modifier(Modifier::new().size(18.0, 18.0));
@@ -1427,6 +1688,19 @@ fn ProjectsTile(tiles: &[ProjectTile], ui: &SharedUi, l: Layout) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l16_capture_hooks_map_env_values() {
+        assert_eq!(pick_from(Some("mode")), (Some(Pick::Mode), false));
+        assert_eq!(pick_from(Some("mode_armed")), (Some(Pick::Mode), true));
+        assert_eq!(pick_from(Some("model")), (Some(Pick::Model), false));
+        assert_eq!(pick_from(Some("zzz")), (None, false));
+        assert_eq!(pick_from(None), (None, false));
+        assert_eq!(mode_from(Some("bypass")), Some(PermMode::Bypass));
+        assert_eq!(mode_from(Some("plan")), Some(PermMode::Plan));
+        assert_eq!(mode_from(Some("nope")), None);
+        assert_eq!(mode_from(None), None);
+    }
+
     use super::*;
     use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
     use compose_rust::{Host, Recomposer};

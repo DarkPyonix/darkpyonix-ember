@@ -226,6 +226,13 @@ impl JsonlLog {
 
     /// Repair the files against the store at start (see the module doc). Never fails: every
     /// problem is a warning naming the channel id and a fixed reason.
+    ///
+    /// ORDER MATTERS: this must run on a `JsonlLog` of its own BEFORE any router that appends is
+    /// served. The routers each build their own `JsonlLog` (their own `guard()` mutex), so this
+    /// function shares no lock with them; it is safe only because `main` calls it synchronously,
+    /// before the owner and guest routers exist (a review finding of #669). A crash fragment is
+    /// cut in place with `set_len`: its bytes are not saved aside (every human message is also in
+    /// SQLite and is re-appended below).
     pub fn recover(&self, store: &Store) -> RecoverReport {
         let mut report = RecoverReport::default();
         let channels = match store.channels(None) {

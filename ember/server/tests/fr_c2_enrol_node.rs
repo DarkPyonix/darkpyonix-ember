@@ -2,9 +2,10 @@
 //! loopback TCP listener (`EnrolDoor::serve`), with the owner's side (`Enrol::confirm` / `deny`)
 //! driven from the test through a fake registrar over an in-memory store.
 //!
-//! NONE of these tests has been run (nothing was compiled when this file was written). Every
-//! expected value was read from `ember/server/src/enrol_door.rs`, `ember/server/src/computers/enrol.rs`
-//! and `ember/node/src/enrol_cli.rs`.
+//! CI compiled and ran the tests of PR #614 (before the two write-failure tests below were added,
+//! which have not been compiled). Every expected value was read from
+//! `ember/server/src/enrol_door.rs`, `ember/server/src/computers/enrol.rs` and
+//! `ember/node/src/enrol_cli.rs`.
 //!
 //! The door allows one poll per enrolment per 2 s, so the node polls every 2100 ms here and a test
 //! confirms long before the first poll (a happy-path test takes about 2.1 s). HTTPS is NOT tested:
@@ -303,6 +304,65 @@ async fn fr_c2_node_enrol_pin_without_a_server_id_aborts() {
     assert!(format!("{err:#}").contains("nothing was written"));
     nothing_written(dir.path());
     assert!(io.text().contains("remove it in Ember"));
+}
+
+// ---- a write that fails after the delivery --------------------------------------------------
+
+/// The server wiped the credential when it delivered it, so a refused write loses the token: the
+/// node says so in plain words, names the computer, and prints neither the token nor the secrets.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2_node_enrol_a_refused_write_after_delivery_says_the_token_is_lost() {
+    let sid = peer_id();
+    let h = start(Some(sid.clone())).await;
+    let (code, id) = h.mint("build-box");
+    let confirm = h.confirm_soon(&id);
+    let dir = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let target = other.path().join("real-peers");
+    std::fs::write(&target, format!("{}\n", peer_id())).unwrap();
+    std::os::unix::fs::symlink(&target, peers_path(dir.path())).unwrap();
+    let mut o = h.opts(&code, dir.path());
+    o.pin = Some(sid.clone());
+    let mut io = Script::new(false, &[]);
+    let err = run(o, &mut io).await.unwrap_err();
+    confirm.await.unwrap();
+    let err = format!("{err:#}");
+    let said = io.text();
+    for text in [&err, &said] {
+        assert!(text.contains("the token is lost"), "{text}");
+        assert!(text.contains("build-box") && text.contains("computer-1"), "{text}");
+        assert!(text.contains("Remove the computer"), "{text}");
+    }
+    assert!(!dir.path().join(ENROL_FILE).exists(), "enrol.json must not exist");
+    assert!(std::fs::symlink_metadata(peers_path(dir.path())).unwrap().file_type().is_symlink());
+    let token = h.fake.token_of("build-box");
+    assert!(!said.contains(&token) && !err.contains(&token), "the token is in no output");
+    assert!(!said.contains(&code) && !err.contains(&code), "the code is in no output");
+    for secret in h.cap.secrets.lock().unwrap().iter() {
+        assert!(!said.contains(secret) && !err.contains(secret), "the poll secret is in no output");
+    }
+    assert!(!said.contains("Enrolled as"), "{said}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2_node_enrol_a_peer_that_is_already_listed_is_not_added_again() {
+    let sid = peer_id();
+    let h = start(Some(sid.clone())).await;
+    let (code, id) = h.mint("build-box");
+    let confirm = h.confirm_soon(&id);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(peers_path(dir.path()), format!("{sid}\n")).unwrap();
+    let mut o = h.opts(&code, dir.path());
+    o.pin = Some(sid.clone());
+    let mut io = Script::new(false, &[]);
+    let out = run(o, &mut io).await.unwrap();
+    confirm.await.unwrap();
+    assert!(out.server_trusted, "the server is trusted");
+    assert!(!out.peer_added, "but no new line was added");
+    assert_eq!(std::fs::read_to_string(peers_path(dir.path())).unwrap(), format!("{sid}\n"));
+    assert!(read_enrolment(dir.path()).unwrap().is_some());
+    let said = io.text();
+    assert!(!said.contains("SIGHUP"), "nothing to reload: {said}");
 }
 
 // ---- no pin ---------------------------------------------------------------------------------

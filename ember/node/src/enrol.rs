@@ -71,6 +71,15 @@ fn read_capped(file: fs::File, path: &Path) -> anyhow::Result<Vec<u8>> {
     Ok(data)
 }
 
+/// The lock file must be a regular file owned by this user: a file another user planted there
+/// (in a group or other writable dir) could otherwise hold the lock and block every enrol. Only a
+/// denial of service, but cheap to refuse.
+fn check_lock_file(is_file: bool, uid: u32, path: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(is_file, "{} is not a regular file", path.display());
+    anyhow::ensure!(uid == euid(), "{} is not owned by this user", path.display());
+    Ok(())
+}
+
 /// The exclusive lock on a state dir, held while one enrol runs. Released when dropped (the file
 /// descriptor closes).
 #[derive(Debug)]
@@ -88,7 +97,13 @@ impl EnrolLock {
 
 /// Locks `<state dir>/.enrol.lock` (`flock`, exclusive, non-blocking), creating the state dir with
 /// mode 0700 when it is missing (an existing dir is never chmodded). Another enrol holding the
-/// lock is an error. The lock file is opened with `O_NOFOLLOW`, mode 0600.
+/// lock is an error. The lock file is opened with `O_NOFOLLOW`, mode 0600, and must be a regular
+/// file owned by this user.
+///
+/// The lock is per host: `flock` on a state dir on NFS may be advisory-only or unsupported, and
+/// then two enrols on different machines are not kept apart. Readers ([`read_enrolment`], and so
+/// `config::from_env`) do not take the lock on purpose: replacing `enrol.json` is one `rename`, so
+/// a reader sees either the old or the new complete file.
 pub fn lock_state_dir(state_dir: &Path) -> anyhow::Result<EnrolLock> {
     if state_dir.exists() {
         warn_state_dir(state_dir);
@@ -108,6 +123,8 @@ pub fn lock_state_dir(state_dir: &Path) -> anyhow::Result<EnrolLock> {
         .custom_flags(libc::O_NOFOLLOW)
         .open(&path)
         .with_context(|| format!("cannot open {}", path.display()))?;
+    let meta = file.metadata().with_context(|| format!("cannot stat {}", path.display()))?;
+    check_lock_file(meta.file_type().is_file(), meta.uid(), &path)?;
     // SAFETY: the descriptor is open for the whole call.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         let err = io::Error::last_os_error();
@@ -213,6 +230,50 @@ pub fn append_allowed_peer(existing: &str, id: &str) -> anyhow::Result<Option<St
     Ok(Some(text))
 }
 
+/// Why [`write_enrolment`] failed, and what is on disk afterwards. The caller needs the
+/// difference: the server hands a credential over once, so a failed write may have lost it.
+/// `Display` is the inner error's full text (`{:#}`); there is no `source`, so a chain printed by
+/// anyhow does not repeat it.
+#[derive(Debug)]
+pub enum WriteError {
+    /// Nothing changed: validation, an existing file without `replace`, a symlinked or foreign
+    /// `allowed-peers`, the lock, staging, or the first rename failing with nothing moved.
+    Refused(anyhow::Error),
+    /// A rename failed after the first one and the previous state was restored.
+    RolledBack(anyhow::Error),
+    /// The undo failed too: `enrol.json` now holds the NEW enrolment.
+    NewKept(anyhow::Error),
+    /// Both files are in place; only the final directory fsync failed. Nothing is undone.
+    NotSynced(anyhow::Error),
+}
+
+impl WriteError {
+    fn inner(&self) -> &anyhow::Error {
+        match self {
+            WriteError::Refused(e) | WriteError::RolledBack(e) | WriteError::NewKept(e) | WriteError::NotSynced(e) => e,
+        }
+    }
+}
+
+impl fmt::Display for WriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:#}", self.inner())
+    }
+}
+
+impl std::error::Error for WriteError {}
+
+/// What a successful [`write_enrolment`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteReport {
+    /// A NEW line was appended to `allowed-peers` (false when no peer was asked for, or the id was
+    /// already listed).
+    pub peer_added: bool,
+}
+
+type SyncDir<'a> = &'a dyn Fn(&Path) -> io::Result<()>;
+type Rename<'a> = &'a dyn Fn(&Path, &Path) -> io::Result<()>;
+
 /// Files made for one write, before any of them is renamed into place.
 struct Staged {
     enrol_tmp: PathBuf,
@@ -283,9 +344,10 @@ fn put_back(
     stage: &Staged,
     previous: Option<&(Vec<u8>, u32)>,
     dir: &Path,
-    rename: &dyn Fn(&Path, &Path) -> io::Result<()>,
+    rename: Rename,
+    sync: SyncDir,
     cause: anyhow::Error,
-) -> anyhow::Error {
+) -> WriteError {
     let restored: anyhow::Result<()> = match previous {
         Some((bytes, mode)) => stage_retry(dir, ENROL_FILE, bytes, *mode).and_then(|tmp| {
             rename(&tmp, &stage.enrol_dst).map_err(|e| {
@@ -299,39 +361,48 @@ fn put_back(
         },
     };
     match restored {
-        Ok(()) => match sync_dir(dir) {
-            Ok(()) => cause,
-            Err(e) => cause.context(format!("the previous state was restored, but syncing {} failed ({e})", dir.display())),
+        Ok(()) => match sync(dir) {
+            Ok(()) => WriteError::RolledBack(cause),
+            Err(e) => WriteError::RolledBack(
+                cause.context(format!("the previous state was restored, but syncing {} failed ({e})", dir.display())),
+            ),
         },
-        Err(e) => cause.context(format!(
+        Err(e) => WriteError::NewKept(cause.context(format!(
             "enrol.json now holds the NEW enrolment: the previous state could not be restored ({e:#})"
-        )),
+        ))),
     }
 }
 
 /// Renames the staged files into place, `enrol.json` first. Replacing `enrol.json` is one atomic
 /// `rename`, so the file never goes missing. If the `allowed-peers` rename fails, the previous
 /// bytes and mode are staged again and renamed over `enrol.json` (or the new file is removed when
-/// there was none); no backup file is ever made. The directory is synced after the renames.
+/// there was none); no backup file is ever made. The directory is synced after the renames; a
+/// failed sync is [`WriteError::NotSynced`] and nothing is undone. `sync_all` on macOS is fsync,
+/// it does not issue `F_FULLFSYNC` (a known limit, the call is not added).
 fn commit(
     stage: &Staged,
     previous: Option<&(Vec<u8>, u32)>,
     dir: &Path,
-    rename: &dyn Fn(&Path, &Path) -> io::Result<()>,
-) -> anyhow::Result<()> {
+    rename: Rename,
+    sync: SyncDir,
+) -> Result<(), WriteError> {
     if let Err(e) = rename(&stage.enrol_tmp, &stage.enrol_dst) {
         // Nothing changed: the previous enrol.json, if any, is still in place.
-        return Err(anyhow::Error::new(e).context("cannot move enrol.json into place"));
+        return Err(WriteError::Refused(anyhow::Error::new(e).context("cannot move enrol.json into place")));
     }
     if let Some((tmp, dst)) = &stage.peers {
         if let Err(e) = rename(tmp, dst) {
             let cause = anyhow::Error::new(e).context("cannot update allowed-peers");
-            return Err(put_back(stage, previous, dir, rename, cause));
+            return Err(put_back(stage, previous, dir, rename, sync, cause));
         }
     }
     // The data renames succeeded; a failed sync is reported but the files are kept.
-    sync_dir(dir).map_err(|e| {
-        anyhow::anyhow!("enrol.json was written, but syncing {} failed ({e}); the files are kept", dir.display())
+    // On macOS `sync_all` is fsync, not F_FULLFSYNC: the drive may still hold the data in its cache.
+    sync(dir).map_err(|e| {
+        WriteError::NotSynced(anyhow::anyhow!(
+            "enrol.json was written, but syncing {} failed ({e}); the files are kept",
+            dir.display()
+        ))
     })
 }
 
@@ -346,8 +417,13 @@ fn commit(
 /// removed. An `enrol.json` without the peer is harmless (the HTTP path works); a peer without a
 /// token is not, hence the order. `allowed-peers` keeps its text byte for byte and its mode; a
 /// symlink, a non-regular file or a file of another user there is refused.
-pub fn write_enrolment(lock: &EnrolLock, e: &Enrolment, allow_peer: Option<&str>, replace: bool) -> anyhow::Result<()> {
-    write_with(lock, e, allow_peer, replace, &|from, to| fs::rename(from, to))
+pub fn write_enrolment(
+    lock: &EnrolLock,
+    e: &Enrolment,
+    allow_peer: Option<&str>,
+    replace: bool,
+) -> Result<WriteReport, WriteError> {
+    write_with(lock, e, allow_peer, replace, &|from, to| fs::rename(from, to), &sync_dir)
 }
 
 fn write_with(
@@ -355,8 +431,23 @@ fn write_with(
     e: &Enrolment,
     allow_peer: Option<&str>,
     replace: bool,
-    rename: &dyn Fn(&Path, &Path) -> io::Result<()>,
-) -> anyhow::Result<()> {
+    rename: Rename,
+    sync: SyncDir,
+) -> Result<WriteReport, WriteError> {
+    let (stage, previous) = prepare(lock, e, allow_peer, replace).map_err(WriteError::Refused)?;
+    let result = commit(&stage, previous.as_ref(), lock.dir(), rename, sync);
+    stage.remove_temps();
+    result.map(|()| WriteReport { peer_added: stage.peers.is_some() })
+}
+
+/// Every check and the staging of both files, under the lock. Anything that fails here changed
+/// nothing (staged temps are removed).
+fn prepare(
+    lock: &EnrolLock,
+    e: &Enrolment,
+    allow_peer: Option<&str>,
+    replace: bool,
+) -> anyhow::Result<(Staged, Option<(Vec<u8>, u32)>)> {
     validate(e)?;
     let dir = lock.dir();
     let enrol_dst = dir.join(ENROL_FILE);
@@ -390,10 +481,11 @@ fn write_with(
                 );
                 anyhow::ensure!(m.file_type().is_file(), "{} is not a regular file; it is not replaced", peers_dst.display());
                 anyhow::ensure!(m.uid() == euid(), "{} is not owned by this user; it is not replaced", peers_dst.display());
-                let mut file = open_regular_owned(&peers_dst)?;
+                let file = open_regular_owned(&peers_dst)?;
                 let mode = file.metadata().map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
-                let mut text = String::new();
-                file.read_to_string(&mut text).with_context(|| format!("cannot read {}", peers_dst.display()))?;
+                // Capped like enrol.json: a bigger file is refused, never read whole.
+                let bytes = read_capped(file, &peers_dst)?;
+                let text = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{} is not valid UTF-8", peers_dst.display()))?;
                 (text, mode)
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => (String::new(), 0o600),
@@ -416,10 +508,7 @@ fn write_with(
             }
         },
     };
-    let stage = Staged { enrol_tmp, enrol_dst, peers };
-    let result = commit(&stage, previous.as_ref(), dir, rename);
-    stage.remove_temps();
-    result
+    Ok((Staged { enrol_tmp, enrol_dst, peers }, previous))
 }
 
 #[cfg(test)]
@@ -454,9 +543,9 @@ mod tests {
     }
 
     /// Locks the dir, writes, unlocks.
-    fn put(dir: &Path, e: &Enrolment, peer: Option<&str>, replace: bool) -> anyhow::Result<()> {
+    fn put(dir: &Path, e: &Enrolment, peer: Option<&str>, replace: bool) -> anyhow::Result<WriteReport> {
         let lock = lock_state_dir(dir)?;
-        write_enrolment(&lock, e, peer, replace)
+        Ok(write_enrolment(&lock, e, peer, replace)?)
     }
 
     fn put_with(
@@ -465,9 +554,19 @@ mod tests {
         peer: Option<&str>,
         replace: bool,
         rename: &dyn Fn(&Path, &Path) -> io::Result<()>,
-    ) -> anyhow::Result<()> {
-        let lock = lock_state_dir(dir)?;
-        write_with(&lock, e, peer, replace, rename)
+    ) -> Result<WriteReport, WriteError> {
+        let lock = lock_state_dir(dir).unwrap();
+        write_with(&lock, e, peer, replace, rename, &sync_dir)
+    }
+
+    fn put_sync(
+        dir: &Path,
+        e: &Enrolment,
+        peer: Option<&str>,
+        sync: &dyn Fn(&Path) -> io::Result<()>,
+    ) -> Result<WriteReport, WriteError> {
+        let lock = lock_state_dir(dir).unwrap();
+        write_with(&lock, e, peer, false, &|from, to| fs::rename(from, to), sync)
     }
 
     fn mode(p: &Path) -> u32 {
@@ -859,6 +958,140 @@ mod tests {
         });
         let err = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("read_enrolment hung on a FIFO");
         assert!(err.contains("not a regular file"), "{err}");
+    }
+
+    #[test]
+    fn fr_c2_node_write_refused_when_nothing_changed() {
+        let d = tempfile::tempdir().unwrap();
+        let enrol = d.path().join(ENROL_FILE);
+        fs::write(&enrol, b"old").unwrap();
+        // An existing file without replace.
+        let lock = lock_state_dir(d.path()).unwrap();
+        let err = write_enrolment(&lock, &sample(), None, false).unwrap_err();
+        assert!(matches!(err, WriteError::Refused(_)), "{err:?}");
+        assert!(err.to_string().contains("already exists"), "{err}");
+        drop(lock);
+        // The first rename failing, with nothing moved.
+        let failing = |_: &Path, _: &Path| -> io::Result<()> { Err(io::Error::other("injected")) };
+        let err = put_with(d.path(), &sample(), None, true, &failing).unwrap_err();
+        assert!(matches!(err, WriteError::Refused(_)), "{err:?}");
+        // An invalid token.
+        let mut bad = sample();
+        bad.node_token = "has space".into();
+        let err = put_with(d.path(), &bad, None, true, &|f, t| fs::rename(f, t)).unwrap_err();
+        assert!(matches!(err, WriteError::Refused(_)), "{err:?}");
+        assert_eq!(fs::read(&enrol).unwrap(), b"old");
+        assert_eq!(names(d.path()), vec![ENROL_FILE.to_string()]);
+    }
+
+    #[test]
+    fn fr_c2_node_write_symlinked_allowed_peers_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let target = other.path().join("real-peers");
+        fs::write(&target, format!("{}\n", peer())).unwrap();
+        std::os::unix::fs::symlink(&target, crate::transport::allowed_peers_file(d.path())).unwrap();
+        let lock = lock_state_dir(d.path()).unwrap();
+        let err = write_enrolment(&lock, &sample(), Some(&peer()), false).unwrap_err();
+        assert!(matches!(err, WriteError::Refused(_)), "{err:?}");
+        assert!(!d.path().join(ENROL_FILE).exists());
+    }
+
+    #[test]
+    fn fr_c2_node_write_second_rename_failing_with_a_good_undo_is_rolled_back() {
+        let d = tempfile::tempdir().unwrap();
+        let enrol = d.path().join(ENROL_FILE);
+        fs::write(&enrol, b"previous enrol bytes").unwrap();
+        let failing = |from: &Path, to: &Path| -> io::Result<()> {
+            if to.file_name().is_some_and(|n| n == "allowed-peers") {
+                return Err(io::Error::other("injected"));
+            }
+            fs::rename(from, to)
+        };
+        let err = put_with(d.path(), &sample(), Some(&peer()), true, &failing).unwrap_err();
+        assert!(matches!(err, WriteError::RolledBack(_)), "{err:?}");
+        assert!(err.to_string().contains("allowed-peers"), "{err}");
+        assert_eq!(fs::read(&enrol).unwrap(), b"previous enrol bytes");
+    }
+
+    #[test]
+    fn fr_c2_node_write_a_failing_undo_is_new_kept() {
+        let d = tempfile::tempdir().unwrap();
+        let enrol = d.path().join(ENROL_FILE);
+        fs::write(&enrol, b"previous enrol bytes").unwrap();
+        let calls = Cell::new(0);
+        let failing = |from: &Path, to: &Path| -> io::Result<()> {
+            calls.set(calls.get() + 1);
+            if calls.get() >= 2 {
+                return Err(io::Error::other("injected"));
+            }
+            fs::rename(from, to)
+        };
+        let err = put_with(d.path(), &sample(), Some(&peer()), true, &failing).unwrap_err();
+        assert!(matches!(err, WriteError::NewKept(_)), "{err:?}");
+        assert!(err.to_string().contains("now holds the NEW enrolment"), "{err}");
+        assert_eq!(read_enrolment(d.path()).unwrap(), Some(sample()));
+    }
+
+    #[test]
+    fn fr_c2_node_write_a_failing_directory_sync_is_not_synced_and_keeps_both_files() {
+        let d = tempfile::tempdir().unwrap();
+        let new = peer();
+        let failing_sync = |_: &Path| -> io::Result<()> { Err(io::Error::other("injected sync")) };
+        let err = put_sync(d.path(), &sample(), Some(&new), &failing_sync).unwrap_err();
+        assert!(matches!(err, WriteError::NotSynced(_)), "{err:?}");
+        assert!(err.to_string().contains("the files are kept"), "{err}");
+        assert_eq!(read_enrolment(d.path()).unwrap(), Some(sample()), "enrol.json holds the new enrolment");
+        assert_eq!(
+            fs::read_to_string(crate::transport::allowed_peers_file(d.path())).unwrap(),
+            format!("{new}\n"),
+            "allowed-peers holds the new peer"
+        );
+        assert_eq!(names(d.path()), vec!["allowed-peers".to_string(), ENROL_FILE.to_string()], "no temp file remains");
+    }
+
+    #[test]
+    fn fr_c2_node_write_error_display_is_the_inner_text_and_converts_into_anyhow() {
+        let e = WriteError::Refused(anyhow::anyhow!("inner").context("outer"));
+        assert_eq!(e.to_string(), "outer: inner");
+        assert_eq!(format!("{e:#}"), "outer: inner");
+        let any: anyhow::Error = e.into();
+        assert_eq!(format!("{any:#}"), "outer: inner", "no repeated source chain");
+    }
+
+    #[test]
+    fn fr_c2_node_write_report_says_whether_a_new_line_was_added() {
+        let d = tempfile::tempdir().unwrap();
+        let a = peer();
+        // No peer asked for.
+        assert!(!put(d.path(), &sample(), None, false).unwrap().peer_added);
+        // A new peer.
+        assert!(put(d.path(), &sample(), Some(&a), true).unwrap().peer_added);
+        // The same peer again: already listed.
+        assert!(!put(d.path(), &sample(), Some(&a), true).unwrap().peer_added);
+        assert_eq!(fs::read_to_string(crate::transport::allowed_peers_file(d.path())).unwrap(), format!("{a}\n"));
+    }
+
+    #[test]
+    fn fr_c2_node_write_refuses_an_oversized_allowed_peers() {
+        let d = tempfile::tempdir().unwrap();
+        let path = crate::transport::allowed_peers_file(d.path());
+        fs::write(&path, vec![b'#'; (MAX_FILE_BYTES + 1) as usize]).unwrap();
+        let lock = lock_state_dir(d.path()).unwrap();
+        let err = write_enrolment(&lock, &sample(), Some(&peer()), false).unwrap_err();
+        assert!(matches!(err, WriteError::Refused(_)), "{err:?}");
+        assert!(err.to_string().contains("larger than"), "{err}");
+        assert!(!d.path().join(ENROL_FILE).exists());
+    }
+
+    #[test]
+    fn fr_c2_node_lock_file_must_be_a_regular_file_owned_by_this_user() {
+        let p = Path::new("/x/.enrol.lock");
+        assert!(check_lock_file(true, euid(), p).is_ok());
+        let err = check_lock_file(false, euid(), p).unwrap_err().to_string();
+        assert!(err.contains(".enrol.lock") && err.contains("not a regular file"), "{err}");
+        let err = check_lock_file(true, euid().wrapping_add(1), p).unwrap_err().to_string();
+        assert!(err.contains(".enrol.lock") && err.contains("not owned by this user"), "{err}");
     }
 
     // A file owned by another user cannot be made portably without root: the "is not owned by this

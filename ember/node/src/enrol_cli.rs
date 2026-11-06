@@ -4,7 +4,8 @@
 //! then write `enrol.json` (and, only when the server is trusted, one line of `allowed-peers`)
 //! through [`crate::enrol::write_enrolment`].
 //!
-//! NOT COMPILED when this file was written. Every call below was read from the source it calls.
+//! Compiled and tested by CI on PR #614 (the step 8 wording for a failed write came after that run
+//! and is covered by the tests in `ember/server/tests/fr_c2_enrol_node.rs`).
 //!
 //! Rules that hold on every path:
 //! - Nothing is written before the trust decision, and an aborted run writes nothing at all.
@@ -27,7 +28,7 @@ use anyhow::{anyhow, bail, ensure, Context};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::enrol::{is_peer_hex, lock_state_dir, validate, write_enrolment, Enrolment, ENROL_FILE};
+use crate::enrol::{is_peer_hex, lock_state_dir, validate, write_enrolment, Enrolment, WriteError, ENROL_FILE};
 
 /// The most of a response body that is read (64 KiB).
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -626,6 +627,21 @@ pub struct Outcome {
     pub peer_added: bool,
 }
 
+/// The words for a failed final write (SPEC `FR-C2h`). The server consumed the credential when it
+/// delivered it, so the token is lost unless it is on disk. Names the computer, never the token
+/// or the cause text (which may hold paths only, but is not needed here).
+fn write_failure_text(err: &WriteError, name: &str, computer_id: &str, enrol_path: &str) -> String {
+    match err {
+        WriteError::Refused(_) | WriteError::RolledBack(_) => format!(
+            "Nothing was written. The server already handed over this computer's credential once and will not do it again: the token is lost. Remove the computer {name} ({computer_id}) in Ember and enrol again with a new code."
+        ),
+        WriteError::NewKept(_) => format!(
+            "enrol.json now holds the NEW enrolment (the previous file could not be restored): the token is on disk; check {enrol_path}."
+        ),
+        WriteError::NotSynced(_) => "The files are written, but syncing the directory failed: the token is on disk and works now, but it may not survive a crash or power loss; run sync, or enrol again if the node loses it.".to_string(),
+    }
+}
+
 /// `ember-node enrol …`: parse, run on the real terminal.
 pub async fn cli(args: &[String]) -> anyhow::Result<()> {
     let opts = parse_args(args, crate::config::default_state_dir())?;
@@ -855,7 +871,17 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
     // 8. Write.
     let trusted = trust == Trust::Trusted;
     let allow = if trusted { delivered.as_deref() } else { None };
-    write_enrolment(&lock, &enrolment, allow, replace)?;
+    // The server wiped the credential when it handed it over, so every outcome other than a full
+    // success says what happened to the token, in plain words (never the token itself).
+    let report = match write_enrolment(&lock, &enrolment, allow, replace) {
+        Ok(r) => r,
+        Err(e) => {
+            let path = opts.state_dir.join(ENROL_FILE);
+            let text = write_failure_text(&e, &name, &computer_id, &path.display().to_string());
+            io.say(&text);
+            return Err(anyhow!("{text}"));
+        }
+    };
     drop(enrolment);
 
     io.say(&format!("Enrolled as {name} ({computer_id})."));
@@ -871,7 +897,9 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
             delivered_fp.clone().unwrap_or_default(),
             server.base
         ));
-        io.say("Restart ember-node, or send it SIGHUP, to load the allowed peer.");
+        if report.peer_added {
+            io.say("Restart ember-node, or send it SIGHUP, to load the allowed peer.");
+        }
     } else {
         io.say(&format!("This node accepts commands from anyone holding the token over HTTP at {}.", server.base));
         if let Some(id) = &delivered {
@@ -882,7 +910,7 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
         }
     }
     io.say("Start the node with: ember-node (add EMBER_NODE_TRANSPORT=1 to serve over the transport).");
-    Ok(Outcome { name, computer_id, server_trusted: trusted, peer_added: trusted })
+    Ok(Outcome { name, computer_id, server_trusted: trusted, peer_added: report.peer_added })
 }
 
 // ---- tests ----------------------------------------------------------------------------------

@@ -24,7 +24,7 @@ use super::project::wrap_lines;
 use super::theme::*;
 use crate::ui::channel_owner::{
     capped_note, clears_sheet_state, create_label, create_runs, door_status, error_message, guest_rows, invite_rows,
-    known_door, clamp_hours, Confirm, DoorStatus, CLAMPED_NOTE,
+    known_door, merge_door, clamp_hours, DOOR_READ_FAILED_NOTE, Confirm, DoorStatus, CLAMPED_NOTE,
     InviteState, ALLOW_PRESETS, DEFAULT_TTL_HOURS, MAX_HOURS, MIN_HOURS, TTL_CHOICES,
 };
 
@@ -60,6 +60,8 @@ pub struct OwnerState {
     armed_at: MutableState<i64>,
     /// The door as the server last said, kept after close (it holds no secret).
     door: MutableState<Option<GuestDoorState>>,
+    /// The last door read failed and no door state is known.
+    door_failed: MutableState<bool>,
     /// Create was tapped once while the door is known off.
     create_armed: MutableState<bool>,
     /// Review-window sample data is shown: nothing is fetched and no action reaches a server.
@@ -173,6 +175,7 @@ impl OwnerState {
             armed_at: mutable_state_of(0),
             door: mutable_state_of(sample.as_ref().and_then(|s| s.created.as_ref().and_then(|c| c.guest_door.clone()))),
             create_armed: mutable_state_of(false),
+            door_failed: mutable_state_of(false),
             note: mutable_state_of(sample.and_then(|s| s.note)),
             }
         })
@@ -225,6 +228,30 @@ impl OwnerState {
         );
     }
 
+    /// Reads the guest door once when the sheet opens, so its state is known before any invite.
+    /// A failed read keeps what was known. Review windows keep their sample door.
+    fn read_door(&self) {
+        if self.sample {
+            return;
+        }
+        let st = self.clone();
+        crate::services::run_shared(
+            async move { crate::services::services().client.api().guest_door().await },
+            move |r| {
+                let fresh = match r {
+                    Ok(d) => Some(d),
+                    Err(e) => {
+                        tracing::warn!("guest door read failed: {:?}", e.code());
+                        None
+                    }
+                };
+                let merged = merge_door(st.door.get_untracked(), fresh.clone());
+                st.door_failed.set(fresh.is_none() && merged.is_none());
+                st.door.set(merged);
+            },
+        );
+    }
+
     /// Runs one owner request. On success `ok` runs and the lists are read again; on failure the
     /// fixed sentence of the error code is shown.
     fn act<T: Send + 'static>(
@@ -262,7 +289,8 @@ impl OwnerState {
             channel,
             async move { crate::services::services().client.api().create_invite(&c, Some(ttl)).await },
             |st, made| {
-                st.door.set(made.guest_door.clone());
+                st.door.set(merge_door(st.door.get_untracked(), made.guest_door.clone()));
+                st.door_failed.set(false);
                 st.create_armed.set(false);
                 st.created.set(Some(made));
             },
@@ -340,6 +368,7 @@ pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bo
             }
             if open && fetch {
                 st2.refresh(&c);
+                st2.read_door();
             }
         });
     }
@@ -432,6 +461,9 @@ fn InviteSection(channel: &str, st: &OwnerState) {
     });
     let tone = if matches!(status, DoorStatus::Off) { p.red.strong } else { p.text_2 };
     Label(status.text(), Fs::Sm, Weight::Regular, Some(paint(tone)), None);
+    if created.is_none() && st.door_failed.get() && matches!(status, DoorStatus::Unknown) {
+        Label(DOOR_READ_FAILED_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+    }
     if let Some(w) = status.warning() {
         Label(w, Fs::Sm, Weight::Regular, Some(paint(p.orange.strong)), None);
         Label("127.0.0.1 같은 내 컴퓨터 주소나 0.0.0.0 주소는 밖에서 닿지 않습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);

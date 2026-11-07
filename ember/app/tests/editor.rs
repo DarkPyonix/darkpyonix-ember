@@ -956,6 +956,21 @@ mod keyboard_navigation {
         );
         assert_eq!(editor_focus_target(None), None);
     }
+
+    #[test]
+    fn fr_l31_tree_ignores_keys_while_prompt_is_open() {
+        use ember_app::ui::editor::{tree_handles_key, TreePrompt};
+        assert!(tree_handles_key(None));
+        for p in [
+            TreePrompt::NewFile { parent: "/p".into() },
+            TreePrompt::NewDir { parent: "/p".into() },
+            TreePrompt::Rename { path: "/p/a.rs".into() },
+            TreePrompt::Delete { path: "/p/a.rs".into(), is_dir: false },
+            TreePrompt::DeleteMany { items: vec![("/p/a.rs".into(), false), ("/p/b.rs".into(), false)] },
+        ] {
+            assert!(!tree_handles_key(Some(&p)), "prompt {p:?} must block tree key handling");
+        }
+    }
 }
 
 // FR-L31.2: the editor's source control rules against the demo git source, which takes the same op

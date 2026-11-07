@@ -1057,7 +1057,7 @@ pub mod page {
                 }
                 div { class: "ed-tree", role: "tree", "aria-label": "프로젝트 트리", "aria-multiselectable": "true", tabindex: "0",
                     onkeydown: move |event| {
-                        if prompt.read().is_some() {
+                        if !crate::ui::editor::tree_handles_key(prompt.read().as_ref()) {
                             return;
                         }
                         if event.key() == Key::Escape {

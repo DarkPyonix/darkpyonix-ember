@@ -530,6 +530,15 @@ pub enum TreeKeyOutcome {
     OpenFile(String),
 }
 
+/// Whether the explorer tree container should handle key events (`Escape`, `Cmd/Ctrl+C/X/V`,
+/// `Delete`/`Backspace`, and arrow navigation). While an inline prompt (`NewFile`, `NewDir`,
+/// `Rename`, `Delete`, `DeleteMany`) is open inside `.ed-tree`, the tree container must ignore
+/// keys so `Backspace`, `Delete`, and `Cmd/Ctrl+C/X/V` inside the inline `<input>` are not
+/// intercepted by the tree.
+pub fn tree_handles_key(prompt: Option<&TreePrompt>) -> bool {
+    prompt.is_none()
+}
+
 /// Handles WAI-ARIA treeview keyboard navigation (`ArrowDown`, `ArrowUp`, `ArrowRight`, `ArrowLeft`, `Home`, `End`, `Enter`, `" "`)
 /// over `rows`, given `selected` (`Option<(&str, bool)>`) and `root`.
 pub fn tree_key_action(

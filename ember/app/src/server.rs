@@ -305,6 +305,33 @@ mod editor_connection_tests {
     }
 }
 
+/// `GET /api/agents/defaults` and `PUT /api/agents/defaults`: global new-member defaults (`새 팀원 기본값`, FR-L20, #481, #670).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDefaults {
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+/// `GET /api/agents/settings` response (FR-L20, FR-S8).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct AgentSettingsResponse {
+    #[serde(default)]
+    pub settings: std::collections::HashMap<String, AgentHarnessSettings>,
+}
+
+/// Per-harness settings in `GET /api/agents/settings` (FR-L20, FR-S8).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct AgentHarnessSettings {
+    #[serde(default)]
+    pub mem_limit_mb: Option<u64>,
+}
+
 /// `POST /api/sessions` body, including the account (FR-U2) that
 /// `ember_client::wire::NewSession` does not have yet.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -434,6 +461,32 @@ impl ServerApi {
         let req = self.http.post(self.url("/sessions")).json(body);
         Ok(Self::check(req.send().await?).await?.json().await?)
     }
+
+    /// `GET /api/agents/defaults`: global new-member defaults (`새 팀원 기본값`, FR-L20, #481, #670).
+    pub async fn agent_defaults(&self) -> ServerResult<AgentDefaults> {
+        Ok(Self::check(self.http.get(self.url("/agents/defaults")).send().await?).await?.json().await?)
+    }
+
+    /// `PUT /api/agents/defaults`: save global new-member defaults (FR-L20, #481, #670).
+    pub async fn put_agent_defaults(&self, defaults: &AgentDefaults) -> ServerResult<AgentDefaults> {
+        let req = self.http.put(self.url("/agents/defaults")).json(defaults);
+        Ok(Self::check(req.send().await?).await?.json().await?)
+    }
+
+    /// `GET /api/agents/settings`: per-harness settings (`mem_limit_mb`, FR-L20, FR-S8).
+    pub async fn agent_settings(&self) -> ServerResult<AgentSettingsResponse> {
+        Ok(Self::check(self.http.get(self.url("/agents/settings")).send().await?).await?.json().await?)
+    }
+
+    /// `PUT /api/agents/{agent}/settings`: set or clear (`None` or `Some(0)`) the memory limit in MiB (FR-L20, FR-S8).
+    pub async fn put_agent_mem_limit(&self, agent: &str, mem_limit_mb: Option<u64>) -> ServerResult<()> {
+        let req = self
+            .http
+            .put(self.url(&agent_settings_path(agent)))
+            .json(&json!({ "mem_limit_mb": mem_limit_mb }));
+        Self::check(req.send().await?).await?;
+        Ok(())
+    }
 }
 
 /// The error for a non-success answer: 401 is [`ServerError::Unauthorized`], the rest carry the
@@ -456,6 +509,10 @@ fn default_path(id: &str) -> String {
 
 fn check_path(id: &str) -> String {
     format!("/accounts/{}/check", seg(id))
+}
+
+fn agent_settings_path(agent: &str) -> String {
+    format!("/agents/{}/settings", seg(agent))
 }
 
 fn create_account_body(agent: &str, label: &str) -> serde_json::Value {
@@ -610,5 +667,37 @@ mod tests {
             json!({ "project": "p", "agent": "codex", "cwd": "/w", "account": "a1" })
         );
         assert_eq!(seg("a b/c"), "a%20b%2Fc");
+    }
+
+    #[test]
+    fn fr_l20_defaults_and_settings_wire_shapes() {
+        let d = AgentDefaults {
+            agent: Some("claude-code".into()),
+            model: Some("Opus 4.7".into()),
+            effort: Some("High".into()),
+            mode: Some("edits".into()),
+        };
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(
+            v,
+            json!({
+                "agent": "claude-code",
+                "model": "Opus 4.7",
+                "effort": "High",
+                "mode": "edits"
+            })
+        );
+        let decoded: AgentDefaults = serde_json::from_value(v).unwrap();
+        assert_eq!(decoded, d);
+
+        let empty: AgentDefaults = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(empty, AgentDefaults::default());
+
+        let s: AgentSettingsResponse = serde_json::from_value(json!({
+            "settings": { "codex": { "mem_limit_mb": 4096 } }
+        }))
+        .unwrap();
+        assert_eq!(s.settings.get("codex").and_then(|c| c.mem_limit_mb), Some(4096));
+        assert_eq!(agent_settings_path("claude-code"), "/agents/claude-code/settings");
     }
 }

@@ -25,6 +25,8 @@
 //! | POST   | `/api/sessions/{id}/fork` | `{turn_seq?, title?}` → 201 new session; 409 without a completed turn |
 //! | GET    | `/api/agents/settings` | → `{settings: {<agent>: {mem_limit_mb}}}`, only harnesses with a stored value (FR-L20, FR-S8) |
 //! | PUT    | `/api/agents/{agent}/settings` | `{mem_limit_mb: 256..=262144 \| 0 \| null}` → `{agent, mem_limit_mb, applies: "next_session"}`; unknown field or missing key 422, bad value 400, unknown agent or `scripted` 404 |
+//! | GET    | `/api/agents/defaults` | → `{agent, model, effort, mode}` (new-member defaults, FR-L20, #481, #670) |
+//! | PUT    | `/api/agents/defaults` | `{agent?, model?, effort?, mode?}` → `{agent, model, effort, mode}`; unknown field or non-object 422, bad value 400 |
 //!
 //! Tokens (FR-U7; cost is always `null`, the response says why in `cost_note`):
 //!
@@ -67,8 +69,9 @@ use crate::agents::AgentKind;
 use crate::events::ApprovalDecision;
 use crate::projects::ProjectError;
 use crate::session::{
-    NewSession, Push, QuestionAnswerBody, QuestionError, SessionError, Sessions, MEM_LIMIT_KEY, MEM_LIMIT_MAX_MB, MEM_LIMIT_MIN_MB,
-    MEM_LIMIT_RANGE_MESSAGE,
+    NewSession, Push, QuestionAnswerBody, QuestionError, SessionError, Sessions, DEFAULT_AGENT_KEY,
+    DEFAULT_EFFORT_KEY, DEFAULT_MODEL_KEY, DEFAULT_MODE_KEY, EFFORT_LEVELS, MEM_LIMIT_KEY,
+    MEM_LIMIT_MAX_MB, MEM_LIMIT_MIN_MB, MEM_LIMIT_RANGE_MESSAGE,
 };
 use crate::store::{now_ms, SessionPatch};
 
@@ -78,6 +81,7 @@ pub fn router(sessions: Arc<Sessions>) -> Router {
         .route("/api/agents", get(agents))
         // `/api/agents/settings` has three segments, `/api/agents/{agent}/settings` four: no overlap.
         .route("/api/agents/settings", get(get_agent_settings))
+        .route("/api/agents/defaults", get(get_agent_defaults).put(put_agent_defaults))
         .route("/api/agents/{agent}/settings", put(put_agent_settings))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}", get(get_session).patch(patch_session))
@@ -189,6 +193,109 @@ async fn put_agent_settings(
     let stored = limit.filter(|mb| *mb > 0);
     tracing::info!(harness = kind.as_str(), mem_limit_mb = ?stored, "agent memory limit set");
     Ok(Json(json!({ "agent": kind.as_str(), "mem_limit_mb": stored, "applies": "next_session" })))
+}
+
+/// `GET /api/agents/defaults`: the stored global new-member defaults (FR-L20, #481, #670).
+async fn get_agent_defaults(State(s): State<Arc<Sessions>>) -> ApiResult<impl IntoResponse> {
+    Ok(Json(s.agent_defaults()?))
+}
+
+/// `PUT /api/agents/defaults` with optional `agent`, `model`, `effort` and `mode` (FR-L20, #481, #670).
+async fn put_agent_defaults(
+    State(s): State<Arc<Sessions>>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<impl IntoResponse> {
+    let unprocessable = |m: &str| ApiError(StatusCode::UNPROCESSABLE_ENTITY, m.to_string());
+    let bad = |m: &str| ApiError(StatusCode::BAD_REQUEST, m.to_string());
+    let obj = body.as_object().ok_or_else(|| unprocessable("body must be an object"))?;
+    const KNOWN_KEYS: &[&str] =
+        &[DEFAULT_AGENT_KEY, DEFAULT_MODEL_KEY, DEFAULT_EFFORT_KEY, DEFAULT_MODE_KEY];
+    if let Some(k) = obj.keys().find(|k| !KNOWN_KEYS.contains(&k.as_str())) {
+        return Err(unprocessable(&format!("unknown field {k}")));
+    }
+
+    let parse_opt_str = |v: &serde_json::Value, field: &str| -> Result<Option<String>, ApiError> {
+        match v {
+            serde_json::Value::Null => Ok(None),
+            serde_json::Value::String(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(trimmed.to_string()))
+                }
+            }
+            _ => Err(bad(&format!("{field} must be a string or null"))),
+        }
+    };
+
+    let agent_patch = match obj.get(DEFAULT_AGENT_KEY) {
+        None => None,
+        Some(v) => {
+            let parsed = parse_opt_str(v, DEFAULT_AGENT_KEY)?;
+            if let Some(ref a) = parsed {
+                match AgentKind::parse(a) {
+                    Some(k) if k != AgentKind::Scripted => {}
+                    _ => return Err(bad(&format!("unknown agent {a}"))),
+                }
+            }
+            Some(parsed)
+        }
+    };
+    let model_patch = match obj.get(DEFAULT_MODEL_KEY) {
+        None => None,
+        Some(v) => {
+            let parsed = parse_opt_str(v, DEFAULT_MODEL_KEY)?;
+            if let Some(ref m) = parsed {
+                if m.chars().count() > 128 || m.chars().any(char::is_control) {
+                    return Err(bad("invalid model"));
+                }
+            }
+            Some(parsed)
+        }
+    };
+    let effort_patch = match obj.get(DEFAULT_EFFORT_KEY) {
+        None => None,
+        Some(v) => {
+            let parsed = parse_opt_str(v, DEFAULT_EFFORT_KEY)?;
+            if let Some(ref e) = parsed {
+                if !EFFORT_LEVELS.contains(&e.as_str()) {
+                    return Err(bad(&format!("invalid effort {e}")));
+                }
+            }
+            Some(parsed)
+        }
+    };
+    let mode_patch = match obj.get(DEFAULT_MODE_KEY) {
+        None => None,
+        Some(v) => {
+            let parsed = parse_opt_str(v, DEFAULT_MODE_KEY)?;
+            if let Some(ref m) = parsed {
+                if !crate::projects::PERMISSION_MODES.contains(&m.as_str()) {
+                    return Err(bad(&format!("invalid mode {m}")));
+                }
+            }
+            Some(parsed)
+        }
+    };
+
+    if let Some(ref a) = agent_patch {
+        s.set_agent_default_key(DEFAULT_AGENT_KEY, a.as_deref())?;
+        if a.is_none() && model_patch.is_none() {
+            s.set_agent_default_key(DEFAULT_MODEL_KEY, None)?;
+        }
+    }
+    if let Some(ref m) = model_patch {
+        s.set_agent_default_key(DEFAULT_MODEL_KEY, m.as_deref())?;
+    }
+    if let Some(ref e) = effort_patch {
+        s.set_agent_default_key(DEFAULT_EFFORT_KEY, e.as_deref())?;
+    }
+    if let Some(ref m) = mode_patch {
+        s.set_agent_default_key(DEFAULT_MODE_KEY, m.as_deref())?;
+    }
+
+    Ok(Json(s.agent_defaults()?))
 }
 
 #[derive(Deserialize)]

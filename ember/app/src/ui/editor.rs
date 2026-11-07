@@ -499,6 +499,27 @@ pub fn problems_tab_label(count: usize) -> String {
     if count == 0 { ToolWindow::Problems.label().to_string() } else { format!("{} {count}", ToolWindow::Problems.label()) }
 }
 
+/// Maximum number of problems rendered in the DOM before offering a load-more button.
+pub const MAX_VISIBLE_PROBLEMS: usize = 200;
+
+/// Maximum number of workbench log entries kept in memory.
+pub const MAX_WORKBENCH_LOGS: usize = 500;
+
+/// Append a workbench log line, keeping at most [`MAX_WORKBENCH_LOGS`] newest lines.
+pub fn push_workbench_log(logs: &mut Vec<String>, line: String) {
+    if logs.len() >= MAX_WORKBENCH_LOGS {
+        let excess = logs.len() + 1 - MAX_WORKBENCH_LOGS;
+        logs.drain(0..excess);
+    }
+    logs.push(line);
+}
+
+/// Return visible problems slice and overflow count.
+pub fn paginate_problems<'a, T>(items: &'a [T], limit: usize) -> (&'a [T], usize) {
+    let cap = limit.min(items.len());
+    (&items[..cap], items.len().saturating_sub(cap))
+}
+
 /// Where a problem is, as a row shows it: the file below the project folder and the 1-based line.
 pub fn problem_location(path: &str, folder: &str, line: u32) -> String {
     format!("{}:{}", breadcrumb_segments(path, folder).join("/"), line + 1)
@@ -776,10 +797,11 @@ pub enum ToolWindow {
     Terminal,
     Run,
     Problems,
+    Output,
 }
 
 impl ToolWindow {
-    pub const ALL: [ToolWindow; 9] = [
+    pub const ALL: [ToolWindow; 10] = [
         ToolWindow::Project,
         ToolWindow::Search,
         ToolWindow::Commit,
@@ -789,11 +811,12 @@ impl ToolWindow {
         ToolWindow::Terminal,
         ToolWindow::Run,
         ToolWindow::Problems,
+        ToolWindow::Output,
     ];
     pub const LEFT: [ToolWindow; 4] = [ToolWindow::Project, ToolWindow::Search, ToolWindow::Commit, ToolWindow::Git];
     pub const RIGHT: [ToolWindow; 2] = [ToolWindow::Agent, ToolWindow::Notifications];
-    pub const BOTTOM: [ToolWindow; 3] =
-        [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems];
+    pub const BOTTOM: [ToolWindow; 4] =
+        [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems, ToolWindow::Output];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -806,6 +829,7 @@ impl ToolWindow {
             ToolWindow::Terminal => "터미널",
             ToolWindow::Run => "실행",
             ToolWindow::Problems => "문제",
+            ToolWindow::Output => "출력",
         }
     }
 
@@ -813,7 +837,7 @@ impl ToolWindow {
         match self {
             ToolWindow::Project | ToolWindow::Search | ToolWindow::Commit | ToolWindow::Git => Side::Left,
             ToolWindow::Agent | ToolWindow::Notifications => Side::Right,
-            ToolWindow::Terminal | ToolWindow::Run | ToolWindow::Problems => Side::Bottom,
+            ToolWindow::Terminal | ToolWindow::Run | ToolWindow::Problems | ToolWindow::Output => Side::Bottom,
         }
     }
 
@@ -829,6 +853,7 @@ impl ToolWindow {
             ToolWindow::Terminal => Some(Action::Terminal),
             ToolWindow::Run => Some(Action::Run),
             ToolWindow::Problems => Some(Action::Problems),
+            ToolWindow::Output => None,
         }
     }
 
@@ -851,6 +876,7 @@ impl ToolWindow {
             ToolWindow::Terminal => IconRole::Menu,
             ToolWindow::Run => IconRole::Forward,
             ToolWindow::Problems => IconRole::Close,
+            ToolWindow::Output => IconRole::Menu,
         }
     }
 }

@@ -263,6 +263,8 @@ pub enum WidgetEvent {
     SelectionChanged { version: u32, anchor: WidgetPos, active: WidgetPos },
     /// The lines visible on screen changed (`compose_rust::code::VisibleRange`).
     VisibleRangeChanged { version: u32, first_line: u32, last_line: u32 },
+    /// A fold chevron in the gutter was toggled (`compose_rust::code::FoldChange`).
+    FoldChanged { start_line: u32, collapsed: bool },
 }
 
 /// What the session asks the UI to do to the widget.

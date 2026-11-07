@@ -1348,3 +1348,58 @@ fn fr_l31_empty_state_hints_and_row_tab_classes_and_tab_width_text() {
     assert_eq!(tab_width_text(2), "2칸");
     assert_eq!(tab_width_text(0), "4칸");
 }
+
+#[test]
+fn fr_e6_folds_prop_encodes_fold_regions_and_bridge_toggles_fold() {
+    let region = ember_editor::FoldRegion {
+        version: 1,
+        start_line: 1,
+        end_line: 4,
+        collapsed: true,
+    };
+    let encoded = ember_app::ui::editor::folds(&[region]);
+    let regions = encoded.folds();
+    assert_eq!(regions.len(), 1);
+    assert_eq!(regions[0].version, 1);
+    assert_eq!(regions[0].start_line, 1);
+    assert_eq!(regions[0].end_line, 4);
+    assert!(regions[0].collapsed);
+
+    let mut bridge = ember_editor::bridge::WidgetBridge::new();
+    let uri = ember_editor_conn::uri::UriComponents::remote("127.0.0.1:9", "/w/a.ts");
+    bridge.apply(ember_editor::SessionUpdate::Opened {
+        uri: uri.clone(),
+        generation: 1,
+        text: "line0\n  line1\n  line2\n  line3\nline4\n".into(),
+        language_id: "typescript".into(),
+        tab_width: 4,
+    });
+    bridge.apply(ember_editor::SessionUpdate::Folds {
+        uri: uri.clone(),
+        generation: 1,
+        version: 0,
+        folds: vec![ember_editor::FoldRegion {
+            version: 0,
+            start_line: 1,
+            end_line: 4,
+            collapsed: false,
+        }],
+    });
+
+    let res = bridge.on_fold_changed(&uri, 1, true).expect("event from bridge");
+    assert_eq!(res.0, uri);
+    assert_eq!(res.1, 1);
+    assert_eq!(
+        res.2,
+        ember_editor::WidgetEvent::FoldChanged {
+            start_line: 1,
+            collapsed: true,
+        }
+    );
+
+    let doc = bridge.document(&uri).expect("document in bridge");
+    assert_eq!(doc.folds.len(), 1);
+    assert_eq!(doc.folds[0].start_line, 1);
+    assert_eq!(doc.folds[0].end_line, 4);
+    assert!(doc.folds[0].collapsed);
+}

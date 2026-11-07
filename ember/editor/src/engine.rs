@@ -72,6 +72,8 @@ pub enum ReadPurpose {
     Open,
     /// The watcher reported a change to an open file.
     Reload,
+    /// An explicit reload of an open file after a work-tree discard (replaces the buffer even if dirty).
+    ForceReload,
     /// `MainThreadDocuments.$tryOpenDocument` from the extension host (`workspace.openTextDocument`).
     ExtHostOpen { req: u32 },
     /// A grammar file the syntax highlighting needs (`scope` is the grammar's scope name).
@@ -84,6 +86,8 @@ pub enum ReadPurpose {
 pub enum Input {
     Open { uri: UriComponents },
     Close { uri: UriComponents },
+    /// Reload an open document from disk even if its buffer has unsaved edits (e.g. after discard).
+    Reload { uri: UriComponents },
     /// The editor of `uri` became the active one.
     Focus { uri: UriComponents },
     /// An event from the `CodeEditor` node rendered with key `generation`.
@@ -311,6 +315,7 @@ impl SessionCore {
         match input {
             Input::Open { uri } => self.on_open(uri),
             Input::Close { uri } => self.on_close(&uri),
+            Input::Reload { uri } => self.on_reload(uri),
             Input::Focus { uri } => self.on_focus(&uri),
             Input::Widget { uri, generation, event } => self.on_widget(&uri, generation, event),
             Input::TriggerInline { uri, generation, pos } => self.on_trigger_inline(&uri, generation, pos),
@@ -558,6 +563,12 @@ impl SessionCore {
         self.rpc(call);
         self.active = Some(key);
         self.send_tab_model();
+    }
+
+    fn on_reload(&mut self, uri: UriComponents) {
+        if self.docs.contains_key(&uri.key()) {
+            self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::ForceReload });
+        }
     }
 
     // ---- widget events ------------------------------------------------------------------------
@@ -1204,6 +1215,16 @@ impl SessionCore {
                     return;
                 }
                 self.reset_doc(&key, &text, Some(bom));
+            }
+            ReadPurpose::ForceReload => {
+                let key = uri.key();
+                let Ok(bytes) = result else { return };
+                if !self.docs.contains_key(&key) {
+                    return;
+                }
+                let Ok((text, bom)) = decode(&bytes) else { return };
+                self.reset_doc(&key, &text, Some(bom));
+                self.ui(SessionUpdate::Dirty { uri, dirty: false });
             }
             ReadPurpose::ExtHostOpen { req } => self.finish_exthost_open(uri, req, result),
             ReadPurpose::Grammar { scope } => self.on_grammar_read(&scope, &uri, result),

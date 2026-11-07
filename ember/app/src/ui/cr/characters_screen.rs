@@ -4,10 +4,10 @@
 //!
 //! It is not a sidebar entry (D26, #503): it opens from the project settings sheet and has a
 //! back button (the mockup reaches it only from its design index). What is real: the project's
-//! style (read from the server, saved with the project API) and the members of the team
-//! preview (the project's sessions). What is a preview: the sample team of a project without
-//! members, and the editor's name, harness, role, style, state and silhouette, which no storage
-//! holds yet (TODO(#489): per-member edits).
+//! style (read from the server, saved with the project API), the members of the team preview
+//! (the project's sessions), and the editor's per-member overrides (name, harness, role, style,
+//! state and silhouette), saved through `PATCH /api/projects/{name}` (`character_overrides`,
+//! #489). What is a preview: the sample team of a project without members.
 
 #![allow(non_snake_case)]
 
@@ -21,13 +21,14 @@ use super::components::{AppButton, ButtonKind, EmberField, FieldOptions, Label, 
 use super::theme::*;
 use crate::services::{run_shared, services};
 use crate::ui::characters::{
-    characters_project, harness_label, state_label, style_apply_needed, supports_pin, team_cols, team_preview, with_topic,
-    EDITOR_HARNESSES, EDITOR_ROLES, SILHOUETTES,
+    apply_character_override, build_character_override, characters_project, editor_save_needed, effective_character_overrides,
+    harness_label, state_label, style_apply_needed, supports_pin, team_cols, team_preview, updated_character_overrides,
+    with_topic, EDITOR_HARNESSES, EDITOR_ROLES, SILHOUETTES,
 };
 use crate::ui::coexist::shared_ui;
 use crate::ui::project::{effective_style, patch_error_message};
 
-/// Sends the style to the project (the one persisted part of this screen).
+/// Sends the style to the project (FR-L26).
 fn apply_style(project: String, style: CharStyle, saving: MutableState<bool>, message: MutableState<Option<String>>) {
     saving.set(true);
     message.set(None);
@@ -36,13 +37,57 @@ fn apply_style(project: String, style: CharStyle, saving: MutableState<bool>, me
     let ui = shared_ui().clone();
     let for_prefs = project.clone();
     run_shared(
-        async move { services().client.patch_project(&project, &patch).await.map(|_| ()) },
+        async move { services().patch_project(&project, &patch).await.map(|_| ()) },
         move |r| {
             saving.set(false);
             match r {
                 Ok(()) => {
                     ui.update_prefs(|pr| pr.set_character_style(&for_prefs, style));
                     message.set(Some("프로젝트의 캐릭터 스타일을 저장했습니다".to_string()));
+                }
+                Err(e) => message.set(Some(patch_error_message(e.status(), e.code(), &sent).to_string())),
+            }
+        },
+    );
+}
+
+/// Sends per-member character overrides to the project (`PATCH /api/projects/{name}`, FR-L22, #489).
+fn save_character_override(
+    project: String,
+    member_name: String,
+    override_entry: Option<ember_client::wire::CharacterOverride>,
+    current_overrides: std::collections::BTreeMap<String, ember_client::wire::CharacterOverride>,
+    saving: MutableState<bool>,
+    message: MutableState<Option<String>>,
+) {
+    saving.set(true);
+    message.set(None);
+    let patch_map = updated_character_overrides(&current_overrides, &member_name, override_entry.clone());
+    let prefs_map: std::collections::BTreeMap<String, ember_client::wire::CharacterOverride> = patch_map
+        .iter()
+        .filter_map(|(k, v)| v.clone().map(|o| (k.clone(), o)))
+        .collect();
+    let patch = ember_client::wire::ProjectPatch {
+        character_overrides: Some(patch_map),
+        ..Default::default()
+    };
+    let sent = patch.clone();
+    let ui = shared_ui().clone();
+    let for_prefs = project.clone();
+    let reset = override_entry.is_none();
+    run_shared(
+        async move { services().patch_project(&project, &patch).await.map(|_| ()) },
+        move |r| {
+            saving.set(false);
+            match r {
+                Ok(()) => {
+                    ui.update_prefs(|pr| pr.set_character_overrides(&for_prefs, prefs_map));
+                    let text = if reset {
+                        format!("{member_name} 팀원의 캐릭터 설정을 초기화했습니다")
+                    } else {
+                        format!("{member_name} 팀원의 캐릭터 설정을 저장했습니다")
+                    };
+                    message.set(Some(text));
                 }
                 Err(e) => message.set(Some(patch_error_message(e.status(), e.code(), &sent).to_string())),
             }
@@ -149,8 +194,22 @@ pub fn CharactersScreen() {
     let names: Vec<String> = svc.as_ref().map(|s| s.client.read(|st| st.projects().into_iter().map(|v| v.name).collect())).unwrap_or_default();
     let project = characters_project(&asked, ui.selected_project.get().as_deref(), &names);
     let project_name = project.clone().unwrap_or_default();
-    let server = svc.as_ref().and_then(|s| s.client.read(|st| st.project(&project_name).and_then(|pr| pr.character_style.clone())));
-    let current = effective_style(server.as_deref(), ui.prefs.get().saved_character_style(&project_name));
+    let (server, server_overrides) = svc
+        .as_ref()
+        .map(|s| {
+            s.client.read(|st| {
+                st.project(&project_name)
+                    .map(|pr| (pr.character_style.clone(), Some(pr.character_overrides.clone())))
+                    .unwrap_or((None, None))
+            })
+        })
+        .unwrap_or((None, None));
+    let prefs = ui.prefs.get();
+    let current = effective_style(server.as_deref(), prefs.saved_character_style(&project_name));
+    let current_overrides = effective_character_overrides(
+        server_overrides.as_ref(),
+        prefs.saved_character_overrides(&project_name),
+    );
     // The project's real members, for the team preview (sessions of the project).
     let members = svc
         .as_ref()
@@ -171,12 +230,44 @@ pub fn CharactersScreen() {
     let style = chosen.get().unwrap_or(current);
     let saving = remember(|| mutable_state_of(false));
     let message = remember(|| mutable_state_of(None::<String>));
-    let ed_name = remember(|| mutable_state_of("ember-리더".to_string()));
+    let ed_saving = remember(|| mutable_state_of(false));
+    let ed_message = remember(|| mutable_state_of(None::<String>));
+    let ed_name = remember(|| {
+        let initial = members
+            .first()
+            .map(|m| m.name.clone())
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| "ember-리더".to_string());
+        mutable_state_of(initial)
+    });
     let ed_harness = remember(|| mutable_state_of(0usize));
     let ed_role = remember(|| mutable_state_of(0usize));
     let ed_style = remember(|| mutable_state_of(None::<CharStyle>));
     let ed_state = remember(|| mutable_state_of(CharState::Idle));
     let ed_pin = remember(|| mutable_state_of(None::<usize>));
+    let ed_loaded_key = remember(|| mutable_state_of(String::new()));
+    let trimmed_ed_name = ed_name.get().trim().to_string();
+    let load_key = format!("{project_name}|{trimmed_ed_name}");
+    if ed_loaded_key.get_untracked() != load_key {
+        ed_loaded_key.set(load_key);
+        if let Some(ov) = current_overrides.get(&trimmed_ed_name) {
+            if let Some(h) = ov.harness.as_deref() {
+                if let Some(pos) = EDITOR_HARNESSES.iter().position(|(id, _)| *id == h) {
+                    ed_harness.set(pos);
+                }
+            }
+            if let Some(r) = ov.role.as_deref() {
+                if let Some(pos) = EDITOR_ROLES.iter().position(|&x| x == r) {
+                    ed_role.set(pos);
+                }
+            }
+            ed_style.set(ov.style.as_deref().and_then(CharStyle::from_id));
+            if let Some(st) = ov.state.as_deref().and_then(CharState::from_id) {
+                ed_state.set(st);
+            }
+            ed_pin.set(ov.silhouette.filter(|&i| i < SILHOUETTES.len()));
+        }
+    }
 
     cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
         cu::Column().spacing(SP[5]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
@@ -256,10 +347,14 @@ pub fn CharactersScreen() {
                     .spacing(SP[3])
                     .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[4]))
                     .content(|| {
+                        let ov_map = current_overrides.clone();
+                        let proj_id = project_name.clone();
                         Grid(&team.cells, cols, SP[3], |m| {
-                            draw(&spec(style, &m.name, &m.agent, m.role.as_deref().unwrap_or(""), m.state, m.crown, None), 64.0);
+                            let base = spec(style, &m.name, &m.agent, m.role.as_deref().unwrap_or(""), m.state, m.crown, None);
+                            let drawn = apply_character_override(base, &proj_id, ov_map.get(&m.name));
+                            draw(&drawn, 64.0);
                             Label(&m.name, Fs::Xs, Weight::Semibold, None, Some(1));
-                            Label(harness_label(&m.agent), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            Label(harness_label(&drawn.agent), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
                         });
                         if team.more > 0 {
                             Label(&format!("외 {}명", team.more), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -268,13 +363,24 @@ pub fn CharactersScreen() {
             });
 
             // 3. The editor: a stage and a form side by side (one column up to 1000 dp).
-            Section("편집기", "이름을 바꾸면 캐릭터가 바뀝니다. 말랑과 키링은 실루엣을 고정할 수 있습니다. 팀원별 수정은 아직 저장되지 않고 이 화면에서만 보입니다", true, || {
+            Section("편집기", "이름을 바꾸면 캐릭터가 바뀝니다. 말랑과 키링은 실루엣을 고정할 수 있습니다. 저장한 팀원 설정은 프로젝트에 기록됩니다.", false, || {
                 let name = ed_name.get();
-                let shown_name = if name.trim().is_empty() { "이름 없음".to_string() } else { name.trim().to_string() };
-                let (agent_id, _) = EDITOR_HARNESSES[ed_harness.get().min(EDITOR_HARNESSES.len() - 1)];
-                let role = EDITOR_ROLES[ed_role.get().min(EDITOR_ROLES.len() - 1)];
+                let trimmed_name = name.trim().to_string();
+                let shown_name = if trimmed_name.is_empty() { "이름 없음".to_string() } else { trimmed_name.clone() };
+                let harness_idx = ed_harness.get().min(EDITOR_HARNESSES.len() - 1);
+                let role_idx = ed_role.get().min(EDITOR_ROLES.len() - 1);
+                let (agent_id, _) = EDITOR_HARNESSES[harness_idx];
+                let role = EDITOR_ROLES[role_idx];
                 let ed_v = ed_style.get().unwrap_or(style);
                 let pin = if supports_pin(ed_v) { ed_pin.get() } else { None };
+                let candidate = build_character_override(harness_idx, role_idx, ed_style.get(), ed_state.get(), ed_pin.get(), style);
+                let can_save_ed = project.is_some()
+                    && !ed_saving.get()
+                    && editor_save_needed(&trimmed_name, &candidate, &current_overrides);
+                let has_saved_ed = project.is_some()
+                    && !ed_saving.get()
+                    && !trimmed_name.is_empty()
+                    && current_overrides.contains_key(&trimmed_name);
                 let stage = || {
                     cu::Column()
                         .alignment(Alignment::Center)
@@ -291,12 +397,15 @@ pub fn CharactersScreen() {
                 };
                 let name_field = || {
                     FieldRow("이름", || {
-                        let n = ed_name.clone();
+                        let (n, m) = (ed_name.clone(), ed_message.clone());
                         EmberField(FieldOptions {
                             fill_max_width: true,
                             placeholder: "ember-리더".to_string(),
                             text: Some(name.clone()),
-                            on_value_change: Some(Box::new(move |v| n.set(v))),
+                            on_value_change: Some(Box::new(move |v| {
+                                n.set(v);
+                                m.set(None);
+                            })),
                             ..Default::default()
                         });
                     });
@@ -307,24 +416,33 @@ pub fn CharactersScreen() {
                     FieldRow("하네스", || {
                         let labels: Vec<String> = EDITOR_HARNESSES.iter().map(|(_, l)| l.to_string()).collect();
                         let at = ed_harness.get().min(labels.len() - 1);
-                        let h = ed_harness.clone();
-                        Select(&labels[at], &labels, at, 260.0, move |i| h.set(i));
+                        let (h, m) = (ed_harness.clone(), ed_message.clone());
+                        Select(&labels[at], &labels, at, 260.0, move |i| {
+                            h.set(i);
+                            m.set(None);
+                        });
                     });
                 };
                 let role_field = || {
                     FieldRow("역할", || {
                         let labels: Vec<String> = EDITOR_ROLES.iter().map(|r| r.to_string()).collect();
                         let at = ed_role.get().min(labels.len() - 1);
-                        let r = ed_role.clone();
-                        Select(&labels[at], &labels, at, 260.0, move |i| r.set(i));
+                        let (r, m) = (ed_role.clone(), ed_message.clone());
+                        Select(&labels[at], &labels, at, 260.0, move |i| {
+                            r.set(i);
+                            m.set(None);
+                        });
                     });
                 };
                 let style_field = || {
                     FieldRow("스타일", || {
                         let labels: Vec<String> = CharStyle::ALL.iter().map(|s| s.label().to_string()).collect();
                         let at = CharStyle::ALL.iter().position(|&s| s == ed_v).unwrap_or(0);
-                        let v = ed_style.clone();
-                        Select(&labels[at], &labels, at, 260.0, move |i| v.set(CharStyle::ALL.get(i).copied()));
+                        let (v, m) = (ed_style.clone(), ed_message.clone());
+                        Select(&labels[at], &labels, at, 260.0, move |i| {
+                            v.set(CharStyle::ALL.get(i).copied());
+                            m.set(None);
+                        });
                     });
                 };
                 let pin_field = || {
@@ -333,8 +451,11 @@ pub fn CharactersScreen() {
                             let mut labels = vec!["자동 (이름이 정합니다)".to_string()];
                             labels.extend(SILHOUETTES.iter().map(|s| s.to_string()));
                             let at = pin.map(|i| i + 1).unwrap_or(0);
-                            let pn = ed_pin.clone();
-                            Select(&labels[at], &labels, at, 260.0, move |i| pn.set(i.checked_sub(1)));
+                            let (pn, m) = (ed_pin.clone(), ed_message.clone());
+                            Select(&labels[at], &labels, at, 260.0, move |i| {
+                                pn.set(i.checked_sub(1));
+                                m.set(None);
+                            });
                         } else {
                             Label(&format!("{} 실루엣을 고정할 수 없습니다", with_topic(ed_v.label())), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                         }
@@ -346,11 +467,75 @@ pub fn CharactersScreen() {
                         for line in CharState::ALL.chunks(per_line) {
                             cu::Row().spacing(6.0).content(|| {
                                 for &s in line {
-                                    let st = ed_state.clone();
+                                    let (st, m) = (ed_state.clone(), ed_message.clone());
                                     let kind = if ed_state.get() == s { ButtonKind::Primary } else { ButtonKind::Default };
-                                    AppButton(state_label(s), None, kind, true, true, false, move || st.set(s));
+                                    AppButton(state_label(s), None, kind, true, true, false, move || {
+                                        st.set(s);
+                                        m.set(None);
+                                    });
                                 }
                             });
+                        }
+                    });
+                };
+                let actions_row = || {
+                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                            let (pr, nm, cand, ovs, sv, ms) = (
+                                project.clone(),
+                                trimmed_name.clone(),
+                                candidate.clone(),
+                                current_overrides.clone(),
+                                ed_saving.clone(),
+                                ed_message.clone(),
+                            );
+                            AppButton(
+                                if ed_saving.get() { "저장 중" } else { "팀원 설정 저장" },
+                                None,
+                                ButtonKind::Primary,
+                                true,
+                                can_save_ed,
+                                false,
+                                move || {
+                                    if let Some(proj) = pr.clone() {
+                                        save_character_override(proj, nm.clone(), Some(cand.clone()), ovs.clone(), sv.clone(), ms.clone());
+                                    }
+                                },
+                            );
+                            if has_saved_ed {
+                                let (pr, nm, ovs, sv, ms) = (
+                                    project.clone(),
+                                    trimmed_name.clone(),
+                                    current_overrides.clone(),
+                                    ed_saving.clone(),
+                                    ed_message.clone(),
+                                );
+                                AppButton(
+                                    "초기화",
+                                    None,
+                                    ButtonKind::Default,
+                                    true,
+                                    true,
+                                    false,
+                                    move || {
+                                        if let Some(proj) = pr.clone() {
+                                            save_character_override(proj, nm.clone(), None, ovs.clone(), sv.clone(), ms.clone());
+                                        }
+                                    },
+                                );
+                            }
+                            let status_note = match &project {
+                                None => "저장할 프로젝트가 없습니다".to_string(),
+                                Some(_) if trimmed_name.is_empty() => "이름을 입력하면 팀원 설정을 저장할 수 있습니다".to_string(),
+                                Some(_) if !can_save_ed && current_overrides.contains_key(&trimmed_name) => {
+                                    format!("{trimmed_name} 팀원의 설정이 저장되어 있습니다")
+                                }
+                                Some(n) => format!("{n} 프로젝트에 {trimmed_name} 팀원 설정을 저장합니다"),
+                            };
+                            Label(&status_note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                        });
+                        if let Some(m) = ed_message.get() {
+                            Label(&m, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
                         }
                     });
                 };
@@ -367,6 +552,7 @@ pub fn CharactersScreen() {
                             Pair(style_field, pin_field);
                         }
                         state_field();
+                        actions_row();
                     });
                 };
                 let card = Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[5]);
@@ -411,13 +597,16 @@ mod tests {
     #[test]
     fn fr_l22_the_characters_screen_lists_the_catalog_and_marks_previews() {
         let _guard = crate::services::test_guard();
+        let svc = crate::services::test_services();
+        svc.reset_demo();
         let text = rendered();
         for s in CharStyle::ALL {
             assert!(text.contains(s.label()), "missing {}", s.label());
         }
         assert!(text.contains("팀 캐릭터"));
-        assert!(text.contains("미리보기"));
+        assert!(text.contains("팀 미리보기"));
         assert!(text.contains("편집기"));
+        assert!(text.contains("팀원 설정 저장"));
         assert!(text.contains("뒤로"));
     }
 
@@ -554,5 +743,47 @@ mod tests {
         assert_eq!(ui.menu.get_untracked(), menu);
         ui.close_characters();
         assert_eq!(ui.characters.get_untracked(), None);
+    }
+
+    #[test]
+    fn fr_l22_editor_save_button_persists_character_override_to_project() {
+        use compose_rust::protocol::HostEvent;
+        use compose_rust::EventPayload;
+        let _guard = crate::services::test_guard();
+        let svc = crate::services::test_services();
+        svc.reset_demo();
+        shared_ui().open_characters("demo-project");
+
+        let mut host = Host::new(|| Box::new(Recomposer::new(CharactersScreen)));
+        let mut nodes = Nodes::default();
+        nodes.take(&compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+
+        let (save_id, save_handler) = nodes.button("팀원 설정 저장");
+        host.dispatch(HostEvent {
+            node_id: save_id,
+            handler_id: save_handler,
+            payload: EventPayload::Clicked,
+        })
+        .expect("dispatch click on 팀원 설정 저장");
+
+        // Wait briefly for the async run_shared task on test_services().rt to apply the patch.
+        for _ in 0..40 {
+            let has_override = svc
+                .client
+                .read(|st| st.project("demo-project").is_some_and(|p| !p.character_overrides.is_empty()));
+            if has_override {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let stored = svc
+            .client
+            .read(|st| st.project("demo-project").map(|p| p.character_overrides.clone()))
+            .unwrap_or_default();
+        assert!(
+            !stored.is_empty(),
+            "clicking '팀원 설정 저장' must persist character_overrides on the project: {stored:?}"
+        );
+        shared_ui().close_characters();
     }
 }

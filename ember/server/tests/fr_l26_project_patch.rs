@@ -288,7 +288,67 @@ async fn fr_l26_a_new_project_has_empty_settings() {
     let (st, p) = call(&f.app, Method::POST, "/api/projects", Some(json!({ "name": "fresh" }))).await;
     assert_eq!(st, StatusCode::CREATED);
     assert_eq!(
-        (&p["repository"], &p["default_branch"], &p["character_style"], &p["archived"], &p["member_defaults"]),
-        (&Value::Null, &Value::Null, &Value::Null, &json!(false), &json!({}))
+        (&p["repository"], &p["default_branch"], &p["character_style"], &p["archived"], &p["member_defaults"], &p["character_overrides"]),
+        (&Value::Null, &Value::Null, &Value::Null, &json!(false), &json!({}), &json!({}))
     );
+}
+
+#[tokio::test]
+async fn fr_l22_character_overrides_roundtrip_and_validate() {
+    let f = fixture();
+    new_session(&f.sessions, "p");
+    let (st, p) = patch(
+        &f,
+        "p",
+        json!({
+            "character_overrides": {
+                "ember-리더": {
+                    "harness": "claude",
+                    "role": "리더",
+                    "style": "malang",
+                    "state": "run",
+                    "silhouette": 3
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    assert_eq!(
+        p["character_overrides"],
+        json!({
+            "ember-리더": {
+                "harness": "claude",
+                "role": "리더",
+                "style": "malang",
+                "state": "run",
+                "silhouette": 3
+            }
+        })
+    );
+
+    // Renaming the project keeps character_overrides.
+    let (st, renamed) = patch(&f, "p", json!({ "name": "p2" })).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(renamed["character_overrides"], p["character_overrides"]);
+
+    // Sending null for a member removes that member; {} clears all.
+    let (st, cleared_one) = patch(&f, "p2", json!({ "character_overrides": { "ember-리더": null } })).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(cleared_one["character_overrides"], json!({}));
+
+    // Validation rejects bad harness, role, style, state, or silhouette out of range / on non-blob style.
+    for bad in [
+        json!({ "character_overrides": null }),
+        json!({ "character_overrides": { "m": { "harness": "nope" } } }),
+        json!({ "character_overrides": { "m": { "role": "없는역할" } } }),
+        json!({ "character_overrides": { "m": { "style": "neon" } } }),
+        json!({ "character_overrides": { "m": { "state": "sleep" } } }),
+        json!({ "character_overrides": { "m": { "style": "malang", "silhouette": 8 } } }),
+        json!({ "character_overrides": { "m": { "style": "crew", "silhouette": 1 } } }),
+    ] {
+        let (st, resp) = patch(&f, "p2", bad.clone()).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {resp}");
+        assert_eq!(resp["code"], "invalid_field", "{bad}: {resp}");
+    }
 }

@@ -1070,6 +1070,59 @@ impl DemoSource {
         }
         client.apply(Input::Push(Push::SessionUpdated { session: rec }));
     }
+
+    /// Update a project's settings in this demo run only (FR-L26, FR-L22, #489).
+    pub fn patch_project(
+        &self,
+        client: &Client,
+        name: &str,
+        patch: &ember_client::wire::ProjectPatch,
+    ) -> Result<Project, ember_client::api::ProjectPatchError> {
+        let Some(mut project) = client.read(|s| s.project(name).cloned()) else {
+            return Err(ember_client::api::ProjectPatchError::Rejected {
+                status: 404,
+                code: Some("not_found".into()),
+                message: "not found".into(),
+            });
+        };
+        if let Some(new_name) = &patch.name {
+            let trimmed = new_name.trim();
+            if trimmed != name {
+                if name == crate::ui::project::DEFAULT_PROJECT_NAME {
+                    return Err(ember_client::api::ProjectPatchError::Rejected {
+                        status: 403,
+                        code: Some("protected_project".into()),
+                        message: "protected".into(),
+                    });
+                }
+                client.apply(Input::ProjectRenamed { old: name.to_string(), new: trimmed.to_string() });
+                project.name = trimmed.to_string();
+            }
+        }
+        if let Some(r) = &patch.repository {
+            project.repository = (!r.trim().is_empty()).then(|| r.trim().to_string());
+        }
+        if let Some(b) = &patch.default_branch {
+            project.default_branch = (!b.trim().is_empty()).then(|| b.trim().to_string());
+        }
+        if let Some(md) = &patch.member_defaults {
+            project.member_defaults = md.clone();
+        }
+        if let Some(st) = &patch.character_style {
+            project.character_style = (!st.trim().is_empty()).then(|| st.trim().to_string());
+        }
+        if let Some(po) = &patch.profile_overrides {
+            project.profile_overrides = po.iter().filter_map(|(k, v)| v.clone().map(|a| (k.clone(), Some(a)))).collect();
+        }
+        if let Some(co) = &patch.character_overrides {
+            project.character_overrides = co
+                .iter()
+                .filter_map(|(k, v)| v.clone().filter(|o| !o.is_empty()).map(|o| (k.clone(), o)))
+                .collect();
+        }
+        client.apply(Input::Push(Push::ProjectUpdated { project: project.clone() }));
+        Ok(project)
+    }
 }
 
 /// The demo history, newest first, as the node's `/git/log` commits. `c7` is a merge of `c8`

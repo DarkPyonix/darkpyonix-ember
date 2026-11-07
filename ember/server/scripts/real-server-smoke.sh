@@ -183,7 +183,7 @@ start_server() {
 start_node() {
   alive "$RUN/node.pid" && { say "ember-node already running (pid $(cat "$RUN/node.pid"))"; return 0; }
   port_free "$NODE_PORT" "$RUN/node.pid"
-  [ -s "$SEC/node-token" ] || (umask 077; LC_ALL=C tr -dc 'a-f0-9' </dev/urandom | head -c 64 >"$SEC/node-token")
+  [ -s "$SEC/node-token" ] || (umask 077; od -An -tx1 -N32 /dev/urandom | tr -d ' \n' >"$SEC/node-token")
   # The node reads its token from the environment (EMBER_NODE_TOKEN); it is set for that one process.
   env -u EMBER_NODE_TRANSPORT -u EMBER_NODE_SOCKS_LISTEN \
     EMBER_NODE_TOKEN="$(cat "$SEC/node-token")" EMBER_NODE_LISTEN="127.0.0.1:$NODE_PORT" \

@@ -2255,6 +2255,11 @@ pub struct BranchEntry {
 }
 
 impl BranchEntry {
+    /// The last commit line (alias for last_line).
+    pub fn last_commit(&self) -> &str {
+        &self.last_line
+    }
+
     /// "앞섬 2 · 뒤처짐 1", "원격과 같음" or "업스트림 없음".
     pub fn sync_text(&self) -> String {
         if self.has_upstream {
@@ -2816,6 +2821,8 @@ pub struct MemberCwd {
     /// "실행 중", "승인 대기" and so on.
     pub state_text: String,
     pub status: ember_client::LauncherStatus,
+    pub session_id: String,
+    pub title: String,
 }
 
 /// The member of a worktree row.
@@ -2826,6 +2833,35 @@ pub struct TeamMember {
     pub leader: bool,
     pub state_text: String,
     pub status: ember_client::LauncherStatus,
+    pub session_id: String,
+    pub title: String,
+}
+
+/// The state of the pull request chip in a team row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeamPrStatus {
+    /// The pull request list is still loading ("PR 확인 중").
+    Checking,
+    /// The pull request list is loaded and none matches this branch ("PR 없음").
+    None,
+    /// A pull request matches the branch, with its number, label, CI status and whether it is merged.
+    Matched {
+        number: u64,
+        label: String,
+        ci: Option<CheckClass>,
+        merged: bool,
+    },
+}
+
+impl TeamPrStatus {
+    /// The text for the chip.
+    pub fn chip_text(&self) -> String {
+        match self {
+            TeamPrStatus::Checking => "PR 확인 중".to_string(),
+            TeamPrStatus::None => "PR 없음".to_string(),
+            TeamPrStatus::Matched { label, .. } => label.clone(),
+        }
+    }
 }
 
 /// One row of 팀 작업: a worktree, its branch, its member and the branch's pull request.
@@ -2835,29 +2871,70 @@ pub struct TeamRow {
     pub worktree: String,
     /// `None` shows "담당 없음".
     pub member: Option<TeamMember>,
+    /// Number of extra members sharing this worktree.
+    pub extra_members: usize,
     /// "앞섬 2 \u{b7} 뒤처짐 1", "원격과 같음" or "업스트림 없음".
     pub sync_text: String,
     /// "#398 열림" for the branch's pull request (an open one first), `None` when there is none.
     pub pr_text: Option<String>,
+    /// The structured pull request chip state.
+    pub pr_status: TeamPrStatus,
     /// The branch the project's main checkout has open.
     pub current: bool,
+    /// The computer the worktree lives on, or an honest fallback ("로컬").
+    pub computer: String,
+    /// Dirty file count (0 = "깨끗함").
+    pub dirty_count: usize,
+    /// The last commit summary line.
+    pub last_commit: String,
+    /// Whether this worktree has merge conflicts.
+    pub conflict: bool,
+}
+
+impl TeamRow {
+    /// "깨끗함" when clean, or "변경 N개".
+    pub fn dirty_text(&self) -> String {
+        if self.dirty_count == 0 {
+            "깨끗함".to_string()
+        } else {
+            format!("변경 {}개", self.dirty_count)
+        }
+    }
+}
+
+/// Normalize a worktree path for matching: strips `/private` prefix on macOS symlinks
+/// (`/private/var`, `/private/tmp`, `/private/etc`), trims trailing slashes, and lowercases
+/// for case-insensitive matching.
+pub fn normalize_worktree_path(path: &str) -> String {
+    let p = path.trim_end_matches('/').to_lowercase();
+    if let Some(rest) = p.strip_prefix("/private/var") {
+        format!("/var{rest}")
+    } else if let Some(rest) = p.strip_prefix("/private/tmp") {
+        format!("/tmp{rest}")
+    } else if let Some(rest) = p.strip_prefix("/private/etc") {
+        format!("/etc{rest}")
+    } else {
+        p
+    }
 }
 
 /// `cwd` is `worktree` or inside it (a path boundary, so "/w/ui2" is not inside "/w/ui").
 fn cwd_in_worktree(cwd: &str, worktree: &str) -> bool {
-    let (c, w) = (cwd.trim_end_matches('/'), worktree.trim_end_matches('/'));
+    let norm_cwd = normalize_worktree_path(cwd);
+    let norm_wt = normalize_worktree_path(worktree);
+    let (c, w) = (norm_cwd.trim_end_matches('/'), norm_wt.trim_end_matches('/'));
     // A worktree of "/" would hold every folder: it holds none.
     !w.is_empty() && (c == w || (c.starts_with(w) && c[w.len()..].starts_with('/')))
 }
 
-/// The rows of 팀 작업, one per branch that has a worktree: the current branch (the main
-/// checkout) first, then by branch name. A member belongs to the worktree with the longest path
-/// that holds its folder; when several members share one worktree the leader, else the first in
-/// `members`, is shown.
-pub fn team_rows(branches: &[BranchEntry], members: &[MemberCwd], prs: &[PrEntry]) -> Vec<TeamRow> {
+/// The rows of 팀 작업, one per branch that has a worktree: the leader first, then the current
+/// branch (main checkout), then other worktrees by branch name. A member belongs to the worktree
+/// with the longest path that holds its folder; when several members share one worktree the leader,
+/// else the first in `members`, is shown, and `extra_members` records the remaining count (`+N`).
+pub fn team_rows(branches: &[BranchEntry], members: &[MemberCwd], prs: Option<&[PrEntry]>) -> Vec<TeamRow> {
     let trees: Vec<(&BranchEntry, &str)> = branches.iter().filter_map(|b| b.worktree.as_deref().filter(|w| !w.is_empty()).map(|w| (b, w))).collect();
     let owner = |m: &MemberCwd| -> Option<usize> {
-        trees.iter().enumerate().filter(|(_, (_, w))| cwd_in_worktree(&m.cwd, w)).max_by_key(|(_, (_, w))| w.trim_end_matches('/').len()).map(|(i, _)| i)
+        trees.iter().enumerate().filter(|(_, (_, w))| cwd_in_worktree(&m.cwd, w)).max_by_key(|(_, (_, w))| normalize_worktree_path(w).len()).map(|(i, _)| i)
     };
     let mut rows: Vec<TeamRow> = trees
         .iter()
@@ -2865,18 +2942,66 @@ pub fn team_rows(branches: &[BranchEntry], members: &[MemberCwd], prs: &[PrEntry
         .map(|(i, (b, w))| {
             let mine: Vec<&MemberCwd> = members.iter().filter(|m| owner(m) == Some(i)).collect();
             let chosen = mine.iter().find(|m| m.leader).or_else(|| mine.first());
-            let pr = prs.iter().filter(|p| p.head == b.name).max_by_key(|p| (p.state == GitPrState::Open, p.number));
+            let extra_members = if mine.len() > 1 { mine.len() - 1 } else { 0 };
+            let (pr_status, pr_text) = match prs {
+                None => (TeamPrStatus::Checking, None),
+                Some(list) => {
+                    let matched = list
+                        .iter()
+                        .filter(|p| p.head == b.name)
+                        .max_by_key(|p| (p.state == GitPrState::Open, p.number));
+                    match matched {
+                        Some(p) => {
+                            let (label, ci, merged) = if p.state == GitPrState::Merged {
+                                (format!("#{} 병합됨", p.number), None, true)
+                            } else if p.checks_failed > 0 {
+                                (format!("#{} 실패", p.number), Some(CheckClass::Failed), false)
+                            } else if p.checks_pending > 0 {
+                                (format!("#{} 진행 중", p.number), Some(CheckClass::Pending), false)
+                            } else if p.checks_text == "체크 없음" {
+                                (format!("#{} {}", p.number, p.state_text), None, false)
+                            } else {
+                                (format!("#{} 통과", p.number), Some(CheckClass::Passed), false)
+                            };
+                            let text = format!("#{} {}", p.number, p.state_text);
+                            (TeamPrStatus::Matched { number: p.number, label, ci, merged }, Some(text))
+                        }
+                        None => (TeamPrStatus::None, None),
+                    }
+                }
+            };
             TeamRow {
                 branch: b.name.clone(),
                 worktree: w.to_string(),
-                member: chosen.map(|m| TeamMember { name: m.name.clone(), harness: m.harness.clone(), leader: m.leader, state_text: m.state_text.clone(), status: m.status }),
+                member: chosen.map(|m| TeamMember {
+                    name: m.name.clone(),
+                    harness: m.harness.clone(),
+                    leader: m.leader,
+                    state_text: m.state_text.clone(),
+                    status: m.status,
+                    session_id: m.session_id.clone(),
+                    title: m.title.clone(),
+                }),
+                extra_members,
                 sync_text: b.sync_text(),
-                pr_text: pr.map(|p| format!("#{} {}", p.number, p.state_text)),
+                pr_text,
+                pr_status,
                 current: b.current,
+                computer: "로컬".to_string(),
+                dirty_count: 0,
+                last_commit: b.last_line.clone(),
+                conflict: false,
             }
         })
         .collect();
-    rows.sort_by(|a, b| b.current.cmp(&a.current).then_with(|| a.branch.cmp(&b.branch)));
+    rows.sort_by(|a, b| {
+        let a_leader = a.member.as_ref().is_some_and(|m| m.leader);
+        let b_leader = b.member.as_ref().is_some_and(|m| m.leader);
+        b_leader
+            .cmp(&a_leader)
+            .then_with(|| b.current.cmp(&a.current))
+            .then_with(|| a.branch.cmp(&b.branch))
+    });
     rows
 }
 
@@ -4893,7 +5018,16 @@ rename to new.txt
     // ---- 팀 작업 (#482) ----
 
     fn a_member(name: &str, leader: bool, cwd: &str) -> MemberCwd {
-        MemberCwd { name: name.into(), harness: "claude-code".into(), leader, cwd: cwd.into(), state_text: "실행 중".into(), status: ember_client::LauncherStatus::Running }
+        MemberCwd {
+            name: name.into(),
+            harness: "claude-code".into(),
+            leader,
+            cwd: cwd.into(),
+            state_text: "실행 중".into(),
+            status: ember_client::LauncherStatus::Running,
+            session_id: format!("sess-{name}"),
+            title: format!("Task for {name}"),
+        }
     }
 
     fn branches_of(list: &[(&str, bool, Option<&str>)]) -> Vec<BranchEntry> {
@@ -4911,7 +5045,7 @@ rename to new.txt
     fn fr_g9_team_longest_prefix_wins_for_a_nested_worktree() {
         let b = branches_of(&[("main", true, Some("/r")), ("feat/ui", false, Some("/r/.claude/worktrees/ui"))]);
         let m = [a_member("ui-agent", false, "/r/.claude/worktrees/ui/ember/app"), a_member("lead", true, "/r/docs")];
-        let rows = team_rows(&b, &m, &[]);
+        let rows = team_rows(&b, &m, None);
         assert_eq!(rows[0].branch, "main");
         assert_eq!(rows[0].member.as_ref().unwrap().name, "lead");
         assert_eq!(rows[1].member.as_ref().unwrap().name, "ui-agent");
@@ -4920,15 +5054,15 @@ rename to new.txt
     #[test]
     fn fr_g9_team_a_sibling_folder_with_the_same_prefix_is_not_inside() {
         let b = branches_of(&[("feat/ui", false, Some("/w/ui"))]);
-        let rows = team_rows(&b, &[a_member("x", false, "/w/ui2")], &[]);
+        let rows = team_rows(&b, &[a_member("x", false, "/w/ui2")], None);
         assert_eq!(rows[0].member, None);
-        assert_eq!(team_rows(&b, &[a_member("x", false, "/w/ui/")], &[])[0].member.as_ref().unwrap().name, "x");
+        assert_eq!(team_rows(&b, &[a_member("x", false, "/w/ui/")], None)[0].member.as_ref().unwrap().name, "x");
     }
 
     #[test]
     fn fr_g9_team_a_worktree_without_a_member_has_none() {
         let b = branches_of(&[("main", true, Some("/r"))]);
-        let rows = team_rows(&b, &[a_member("far", false, "/elsewhere")], &[]);
+        let rows = team_rows(&b, &[a_member("far", false, "/elsewhere")], None);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].member, None);
         assert_eq!(rows[0].sync_text, "앞섬 2 \u{00b7} 뒤처짐 1");
@@ -4937,16 +5071,18 @@ rename to new.txt
     #[test]
     fn fr_g9_team_lists_only_branches_with_a_worktree_main_first_then_by_name() {
         let b = branches_of(&[("zeta", false, Some("/w/z")), ("develop", false, None), ("alpha", false, Some("/w/a")), ("main", true, Some("/r"))]);
-        let names: Vec<String> = team_rows(&b, &[], &[]).into_iter().map(|r| r.branch).collect();
+        let names: Vec<String> = team_rows(&b, &[], None).into_iter().map(|r| r.branch).collect();
         assert_eq!(names, ["main", "alpha", "zeta"]);
-        assert!(team_rows(&b, &[], &[])[0].current);
+        assert!(team_rows(&b, &[], None)[0].current);
     }
 
     #[test]
     fn fr_g9_team_a_shared_worktree_shows_the_leader() {
         let b = branches_of(&[("main", true, Some("/r"))]);
         let m = [a_member("first", false, "/r"), a_member("lead", true, "/r/x")];
-        assert_eq!(team_rows(&b, &m, &[])[0].member.as_ref().unwrap().name, "lead");
+        let rows = team_rows(&b, &m, None);
+        assert_eq!(rows[0].member.as_ref().unwrap().name, "lead");
+        assert_eq!(rows[0].extra_members, 1);
     }
 
     #[test]
@@ -4956,7 +5092,7 @@ rename to new.txt
             pr_entry(&a_pr(7, GitPrState::Merged, GitPrReview::None, (0, 0, 0), (false, "")), 0),
             pr_entry(&a_pr(9, GitPrState::Open, GitPrReview::None, (0, 0, 0), (false, "")), 0),
         ];
-        let rows = team_rows(&b, &[], &prs);
+        let rows = team_rows(&b, &[], Some(&prs));
         let x = rows.iter().find(|r| r.branch == "feat/x").unwrap();
         assert_eq!(x.pr_text.as_deref(), Some("#9 열림"));
         assert_eq!(rows.iter().find(|r| r.branch == "main").unwrap().pr_text, None);
@@ -4964,10 +5100,141 @@ rename to new.txt
 
     #[test]
     fn fr_g9_team_empty_input_gives_no_rows_and_the_count_is_the_loaded_count() {
-        assert!(team_rows(&[], &[], &[]).is_empty());
+        assert!(team_rows(&[], &[], None).is_empty());
         assert_eq!(section_count_with_team(Section::Team, None, None, None, None, None), None);
         assert_eq!(section_count_with_team(Section::Team, None, None, None, None, Some(3)), Some(3));
         assert_eq!(section_count_with_team(Section::Branches, None, None, None, Some(4), Some(3)), Some(4));
+    }
+
+    #[test]
+    fn fr_l19_worktree_path_normalization_and_case_insensitive_matching() {
+        assert_eq!(normalize_worktree_path("/private/var/folders/wt/app/"), "/var/folders/wt/app");
+        assert_eq!(normalize_worktree_path("/var/folders/wt"), "/var/folders/wt");
+        assert_eq!(normalize_worktree_path("/PRIVATE/VAR/Folders/wt"), "/var/folders/wt");
+        assert_eq!(normalize_worktree_path("/private/tmp/wt/"), "/tmp/wt");
+        assert_eq!(normalize_worktree_path("/private/etc/wt"), "/etc/wt");
+
+        // Symlink normalization allows session cwd to match worktree path
+        assert!(cwd_in_worktree("/private/var/folders/wt/sub", "/var/folders/wt"));
+        assert!(cwd_in_worktree("/var/folders/wt/sub", "/private/var/folders/wt"));
+        // Case-insensitive matching
+        assert!(cwd_in_worktree("/Users/Alice/Project/src", "/users/alice/project"));
+
+        let b = branches_of(&[("feat/wt", false, Some("/var/folders/wt"))]);
+        let m = [a_member("dev", false, "/private/var/folders/wt/ember/app")];
+        let rows = team_rows(&b, &m, None);
+        assert_eq!(rows[0].member.as_ref().unwrap().name, "dev", "macOS symlink cwd must match worktree");
+
+        let b_case = branches_of(&[("feat/case", false, Some("/users/demo/repo"))]);
+        let m_case = [a_member("dev2", false, "/Users/Demo/Repo/sub")];
+        let rows_case = team_rows(&b_case, &m_case, None);
+        assert_eq!(rows_case[0].member.as_ref().unwrap().name, "dev2", "casing differences must match worktree");
+    }
+
+    #[test]
+    fn fr_l19_team_multiple_members_per_worktree_records_extra_count() {
+        let b = branches_of(&[("main", true, Some("/r"))]);
+        let m = [
+            a_member("first", false, "/r"),
+            a_member("lead", true, "/r/x"),
+            a_member("third", false, "/r/y"),
+        ];
+        let rows = team_rows(&b, &m, None);
+        assert_eq!(rows[0].member.as_ref().unwrap().name, "lead");
+        assert_eq!(rows[0].extra_members, 2, "3 members total means +2 extra");
+
+        // Two members without a leader
+        let m2 = [a_member("alpha", false, "/r"), a_member("beta", false, "/r")];
+        let rows2 = team_rows(&b, &m2, None);
+        assert_eq!(rows2[0].member.as_ref().unwrap().name, "alpha");
+        assert_eq!(rows2[0].extra_members, 1, "2 members total means +1 extra");
+
+        // Single member
+        let m3 = [a_member("lone", false, "/r")];
+        let rows3 = team_rows(&b, &m3, None);
+        assert_eq!(rows3[0].extra_members, 0);
+    }
+
+    #[test]
+    fn fr_l19_team_rows_sort_leader_first_then_main_then_other() {
+        let b = branches_of(&[
+            ("feat/zebra", false, Some("/w/z")),
+            ("feat/leader-wt", false, Some("/w/lead")),
+            ("main", true, Some("/r")),
+            ("feat/alpha", false, Some("/w/a")),
+        ]);
+        let m = [
+            a_member("worker", false, "/r"),
+            a_member("boss", true, "/w/lead"),
+        ];
+        let rows = team_rows(&b, &m, None);
+        let branches: Vec<String> = rows.into_iter().map(|r| r.branch).collect();
+        assert_eq!(
+            branches,
+            ["feat/leader-wt", "main", "feat/alpha", "feat/zebra"],
+            "order must be: leader first, then main checkout, then other worktrees alphabetically"
+        );
+    }
+
+    #[test]
+    fn fr_l19_team_pr_status_distinguishes_checking_none_and_matched_ci() {
+        let b = branches_of(&[("feat/x", false, Some("/w/x")), ("main", true, Some("/r"))]);
+
+        // When pr list is not loaded yet (None)
+        let rows_checking = team_rows(&b, &[], None);
+        assert_eq!(rows_checking[0].pr_status, TeamPrStatus::Checking);
+        assert_eq!(rows_checking[0].pr_status.chip_text(), "PR 확인 중");
+
+        // When pr list is loaded and none matches (Some(&[]))
+        let rows_none = team_rows(&b, &[], Some(&[]));
+        assert_eq!(rows_none[0].pr_status, TeamPrStatus::None);
+        assert_eq!(rows_none[0].pr_status.chip_text(), "PR 없음");
+
+        // When pr list has matching PR with passed checks
+        let pr_passed = [pr_entry(&a_pr(10, GitPrState::Open, GitPrReview::Approved, (3, 0, 0), (true, "")), 0)];
+        let rows_passed = team_rows(&b, &[], Some(&pr_passed));
+        let x_passed = rows_passed.iter().find(|r| r.branch == "feat/x").unwrap();
+        assert_eq!(x_passed.pr_status, TeamPrStatus::Matched {
+            number: 10,
+            label: "#10 통과".to_string(),
+            ci: Some(CheckClass::Passed),
+            merged: false,
+        });
+        assert_eq!(x_passed.pr_status.chip_text(), "#10 통과");
+
+        // When pr list has matching PR with failed checks
+        let pr_failed = [pr_entry(&a_pr(11, GitPrState::Open, GitPrReview::None, (2, 1, 0), (false, "")), 0)];
+        let rows_failed = team_rows(&b, &[], Some(&pr_failed));
+        let x_failed = rows_failed.iter().find(|r| r.branch == "feat/x").unwrap();
+        assert_eq!(x_failed.pr_status, TeamPrStatus::Matched {
+            number: 11,
+            label: "#11 실패".to_string(),
+            ci: Some(CheckClass::Failed),
+            merged: false,
+        });
+        assert_eq!(x_failed.pr_status.chip_text(), "#11 실패");
+
+        // When pr list has matching PR with pending checks
+        let pr_pending = [pr_entry(&a_pr(12, GitPrState::Open, GitPrReview::None, (1, 0, 1), (false, "")), 0)];
+        let rows_pending = team_rows(&b, &[], Some(&pr_pending));
+        let x_pending = rows_pending.iter().find(|r| r.branch == "feat/x").unwrap();
+        assert_eq!(x_pending.pr_status, TeamPrStatus::Matched {
+            number: 12,
+            label: "#12 진행 중".to_string(),
+            ci: Some(CheckClass::Pending),
+            merged: false,
+        });
+
+        // When pr list has merged PR
+        let pr_merged = [pr_entry(&a_pr(13, GitPrState::Merged, GitPrReview::None, (3, 0, 0), (false, "")), 0)];
+        let rows_merged = team_rows(&b, &[], Some(&pr_merged));
+        let x_merged = rows_merged.iter().find(|r| r.branch == "feat/x").unwrap();
+        assert_eq!(x_merged.pr_status, TeamPrStatus::Matched {
+            number: 13,
+            label: "#13 병합됨".to_string(),
+            ci: None,
+            merged: true,
+        });
     }
 
     // ---- FR-G10 to FR-G12: pull request detail, review, merge, create (#483) ----

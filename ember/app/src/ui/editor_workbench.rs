@@ -1,5 +1,5 @@
 //! Remote editor workbench.
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 use dioxus_compose::prelude::*;
 use ember_editor::{BridgeAction, WidgetBridge, WidgetPos, WidgetRange};
 use ember_editor::widget::HoverPhase as EditorHoverPhase;
@@ -31,6 +31,15 @@ pub struct FindCmd {
     pub replacements: Vec<(crate::ui::find::Match, String)>,
 }
 
+/// A pending cursor / caret move target requested by the problems list or a goto command.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingGoto {
+    pub id: u64,
+    pub path: String,
+    pub line: u32,
+    pub col: u32,
+}
+
 #[derive(Clone)]
 pub struct Shared {
     pub host: EditorHost,
@@ -41,6 +50,9 @@ pub struct Shared {
     pub expanded: Signal<std::collections::HashSet<String>>,
     pub bottom_max: Signal<bool>,
     pub tree_sel: Signal<Option<(String, bool)>>,
+    pub tree_multi_sel: Signal<Vec<(String, bool)>>,
+    pub tree_clipboard: Signal<Option<crate::ui::editor::TreeClipboard>>,
+    pub tree_drag_src: Signal<Option<String>>,
     pub prompt: Signal<Option<crate::ui::editor::TreePrompt>>,
     pub prompt_text: Signal<String>,
     pub prompt_at: Signal<u64>,
@@ -49,6 +61,7 @@ pub struct Shared {
     pub palette_mode: Signal<crate::ui::palette::Mode>,
     pub palette_query: Signal<String>,
     pub palette_sel: Signal<usize>,
+    pub recent_files: Signal<Vec<String>>,
     pub theme: Signal<crate::ui::theme::ThemePref>,
     pub position: Signal<(usize, usize)>,
     pub stripes: Signal<Stripes>,
@@ -64,6 +77,12 @@ pub struct Shared {
     pub open_errors: Rc<RefCell<HashMap<String, String>>>,
     pub editor_versions: Rc<RefCell<HashMap<u64, u32>>>,
     pub last_find_cmd: Rc<RefCell<u64>>,
+    pub pending_goto: Signal<Option<PendingGoto>>,
+    pub next_goto_id: Signal<u64>,
+    pub last_goto_id: Rc<RefCell<u64>>,
+    pub problems_limit: Signal<usize>,
+    pub selected_output_channel: Signal<String>,
+    pub workbench_logs: Signal<Vec<String>>,
     /// Source control of the 커밋 and Git windows (FR-L31.2).
     pub scm: crate::ui::editor_scm::Scm,
 }
@@ -80,6 +99,7 @@ fn now_ms() -> u64 {
 }
 
 thread_local! { static ICON_DARK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+thread_local! { static MODIFIER_CLICK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 thread_local! { static SHARED: RefCell<Option<Shared>> = const { RefCell::new(None) }; }
 fn shared() -> Shared { SHARED.with(|s| s.borrow().as_ref().expect("workbench initialized").clone()) }
 
@@ -94,6 +114,9 @@ fn init(target: EditorTarget) {
     let expanded = use_hook(|| Signal::new_in_scope(std::collections::HashSet::<String>::new(), root));
     let theme = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().theme, root));
     let tree_sel = use_hook(|| Signal::new_in_scope(None::<(String, bool)>, root));
+    let tree_multi_sel = use_hook(|| Signal::new_in_scope(Vec::<(String, bool)>::new(), root));
+    let tree_clipboard = use_hook(|| Signal::new_in_scope(None::<crate::ui::editor::TreeClipboard>, root));
+    let tree_drag_src = use_hook(|| Signal::new_in_scope(None::<String>, root));
     let prompt = use_hook(|| Signal::new_in_scope(None::<crate::ui::editor::TreePrompt>, root));
     let palette_open = use_hook(|| Signal::new_in_scope(false, root));
     let find = use_hook(|| FindState {
@@ -110,6 +133,7 @@ fn init(target: EditorTarget) {
     let palette_mode = use_hook(|| Signal::new_in_scope(crate::ui::palette::Mode::Commands, root));
     let palette_query = use_hook(|| Signal::new_in_scope(String::new(), root));
     let palette_sel = use_hook(|| Signal::new_in_scope(0usize, root));
+    let recent_files = use_hook(|| Signal::new_in_scope(Vec::<String>::new(), root));
     let prompt_at = use_hook(|| Signal::new_in_scope(0u64, root));
     let prompt_text = use_hook(|| Signal::new_in_scope(String::new(), root));
     let bottom_max = use_hook(|| Signal::new_in_scope(false, root));
@@ -122,9 +146,15 @@ fn init(target: EditorTarget) {
     let open_errors = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
     let editor_versions = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
     let last_find_cmd = use_hook(|| Rc::new(RefCell::new(0u64)));
+    let pending_goto = use_hook(|| Signal::new_in_scope(None::<PendingGoto>, root));
+    let next_goto_id = use_hook(|| Signal::new_in_scope(1u64, root));
+    let last_goto_id = use_hook(|| Rc::new(RefCell::new(0u64)));
+    let problems_limit = use_hook(|| Signal::new_in_scope(crate::ui::editor::MAX_VISIBLE_PROBLEMS, root));
+    let selected_output_channel = use_hook(|| Signal::new_in_scope("ember-workbench".to_string(), root));
+    let workbench_logs = use_hook(|| Signal::new_in_scope(Vec::<String>::new(), root));
     // The branch in the bars comes from the first status read, so it starts with the window.
     let scm = use_hook(|| { let scm = crate::ui::editor_scm::Scm::new(&target.project, revision); scm.refresh(); scm });
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, scm }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -183,6 +213,28 @@ fn editor_pane() -> Element {
             }
         }
     }
+    if let Some(goto) = s.pending_goto.read().clone() {
+        if goto.path == doc.uri.path {
+            let mut last_goto = s.last_goto_id.borrow_mut();
+            if *last_goto != goto.id {
+                *last_goto = goto.id;
+                use compose_rust::code::{CodeRange, Position};
+                let pos = Position::new(goto.line, goto.col);
+                handle.select(version, pos, pos);
+                handle.reveal(version, CodeRange::of(goto.line, goto.col, goto.line, goto.col), compose_rust::schema::RevealAlign::Center);
+                let mut pos_sig = s.position;
+                pos_sig.set((goto.line as usize + 1, goto.col as usize + 1));
+            }
+        }
+    }
+    let gutter_decorations = {
+        let current_path = s.tabs.read().current_path().map(str::to_string);
+        if let Some(abs_path) = current_path {
+            s.scm.gutter_decorations(&s.folder, &abs_path, &doc.text, version)
+        } else {
+            compose_rust::code::GutterDecorations::default()
+        }
+    };
     let change_s = s.clone(); let change_uri = uri.clone();
     let save_s = s.clone(); let save_uri = uri.clone();
     let hover_s = s.clone(); let hover_uri = uri.clone();
@@ -191,8 +243,9 @@ fn editor_pane() -> Element {
     rsx! { CodeEditor {
         key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
         text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), tab_width: Some(doc.tab_width),
+        gutter_decorations,
         on_change: move |e: compose_rust::code::CodeChange| { change_s.editor_versions.borrow_mut().insert(generation, e.version); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); },
-        on_save: move |e: compose_rust::code::SaveRequest| { let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); },
+        on_save: move |e: compose_rust::code::SaveRequest| { let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
         on_decoration_click: move |id| { let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id); send(&click_s, event); },
         on_selection_change: move |e: compose_rust::code::SelectionChange| { let mut position = selection_s.position; position.set((e.active.line as usize + 1, e.active.column as usize + 1)); let event = selection_s.bridge.borrow().on_selection_changed(&selection_uri, e.version, pos(e.anchor), pos(e.active)); send(&selection_s, event); },
@@ -206,7 +259,7 @@ pub mod page {
     use dioxus_compose::html::prelude::*;
     use std::sync::Arc;
     use crate::terminal_stream::{self, ChangeCallback, TerminalHandle, TerminalState};
-    use super::{DOUBLE_SHIFT, now_ms, send, editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, Shared};
+    use super::{DOUBLE_SHIFT, now_ms, send, editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, PendingGoto, Shared};
     use crate::ui::editor::{
         action_for_key, agent_status_text, apply_action, tooltip_text, Side, Stripes, ToolWindow,
     };
@@ -314,13 +367,23 @@ pub mod page {
         }
     }
 
+    fn record_recent_file(recent: &mut super::Signal<Vec<String>>, path: &str) {
+        let mut list = recent.read().clone();
+        crate::ui::palette::record_recent_path(&mut list, path);
+        recent.set(list);
+    }
+
     fn open_palette(s: &Shared, mode: crate::ui::palette::Mode) {
         let (mut open, mut query, mut sel, mut palette_mode) = (s.palette_open, s.palette_query, s.palette_sel, s.palette_mode);
         palette_mode.set(mode);
-        if mode != crate::ui::palette::Mode::Commands {
+        if mode != crate::ui::palette::Mode::Commands && mode != crate::ui::palette::Mode::GotoLine {
             s.host.send(HostCommand::IndexFiles);
         }
-        query.set(String::new());
+        if mode == crate::ui::palette::Mode::GotoLine {
+            query.set(":".to_string());
+        } else {
+            query.set(String::new());
+        }
         sel.set(0);
         open.set(true);
     }
@@ -332,7 +395,40 @@ pub mod page {
             crate::ui::palette::Payload::File(path) => {
                 let mut tabs = s.tabs;
                 tabs.write().open(&path);
-                s.host.send(HostCommand::Open(path));
+                s.open_errors.borrow_mut().remove(&path);
+                s.host.send(HostCommand::Open(path.clone()));
+                s.host.send(HostCommand::Focus(path.clone()));
+                let mut recent = s.recent_files;
+                record_recent_file(&mut recent, &path);
+            }
+            crate::ui::palette::Payload::FileAt { path, line, column } => {
+                let mut tabs = s.tabs;
+                tabs.write().open(&path);
+                s.open_errors.borrow_mut().remove(&path);
+                s.host.send(HostCommand::Open(path.clone()));
+                s.host.send(HostCommand::Focus(path.clone()));
+                let mut recent = s.recent_files;
+                record_recent_file(&mut recent, &path);
+                let line0 = line.saturating_sub(1) as u32;
+                let col0 = column.unwrap_or(1).saturating_sub(1) as u32;
+                let target = crate::ui::find::Match { line: line0, start: col0, end: col0 };
+                if s.bridge.borrow().active_document().is_some_and(|d| d.uri.path == path) {
+                    find_send(s, Some(target), Vec::new());
+                } else {
+                    crate::ui::editor_search::view::schedule_reveal(&path, target);
+                }
+                let mut pos_sig = s.position;
+                pos_sig.set((line, column.unwrap_or(1)));
+            }
+            crate::ui::palette::Payload::GotoLine { line, column } => {
+                let line0 = line.saturating_sub(1) as u32;
+                let col0 = column.unwrap_or(1).saturating_sub(1) as u32;
+                find_send(s, Some(crate::ui::find::Match { line: line0, start: col0, end: col0 }), Vec::new());
+                let mut pos_sig = s.position;
+                pos_sig.set((line, column.unwrap_or(1)));
+            }
+            crate::ui::palette::Payload::ExtensionCommand(id) => {
+                s.host.send(HostCommand::ExecuteCommand(id));
             }
         }
     }
@@ -341,21 +437,38 @@ pub mod page {
     /// Enter does the highlighted one, Escape or a click outside closes it. The design follows the
     /// app's sheet rules in the mockup's tokens (the mockup has no palette).
     fn palette_sheet(s: &Shared, keymap: Keymap) -> Element {
-        use crate::ui::palette::{highlight_segments, items_for, move_selection, placeholder, rank, Payload};
-        let (mut open, mut query, mut sel) = (s.palette_open, s.palette_query, s.palette_sel);
-        let mode = *s.palette_mode.read();
-        let (files, index_running, index_capped) = {
-            let state = s.host.state.lock().unwrap();
-            (state.file_items.clone(), state.index_running, state.index_capped)
+        use crate::ui::palette::{
+            apply_line_suffix, effective_mode, goto_line_item, highlight_segments, items_for_workbench,
+            move_selection, parse_path_line_suffix, placeholder, rank, Payload,
         };
-        let items = items_for(mode, keymap, Os::current(), &files);
+        let (mut open, mut query, mut sel) = (s.palette_open, s.palette_query, s.palette_sel);
+        let base_mode = *s.palette_mode.read();
+        let raw_text = query.read().clone();
+        let (mode, effective_query) = effective_mode(base_mode, &raw_text);
+        let (files, index_running, index_capped, ext_commands) = {
+            let state = s.host.state.lock().unwrap();
+            (state.file_items.clone(), state.index_running, state.index_capped, state.extension_commands.clone())
+        };
+        let recent = s.recent_files.read().clone();
+        let (items, ranked, line_suffix) = if mode == crate::ui::palette::Mode::GotoLine {
+            let item = goto_line_item(&effective_query);
+            let items = vec![item];
+            let ranked = vec![crate::ui::palette::Ranked { index: 0, score: 100, matched: Vec::new() }];
+            (items, ranked, None)
+        } else {
+            let (file_q, suffix) = parse_path_line_suffix(&effective_query);
+            let items = items_for_workbench(mode, keymap, Os::current(), &s.folder, &files, &ext_commands, &recent);
+            let ranked = rank(file_q, &items);
+            (items, ranked, suffix)
+        };
         let hint_text = placeholder(mode, keymap);
-        let text = query.read().clone();
-        let ranked = rank(&text, &items);
         let shown: Vec<_> = ranked.iter().take(50).cloned().collect();
         let chosen = (*sel.read()).min(shown.len().saturating_sub(1));
         // A command the editor cannot do yet is listed but does nothing: Enter on it leaves the sheet open.
-        let enter_payload = shown.get(chosen).filter(|r| items[r.index].enabled).map(|r| items[r.index].payload.clone());
+        let enter_payload = shown
+            .get(chosen)
+            .filter(|r| items[r.index].enabled)
+            .map(|r| apply_line_suffix(items[r.index].payload.clone(), line_suffix));
         let count = shown.len();
         let run_s = s.clone();
         rsx! {
@@ -365,7 +478,7 @@ pub mod page {
                 div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
                     {icon("search")}
                     input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
-                        "aria-label": "{crate::ui::palette::search_label(mode)}", placeholder: "{hint_text}", value: "{text}", autofocus: true,
+                        "aria-label": "{crate::ui::palette::search_label(mode)}", placeholder: "{hint_text}", value: "{raw_text}", autofocus: true,
                         oninput: move |event| { query.set(event.value()); sel.set(0); },
                         onkeydown: move |event| {
                             match event.key() {
@@ -384,10 +497,10 @@ pub mod page {
                         },
                     }
                 }
-                if mode != crate::ui::palette::Mode::Commands && index_running && !shown.is_empty() {
+                if mode != crate::ui::palette::Mode::Commands && mode != crate::ui::palette::Mode::GotoLine && index_running && !shown.is_empty() {
                     div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일을 더 찾는 중입니다…" }
                 }
-                if mode != crate::ui::palette::Mode::Commands && index_capped {
+                if mode != crate::ui::palette::Mode::Commands && mode != crate::ui::palette::Mode::GotoLine && index_capped {
                     div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일이 많아 일부만 표시합니다." }
                 }
                 div { style: "max-height:320px; overflow:auto;", role: "listbox",
@@ -397,8 +510,8 @@ pub mod page {
                             let item = &items[r.index];
                             let segments = highlight_segments(&item.title, &r.matched);
                             let enabled = item.enabled;
-                            let hint = if enabled { item.hint.clone() } else { "준비 중".to_string() };
-                            let payload = item.payload.clone();
+                            let hint = if enabled { item.hint.clone() } else if mode == crate::ui::palette::Mode::GotoLine { String::new() } else { "준비 중".to_string() };
+                            let payload = apply_line_suffix(item.payload.clone(), line_suffix);
                             let click_s = s.clone();
                             let class = if row == chosen { "ed-tn sel" } else { "ed-tn" };
                             let row_style = if enabled { "--d:0; height:34px;" } else { "--d:0; height:34px; color:var(--muted);" };
@@ -550,8 +663,8 @@ pub mod page {
                 button { class: on(case_on), title: "대소문자 구분", "aria-pressed": "{case_on}", style: "border:1px solid var(--line);", onclick: move |_| { case_sensitive.set(!case_on); current.set(None); }, "Aa" }
                 button { class: on(word_on), title: "단어 단위", "aria-pressed": "{word_on}", style: "border:1px solid var(--line);", onclick: move |_| { whole_word.set(!word_on); current.set(None); }, "단어" }
                 span { class: "ed-sbi", role: "status", "{counter}" }
-                button { class: "ed-ib", title: "이전 결과", disabled: !has_matches, onclick: move |_| find_go(&prev_s, false), {icon("up")} }
-                button { class: "ed-ib", title: "다음 결과", disabled: !has_matches, onclick: move |_| find_go(&next_s, true), {icon("down")} }
+                button { class: "ed-ib", title: "이전 결과", "aria-label": "이전 결과", disabled: !has_matches, onclick: move |_| find_go(&prev_s, false), {icon("up")} }
+                button { class: "ed-ib", title: "다음 결과", "aria-label": "다음 결과", disabled: !has_matches, onclick: move |_| find_go(&next_s, true), {icon("down")} }
                 div { class: "ed-find", style: "width:200px; height:28px;",
                     input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
                         "aria-label": "바꿀 내용", placeholder: "바꾸기", value: "{replacement}",
@@ -568,7 +681,7 @@ pub mod page {
                 button { class: "ed-pj", style: "border:1px solid var(--line);", disabled: !has_matches, onclick: move |_| find_replace_one(&one_s), "바꾸기" }
                 button { class: "ed-pj", style: "border:1px solid var(--line);", disabled: !has_matches, onclick: move |_| find_replace_all(&all_s), "모두 바꾸기" }
                 div { class: "spacer" }
-                button { class: "ed-ib", title: "닫기", onclick: move |_| open.set(false), {icon("close")} }
+                button { class: "ed-ib", title: "닫기", "aria-label": "닫기", onclick: move |_| open.set(false), {icon("close")} }
             }
         }
     }
@@ -642,6 +755,19 @@ pub mod page {
                     tracing::warn!(path = %uri.path, %error, "saving a file failed");
                     notice(format!("{}을(를) 저장하지 못했습니다: {}", crate::ui::editor::display_name(base_name(&uri.path)), crate::ui::editor::file_failure_reason(&error)));
                 }
+                BridgeAction::ExtensionNotice { severity, message, source } => {
+                    let prefix = source.as_deref().unwrap_or("알림");
+                    notice(format!("{prefix}: {message}"));
+                    let mut logs = s.workbench_logs;
+                    crate::ui::editor::push_workbench_log(&mut logs.write(), format!("[{prefix}] [{}] {message}", severity.label()));
+                }
+                BridgeAction::CommandFailed { id, error } => {
+                    tracing::warn!(%id, %error, "extension command failed");
+                    notice(format!("명령 {id}을(를) 실행하지 못했습니다: {error}"));
+                }
+                BridgeAction::RunCommand(command) => {
+                    notice(format!("지원하지 않는 명령입니다: {}", command.id));
+                }
                 _ => {}
             }
         }
@@ -668,6 +794,7 @@ pub mod page {
         let (agent_state, project_branch) = project_status(&s.project);
         // The branch git/status returned; the project row's until the first answer.
         let branch = s.scm.branch_line().unwrap_or(project_branch);
+        let conflict_shown = s.scm.conflict_visible();
         let diff_shown = s.scm.diff_visible(current.as_deref());
         let key_s = s.clone();
         let has_left = sel.selected(Side::Left).is_some();
@@ -700,6 +827,11 @@ pub mod page {
                     let m = event.modifiers();
                     let keymap = *key_s.keymap.read();
                     let name = key_name(&event.key());
+                    if event.key() == Key::Escape && !m.contains(Modifiers::CONTROL) && !m.contains(Modifiers::ALT) && !m.contains(Modifiers::META) && !m.contains(Modifiers::SHIFT) {
+                        if let Some(target) = crate::ui::editor::editor_focus_target(key_s.tabs.read().current_path()) {
+                            key_s.host.send(HostCommand::Focus(target));
+                        }
+                    }
                     let double = DOUBLE_SHIFT.with(|d| {
                         d.borrow_mut().press(
                             &name,
@@ -753,9 +885,10 @@ pub mod page {
                         if let Some(path) = current.as_deref() {
                             {breadcrumbs(path, &s.folder)}
                         }
-                        if *s.find.open.read() && active.is_some() && !diff_shown { {find_bar(&s)} }
+                        if *s.find.open.read() && active.is_some() && !diff_shown && !conflict_shown { {find_bar(&s)} }
                         div { style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
-                            if diff_shown { {crate::ui::editor_scm::view::diff_pane(&s)} }
+                            if conflict_shown { {crate::ui::editor_scm::view::conflict_pane(&s)} }
+                            else if diff_shown { {crate::ui::editor_scm::view::diff_pane(&s)} }
                             else if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
                             else if let Some(error) = current.as_ref().and_then(|p| open_error.clone().map(|e| (p.clone(), e))) {
                                 div { class: "ed-empty", role: "alert",
@@ -807,25 +940,25 @@ pub mod page {
         rsx! {
             header { class: "ed-top", style: "{strip_pad}",
                 img { class: "logo logo-img", src: "icon:mark", width: "28", height: "28", alt: "Ember" }
-                button { class: "ed-pj", title: "닫기", onclick: move |_| crate::services::services().ui.close_editor(), "{name}" {icon_px("chev-dn", 12)} }
-                button { class: "ed-pj", title: "브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon("git")} "{branch}" {icon_px("chev-dn", 12)} }
+                button { class: "ed-pj", title: "닫기", "aria-label": "닫기", onclick: move |_| crate::services::services().ui.close_editor(), "{name}" {icon_px("chev-dn", 12)} }
+                button { class: "ed-pj", title: "브랜치", "aria-label": "브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon("git")} "{branch}" {icon_px("chev-dn", 12)} }
                 div { class: "spacer" }
-                button { class: "ed-find", title: "{find}", onclick: move |_| run_action(&find_s, Action::Find),
+                button { class: "ed-find", title: "{find}", "aria-label": "{find}", onclick: move |_| run_action(&find_s, Action::Find),
                     {icon("search")}
                     span { class: "hide-md", "{keymap.find_label()}" }
                     kbd { class: "ed-sc", "{find_hint}" }
                 }
                 div { class: "ed-runcfg",
-                    button { class: "ed-pj", title: "실행 구성", onclick: move |_| notice(format!("실행 구성: {SOON}")), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
-                    button { class: "ed-ib run", title: "실행", onclick: move |_| notice(format!("실행: {SOON}")), {icon("play")} }
-                    button { class: "ed-ib", title: "중지", onclick: move |_| notice(format!("중지: {SOON}")), {icon("pause")} }
-                    button { class: "ed-ib", title: "{theme_title}", onclick: move |_| {
+                    button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| notice(format!("실행 구성: {SOON}")), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
+                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| notice(format!("실행: {SOON}")), {icon("play")} }
+                    button { class: "ed-ib", title: "중지", "aria-label": "중지", onclick: move |_| notice(format!("중지: {SOON}")), {icon("pause")} }
+                    button { class: "ed-ib", title: "{theme_title}", "aria-label": "{theme_title}", onclick: move |_| {
                         let next = theme_pref.next();
                         theme.set(next);
                         crate::services::services().ui.update_prefs(|p| p.theme = next);
                     }, {icon(if super::ICON_DARK.with(|d| d.get()) { "moon" } else { "sun" })} }
-                    button { class: "ed-ib", title: "에이전트에게 묻기", onclick: move |_| notice(format!("에이전트에게 묻기: {SOON}")), {icon("spark")} }
-                    button { class: "ed-ib", title: "메뉴", onclick: move |_| menu_open.set(!open), {icon("more")} }
+                    button { class: "ed-ib", title: "에이전트에게 묻기", "aria-label": "에이전트에게 묻기", onclick: move |_| notice(format!("에이전트에게 묻기: {SOON}")), {icon("spark")} }
+                    button { class: "ed-ib", title: "메뉴", "aria-label": "메뉴", onclick: move |_| menu_open.set(!open), {icon("more")} }
                 }
                 if open { {menu(s, keymap)} }
             }
@@ -892,6 +1025,7 @@ pub mod page {
             ToolWindow::Terminal => "code",
             ToolWindow::Run => "play",
             ToolWindow::Problems => "warn",
+            ToolWindow::Output => "code",
         }
     }
 
@@ -927,6 +1061,9 @@ pub mod page {
         let mut expanded = s.expanded;
         let mut stripes = s.stripes;
         let mut tree_sel = s.tree_sel;
+        let mut tree_multi_sel = s.tree_multi_sel;
+        let mut tree_clipboard = s.tree_clipboard;
+        let mut tree_drag_src = s.tree_drag_src;
         let mut prompt = s.prompt;
         let mut prompt_text = s.prompt_text;
         let mut prompt_at = s.prompt_at;
@@ -938,6 +1075,10 @@ pub mod page {
         };
         let root_name = base_name(&root).to_string();
         let selected: Option<(String, bool)> = tree_sel.read().clone();
+        let tree_rows_owned = rows.clone();
+        let tree_root = root.clone();
+        let tree_host = s.host.clone();
+        let tree_open_errors = s.open_errors.clone();
         let pending = prompt.read().clone();
         let parent_for_new = crate::ui::editor::new_item_parent(selected.as_ref().map(|(p, d)| (p.as_str(), *d)), &root);
         let (new_file_parent, new_dir_parent) = (parent_for_new.clone(), parent_for_new);
@@ -956,6 +1097,7 @@ pub mod page {
                 }
                 TreePrompt::Rename { path } => { submit_host.send(HostCommand::Rename { path, new_name: name }); }
                 TreePrompt::Delete { path, is_dir } => { submit_host.send(HostCommand::Delete { path, is_dir }); }
+                TreePrompt::DeleteMany { items } => { submit_host.send(HostCommand::DeleteMany { items }); }
             }
             let _ = &submit_root;
             prompt.set(None);
@@ -972,6 +1114,21 @@ pub mod page {
                 // A deletion cannot be undone: the answer that is safe is the one a stray key or an early
                 // double click gives. Cancel is the default (Enter and Escape cancel), and a click on
                 // the delete button is ignored for the first 600 ms after the question appears.
+                rsx! {
+                    div { class: "ed-tn", role: "alertdialog", "aria-label": "삭제 확인", tabindex: "0", style: "--d:0; height:auto; flex-wrap:wrap; padding:var(--sp2); white-space:normal; background:var(--c-red-soft); color:var(--c-red);",
+                        onkeydown: move |event| { if matches!(event.key(), Key::Enter | Key::Escape) { event.stop_propagation(); prompt.set(None); } },
+                        div { style: "flex:1 1 100%;", "{message}" }
+                        button { class: "ed-pj", style: "border:1px solid var(--line); background:var(--surface); color:var(--text);", autofocus: true, onclick: move |_| prompt.set(None), "취소" }
+                        button { class: "ed-pj", style: "background:var(--c-red); color:var(--ink-text);", onclick: move |_| {
+                            if crate::ui::editor::delete_click_allowed(*prompt_at.read(), now_ms()) { submit_ok(confirm.clone()); }
+                        }, "삭제" }
+                    }
+                }
+            }
+            Some(TreePrompt::DeleteMany { items }) => {
+                let affected: Vec<String> = unsaved.iter().filter(|p| items.iter().any(|(ip, _)| crate::ui::editor::is_at_or_below(p, ip))).cloned().collect();
+                let message = crate::ui::editor::delete_many_confirmation(&items, &root, &affected);
+                let confirm = TreePrompt::DeleteMany { items };
                 rsx! {
                     div { class: "ed-tn", role: "alertdialog", "aria-label": "삭제 확인", tabindex: "0", style: "--d:0; height:auto; flex-wrap:wrap; padding:var(--sp2); white-space:normal; background:var(--c-red-soft); color:var(--c-red);",
                         onkeydown: move |event| { if matches!(event.key(), Key::Enter | Key::Escape) { event.stop_propagation(); prompt.set(None); } },
@@ -1005,53 +1162,349 @@ pub mod page {
                 }
             }
         };
+        let search_s = s.clone();
+        let rows_for_sel_all = rows.clone();
+        let paste_selected = selected.clone();
+        let paste_host = s.host.clone();
+        let paste_root = root.clone();
+        let clip_state = tree_clipboard.read().clone();
+        let clip_badge = crate::ui::editor::clipboard_badge_text(clip_state.as_ref());
+        let key_host = s.host.clone();
+        let root_for_key = root.clone();
+        let root_for_drop = root.clone();
+        let drop_root_host = s.host.clone();
         rsx! {
             section { class: "ed-tw ed-left", "aria-label": "프로젝트",
-                div { class: "ed-twh",
+                div { class: "ed-twh", style: "gap:2px;",
                     b { class: "ed-twt", "프로젝트" }
                     div { class: "spacer" }
-                    button { class: "ed-ib", title: "새 파일", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewFile { parent: new_file_parent.clone() })); }, {icon("plus")} }
-                    button { class: "ed-ib", title: "새 폴더", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewDir { parent: new_dir_parent.clone() })); }, {icon("folder")} }
-                    button { class: "ed-ib", title: "모두 접기", onclick: move |_| expanded.write().clear(), {icon_px("chev", 16)} }
-                    button { class: "ed-ib", title: "파일 검색", onclick: move |_| notice(format!("파일 검색: {SOON}")), {icon("search")} }
-                    button { class: "ed-ib", title: "숨기기", onclick: move |_| stripes.write().hide(Side::Left), {icon("close")} }
+                    button { class: "ed-ib", title: "새 파일", "aria-label": "새 파일", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewFile { parent: new_file_parent.clone() })); }, {icon("plus")} }
+                    button { class: "ed-ib", title: "새 폴더", "aria-label": "새 폴더", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewDir { parent: new_dir_parent.clone() })); }, {icon("folder")} }
+                    button { class: "ed-ib", title: "모두 선택", "aria-label": "모두 선택", onclick: move |_| {
+                        let (all, last) = crate::ui::editor::select_all_tree_rows(&rows_for_sel_all);
+                        tree_multi_sel.set(all);
+                        tree_sel.set(last);
+                    }, {icon_px("check", 15)} }
+                    button { class: "ed-ib", title: "모두 접기", "aria-label": "모두 접기", onclick: move |_| expanded.write().clear(), {icon_px("chev", 16)} }
+                    button { class: "ed-ib", title: "파일 검색", "aria-label": "파일 검색", onclick: move |_| crate::ui::editor_search::view::open(&search_s, false), {icon("search")} }
+                    button { class: "ed-ib", title: "숨기기", "aria-label": "숨기기", onclick: move |_| stripes.write().hide(Side::Left), {icon("close")} }
                 }
-                div { class: "ed-tree", role: "tree", "aria-label": "프로젝트 트리",
-                    div { class: "ed-tn", role: "treeitem", "aria-expanded": "true", "aria-label": "{root_name} 폴더", style: "--d:0;", {icon_px("chev-dn", 12)} {icon_px("folder", 15)} "{root_name}" }
+                div { class: "ed-tree", role: "tree", "aria-label": "프로젝트 트리", "aria-multiselectable": "true", tabindex: "0",
+                    onkeydown: move |event| {
+                        if !crate::ui::editor::tree_handles_key(prompt.read().as_ref()) {
+                            return;
+                        }
+                        if event.key() == Key::Escape {
+                            event.stop_propagation();
+                            if let Some(current_path) = tabs.read().current_path() {
+                                tree_host.send(HostCommand::Focus(current_path.to_string()));
+                            }
+                            return;
+                        }
+                        let m = event.modifiers();
+                        let cmd = m.contains(Modifiers::META) || m.contains(Modifiers::CONTROL);
+                        if cmd {
+                            match event.key() {
+                                Key::Character(ref c) if c.eq_ignore_ascii_case("c") => {
+                                    event.stop_propagation();
+                                    event.prevent_default();
+                                    let sel = tree_multi_sel.read();
+                                    let items = if sel.is_empty() {
+                                        selected.clone().into_iter().collect::<Vec<_>>()
+                                    } else {
+                                        sel.clone()
+                                    };
+                                    let pruned = crate::ui::editor::prune_redundant_selection(&items);
+                                    if !pruned.is_empty() {
+                                        let n = pruned.len();
+                                        tree_clipboard.set(Some(crate::ui::editor::TreeClipboard {
+                                            kind: crate::ui::editor::ClipboardKind::Copy,
+                                            paths: pruned,
+                                        }));
+                                        notice(format!("{n}개 항목을 복사했습니다"));
+                                    }
+                                    return;
+                                }
+                                Key::Character(ref c) if c.eq_ignore_ascii_case("x") => {
+                                    event.stop_propagation();
+                                    event.prevent_default();
+                                    let sel = tree_multi_sel.read();
+                                    let items = if sel.is_empty() {
+                                        selected.clone().into_iter().collect::<Vec<_>>()
+                                    } else {
+                                        sel.clone()
+                                    };
+                                    let pruned = crate::ui::editor::prune_redundant_selection(&items);
+                                    if !pruned.is_empty() {
+                                        let n = pruned.len();
+                                        tree_clipboard.set(Some(crate::ui::editor::TreeClipboard {
+                                            kind: crate::ui::editor::ClipboardKind::Cut,
+                                            paths: pruned,
+                                        }));
+                                        notice(format!("{n}개 항목을 잘라냈습니다"));
+                                    }
+                                    return;
+                                }
+                                Key::Character(ref c) if c.eq_ignore_ascii_case("v") => {
+                                    event.stop_propagation();
+                                    event.prevent_default();
+                                    let clip = tree_clipboard.read().clone();
+                                    if let Some(clip) = clip {
+                                        let dest_dir = crate::ui::editor::new_item_parent(selected.as_ref().map(|(p, d)| (p.as_str(), *d)), &root_for_key);
+                                        let sources: Vec<String> = clip.paths.into_iter().map(|(p, _)| p).collect();
+                                        expanded.write().insert(dest_dir.clone());
+                                        match clip.kind {
+                                            crate::ui::editor::ClipboardKind::Copy => {
+                                                key_host.send(HostCommand::CopyPaths { sources, dest_dir });
+                                            }
+                                            crate::ui::editor::ClipboardKind::Cut => {
+                                                key_host.send(HostCommand::MovePaths { sources, dest_dir });
+                                                tree_clipboard.set(None);
+                                            }
+                                        }
+                                    }
+                                    return;
+                                }
+                                _ => {}
+                            }
+                        } else if matches!(event.key(), Key::Delete | Key::Backspace) {
+                            let sel = tree_multi_sel.read();
+                            let items = if sel.is_empty() {
+                                selected.clone().into_iter().collect::<Vec<_>>()
+                            } else {
+                                sel.clone()
+                            };
+                            let pruned = crate::ui::editor::prune_redundant_selection(&items);
+                            if !pruned.is_empty() {
+                                event.stop_propagation();
+                                event.prevent_default();
+                                prompt_at.set(now_ms());
+                                if pruned.len() == 1 {
+                                    prompt.set(Some(TreePrompt::Delete { path: pruned[0].0.clone(), is_dir: pruned[0].1 }));
+                                } else {
+                                    prompt.set(Some(TreePrompt::DeleteMany { items: pruned }));
+                                }
+                            }
+                            return;
+                        }
+                        let key_str = key_name(&event.key());
+                        let cur_sel = tree_sel.read().clone();
+                        let outcome = crate::ui::editor::tree_key_action(
+                            &tree_rows_owned,
+                            cur_sel.as_ref().map(|(p, d)| (p.as_str(), *d)),
+                            &tree_root,
+                            &key_str,
+                        );
+                        if let Some(action) = outcome {
+                            event.stop_propagation();
+                            match action {
+                                crate::ui::editor::TreeKeyOutcome::Select(p, is_dir) => {
+                                    tree_multi_sel.set(vec![(p.clone(), is_dir)]);
+                                    tree_sel.set(Some((p, is_dir)));
+                                }
+                                crate::ui::editor::TreeKeyOutcome::Expand(p) => {
+                                    expanded.write().insert(p.clone());
+                                    tree_host.send(HostCommand::List(p));
+                                }
+                                crate::ui::editor::TreeKeyOutcome::Collapse(p) => {
+                                    expanded.write().remove(&p);
+                                }
+                                crate::ui::editor::TreeKeyOutcome::OpenFile(p) => {
+                                    tree_open_errors.borrow_mut().remove(&p);
+                                    tabs.write().open(&p);
+                                    tree_host.send(HostCommand::Open(p.clone()));
+                                    tree_host.send(HostCommand::Focus(p));
+                                }
+                            }
+                        }
+                    },
+                    div { class: "ed-tn", role: "treeitem", "aria-expanded": "true", "aria-label": "{root_name} 폴더", tabindex: "-1", style: "--d:0;",
+                        ondragover: move |event| { event.prevent_default(); },
+                        ondrop: move |event| {
+                            event.prevent_default();
+                            let drag_src = tree_drag_src.read().clone();
+                            if let Some(src) = drag_src {
+                                let dest_dir = root_for_drop.clone();
+                                let multi = tree_multi_sel.read().clone();
+                                let sources = if multi.iter().any(|(p, _)| p == &src) {
+                                    crate::ui::editor::prune_redundant_selection(&multi)
+                                        .into_iter()
+                                        .map(|(p, _)| p)
+                                        .filter(|p| p != &dest_dir)
+                                        .collect()
+                                } else if src != dest_dir {
+                                    vec![src]
+                                } else {
+                                    Vec::new()
+                                };
+                                if !sources.is_empty() {
+                                    drop_root_host.send(HostCommand::MovePaths { sources, dest_dir });
+                                }
+                                tree_drag_src.set(None);
+                            }
+                        },
+                        {icon_px("chev-dn", 12)} {icon_px("folder", 15)} span { class: "ellipsis", "{root_name}" }
+                    }
+                    if let Some(badge) = clip_badge {
+                        div { class: "ed-tn", style: "--d:0; padding:0 var(--sp2); background:var(--surface-2);",
+                            span { class: "ed-sc", style: "flex:none;", "{badge}" }
+                            div { class: "spacer" }
+                            button { class: "ed-sc", title: "붙여넣기", "aria-label": "붙여넣기", style: "flex:none; cursor:pointer; color:var(--text);", onclick: move |event| {
+                                event.stop_propagation();
+                                let clip = tree_clipboard.read().clone();
+                                if let Some(clip) = clip {
+                                    let dest_dir = crate::ui::editor::new_item_parent(paste_selected.as_ref().map(|(p, d)| (p.as_str(), *d)), &paste_root);
+                                    let sources: Vec<String> = clip.paths.into_iter().map(|(p, _)| p).collect();
+                                    expanded.write().insert(dest_dir.clone());
+                                    match clip.kind {
+                                        crate::ui::editor::ClipboardKind::Copy => {
+                                            paste_host.send(HostCommand::CopyPaths { sources, dest_dir });
+                                        }
+                                        crate::ui::editor::ClipboardKind::Cut => {
+                                            paste_host.send(HostCommand::MovePaths { sources, dest_dir });
+                                            tree_clipboard.set(None);
+                                        }
+                                    }
+                                }
+                            }, "붙여넣기" }
+                            button { class: "ed-ib", title: "클립보드 비우기", "aria-label": "클립보드 비우기", style: "width:20px; height:20px; flex:none;", onclick: move |event| {
+                                event.stop_propagation();
+                                tree_clipboard.set(None);
+                            }, {icon_px("close", 12)} }
+                        }
+                    }
                     {prompt_row}
-                    for row in rows {
+                    for row in rows.iter() {
                         {
                             let path = row.path.clone();
                             let host = s.host.clone();
+                            let mut recent_files = s.recent_files;
                             let open_errors = s.open_errors.clone();
                             let is_dir = row.is_dir;
-                            let chosen = selected.as_ref().map(|(p, _)| p.as_str()) == Some(row.path.as_str());
-                            let class = if chosen || (selected.is_none() && current == Some(row.path.as_str())) { "ed-tn sel" } else { "ed-tn" };
+                            let in_multi = tree_multi_sel.read().iter().any(|(p, _)| p == &row.path);
+                            let in_cut = tree_clipboard.read().as_ref().is_some_and(|c| c.kind == crate::ui::editor::ClipboardKind::Cut && c.paths.iter().any(|(p, _)| p == &row.path));
+                            let chosen = in_multi || selected.as_ref().map(|(p, _)| p.as_str()) == Some(row.path.as_str());
+                            let class = if chosen || (selected.is_none() && tree_multi_sel.read().is_empty() && current == Some(row.path.as_str())) { "ed-tn sel" } else { "ed-tn" };
                             let depth = row.depth + 1;
+                            let row_style = if in_cut { format!("--d:{depth}; opacity:0.55;") } else { format!("--d:{depth};") };
                             let rename_path = row.path.clone();
+                            let cut_path = row.path.clone();
                             let delete_path = row.path.clone();
                             let rename_name = row.name.clone();
                             let rename_label = row.name.clone();
+                            let cut_label = row.name.clone();
                             let unsaved_for_rename = unsaved.clone();
                             let row_label = crate::ui::editor::tree_item_aria_label(&row.name, is_dir);
-                            rsx! { div { key: "{row.path}", class, role: "treeitem", "aria-label": "{row_label}", style: "--d:{depth};",
+                            let path_for_down = row.path.clone();
+                            let rows_for_down = rows.clone();
+                            let rows_for_click = rows.clone();
+                            let drag_path = row.path.clone();
+                            let drop_path = row.path.clone();
+                            let drop_is_dir = is_dir;
+                            let drop_host = s.host.clone();
+                            let drop_root = root.clone();
+                            rsx! { div { key: "{row.path}", class, role: "treeitem", "aria-label": "{row_label}", "aria-selected": "{chosen}", tabindex: if chosen { "0" } else { "-1" }, style: "{row_style}",
                                 "aria-expanded": if is_dir { "{row.open}" } else { "" },
-                                onclick: move |_| {
+                                draggable: "true",
+                                ondragstart: move |_| {
+                                    tree_drag_src.set(Some(drag_path.clone()));
+                                },
+                                ondragover: move |event| {
+                                    event.prevent_default();
+                                },
+                                ondrop: move |event| {
+                                    event.prevent_default();
+                                    let drag_src = tree_drag_src.read().clone();
+                                    if let Some(src) = drag_src {
+                                        let dest_dir = if drop_is_dir {
+                                            drop_path.clone()
+                                        } else {
+                                            crate::ui::editor::new_item_parent(Some((drop_path.as_str(), false)), &drop_root)
+                                        };
+                                        let multi = tree_multi_sel.read().clone();
+                                        let sources = if multi.iter().any(|(p, _)| p == &src) {
+                                            crate::ui::editor::prune_redundant_selection(&multi)
+                                                .into_iter()
+                                                .map(|(p, _)| p)
+                                                .filter(|p| p != &dest_dir)
+                                                .collect()
+                                        } else if src != dest_dir {
+                                            vec![src]
+                                        } else {
+                                            Vec::new()
+                                        };
+                                        if !sources.is_empty() {
+                                            expanded.write().insert(dest_dir.clone());
+                                            drop_host.send(HostCommand::MovePaths { sources, dest_dir });
+                                        }
+                                        tree_drag_src.set(None);
+                                    }
+                                },
+                                onmousedown: move |event| {
                                     let close = prompt.read().as_ref().is_some_and(|p| crate::ui::editor::row_click_closes_prompt(p, &prompt_text.read()));
                                     if close { prompt.set(None); }
-                                    tree_sel.set(Some((path.clone(), is_dir)));
+                                    let m = event.modifiers();
+                                    let shift = m.contains(Modifiers::SHIFT);
+                                    let toggle = m.contains(Modifiers::META) || m.contains(Modifiers::CONTROL);
+                                    super::MODIFIER_CLICK.with(|c| c.set(shift || toggle));
+                                    if shift || toggle {
+                                        event.stop_propagation();
+                                        let new_multi = crate::ui::editor::update_tree_selection(
+                                            &tree_multi_sel.read(),
+                                            (path_for_down.clone(), is_dir),
+                                            &rows_for_down,
+                                            shift,
+                                            toggle,
+                                        );
+                                        let new_sel = new_multi.last().cloned().or_else(|| Some((path_for_down.clone(), is_dir)));
+                                        tree_multi_sel.set(new_multi);
+                                        tree_sel.set(new_sel);
+                                    }
+                                },
+                                onclick: move |_| {
+                                    if super::MODIFIER_CLICK.with(|c| c.replace(false)) {
+                                        return;
+                                    }
+                                    let close = prompt.read().as_ref().is_some_and(|p| crate::ui::editor::row_click_closes_prompt(p, &prompt_text.read()));
+                                    if close { prompt.set(None); }
+                                    let new_multi = crate::ui::editor::update_tree_selection(
+                                        &tree_multi_sel.read(),
+                                        (path.clone(), is_dir),
+                                        &rows_for_click,
+                                        false,
+                                        false,
+                                    );
+                                    let new_sel = new_multi.last().cloned().or_else(|| Some((path.clone(), is_dir)));
+                                    tree_multi_sel.set(new_multi);
+                                    tree_sel.set(new_sel);
                                     if is_dir {
                                         let was_open = expanded.read().contains(&path);
                                         if was_open { expanded.write().remove(&path); }
                                         else { expanded.write().insert(path.clone()); host.send(HostCommand::List(path.clone())); }
-                                    } else { open_errors.borrow_mut().remove(&path); tabs.write().open(&path); host.send(HostCommand::Open(path.clone())); }
+                                    } else {
+                                        open_errors.borrow_mut().remove(&path);
+                                        tabs.write().open(&path);
+                                        record_recent_file(&mut recent_files, &path);
+                                        host.send(HostCommand::Open(path.clone()));
+                                    }
                                 },
                                 if is_dir { if row.open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} } } else { span { class: "chev-sp" } }
                                 if is_dir { {icon_px("folder", 15)} } else { {icon_px("file", 15)} }
                                 "{row.name}"
                                 if chosen {
                                     div { class: "spacer" }
-                                    button { class: "ed-ib", title: "이름 변경: {rename_label}", style: "width:22px; height:22px;",
+                                    button { class: "ed-ib", title: "잘라내기: {cut_label}", "aria-label": "잘라내기: {cut_label}", style: "width:22px; height:22px;",
+                                        onmousedown: move |event| { event.stop_propagation(); },
+                                        onclick: move |event| {
+                                            event.stop_propagation();
+                                            if let Some(clip) = crate::ui::editor::cut_selection(&tree_multi_sel.read(), &cut_path, is_dir) {
+                                                let n = clip.paths.len();
+                                                tree_clipboard.set(Some(clip));
+                                                notice(format!("{n}개 항목을 잘라냈습니다"));
+                                            }
+                                        }, {icon_px("minus", 13)} }
+                                    button { class: "ed-ib", title: "이름 변경: {rename_label}", "aria-label": "이름 변경: {rename_label}", style: "width:22px; height:22px;",
+                                        onmousedown: move |event| { event.stop_propagation(); },
                                         onclick: move |event| {
                                             event.stop_propagation();
                                             let blocked: Vec<String> = unsaved_for_rename.iter().filter(|p| crate::ui::editor::is_at_or_below(p, &rename_path)).cloned().collect();
@@ -1062,8 +1515,23 @@ pub mod page {
                                             prompt_text.set(rename_name.clone());
                                             prompt.set(Some(TreePrompt::Rename { path: rename_path.clone() }));
                                         }, {icon_px("edit", 13)} }
-                                    button { class: "ed-ib", title: "삭제: {rename_label}", style: "width:22px; height:22px; color:var(--c-red);",
-                                        onclick: move |event| { event.stop_propagation(); prompt_at.set(now_ms()); prompt.set(Some(TreePrompt::Delete { path: delete_path.clone(), is_dir })); }, {icon_px("close", 13)} }
+                                    button { class: "ed-ib", title: "삭제: {rename_label}", "aria-label": "삭제: {rename_label}", style: "width:22px; height:22px; color:var(--c-red);",
+                                        onmousedown: move |event| { event.stop_propagation(); },
+                                        onclick: move |event| {
+                                            event.stop_propagation();
+                                            prompt_at.set(now_ms());
+                                            let multi = tree_multi_sel.read();
+                                            if multi.iter().any(|(p, _)| p == &delete_path) && multi.len() > 1 {
+                                                let pruned = crate::ui::editor::prune_redundant_selection(&multi);
+                                                if pruned.len() == 1 {
+                                                    prompt.set(Some(TreePrompt::Delete { path: pruned[0].0.clone(), is_dir: pruned[0].1 }));
+                                                } else {
+                                                    prompt.set(Some(TreePrompt::DeleteMany { items: pruned }));
+                                                }
+                                            } else {
+                                                prompt.set(Some(TreePrompt::Delete { path: delete_path.clone(), is_dir }));
+                                            }
+                                        }, {icon_px("close", 13)} }
                                 }
                             } }
                         }
@@ -1076,27 +1544,109 @@ pub mod page {
     fn tab_strip(s: &Shared, paths: &[String], dirty: &[bool], current: Option<&str>) -> Element {
         let mut tabs = s.tabs;
         let mut menu_open = s.menu_open;
+        let host = s.host.clone();
+        let scm = s.scm.clone();
+        let paths_owned: Vec<String> = paths.to_vec();
+        let current_owned: Option<String> = current.map(str::to_string);
         rsx! {
-            div { class: "ed-tabs", role: "tablist", "aria-label": "열린 파일",
+            div { class: "ed-tabs", role: "tablist", "aria-label": "열린 파일", tabindex: "0",
+                onkeydown: move |event| {
+                    if event.key() == Key::Escape {
+                        event.stop_propagation();
+                        if let Some(ref current_path) = current_owned {
+                            host.send(HostCommand::Focus(current_path.clone()));
+                        }
+                        return;
+                    }
+                    let key_str = key_name(&event.key());
+                    let outcome = crate::ui::editor::tab_strip_key(
+                        &paths_owned,
+                        current_owned.as_deref(),
+                        &key_str,
+                    );
+                    if let Some(action) = outcome {
+                        event.stop_propagation();
+                        match action {
+                            crate::ui::editor::TabKeyOutcome::Activate(path) => {
+                                scm.close_diff();
+                                tabs.write().activate(&path);
+                                host.send(HostCommand::Focus(path));
+                            }
+                            crate::ui::editor::TabKeyOutcome::Close(path) => {
+                                tabs.write().close(&path);
+                                host.send(HostCommand::Close(path));
+                                if let Some(next) = tabs.read().current_path() {
+                                    host.send(HostCommand::Focus(next.to_string()));
+                                }
+                            }
+                        }
+                    }
+                },
                 for (i, path) in paths.iter().enumerate() {
                     {
                         let path = path.clone(); let close_path = path.clone();
-                        let host = s.host.clone(); let close_host = s.host.clone();
+                        let close_path_key = path.clone();
+                        let host = s.host.clone(); let key_host = s.host.clone(); let close_host = s.host.clone();
+                        let close_host_key = s.host.clone();
+                        let mut recent_files = s.recent_files;
+                        let mut key_recent_files = s.recent_files;
                         let selected = current == Some(path.as_str());
                         let label = base_name(&path).to_string();
-                                                let class = if selected { "ed-tab on" } else { "ed-tab" };
+                        let class = if selected { "ed-tab on" } else { "ed-tab" };
                         let tab_label = crate::ui::editor::tab_aria_label(&label, dirty[i]);
                         let close_label = format!("닫기: {label}");
                         let scm = s.scm.clone();
-                        rsx! { div { class, role: "tab", "aria-selected": "{selected}", "aria-label": "{tab_label}", onclick: move |_| {
-                            scm.close_diff();
-                            tabs.write().activate(&path);
-                            host.send(HostCommand::Focus(path.clone()));
-                        }, {icon_px(if selected { "file-w" } else { "file" }, 14)} "{label}" if dirty[i] { span { class: "ed-dirty" } } button { class: "ed-tx", "aria-label": "{close_label}", onclick: move |event| { event.stop_propagation(); tabs.write().close(&close_path); close_host.send(HostCommand::Close(close_path.clone())); if let Some(next) = tabs.read().current_path() { close_host.send(HostCommand::Focus(next.to_string())); } }, {icon_px(if selected { "close-w" } else { "close" }, 12)} } } }
+                        let key_scm = s.scm.clone();
+                        let tab_path = path.clone();
+                        rsx! { div { class, role: "tab", "aria-selected": "{selected}", "aria-label": "{tab_label}", tabindex: if selected { "0" } else { "-1" },
+                            onclick: move |_| {
+                                scm.close_diff();
+                                tabs.write().activate(&path);
+                                record_recent_file(&mut recent_files, &path);
+                                host.send(HostCommand::Focus(path.clone()));
+                            },
+                            onkeydown: move |event| {
+                                if matches!(event.key(), Key::Enter) || matches!(event.key(), Key::Character(ref c) if c == " ") {
+                                    event.stop_propagation();
+                                    key_scm.close_diff();
+                                    tabs.write().activate(&tab_path);
+                                    record_recent_file(&mut key_recent_files, &tab_path);
+                                    key_host.send(HostCommand::Focus(tab_path.clone()));
+                                }
+                            },
+                            {icon_px(if selected { "file-w" } else { "file" }, 14)}
+                            "{label}"
+                            if dirty[i] { span { class: "ed-dirty" } }
+                            button {
+                                class: "ed-tx",
+                                tabindex: "0",
+                                title: "{close_label}",
+                                "aria-label": "{close_label}",
+                                onclick: move |event| {
+                                    event.stop_propagation();
+                                    tabs.write().close(&close_path);
+                                    close_host.send(HostCommand::Close(close_path.clone()));
+                                    if let Some(next) = tabs.read().current_path() {
+                                        close_host.send(HostCommand::Focus(next.to_string()));
+                                    }
+                                },
+                                onkeydown: move |event| {
+                                    if matches!(event.key(), Key::Enter) || matches!(event.key(), Key::Character(ref c) if c == " ") {
+                                        event.stop_propagation();
+                                        tabs.write().close(&close_path_key);
+                                        close_host_key.send(HostCommand::Close(close_path_key.clone()));
+                                        if let Some(next) = tabs.read().current_path() {
+                                            close_host_key.send(HostCommand::Focus(next.to_string()));
+                                        }
+                                    }
+                                },
+                                {icon_px(if selected { "close-w" } else { "close" }, 12)}
+                            }
+                        } }
                     }
                 }
                 div { class: "spacer" }
-                button { class: "ed-ib", title: "탭 메뉴", onclick: move |_| { let open = *menu_open.read(); menu_open.set(!open); }, {icon("more")} }
+                button { class: "ed-ib", title: "탭 메뉴", "aria-label": "탭 메뉴", onclick: move |_| { let open = *menu_open.read(); menu_open.set(!open); }, {icon("more")} }
             }
         }
     }
@@ -1188,7 +1738,7 @@ pub mod page {
         rsx! {
             div { class: "ed-tsub",
                 button { class: "on", {icon_px("code", 14)} "{computer}" }
-                button { class: "ed-ib", title: "새 터미널", onclick: move |_| notice(format!("새 터미널: {SOON}")), {icon("plus")} }
+                button { class: "ed-ib", title: "새 터미널", "aria-label": "새 터미널", onclick: move |_| notice(format!("새 터미널: {SOON}")), {icon("plus")} }
             }
             div { class: "ed-term", tabindex: "0", style: "outline:none;",
                 // TODO(#335): paste and IME. Only key presses are forwarded; pasted and composed text is not.
@@ -1237,28 +1787,137 @@ pub mod page {
         }
     }
 
-    /// The problems list: a row per marker, errors first; a click opens the file.
-    fn problems_body(s: &Shared, rows: Vec<(String, ember_editor::widget::Severity, String, String, String)>) -> Element {
+    /// The problems list: a row per marker, errors first; a click opens the file and moves the caret.
+    fn problems_body(s: &Shared, rows: Vec<(String, ember_editor::widget::Severity, String, String, String, u32, u32)>) -> Element {
         use ember_editor::widget::Severity;
         let mut tabs = s.tabs;
         if rows.is_empty() {
             return rsx! { div { class: "ed-term", style: "color:var(--muted);", "문제가 없습니다." } };
         }
+        let limit = *s.problems_limit.read();
+        let (visible_rows, overflow) = crate::ui::editor::paginate_problems(&rows, limit);
+        let mut problems_limit = s.problems_limit;
         rsx! {
             div { class: "ed-plist", role: "list", "aria-label": "문제 목록",
-                for (i, (path, severity, message, location, source)) in rows.into_iter().enumerate() {
+                for (i, (path, severity, message, location, source, start_line, start_col)) in visible_rows.iter().cloned().enumerate() {
                     {
                         let host = s.host.clone();
+                        let mut recent_files = s.recent_files;
                         let dot = match severity { Severity::Error => "ed-pdot err", Severity::Warning => "ed-pdot warn", _ => "ed-pdot" };
                         let row_label = crate::ui::editor::problem_aria_label(match severity { Severity::Error => "오류", Severity::Warning => "경고", _ => "정보" }, &message, &location);
+                        let mut pending_goto = s.pending_goto;
+                        let mut next_goto_id = s.next_goto_id;
                         rsx! { div { key: "{i}", class: "ed-prow", role: "listitem", "aria-label": "{row_label}", onclick: move |_| {
                             tabs.write().open(&path);
+                            record_recent_file(&mut recent_files, &path);
                             host.send(HostCommand::Open(path.clone()));
+                            host.send(HostCommand::Focus(path.clone()));
+                            let gid = *next_goto_id.read();
+                            *next_goto_id.write() += 1;
+                            pending_goto.set(Some(PendingGoto {
+                                id: gid,
+                                path: path.clone(),
+                                line: start_line,
+                                col: start_col,
+                            }));
                         },
                             span { class: "{dot}" }
                             span { style: "flex:1; min-width:0; overflow:hidden; white-space:nowrap;", "{message}" }
                             span { style: "color:var(--muted); font-size:var(--fs-xs); white-space:nowrap;", "{source} {location}" }
                         } }
+                    }
+                }
+                if overflow > 0 {
+                    button {
+                        class: "ed-pj ed-prow-more",
+                        style: "width:100%; justify-content:center; padding:var(--sp2); color:var(--c-blue); font-size:var(--fs-xs);",
+                        onclick: move |_| {
+                            let cur = *problems_limit.read();
+                            problems_limit.set(cur.saturating_add(crate::ui::editor::MAX_VISIBLE_PROBLEMS));
+                        },
+                        "외 {overflow}개 항목 더 보기…"
+                    }
+                }
+            }
+        }
+    }
+
+    /// The output panel: channel selector, log text, and clear button.
+    fn output_body(s: &Shared) -> Element {
+        let bridge = s.bridge.borrow();
+        let channels = bridge.output_channels().to_vec();
+        drop(bridge);
+
+        let selected_sig = s.selected_output_channel;
+        let selected_id = selected_sig.read().clone();
+
+        let all_channels: Vec<(String, String)> = std::iter::once(("ember-workbench".into(), "워크벤치".into()))
+            .chain(channels.iter().map(|c| (c.id.clone(), c.label.clone())))
+            .collect();
+
+        let active_id = if all_channels.iter().any(|(id, _)| id == &selected_id) {
+            selected_id
+        } else {
+            "ember-workbench".into()
+        };
+
+        let text = if active_id == "ember-workbench" {
+            s.workbench_logs.read().join("\n")
+        } else {
+            channels.iter().find(|c| c.id == active_id).map(|c| c.text.clone()).unwrap_or_default()
+        };
+
+        let clear_id = active_id.clone();
+        let mut clear_s = s.clone();
+
+        rsx! {
+            div { class: "ed-tsub", style: "display:flex; align-items:center; gap:var(--sp2); padding:var(--sp1) var(--sp2);",
+                div { role: "group", "aria-label": "출력 채널", style: "display:flex; gap:var(--sp1); align-items:center; overflow-x:auto;",
+                    for (id, label) in all_channels {
+                        {
+                            let is_on = id == active_id;
+                            let cid = id.clone();
+                            let mut sel = selected_sig;
+                            let bridge = s.bridge.clone();
+                            rsx! {
+                                button {
+                                    key: "{id}",
+                                    class: if is_on { "ed-pj on" } else { "ed-pj" },
+                                    "aria-pressed": "{is_on}",
+                                    onclick: move |_| {
+                                        sel.set(cid.clone());
+                                        bridge.borrow_mut().set_active_output_channel(cid.clone());
+                                    },
+                                    "{label}"
+                                }
+                            }
+                        }
+                    }
+                }
+                div { class: "spacer" }
+                button {
+                    class: "ed-pj",
+                    title: "지우기",
+                    "aria-label": "지우기",
+                    style: "border:1px solid var(--line);",
+                    onclick: move |_| {
+                        if clear_id == "ember-workbench" {
+                            clear_s.workbench_logs.write().clear();
+                        } else {
+                            clear_s.bridge.borrow_mut().clear_output_channel(&clear_id);
+                            let mut rev = clear_s.revision;
+                            *rev.write() += 1;
+                        }
+                    },
+                    "지우기"
+                }
+            }
+            div { class: "ed-term", style: "flex:1; overflow-y:auto; padding:var(--sp2); font-family:var(--font-mono); white-space:pre-wrap; outline:none;",
+                if text.trim().is_empty() {
+                    div { style: "color:var(--muted);", "출력이 없습니다." }
+                } else {
+                    for (i, line) in text.lines().enumerate() {
+                        div { key: "{i}", class: "tl", "{line}" }
                     }
                 }
             }
@@ -1270,18 +1929,27 @@ pub mod page {
         let mut bottom_max = s.bottom_max;
         let max = *bottom_max.read();
         let has_left = s.stripes.read().selected(Side::Left).is_some();
-        let problem_rows: Vec<(String, ember_editor::widget::Severity, String, String, String)> = s
+        let problem_rows: Vec<(String, ember_editor::widget::Severity, String, String, String, u32, u32)> = s
             .bridge
             .borrow()
             .problems()
             .iter()
-            .map(|p| (p.uri.path.clone(), p.severity, p.message.clone(), crate::ui::editor::problem_location(&p.uri.path, &s.folder, p.range.start.line), p.source.clone().unwrap_or_default()))
+            .map(|p| (
+                p.uri.path.clone(),
+                p.severity,
+                p.message.clone(),
+                crate::ui::editor::problem_location(&p.uri.path, &s.folder, p.range.start.line),
+                p.source.clone().unwrap_or_default(),
+                p.range.start.line,
+                p.range.start.col,
+            ))
             .collect();
         let problem_count = problem_rows.len();
         let body = match w {
             ToolWindow::Run => "실행 구성이 없습니다. 구성이 연결되면 이곳에 출력이 표시됩니다.",
             _ => "진단 정보가 아직 연결되지 않았습니다. 연결되면 이곳에 문제가 표시됩니다.",
         };
+        let max_label = if max { "원래 크기" } else { "최대화" };
         rsx! {
             section { class: "ed-tw ed-bottom", style: if max { "grid-row:2 / 4;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "아래 도구 창",
                 div { class: "ed-twh",
@@ -1295,13 +1963,15 @@ pub mod page {
                         }
                     }
                     div { class: "spacer" }
-                    button { class: "ed-ib", title: if max { "원래 크기" } else { "최대화" }, onclick: move |_| bottom_max.set(!max), {icon(if max { "down" } else { "up" })} }
-                    button { class: "ed-ib", title: "숨기기", onclick: move |_| { bottom_max.set(false); stripes.write().hide(Side::Bottom); }, {icon("close")} }
+                    button { class: "ed-ib", title: "{max_label}", "aria-label": "{max_label}", onclick: move |_| bottom_max.set(!max), {icon(if max { "down" } else { "up" })} }
+                    button { class: "ed-ib", title: "숨기기", "aria-label": "숨기기", onclick: move |_| { bottom_max.set(false); stripes.write().hide(Side::Bottom); }, {icon("close")} }
                 }
                 if w == ToolWindow::Terminal {
                     {terminal_body(s)}
                 } else if w == ToolWindow::Problems {
                     {problems_body(s, problem_rows)}
+                } else if w == ToolWindow::Output {
+                    {output_body(s)}
                 } else {
                     div { class: "ed-term", style: "color:var(--muted);", "{body}" }
                 }
@@ -1328,7 +1998,7 @@ pub mod page {
                     span { class: "ed-sbi hide-md", "UTF-8" }
                     span { class: "ed-sbi hide-md", "4칸" }
                 }
-                button { class: "ed-sbi", title: "Git 브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon("git")} "{branch}" }
+                button { class: "ed-sbi", title: "Git 브랜치", "aria-label": "Git 브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon("git")} "{branch}" }
             }
         }
     }

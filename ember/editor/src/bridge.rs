@@ -59,6 +59,14 @@ pub enum BridgeAction {
     OpenFailed { uri: UriComponents, error: String },
     /// Saving a document failed.
     SaveFailed { uri: UriComponents, error: String },
+    /// An extension notification surfaced to the workbench.
+    ExtensionNotice {
+        severity: crate::output::MessageSeverity,
+        message: String,
+        source: Option<String>,
+    },
+    /// Running an extension command failed.
+    CommandFailed { id: String, error: String },
 }
 
 impl BridgeAction {
@@ -109,6 +117,9 @@ pub struct WidgetBridge {
     docs: HashMap<String, DocumentWidgetState>,
     active: Option<String>,
     problems: Vec<crate::diagnostics::Problem>,
+    output_channels: Vec<crate::output::OutputChannel>,
+    active_output_channel: Option<String>,
+    extension_messages: Vec<crate::output::ExtensionMessage>,
 }
 
 impl WidgetBridge {
@@ -119,6 +130,31 @@ impl WidgetBridge {
     /// The problems list as the session last reported it.
     pub fn problems(&self) -> &[crate::diagnostics::Problem] {
         &self.problems
+    }
+
+    /// Every output channel reported by the session.
+    pub fn output_channels(&self) -> &[crate::output::OutputChannel] {
+        &self.output_channels
+    }
+
+    /// The id of the selected output channel.
+    pub fn active_output_channel(&self) -> Option<&str> {
+        self.active_output_channel.as_deref()
+    }
+
+    pub fn set_active_output_channel(&mut self, id: impl Into<String>) {
+        self.active_output_channel = Some(id.into());
+    }
+
+    pub fn clear_output_channel(&mut self, id: &str) {
+        if let Some(ch) = self.output_channels.iter_mut().find(|c| c.id == id) {
+            ch.clear();
+        }
+    }
+
+    /// Recent extension messages reported by the session.
+    pub fn extension_messages(&self) -> &[crate::output::ExtensionMessage] {
+        &self.extension_messages
     }
 
     /// Apply one [`SessionUpdate`] and return any [`BridgeAction`] the UI layer must handle.
@@ -214,6 +250,7 @@ impl WidgetBridge {
                 BridgeAction::None
             }
             SessionUpdate::SaveFailed { uri, error } => BridgeAction::SaveFailed { uri, error },
+            SessionUpdate::CommandFailed { id, error } => BridgeAction::CommandFailed { id, error },
             SessionUpdate::ExternalChange { uri, change } => {
                 if let Some(doc) = self.docs.get_mut(&uri.key()) {
                     doc.external_change = Some(change);
@@ -225,6 +262,7 @@ impl WidgetBridge {
             SessionUpdate::Closed { uri } => {
                 let key = uri.key();
                 self.docs.remove(&key);
+                self.problems.retain(|p| p.uri.path != uri.path && p.uri.key() != key);
                 if self.active.as_deref() == Some(key.as_str()) {
                     self.active = self.docs.keys().next().cloned();
                 }
@@ -235,6 +273,26 @@ impl WidgetBridge {
                 self.problems = problems;
                 BridgeAction::None
             }
+            SessionUpdate::OutputChannels { channels, active_id } => {
+                self.output_channels = channels;
+                if let Some(active) = active_id {
+                    self.active_output_channel = Some(active);
+                } else if self.active_output_channel.is_none()
+                    || !self.output_channels.iter().any(|c| Some(&c.id) == self.active_output_channel.as_ref())
+                {
+                    self.active_output_channel = self.output_channels.first().map(|c| c.id.clone());
+                }
+                BridgeAction::None
+            }
+            SessionUpdate::ExtensionMessage { severity, message, source } => {
+                self.extension_messages.push(crate::output::ExtensionMessage {
+                    severity,
+                    message: message.clone(),
+                    source: source.clone(),
+                });
+                BridgeAction::ExtensionNotice { severity, message, source }
+            }
+            SessionUpdate::Commands { .. } => BridgeAction::None,
             // Search and replace results are the search panel's, not a document's (FR-E7).
             SessionUpdate::SearchHits { .. } | SessionUpdate::SearchDone { .. } | SessionUpdate::ReplaceDone { .. } => BridgeAction::None,
         }

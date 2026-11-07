@@ -348,3 +348,115 @@ async fn fr_s8_limit_survives_a_rebuilt_sessions() {
     let app = ember_server::api::router(s);
     assert_eq!(get_settings(&app).await, json!({ "settings": { "antigravity": { "mem_limit_mb": 3000 } } }));
 }
+
+async fn get_defaults(app: &Router) -> Value {
+    let (st, body) = call(app, Method::GET, "/api/agents/defaults", None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    body
+}
+
+async fn put_defaults(app: &Router, body: &str) -> (StatusCode, Value) {
+    call(app, Method::PUT, "/api/agents/defaults", Some(body)).await
+}
+
+/// FR-L20 (#481, #670): new-member defaults (`agent`, `model`, `effort`, `mode`) round-trip through
+/// `GET /api/agents/defaults` and `PUT /api/agents/defaults`, support partial updates and clearing,
+/// and survive a rebuilt `Sessions` on the same database file without touching `GET /api/agents/settings`.
+#[tokio::test]
+async fn fr_l20_defaults_put_get_partial_clear_and_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ember.db");
+    {
+        let s = sessions_on(Arc::new(Store::open(&path).unwrap()));
+        let app = ember_server::api::router(s);
+
+        assert_eq!(
+            get_defaults(&app).await,
+            json!({ "agent": null, "model": null, "effort": null, "mode": null })
+        );
+
+        let (st, body) = put_defaults(
+            &app,
+            r#"{"agent":"claude-code","model":"Opus 4.7","effort":"High","mode":"edits"}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({ "agent": "claude-code", "model": "Opus 4.7", "effort": "High", "mode": "edits" })
+        );
+        assert_eq!(
+            get_settings(&app).await,
+            json!({ "settings": {} }),
+            "defaults row never leaks into per-harness mem_limit_mb settings"
+        );
+
+        // Partial update keeps omitted fields.
+        let (st, body) = put_defaults(&app, r#"{"effort":"Medium","mode":"ask"}"#).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({ "agent": "claude-code", "model": "Opus 4.7", "effort": "Medium", "mode": "ask" })
+        );
+    }
+
+    // Reopen the store on a fresh `Sessions`: defaults are still there.
+    let s = sessions_on(Arc::new(Store::open(&path).unwrap()));
+    let app = ember_server::api::router(s);
+    assert_eq!(
+        get_defaults(&app).await,
+        json!({ "agent": "claude-code", "model": "Opus 4.7", "effort": "Medium", "mode": "ask" })
+    );
+
+    // Clearing `agent` without giving `model` also clears `model`.
+    let (st, body) = put_defaults(&app, r#"{"agent":null}"#).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({ "agent": null, "model": null, "effort": "Medium", "mode": "ask" })
+    );
+
+    // Empty strings also clear.
+    let (st, body) = put_defaults(&app, r#"{"effort":"","mode":""}"#).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({ "agent": null, "model": null, "effort": null, "mode": null })
+    );
+}
+
+#[tokio::test]
+async fn fr_l20_defaults_validation_and_token_gate() {
+    let app = ember_server::api::router(sessions());
+
+    // Unknown field or non-object body -> 422.
+    for bad_shape in [r#"{"unknown": 1}"#, r#"[1, 2]"#, r#""text""#] {
+        let (st, _) = put_defaults(&app, bad_shape).await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{bad_shape}");
+    }
+
+    // Invalid agent, model, effort, mode or wrong type -> 400.
+    for bad_val in [
+        r#"{"agent":"scripted"}"#,
+        r#"{"agent":"no-such-agent"}"#,
+        r#"{"agent":123}"#,
+        r#"{"model":"bad\nmodel"}"#,
+        r#"{"effort":"Ultra"}"#,
+        r#"{"mode":"sudo"}"#,
+    ] {
+        let (st, _) = put_defaults(&app, bad_val).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad_val}");
+    }
+
+    // Token gate: `/api/agents/defaults` requires the bearer token when auth is on.
+    let dir = tempfile::tempdir().unwrap();
+    let token = auth::load_or_create_token(dir.path()).unwrap();
+    let authed = auth::protect(
+        ember_server::api::router(sessions()),
+        ServerAuth::new(token, LISTEN.parse().unwrap(), []),
+    );
+    let (st, _) = call(&authed, Method::GET, "/api/agents/defaults", None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    let (st, _) = call(&authed, Method::PUT, "/api/agents/defaults", Some(r#"{"mode":"ask"}"#)).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+}

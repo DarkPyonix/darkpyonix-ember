@@ -244,6 +244,7 @@ impl EditorSession {
         // two bootstrap calls below are outstanding.
         let (tx, rx) = mpsc::unbounded_channel();
         let (updates_tx, updates_rx) = mpsc::unbounded_channel();
+        let commands = crate::commands::parse_contributed_commands(&extensions);
         let mut core = SessionCore::new(LanguageRegistry::from_extensions(&extensions), config.core.clone(), Instant::now());
         core.set_grammar_catalog(crate::textmate::GrammarCatalog::from_extensions(&extensions));
         let driver = Driver {
@@ -255,6 +256,7 @@ impl EditorSession {
             updates: updates_tx,
             reqs: HashMap::new(),
             watches: Arc::new(Mutex::new(HashMap::new())),
+            commands,
         };
         let task = tokio::spawn(driver.run(rx, rpc_events, changes, ipc_lifecycle));
 
@@ -322,6 +324,23 @@ impl EditorSession {
         Ok(path)
     }
 
+    /// Reads the UTF-8 text of `path` on the remote server.
+    pub async fn read_file_text(&self, path: &str) -> Result<String, Error> {
+        let path = crate::paths::target_path(&self.workspace_path, path).map_err(Error::Path)?;
+        let bytes = self.fs.read_file(&self.uri(&path)).await.map_err(Error::Conn)?;
+        let (text, _bom) = crate::document::decode(&bytes)
+            .map_err(|_| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "file is not UTF-8")))?;
+        Ok(text)
+    }
+
+    /// Writes content to `path`. Creates or overwrites the file.
+    pub async fn write_file(&self, path: &str, content: &[u8]) -> Result<(), Error> {
+        let path = crate::paths::target_path(&self.workspace_path, path).map_err(Error::Path)?;
+        let opts = WriteOptions { create: true, overwrite: true, unlock: false, atomic: false };
+        self.fs.write_file(&self.uri(&path), content.to_vec(), &opts).await.map_err(Error::Conn)?;
+        Ok(())
+    }
+
     /// Creates a directory named `name` in the directory `parent`. Returns the new path.
     pub async fn create_dir(&self, parent: &str, name: &str) -> Result<String, Error> {
         let path = crate::paths::child_path(&self.workspace_path, parent, name).map_err(Error::Path)?;
@@ -349,6 +368,52 @@ impl EditorSession {
         self.fs.delete(&self.uri(&path), &opts).await.map_err(Error::Conn)
     }
 
+    /// Moves a file or directory at `src` into `dest_dir`.
+    pub async fn move_path(&self, src: &str, dest_dir: &str) -> Result<String, Error> {
+        let from = crate::paths::target_path(&self.workspace_path, src).map_err(Error::Path)?;
+        self.refuse_symlink_parent(dest_dir).await?;
+        let to = crate::paths::paste_destination(&self.workspace_path, &from, dest_dir, &[], true).map_err(Error::Path)?;
+        self.fs.rename(&self.uri(&from), &self.uri(&to), false).await.map_err(Error::Conn)?;
+        Ok(to)
+    }
+
+    /// Helper that recursively copies an entry from `from` to `to`.
+    async fn copy_entry(&self, from: &str, to: &str) -> Result<(), Error> {
+        let mut stack = vec![(from.to_string(), to.to_string())];
+        let opts = WriteOptions { create: true, overwrite: false, unlock: false, atomic: false };
+        while let Some((src, dst)) = stack.pop() {
+            let stat = self.fs.stat(&self.uri(&src)).await.map_err(Error::Conn)?;
+            if stat.file_type & ember_editor_conn::remote_fs::file_type::SYMBOLIC_LINK != 0 {
+                return Err(Error::Path(crate::paths::PathError::Symlink));
+            }
+            if stat.file_type & ember_editor_conn::remote_fs::file_type::DIRECTORY != 0 {
+                self.fs.mkdir(&self.uri(&dst)).await.map_err(Error::Conn)?;
+                let entries = self.fs.readdir(&self.uri(&src)).await.map_err(Error::Conn)?;
+                for (name, _) in entries {
+                    let child_src = format!("{}/{}", src.trim_end_matches('/'), name);
+                    let child_dst = format!("{}/{}", dst.trim_end_matches('/'), name);
+                    stack.push((child_src, child_dst));
+                }
+            } else {
+                let bytes = self.fs.read_file(&self.uri(&src)).await.map_err(Error::Conn)?;
+                self.fs.write_file(&self.uri(&dst), bytes, &opts).await.map_err(Error::Conn)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Copies a file or directory at `src` into `dest_dir`.
+    pub async fn copy_path(&self, src: &str, dest_dir: &str) -> Result<String, Error> {
+        let from = crate::paths::target_path(&self.workspace_path, src).map_err(Error::Path)?;
+        let dest_norm = crate::paths::folder_path(&self.workspace_path, dest_dir).map_err(Error::Path)?;
+        self.refuse_symlink_parent(&dest_norm).await?;
+        let entries = self.fs.readdir(&self.uri(&dest_norm)).await.map_err(Error::Conn)?;
+        let existing: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+        let to = crate::paths::paste_destination(&self.workspace_path, &from, &dest_norm, &existing, false).map_err(Error::Path)?;
+        self.copy_entry(&from, &to).await?;
+        Ok(to)
+    }
+
     fn send(&self, c: Command) -> Result<(), Error> {
         self.tx.send(c).map_err(|_| Error::Closed)
     }
@@ -360,6 +425,11 @@ impl EditorSession {
 
     pub fn close(&self, uri: UriComponents) -> Result<(), Error> {
         self.send(Command::Input(Input::Close { uri }))
+    }
+
+    /// Reload an open document from disk even if its buffer has unsaved edits (e.g. after discard).
+    pub fn reload(&self, uri: UriComponents) -> Result<(), Error> {
+        self.send(Command::Input(Input::Reload { uri }))
     }
 
     /// The editor showing `uri` got focus.
@@ -375,6 +445,11 @@ impl EditorSession {
     /// Ask for inline completions at `pos` now (explicit trigger).
     pub fn trigger_inline_completion(&self, uri: UriComponents, generation: u64, pos: WidgetPos) -> Result<(), Error> {
         self.send(Command::Input(Input::TriggerInline { uri, generation, pos }))
+    }
+
+    /// Run a command by its id, dispatching to the extension host or workbench.
+    pub fn execute_command(&self, id: impl Into<String>, arguments: Vec<Value>) -> Result<(), Error> {
+        self.send(Command::Input(Input::ExecuteCommand { id: id.into(), arguments }))
     }
 
     /// Search the workspace folder (FR-E7): answered with [`SessionUpdate::SearchHits`] and one
@@ -426,6 +501,7 @@ struct Driver {
     reqs: HashMap<Token, u32>,
     /// uri key → watch request id.
     watches: Arc<Mutex<HashMap<String, String>>>,
+    commands: Vec<crate::commands::ContributedCommand>,
 }
 
 /// How many jobs may wait for the highlighting thread. A job that does not fit is not lost silently: its
@@ -473,6 +549,9 @@ impl Driver {
     ) {
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<Input>();
         self.highlight = Some(spawn_highlighter(internal_tx.clone()));
+        if !self.commands.is_empty() {
+            let _ = self.updates.send(SessionUpdate::Commands { commands: self.commands.clone() });
+        }
         let mut changes = Some(changes);
         let mut lifecycle = Some(ipc_lifecycle);
         loop {

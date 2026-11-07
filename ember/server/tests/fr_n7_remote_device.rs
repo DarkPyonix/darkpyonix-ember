@@ -166,3 +166,61 @@ async fn fr_n7_revoked_device_is_dropped_within_one_heartbeat_and_cannot_call_ag
         assert!(device_get(&phone, &server_t, path).await.is_err(), "a revoked device still called {path}");
     }
 }
+
+/// Over the real letify localhost transport (`FR-N7` acceptance: "the letify localhost test
+/// of #229 extended to a route call"): an admitted device calls `/api/projects` without the local
+/// token, revoking the device closes its letify session within one second, and later route calls
+/// fail.
+#[tokio::test(flavor = "multi_thread")]
+async fn fr_n7_letify_localhost_route_call_and_revocation() {
+    use ember_transport::{BackendKind, LetifyConfig, MemoryDirectory, SecretKey, TransportConfig};
+
+    let dir = MemoryDirectory::new();
+    let bind_letify = |dir: &MemoryDirectory| {
+        let cfg = TransportConfig::new(SecretKey::generate())
+            .backend(BackendKind::Letify)
+            .bind_addr("127.0.0.1:0".parse().unwrap())
+            .directory(Arc::new(dir.clone()))
+            .letify(LetifyConfig {
+                connect_timeout: Duration::from_secs(3),
+                ..LetifyConfig::default()
+            });
+        Transport::bind(cfg)
+    };
+    let (server_t, phone_t, stranger_t) = (
+        bind_letify(&dir).await.unwrap(),
+        bind_letify(&dir).await.unwrap(),
+        bind_letify(&dir).await.unwrap(),
+    );
+    let (app, store) = router();
+    let devices = Devices::open(store).unwrap();
+    devices.gate().attach(&server_t);
+    let task = tokio::spawn(server_transport::serve(&server_t, app, devices.gate().clone()).unwrap());
+
+    devices.add(phone_t.peer_id(), "phone").unwrap();
+    let phone = Dialer::new(phone_t.clone());
+    let stranger = Dialer::new(stranger_t.clone());
+
+    // Stranger is refused on the letify transport.
+    assert!(device_get(&stranger, &server_t, NORMAL_ROUTE).await.is_err());
+
+    // Admitted device calls `/api/projects` over the letify transport without a bearer token.
+    let (status, body) = device_get(&phone, &server_t, NORMAL_ROUTE).await.expect("letify route call failed");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    serde_json::from_slice::<serde_json::Value>(&body).expect("a JSON body");
+
+    // Revoke: the letify session closes within 1 s (`FR-N3`) and subsequent route calls fail.
+    let conn = phone.connection(&PeerAddr::new(server_t.peer_id()), SERVER_SERVICE).await.unwrap();
+    let start = std::time::Instant::now();
+    assert_eq!(devices.remove(&phone_t.peer_id()).unwrap(), 1);
+    tokio::time::timeout(Duration::from_secs(2), conn.closed())
+        .await
+        .expect("letify connection did not close on revoke");
+    assert!(start.elapsed() < Duration::from_secs(1), "closed after {:?}", start.elapsed());
+    assert!(device_get(&phone, &server_t, NORMAL_ROUTE).await.is_err());
+
+    phone_t.close().await;
+    stranger_t.close().await;
+    server_t.close().await;
+    task.abort();
+}

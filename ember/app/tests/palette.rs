@@ -2,7 +2,13 @@
 //! the editor's own actions it starts with. No renderer.
 
 use ember_app::ui::keymap::{Action, Keymap, Os};
-use ember_app::ui::palette::{action_items, empty_text, file_items, highlight_segments, items_for, mode_for, move_selection, placeholder, rank, search_label, skipped_directory, Item, Mode, Payload};
+use ember_app::ui::palette::{
+    action_items, apply_line_suffix, effective_mode, empty_text, extension_command_items,
+    file_items, goto_line_item, highlight_segments, items_for, items_for_workbench, mode_for,
+    move_selection, parse_contributed_commands, parse_goto_line, parse_path_line_suffix,
+    placeholder, prioritize_recent_files, rank, record_recent_path, search_label,
+    skipped_directory, ContributedCommand, Item, Mode, Payload,
+};
 
 fn items(titles: &[&str]) -> Vec<Item> {
     titles
@@ -86,8 +92,8 @@ fn fr_l31_the_palette_starts_with_the_editors_actions_and_not_itself() {
 fn fr_l31_commands_the_editor_cannot_do_yet_are_marked_and_listed_after_the_working_ones() {
     let list = action_items(Keymap::VsCode, Os::Mac);
     let enabled = |a: Action| list.iter().find(|i| i.payload == Payload::Action(a)).unwrap().enabled;
-    assert!(enabled(Action::Terminal) && enabled(Action::Close) && enabled(Action::HideTool));
-    for a in [Action::Save, Action::Recent, Action::RunConfig, Action::Stop, Action::GotoLine, Action::Format, Action::Ask, Action::NewTerminal, Action::MaximizeTool] {
+    assert!(enabled(Action::Terminal) && enabled(Action::Close) && enabled(Action::HideTool) && enabled(Action::Recent) && enabled(Action::GotoLine));
+    for a in [Action::Save, Action::RunConfig, Action::Stop, Action::Format, Action::Ask, Action::NewTerminal, Action::MaximizeTool] {
         assert!(!enabled(a), "{a:?} is not implemented");
     }
     let ranked = rank("", &list);
@@ -127,6 +133,8 @@ fn fr_l31_find_opens_files_in_vs_code_and_everything_in_jetbrains_and_the_palett
     assert_eq!(mode_for(Action::Palette, Keymap::JetBrains), Some(Mode::Commands));
     assert_eq!(mode_for(Action::Find, Keymap::VsCode), Some(Mode::Files));
     assert_eq!(mode_for(Action::Find, Keymap::JetBrains), Some(Mode::Everything));
+    assert_eq!(mode_for(Action::Recent, Keymap::VsCode), Some(Mode::Recent));
+    assert_eq!(mode_for(Action::GotoLine, Keymap::VsCode), Some(Mode::GotoLine));
     assert_eq!(mode_for(Action::Save, Keymap::VsCode), None);
 }
 
@@ -179,15 +187,157 @@ fn fr_l31_everything_lists_the_actions_then_the_files() {
 fn fr_l31_the_field_and_the_empty_list_say_what_is_going_on() {
     assert_ne!(search_label(Mode::Files), search_label(Mode::Commands));
     assert_ne!(search_label(Mode::Everything), search_label(Mode::Files));
+    assert_ne!(search_label(Mode::GotoLine), search_label(Mode::Commands));
+    assert_ne!(search_label(Mode::Recent), search_label(Mode::Commands));
     assert_eq!(empty_text(Mode::Files, true), "파일을 찾는 중입니다…", "an index still being built is not 'nothing matches'");
     assert_eq!(empty_text(Mode::Everything, true), "파일을 찾는 중입니다…");
+    assert_eq!(empty_text(Mode::Recent, true), "파일을 찾는 중입니다…");
     assert_eq!(empty_text(Mode::Files, false), "일치하는 항목이 없습니다.");
     assert_eq!(empty_text(Mode::Commands, true), "일치하는 항목이 없습니다.", "commands do not wait for the index");
+    assert_eq!(empty_text(Mode::GotoLine, true), "일치하는 항목이 없습니다.");
 }
+
 #[test]
 fn fr_l31_the_field_names_what_opened_the_palette_in_the_keymaps_words() {
     assert_eq!(placeholder(Mode::Commands, Keymap::VsCode), "명령 팔레트");
     assert_eq!(placeholder(Mode::Commands, Keymap::JetBrains), "동작 찾기");
     assert_eq!(placeholder(Mode::Files, Keymap::VsCode), "파일로 이동");
     assert_eq!(placeholder(Mode::Everything, Keymap::JetBrains), "모든 곳에서 찾기");
+    assert_eq!(placeholder(Mode::GotoLine, Keymap::VsCode), "이동할 줄 번호 입력");
+    assert_eq!(placeholder(Mode::Recent, Keymap::VsCode), "최근 파일");
+}
+
+#[test]
+fn fr_l31_prefix_gt_switches_quick_open_to_commands() {
+    let (mode, q) = effective_mode(Mode::Files, ">");
+    assert_eq!(mode, Mode::Commands);
+    assert_eq!(q, "");
+
+    let (mode, q) = effective_mode(Mode::Files, ">save");
+    assert_eq!(mode, Mode::Commands);
+    assert_eq!(q, "save");
+
+    let (mode, q) = effective_mode(Mode::Files, ">  close");
+    assert_eq!(mode, Mode::Commands);
+    assert_eq!(q, "close");
+
+    // Query not starting with > stays in file mode
+    let (mode, q) = effective_mode(Mode::Files, "save>file");
+    assert_eq!(mode, Mode::Files);
+    assert_eq!(q, "save>file");
+
+    // Works also from Mode::Recent
+    let (mode, q) = effective_mode(Mode::Recent, ">git");
+    assert_eq!(mode, Mode::Commands);
+    assert_eq!(q, "git");
+}
+
+#[test]
+fn fr_l31_goto_line_prefix_and_parsing() {
+    assert_eq!(parse_goto_line("42"), Some((42, None)));
+    assert_eq!(parse_goto_line("42:10"), Some((42, Some(10))));
+    assert_eq!(parse_goto_line("0"), None);
+    assert_eq!(parse_goto_line("abc"), None);
+    assert_eq!(parse_goto_line(""), None);
+
+    let (mode, q) = effective_mode(Mode::Files, ":42");
+    assert_eq!(mode, Mode::GotoLine);
+    assert_eq!(q, "42");
+
+    let (mode, q) = effective_mode(Mode::Commands, ":42:10");
+    assert_eq!(mode, Mode::GotoLine);
+    assert_eq!(q, "42:10");
+
+    let (mode, q) = effective_mode(Mode::GotoLine, ":42");
+    assert_eq!(mode, Mode::GotoLine);
+    assert_eq!(q, "42");
+
+    let item = goto_line_item("42");
+    assert_eq!(item.title, "42번 줄로 이동");
+    assert_eq!(item.payload, Payload::GotoLine { line: 42, column: None });
+    assert!(item.enabled);
+
+    let item_col = goto_line_item("42:10");
+    assert_eq!(item_col.title, "42번 줄, 10번째 칸으로 이동");
+    assert_eq!(item_col.payload, Payload::GotoLine { line: 42, column: Some(10) });
+    assert!(item_col.enabled);
+
+    let item_empty = goto_line_item("");
+    assert_eq!(item_empty.title, "이동할 줄 번호를 입력하세요");
+    assert!(!item_empty.enabled);
+}
+
+#[test]
+fn fr_l31_quick_open_line_and_col_suffix() {
+    assert_eq!(parse_path_line_suffix("main.rs:25"), ("main.rs", Some((25, None))));
+    assert_eq!(parse_path_line_suffix("src/lib.rs:10:4"), ("src/lib.rs", Some((10, Some(4)))));
+    assert_eq!(parse_path_line_suffix("main.rs"), ("main.rs", None));
+    assert_eq!(parse_path_line_suffix("main.rs:abc"), ("main.rs:abc", None));
+    assert_eq!(parse_path_line_suffix(":42"), (":42", None));
+
+    let p = Payload::File("/w/p/src/main.rs".to_string());
+    assert_eq!(
+        apply_line_suffix(p.clone(), Some((25, None))),
+        Payload::FileAt { path: "/w/p/src/main.rs".to_string(), line: 25, column: None }
+    );
+    assert_eq!(
+        apply_line_suffix(p.clone(), Some((10, Some(4)))),
+        Payload::FileAt { path: "/w/p/src/main.rs".to_string(), line: 10, column: Some(4) }
+    );
+    assert_eq!(apply_line_suffix(p.clone(), None), p);
+}
+
+#[test]
+fn fr_l31_recent_files_mru_ordering_and_quick_open() {
+    let mut recent = Vec::new();
+    record_recent_path(&mut recent, "/w/p/src/a.rs");
+    record_recent_path(&mut recent, "/w/p/src/b.rs");
+    record_recent_path(&mut recent, "/w/p/src/a.rs");
+    assert_eq!(recent, vec!["/w/p/src/a.rs", "/w/p/src/b.rs"]);
+
+    let paths = vec![
+        "/w/p/src/c.rs".to_string(),
+        "/w/p/src/b.rs".to_string(),
+        "/w/p/src/a.rs".to_string(),
+    ];
+    let files = file_items("/w/p", &paths);
+    let prioritized = prioritize_recent_files("/w/p", &files, &recent);
+    assert_eq!(prioritized[0].payload, Payload::File("/w/p/src/a.rs".to_string()));
+    assert_eq!(prioritized[1].payload, Payload::File("/w/p/src/b.rs".to_string()));
+    assert_eq!(prioritized[2].payload, Payload::File("/w/p/src/c.rs".to_string()));
+
+    let ranked_empty = rank("", &prioritized);
+    assert_eq!(prioritized[ranked_empty[0].index].payload, Payload::File("/w/p/src/a.rs".to_string()));
+    assert_eq!(prioritized[ranked_empty[1].index].payload, Payload::File("/w/p/src/b.rs".to_string()));
+    assert_eq!(prioritized[ranked_empty[2].index].payload, Payload::File("/w/p/src/c.rs".to_string()));
+}
+
+#[test]
+fn fr_l31_extension_commands_ranking_and_payload() {
+    use serde_json::json;
+    let exts = vec![json!({
+        "contributes": {
+            "commands": [
+                { "command": "git.stage", "title": "Stage Changes", "category": "Git" },
+                { "command": "editor.formatDoc", "title": "Format Document" }
+            ]
+        }
+    })];
+    let cmds = parse_contributed_commands(&exts);
+    assert_eq!(cmds.len(), 2);
+    assert_eq!(cmds[0].id, "git.stage");
+    assert_eq!(cmds[0].display_title(), "Git: Stage Changes");
+    assert_eq!(cmds[1].display_title(), "Format Document");
+
+    let items = extension_command_items(&cmds);
+    assert_eq!(items[0].payload, Payload::ExtensionCommand("git.stage".to_string()));
+    assert_eq!(items[0].title, "Git: Stage Changes");
+
+    let ranked = rank("stage", &items);
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(items[ranked[0].index].payload, Payload::ExtensionCommand("git.stage".to_string()));
+
+    let ranked_cat = rank("git", &items);
+    assert_eq!(ranked_cat.len(), 1);
+    assert_eq!(items[ranked_cat[0].index].payload, Payload::ExtensionCommand("git.stage".to_string()));
 }

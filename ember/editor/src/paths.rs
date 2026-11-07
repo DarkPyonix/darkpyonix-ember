@@ -18,6 +18,8 @@ pub enum PathError {
     Symlink,
     /// The new name is the old name.
     SameName,
+    /// Moving or copying into itself or a subdirectory.
+    IntoSelf,
 }
 
 impl std::fmt::Display for PathError {
@@ -28,6 +30,7 @@ impl std::fmt::Display for PathError {
             PathError::FolderRoot => "프로젝트 폴더 자체는 바꿀 수 없습니다",
             PathError::Symlink => "심볼릭 링크 폴더 안에는 만들 수 없습니다",
             PathError::SameName => "이름이 그대로입니다",
+            PathError::IntoSelf => "폴더를 자기 자신이나 하위 폴더 안으로 옮길 수 없습니다",
         })
     }
 }
@@ -104,4 +107,67 @@ pub fn renamed_path(folder: &str, path: &str, new_name: &str) -> Result<String, 
         return Err(PathError::SameName);
     }
     child_path(folder, parent, new_name)
+}
+
+/// An absolute path strictly inside or equal to the project folder.
+pub fn folder_path(folder: &str, path: &str) -> Result<String, PathError> {
+    let folder = normalize(folder).ok_or(PathError::OutsideFolder)?;
+    let path = normalize(path).ok_or(PathError::OutsideFolder)?;
+    if !inside(&folder, &path) {
+        return Err(PathError::OutsideFolder);
+    }
+    Ok(path)
+}
+
+/// Splits a file name into its stem and extension.
+/// For example: "main.rs" -> ("main", ".rs"), "README" -> ("README", ""),
+/// ".gitignore" -> (".gitignore", ""), "archive.tar.gz" -> ("archive.tar", ".gz").
+pub fn split_stem_ext(name: &str) -> (&str, &str) {
+    if let Some((stem, _)) = name.rsplit_once('.') {
+        if !stem.is_empty() {
+            return name.split_at(stem.len());
+        }
+    }
+    (name, "")
+}
+
+/// Destination path when copying or moving `src` into `dest_dir`.
+/// If `cut` is true, moving to the same directory or with the same name returns `PathError::SameName`.
+/// If `cut` is false, colliding names generate a suffix: " copy", " copy 2", " copy 3", etc.
+pub fn paste_destination(
+    folder: &str,
+    src: &str,
+    dest_dir: &str,
+    existing_names: &[&str],
+    cut: bool,
+) -> Result<String, PathError> {
+    let src = target_path(folder, src)?;
+    let folder_norm = normalize(folder).ok_or(PathError::OutsideFolder)?;
+    let dest_dir = normalize(dest_dir).ok_or(PathError::OutsideFolder)?;
+    if !inside(&folder_norm, &dest_dir) {
+        return Err(PathError::OutsideFolder);
+    }
+    if dest_dir == src || dest_dir.strip_prefix(&src).is_some_and(|r| r.starts_with('/')) {
+        return Err(PathError::IntoSelf);
+    }
+    let name = src.rsplit_once('/').map(|(_, n)| n).unwrap_or(&src);
+    if cut || !existing_names.contains(&name) {
+        let dest_path = child_path(folder, &dest_dir, name)?;
+        if cut && dest_path == src {
+            return Err(PathError::SameName);
+        }
+        return Ok(dest_path);
+    }
+    let (stem, ext) = split_stem_ext(name);
+    for i in 1.. {
+        let candidate = if i == 1 {
+            format!("{stem} copy{ext}")
+        } else {
+            format!("{stem} copy {i}{ext}")
+        };
+        if !existing_names.contains(&candidate.as_str()) {
+            return child_path(folder, &dest_dir, &candidate);
+        }
+    }
+    unreachable!()
 }

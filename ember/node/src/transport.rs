@@ -61,6 +61,28 @@ impl TransportMode {
         Self::parse(&std::env::var(ENABLE_ENV).unwrap_or_default())
     }
 
+    /// Reads [`ENABLE_ENV`]; when it is unset (empty, not explicitly `0`/`off`/`false`/`no`) and
+    /// `state_dir` holds both an enrolment with a `server_peer_id` and a `transport.key`, enables
+    /// the transport automatically (`Also`) so a transport-enrolled node serves over the transport
+    /// without needing `EMBER_NODE_TRANSPORT=1` on every start.
+    pub fn from_env_or_state(state_dir: Option<&Path>) -> anyhow::Result<Self> {
+        let raw = std::env::var(ENABLE_ENV).unwrap_or_default();
+        if !raw.trim().is_empty() {
+            return Self::parse(&raw);
+        }
+        if let Some(dir) = state_dir {
+            let has_key = dir.join(KEY_FILE).is_file();
+            let has_server_peer = crate::enrol::read_enrolment(dir)
+                .ok()
+                .flatten()
+                .is_some_and(|e| e.server_peer_id.is_some());
+            if has_key && has_server_peer {
+                return Ok(Self::Also);
+            }
+        }
+        Ok(Self::Off)
+    }
+
     pub fn tcp(self) -> bool {
         self != Self::Only
     }
@@ -152,5 +174,24 @@ mod tests {
         assert!(allowed_peers(Some(dir.path())).unwrap().is_empty() || std::env::var(ALLOWED_PEERS_ENV).is_ok());
         std::fs::write(allowed_peers_file(dir.path()), format!("{b}\n")).unwrap();
         assert!(allowed_peers(Some(dir.path())).unwrap().contains(&b));
+
+        // When EMBER_NODE_TRANSPORT is unset, a state dir with transport.key and an enrol.json
+        // carrying server_peer_id enables the transport automatically.
+        if std::env::var(ENABLE_ENV).unwrap_or_default().trim().is_empty() {
+            assert_eq!(TransportMode::from_env_or_state(Some(dir.path())).unwrap(), TransportMode::Off);
+            let _ = SecretKey::load_or_generate(dir.path().join(KEY_FILE)).unwrap();
+            let lock = crate::enrol::lock_state_dir(dir.path()).unwrap();
+            let sid = a.to_string();
+            let enrol = crate::enrol::Enrolment {
+                server: "http://127.0.0.1:8742".into(),
+                node_token: "tok_test_token_1234567890".into(),
+                server_peer_id: Some(sid.clone()),
+                name: "nat-box".into(),
+                computer_id: "c-1".into(),
+                enrolled_ms: 1,
+            };
+            crate::enrol::write_enrolment(&lock, &enrol, Some(&sid), false).unwrap();
+            assert_eq!(TransportMode::from_env_or_state(Some(dir.path())).unwrap(), TransportMode::Also);
+        }
     }
 }

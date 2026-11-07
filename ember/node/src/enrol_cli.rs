@@ -690,7 +690,10 @@ impl std::error::Error for Said {}
 
 /// `ember-node enrol …`: parse, run on the real terminal.
 pub async fn cli(args: &[String]) -> anyhow::Result<()> {
-    let opts = parse_args(args, crate::config::default_state_dir())?;
+    let mut opts = parse_args(args, crate::config::default_state_dir())?;
+    if !opts.transport && crate::transport::TransportMode::from_env()?.transport() {
+        opts.transport = true;
+    }
     let mut io = StdIo;
     match run(opts, &mut io).await {
         Ok(_) => Ok(()),

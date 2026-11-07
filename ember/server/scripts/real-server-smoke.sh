@@ -9,6 +9,7 @@
 #   real-server-smoke.sh status           processes, computers, sessions (no secrets)
 #   real-server-smoke.sh app              restart the app only (the app restart check)
 #   real-server-smoke.sh server-restart   restart the server only, keeping its data
+#   real-server-smoke.sh server-update    update/replace the server while sessions run, checking shim survival (FR-S8)
 #   real-server-smoke.sh down             stop everything `up` started, agents included
 #   real-server-smoke.sh reset            `down`, then delete the live run directory
 #
@@ -165,8 +166,11 @@ start_server() {
   port_free "$PORT" "$RUN/server.pid"
   # Isolation: own data dir and TMPDIR (private MCP config files), no hub, no relay roles, no
   # transport, no guest door, no demo data. EMBER_SCRIPTED_AGENT=1 offers the no-model test agent.
+  local extra_env=()
+  [ -n "${SMOKE_CLAUDE_BIN:-}" ] && extra_env+=("EMBER_CLAUDE_BIN=$SMOKE_CLAUDE_BIN")
   env -u EMBER_DEMO_DATA -u EMBER_TRANSPORT -u EMBER_GUEST_LISTEN -u EMBER_SERVER_TOKEN \
     -u EMBER_ACP_AGENTS -u EMBER_ACP_AGENTS_FILE -u EMBER_HOSTED \
+    "${extra_env[@]}" \
     EMBER_DATA_DIR="$SD" EMBER_LISTEN="127.0.0.1:$PORT" EMBER_SCRIPTED_AGENT=1 \
     EMBER_HUB_URL=off EMBER_SERVER_RELAY=off TMPDIR="$RUN/tmp" RUST_LOG="${RUST_LOG:-info}" \
     nohup "$SERVER_BIN" >>"$LOGS/server.log" 2>&1 &
@@ -423,6 +427,70 @@ cmd_check() {
   if wait_status "$A" waiting_for_approval; then ok "FR-S2 alpha resumes and runs a turn after the restart"; else bad "FR-S2 alpha resumes and runs a turn after the restart"; fi
   settle "$A" || true
 
+  # FR-S8 (#128): live agent processes under session shims survive a server crash/update/restart.
+  # Three Claude Code sessions run concurrently under ember-shim; the server is stopped mid-turn and
+  # started again (with the updated binary when EMBER_SERVER_UPDATE_BIN is set); none of the shims or
+  # agents stop, all three sessions are rejoined, and every turn completes without losing ticks.
+  local sdir; sdir="$(dirname "$SERVER_BIN")"
+  if [ -x "$sdir/ember-shim" ]; then
+    SMOKE_CLAUDE_BIN="$R/ember/server/tests/fixtures/claude/fake-claude-ticks.sh"
+    stop_pid "$RUN/server.pid" ember-server >/dev/null
+    start_server >/dev/null
+    local S1 S2 S3 m pid1 pid2 pid3
+    mkdir -p "$WORK/$P/s1" "$WORK/$P/s2" "$WORK/$P/s3"
+    api POST /api/sessions "{\"project\":\"$P\",\"agent\":\"claude-code\",\"cwd\":\"$WORK/$P/s1\",\"title\":\"s8-one\"}"
+    expect "FR-S8 create shim session s8-one" 201; S1="$(j '.id')"
+    api POST /api/sessions "{\"project\":\"$P\",\"agent\":\"claude-code\",\"cwd\":\"$WORK/$P/s2\",\"title\":\"s8-two\"}"
+    expect "FR-S8 create shim session s8-two" 201; S2="$(j '.id')"
+    api POST /api/sessions "{\"project\":\"$P\",\"agent\":\"claude-code\",\"cwd\":\"$WORK/$P/s3\",\"title\":\"s8-three\"}"
+    expect "FR-S8 create shim session s8-three" 201; S3="$(j '.id')"
+    for sid in "$S1" "$S2" "$S3"; do
+      api POST "/api/sessions/$sid/messages" '{"text":"go"}'
+    done
+    local ticks_ready=0
+    for _ in $(seq 1 100); do
+      if [ "$(jq '[.[] | select(.event.kind == "assistant_message")] | length' "$(events_of "$S1")")" -ge 3 ] \
+        && [ "$(jq '[.[] | select(.event.kind == "assistant_message")] | length' "$(events_of "$S2")")" -ge 3 ] \
+        && [ "$(jq '[.[] | select(.event.kind == "assistant_message")] | length' "$(events_of "$S3")")" -ge 3 ]; then
+        ticks_ready=1
+        break
+      fi
+      sleep 0.1
+    done
+    [ "$ticks_ready" = 1 ] && ok "FR-S8 all 3 shim sessions emit mid-turn ticks before server update" \
+      || bad "FR-S8 all 3 shim sessions emit mid-turn ticks before server update"
+    pid1="$(jq -r '.agent_pid // empty' "$SD/shims/$S1.json" 2>/dev/null || true)"
+    pid2="$(jq -r '.agent_pid // empty' "$SD/shims/$S2.json" 2>/dev/null || true)"
+    pid3="$(jq -r '.agent_pid // empty' "$SD/shims/$S3.json" 2>/dev/null || true)"
+    # Stop the server mid-turn (simulating a server update / restart) and verify shims + agents stay alive.
+    stop_pid "$RUN/server.pid" ember-server >/dev/null
+    if [ -n "$pid1" ] && [ -n "$pid2" ] && [ -n "$pid3" ] \
+      && kill -0 "$pid1" 2>/dev/null && kill -0 "$pid2" 2>/dev/null && kill -0 "$pid3" 2>/dev/null; then
+      ok "FR-S8 all 3 agent processes keep running while the server is down for update"
+    else
+      bad "FR-S8 all 3 agent processes keep running while the server is down for update" "pids: $pid1 $pid2 $pid3"
+    fi
+    [ -n "${EMBER_SERVER_UPDATE_BIN:-}" ] && SERVER_BIN="$EMBER_SERVER_UPDATE_BIN"
+    start_server >/dev/null
+    local all_done=1
+    for sid in "$S1" "$S2" "$S3"; do
+      wait_status "$sid" finished 150 || all_done=0
+    done
+    [ "$all_done" = 1 ] && ok "FR-S8 updated server rejoins all 3 sessions and finishes their turns" \
+      || bad "FR-S8 updated server rejoins all 3 sessions and finishes their turns"
+    local no_loss=1
+    for sid in "$S1" "$S2" "$S3"; do
+      if ! jq -e '[.[] | .event | select(.kind == "assistant_message") | .text | sub("^tick ";"") | tonumber] | unique == ([range(1; 31)])' "$(events_of "$sid")" >/dev/null 2>&1; then
+        no_loss=0
+      fi
+    done
+    [ "$no_loss" = 1 ] && ok "FR-S8 all 30 ticks per session are stored in order without loss across server update" \
+      || bad "FR-S8 all 30 ticks per session are stored in order without loss across server update"
+    unset SMOKE_CLAUDE_BIN
+  else
+    bad "FR-S8 ember-shim binary next to ember-server" "missing $sdir/ember-shim"
+  fi
+
   # FR-L4: the project can be assigned to the node computer (last, so the turns above run locally).
   if [ -n "${COMP:-}" ]; then
     api PUT "/api/projects/$P/computers/$COMP"; expect "FR-L4 assign $P to smoke-node" "200|201|204"
@@ -486,7 +554,12 @@ model call on your Claude login) and gamma (scripted test agent: no model call).
       $0 app
     Reopen alpha: the whole transcript is there and its status is right. Optional, the server too:
       $0 server-restart
-    then send alpha "What did I ask you first?" (native resume, FR-S2).
+    then send alpha "What did I ask you first?" (native resume, FR-S2). To verify live server update
+    handoff while a turn is streaming (FR-S8, #128): start a long streaming turn in alpha and beta,
+    then run:
+      $0 server-update
+    The script verifies every shim and agent PID stays alive while the server is replaced, then the
+    new server reattaches and finishes the turn without losing output.
  5. A2A between two sessions. In alpha's composer send:
       @@beta Reply to alpha with the single word PONG using ember-a2a, then stop.
     beta's transcript gets an "[ember a2a]" message from alpha, beta answers, and alpha receives
@@ -540,6 +613,26 @@ cmd_server_restart() {
   say "agents under session shims kept running; the app reconnects by itself"
 }
 
+cmd_server_update() {
+  live_run; resolve_bins >/dev/null
+  [ -n "${EMBER_SERVER_UPDATE_BIN:-}" ] && SERVER_BIN="$EMBER_SERVER_UPDATE_BIN"
+  local f spid apid count=0
+  stop_pid "$RUN/server.pid" ember-server
+  for f in "$SD"/shims/*.json; do
+    [ -f "$f" ] || continue
+    spid="$(jq -r '.shim_pid // empty' "$f" 2>/dev/null || true)"
+    apid="$(jq -r '.agent_pid // empty' "$f" 2>/dev/null || true)"
+    if [ -n "$spid" ] && [ -n "$apid" ] && kill -0 "$spid" 2>/dev/null && kill -0 "$apid" 2>/dev/null; then
+      count=$((count + 1))
+      say "shim $(basename "$f" .json): shim_pid=$spid and agent_pid=$apid stayed alive while server is down"
+    else
+      die "shim $(basename "$f" .json) or its agent died during server update (shim_pid=$spid, agent_pid=$apid)"
+    fi
+  done
+  start_server
+  say "updated server started ($SERVER_BIN); $count live shim session(s) survived and rejoined"
+}
+
 cmd_down() { live_run; [ -d "$RUN" ] || { say "nothing to stop"; return 0; }; stop_all; }
 
 cmd_reset() {
@@ -555,7 +648,8 @@ case "${1:-}" in
   status) cmd_status ;;
   app) cmd_app ;;
   server-restart) cmd_server_restart ;;
+  server-update) cmd_server_update ;;
   down) cmd_down ;;
   reset) cmd_reset ;;
-  *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

@@ -49,6 +49,23 @@ pub enum Message {
         detail: String,
     },
     Cancel { id: String },
+    /// One chunk of file data (`FR-F5`). `file` is the index in the offer's `files` list.
+    Chunk {
+        id: String,
+        file: u32,
+        offset: u64,
+        data: Vec<u8>,
+        #[serde(default)]
+        sha256: Option<String>,
+    },
+    /// Receiver tells the sender to resume streaming `file` from `offset` (`FR-F5`).
+    ResumeFrom { id: String, file: u32, offset: u64 },
+    /// Sender or receiver pauses streaming (`FR-F4`).
+    Pause { id: String },
+    /// Sender or receiver resumes a paused transfer (`FR-F4`).
+    Resume { id: String },
+    /// Sender declares all files sent with their final SHA-256 digests (`FR-F5`).
+    Done { id: String, sha256: Vec<String> },
 }
 
 impl Message {
@@ -57,7 +74,12 @@ impl Message {
             Message::Offer { id, .. }
             | Message::Accept { id }
             | Message::Decline { id, .. }
-            | Message::Cancel { id } => id,
+            | Message::Cancel { id }
+            | Message::Chunk { id, .. }
+            | Message::ResumeFrom { id, .. }
+            | Message::Pause { id }
+            | Message::Resume { id }
+            | Message::Done { id, .. } => id,
         }
     }
 }
@@ -253,5 +275,26 @@ mod tests {
         let huge = u32::MAX.to_be_bytes();
         let mut h: &[u8] = &huge;
         assert!(matches!(read_message(&mut h).await, Err(WireError::FrameTooLarge { .. })));
+    }
+
+    #[test]
+    fn fr_f3_decoder_never_panics_on_arbitrary_bytes() {
+        // #527 item 7: fuzz-style arbitrary-bytes decoder check alongside the hand cases.
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next_u8 = || -> u8 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed & 0xFF) as u8
+        };
+        for len in 0..512 {
+            let buf: Vec<u8> = (0..len).map(|_| next_u8()).collect();
+            let _ = decode(&buf);
+        }
+        for payload_len in [0u32, 1, 2, 15, 64, 256] {
+            let mut frame = payload_len.to_be_bytes().to_vec();
+            frame.extend((0..payload_len).map(|_| next_u8()));
+            let _ = decode(&frame);
+        }
     }
 }

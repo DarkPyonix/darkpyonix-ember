@@ -313,3 +313,46 @@ async fn fr_f4_sender_cancels_after_the_answer() {
     drop(handled);
     let _ = &rig.b;
 }
+
+#[tokio::test]
+async fn fr_f5_streams_chunks_end_to_end_over_transport_and_saves_mode_0644() {
+    let rig = rig().await;
+    let prompter = TestPrompter::answering(PromptAnswer::Accept);
+    let svc = service(&rig, registered(&[rig.a.peer_id()]), prompter, Limits::default(), ReceiveMode::Ask);
+    let p1 = b"first file payload over ember-transfer";
+    let p2 = b"#!/bin/sh\necho second file\n";
+    let (mut out, reply, mut handled) = run(
+        &rig,
+        &svc,
+        vec![file("../notes.txt", p1.len() as u64), file("sub/run.sh", p2.len() as u64)],
+    )
+    .await;
+    assert_eq!(reply, Reply::Accepted);
+
+    let dir = tempfile::tempdir().unwrap();
+    let recv_dir = dir.path().to_path_buf();
+    let payloads: [&[u8]; 2] = [p1.as_slice(), p2.as_slice()];
+    let (sent, stored) = tokio::join!(
+        out.send_bytes(&payloads, 8),
+        handled.receive_into(&recv_dir, Limits::default()),
+    );
+    let digests = sent.unwrap();
+    let stored = stored.unwrap();
+    assert_eq!(out.state(), &State::Done);
+    assert_eq!(handled.state(), &State::Done);
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored[0].name, "notes.txt");
+    assert_eq!(stored[0].sha256, digests[0]);
+    assert_eq!(std::fs::read(&stored[0].path).unwrap(), p1);
+    assert_eq!(stored[1].name, "sub/run.sh");
+    assert_eq!(stored[1].sha256, digests[1]);
+    assert_eq!(std::fs::read(&stored[1].path).unwrap(), p2);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for s in &stored {
+            let mode = std::fs::metadata(&s.path).unwrap().permissions().mode() & 0o7777;
+            assert_eq!(mode, 0o644);
+        }
+    }
+}

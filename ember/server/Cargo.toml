@@ -13,6 +13,8 @@ ember-node = { path = "../node" }
 ember-transport = { path = "../transport" }
 # The darkpyonix.dev hub: registration, device list, address directory (SPEC FR-N2).
 ember-hub = { path = "../hub" }
+# Device-to-device file transfer over ember-transport streams (SPEC FR-F1..FR-F10, #487).
+ember-transfer = { path = "../transfer" }
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"

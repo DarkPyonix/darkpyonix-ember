@@ -322,6 +322,15 @@ impl EditorSession {
         Ok(path)
     }
 
+    /// Reads the UTF-8 text of `path` on the remote server.
+    pub async fn read_file_text(&self, path: &str) -> Result<String, Error> {
+        let path = crate::paths::target_path(&self.workspace_path, path).map_err(Error::Path)?;
+        let bytes = self.fs.read_file(&self.uri(&path)).await.map_err(Error::Conn)?;
+        let (text, _bom) = crate::document::decode(&bytes)
+            .map_err(|_| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "file is not UTF-8")))?;
+        Ok(text)
+    }
+
     /// Writes content to `path`. Creates or overwrites the file.
     pub async fn write_file(&self, path: &str, content: &[u8]) -> Result<(), Error> {
         let path = crate::paths::target_path(&self.workspace_path, path).map_err(Error::Path)?;
@@ -368,6 +377,11 @@ impl EditorSession {
 
     pub fn close(&self, uri: UriComponents) -> Result<(), Error> {
         self.send(Command::Input(Input::Close { uri }))
+    }
+
+    /// Reload an open document from disk even if its buffer has unsaved edits (e.g. after discard).
+    pub fn reload(&self, uri: UriComponents) -> Result<(), Error> {
+        self.send(Command::Input(Input::Reload { uri }))
     }
 
     /// The editor showing `uri` got focus.

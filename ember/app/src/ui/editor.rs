@@ -834,6 +834,10 @@ pub struct DiffLineMarker {
     pub kind: DiffLineKind,
 }
 
+/// Maximum number of LCS matrix cells (`old_mid.len() * new_mid.len()`) allocated by [`compute_line_diffs`].
+/// When the changed middle region exceeds this cap, [`compute_line_diffs`] pairs lines in O(n) memory.
+pub const MAX_DIFF_MATRIX_CELLS: usize = 250_000;
+
 /// Compute line-level diff markers (added, modified, deleted lines) comparing new_text against old_text.
 pub fn compute_line_diffs(old_text: &str, new_text: &str) -> Vec<DiffLineMarker> {
     if old_text == new_text {
@@ -914,6 +918,14 @@ pub fn compute_line_diffs(old_text: &str, new_text: &str) -> Vec<DiffLineMarker>
 
     let m = old_mid.len();
     let n = new_mid.len();
+    if m.saturating_mul(n) > MAX_DIFF_MATRIX_CELLS {
+        let mod_count = m.min(n);
+        for idx in 0..n {
+            let kind = if idx < mod_count { DiffLineKind::Modified } else { DiffLineKind::Added };
+            markers.push(DiffLineMarker { line: (prefix + idx) as u32, kind });
+        }
+        return markers;
+    }
     let mut dp = vec![vec![0u32; n + 1]; m + 1];
 
     for i in 0..m {
@@ -1182,7 +1194,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_e10_compute_line_diffs_identifies_added_modified_and_deleted_lines() {
+    fn fr_l31_2_compute_line_diffs_identifies_added_modified_and_deleted_lines() {
         let old = "line 1\nline 2\nline 3\nline 4";
         let new = "line 1\nline 2 mod\nline 3\nline 4\nline 5 add";
         let markers = compute_line_diffs(old, new);
@@ -1215,7 +1227,21 @@ mod tests {
     }
 
     #[test]
-    fn fr_e10_diff_gutter_decorations_maps_to_color_roles() {
+    fn fr_l31_2_compute_line_diffs_caps_large_middle_region_without_quadratic_table() {
+        let old_lines: Vec<String> = (0..20_000).map(|i| format!("old_{i}")).collect();
+        let new_lines: Vec<String> = (0..20_005).map(|i| format!("new_{i}")).collect();
+        let old = old_lines.join("\n");
+        let new = new_lines.join("\n");
+        let markers = compute_line_diffs(&old, &new);
+        assert_eq!(markers.len(), 20_005);
+        assert_eq!(markers[0], DiffLineMarker { line: 0, kind: DiffLineKind::Modified });
+        assert_eq!(markers[19_999], DiffLineMarker { line: 19_999, kind: DiffLineKind::Modified });
+        assert_eq!(markers[20_000], DiffLineMarker { line: 20_000, kind: DiffLineKind::Added });
+        assert_eq!(markers[20_004], DiffLineMarker { line: 20_004, kind: DiffLineKind::Added });
+    }
+
+    #[test]
+    fn fr_l31_2_diff_gutter_decorations_maps_to_color_roles() {
         use compose_rust::{ColorRole, GutterDecorationKind};
 
         let markers = vec![

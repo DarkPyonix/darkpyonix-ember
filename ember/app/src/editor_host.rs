@@ -28,8 +28,9 @@ pub enum HostCommand {
     SearchNow { id: u64, request: ember_editor::search::SearchRequest },
     CancelSearch(u64),
     Replace { id: u64, request: ember_editor::search::ReplaceRequest },
-    /// Write file contents to disk.
-    WriteFile { path: String, content: String },
+    /// Discard working-tree changes for a file by reading it through the session, reconstructing
+    /// the base text from `diff`, and writing it back only if reading succeeds.
+    DiscardFile { path: String, diff: crate::ui::vcs::FileDiff },
 }
 
 #[derive(Default)]
@@ -260,10 +261,22 @@ impl EditorHost {
                             }
                             finish_edit(&session, &shared, "삭제", &parent, result).await;
                         }
-                        Some(HostCommand::WriteFile { path, content }) => {
+                        Some(HostCommand::DiscardFile { path, diff }) => {
                             let parent = parent_of(&path);
-                            let result = session.write_file(&path, content.as_bytes()).await;
-                            finish_edit(&session, &shared, "변경 취소", &parent, result).await;
+                            if !diff.hunks.is_empty() {
+                                let cur = session.read_file_text(&path).await;
+                                let result = match crate::ui::editor_scm::reconstruct_base_from_read(|| cur, &diff) {
+                                    Ok(base) => {
+                                        let write_res = session.write_file(&path, base.as_bytes()).await;
+                                        if write_res.is_ok() {
+                                            let _ = session.reload(session.uri(&path));
+                                        }
+                                        write_res
+                                    }
+                                    Err(err) => Err(err),
+                                };
+                                finish_edit(&session, &shared, "변경 사항 취소", &parent, result).await;
+                            }
                         }
                         Some(HostCommand::IndexFiles) => {
                             // A fresh index replaces the last one and a running one is cancelled; the walk runs

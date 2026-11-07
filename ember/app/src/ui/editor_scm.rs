@@ -58,6 +58,17 @@ pub fn reconstruct_base_text(current_text: &str, diff: &FileDiff) -> String {
     base_lines.join("\n")
 }
 
+/// Reconstruct the base text of `path` by reading the current file with `read_file` and applying
+/// [`reconstruct_base_text`]. Returns `Err` without producing a partial or empty base if reading fails
+/// or if `diff.hunks` is empty, so a failed read never overwrites the file with wrong content.
+pub fn reconstruct_base_from_read<E, F>(read_file: F, diff: &FileDiff) -> Result<String, E>
+where
+    F: FnOnce() -> Result<String, E>,
+{
+    let cur_text = read_file()?;
+    Ok(reconstruct_base_text(&cur_text, diff))
+}
+
 /// Compute line markers directly from a FileDiff.
 pub fn markers_from_file_diff(diff: &FileDiff, new_line_count: usize) -> Vec<crate::ui::editor::DiffLineMarker> {
     use crate::ui::editor::{DiffLineKind, DiffLineMarker};
@@ -847,11 +858,11 @@ impl Scm {
         );
     }
 
-    pub fn conflict_visible(&self, _current_tab: Option<&str>) -> bool {
+    pub fn conflict_visible(&self) -> bool {
         self.with(|s| s.conflict.is_some())
     }
 
-    pub fn open_conflict(&self, path: &str, _over: Option<String>) {
+    pub fn open_conflict(&self, path: &str) {
         if self.project.is_empty() {
             return;
         }
@@ -985,12 +996,18 @@ impl Scm {
                 d.map(|d| d.patch)
             },
             move |result| {
-                if let Ok(patch) = result {
-                    if let Some(fd) = parse_unified(&patch).into_iter().next() {
-                        let cur_text = std::fs::read_to_string(&abs_str).unwrap_or_default();
-                        let base = reconstruct_base_text(&cur_text, &fd);
-                        host_clone.send(crate::editor_host::HostCommand::WriteFile { path: abs_str, content: base });
-                        this.refresh();
+                match result {
+                    Ok(patch) => match parse_unified(&patch).into_iter().next() {
+                        Some(fd) if !fd.hunks.is_empty() => {
+                            host_clone.send(crate::editor_host::HostCommand::DiscardFile { path: abs_str, diff: fd });
+                            this.refresh();
+                        }
+                        _ => {
+                            crate::ui::cr::notice::post("되돌릴 변경 사항을 찾지 못했습니다.");
+                        }
+                    },
+                    Err(e) => {
+                        crate::ui::cr::notice::post(failure_text("변경 사항 취소", &e));
                     }
                 }
             },
@@ -1304,8 +1321,7 @@ pub mod view {
             div { key: "{group.title()}:{e.path}", class, role: "listitem", "aria-label": "{row_label}", title: "{tip}", style: "--d:1;",
                 onclick: move |_| {
                     if group == Group::Conflicts {
-                        let over = diff_s.tabs.read().current_path().map(str::to_owned);
-                        diff_s.scm.open_conflict(&diff_path, over);
+                        diff_s.scm.open_conflict(&diff_path);
                     } else {
                         let over = diff_s.tabs.read().current_path().map(str::to_owned);
                         diff_s.scm.open_diff(&diff_path, group.staged(), over);
@@ -1445,7 +1461,7 @@ pub mod view {
                             "{stage_lines_label} ({staged_cnt})" }
                     }
                     button { class: "ed-pj", style: "border:1px solid var(--line);", onclick: move |_| open_file(&open_s, &open_path), "파일 열기" }
-                    button { class: "ed-ib", title: "차이 닫기", onclick: move |_| close_s.scm.close_diff(), {icon("close")} }
+                    button { class: "ed-ib", title: "차이 닫기", "aria-label": "차이 닫기", onclick: move |_| close_s.scm.close_diff(), {icon("close")} }
                 }
                 if let Some(text) = d.view.note() {
                     div { class: "ed-empty", role: "status", p { "{text}" } }
@@ -1575,7 +1591,7 @@ pub mod view {
                     } else {
                         div { class: "spacer" }
                     }
-                    button { class: "ed-ib", title: "닫기", onclick: move |_| close_s.scm.close_conflict(), {icon("close")} }
+                    button { class: "ed-ib", title: "닫기", "aria-label": "닫기", onclick: move |_| close_s.scm.close_conflict(), {icon("close")} }
                 }
                 match load {
                     ConflictLoad::Loading => rsx! { div { class: "ed-empty", role: "status", p { "충돌 내용을 확인하는 중입니다." } } },
@@ -1810,7 +1826,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_e10_reconstruct_base_text_handles_add_mod_del_and_empty() {
+    fn fr_l31_2_reconstruct_base_text_handles_add_mod_del_and_empty() {
         let diff_patch = "diff --git a/file.rs b/file.rs\n--- a/file.rs\n+++ b/file.rs\n@@ -1,4 +1,5 @@\n line1\n-line2\n+line2_mod\n line3\n+line4_add\n line5\n";
         let diff = parse_unified(diff_patch).into_iter().next().unwrap();
         let cur_text = "line1\nline2_mod\nline3\nline4_add\nline5";
@@ -1842,7 +1858,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_e10_markers_from_file_diff_identifies_added_modified_deleted() {
+    fn fr_l31_2_markers_from_file_diff_identifies_added_modified_deleted() {
         use crate::ui::editor::{DiffLineKind, DiffLineMarker};
 
         let patch = "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -1,4 +1,5 @@\n c1\n-d2\n+m2\n c3\n+a4\n";
@@ -1862,7 +1878,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_e10_side_by_side_rows_pairs_dels_and_adds() {
+    fn fr_l31_2_side_by_side_rows_pairs_dels_and_adds() {
         let patch = "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -1,3 +1,3 @@\n c1\n-old2\n+new2\n c3\n";
         let diff = parse_unified(patch).into_iter().next().unwrap();
         let hunk = &diff.hunks[0];
@@ -1918,6 +1934,12 @@ mod tests {
         assert_eq!(discard_tap(Some((path, 1000)), path, 4999), DeleteTap::Confirm);
         assert_eq!(discard_tap(Some((path, 1000)), path, 5000), DeleteTap::Expired);
         assert_eq!(discard_tap(Some(("other.rs", 1000)), path, 1600), DeleteTap::Arm);
+
+        // If reading the file fails, reconstruct_base_from_read aborts with Err and never rebuilds from empty text.
+        let read_err: Result<String, &str> = reconstruct_base_from_read(|| Err("permission denied"), &diff);
+        assert_eq!(read_err, Err("permission denied"));
+        let read_ok: Result<String, &str> = reconstruct_base_from_read(|| Ok("two".into()), &diff);
+        assert_eq!(read_ok, Ok("one".into()));
     }
 
     #[test]

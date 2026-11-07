@@ -677,7 +677,7 @@ pub mod page {
         let (agent_state, project_branch) = project_status(&s.project);
         // The branch git/status returned; the project row's until the first answer.
         let branch = s.scm.branch_line().unwrap_or(project_branch);
-        let conflict_shown = s.scm.conflict_visible(current.as_deref());
+        let conflict_shown = s.scm.conflict_visible();
         let diff_shown = s.scm.diff_visible(current.as_deref());
         let key_s = s.clone();
         let has_left = sel.selected(Side::Left).is_some();

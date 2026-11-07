@@ -904,9 +904,9 @@ fn fr_l31_2_stage_unstage_and_commit_against_the_demo_repository() {
     assert_eq!(commit_gate(&after, "\n  \n", false).unwrap_err(), NEED_MESSAGE);
 }
 
-// FR-E10 and #444: Diff gutter and editor source control tests.
+// FR-L31.2 and #444: Diff gutter and editor source control tests.
 #[test]
-fn fr_e10_diff_gutter_and_scm_helpers() {
+fn fr_l31_2_diff_gutter_and_scm_helpers() {
     use ember_app::ui::editor::{compute_line_diffs, diff_gutter_decorations, DiffLineKind, DiffLineMarker};
     use ember_app::ui::editor_scm::{
         commit_gate_with_amend, discard_patch, discard_tap, markers_from_file_diff, reconstruct_base_text,

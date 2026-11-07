@@ -665,14 +665,23 @@ pub mod view {
                             let count = f.hits.len();
                             let label = file_label(&relative, count);
                             let toggle_key = key.clone();
+                            let key_toggle_key = key.clone();
                             let file_uri = f.uri.clone();
                             let file_s = s.clone();
                             let file_title = format!("이 파일에서 모두 바꾸기: {name}");
                             let rows = f.hits.clone();
                             let path = f.uri.path.clone();
                             rsx! {
-                                div { key: "{key}", class: "ed-tn", role: "treeitem", "aria-label": "{label}", "aria-expanded": "{open}", style: "--d:0;",
+                                div { key: "{key}", class: "ed-tn", role: "treeitem", "aria-label": "{label}", "aria-expanded": "{open}", tabindex: "0", style: "--d:0;",
                                     onclick: move |_| { let mut c = collapsed.write(); if !c.remove(&toggle_key) { c.insert(toggle_key.clone()); } },
+                                    onkeydown: move |event| {
+                                        if matches!(event.key(), Key::Enter) || matches!(event.key(), Key::Character(ref c) if c == " ") {
+                                            event.stop_propagation();
+                                            event.prevent_default();
+                                            let mut c = collapsed.write();
+                                            if !c.remove(&key_toggle_key) { c.insert(key_toggle_key.clone()); }
+                                        }
+                                    },
                                     if open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} }
                                     {icon_px("file", 15)}
                                     span { style: "font-weight:var(--fw-medium);", "{name}" }
@@ -694,13 +703,20 @@ pub mod view {
                                             let row_label = hit_label(&hit);
                                             let m = Match { line: hit.line, start: hit.start, end: if hit.end_line == hit.line { hit.end } else { hit.start } };
                                             let target = hit.target();
-                                            let (click_s, one_s) = (s.clone(), s.clone());
-                                            let (click_path, one_uri) = (path.clone(), f.uri.clone());
+                                            let (click_s, key_hit_s, one_s) = (s.clone(), s.clone(), s.clone());
+                                            let (click_path, key_hit_path, one_uri) = (path.clone(), path.clone(), f.uri.clone());
                                             let line_no = hit.line + 1;
                                             let one_title = "이 결과 바꾸기";
                                             rsx! {
-                                                div { key: "{key}:{i}", class: "ed-tn", role: "treeitem", "aria-label": "{row_label}", style: "--d:1; gap:var(--sp2);",
+                                                div { key: "{key}:{i}", class: "ed-tn", role: "treeitem", "aria-label": "{row_label}", tabindex: "0", style: "--d:1; gap:var(--sp2);",
                                                     onclick: move |_| open_hit(&click_s, &click_path, m),
+                                                    onkeydown: move |event| {
+                                                        if matches!(event.key(), Key::Enter) || matches!(event.key(), Key::Character(ref c) if c == " ") {
+                                                            event.stop_propagation();
+                                                            event.prevent_default();
+                                                            open_hit(&key_hit_s, &key_hit_path, m);
+                                                        }
+                                                    },
                                                     span { style: "color:var(--muted); font-size:var(--fs-2xs); font-variant-numeric:tabular-nums; flex:none;", "{line_no}" }
                                                     span { style: "flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:pre; font-family:var(--mono); font-size:var(--fs-xs);",
                                                         span { "{before}" }

@@ -1177,12 +1177,13 @@ pub mod view {
         let mut stripes = s.stripes;
         let refresh_s = s.clone();
         let refreshing = s.scm.snapshot().refreshing;
+        let refresh_label = if refreshing { "읽는 중" } else { "새로 고침" };
         rsx! {
             div { class: "ed-twh",
                 b { class: "ed-twt", "{title}" }
                 div { class: "spacer" }
-                button { class: "ed-ib", title: if refreshing { "읽는 중" } else { "새로 고침" }, disabled: refreshing, onclick: move |_| refresh_s.scm.refresh(), {icon("refresh")} }
-                button { class: "ed-ib", title: "숨기기", onclick: move |_| stripes.write().hide(Side::Left), {icon("close")} }
+                button { class: "ed-ib", title: "{refresh_label}", "aria-label": "{refresh_label}", disabled: refreshing, onclick: move |_| refresh_s.scm.refresh(), {icon("refresh")} }
+                button { class: "ed-ib", title: "숨기기", "aria-label": "숨기기", onclick: move |_| stripes.write().hide(Side::Left), {icon("close")} }
             }
         }
     }
@@ -1238,7 +1239,7 @@ pub mod view {
                         }
                         span { "이전 커밋 수정 (amend)" }
                     }
-                    button { class: "ed-pj", title: "{commit_title}", disabled: busy,
+                    button { class: "ed-pj", title: "{commit_title}", "aria-label": "{commit_title}", disabled: busy,
                         style: "justify-content:center; background:var(--ink); color:var(--ink-text); height:30px;",
                         onclick: move |_| click_s.scm.commit(),
                         {icon_px("check", 14)} "{commit_btn_text}"
@@ -1276,7 +1277,7 @@ pub mod view {
                     span { style: "margin-left:var(--sp1); padding:0 6px; border-radius:var(--pill); background:var(--surface-2); color:var(--text-2);", "{count}" }
                     div { class: "spacer" }
                     if count > 0 && group != Group::Conflicts {
-                        button { class: "ed-ib", style: "width:22px; height:22px;", title: "{all_title}", disabled: busy,
+                        button { class: "ed-ib", style: "width:22px; height:22px;", title: "{all_title}", "aria-label": "{all_title}", disabled: busy,
                             onclick: move |_| { if group == Group::Staged { all_s.scm.unstage(&all) } else { all_s.scm.stage(&all) } },
                             {icon_px(all_icon, 13)} }
                     }
@@ -1300,8 +1301,8 @@ pub mod view {
         let class = if selected { "ed-tn sel" } else { "ed-tn" };
         let group = e.group;
         let deleted = e.letter == 'D';
-        let (diff_s, open_s, op_s, discard_s) = (s.clone(), s.clone(), s.clone(), s.clone());
-        let (diff_path, open_path, discard_path) = (e.path.clone(), e.path.clone(), e.path.clone());
+        let (diff_s, key_diff_s, open_s, op_s, discard_s) = (s.clone(), s.clone(), s.clone(), s.clone(), s.clone());
+        let (diff_path, key_diff_path, open_path, discard_path) = (e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone());
         let op_entry = vec![e.clone()];
         let (op_title, op_icon) = match group {
             Group::Staged => ("스테이지 해제", "minus"),
@@ -1318,7 +1319,7 @@ pub mod view {
         let discard_title = if is_armed { "정말 변경 사항을 취소합니다" } else { "변경 사항 취소" };
 
         rsx! {
-            div { key: "{group.title()}:{e.path}", class, role: "listitem", "aria-label": "{row_label}", title: "{tip}", style: "--d:1; gap:3px; padding-right:var(--sp2);",
+            div { key: "{group.title()}:{e.path}", class, role: "listitem", "aria-label": "{row_label}", title: "{tip}", tabindex: "0", style: "--d:1; gap:3px; padding-right:var(--sp2);",
                 onclick: move |_| {
                     if group == Group::Conflicts {
                         diff_s.scm.open_conflict(&diff_path);
@@ -1327,17 +1328,29 @@ pub mod view {
                         diff_s.scm.open_diff(&diff_path, group.staged(), over);
                     }
                 },
+                onkeydown: move |event| {
+                    if matches!(event.key(), Key::Enter) || matches!(event.key(), Key::Character(ref c) if c == " ") {
+                        event.stop_propagation();
+                        event.prevent_default();
+                        if group == Group::Conflicts {
+                            key_diff_s.scm.open_conflict(&key_diff_path);
+                        } else {
+                            let over = key_diff_s.tabs.read().current_path().map(str::to_owned);
+                            key_diff_s.scm.open_diff(&key_diff_path, group.staged(), over);
+                        }
+                    }
+                },
                 {icon_px("file", 15)}
                 span { style: "overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; min-width:20px;", "{name}" }
                 if !dir.is_empty() { span { style: "color:var(--muted); font-size:var(--fs-2xs); overflow:hidden; text-overflow:ellipsis; flex:1 2 0px; min-width:0;", "{dir}" } }
                 div { class: "spacer" }
                 if !deleted {
-                    button { class: "ed-ib", style: "width:20px; height:20px; flex:none;", title: "파일 열기: {name}",
+                    button { class: "ed-ib", style: "width:20px; height:20px; flex:none;", title: "파일 열기: {name}", "aria-label": "파일 열기: {name}",
                         onclick: move |event| { event.stop_propagation(); open_file(&open_s, &open_path); }, {icon_px("file", 13)} }
                 }
                 if group == Group::Changes && e.letter != 'U' {
                     button { class: "ed-ib", style: if is_armed { "width:20px; height:20px; flex:none; color:var(--c-red);" } else { "width:20px; height:20px; flex:none;" },
-                        title: "{discard_title}: {name}", disabled: busy,
+                        title: "{discard_title}: {name}", "aria-label": "{discard_title}: {name}", disabled: busy,
                         onclick: move |event| {
                             event.stop_propagation();
                             let abs = join_path(&discard_s.folder, &discard_path);
@@ -1345,7 +1358,7 @@ pub mod view {
                         }, {icon_px("close", 13)} }
                 }
                 if group != Group::Conflicts {
-                    button { class: "ed-ib", style: "width:20px; height:20px; flex:none;", title: "{op_title}: {name}", disabled: busy,
+                    button { class: "ed-ib", style: "width:20px; height:20px; flex:none;", title: "{op_title}: {name}", "aria-label": "{op_title}: {name}", disabled: busy,
                         onclick: move |event| {
                             event.stop_propagation();
                             if group == Group::Staged { op_s.scm.unstage(&op_entry) } else { op_s.scm.stage(&op_entry) }
@@ -1390,10 +1403,10 @@ pub mod view {
                                 div { style: "display:flex; gap:var(--sp1); padding:var(--sp1) var(--sp3);",
                                     input {
                                         style: "flex:1 1 0px; min-width:0; border:1px solid var(--line); border-radius:var(--r-sm); background:var(--surface); color:var(--text); padding:2px 6px; font:inherit; font-size:var(--fs-xs);",
-                                        placeholder: "새 브랜치 이름", value: "{new_branch}",
+                                        "aria-label": "새 브랜치 이름", placeholder: "새 브랜치 이름", value: "{new_branch}",
                                         oninput: move |e| new_branch_input_s.scm.set_new_branch(e.value()),
                                     }
-                                    button { class: "ed-pj", style: "flex:none; border:1px solid var(--line); height:26px; font-size:var(--fs-xs);", disabled: busy,
+                                    button { class: "ed-pj", style: "flex:none; border:1px solid var(--line); height:26px; font-size:var(--fs-xs);", "aria-label": "새 브랜치", disabled: busy,
                                         onclick: move |_| {
                                             if !new_branch_for_create.trim().is_empty() {
                                                 s_create.scm.create_branch(&new_branch_for_create);
@@ -1411,12 +1424,22 @@ pub mod view {
                                 let current = *b == status.branch;
                                 let label = if current { format!("{b}, 현재 브랜치") } else { b.clone() };
                                 let b_str = b.clone();
+                                let b_key_str = b.clone();
                                 let branch_click_s = s.clone();
+                                let branch_key_s = s.clone();
                                 rsx! { div { key: "{b}", class: if current { "ed-tn sel" } else { "ed-tn" }, role: "listitem",
                                     "aria-label": "{label}",
+                                    tabindex: "0",
                                     title: if current { format!("{b}") } else { format!("{b} (클릭하여 전환)") },
                                     style: if current { "--d:1; cursor:default;" } else { "--d:1; cursor:pointer;" },
                                     onclick: move |_| { if !current { branch_click_s.scm.checkout(&b_str); } },
+                                    onkeydown: move |event| {
+                                        if !current && (matches!(event.key(), Key::Enter) || matches!(event.key(), Key::Character(ref c) if c == " ")) {
+                                            event.stop_propagation();
+                                            event.prevent_default();
+                                            branch_key_s.scm.checkout(&b_key_str);
+                                        }
+                                    },
                                     if current { {icon_px("check", 13)} } else { span { class: "chev-sp" } }
                                     "{b}"
                                 } }
@@ -1623,13 +1646,13 @@ pub mod view {
                                                     div { key: "b-{si}", style: "margin:var(--sp2) 0; border:1px solid var(--line); border-radius:var(--r-sm); overflow:hidden;",
                                                         div { style: "display:flex; gap:var(--sp2); align-items:center; padding:4px 8px; background:var(--surface-2); font-family:var(--font); font-size:var(--fs-xs);",
                                                             span { style: "font-weight:var(--fw-semibold);", "블록 #{b_i + 1}" }
-                                                            button { class: "ed-pj", style: if *choice == ConflictChoice::Ours { "background:var(--ink); color:var(--ink-text); height:22px; padding:0 6px;" } else { "border:1px solid var(--line); height:22px; padding:0 6px;" },
+                                                            button { class: "ed-pj", "aria-pressed": "{*choice == ConflictChoice::Ours}", style: if *choice == ConflictChoice::Ours { "background:var(--ink); color:var(--ink-text); height:22px; padding:0 6px;" } else { "border:1px solid var(--line); height:22px; padding:0 6px;" },
                                                                 onclick: move |_| ours_choice_s.scm.set_conflict_choice(b_i, ConflictChoice::Ours),
                                                                 "현재 변경 사항 ({ours_label})" }
-                                                            button { class: "ed-pj", style: if *choice == ConflictChoice::Theirs { "background:var(--ink); color:var(--ink-text); height:22px; padding:0 6px;" } else { "border:1px solid var(--line); height:22px; padding:0 6px;" },
+                                                            button { class: "ed-pj", "aria-pressed": "{*choice == ConflictChoice::Theirs}", style: if *choice == ConflictChoice::Theirs { "background:var(--ink); color:var(--ink-text); height:22px; padding:0 6px;" } else { "border:1px solid var(--line); height:22px; padding:0 6px;" },
                                                                 onclick: move |_| theirs_choice_s.scm.set_conflict_choice(b_i, ConflictChoice::Theirs),
                                                                 "들어오는 변경 사항 ({theirs_label})" }
-                                                            button { class: "ed-pj", style: if *choice == ConflictChoice::Both { "background:var(--ink); color:var(--ink-text); height:22px; padding:0 6px;" } else { "border:1px solid var(--line); height:22px; padding:0 6px;" },
+                                                            button { class: "ed-pj", "aria-pressed": "{*choice == ConflictChoice::Both}", style: if *choice == ConflictChoice::Both { "background:var(--ink); color:var(--ink-text); height:22px; padding:0 6px;" } else { "border:1px solid var(--line); height:22px; padding:0 6px;" },
                                                                 onclick: move |_| both_choice_s.scm.set_conflict_choice(b_i, ConflictChoice::Both),
                                                                 "모두 수용 (Both)" }
                                                         }

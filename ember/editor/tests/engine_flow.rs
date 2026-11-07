@@ -343,6 +343,11 @@ fn code_lens_is_requested_resolved_drawn_and_clicked() {
     let fx = c.handle(t0, Input::RpcReply { token: at.unwrap(), result: Ok(Value::Null) });
     assert!(matches!(updates(&fx)[0], SessionUpdate::RunCommand { command } if command.id == "workbench.action.x"));
 
+    // Executing a command through Input::ExecuteCommand dispatches $executeContributedCommand.
+    let fx = c.handle(t0, Input::ExecuteCommand { id: "__vsc1".into(), arguments: vec![json!("hello")] });
+    let ec = call(&fx, "$executeContributedCommand").1;
+    assert_eq!((arg(ec, 0), arg(ec, 1)), (json!("__vsc1"), json!("hello")));
+
     // $emitCodeLensEvent re-requests; the replaced list is released.
     c.handle(t0, request(3, "MainThreadLanguageFeatures", "$emitCodeLensEvent", vec![json!(8)]));
     let fx = c.handle(t0 + Duration::from_secs(1), Input::Tick);

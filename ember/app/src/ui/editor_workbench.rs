@@ -265,6 +265,10 @@ pub mod page {
             open_find_bar(s);
             return;
         }
+        if matches!(action, Action::FindInFiles | Action::ReplaceInFiles) {
+            crate::ui::editor_search::view::open(s, action == Action::ReplaceInFiles);
+            return;
+        }
         if action == Action::Save {
             save_current(s);
             return;
@@ -645,6 +649,7 @@ pub mod page {
         let dirty: Vec<bool> = paths.iter().map(|p| uris.get(p).and_then(|u| bridge.document(u)).is_some_and(|d| d.dirty)).collect();
         drop(uris);
         drop(bridge);
+        crate::ui::editor_search::view::apply_pending_reveal(&s);
         let (line, col) = *s.position.read();
         let sel = *s.stripes.read();
         let keymap = *s.keymap.read();
@@ -718,6 +723,8 @@ pub mod page {
                     if let (Some(w), false) = (sel.selected(Side::Left), maximized) {
                         if w == ToolWindow::Project {
                             {project_tree(&s, current.as_deref())}
+                        } else if w == ToolWindow::Search {
+                            {crate::ui::editor_search::view::panel(&s)}
                         } else {
                             {side_note(w, "ed-left")}
                         }
@@ -753,12 +760,12 @@ pub mod page {
     /// A mockup icon as an image: the HTML path draws SVG through `img`, which cannot take
     /// `currentColor`, so the stroke is the text colour of the light palette.
     // TODO(editor-redesign step 4): tint per theme once the dark palette is switched on.
-    pub(super) fn icon(name: &str) -> Element {
+    pub(crate) fn icon(name: &str) -> Element {
         icon_px(name, 16)
     }
 
     /// A mockup icon at `px` dp (the mockup sizes tree, tab and breadcrumb icons by context).
-    pub(super) fn icon_px(name: &str, px: u32) -> Element {
+    pub(crate) fn icon_px(name: &str, px: u32) -> Element {
         let dark = if super::ICON_DARK.with(|d| d.get()) { "@dark" } else { "" };
         rsx! { img { class: "i", src: "icon:{name}{dark}", width: "{px}", height: "{px}" } }
     }
@@ -854,6 +861,7 @@ pub mod page {
     fn icon_name(w: ToolWindow) -> &'static str {
         match w {
             ToolWindow::Project => "folder",
+            ToolWindow::Search => "search",
             ToolWindow::Commit => "commit",
             ToolWindow::Git => "git",
             ToolWindow::Agent => "spark",

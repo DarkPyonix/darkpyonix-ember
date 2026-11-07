@@ -3265,6 +3265,55 @@ pub fn team_rows_with_pr_load(branches: &[BranchEntry], members: &[MemberCwd], p
     }
 }
 
+/// Resolve the [`PrLoad`] used by [`TeamPane`] rows: while the all-states fetch (`team_pr_load`)
+/// is still `Loading`, fall back to the shared PR list (`shared_prs`) if already loaded.
+pub fn resolve_team_pr_load(team_pr_load: &PrLoad, shared_prs: Option<&[PrEntry]>) -> PrLoad {
+    match team_pr_load {
+        PrLoad::Loading => match shared_prs {
+            Some(shared) => PrLoad::Ready(shared.to_vec()),
+            None => PrLoad::Loading,
+        },
+        other => other.clone(),
+    }
+}
+
+/// Apply the loaded repository snapshot and demo flags to [`TeamRow`] entries:
+/// - In real mode (`is_demo == false`), `computer` stays `None` ("알 수 없음"), the current
+///   checkout gets `snap.changes.len()` and `!snap.conflicts.is_empty()` when `snap` is `Some`,
+///   and non-current worktrees stay `dirty_count: None` ("확인 안 됨").
+/// - In demo mode (`is_demo == true`), `computer` becomes `Some("mac-mini")` and non-current
+///   worktrees also stay `dirty_count: None` ("확인 안 됨").
+pub fn apply_team_row_snapshot_and_mode(rows: &mut [TeamRow], snap: Option<&RepoSnapshot>, is_demo: bool) {
+    let snap_dirty = snap.map(|s| s.changes.len());
+    let snap_conflict = snap.is_some_and(|s| !s.conflicts.is_empty());
+    for r in rows {
+        if is_demo {
+            r.computer = Some("mac-mini".to_string());
+        }
+        if r.current {
+            if let Some(d) = snap_dirty {
+                r.dirty_count = Some(d);
+                r.conflict = snap_conflict;
+            }
+        }
+    }
+}
+
+/// Build the full list of [`TeamRow`] entries for `TeamPane` in live/demo mode (`has_actions == true`).
+pub fn resolve_team_rows(
+    branches: &[BranchEntry],
+    members: &[MemberCwd],
+    team_pr_load: &PrLoad,
+    shared_prs: Option<&[PrEntry]>,
+    snap: Option<&RepoSnapshot>,
+    is_demo: bool,
+) -> Vec<TeamRow> {
+    let pr_load = resolve_team_pr_load(team_pr_load, shared_prs);
+    let mut rows = team_rows_with_pr_load(branches, members, &pr_load);
+    apply_team_row_snapshot_and_mode(&mut rows, snap, is_demo);
+    rows
+}
+
 /// The rows of 팀 작업, one per branch that has a worktree: the leader first, then the current
 /// branch (main checkout), then other worktrees by branch name. A member belongs to the worktree
 /// with the longest path that holds its folder; when several members share one worktree the leader,
@@ -5586,6 +5635,57 @@ rename to new.txt
         let mut dirty = rows[0].clone();
         dirty.dirty_count = Some(3);
         assert_eq!(dirty.dirty_text(), "변경 3개");
+    }
+
+    #[test]
+    fn fr_l19_team_real_mode_snapshot_and_pr_fallback_rules() {
+        let b = branches_of(&[("feat/x", false, Some("/w/x")), ("main", true, Some("/r"))]);
+        let mut snap = RepoSnapshot::default();
+        snap.changes = vec![
+            FileDiff { path: "a.rs".into(), old_path: None, status: FileStatus::Modified, binary: false, mode: None, hunks: vec![] },
+            FileDiff { path: "b.rs".into(), old_path: None, status: FileStatus::Added, binary: false, mode: None, hunks: vec![] },
+        ];
+        snap.conflicts = vec!["a.rs".into()];
+
+        // 1. Real mode (is_demo == false) with loaded snapshot and shared PR fallback while team_pr_load is Loading:
+        //    - current worktree ("main") gets dirty_count = Some(2), conflict = true, computer = None ("알 수 없음")
+        //    - other worktree ("feat/x") stays dirty_count = None ("확인 안 됨"), conflict = false, computer = None ("알 수 없음")
+        let shared = [pr_entry(&a_pr(42, GitPrState::Merged, GitPrReview::None, (1, 0, 0), (false, "")), 0)];
+        let rows_real = resolve_team_rows(&b, &[], &PrLoad::Loading, Some(&shared), Some(&snap), false);
+        let main_row = rows_real.iter().find(|r| r.branch == "main").unwrap();
+        let other_row = rows_real.iter().find(|r| r.branch == "feat/x").unwrap();
+
+        assert_eq!(main_row.computer, None);
+        assert_eq!(main_row.computer_text(), "알 수 없음");
+        assert_eq!(main_row.dirty_count, Some(2));
+        assert_eq!(main_row.dirty_text(), "변경 2개");
+        assert!(main_row.conflict);
+
+        assert_eq!(other_row.computer, None);
+        assert_eq!(other_row.computer_text(), "알 수 없음");
+        assert_eq!(other_row.dirty_count, None);
+        assert_eq!(other_row.dirty_text(), "확인 안 됨");
+        assert!(!other_row.conflict);
+        assert_eq!(other_row.pr_status.chip_text(), "#42 병합됨");
+
+        // 2. Real mode when PR fetch fails (`PrLoad::Failed`): chip becomes `TeamPrStatus::Failed` ("PR 확인 실패")
+        //    even if `shared_prs` had an earlier value.
+        let rows_failed = resolve_team_rows(&b, &[], &PrLoad::Failed("오류".into()), Some(&shared), None, false);
+        for r in &rows_failed {
+            assert_eq!(r.pr_status, TeamPrStatus::Failed);
+            assert_eq!(r.pr_status.chip_text(), "PR 확인 실패");
+            assert_eq!(r.dirty_count, None);
+            assert_eq!(r.dirty_text(), "확인 안 됨");
+        }
+
+        // 3. Demo mode (is_demo == true): sets computer to "mac-mini" while non-current worktree stays "확인 안 됨".
+        let rows_demo = resolve_team_rows(&b, &[], &PrLoad::Ready(vec![]), None, Some(&RepoSnapshot::default()), true);
+        let demo_main = rows_demo.iter().find(|r| r.branch == "main").unwrap();
+        let demo_other = rows_demo.iter().find(|r| r.branch == "feat/x").unwrap();
+        assert_eq!(demo_main.computer_text(), "mac-mini");
+        assert_eq!(demo_main.dirty_text(), "깨끗함");
+        assert_eq!(demo_other.computer_text(), "mac-mini");
+        assert_eq!(demo_other.dirty_text(), "확인 안 됨");
     }
 
     // ---- FR-G10 to FR-G12: pull request detail, review, merge, create (#483) ----

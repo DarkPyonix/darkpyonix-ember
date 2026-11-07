@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{can_approve_pr, merge_method_text, pr_created_notice, pr_merge_method_label, pr_review_notice, PR_DELETE_BRANCH_LABEL, PR_DELETE_BRANCH_NOTE, PR_MERGE_METHODS, PR_SELF_APPROVAL_DISALLOWED, copy_sha_to_clipboard, filter_history_entries, HistoryFilter, branch_switch_allowed, branch_matches, branch_bar_text, BRANCH_SWITCH_NOTE, BRANCH_CREATE_NOTE, STASH_NOW_NOTE, commit_action_branch_line, commit_failure_reloads_snapshot, commit_action_gate, commit_action_key, commit_detail_from, commit_detail_view, commit_files_shown, fetch_commit_detail, file_stat_text, run_branch_from, run_commit_cherry_pick, run_commit_revert, snapshot_dirty, CommitAction, CommitDetailLoad, CommitDetailView, choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, team_rows_with_pr_load, MemberCwd, TeamMember, TeamRow, TeamPrStatus, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState, banner_sub, banner_title, fetch_merge_state, banner_button_text, merge_tap, merge_tap_key, run_merge_abort, run_merge_commit, MergeAction, MergeLoad, MergeView, MERGE_ABORT_NOTE, MERGE_COMMIT_NOTE, merge_answer_reloads, pick_all_key, pick_all_note, pick_all_text};
+use crate::ui::vcs::{can_approve_pr, merge_method_text, pr_created_notice, pr_merge_method_label, pr_review_notice, PR_DELETE_BRANCH_LABEL, PR_DELETE_BRANCH_NOTE, PR_MERGE_METHODS, PR_SELF_APPROVAL_DISALLOWED, copy_sha_to_clipboard, filter_history_entries, HistoryFilter, branch_switch_allowed, branch_matches, branch_bar_text, BRANCH_SWITCH_NOTE, BRANCH_CREATE_NOTE, STASH_NOW_NOTE, commit_action_branch_line, commit_failure_reloads_snapshot, commit_action_gate, commit_action_key, commit_detail_from, commit_detail_view, commit_files_shown, fetch_commit_detail, file_stat_text, run_branch_from, run_commit_cherry_pick, run_commit_revert, snapshot_dirty, CommitAction, CommitDetailLoad, CommitDetailView, choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, team_rows_with_pr_load, resolve_team_pr_load, apply_team_row_snapshot_and_mode, MemberCwd, TeamMember, TeamRow, TeamPrStatus, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState, banner_sub, banner_title, fetch_merge_state, banner_button_text, merge_tap, merge_tap_key, run_merge_abort, run_merge_commit, MergeAction, MergeLoad, MergeView, MERGE_ABORT_NOTE, MERGE_COMMIT_NOTE, merge_answer_reloads, pick_all_key, pick_all_note, pick_all_text};
 use ember_client::api::{GitPrMergeMethod, GitPrReviewAction};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
@@ -3852,10 +3852,6 @@ fn sample_team_rows() -> Vec<TeamRow> {
         r.computer = Some("mac-mini".to_string());
         r.dirty_count = Some(0);
     }
-    if let Some(r) = rows.get_mut(1) {
-        r.computer = Some("mac-mini".to_string());
-        r.dirty_count = Some(2);
-    }
     rows
 }
 
@@ -4139,16 +4135,8 @@ fn TeamPane(
     };
 
     let pr_load_for_rows = if actions.is_some() {
-        match team_pr_load.get() {
-            PrLoad::Loading => {
-                if let Some(shared) = prs.get() {
-                    PrLoad::Ready(shared)
-                } else {
-                    PrLoad::Loading
-                }
-            }
-            other => other,
-        }
+        let shared = prs.get();
+        resolve_team_pr_load(&team_pr_load.get(), shared.as_deref())
     } else {
         sample_prs()
     };
@@ -4156,8 +4144,7 @@ fn TeamPane(
     let retry_state = retry.clone();
     let sec_nav = sec_state.clone();
     let sel_pr_nav = selected_pr.clone();
-    let snap_dirty = snap.map(|s| s.changes.len());
-    let snap_conflict = snap.is_some_and(|s| !s.conflicts.is_empty());
+    let snap_owned = snap.cloned();
     let has_actions = actions.is_some();
 
     let list = move || {
@@ -4182,19 +4169,7 @@ fn TeamPane(
                     return;
                 }
                 if has_actions {
-                    for r in &mut rows {
-                        if is_demo {
-                            r.computer = Some("mac-mini".to_string());
-                        }
-                        if r.current {
-                            if let Some(d) = snap_dirty {
-                                r.dirty_count = Some(d);
-                                r.conflict = snap_conflict;
-                            }
-                        } else if is_demo {
-                            r.dirty_count = Some(2);
-                        }
-                    }
+                    apply_team_row_snapshot_and_mode(&mut rows, snap_owned.as_ref(), is_demo);
                 }
                 for r in &rows {
                     let nav_br = sec_nav.clone();
@@ -4616,7 +4591,10 @@ fn VcsScreenWithLoad(
 
         if let Some(project) = project {
                     let sel_proj = selected_proj.clone();
-                    let actions = crate::services::try_services().map(|_| Actions { project: project.id.clone(), reload: reload.clone() });
+                    let actions = (!sample)
+                        .then(crate::services::try_services)
+                        .flatten()
+                        .map(|_| Actions { project: project.id.clone(), reload: reload.clone() });
                     RepoBarWithActions(
                         &projects,
                         &project,
@@ -6563,7 +6541,7 @@ mod tests {
         assert!(texts.iter().any(|t| t == "컴퓨터"), "should render computer label");
         assert!(texts.iter().any(|t| t == "mac-mini"), "should render computer name");
         assert!(texts.iter().any(|t| t == "깨끗함"), "should render clean status");
-        assert!(texts.iter().any(|t| t == "변경 2개"), "should render dirty status for dirty worktree");
+        assert!(texts.iter().any(|t| t == "확인 안 됨"), "should render unknown dirty status for non-current worktree");
         assert!(texts.iter().any(|t| t == "브랜치 보기"), "should render '브랜치 보기' action button");
         assert!(texts.iter().any(|t| t == "세션"), "should render '세션' action button");
     }

@@ -83,6 +83,7 @@ fn now_ms() -> u64 {
 }
 
 thread_local! { static ICON_DARK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+thread_local! { static MODIFIER_CLICK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 thread_local! { static SHARED: RefCell<Option<Shared>> = const { RefCell::new(None) }; }
 fn shared() -> Shared { SHARED.with(|s| s.borrow().as_ref().expect("workbench initialized").clone()) }
 
@@ -1040,17 +1041,55 @@ pub mod page {
             }
         };
         let search_s = s.clone();
+        let rows_for_sel_all = rows.clone();
+        let paste_selected = selected.clone();
+        let paste_host = s.host.clone();
+        let paste_root = root.clone();
+        let clip_state = tree_clipboard.read().clone();
+        let has_clip = clip_state.is_some();
+        let clip_badge = clip_state.as_ref().map(|c| {
+            let verb = match c.kind {
+                crate::ui::editor::ClipboardKind::Copy => "복사됨",
+                crate::ui::editor::ClipboardKind::Cut => "잘라냄",
+            };
+            format!("{verb} {}개", c.paths.len())
+        });
         let key_host = s.host.clone();
         let root_for_key = root.clone();
         let root_for_drop = root.clone();
         let drop_root_host = s.host.clone();
         rsx! {
             section { class: "ed-tw ed-left", "aria-label": "프로젝트",
-                div { class: "ed-twh",
+                div { class: "ed-twh", style: "gap:2px;",
                     b { class: "ed-twt", "프로젝트" }
                     div { class: "spacer" }
                     button { class: "ed-ib", title: "새 파일", "aria-label": "새 파일", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewFile { parent: new_file_parent.clone() })); }, {icon("plus")} }
                     button { class: "ed-ib", title: "새 폴더", "aria-label": "새 폴더", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewDir { parent: new_dir_parent.clone() })); }, {icon("folder")} }
+                    button { class: "ed-ib", title: "모두 선택", "aria-label": "모두 선택", onclick: move |_| {
+                        let all: Vec<(String, bool)> = rows_for_sel_all.iter().map(|r| (r.path.clone(), r.is_dir)).collect();
+                        let last = all.last().cloned();
+                        tree_multi_sel.set(all);
+                        tree_sel.set(last);
+                    }, {icon_px("check", 15)} }
+                    if has_clip {
+                        button { class: "ed-pj", title: "붙여넣기", "aria-label": "붙여넣기", style: "height:24px; padding:0 6px; font-size:var(--fs-2xs); border:1px solid var(--line);", onclick: move |_| {
+                            let clip = tree_clipboard.read().clone();
+                            if let Some(clip) = clip {
+                                let dest_dir = crate::ui::editor::new_item_parent(paste_selected.as_ref().map(|(p, d)| (p.as_str(), *d)), &paste_root);
+                                let sources: Vec<String> = clip.paths.into_iter().map(|(p, _)| p).collect();
+                                expanded.write().insert(dest_dir.clone());
+                                match clip.kind {
+                                    crate::ui::editor::ClipboardKind::Copy => {
+                                        paste_host.send(HostCommand::CopyPaths { sources, dest_dir });
+                                    }
+                                    crate::ui::editor::ClipboardKind::Cut => {
+                                        paste_host.send(HostCommand::MovePaths { sources, dest_dir });
+                                        tree_clipboard.set(None);
+                                    }
+                                }
+                            }
+                        }, "붙여넣기" }
+                    }
                     button { class: "ed-ib", title: "모두 접기", "aria-label": "모두 접기", onclick: move |_| expanded.write().clear(), {icon_px("chev", 16)} }
                     button { class: "ed-ib", title: "파일 검색", "aria-label": "파일 검색", onclick: move |_| crate::ui::editor_search::view::open(&search_s, false), {icon("search")} }
                     button { class: "ed-ib", title: "숨기기", "aria-label": "숨기기", onclick: move |_| stripes.write().hide(Side::Left), {icon("close")} }
@@ -1210,6 +1249,10 @@ pub mod page {
                             }
                         },
                         {icon_px("chev-dn", 12)} {icon_px("folder", 15)} "{root_name}"
+                    if let Some(badge) = clip_badge {
+                        div { class: "spacer" }
+                        span { class: "ed-sc", "{badge}" }
+                    }
                     }
                     {prompt_row}
                     for row in rows.iter() {
@@ -1219,22 +1262,28 @@ pub mod page {
                             let open_errors = s.open_errors.clone();
                             let is_dir = row.is_dir;
                             let in_multi = tree_multi_sel.read().iter().any(|(p, _)| p == &row.path);
+                            let in_cut = tree_clipboard.read().as_ref().is_some_and(|c| c.kind == crate::ui::editor::ClipboardKind::Cut && c.paths.iter().any(|(p, _)| p == &row.path));
                             let chosen = in_multi || selected.as_ref().map(|(p, _)| p.as_str()) == Some(row.path.as_str());
                             let class = if chosen || (selected.is_none() && tree_multi_sel.read().is_empty() && current == Some(row.path.as_str())) { "ed-tn sel" } else { "ed-tn" };
                             let depth = row.depth + 1;
+                            let row_style = if in_cut { format!("--d:{depth}; opacity:0.55;") } else { format!("--d:{depth};") };
                             let rename_path = row.path.clone();
+                            let cut_path = row.path.clone();
                             let delete_path = row.path.clone();
                             let rename_name = row.name.clone();
                             let rename_label = row.name.clone();
+                            let cut_label = row.name.clone();
                             let unsaved_for_rename = unsaved.clone();
                             let row_label = crate::ui::editor::tree_item_aria_label(&row.name, is_dir);
+                            let path_for_down = row.path.clone();
+                            let rows_for_down = rows.clone();
                             let rows_for_click = rows.clone();
                             let drag_path = row.path.clone();
                             let drop_path = row.path.clone();
                             let drop_is_dir = is_dir;
                             let drop_host = s.host.clone();
                             let drop_root = root.clone();
-                            rsx! { div { key: "{row.path}", class, role: "treeitem", "aria-label": "{row_label}", "aria-selected": "{chosen}", tabindex: if chosen { "0" } else { "-1" }, style: "--d:{depth};",
+                            rsx! { div { key: "{row.path}", class, role: "treeitem", "aria-label": "{row_label}", "aria-selected": "{chosen}", tabindex: if chosen { "0" } else { "-1" }, style: "{row_style}",
                                 "aria-expanded": if is_dir { "{row.open}" } else { "" },
                                 draggable: "true",
                                 ondragstart: move |_| {
@@ -1271,36 +1320,76 @@ pub mod page {
                                         tree_drag_src.set(None);
                                     }
                                 },
-                                onclick: move |event| {
+                                onmousedown: move |event| {
                                     let close = prompt.read().as_ref().is_some_and(|p| crate::ui::editor::row_click_closes_prompt(p, &prompt_text.read()));
                                     if close { prompt.set(None); }
                                     let m = event.modifiers();
                                     let shift = m.contains(Modifiers::SHIFT);
                                     let toggle = m.contains(Modifiers::META) || m.contains(Modifiers::CONTROL);
+                                    super::MODIFIER_CLICK.with(|c| c.set(shift || toggle));
+                                    if shift || toggle {
+                                        event.stop_propagation();
+                                        let new_multi = crate::ui::editor::update_tree_selection(
+                                            &tree_multi_sel.read(),
+                                            (path_for_down.clone(), is_dir),
+                                            &rows_for_down,
+                                            shift,
+                                            toggle,
+                                        );
+                                        let new_sel = new_multi.last().cloned().or_else(|| Some((path_for_down.clone(), is_dir)));
+                                        tree_multi_sel.set(new_multi);
+                                        tree_sel.set(new_sel);
+                                    }
+                                },
+                                onclick: move |_| {
+                                    if super::MODIFIER_CLICK.with(|c| c.replace(false)) {
+                                        return;
+                                    }
+                                    let close = prompt.read().as_ref().is_some_and(|p| crate::ui::editor::row_click_closes_prompt(p, &prompt_text.read()));
+                                    if close { prompt.set(None); }
                                     let new_multi = crate::ui::editor::update_tree_selection(
                                         &tree_multi_sel.read(),
                                         (path.clone(), is_dir),
                                         &rows_for_click,
-                                        shift,
-                                        toggle,
+                                        false,
+                                        false,
                                     );
                                     let new_sel = new_multi.last().cloned().or_else(|| Some((path.clone(), is_dir)));
                                     tree_multi_sel.set(new_multi);
                                     tree_sel.set(new_sel);
-                                    if !shift && !toggle {
-                                        if is_dir {
-                                            let was_open = expanded.read().contains(&path);
-                                            if was_open { expanded.write().remove(&path); }
-                                            else { expanded.write().insert(path.clone()); host.send(HostCommand::List(path.clone())); }
-                                        } else { open_errors.borrow_mut().remove(&path); tabs.write().open(&path); host.send(HostCommand::Open(path.clone())); }
-                                    }
+                                    if is_dir {
+                                        let was_open = expanded.read().contains(&path);
+                                        if was_open { expanded.write().remove(&path); }
+                                        else { expanded.write().insert(path.clone()); host.send(HostCommand::List(path.clone())); }
+                                    } else { open_errors.borrow_mut().remove(&path); tabs.write().open(&path); host.send(HostCommand::Open(path.clone())); }
                                 },
                                 if is_dir { if row.open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} } } else { span { class: "chev-sp" } }
                                 if is_dir { {icon_px("folder", 15)} } else { {icon_px("file", 15)} }
                                 "{row.name}"
                                 if chosen {
                                     div { class: "spacer" }
+                                    button { class: "ed-ib", title: "잘라내기: {cut_label}", "aria-label": "잘라내기: {cut_label}", style: "width:22px; height:22px;",
+                                        onmousedown: move |event| { event.stop_propagation(); },
+                                        onclick: move |event| {
+                                            event.stop_propagation();
+                                            let multi = tree_multi_sel.read();
+                                            let items = if multi.iter().any(|(p, _)| p == &cut_path) && !multi.is_empty() {
+                                                multi.clone()
+                                            } else {
+                                                vec![(cut_path.clone(), is_dir)]
+                                            };
+                                            let pruned = crate::ui::editor::prune_redundant_selection(&items);
+                                            if !pruned.is_empty() {
+                                                let n = pruned.len();
+                                                tree_clipboard.set(Some(crate::ui::editor::TreeClipboard {
+                                                    kind: crate::ui::editor::ClipboardKind::Cut,
+                                                    paths: pruned,
+                                                }));
+                                                notice(format!("{n}개 항목을 잘라냈습니다"));
+                                            }
+                                        }, {icon_px("minus", 13)} }
                                     button { class: "ed-ib", title: "이름 변경: {rename_label}", "aria-label": "이름 변경: {rename_label}", style: "width:22px; height:22px;",
+                                        onmousedown: move |event| { event.stop_propagation(); },
                                         onclick: move |event| {
                                             event.stop_propagation();
                                             let blocked: Vec<String> = unsaved_for_rename.iter().filter(|p| crate::ui::editor::is_at_or_below(p, &rename_path)).cloned().collect();
@@ -1312,6 +1401,7 @@ pub mod page {
                                             prompt.set(Some(TreePrompt::Rename { path: rename_path.clone() }));
                                         }, {icon_px("edit", 13)} }
                                     button { class: "ed-ib", title: "삭제: {rename_label}", "aria-label": "삭제: {rename_label}", style: "width:22px; height:22px; color:var(--c-red);",
+                                        onmousedown: move |event| { event.stop_propagation(); },
                                         onclick: move |event| {
                                             event.stop_propagation();
                                             prompt_at.set(now_ms());

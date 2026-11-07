@@ -1343,29 +1343,35 @@ pub mod page {
                                 tree_drag_src.set(None);
                             }
                         },
-                        {icon_px("chev-dn", 12)} {icon_px("folder", 15)} "{root_name}"
+                        {icon_px("chev-dn", 12)} {icon_px("folder", 15)} span { class: "ellipsis", "{root_name}" }
+                    }
                     if let Some(badge) = clip_badge {
-                        div { class: "spacer" }
-                        span { class: "ed-sc", "{badge}" }
-                        button { class: "ed-sc", title: "붙여넣기", "aria-label": "붙여넣기", style: "cursor:pointer; color:var(--text);", onclick: move |event| {
-                            event.stop_propagation();
-                            let clip = tree_clipboard.read().clone();
-                            if let Some(clip) = clip {
-                                let dest_dir = crate::ui::editor::new_item_parent(paste_selected.as_ref().map(|(p, d)| (p.as_str(), *d)), &paste_root);
-                                let sources: Vec<String> = clip.paths.into_iter().map(|(p, _)| p).collect();
-                                expanded.write().insert(dest_dir.clone());
-                                match clip.kind {
-                                    crate::ui::editor::ClipboardKind::Copy => {
-                                        paste_host.send(HostCommand::CopyPaths { sources, dest_dir });
-                                    }
-                                    crate::ui::editor::ClipboardKind::Cut => {
-                                        paste_host.send(HostCommand::MovePaths { sources, dest_dir });
-                                        tree_clipboard.set(None);
+                        div { class: "ed-tn", style: "--d:0; padding:0 var(--sp2); background:var(--surface-2);",
+                            span { class: "ed-sc", style: "flex:none;", "{badge}" }
+                            div { class: "spacer" }
+                            button { class: "ed-sc", title: "붙여넣기", "aria-label": "붙여넣기", style: "flex:none; cursor:pointer; color:var(--text);", onclick: move |event| {
+                                event.stop_propagation();
+                                let clip = tree_clipboard.read().clone();
+                                if let Some(clip) = clip {
+                                    let dest_dir = crate::ui::editor::new_item_parent(paste_selected.as_ref().map(|(p, d)| (p.as_str(), *d)), &paste_root);
+                                    let sources: Vec<String> = clip.paths.into_iter().map(|(p, _)| p).collect();
+                                    expanded.write().insert(dest_dir.clone());
+                                    match clip.kind {
+                                        crate::ui::editor::ClipboardKind::Copy => {
+                                            paste_host.send(HostCommand::CopyPaths { sources, dest_dir });
+                                        }
+                                        crate::ui::editor::ClipboardKind::Cut => {
+                                            paste_host.send(HostCommand::MovePaths { sources, dest_dir });
+                                            tree_clipboard.set(None);
+                                        }
                                     }
                                 }
-                            }
-                        }, "붙여넣기" }
-                    }
+                            }, "붙여넣기" }
+                            button { class: "ed-ib", title: "클립보드 비우기", "aria-label": "클립보드 비우기", style: "width:20px; height:20px; flex:none;", onclick: move |event| {
+                                event.stop_propagation();
+                                tree_clipboard.set(None);
+                            }, {icon_px("close", 12)} }
+                        }
                     }
                     {prompt_row}
                     for row in rows.iter() {

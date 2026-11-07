@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use ember_editor::engine::{ReadPurpose, Token};
 use ember_editor::languages::LanguageRegistry;
 use ember_editor::{
-    BridgeAction, CoreOptions, Decoration, DecorationId, DecorationKind, Effect, HoverPhase, Input,
+    apply_text_change, BridgeAction, CoreOptions, Decoration, DecorationId, DecorationKind, Effect, HoverPhase, Input,
     SessionCore, Severity, WidgetBridge, WidgetCommand, WidgetEvent, WidgetPos, WidgetRange,
     DECORATION_RECORD_LEN,
 };
@@ -486,4 +486,93 @@ fn end_to_end_session_core_and_widget_bridge_flow() {
     assert!(doc.decorations.iter().any(|d| d.kind == DecorationKind::Underline));
     let _ = WidgetCommand::SetText { generation: doc.generation, text: doc.text.clone() };
     let _ = WidgetEvent::CodeSaveRequested { version: 0 };
+}
+
+#[test]
+fn remount_or_reopen_preserves_document_version_in_widget_bridge() {
+    let mut bridge = WidgetBridge::new();
+    let u = uri("/src/main.rs");
+    let fx = vec![Effect::Ui(ember_editor::SessionUpdate::Opened {
+        uri: u.clone(),
+        generation: 42,
+        text: "hello world".to_string(),
+        language_id: "rust".to_string(),
+        tab_width: 4,
+    })];
+    apply_all(&mut bridge, &fx);
+
+    let doc = bridge.document(&u).expect("document opened");
+    assert_eq!(doc.generation, 42);
+    assert_eq!(doc.version, 0, "initial version is 0");
+
+    // First edit updates version to 1.
+    bridge
+        .on_code_changed(&u, 1, WidgetRange::empty(p(0, 5)), ",".to_string())
+        .expect("on_code_changed event");
+    assert_eq!(bridge.document(&u).unwrap().version, 1);
+
+    // Later edit updates version to 5.
+    bridge
+        .on_code_changed(&u, 5, WidgetRange::empty(p(0, 12)), "!".to_string())
+        .expect("on_code_changed event");
+    assert_eq!(bridge.document(&u).unwrap().version, 5);
+
+    // Simulated remount or tab switch: re-reading document preserves version 5.
+    let remounted_doc = bridge.document(&u).expect("document exists");
+    assert_eq!(remounted_doc.version, 5, "remount sees current version, not 0");
+
+    // Syntax update with version 9 advances version.
+    let fx_syntax = vec![Effect::Ui(ember_editor::SessionUpdate::Syntax {
+        uri: u.clone(),
+        generation: 42,
+        version: 9,
+        window: (0, 0),
+        runs: Vec::new(),
+    })];
+    apply_all(&mut bridge, &fx_syntax);
+    assert_eq!(bridge.document(&u).unwrap().version, 9);
+}
+
+#[test]
+fn replace_all_multi_edit_with_hangul_and_emoji_preserves_utf8_boundaries() {
+    let text = "안녕 😀 세상 🚀 안녕 😀 모두 🚀\n한글 🦀 테스트 🦀 한글\n";
+    // Target matches for "안녕 😀" on line 0:
+    // "안"(1) + "녕"(1) + " "(1) + "😀"(2) = 5 UTF-16 units -> cols 0..5
+    // " 세상 "(4) + "🚀"(2) + " "(1) = 7 units -> cols 12..17
+    let r1 = r(0, 0, 0, 5);
+    let r2 = r(0, 12, 0, 17);
+
+    // Apply last first (r2 then r1)
+    let step1 = apply_text_change(text, r2, "반가워요 ✨").expect("valid UTF-16 edit 2");
+    assert!(std::str::from_utf8(step1.as_bytes()).is_ok(), "step 1 produces valid UTF-8");
+    let step2 = apply_text_change(&step1, r1, "반가워요 ✨").expect("valid UTF-16 edit 1");
+    assert!(std::str::from_utf8(step2.as_bytes()).is_ok(), "step 2 produces valid UTF-8");
+
+    assert_eq!(
+        step2,
+        "반가워요 ✨ 세상 🚀 반가워요 ✨ 모두 🚀\n한글 🦀 테스트 🦀 한글\n"
+    );
+
+    // Target matches for "🦀" on line 1:
+    // "한"(1) + "글"(1) + " "(1) = 3 units -> cols 3..5
+    // " 테스트 "(5) = 5 units -> cols 10..12
+    let r3 = r(1, 3, 1, 5);
+    let r4 = r(1, 10, 1, 12);
+
+    let step3 = apply_text_change(&step2, r4, "🌟").expect("valid UTF-16 edit 4");
+    let step4 = apply_text_change(&step3, r3, "🌟").expect("valid UTF-16 edit 3");
+    assert_eq!(
+        step4,
+        "반가워요 ✨ 세상 🚀 반가워요 ✨ 모두 🚀\n한글 🌟 테스트 🌟 한글\n"
+    );
+
+    // Round-trip back
+    let r_back1 = r(1, 3, 1, 5);
+    let r_back2 = r(1, 10, 1, 12);
+    let back1 = apply_text_change(&step4, r_back2, "🦀").unwrap();
+    let back2 = apply_text_change(&back1, r_back1, "🦀").unwrap();
+    assert_eq!(
+        back2,
+        "반가워요 ✨ 세상 🚀 반가워요 ✨ 모두 🚀\n한글 🦀 테스트 🦀 한글\n"
+    );
 }

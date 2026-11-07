@@ -49,7 +49,7 @@ pub mod textmate;
 pub mod session;
 pub mod widget;
 
-pub use crate::bridge::{BridgeAction, DocumentWidgetState, SyntaxRuns, WidgetBridge};
+pub use crate::bridge::{apply_text_change, BridgeAction, DocumentWidgetState, SyntaxRuns, WidgetBridge};
 pub use crate::fallback::{fallback_for, vscode_fallback_url, ConnectOutcome, Fallback, FallbackTarget};
 pub use crate::engine::{CoreOptions, Effect, ExternalChange, Input, SessionCore, SessionUpdate};
 pub use crate::coords::{WidgetPos, WidgetRange};

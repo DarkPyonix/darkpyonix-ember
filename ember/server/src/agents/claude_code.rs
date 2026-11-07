@@ -511,23 +511,36 @@ fn question_reply(
 /// bool `multiSelect`. Two questions with the same text are refused too, because the reply is
 /// keyed by the text.
 fn parse_questions(input: &Value) -> Option<Vec<Question>> {
+    use crate::events::clean_question_text;
     let list = input.get("questions")?.as_array()?;
     if list.is_empty() {
         return None;
     }
     let mut out: Vec<Question> = Vec::new();
     for (i, q) in list.iter().enumerate() {
-        let text = q.get("question")?.as_str()?.to_string();
-        if out.iter().any(|o| o.text == text) {
+        let text = clean_question_text(q.get("question")?.as_str()?);
+        if text.is_empty() || out.iter().any(|o| o.text == text) {
             return None;
         }
-        let header = q.get("header").and_then(Value::as_str).map(str::to_string);
+        let header = q
+            .get("header")
+            .and_then(Value::as_str)
+            .map(clean_question_text)
+            .filter(|h| !h.is_empty());
         let mut options = Vec::new();
         if let Some(opts) = q.get("options") {
             for o in opts.as_array()? {
+                let label = clean_question_text(o.get("label")?.as_str()?);
+                if label.is_empty() {
+                    return None;
+                }
                 options.push(QuestionOption {
-                    label: o.get("label")?.as_str()?.to_string(),
-                    description: o.get("description").and_then(Value::as_str).map(str::to_string),
+                    label,
+                    description: o
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(clean_question_text)
+                        .filter(|d| !d.is_empty()),
                 });
             }
         }

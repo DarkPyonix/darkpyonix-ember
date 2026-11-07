@@ -384,6 +384,23 @@ impl EditorSession {
         self.send(Command::Input(Input::ExecuteCommand { id: id.into(), arguments }))
     }
 
+    /// Search the workspace folder (FR-E7): answered with [`SessionUpdate::SearchHits`] and one
+    /// [`SessionUpdate::SearchDone`] for `id`. A running search is cancelled.
+    pub fn search(&self, id: u64, request: crate::search::SearchRequest) -> Result<(), Error> {
+        let folder = self.workspace_uri();
+        self.send(Command::Input(Input::Search { id, request, folder }))
+    }
+
+    /// Stop search `id`; answered with [`SessionUpdate::SearchDone`] (`Cancelled`).
+    pub fn cancel_search(&self, id: u64) -> Result<(), Error> {
+        self.send(Command::Input(Input::CancelSearch { id }))
+    }
+
+    /// Replace the chosen matches (FR-E7); answered with [`SessionUpdate::ReplaceDone`].
+    pub fn replace(&self, id: u64, request: crate::search::ReplaceRequest) -> Result<(), Error> {
+        self.send(Command::Input(Input::Replace { id, request }))
+    }
+
     /// After [`SessionUpdate::Desync`]: re-send the session's text as a new generation.
     pub fn resync(&self, uri: UriComponents) -> Result<(), Error> {
         self.send(Command::Resync(uri))

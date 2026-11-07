@@ -22,6 +22,13 @@ pub enum HostCommand {
     IndexFiles,
     Delete { path: String, is_dir: bool },
     ExecuteCommand(String),
+    /// Search the project folder (FR-E7). `debounce` waits for a pause in typing first; a newer search
+    /// replaces one still waiting.
+    Search { id: u64, request: ember_editor::search::SearchRequest, debounce: bool },
+    /// A debounced search whose pause is over (sent by the host to itself).
+    SearchNow { id: u64, request: ember_editor::search::SearchRequest },
+    CancelSearch(u64),
+    Replace { id: u64, request: ember_editor::search::ReplaceRequest },
 }
 
 #[derive(Default)]
@@ -45,6 +52,8 @@ pub struct HostState {
     pub renamed: Vec<(String, String)>,
     /// Extension commands from contributes.commands.
     pub extension_commands: Vec<ember_editor::ContributedCommand>,
+    /// The search panel's matches and the last replace's report (FR-E7).
+    pub search: crate::ui::editor_search::SearchResults,
     pub updates: Vec<SessionUpdate>,
 }
 
@@ -88,8 +97,12 @@ impl HostState {
         self.listings.retain(|dir, _| !crate::ui::editor::is_at_or_below(dir, path));
     }
 
-    /// Handle one session update: connection loss is recorded, every update is queued in order.
+    /// Handle one session update: search and replace results go to the search panel, connection loss is
+    /// recorded, every other update is queued in order.
     pub fn apply_update(&mut self, update: SessionUpdate) {
+        if self.search.apply(&update) {
+            return;
+        }
         if let SessionUpdate::ConnectionLost { reason } = &update {
             self.connection_lost(reason);
         }
@@ -187,6 +200,7 @@ impl EditorHost {
         let state = Arc::new(Mutex::new(HostState::default()));
         let (tx, mut rx) = mpsc::unbounded_channel();
         let shared = state.clone();
+        let self_tx = tx.clone();
         crate::services::services().rt.spawn(async move {
             if target.endpoint.trim().is_empty() {
                 shared.lock().unwrap().error = HostState::missing_endpoint().error;
@@ -213,6 +227,8 @@ impl EditorHost {
             }
             *revision.write() += 1;
             let mut index_task: Option<tokio::task::JoinHandle<()>> = None;
+            // The newest search the window asked for: a debounced one that is no longer it is dropped.
+            let mut latest_search = 0u64;
             loop {
                 tokio::select! {
                     command = rx.recv() => match command {
@@ -261,6 +277,26 @@ impl EditorHost {
                             *revision.write() += 1;
                             index_task = Some(tokio::spawn(index_files(session.lister(), root.clone(), shared.clone(), revision)));
                         }
+                        Some(HostCommand::Search { id, request, debounce }) => {
+                            latest_search = id;
+                            if debounce {
+                                let tx = self_tx.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(std::time::Duration::from_millis(crate::ui::editor_search::SEARCH_DEBOUNCE_MS)).await;
+                                    let _ = tx.send(HostCommand::SearchNow { id, request });
+                                });
+                            } else {
+                                let _ = session.search(id, request);
+                            }
+                        }
+                        Some(HostCommand::SearchNow { id, request }) => {
+                            if id == latest_search { let _ = session.search(id, request); }
+                        }
+                        Some(HostCommand::CancelSearch(id)) => {
+                            if id == latest_search { latest_search = 0; }
+                            let _ = session.cancel_search(id);
+                        }
+                        Some(HostCommand::Replace { id, request }) => { let _ = session.replace(id, request); }
                         Some(HostCommand::Open(path)) => { let _ = session.open(session.uri(&path)); }
                         Some(HostCommand::Close(path)) => { let _ = session.close(session.uri(&path)); }
                         Some(HostCommand::Focus(path)) => { let _ = session.focus(session.uri(&path)); }
@@ -271,7 +307,16 @@ impl EditorHost {
                     },
                     update = updates.recv() => match update {
                         Some(update) => {
-                            shared.lock().unwrap().apply_update(update);
+                            // After a replace the search runs again so the list shows what is left.
+                            let refresh = {
+                                let mut state = shared.lock().unwrap();
+                                state.apply_update(update);
+                                state.search.take_refresh()
+                            };
+                            if let Some((id, request)) = refresh {
+                                latest_search = id;
+                                let _ = session.search(id, request);
+                            }
                         }
                         None => break,
                     }
@@ -329,6 +374,18 @@ mod tests {
         state.set_listing(Err::<Vec<(String, u32)>, _>("permission denied"));
         assert_eq!(state.error.as_deref(), Some("permission denied"));
         assert_eq!(state.entries.len(), 1);
+    }
+
+    #[test]
+    fn fr_e7_search_updates_go_to_the_panel_not_the_queue() {
+        use ember_editor::search::{SearchEnd, SearchRequest};
+        let mut state = HostState::default();
+        state.search.start(4, SearchRequest::default());
+        state.apply_update(SessionUpdate::SearchDone { id: 4, end: SearchEnd::Complete { limit_hit: false } });
+        assert!(state.updates.is_empty());
+        assert!(!state.search.running);
+        state.apply_update(lost("x"));
+        assert_eq!(state.updates.len(), 1);
     }
 
     #[test]

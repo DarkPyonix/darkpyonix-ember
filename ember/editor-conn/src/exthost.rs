@@ -45,6 +45,7 @@ pub mod proxy {
     pub const EXT_HOST_EXTENSION_SERVICE: &str = "ExtHostExtensionService";
     pub const EXT_HOST_WORKSPACE: &str = "ExtHostWorkspace";
     pub const EXT_HOST_FILE_SYSTEM_INFO: &str = "ExtHostFileSystemInfo";
+    pub const EXT_HOST_SEARCH: &str = "ExtHostSearch";
 
     pub const MAIN_THREAD_COMMANDS: &str = "MainThreadCommands";
     pub const MAIN_THREAD_DIAGNOSTICS: &str = "MainThreadDiagnostics";
@@ -53,6 +54,7 @@ pub mod proxy {
     pub const MAIN_THREAD_WINDOW: &str = "MainThreadWindow";
     pub const MAIN_THREAD_WORKSPACE: &str = "MainThreadWorkspace";
     pub const MAIN_THREAD_EXTENSION_SERVICE: &str = "MainThreadExtensionService";
+    pub const MAIN_THREAD_SEARCH: &str = "MainThreadSearch";
 }
 
 // ---- init data ------------------------------------------------------------------------------
@@ -633,6 +635,12 @@ pub enum MainThreadCall {
     RegisterCommand { id: String },
     UnregisterCommand { id: String },
     ExecuteCommand { id: String, args: Value },
+    /// `MainThreadSearch.$registerTextSearchProvider(handle, scheme)` (FR-E7).
+    RegisterTextSearchProvider { handle: i64, scheme: String },
+    /// `MainThreadSearch.$unregisterProvider(handle)`: any search provider kind.
+    UnregisterSearchProvider { handle: i64 },
+    /// `MainThreadSearch.$handleTextMatch(handle, session, IRawFileMatch2[])`: matches of a running search.
+    HandleTextMatch { handle: i64, session: i64, matches: Vec<crate::search::FileMatch> },
     Other { proxy: Option<&'static str>, method: String },
 }
 
@@ -690,6 +698,15 @@ impl MainThreadCall {
             (Some(proxy::MAIN_THREAD_COMMANDS), "$executeCommand") => {
                 Self::ExecuteCommand { id: arg_str(a, 0)?, args: arg_json(a, 1) }
             }
+            (Some(proxy::MAIN_THREAD_SEARCH), "$registerTextSearchProvider") => {
+                Self::RegisterTextSearchProvider { handle: arg_i64(a, 0)?, scheme: arg_str(a, 1)? }
+            }
+            (Some(proxy::MAIN_THREAD_SEARCH), "$unregisterProvider") => Self::UnregisterSearchProvider { handle: arg_i64(a, 0)? },
+            (Some(proxy::MAIN_THREAD_SEARCH), "$handleTextMatch") => Self::HandleTextMatch {
+                handle: arg_i64(a, 0)?,
+                session: arg_i64(a, 1)?,
+                matches: crate::search::parse_file_matches(&arg_json(a, 2))?,
+            },
             (proxy, _) => Self::Other { proxy, method: r.method.clone() },
         })
     }
@@ -772,6 +789,32 @@ mod tests {
                 }],
             }
         );
+    }
+
+    #[test]
+    fn fr_e7_parses_text_search_registration_and_matches() {
+        let r = req(proxy::MAIN_THREAD_SEARCH, "$registerTextSearchProvider", json!([1, "vscode-remote"]));
+        assert_eq!(
+            MainThreadCall::parse(&r).unwrap(),
+            MainThreadCall::RegisterTextSearchProvider { handle: 1, scheme: "vscode-remote".into() }
+        );
+        let r = req(proxy::MAIN_THREAD_SEARCH, "$unregisterProvider", json!([1]));
+        assert_eq!(MainThreadCall::parse(&r).unwrap(), MainThreadCall::UnregisterSearchProvider { handle: 1 });
+        let r = req(
+            proxy::MAIN_THREAD_SEARCH,
+            "$handleTextMatch",
+            json!([1, 3, [{"resource": {"$mid": 1, "scheme": "vscode-remote", "authority": "h", "path": "/w/a.rs"},
+                "results": [{"previewText": "foo", "rangeLocations": [{
+                    "source": {"startLineNumber": 0, "startColumn": 0, "endLineNumber": 0, "endColumn": 3},
+                    "preview": {"startLineNumber": 0, "startColumn": 0, "endLineNumber": 0, "endColumn": 3}}]}]}]]),
+        );
+        match MainThreadCall::parse(&r).unwrap() {
+            MainThreadCall::HandleTextMatch { handle, session, matches } => {
+                assert_eq!((handle, session), (1, 3));
+                assert_eq!(matches[0].matches[0].preview_text, "foo");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

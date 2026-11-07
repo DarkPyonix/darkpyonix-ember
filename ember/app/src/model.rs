@@ -183,6 +183,9 @@ pub fn preview(t: &Transcript) -> Option<String> {
         }
         TranscriptItem::ToolCall { name, .. } if !name.is_empty() => Some(format!("Tool: {name}")),
         TranscriptItem::Approval { tool, .. } => Some(format!("Approval requested: {tool}")),
+        TranscriptItem::Question { questions, .. } => {
+            questions.first().map(|q| format!("Question: {}", one_line(&q.text, 60)))
+        }
         TranscriptItem::Error { message, .. } => Some(one_line(message, 120)),
         _ => None,
     })

@@ -19,9 +19,10 @@ pub use crate::ui::home::{
     harness_block, kpis, mode_after_harness_change, composer_chip_budget, composer_chip_rows, composer_chip_width, mode_header, mode_picker_rows_pending, mode_tap, popover_width, model_catalog, modes_for, needs_approve_all,
     project_options, project_tile_line, resolve_cwd, shortcut_label, split_chip_rows,
     success_percent, title_from_message, CrewMember, Dash, Harness, HarnessBar, Kpi, ModelOption,
-    ModeRow, PermMode, ProjectTile, Selection, StatusCounts, ATTACH_UNSUPPORTED, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
-    EMPTY_CREW, EMPTY_HARNESS_USAGE, CiResult, GithubCard, GithubPill, INTEGRATIONS_TITLE, LATER_INTEGRATIONS, LATER_LINE, LATER_PILL, GITHUB_NAME, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
+    ModeRow, PermMode, ProjectTile, Selection, StatusCounts, ComposerAttachment, ATTACH_HINT, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
+    EMPTY_CREW, EMPTY_HARNESS_USAGE, CiResult, GithubCard, GithubPill, GithubSampleKind, INTEGRATIONS_TITLE, LATER_INTEGRATIONS, LATER_LINE, LATER_PILL, GITHUB_NAME, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
 };
+use crate::ui::home::{model_active_row, model_enter, model_row_detail, model_view, ModelEnter};
 use super::components::{
     AppButton, ButtonKind, Clickable, EmberField, EmberSheet, FieldOptions, FilterChip, Label,
     OptionSheet, PickChip, Pill, PillTone,
@@ -51,6 +52,11 @@ const MODEL_RAIL_WIDTH: f32 = 128.0;
 /// one row per mode with a shield (a warning triangle on the danger row), the title, a
 /// one-line description and a check on the chosen row. The bypass row is red. Tapping calls
 /// `on_tap(i)`; closing and the bypass confirmation belong to the caller.
+/// Keyboard: each row is a `Clickable`, which the renderer makes a focusable button (Tab, Enter,
+/// Space), named by its title and description. Not built: arrow keys between rows and focus on
+/// the chosen row when the picker opens (TODO(compose-rust#504): only Enter reaches the Host,
+/// compose-rust#100; request focus landed after the pinned v0.0.6), and the selected state for screen readers
+/// (TODO(compose-rust#460): `Modifier.selected` landed after v0.0.6).
 fn ModeBody(header: &str, rows: &[ModeRow], width: f32, on_tap: impl FnMut(usize) + Clone + 'static) {
     let p = ember_theme().palette;
     cu::Column().modifier(Modifier::new().width(width)).content(|| {
@@ -386,6 +392,22 @@ pub fn Dot(color: compose_rust::Color) {
     cu::Spacer().modifier(Modifier::new().size(8.0, 8.0).background(paint(color)).shape_role(ShapeRole::Full));
 }
 
+/// A legend dot: solid in `solid`, or an 8 px hatched square in `hatch` (the bars' hatch, FR-L23).
+fn DotOrHatch(hatched: bool, hatch: compose_rust::Color, solid: compose_rust::Color) {
+    if !hatched {
+        Dot(solid);
+        return;
+    }
+    // The bars' pattern: same colour for fill and lines, same step (`legend_hatch_style`).
+    // TODO(compose-rust#428, #429): the dots have no accessible label; the Label beside them is the text.
+    let (step, _alpha) = usage::legend_hatch_style();
+    let mut list = DrawList::builder().round_rect(paint(hatch), 0.0, 0.0, 8.0, 8.0, 2.0, 1.0);
+    for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(0.0, 0.0, 8.0, 8.0, step) {
+        list = list.line(paint(hatch), x1, y1, x2, y2, 1.0);
+    }
+    cu::Canvas(list.build()).modifier(Modifier::new().size(8.0, 8.0));
+}
+
 // ---------------------------------------------------------------------------------------------
 // The screen
 // ---------------------------------------------------------------------------------------------
@@ -488,6 +510,12 @@ pub fn HomeScreen() {
     let _ = ui.live.launcher.get();
     let dash = services().client.read(crate::ui::home::read_dash);
 
+    // Initial fetch when HomeScreen mounts directly (and `shell()` also triggers on route transitions to Home, FR-L35, #621).
+    let _requested = remember(|| {
+        crate::bridge::request_github_summary();
+        0u8
+    });
+
     // The lists are modals; they sit beside the scroller so no parent's spacing counts them.
     let composer = remember(|| Composer::new());
     let skip = Skip::from_env(EST_HERO + EST_HEAD + EST_TREND + EST_USAGE + EST_SMALL + EST_EFF + EST_PROJ, window.height_dp);
@@ -510,6 +538,10 @@ pub fn HomeScreen() {
 struct Composer {
     selection: MutableState<Selection>,
     typed: MutableState<String>,
+    attachments: MutableState<Vec<ComposerAttachment>>,
+    attachment_open: MutableState<bool>,
+    attachment_path: MutableState<String>,
+    attachment_error: MutableState<Option<String>>,
     suggestion: MutableState<Option<String>>,
     busy: MutableState<bool>,
     open: MutableState<Option<Pick>>,
@@ -527,6 +559,10 @@ impl Composer {
                 None => Selection::initial(),
             }),
             typed: mutable_state_of(String::new()),
+            attachments: mutable_state_of(Vec::new()),
+            attachment_open: mutable_state_of(false),
+            attachment_path: mutable_state_of(String::new()),
+            attachment_error: mutable_state_of(None),
             suggestion: mutable_state_of(initial_suggestion()),
             busy: mutable_state_of(false),
             open: mutable_state_of(initial_pick()),
@@ -563,8 +599,22 @@ impl Composer {
             .unwrap_or_else(|| "이 서버".to_string())
     }
 
+    fn add_attachment(&self) {
+        let mut items = self.attachments.get_untracked();
+        match crate::ui::home::stage_attachment(&mut items, &self.attachment_path.get_untracked()) {
+            Ok(()) => {
+                self.attachments.set(items);
+                self.attachment_error.set(None);
+                self.attachment_open.set(false);
+            }
+            Err(e) => self.attachment_error.set(Some(e.to_string())),
+        }
+    }
+
     fn send(&self, ui: &SharedUi) {
         let message = effective_message(&self.typed.get_untracked(), self.suggestion.get_untracked().as_deref());
+        let staged = self.attachments.get_untracked();
+        let message = crate::ui::home::attachment_message(&message, &staged);
         if !can_send(&message, self.busy.get_untracked()) {
             return;
         }
@@ -602,7 +652,7 @@ impl Composer {
             cwd,
         };
         let project_name = sel.project.clone();
-        let (ui, busy) = (ui.clone(), self.busy.clone());
+        let (ui, busy, attachments) = (ui.clone(), self.busy.clone(), self.attachments.clone());
         run_shared(
             async move {
                 let s = services();
@@ -625,6 +675,9 @@ impl Composer {
                 busy.set(false);
                 match r {
                     Ok((rec, note)) => {
+                        let mut remaining = attachments.get_untracked();
+                        remaining.retain(|item| !staged.contains(item));
+                        attachments.set(remaining);
                         ui.update_prefs(|p| {
                             p.last_used.insert(project_name.clone(), remember);
                             p.last_project = Some(project_name);
@@ -742,36 +795,57 @@ impl Composer {
         });
     }
 
+    /// Closing the model picker: the next opening starts on the chosen harness with an empty
+    /// search, as the mockup's `open()` does (the search field is new each time it opens).
+    fn close_model(&self) -> impl FnMut() + Clone + 'static {
+        let (o, f, q) = (self.open.clone(), self.harness_filter.clone(), self.query.clone());
+        move || {
+            f.set(None);
+            q.set(String::new());
+            if o.get_untracked() == Some(Pick::Model) {
+                o.set(None);
+            }
+        }
+    }
+
     /// The model picker as a modal (compact widths, where the spec asks for a bottom sheet):
     /// harness chips on top, search and the rows with their reasons (FR-L15).
     fn model_sheet(&self, ui: &SharedUi, sel: &Selection, open: bool, close: impl FnMut() + Clone + 'static) {
-        EmberSheet("모델 선택", open, close.clone(), None, || {
-            self.model_body(ui, sel, false, close);
+        let mut reset = self.close_model();
+        let mut close = close;
+        let dismiss = move || {
+            reset();
+            close();
+        };
+        EmberSheet("모델 선택", open, dismiss.clone(), None, || {
+            self.model_body(ui, sel, false, dismiss);
         });
     }
 
     /// The model picker as a popover hanging under the model chip (FR-L15, mockup v8 `.mpick`):
     /// a left rail of harnesses, then search and the rows. The toolkit `Menu` places its popup
-    /// below its anchor since compose-rust v0.0.5 (#383), with any content as its entries.
-    /// Not built: the rail's favourites group, favourite stars and profile names, which need
-    /// stored favourites and FR-L17 profiles (SPEC FR-L15 note).
+    /// below its anchor since compose-rust v0.0.5 (#383), with any content as its entries; the
+    /// popup is a focusable platform popup, so Escape and a click outside call `on_dismiss`.
+    /// Not built: the rail's favourites group and the favourite stars (no place stores them),
+    /// profile names (FR-L17 profiles are not built), arrow keys and `Ctrl+number`: the pinned
+    /// toolkit delivers only Enter to the Host (TODO(compose-rust#504) for arrows and focus in
+    /// the popup, TODO(compose-rust#100) for `Ctrl+number`).
     fn model_popover(&self, ui: &SharedUi, sel: &Selection, anchor: impl FnOnce(), close: impl FnMut() + Clone + 'static) {
         let open = self.open.get() == Some(Pick::Model);
-        let dismiss = {
-            let o = self.open.clone();
-            move || {
-                if o.get_untracked() == Some(Pick::Model) {
-                    o.set(None);
-                }
-            }
+        let mut reset = self.close_model();
+        let mut close = close;
+        let dismiss = move || {
+            reset();
+            close();
         };
-        cu::Menu(open).on_dismiss(dismiss).anchor(anchor).content(|| {
-            self.model_body(ui, sel, true, close);
+        cu::Menu(open).on_dismiss(dismiss.clone()).anchor(anchor).content(|| {
+            self.model_body(ui, sel, true, dismiss);
         });
     }
 
-    /// The picker's contents. With `rail` the harness filter is a vertical rail at the left
-    /// and the list is a fixed-width column beside it; without, chips run along the top.
+    /// The picker's contents. With `rail` the harness switch is a vertical rail at the left
+    /// and the list is a fixed-width column beside it; without, chips run along the top. Either
+    /// way it opens on the chosen model's harness and has no "all" entry (mockup v8).
     fn model_body(&self, ui: &SharedUi, sel: &Selection, rail: bool, close: impl FnMut() + Clone + 'static) {
         let p = ember_theme().palette;
         let agents: Vec<(String, bool)> = ui.live.agents.get().iter().map(|a| (a.kind.clone(), a.installed)).collect();
@@ -788,68 +862,92 @@ impl Composer {
                 .collect()
         };
         let all = model_catalog();
-        let filter = self.harness_filter.get();
+        let view = model_view(self.harness_filter.get(), sel.option.harness);
         let query = self.query.get();
-        let rows = filter_models(&all, filter, &query);
-        let filters = || {
-            let f = self.harness_filter.clone();
-            FilterChip("전체", filter.is_none(), move || f.set(None));
-            for h in Harness::ALL {
-                cu::Spacer().modifier(Modifier::new().width(SP[0]).height(SP[0]));
-                let f = self.harness_filter.clone();
-                FilterChip(h.label(), filter == Some(h), move || f.set(Some(h)));
-            }
-        };
+        let rows = filter_models(&all, Some(view), &query);
+        let active = model_active_row(&rows, sel.option, &query);
+        let blocks: Vec<Option<&'static str>> = rows.iter().map(|o| harness_block(o.harness, &agents, &limited)).collect();
+        // The search field keeps what was typed on its own (it is uncontrolled), so a rail tap
+        // that clears the query gives the field a new identity, which starts empty.
+        let field_gen = remember(|| mutable_state_of(0u32));
         let list = || {
             cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                 let q = self.query.clone();
-                EmberField(FieldOptions {
-                    fill_max_width: true,
-                    placeholder: "모델 검색".to_string(),
-                    on_value_change: Some(Box::new(move |v| q.set(v))),
-                    ..Default::default()
+                // Enter takes the active row (FR-L15): the chosen row, or the first match once
+                // something is typed. A blocked row says why and the picker stays open.
+                let enter = {
+                    let (rows, current, query) = (rows.clone(), sel.option, query.clone());
+                    let (agents, limited) = (agents.clone(), limited.clone());
+                    let (selection, mut done) = (self.selection.clone(), close.clone());
+                    move |_: String| match model_enter(&rows, current, &query, |h| harness_block(h, &agents, &limited)) {
+                        ModelEnter::Choose(o) => {
+                            selection.set(selection.get_untracked().with_option(o));
+                            done();
+                        }
+                        ModelEnter::Blocked(reason) => notice::post(reason),
+                        ModelEnter::Nothing => {}
+                    }
+                };
+                compose_rust::runtime::key(field_gen.get(), || {
+                    EmberField(FieldOptions {
+                        fill_max_width: true,
+                        placeholder: "모델 검색".to_string(),
+                        text: Some(query.clone()),
+                        on_value_change: Some(Box::new(move |v| q.set(v))),
+                        on_submit: Some(Box::new(enter)),
+                        ..Default::default()
+                    })
                 });
                 if rows.is_empty() {
-                    Label("맞는 모델이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                    Label("일치하는 모델이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
                 }
                 cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(320.0)).content(|| {
                     cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
                         for (i, o) in rows.iter().copied().enumerate() {
-                            let block = harness_block(o.harness, &agents, &limited);
-                            let (selection, open, mut dismiss) = (self.selection.clone(), self.open.clone(), close.clone());
-                            let fill = if o == sel.option { paint(p.sel) } else { paint(compose_rust::Color::argb(0)) };
-                            let m = Modifier::new().fill_max_width().height(40.0).background(fill).corner_radius(CORNER_SM);
-                            // A row: the name at the left, the harness and the shortcut in columns.
-                            // TODO(compose-rust#372): a pointer-up `Clickable`.
+                            let block = blocks[i];
+                            let (selection, mut done) = (self.selection.clone(), close.clone());
+                            // `.mp-row.on` is the chosen row, `.mp-row.act` the one Enter takes.
+                            let fill = if o == sel.option {
+                                paint(p.sel)
+                            } else if active == Some(i) && !query.trim().is_empty() {
+                                paint(p.hover)
+                            } else {
+                                paint(compose_rust::Color::argb(0))
+                            };
+                            let m = Modifier::new().fill_max_width().height(56.0).background(fill).corner_radius(CORNER_SM);
+                            // A row: the name over the harness (and why it cannot be chosen),
+                            // the shortcut at the right. A blocked row says why when tapped.
                             Clickable(
                                 if block.is_some() { m.alpha(0.5) } else { m },
                                 Alignment::CenterStart,
-                                move || {
-                                    if block.is_none() {
+                                move || match block {
+                                    Some(reason) => notice::post(reason),
+                                    None => {
                                         selection.set(selection.get_untracked().with_option(o));
-                                        open.set(None);
-                                        dismiss();
+                                        done();
                                     }
                                 },
                                 || {
                                     cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                                        Label(&o.row_title(), Fs::Md, Weight::Medium, None, Some(1));
-                                        cu::Spacer().modifier(Modifier::new().weight(1.0));
-                                        Label(o.harness.label(), Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+                                        cu::Spacer().modifier(Modifier::new().width(SP[3]));
+                                        cu::Column().spacing(2.0).modifier(Modifier::new().weight(1.0)).content(|| {
+                                            Label(&o.row_title(), Fs::Md, Weight::Semibold, None, Some(1));
+                                            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                                                NavIcon(harness_glyph(o.harness), harness_tint(o.harness), 14.0);
+                                                let tone = if block.is_some() { p.red.strong } else { p.muted };
+                                                Label(&model_row_detail(&o, block), Fs::Sm, Weight::Regular, Some(paint(tone)), Some(1));
+                                            });
+                                        });
                                         cu::Spacer().modifier(Modifier::new().width(SP[2]));
                                         cu::Row().modifier(Modifier::new().width(56.0)).content(|| {
                                             if let Some(k) = shortcut_label(i) {
-                                                Label(&k, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                                                Label(&k, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
                                             }
                                         });
                                         cu::Spacer().modifier(Modifier::new().width(SP[2]));
                                     });
                                 },
                             );
-                            if let Some(reason) = block {
-                                Label(reason, Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
-                            }
                         }
                     });
                 });
@@ -860,23 +958,91 @@ impl Composer {
                 .width(popover_width(MODEL_POPOVER_WIDTH, compose_rust::runtime::current_window_size().width_dp))
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
-                .corner_radius(CORNER_MD)
-                .padding(SP[1]);
-            cu::Row().modifier(surface).content(|| {
-                cu::Column().spacing(SP[0]).modifier(Modifier::new().width(MODEL_RAIL_WIDTH).padding(SP[1])).content(|| {
-                    filters();
-                });
-                cu::Box().modifier(Modifier::new().weight(1.0).padding(SP[1])).content(list);
+                .corner_radius(CORNER_MD);
+            // `equal_height`: the rail's `surface-2` runs the popover's full height.
+            cu::Row().equal_height(true).modifier(surface).content(|| {
+                // `.mp-rail`: `surface-2`, one entry per harness, the open one marked.
+                // TODO(compose-rust#460): icon-only 36 dp entries in a 52 dp rail as in the
+                // mockup once the pinned toolkit has the label modifier; until then each entry
+                // keeps its harness name as text, which is what names it to a screen reader.
+                cu::Column()
+                    .spacing(SP[0])
+                    .modifier(Modifier::new().width(MODEL_RAIL_WIDTH).fill_max_height().background(paint(p.surface_2)).padding(SP[1]))
+                    .content(|| {
+                        for h in Harness::ALL {
+                            let (f, q, g) = (self.harness_filter.clone(), self.query.clone(), field_gen.clone());
+                            RailEntry(h, view == h && query.trim().is_empty(), move || {
+                                if !q.get_untracked().is_empty() {
+                                    q.set(String::new());
+                                    g.set(g.get_untracked().wrapping_add(1));
+                                }
+                                f.set(Some(h));
+                            });
+                        }
+                    });
+                cu::Box().modifier(Modifier::new().weight(1.0).padding(SP[2])).content(list);
             });
         } else {
             cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[3])).content(|| {
                 cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
-                    filters();
+                    for h in Harness::ALL {
+                        cu::Spacer().modifier(Modifier::new().width(SP[0]).height(SP[0]));
+                        let f = self.harness_filter.clone();
+                        FilterChip(h.label(), view == h, move || f.set(Some(h)));
+                    }
                 });
                 list();
             });
         }
     }
+}
+
+/// One entry of the model popover's rail (mockup `.mp-rail-b`): the harness glyph in its vendor
+/// colour and the harness name, on `sel` with the 3 dp blue bar at the right edge when open.
+fn RailEntry(h: Harness, on: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let bg = if on { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
+    Clickable(
+        Modifier::new().fill_max_width().height(36.0).background(bg).corner_radius(CORNER_SM),
+        Alignment::CenterStart,
+        on_click,
+        || {
+            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                NavIcon(harness_glyph(h), harness_tint(h), 20.0);
+                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                Label(h.label(), Fs::Sm, if on { Weight::Semibold } else { Weight::Regular }, None, Some(1));
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                if on {
+                    cu::Spacer().modifier(Modifier::new().size(3.0, 20.0).background(paint(p.blue.strong)).corner_radius(2.0));
+                }
+            });
+        },
+    );
+}
+
+/// The harness glyphs of mockup v8 (`core.js` `GLYPH`), drawn in `currentColor`.
+const GLYPH_CLAUDE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" fill="none"/></svg>"#;
+const GLYPH_CODEX: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path d="M12 2.8 20 7.4v9.2l-8 4.6-8-4.6V7.4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" fill="none"/><path d="M8.5 10l2.5 2-2.5 2M12.5 14.5h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>"#;
+const GLYPH_GEMINI: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path d="M12 2.5c.6 5.2 4.3 8.9 9.5 9.5-5.2.6-8.9 4.3-9.5 9.5-.6-5.2-4.3-8.9-9.5-9.5 5.2-.6 8.9-4.3 9.5-9.5z" fill="currentColor"/></svg>"#;
+
+fn harness_glyph(h: Harness) -> &'static str {
+    match h {
+        Harness::ClaudeCode => GLYPH_CLAUDE,
+        Harness::Codex => GLYPH_CODEX,
+        Harness::Gemini => GLYPH_GEMINI,
+    }
+}
+
+/// `--v-claude`, `--v-codex`, `--v-gemini`: orange, blue and sky.
+fn harness_tint(h: Harness) -> u32 {
+    let p = ember_theme().palette;
+    match h {
+        Harness::ClaudeCode => p.orange.strong,
+        Harness::Codex => p.blue.strong,
+        Harness::Gemini => p.sky.strong,
+    }
+    .to_argb()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1047,7 +1213,7 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     let sel = c.selection.get();
     let (_, computers) = c.live(ui);
     let message = effective_message(&c.typed.get(), c.suggestion.get().as_deref());
-    let sendable = can_send(&message, c.busy.get());
+    let sendable = can_send(&crate::ui::home::attachment_message(&message, &c.attachments.get()), c.busy.get());
     let placeholder = c.suggestion.get().unwrap_or_else(|| COMPOSER_PLACEHOLDER.to_string());
     let computer_text = crate::ui::home::computer_chip_text(sel.computer.as_deref(), &computers);
     let computer_text = if sel.computer.is_none() { c.local_name(ui) } else { computer_text };
@@ -1062,12 +1228,8 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
         ComposerChip(text, icon, chip_has_chevron(pick), selected, icon_only && pick != Pick::Project, icon_only && pick == Pick::Project, move || open.set(Some(pick)));
     };
     let add = || {
-        // TODO(compose-rust#483, #500): attachments need the file picker (planned for v0.0.8)
-        // and an upload API. Until then the button is dimmed and says why when tapped.
-        // TODO(compose-rust#429): the dimmed wrapper has no disabled accessible name.
-        cu::Box().modifier(Modifier::new().alpha(0.5)).content(|| {
-            super::components::IconButton(IconRole::Add, true, || notice::post(ATTACH_UNSUPPORTED));
-        });
+        let open = c.attachment_open.clone();
+        super::components::IconButton(IconRole::Add, true, move || open.set(!open.get_untracked()));
     };
     let send = || {
         let (c2, ui2) = (c.clone(), ui.clone());
@@ -1089,6 +1251,35 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
         )
         .content(|| {
             cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                for item in c.attachments.get() {
+                    let attachments = c.attachments.clone();
+                    let path = item.path.clone();
+                    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                        Label(&item.name, Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                        PickChip("×", None, false, false, move || {
+                            let mut items = attachments.get_untracked();
+                            items.retain(|item| item.path != path);
+                            attachments.set(items);
+                        });
+                    });
+                }
+                if c.attachment_open.get() {
+                    Label(ATTACH_HINT, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                    let path = c.attachment_path.clone();
+                    let add = c.clone();
+                    EmberField(FieldOptions {
+                        fill_max_width: true,
+                        placeholder: "파일의 절대 경로".to_string(),
+                        on_value_change: Some(Box::new(move |v| path.set(v))),
+                        on_submit: Some(Box::new(move |_| add.add_attachment())),
+                        ..Default::default()
+                    });
+                    if let Some(error) = c.attachment_error.get() {
+                        Label(&error, Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), Some(2));
+                    }
+                    let add = c.clone();
+                    PickChip("첨부", None, false, false, move || add.add_attachment());
+                }
                 let (typed, ui2, c2) = (c.typed.clone(), ui.clone(), c.clone());
                 // TODO(compose-rust#374, #376): the field is uncontrolled with no initial value
                 // and carries the toolkit frame, so a suggestion shows as the placeholder.
@@ -1265,15 +1456,13 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
 fn IntegrationsArea() {
     let p = ember_theme().palette;
     let s = services();
-    let _requested = remember(|| {
-        crate::bridge::request_github_summary();
-        0u8
-    });
     let demo = s.demo.is_some();
     let fetched = s.ui.live.github.get();
-    let sample = demo.then(crate::demo::github_state);
-    let card = GithubCard::from_state(if demo { sample.as_ref() } else { fetched.state() });
-    let header_line = if demo { crate::ui::home::sample_header(&card.header_line) } else { card.header_line.clone() };
+    let hook_sample = crate::ui::home::github_sample_from_env();
+    let is_sample = demo || hook_sample.is_some();
+    let sample = hook_sample.or_else(|| demo.then(crate::demo::github_state));
+    let card = GithubCard::from_state(if is_sample { sample.as_ref() } else { fetched.state() });
+    let header_line = if is_sample { crate::ui::home::sample_header(&card.header_line) } else { card.header_line.clone() };
     let guidance = remember(|| mutable_state_of(false));
     cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
         Label(INTEGRATIONS_TITLE, Fs::Lg, Weight::Semibold, None, Some(1));
@@ -1447,16 +1636,26 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
         if h > 0.0 {
             let color = paint(if i == now { p.orange.strong } else { p.grey.strong });
             list = list.round_rect(color, x, y, w, h, 3.0, 1.0);
-            for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(x, y, w, h, 5.0) {
+            for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(x, y, w, h, usage::legend_hatch_style().0) {
                 list = list.line(color, x1, y1, x2, y2, 1.0);
             }
         }
     }
     let commands = list.build();
+    let legend = usage::cost_legend(
+        usage::period_cost(&load, days.get()).is_some(),
+        usage::window_total(&load, days.get()).is_some(),
+        layout(compose_rust::runtime::current_window_size().width_dp).compact,
+    );
     let first = series.first().map(|(d, _)| d.clone()).unwrap_or_default();
     let last = series.last().map(|(d, _)| d.clone()).unwrap_or_default();
     Tile(|| {
         CardHead(shell::ICON_GAUGE_SVG, "비용과 토큰 추이", || {
+            for e in &legend {
+                DotOrHatch(e.hatched, p.grey.strong, p.text);
+                Label(e.label, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            }
             for n in [7usize, 14] {
                 let d = days.clone();
                 // The mockup's toggle pill is 42 x 26.
@@ -1479,8 +1678,6 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
                 cu::Spacer().modifier(Modifier::new().width(SP[0]));
             }
         });
-        // Legend above the chart: says what the bars are.
-        Label(&usage::cost_legend(&load, days.get()), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         cu::Canvas(commands).modifier(Modifier::new().size(chart_w, H + 1.0));
         cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
             Label(&first, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -1908,6 +2105,23 @@ mod tests {
     }
 
     #[test]
+    fn fr_l11_attachment_bar_and_chip_render() {
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| {
+            let c = Composer::new();
+            c.attachment_open.set(true);
+            c.attachments.set(vec![ComposerAttachment { path: "/sample/file.png".into(), name: "file.png".into() }]);
+            ComposerCard(&c, shared_ui(), 720.0, layout(1440.0));
+        })));
+        let bytes = host.rebuild().expect("rebuild");
+        let batch = decode_batch(bytes).expect("decode");
+        let all = texts(&batch);
+        for expected in ["file.png", "×", ATTACH_HINT, "파일의 절대 경로"] {
+            assert!(all.iter().any(|text| text == expected), "missing {expected}: {all:?}");
+        }
+    }
+
+    #[test]
     fn fr_l11_composer_layout() {
         assert_eq!(suggestion_cols(1440.0), 3);
         assert_eq!(suggestion_cols(768.0), 2);
@@ -2042,6 +2256,191 @@ mod tests {
             .collect()
     }
 
+    /// What the tests read off the wire, kept across batches: node ids stay the same.
+    #[derive(Default)]
+    struct Tree {
+        text: std::collections::HashMap<u32, String>,
+        placeholder: std::collections::HashMap<u32, String>,
+        /// (node, property) to handler id: `PropertyKind` is not `Hash`, so a list.
+        handler: Vec<(u32, PropertyKind, u64)>,
+        parent: std::collections::HashMap<u32, u32>,
+        /// Texts in the order they were last sent.
+        sent: Vec<String>,
+    }
+
+    use compose_rust::schema::PropertyKind;
+
+    impl Tree {
+        fn read(&mut self, bytes: &[u8]) {
+            self.sent.clear();
+            for m in decode_batch(bytes).expect("decode") {
+                match m {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        self.text.insert(node_id, s.to_string());
+                        self.sent.push(s.to_string());
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::Placeholder, value: PropertyValue::String(s) } => {
+                        self.placeholder.insert(node_id, s.to_string());
+                    }
+                    Mutation::SetProp { node_id, property, value: PropertyValue::Integer(h) } => {
+                        self.handler.retain(|(n, k, _)| !(*n == node_id && *k == property));
+                        self.handler.push((node_id, property, h as u64));
+                    }
+                    Mutation::Insert { parent_id, node_id, .. } => {
+                        self.parent.insert(node_id, parent_id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn has(&self, want: &str) -> bool {
+            self.text.values().any(|t| t == want)
+        }
+
+        /// The clickable container around the text `label`: its node and click handler.
+        fn click_target(&self, label: &str) -> (u32, u64) {
+            let mut node = *self.text.iter().find(|(_, t)| t.as_str() == label).unwrap_or_else(|| panic!("no text {label}")).0;
+            loop {
+                if let Some(h) = self.handler_of(node, PropertyKind::OnClick) {
+                    return (node, h);
+                }
+                node = *self.parent.get(&node).unwrap_or_else(|| panic!("{label} has no clickable ancestor"));
+            }
+        }
+
+        /// The text field with this placeholder and its handler for `property`.
+        fn field(&self, placeholder: &str, property: PropertyKind) -> (u32, u64) {
+            let node = *self.placeholder.iter().find(|(_, t)| t.as_str() == placeholder).expect("field").0;
+            (node, self.handler_of(node, property).expect("handler"))
+        }
+
+        fn handler_of(&self, node: u32, property: PropertyKind) -> Option<u64> {
+            self.handler.iter().find(|(n, k, _)| *n == node && *k == property).map(|(_, _, h)| *h)
+        }
+    }
+
+    thread_local! {
+        static PICKER: std::cell::RefCell<Option<Composer>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// The composer card at 1440 dp with the model picker open, and the composer it draws.
+    fn model_picker_host() -> (Host, Tree, Composer) {
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let c = remember(|| {
+                    let c = Composer::new();
+                    c.open.set(Some(Pick::Model));
+                    c
+                });
+                PICKER.with(|p| *p.borrow_mut() = Some(c.clone()));
+                ComposerCard(&c, shared_ui(), composer_width(1390.0), layout(1440.0));
+            }))
+        });
+        let mut tree = Tree::default();
+        tree.read(host.rebuild().expect("rebuild"));
+        let c = PICKER.with(|p| p.borrow().clone()).expect("composed");
+        (host, tree, c)
+    }
+
+    fn click(host: &mut Host, tree: &mut Tree, label: &str) {
+        let (node_id, handler_id) = tree.click_target(label);
+        let (bytes, _) = host.dispatch(HostEvent { node_id, handler_id, payload: compose_rust::EventPayload::Clicked }).expect("click");
+        tree.read(bytes);
+    }
+
+    #[test]
+    fn fr_l15_model_popover_opens_on_the_chosen_harness_with_a_harness_rail() {
+        let _guard = crate::services::test_guard();
+        let (_host, tree, c) = model_picker_host();
+        assert_eq!(c.selection.get_untracked().option.harness, Harness::ClaudeCode);
+        for h in Harness::ALL {
+            assert!(tree.has(h.label()), "rail entry {}", h.label());
+        }
+        assert!(!tree.has("전체"), "the rail has no all entry (mockup v8)");
+        assert!(tree.has("Opus 5.5 (높음)") && tree.has("Haiku 5.5 (낮음)"));
+        assert!(!tree.has("GPT-5 (높음)"), "only the chosen harness is listed");
+        assert!(tree.has("Ctrl+1"));
+    }
+
+    #[test]
+    fn fr_l15_rail_tap_lists_that_harness_and_a_row_tap_chooses_and_closes() {
+        let _guard = crate::services::test_guard();
+        let (mut host, mut tree, c) = model_picker_host();
+        click(&mut host, &mut tree, "Codex");
+        assert!(tree.has("GPT-5 mini (보통)"), "codex rows after the rail tap: {:?}", tree.sent);
+        click(&mut host, &mut tree, "GPT-5 mini (보통)");
+        let sel = c.selection.get_untracked();
+        assert_eq!((sel.option.harness, sel.option.model, sel.option.effort), (Harness::Codex, "gpt-5-mini", Some("Medium")));
+        assert_eq!(c.open.get_untracked(), None, "choosing closes the picker");
+        assert_eq!(c.harness_filter.get_untracked(), None, "the next opening starts on the chosen harness");
+    }
+
+    #[test]
+    fn fr_l15_enter_in_the_search_chooses_the_first_match() {
+        let _guard = crate::services::test_guard();
+        let (mut host, mut tree, c) = model_picker_host();
+        let (node_id, handler_id) = tree.field("모델 검색", PropertyKind::OnValueChange);
+        let (bytes, _) = host
+            .dispatch(HostEvent { node_id, handler_id, payload: compose_rust::EventPayload::TextChanged("sonnet 보통") })
+            .expect("type");
+        tree.read(bytes);
+        let (node_id, handler_id) = tree.field("모델 검색", PropertyKind::OnSubmit);
+        let (bytes, _) = host
+            .dispatch(HostEvent { node_id, handler_id, payload: compose_rust::EventPayload::TextSubmitted("sonnet 보통") })
+            .expect("enter");
+        tree.read(bytes);
+        let sel = c.selection.get_untracked();
+        assert_eq!((sel.option.model, sel.option.effort), ("sonnet", Some("Medium")));
+        assert_eq!(c.open.get_untracked(), None);
+        assert_eq!(c.query.get_untracked(), "", "the search starts empty next time");
+    }
+
+    #[test]
+    fn fr_l15_enter_on_a_blocked_model_keeps_the_picker_open() {
+        let _guard = crate::services::test_guard();
+        let (mut host, mut tree, c) = model_picker_host();
+        let before = c.selection.get_untracked();
+        let (node_id, handler_id) = tree.field("모델 검색", PropertyKind::OnValueChange);
+        let (bytes, _) = host
+            .dispatch(HostEvent { node_id, handler_id, payload: compose_rust::EventPayload::TextChanged("gemini flash") })
+            .expect("type");
+        tree.read(bytes);
+        assert!(tree.has("Gemini · 준비 중입니다"), "the row says why: {:?}", tree.sent);
+        let (node_id, handler_id) = tree.field("모델 검색", PropertyKind::OnSubmit);
+        host.dispatch(HostEvent { node_id, handler_id, payload: compose_rust::EventPayload::TextSubmitted("gemini flash") })
+            .expect("enter");
+        assert_eq!(c.selection.get_untracked(), before);
+        assert_eq!(c.open.get_untracked(), Some(Pick::Model));
+    }
+
+    #[test]
+    fn fr_l16_mode_popover_lists_titles_and_descriptions_and_a_tap_applies() {
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let c = remember(|| {
+                    let c = Composer::new();
+                    c.open.set(Some(Pick::Mode));
+                    c
+                });
+                PICKER.with(|p| *p.borrow_mut() = Some(c.clone()));
+                ComposerCard(&c, shared_ui(), composer_width(1390.0), layout(1440.0));
+            }))
+        });
+        let mut tree = Tree::default();
+        tree.read(host.rebuild().expect("rebuild"));
+        let c = PICKER.with(|p| p.borrow().clone()).expect("composed");
+        assert!(tree.has("권한 모드 \u{b7} Claude Code"));
+        for m in modes_for(Harness::ClaudeCode) {
+            assert!(tree.has(m.label()) && tree.has(m.description()), "{m:?}");
+        }
+        // Edits applies at once and closes the picker.
+        click(&mut host, &mut tree, PermMode::Edits.label());
+        assert_eq!(c.selection.get_untracked().mode, PermMode::Edits);
+        assert_eq!(c.open.get_untracked(), None);
+    }
+
     #[test]
     fn fr_l11_home_shows_the_greeting_the_composer_and_the_dashboard() {
         use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
@@ -2075,5 +2474,27 @@ mod tests {
             assert!(has(s), "missing suggestion {s}");
         }
         compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l35_home_requests_github_summary_on_mount_and_on_returning_to_home() {
+        let _guard = crate::services::test_guard();
+        let ui = shared_ui();
+        ui.set_menu(crate::ui::shell::NavMenu::Home);
+        let before = crate::bridge::github_request_count();
+        let mut host = Host::new(|| Box::new(Recomposer::new(HomeScreen)));
+        host.rebuild().expect("first home mount");
+        let after_mount = crate::bridge::github_request_count();
+        assert_eq!(after_mount, before + 1);
+
+        // Staying on Home and rebuilding does not re-request.
+        host.rebuild().expect("still on home");
+        assert_eq!(crate::bridge::github_request_count(), after_mount);
+
+        // Switching to another menu does not request; returning to Home requests immediately.
+        ui.set_menu(crate::ui::shell::NavMenu::Projects);
+        assert_eq!(crate::bridge::github_request_count(), after_mount);
+        ui.set_menu(crate::ui::shell::NavMenu::Home);
+        assert_eq!(crate::bridge::github_request_count(), after_mount + 1);
     }
 }

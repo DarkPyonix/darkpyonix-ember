@@ -9,6 +9,7 @@ pub(crate) fn item_key(item: &TranscriptItem) -> String {
         | TranscriptItem::Assistant { seq, .. }
         | TranscriptItem::ToolCall { seq, .. }
         | TranscriptItem::Approval { seq, .. }
+        | TranscriptItem::Question { seq, .. }
         | TranscriptItem::TurnEnded { seq, .. }
         | TranscriptItem::Error { seq, .. }
         | TranscriptItem::Notice { seq, .. } => *seq,

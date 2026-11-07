@@ -18,11 +18,11 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use compose_rust::runtime::{
-    MutableState, current_window_size, launched_effect, mutable_state_of, remember,
-    remember_with_key,
+    MutableState, current_window_size, delay, disposable_effect, launched_effect, mutable_state_of,
+    on_dispose, remember, remember_with_key,
 };
 use compose_rust::ui::{self as cu, Modifier};
-use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, SpaceRole};
+use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, SpaceRole, TypeRole};
 
 use ember_client::LauncherStatus;
 
@@ -51,7 +51,7 @@ use super::compat::Spinner;
 use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
     AppButton, ButtonKind, Clickable, CloseButton, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
-    FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, SearchField, Select, SheetFooter,
+    FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, SearchField, Select, SheetFooter, Txt,
     SEARCH_FIELD_H_COMPACT,
 };
 use super::conversation::{ConversationView, ICON_SEND_SVG, ICON_TERMINAL_SVG, TranscriptRow, tail_start_index};
@@ -88,7 +88,6 @@ const NO_MEMBERS: &str = "표시할 팀원이 없습니다";
 const PICK_FROM_LIST: &str = "목록에서 팀원을 고르면 이 탭에 추가됩니다";
 const NO_CONVERSATION: &str = "아직 대화가 없습니다";
 const ICON_CHAT_SVG: &str = include_str!("../../../assets/nav/chat.svg");
-const TERMINAL_SOON: &str = "터미널은 준비 중입니다";
 const MODEL_LOCKED: &str = "실행 중인 세션의 모델은 바꿀 수 없습니다";
 const NO_SESSION: &str = "세션이 없습니다";
 const TIMELINE_TITLE: &str = "에이전트 간 통신";
@@ -1096,6 +1095,130 @@ pub fn PaneTranscript(session: &str, agent: &str) {
         });
 }
 
+/// The Terminal side of a pane: the member's terminal, read-only, in the mockup's `.term` colours
+/// (FR-L18). Outside the demo the client has no stream to attach to for a member, so it says so.
+///
+/// TODO(compose-rust#5): wrap in `SelectionContainer` so the output can be selected and copied.
+/// TODO(compose-rust): scroll to the bottom on new output; the pane opens at the top.
+/// Outside the demo it attaches as a read-only viewer to the project's one running agent terminal on
+/// the session's computer, and detaches when the pane leaves the screen (the terminal keeps running).
+pub fn PaneTerminal(member: &Member, project: &str) {
+    use crate::terminal_stream::{start_view, TerminalHandle};
+    use crate::ui::term_pane::{self as tp, TermRole, TermView};
+    let p = ember_theme().palette;
+    let demo = services().demo.is_some();
+    let sid = member.session_id.clone();
+    let computer = remember_with_key(sid.clone(), || mutable_state_of(None::<String>));
+    let revision = remember_with_key(sid.clone(), || mutable_state_of(0u64));
+    let handle = remember_with_key(sid.clone(), || Rc::new(RefCell::new(None::<TerminalHandle>)));
+    if !demo {
+        {
+            let (sid, computer) = (sid.clone(), computer.clone());
+            launched_effect(sid.clone(), move || async move {
+                let (s_id, c_st) = (sid.clone(), computer.clone());
+                run_shared(
+                    async move { services().server.session_computer(&s_id).await.map_err(|e| e.to_string()) },
+                    move |r: Result<CurrentComputer, String>| {
+                        if let Ok(c) = r {
+                            c_st.set(Some(c.computer.id));
+                        }
+                    },
+                );
+            });
+        }
+        let computer_id = computer.get();
+        let (handle_start, project_start) = (handle.clone(), project.to_string());
+        disposable_effect((sid.clone(), computer_id.clone()), move || {
+            if let Some(id) = &computer_id {
+                let server = services().config.server_url.clone();
+                *handle_start.borrow_mut() = Some(start_view(&server, id, &project_start, None));
+            }
+            let handle_stop = handle_start.clone();
+            on_dispose(move || {
+                if let Some(h) = handle_stop.borrow_mut().take() {
+                    h.detach();
+                }
+            })
+        });
+        // The stream runs on a worker; read its revision here, on the UI thread, and recompose on change.
+        let (handle_poll, revision_poll) = (handle.clone(), revision.clone());
+        launched_effect(sid.clone(), move || async move {
+            loop {
+                delay(std::time::Duration::from_millis(250)).await;
+                let current = handle_poll.borrow().as_ref().map(TerminalHandle::revision).unwrap_or(0);
+                if current != revision_poll.get() {
+                    revision_poll.set(current);
+                }
+            }
+        });
+    }
+    let _ = revision.get();
+    let attached = handle.borrow().clone();
+    let state = attached.as_ref().map(TerminalHandle::snapshot);
+    let pick = attached.as_ref().and_then(TerminalHandle::pick);
+    let view = if demo {
+        tp::view_for_member(true, None, &member.agent, &member.agent, project, &member.task)
+    } else if computer.get().is_none() {
+        TermView::Connecting
+    } else {
+        tp::view_for_attached(state.as_ref(), pick.as_ref())
+    };
+    let note = |text: &str| {
+        let text = text.to_string();
+        cu::Box()
+            .alignment(Alignment::Center)
+            .modifier(Modifier::new().fill_max_width().weight(1.0))
+            .content(move || {
+                Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+            });
+    };
+    match view {
+        TermView::Connecting => note(tp::CONNECTING),
+        TermView::NoTerminal => note(tp::NO_TERMINAL),
+        TermView::Note(text) => note(text),
+        TermView::Failed(text) => note(text),
+        TermView::Lines { rows, notice } => {
+            cu::Box()
+                .modifier(
+                    Modifier::new()
+                        .fill_max_width()
+                        .weight(1.0)
+                        .background(paint(p.surface_2))
+                        .border(1.0, paint(p.line))
+                        .corner_radius(CORNER_SM),
+                )
+                .content(move || {
+                    cu::ScrollColumn()
+                        .modifier(Modifier::new().fill_max_width().fill_max_height())
+                        .content(move || {
+                            cu::Column()
+                                .modifier(Modifier::new().fill_max_width().padding(SP[2]))
+                                .content(move || {
+                                    for (role, line) in rows.iter() {
+                                        let (color, weight) = match role {
+                                            TermRole::Banner | TermRole::Warn => (p.orange.strong, None),
+                                            TermRole::User => (p.text, Some(600.0)),
+                                            TermRole::Agent => (p.text, None),
+                                            TermRole::Tool | TermRole::Selected => (p.blue.strong, None),
+                                            TermRole::Add => (p.green.strong, None),
+                                            TermRole::Del => (p.red.strong, None),
+                                            TermRole::Muted => (p.muted, None),
+                                            TermRole::Plain => (p.text_2, None),
+                                        };
+                                        // An empty line still takes a row.
+                                        let text = if line.is_empty() { " " } else { line.as_str() };
+                                        Txt(text, TypeRole::Mono, Some(paint(color)), None, None, weight, None);
+                                    }
+                                    if let Some(n) = &notice {
+                                        Txt(n, TypeRole::Mono, Some(paint(p.muted)), None, None, None, None);
+                                    }
+                                });
+                        });
+                });
+        }
+    }
+}
+
 /// A pane's own composer: Enter sends, a message while the agent is busy is queued (FR-L6).
 pub fn PaneComposer(session: &str, busy: bool) {
     let ui = shared_ui().clone();
@@ -1434,18 +1557,7 @@ pub fn Pane(
                         PaneTranscript(&id, &member_owned.agent);
                         PaneComposer(&id, busy);
                     } else {
-                        cu::Box()
-                            .alignment(Alignment::Center)
-                            .modifier(Modifier::new().fill_max_width().weight(1.0))
-                            .content(|| {
-                                Label(
-                                    TERMINAL_SOON,
-                                    Fs::Sm,
-                                    Weight::Regular,
-                                    Some(paint(p.muted)),
-                                    None,
-                                );
-                            });
+                        PaneTerminal(&member_owned, &proj_owned);
                     }
                 });
 

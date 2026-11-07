@@ -18,6 +18,9 @@
 //! - Tiles are not clickable containers (pG), so each tile carries a small button.
 //! - Device kind icons: `IconRole` has no phone or laptop glyph, so the kind is text.
 
+use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+
 use ember_client::state::{Computer, Reachability};
 
 
@@ -192,6 +195,51 @@ pub fn grid<T: Clone>(items: &[T], cols: usize) -> Vec<Vec<Option<T>>> {
         .chunks(cols)
         .map(|c| (0..cols).map(|i| c.get(i).cloned()).collect())
         .collect()
+}
+
+/// A clean, concise member name for recipient chips and agent tiles so that
+/// the project prefix or harness suffix does not awkwardly push the meaningful identity
+/// into an ellipsis (for example "demo-project-claude-code" becomes "demo-claude").
+pub fn clean_member_name(project: &str, agent: &str, title: &str) -> String {
+    let mut p = project
+        .trim()
+        .strip_prefix("darkpyonix-")
+        .unwrap_or(project.trim());
+    p = p
+        .strip_suffix("-project")
+        .or_else(|| p.strip_suffix("-repo"))
+        .unwrap_or(p);
+    let a = agent
+        .trim()
+        .strip_suffix("-code")
+        .or_else(|| agent.strip_suffix("-cli"))
+        .unwrap_or(agent.trim());
+    if a.is_empty() {
+        let title = title.trim();
+        if title.is_empty() {
+            p.to_string()
+        } else if p.is_empty() {
+            title.to_string()
+        } else {
+            format!("{p}-{title}")
+        }
+    } else if p.is_empty() {
+        a.to_string()
+    } else {
+        format!("{p}-{a}")
+    }
+}
+
+/// Demo tray files available for sending in demo mode.
+pub const DEMO_FILES: [&str; 4] = [
+    "screen-390-dark.png",
+    "SPEC-FR-files.pdf",
+    "demo-recording.mov",
+    "ose-build-arm64.tar.zst",
+];
+
+pub fn demo_files() -> &'static [&'static str] {
+    &DEMO_FILES
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -569,9 +617,286 @@ impl TransferService for NoTransferService {
 
 static NO_SERVICE: NoTransferService = NoTransferService;
 
+/// State for the demo transfer service so transfers and offers can be exercised.
+pub struct DemoTransferService {
+    devices: Mutex<Vec<Device>>,
+    transfers: Mutex<Vec<Transfer>>,
+    received: Mutex<Vec<ReceivedFile>>,
+    history: Mutex<Vec<HistoryEntry>>,
+    offers: Mutex<Vec<Offer>>,
+    week_sent_mb: Mutex<u64>,
+}
+
+impl Default for DemoTransferService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DemoTransferService {
+    pub fn new() -> Self {
+        let dev = |id: &str, name: &str, kind, presence, path, ms| Device {
+            id: id.into(),
+            name: name.into(),
+            kind,
+            presence,
+            path,
+            latency_ms: ms,
+        };
+        let devices = vec![
+            dev("d1", "macbook-pro", DeviceKind::Laptop, Presence::Online, Some(PathKind::Nearby), Some(3)),
+            dev("d2", "BREW의 iPhone", DeviceKind::Phone, Presence::Online, Some(PathKind::Nearby), Some(6)),
+            dev("d3", "ws-linux-01", DeviceKind::Server, Presence::Online, Some(PathKind::Direct), Some(18)),
+            dev("d4", "iPad Pro", DeviceKind::Tablet, Presence::Online, Some(PathKind::Relay), Some(41)),
+            dev("d5", "Pixel 10", DeviceKind::Phone, Presence::Sleeping, None, None),
+            dev("d6", "win-desktop", DeviceKind::Desktop, Presence::Offline, None, None),
+            dev("d7", "gpu-box", DeviceKind::Server, Presence::Unknown, None, None),
+        ];
+        let transfers = vec![
+            Transfer {
+                id: "t1".into(),
+                name: "design-assets-v8.zip".into(),
+                device: "macbook-pro".into(),
+                direction: Direction::Send,
+                total: 820 << 20,
+                done: 560 << 20,
+                bytes_per_sec: Some(54 << 20),
+                state: TransferState::Sending,
+            },
+            Transfer {
+                id: "t2".into(),
+                name: "IMG_2041.mov".into(),
+                device: "BREW의 iPhone".into(),
+                direction: Direction::Receive,
+                total: 1_200 << 20,
+                done: 300 << 20,
+                bytes_per_sec: None,
+                state: TransferState::Paused,
+            },
+        ];
+        let received = vec![
+            ReceivedFile {
+                name: "screenshot-0925.png".into(),
+                size: 2 << 20,
+                from: "BREW의 iPhone".into(),
+            },
+            ReceivedFile {
+                name: "notes.pdf".into(),
+                size: 640 << 10,
+                from: "iPad Pro".into(),
+            },
+        ];
+        let history = vec![
+            HistoryEntry {
+                name: "release-notes.md".into(),
+                device: "ws-linux-01".into(),
+                direction: Direction::Send,
+                size: 12 << 10,
+                result: HistoryResult::Done,
+                when: "오늘 09:41".into(),
+            },
+            HistoryEntry {
+                name: "dump.sql".into(),
+                device: "iPad Pro".into(),
+                direction: Direction::Receive,
+                size: 48 << 20,
+                result: HistoryResult::Failed,
+                when: "어제 22:10".into(),
+            },
+            HistoryEntry {
+                name: "photo.heic".into(),
+                device: "Pixel 10".into(),
+                direction: Direction::Send,
+                size: 4 << 20,
+                result: HistoryResult::Declined,
+                when: "어제 18:02".into(),
+            },
+        ];
+        let offers = vec![Offer {
+            id: "o1".into(),
+            from: "BREW의 iPhone".into(),
+            files: vec!["IMG_2042.heic".into(), "IMG_2043.heic".into()],
+            total: 9 << 20,
+        }];
+        Self {
+            devices: Mutex::new(devices),
+            transfers: Mutex::new(transfers),
+            received: Mutex::new(received),
+            history: Mutex::new(history),
+            offers: Mutex::new(offers),
+            week_sent_mb: Mutex::new(9400),
+        }
+    }
+
+    pub fn reset(&self) {
+        let fresh = Self::new();
+        *self.devices.lock().unwrap() = fresh.devices.into_inner().unwrap();
+        *self.transfers.lock().unwrap() = fresh.transfers.into_inner().unwrap();
+        *self.received.lock().unwrap() = fresh.received.into_inner().unwrap();
+        *self.history.lock().unwrap() = fresh.history.into_inner().unwrap();
+        *self.offers.lock().unwrap() = fresh.offers.into_inner().unwrap();
+        *self.week_sent_mb.lock().unwrap() = 9400;
+    }
+}
+
+impl TransferService for DemoTransferService {
+    fn ready(&self) -> bool {
+        true
+    }
+
+    fn devices(&self) -> Option<Vec<Device>> {
+        Some(self.devices.lock().unwrap().clone())
+    }
+
+    fn transfers(&self) -> Vec<Transfer> {
+        self.transfers.lock().unwrap().clone()
+    }
+
+    fn received(&self) -> Vec<ReceivedFile> {
+        self.received.lock().unwrap().clone()
+    }
+
+    fn history(&self) -> Vec<HistoryEntry> {
+        self.history.lock().unwrap().clone()
+    }
+
+    fn pending_offers(&self) -> Vec<Offer> {
+        self.offers.lock().unwrap().clone()
+    }
+
+    fn answer(&self, offer_id: &str, answer: Answer) {
+        let mut offers = self.offers.lock().unwrap();
+        if let Some(pos) = offers.iter().position(|o| o.id == offer_id) {
+            let o = offers.remove(pos);
+            match answer {
+                Answer::Accept => {
+                    let mut trs = self.transfers.lock().unwrap();
+                    let count = o.files.len().max(1) as u64;
+                    for (i, f) in o.files.iter().enumerate() {
+                        trs.insert(
+                            0,
+                            Transfer {
+                                id: format!("recv-{}-{}", o.id, i),
+                                name: f.clone(),
+                                device: o.from.clone(),
+                                direction: Direction::Receive,
+                                total: o.total / count,
+                                done: 0,
+                                bytes_per_sec: Some(28 << 20),
+                                state: TransferState::Sending,
+                            },
+                        );
+                    }
+                }
+                Answer::Decline => {
+                    let mut hist = self.history.lock().unwrap();
+                    hist.insert(
+                        0,
+                        HistoryEntry {
+                            name: o.files.first().cloned().unwrap_or_else(|| "파일".into()),
+                            device: o.from,
+                            direction: Direction::Receive,
+                            size: o.total,
+                            result: HistoryResult::Declined,
+                            when: "오늘 방금".into(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    fn control(&self, transfer_id: &str, action: TransferAction) {
+        let mut trs = self.transfers.lock().unwrap();
+        if let Some(t) = trs.iter_mut().find(|x| x.id == transfer_id) {
+            if let Ok(()) = apply(t, action) {
+                if t.state == TransferState::Cancelled {
+                    let t_clone = t.clone();
+                    trs.retain(|x| x.id != transfer_id);
+                    let mut hist = self.history.lock().unwrap();
+                    hist.insert(
+                        0,
+                        HistoryEntry {
+                            name: t_clone.name,
+                            device: t_clone.device,
+                            direction: t_clone.direction,
+                            size: t_clone.total,
+                            result: HistoryResult::Cancelled,
+                            when: "오늘 방금".into(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    fn send(&self, device_id: &str, files: Vec<String>) -> Result<(), String> {
+        let devs = self.devices.lock().unwrap();
+        let dev = devs
+            .iter()
+            .find(|d| d.id == device_id || d.name == device_id);
+        let Some(d) = dev else {
+            return Err("대상 장비를 찾을 수 없습니다".into());
+        };
+        if d.presence != Presence::Online {
+            return Err(format!("{}은(는) 지금 연결되어 있지 않습니다", d.name));
+        }
+        let dev_name = d.name.clone();
+        drop(devs);
+
+        let mut trs = self.transfers.lock().unwrap();
+        let mut sent_mb = self.week_sent_mb.lock().unwrap();
+        let mut count = 0;
+        for (i, f) in files.iter().enumerate() {
+            let fname = Path::new(f)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(f)
+                .to_string();
+            let size = 15 << 20; // 15 MB sample
+            trs.insert(
+                0,
+                Transfer {
+                    id: format!("send-{}-{}", fname, i),
+                    name: fname,
+                    device: dev_name.clone(),
+                    direction: Direction::Send,
+                    total: size,
+                    done: 0,
+                    bytes_per_sec: Some(40 << 20),
+                    state: TransferState::Sending,
+                },
+            );
+            count += 1;
+            *sent_mb += 15;
+        }
+        if count == 0 {
+            return Err("보낼 파일을 선택해야 합니다".into());
+        }
+        Ok(())
+    }
+}
+
+/// Whether demo data is active (either via EMBER_CR_FILES_SAMPLE in debug builds, EMBER_DEMO_DATA or launcher demo).
+pub fn is_demo() -> bool {
+    (cfg!(debug_assertions) && std::env::var("EMBER_CR_FILES_SAMPLE").as_deref() == Ok("1"))
+        || std::env::var("EMBER_DEMO_DATA").as_deref() == Ok("1")
+        || crate::demo::active_from_env()
+}
+
+static DEMO_SERVICE: OnceLock<DemoTransferService> = OnceLock::new();
+
+pub fn demo_transfer_service() -> &'static DemoTransferService {
+    DEMO_SERVICE.get_or_init(DemoTransferService::new)
+}
+
 /// TODO(FR-F): return the real service once the transfer client exists.
 pub fn transfer_service() -> &'static dyn TransferService {
-    &NO_SERVICE
+    if is_demo() {
+        demo_transfer_service()
+    } else {
+        &NO_SERVICE
+    }
 }
 
 /// Everything the screen shows, read in one pass.
@@ -1692,5 +2017,124 @@ mod tests {
             assert!(!t.ends_with('다') || t.ends_with("니다"), "plain ending: {t}");
             assert!(!t.contains('\u{2014}'), "em-dash: {t}");
         }
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_clean_member_names_do_not_cut_important_identity() {
+        assert_eq!(
+            clean_member_name("demo-project", "claude-code", ""),
+            "demo-claude"
+        );
+        assert_eq!(
+            clean_member_name("second-project", "codex", "README"),
+            "second-codex"
+        );
+        assert_eq!(
+            clean_member_name("darkpyonix-core", "gemini-cli", ""),
+            "core-gemini"
+        );
+        assert_eq!(
+            clean_member_name("ember", "claude", ""),
+            "ember-claude"
+        );
+        assert_eq!(
+            clean_member_name("demo-project", "", "리뷰어"),
+            "demo-리뷰어"
+        );
+        assert_eq!(clean_member_name("demo-project", "", ""), "demo");
+        assert_eq!(clean_member_name("", "codex", ""), "codex");
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_demo_transfer_service_send_and_offers_can_be_exercised() {
+        let svc = DemoTransferService::new();
+        assert!(svc.ready());
+        assert_eq!(svc.devices().unwrap().len(), 7);
+        let tr_init = svc.transfers().len();
+
+        // Sending to an online device creates an active transfer.
+        let ok = svc.send("d1", vec!["screen-390-dark.png".into()]);
+        assert!(ok.is_ok());
+        let trs = svc.transfers();
+        assert_eq!(trs.len(), tr_init + 1);
+        assert_eq!(trs[0].name, "screen-390-dark.png");
+        assert_eq!(trs[0].device, "macbook-pro");
+        assert_eq!(trs[0].direction, Direction::Send);
+        assert_eq!(trs[0].state, TransferState::Sending);
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_demo_transfer_service_offline_send_is_refused() {
+        let svc = DemoTransferService::new();
+        // win-desktop is offline
+        let err = svc.send("d6", vec!["test.txt".into()]).unwrap_err();
+        assert!(err.contains("지금 연결되어 있지 않습니다"));
+        assert!(err.ends_with("않습니다") && !err.contains('\u{2014}'));
+
+        // Unknown device
+        let unknown = svc.send("unknown", vec!["test.txt".into()]).unwrap_err();
+        assert!(unknown.contains("대상 장비를 찾을 수 없습니다"));
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_demo_transfer_service_control_pause_and_cancel() {
+        let svc = DemoTransferService::new();
+        // Pause active transfer t1
+        svc.control("t1", TransferAction::Pause);
+        let trs = svc.transfers();
+        let t1 = trs.iter().find(|t| t.id == "t1").unwrap();
+        assert_eq!(t1.state, TransferState::Paused);
+
+        // Resume t1
+        svc.control("t1", TransferAction::Resume);
+        let trs = svc.transfers();
+        let t1 = trs.iter().find(|t| t.id == "t1").unwrap();
+        assert_eq!(t1.state, TransferState::Sending);
+
+        // Cancel t1
+        let hist_len = svc.history().len();
+        svc.control("t1", TransferAction::Cancel);
+        let trs = svc.transfers();
+        assert!(trs.iter().all(|t| t.id != "t1"));
+        let hist = svc.history();
+        assert_eq!(hist.len(), hist_len + 1);
+        assert_eq!(hist[0].result, HistoryResult::Cancelled);
+    }
+
+    // FR-L27.4
+    #[test]
+    fn fr_l27_4_demo_transfer_service_accept_and_decline_offer() {
+        let svc = DemoTransferService::new();
+        let offers = svc.pending_offers();
+        assert_eq!(offers.len(), 1);
+        let offer_id = &offers[0].id;
+
+        // Accept offer
+        let tr_len = svc.transfers().len();
+        svc.answer(offer_id, Answer::Accept);
+        assert!(svc.pending_offers().is_empty());
+        assert_eq!(svc.transfers().len(), tr_len + 2); // 2 files in offer o1
+
+        // Reset and test decline
+        svc.reset();
+        assert_eq!(svc.pending_offers().len(), 1);
+        let hist_len = svc.history().len();
+        svc.answer("o1", Answer::Decline);
+        assert!(svc.pending_offers().is_empty());
+        assert_eq!(svc.history().len(), hist_len + 1);
+        assert_eq!(svc.history()[0].result, HistoryResult::Declined);
+    }
+
+    // FR-L27.2
+    #[test]
+    fn fr_l27_2_demo_files_tray_list() {
+        let files = demo_files();
+        assert_eq!(files.len(), 4);
+        assert!(files.contains(&"screen-390-dark.png"));
+        assert!(files.contains(&"SPEC-FR-files.pdf"));
     }
 }

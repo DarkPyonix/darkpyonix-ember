@@ -648,6 +648,102 @@ pub fn bar_max(metric: Metric, bars: &[f32]) -> f32 {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Status score and fan mode (FR-L21, #389; mockup monitor.js `score`, `scoreWord`, fan card)
+// ---------------------------------------------------------------------------------------------
+
+/// The main disk: the `/` mount, else the largest one. `None` without disks.
+pub fn main_disk(s: &MetricsSample) -> Option<&ember_client::api::DiskMetrics> {
+    s.disks
+        .iter()
+        .find(|d| d.mount == "/")
+        .or_else(|| s.disks.iter().filter(|d| d.total_bytes > 0).max_by_key(|d| d.total_bytes))
+}
+
+/// The health score, 0 to 100, from one sample with the mockup's formula: 100, minus 0.25 per
+/// CPU percent, minus 0.6 per memory percent above 60, minus 0.8 per degree above 70 on the
+/// hottest sensor, minus 12 when the main disk has less than 15 percent free. A value the node
+/// did not report takes nothing off; without a CPU total there is no score.
+pub fn health_score(s: &MetricsSample) -> Option<u8> {
+    let cpu = s.cpu.total_percent.filter(|v| v.is_finite())?;
+    let mem = s.memory.as_ref().filter(|m| m.total_bytes > 0).map(|m| ratio_percent(m.used_bytes, m.total_bytes));
+    let temp = hottest(s).map(|t| t.celsius);
+    let low_disk = main_disk(s)
+        .filter(|d| d.total_bytes > 0)
+        .is_some_and(|d| (d.available_bytes as f64 / d.total_bytes as f64) < 0.15);
+    let mut v = 100.0 - cpu.clamp(0.0, 100.0) * 0.25;
+    if let Some(m) = mem {
+        v -= (m - 60.0).max(0.0) * 0.6;
+    }
+    if let Some(t) = temp {
+        v -= (t - 70.0).max(0.0) * 0.8;
+    }
+    if low_disk {
+        v -= 12.0;
+    }
+    Some(v.clamp(0.0, 100.0).round() as u8)
+}
+
+/// The word beside the score (mockup `scoreWord`).
+pub fn score_word(n: u8) -> &'static str {
+    match n {
+        85.. => "아주 좋습니다",
+        70..=84 => "좋습니다",
+        50..=69 => "바쁩니다",
+        _ => "점검이 필요합니다",
+    }
+}
+
+/// The ring's tone: green from 70, orange from 50, red below.
+pub fn score_tone(n: u8) -> crate::ui::components::PillTone {
+    use crate::ui::components::PillTone;
+    match n {
+        70.. => PillTone::Green,
+        50..=69 => PillTone::Orange,
+        _ => PillTone::Red,
+    }
+}
+
+/// The line under the score: whether the main disk has room, and how much is free.
+pub fn storage_line(s: &MetricsSample) -> Option<String> {
+    let d = main_disk(s).filter(|d| d.total_bytes > 0)?;
+    let low = (d.available_bytes as f64 / d.total_bytes as f64) < 0.15;
+    let word = if low { "저장 공간이 부족합니다" } else { "저장 공간이 넉넉합니다" };
+    Some(format!("{word} \u{00B7} 여유 {}", bytes_text(d.available_bytes)))
+}
+
+/// The RAM size badge of the status card, from the memory total.
+pub fn ram_badge(s: &MetricsSample) -> Option<String> {
+    s.memory.as_ref().filter(|m| m.total_bytes > 0).map(|m| bytes_text(m.total_bytes))
+}
+
+/// The fan modes of the mockup's fan card, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanMode {
+    Auto,
+    Cool,
+    Max,
+}
+
+impl FanMode {
+    pub const ALL: [FanMode; 3] = [FanMode::Auto, FanMode::Cool, FanMode::Max];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FanMode::Auto => "자동",
+            FanMode::Cool => "냉각",
+            FanMode::Max => "최대",
+        }
+    }
+}
+
+/// Whether the fan mode can be changed. The node neither reports fan speed nor sets a mode
+/// (FR-X7), so the control is shown disabled. TODO(#389): enable when the node can.
+pub const FAN_MODE_AVAILABLE: bool = false;
+
+/// Why the fan mode control is disabled.
+pub const FAN_MODE_REASON: &str = "이 컴퓨터의 팬 속도와 모드는 아직 읽거나 바꿀 수 없습니다";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1051,5 +1147,69 @@ mod tests {
         let disk = card_view(Metric::Disk, &f).unwrap();
         assert_eq!(disk.lines.len(), 2);
         assert!(disk.lines[1].starts_with("/data 60.0%"));
+    }
+    #[test]
+    fn fr_l21_health_score_follows_the_mockup_formula() {
+        // 25 % CPU, 50 % memory, 51.5 C, 40 % free: only the CPU takes points off.
+        let s = sample(1, 0, 0);
+        assert_eq!(health_score(&s), Some(94));
+        let mut busy = sample(1, 0, 0);
+        busy.cpu.total_percent = Some(80.0);
+        busy.memory = Some(MemoryMetrics { total_bytes: 100, used_bytes: 90, swap_total_bytes: 0, swap_used_bytes: 0 });
+        busy.temperatures = vec![TempMetrics { label: "cpu".into(), celsius: 85.0 }];
+        busy.disks = vec![DiskMetrics { name: "d".into(), mount: "/".into(), total_bytes: 100, available_bytes: 10 }];
+        // 100 - 20 - 18 - 12 - 12 = 38
+        assert_eq!(health_score(&busy), Some(38));
+        assert_eq!(score_word(38), "점검이 필요합니다");
+    }
+
+    #[test]
+    fn fr_l21_health_score_needs_a_cpu_total_and_skips_unknown_values() {
+        let mut s = sample(1, 0, 0);
+        s.cpu.total_percent = None;
+        assert_eq!(health_score(&s), None);
+        let mut bare = sample(1, 0, 0);
+        bare.memory = None;
+        bare.temperatures.clear();
+        bare.disks.clear();
+        assert_eq!(health_score(&bare), Some(94));
+        assert_eq!(storage_line(&bare), None);
+        assert_eq!(ram_badge(&bare), None);
+    }
+
+    #[test]
+    fn fr_l21_health_words_and_tones_by_band() {
+        use crate::ui::components::PillTone;
+        assert_eq!(score_word(100), "아주 좋습니다");
+        assert_eq!(score_word(85), "아주 좋습니다");
+        assert_eq!(score_word(84), "좋습니다");
+        assert_eq!(score_word(70), "좋습니다");
+        assert_eq!(score_word(69), "바쁩니다");
+        assert_eq!(score_word(50), "바쁩니다");
+        assert_eq!(score_word(49), "점검이 필요합니다");
+        assert_eq!(score_tone(70), PillTone::Green);
+        assert_eq!(score_tone(69), PillTone::Orange);
+        assert_eq!(score_tone(49), PillTone::Red);
+    }
+
+    #[test]
+    fn fr_l21_health_storage_line_reads_the_main_disk() {
+        let mut s = sample(1, 0, 0);
+        s.disks = vec![
+            DiskMetrics { name: "data".into(), mount: "/data".into(), total_bytes: 8 << 30, available_bytes: 1 << 30 },
+            DiskMetrics { name: "root".into(), mount: "/".into(), total_bytes: 4 << 30, available_bytes: 2 << 30 },
+        ];
+        assert_eq!(storage_line(&s).as_deref(), Some("저장 공간이 넉넉합니다 \u{00B7} 여유 2.0 GB"));
+        s.disks = vec![DiskMetrics { name: "c".into(), mount: "C:\\".into(), total_bytes: 10 << 30, available_bytes: 1 << 30 }];
+        assert_eq!(storage_line(&s).as_deref(), Some("저장 공간이 부족합니다 \u{00B7} 여유 1.0 GB"));
+        assert_eq!(ram_badge(&s).as_deref(), Some("16.0 GB"));
+    }
+
+    #[test]
+    fn fr_l21_fan_modes_match_the_mockup_and_stay_disabled() {
+        let labels: Vec<_> = FanMode::ALL.iter().map(|m| m.label()).collect();
+        assert_eq!(labels, ["자동", "냉각", "최대"]);
+        assert!(!FAN_MODE_AVAILABLE);
+        assert!(FAN_MODE_REASON.ends_with("없습니다"));
     }
 }

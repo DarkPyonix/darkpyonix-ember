@@ -607,6 +607,9 @@ pub fn stdin_form(command: &str, code: &str) -> Option<String> {
     found.then(|| parts.join(" "))
 }
 
+/// The maximum number of detached confirms held while waiting for their late answers.
+pub const MAX_DETACHED_CONFIRMS: usize = 8;
+
 /// What the sheet knows for the async-order decisions. The widget glue copies it from its
 /// states, calls `reduce` and writes it back.
 #[derive(Debug, Clone, Default)]
@@ -617,10 +620,31 @@ pub struct SheetState {
     pub confirm_in_flight: bool,
     /// A confirm failed without an answer: it may have been accepted, so Leave does not cancel.
     pub confirm_unknown: bool,
-    /// The run whose confirm was in flight when the sheet closed: its answer is still reported,
-    /// once.
-    pub detached_confirm: Option<String>,
+    /// The runs whose confirms were in flight when the sheet closed: their answers are still
+    /// reported, once. Bounded (up to 8) to keep memory small if an answer never comes.
+    pub detached_confirms: Vec<String>,
     pub sample: bool,
+}
+
+impl SheetState {
+    pub fn push_detached_confirm(&mut self, id: String) {
+        if id.is_empty() || self.detached_confirms.iter().any(|existing| existing == &id) {
+            return;
+        }
+        if self.detached_confirms.len() >= MAX_DETACHED_CONFIRMS {
+            self.detached_confirms.remove(0);
+        }
+        self.detached_confirms.push(id);
+    }
+
+    pub fn take_detached_confirm(&mut self, id: &str) -> bool {
+        if let Some(pos) = self.detached_confirms.iter().position(|x| x == id) {
+            self.detached_confirms.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Something that happened to the sheet. An answer names the run (or mint generation) it is for.
@@ -700,8 +724,7 @@ pub fn reduce(s: &mut SheetState, ev: Event) -> Vec<Effect> {
                     s.confirmed = true;
                     out.push(Effect::ClearTypedFingerprint);
                 }
-            } else if s.detached_confirm.as_deref() == Some(id.as_str()) {
-                s.detached_confirm = None;
+            } else if s.take_detached_confirm(&id) {
                 if ok {
                     out.push(Effect::RefreshComputers);
                     out.push(Effect::Notice(ADDED_NOTICE.to_string()));
@@ -714,8 +737,7 @@ pub fn reduce(s: &mut SheetState, ev: Event) -> Vec<Effect> {
             if s.guard.is_current(&id) {
                 s.confirm_in_flight = false;
                 s.confirm_unknown = true;
-            } else if s.detached_confirm.as_deref() == Some(id.as_str()) {
-                s.detached_confirm = None;
+            } else if s.take_detached_confirm(&id) {
                 out.push(Effect::RefreshComputers);
                 out.push(Effect::Notice(CONFIRM_UNKNOWN.to_string()));
             }
@@ -734,7 +756,12 @@ pub fn reduce(s: &mut SheetState, ev: Event) -> Vec<Effect> {
             let cancel = should_cancel_on_leave(s.view.as_ref(), s.confirmed, s.confirm_in_flight, s.sample) && !s.confirm_unknown;
             let run = s.guard.run_id().map(str::to_string);
             if s.confirm_in_flight && !s.sample {
-                s.detached_confirm = run.clone();
+                if let Some(id) = run.clone() {
+                    s.push_detached_confirm(id);
+                }
+            }
+            if s.confirm_unknown {
+                out.push(Effect::Notice(CONFIRM_UNKNOWN.to_string()));
             }
             if let (true, Some(id)) = (cancel, run) {
                 out.push(Effect::Cancel(id));
@@ -1257,10 +1284,99 @@ mod tests {
         s.confirm_in_flight = true;
         reduce(&mut s, Event::ConfirmUnknown { id: "a".into() });
         assert!(s.confirm_unknown && !s.confirm_in_flight);
-        assert_eq!(reduce(&mut s, Event::Leave), vec![Effect::ClearSecrets]);
+        assert_eq!(reduce(&mut s, Event::Leave), vec![Effect::Notice(CONFIRM_UNKNOWN.into()), Effect::ClearSecrets]);
         let mut s = left_during_confirm();
         let fx = reduce(&mut s, Event::ConfirmUnknown { id: "a".into() });
         assert_eq!(fx, vec![Effect::RefreshComputers, Effect::Notice(CONFIRM_UNKNOWN.into())]);
+    }
+
+    #[test]
+    fn fr_c2_enrol_reducer_unknown_confirm_on_open_posts_notice_on_leave() {
+        let mut s = open_sheet(view_from_status(&awaiting(), "c", 1));
+        s.confirm_in_flight = true;
+        reduce(&mut s, Event::ConfirmUnknown { id: "a".into() });
+        assert!(s.confirm_unknown);
+        let fx = reduce(&mut s, Event::Leave);
+        assert_eq!(fx, vec![Effect::Notice(CONFIRM_UNKNOWN.into()), Effect::ClearSecrets]);
+        assert!(!s.confirm_unknown);
+        assert_eq!(reduce(&mut s, Event::Leave), vec![Effect::ClearSecrets]);
+    }
+
+    #[test]
+    fn fr_c2_enrol_reducer_multiple_detached_confirms_all_post_notices() {
+        let mut s = open_sheet(view_from_status(&awaiting(), "c1", 1));
+        s.confirm_in_flight = true;
+        assert_eq!(reduce(&mut s, Event::Leave), vec![Effect::ClearSecrets]);
+        assert_eq!(s.detached_confirms, vec!["a".to_string()]);
+
+        // Second sheet opened and confirmed before first completes.
+        s.guard.open();
+        let n2 = s.guard.begin_mint();
+        assert!(reduce(&mut s, Event::MintAnswered { generation: n2, id: "b".into() }).is_empty());
+        s.view = Some(view_from_status(&awaiting(), "c2", 2));
+        s.confirm_in_flight = true;
+        assert_eq!(reduce(&mut s, Event::Leave), vec![Effect::ClearSecrets]);
+        assert_eq!(s.detached_confirms, vec!["a".to_string(), "b".to_string()]);
+
+        // First confirm answers: notice posted, "b" stays.
+        let fx_a = reduce(&mut s, Event::ConfirmAnswered { id: "a".into(), ok: true });
+        assert_eq!(fx_a, vec![Effect::RefreshComputers, Effect::Notice(ADDED_NOTICE.into())]);
+        assert_eq!(s.detached_confirms, vec!["b".to_string()]);
+
+        // Second confirm answers: notice posted, list empty.
+        let fx_b = reduce(&mut s, Event::ConfirmAnswered { id: "b".into(), ok: true });
+        assert_eq!(fx_b, vec![Effect::RefreshComputers, Effect::Notice(ADDED_NOTICE.into())]);
+        assert!(s.detached_confirms.is_empty());
+
+        // Subsequent answers for both are ignored.
+        assert!(reduce(&mut s, Event::ConfirmAnswered { id: "a".into(), ok: true }).is_empty());
+        assert!(reduce(&mut s, Event::ConfirmAnswered { id: "b".into(), ok: true }).is_empty());
+    }
+
+    #[test]
+    fn fr_c2_enrol_reducer_detached_confirms_are_bounded_at_eight() {
+        let mut s = SheetState::default();
+        for i in 0..10 {
+            s.push_detached_confirm(format!("run-{i}"));
+        }
+        assert_eq!(s.detached_confirms.len(), MAX_DETACHED_CONFIRMS);
+        assert_eq!(MAX_DETACHED_CONFIRMS, 8);
+        assert_eq!(s.detached_confirms.first().map(String::as_str), Some("run-2"));
+        assert_eq!(s.detached_confirms.last().map(String::as_str), Some("run-9"));
+        s.push_detached_confirm("run-9".into());
+        assert_eq!(s.detached_confirms.len(), 8);
+    }
+
+    #[test]
+    fn fr_c2_enrol_reducer_multiple_detached_confirms_handle_unknown_and_failure() {
+        let mut s = SheetState::default();
+        s.push_detached_confirm("x".into());
+        s.push_detached_confirm("y".into());
+        let fx_x = reduce(&mut s, Event::ConfirmUnknown { id: "x".into() });
+        assert_eq!(fx_x, vec![Effect::RefreshComputers, Effect::Notice(CONFIRM_UNKNOWN.into())]);
+        let fx_y = reduce(&mut s, Event::ConfirmAnswered { id: "y".into(), ok: false });
+        assert_eq!(fx_y, vec![Effect::Notice(CONFIRM_FAILED_LATE.into())]);
+        assert!(s.detached_confirms.is_empty());
+    }
+
+    #[test]
+    fn fr_c2_enrol_registered_by_variants_and_expect_fingerprint() {
+        let peer = confirm_rows(&status_by(Some("http://10.0.0.5:8741"), Some("peer"))).unwrap();
+        assert!(peer_only(&peer));
+        assert!(hide_proposed(&peer));
+        assert_eq!(expect_fingerprint(&peer, " ab12 cd34 ef56 7890 "), Some("ab12 cd34 ef56 7890".to_string()));
+
+        let url = confirm_rows(&status_by(Some("http://10.0.0.5:8741"), Some("url"))).unwrap();
+        assert!(!peer_only(&url));
+        assert!(!hide_proposed(&url));
+        assert_eq!(expect_fingerprint(&url, "ab12cd34ef567890"), None);
+        assert!(peer_id_unused(&url));
+
+        let obs = confirm_rows(&status_by(None, Some("observed"))).unwrap();
+        assert!(!peer_only(&obs));
+        assert!(!hide_proposed(&obs));
+        assert_eq!(expect_fingerprint(&obs, "ab12cd34ef567890"), None);
+        assert!(!peer_id_unused(&obs));
     }
 
     #[test]

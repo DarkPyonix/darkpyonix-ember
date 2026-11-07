@@ -1251,6 +1251,25 @@ pub async fn fetch_snapshot(project: &str) -> Result<RepoSnapshot, ApiError> {
 // History (FR-G5)
 // ---------------------------------------------------------------------------------------------
 
+/// Which commits the history list displays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HistoryFilter {
+    #[default]
+    AllBranches,
+    LocalOnly,
+}
+
+impl HistoryFilter {
+    pub const ALL: [HistoryFilter; 2] = [HistoryFilter::AllBranches, HistoryFilter::LocalOnly];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            HistoryFilter::AllBranches => "모든 브랜치",
+            HistoryFilter::LocalOnly => "로컬 전용",
+        }
+    }
+}
+
 /// Commits read per page of the history list.
 pub const HISTORY_PAGE: u32 = 30;
 
@@ -1273,6 +1292,10 @@ pub struct HistoryEntry {
     pub refs: Vec<HistoryRef>,
     /// A commit with two or more parents.
     pub is_merge: bool,
+    /// A local commit not yet pushed to the remote.
+    pub unpushed: bool,
+    /// A commit on a remote ref not present on local branches.
+    pub remote_only: bool,
 }
 
 /// The chip text of a ref: the node sends full names (`refs/heads/main`), the chip shows `main`.
@@ -1318,12 +1341,49 @@ pub fn history_entry(c: &GitLogCommit, now: i64) -> HistoryEntry {
         time_text: history_time_text(now, c.time),
         refs,
         is_merge: c.parents.len() > 1,
+        unpushed: false,
+        remote_only: false,
     }
+}
+
+/// Annotate a sequence of history commits with `unpushed` and `remote_only` flags.
+pub fn annotate_history_sync(entries: &mut [HistoryEntry]) {
+    let mut past_remote = false;
+    for e in entries.iter_mut() {
+        let has_remote = e.refs.iter().any(|r| r.kind == GitLogRefKind::Remote);
+        let has_local = e.refs.iter().any(|r| r.kind == GitLogRefKind::Branch || r.kind == GitLogRefKind::Head);
+
+        if has_remote {
+            past_remote = true;
+        }
+
+        if e.unpushed || (!past_remote && !has_remote) {
+            e.unpushed = true;
+        }
+        if e.remote_only || (has_remote && !has_local) {
+            e.remote_only = true;
+        }
+    }
+}
+
+/// Whether a commit matches the selected history filter.
+pub fn history_matches_filter(entry: &HistoryEntry, filter: HistoryFilter) -> bool {
+    match filter {
+        HistoryFilter::AllBranches => true,
+        HistoryFilter::LocalOnly => !entry.remote_only,
+    }
+}
+
+/// Filter history entries according to the chosen filter.
+pub fn filter_history_entries(entries: &[HistoryEntry], filter: HistoryFilter) -> Vec<HistoryEntry> {
+    entries.iter().filter(|e| history_matches_filter(e, filter)).cloned().collect()
 }
 
 /// The rows of one page of the log, in the node's order (newest first).
 pub fn history_entries(log: &GitLog, now: i64) -> Vec<HistoryEntry> {
-    log.commits.iter().map(|c| history_entry(c, now)).collect()
+    let mut entries: Vec<HistoryEntry> = log.commits.iter().map(|c| history_entry(c, now)).collect();
+    annotate_history_sync(&mut entries);
+    entries
 }
 
 /// Whether another page may exist: the last page came back full. An empty log (a branch with no
@@ -1422,6 +1482,10 @@ pub struct CommitDetailView {
     /// The files the commit changed, also those past what the node listed.
     pub files_total: usize,
     pub truncated: bool,
+    /// A local commit not yet pushed to the remote.
+    pub unpushed: bool,
+    /// A commit on a remote ref not present on local branches.
+    pub remote_only: bool,
 }
 
 /// The state of the detail of the selected commit.
@@ -1481,6 +1545,10 @@ pub fn commit_detail_view(d: &GitCommitDetail, now: i64) -> CommitDetailView {
         lines.next();
     }
     let body_lines: Vec<String> = lines.filter(|l| !l.trim().is_empty()).take(COMMIT_BODY_LINES).map(|l| clip_line(l, COMMIT_TEXT_MAX)).collect();
+    let has_remote = refs.iter().any(|r| r.kind == GitLogRefKind::Remote);
+    let has_local = refs.iter().any(|r| r.kind == GitLogRefKind::Branch || r.kind == GitLogRefKind::Head);
+    let unpushed = has_local && !has_remote;
+    let remote_only = has_remote && !has_local;
     CommitDetailView {
         sha: d.sha.clone(),
         short: if d.short.is_empty() { d.sha.chars().take(7).collect() } else { d.short.clone() },
@@ -1494,7 +1562,65 @@ pub fn commit_detail_view(d: &GitCommitDetail, now: i64) -> CommitDetailView {
         files_total: d.files_total.max(files.len()),
         truncated: d.truncated,
         files,
+        unpushed,
+        remote_only,
     }
+}
+
+/// Attempt to copy `sha` to the system clipboard on macOS, Linux, or Windows.
+/// Returns true if an OS clipboard command was launched and succeeded.
+/// TODO(compose-rust#471): replace with native toolkit clipboard support once available.
+pub fn copy_sha_to_clipboard(sha: &str) -> bool {
+    let sha = sha.trim();
+    if sha.is_empty() {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(mut child) = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(sha.as_bytes());
+            }
+            return child.wait().map(|s| s.success()).unwrap_or(false);
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        for cmd in ["wl-copy", "xclip -selection clipboard", "xsel --clipboard --input"] {
+            let parts: Vec<&str> = cmd.split_whitespace().collect();
+            if let Ok(mut child) = std::process::Command::new(parts[0])
+                .args(&parts[1..])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    use std::io::Write;
+                    let _ = stdin.write_all(sha.as_bytes());
+                }
+                if child.wait().map(|s| s.success()).unwrap_or(false) {
+                    return true;
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(mut child) = std::process::Command::new("clip")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(sha.as_bytes());
+            }
+            return child.wait().map(|s| s.success()).unwrap_or(false);
+        }
+    }
+    false
 }
 
 /// Read one commit. Runs on the runtime, not the UI thread.
@@ -1547,9 +1673,29 @@ pub fn commit_files_shown(v: &CommitDetailView) -> (&[CommitFileView], Option<St
     (shown, commit_files_notice(shown.len(), v.files_total, v.truncated))
 }
 
+/// Map common git failures before displaying a history operation error.
+fn history_error_reason(e: &ApiError) -> Option<&'static str> {
+    let ApiError::Status { message, code, .. } = e else { return None };
+    let raw = format!("{} {}", code.as_deref().unwrap_or(""), message).to_lowercase();
+    if raw.contains("dirty") || raw.contains("local changes") || raw.contains("uncommitted") {
+        Some("작업 중인 변경이 있습니다. 먼저 커밋하거나 스태시해야 합니다.")
+    } else if raw.contains("conflict") {
+        Some("충돌이 발생하여 작업을 완료하지 못했습니다. 저장소 상태를 확인해야 합니다.")
+    } else if raw.contains("index.lock") || raw.contains("another git process") || raw.contains("in_progress") {
+        Some("진행 중인 git 작업이 있습니다. 작업이 끝난 뒤 다시 시도해야 합니다.")
+    } else if raw.contains("unknown revision") || raw.contains("bad revision") || raw.contains("unknown_commit") {
+        Some("커밋을 찾을 수 없습니다. 히스토리를 다시 불러와야 합니다.")
+    } else if raw.contains("not a git repository") || raw.contains("not_repository") {
+        Some("git 저장소를 찾을 수 없습니다. 프로젝트 경로를 확인해야 합니다.")
+    } else if raw.contains("identity unknown") || raw.contains("unable to auto-detect email") {
+        Some("git 사용자 이름과 이메일이 설정되어 있지 않습니다.")
+    } else { None }
+}
+
 /// A Korean line for a failed commit call: the node's Korean message as it is; anything else
 /// (git's own text, a demo's) becomes "{what}에 실패했습니다" with a Korean reason, never raw English.
 pub fn commit_failure(what: &str, e: &ApiError) -> String {
+    if let Some(reason) = history_error_reason(e) { return reason.to_string(); }
     match e {
         ApiError::Status { message, .. } if is_korean(message) => message.clone(),
         ApiError::Status { status: 409, .. } => "작업을 하지 못했습니다. 저장소 상태를 확인해 주세요.".to_string(),
@@ -2835,6 +2981,7 @@ fn is_korean(text: &str) -> bool {
 /// writes the whole sentence, detail after it); an English one (git's own, or a demo's) goes
 /// after "{what}하지 못했습니다:".
 pub fn failure_text(what: &str, e: &ApiError) -> String {
+    if let Some(reason) = history_error_reason(e) { return reason.to_string(); }
     match e {
         ApiError::Status { message, .. } if is_korean(message) => message.clone(),
         ApiError::Status { message, .. } => format!("{what}하지 못했습니다: {message}"),
@@ -5553,4 +5700,82 @@ mod commit_detail_tests {
         assert!(!armed_label_visible(armed, rv, 11_100));
         assert!(armed_label_visible(armed, cp, 11_100));
     }
+    #[test]
+    fn fr_g15_history_errors_map_raw_git_output() {
+        for (raw, expected) in [
+            ("Your local changes would be overwritten", "작업 중인 변경"),
+            ("uncommitted changes exist", "작업 중인 변경"),
+            ("CONFLICT in file", "충돌이 발생"),
+            ("fatal: Unable to create index.lock", "진행 중인 git 작업"),
+            ("another git process seems to be running", "진행 중인 git 작업"),
+            ("fatal: bad revision abc", "커밋을 찾을 수 없습니다"),
+            ("unknown_commit 123", "커밋을 찾을 수 없습니다"),
+            ("fatal: not a git repository", "git 저장소를 찾을 수 없습니다"),
+            ("unable to auto-detect email address", "git 사용자 이름과 이메일"),
+        ] {
+            let error = ApiError::Status { status: 409, message: raw.into(), code: None };
+            assert!(commit_failure("되돌리기", &error).contains(expected));
+            assert!(failure_text("히스토리를 확인", &error).contains(expected));
+        }
+    }
+
+    #[test]
+    fn fr_g5_history_filter_and_sync_derivation() {
+        assert_eq!(HistoryFilter::default(), HistoryFilter::AllBranches);
+        assert_eq!(HistoryFilter::ALL, [HistoryFilter::AllBranches, HistoryFilter::LocalOnly]);
+        assert_eq!(HistoryFilter::AllBranches.label(), "모든 브랜치");
+        assert_eq!(HistoryFilter::LocalOnly.label(), "로컬 전용");
+
+        let make_commit = |sha: &str, refs: &[(&str, GitLogRefKind)]| HistoryEntry {
+            sha: sha.to_string(),
+            short: sha[..7].to_string(),
+            subject: "test".to_string(),
+            author: "author".to_string(),
+            time_text: "1시간 전".to_string(),
+            refs: refs.iter().map(|(l, k)| HistoryRef { label: l.to_string(), kind: k.clone() }).collect(),
+            is_merge: false,
+            unpushed: false,
+            remote_only: false,
+        };
+
+        let mut entries = vec![
+            make_commit("1111111111", &[("HEAD", GitLogRefKind::Head), ("feat/test", GitLogRefKind::Branch)]),
+            make_commit("2222222222", &[("develop", GitLogRefKind::Branch), ("origin/develop", GitLogRefKind::Remote)]),
+            make_commit("3333333333", &[("origin/other", GitLogRefKind::Remote)]),
+        ];
+
+        annotate_history_sync(&mut entries);
+
+        assert!(entries[0].unpushed, "commit 0 is before remote ref and local only");
+        assert!(!entries[0].remote_only);
+
+        assert!(!entries[1].unpushed, "commit 1 is synced with origin");
+        assert!(!entries[1].remote_only);
+
+        assert!(!entries[2].unpushed);
+        assert!(entries[2].remote_only, "commit 2 has only remote ref");
+
+        let all = filter_history_entries(&entries, HistoryFilter::AllBranches);
+        assert_eq!(all.len(), 3);
+
+        let local = filter_history_entries(&entries, HistoryFilter::LocalOnly);
+        assert_eq!(local.len(), 2);
+        assert_eq!(local[0].sha, "1111111111");
+        assert_eq!(local[1].sha, "2222222222");
+
+        // detail sync flags
+        let mut d = detail(&["p"], vec![]);
+        d.refs = vec![GitLogRef { name: "refs/heads/feature".into(), kind: GitLogRefKind::Branch }];
+        let v_local = commit_detail_view(&d, 0);
+        assert!(v_local.unpushed);
+        assert!(!v_local.remote_only);
+
+        d.refs = vec![GitLogRef { name: "refs/remotes/origin/main".into(), kind: GitLogRefKind::Remote }];
+        let v_remote = commit_detail_view(&d, 0);
+        assert!(!v_remote.unpushed);
+        assert!(v_remote.remote_only);
+
+        assert!(!copy_sha_to_clipboard(""));
+    }
+
 }

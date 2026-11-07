@@ -138,6 +138,8 @@ pub const UI_STRINGS: &[&str] = &[
     crate::ui::home::GITHUB_LOGIN_HINT,
     crate::ui::home::GITHUB_UNAVAILABLE_HINT,
     crate::ui::home::GITHUB_INSTALL_HINT,
+    crate::ui::home::GITHUB_SAMPLE_WARN_REASON,
+    crate::ui::home::GITHUB_SAMPLE_OFF_REASON,
     crate::ui::home::GITHUB_HOW,
     crate::ui::home::LATER_PILL,
     crate::ui::home::LATER_LINE,

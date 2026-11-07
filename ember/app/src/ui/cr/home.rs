@@ -20,7 +20,7 @@ pub use crate::ui::home::{
     project_options, project_tile_line, resolve_cwd, shortcut_label, split_chip_rows,
     success_percent, title_from_message, CrewMember, Dash, Harness, HarnessBar, Kpi, ModelOption,
     ModeRow, PermMode, ProjectTile, Selection, StatusCounts, ATTACH_UNSUPPORTED, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
-    EMPTY_CREW, EMPTY_HARNESS_USAGE, CiResult, GithubCard, GithubPill, INTEGRATIONS_TITLE, LATER_INTEGRATIONS, LATER_LINE, LATER_PILL, GITHUB_NAME, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
+    EMPTY_CREW, EMPTY_HARNESS_USAGE, CiResult, GithubCard, GithubPill, GithubSampleKind, INTEGRATIONS_TITLE, LATER_INTEGRATIONS, LATER_LINE, LATER_PILL, GITHUB_NAME, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
 };
 use crate::ui::home::{model_active_row, model_enter, model_row_detail, model_view, ModelEnter};
 use super::components::{
@@ -509,6 +509,12 @@ pub fn HomeScreen() {
     let ui = shared_ui().clone();
     let _ = ui.live.launcher.get();
     let dash = services().client.read(crate::ui::home::read_dash);
+
+    // Initial fetch when HomeScreen mounts directly (and `shell()` also triggers on route transitions to Home, FR-L35, #621).
+    let _requested = remember(|| {
+        crate::bridge::request_github_summary();
+        0u8
+    });
 
     // The lists are modals; they sit beside the scroller so no parent's spacing counts them.
     let composer = remember(|| Composer::new());
@@ -1400,15 +1406,13 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
 fn IntegrationsArea() {
     let p = ember_theme().palette;
     let s = services();
-    let _requested = remember(|| {
-        crate::bridge::request_github_summary();
-        0u8
-    });
     let demo = s.demo.is_some();
     let fetched = s.ui.live.github.get();
-    let sample = demo.then(crate::demo::github_state);
-    let card = GithubCard::from_state(if demo { sample.as_ref() } else { fetched.state() });
-    let header_line = if demo { crate::ui::home::sample_header(&card.header_line) } else { card.header_line.clone() };
+    let hook_sample = crate::ui::home::github_sample_from_env();
+    let is_sample = demo || hook_sample.is_some();
+    let sample = hook_sample.or_else(|| demo.then(crate::demo::github_state));
+    let card = GithubCard::from_state(if is_sample { sample.as_ref() } else { fetched.state() });
+    let header_line = if is_sample { crate::ui::home::sample_header(&card.header_line) } else { card.header_line.clone() };
     let guidance = remember(|| mutable_state_of(false));
     cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
         Label(INTEGRATIONS_TITLE, Fs::Lg, Weight::Semibold, None, Some(1));
@@ -2403,5 +2407,27 @@ mod tests {
             assert!(has(s), "missing suggestion {s}");
         }
         compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l35_home_requests_github_summary_on_mount_and_on_returning_to_home() {
+        let _guard = crate::services::test_guard();
+        let ui = shared_ui();
+        ui.set_menu(crate::ui::shell::NavMenu::Home);
+        let before = crate::bridge::github_request_count();
+        let mut host = Host::new(|| Box::new(Recomposer::new(HomeScreen)));
+        host.rebuild().expect("first home mount");
+        let after_mount = crate::bridge::github_request_count();
+        assert_eq!(after_mount, before + 1);
+
+        // Staying on Home and rebuilding does not re-request.
+        host.rebuild().expect("still on home");
+        assert_eq!(crate::bridge::github_request_count(), after_mount);
+
+        // Switching to another menu does not request; returning to Home requests immediately.
+        ui.set_menu(crate::ui::shell::NavMenu::Projects);
+        assert_eq!(crate::bridge::github_request_count(), after_mount);
+        ui.set_menu(crate::ui::shell::NavMenu::Home);
+        assert_eq!(crate::bridge::github_request_count(), after_mount + 1);
     }
 }

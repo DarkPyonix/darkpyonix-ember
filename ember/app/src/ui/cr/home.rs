@@ -54,8 +54,8 @@ const MODEL_RAIL_WIDTH: f32 = 128.0;
 /// `on_tap(i)`; closing and the bypass confirmation belong to the caller.
 /// Keyboard: each row is a `Clickable`, which the renderer makes a focusable button (Tab, Enter,
 /// Space), named by its title and description. Not built: arrow keys between rows and focus on
-/// the chosen row when the picker opens (TODO(compose-rust#100): only Enter reaches the Host;
-/// request-focus landed after the pinned v0.0.6), and the selected state for screen readers
+/// the chosen row when the picker opens (TODO(compose-rust#504): only Enter reaches the Host,
+/// compose-rust#100; request focus landed after the pinned v0.0.6), and the selected state for screen readers
 /// (TODO(compose-rust#460): `Modifier.selected` landed after v0.0.6).
 fn ModeBody(header: &str, rows: &[ModeRow], width: f32, on_tap: impl FnMut(usize) + Clone + 'static) {
     let p = ember_theme().palette;
@@ -781,7 +781,8 @@ impl Composer {
     /// popup is a focusable platform popup, so Escape and a click outside call `on_dismiss`.
     /// Not built: the rail's favourites group and the favourite stars (no place stores them),
     /// profile names (FR-L17 profiles are not built), arrow keys and `Ctrl+number`: the pinned
-    /// toolkit delivers only Enter to the Host (TODO(compose-rust#100, compose-rust#476)).
+    /// toolkit delivers only Enter to the Host (TODO(compose-rust#504) for arrows and focus in
+    /// the popup, TODO(compose-rust#100) for `Ctrl+number`).
     fn model_popover(&self, ui: &SharedUi, sel: &Selection, anchor: impl FnOnce(), close: impl FnMut() + Clone + 'static) {
         let open = self.open.get() == Some(Pick::Model);
         let mut reset = self.close_model();

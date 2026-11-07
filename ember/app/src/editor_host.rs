@@ -21,6 +21,7 @@ pub enum HostCommand {
     /// List every file below the project folder for quick open.
     IndexFiles,
     Delete { path: String, is_dir: bool },
+    ExecuteCommand(String),
     /// Search the project folder (FR-E7). `debounce` waits for a pause in typing first; a newer search
     /// replaces one still waiting.
     Search { id: u64, request: ember_editor::search::SearchRequest, debounce: bool },
@@ -49,6 +50,8 @@ pub struct HostState {
     pub gone: Vec<String>,
     /// (old, new) paths an explorer edit renamed, for the window to move their tabs.
     pub renamed: Vec<(String, String)>,
+    /// Extension commands from contributes.commands.
+    pub extension_commands: Vec<ember_editor::ContributedCommand>,
     /// The search panel's matches and the last replace's report (FR-E7).
     pub search: crate::ui::editor_search::SearchResults,
     pub updates: Vec<SessionUpdate>,
@@ -102,6 +105,9 @@ impl HostState {
         }
         if let SessionUpdate::ConnectionLost { reason } = &update {
             self.connection_lost(reason);
+        }
+        if let SessionUpdate::Commands { commands } = &update {
+            self.extension_commands = commands.clone();
         }
         self.updates.push(update);
     }
@@ -296,6 +302,11 @@ impl EditorHost {
                         Some(HostCommand::Focus(path)) => { let _ = session.focus(session.uri(&path)); }
                         Some(HostCommand::Widget(uri, generation, event)) => { let _ = session.widget_event(uri, generation, event); }
                         Some(HostCommand::Resync(uri)) => { let _ = session.resync(uri); }
+                        Some(HostCommand::ExecuteCommand(id)) => {
+                            if let Err(error) = session.execute_command(id.clone(), Vec::new()) {
+                                shared.lock().unwrap().edit_errors.push(format!("명령 {id}을(를) 실행하지 못했습니다: {error}"));
+                            }
+                        }
                         None => break,
                     },
                     update = updates.recv() => match update {

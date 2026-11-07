@@ -606,11 +606,11 @@ pub fn RepoBar(
     compact: bool,
     mut on_pick: impl FnMut(String) + Clone + 'static,
 ) {
-    RepoBarWithActions(projects, project, snap, compact, on_pick, None);
+    RepoBarWithActions(projects, project, snap, compact, current_window_size().width_dp, on_pick, None);
 }
 
 fn RepoBarWithActions(
-    projects: &[(String, String)], project: &ProjectBox, snap: Option<&RepoSnapshot>, compact: bool,
+    projects: &[(String, String)], project: &ProjectBox, snap: Option<&RepoSnapshot>, compact: bool, content_width: f32,
     mut on_pick: impl FnMut(String) + Clone + 'static, actions: Option<Actions>,
 ) {
     let project_menu = remember(|| mutable_state_of(false));
@@ -651,7 +651,7 @@ fn RepoBarWithActions(
     let b_dismiss = branch_menu.clone();
 
     // Below 1100 dp the three cards stack, so the remote card's buttons are not clipped (FR-L19).
-    let stacked = repo_bar_columns(current_window_size().width_dp) == 1;
+    let stacked = repo_bar_columns(content_width) == 1;
     cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
         let (project_menu_c, branch_menu_c) = (project_menu.clone(), branch_menu.clone());
         let p = ember_theme().palette;
@@ -898,13 +898,20 @@ pub fn SectionPills(
     active: Section,
     mut on_pick: impl FnMut(Section) + Clone + 'static,
 ) {
-    cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
-        cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
-            for sec in Section::ALL {
-                let mut pick = on_pick.clone();
-                PickChip(sec.label(), None, sec == active, false, move || pick(sec));
-            }
-        });
+    SectionPillsAtWidth(active, current_window_size().width_dp, on_pick);
+}
+
+fn SectionPillsAtWidth(active: Section, width: f32, on_pick: impl FnMut(Section) + Clone + 'static) {
+    let per_row = if width < 820.0 { 3 } else { Section::ALL.len() };
+    cu::Column().modifier(Modifier::new().fill_max_width()).spacing(SP[1]).content(|| {
+        for row in Section::ALL.chunks(per_row) {
+            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                for sec in row.iter().copied() {
+                    let mut pick = on_pick.clone();
+                    PickChip(sec.label(), None, sec == active, false, move || pick(sec));
+                }
+            });
+        }
     });
 }
 
@@ -924,6 +931,10 @@ pub fn PaneTabs(
 
 /// One file diff with a check per changed line and per hunk.
 pub fn DiffView(file: &FileDiff, staging: &MutableState<Staging>) {
+    DiffViewAtWidth(file, staging, diff_pane_width(current_window_size().width_dp, pane_layout(current_window_size().class)));
+}
+
+fn DiffViewAtWidth(file: &FileDiff, staging: &MutableState<Staging>, pane_width: f32) {
     let p = ember_theme().palette;
     let (on, total) = staging
         .get()
@@ -937,8 +948,7 @@ pub fn DiffView(file: &FileDiff, staging: &MutableState<Staging>) {
         FileStatus::Renamed => (p.blue.soft, p.blue.strong),
     };
 
-    let window = current_window_size();
-    let wraps = diff_header_wraps(diff_pane_width(window.width_dp, pane_layout(window.class)));
+    let wraps = diff_header_wraps(pane_width);
     let stage_chip = format!("{on}/{total}줄 스테이징");
     cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
         if wraps {
@@ -1275,14 +1285,14 @@ fn FilesPane(
     });
 }
 
-fn DiffPane(diffs: &[FileDiff], selected: usize, staging: &MutableState<Staging>) {
+fn DiffPane(diffs: &[FileDiff], selected: usize, staging: &MutableState<Staging>, width: f32) {
     let p = ember_theme().palette;
     let selected_file = diffs.get(selected).cloned();
     let st_diff = staging.clone();
     VcsCard(move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
             if let Some(file) = selected_file {
-                DiffView(&file, &st_diff);
+                DiffViewAtWidth(&file, &st_diff, width);
             } else {
                 cu::Box().modifier(Modifier::new().fill_max_width().padding(SP[3])).content(|| {
                     Label("변경 사항이 없습니다. 작업 트리가 깨끗합니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
@@ -1438,10 +1448,10 @@ pub fn ChangesPane(
     tab: Option<PaneTab>,
     on_tab: impl FnMut(PaneTab) + Clone + 'static,
 ) {
-    ChangesPaneWithActions(snap, layout, tab, on_tab, None);
+    ChangesPaneWithActions(snap, layout, tab, on_tab, None, diff_pane_width(current_window_size().width_dp, layout));
 }
 
-fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<PaneTab>, on_tab: impl FnMut(PaneTab) + Clone + 'static, actions: Option<Actions>) {
+fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<PaneTab>, on_tab: impl FnMut(PaneTab) + Clone + 'static, actions: Option<Actions>, diff_width: f32) {
     let p = ember_theme().palette;
     let diffs = snap.changes.clone();
     let staging_key = (actions.as_ref().map(|a| (a.project.clone(), a.reload.get())), snap.branch.clone(), snap.staged.clone(), diffs.clone());
@@ -1483,9 +1493,9 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
                 .alignment(Alignment::TopStart)
                 .spacing(GAP_CARD)
                 .content(move || {
-                    // Left column: the tree scrolls, the commit box stays pinned below it (#290)
-                    cu::Column().spacing(GAP_CARD).modifier(Modifier::new().width(320.0).fill_max_height()).content(move || {
-                        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(move || {
+                    // The tree and commit card share a scroll, leaving more room for file rows (#654).
+                    cu::ScrollColumn().modifier(Modifier::new().width(320.0).fill_max_height()).content(move || {
+                        cu::Column().modifier(Modifier::new().fill_max_width()).spacing(GAP_CARD).content(move || {
                             VcsCard(move || {
                                 cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
                                     FilesHeader(stash_actions.clone(), diffs_len, &all_checks, &st_files, &d_files);
@@ -1493,15 +1503,15 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
                                     FilesTree(&d_files, &st_files, &fold_files, &sel_files, on_tab_files);
                                 });
                             });
-                        });
-                        VcsCard(move || {
-                            CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files, commit.clone());
+                            VcsCard(move || {
+                                CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files, commit.clone());
+                            });
                         });
                     });
 
                     // Right card: diff
                     cu::ScrollColumn().modifier(Modifier::new().weight(1.0).fill_max_height()).content(move || {
-                        DiffPane(&diffs, sel, &staging);
+                        DiffPane(&diffs, sel, &staging, diff_width);
                     });
                 });
         }
@@ -1526,7 +1536,7 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
                         CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files, commit.clone());
                     });
                 });
-                DiffPane(&diffs, sel, &staging);
+                DiffPane(&diffs, sel, &staging, diff_width);
             });
         }
         PaneLayout::Tabs => {
@@ -1540,7 +1550,7 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
             cu::Column().modifier(Modifier::new().fill_max_width()).spacing(GAP_CARD).content(move || {
                 PaneTabs(Section::Changes, tab, move |t| on_tab_pick(t));
                 match tab.unwrap_or(PaneTab::Files) {
-                    PaneTab::Diff => DiffPane(&diffs, sel, &staging),
+                    PaneTab::Diff => DiffPane(&diffs, sel, &staging, diff_width),
                     PaneTab::Commit => {
                         CommitPane(&snap.branch, staged_files, &summary, &body, &amend, commit.clone());
                         cu::Spacer().modifier(Modifier::new().height(super::routines::compact_bottom_clearance()));
@@ -1572,6 +1582,7 @@ fn SectionContent(
     branch_count: MutableState<Option<usize>>,
     team_count: MutableState<Option<usize>>,
     pr_list: MutableState<Vec<PrEntry>>,
+    diff_width: f32,
 ) {
     match (snap, sec) {
         (Some(s), Section::Changes) => {
@@ -1582,6 +1593,7 @@ fn SectionContent(
                 active_tab,
                 move |t| tab_state.set(t),
                 actions,
+                diff_width,
             );
         }
         (Some(s), Section::Conflicts) => ConflictsPane(&s.conflicts, actions, layout),
@@ -4103,6 +4115,9 @@ fn VcsScreenWithLoad(
     let wide = !sheet && section_nav(class) == SectionNav::List;
     let compact = class == WindowSizeClass::Compact;
     let pad = if compact { SP[2] } else { 32.0 };
+    let content_width = ((if sheet { vcs_sheet_width(window.width_dp) } else { window.width_dp }) - 2.0 * pad).max(0.0);
+    let section_width = (content_width - if wide { 200.0 + SP[3] } else { 0.0 }).max(0.0);
+    let diff_width = (section_width - if layout == PaneLayout::Two { 320.0 + GAP_CARD } else { 0.0 }).max(0.0);
 
     // `EMBER_CR_VCS_SECTION=<key>` opens a section directly, for captures without clicks.
     let section = remember(|| mutable_state_of(std::env::var("EMBER_CR_VCS_SECTION").map(|k| route_section(&k)).unwrap_or(Section::Changes)));
@@ -4143,6 +4158,7 @@ fn VcsScreenWithLoad(
             // phone (where the shell's menu button sits) do not (#495).
             if !sheet && !compact {
                 if let Some(s) = crate::services::try_services() {
+                    // TODO(compose-rust#460, #429): the icon-only theme button has no accessible name.
                     super::project::ThemeButton(&s.ui);
                 }
             }
@@ -4156,6 +4172,7 @@ fn VcsScreenWithLoad(
                         &project,
                         snap.as_ref(),
                         compact,
+                        content_width,
                         move |id: String| {
                             sel_proj.set(Some(id.clone()));
                             if !sheet {
@@ -4187,18 +4204,18 @@ fn VcsScreenWithLoad(
                                 SectionListWithSample(sec, snap.as_ref(), sample, stash_count.get(), pr_count.get(), branch_count.get(), team_count.get(), move |s| sec_state.set(s));
                             });
                             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
-                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone());
+                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone(), diff_width);
                             });
                         });
                     } else {
                         cu::Column().modifier(Modifier::new().fill_max_width()).spacing(SP[2]).content(|| {
                             let sec_state = section.clone();
-                            SectionPills(sec, move |s| sec_state.set(s));
+                            SectionPillsAtWidth(sec, section_width, move |s| sec_state.set(s));
                             if layout == PaneLayout::Tabs && snap.is_none() && !pane_tabs(sec).is_empty() {
                                 let tab_state = tab.clone();
                                 PaneTabs(sec, active_tab, move |t| tab_state.set(t));
                             }
-                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone());
+                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone(), diff_width);
                         });
                     }
                 } else {
@@ -4748,6 +4765,42 @@ mod tests {
         batch.iter().map(|m| format!("{m:?}")).collect()
     }
 
+    #[compose_rust::runtime::composable]
+    fn responsive_pills_sample() {
+        SectionPillsAtWidth(Section::Changes, 704.0, |_| {});
+    }
+
+    #[compose_rust::runtime::composable]
+    fn commit_fields_sample() {
+        let summary = remember(|| mutable_state_of(String::new()));
+        let body = remember(|| mutable_state_of(String::new()));
+        let amend = remember(|| mutable_state_of(false));
+        CommitBox("main", 1, &summary, &body, &amend, None);
+    }
+
+    #[compose_rust::runtime::composable]
+    fn theme_button_sample() {
+        let ui = remember(|| crate::ui::coexist::SharedUi::new(crate::prefs::Prefs::default()));
+        super::super::project::ThemeButton(&ui);
+    }
+
+    #[test]
+    fn fr_l19_responsive_controls_render_in_the_host() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let pills = text_of(responsive_pills_sample);
+        for section in Section::ALL {
+            assert!(pills.contains(section.label()), "missing {}", section.label());
+        }
+        let fields = text_of(commit_fields_sample);
+        assert!(fields.contains("요약 (필수)"));
+        assert!(fields.contains("설명 (선택)"));
+        let theme = text_of(theme_button_sample);
+        assert!(theme.contains("OnClick"), "theme control must render: {theme}");
+        assert_eq!(repo_bar_columns(vcs_sheet_width(1024.0) - 64.0), 1);
+        assert!(diff_header_wraps(500.0));
+    }
+
     #[test]
     fn fr_l19_without_git_data_the_vcs_screen_says_it_is_not_ready() {
         let _guard = crate::services::test_guard();
@@ -5250,7 +5303,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l19_commit_box_is_pinned_below_the_tree_at_the_wide_layout() {
+    fn fr_l19_commit_box_follows_the_tree_at_the_wide_layout() {
         let _guard = crate::services::test_guard();
         compose_rust::window::reset_window_size();
         let mut host = Host::new(|| Box::new(Recomposer::new(sample_screen)));

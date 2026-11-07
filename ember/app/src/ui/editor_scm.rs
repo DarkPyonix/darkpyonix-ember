@@ -1318,7 +1318,7 @@ pub mod view {
         let discard_title = if is_armed { "정말 변경 사항을 취소합니다" } else { "변경 사항 취소" };
 
         rsx! {
-            div { key: "{group.title()}:{e.path}", class, role: "listitem", "aria-label": "{row_label}", title: "{tip}", style: "--d:1;",
+            div { key: "{group.title()}:{e.path}", class, role: "listitem", "aria-label": "{row_label}", title: "{tip}", style: "--d:1; gap:3px; padding-right:var(--sp2);",
                 onclick: move |_| {
                     if group == Group::Conflicts {
                         diff_s.scm.open_conflict(&diff_path);
@@ -1328,15 +1328,15 @@ pub mod view {
                     }
                 },
                 {icon_px("file", 15)}
-                span { style: "overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; min-width:0;", "{name}" }
-                if !dir.is_empty() { span { style: "color:var(--muted); font-size:var(--fs-2xs); overflow:hidden; text-overflow:ellipsis; flex:1 1 auto; min-width:0;", "{dir}" } }
+                span { style: "overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; min-width:20px;", "{name}" }
+                if !dir.is_empty() { span { style: "color:var(--muted); font-size:var(--fs-2xs); overflow:hidden; text-overflow:ellipsis; flex:1 2 0px; min-width:0;", "{dir}" } }
                 div { class: "spacer" }
                 if !deleted {
-                    button { class: "ed-ib", style: "width:22px; height:22px;", title: "파일 열기: {name}",
+                    button { class: "ed-ib", style: "width:20px; height:20px; flex:none;", title: "파일 열기: {name}",
                         onclick: move |event| { event.stop_propagation(); open_file(&open_s, &open_path); }, {icon_px("file", 13)} }
                 }
                 if group == Group::Changes && e.letter != 'U' {
-                    button { class: "ed-ib", style: if is_armed { "width:22px; height:22px; color:var(--c-red);" } else { "width:22px; height:22px;" },
+                    button { class: "ed-ib", style: if is_armed { "width:20px; height:20px; flex:none; color:var(--c-red);" } else { "width:20px; height:20px; flex:none;" },
                         title: "{discard_title}: {name}", disabled: busy,
                         onclick: move |event| {
                             event.stop_propagation();
@@ -1345,7 +1345,7 @@ pub mod view {
                         }, {icon_px("close", 13)} }
                 }
                 if group != Group::Conflicts {
-                    button { class: "ed-ib", style: "width:22px; height:22px;", title: "{op_title}: {name}", disabled: busy,
+                    button { class: "ed-ib", style: "width:20px; height:20px; flex:none;", title: "{op_title}: {name}", disabled: busy,
                         onclick: move |event| {
                             event.stop_propagation();
                             if group == Group::Staged { op_s.scm.unstage(&op_entry) } else { op_s.scm.stage(&op_entry) }
@@ -1389,11 +1389,11 @@ pub mod view {
                                 }
                                 div { style: "display:flex; gap:var(--sp1); padding:var(--sp1) var(--sp3);",
                                     input {
-                                        style: "flex:1; border:1px solid var(--line); border-radius:var(--r-sm); background:var(--surface); color:var(--text); padding:2px 6px; font:inherit; font-size:var(--fs-xs);",
+                                        style: "flex:1 1 0px; min-width:0; border:1px solid var(--line); border-radius:var(--r-sm); background:var(--surface); color:var(--text); padding:2px 6px; font:inherit; font-size:var(--fs-xs);",
                                         placeholder: "새 브랜치 이름", value: "{new_branch}",
                                         oninput: move |e| new_branch_input_s.scm.set_new_branch(e.value()),
                                     }
-                                    button { class: "ed-pj", style: "border:1px solid var(--line); height:26px; font-size:var(--fs-xs);", disabled: busy,
+                                    button { class: "ed-pj", style: "flex:none; border:1px solid var(--line); height:26px; font-size:var(--fs-xs);", disabled: busy,
                                         onclick: move |_| {
                                             if !new_branch_for_create.trim().is_empty() {
                                                 s_create.scm.create_branch(&new_branch_for_create);

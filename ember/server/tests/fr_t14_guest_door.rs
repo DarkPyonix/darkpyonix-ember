@@ -256,6 +256,31 @@ async fn fr_t14_join_page_has_csp_nosniff_and_no_referrer() {
     assert_eq!(h.get("x-content-type-options").unwrap(), "nosniff");
 }
 
+/// FR-T11, FR-A5: a guest cannot answer an agent's question: the guest door has no route of the
+/// owner's question shape, under either prefix, with a valid guest credential.
+#[tokio::test]
+async fn fr_t11_the_guest_door_has_no_question_answer_route() {
+    let d = door(&[("EMBER_GUEST_LISTEN", "127.0.0.1:9000")]);
+    let (store, sessions) = store_and_sessions();
+    store.create_session("core", AgentKind::Scripted, "/tmp/x", None, "alpha").unwrap();
+    let ch = store.channels(None).unwrap().remove(0).id;
+    let (_, token) = store.create_invite(&ch, "user", None).unwrap();
+    let (_, cred) = store.accept_invite(&token, "A").unwrap();
+    let a = d.wrap(guest_router(store, sessions));
+    let bearer = format!("Bearer {cred}");
+    let authed: Vec<(&str, &str)> = vec![("host", "127.0.0.1:9000"), ("authorization", &bearer)];
+    for uri in [
+        format!("/api/channels/{ch}/questions/q1/answer"),
+        format!("/api/guest/channels/{ch}/questions/q1/answer"),
+    ] {
+        for m in ["POST", "GET", "PUT"] {
+            let (s, _, _) = send(&a, m, &uri, &authed).await;
+            assert!(s == StatusCode::NOT_FOUND || s == StatusCode::METHOD_NOT_ALLOWED, "{m} {uri}: {s}");
+        }
+    }
+    assert!(!GUEST_ROUTES.iter().any(|r| r.1.contains("questions")));
+}
+
 #[tokio::test]
 async fn fr_t14_guest_door_serves_exactly_the_route_table() {
     let d = door(&[("EMBER_GUEST_LISTEN", "127.0.0.1:9000")]);

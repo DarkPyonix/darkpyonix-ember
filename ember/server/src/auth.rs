@@ -307,6 +307,23 @@ mod tests {
         }
     }
 
+    /// FR-T11, FR-A5: answering a question from the channel feed is an owner route like the
+    /// approval answer beside it: under `/api/channels/` only the agent `post` route is exempt.
+    #[test]
+    fn fr_t11_the_channel_question_answer_route_is_not_token_exempt() {
+        use axum::http::Method;
+        for m in [Method::GET, Method::POST, Method::PUT, Method::DELETE] {
+            for p in [
+                "/api/channels/c1/questions/q1/answer",
+                "/api/channels/c1/questions/post",
+                "/api/channels/c1/questions/q1/answer/post",
+                "/api/channels/c1/feed/a1/answer",
+            ] {
+                assert!(!token_exempt(&m, p), "{m} {p}");
+            }
+        }
+    }
+
     #[test]
     fn fr_t14_the_guest_family_is_not_exempt() {
         use axum::http::Method;

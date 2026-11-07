@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::agents::{AgentAdapter, AgentKind, AgentRun, Detected, Probe, StartRequest};
@@ -77,8 +77,52 @@ pub enum QuestionError {
     Invalid(#[from] AnswerInvalid),
     #[error("session {0} has no running agent")]
     NoAgent(String),
+    /// The body names both or neither of `answers` and `decline: true`.
+    #[error("send either answers or decline: true, not both")]
+    BadBody,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+/// One answer in the body of a question route.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionAnswerItem {
+    pub question_id: String,
+    pub values: Vec<String>,
+}
+
+/// The body of both question routes (`POST /api/sessions/{id}/questions/{question_id}/answer`
+/// and `POST /api/channels/{id}/questions/{question_id}/answer`, FR-A5, FR-T11):
+/// `{"answers":[{"question_id":"q0","values":["blue"]}]}` or `{"decline":true}`, exactly one.
+/// An unknown field is refused (422). One type and one checker, so the routes cannot drift.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionAnswerBody {
+    pub answers: Option<Vec<QuestionAnswerItem>>,
+    pub decline: Option<bool>,
+}
+
+/// What a valid [`QuestionAnswerBody`] asks for.
+pub enum QuestionChoice {
+    Answer(Vec<QuestionAnswer>),
+    Decline,
+}
+
+impl QuestionAnswerBody {
+    /// The one choice the body makes, or [`QuestionError::BadBody`] (400) when it makes both or none.
+    pub fn choice(self) -> Result<QuestionChoice, QuestionError> {
+        match (self.answers, self.decline) {
+            (Some(items), None) => Ok(QuestionChoice::Answer(
+                items
+                    .into_iter()
+                    .map(|a| QuestionAnswer { question_id: a.question_id, values: a.values })
+                    .collect(),
+            )),
+            (None, Some(true)) => Ok(QuestionChoice::Decline),
+            _ => Err(QuestionError::BadBody),
+        }
+    }
 }
 
 pub struct NewSession {
@@ -773,6 +817,27 @@ impl Sessions {
         answers: Vec<QuestionAnswer>,
     ) -> Result<(), QuestionError> {
         self.resolve_question(id, question_id, Some(answers)).await
+    }
+
+    /// [`Sessions::answer_question`] or [`Sessions::decline_question`] as the body of a question
+    /// route chooses; `"answered"` or `"declined"` is the `status` the routes answer with. The body
+    /// is checked before the session is looked at.
+    pub async fn resolve_question_body(
+        self: &Arc<Self>,
+        id: &str,
+        question_id: &str,
+        body: QuestionAnswerBody,
+    ) -> Result<&'static str, QuestionError> {
+        match body.choice()? {
+            QuestionChoice::Answer(answers) => {
+                self.answer_question(id, question_id, answers).await?;
+                Ok("answered")
+            }
+            QuestionChoice::Decline => {
+                self.decline_question(id, question_id).await?;
+                Ok("declined")
+            }
+        }
     }
 
     /// Skip a pending question: the agent is told that the person did not answer (FR-A5). An

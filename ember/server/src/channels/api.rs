@@ -16,11 +16,22 @@
 //!
 //! | GET    | `/api/channels/{id}/feed` | → `[FeedItem]`, newest first (FR-T11) |
 //! | POST   | `/api/channels/{id}/feed/{approval_id}/answer` | `{decision}` → 204 |
+//! | POST   | `/api/channels/{id}/questions/{question_id}/answer` | `{answers:[{question_id, values}]}` or `{decline:true}` → 200 `{status: "answered"\|"declined"}` |
 //! | POST   | `/api/channels/{id}/mentions/preview` | `{text}` → `{reaches: [{id, name}], unknown: [name]}` |
 //!
 //! The feed holds the pending approvals and the last-turn reports of the channel's member agents
 //! (see [`super::feed`]). `decision` is `allow_once`, `allow_always` or `deny`; an approval that
 //! is not pending in this channel is 404.
+//!
+//! `questions/{question_id}/answer` answers a member session's pending question (FR-T11, FR-A5):
+//! the body is the session route's ([`crate::session::QuestionAnswerBody`], exactly one of
+//! `answers` and `decline`, an unknown field 422). The question must be pending in a member
+//! session of this channel, else 404 (a question of a non-member, an answered or withdrawn one, an
+//! unknown id, or one only another channel has). Then the session decides, as on its own route:
+//! 404 not pending, 400 invalid answers (the fixed messages) or a body that is both or neither, 409
+//! no running agent. Errors are `{error, code}` with `code` `not_found`, `bad_request` or `conflict`
+//! (`internal` for 500). Owner only: `auth.rs` exempts nothing under `/api/channels/` but the agent
+//! `post` route, so a runtime token is refused (401) and the guest router has no such route.
 //!
 //! A message from `user` with `@name` of a name that is not a member agent is refused 400 with
 //! `code`/`reason` `not_a_member` and `unknown: [name]`; nothing is stored or pushed (FR-T13).
@@ -70,7 +81,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::{ChannelError, NewChannel, USER};
-use crate::session::{Push, Sessions};
+use crate::session::{Push, QuestionAnswerBody, QuestionError, Sessions};
 use crate::store::Store;
 
 /// Router state: the store for the log, and the sessions for the push broadcaster (FR-L12) and,
@@ -144,6 +155,7 @@ fn build(ctx: ChannelsCtx) -> Router {
         .route("/api/channels/{id}/mentions/preview", post(preview))
         .route("/api/channels/{id}/feed", get(feed))
         .route("/api/channels/{id}/feed/{approval_id}/answer", post(answer_feed))
+        .route("/api/channels/{id}/questions/{question_id}/answer", post(answer_feed_question))
         .route("/api/guest-door", get(guest_door_status))
         .route("/api/channels/{id}/invites", get(list_invites).post(create_invite))
         .route("/api/channels/{id}/invites/{invite_id}", delete(revoke_invite))
@@ -377,6 +389,32 @@ async fn answer_feed(
         .await
         .map_err(|e| ChannelError::Other(anyhow::anyhow!("{e}")))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Answer or skip a member session's pending question from the feed (FR-T11, FR-A5). The feed
+/// lookup is the membership check (404); the session then validates and records the answer, so
+/// the feed and the session clear together. Errors of the session map as on its own route.
+async fn answer_feed_question(
+    State(c): State<ChannelsCtx>,
+    Path((id, question_id)): Path<(String, String)>,
+    Json(b): Json<QuestionAnswerBody>,
+) -> Response {
+    let item = match c.store.channel_feed_question(&id, &question_id) {
+        Ok(item) => item,
+        Err(e) => return e.into_response(),
+    };
+    match c.sessions.resolve_question_body(&item.session_id, &question_id, b).await {
+        Ok(status) => Json(json!({ "status": status })).into_response(),
+        Err(e) => {
+            let (code, name) = match &e {
+                QuestionError::NoSession(_) | QuestionError::NotPending(_) => (StatusCode::NOT_FOUND, "not_found"),
+                QuestionError::Invalid(_) | QuestionError::BadBody => (StatusCode::BAD_REQUEST, "bad_request"),
+                QuestionError::NoAgent(_) => (StatusCode::CONFLICT, "conflict"),
+                QuestionError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+            };
+            (code, Json(json!({ "error": format!("{e:#}"), "code": name }))).into_response()
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]

@@ -9,11 +9,13 @@
 pub mod catalog;
 pub mod grammar;
 pub mod interpreter;
+pub mod plist;
 pub mod roles;
 pub mod selector;
 pub mod tokens;
 
 pub use catalog::{GrammarCatalog, GrammarEntry};
+pub use plist::{parse_plist, PlistError, MAX_PLIST_BYTES, MAX_PLIST_DEPTH, MAX_PLIST_NODES};
 pub use selector::{Matcher, Selector, MAX_SELECTOR_CHARS, MAX_SELECTOR_DEPTH, MAX_SELECTOR_TOKENS};
 pub use roles::{role_for_scopes, SyntaxRole};
 pub use tokens::{Changed, ColorRun, DocRun, DocumentTokens, EditError, TooLarge, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_LINES};

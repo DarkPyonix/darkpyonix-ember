@@ -60,8 +60,8 @@ pub struct AddUi {
     confirm_in_flight: MutableState<bool>,
     /// A confirm failed without an answer: it may have been accepted, so closing does not cancel.
     confirm_unknown: MutableState<bool>,
-    /// The run whose confirm was in flight at close; its answer is still reported once.
-    detached_confirm: MutableState<Option<String>>,
+    /// The runs whose confirms were in flight at close; their answers are still reported once.
+    detached_confirms: MutableState<Vec<String>>,
     armed_at: MutableState<i64>,
     /// Ticks once a second while a view counts down.
     tick: MutableState<i64>,
@@ -85,7 +85,7 @@ impl AddUi {
             confirmed: mutable_state_of(false),
             confirm_in_flight: mutable_state_of(false),
             confirm_unknown: mutable_state_of(false),
-            detached_confirm: mutable_state_of(None),
+            detached_confirms: mutable_state_of(Vec::new()),
             armed_at: mutable_state_of(0),
             tick: mutable_state_of(0),
             review: false,
@@ -180,7 +180,7 @@ impl AddUi {
             confirmed: self.confirmed.get_untracked(),
             confirm_in_flight: self.confirm_in_flight.get_untracked(),
             confirm_unknown: self.confirm_unknown.get_untracked(),
-            detached_confirm: self.detached_confirm.get_untracked(),
+            detached_confirms: self.detached_confirms.get_untracked(),
             sample: self.sample(),
         };
         let effects = flow::reduce(&mut st, ev);
@@ -188,7 +188,7 @@ impl AddUi {
         self.confirmed.set(st.confirmed);
         self.confirm_in_flight.set(st.confirm_in_flight);
         self.confirm_unknown.set(st.confirm_unknown);
-        self.detached_confirm.set(st.detached_confirm);
+        self.detached_confirms.set(st.detached_confirms);
         for e in effects {
             match e {
                 flow::Effect::Cancel(id) => cancel_on_server(id),

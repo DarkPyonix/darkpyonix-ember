@@ -34,6 +34,21 @@ pub const PEER_MIGRATION: &str = "
 ALTER TABLE computers ADD COLUMN peer_json TEXT;
 ";
 
+/// Migration for FR-C2c (#633): extracted transport peer id column with a partial UNIQUE index,
+/// so duplicate peer ids are refused by an O(log n) index lookup and enforced by SQLite.
+pub const PEER_ID_UNIQUE_MIGRATION: &str = "
+ALTER TABLE computers ADD COLUMN peer_id TEXT;
+UPDATE computers
+SET peer_id = lower(json_extract(peer_json, '$.peer'))
+WHERE peer_json IS NOT NULL
+  AND json_valid(peer_json)
+  AND typeof(json_extract(peer_json, '$.peer')) = 'text'
+  AND length(json_extract(peer_json, '$.peer')) = 64;
+CREATE UNIQUE INDEX IF NOT EXISTS computers_peer_id_idx
+ON computers(peer_id)
+WHERE peer_id IS NOT NULL;
+";
+
 /// Migration for FR-X3: the computer a user designated for a session. The session falls back to
 /// the main server when it is lost and returns when it is detected again.
 pub const DESIGNATED_MIGRATION: &str = "

@@ -159,6 +159,7 @@ const MIGRATIONS: &[&str] = &[
     crate::computers::enrol::MIGRATION,
     crate::computers::enrol::CONFIRM_MIGRATION,
     HARNESS_SETTINGS_MIGRATION,
+    crate::projects::schema::CHARACTER_OVERRIDES_MIGRATION,
 ];
 
 /// The position of a registered migration (tests locate migrations by position, never by length).

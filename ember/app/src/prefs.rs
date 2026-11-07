@@ -54,6 +54,10 @@ pub struct Prefs {
     /// TODO(server): the project stores its own style once the server has the field.
     #[serde(default)]
     pub character_styles: BTreeMap<String, crate::ui::characters::CharStyle>,
+    /// Per-member character overrides per project id (FR-L22, #489). Fallback when the server has
+    /// none for the project.
+    #[serde(default)]
+    pub character_overrides: BTreeMap<String, BTreeMap<String, ember_client::wire::CharacterOverride>>,
     /// The editor's shortcut set (FR-L30). Older files have none, which reads as VS Code.
     #[serde(default)]
     pub keymap: crate::ui::keymap::Keymap,
@@ -74,6 +78,7 @@ impl Default for Prefs {
             session_view: None,
             panes: BTreeMap::new(),
             character_styles: BTreeMap::new(),
+            character_overrides: BTreeMap::new(),
             keymap: crate::ui::keymap::Keymap::default(),
         }
     }
@@ -93,11 +98,34 @@ impl Prefs {
         self.character_styles.get(project).copied()
     }
 
+    /// The per-member character overrides this device remembers for `project` (FR-L22, #489).
+    pub fn saved_character_overrides(
+        &self,
+        project: &str,
+    ) -> Option<&BTreeMap<String, ember_client::wire::CharacterOverride>> {
+        self.character_overrides.get(project)
+    }
+
+    pub fn set_character_overrides(
+        &mut self,
+        project: &str,
+        overrides: BTreeMap<String, ember_client::wire::CharacterOverride>,
+    ) {
+        if overrides.is_empty() {
+            self.character_overrides.remove(project);
+        } else {
+            self.character_overrides.insert(project.to_string(), overrides);
+        }
+    }
+
     /// A rename moves the remembered style to the new name (FR-L26).
     pub fn move_character_style(&mut self, old: &str, new: &str) {
         if old != new {
             if let Some(st) = self.character_styles.remove(old) {
                 self.character_styles.entry(new.to_string()).or_insert(st);
+            }
+            if let Some(ov) = self.character_overrides.remove(old) {
+                self.character_overrides.entry(new.to_string()).or_insert(ov);
             }
         }
     }

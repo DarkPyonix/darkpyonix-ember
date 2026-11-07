@@ -232,6 +232,30 @@ pub struct Project {
     /// missing field or `null` reads as no overrides.
     #[serde(default, deserialize_with = "null_as_default")]
     pub profile_overrides: std::collections::BTreeMap<String, Option<String>>,
+    /// Per-member character overrides saved from the team character editor (FR-L22, #489).
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub character_overrides: std::collections::BTreeMap<String, CharacterOverride>,
+}
+
+/// A saved character override for one member name in a project (FR-L22, #489).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub silhouette: Option<usize>,
+}
+
+impl CharacterOverride {
+    pub fn is_empty(&self) -> bool {
+        *self == CharacterOverride::default()
+    }
 }
 
 fn null_as_default<'de, D, T>(d: D) -> Result<T, D::Error>
@@ -278,6 +302,10 @@ pub struct ProjectPatch {
     /// clears all). The field is never sent as `null` (the server answers 400).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_overrides: Option<std::collections::BTreeMap<String, Option<String>>>,
+    /// Per-member character overrides (`Some(map)` replaces the stored one, an empty map clears
+    /// all; FR-L22, #489).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub character_overrides: Option<std::collections::BTreeMap<String, Option<CharacterOverride>>>,
 }
 
 impl ProjectPatch {

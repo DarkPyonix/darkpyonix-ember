@@ -1246,3 +1246,105 @@ fn fr_l31_2_diff_gutter_and_scm_helpers() {
     let cf_both = cf.with_choice(0, ConflictChoice::Both);
     assert_eq!(cf_both.resolved_content().unwrap(), "fn main() {\n    println!(\"ours\");\n    println!(\"theirs\");\n}\n");
 }
+
+
+// #477: Remaining mockup differences (FR-L31): close_others, locate ancestors, modified path set from real SCM status, empty state hints, tab_width text, tree/tab classes.
+#[test]
+fn fr_l31_close_others_keeps_only_active_tab_and_returns_closed_paths() {
+    use ember_app::ui::editor::EditorTabs;
+    let mut tabs = EditorTabs::default();
+    assert!(tabs.close_others().is_empty());
+
+    tabs.open("/w/a.rs");
+    tabs.open("/w/b.rs");
+    tabs.open("/w/c.rs");
+    tabs.set_dirty("/w/b.rs", true);
+    tabs.activate("/w/b.rs");
+
+    let closed = tabs.close_others();
+    assert_eq!(closed, vec!["/w/a.rs".to_string(), "/w/c.rs".to_string()]);
+    assert_eq!(tabs.paths(), vec!["/w/b.rs"]);
+    assert_eq!(tabs.current_path(), Some("/w/b.rs"));
+    assert!(tabs.is_dirty("/w/b.rs"));
+}
+
+#[test]
+fn fr_l31_ancestor_dirs_to_expand_reveals_active_file_below_root() {
+    use ember_app::ui::editor::ancestor_dirs_to_expand;
+    assert_eq!(
+        ancestor_dirs_to_expand("/w/p", "/w/p/ember/proxy/src/shim.rs"),
+        vec![
+            "/w/p".to_string(),
+            "/w/p/ember".to_string(),
+            "/w/p/ember/proxy".to_string(),
+            "/w/p/ember/proxy/src".to_string(),
+        ]
+    );
+    assert_eq!(
+        ancestor_dirs_to_expand("/w/p/", "/w/p/README.md"),
+        vec!["/w/p".to_string()]
+    );
+    assert!(ancestor_dirs_to_expand("/w/p", "/other/README.md").is_empty());
+}
+
+#[test]
+fn fr_l31_modified_paths_set_reflects_only_real_scm_status() {
+    use ember_app::ui::editor_scm::{modified_paths_set, ScmLoad};
+    use ember_client::api::{GitFile, GitStatus};
+
+    // Without a ready SCM status, no file is marked modified.
+    assert!(modified_paths_set("/w/p", &ScmLoad::NoProject).is_empty());
+    assert!(modified_paths_set("/w/p", &ScmLoad::Loading).is_empty());
+    assert!(modified_paths_set("/w/p", &ScmLoad::NotRepo).is_empty());
+    assert!(modified_paths_set("/w/p", &ScmLoad::Unavailable("offline".into())).is_empty());
+
+    // With a ready status, modified/added/conflict files are included as absolute paths, while clean/ignored or deleted-only are not.
+    let status = GitStatus {
+        branch: "develop".into(),
+        files: vec![
+            GitFile { path: "src/shim.rs".into(), old_path: None, index: '.', worktree: 'M' },
+            GitFile { path: "src/router.rs".into(), old_path: None, index: 'M', worktree: '.' },
+            GitFile { path: "docs/SPEC.md".into(), old_path: None, index: '?', worktree: '?' },
+            GitFile { path: "src/deleted.rs".into(), old_path: None, index: '.', worktree: 'D' },
+        ],
+        ..GitStatus::default()
+    };
+    let set = modified_paths_set("/w/p", &ScmLoad::Ready(status));
+    assert!(set.contains("/w/p/src/shim.rs"));
+    assert!(set.contains("/w/p/src/router.rs"));
+    assert!(set.contains("/w/p/docs/SPEC.md"));
+    assert!(!set.contains("/w/p/src/deleted.rs"));
+    assert!(!set.contains("/w/p/Cargo.toml"));
+}
+
+#[test]
+fn fr_l31_empty_state_hints_and_row_tab_classes_and_tab_width_text() {
+    use ember_app::ui::editor::{empty_state_hints, tab_class, tab_width_text, tree_row_class};
+    use ember_app::ui::keymap::{Keymap, Os};
+
+    let ((find_hint, find_label), (proj_hint, proj_label)) = empty_state_hints(Keymap::VsCode, Os::Mac);
+    assert_eq!(find_hint, "\u{2318}P");
+    assert_eq!(find_label, "파일로 이동");
+    assert_eq!(proj_hint, "\u{21E7}\u{2318}E");
+    assert_eq!(proj_label, "프로젝트 창");
+
+    let ((jb_find_hint, jb_find_label), (jb_proj_hint, jb_proj_label)) = empty_state_hints(Keymap::JetBrains, Os::Mac);
+    assert_eq!(jb_find_hint, "\u{21E7}\u{21E7}");
+    assert_eq!(jb_find_label, "모든 곳에서 찾기");
+    assert_eq!(jb_proj_hint, "\u{2318}1");
+    assert_eq!(jb_proj_label, "프로젝트 창");
+
+    assert_eq!(tree_row_class(false, false), "ed-tn");
+    assert_eq!(tree_row_class(true, false), "ed-tn sel");
+    assert_eq!(tree_row_class(false, true), "ed-tn mod");
+    assert_eq!(tree_row_class(true, true), "ed-tn sel mod");
+
+    assert_eq!(tab_class(false, false), "ed-tab");
+    assert_eq!(tab_class(true, false), "ed-tab on");
+    assert_eq!(tab_class(false, true), "ed-tab vc-mod");
+    assert_eq!(tab_class(true, true), "ed-tab on vc-mod");
+
+    assert_eq!(tab_width_text(4), "4칸");
+    assert_eq!(tab_width_text(2), "2칸");
+    assert_eq!(tab_width_text(0), "4칸");
+}

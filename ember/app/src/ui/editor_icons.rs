@@ -26,6 +26,7 @@ fn path(name: &str) -> &'static str {
         "close" => r#"<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/>"#,
         "file" => r#"<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Zm0 0v5h5"/>"#,
         "commit" => r#"<circle cx="12" cy="12" r="3.25"/><path d="M3 12h5.75M15.25 12H21"/>"#,
+        "dot" => r#"<circle cx="12" cy="12" r="5"/><path stroke-linecap="round" d="M12 3v3M12 18v3M3 12h3M18 12h3"/>"#,
         _ => "",
     }
 }

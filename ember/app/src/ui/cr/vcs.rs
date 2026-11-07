@@ -551,11 +551,11 @@ fn VcsCard(content: impl FnOnce()) {
     });
 }
 
-/// Columns of the repository, branch and remote cards: three side by side from 1000 dp, one
+/// Columns of the repository, branch and remote cards: three side by side from 1100 dp, one
 /// stacked column below it (the 768 dp mockup), where the remote card's Pull and icon buttons
 /// were cut at the right edge (FR-L19).
 pub fn repo_bar_columns(width_dp: f32) -> usize {
-    if width_dp >= 1000.0 { 3 } else { 1 }
+    if width_dp >= 1100.0 { 3 } else { 1 }
 }
 
 /// The diff header wraps to two lines (title and path, then the chips) when the diff pane is
@@ -626,7 +626,7 @@ fn RepoBarWithActions(
     let mut on_pick_proj = on_pick.clone();
     let b_dismiss = branch_menu.clone();
 
-    // Below 1000 dp the three cards stack, so the remote card's buttons are not clipped (FR-L19).
+    // Below 1100 dp the three cards stack, so the remote card's buttons are not clipped (FR-L19).
     let stacked = repo_bar_columns(current_window_size().width_dp) == 1;
     cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
         let (project_menu_c, branch_menu_c) = (project_menu.clone(), branch_menu.clone());
@@ -4370,10 +4370,10 @@ mod tests {
     }
 
     #[test]
-    fn fr_l19_repo_bar_stacks_below_1000dp() {
+    fn fr_l19_repo_bar_stacks_below_1100dp() {
         assert_eq!(repo_bar_columns(1440.0), 3);
-        assert_eq!(repo_bar_columns(1024.0), 3);
-        assert_eq!(repo_bar_columns(1000.0), 3);
+        assert_eq!(repo_bar_columns(1024.0), 1);
+        assert_eq!(repo_bar_columns(1100.0), 3);
         assert_eq!(repo_bar_columns(768.0), 1);
         assert_eq!(repo_bar_columns(390.0), 1);
     }
@@ -5067,8 +5067,27 @@ mod tests {
         let end = start + src[start..].find("pub fn preview()").expect("preview");
         let body = &src[start..end];
         assert!(!body.contains("set_selected_project"));
-        // The close callback is the sheet's on_dismiss (scrim, Escape) and the header close.
-        assert!(body.contains("EmberSheetSized(\"버전 관리\", true, sheet_w, true, on_close,"));
+    }
+
+    static VCS_DISMISSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    #[compose_rust::runtime::composable]
+    fn host_vcs_sheet_dismiss() {
+        VcsSheet("ember", true, || { VCS_DISMISSES.fetch_add(1, std::sync::atomic::Ordering::SeqCst); });
+    }
+
+    #[test]
+    fn fr_l18_vcs_sheet_renderer_dismiss_calls_close() {
+        let _guard = crate::services::test_guard();
+        VCS_DISMISSES.store(0, std::sync::atomic::Ordering::SeqCst);
+        let mut host = Host::new(|| Box::new(Recomposer::new(host_vcs_sheet_dismiss)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let (node_id, handler_id) = batch.iter().find_map(|m| match m {
+            Mutation::SetProp { node_id, property: PropertyKind::OnDismiss, value: PropertyValue::Integer(h) } => Some((*node_id, *h as u64)),
+            _ => None,
+        }).expect("VCS sheet dismiss handler");
+        host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch dismiss");
+        assert_eq!(VCS_DISMISSES.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[compose_rust::runtime::composable]

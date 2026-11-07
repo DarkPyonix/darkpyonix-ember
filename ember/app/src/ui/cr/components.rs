@@ -869,7 +869,9 @@ pub fn EmberSheetSized(
     let theme = ember_theme();
     // TODO(compose-rust#384): expose modal scrim color; the mockup uses rgba(0, 0, 0, 0.3).
     // The layered card shadow (#214) replaces the Material tint ring that `elevation` painted.
-    let modifier = with_shadows(Modifier::new(), theme.shadow_sm()).background(paint(theme.palette.surface));
+    // Explicit zero padding suppresses the renderer dialog's theme padding, which otherwise
+    // adds space around the frame and prevents a full-screen sheet.
+    let modifier = with_shadows(Modifier::new().padding(0.0), theme.shadow_sm()).background(paint(theme.palette.surface));
     let dismiss = on_dismiss.clone();
     let body = move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {

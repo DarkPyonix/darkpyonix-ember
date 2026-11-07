@@ -622,6 +622,8 @@ Glass; every other platform draws the same bar opaque. Tokens, the Apple-style s
 radius, smoothing 0.6: "애플의 스퀘어클과 맞지 않는 구현이야"), motion and every screen layout are in
 `DESIGN.md`.
 
+[user, 2026-11-08: "원칙으로 절대 ember UI 구현할 때 운영체제별로 UI를 일부러 다르게 구현하는 문제는 없어야 해", "유니파이드가 맞고 iOS에서 앱바만 리쿠이드 클라스야"] The app builds its toolkit theme with `Theme::unified`, never `Theme::adaptive`. An adaptive theme lets compose-rust pick the platform design system (Liquid Glass on macOS, Fluent on Windows, a Linux one elsewhere), and every toolkit-drawn part (dialog, menu, dropdown, sheet, their scrim and shape) then changes per OS; that is how Windows came to show different modals. Code may branch on the OS only for window chrome, safe areas, key labels and file-manager names, never for how a control looks or behaves. A difference between OSes is a toolkit bug and goes to compose-rust as an issue.
+
 [user, 2026-10-25: "앱 기본 스타일에서 안쪽 코드 작성이랑 도구창이 오히려 jetbrains island라는 최신 디자인 컨셉에 더 맞아. 그래서 그쪽 디자인이 맞고, 다만 지금 좌우 메뉴바의 경우 jetbrains 느낌으로 하는게 맞을거 같아. 흰색 버튼 배경이 보기 싫네."] The editor and terminal use the app's own style: rounded island panels, tabs, tool windows and the code area, matching the JetBrains Islands concept. Only the left and right tool-window stripes take the JetBrains form: 40 px icon-only stripes, with no white background or shadow on the selected button, just a faint selection tint. Breadcrumbs stay under the tabs. [provisional] The owner did not decide this, so it is a leader decision. Every other screen keeps the mockup design unchanged, including the session panels, the status view and version control.
 
 **Why.** One product that a user moves between machines should look the same on all of them, and a

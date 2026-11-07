@@ -235,6 +235,8 @@ impl WidgetBridge {
                 self.problems = problems;
                 BridgeAction::None
             }
+            // Search and replace results are the search panel's, not a document's (FR-E7).
+            SessionUpdate::SearchHits { .. } | SessionUpdate::SearchDone { .. } | SessionUpdate::ReplaceDone { .. } => BridgeAction::None,
         }
     }
 

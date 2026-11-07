@@ -21,6 +21,9 @@ pub enum HostCommand {
     /// List every file below the project folder for quick open.
     IndexFiles,
     Delete { path: String, is_dir: bool },
+    DeleteMany { items: Vec<(String, bool)> },
+    CopyPaths { sources: Vec<String>, dest_dir: String },
+    MovePaths { sources: Vec<String>, dest_dir: String },
     /// Search the project folder (FR-E7). `debounce` waits for a pause in typing first; a newer search
     /// replaces one still waiting.
     Search { id: u64, request: ember_editor::search::SearchRequest, debounce: bool },
@@ -257,6 +260,38 @@ impl EditorHost {
                                 state.gone.push(path.clone());
                             }
                             finish_edit(&session, &shared, "삭제", &parent, result).await;
+                        }
+                        Some(HostCommand::DeleteMany { items }) => {
+                            for (path, is_dir) in items {
+                                let parent = parent_of(&path);
+                                let result = session.delete_path(&path, is_dir).await;
+                                if result.is_ok() {
+                                    let mut state = shared.lock().unwrap();
+                                    state.forget_below(&path);
+                                    state.gone.push(path.clone());
+                                }
+                                finish_edit(&session, &shared, "삭제", &parent, result).await;
+                            }
+                        }
+                        Some(HostCommand::CopyPaths { sources, dest_dir }) => {
+                            for src in sources {
+                                let result = session.copy_path(&src, &dest_dir).await;
+                                finish_edit(&session, &shared, "복사", &dest_dir, result.map(|_| ())).await;
+                            }
+                        }
+                        Some(HostCommand::MovePaths { sources, dest_dir }) => {
+                            for src in sources {
+                                let old_parent = parent_of(&src);
+                                let result = session.move_path(&src, &dest_dir).await;
+                                if let Ok(new_path) = &result {
+                                    let mut state = shared.lock().unwrap();
+                                    state.forget_below(&src);
+                                    state.renamed.push((src.clone(), new_path.clone()));
+                                }
+                                let listed = session.read_dir(&session.uri(&old_parent)).await;
+                                shared.lock().unwrap().set_dir_listing(&old_parent, listed);
+                                finish_edit(&session, &shared, "이동", &dest_dir, result.map(|_| ())).await;
+                            }
                         }
                         Some(HostCommand::IndexFiles) => {
                             // A fresh index replaces the last one and a running one is cancelled; the walk runs

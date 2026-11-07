@@ -41,6 +41,9 @@ pub struct Shared {
     pub expanded: Signal<std::collections::HashSet<String>>,
     pub bottom_max: Signal<bool>,
     pub tree_sel: Signal<Option<(String, bool)>>,
+    pub tree_multi_sel: Signal<Vec<(String, bool)>>,
+    pub tree_clipboard: Signal<Option<crate::ui::editor::TreeClipboard>>,
+    pub tree_drag_src: Signal<Option<String>>,
     pub prompt: Signal<Option<crate::ui::editor::TreePrompt>>,
     pub prompt_text: Signal<String>,
     pub prompt_at: Signal<u64>,
@@ -94,6 +97,9 @@ fn init(target: EditorTarget) {
     let expanded = use_hook(|| Signal::new_in_scope(std::collections::HashSet::<String>::new(), root));
     let theme = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().theme, root));
     let tree_sel = use_hook(|| Signal::new_in_scope(None::<(String, bool)>, root));
+    let tree_multi_sel = use_hook(|| Signal::new_in_scope(Vec::<(String, bool)>::new(), root));
+    let tree_clipboard = use_hook(|| Signal::new_in_scope(None::<crate::ui::editor::TreeClipboard>, root));
+    let tree_drag_src = use_hook(|| Signal::new_in_scope(None::<String>, root));
     let prompt = use_hook(|| Signal::new_in_scope(None::<crate::ui::editor::TreePrompt>, root));
     let palette_open = use_hook(|| Signal::new_in_scope(false, root));
     let find = use_hook(|| FindState {
@@ -124,7 +130,7 @@ fn init(target: EditorTarget) {
     let last_find_cmd = use_hook(|| Rc::new(RefCell::new(0u64)));
     // The branch in the bars comes from the first status read, so it starts with the window.
     let scm = use_hook(|| { let scm = crate::ui::editor_scm::Scm::new(&target.project, revision); scm.refresh(); scm });
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, scm }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, scm }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -927,6 +933,9 @@ pub mod page {
         let mut expanded = s.expanded;
         let mut stripes = s.stripes;
         let mut tree_sel = s.tree_sel;
+        let mut tree_multi_sel = s.tree_multi_sel;
+        let mut tree_clipboard = s.tree_clipboard;
+        let mut tree_drag_src = s.tree_drag_src;
         let mut prompt = s.prompt;
         let mut prompt_text = s.prompt_text;
         let mut prompt_at = s.prompt_at;
@@ -956,6 +965,7 @@ pub mod page {
                 }
                 TreePrompt::Rename { path } => { submit_host.send(HostCommand::Rename { path, new_name: name }); }
                 TreePrompt::Delete { path, is_dir } => { submit_host.send(HostCommand::Delete { path, is_dir }); }
+                TreePrompt::DeleteMany { items } => { submit_host.send(HostCommand::DeleteMany { items }); }
             }
             let _ = &submit_root;
             prompt.set(None);
@@ -972,6 +982,21 @@ pub mod page {
                 // A deletion cannot be undone: the answer that is safe is the one a stray key or an early
                 // double click gives. Cancel is the default (Enter and Escape cancel), and a click on
                 // the delete button is ignored for the first 600 ms after the question appears.
+                rsx! {
+                    div { class: "ed-tn", role: "alertdialog", "aria-label": "삭제 확인", tabindex: "0", style: "--d:0; height:auto; flex-wrap:wrap; padding:var(--sp2); white-space:normal; background:var(--c-red-soft); color:var(--c-red);",
+                        onkeydown: move |event| { if matches!(event.key(), Key::Enter | Key::Escape) { event.stop_propagation(); prompt.set(None); } },
+                        div { style: "flex:1 1 100%;", "{message}" }
+                        button { class: "ed-pj", style: "border:1px solid var(--line); background:var(--surface); color:var(--text);", autofocus: true, onclick: move |_| prompt.set(None), "취소" }
+                        button { class: "ed-pj", style: "background:var(--c-red); color:var(--ink-text);", onclick: move |_| {
+                            if crate::ui::editor::delete_click_allowed(*prompt_at.read(), now_ms()) { submit_ok(confirm.clone()); }
+                        }, "삭제" }
+                    }
+                }
+            }
+            Some(TreePrompt::DeleteMany { items }) => {
+                let affected: Vec<String> = unsaved.iter().filter(|p| items.iter().any(|(ip, _)| crate::ui::editor::is_at_or_below(p, ip))).cloned().collect();
+                let message = crate::ui::editor::delete_many_confirmation(&items, &root, &affected);
+                let confirm = TreePrompt::DeleteMany { items };
                 rsx! {
                     div { class: "ed-tn", role: "alertdialog", "aria-label": "삭제 확인", tabindex: "0", style: "--d:0; height:auto; flex-wrap:wrap; padding:var(--sp2); white-space:normal; background:var(--c-red-soft); color:var(--c-red);",
                         onkeydown: move |event| { if matches!(event.key(), Key::Enter | Key::Escape) { event.stop_propagation(); prompt.set(None); } },
@@ -1005,6 +1030,11 @@ pub mod page {
                 }
             }
         };
+        let search_s = s.clone();
+        let key_host = s.host.clone();
+        let root_for_key = root.clone();
+        let root_for_drop = root.clone();
+        let drop_root_host = s.host.clone();
         rsx! {
             section { class: "ed-tw ed-left", "aria-label": "프로젝트",
                 div { class: "ed-twh",
@@ -1013,20 +1043,131 @@ pub mod page {
                     button { class: "ed-ib", title: "새 파일", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewFile { parent: new_file_parent.clone() })); }, {icon("plus")} }
                     button { class: "ed-ib", title: "새 폴더", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewDir { parent: new_dir_parent.clone() })); }, {icon("folder")} }
                     button { class: "ed-ib", title: "모두 접기", onclick: move |_| expanded.write().clear(), {icon_px("chev", 16)} }
-                    button { class: "ed-ib", title: "파일 검색", onclick: move |_| notice(format!("파일 검색: {SOON}")), {icon("search")} }
+                    button { class: "ed-ib", title: "파일 검색", onclick: move |_| crate::ui::editor_search::view::open(&search_s, false), {icon("search")} }
                     button { class: "ed-ib", title: "숨기기", onclick: move |_| stripes.write().hide(Side::Left), {icon("close")} }
                 }
-                div { class: "ed-tree", role: "tree", "aria-label": "프로젝트 트리",
-                    div { class: "ed-tn", role: "treeitem", "aria-expanded": "true", "aria-label": "{root_name} 폴더", style: "--d:0;", {icon_px("chev-dn", 12)} {icon_px("folder", 15)} "{root_name}" }
+                div { class: "ed-tree", role: "tree", "aria-label": "프로젝트 트리", tabindex: "0",
+                    onkeydown: move |event| {
+                        let m = event.modifiers();
+                        let cmd = m.contains(Modifiers::META) || m.contains(Modifiers::CONTROL);
+                        if cmd {
+                            match event.key() {
+                                Key::Character(ref c) if c.eq_ignore_ascii_case("c") => {
+                                    event.stop_propagation();
+                                    event.prevent_default();
+                                    let sel = tree_multi_sel.read();
+                                    let items = if sel.is_empty() {
+                                        selected.clone().into_iter().collect::<Vec<_>>()
+                                    } else {
+                                        sel.clone()
+                                    };
+                                    let pruned = crate::ui::editor::prune_redundant_selection(&items);
+                                    if !pruned.is_empty() {
+                                        let n = pruned.len();
+                                        tree_clipboard.set(Some(crate::ui::editor::TreeClipboard {
+                                            kind: crate::ui::editor::ClipboardKind::Copy,
+                                            paths: pruned,
+                                        }));
+                                        notice(format!("{n}개 항목을 복사했습니다"));
+                                    }
+                                }
+                                Key::Character(ref c) if c.eq_ignore_ascii_case("x") => {
+                                    event.stop_propagation();
+                                    event.prevent_default();
+                                    let sel = tree_multi_sel.read();
+                                    let items = if sel.is_empty() {
+                                        selected.clone().into_iter().collect::<Vec<_>>()
+                                    } else {
+                                        sel.clone()
+                                    };
+                                    let pruned = crate::ui::editor::prune_redundant_selection(&items);
+                                    if !pruned.is_empty() {
+                                        let n = pruned.len();
+                                        tree_clipboard.set(Some(crate::ui::editor::TreeClipboard {
+                                            kind: crate::ui::editor::ClipboardKind::Cut,
+                                            paths: pruned,
+                                        }));
+                                        notice(format!("{n}개 항목을 잘라냈습니다"));
+                                    }
+                                }
+                                Key::Character(ref c) if c.eq_ignore_ascii_case("v") => {
+                                    event.stop_propagation();
+                                    event.prevent_default();
+                                    let clip = tree_clipboard.read().clone();
+                                    if let Some(clip) = clip {
+                                        let dest_dir = crate::ui::editor::new_item_parent(selected.as_ref().map(|(p, d)| (p.as_str(), *d)), &root_for_key);
+                                        let sources: Vec<String> = clip.paths.into_iter().map(|(p, _)| p).collect();
+                                        expanded.write().insert(dest_dir.clone());
+                                        match clip.kind {
+                                            crate::ui::editor::ClipboardKind::Copy => {
+                                                key_host.send(HostCommand::CopyPaths { sources, dest_dir });
+                                            }
+                                            crate::ui::editor::ClipboardKind::Cut => {
+                                                key_host.send(HostCommand::MovePaths { sources, dest_dir });
+                                                tree_clipboard.set(None);
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        } else if matches!(event.key(), Key::Delete | Key::Backspace) {
+                            let sel = tree_multi_sel.read();
+                            let items = if sel.is_empty() {
+                                selected.clone().into_iter().collect::<Vec<_>>()
+                            } else {
+                                sel.clone()
+                            };
+                            let pruned = crate::ui::editor::prune_redundant_selection(&items);
+                            if !pruned.is_empty() {
+                                event.stop_propagation();
+                                event.prevent_default();
+                                prompt_at.set(now_ms());
+                                if pruned.len() == 1 {
+                                    prompt.set(Some(TreePrompt::Delete { path: pruned[0].0.clone(), is_dir: pruned[0].1 }));
+                                } else {
+                                    prompt.set(Some(TreePrompt::DeleteMany { items: pruned }));
+                                }
+                            }
+                        }
+                    },
+                    div { class: "ed-tn", role: "treeitem", "aria-expanded": "true", "aria-label": "{root_name} 폴더", style: "--d:0;",
+                        ondragover: move |event| { event.prevent_default(); },
+                        ondrop: move |event| {
+                            event.prevent_default();
+                            let drag_src = tree_drag_src.read().clone();
+                            if let Some(src) = drag_src {
+                                let dest_dir = root_for_drop.clone();
+                                let multi = tree_multi_sel.read().clone();
+                                let sources = if multi.iter().any(|(p, _)| p == &src) {
+                                    crate::ui::editor::prune_redundant_selection(&multi)
+                                        .into_iter()
+                                        .map(|(p, _)| p)
+                                        .filter(|p| p != &dest_dir)
+                                        .collect()
+                                } else if src != dest_dir {
+                                    vec![src]
+                                } else {
+                                    Vec::new()
+                                };
+                                if !sources.is_empty() {
+                                    drop_root_host.send(HostCommand::MovePaths { sources, dest_dir });
+                                }
+                                tree_drag_src.set(None);
+                            }
+                        },
+                        {icon_px("chev-dn", 12)} {icon_px("folder", 15)} "{root_name}"
+                    }
                     {prompt_row}
-                    for row in rows {
+                    for row in rows.iter() {
                         {
                             let path = row.path.clone();
                             let host = s.host.clone();
                             let open_errors = s.open_errors.clone();
                             let is_dir = row.is_dir;
-                            let chosen = selected.as_ref().map(|(p, _)| p.as_str()) == Some(row.path.as_str());
-                            let class = if chosen || (selected.is_none() && current == Some(row.path.as_str())) { "ed-tn sel" } else { "ed-tn" };
+                            let in_multi = tree_multi_sel.read().iter().any(|(p, _)| p == &row.path);
+                            let chosen = in_multi || selected.as_ref().map(|(p, _)| p.as_str()) == Some(row.path.as_str());
+                            let class = if chosen || (selected.is_none() && tree_multi_sel.read().is_empty() && current == Some(row.path.as_str())) { "ed-tn sel" } else { "ed-tn" };
                             let depth = row.depth + 1;
                             let rename_path = row.path.clone();
                             let delete_path = row.path.clone();
@@ -1034,17 +1175,72 @@ pub mod page {
                             let rename_label = row.name.clone();
                             let unsaved_for_rename = unsaved.clone();
                             let row_label = crate::ui::editor::tree_item_aria_label(&row.name, is_dir);
+                            let rows_for_click = rows.clone();
+                            let drag_path = row.path.clone();
+                            let drop_path = row.path.clone();
+                            let drop_is_dir = is_dir;
+                            let drop_host = s.host.clone();
+                            let drop_root = root.clone();
                             rsx! { div { key: "{row.path}", class, role: "treeitem", "aria-label": "{row_label}", style: "--d:{depth};",
                                 "aria-expanded": if is_dir { "{row.open}" } else { "" },
-                                onclick: move |_| {
+                                draggable: "true",
+                                ondragstart: move |_| {
+                                    tree_drag_src.set(Some(drag_path.clone()));
+                                },
+                                ondragover: move |event| {
+                                    event.prevent_default();
+                                },
+                                ondrop: move |event| {
+                                    event.prevent_default();
+                                    let drag_src = tree_drag_src.read().clone();
+                                    if let Some(src) = drag_src {
+                                        let dest_dir = if drop_is_dir {
+                                            drop_path.clone()
+                                        } else {
+                                            crate::ui::editor::new_item_parent(Some((drop_path.as_str(), false)), &drop_root)
+                                        };
+                                        let multi = tree_multi_sel.read().clone();
+                                        let sources = if multi.iter().any(|(p, _)| p == &src) {
+                                            crate::ui::editor::prune_redundant_selection(&multi)
+                                                .into_iter()
+                                                .map(|(p, _)| p)
+                                                .filter(|p| p != &dest_dir)
+                                                .collect()
+                                        } else if src != dest_dir {
+                                            vec![src]
+                                        } else {
+                                            Vec::new()
+                                        };
+                                        if !sources.is_empty() {
+                                            expanded.write().insert(dest_dir.clone());
+                                            drop_host.send(HostCommand::MovePaths { sources, dest_dir });
+                                        }
+                                        tree_drag_src.set(None);
+                                    }
+                                },
+                                onclick: move |event| {
                                     let close = prompt.read().as_ref().is_some_and(|p| crate::ui::editor::row_click_closes_prompt(p, &prompt_text.read()));
                                     if close { prompt.set(None); }
-                                    tree_sel.set(Some((path.clone(), is_dir)));
-                                    if is_dir {
-                                        let was_open = expanded.read().contains(&path);
-                                        if was_open { expanded.write().remove(&path); }
-                                        else { expanded.write().insert(path.clone()); host.send(HostCommand::List(path.clone())); }
-                                    } else { open_errors.borrow_mut().remove(&path); tabs.write().open(&path); host.send(HostCommand::Open(path.clone())); }
+                                    let m = event.modifiers();
+                                    let shift = m.contains(Modifiers::SHIFT);
+                                    let toggle = m.contains(Modifiers::META) || m.contains(Modifiers::CONTROL);
+                                    let new_multi = crate::ui::editor::update_tree_selection(
+                                        &tree_multi_sel.read(),
+                                        (path.clone(), is_dir),
+                                        &rows_for_click,
+                                        shift,
+                                        toggle,
+                                    );
+                                    let new_sel = new_multi.last().cloned().or_else(|| Some((path.clone(), is_dir)));
+                                    tree_multi_sel.set(new_multi);
+                                    tree_sel.set(new_sel);
+                                    if !shift && !toggle {
+                                        if is_dir {
+                                            let was_open = expanded.read().contains(&path);
+                                            if was_open { expanded.write().remove(&path); }
+                                            else { expanded.write().insert(path.clone()); host.send(HostCommand::List(path.clone())); }
+                                        } else { open_errors.borrow_mut().remove(&path); tabs.write().open(&path); host.send(HostCommand::Open(path.clone())); }
+                                    }
                                 },
                                 if is_dir { if row.open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} } } else { span { class: "chev-sp" } }
                                 if is_dir { {icon_px("folder", 15)} } else { {icon_px("file", 15)} }
@@ -1063,7 +1259,21 @@ pub mod page {
                                             prompt.set(Some(TreePrompt::Rename { path: rename_path.clone() }));
                                         }, {icon_px("edit", 13)} }
                                     button { class: "ed-ib", title: "삭제: {rename_label}", style: "width:22px; height:22px; color:var(--c-red);",
-                                        onclick: move |event| { event.stop_propagation(); prompt_at.set(now_ms()); prompt.set(Some(TreePrompt::Delete { path: delete_path.clone(), is_dir })); }, {icon_px("close", 13)} }
+                                        onclick: move |event| {
+                                            event.stop_propagation();
+                                            prompt_at.set(now_ms());
+                                            let multi = tree_multi_sel.read();
+                                            if multi.iter().any(|(p, _)| p == &delete_path) && multi.len() > 1 {
+                                                let pruned = crate::ui::editor::prune_redundant_selection(&multi);
+                                                if pruned.len() == 1 {
+                                                    prompt.set(Some(TreePrompt::Delete { path: pruned[0].0.clone(), is_dir: pruned[0].1 }));
+                                                } else {
+                                                    prompt.set(Some(TreePrompt::DeleteMany { items: pruned }));
+                                                }
+                                            } else {
+                                                prompt.set(Some(TreePrompt::Delete { path: delete_path.clone(), is_dir }));
+                                            }
+                                        }, {icon_px("close", 13)} }
                                 }
                             } }
                         }

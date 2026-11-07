@@ -78,7 +78,7 @@ pub fn display_name(name: &str) -> String {
 pub fn row_click_closes_prompt(prompt: &TreePrompt, typed: &str) -> bool {
     match prompt {
         TreePrompt::NewFile { .. } | TreePrompt::NewDir { .. } | TreePrompt::Rename { .. } => typed.trim().is_empty(),
-        TreePrompt::Delete { .. } => false,
+        TreePrompt::Delete { .. } | TreePrompt::DeleteMany { .. } => false,
     }
 }
 
@@ -288,6 +288,20 @@ pub fn breadcrumb_text(path: &str, folder: &str) -> String {
     breadcrumb_segments(path, folder).join(" \u{203A} ")
 }
 
+/// How an item was placed on the clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardKind {
+    Copy,
+    Cut,
+}
+
+/// Paths held on the explorer clipboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeClipboard {
+    pub kind: ClipboardKind,
+    pub paths: Vec<(String, bool)>,
+}
+
 /// A pending explorer edit the tree is asking a name or a confirmation for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreePrompt {
@@ -295,6 +309,56 @@ pub enum TreePrompt {
     NewDir { parent: String },
     Rename { path: String },
     Delete { path: String, is_dir: bool },
+    DeleteMany { items: Vec<(String, bool)> },
+}
+
+/// Updates the explorer selection based on shift (range) or toggle (Cmd/Ctrl) modifiers.
+pub fn update_tree_selection(
+    current: &[(String, bool)],
+    clicked: (String, bool),
+    rows: &[TreeRow],
+    shift: bool,
+    toggle: bool,
+) -> Vec<(String, bool)> {
+    if shift {
+        if let Some(anchor) = current.first() {
+            let anchor_idx = rows.iter().position(|r| r.path == anchor.0);
+            let clicked_idx = rows.iter().position(|r| r.path == clicked.0);
+            if let (Some(a), Some(c)) = (anchor_idx, clicked_idx) {
+                let (start, end) = if a <= c { (a, c) } else { (c, a) };
+                return rows[start..=end]
+                    .iter()
+                    .map(|r| (r.path.clone(), r.is_dir))
+                    .collect();
+            }
+        }
+        vec![clicked]
+    } else if toggle {
+        if let Some(pos) = current.iter().position(|(p, _)| p == &clicked.0) {
+            let mut next = current.to_vec();
+            next.remove(pos);
+            next
+        } else {
+            let mut next = current.to_vec();
+            next.push(clicked);
+            next
+        }
+    } else {
+        vec![clicked]
+    }
+}
+
+/// Removes any item whose ancestor directory is also in `items`.
+pub fn prune_redundant_selection(items: &[(String, bool)]) -> Vec<(String, bool)> {
+    items
+        .iter()
+        .filter(|(p, _)| {
+            !items
+                .iter()
+                .any(|(other, is_dir)| *is_dir && other != p && is_at_or_below(p, other))
+        })
+        .cloned()
+        .collect()
 }
 
 /// The directory a new file or folder goes in: the selected directory, the directory of the
@@ -319,6 +383,20 @@ pub fn delete_confirmation(path: &str, folder: &str, is_dir: bool, unsaved: &[St
     } else {
         format!("파일 {name}을 삭제할까요? 휴지통이 없어 되돌릴 수 없습니다.")
     };
+    if !unsaved.is_empty() {
+        let names: Vec<String> = unsaved.iter().map(|p| breadcrumb_segments(p, folder).join("/")).collect();
+        text.push_str(&format!(" 저장하지 않은 변경이 있는 파일: {}. 삭제하면 그 편집도 사라집니다.", names.join(", ")));
+    }
+    text
+}
+
+/// What the delete confirmation says when multiple items are selected.
+pub fn delete_many_confirmation(items: &[(String, bool)], folder: &str, unsaved: &[String]) -> String {
+    if items.len() == 1 {
+        return delete_confirmation(&items[0].0, folder, items[0].1, unsaved);
+    }
+    let count = items.len();
+    let mut text = format!("선택한 항목 {count}개를 삭제할까요? 휴지통이 없어 되돌릴 수 없습니다.");
     if !unsaved.is_empty() {
         let names: Vec<String> = unsaved.iter().map(|p| breadcrumb_segments(p, folder).join("/")).collect();
         text.push_str(&format!(" 저장하지 않은 변경이 있는 파일: {}. 삭제하면 그 편집도 사라집니다.", names.join(", ")));

@@ -34,8 +34,11 @@ pub const SKIP_CONFIRM_LABEL: &str = "정말 건너뛰기";
 pub const SKIP_CONFIRM_NOTE: &str = "이 질문을 거절하고 건너뜁니다. 다시 누르면 보내게 됩니다";
 /// Seconds after which a first tap on 건너뛰기 is forgotten.
 pub const SKIP_CONFIRM_SECS: u64 = 5;
-/// Characters of a question text or an option label the card shows before an ellipsis.
+/// Characters of a question text, option label, description or answered value the card shows
+/// before an ellipsis.
 pub const SHOWN_CHARS_MAX: usize = 300;
+/// Characters of a question header the card shows before an ellipsis.
+pub const SHOWN_HEADER_MAX: usize = 80;
 
 /// Every fixed sentence and title of the card, for the NFR-L4 check.
 pub const STRINGS: &[&str] = &[
@@ -80,14 +83,16 @@ impl SkipStep {
     }
 }
 
-/// `text` cut to `SHOWN_CHARS_MAX` characters with an ellipsis (on a character boundary).
+/// `text` cleaned of control and bidi characters, whitespace collapsed, and capped to
+/// `SHOWN_CHARS_MAX` characters with an ellipsis (reusing `crate::ui::home::clean_text`).
 pub fn shown(text: &str) -> String {
-    if text.chars().count() <= SHOWN_CHARS_MAX {
-        return text.to_string();
-    }
-    let mut out: String = text.chars().take(SHOWN_CHARS_MAX).collect();
-    out.push('\u{2026}');
-    out
+    crate::ui::home::clean_text(text, SHOWN_CHARS_MAX + 1)
+}
+
+/// `header` cleaned of control and bidi characters, whitespace collapsed, and capped to
+/// `SHOWN_HEADER_MAX` characters with an ellipsis.
+pub fn shown_header(header: &str) -> String {
+    crate::ui::home::clean_text(header, SHOWN_HEADER_MAX + 1)
 }
 
 /// What the person has picked or typed so far, per question id.
@@ -218,22 +223,34 @@ pub fn mask(text: &str) -> String {
 }
 
 /// One line per answered question: `header or text: labels`. A secret question shows `***`
-/// whatever the stored values are.
+/// whatever the stored values are. All agent-supplied strings are cleaned of control and bidi
+/// characters and capped.
 pub fn answered_lines(questions: &[Question], answers: &[QuestionAnswer]) -> Vec<String> {
     questions
         .iter()
         .map(|q| {
-            let title = q.header.as_deref().filter(|h| !h.trim().is_empty()).unwrap_or(&q.text);
-            let shown = if q.secret {
+            let title = q
+                .header
+                .as_deref()
+                .map(shown_header)
+                .filter(|h| !h.is_empty())
+                .unwrap_or_else(|| shown(&q.text));
+            let val = if q.secret {
                 SECRET_STARS.to_string()
             } else {
                 answers
                     .iter()
                     .find(|a| a.question_id == q.id)
-                    .map(|a| a.values.join(", "))
+                    .map(|a| {
+                        a.values
+                            .iter()
+                            .map(|v| shown(v))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
                     .unwrap_or_default()
             };
-            format!("{title}: {shown}")
+            format!("{title}: {val}")
         })
         .collect()
 }
@@ -483,6 +500,24 @@ mod tests {
         let exact = "나".repeat(SHOWN_CHARS_MAX);
         assert_eq!(shown(&exact), exact);
         assert_eq!(shown("짧음"), "짧음");
+    }
+
+    #[test]
+    fn fr_t11_question_text_and_answered_lines_strip_control_and_bidi_chars() {
+        let bidi = "배포\u{202E}실행\u{0007}\n계속";
+        assert_eq!(shown(bidi), "배포실행 계속");
+        assert_eq!(shown_header("단계\u{2066}1\u{2069}\t확인"), "단계1 확인");
+        let long_header = "헤".repeat(SHOWN_HEADER_MAX + 20);
+        assert_eq!(shown_header(&long_header).chars().count(), SHOWN_HEADER_MAX + 1);
+
+        let mut q0 = q("q0", false, false, false);
+        q0.header = Some("제목\u{202E}악성".into());
+        let a = vec![QuestionAnswer {
+            question_id: "q0".into(),
+            values: vec!["허용\u{202E}거부\u{0000}".into()],
+        }];
+        let lines = answered_lines(&[q0], &a);
+        assert_eq!(lines, vec!["제목악성: 허용거부"]);
     }
 
     #[test]

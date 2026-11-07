@@ -1398,8 +1398,8 @@ pub fn QuestionCard(
                                 .spacing(6.0)
                                 .modifier(Modifier::new().fill_max_width())
                                 .content(move || {
-                                    if let Some(h) = q.header.as_deref().filter(|h| !h.trim().is_empty()) {
-                                        Label(h, Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1));
+                                    if let Some(h) = q.header.as_deref().map(qv::shown_header).filter(|h| !h.is_empty()) {
+                                        Label(&h, Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1));
                                     }
                                     Label(&qv::shown(&q.text), Fs::Sm, Weight::Medium, None, Some(6));
                                     if q.secret {
@@ -1410,9 +1410,10 @@ pub fn QuestionCard(
                                     for o in q.options.iter() {
                                         let (d2, q2, label) = (d.clone(), q.clone(), o.label.clone());
                                         let step2 = ss.clone();
+                                        let desc = o.description.as_deref().map(qv::shown).filter(|s| !s.is_empty());
                                         OptionRow(
                                             &qv::shown(&o.label),
-                                            o.description.as_deref(),
+                                            desc.as_deref(),
                                             d.get().picked(&q.id, &o.label),
                                             q.multi_select,
                                             !locked,

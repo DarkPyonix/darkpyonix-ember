@@ -45,10 +45,11 @@ pub struct FeedQuestion {
 /// At most [`QUESTION_CHARS`] characters of `s`, ending in an ellipsis when cut. Counts chars, so
 /// a cut never splits a UTF-8 sequence.
 fn clip(s: &str) -> String {
-    if s.chars().count() <= QUESTION_CHARS {
-        return s.to_string();
+    let cleaned = crate::events::clean_question_text(s);
+    if cleaned.chars().count() <= QUESTION_CHARS {
+        return cleaned;
     }
-    let mut out: String = s.chars().take(QUESTION_CHARS - 1).collect();
+    let mut out: String = cleaned.chars().take(QUESTION_CHARS - 1).collect();
     out.push('\u{2026}');
     out
 }

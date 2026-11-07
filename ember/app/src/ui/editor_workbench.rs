@@ -52,6 +52,7 @@ pub struct Shared {
     pub palette_mode: Signal<crate::ui::palette::Mode>,
     pub palette_query: Signal<String>,
     pub palette_sel: Signal<usize>,
+    pub recent_files: Signal<Vec<String>>,
     pub theme: Signal<crate::ui::theme::ThemePref>,
     pub position: Signal<(usize, usize)>,
     pub stripes: Signal<Stripes>,
@@ -117,6 +118,7 @@ fn init(target: EditorTarget) {
     let palette_mode = use_hook(|| Signal::new_in_scope(crate::ui::palette::Mode::Commands, root));
     let palette_query = use_hook(|| Signal::new_in_scope(String::new(), root));
     let palette_sel = use_hook(|| Signal::new_in_scope(0usize, root));
+    let recent_files = use_hook(|| Signal::new_in_scope(Vec::<String>::new(), root));
     let prompt_at = use_hook(|| Signal::new_in_scope(0u64, root));
     let prompt_text = use_hook(|| Signal::new_in_scope(String::new(), root));
     let bottom_max = use_hook(|| Signal::new_in_scope(false, root));
@@ -131,7 +133,7 @@ fn init(target: EditorTarget) {
     let last_find_cmd = use_hook(|| Rc::new(RefCell::new(0u64)));
     // The branch in the bars comes from the first status read, so it starts with the window.
     let scm = use_hook(|| { let scm = crate::ui::editor_scm::Scm::new(&target.project, revision); scm.refresh(); scm });
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, scm }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, scm }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -190,6 +192,14 @@ fn editor_pane() -> Element {
             }
         }
     }
+    let gutter_decorations = {
+        let current_path = s.tabs.read().current_path().map(str::to_string);
+        if let Some(abs_path) = current_path {
+            s.scm.gutter_decorations(&s.folder, &abs_path, &doc.text, version)
+        } else {
+            compose_rust::code::GutterDecorations::default()
+        }
+    };
     let change_s = s.clone(); let change_uri = uri.clone();
     let save_s = s.clone(); let save_uri = uri.clone();
     let hover_s = s.clone(); let hover_uri = uri.clone();
@@ -198,8 +208,9 @@ fn editor_pane() -> Element {
     rsx! { CodeEditor {
         key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
         text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), tab_width: Some(doc.tab_width),
+        gutter_decorations,
         on_change: move |e: compose_rust::code::CodeChange| { change_s.editor_versions.borrow_mut().insert(generation, e.version); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); },
-        on_save: move |e: compose_rust::code::SaveRequest| { let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); },
+        on_save: move |e: compose_rust::code::SaveRequest| { let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
         on_decoration_click: move |id| { let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id); send(&click_s, event); },
         on_selection_change: move |e: compose_rust::code::SelectionChange| { let mut position = selection_s.position; position.set((e.active.line as usize + 1, e.active.column as usize + 1)); let event = selection_s.bridge.borrow().on_selection_changed(&selection_uri, e.version, pos(e.anchor), pos(e.active)); send(&selection_s, event); },
@@ -321,13 +332,23 @@ pub mod page {
         }
     }
 
+    fn record_recent_file(recent: &mut super::Signal<Vec<String>>, path: &str) {
+        let mut list = recent.read().clone();
+        crate::ui::palette::record_recent_path(&mut list, path);
+        recent.set(list);
+    }
+
     fn open_palette(s: &Shared, mode: crate::ui::palette::Mode) {
         let (mut open, mut query, mut sel, mut palette_mode) = (s.palette_open, s.palette_query, s.palette_sel, s.palette_mode);
         palette_mode.set(mode);
-        if mode != crate::ui::palette::Mode::Commands {
+        if mode != crate::ui::palette::Mode::Commands && mode != crate::ui::palette::Mode::GotoLine {
             s.host.send(HostCommand::IndexFiles);
         }
-        query.set(String::new());
+        if mode == crate::ui::palette::Mode::GotoLine {
+            query.set(":".to_string());
+        } else {
+            query.set(String::new());
+        }
         sel.set(0);
         open.set(true);
     }
@@ -339,7 +360,40 @@ pub mod page {
             crate::ui::palette::Payload::File(path) => {
                 let mut tabs = s.tabs;
                 tabs.write().open(&path);
-                s.host.send(HostCommand::Open(path));
+                s.open_errors.borrow_mut().remove(&path);
+                s.host.send(HostCommand::Open(path.clone()));
+                s.host.send(HostCommand::Focus(path.clone()));
+                let mut recent = s.recent_files;
+                record_recent_file(&mut recent, &path);
+            }
+            crate::ui::palette::Payload::FileAt { path, line, column } => {
+                let mut tabs = s.tabs;
+                tabs.write().open(&path);
+                s.open_errors.borrow_mut().remove(&path);
+                s.host.send(HostCommand::Open(path.clone()));
+                s.host.send(HostCommand::Focus(path.clone()));
+                let mut recent = s.recent_files;
+                record_recent_file(&mut recent, &path);
+                let line0 = line.saturating_sub(1) as u32;
+                let col0 = column.unwrap_or(1).saturating_sub(1) as u32;
+                let target = crate::ui::find::Match { line: line0, start: col0, end: col0 };
+                if s.bridge.borrow().active_document().is_some_and(|d| d.uri.path == path) {
+                    find_send(s, Some(target), Vec::new());
+                } else {
+                    crate::ui::editor_search::view::schedule_reveal(&path, target);
+                }
+                let mut pos_sig = s.position;
+                pos_sig.set((line, column.unwrap_or(1)));
+            }
+            crate::ui::palette::Payload::GotoLine { line, column } => {
+                let line0 = line.saturating_sub(1) as u32;
+                let col0 = column.unwrap_or(1).saturating_sub(1) as u32;
+                find_send(s, Some(crate::ui::find::Match { line: line0, start: col0, end: col0 }), Vec::new());
+                let mut pos_sig = s.position;
+                pos_sig.set((line, column.unwrap_or(1)));
+            }
+            crate::ui::palette::Payload::ExtensionCommand(id) => {
+                s.host.send(HostCommand::ExecuteCommand(id));
             }
         }
     }
@@ -348,21 +402,38 @@ pub mod page {
     /// Enter does the highlighted one, Escape or a click outside closes it. The design follows the
     /// app's sheet rules in the mockup's tokens (the mockup has no palette).
     fn palette_sheet(s: &Shared, keymap: Keymap) -> Element {
-        use crate::ui::palette::{highlight_segments, items_for, move_selection, placeholder, rank, Payload};
-        let (mut open, mut query, mut sel) = (s.palette_open, s.palette_query, s.palette_sel);
-        let mode = *s.palette_mode.read();
-        let (files, index_running, index_capped) = {
-            let state = s.host.state.lock().unwrap();
-            (state.file_items.clone(), state.index_running, state.index_capped)
+        use crate::ui::palette::{
+            apply_line_suffix, effective_mode, goto_line_item, highlight_segments, items_for_workbench,
+            move_selection, parse_path_line_suffix, placeholder, rank, Payload,
         };
-        let items = items_for(mode, keymap, Os::current(), &files);
+        let (mut open, mut query, mut sel) = (s.palette_open, s.palette_query, s.palette_sel);
+        let base_mode = *s.palette_mode.read();
+        let raw_text = query.read().clone();
+        let (mode, effective_query) = effective_mode(base_mode, &raw_text);
+        let (files, index_running, index_capped, ext_commands) = {
+            let state = s.host.state.lock().unwrap();
+            (state.file_items.clone(), state.index_running, state.index_capped, state.extension_commands.clone())
+        };
+        let recent = s.recent_files.read().clone();
+        let (items, ranked, line_suffix) = if mode == crate::ui::palette::Mode::GotoLine {
+            let item = goto_line_item(&effective_query);
+            let items = vec![item];
+            let ranked = vec![crate::ui::palette::Ranked { index: 0, score: 100, matched: Vec::new() }];
+            (items, ranked, None)
+        } else {
+            let (file_q, suffix) = parse_path_line_suffix(&effective_query);
+            let items = items_for_workbench(mode, keymap, Os::current(), &s.folder, &files, &ext_commands, &recent);
+            let ranked = rank(file_q, &items);
+            (items, ranked, suffix)
+        };
         let hint_text = placeholder(mode, keymap);
-        let text = query.read().clone();
-        let ranked = rank(&text, &items);
         let shown: Vec<_> = ranked.iter().take(50).cloned().collect();
         let chosen = (*sel.read()).min(shown.len().saturating_sub(1));
         // A command the editor cannot do yet is listed but does nothing: Enter on it leaves the sheet open.
-        let enter_payload = shown.get(chosen).filter(|r| items[r.index].enabled).map(|r| items[r.index].payload.clone());
+        let enter_payload = shown
+            .get(chosen)
+            .filter(|r| items[r.index].enabled)
+            .map(|r| apply_line_suffix(items[r.index].payload.clone(), line_suffix));
         let count = shown.len();
         let run_s = s.clone();
         rsx! {
@@ -372,7 +443,7 @@ pub mod page {
                 div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
                     {icon("search")}
                     input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
-                        "aria-label": "{crate::ui::palette::search_label(mode)}", placeholder: "{hint_text}", value: "{text}", autofocus: true,
+                        "aria-label": "{crate::ui::palette::search_label(mode)}", placeholder: "{hint_text}", value: "{raw_text}", autofocus: true,
                         oninput: move |event| { query.set(event.value()); sel.set(0); },
                         onkeydown: move |event| {
                             match event.key() {
@@ -391,10 +462,10 @@ pub mod page {
                         },
                     }
                 }
-                if mode != crate::ui::palette::Mode::Commands && index_running && !shown.is_empty() {
+                if mode != crate::ui::palette::Mode::Commands && mode != crate::ui::palette::Mode::GotoLine && index_running && !shown.is_empty() {
                     div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일을 더 찾는 중입니다…" }
                 }
-                if mode != crate::ui::palette::Mode::Commands && index_capped {
+                if mode != crate::ui::palette::Mode::Commands && mode != crate::ui::palette::Mode::GotoLine && index_capped {
                     div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일이 많아 일부만 표시합니다." }
                 }
                 div { style: "max-height:320px; overflow:auto;", role: "listbox",
@@ -404,8 +475,8 @@ pub mod page {
                             let item = &items[r.index];
                             let segments = highlight_segments(&item.title, &r.matched);
                             let enabled = item.enabled;
-                            let hint = if enabled { item.hint.clone() } else { "준비 중".to_string() };
-                            let payload = item.payload.clone();
+                            let hint = if enabled { item.hint.clone() } else if mode == crate::ui::palette::Mode::GotoLine { String::new() } else { "준비 중".to_string() };
+                            let payload = apply_line_suffix(item.payload.clone(), line_suffix);
                             let click_s = s.clone();
                             let class = if row == chosen { "ed-tn sel" } else { "ed-tn" };
                             let row_style = if enabled { "--d:0; height:34px;" } else { "--d:0; height:34px; color:var(--muted);" };
@@ -649,6 +720,13 @@ pub mod page {
                     tracing::warn!(path = %uri.path, %error, "saving a file failed");
                     notice(format!("{}을(를) 저장하지 못했습니다: {}", crate::ui::editor::display_name(base_name(&uri.path)), crate::ui::editor::file_failure_reason(&error)));
                 }
+                BridgeAction::CommandFailed { id, error } => {
+                    tracing::warn!(%id, %error, "extension command failed");
+                    notice(format!("명령 {id}을(를) 실행하지 못했습니다: {error}"));
+                }
+                BridgeAction::RunCommand(command) => {
+                    notice(format!("지원하지 않는 명령입니다: {}", command.id));
+                }
                 _ => {}
             }
         }
@@ -675,6 +753,7 @@ pub mod page {
         let (agent_state, project_branch) = project_status(&s.project);
         // The branch git/status returned; the project row's until the first answer.
         let branch = s.scm.branch_line().unwrap_or(project_branch);
+        let conflict_shown = s.scm.conflict_visible();
         let diff_shown = s.scm.diff_visible(current.as_deref());
         let key_s = s.clone();
         let has_left = sel.selected(Side::Left).is_some();
@@ -765,9 +844,10 @@ pub mod page {
                         if let Some(path) = current.as_deref() {
                             {breadcrumbs(path, &s.folder)}
                         }
-                        if *s.find.open.read() && active.is_some() && !diff_shown { {find_bar(&s)} }
+                        if *s.find.open.read() && active.is_some() && !diff_shown && !conflict_shown { {find_bar(&s)} }
                         div { style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
-                            if diff_shown { {crate::ui::editor_scm::view::diff_pane(&s)} }
+                            if conflict_shown { {crate::ui::editor_scm::view::conflict_pane(&s)} }
+                            else if diff_shown { {crate::ui::editor_scm::view::diff_pane(&s)} }
                             else if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
                             else if let Some(error) = current.as_ref().and_then(|p| open_error.clone().map(|e| (p.clone(), e))) {
                                 div { class: "ed-empty", role: "alert",
@@ -1259,6 +1339,7 @@ pub mod page {
                         {
                             let path = row.path.clone();
                             let host = s.host.clone();
+                            let mut recent_files = s.recent_files;
                             let open_errors = s.open_errors.clone();
                             let is_dir = row.is_dir;
                             let in_multi = tree_multi_sel.read().iter().any(|(p, _)| p == &row.path);
@@ -1361,7 +1442,12 @@ pub mod page {
                                         let was_open = expanded.read().contains(&path);
                                         if was_open { expanded.write().remove(&path); }
                                         else { expanded.write().insert(path.clone()); host.send(HostCommand::List(path.clone())); }
-                                    } else { open_errors.borrow_mut().remove(&path); tabs.write().open(&path); host.send(HostCommand::Open(path.clone())); }
+                                    } else {
+                                        open_errors.borrow_mut().remove(&path);
+                                        tabs.write().open(&path);
+                                        record_recent_file(&mut recent_files, &path);
+                                        host.send(HostCommand::Open(path.clone()));
+                                    }
                                 },
                                 if is_dir { if row.open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} } } else { span { class: "chev-sp" } }
                                 if is_dir { {icon_px("folder", 15)} } else { {icon_px("file", 15)} }
@@ -1473,6 +1559,8 @@ pub mod page {
                         let close_path_key = path.clone();
                         let host = s.host.clone(); let key_host = s.host.clone(); let close_host = s.host.clone();
                         let close_host_key = s.host.clone();
+                        let mut recent_files = s.recent_files;
+                        let mut key_recent_files = s.recent_files;
                         let selected = current == Some(path.as_str());
                         let label = base_name(&path).to_string();
                         let class = if selected { "ed-tab on" } else { "ed-tab" };
@@ -1485,6 +1573,7 @@ pub mod page {
                             onclick: move |_| {
                                 scm.close_diff();
                                 tabs.write().activate(&path);
+                                record_recent_file(&mut recent_files, &path);
                                 host.send(HostCommand::Focus(path.clone()));
                             },
                             onkeydown: move |event| {
@@ -1492,6 +1581,7 @@ pub mod page {
                                     event.stop_propagation();
                                     key_scm.close_diff();
                                     tabs.write().activate(&tab_path);
+                                    record_recent_file(&mut key_recent_files, &tab_path);
                                     key_host.send(HostCommand::Focus(tab_path.clone()));
                                 }
                             },
@@ -1680,10 +1770,12 @@ pub mod page {
                 for (i, (path, severity, message, location, source)) in rows.into_iter().enumerate() {
                     {
                         let host = s.host.clone();
+                        let mut recent_files = s.recent_files;
                         let dot = match severity { Severity::Error => "ed-pdot err", Severity::Warning => "ed-pdot warn", _ => "ed-pdot" };
                         let row_label = crate::ui::editor::problem_aria_label(match severity { Severity::Error => "오류", Severity::Warning => "경고", _ => "정보" }, &message, &location);
                         rsx! { div { key: "{i}", class: "ed-prow", role: "listitem", "aria-label": "{row_label}", onclick: move |_| {
                             tabs.write().open(&path);
+                            record_recent_file(&mut recent_files, &path);
                             host.send(HostCommand::Open(path.clone()));
                         },
                             span { class: "{dot}" }

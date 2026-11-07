@@ -24,6 +24,7 @@ pub enum HostCommand {
     DeleteMany { items: Vec<(String, bool)> },
     CopyPaths { sources: Vec<String>, dest_dir: String },
     MovePaths { sources: Vec<String>, dest_dir: String },
+    ExecuteCommand(String),
     /// Search the project folder (FR-E7). `debounce` waits for a pause in typing first; a newer search
     /// replaces one still waiting.
     Search { id: u64, request: ember_editor::search::SearchRequest, debounce: bool },
@@ -31,6 +32,9 @@ pub enum HostCommand {
     SearchNow { id: u64, request: ember_editor::search::SearchRequest },
     CancelSearch(u64),
     Replace { id: u64, request: ember_editor::search::ReplaceRequest },
+    /// Discard working-tree changes for a file by reading it through the session, reconstructing
+    /// the base text from `diff`, and writing it back only if reading succeeds.
+    DiscardFile { path: String, diff: crate::ui::vcs::FileDiff },
 }
 
 #[derive(Default)]
@@ -52,6 +56,8 @@ pub struct HostState {
     pub gone: Vec<String>,
     /// (old, new) paths an explorer edit renamed, for the window to move their tabs.
     pub renamed: Vec<(String, String)>,
+    /// Extension commands from contributes.commands.
+    pub extension_commands: Vec<ember_editor::ContributedCommand>,
     /// The search panel's matches and the last replace's report (FR-E7).
     pub search: crate::ui::editor_search::SearchResults,
     pub updates: Vec<SessionUpdate>,
@@ -105,6 +111,9 @@ impl HostState {
         }
         if let SessionUpdate::ConnectionLost { reason } = &update {
             self.connection_lost(reason);
+        }
+        if let SessionUpdate::Commands { commands } = &update {
+            self.extension_commands = commands.clone();
         }
         self.updates.push(update);
     }
@@ -293,6 +302,23 @@ impl EditorHost {
                                 finish_edit(&session, &shared, "이동", &dest_dir, result.map(|_| ())).await;
                             }
                         }
+                        Some(HostCommand::DiscardFile { path, diff }) => {
+                            let parent = parent_of(&path);
+                            if !diff.hunks.is_empty() {
+                                let cur = session.read_file_text(&path).await;
+                                let result = match crate::ui::editor_scm::reconstruct_base_from_read(|| cur, &diff) {
+                                    Ok(base) => {
+                                        let write_res = session.write_file(&path, base.as_bytes()).await;
+                                        if write_res.is_ok() {
+                                            let _ = session.reload(session.uri(&path));
+                                        }
+                                        write_res
+                                    }
+                                    Err(err) => Err(err),
+                                };
+                                finish_edit(&session, &shared, "변경 사항 취소", &parent, result).await;
+                            }
+                        }
                         Some(HostCommand::IndexFiles) => {
                             // A fresh index replaces the last one and a running one is cancelled; the walk runs
                             // in a task of its own so the session keeps answering while it goes.
@@ -331,6 +357,11 @@ impl EditorHost {
                         Some(HostCommand::Focus(path)) => { let _ = session.focus(session.uri(&path)); }
                         Some(HostCommand::Widget(uri, generation, event)) => { let _ = session.widget_event(uri, generation, event); }
                         Some(HostCommand::Resync(uri)) => { let _ = session.resync(uri); }
+                        Some(HostCommand::ExecuteCommand(id)) => {
+                            if let Err(error) = session.execute_command(id.clone(), Vec::new()) {
+                                shared.lock().unwrap().edit_errors.push(format!("명령 {id}을(를) 실행하지 못했습니다: {error}"));
+                            }
+                        }
                         None => break,
                     },
                     update = updates.recv() => match update {

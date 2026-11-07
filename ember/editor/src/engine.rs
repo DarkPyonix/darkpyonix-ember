@@ -72,6 +72,8 @@ pub enum ReadPurpose {
     Open,
     /// The watcher reported a change to an open file.
     Reload,
+    /// An explicit reload of an open file after a work-tree discard (replaces the buffer even if dirty).
+    ForceReload,
     /// `MainThreadDocuments.$tryOpenDocument` from the extension host (`workspace.openTextDocument`).
     ExtHostOpen { req: u32 },
     /// A grammar file the syntax highlighting needs (`scope` is the grammar's scope name).
@@ -84,6 +86,8 @@ pub enum ReadPurpose {
 pub enum Input {
     Open { uri: UriComponents },
     Close { uri: UriComponents },
+    /// Reload an open document from disk even if its buffer has unsaved edits (e.g. after discard).
+    Reload { uri: UriComponents },
     /// The editor of `uri` became the active one.
     Focus { uri: UriComponents },
     /// An event from the `CodeEditor` node rendered with key `generation`.
@@ -97,6 +101,8 @@ pub enum Input {
     FilesChanged(Vec<FileChange>),
     /// The highlighting worker finished a batch of jobs.
     Highlighted(HighlightOutput),
+    /// Execute a command (dispatches to extension host or workbench).
+    ExecuteCommand { id: String, arguments: Vec<Value> },
     /// Search the workspace folder `folder` (FR-E7). A running search is cancelled first.
     Search { id: u64, request: SearchRequest, folder: UriComponents },
     /// Stop search `id`.
@@ -152,9 +158,11 @@ pub enum SessionUpdate {
     Saved { uri: UriComponents },
     SaveFailed { uri: UriComponents, error: String },
     ExternalChange { uri: UriComponents, change: ExternalChange },
-    /// A command neither the extension host nor Ember implements (a workbench command such as
+    /// Acommand neither the extension host nor Ember implements (a workbench command such as
     /// `editor.action.showReferences`); the UI may handle it or ignore it.
     RunCommand { command: CommandDto },
+    /// An extension command execution failed (`$executeContributedCommand`).
+    CommandFailed { id: String, error: String },
     /// The widget and the session disagree about the document (lost event, bad range). The UI
     /// should call `EditorSession::resync` (re-sends the session's text as a new generation).
     Desync { uri: UriComponents, error: String },
@@ -163,6 +171,8 @@ pub enum SessionUpdate {
     ConnectionLost { reason: String },
     /// The problems list changed: every marker of every file, errors first.
     Problems { problems: Vec<crate::diagnostics::Problem> },
+    /// Commands contributed by extensions or registered at runtime.
+    Commands { commands: Vec<crate::commands::ContributedCommand> },
     /// More matches of search `id` (FR-E7), in arrival order.
     SearchHits { id: u64, files: Vec<FileHits> },
     /// Search `id` ended; no hits for it follow.
@@ -305,6 +315,7 @@ impl SessionCore {
         match input {
             Input::Open { uri } => self.on_open(uri),
             Input::Close { uri } => self.on_close(&uri),
+            Input::Reload { uri } => self.on_reload(uri),
             Input::Focus { uri } => self.on_focus(&uri),
             Input::Widget { uri, generation, event } => self.on_widget(&uri, generation, event),
             Input::TriggerInline { uri, generation, pos } => self.on_trigger_inline(&uri, generation, pos),
@@ -314,6 +325,9 @@ impl SessionCore {
             Input::FileWritten { uri, token, result } => self.on_file_written(&uri, token, result),
             Input::FilesChanged(changes) => self.on_files_changed(changes),
             Input::Highlighted(output) => self.on_highlighted(output),
+            Input::ExecuteCommand { id, arguments } => {
+                self.run_command(CommandDto { id, title: String::new(), tooltip: None, arguments });
+            }
             Input::Search { id, request, folder } => self.on_search(id, request, folder),
             Input::CancelSearch { id } => self.on_cancel_search(id),
             Input::Replace { id, request } => self.on_replace(id, request),
@@ -549,6 +563,12 @@ impl SessionCore {
         self.rpc(call);
         self.active = Some(key);
         self.send_tab_model();
+    }
+
+    fn on_reload(&mut self, uri: UriComponents) {
+        if self.docs.contains_key(&uri.key()) {
+            self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::ForceReload });
+        }
     }
 
     // ---- widget events ------------------------------------------------------------------------
@@ -1158,8 +1178,9 @@ impl SessionCore {
                 }
             }
             Pending::Command { id } => {
-                if let Err(e) = result {
-                    tracing::warn!("ember-editor: command {id} failed: {e}");
+                if let Err(error) = result {
+                    tracing::warn!("ember-editor: command {id} failed: {error}");
+                    self.ui(SessionUpdate::CommandFailed { id, error });
                 }
             }
             Pending::Search { id } => self.on_search_reply(id, result),
@@ -1194,6 +1215,16 @@ impl SessionCore {
                     return;
                 }
                 self.reset_doc(&key, &text, Some(bom));
+            }
+            ReadPurpose::ForceReload => {
+                let key = uri.key();
+                let Ok(bytes) = result else { return };
+                if !self.docs.contains_key(&key) {
+                    return;
+                }
+                let Ok((text, bom)) = decode(&bytes) else { return };
+                self.reset_doc(&key, &text, Some(bom));
+                self.ui(SessionUpdate::Dirty { uri, dirty: false });
             }
             ReadPurpose::ExtHostOpen { req } => self.finish_exthost_open(uri, req, result),
             ReadPurpose::Grammar { scope } => self.on_grammar_read(&scope, &uri, result),

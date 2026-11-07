@@ -94,7 +94,7 @@ pub struct Pty {
 #[cfg(not(unix))]
 impl Pty {
     pub fn reader(&self) -> io::Result<Box<dyn Read + Send>> {
-        self.master.lock().unwrap().try_clone_reader()
+        self.master.lock().unwrap().try_clone_reader().map_err(io::Error::other)
     }
 
     pub fn writer(&self) -> io::Result<Box<dyn Write + Send>> {

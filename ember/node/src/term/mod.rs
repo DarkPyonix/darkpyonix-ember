@@ -32,6 +32,7 @@ use std::time::Duration;
 use crate::jobs::{now_ms, Jobs, Removal};
 use crate::proto::*;
 
+#[cfg(unix)]
 use self::pty::Pty;
 use self::session::{Child, Session, TermRecord};
 use self::store::Store;

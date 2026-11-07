@@ -5642,7 +5642,7 @@ mod tests {
             assert!(text.contains("작업 브랜치"));
             assert!(text.contains("feat/git-api"));
             assert!(text.contains("현재"));
-            assert!(text.contains("앞섬 2 \u{00b7} 뒤처짐 1"));
+            assert!(text.contains(branch_bar_text(2, 1).as_str()));
             assert!(text.contains("원격과 같음"));
             assert!(text.contains("업스트림 없음"));
             assert!(text.contains("워크트리 ui-phase-6"));

@@ -79,9 +79,59 @@ pub enum AgentEvent {
     /// Something Ember shows in the session, not part of the agent's conversation (an A2A
     /// message refused by loop protection, the outcome of a mention, a teammate ended).
     Notice { message: String },
+    /// The agent asks the person one or more questions and waits (FR-T11, FR-A5).
+    QuestionAsked { question_id: String, questions: Vec<Question> },
+    /// A question was answered (`answers` empty: skipped). Values of a secret question arrive as
+    /// `***`; the client never holds the typed secret after sending it.
+    QuestionAnswered { question_id: String, #[serde(default)] answers: Vec<QuestionAnswer> },
+    /// The agent withdrew an approval or a question that was still waiting (server
+    /// `PromptWithdrawn`). Nothing can be answered for `prompt_id` any more.
+    PromptWithdrawn { prompt_id: String },
     /// An event kind this client does not know yet. Ignored by the reducer.
     #[serde(other)]
     Unknown,
+}
+
+/// One question of a `QuestionAsked` event (server `Question`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Question {
+    pub id: String,
+    #[serde(default)]
+    pub header: Option<String>,
+    pub text: String,
+    #[serde(default)]
+    pub options: Vec<QuestionOption>,
+    #[serde(default)]
+    pub multi_select: bool,
+    #[serde(default)]
+    pub secret: bool,
+    #[serde(default)]
+    pub allow_other: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuestionOption {
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// The answer to one question. `Debug` never prints a value: an answer may be a password
+/// (FR-T11).
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuestionAnswer {
+    pub question_id: String,
+    #[serde(default)]
+    pub values: Vec<String>,
+}
+
+impl std::fmt::Debug for QuestionAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuestionAnswer")
+            .field("question_id", &self.question_id)
+            .field("values", &vec!["***"; self.values.len()])
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -656,4 +706,51 @@ pub struct SchedulePatch {
     pub kind: Option<ScheduleKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catch_up: Option<bool>,
+}
+
+#[cfg(test)]
+mod question_wire_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn fr_t11_question_unknown_fields_and_old_rows_decode() {
+        let ev: AgentEvent = serde_json::from_value(json!({
+            "kind": "question_asked", "question_id": "r1", "future": 1,
+            "questions": [{"id": "q0", "text": "Colour?", "extra": true}]
+        }))
+        .unwrap();
+        let AgentEvent::QuestionAsked { question_id, questions } = ev else { panic!() };
+        assert_eq!(question_id, "r1");
+        let q = &questions[0];
+        assert!(q.header.is_none() && q.options.is_empty());
+        assert!(!q.multi_select && !q.secret && !q.allow_other);
+        // An approval with the server's newer `needs_person` field still decodes.
+        let ev: AgentEvent = serde_json::from_value(json!({
+            "kind": "approval_requested", "approval_id": "a", "tool": "T", "input": {}, "needs_person": true
+        }))
+        .unwrap();
+        assert!(matches!(ev, AgentEvent::ApprovalRequested { .. }));
+    }
+
+    #[test]
+    fn fr_t11_question_answered_decodes_skipped_and_secret_stars() {
+        let ev: AgentEvent =
+            serde_json::from_value(json!({"kind": "question_answered", "question_id": "r1", "answers": []})).unwrap();
+        assert!(matches!(ev, AgentEvent::QuestionAnswered { ref answers, .. } if answers.is_empty()));
+        let ev: AgentEvent = serde_json::from_value(json!({
+            "kind": "question_answered", "question_id": "r1",
+            "answers": [{"question_id": "q0", "values": ["***"]}]
+        }))
+        .unwrap();
+        assert!(matches!(ev, AgentEvent::QuestionAnswered { ref answers, .. } if answers[0].values == ["***"]));
+    }
+
+    #[test]
+    fn fr_t11_question_answer_debug_never_prints_a_value() {
+        let a = QuestionAnswer { question_id: "q0".into(), values: vec!["hunter2".into(), "x".into()] };
+        let shown = format!("{a:?}");
+        assert!(!shown.contains("hunter2") && !shown.contains("\"x\""), "{shown}");
+        assert!(shown.contains("***"));
+    }
 }

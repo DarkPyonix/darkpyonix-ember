@@ -64,10 +64,10 @@ use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::agents::AgentKind;
-use crate::events::{ApprovalDecision, QuestionAnswer};
+use crate::events::ApprovalDecision;
 use crate::projects::ProjectError;
 use crate::session::{
-    NewSession, Push, QuestionError, SessionError, Sessions, MEM_LIMIT_KEY, MEM_LIMIT_MAX_MB, MEM_LIMIT_MIN_MB,
+    NewSession, Push, QuestionAnswerBody, QuestionError, SessionError, Sessions, MEM_LIMIT_KEY, MEM_LIMIT_MAX_MB, MEM_LIMIT_MIN_MB,
     MEM_LIMIT_RANGE_MESSAGE,
 };
 use crate::store::{now_ms, SessionPatch};
@@ -509,27 +509,11 @@ async fn answer(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// One answer in the body of the question route.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct QuestionAnswerItem {
-    question_id: String,
-    values: Vec<String>,
-}
-
-/// `{"answers":[{"question_id":"q0","values":["blue"]}]}` or `{"decline":true}`: exactly one.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct QuestionAnswerBody {
-    answers: Option<Vec<QuestionAnswerItem>>,
-    decline: Option<bool>,
-}
-
 impl From<QuestionError> for ApiError {
     fn from(e: QuestionError) -> Self {
         let code = match &e {
             QuestionError::NoSession(_) | QuestionError::NotPending(_) => StatusCode::NOT_FOUND,
-            QuestionError::Invalid(_) => StatusCode::BAD_REQUEST,
+            QuestionError::Invalid(_) | QuestionError::BadBody => StatusCode::BAD_REQUEST,
             QuestionError::NoAgent(_) => StatusCode::CONFLICT,
             QuestionError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -544,24 +528,8 @@ async fn answer_question(
     Path((id, question_id)): Path<(String, String)>,
     Json(b): Json<QuestionAnswerBody>,
 ) -> ApiResult<impl IntoResponse> {
-    match (b.answers, b.decline) {
-        (Some(items), None) => {
-            let answers = items
-                .into_iter()
-                .map(|a| QuestionAnswer { question_id: a.question_id, values: a.values })
-                .collect();
-            s.answer_question(&id, &question_id, answers).await?;
-            Ok(Json(json!({ "status": "answered" })))
-        }
-        (None, Some(true)) => {
-            s.decline_question(&id, &question_id).await?;
-            Ok(Json(json!({ "status": "declined" })))
-        }
-        _ => Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "send either answers or decline: true, not both".into(),
-        )),
-    }
+    let status = s.resolve_question_body(&id, &question_id, b).await?;
+    Ok(Json(json!({ "status": status })))
 }
 
 #[derive(Deserialize)]

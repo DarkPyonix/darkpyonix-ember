@@ -260,6 +260,17 @@ impl Client {
         self.inner.api.answer(id, approval_id, decision).await
     }
 
+    /// Answer or skip an agent's question (FR-T11). The transcript follows from the server's
+    /// `QuestionAnswered` push, not from this call.
+    pub async fn answer_question(
+        &self,
+        id: &str,
+        question_id: &str,
+        reply: &crate::api::QuestionReply,
+    ) -> ApiResult<()> {
+        self.inner.api.answer_question(id, question_id, reply).await
+    }
+
     /// Switch a session's approve-everything mode (FR-A5). The state follows at once; the
     /// server's push tells every other client.
     pub async fn set_approve_all(&self, id: &str, enabled: bool) -> ApiResult<()> {

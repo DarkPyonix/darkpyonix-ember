@@ -271,14 +271,37 @@ pub fn cost_stats(load: &Load<UsageSummary>, window: usize) -> [(&'static str, S
     ]
 }
 
-/// What the bars are: tokens per UTC day. The cost line of the mockup is named only when cost
-/// data exists.
-pub fn cost_legend(load: &Load<UsageSummary>, window: usize) -> String {
-    if period_cost(load, window).is_some() {
-        "막대: 일별 토큰 · 선: 비용".to_string()
-    } else {
-        "막대: 일별 토큰 (비용 데이터 없음)".to_string()
+pub const LEGEND_COST: &str = "비용";
+pub const LEGEND_TOKENS: &str = "토큰";
+
+/// One entry of the cost card's dot legend: a label and whether its dot is hatched (tokens) or solid (cost).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CostLegendEntry {
+    pub label: &'static str,
+    pub hatched: bool,
+}
+
+/// The hatch of a cost-card bar and of the 토큰 legend dot, one definition so they cannot drift:
+/// `(line step in dp, line alpha 0..=255)`. The lines are drawn in the bar's own colour
+/// (grey.strong; the 'today' bar is orange.strong and has no legend entry in the mockup).
+pub fn legend_hatch_style() -> (f32, u8) {
+    (5.0, 0xff)
+}
+
+/// The legend in the card head (mockup: a 비용 dot and a 토큰 hatch dot). 비용 only when cost data
+/// exists (never invented), 토큰 when tokens exist, nothing at all on a narrow card.
+pub fn cost_legend(has_cost: bool, has_tokens: bool, narrow: bool) -> Vec<CostLegendEntry> {
+    let mut v = Vec::new();
+    if narrow {
+        return v;
     }
+    if has_cost {
+        v.push(CostLegendEntry { label: LEGEND_COST, hatched: false });
+    }
+    if has_tokens {
+        v.push(CostLegendEntry { label: LEGEND_TOKENS, hatched: true });
+    }
+    v
 }
 
 /// Tokens per UTC day for the last `window` days, oldest first, as `(YYYY-MM-DD, tokens)`.
@@ -493,6 +516,19 @@ mod tests {
     }
 
     #[test]
+    fn fr_u7_cost_legend_entries_follow_data() {
+        let labels = |c, t| cost_legend(c, t, false).iter().map(|e| (e.label, e.hatched)).collect::<Vec<_>>();
+        assert_eq!(labels(false, true), vec![("토큰", true)]);
+        assert_eq!(labels(true, true), vec![("비용", false), ("토큰", true)]);
+        assert!(labels(false, false).is_empty());
+    }
+
+    #[test]
+    fn fr_l23_cost_card_legend_hidden_when_narrow() {
+        assert!(cost_legend(true, true, true).is_empty());
+    }
+
+    #[test]
     fn fr_l11_cost_card_without_cost_says_no_data() {
         let l = summary(vec![day("2026-11-05", 100, 0, 2)]);
         let st = cost_stats(&l, 14);
@@ -500,7 +536,6 @@ mod tests {
         assert_eq!(st[2].1, NO_DATA);
         assert_eq!(st[3].1, NO_DATA);
         assert_eq!(st[1].1, "100");
-        assert!(cost_legend(&l, 14).contains("비용 데이터 없음"));
         assert_eq!(cost_stats(&Load::Loading, 14)[1].1, NO_DATA);
     }
 
@@ -715,5 +750,11 @@ mod tests {
         assert_eq!(weekday_name("2026-11-06"), "금");
         assert_eq!(weekday_name("1970-01-01"), "목");
         assert_eq!(weekday_name("nope"), "");
+    }
+
+    #[test]
+    fn fr_u7_legend_dot_matches_the_bar_hatch() {
+        // The dot and the bars read the same step and alpha (FR-L23, #509 review).
+        assert_eq!(legend_hatch_style(), (5.0, 0xff));
     }
 }

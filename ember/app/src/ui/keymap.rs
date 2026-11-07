@@ -62,10 +62,14 @@ pub enum Action {
     MaximizeTool,
     /// Find (and replace) in the open file.
     FindInFile,
+    /// Search across the project's files (FR-E7).
+    FindInFiles,
+    /// Search across the project's files with the replace field shown (FR-E7).
+    ReplaceInFiles,
 }
 
 impl Action {
-    pub const ALL: [Action; 20] = [
+    pub const ALL: [Action; 22] = [
         Action::Project,
         Action::Commit,
         Action::Git,
@@ -86,6 +90,8 @@ impl Action {
         Action::NewTerminal,
         Action::MaximizeTool,
         Action::FindInFile,
+        Action::FindInFiles,
+        Action::ReplaceInFiles,
     ];
 
     pub fn label(self) -> &'static str {
@@ -110,6 +116,8 @@ impl Action {
             Action::NewTerminal => "새 터미널",
             Action::MaximizeTool => "최대화",
             Action::FindInFile => "문서에서 찾기",
+            Action::FindInFiles => "파일에서 찾기",
+            Action::ReplaceInFiles => "파일에서 바꾸기",
         }
     }
 }
@@ -237,7 +245,7 @@ impl Chord {
 /// `(action, macOS chord, other chord)`; an empty chord means no default binding.
 type Row = (Action, &'static str, &'static str);
 
-const VSCODE: [Row; 20] = [
+const VSCODE: [Row; 22] = [
     (Action::Project, "\u{21E7}\u{2318}E", "Ctrl+Shift+E"),
     // VS Code has no default for a commit window; the source control view shares Git's chord.
     (Action::Commit, "", ""),
@@ -259,9 +267,11 @@ const VSCODE: [Row; 20] = [
     (Action::NewTerminal, "\u{2303}\u{21E7}`", "Ctrl+Shift+`"),
     (Action::MaximizeTool, "", ""),
     (Action::FindInFile, "\u{2318}F", "Ctrl+F"),
+    (Action::FindInFiles, "\u{21E7}\u{2318}F", "Ctrl+Shift+F"),
+    (Action::ReplaceInFiles, "\u{21E7}\u{2318}H", "Ctrl+Shift+H"),
 ];
 
-const JETBRAINS: [Row; 20] = [
+const JETBRAINS: [Row; 22] = [
     (Action::Project, "\u{2318}1", "Alt+1"),
     (Action::Commit, "\u{2318}0", "Alt+0"),
     (Action::Git, "\u{2318}9", "Alt+9"),
@@ -282,6 +292,8 @@ const JETBRAINS: [Row; 20] = [
     (Action::NewTerminal, "\u{2318}T", "Ctrl+Shift+T"),
     (Action::MaximizeTool, "\u{21E7}\u{2318}'", "Ctrl+Shift+'"),
     (Action::FindInFile, "\u{2318}F", "Ctrl+F"),
+    (Action::FindInFiles, "\u{21E7}\u{2318}F", "Ctrl+Shift+F"),
+    (Action::ReplaceInFiles, "\u{21E7}\u{2318}R", "Ctrl+Shift+R"),
 ];
 
 impl Keymap {
@@ -309,7 +321,7 @@ impl Keymap {
         }
     }
 
-    fn table(self) -> &'static [Row; 20] {
+    fn table(self) -> &'static [Row; 22] {
         match self {
             Keymap::VsCode => &VSCODE,
             Keymap::JetBrains => &JETBRAINS,

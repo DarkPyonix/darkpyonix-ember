@@ -28,6 +28,14 @@ Four more files carry no `version` field of an upstream, and are listed here by 
 | injection-host.tmLanguage.json | written for these tests: part of this repository | this repository's |
 | injection-guest.tmLanguage.json | written for these tests: part of this repository | this repository's |
 
+One file has a different licence: `Regular Expressions (JavaScript).tmLanguage` is the `source.js.regexp` grammar from
+the TextMate JavaScript bundle (github.com/textmate/javascript.tmbundle, commit fccf0af0c95430a42e1bf98f0c7a4723a53283e7,
+as listed in Code-OSS's `extensions/javascript/cgmanifest.json`), taken unchanged from Code-OSS 1.139.1
+(`extensions/javascript/syntaxes/`). Its licence, "TextMate Bundle License", reads: "Copyright (c) textmate-javascript.tmbundle
+project authors. If not otherwise specified, files in this repository fall under the following license: Permission to copy,
+use, modify, sell and distribute this software is granted. This software is provided "as is" without express or implied
+warranty, and with no claim as to its suitability for any purpose."
+
 (The upstream file is the plist or YAML original; Code-OSS converted each to JSON, which is the file here.
 `JavaScript.tmLanguage.json` is the conversion of TypeScript-TmLanguage's `TypeScriptReact.tmLanguage`.)
 

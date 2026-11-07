@@ -1251,6 +1251,25 @@ pub async fn fetch_snapshot(project: &str) -> Result<RepoSnapshot, ApiError> {
 // History (FR-G5)
 // ---------------------------------------------------------------------------------------------
 
+/// Which commits the history list displays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HistoryFilter {
+    #[default]
+    AllBranches,
+    LocalOnly,
+}
+
+impl HistoryFilter {
+    pub const ALL: [HistoryFilter; 2] = [HistoryFilter::AllBranches, HistoryFilter::LocalOnly];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            HistoryFilter::AllBranches => "모든 브랜치",
+            HistoryFilter::LocalOnly => "로컬 전용",
+        }
+    }
+}
+
 /// Commits read per page of the history list.
 pub const HISTORY_PAGE: u32 = 30;
 
@@ -1273,6 +1292,10 @@ pub struct HistoryEntry {
     pub refs: Vec<HistoryRef>,
     /// A commit with two or more parents.
     pub is_merge: bool,
+    /// A local commit not yet pushed to the remote.
+    pub unpushed: bool,
+    /// A commit on a remote ref not present on local branches.
+    pub remote_only: bool,
 }
 
 /// The chip text of a ref: the node sends full names (`refs/heads/main`), the chip shows `main`.
@@ -1318,12 +1341,49 @@ pub fn history_entry(c: &GitLogCommit, now: i64) -> HistoryEntry {
         time_text: history_time_text(now, c.time),
         refs,
         is_merge: c.parents.len() > 1,
+        unpushed: false,
+        remote_only: false,
     }
+}
+
+/// Annotate a sequence of history commits with `unpushed` and `remote_only` flags.
+pub fn annotate_history_sync(entries: &mut [HistoryEntry]) {
+    let mut past_remote = false;
+    for e in entries.iter_mut() {
+        let has_remote = e.refs.iter().any(|r| r.kind == GitLogRefKind::Remote);
+        let has_local = e.refs.iter().any(|r| r.kind == GitLogRefKind::Branch || r.kind == GitLogRefKind::Head);
+
+        if has_remote {
+            past_remote = true;
+        }
+
+        if e.unpushed || (!past_remote && !has_remote) {
+            e.unpushed = true;
+        }
+        if e.remote_only || (has_remote && !has_local) {
+            e.remote_only = true;
+        }
+    }
+}
+
+/// Whether a commit matches the selected history filter.
+pub fn history_matches_filter(entry: &HistoryEntry, filter: HistoryFilter) -> bool {
+    match filter {
+        HistoryFilter::AllBranches => true,
+        HistoryFilter::LocalOnly => !entry.remote_only,
+    }
+}
+
+/// Filter history entries according to the chosen filter.
+pub fn filter_history_entries(entries: &[HistoryEntry], filter: HistoryFilter) -> Vec<HistoryEntry> {
+    entries.iter().filter(|e| history_matches_filter(e, filter)).cloned().collect()
 }
 
 /// The rows of one page of the log, in the node's order (newest first).
 pub fn history_entries(log: &GitLog, now: i64) -> Vec<HistoryEntry> {
-    log.commits.iter().map(|c| history_entry(c, now)).collect()
+    let mut entries: Vec<HistoryEntry> = log.commits.iter().map(|c| history_entry(c, now)).collect();
+    annotate_history_sync(&mut entries);
+    entries
 }
 
 /// Whether another page may exist: the last page came back full. An empty log (a branch with no
@@ -1422,6 +1482,10 @@ pub struct CommitDetailView {
     /// The files the commit changed, also those past what the node listed.
     pub files_total: usize,
     pub truncated: bool,
+    /// A local commit not yet pushed to the remote.
+    pub unpushed: bool,
+    /// A commit on a remote ref not present on local branches.
+    pub remote_only: bool,
 }
 
 /// The state of the detail of the selected commit.
@@ -1481,6 +1545,10 @@ pub fn commit_detail_view(d: &GitCommitDetail, now: i64) -> CommitDetailView {
         lines.next();
     }
     let body_lines: Vec<String> = lines.filter(|l| !l.trim().is_empty()).take(COMMIT_BODY_LINES).map(|l| clip_line(l, COMMIT_TEXT_MAX)).collect();
+    let has_remote = refs.iter().any(|r| r.kind == GitLogRefKind::Remote);
+    let has_local = refs.iter().any(|r| r.kind == GitLogRefKind::Branch || r.kind == GitLogRefKind::Head);
+    let unpushed = has_local && !has_remote;
+    let remote_only = has_remote && !has_local;
     CommitDetailView {
         sha: d.sha.clone(),
         short: if d.short.is_empty() { d.sha.chars().take(7).collect() } else { d.short.clone() },
@@ -1494,7 +1562,65 @@ pub fn commit_detail_view(d: &GitCommitDetail, now: i64) -> CommitDetailView {
         files_total: d.files_total.max(files.len()),
         truncated: d.truncated,
         files,
+        unpushed,
+        remote_only,
     }
+}
+
+/// Attempt to copy `sha` to the system clipboard on macOS, Linux, or Windows.
+/// Returns true if an OS clipboard command was launched and succeeded.
+/// TODO(compose-rust#471): replace with native toolkit clipboard support once available.
+pub fn copy_sha_to_clipboard(sha: &str) -> bool {
+    let sha = sha.trim();
+    if sha.is_empty() {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(mut child) = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(sha.as_bytes());
+            }
+            return child.wait().map(|s| s.success()).unwrap_or(false);
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        for cmd in ["wl-copy", "xclip -selection clipboard", "xsel --clipboard --input"] {
+            let parts: Vec<&str> = cmd.split_whitespace().collect();
+            if let Ok(mut child) = std::process::Command::new(parts[0])
+                .args(&parts[1..])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    use std::io::Write;
+                    let _ = stdin.write_all(sha.as_bytes());
+                }
+                if child.wait().map(|s| s.success()).unwrap_or(false) {
+                    return true;
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(mut child) = std::process::Command::new("clip")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(sha.as_bytes());
+            }
+            return child.wait().map(|s| s.success()).unwrap_or(false);
+        }
+    }
+    false
 }
 
 /// Read one commit. Runs on the runtime, not the UI thread.
@@ -1547,9 +1673,29 @@ pub fn commit_files_shown(v: &CommitDetailView) -> (&[CommitFileView], Option<St
     (shown, commit_files_notice(shown.len(), v.files_total, v.truncated))
 }
 
+/// Map common git failures before displaying a history operation error.
+fn history_error_reason(e: &ApiError) -> Option<&'static str> {
+    let ApiError::Status { message, code, .. } = e else { return None };
+    let raw = format!("{} {}", code.as_deref().unwrap_or(""), message).to_lowercase();
+    if raw.contains("dirty") || raw.contains("local changes") || raw.contains("uncommitted") {
+        Some("작업 중인 변경이 있습니다. 먼저 커밋하거나 스태시해야 합니다.")
+    } else if raw.contains("conflict") {
+        Some("충돌이 발생하여 작업을 완료하지 못했습니다. 저장소 상태를 확인해야 합니다.")
+    } else if raw.contains("index.lock") || raw.contains("another git process") || raw.contains("in_progress") {
+        Some("진행 중인 git 작업이 있습니다. 작업이 끝난 뒤 다시 시도해야 합니다.")
+    } else if raw.contains("unknown revision") || raw.contains("bad revision") || raw.contains("unknown_commit") {
+        Some("커밋을 찾을 수 없습니다. 히스토리를 다시 불러와야 합니다.")
+    } else if raw.contains("not a git repository") || raw.contains("not_repository") {
+        Some("git 저장소를 찾을 수 없습니다. 프로젝트 경로를 확인해야 합니다.")
+    } else if raw.contains("identity unknown") || raw.contains("unable to auto-detect email") {
+        Some("git 사용자 이름과 이메일이 설정되어 있지 않습니다.")
+    } else { None }
+}
+
 /// A Korean line for a failed commit call: the node's Korean message as it is; anything else
 /// (git's own text, a demo's) becomes "{what}에 실패했습니다" with a Korean reason, never raw English.
 pub fn commit_failure(what: &str, e: &ApiError) -> String {
+    if let Some(reason) = history_error_reason(e) { return reason.to_string(); }
     match e {
         ApiError::Status { message, .. } if is_korean(message) => message.clone(),
         ApiError::Status { status: 409, .. } => "작업을 하지 못했습니다. 저장소 상태를 확인해 주세요.".to_string(),
@@ -1997,7 +2143,7 @@ pub fn pr_detail_view(d: &GitPrDetail) -> PrDetailView {
         number: pr.number,
         title: pr.title.clone(),
         state_text: pr_state_text(pr.state),
-        body_lines: d.body.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).take(PR_BODY_LINES).map(String::from).collect(),
+        body_lines: clean_body(&d.body).lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).take(PR_BODY_LINES).map(String::from).collect(),
         author: pr.author.clone(),
         head: pr.head.clone(),
         base: pr.base.clone(),
@@ -2060,6 +2206,56 @@ pub const MERGE_NO_HEAD: &str = "헤드를 확인할 수 없어 병합할 수 �
 /// The first line of the armed merge: the method is squash.
 pub const MERGE_METHOD_TEXT: &str = "스쿼시로 병합합니다";
 
+/// Labels for the merge method chips.
+pub fn pr_merge_method_label(method: GitPrMergeMethod) -> &'static str {
+    match method {
+        GitPrMergeMethod::Squash => "스쿼시",
+        GitPrMergeMethod::Merge => "병합 커밋",
+        GitPrMergeMethod::Rebase => "리베이스",
+    }
+}
+
+/// All available merge methods in UI display order.
+pub const PR_MERGE_METHODS: [GitPrMergeMethod; 3] = [
+    GitPrMergeMethod::Squash,
+    GitPrMergeMethod::Merge,
+    GitPrMergeMethod::Rebase,
+];
+
+/// Text explaining how the pull request will be merged based on the chosen method.
+pub fn merge_method_text(method: GitPrMergeMethod) -> &'static str {
+    match method {
+        GitPrMergeMethod::Squash => MERGE_METHOD_TEXT,
+        GitPrMergeMethod::Merge => "병합 커밋을 만들어 병합합니다",
+        GitPrMergeMethod::Rebase => "리베이스하여 병합합니다",
+    }
+}
+
+/// Toggle label for deleting the branch after merge.
+pub const PR_DELETE_BRANCH_LABEL: &str = "병합 후 브랜치 삭제";
+
+/// Honest note explaining branch deletion (#572 finding 3).
+pub const PR_DELETE_BRANCH_NOTE: &str = "원격 브랜치를 삭제합니다. 작업 중인 브랜치인 경우 로컬 브랜치도 함께 삭제되고 기본 브랜치로 전환될 수 있습니다.";
+
+/// The note shown when an author tries to approve their own pull request.
+pub const PR_SELF_APPROVAL_DISALLOWED: &str = "본인이 연 풀 리퀘스트는 직접 승인할 수 없습니다.";
+
+/// Whether the signed-in GitHub account is allowed to approve the pull request.
+/// An author cannot approve their own pull request.
+pub fn can_approve_pr(author: &str, signed_in: Option<&str>) -> Result<(), &'static str> {
+    fn clean(s: &str) -> &str {
+        s.trim().trim_start_matches('@').trim()
+    }
+    let author_clean = clean(author);
+    if let Some(user) = signed_in {
+        let user_clean = clean(user);
+        if !author_clean.is_empty() && !user_clean.is_empty() && author_clean.eq_ignore_ascii_case(user_clean) {
+            return Err(PR_SELF_APPROVAL_DISALLOWED);
+        }
+    }
+    Ok(())
+}
+
 /// The label of the merge button; the armed second tap reads "정말 병합합니다".
 pub fn merge_button_text(armed: bool) -> &'static str {
     if armed { "정말 병합합니다" } else { "병합" }
@@ -2092,10 +2288,36 @@ pub fn pr_create_gate(title: &str) -> Result<(), &'static str> {
     }
 }
 
+/// Format markdown bullet lines (`- item`, `* item`) to `• item` and strip raw `# ` heading markers.
+fn format_markdown_line(line: &str) -> String {
+    let trimmed_start = line.trim_start();
+    let indent = &line[..line.len() - trimmed_start.len()];
+    if let Some(rest) = trimmed_start.strip_prefix("- ") {
+        return format!("{indent}\u{2022} {rest}");
+    }
+    if let Some(rest) = trimmed_start.strip_prefix("* ") {
+        return format!("{indent}\u{2022} {rest}");
+    }
+    if trimmed_start.starts_with('#') {
+        let hashes = trimmed_start.chars().take_while(|&c| c == '#').count();
+        if hashes > 0 && trimmed_start[hashes..].starts_with(' ') {
+            let after_hashes = trimmed_start[hashes..].trim_start();
+            return format!("{indent}{after_hashes}");
+        }
+    }
+    line.to_string()
+}
+
 /// A review or description body without control characters, except newline and tab. Pasted
-/// text can carry escapes; the node and the host should never see them.
+/// text can carry escapes; the node and the host should never see them. Formats markdown
+/// bullet lines (`- item`, `* item`) to bullet points (`• `) and strips raw `# ` heading markers.
 pub fn clean_body(body: &str) -> String {
-    body.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect()
+    let filtered: String = body.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect();
+    filtered
+        .split('\n')
+        .map(format_markdown_line)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The key of the review draft: the project and the selected pull request, so a draft typed
@@ -2182,9 +2404,9 @@ pub fn pr_review_body(number: u64, action: GitPrReviewAction, body: &str) -> Val
     json!({ "number": number, "action": action, "body": non_empty(&clean_body(body)), "confirm": true })
 }
 
-/// The `pr/merge` body (squash by default; the branch stays). `head_sha` is the head the user saw.
-pub fn pr_merge_body(number: u64, method: GitPrMergeMethod, head_sha: &str) -> Value {
-    json!({ "number": number, "method": method, "delete_branch": false, "head_sha": head_sha, "confirm": true })
+/// The `pr/merge` body. `head_sha` is the head the user saw.
+pub fn pr_merge_body(number: u64, method: GitPrMergeMethod, delete_branch: bool, head_sha: &str) -> Value {
+    json!({ "number": number, "method": method, "delete_branch": delete_branch, "head_sha": head_sha, "confirm": true })
 }
 
 /// The `pr/create` body; an empty base or head is left to the node.
@@ -2207,11 +2429,11 @@ pub async fn run_pr_review(project: &str, number: u64, action: GitPrReviewAction
 }
 
 /// Merge. `Ok` is the notice to show, `Err` the Korean line (a closed gate or a moved head answers 409).
-pub async fn run_pr_merge(project: &str, number: u64, method: GitPrMergeMethod, head_sha: &str) -> Result<String, String> {
+pub async fn run_pr_merge(project: &str, number: u64, method: GitPrMergeMethod, delete_branch: bool, head_sha: &str) -> Result<String, String> {
     if head_sha.trim().is_empty() {
         return Err(MERGE_NO_HEAD.to_string());
     }
-    git_call::<Value>(project, "pr/merge", pr_merge_body(number, method, head_sha))
+    git_call::<Value>(project, "pr/merge", pr_merge_body(number, method, delete_branch, head_sha))
         .await
         .map(|_| "병합했습니다".to_string())
         .map_err(|e| korean_failure("병합", &e))
@@ -2233,6 +2455,54 @@ pub fn pr_created_notice(number: u64) -> String {
 // ---------------------------------------------------------------------------------------------
 // Branches (FR-G9)
 // ---------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod fr_l19_branch_followup_tests {
+    use super::*;
+
+    #[test]
+    fn fr_l19_switch_guard_covers_flight_and_600_ms() {
+        assert!(!branch_switch_allowed(true, None, 1000));
+        assert!(!branch_switch_allowed(false, Some(1000), 1599));
+        assert!(branch_switch_allowed(false, Some(1000), 1600));
+        assert!(branch_switch_allowed(false, None, 1000));
+    }
+
+    #[test]
+    fn fr_l19_branch_search_ignores_case_and_whitespace() {
+        assert!(branch_matches("feature/Hello", "  HELLO "));
+        assert!(!branch_matches("main", "hello"));
+        assert!(branch_matches("main", " "));
+    }
+
+    #[test]
+    fn fr_l19_branch_and_stash_notes_are_clear() {
+        assert!(BRANCH_SWITCH_NOTE.contains("변경"));
+        assert!(BRANCH_CREATE_NOTE.contains("변경"));
+        assert!(STASH_NOW_NOTE.contains("추적하지 않는 파일"));
+        for note in [BRANCH_SWITCH_NOTE, BRANCH_CREATE_NOTE, STASH_NOW_NOTE] {
+            assert!(note.ends_with("합니다.") || note.ends_with("입니다.") || note.ends_with("습니다."));
+        }
+        assert_eq!(branch_bar_text(2, 1), "원격보다 2개 앞서고 1개 뒤처져 있습니다.");
+    }
+}
+
+/// Guidance shown before branch and stash actions.
+pub const BRANCH_SWITCH_NOTE: &str = "전환할 때 커밋하지 않은 변경 사항이 함께 이동할 수 있습니다.";
+pub const BRANCH_CREATE_NOTE: &str = "만들고 전환할 때 커밋하지 않은 변경 사항이 함께 이동할 수 있습니다.";
+pub const STASH_NOW_NOTE: &str = "스태시는 추적하지 않는 파일을 포함하지 않습니다.";
+
+pub fn branch_switch_allowed(busy: bool, last: Option<i64>, now: i64) -> bool {
+    !busy && last.map_or(true, |time| now.saturating_sub(time) >= 600)
+}
+
+pub fn branch_matches(name: &str, query: &str) -> bool {
+    name.to_lowercase().contains(&query.trim().to_lowercase())
+}
+
+pub fn branch_bar_text(ahead: u32, behind: u32) -> String {
+    format!("원격보다 {ahead}개 앞서고 {behind}개 뒤처져 있습니다.")
+}
 
 /// Commits the ahead/behind bars show at full width; more is drawn as full.
 pub const BRANCH_BAR_CAP: u32 = 10;
@@ -2792,6 +3062,7 @@ fn is_korean(text: &str) -> bool {
 /// writes the whole sentence, detail after it); an English one (git's own, or a demo's) goes
 /// after "{what}하지 못했습니다:".
 pub fn failure_text(what: &str, e: &ApiError) -> String {
+    if let Some(reason) = history_error_reason(e) { return reason.to_string(); }
     match e {
         ApiError::Status { message, .. } if is_korean(message) => message.clone(),
         ApiError::Status { message, .. } => format!("{what}하지 못했습니다: {message}"),
@@ -5271,7 +5542,7 @@ rename to new.txt
 
     #[test]
     fn fr_g11_merge_body_carries_the_head_sha() {
-        let body = pr_merge_body(7, GitPrMergeMethod::Squash, A_HEAD);
+        let body = pr_merge_body(7, GitPrMergeMethod::Squash, false, A_HEAD);
         assert_eq!(body["head_sha"], json!(A_HEAD));
         assert_eq!(body["confirm"], json!(true));
     }
@@ -5355,7 +5626,8 @@ rename to new.txt
     fn fr_g11_the_request_bodies_confirm_and_trim() {
         assert_eq!(pr_review_body(7, GitPrReviewAction::RequestChanges, " 고쳐 주세요 "), json!({ "number": 7, "action": "request_changes", "body": "고쳐 주세요", "confirm": true }));
         assert_eq!(pr_review_body(7, GitPrReviewAction::Approve, ""), json!({ "number": 7, "action": "approve", "body": null, "confirm": true }));
-        assert_eq!(pr_merge_body(7, GitPrMergeMethod::Squash, "abc"), json!({ "number": 7, "method": "squash", "delete_branch": false, "head_sha": "abc", "confirm": true }));
+        assert_eq!(pr_merge_body(7, GitPrMergeMethod::Squash, false, "abc"), json!({ "number": 7, "method": "squash", "delete_branch": false, "head_sha": "abc", "confirm": true }));
+        assert_eq!(pr_merge_body(7, GitPrMergeMethod::Merge, true, "def"), json!({ "number": 7, "method": "merge", "delete_branch": true, "head_sha": "def", "confirm": true }));
         assert_eq!(pr_review_notice(GitPrReviewAction::Approve), "승인했습니다");
     }
 
@@ -5449,6 +5721,49 @@ rename to new.txt
         let gate = ApiError::Status { status: 409, message: "CI 체크가 실패했습니다.".into(), code: None };
         assert_eq!(korean_failure("병합", &gate), "CI 체크가 실패했습니다.");
         assert!(!korean_failure("병합", &ApiError::Peer("refused".into())).contains("refused"));
+    }
+
+    #[test]
+    fn fr_g11_merge_method_choice_and_delete_branch_note() {
+        assert_eq!(pr_merge_method_label(GitPrMergeMethod::Squash), "스쿼시");
+        assert_eq!(pr_merge_method_label(GitPrMergeMethod::Merge), "병합 커밋");
+        assert_eq!(pr_merge_method_label(GitPrMergeMethod::Rebase), "리베이스");
+
+        assert_eq!(merge_method_text(GitPrMergeMethod::Squash), "스쿼시로 병합합니다");
+        assert_eq!(merge_method_text(GitPrMergeMethod::Merge), "병합 커밋을 만들어 병합합니다");
+        assert_eq!(merge_method_text(GitPrMergeMethod::Rebase), "리베이스하여 병합합니다");
+
+        assert_eq!(PR_DELETE_BRANCH_LABEL, "병합 후 브랜치 삭제");
+        assert!(PR_DELETE_BRANCH_NOTE.contains("원격 브랜치를 삭제합니다"));
+        assert!(PR_DELETE_BRANCH_NOTE.contains("로컬 브랜치도 함께 삭제되고 기본 브랜치로 전환될 수 있습니다"));
+    }
+
+    #[test]
+    fn fr_g11_can_approve_pr_blocks_self_approval() {
+        // Same author and signed-in account: blocked.
+        assert_eq!(can_approve_pr("alice", Some("alice")), Err(PR_SELF_APPROVAL_DISALLOWED));
+        // Case-insensitive.
+        assert_eq!(can_approve_pr("Alice", Some("alice")), Err(PR_SELF_APPROVAL_DISALLOWED));
+        assert_eq!(can_approve_pr("alice", Some("ALICE")), Err(PR_SELF_APPROVAL_DISALLOWED));
+        // Trims leading @ and whitespace.
+        assert_eq!(can_approve_pr("@alice", Some("alice")), Err(PR_SELF_APPROVAL_DISALLOWED));
+        assert_eq!(can_approve_pr("alice", Some("@alice")), Err(PR_SELF_APPROVAL_DISALLOWED));
+        assert_eq!(can_approve_pr("  @Alice  ", Some("  alice  ")), Err(PR_SELF_APPROVAL_DISALLOWED));
+
+        // Different user: allowed.
+        assert_eq!(can_approve_pr("alice", Some("bob")), Ok(()));
+        // Not signed in: allowed.
+        assert_eq!(can_approve_pr("alice", None), Ok(()));
+        // Empty author or empty signed-in: allowed.
+        assert_eq!(can_approve_pr("", Some("alice")), Ok(()));
+        assert_eq!(can_approve_pr("alice", Some("")), Ok(()));
+    }
+
+    #[test]
+    fn fr_g11_clean_body_formats_markdown_bullets_and_headings() {
+        let input = "# Heading 1\n## Heading 2\n- first item\n* second item\n  - nested\n  * nested star\n#tag\n-notbullet\nplain text";
+        let expected = "Heading 1\nHeading 2\n\u{2022} first item\n\u{2022} second item\n  \u{2022} nested\n  \u{2022} nested star\n#tag\n-notbullet\nplain text";
+        assert_eq!(clean_body(input), expected);
     }
 
     // ---- merge banner and pick-all (FR-G16, FR-G17, FR-G7, #382) ----
@@ -5772,4 +6087,82 @@ mod commit_detail_tests {
         assert!(!armed_label_visible(armed, rv, 11_100));
         assert!(armed_label_visible(armed, cp, 11_100));
     }
+    #[test]
+    fn fr_g15_history_errors_map_raw_git_output() {
+        for (raw, expected) in [
+            ("Your local changes would be overwritten", "작업 중인 변경"),
+            ("uncommitted changes exist", "작업 중인 변경"),
+            ("CONFLICT in file", "충돌이 발생"),
+            ("fatal: Unable to create index.lock", "진행 중인 git 작업"),
+            ("another git process seems to be running", "진행 중인 git 작업"),
+            ("fatal: bad revision abc", "커밋을 찾을 수 없습니다"),
+            ("unknown_commit 123", "커밋을 찾을 수 없습니다"),
+            ("fatal: not a git repository", "git 저장소를 찾을 수 없습니다"),
+            ("unable to auto-detect email address", "git 사용자 이름과 이메일"),
+        ] {
+            let error = ApiError::Status { status: 409, message: raw.into(), code: None };
+            assert!(commit_failure("되돌리기", &error).contains(expected));
+            assert!(failure_text("히스토리를 확인", &error).contains(expected));
+        }
+    }
+
+    #[test]
+    fn fr_g5_history_filter_and_sync_derivation() {
+        assert_eq!(HistoryFilter::default(), HistoryFilter::AllBranches);
+        assert_eq!(HistoryFilter::ALL, [HistoryFilter::AllBranches, HistoryFilter::LocalOnly]);
+        assert_eq!(HistoryFilter::AllBranches.label(), "모든 브랜치");
+        assert_eq!(HistoryFilter::LocalOnly.label(), "로컬 전용");
+
+        let make_commit = |sha: &str, refs: &[(&str, GitLogRefKind)]| HistoryEntry {
+            sha: sha.to_string(),
+            short: sha[..7].to_string(),
+            subject: "test".to_string(),
+            author: "author".to_string(),
+            time_text: "1시간 전".to_string(),
+            refs: refs.iter().map(|(l, k)| HistoryRef { label: l.to_string(), kind: k.clone() }).collect(),
+            is_merge: false,
+            unpushed: false,
+            remote_only: false,
+        };
+
+        let mut entries = vec![
+            make_commit("1111111111", &[("HEAD", GitLogRefKind::Head), ("feat/test", GitLogRefKind::Branch)]),
+            make_commit("2222222222", &[("develop", GitLogRefKind::Branch), ("origin/develop", GitLogRefKind::Remote)]),
+            make_commit("3333333333", &[("origin/other", GitLogRefKind::Remote)]),
+        ];
+
+        annotate_history_sync(&mut entries);
+
+        assert!(entries[0].unpushed, "commit 0 is before remote ref and local only");
+        assert!(!entries[0].remote_only);
+
+        assert!(!entries[1].unpushed, "commit 1 is synced with origin");
+        assert!(!entries[1].remote_only);
+
+        assert!(!entries[2].unpushed);
+        assert!(entries[2].remote_only, "commit 2 has only remote ref");
+
+        let all = filter_history_entries(&entries, HistoryFilter::AllBranches);
+        assert_eq!(all.len(), 3);
+
+        let local = filter_history_entries(&entries, HistoryFilter::LocalOnly);
+        assert_eq!(local.len(), 2);
+        assert_eq!(local[0].sha, "1111111111");
+        assert_eq!(local[1].sha, "2222222222");
+
+        // detail sync flags
+        let mut d = detail(&["p"], vec![]);
+        d.refs = vec![GitLogRef { name: "refs/heads/feature".into(), kind: GitLogRefKind::Branch }];
+        let v_local = commit_detail_view(&d, 0);
+        assert!(v_local.unpushed);
+        assert!(!v_local.remote_only);
+
+        d.refs = vec![GitLogRef { name: "refs/remotes/origin/main".into(), kind: GitLogRefKind::Remote }];
+        let v_remote = commit_detail_view(&d, 0);
+        assert!(!v_remote.unpushed);
+        assert!(v_remote.remote_only);
+
+        assert!(!copy_sha_to_clipboard(""));
+    }
+
 }

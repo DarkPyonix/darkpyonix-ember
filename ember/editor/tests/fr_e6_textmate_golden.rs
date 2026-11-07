@@ -19,7 +19,7 @@ fn grammar_set() -> GrammarSet {
     let dir = fixtures().join("grammars");
     for entry in std::fs::read_dir(&dir).unwrap().flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "json") {
+        if path.extension().is_some_and(|e| e == "json" || e == "tmLanguage") {
             let text = std::fs::read_to_string(&path).unwrap();
             set.add(parse_grammar(&path.to_string_lossy(), &text).unwrap_or_else(|e| panic!("{}: {e}", path.display())));
         }

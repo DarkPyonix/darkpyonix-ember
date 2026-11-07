@@ -21,12 +21,13 @@ pub use crate::ui::monitor::{
     SortState,
 };
 use crate::ui::monitor::{
-    bar_fraction, bar_max, card_view, meter_fraction, empty_text, process_footer, status_line, CardView, FeedStatus,
-    POLL_SECS, TOP_PROCESSES,
+    bar_fraction, bar_max, card_view, meter_fraction, empty_text, health_score, process_footer, ram_badge, score_tone,
+    score_word, status_line, storage_line, CardView, FanMode, FeedStatus, FAN_MODE_AVAILABLE, FAN_MODE_REASON, POLL_SECS,
+    TOP_PROCESSES,
 };
 use super::characters::{Character, CharState};
 use super::components::{
-    EmberCard, EmberSheetSized, Label, Pill, PillTone, SHEET_WIDTH_MONITOR,
+    AppButton, ButtonKind, EmberCard, EmberSheetSized, Label, Pill, PillTone, SHEET_WIDTH_MONITOR,
 };
 use super::theme::*;
 use crate::ui::coexist::shared_ui;
@@ -208,17 +209,20 @@ fn FailureNotice(detail: &str) {
 }
 
 /// The metric cards: the status card first, then CPU, GPU, memory, temperature, disk, network
-/// and fans, `columns` to a row (`.mon-grid`).
+/// and fans, `columns` to a row (`.mon-grid`). Cards are 200 high in a grid (`.mon-card`
+/// `min-height: 200px`) and as high as their content in one column.
 fn Grid(columns: usize, c: &ComputerChip, feed: &MonitorFeed, online: bool) {
     let cards: Vec<Card> = std::iter::once(Card::Status)
         .chain(Metric::ALL.iter().copied().map(Card::Metric))
         .collect();
+    let height = card_height(columns);
     for chunk in cards.chunks(columns) {
         cu::Row().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width()).content(|| {
             for card in chunk.iter().copied() {
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| match card {
-                    Card::Status => StatusCard(c, feed, online),
-                    Card::Metric(m) => MetricCard(m, card_view(m, feed), empty_text(m, online, feed.status()), meter_fraction(m, feed)),
+                    Card::Status => StatusCard(c, feed, online, height),
+                    Card::Metric(Metric::Fans) => FanCard(height),
+                    Card::Metric(m) => MetricCard(m, card_view(m, feed), empty_text(m, online, feed.status()), meter_fraction(m, feed), height),
                 });
             }
             for _ in chunk.len()..columns {
@@ -246,49 +250,110 @@ fn metric_icon(m: Metric) -> &'static str {
     }
 }
 
-/// `.mon-card`: 200 high on wide windows, a 16 px icon and a 13 px semibold `--text-2` label.
-fn MonCard(icon: &'static str, label: &str, body: impl FnOnce()) {
+/// The inner height of a card: 200 less the card padding in a grid, free in one column.
+pub fn card_height(columns: usize) -> Option<f32> {
+    (columns > 1).then_some(200.0 - 2.0 * PAD_CARD_V)
+}
+
+/// `.mon-card`: a 16 px icon, a 13 px semibold `--text-2` label and an optional badge on the
+/// right (`.mon-badge`).
+fn MonCard(icon: &'static str, label: &str, badge: Option<(&str, PillTone)>, height: Option<f32>, body: impl FnOnce()) {
     let p = ember_theme().palette;
     EmberCard(false, true, None, None, None, || {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().height(168.0)).content(|| {
+        let m = Modifier::new().fill_max_width();
+        let m = match height {
+            Some(h) => m.height(h),
+            None => m,
+        };
+        cu::Column().spacing(SP[2]).modifier(m).content(|| {
             cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).modifier(Modifier::new().fill_max_width()).content(|| {
                 super::shell::NavIcon(icon, p.muted.to_argb(), 16.0);
                 // TODO(compose-rust#443): no overflow_wrap on Text, so a long label clips with an ellipsis.
                 Label(label, Fs::Sm, Weight::Semibold, Some(paint(p.text_2)), Some(1));
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                if let Some((text, tone)) = badge {
+                    Pill(text, tone, true);
+                }
             });
             body();
         });
     });
 }
 
-/// The status card: the score ring (an empty track until the node reports) and the assigned
-/// projects as chips (`.mon-score`).
-fn StatusCard(c: &ComputerChip, feed: &MonitorFeed, online: bool) {
+/// The status card (`.mon-score`): the health score with its word, the main disk's free space,
+/// the score ring in its tone, the RAM badge, and the assigned projects. Without a score the
+/// card says why over an empty track (FR-L21, #389).
+fn StatusCard(c: &ComputerChip, feed: &MonitorFeed, online: bool, height: Option<f32>) {
     let p = ember_theme().palette;
-    let ring = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"72\" height=\"72\" viewBox=\"0 0 72 72\"><circle cx=\"36\" cy=\"36\" r=\"32\" fill=\"none\" stroke=\"#{:06x}\" stroke-width=\"8\"/></svg>",
-        p.track.to_argb() & 0x00ff_ffff
-    );
-    MonCard(super::shell::ICON_GAUGE_SVG, "상태", || {
-        cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Column().space_role(SpaceRole::Sm).modifier(Modifier::new().weight(1.0)).content(|| {
-                Label(&status_line(feed, online), Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(3));
-                if c.projects.is_empty() {
-                    Label("할당된 프로젝트가 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(3));
+    let latest = feed.latest();
+    let score = latest.and_then(health_score);
+    let badge = latest.and_then(ram_badge);
+    let storage = latest.and_then(storage_line);
+    MonCard(super::shell::ICON_GAUGE_SVG, "상태", badge.as_deref().map(|b| (b, PillTone::Grey)), height, || {
+        cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Column().spacing(4.0).modifier(Modifier::new().weight(1.0)).content(|| {
+                match score {
+                    Some(n) => {
+                        cu::Row().alignment(Alignment::BottomStart).space_role(SpaceRole::Sm).content(|| {
+                            Label(&n.to_string(), Fs::Xl4, Weight::Semibold, None, Some(1));
+                            Label(score_word(n), Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        });
+                        if let Some(line) = &storage {
+                            Label(line, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(2));
+                        }
+                    }
+                    None => Label(&status_line(feed, online), Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(3)),
                 }
+            });
+            let fill = score.map(|n| {
+                let tone = match score_tone(n) {
+                    crate::ui::components::PillTone::Green => p.green.strong,
+                    crate::ui::components::PillTone::Orange => p.orange.strong,
+                    _ => p.red.strong,
+                };
+                (tone.to_argb(), n as f32 / 100.0)
+            });
+            super::home::ring_image(72.0, 8.0, fill.as_slice());
+        });
+        if c.projects.is_empty() {
+            Label("할당된 프로젝트가 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(3));
+        } else {
+            cu::Row().space_role(SpaceRole::Xs).modifier(Modifier::new().fill_max_width()).content(|| {
                 for pr in c.projects.iter() {
                     Pill(&display_name(pr), PillTone::Grey, true);
                 }
             });
-            cu::Image(compose_rust::asset(compose_rust::AssetKind::Svg, super::shell::leak_doc(ring)))
-                .modifier(Modifier::new().size(72.0, 72.0));
-        });
+        }
+        if score.is_some() {
+            Label(&status_line(feed, online), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+        }
     });
 }
 
-fn MetricCard(metric: Metric, view: Option<CardView>, empty: &str, meter: Option<f32>) {
+/// The fan card: the speed stays 준비 중입니다 and the mode control (자동, 냉각, 최대) is shown
+/// disabled with the reason, because the node neither reports fans nor sets a mode
+/// (FR-X7, TODO(#389)). TODO(compose-rust#473): no radio role or checked state on the buttons.
+fn FanCard(height: Option<f32>) {
     let p = ember_theme().palette;
-    MonCard(metric_icon(metric), metric.title(), || match view.as_ref() {
+    MonCard(metric_icon(Metric::Fans), Metric::Fans.title(), None, height, || {
+        cu::Row().alignment(Alignment::BottomStart).space_role(SpaceRole::Xs).content(|| {
+            Label("-", Fs::Xl4, Weight::Semibold, Some(paint(p.muted)), Some(1));
+            Label("RPM", Fs::Lg, Weight::Medium, Some(paint(p.muted)), Some(1));
+            Label(empty_text(Metric::Fans, true, FeedStatus::Live), Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+        });
+        cu::Row().space_role(SpaceRole::Xs).modifier(Modifier::new().fill_max_width()).content(|| {
+            for mode in FanMode::ALL {
+                let kind = if mode == FanMode::Auto { ButtonKind::Primary } else { ButtonKind::Default };
+                AppButton(mode.label(), None, kind, true, FAN_MODE_AVAILABLE, false, || {});
+            }
+        });
+        Label(FAN_MODE_REASON, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+    });
+}
+
+fn MetricCard(metric: Metric, view: Option<CardView>, empty: &str, meter: Option<f32>, height: Option<f32>) {
+    let p = ember_theme().palette;
+    MonCard(metric_icon(metric), metric.title(), None, height, || match view.as_ref() {
         Some(v) => {
             Label(&v.headline, Fs::Xl4, Weight::Semibold, None, Some(1));
             for line in v.lines.iter().take(4) {
@@ -627,5 +692,65 @@ mod tests {
         let batch = compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode");
         assert!(has_text_with_max_lines_1(&batch, "1234"));
         assert!(has_text_with_max_lines_1(&batch, "ember-agent"));
+    }
+    #[test]
+    fn fr_l21_health_status_card_shows_the_score_word_ram_and_storage() {
+        let _guard = crate::services::test_guard();
+        fn ui() {
+            Grid(1, &chip(), &live_feed(), true);
+        }
+        let text = composed_text(ui);
+        // 25 % CPU, 50 % memory, no sensor, 40 % free: 100 - 6.25 = 94.
+        for want in ["\"94\"", "아주 좋습니다", "저장 공간이 넉넉합니다", "16.0 GB", "프로세스 321개 실행 중입니다"] {
+            assert!(text.contains(want), "missing {want}");
+        }
+    }
+
+    #[test]
+    fn fr_l21_health_status_card_without_a_sample_says_why() {
+        let _guard = crate::services::test_guard();
+        fn ui() {
+            Grid(1, &chip(), &MonitorFeed::default(), true);
+        }
+        let text = composed_text(ui);
+        assert!(text.contains("불러오는 중입니다"));
+        assert!(!text.contains("아주 좋습니다"));
+    }
+
+    #[test]
+    fn fr_l21_health_cards_are_200_high_in_a_grid_and_free_in_one_column() {
+        assert_eq!(card_height(1), None);
+        assert_eq!(card_height(2), Some(200.0 - 2.0 * PAD_CARD_V));
+        assert_eq!(card_height(4), Some(200.0 - 2.0 * PAD_CARD_V));
+    }
+
+    #[test]
+    fn fr_l21_fan_mode_buttons_are_named_and_disabled_with_the_reason() {
+        use compose_rust::protocol::{Mutation, PropertyValue};
+        use compose_rust::PropertyKind;
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| FanCard(None))));
+        let batch = compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let text: String = batch.iter().map(|m| format!("{m:?}")).collect();
+        assert!(text.contains(FAN_MODE_REASON));
+        assert!(text.contains("준비 중입니다"));
+        assert!(text.contains("RPM"));
+        for mode in FanMode::ALL {
+            let node = batch
+                .iter()
+                .find_map(|m| match m {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } if *s == mode.label() => {
+                        Some(*node_id)
+                    }
+                    Mutation::SetText { node_id, text, .. } if *text == mode.label() => Some(*node_id),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no button named {}", mode.label()));
+            let enabled = batch.iter().find_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Enabled, value: PropertyValue::Bool(b) } if *node_id == node => Some(*b),
+                _ => None,
+            });
+            assert_eq!(enabled, Some(false), "{} must be disabled", mode.label());
+        }
     }
 }

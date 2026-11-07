@@ -435,6 +435,19 @@ impl Inner {
         list.push(link);
     }
 
+    /// Registers `link` and closes it at once when the transport is already shutting down.
+    /// `shutdown` sets `closed` FIRST and only then lists the links to close, so a link added after
+    /// that listing would stay open on both ends (#411: after `b.close()` neither the client nor the
+    /// accepted side of a just accepted connection closed). Registering first and reading the flag
+    /// second means one of the two sees the other: either `shutdown` lists the link, or `closed` is
+    /// already true here and the link is closed from here.
+    fn register_link(&self, link: Arc<PeerLink>) {
+        self.add_link(link.clone());
+        if self.closed.load(Ordering::SeqCst) {
+            tokio::spawn(async move { link.close_local(None).await });
+        }
+    }
+
     fn live_link(&self, peer: PeerId) -> Option<Arc<PeerLink>> {
         let mut links = self.links.lock().unwrap();
         let list = links.get_mut(&peer)?;
@@ -476,7 +489,7 @@ impl Inner {
                 if let Some(s) = watcher_session {
                     link.add_task(tokio::spawn(run_path_watch(link.clone(), s)).abort_handle());
                 }
-                self.add_link(link);
+                self.register_link(link);
             }
             Accepted::Subflow(id) => {
                 if let Some(link) = self.all_links().into_iter().find(|l| l.session_id == id) {
@@ -513,7 +526,7 @@ impl Inner {
         if let Some(s) = for_watch {
             link.add_task(tokio::spawn(run_path_watch(link.clone(), s)).abort_handle());
         }
-        self.add_link(link.clone());
+        self.register_link(link.clone());
         link
     }
 

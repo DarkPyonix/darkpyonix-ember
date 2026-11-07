@@ -96,6 +96,31 @@ async fn fr_n5_letify_dropping_a_connection_ends_it_for_the_peer() {
     assert!(matches!(reason, CloseReason::Remote { code: 0, .. }), "{reason:?}");
 }
 
+/// #411: `Transport::close` closes the links it can SEE. A link registered after that listing (the
+/// accepted side right after the handshake, or an initiated one) used to stay open on both ends, so
+/// neither the client nor the accepted side ever saw the close. Closing at once after `accept` is the
+/// shape that hits the window; repeating it makes a rare ordering likely. Every round must end both
+/// sides within 5 s (a lost close would take 45 or 300 s).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fr_n5_letify_closing_right_after_accept_ends_both_sides_every_time() {
+    for round in 0..60 {
+        let (a, b, _dir) = letify_pair().await;
+        let mut listener = b.listen("svc").unwrap();
+        let conn = a.connect(b.peer_id(), "svc").await.unwrap();
+        let accepted = listener.accept().await.unwrap();
+        b.close().await;
+        let client = tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;
+        let server = tokio::time::timeout(Duration::from_secs(5), accepted.closed()).await;
+        assert!(
+            client.is_ok() && server.is_ok(),
+            "round {round}: client closed: {}, accepted side closed: {}; client path_state {:?}",
+            client.is_ok(),
+            server.is_ok(),
+            conn.path_state()
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn fr_n5_letify_open_streams_end_when_the_connection_closes() {
     let (a, b, _dir) = letify_pair().await;

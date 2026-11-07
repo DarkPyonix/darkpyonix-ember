@@ -9,6 +9,8 @@
 //! client's state yet (FR-U7 has no endpoint), so those tiles say [`UNAVAILABLE`] and carry a
 //! TODO, never an estimate.
 
+use std::time::Duration;
+
 use ember_client::wire::DailyUsage;
 use ember_client::state::{LauncherStatus, Reachability, State};
 
@@ -36,6 +38,10 @@ pub const GITHUB_INSTALL_HINT: &str = "gh를 설치하고 로그인하십시오"
 pub const GITHUB_UNAVAILABLE_HINT: &str = "연결 상태를 확인할 수 없습니다";
 /// The control only reveals the `gh auth login` guidance, so it does not say 연결 or 다시 로그인.
 pub const GITHUB_HOW: &str = "방법 보기";
+/// Minimum gap between two timer reads of the GitHub card (the server caches for 90 s).
+pub const GITHUB_MIN_GAP: Duration = Duration::from_secs(90);
+pub const GITHUB_SAMPLE_WARN_REASON: &str = "로그인이 만료되어 재인증이 필요합니다";
+pub const GITHUB_SAMPLE_OFF_REASON: &str = "gh에 로그인되어 있지 않습니다";
 /// Repositories listed on the card; the server may send more.
 pub const GITHUB_MAX_REPOS: usize = 3;
 /// CI cells per repository, newest first.
@@ -142,6 +148,123 @@ pub fn sample_header(line: &str) -> String {
     format!("{line} {GITHUB_SAMPLE_MARK}")
 }
 
+/// The sample GitHub card state selected by a capture hook (FR-L35, #621).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GithubSampleKind {
+    Ok,
+    Warn,
+    Off,
+}
+
+/// Pure parse of the `EMBER_CR_GITHUB` environment hook value.
+pub fn parse_github_sample_hook(value: Option<&str>, active: bool) -> Option<GithubSampleKind> {
+    if !active {
+        return None;
+    }
+    match value? {
+        "ok" | "on" => Some(GithubSampleKind::Ok),
+        "warn" => Some(GithubSampleKind::Warn),
+        "off" => Some(GithubSampleKind::Off),
+        _ => None,
+    }
+}
+
+/// The deterministic sample `GithubState` for capture hooks and demo mode (FR-L35, #621).
+pub fn sample_github_state(kind: GithubSampleKind) -> GithubState {
+    let repo = |name: &str, branch: &str, prs, rev, ci: Vec<CiResult>| GithubRepo {
+        name_with_owner: name.into(),
+        default_branch: branch.into(),
+        open_prs: Some(prs),
+        review_requested: Some(rev),
+        ci: Some(ci),
+        error: None,
+        capped: false,
+    };
+    match kind {
+        GithubSampleKind::Ok => GithubState {
+            state: GithubConn::On,
+            reason: None,
+            account: Some("데모 계정".into()),
+            repos: vec![
+                repo("demo/ember", "develop", 4, 1, vec![CiResult::Success, CiResult::Success, CiResult::Failure, CiResult::Success]),
+                repo("demo/notes", "main", 1, 0, vec![CiResult::Success, CiResult::Success, CiResult::Success]),
+            ],
+            totals: GithubTotals {
+                repos: Some(2),
+                open_prs: Some(5),
+                review_requested: Some(1),
+                ci_pass_percent: Some(86.0),
+            },
+            checked_at: None,
+        },
+        GithubSampleKind::Warn => GithubState {
+            state: GithubConn::Warn,
+            reason: Some(GITHUB_SAMPLE_WARN_REASON.into()),
+            account: Some("데모 계정".into()),
+            repos: vec![
+                repo("demo/ember", "develop", 4, 1, vec![CiResult::Success, CiResult::Success, CiResult::Failure, CiResult::Success]),
+                repo("demo/notes", "main", 1, 0, vec![CiResult::Success, CiResult::Success, CiResult::Success]),
+            ],
+            totals: GithubTotals {
+                repos: Some(2),
+                open_prs: Some(5),
+                review_requested: Some(1),
+                ci_pass_percent: Some(86.0),
+            },
+            checked_at: None,
+        },
+        GithubSampleKind::Off => GithubState {
+            state: GithubConn::Off,
+            reason: Some(GITHUB_SAMPLE_OFF_REASON.into()),
+            account: None,
+            repos: Vec::new(),
+            totals: GithubTotals::default(),
+            checked_at: None,
+        },
+    }
+}
+
+/// Pure helper to resolve the sample state for captures and demo.
+pub fn github_sample_hook_with(value: Option<&str>, active: bool) -> Option<GithubState> {
+    parse_github_sample_hook(value, active).map(sample_github_state)
+}
+
+/// Read the `EMBER_CR_GITHUB` environment variable for capture hooks.
+pub fn github_sample_from_env() -> Option<GithubState> {
+    github_sample_hook_with(
+        std::env::var("EMBER_CR_GITHUB").ok().as_deref(),
+        cfg!(debug_assertions),
+    )
+}
+
+/// Whether to fetch the GitHub card (FR-L35, FR-G13, #621).
+///
+/// When `force` is true (Home screen mounts or is shown again), the fetch runs at once,
+/// ignoring `last_fetch_age` (`GITHUB_LAST`).
+/// When `force` is false (the periodic timer), the fetch only runs while Home is shown
+/// and at least `min_gap` (90 s) has elapsed since the previous fetch.
+/// In demo mode, neither fetches.
+pub fn should_fetch_github(
+    force: bool,
+    route_is_home: bool,
+    last_fetch_age: Option<Duration>,
+    min_gap: Duration,
+    demo: bool,
+) -> bool {
+    if demo {
+        return false;
+    }
+    if force {
+        return true;
+    }
+    route_is_home && last_fetch_age.is_none_or(|a| a >= min_gap)
+}
+
+/// Periodic timer check for GitHub card refresh (FR-G13).
+pub fn should_poll_github(route_is_home: bool, last_fetch_age: Option<Duration>, min_gap: Duration, demo: bool) -> bool {
+    should_fetch_github(false, route_is_home, last_fetch_age, min_gap, demo)
+}
+
 /// Server text shown on the card: control and bidi characters removed, whitespace collapsed,
 /// capped at `max` characters with an ellipsis (FR-L35).
 pub fn clean_text(s: &str, max: usize) -> String {
@@ -175,13 +298,13 @@ pub fn github_state_from(s: &ember_client::api::GithubSummary) -> GithubState {
             Conn::Off => GithubConn::Off,
         },
         reason: s.reason.as_deref().map(|r| clean_text(r, 120)),
-        account: s.account.clone(),
+        account: s.account.as_deref().map(|a| clean_text(a, 80)),
         repos: s
             .repos
             .iter()
             .map(|r| GithubRepo {
                 name_with_owner: clean_text(r.name_with_owner.as_deref().unwrap_or_default(), 80),
-                default_branch: r.default_branch.clone().unwrap_or_default(),
+                default_branch: clean_text(r.default_branch.as_deref().unwrap_or_default(), 80),
                 open_prs: n(r.open_prs),
                 review_requested: n(r.review_requested),
                 ci: r.ci.as_ref().map(|v| {
@@ -194,7 +317,7 @@ pub fn github_state_from(s: &ember_client::api::GithubSummary) -> GithubState {
                         })
                         .collect()
                 }),
-                error: r.error.clone(),
+                error: r.error.as_deref().map(|e| clean_text(e, 120)),
                 capped: r.capped,
             })
             .collect(),
@@ -319,11 +442,11 @@ impl GithubCard {
                 .iter()
                 .take(GITHUB_MAX_REPOS)
                 .map(|r| GithubRepoRow {
-                    name: r.name_with_owner.clone(),
+                    name: clean_text(&r.name_with_owner, 80),
                     open_prs: prs(r.open_prs, r.capped),
                     review_requested: count(r.review_requested),
                     ci: r.ci.iter().flatten().take(GITHUB_MAX_CI).copied().collect(),
-                    error: r.error.clone(),
+                    error: r.error.as_deref().map(|e| clean_text(e, 120)),
                 })
                 .collect()
         } else {
@@ -335,7 +458,7 @@ impl GithubCard {
             tone,
             header_line: header_line.to_string(),
             note,
-            account: g.account.clone(),
+            account: g.account.as_deref().map(|a| clean_text(a, 80)),
             action,
             kpis: [
                 (labels[0], count(t.repos)),
@@ -350,9 +473,36 @@ impl GithubCard {
     }
 }
 
-/// What tapping the composer's attach button says (FR-L11, #500): picking files needs the
-/// toolkit's file picker (compose-rust#483, planned for v0.0.8).
-pub const ATTACH_UNSUPPORTED: &str = "파일 고르기는 아직 지원하지 않습니다";
+/// A local file reference staged for the next Home message. No file data is uploaded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComposerAttachment {
+    pub path: String,
+    pub name: String,
+}
+
+pub const ATTACH_EMPTY: &str = "파일 경로를 입력해 주세요";
+pub const ATTACH_INVALID: &str = "파일 경로를 읽을 수 없습니다";
+pub const ATTACH_HINT: &str = "파일 경로가 메시지에 포함됩니다. 파일 내용은 전송되지 않습니다";
+
+pub fn stage_attachment(items: &mut Vec<ComposerAttachment>, input: &str) -> Result<(), &'static str> {
+    let path = input.trim();
+    if path.is_empty() { return Err(ATTACH_EMPTY); }
+    let p = std::path::Path::new(path);
+    if !p.is_absolute() || !p.is_file() || std::fs::File::open(p).is_err() {
+        return Err(ATTACH_INVALID);
+    }
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).ok_or(ATTACH_INVALID)?;
+    if !items.iter().any(|item| item.path == path) {
+        items.push(ComposerAttachment { path: path.to_string(), name });
+    }
+    Ok(())
+}
+
+pub fn attachment_message(message: &str, items: &[ComposerAttachment]) -> String {
+    if items.is_empty() { return message.to_string(); }
+    let paths = items.iter().map(|item| format!("- {}", item.path)).collect::<Vec<_>>().join("\n");
+    format!("{}\n\n첨부 파일 경로:\n{}", message.trim(), paths).trim().to_string()
+}
 
 pub const GREETING: &str = "무엇을 도와줄까요?";
 pub const COMPOSER_PLACEHOLDER: &str =
@@ -799,6 +949,61 @@ pub fn harness_block(
         return Some("계정의 사용 한도에 도달했습니다");
     }
     None
+}
+
+/// The harness whose models the picker lists while nothing is typed (FR-L15, mockup v8
+/// `.mp-rail`): the one the rail picked, else the chosen model's harness. The rail has one
+/// entry per harness and no "all" entry; a search looks across every harness instead.
+pub fn model_view(rail: Option<Harness>, current: Harness) -> Harness {
+    rail.unwrap_or(current)
+}
+
+/// The row Enter in the search field takes (FR-L15, mockup `st.act`): with a query the first
+/// match, else the chosen model's row, else the first row. `None` when nothing is listed.
+pub fn model_active_row(rows: &[ModelOption], current: ModelOption, query: &str) -> Option<usize> {
+    if rows.is_empty() {
+        return None;
+    }
+    if !query.trim().is_empty() {
+        return Some(0);
+    }
+    Some(rows.iter().position(|o| *o == current).unwrap_or(0))
+}
+
+/// What Enter in the model search field does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelEnter {
+    /// Choose this row and close the picker.
+    Choose(ModelOption),
+    /// The active row cannot be chosen; say why and keep the picker open.
+    Blocked(&'static str),
+    /// Nothing is listed.
+    Nothing,
+}
+
+/// Enter in the search field of the model picker (FR-L15 "Keyboard: Enter"): takes the active
+/// row ([`model_active_row`]) unless its harness is blocked (`block`, as [`harness_block`]).
+pub fn model_enter(
+    rows: &[ModelOption],
+    current: ModelOption,
+    query: &str,
+    block: impl Fn(Harness) -> Option<&'static str>,
+) -> ModelEnter {
+    let Some(i) = model_active_row(rows, current, query) else { return ModelEnter::Nothing };
+    let o = rows[i];
+    match block(o.harness) {
+        Some(reason) => ModelEnter::Blocked(reason),
+        None => ModelEnter::Choose(o),
+    }
+}
+
+/// The second line of a model row (mockup `.mp-h`): the harness, then the reason the row cannot
+/// be chosen. No profile name: profiles (FR-L17) are not built, so none is shown or invented.
+pub fn model_row_detail(o: &ModelOption, block: Option<&str>) -> String {
+    match block {
+        Some(reason) => format!("{} \u{b7} {}", o.harness.label(), reason),
+        None => o.harness.label().to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1562,6 +1767,123 @@ mod tests {
     }
 
     #[test]
+    fn fr_l35_github_fetch_force_on_mount_ignores_cooldown_while_timer_respects_gap() {
+        let gap = Duration::from_secs(90);
+        // Force on mount / shown again: always fetches at once, ignoring GITHUB_LAST age.
+        assert!(should_fetch_github(true, true, Some(Duration::from_secs(10)), gap, false));
+        assert!(should_fetch_github(true, true, Some(Duration::ZERO), gap, false));
+        assert!(should_fetch_github(true, true, None, gap, false));
+        assert!(should_fetch_github(true, false, Some(Duration::from_secs(10)), gap, false));
+        // Demo never fetches from network, even with force.
+        assert!(!should_fetch_github(true, true, Some(Duration::from_secs(10)), gap, true));
+
+        // Periodic timer (force = false): only fetches on Home, after 90 s gap, not in demo.
+        assert!(!should_fetch_github(false, true, Some(Duration::from_secs(10)), gap, false));
+        assert!(should_fetch_github(false, true, Some(Duration::from_secs(90)), gap, false));
+        assert!(should_fetch_github(false, true, Some(Duration::from_secs(100)), gap, false));
+        assert!(should_fetch_github(false, true, None, gap, false));
+        assert!(!should_fetch_github(false, false, Some(Duration::from_secs(100)), gap, false));
+        assert!(!should_fetch_github(false, true, Some(Duration::from_secs(100)), gap, true));
+    }
+
+    #[test]
+    fn fr_l35_github_account_default_branch_and_error_are_cleaned_and_capped() {
+        use ember_client::api as a;
+        let dirty_account = "  octo\u{202E}user\t \n name  ";
+        let long_account = "a".repeat(100);
+        let dirty_branch = "  feature/\u{0007}branch\n ";
+        let long_branch = "b".repeat(100);
+        let dirty_error = " 오류:\u{202A} 실패했습니다 \t";
+        let long_error = "오류: ".to_string() + &"가".repeat(200);
+
+        let mut s = summary();
+        s.account = Some(dirty_account.into());
+        s.repos[0].default_branch = Some(dirty_branch.into());
+        s.repos[0].error = Some(dirty_error.into());
+
+        let g = github_state_from(&s);
+        assert_eq!(g.account.as_deref(), Some("octouser name"));
+        assert_eq!(g.repos[0].default_branch, "feature/branch");
+        assert_eq!(g.repos[0].error.as_deref(), Some("오류: 실패했습니다"));
+
+        let card = GithubCard::from_state(Some(&g));
+        assert_eq!(card.account.as_deref(), Some("octouser name"));
+        assert_eq!(card.repos[0].error.as_deref(), Some("오류: 실패했습니다"));
+
+        // Long text is capped with an ellipsis (80 for account and branch, 120 for error).
+        s.account = Some(long_account);
+        s.repos[0].default_branch = Some(long_branch);
+        s.repos[0].error = Some(long_error);
+
+        let g2 = github_state_from(&s);
+        assert_eq!(g2.account.as_deref().unwrap().chars().count(), 80);
+        assert!(g2.account.as_deref().unwrap().ends_with('\u{2026}'));
+        assert_eq!(g2.repos[0].default_branch.chars().count(), 80);
+        assert!(g2.repos[0].default_branch.ends_with('\u{2026}'));
+        assert_eq!(g2.repos[0].error.as_deref().unwrap().chars().count(), 120);
+        assert!(g2.repos[0].error.as_deref().unwrap().ends_with('\u{2026}'));
+
+        let card2 = GithubCard::from_state(Some(&g2));
+        assert_eq!(card2.account.as_deref().unwrap().chars().count(), 80);
+        assert!(card2.account.as_deref().unwrap().ends_with('\u{2026}'));
+        assert_eq!(card2.repos[0].error.as_deref().unwrap().chars().count(), 120);
+        assert!(card2.repos[0].error.as_deref().unwrap().ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn fr_l35_github_sample_hook_selects_ok_warn_off_states() {
+        assert_eq!(parse_github_sample_hook(Some("ok"), true), Some(GithubSampleKind::Ok));
+        assert_eq!(parse_github_sample_hook(Some("on"), true), Some(GithubSampleKind::Ok));
+        assert_eq!(parse_github_sample_hook(Some("warn"), true), Some(GithubSampleKind::Warn));
+        assert_eq!(parse_github_sample_hook(Some("off"), true), Some(GithubSampleKind::Off));
+        assert_eq!(parse_github_sample_hook(Some("other"), true), None);
+        assert_eq!(parse_github_sample_hook(None, true), None);
+        assert_eq!(parse_github_sample_hook(Some("ok"), false), None);
+        assert_eq!(parse_github_sample_hook(Some("warn"), false), None);
+        assert!(github_sample_hook_with(Some("ok"), false).is_none());
+        assert!(github_sample_hook_with(Some("warn"), false).is_none());
+        assert!(github_sample_hook_with(Some("off"), false).is_none());
+
+        // Ok sample state: connected, numbers shown, no action note.
+        let ok = sample_github_state(GithubSampleKind::Ok);
+        assert_eq!(ok.state, GithubConn::On);
+        assert_eq!(ok.account.as_deref(), Some("데모 계정"));
+        assert_eq!(ok.repos.len(), 2);
+        let card_ok = GithubCard::from_state(Some(&ok));
+        assert_eq!(card_ok.pill, "연결됨");
+        assert_eq!(card_ok.tone, GithubPill::On);
+        assert_eq!(card_ok.note, None);
+        assert_eq!(card_ok.action, None);
+        assert_eq!(sample_header(&card_ok.header_line), "GitHub 연결됨 (예시)");
+
+        // Warn sample state: reauth needed, shows note and 방법 보기 action.
+        let warn = sample_github_state(GithubSampleKind::Warn);
+        assert_eq!(warn.state, GithubConn::Warn);
+        assert_eq!(warn.account.as_deref(), Some("데모 계정"));
+        assert!(warn.reason.is_some());
+        let card_warn = GithubCard::from_state(Some(&warn));
+        assert_eq!(card_warn.pill, "재인증 필요");
+        assert_eq!(card_warn.tone, GithubPill::Warn);
+        assert_eq!(card_warn.note.as_deref(), Some(GITHUB_SAMPLE_WARN_REASON));
+        assert_eq!(card_warn.action.as_ref().unwrap().label, "방법 보기");
+        assert_eq!(sample_header(&card_warn.header_line), "GitHub 재인증 필요 (예시)");
+
+        // Off sample state: not connected, no repos, kpis unread, shows note and guidance.
+        let off = sample_github_state(GithubSampleKind::Off);
+        assert_eq!(off.state, GithubConn::Off);
+        assert_eq!(off.account, None);
+        assert!(off.repos.is_empty());
+        let card_off = GithubCard::from_state(Some(&off));
+        assert_eq!(card_off.pill, "연결 안 됨");
+        assert_eq!(card_off.tone, GithubPill::Off);
+        assert_eq!(card_off.note.as_deref(), Some(GITHUB_SAMPLE_OFF_REASON));
+        assert_eq!(card_off.action.as_ref().unwrap().label, "방법 보기");
+        assert!(card_off.kpis.iter().all(|(_, v)| v == "아직 정보가 없습니다"));
+        assert!(card_off.repos.is_empty());
+        assert_eq!(sample_header(&card_off.header_line), "GitHub 연결 안 됨 (예시)");
+    }
+
+    #[test]
     fn fr_l35_github_state_decodes_the_server_body() {
         let g: GithubState = serde_json::from_str(
             r#"{"state":"warn","reason":"재로그인","account":null,
@@ -1593,10 +1915,19 @@ mod tests {
     }
 
     #[test]
-    fn fr_l11_attach_is_disabled_with_a_reason() {
-        assert_ne!(ATTACH_UNSUPPORTED, UNAVAILABLE);
-        assert!(ATTACH_UNSUPPORTED.contains("지원하지 않습니다"));
-        assert!(ATTACH_UNSUPPORTED.ends_with("습니다"));
+    fn fr_l11_attachments_validate_remove_and_form_message() {
+        let mut items = Vec::new();
+        assert_eq!(stage_attachment(&mut items, ""), Err(ATTACH_EMPTY));
+        assert_eq!(stage_attachment(&mut items, "/no/such/ember-file"), Err(ATTACH_INVALID));
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let path = path.to_str().unwrap();
+        stage_attachment(&mut items, path).unwrap();
+        stage_attachment(&mut items, path).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "Cargo.toml");
+        assert!(attachment_message("hello", &items).contains(path));
+        items.remove(0);
+        assert_eq!(attachment_message("hello", &items), "hello");
     }
 
     #[test]
@@ -2009,6 +2340,56 @@ mod tests {
         assert!(filter_models(&all, None, "zzz").is_empty());
         // A blank query is not a search.
         assert_eq!(filter_models(&all, Some(Harness::Gemini), "  ").len(), 2);
+    }
+
+    #[test]
+    fn fr_l15_rail_opens_on_the_chosen_harness_and_has_no_all_entry() {
+        assert_eq!(model_view(None, Harness::Codex), Harness::Codex);
+        assert_eq!(model_view(Some(Harness::ClaudeCode), Harness::Codex), Harness::ClaudeCode);
+        let all = model_catalog();
+        let rows = filter_models(&all, Some(model_view(None, Harness::ClaudeCode)), "");
+        assert!(rows.iter().all(|o| o.harness == Harness::ClaudeCode));
+    }
+
+    #[test]
+    fn fr_l15_enter_takes_the_chosen_row_or_the_first_match() {
+        let all = model_catalog();
+        let current = default_option(Harness::ClaudeCode);
+        let rows = filter_models(&all, Some(Harness::ClaudeCode), "");
+        let at = model_active_row(&rows, current, "").expect("a row");
+        assert_eq!(rows[at], current);
+        // Typing moves the active row to the first match.
+        let hits = filter_models(&all, Some(Harness::ClaudeCode), "gpt-5 mini");
+        assert_eq!(model_active_row(&hits, current, "gpt-5 mini"), Some(0));
+        assert_eq!(model_enter(&hits, current, "gpt-5 mini", |_| None), ModelEnter::Choose(hits[0]));
+        // A current model that is not listed falls back to the first row.
+        let codex = filter_models(&all, Some(Harness::Codex), "");
+        assert_eq!(model_active_row(&codex, current, ""), Some(0));
+        assert_eq!(model_active_row(&[], current, ""), None);
+        assert_eq!(model_enter(&[], current, "", |_| None), ModelEnter::Nothing);
+    }
+
+    #[test]
+    fn fr_l15_enter_on_a_blocked_row_says_why_and_chooses_nothing() {
+        let all = model_catalog();
+        let current = default_option(Harness::ClaudeCode);
+        let gemini = filter_models(&all, None, "gemini flash");
+        let block = |h: Harness| harness_block(h, &[], &[]);
+        assert_eq!(model_enter(&gemini, current, "gemini flash", block), ModelEnter::Blocked("준비 중입니다"));
+    }
+
+    #[test]
+    fn fr_l15_row_detail_names_the_harness_and_the_reason_and_no_profile() {
+        let o = default_option(Harness::Codex);
+        assert_eq!(model_row_detail(&o, None), "Codex");
+        assert_eq!(
+            model_row_detail(&o, Some("이 컴퓨터에 설치되어 있지 않습니다")),
+            "Codex · 이 컴퓨터에 설치되어 있지 않습니다"
+        );
+        for o in model_catalog() {
+            let d = model_row_detail(&o, None);
+            assert!(!d.contains("개인") && !d.contains("팀"), "no invented profile: {d}");
+        }
     }
 
     #[test]

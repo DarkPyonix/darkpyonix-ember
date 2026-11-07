@@ -361,7 +361,8 @@ fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
     if search_icon_visible(w) {
         let o = st.search_open.clone();
         let q = st.query.clone();
-        // TODO(compose-rust#428, #429): a name "팀원 검색 열기/닫기" and the expanded state.
+        // TODO(compose-rust#428, #429): expose the accessible name "팀원 검색 열기/닫기"
+        // and the current expanded state when the toolkit supports them.
         IconButton(IconRole::Search, false, move || {
             let (open, query) = toggle_search(o.get_untracked(), &q.get_untracked());
             o.set(open);

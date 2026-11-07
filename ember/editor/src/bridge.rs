@@ -19,6 +19,8 @@ pub struct DocumentWidgetState {
     pub uri: UriComponents,
     /// The node key for `CodeEditor`.
     pub generation: u64,
+    /// The document version as last edited or reported.
+    pub version: u32,
     /// The current text prop / buffer mirror (`\n`-normalized).
     pub text: String,
     pub language_id: String,
@@ -69,7 +71,7 @@ impl BridgeAction {
     }
 }
 
-fn apply_text_change(text: &str, range: WidgetRange, insert: &str) -> Option<String> {
+pub fn apply_text_change(text: &str, range: WidgetRange, insert: &str) -> Option<String> {
     let mut lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
     let sl = range.start.line as usize;
     let el = range.end.line as usize;
@@ -129,6 +131,7 @@ impl WidgetBridge {
                     DocumentWidgetState {
                         uri,
                         generation,
+                        version: 0,
                         text,
                         language_id,
                         tab_width,
@@ -150,6 +153,7 @@ impl WidgetBridge {
                     match command {
                         WidgetCommand::SetText { generation, text } => {
                             doc.generation = generation;
+                            doc.version = 0;
                             doc.text = text;
                             doc.decorations.clear();
                             doc.decoration_bytes.clear();
@@ -177,6 +181,7 @@ impl WidgetBridge {
             SessionUpdate::Syntax { uri, generation, version, runs, .. } => {
                 if let Some(doc) = self.docs.get_mut(&uri.key()) {
                     if doc.generation == generation {
+                        doc.version = doc.version.max(version);
                         doc.syntax = SyntaxRuns { version, runs };
                     }
                 }
@@ -230,6 +235,8 @@ impl WidgetBridge {
                 self.problems = problems;
                 BridgeAction::None
             }
+            // Search and replace results are the search panel's, not a document's (FR-E7).
+            SessionUpdate::SearchHits { .. } | SessionUpdate::SearchDone { .. } | SessionUpdate::ReplaceDone { .. } => BridgeAction::None,
         }
     }
 
@@ -264,6 +271,7 @@ impl WidgetBridge {
         text: String,
     ) -> Option<(UriComponents, u64, WidgetEvent)> {
         let doc = self.docs.get_mut(&uri.key())?;
+        doc.version = version;
         if let Some(updated) = apply_text_change(&doc.text, range, &text) {
             doc.text = updated;
         }

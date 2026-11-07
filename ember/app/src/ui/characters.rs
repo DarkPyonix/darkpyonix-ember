@@ -859,6 +859,71 @@ pub fn characters_project(asked: &str, selected: Option<&str>, names: &[String])
     names.iter().find(|n| !is_default_project(n)).or_else(|| names.first()).cloned()
 }
 
+/// How many members the team preview draws (mockup `D.sessions.slice(0, 18)`).
+pub const TEAM_PREVIEW_CAP: usize = 18;
+
+/// One drawn member of the team preview.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TeamCell {
+    /// The seed and the caption.
+    pub name: String,
+    pub agent: String,
+    pub role: Option<String>,
+    pub state: CharState,
+    pub crown: bool,
+}
+
+/// What the team preview draws: the project's real members, or the sample team when the
+/// project has none (`sample`, labelled 미리보기 on screen). `more` counts real members past
+/// the cap.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TeamPreview {
+    pub cells: Vec<TeamCell>,
+    pub more: usize,
+    pub sample: bool,
+}
+
+/// The team preview of a project from its members (FR-L22): the real members in their own
+/// order, up to [`TEAM_PREVIEW_CAP`]; without any, the 18 sample members.
+pub fn team_preview(project_id: &str, members: &[crate::ui::project::Member]) -> TeamPreview {
+    if members.is_empty() {
+        let cells = preview_team()
+            .into_iter()
+            .map(|m| TeamCell {
+                name: m.name(),
+                agent: m.agent.to_string(),
+                role: Some(m.role.to_string()),
+                state: m.state,
+                crown: m.crown(),
+            })
+            .collect();
+        return TeamPreview { cells, more: 0, sample: true };
+    }
+    let cells = members
+        .iter()
+        .take(TEAM_PREVIEW_CAP)
+        .map(|m| TeamCell {
+            name: m.name.clone(),
+            agent: m.agent.clone(),
+            role: None,
+            state: CharState::from_status(m.status),
+            crown: crown_shown(project_id, m.leader),
+        })
+        .collect();
+    TeamPreview { cells, more: members.len().saturating_sub(TEAM_PREVIEW_CAP), sample: false }
+}
+
+/// A word with its topic particle: 은 after a final consonant, 는 after a vowel or a non-Hangul
+/// letter ("크루는", "몽글은").
+pub fn with_topic(word: &str) -> String {
+    let batchim = word
+        .chars()
+        .last()
+        .filter(|c| ('\u{AC00}'..='\u{D7A3}').contains(c))
+        .is_some_and(|c| (c as u32 - 0xAC00) % 28 != 0);
+    format!("{word}{}", if batchim { "은" } else { "는" })
+}
+
 /// What the apply button does: nothing to save when the chosen style is already the project's.
 pub fn style_apply_needed(current: CharStyle, chosen: CharStyle) -> bool {
     current != chosen
@@ -1154,5 +1219,56 @@ mod tests {
         for s in CharState::ALL {
             assert!(!state_label(s).is_empty());
         }
+    }
+    fn real_member(name: &str, leader: bool, status: LauncherStatus) -> crate::ui::project::Member {
+        crate::ui::project::Member {
+            session_id: format!("s-{name}"),
+            name: name.into(),
+            task: String::new(),
+            agent: "codex".into(),
+            status,
+            leader,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn fr_l22_team_cells_use_the_real_members_of_the_project() {
+        let members = vec![real_member("ember-리더", true, LauncherStatus::Running), real_member("ember-구현", false, LauncherStatus::Failed)];
+        let t = team_preview("ember", &members);
+        assert!(!t.sample);
+        assert_eq!(t.more, 0);
+        let names: Vec<&str> = t.cells.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["ember-리더", "ember-구현"]);
+        assert!(t.cells[0].crown);
+        assert_eq!(t.cells[0].state, CharState::Run);
+        assert_eq!(t.cells[1].state, CharState::Fail);
+        assert_eq!(t.cells[1].agent, "codex");
+        // No crown in 기본 프로젝트 (FR-L24).
+        let d = team_preview(DEFAULT_PROJECT_ID, &members);
+        assert!(!d.cells[0].crown);
+    }
+
+    #[test]
+    fn fr_l22_team_cells_cap_at_eighteen_and_count_the_rest() {
+        let members: Vec<_> = (0..21).map(|i| real_member(&format!("m{i}"), false, LauncherStatus::Idle)).collect();
+        let t = team_preview("ember", &members);
+        assert_eq!(t.cells.len(), TEAM_PREVIEW_CAP);
+        assert_eq!(t.more, 3);
+        assert!(!t.sample);
+    }
+
+    #[test]
+    fn fr_l22_team_cells_fall_back_to_the_sample_team_when_the_project_has_none() {
+        let t = team_preview("ember", &[]);
+        assert!(t.sample);
+        assert_eq!(t.cells.len(), 18);
+        assert_eq!(t.cells[8].name, "기본-비서");
+    }
+
+    #[test]
+    fn fr_l22_style_names_take_the_right_topic_particle() {
+        let got: Vec<String> = CharStyle::ALL.iter().map(|s| with_topic(s.label())).collect();
+        assert_eq!(got, ["몽글은", "말랑은", "크루는", "포켓은", "크림은", "키링은"]);
     }
 }

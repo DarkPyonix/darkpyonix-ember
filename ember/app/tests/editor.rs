@@ -971,6 +971,54 @@ mod keyboard_navigation {
             assert!(!tree_handles_key(Some(&p)), "prompt {p:?} must block tree key handling");
         }
     }
+
+    #[test]
+    fn fr_l31_4_select_all_cut_selection_and_clipboard_badge() {
+        use ember_app::ui::editor::{
+            clipboard_badge_text, cut_selection, select_all_tree_rows, ClipboardKind, TreeClipboard,
+        };
+        let rows = sample_tree();
+        let (all, last) = select_all_tree_rows(&rows);
+        assert_eq!(all.len(), rows.len());
+        assert_eq!(all[0], ("/p/src".to_string(), true));
+        assert_eq!(last, Some(("/p/README.md".to_string(), false)));
+
+        let (empty_all, empty_last) = select_all_tree_rows(&[]);
+        assert!(empty_all.is_empty());
+        assert_eq!(empty_last, None);
+
+        // Cutting when row_path is part of multi_sel cuts all non-redundant selected items.
+        let clip = cut_selection(&all, "/p/README.md", false).expect("non-empty cut");
+        assert_eq!(clip.kind, ClipboardKind::Cut);
+        // `/p/src/deep` and `/p/src/lib.rs` are pruned because `/p/src` is selected.
+        assert_eq!(
+            clip.paths,
+            vec![
+                ("/p/src".to_string(), true),
+                ("/p/Cargo.toml".to_string(), false),
+                ("/p/README.md".to_string(), false),
+            ]
+        );
+        assert_eq!(clipboard_badge_text(Some(&clip)).as_deref(), Some("잘라냄 3개"));
+
+        // Cutting a row outside multi_sel cuts only that row.
+        let single = cut_selection(&[("/p/Cargo.toml".to_string(), false)], "/p/README.md", false)
+            .expect("single cut");
+        assert_eq!(single.paths, vec![("/p/README.md".to_string(), false)]);
+        assert_eq!(clipboard_badge_text(Some(&single)).as_deref(), Some("잘라냄 1개"));
+
+        // Copy badge formatting and empty clipboard handling.
+        let copy_clip = TreeClipboard {
+            kind: ClipboardKind::Copy,
+            paths: vec![("/p/Cargo.toml".to_string(), false), ("/p/README.md".to_string(), false)],
+        };
+        assert_eq!(clipboard_badge_text(Some(&copy_clip)).as_deref(), Some("복사됨 2개"));
+        assert_eq!(
+            clipboard_badge_text(Some(&TreeClipboard { kind: ClipboardKind::Cut, paths: Vec::new() })),
+            None
+        );
+        assert_eq!(clipboard_badge_text(None), None);
+    }
 }
 
 // FR-L31.2: the editor's source control rules against the demo git source, which takes the same op

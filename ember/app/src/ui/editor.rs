@@ -361,6 +361,47 @@ pub fn prune_redundant_selection(items: &[(String, bool)]) -> Vec<(String, bool)
         .collect()
 }
 
+/// Selects every visible row in the explorer tree (FR-L31.4), returning `(multi_selection, primary_selection)`.
+pub fn select_all_tree_rows(rows: &[TreeRow]) -> (Vec<(String, bool)>, Option<(String, bool)>) {
+    let all: Vec<(String, bool)> = rows.iter().map(|r| (r.path.clone(), r.is_dir)).collect();
+    let last = all.last().cloned();
+    (all, last)
+}
+
+/// Builds a cut [`TreeClipboard`] from either the multi-selection (when `row_path` belongs to it)
+/// or `(row_path, is_dir)` alone, pruning redundant descendant paths (FR-L31.4).
+pub fn cut_selection(
+    multi_sel: &[(String, bool)],
+    row_path: &str,
+    is_dir: bool,
+) -> Option<TreeClipboard> {
+    let items = if multi_sel.iter().any(|(p, _)| p == row_path) && !multi_sel.is_empty() {
+        multi_sel.to_vec()
+    } else {
+        vec![(row_path.to_string(), is_dir)]
+    };
+    let pruned = prune_redundant_selection(&items);
+    if pruned.is_empty() {
+        None
+    } else {
+        Some(TreeClipboard {
+            kind: ClipboardKind::Cut,
+            paths: pruned,
+        })
+    }
+}
+
+/// Formats the status badge (`"복사됨 N개"` / `"잘라냄 N개"`) shown on the explorer root row when the
+/// tree clipboard holds items (FR-L31.4).
+pub fn clipboard_badge_text(clipboard: Option<&TreeClipboard>) -> Option<String> {
+    let clip = clipboard.filter(|c| !c.paths.is_empty())?;
+    let verb = match clip.kind {
+        ClipboardKind::Copy => "복사됨",
+        ClipboardKind::Cut => "잘라냄",
+    };
+    Some(format!("{verb} {}개", clip.paths.len()))
+}
+
 /// The directory a new file or folder goes in: the selected directory, the directory of the
 /// selected file, or the project folder when nothing is selected.
 pub fn new_item_parent(selected: Option<(&str, bool)>, root: &str) -> String {

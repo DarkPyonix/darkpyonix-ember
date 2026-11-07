@@ -1126,14 +1126,7 @@ pub mod page {
         let paste_host = s.host.clone();
         let paste_root = root.clone();
         let clip_state = tree_clipboard.read().clone();
-        let has_clip = clip_state.is_some();
-        let clip_badge = clip_state.as_ref().map(|c| {
-            let verb = match c.kind {
-                crate::ui::editor::ClipboardKind::Copy => "복사됨",
-                crate::ui::editor::ClipboardKind::Cut => "잘라냄",
-            };
-            format!("{verb} {}개", c.paths.len())
-        });
+        let clip_badge = crate::ui::editor::clipboard_badge_text(clip_state.as_ref());
         let key_host = s.host.clone();
         let root_for_key = root.clone();
         let root_for_drop = root.clone();
@@ -1146,30 +1139,10 @@ pub mod page {
                     button { class: "ed-ib", title: "새 파일", "aria-label": "새 파일", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewFile { parent: new_file_parent.clone() })); }, {icon("plus")} }
                     button { class: "ed-ib", title: "새 폴더", "aria-label": "새 폴더", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewDir { parent: new_dir_parent.clone() })); }, {icon("folder")} }
                     button { class: "ed-ib", title: "모두 선택", "aria-label": "모두 선택", onclick: move |_| {
-                        let all: Vec<(String, bool)> = rows_for_sel_all.iter().map(|r| (r.path.clone(), r.is_dir)).collect();
-                        let last = all.last().cloned();
+                        let (all, last) = crate::ui::editor::select_all_tree_rows(&rows_for_sel_all);
                         tree_multi_sel.set(all);
                         tree_sel.set(last);
                     }, {icon_px("check", 15)} }
-                    if has_clip {
-                        button { class: "ed-pj", title: "붙여넣기", "aria-label": "붙여넣기", style: "height:24px; padding:0 6px; font-size:var(--fs-2xs); border:1px solid var(--line);", onclick: move |_| {
-                            let clip = tree_clipboard.read().clone();
-                            if let Some(clip) = clip {
-                                let dest_dir = crate::ui::editor::new_item_parent(paste_selected.as_ref().map(|(p, d)| (p.as_str(), *d)), &paste_root);
-                                let sources: Vec<String> = clip.paths.into_iter().map(|(p, _)| p).collect();
-                                expanded.write().insert(dest_dir.clone());
-                                match clip.kind {
-                                    crate::ui::editor::ClipboardKind::Copy => {
-                                        paste_host.send(HostCommand::CopyPaths { sources, dest_dir });
-                                    }
-                                    crate::ui::editor::ClipboardKind::Cut => {
-                                        paste_host.send(HostCommand::MovePaths { sources, dest_dir });
-                                        tree_clipboard.set(None);
-                                    }
-                                }
-                            }
-                        }, "붙여넣기" }
-                    }
                     button { class: "ed-ib", title: "모두 접기", "aria-label": "모두 접기", onclick: move |_| expanded.write().clear(), {icon_px("chev", 16)} }
                     button { class: "ed-ib", title: "파일 검색", "aria-label": "파일 검색", onclick: move |_| crate::ui::editor_search::view::open(&search_s, false), {icon("search")} }
                     button { class: "ed-ib", title: "숨기기", "aria-label": "숨기기", onclick: move |_| stripes.write().hide(Side::Left), {icon("close")} }
@@ -1332,6 +1305,24 @@ pub mod page {
                     if let Some(badge) = clip_badge {
                         div { class: "spacer" }
                         span { class: "ed-sc", "{badge}" }
+                        button { class: "ed-pj", title: "붙여넣기", "aria-label": "붙여넣기", style: "height:20px; padding:0 6px; font-size:var(--fs-2xs); border:1px solid var(--line);", onclick: move |event| {
+                            event.stop_propagation();
+                            let clip = tree_clipboard.read().clone();
+                            if let Some(clip) = clip {
+                                let dest_dir = crate::ui::editor::new_item_parent(paste_selected.as_ref().map(|(p, d)| (p.as_str(), *d)), &paste_root);
+                                let sources: Vec<String> = clip.paths.into_iter().map(|(p, _)| p).collect();
+                                expanded.write().insert(dest_dir.clone());
+                                match clip.kind {
+                                    crate::ui::editor::ClipboardKind::Copy => {
+                                        paste_host.send(HostCommand::CopyPaths { sources, dest_dir });
+                                    }
+                                    crate::ui::editor::ClipboardKind::Cut => {
+                                        paste_host.send(HostCommand::MovePaths { sources, dest_dir });
+                                        tree_clipboard.set(None);
+                                    }
+                                }
+                            }
+                        }, "붙여넣기" }
                     }
                     }
                     {prompt_row}
@@ -1458,19 +1449,9 @@ pub mod page {
                                         onmousedown: move |event| { event.stop_propagation(); },
                                         onclick: move |event| {
                                             event.stop_propagation();
-                                            let multi = tree_multi_sel.read();
-                                            let items = if multi.iter().any(|(p, _)| p == &cut_path) && !multi.is_empty() {
-                                                multi.clone()
-                                            } else {
-                                                vec![(cut_path.clone(), is_dir)]
-                                            };
-                                            let pruned = crate::ui::editor::prune_redundant_selection(&items);
-                                            if !pruned.is_empty() {
-                                                let n = pruned.len();
-                                                tree_clipboard.set(Some(crate::ui::editor::TreeClipboard {
-                                                    kind: crate::ui::editor::ClipboardKind::Cut,
-                                                    paths: pruned,
-                                                }));
+                                            if let Some(clip) = crate::ui::editor::cut_selection(&tree_multi_sel.read(), &cut_path, is_dir) {
+                                                let n = clip.paths.len();
+                                                tree_clipboard.set(Some(clip));
                                                 notice(format!("{n}개 항목을 잘라냈습니다"));
                                             }
                                         }, {icon_px("minus", 13)} }

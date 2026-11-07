@@ -665,3 +665,9 @@ Each needs an issue in the owning repository before the screen that depends on i
 | Press scale and tint | Partial | Scale transform exists; no spring, no press-scale option; tint is the theme's state layer |
 | Width breakpoints | Partial | Window size classes are 600/840dp; the design uses 1280/900/560 |
 | Back stack, list-detail | Missing | System back and list/detail swap at 390 |
+
+## Real-window checks
+
+The owner has not yet verified these interactions in a real window.
+
+- [ ] At 390 dp, open 더보기, select 검색, and confirm global search opens. (#676)

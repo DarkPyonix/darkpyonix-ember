@@ -40,6 +40,7 @@ fn router(dir: &std::path::Path) -> Router {
     let computers = Computers::new(Registry::new(store.clone()), computers::default_connector());
     let accounts = Accounts::open(store.clone(), dir).unwrap();
     let enrol = computers::enrol::Enrol::new(store.clone());
+    let channels = ember_server::channels::api::router(store.clone(), sessions.clone());
     let mcp = McpRegistry::open(store, dir).unwrap();
     let scheduler = Scheduler::new(sessions.clone(), Arc::new(SystemClock));
     let a2a = A2a::new(
@@ -64,6 +65,7 @@ fn router(dir: &std::path::Path) -> Router {
         .merge(ember_server::a2a::api::router(a2a))
         .merge(ember_server::accounts::api::router(accounts))
         .merge(ember_server::browser::api::router(browsers))
+        .merge(channels)
 }
 
 fn fx() -> Fx {
@@ -99,6 +101,7 @@ const FAMILIES: &[(&str, &str)] = &[
     ("GET", "/api/sessions"),
     ("POST", "/api/sessions"),
     ("POST", "/api/sessions/s1/questions/q1/answer"),
+    ("POST", "/api/channels/c1/questions/q1/answer"),
     ("GET", "/api/projects"),
     ("GET", "/api/agents"),
     ("GET", "/api/computers"),
@@ -180,6 +183,30 @@ async fn fr_a5_the_question_route_is_not_reachable_with_a_runtime_token() {
     let h = format!("Bearer {}", f.token);
     let (st, _) = call(&f.app, Method::POST, path, &[("authorization", &h)]).await;
     assert_ne!(st, StatusCode::UNAUTHORIZED);
+}
+
+/// FR-T11, FR-A5: the channel's question route is an owner route too. A runtime token (the one an
+/// A2A agent holds, which may reach `POST /api/channels/{id}/post`) is refused before the handler.
+#[tokio::test]
+async fn fr_t11_the_channel_question_route_is_not_reachable_with_a_runtime_token() {
+    let f = fx();
+    let path = "/api/channels/c1/questions/q1/answer";
+    for h in ["Bearer runtime-token", "Bearer "] {
+        let (st, body) = call(&f.app, Method::POST, path, &[("authorization", h)]).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{h:?}");
+        assert!(body["error"].is_string(), "{body}");
+        assert!(body.get("code").is_none(), "refused by the server token layer, not a channel route: {body}");
+    }
+    let (st, _) = call(&f.app, Method::POST, path, &[]).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    // The agent post route is the one exemption and stays so: the layer lets it through.
+    let (st, _) = call(&f.app, Method::POST, "/api/channels/c1/post", &[("authorization", "Bearer runtime-token")]).await;
+    assert_ne!(st, StatusCode::UNAUTHORIZED);
+    // The owner's token gets past the layer (the handler then answers; here the body is empty).
+    let h = format!("Bearer {}", f.token);
+    let (st, _) = call(&f.app, Method::POST, path, &[("authorization", &h)]).await;
+    assert_ne!(st, StatusCode::UNAUTHORIZED);
+    assert_ne!(st, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

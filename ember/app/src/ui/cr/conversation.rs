@@ -26,8 +26,11 @@ use compose_rust::{
     Alignment, ColorRole, IconRole, Paint, ShapeRole, SpaceRole, TextAlign, TextOverflow, TypeRole,
 };
 
-use ember_client::transcript::{ApprovalState, TranscriptItem};
-use ember_client::wire::{ApprovalDecision, MentionCandidate, SessionPatch, TurnOutcome};
+use ember_client::api::{QuestionCallError, QuestionReply};
+use ember_client::transcript::{ApprovalState, QuestionState, TranscriptItem};
+use compose_rust::runtime::delay;
+use std::time::Duration;
+use ember_client::wire::{ApprovalDecision, MentionCandidate, Question, SessionPatch, TurnOutcome};
 use ember_client::LauncherStatus;
 
 pub fn item_key(item: &TranscriptItem) -> String {
@@ -39,6 +42,7 @@ use crate::model::{self, Tone};
 use crate::server::{CurrentComputer, IdeLaunch};
 use crate::services::{run_shared, services};
 use crate::ui::coexist::{SharedUi, shared_ui};
+use crate::ui::question::{self as qv, QuestionDraft};
 use crate::ui::Route;
 
 use super::compat::{Badge, Banner, CodeText, MessageText, Spinner, StatusIndicator};
@@ -77,6 +81,9 @@ pub fn estimate_item_height(item: &TranscriptItem, open: bool) -> f32 {
             ApprovalState::Pending => 188.0,
             _ => 120.0,
         },
+        TranscriptItem::Question { questions, state, .. } => {
+            qv::estimate_height(questions, matches!(state, QuestionState::Pending))
+        }
         _ => 34.0,
     }
 }
@@ -409,7 +416,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
             Some(t) => (
                 t.items.clone(),
                 t.items.iter().map(item_key).collect::<Vec<_>>(),
-                t.pending_approvals().count(),
+                qv::needs_you_count(t),
                 t.items.iter().any(|i| {
                     matches!(
                         i,
@@ -420,8 +427,27 @@ pub fn ConversationView(id: &str, embedded: bool) {
                     )
                 }),
             ),
-            None => (Vec::new(), Vec::new(), 0, false),
+            None => (Vec::new(), Vec::new(), (0, 0), false),
         })
+    };
+    // Review captures: `EMBER_CR_QUESTION=single|multi|secret|answered` adds a sample question.
+    let (items, keys) = match qv::debug_sample(
+        std::env::var("EMBER_CR_QUESTION").ok().as_deref(),
+        cfg!(debug_assertions),
+        s.client.read(|st| st.transcript(&sid).map_or(0, |t| t.last_seq)) + 1_000_000,
+    ) {
+        Some(extra) => {
+            let (mut i, mut k) = (items, keys);
+            if qv::debug_first(std::env::var("EMBER_CR_QUESTION_FIRST").ok().as_deref(), cfg!(debug_assertions)) {
+                k.insert(0, item_key(&extra));
+                i.insert(0, extra);
+            } else {
+                k.push(item_key(&extra));
+                i.push(extra);
+            }
+            (i, k)
+        }
+        None => (items, keys),
     };
     let count = items.len();
 
@@ -626,8 +652,8 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                     move || cm.set(true),
                                 );
                                 cu::Spacer().modifier(Modifier::new().weight(1.0));
-                                if pending > 0 {
-                                    Badge(&format!("승인 대기 {pending}"), Tone::Warning);
+                                if let Some(label) = qv::needs_you_label(pending) {
+                                    Badge(&label, Tone::Warning);
                                 }
                                 let im = ide_menu.clone();
                                 let ui_ide_btn = ui.clone();
@@ -1175,6 +1201,287 @@ pub fn ConversationView(id: &str, embedded: bool) {
         });
 }
 
+/// A radio or check row of one option (single or multi select), with its description.
+fn OptionRow(label: &str, description: Option<&str>, chosen: bool, multi: bool, enabled: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let mark = match (multi, chosen) {
+        (false, true) => "\u{25CF}",
+        (false, false) => "\u{25CB}",
+        (true, true) => "\u{25A0}",
+        (true, false) => "\u{25A1}",
+    };
+    let label = label.to_string();
+    let description = description.map(str::to_string);
+    let mut on_click = on_click;
+    Clickable(
+        Modifier::new()
+            .fill_max_width()
+            .padding(6.0)
+            .background(paint(if chosen { p.sel } else { p.surface }))
+            .border(1.0, paint(p.line))
+            .corner_radius(CORNER_SM),
+        Alignment::CenterStart,
+        move || {
+            if enabled {
+                on_click();
+            }
+        },
+        move || {
+            cu::Row()
+                .alignment(Alignment::CenterStart)
+                .spacing(SP[1])
+                .modifier(Modifier::new().fill_max_width())
+                .content(move || {
+                    Label(mark, Fs::Md, Weight::Regular, Some(paint(if enabled { p.text } else { p.muted })), Some(1));
+                    cu::Column().spacing(2.0).modifier(Modifier::new().weight(1.0)).content(move || {
+                        Label(&label, Fs::Sm, Weight::Medium, Some(paint(if enabled { p.text } else { p.muted })), Some(3));
+                        if let Some(d) = &description {
+                            Label(d, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(3));
+                        }
+                    });
+                });
+        },
+    );
+}
+
+/// A pill button whose text is on the same step as the option rows (Fs::Sm).
+fn QuestionButton(text: &str, primary: bool, enabled: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let (fill, border, fg) = match (primary, enabled) {
+        (true, true) => (p.ink, p.ink, p.ink_text),
+        (_, false) => (p.surface, p.line, p.muted),
+        (false, true) => (p.surface, p.line, p.text),
+    };
+    let text = text.to_string();
+    let mut on_click = on_click;
+    Clickable(
+        Modifier::new().height(super::theme::H_CTL).background(paint(fill)).border(1.0, paint(border)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        move || {
+            if enabled {
+                on_click();
+            }
+        },
+        move || {
+            cu::Row().alignment(Alignment::Center).content(move || {
+                cu::Spacer().modifier(Modifier::new().width(14.0));
+                Label(&text, Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
+                cu::Spacer().modifier(Modifier::new().width(14.0));
+            });
+        },
+    );
+}
+
+/// The agent's question (FR-T11, FR-A5): the questions with their options, 보내기 and 건너뛰기.
+/// A secret question is never typed here (compose-rust has no masked field): the card says it
+/// is answered on the computer's own terminal and offers only 건너뛰기. The draft is a local
+/// signal, never in the transcript, a log or `Debug`; the server's error text is never shown.
+pub fn QuestionCard(
+    session: &str,
+    question_id: String,
+    questions: Vec<Question>,
+    state: QuestionState,
+    answering: &MutableState<HashSet<String>>,
+) {
+    let p = ember_theme().palette;
+    let pending = state == QuestionState::Pending;
+    let key = format!("{session}/{question_id}");
+    let draft = remember_with_key(key.clone(), || mutable_state_of(QuestionDraft::default()));
+    let sent = remember_with_key(key.clone(), || mutable_state_of(false));
+    let failed = remember_with_key(key.clone(), || mutable_state_of(None::<QuestionCallError>));
+    let skip_step = remember_with_key(key.clone(), || mutable_state_of(qv::SkipStep::Idle));
+    let confirming = skip_step.get() == qv::SkipStep::Confirm;
+    {
+        // The first tap on 건너뛰기 is forgotten after a few seconds.
+        let step = skip_step.clone();
+        launched_effect(confirming, move || async move {
+            if confirming {
+                delay(Duration::from_secs(qv::SKIP_CONFIRM_SECS)).await;
+                step.set(qv::SkipStep::Idle.reset());
+            }
+        });
+    }
+    let flight_key = format!("q:{question_id}");
+    let in_flight = answering.get().contains(&flight_key);
+    let dead = failed.get().is_some_and(QuestionCallError::is_terminal);
+    let locked = in_flight || sent.get() || dead;
+    let secret = qv::has_secret(&questions);
+    let can_send = pending && !locked && qv::can_submit(&questions, &draft.get());
+    let sample = question_id.starts_with("demo-question");
+
+    let send = {
+        let sid = session.to_string();
+        let qid = question_id.clone();
+        let questions = questions.clone();
+        let answering = answering.clone();
+        let (draft, sent, failed) = (draft.clone(), sent.clone(), failed.clone());
+        move |skip: bool| {
+            if answering.get_untracked().contains(&flight_key) || sent.get_untracked() {
+                return;
+            }
+            if qid == qv::DEBUG_SAMPLE_ID {
+                // The capture sample calls nothing.
+                sent.set(true);
+                return;
+            }
+            let reply = if skip {
+                QuestionReply::Skip
+            } else {
+                match qv::reply(&questions, &draft.get_untracked()) {
+                    Some(r) => r,
+                    None => return,
+                }
+            };
+            answering.update(|set| {
+                set.insert(flight_key.clone());
+            });
+            failed.set(None);
+            let (s_id, q_id) = (sid.clone(), qid.clone());
+            let (done_key, answering_done) = (flight_key.clone(), answering.clone());
+            let (draft, sent, failed) = (draft.clone(), sent.clone(), failed.clone());
+            run_shared(
+                async move { services().answer_question(&s_id, &q_id, &reply).await },
+                move |r: Result<(), QuestionCallError>| {
+                    answering_done.update(|set| {
+                        set.remove(&done_key);
+                    });
+                    match r {
+                        Ok(()) => {
+                            draft.set(QuestionDraft::default());
+                            sent.set(true);
+                        }
+                        Err(e) => failed.set(Some(e)),
+                    }
+                },
+            );
+        }
+    };
+    let (send_ok, send_skip) = (send.clone(), send);
+    let tap_skip = {
+        let step = skip_step.clone();
+        move || {
+            let (next, go) = step.get_untracked().tap();
+            step.set(next);
+            if go {
+                send_skip(true);
+            }
+        }
+    };
+
+    let border = if pending { Some(p.orange.strong) } else { None };
+    EmberCard(false, true, None, Some(SP[2]), border, move || {
+        cu::Column()
+            .spacing(SP[1])
+            .modifier(Modifier::new().fill_max_width())
+            .content(move || {
+                cu::Row()
+                    .alignment(Alignment::CenterStart)
+                    .spacing(SP[1])
+                    .modifier(Modifier::new().fill_max_width())
+                    .content(move || {
+                        NavIcon(ICON_SHIELD_SVG, p.orange.strong.to_argb(), 16.0);
+                        Label(qv::CARD_TITLE, Fs::Md, Weight::Semibold, None, Some(1));
+                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                        if pending {
+                            Pill(qv::NEEDS_ANSWER, PillTone::Orange, true);
+                        }
+                    });
+                if sample {
+                    Label(qv::SAMPLE_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                }
+                match state {
+                    QuestionState::Pending => {
+                        for q in questions.iter().cloned() {
+                            let d = draft.clone();
+                            let ss = skip_step.clone();
+                            cu::Column()
+                                .spacing(6.0)
+                                .modifier(Modifier::new().fill_max_width())
+                                .content(move || {
+                                    if let Some(h) = q.header.as_deref().map(qv::shown_header).filter(|h| !h.is_empty()) {
+                                        Label(&h, Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1));
+                                    }
+                                    Label(&qv::shown(&q.text), Fs::Sm, Weight::Medium, None, Some(6));
+                                    if q.secret {
+                                        Label(qv::SECRET_ON_TERMINAL, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(3));
+                                        Label(qv::SECRET_ONLY_SKIP, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                                        return;
+                                    }
+                                    for o in q.options.iter() {
+                                        let (d2, q2, label) = (d.clone(), q.clone(), o.label.clone());
+                                        let step2 = ss.clone();
+                                        let desc = o.description.as_deref().map(qv::shown).filter(|s| !s.is_empty());
+                                        OptionRow(
+                                            &qv::shown(&o.label),
+                                            desc.as_deref(),
+                                            d.get().picked(&q.id, &o.label),
+                                            q.multi_select,
+                                            !locked,
+                                            move || {
+                                                step2.set(qv::SkipStep::Idle.reset());
+                                                d2.update(|v| *v = qv::toggle(std::mem::take(v), &q2, &label))
+                                            },
+                                        );
+                                    }
+                                    if q.allow_other {
+                                        let (d2, q2) = (d.clone(), q.clone());
+                                        let step2 = ss.clone();
+                                        EmberField(FieldOptions {
+                                            fill_max_width: true,
+                                            placeholder: qv::OTHER_PLACEHOLDER.to_string(),
+                                            enabled: Some(!locked),
+                                            on_value_change: Some(Box::new(move |text: String| {
+                                                step2.set(qv::SkipStep::Idle.reset());
+                                                d2.update(|v| *v = qv::set_other(std::mem::take(v), &q2, &text))
+                                            })),
+                                            ..Default::default()
+                                        });
+                                    }
+                                });
+                        }
+                        cu::Row()
+                            .alignment(Alignment::CenterStart)
+                            .spacing(6.0)
+                            .modifier(Modifier::new().fill_max_width())
+                            .content(move || {
+                                // Same text step as the options (Fs::Sm), not the toolkit button's.
+                                if !secret {
+                                    QuestionButton(qv::SEND_LABEL, true, can_send, move || send_ok(false));
+                                }
+                                QuestionButton(skip_step.get().label(), false, pending && !locked, tap_skip);
+                                if in_flight {
+                                    Spinner(14.0);
+                                }
+                            });
+                        if confirming {
+                            Label(qv::SKIP_CONFIRM_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(3));
+                        }
+                        if sent.get() {
+                            Label(qv::SENT_WAITING, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                        }
+                        if let Some(e) = failed.get() {
+                            Label(e.text_ko(), Fs::Xs, Weight::Medium, Some(paint(p.red.strong)), Some(3));
+                        }
+                    }
+                    QuestionState::Answered(answers) => {
+                        for line in qv::answered_lines(&questions, &answers) {
+                            Label(&line, Fs::Xs, Weight::Medium, Some(paint(p.green.strong)), Some(4));
+                        }
+                    }
+                    QuestionState::Skipped => {
+                        Label(qv::SKIPPED_LINE, Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
+                    }
+                    QuestionState::Abandoned => {
+                        Label(qv::ABANDONED_LINE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    }
+                    QuestionState::Withdrawn => {
+                        Label(qv::WITHDRAWN_LINE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                    }
+                }
+            });
+    });
+}
+
 /// One transcript entry (FR-L5..FR-L7, FR-S5).
 pub fn TranscriptRow(
     session: &str,
@@ -1508,6 +1815,15 @@ pub fn TranscriptRow(
                                 };
                                 Label(txt, Fs::Xs, Weight::Medium, Some(paint(col)), Some(1));
                             }
+                            ApprovalState::Withdrawn => {
+                                Label(
+                                    "에이전트가 이 요청을 거두었습니다",
+                                    Fs::Xs,
+                                    Weight::Regular,
+                                    Some(paint(p.muted)),
+                                    Some(2),
+                                );
+                            }
                             ApprovalState::Abandoned => {
                                 Label(
                                     "턴이 끝나기 전에 응답하지 않았습니다",
@@ -1520,6 +1836,9 @@ pub fn TranscriptRow(
                         }
                     });
             });
+        }
+        TranscriptItem::Question { question_id, questions, state, .. } => {
+            QuestionCard(&sid, question_id, questions, state, answering);
         }
         TranscriptItem::TurnEnded { seq, outcome } => {
             let ui = shared_ui().clone();

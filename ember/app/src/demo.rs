@@ -547,6 +547,24 @@ fn ask(approval_id: &str, command: &str, description: &str) -> AgentEvent {
     }
 }
 
+/// A sample question marked 예시: answering it calls nothing (FR-T11).
+fn sample_question() -> AgentEvent {
+    use ember_client::wire::{Question, QuestionOption};
+    let opt = |l: &str, d: &str| QuestionOption { label: l.into(), description: Some(d.into()) };
+    AgentEvent::QuestionAsked {
+        question_id: "demo-question-1".into(),
+        questions: vec![Question {
+            id: "q0".into(),
+            header: Some("예시".into()),
+            text: "(예시) 링크 목록을 어떤 순서로 정리할까요?".into(),
+            options: vec![opt("가나다순", "제목 기준으로 정렬합니다."), opt("최근 수정순", "마지막 수정 시각 기준으로 정렬합니다.")],
+            multi_select: false,
+            secret: false,
+            allow_other: true,
+        }],
+    }
+}
+
 fn decided(approval_id: &str, decision: ApprovalDecision) -> AgentEvent {
     AgentEvent::ApprovalResolved {
         approval_id: approval_id.into(),
@@ -651,7 +669,10 @@ fn script_brief(id: &str, status: SessionStatus, prompt: &str, reply: &str, now:
             json!({ "command": "ls", "description": "List files" }),
         )),
         SessionStatus::WaitingForApproval => {
-            events.push(ask(&format!("demo-approval-{id}"), "git status", "Show the status"))
+            events.push(ask(&format!("demo-approval-{id}"), "git status", "Show the status"));
+            if id == "demo-s6" {
+                events.push(sample_question());
+            }
         }
         SessionStatus::Failed => {
             events.push(AgentEvent::Error {
@@ -939,6 +960,27 @@ impl DemoSource {
             AgentEvent::TurnEnded {
                 outcome: TurnOutcome::Completed,
             },
+        );
+    }
+
+    /// The user answered or skipped the sample question (FR-T11). Nothing leaves the process;
+    /// the sample has no secret question, and a secret value would be stored as `***` anyway.
+    pub fn answer_question(
+        &self,
+        client: &Client,
+        id: &str,
+        question_id: &str,
+        reply: &ember_client::api::QuestionReply,
+    ) {
+        let answers = match reply {
+            ember_client::api::QuestionReply::Answers(a) => a.clone(),
+            ember_client::api::QuestionReply::Skip => Vec::new(),
+        };
+        self.emit(
+            client,
+            id,
+            SessionStatus::WaitingForApproval,
+            AgentEvent::QuestionAnswered { question_id: question_id.into(), answers },
         );
     }
 

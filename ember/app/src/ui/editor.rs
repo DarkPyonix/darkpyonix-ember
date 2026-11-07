@@ -607,6 +607,81 @@ pub enum TabKeyOutcome {
     Activate(String),
     /// Close this tab path.
     Close(String),
+    /// Refuse to close this dirty tab via keyboard Delete/Backspace without saving first.
+    RefuseDirty(String),
+}
+
+/// Roving `tabindex` values for the explorer tree: `(container_tabindex, root_tabindex, row_tabindices)`.
+/// The tree container (`role="tree"`) is always `"-1"` so it is never a duplicate tab stop;
+/// when a child row is active (matching `selected`, else the first item in `multi_sel` present in `rows`),
+/// that single child row has `"0"` and all other rows (including the root folder row) have `"-1"`.
+/// When no child row is selected, the root folder row (`role="treeitem"`) has `"0"`.
+pub fn tree_roving_tabindex(
+    rows: &[TreeRow],
+    selected: Option<(&str, bool)>,
+    multi_sel: &[(String, bool)],
+) -> (&'static str, &'static str, Vec<&'static str>) {
+    let active_idx = selected
+        .and_then(|(p, _)| rows.iter().position(|r| r.path == p))
+        .or_else(|| {
+            rows.iter()
+                .position(|r| multi_sel.iter().any(|(mp, _)| mp == &r.path))
+        });
+    let root_ti = if active_idx.is_none() { "0" } else { "-1" };
+    let row_tis = (0..rows.len())
+        .map(|i| if active_idx == Some(i) { "0" } else { "-1" })
+        .collect();
+    ("-1", root_ti, row_tis)
+}
+
+/// Roving `tabindex` values for the tab strip: `(strip_tabindex, tab_tabindices)`.
+/// The tablist container (`role="tablist"`) is always `"-1"`; when tabs exist, only the active tab
+/// (or the first tab if `current` does not match any open tab) has `"0"`.
+pub fn tab_strip_roving_tabindex(
+    paths: &[String],
+    current: Option<&str>,
+) -> (&'static str, Vec<&'static str>) {
+    if paths.is_empty() {
+        return ("-1", Vec::new());
+    }
+    let active_idx = current
+        .and_then(|c| paths.iter().position(|p| p == c))
+        .unwrap_or(0);
+    let tab_tis = (0..paths.len())
+        .map(|i| if i == active_idx { "0" } else { "-1" })
+        .collect();
+    ("-1", tab_tis)
+}
+
+/// Polite Korean notice shown when keyboard `Delete` or `Backspace` is pressed on an unsaved tab.
+pub fn dirty_tab_close_notice(path: &str) -> String {
+    let name = display_name(base_name(path));
+    format!("{name} 파일에 저장하지 않은 변경이 있어 바로 닫지 않았습니다. 먼저 저장하세요.")
+}
+
+/// Handles ArrowLeft, ArrowRight, Home, End, Enter, Space, and Delete/Backspace on the tab strip,
+/// refusing to close a dirty tab when `dirty[i]` is true.
+pub fn tab_strip_key_with_dirty(
+    paths: &[String],
+    dirty: &[bool],
+    current: Option<&str>,
+    key: &str,
+) -> Option<TabKeyOutcome> {
+    if paths.is_empty() {
+        return None;
+    }
+    match key {
+        "Delete" | "Backspace" => {
+            let idx = current.and_then(|c| paths.iter().position(|p| p == c))?;
+            let path = paths[idx].clone();
+            if dirty.get(idx).copied().unwrap_or(false) {
+                Some(TabKeyOutcome::RefuseDirty(path))
+            } else {
+                Some(TabKeyOutcome::Close(path))
+            }
+        }
+        _ => tab_strip_key(paths, current, key),
+    }
 }
 
 /// Handles ArrowLeft, ArrowRight, Home, End, Enter, Space, and Delete/Backspace on the tab strip.

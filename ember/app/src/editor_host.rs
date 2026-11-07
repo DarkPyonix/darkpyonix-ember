@@ -28,6 +28,8 @@ pub enum HostCommand {
     SearchNow { id: u64, request: ember_editor::search::SearchRequest },
     CancelSearch(u64),
     Replace { id: u64, request: ember_editor::search::ReplaceRequest },
+    /// Write file contents to disk.
+    WriteFile { path: String, content: String },
 }
 
 #[derive(Default)]
@@ -257,6 +259,11 @@ impl EditorHost {
                                 state.gone.push(path.clone());
                             }
                             finish_edit(&session, &shared, "삭제", &parent, result).await;
+                        }
+                        Some(HostCommand::WriteFile { path, content }) => {
+                            let parent = parent_of(&path);
+                            let result = session.write_file(&path, content.as_bytes()).await;
+                            finish_edit(&session, &shared, "변경 취소", &parent, result).await;
                         }
                         Some(HostCommand::IndexFiles) => {
                             // A fresh index replaces the last one and a running one is cancelled; the walk runs

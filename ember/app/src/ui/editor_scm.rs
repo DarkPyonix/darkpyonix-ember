@@ -4,13 +4,174 @@
 //! the 버전 관리 screen already uses (`/api/projects/{name}/git/{op}`, FR-G4, via
 //! [`crate::ui::vcs::git_call`]). This module holds the state and the rules as plain functions,
 //! and the island views in [`view`].
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use dioxus_compose::html::prelude::dioxus_signals::WritableExt;
 use ember_client::api::{ApiError, GitCommitted, GitDiff, GitFile, GitStatus};
 use serde_json::{json, Value};
 
-use crate::ui::vcs::{commit_body, commit_done_text, failure_text, git_call, parse_unified, CommitRequest, FileDiff};
+use crate::ui::vcs::{
+    commit_body, commit_done_text, failure_text, git_call, parse_unified, CommitRequest, ConflictChoice,
+    ConflictFile, ConflictLoad, ConflictSegment, ConflictStep, DeleteTap, FileDiff, FileStaging, Hunk,
+    LineKind, RemoteAction,
+};
+
+/// Given the current file text and a `FileDiff` (from `git/diff`), reconstruct the base text prior to `diff.hunks`.
+pub fn reconstruct_base_text(current_text: &str, diff: &FileDiff) -> String {
+    let norm = current_text.replace("\r\n", "\n").replace('\r', "\n");
+    if diff.hunks.is_empty() {
+        return norm;
+    }
+    let cur_lines: Vec<&str> = if norm.is_empty() {
+        Vec::new()
+    } else {
+        norm.split('\n').collect()
+    };
+    let mut base_lines: Vec<&str> = Vec::new();
+    let mut cur_idx = 1usize;
+
+    for hunk in &diff.hunks {
+        while (if hunk.new_len > 0 { cur_idx < hunk.new_start as usize } else { cur_idx <= hunk.new_start as usize }) && cur_idx <= cur_lines.len() {
+            base_lines.push(cur_lines[cur_idx - 1]);
+            cur_idx += 1;
+        }
+        for line in &hunk.lines {
+            match line.kind {
+                LineKind::Context => {
+                    base_lines.push(line.text.as_str());
+                    cur_idx += 1;
+                }
+                LineKind::Del => {
+                    base_lines.push(line.text.as_str());
+                }
+                LineKind::Add => {
+                    cur_idx += 1;
+                }
+            }
+        }
+    }
+    while cur_idx <= cur_lines.len() {
+        base_lines.push(cur_lines[cur_idx - 1]);
+        cur_idx += 1;
+    }
+    base_lines.join("\n")
+}
+
+/// Compute line markers directly from a FileDiff.
+pub fn markers_from_file_diff(diff: &FileDiff, new_line_count: usize) -> Vec<crate::ui::editor::DiffLineMarker> {
+    use crate::ui::editor::{DiffLineKind, DiffLineMarker};
+    let mut markers = Vec::new();
+    for hunk in &diff.hunks {
+        let mut i = 0;
+        while i < hunk.lines.len() {
+            match hunk.lines[i].kind {
+                LineKind::Context => {
+                    i += 1;
+                }
+                LineKind::Del | LineKind::Add => {
+                    let mut del_count = 0;
+                    let mut add_lines = Vec::new();
+                    while i < hunk.lines.len() {
+                        match hunk.lines[i].kind {
+                            LineKind::Del => {
+                                del_count += 1;
+                                i += 1;
+                            }
+                            LineKind::Add => {
+                                if let Some(new_no) = hunk.lines[i].new_no {
+                                    add_lines.push(new_no.saturating_sub(1));
+                                }
+                                i += 1;
+                            }
+                            LineKind::Context => break,
+                        }
+                    }
+                    if del_count > 0 && add_lines.is_empty() {
+                        let del_line = if hunk.new_start == 0 {
+                            0
+                        } else {
+                            (hunk.new_start.saturating_sub(1)) as u32
+                        };
+                        let del_line = del_line.min(new_line_count.saturating_sub(1) as u32);
+                        markers.push(DiffLineMarker { line: del_line, kind: DiffLineKind::Deleted });
+                    } else {
+                        let mod_count = del_count.min(add_lines.len());
+                        for (idx, &line) in add_lines.iter().enumerate() {
+                            let kind = if idx < mod_count {
+                                DiffLineKind::Modified
+                            } else {
+                                DiffLineKind::Added
+                            };
+                            markers.push(DiffLineMarker { line, kind });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    markers
+}
+
+/// Pairs consecutive Del and Add lines side-by-side, placing Context lines on both sides.
+pub fn side_by_side_rows(hunk: &Hunk) -> Vec<(Option<(u32, LineKind, String)>, Option<(u32, LineKind, String)>)> {
+    let mut rows = Vec::new();
+    let mut i = 0;
+    while i < hunk.lines.len() {
+        if hunk.lines[i].kind == LineKind::Context {
+            let l = &hunk.lines[i];
+            let left = l.old_no.map(|n| (n, LineKind::Context, l.text.clone()));
+            let right = l.new_no.map(|n| (n, LineKind::Context, l.text.clone()));
+            rows.push((left, right));
+            i += 1;
+        } else {
+            let mut dels = Vec::new();
+            let mut adds = Vec::new();
+            while i < hunk.lines.len() && hunk.lines[i].kind != LineKind::Context {
+                let l = &hunk.lines[i];
+                match l.kind {
+                    LineKind::Del => {
+                        let no = l.old_no.unwrap_or(0);
+                        dels.push((no, LineKind::Del, l.text.clone()));
+                    }
+                    LineKind::Add => {
+                        let no = l.new_no.unwrap_or(0);
+                        adds.push((no, LineKind::Add, l.text.clone()));
+                    }
+                    LineKind::Context => unreachable!(),
+                }
+                i += 1;
+            }
+            let max_len = dels.len().max(adds.len());
+            for idx in 0..max_len {
+                rows.push((dels.get(idx).cloned(), adds.get(idx).cloned()));
+            }
+        }
+    }
+    rows
+}
+
+/// Build a full patch representing all changes in diff to discard.
+pub fn discard_patch(diff: &FileDiff) -> Option<String> {
+    crate::ui::vcs::build_patch(diff, &crate::ui::vcs::FileStaging::all(diff))
+}
+
+/// Confirm discard with a 600ms to 4000ms confirmation window.
+pub fn discard_tap(armed: Option<(&str, u64)>, path: &str, now_ms: u64) -> DeleteTap {
+    match armed {
+        Some((p, at)) if p == path => {
+            let age = now_ms.saturating_sub(at);
+            if age >= 4000 {
+                DeleteTap::Expired
+            } else if age < 600 {
+                DeleteTap::Wait
+            } else {
+                DeleteTap::Confirm
+            }
+        }
+        _ => DeleteTap::Arm,
+    }
+}
 
 /// The longest diff the editor area draws, in lines; a longer one says it was cut.
 pub const DIFF_LINE_CAP: usize = 4000;
@@ -207,8 +368,8 @@ pub const CONFLICTS_LEFT: &str = "병합 충돌이 남아 있어 커밋할 수 �
 pub const NOT_READ_YET: &str = "저장소 상태를 아직 읽지 못했습니다.";
 pub const BUSY: &str = "앞의 git 작업이 끝나기를 기다리는 중입니다.";
 
-/// Whether the commit button may call the server, and with what; else the line it shows instead.
-pub fn commit_gate(load: &ScmLoad, message: &str, busy: bool) -> Result<CommitRequest, &'static str> {
+/// Whether the commit button may call the server, with optional amend flag.
+pub fn commit_gate_with_amend(load: &ScmLoad, message: &str, amend: bool, busy: bool) -> Result<CommitRequest, &'static str> {
     if busy {
         return Err(BUSY);
     }
@@ -218,10 +379,15 @@ pub fn commit_gate(load: &ScmLoad, message: &str, busy: bool) -> Result<CommitRe
         return Err(CONFLICTS_LEFT);
     }
     let Some((summary, description)) = split_message(message) else { return Err(NEED_MESSAGE) };
-    if g.staged.is_empty() {
+    if !amend && g.staged.is_empty() {
         return Err(NOTHING_STAGED);
     }
-    Ok(CommitRequest { ops: Vec::new(), summary, description, amend: false })
+    Ok(CommitRequest { ops: Vec::new(), summary, description, amend })
+}
+
+/// Whether the commit button may call the server, and with what; else the line it shows instead.
+pub fn commit_gate(load: &ScmLoad, message: &str, busy: bool) -> Result<CommitRequest, &'static str> {
+    commit_gate_with_amend(load, message, false, busy)
 }
 
 /// The state of the repository as the window last read it.
@@ -315,6 +481,8 @@ pub struct DiffState {
     /// that tab stays current, so opening or choosing another file shows the file.
     pub over: Option<String>,
     pub view: DiffView,
+    pub staging: FileStaging,
+    pub side_by_side: bool,
     seq: u64,
 }
 
@@ -340,6 +508,13 @@ pub struct ScmState {
     pub busy: bool,
     pub message: String,
     pub diff: Option<DiffState>,
+    pub gutter_diffs: BTreeMap<String, FileDiff>,
+    pub gutter_seq: u64,
+    pub amend: bool,
+    pub new_branch: String,
+    pub armed_discard: Option<(String, u64)>,
+    pub conflict: Option<(String, ConflictLoad, ConflictStep)>,
+    pub side_by_side: bool,
     seq: u64,
     diff_seq: u64,
 }
@@ -352,6 +527,13 @@ impl ScmState {
             busy: false,
             message: String::new(),
             diff: None,
+            gutter_diffs: BTreeMap::new(),
+            gutter_seq: 0,
+            amend: false,
+            new_branch: String::new(),
+            armed_discard: None,
+            conflict: None,
+            side_by_side: false,
             seq: 0,
             diff_seq: 0,
         }
@@ -380,7 +562,15 @@ impl ScmState {
     /// Opens the diff of `path` over the current tab; the answer carries the returned number.
     pub fn begin_diff(&mut self, path: &str, staged: bool, over: Option<String>) -> u64 {
         self.diff_seq += 1;
-        self.diff = Some(DiffState { path: path.to_string(), staged, over, view: DiffView::Loading, seq: self.diff_seq });
+        self.diff = Some(DiffState {
+            path: path.to_string(),
+            staged,
+            over,
+            view: DiffView::Loading,
+            staging: FileStaging::none(),
+            side_by_side: self.side_by_side,
+            seq: self.diff_seq,
+        });
         self.diff_seq
     }
 
@@ -388,6 +578,9 @@ impl ScmState {
     pub fn finish_diff(&mut self, seq: u64, view: DiffView) -> bool {
         match self.diff.as_mut() {
             Some(d) if d.seq == seq => {
+                if let DiffView::Ready(_) = view {
+                    d.staging = FileStaging::none();
+                }
                 d.view = view;
                 true
             }
@@ -456,6 +649,7 @@ impl Scm {
         if self.project.is_empty() {
             return;
         }
+        self.with(|s| s.gutter_diffs.clear());
         let seq = self.with(ScmState::begin_load);
         let (state, revision, project) = (self.state.clone(), self.revision, self.project.clone());
         crate::services::run_shared(async move { git_call::<GitStatus>(&project, "status", json!({})).await }, move |result| {
@@ -468,6 +662,339 @@ impl Scm {
         if let Some((path, staged, over)) = open {
             self.load_diff(&path, staged, over);
         }
+    }
+
+    pub fn ensure_gutter_diff(&self, rel_path: &str) {
+        let (needed, staged) = self.with(|s| {
+            if s.gutter_diffs.contains_key(rel_path) {
+                return (false, false);
+            }
+            if let ScmLoad::Ready(status) = &s.load {
+                if let Some(f) = status.files.iter().find(|f| f.path == rel_path) {
+                    if f.index == '?' && f.worktree == '?' {
+                        return (false, false);
+                    }
+                    let staged = f.worktree == '.' || f.worktree == ' ';
+                    return (true, staged);
+                }
+            }
+            (false, false)
+        });
+        if !needed || self.project.is_empty() {
+            return;
+        }
+        let (state, revision, project, path) = (self.state.clone(), self.revision, self.project.clone(), rel_path.to_string());
+        let path_for_call = path.clone();
+        crate::services::run_shared(
+            async move {
+                let d: Result<GitDiff, ApiError> = git_call(&project, "diff", json!({ "path": path_for_call, "staged": staged, "include_untracked": false })).await;
+                d.map(|d| d.patch)
+            },
+            move |result| {
+                if let Ok(patch) = result {
+                    if let Some(fd) = parse_unified(&patch).into_iter().next() {
+                        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                        s.gutter_diffs.insert(path, fd);
+                        Self::redraw(revision);
+                    }
+                }
+            },
+        );
+    }
+
+    pub fn gutter_decorations(&self, folder: &str, abs_path: &str, current_text: &str, version: u32) -> compose_rust::code::GutterDecorations {
+        let folder = folder.trim_end_matches('/');
+        let rel_path = match abs_path.strip_prefix(folder) {
+            Some(r) => r.trim_start_matches('/'),
+            None => abs_path,
+        };
+        let snapshot = self.snapshot();
+        let ScmLoad::Ready(status) = &snapshot.load else {
+            return compose_rust::code::GutterDecorations::default();
+        };
+        let Some(f) = status.files.iter().find(|f| f.path == rel_path) else {
+            return compose_rust::code::GutterDecorations::default();
+        };
+        if f.index == '?' && f.worktree == '?' {
+            let line_count = if current_text.is_empty() { 0 } else { current_text.lines().count() };
+            let markers: Vec<crate::ui::editor::DiffLineMarker> = (0..line_count as u32)
+                .map(|line| crate::ui::editor::DiffLineMarker { line, kind: crate::ui::editor::DiffLineKind::Added })
+                .collect();
+            return crate::ui::editor::diff_gutter_decorations(version, &markers);
+        }
+        if let Some(d) = snapshot.gutter_diffs.get(rel_path) {
+            let base = reconstruct_base_text(current_text, d);
+            let markers = crate::ui::editor::compute_line_diffs(&base, current_text);
+            crate::ui::editor::diff_gutter_decorations(version, &markers)
+        } else {
+            self.ensure_gutter_diff(rel_path);
+            compose_rust::code::GutterDecorations::default()
+        }
+    }
+
+    pub fn toggle_side_by_side(&self) {
+        self.with(|s| {
+            s.side_by_side = !s.side_by_side;
+            if let Some(d) = &mut s.diff {
+                d.side_by_side = s.side_by_side;
+            }
+        });
+        Self::redraw(self.revision);
+    }
+
+    pub fn toggle_diff_line(&self, hunk: usize, line: usize) {
+        self.with(|s| {
+            if let Some(d) = &mut s.diff {
+                if let DiffView::Ready(fd) = &d.view {
+                    d.staging.toggle_line(fd, hunk, line);
+                }
+            }
+        });
+        Self::redraw(self.revision);
+    }
+
+    pub fn toggle_diff_hunk(&self, hunk: usize) {
+        self.with(|s| {
+            if let Some(d) = &mut s.diff {
+                if let DiffView::Ready(fd) = &d.view {
+                    d.staging.toggle_hunk(fd, hunk);
+                }
+            }
+        });
+        Self::redraw(self.revision);
+    }
+
+    pub fn stage_diff_selection(&self) {
+        let (patch, staged) = self.with(|s| {
+            if let Some(d) = &s.diff {
+                if let DiffView::Ready(fd) = &d.view {
+                    (crate::ui::vcs::build_patch(fd, &d.staging), d.staged)
+                } else {
+                    (None, false)
+                }
+            } else {
+                (None, false)
+            }
+        });
+        if let Some(patch) = patch {
+            self.apply_patch(patch, staged);
+        }
+    }
+
+    pub fn apply_patch(&self, patch: String, reverse: bool) {
+        let what = if reverse { "스테이지 해제" } else { "스테이지" };
+        self.change(what, "apply", json!({ "patch": patch, "reverse": reverse }), None);
+    }
+
+    pub fn toggle_amend(&self) {
+        self.with(|s| s.amend = !s.amend);
+        Self::redraw(self.revision);
+    }
+
+    pub fn set_new_branch(&self, text: String) {
+        self.with(|s| s.new_branch = text);
+        Self::redraw(self.revision);
+    }
+
+    pub fn checkout(&self, branch: &str) {
+        let branch = branch.trim().to_string();
+        if branch.is_empty() {
+            return;
+        }
+        self.change("브랜치 전환", "checkout", json!({ "branch": branch }), Some(format!("{branch}(으)로 전환했습니다.")));
+    }
+
+    pub fn create_branch(&self, name: &str) {
+        let name = name.trim().to_string();
+        if !crate::ui::vcs::valid_branch_name(&name) {
+            crate::ui::cr::notice::post("올바른 브랜치 이름을 입력하세요.");
+            return;
+        }
+        self.change("새 브랜치", "branch", json!({ "name": name }), Some(format!("브랜치 {name}을 만들었습니다.")));
+    }
+
+    pub fn remote(&self, action: RemoteAction) {
+        if self.project.is_empty() {
+            return;
+        }
+        let started = self.with(|s| {
+            if s.busy {
+                false
+            } else {
+                s.busy = true;
+                true
+            }
+        });
+        if !started {
+            crate::ui::cr::notice::post(BUSY);
+            return;
+        }
+        Self::redraw(self.revision);
+        let (this, project, state, revision) = (self.clone(), self.project.clone(), self.state.clone(), self.revision);
+        crate::services::run_shared(
+            async move { crate::ui::vcs::run_remote(&project, action).await },
+            move |result| {
+                state.lock().unwrap_or_else(|e| e.into_inner()).busy = false;
+                match result {
+                    Ok(output) => {
+                        crate::ui::cr::notice::post(crate::ui::vcs::remote_done_text(action, &output));
+                    }
+                    Err(e) => crate::ui::cr::notice::post(failure_text(&action.label(), &e)),
+                }
+                Self::redraw(revision);
+                this.refresh();
+            },
+        );
+    }
+
+    pub fn conflict_visible(&self, _current_tab: Option<&str>) -> bool {
+        self.with(|s| s.conflict.is_some())
+    }
+
+    pub fn open_conflict(&self, path: &str, _over: Option<String>) {
+        if self.project.is_empty() {
+            return;
+        }
+        let path_str = path.to_string();
+        self.with(|s| {
+            s.diff = None;
+            s.conflict = Some((path_str.clone(), ConflictLoad::Loading, ConflictStep::Editing));
+        });
+        Self::redraw(self.revision);
+        let (state, revision, project, path_owned) = (self.state.clone(), self.revision, self.project.clone(), path_str);
+        let path_for_call = path_owned.clone();
+        crate::services::run_shared(
+            async move { crate::ui::vcs::fetch_conflict(&project, &path_for_call).await },
+            move |load| {
+                let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some((p, _, step)) = &mut s.conflict {
+                    if *p == path_owned {
+                        *step = ConflictStep::Editing;
+                        s.conflict = Some((path_owned, load, ConflictStep::Editing));
+                    }
+                }
+                Self::redraw(revision);
+            },
+        );
+    }
+
+    pub fn set_conflict_choice(&self, block: usize, choice: ConflictChoice) {
+        self.with(|s| {
+            if let Some((path, ConflictLoad::Ready(file), step)) = &s.conflict {
+                let updated = file.with_choice(block, choice);
+                s.conflict = Some((path.clone(), ConflictLoad::Ready(updated), *step));
+            }
+        });
+        Self::redraw(self.revision);
+    }
+
+    pub fn pick_all_conflicts(&self, choice: ConflictChoice) {
+        self.with(|s| {
+            if let Some((path, ConflictLoad::Ready(file), step)) = &s.conflict {
+                let updated = file.pick_all(choice);
+                s.conflict = Some((path.clone(), ConflictLoad::Ready(updated), *step));
+            }
+        });
+        Self::redraw(self.revision);
+    }
+
+    pub fn set_conflict_step(&self, new_step: ConflictStep) {
+        self.with(|s| {
+            if let Some((_, _, step)) = &mut s.conflict {
+                *step = new_step;
+            }
+        });
+        Self::redraw(self.revision);
+    }
+
+    pub fn close_conflict(&self) {
+        let had = self.with(|s| s.conflict.take().is_some());
+        if had {
+            Self::redraw(self.revision);
+        }
+    }
+
+    pub fn resolve_conflict(&self, path: &str, content: &str) {
+        if self.project.is_empty() {
+            return;
+        }
+        let started = self.with(|s| {
+            if s.busy {
+                false
+            } else {
+                s.busy = true;
+                true
+            }
+        });
+        if !started {
+            crate::ui::cr::notice::post(BUSY);
+            return;
+        }
+        Self::redraw(self.revision);
+        let (this, project, state, revision, content_owned, path_owned) =
+            (self.clone(), self.project.clone(), self.state.clone(), self.revision, content.to_string(), path.to_string());
+        crate::services::run_shared(
+            async move { crate::ui::vcs::run_resolve(&project, &path_owned, &content_owned).await },
+            move |result| {
+                state.lock().unwrap_or_else(|e| e.into_inner()).busy = false;
+                match result {
+                    Ok(_) => {
+                        crate::ui::cr::notice::post("충돌을 해결하고 스테이지했습니다.");
+                        state.lock().unwrap_or_else(|e| e.into_inner()).conflict = None;
+                    }
+                    Err(e) => crate::ui::cr::notice::post(e),
+                }
+                Self::redraw(revision);
+                this.refresh();
+            },
+        );
+    }
+
+    pub fn discard_file(&self, path: &str, abs_path: &str, host: &crate::editor_host::EditorHost) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let tap = self.with(|s| {
+            let armed = s.armed_discard.as_ref().map(|(p, t)| (p.as_str(), *t));
+            let tap = discard_tap(armed, path, now_ms);
+            match tap {
+                DeleteTap::Arm => {
+                    s.armed_discard = Some((path.to_string(), now_ms));
+                }
+                DeleteTap::Wait => {}
+                DeleteTap::Confirm => {
+                    s.armed_discard = None;
+                }
+                DeleteTap::Expired => {
+                    s.armed_discard = Some((path.to_string(), now_ms));
+                }
+            }
+            tap
+        });
+        Self::redraw(self.revision);
+        if tap != DeleteTap::Confirm {
+            return;
+        }
+
+        let (this, project, path_str, abs_str, host_clone) =
+            (self.clone(), self.project.clone(), path.to_string(), abs_path.to_string(), host.clone());
+        crate::services::run_shared(
+            async move {
+                let d: Result<GitDiff, ApiError> = git_call(&project, "diff", json!({ "path": path_str, "staged": false, "include_untracked": false })).await;
+                d.map(|d| d.patch)
+            },
+            move |result| {
+                if let Ok(patch) = result {
+                    if let Some(fd) = parse_unified(&patch).into_iter().next() {
+                        let cur_text = std::fs::read_to_string(&abs_str).unwrap_or_default();
+                        let base = reconstruct_base_text(&cur_text, &fd);
+                        host_clone.send(crate::editor_host::HostCommand::WriteFile { path: abs_str, content: base });
+                        this.refresh();
+                    }
+                }
+            },
+        );
     }
 
     /// Opens the diff of `path` (relative to the repository) in the editor area over `over`.
@@ -548,7 +1075,7 @@ impl Scm {
 
     /// Commits the index with the message box, after the gate's checks.
     pub fn commit(&self) {
-        let gate = self.with(|s| commit_gate(&s.load, &s.message, s.busy).map(|req| {
+        let gate = self.with(|s| commit_gate_with_amend(&s.load, &s.message, s.amend, s.busy).map(|req| {
             s.busy = true;
             req
         }));
@@ -568,9 +1095,12 @@ impl Scm {
                 {
                     let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                     s.busy = false;
-                    if result.is_ok() && split_message(&s.message).map(|(a, b)| format!("{a}\n{b}")) == Some(submitted) {
-                        // Only the text that was committed is cleared; a box edited meanwhile keeps the edit.
-                        s.message.clear();
+                    if result.is_ok() {
+                        s.amend = false;
+                        if split_message(&s.message).map(|(a, b)| format!("{a}\n{b}")) == Some(submitted) {
+                            // Only the text that was committed is cleared; a box edited meanwhile keeps the edit.
+                            s.message.clear();
+                        }
                     }
                 }
                 crate::ui::cr::notice::post(match result {
@@ -591,12 +1121,15 @@ pub mod view {
     use dioxus_compose::html::prelude::dioxus_signals::{ReadableExt, WritableExt};
     use dioxus_compose::html::prelude::*;
 
-    use super::{groups, letter_color, letter_label, upstream_text, branch_name, Entry, Group, DIFF_LINE_CAP, DiffView};
+    use super::{
+        branch_name, groups, letter_color, letter_label, side_by_side_rows, upstream_text, Entry, Group,
+        DIFF_LINE_CAP, DiffView,
+    };
     use crate::editor_host::HostCommand;
     use crate::ui::editor::{base_name, Side, ToolWindow};
     use crate::ui::editor_workbench::page::{icon, icon_px};
     use crate::ui::editor_workbench::{join_path, Shared};
-    use crate::ui::vcs::LineKind;
+    use crate::ui::vcs::{ConflictChoice, ConflictLoad, ConflictStep, LineKind, RemoteAction};
 
     /// The folder part of a repository path, for the muted text after the name.
     fn dir_of(path: &str) -> &str {
@@ -651,7 +1184,14 @@ pub mod view {
         let open_diff = st.diff.as_ref().map(|d| (d.path.clone(), d.staged));
         let commit_hint = if cfg!(target_os = "macos") { "\u{2318}Enter" } else { "Ctrl+Enter" };
         let commit_title = format!("커밋 ({commit_hint})");
-        let (input_s, key_s, click_s) = (s.clone(), s.clone(), s.clone());
+        let (input_s, key_s, click_s, amend_s) = (s.clone(), s.clone(), s.clone(), s.clone());
+        let commit_btn_text = if busy {
+            "작업하는 중…"
+        } else if st.amend {
+            "이전 커밋 수정"
+        } else {
+            "커밋"
+        };
         rsx! {
             section { class: "ed-tw ed-left", "aria-label": "커밋",
                 {header(s, "커밋")}
@@ -672,10 +1212,19 @@ pub mod view {
                             }
                         },
                     }
+                    div { style: "display:flex; align-items:center; gap:6px; font-size:var(--fs-xs); color:var(--text-2); cursor:pointer;",
+                        onclick: move |_| amend_s.scm.toggle_amend(),
+                        input {
+                            r#type: "checkbox",
+                            checked: st.amend,
+                            "aria-label": "이전 커밋 수정",
+                        }
+                        span { "이전 커밋 수정 (amend)" }
+                    }
                     button { class: "ed-pj", title: "{commit_title}", disabled: busy,
                         style: "justify-content:center; background:var(--ink); color:var(--ink-text); height:30px;",
                         onclick: move |_| click_s.scm.commit(),
-                        {icon_px("check", 14)} if busy { "작업하는 중…" } else { "커밋" }
+                        {icon_px("check", 14)} "{commit_btn_text}"
                     }
                 }
                 div { class: "ed-tree", role: "list", "aria-label": "변경된 파일",
@@ -734,8 +1283,8 @@ pub mod view {
         let class = if selected { "ed-tn sel" } else { "ed-tn" };
         let group = e.group;
         let deleted = e.letter == 'D';
-        let (diff_s, open_s, op_s) = (s.clone(), s.clone(), s.clone());
-        let (diff_path, open_path) = (e.path.clone(), e.path.clone());
+        let (diff_s, open_s, op_s, discard_s) = (s.clone(), s.clone(), s.clone(), s.clone());
+        let (diff_path, open_path, discard_path) = (e.path.clone(), e.path.clone(), e.path.clone());
         let op_entry = vec![e.clone()];
         let (op_title, op_icon) = match group {
             Group::Staged => ("스테이지 해제", "minus"),
@@ -745,11 +1294,22 @@ pub mod view {
             Some(old) => format!("{old} \u{2192} {}, {label}", e.path),
             None => format!("{}, {label}", e.path),
         };
+        let st = s.scm.snapshot();
+        let armed = st.armed_discard.as_ref().map(|(p, t)| (p.as_str(), *t));
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        let is_armed = armed.is_some_and(|(p, at)| p == e.path && (now_ms.saturating_sub(at)) >= 600 && (now_ms.saturating_sub(at)) < 4000);
+        let discard_title = if is_armed { "정말 변경 사항을 취소합니다" } else { "변경 사항 취소" };
+
         rsx! {
             div { key: "{group.title()}:{e.path}", class, role: "listitem", "aria-label": "{row_label}", title: "{tip}", style: "--d:1;",
                 onclick: move |_| {
-                    let over = diff_s.tabs.read().current_path().map(str::to_owned);
-                    diff_s.scm.open_diff(&diff_path, group.staged(), over);
+                    if group == Group::Conflicts {
+                        let over = diff_s.tabs.read().current_path().map(str::to_owned);
+                        diff_s.scm.open_conflict(&diff_path, over);
+                    } else {
+                        let over = diff_s.tabs.read().current_path().map(str::to_owned);
+                        diff_s.scm.open_diff(&diff_path, group.staged(), over);
+                    }
                 },
                 {icon_px("file", 15)}
                 span { style: "overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; min-width:0;", "{name}" }
@@ -758,6 +1318,15 @@ pub mod view {
                 if !deleted {
                     button { class: "ed-ib", style: "width:22px; height:22px;", title: "파일 열기: {name}",
                         onclick: move |event| { event.stop_propagation(); open_file(&open_s, &open_path); }, {icon_px("file", 13)} }
+                }
+                if group == Group::Changes && e.letter != 'U' {
+                    button { class: "ed-ib", style: if is_armed { "width:22px; height:22px; color:var(--c-red);" } else { "width:22px; height:22px;" },
+                        title: "{discard_title}: {name}", disabled: busy,
+                        onclick: move |event| {
+                            event.stop_propagation();
+                            let abs = join_path(&discard_s.folder, &discard_path);
+                            discard_s.scm.discard_file(&discard_path, &abs, &discard_s.host);
+                        }, {icon_px("close", 13)} }
                 }
                 if group != Group::Conflicts {
                     button { class: "ed-ib", style: "width:22px; height:22px;", title: "{op_title}: {name}", disabled: busy,
@@ -775,14 +1344,49 @@ pub mod view {
     pub fn git_window(s: &Shared) -> Element {
         let st = s.scm.snapshot();
         let status = st.load.status().cloned();
+        let busy = st.busy;
+        let new_branch = st.new_branch.clone();
+        let new_branch_for_create = new_branch.clone();
+        let (fetch_s, pull_s, push_s, new_branch_input_s, s_create) = (s.clone(), s.clone(), s.clone(), s.clone(), s.clone());
+
         rsx! {
             section { class: "ed-tw ed-left", "aria-label": "Git",
                 {header(s, "Git")}
                 div { class: "ed-tree", role: "list", "aria-label": "브랜치",
                     if let Some(text) = st.load.note() { {note(&text)} }
                     if let Some(status) = status {
-                        div { class: "ed-tn", style: "--d:0; cursor:default; font-weight:var(--fw-semibold);", {icon_px("git", 15)} "{branch_name(&status)}" }
-                        {note(&upstream_text(&status))}
+                        {
+                            let pull_label = if status.behind > 0 { format!("Pull {}", status.behind) } else { "Pull".to_string() };
+                            let push_label = if status.ahead > 0 { format!("Push {}", status.ahead) } else { "Push".to_string() };
+                            rsx! {
+                                div { class: "ed-tn", style: "--d:0; cursor:default; font-weight:var(--fw-semibold);", {icon_px("git", 15)} "{branch_name(&status)}" }
+                                {note(&upstream_text(&status))}
+                                div { style: "display:flex; gap:var(--sp1); padding:var(--sp1) var(--sp3);",
+                                    button { class: "ed-pj", style: "flex:1; justify-content:center; border:1px solid var(--line); height:26px; font-size:var(--fs-xs);",
+                                        disabled: busy, onclick: move |_| fetch_s.scm.remote(crate::ui::vcs::RemoteAction::Fetch), "Fetch" }
+                                    button { class: "ed-pj", style: "flex:1; justify-content:center; border:1px solid var(--line); height:26px; font-size:var(--fs-xs);",
+                                        disabled: busy, onclick: move |_| pull_s.scm.remote(crate::ui::vcs::RemoteAction::Pull(status.behind)),
+                                        "{pull_label}" }
+                                    button { class: "ed-pj", style: "flex:1; justify-content:center; border:1px solid var(--line); height:26px; font-size:var(--fs-xs);",
+                                        disabled: busy, onclick: move |_| push_s.scm.remote(crate::ui::vcs::RemoteAction::Push(status.ahead)),
+                                        "{push_label}" }
+                                }
+                                div { style: "display:flex; gap:var(--sp1); padding:var(--sp1) var(--sp3);",
+                                    input {
+                                        style: "flex:1; border:1px solid var(--line); border-radius:var(--r-sm); background:var(--surface); color:var(--text); padding:2px 6px; font:inherit; font-size:var(--fs-xs);",
+                                        placeholder: "새 브랜치 이름", value: "{new_branch}",
+                                        oninput: move |e| new_branch_input_s.scm.set_new_branch(e.value()),
+                                    }
+                                    button { class: "ed-pj", style: "border:1px solid var(--line); height:26px; font-size:var(--fs-xs);", disabled: busy,
+                                        onclick: move |_| {
+                                            if !new_branch_for_create.trim().is_empty() {
+                                                s_create.scm.create_branch(&new_branch_for_create);
+                                                s_create.scm.set_new_branch(String::new());
+                                            }
+                                        }, "새 브랜치" }
+                                }
+                            }
+                        }
                         div { class: "ed-tn", style: "--d:0; cursor:default; color:var(--text-2); font-size:var(--fs-xs); font-weight:var(--fw-semibold);", "로컬 브랜치"
                             span { style: "margin-left:var(--sp1); padding:0 6px; border-radius:var(--pill); background:var(--surface-2); color:var(--text-2);", "{status.branches.len()}" } }
                         if status.branches.is_empty() { {note("로컬 브랜치가 없습니다.")} }
@@ -790,13 +1394,19 @@ pub mod view {
                             {
                                 let current = *b == status.branch;
                                 let label = if current { format!("{b}, 현재 브랜치") } else { b.clone() };
-                                rsx! { div { key: "{b}", class: if current { "ed-tn sel" } else { "ed-tn" }, role: "listitem", "aria-label": "{label}", style: "--d:1; cursor:default;",
+                                let b_str = b.clone();
+                                let branch_click_s = s.clone();
+                                rsx! { div { key: "{b}", class: if current { "ed-tn sel" } else { "ed-tn" }, role: "listitem",
+                                    "aria-label": "{label}",
+                                    title: if current { format!("{b}") } else { format!("{b} (클릭하여 전환)") },
+                                    style: if current { "--d:1; cursor:default;" } else { "--d:1; cursor:pointer;" },
+                                    onclick: move |_| { if !current { branch_click_s.scm.checkout(&b_str); } },
                                     if current { {icon_px("check", 13)} } else { span { class: "chev-sp" } }
                                     "{b}"
                                 } }
                             }
                         }
-                        div { style: "padding:var(--sp2) var(--sp3); color:var(--muted); font-size:var(--fs-2xs); white-space:normal; line-height:1.6;", "브랜치 전환과 원격 작업은 앱의 버전 관리 화면에서 할 수 있습니다." }
+                        div { style: "padding:var(--sp2) var(--sp3); color:var(--muted); font-size:var(--fs-2xs); white-space:normal; line-height:1.6;", "브랜치 전환과 원격 작업은 위 버튼으로 실행할 수 있습니다." }
                     }
                 }
             }
@@ -808,26 +1418,18 @@ pub mod view {
     pub fn diff_pane(s: &Shared) -> Element {
         let Some(d) = s.scm.snapshot().diff else { return rsx! {} };
         let title = d.title();
-        let (open_s, close_s) = (s.clone(), s.clone());
+        let (open_s, close_s, side_s, stage_sel_s) = (s.clone(), s.clone(), s.clone(), s.clone());
         let open_path = d.path.clone();
-        let mut lines: Vec<(Option<u32>, Option<u32>, Option<LineKind>, String)> = Vec::new();
-        let mut cut = false;
-        if let DiffView::Ready(fd) = &d.view {
-            'outer: for h in &fd.hunks {
-                lines.push((None, None, None, h.header.clone()));
-                for l in &h.lines {
-                    if lines.len() >= DIFF_LINE_CAP {
-                        cut = true;
-                        break 'outer;
-                    }
-                    lines.push((l.old_no, l.new_no, Some(l.kind), l.text.clone()));
-                }
-            }
-        }
         let summary = match &d.view {
             DiffView::Ready(fd) => format!("+{} \u{2212}{}", fd.added(), fd.removed()),
             _ => String::new(),
         };
+        let (staged_cnt, _) = match &d.view {
+            DiffView::Ready(fd) => d.staging.counts(fd),
+            _ => (0, 0),
+        };
+        let stage_lines_label = if d.staged { "선택 줄 스테이지 해제" } else { "선택 줄 스테이지" };
+
         rsx! {
             div { style: "flex:1; min-width:0; min-height:0; display:flex; flex-direction:column;", role: "region", "aria-label": "변경 내용: {title}",
                 div { class: "ed-tsub",
@@ -835,33 +1437,195 @@ pub mod view {
                     b { "{title}" }
                     span { class: "ed-sbi", "{summary}" }
                     div { class: "spacer" }
+                    button { class: "ed-pj", style: "border:1px solid var(--line);", onclick: move |_| side_s.scm.toggle_side_by_side(),
+                        if d.side_by_side { "통합 보기" } else { "나란히 보기" } }
+                    if staged_cnt > 0 {
+                        button { class: "ed-pj", style: "border:1px solid var(--line); background:var(--surface-2);",
+                            onclick: move |_| stage_sel_s.scm.stage_diff_selection(),
+                            "{stage_lines_label} ({staged_cnt})" }
+                    }
                     button { class: "ed-pj", style: "border:1px solid var(--line);", onclick: move |_| open_file(&open_s, &open_path), "파일 열기" }
                     button { class: "ed-ib", title: "차이 닫기", onclick: move |_| close_s.scm.close_diff(), {icon("close")} }
                 }
                 if let Some(text) = d.view.note() {
                     div { class: "ed-empty", role: "status", p { "{text}" } }
-                } else {
+                } else if let DiffView::Ready(fd) = &d.view {
                     div { style: "flex:1; min-height:0; overflow:auto; font-family:var(--mono); font-size:var(--fs-sm); padding:var(--sp2) 0;",
-                        for (i, (old_no, new_no, kind, text)) in lines.into_iter().enumerate() {
+                        for (hi, h) in fd.hunks.iter().enumerate() {
                             {
-                                let (bg, sign, fg) = match kind {
-                                    None => ("background:var(--surface-2);", " ", "color:var(--muted);"),
-                                    Some(LineKind::Add) => ("background:var(--c-green-soft);", "+", ""),
-                                    Some(LineKind::Del) => ("background:var(--c-red-soft);", "-", ""),
-                                    Some(LineKind::Context) => ("", " ", ""),
-                                };
-                                let old = old_no.map(|n| n.to_string()).unwrap_or_default();
-                                let new = new_no.map(|n| n.to_string()).unwrap_or_default();
-                                rsx! { div { key: "{i}", style: "display:flex; white-space:pre; min-height:20px; line-height:20px; {bg} {fg}",
-                                    span { style: "width:48px; flex:none; text-align:right; padding-right:8px; color:var(--muted);", "{old}" }
-                                    span { style: "width:48px; flex:none; text-align:right; padding-right:8px; color:var(--muted);", "{new}" }
-                                    span { style: "width:16px; flex:none; text-align:center;", "{sign}" }
-                                    span { style: "flex:1;", "{text}" }
-                                } }
+                                let hunk_action_title = if d.staged { "이 덩어리 스테이지 해제" } else { "이 덩어리 스테이지" };
+                                let hunk_s = s.clone();
+                                rsx! {
+                                    div { key: "hunk-{hi}", style: "display:flex; align-items:center; background:var(--surface-2); color:var(--muted); font-size:var(--fs-xs); padding:2px 8px; margin:4px 0;",
+                                        span { style: "flex:1;", "{h.header}" }
+                                        button { class: "ed-pj", style: "border:1px solid var(--line); height:20px; font-size:var(--fs-2xs); padding:0 6px;",
+                                            onclick: move |_| hunk_s.scm.toggle_diff_hunk(hi),
+                                            "{hunk_action_title}" }
+                                    }
+                                    if d.side_by_side {
+                                        for (ri, (left, right)) in side_by_side_rows(h).into_iter().enumerate() {
+                                            {
+                                                let (l_bg, l_sign, l_no, l_text) = match left {
+                                                    None => ("", " ", String::new(), String::new()),
+                                                    Some((no, LineKind::Del, text)) => ("background:var(--c-red-soft);", "-", no.to_string(), text),
+                                                    Some((no, _, text)) => ("", " ", no.to_string(), text),
+                                                };
+                                                let (r_bg, r_sign, r_no, r_text) = match right {
+                                                    None => ("", " ", String::new(), String::new()),
+                                                    Some((no, LineKind::Add, text)) => ("background:var(--c-green-soft);", "+", no.to_string(), text),
+                                                    Some((no, _, text)) => ("", " ", no.to_string(), text),
+                                                };
+                                                rsx! {
+                                                    div { key: "sbs-{hi}-{ri}", style: "display:flex; white-space:pre; min-height:20px; line-height:20px; border-bottom:1px solid var(--surface-2);",
+                                                        div { style: "flex:1; display:flex; min-width:0; overflow:hidden; border-right:1px solid var(--line); {l_bg}",
+                                                            span { style: "width:40px; flex:none; text-align:right; padding-right:6px; color:var(--muted);", "{l_no}" }
+                                                            span { style: "width:14px; flex:none; text-align:center;", "{l_sign}" }
+                                                            span { style: "flex:1; overflow:hidden; text-overflow:ellipsis;", "{l_text}" }
+                                                        }
+                                                        div { style: "flex:1; display:flex; min-width:0; overflow:hidden; {r_bg}",
+                                                            span { style: "width:40px; flex:none; text-align:right; padding-right:6px; color:var(--muted);", "{r_no}" }
+                                                            span { style: "width:14px; flex:none; text-align:center;", "{r_sign}" }
+                                                            span { style: "flex:1; overflow:hidden; text-overflow:ellipsis;", "{r_text}" }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        for (li, l) in h.lines.iter().enumerate() {
+                                            {
+                                                let is_staged = d.staging.is_staged(hi, li);
+                                                let (bg, sign, fg) = match l.kind {
+                                                    LineKind::Add => ("background:var(--c-green-soft);", "+", ""),
+                                                    LineKind::Del => ("background:var(--c-red-soft);", "-", ""),
+                                                    LineKind::Context => ("", " ", ""),
+                                                };
+                                                let old = l.old_no.map(|n| n.to_string()).unwrap_or_default();
+                                                let new = l.new_no.map(|n| n.to_string()).unwrap_or_default();
+                                                let is_change = l.is_change();
+                                                let cursor = if is_change { "cursor:pointer;" } else { "" };
+                                                let border = if is_staged { "outline:1px solid var(--ink); z-index:1;" } else { "" };
+                                                let line_click_s = s.clone();
+                                                rsx! {
+                                                    div { key: "line-{hi}-{li}", style: "display:flex; white-space:pre; min-height:20px; line-height:20px; {bg} {fg} {cursor} {border}",
+                                                        onclick: move |_| {
+                                                            if is_change {
+                                                                line_click_s.scm.toggle_diff_line(hi, li);
+                                                            }
+                                                        },
+                                                        span { style: "width:48px; flex:none; text-align:right; padding-right:8px; color:var(--muted);", "{old}" }
+                                                        span { style: "width:48px; flex:none; text-align:right; padding-right:8px; color:var(--muted);", "{new}" }
+                                                        span { style: "width:16px; flex:none; text-align:center;", "{sign}" }
+                                                        span { style: "flex:1;", "{l.text}" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
-                        if cut {
+                        if fd.hunks.iter().map(|h| h.lines.len()).sum::<usize>() >= DIFF_LINE_CAP {
                             div { style: "padding:var(--sp2) var(--sp3); color:var(--muted); font-family:var(--font);", "차이가 길어 앞의 {DIFF_LINE_CAP}줄만 표시합니다. 전체는 파일을 열어 확인하세요." }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The conflict resolution pane in the editor area (FR-G7).
+    pub fn conflict_pane(s: &Shared) -> Element {
+        let st = s.scm.snapshot();
+        let Some((path, load, step)) = st.conflict else { return rsx! {} };
+        let name = base_name(&path).to_string();
+        let close_s = s.clone();
+        let resolve_s = s.clone();
+        let preview_s = s.clone();
+        let pick_ours_s = s.clone();
+        let pick_theirs_s = s.clone();
+        let ready_meta = match &load {
+            ConflictLoad::Ready(file) => Some((file.progress_text(), file.is_resolved(), file.resolved_content())),
+            _ => None,
+        };
+
+        rsx! {
+            div { style: "flex:1; min-width:0; min-height:0; display:flex; flex-direction:column;", role: "region", "aria-label": "충돌 해결: {name}",
+                div { class: "ed-tsub",
+                    {icon_px("git", 14)}
+                    b { "충돌 해결: {name}" }
+                    if let Some((progress, resolved, resolved_content)) = ready_meta {
+                        span { class: "ed-sbi", "{progress}" }
+                        div { class: "spacer" }
+                        button { class: "ed-pj", style: "border:1px solid var(--line);", onclick: move |_| pick_ours_s.scm.pick_all_conflicts(ConflictChoice::Ours), "모두 현재 것" }
+                        button { class: "ed-pj", style: "border:1px solid var(--line);", onclick: move |_| pick_theirs_s.scm.pick_all_conflicts(ConflictChoice::Theirs), "모두 들어오는 것" }
+                        button { class: "ed-pj", style: "border:1px solid var(--line);",
+                            onclick: move |_| preview_s.scm.set_conflict_step(if step.is_preview() { ConflictStep::Editing } else { ConflictStep::Preview }),
+                            if step.is_preview() { "편집" } else { "미리보기" }
+                        }
+                        button { class: "ed-pj", style: "background:var(--ink); color:var(--ink-text);",
+                            disabled: !resolved || st.busy,
+                            onclick: move |_| {
+                                if let Some(content) = resolved_content.as_deref() {
+                                    resolve_s.scm.resolve_conflict(&path, content);
+                                }
+                            },
+                            "해결하고 스테이징"
+                        }
+                    } else {
+                        div { class: "spacer" }
+                    }
+                    button { class: "ed-ib", title: "닫기", onclick: move |_| close_s.scm.close_conflict(), {icon("close")} }
+                }
+                match load {
+                    ConflictLoad::Loading => rsx! { div { class: "ed-empty", role: "status", p { "충돌 내용을 확인하는 중입니다." } } },
+                    ConflictLoad::Failed(text) => rsx! { div { class: "ed-empty", role: "alert", p { "{text}" } } },
+                    ConflictLoad::Ready(file) => {
+                        if step.is_preview() {
+                            let preview_text = file.resolved_content().unwrap_or_default();
+                            rsx! {
+                                div { style: "flex:1; min-height:0; overflow:auto; font-family:var(--mono); font-size:var(--fs-sm); padding:var(--sp3); white-space:pre;",
+                                    "{preview_text}"
+                                }
+                            }
+                        } else {
+                            let mut block_idx = 0usize;
+                            rsx! {
+                                div { style: "flex:1; min-height:0; overflow:auto; font-family:var(--mono); font-size:var(--fs-sm); padding:var(--sp2) 0;",
+                                    for (si, seg) in file.segments.iter().enumerate() {
+                                        match seg {
+                                            crate::ui::vcs::ConflictSegment::Common(text) => rsx! {
+                                                div { key: "c-{si}", style: "white-space:pre; padding:0 var(--sp3); min-height:20px; line-height:20px;", "{text}" }
+                                            },
+                                            crate::ui::vcs::ConflictSegment::Block { ours_label, theirs_label, ours, theirs, choice } => {
+                                                let b_i = block_idx;
+                                                block_idx += 1;
+                                                let ours_choice_s = s.clone();
+                                                let theirs_choice_s = s.clone();
+                                                let both_choice_s = s.clone();
+                                                rsx! {
+                                                    div { key: "b-{si}", style: "margin:var(--sp2) 0; border:1px solid var(--line); border-radius:var(--r-sm); overflow:hidden;",
+                                                        div { style: "display:flex; gap:var(--sp2); align-items:center; padding:4px 8px; background:var(--surface-2); font-family:var(--font); font-size:var(--fs-xs);",
+                                                            span { style: "font-weight:var(--fw-semibold);", "블록 #{b_i + 1}" }
+                                                            button { class: "ed-pj", style: if *choice == ConflictChoice::Ours { "background:var(--ink); color:var(--ink-text); height:22px; padding:0 6px;" } else { "border:1px solid var(--line); height:22px; padding:0 6px;" },
+                                                                onclick: move |_| ours_choice_s.scm.set_conflict_choice(b_i, ConflictChoice::Ours),
+                                                                "현재 변경 사항 ({ours_label})" }
+                                                            button { class: "ed-pj", style: if *choice == ConflictChoice::Theirs { "background:var(--ink); color:var(--ink-text); height:22px; padding:0 6px;" } else { "border:1px solid var(--line); height:22px; padding:0 6px;" },
+                                                                onclick: move |_| theirs_choice_s.scm.set_conflict_choice(b_i, ConflictChoice::Theirs),
+                                                                "들어오는 변경 사항 ({theirs_label})" }
+                                                            button { class: "ed-pj", style: if *choice == ConflictChoice::Both { "background:var(--ink); color:var(--ink-text); height:22px; padding:0 6px;" } else { "border:1px solid var(--line); height:22px; padding:0 6px;" },
+                                                                onclick: move |_| both_choice_s.scm.set_conflict_choice(b_i, ConflictChoice::Both),
+                                                                "모두 수용 (Both)" }
+                                                        }
+                                                        div { style: "background:var(--c-blue-soft); padding:4px 8px; border-left:3px solid var(--c-blue); white-space:pre;", "{ours}" }
+                                                        div { style: "background:var(--c-orange-soft); padding:4px 8px; border-left:3px solid var(--c-orange); white-space:pre;", "{theirs}" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1043,5 +1807,150 @@ mod tests {
             assert!(polite(line), "not 합니다체: {line}");
             assert!(!line.contains('\u{2014}'), "em-dash in: {line}");
         }
+    }
+
+    #[test]
+    fn fr_e10_reconstruct_base_text_handles_add_mod_del_and_empty() {
+        let diff_patch = "diff --git a/file.rs b/file.rs\n--- a/file.rs\n+++ b/file.rs\n@@ -1,4 +1,5 @@\n line1\n-line2\n+line2_mod\n line3\n+line4_add\n line5\n";
+        let diff = parse_unified(diff_patch).into_iter().next().unwrap();
+        let cur_text = "line1\nline2_mod\nline3\nline4_add\nline5";
+        let base = reconstruct_base_text(cur_text, &diff);
+        assert_eq!(base, "line1\nline2\nline3\nline5");
+
+        // When diff hunks are empty, returns current text normalized
+        let empty_diff = FileDiff {
+            path: String::new(),
+            old_path: None,
+            status: crate::ui::vcs::FileStatus::Modified,
+            mode: None,
+            binary: false,
+            hunks: Vec::new(),
+        };
+        assert_eq!(reconstruct_base_text("hello\r\nworld", &empty_diff), "hello\nworld");
+
+        // Deletion-only hunk
+        let del_patch = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,2 @@\n a\n-b\n c\n";
+        let del_diff = parse_unified(del_patch).into_iter().next().unwrap();
+        let cur_del = "a\nc";
+        assert_eq!(reconstruct_base_text(cur_del, &del_diff), "a\nb\nc");
+
+        // Addition-only hunk
+        let add_patch = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,3 @@\n a\n+new_b\n c\n";
+        let add_diff = parse_unified(add_patch).into_iter().next().unwrap();
+        let cur_add = "a\nnew_b\nc";
+        assert_eq!(reconstruct_base_text(cur_add, &add_diff), "a\nc");
+    }
+
+    #[test]
+    fn fr_e10_markers_from_file_diff_identifies_added_modified_deleted() {
+        use crate::ui::editor::{DiffLineKind, DiffLineMarker};
+
+        let patch = "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -1,4 +1,5 @@\n c1\n-d2\n+m2\n c3\n+a4\n";
+        let diff = parse_unified(patch).into_iter().next().unwrap();
+        let markers = markers_from_file_diff(&diff, 4);
+        assert_eq!(markers, vec![
+            DiffLineMarker { line: 1, kind: DiffLineKind::Modified },
+            DiffLineMarker { line: 3, kind: DiffLineKind::Added },
+        ]);
+
+        let del_patch = "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -1,3 +1,2 @@\n c1\n-d2\n c3\n";
+        let del_diff = parse_unified(del_patch).into_iter().next().unwrap();
+        let del_markers = markers_from_file_diff(&del_diff, 2);
+        assert_eq!(del_markers, vec![
+            DiffLineMarker { line: 0, kind: DiffLineKind::Deleted },
+        ]);
+    }
+
+    #[test]
+    fn fr_e10_side_by_side_rows_pairs_dels_and_adds() {
+        let patch = "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -1,3 +1,3 @@\n c1\n-old2\n+new2\n c3\n";
+        let diff = parse_unified(patch).into_iter().next().unwrap();
+        let hunk = &diff.hunks[0];
+        let rows = side_by_side_rows(hunk);
+        assert_eq!(rows.len(), 3);
+
+        // Row 0: Context c1 on both sides
+        assert_eq!(rows[0].0.as_ref().unwrap().1, LineKind::Context);
+        assert_eq!(rows[0].1.as_ref().unwrap().1, LineKind::Context);
+
+        // Row 1: Del on left, Add on right
+        assert_eq!(rows[1].0.as_ref().unwrap().1, LineKind::Del);
+        assert_eq!(rows[1].0.as_ref().unwrap().2, "old2");
+        assert_eq!(rows[1].1.as_ref().unwrap().1, LineKind::Add);
+        assert_eq!(rows[1].1.as_ref().unwrap().2, "new2");
+
+        // Row 2: Context c3 on both sides
+        assert_eq!(rows[2].0.as_ref().unwrap().1, LineKind::Context);
+        assert_eq!(rows[2].1.as_ref().unwrap().1, LineKind::Context);
+    }
+
+    #[test]
+    fn fr_l31_2_commit_gate_with_amend_allows_empty_staged() {
+        let unstaged = ScmLoad::Ready(status(vec![file("a.rs", '.', 'M')]));
+        // Normal commit without amend fails when nothing is staged
+        assert_eq!(commit_gate_with_amend(&unstaged, "msg", false, false).unwrap_err(), NOTHING_STAGED);
+        // Amend commit succeeds even when nothing is staged
+        let req = commit_gate_with_amend(&unstaged, "Fix: fix previous\n\nexplanation", true, false).unwrap();
+        assert!(req.amend);
+        assert_eq!(req.summary, "Fix: fix previous");
+        assert_eq!(req.description, "explanation");
+
+        // Still checks message, busy, conflicts
+        assert_eq!(commit_gate_with_amend(&unstaged, "", true, false).unwrap_err(), NEED_MESSAGE);
+        assert_eq!(commit_gate_with_amend(&unstaged, "msg", true, true).unwrap_err(), BUSY);
+        let conflicted = ScmLoad::Ready(status(vec![file("a.rs", 'U', 'U')]));
+        assert_eq!(commit_gate_with_amend(&conflicted, "msg", true, false).unwrap_err(), CONFLICTS_LEFT);
+    }
+
+    #[test]
+    fn fr_l31_2_discard_patch_and_tap_confirmation() {
+        let patch = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n-one\n+two\n";
+        let diff = parse_unified(patch).into_iter().next().unwrap();
+        let p = discard_patch(&diff);
+        assert!(p.is_some());
+        assert!(p.unwrap().contains("+two"));
+
+        // 600ms confirmation window for discard
+        let path = "src/lib.rs";
+        assert_eq!(discard_tap(None, path, 1000), DeleteTap::Arm);
+        assert_eq!(discard_tap(Some((path, 1000)), path, 1200), DeleteTap::Wait);
+        assert_eq!(discard_tap(Some((path, 1000)), path, 1600), DeleteTap::Confirm);
+        assert_eq!(discard_tap(Some((path, 1000)), path, 4999), DeleteTap::Confirm);
+        assert_eq!(discard_tap(Some((path, 1000)), path, 5000), DeleteTap::Expired);
+        assert_eq!(discard_tap(Some(("other.rs", 1000)), path, 1600), DeleteTap::Arm);
+    }
+
+    #[test]
+    fn fr_g7_conflict_resolution_choices_work() {
+        let f = ConflictFile {
+            path: "test.txt".into(),
+            segments: vec![
+                ConflictSegment::Common("header\n".into()),
+                ConflictSegment::Block {
+                    ours_label: "main".into(),
+                    theirs_label: "feat".into(),
+                    ours: "ours line\n".into(),
+                    theirs: "theirs line\n".into(),
+                    choice: ConflictChoice::Unresolved,
+                },
+                ConflictSegment::Common("footer\n".into()),
+            ],
+        };
+        assert!(!f.is_resolved());
+        assert_eq!(f.resolved_content(), None);
+
+        let resolved_ours = f.with_choice(0, ConflictChoice::Ours);
+        assert!(resolved_ours.is_resolved());
+        assert_eq!(resolved_ours.resolved_content(), Some("header\nours line\nfooter\n".into()));
+
+        let resolved_theirs = f.with_choice(0, ConflictChoice::Theirs);
+        assert_eq!(resolved_theirs.resolved_content(), Some("header\ntheirs line\nfooter\n".into()));
+
+        let resolved_both = f.with_choice(0, ConflictChoice::Both);
+        assert_eq!(resolved_both.resolved_content(), Some("header\nours line\ntheirs line\nfooter\n".into()));
+
+        let pick_all = f.pick_all(ConflictChoice::Theirs);
+        assert!(pick_all.is_resolved());
+        assert_eq!(pick_all.resolved_content(), Some("header\ntheirs line\nfooter\n".into()));
     }
 }

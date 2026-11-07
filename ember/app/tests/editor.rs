@@ -582,3 +582,100 @@ fn fr_l31_2_stage_unstage_and_commit_against_the_demo_repository() {
     assert_eq!(after.status().unwrap().ahead, ahead + 1);
     assert_eq!(commit_gate(&after, "\n  \n", false).unwrap_err(), NEED_MESSAGE);
 }
+
+// FR-E10 and #444: Diff gutter and editor source control tests.
+#[test]
+fn fr_e10_diff_gutter_and_scm_helpers() {
+    use ember_app::ui::editor::{compute_line_diffs, diff_gutter_decorations, DiffLineKind, DiffLineMarker};
+    use ember_app::ui::editor_scm::{
+        commit_gate_with_amend, discard_patch, discard_tap, markers_from_file_diff, reconstruct_base_text,
+        side_by_side_rows, ScmLoad,
+    };
+    use ember_app::ui::vcs::{
+        parse_unified, ConflictChoice, ConflictFile, ConflictSegment, DeleteTap, FileDiff, LineKind,
+    };
+    use ember_client::api::{GitFile, GitStatus};
+
+    // 1. Line diff markers
+    let old_text = "alpha\nbeta\ngamma\ndelta";
+    let new_text = "alpha\nbeta_mod\ngamma\ndelta\nepsilon";
+    let markers = compute_line_diffs(old_text, new_text);
+    assert_eq!(markers, vec![
+        DiffLineMarker { line: 1, kind: DiffLineKind::Modified },
+        DiffLineMarker { line: 4, kind: DiffLineKind::Added },
+    ]);
+
+    // 2. Diff gutter decorations
+    let decs = diff_gutter_decorations(1, &markers);
+    assert_eq!(decs.decorations().len(), 2);
+
+    // 3. Reconstruct base text
+    let patch = "diff --git a/test.rs b/test.rs\n--- a/test.rs\n+++ b/test.rs\n@@ -1,4 +1,5 @@\n alpha\n-beta\n+beta_mod\n gamma\n delta\n+epsilon\n";
+    let diff = parse_unified(patch).into_iter().next().unwrap();
+    let base = reconstruct_base_text(new_text, &diff);
+    assert_eq!(base, old_text);
+
+    // 4. Markers from file diff
+    let m_fd = markers_from_file_diff(&diff, 5);
+    assert_eq!(m_fd, vec![
+        DiffLineMarker { line: 1, kind: DiffLineKind::Modified },
+        DiffLineMarker { line: 4, kind: DiffLineKind::Added },
+    ]);
+
+    // 5. Side by side rows
+    let sbs = side_by_side_rows(&diff.hunks[0]);
+    assert_eq!(sbs.len(), 5);
+    // Context alpha
+    assert_eq!(sbs[0].0.as_ref().unwrap().1, LineKind::Context);
+    assert_eq!(sbs[0].1.as_ref().unwrap().1, LineKind::Context);
+    // beta (del on left, mod on right)
+    assert_eq!(sbs[1].0.as_ref().unwrap().1, LineKind::Del);
+    assert_eq!(sbs[1].1.as_ref().unwrap().1, LineKind::Add);
+    // Context gamma
+    assert_eq!(sbs[2].0.as_ref().unwrap().1, LineKind::Context);
+    // Context delta
+    assert_eq!(sbs[3].0.as_ref().unwrap().1, LineKind::Context);
+    // epsilon (None on left, Add on right)
+    assert!(sbs[4].0.is_none());
+    assert_eq!(sbs[4].1.as_ref().unwrap().1, LineKind::Add);
+
+    // 6. Amend commit gate
+    let status = GitStatus {
+        branch: "main".into(),
+        files: vec![GitFile { path: "a.rs".into(), old_path: None, index: '.', worktree: 'M' }],
+        ..GitStatus::default()
+    };
+    let ready = ScmLoad::Ready(status);
+    let req = commit_gate_with_amend(&ready, "Fix: amend previous\n\nDetails", true, false).unwrap();
+    assert!(req.amend);
+
+    // 7. Discard patch and confirmation tap
+    let dp = discard_patch(&diff).unwrap();
+    assert!(dp.contains("+beta_mod"));
+    assert_eq!(discard_tap(None, "test.rs", 100), DeleteTap::Arm);
+    assert_eq!(discard_tap(Some(("test.rs", 100)), "test.rs", 300), DeleteTap::Wait);
+    assert_eq!(discard_tap(Some(("test.rs", 100)), "test.rs", 800), DeleteTap::Confirm);
+    assert_eq!(discard_tap(Some(("test.rs", 100)), "test.rs", 4200), DeleteTap::Expired);
+
+    // 8. Conflict file resolution
+    let cf = ConflictFile {
+        path: "conf.rs".into(),
+        segments: vec![
+            ConflictSegment::Common("fn main() {\n".into()),
+            ConflictSegment::Block {
+                ours_label: "HEAD".into(),
+                theirs_label: "feature".into(),
+                ours: "    println!(\"ours\");\n".into(),
+                theirs: "    println!(\"theirs\");\n".into(),
+                choice: ConflictChoice::Unresolved,
+            },
+            ConflictSegment::Common("}\n".into()),
+        ],
+    };
+    assert!(!cf.is_resolved());
+    let cf_ours = cf.with_choice(0, ConflictChoice::Ours);
+    assert!(cf_ours.is_resolved());
+    assert_eq!(cf_ours.resolved_content().unwrap(), "fn main() {\n    println!(\"ours\");\n}\n");
+    let cf_both = cf.with_choice(0, ConflictChoice::Both);
+    assert_eq!(cf_both.resolved_content().unwrap(), "fn main() {\n    println!(\"ours\");\n    println!(\"theirs\");\n}\n");
+}

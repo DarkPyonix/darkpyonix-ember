@@ -322,6 +322,14 @@ impl EditorSession {
         Ok(path)
     }
 
+    /// Writes content to `path`. Creates or overwrites the file.
+    pub async fn write_file(&self, path: &str, content: &[u8]) -> Result<(), Error> {
+        let path = crate::paths::target_path(&self.workspace_path, path).map_err(Error::Path)?;
+        let opts = WriteOptions { create: true, overwrite: true, unlock: false, atomic: false };
+        self.fs.write_file(&self.uri(&path), content.to_vec(), &opts).await.map_err(Error::Conn)?;
+        Ok(())
+    }
+
     /// Creates a directory named `name` in the directory `parent`. Returns the new path.
     pub async fn create_dir(&self, parent: &str, name: &str) -> Result<String, Error> {
         let path = crate::paths::child_path(&self.workspace_path, parent, name).map_err(Error::Path)?;

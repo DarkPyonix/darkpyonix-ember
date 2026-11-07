@@ -20,6 +20,7 @@ pub mod mode;
 pub mod names;
 pub mod session;
 pub mod state;
+pub mod store;
 pub mod wire;
 
 /// The transport service name a device listens on for transfer offers.

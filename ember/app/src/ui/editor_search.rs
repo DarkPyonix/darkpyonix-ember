@@ -491,15 +491,20 @@ pub mod view {
         cmd.set(Some(FindCmd { id, goto: Some(m), replacements: Vec::new() }));
     }
 
+    /// Queue a match or caret location in `path` to be revealed as soon as `path` is the mounted active editor.
+    pub fn schedule_reveal(path: &str, m: Match) {
+        let mut reveal = ui().reveal;
+        reveal.set(Some((path.to_string(), m)));
+        REVEAL_SEEN.with(|c| c.set(false));
+    }
+
     fn open_hit(s: &Shared, path: &str, m: Match) {
         let mut tabs = s.tabs;
         tabs.write().open(path);
         s.open_errors.borrow_mut().remove(path);
         s.host.send(HostCommand::Open(path.to_string()));
         s.host.send(HostCommand::Focus(path.to_string()));
-        let mut reveal = ui().reveal;
-        reveal.set(Some((path.to_string(), m)));
-        REVEAL_SEEN.with(|c| c.set(false));
+        schedule_reveal(path, m);
     }
 
     const FIELD: &str = "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;";

@@ -54,6 +54,8 @@ pub mod proxy {
     pub const MAIN_THREAD_WINDOW: &str = "MainThreadWindow";
     pub const MAIN_THREAD_WORKSPACE: &str = "MainThreadWorkspace";
     pub const MAIN_THREAD_EXTENSION_SERVICE: &str = "MainThreadExtensionService";
+    pub const MAIN_THREAD_OUTPUT_SERVICE: &str = "MainThreadOutputService";
+    pub const MAIN_THREAD_MESSAGE_SERVICE: &str = "MainThreadMessageService";
     pub const MAIN_THREAD_SEARCH: &str = "MainThreadSearch";
 }
 
@@ -635,6 +637,15 @@ pub enum MainThreadCall {
     RegisterCommand { id: String },
     UnregisterCommand { id: String },
     ExecuteCommand { id: String, args: Value },
+    /// MainThreadOutputService calls
+    OutputRegister { label: String, file: Option<UriComponents>, language_id: Option<String>, extension_id: Option<String> },
+    OutputUpdate { channel_id: String },
+    OutputAppend { channel_id: String, value: String },
+    OutputClear { channel_id: String, till: Option<i64> },
+    OutputReveal { channel_id: String, preserve_focus: bool },
+    OutputDispose { channel_id: String },
+    /// MainThreadMessageService.$showMessage
+    ShowMessage { severity: u8, message: String, options: Value, commands: Vec<Value> },
     /// `MainThreadSearch.$registerTextSearchProvider(handle, scheme)` (FR-E7).
     RegisterTextSearchProvider { handle: i64, scheme: String },
     /// `MainThreadSearch.$unregisterProvider(handle)`: any search provider kind.
@@ -698,6 +709,36 @@ impl MainThreadCall {
             (Some(proxy::MAIN_THREAD_COMMANDS), "$executeCommand") => {
                 Self::ExecuteCommand { id: arg_str(a, 0)?, args: arg_json(a, 1) }
             }
+            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$register") => Self::OutputRegister {
+                label: arg_str(a, 0)?,
+                file: serde_json::from_value(arg_json(a, 1)).ok(),
+                language_id: arg_json(a, 2).as_str().map(str::to_owned),
+                extension_id: arg_json(a, 3).as_str().map(str::to_owned),
+            },
+            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$update") => Self::OutputUpdate {
+                channel_id: arg_str(a, 0)?,
+            },
+            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$append") => Self::OutputAppend {
+                channel_id: arg_str(a, 0)?,
+                value: arg_str(a, 1)?,
+            },
+            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$clear") => Self::OutputClear {
+                channel_id: arg_str(a, 0)?,
+                till: arg_json(a, 1).as_i64(),
+            },
+            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$reveal") => Self::OutputReveal {
+                channel_id: arg_str(a, 0)?,
+                preserve_focus: arg_json(a, 1).as_bool().unwrap_or(false),
+            },
+            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$dispose" | "$close") => Self::OutputDispose {
+                channel_id: arg_str(a, 0)?,
+            },
+            (Some(proxy::MAIN_THREAD_MESSAGE_SERVICE), "$showMessage") => Self::ShowMessage {
+                severity: arg_i64(a, 0).map(|s| s as u8).unwrap_or(1),
+                message: arg_str(a, 1)?,
+                options: arg_json(a, 2),
+                commands: arg_json(a, 3).as_array().cloned().unwrap_or_default(),
+            },
             (Some(proxy::MAIN_THREAD_SEARCH), "$registerTextSearchProvider") => {
                 Self::RegisterTextSearchProvider { handle: arg_i64(a, 0)?, scheme: arg_str(a, 1)? }
             }
@@ -863,5 +904,78 @@ mod tests {
             default_reply(Some(proxy::MAIN_THREAD_WINDOW), "$getInitialState"),
             Reply::Json(json!({"isFocused": true, "isActive": true}))
         );
+    }
+
+    #[test]
+    fn parses_output_and_message_service_calls() {
+        let r1 = req(
+            proxy::MAIN_THREAD_OUTPUT_SERVICE,
+            "$register",
+            json!(["Git", null, "git", "vscode.git"]),
+        );
+        match MainThreadCall::parse(&r1).unwrap() {
+            MainThreadCall::OutputRegister { label, file, language_id, extension_id } => {
+                assert_eq!(label, "Git");
+                assert!(file.is_none());
+                assert_eq!(language_id.as_deref(), Some("git"));
+                assert_eq!(extension_id.as_deref(), Some("vscode.git"));
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let r2 = req(
+            proxy::MAIN_THREAD_OUTPUT_SERVICE,
+            "$append",
+            json!(["ember-output-1", "hello world\n"]),
+        );
+        assert_eq!(
+            MainThreadCall::parse(&r2).unwrap(),
+            MainThreadCall::OutputAppend { channel_id: "ember-output-1".into(), value: "hello world\n".into() }
+        );
+
+        let r3 = req(
+            proxy::MAIN_THREAD_OUTPUT_SERVICE,
+            "$clear",
+            json!(["ember-output-1"]),
+        );
+        assert_eq!(
+            MainThreadCall::parse(&r3).unwrap(),
+            MainThreadCall::OutputClear { channel_id: "ember-output-1".into(), till: None }
+        );
+
+        let r4 = req(
+            proxy::MAIN_THREAD_OUTPUT_SERVICE,
+            "$reveal",
+            json!(["ember-output-1", true]),
+        );
+        assert_eq!(
+            MainThreadCall::parse(&r4).unwrap(),
+            MainThreadCall::OutputReveal { channel_id: "ember-output-1".into(), preserve_focus: true }
+        );
+
+        let r5 = req(
+            proxy::MAIN_THREAD_OUTPUT_SERVICE,
+            "$dispose",
+            json!(["ember-output-1"]),
+        );
+        assert_eq!(
+            MainThreadCall::parse(&r5).unwrap(),
+            MainThreadCall::OutputDispose { channel_id: "ember-output-1".into() }
+        );
+
+        let r6 = req(
+            proxy::MAIN_THREAD_MESSAGE_SERVICE,
+            "$showMessage",
+            json!([3, "Build failed", {"source": "Rust Analyzer"}, []]),
+        );
+        match MainThreadCall::parse(&r6).unwrap() {
+            MainThreadCall::ShowMessage { severity, message, options, commands } => {
+                assert_eq!(severity, 3);
+                assert_eq!(message, "Build failed");
+                assert_eq!(options["source"], "Rust Analyzer");
+                assert!(commands.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

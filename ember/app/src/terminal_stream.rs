@@ -61,6 +61,18 @@ pub fn attach_url(base: &str, computer_id: &str, term_id: &str) -> String {
     format!("{ws}/{}/attach", encode_segment(term_id))
 }
 
+/// `GET {base}/api/computers/{computer}/terms?project=&origin=&running=`: the terminals of a project.
+pub fn terms_list_url(base: &str, computer_id: &str, project: &str, origin: Option<&str>, running: bool) -> String {
+    let mut url = format!("{}?project={}", terms_url(base, computer_id), encode_segment(project));
+    if let Some(origin) = origin {
+        url.push_str(&format!("&origin={}", encode_segment(origin)));
+    }
+    if running {
+        url.push_str("&running=true");
+    }
+    url
+}
+
 /// Idempotency key of the editor's terminal for a project folder.
 pub fn session_key(project: &str, folder: &str) -> String {
     format!("{project}:{folder}")
@@ -110,6 +122,16 @@ pub struct TermInfo {
     pub title: String,
     #[serde(default)]
     pub size: PtySize,
+    /// What started it (`ide-ember`, `agent`, ...), as the list endpoint reports it.
+    #[serde(default)]
+    pub origin: String,
+    #[serde(default)]
+    pub project: Option<String>,
+    /// `running` while the process is alive.
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub last_activity_ms: u64,
 }
 
 /// One attached client.
@@ -142,6 +164,44 @@ pub struct TermHello {
     pub active: bool,
     pub read_only: bool,
     pub snapshot: bool,
+}
+
+impl TermHello {
+    /// The first frame of a viewer that only watches. The node enforces `read_only` (it refuses this
+    /// client's input and never gives it control); `active: false` keeps its window from resizing the
+    /// terminal the others share. The server does not force this: the owner's own panel declares it.
+    pub fn viewer() -> Self {
+        Self {
+            device: device_name(),
+            kind: Some("ember-app".into()),
+            pid: Some(std::process::id()),
+            size: None,
+            active: false,
+            read_only: true,
+            snapshot: true,
+        }
+    }
+}
+
+/// Which of a project's terminals a member's pane shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TermPick {
+    One(String),
+    /// The project has no running agent terminal.
+    None,
+    /// More than one runs and nothing in the list says which is the member's.
+    Ambiguous,
+}
+
+/// The terminal of a member's agent: the one running terminal of the project that an agent started.
+/// The node's list carries no link from a terminal to a member, so with two or more it does not guess.
+pub fn pick_agent_terminal(list: &[TermInfo]) -> TermPick {
+    let mut running = list.iter().filter(|t| t.origin == "agent" && t.state == "running");
+    match (running.next(), running.next()) {
+        (None, _) => TermPick::None,
+        (Some(t), None) => TermPick::One(t.id.clone()),
+        (Some(_), Some(_)) => TermPick::Ambiguous,
+    }
 }
 
 /// Frames the node (through the relay) sends down the attach socket.
@@ -566,6 +626,8 @@ struct Shared {
     size: Mutex<(u16, u16)>,
     tx: tokio::sync::mpsc::UnboundedSender<String>,
     on_change: Option<ChangeCallback>,
+    /// Why a viewer has nothing to show (set by [`start_view`]).
+    pick: Mutex<Option<TermPick>>,
 }
 
 /// Called after every state change, from the transport task.
@@ -598,6 +660,12 @@ impl TerminalHandle {
     /// Current state, copied out of the shared session.
     pub fn snapshot(&self) -> TerminalState {
         self.shared.session.lock().unwrap_or_else(|e| e.into_inner()).state.clone()
+    }
+
+    /// For a viewer: why there is no terminal ([`TermPick::None`] or [`TermPick::Ambiguous`]); `None`
+    /// while one is attached or being looked for.
+    pub fn pick(&self) -> Option<TermPick> {
+        self.shared.pick.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Bumped on every change; the UI polls it to know when to re-read [`snapshot`](Self::snapshot).
@@ -657,6 +725,7 @@ pub fn start(
         size: Mutex::new((80, 24)),
         tx,
         on_change,
+        pick: Mutex::new(None),
     });
     shared.update(|s| s.connecting());
     let task_shared = Arc::downgrade(&shared);
@@ -681,7 +750,7 @@ async fn run(
     computer: &str,
     folder: &str,
     project: &str,
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    rx: tokio::sync::mpsc::UnboundedReceiver<String>,
 ) -> Result<(), ClientError> {
     let live = || shared.upgrade().ok_or_else(|| ClientError::Protocol("terminal closed".into()));
     let (cols, rows) = {
@@ -726,8 +795,22 @@ async fn run(
         read_only: false,
         snapshot: true,
     };
+    stream(shared, base, computer, &created.term.id, hello, token, rx).await
+}
+
+/// Attaches to terminal `term_id` with `hello` as the first frame and runs until it ends.
+async fn stream(
+    shared: &std::sync::Weak<Shared>,
+    base: &str,
+    computer: &str,
+    term_id: &str,
+    hello: TermHello,
+    token: Option<String>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+) -> Result<(), ClientError> {
+    let live = || shared.upgrade().ok_or_else(|| ClientError::Protocol("terminal closed".into()));
     // TODO(#333): TLS. Plain ws only; wss is not configured.
-    let mut upgrade = attach_url(base, computer, &created.term.id).into_client_request()?;
+    let mut upgrade = attach_url(base, computer, term_id).into_client_request()?;
     if let Some(token) = &token {
         let value = HeaderValue::from_str(&ember_client::token::bearer_header(token))
             .map_err(|_| ClientError::Protocol("the server token is not a valid header value".into()))?;
@@ -772,9 +855,103 @@ async fn run(
     Ok(())
 }
 
+/// Watches a project's agent terminal on `computer_id`, read-only: lists the project's running
+/// terminals, takes the one agent terminal there is ([`pick_agent_terminal`]) and attaches with
+/// [`TermHello::viewer`]. With none, or with several, nothing is attached and [`TerminalHandle::pick`]
+/// says which. Dropping the last clone of the handle detaches; the terminal keeps running.
+pub fn start_view(
+    base_url: &str,
+    computer_id: &str,
+    project: &str,
+    on_change: Option<ChangeCallback>,
+) -> TerminalHandle {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let shared = Arc::new(Shared {
+        session: Mutex::new(TerminalSession::new()),
+        revision: AtomicU64::new(0),
+        size: Mutex::new((80, 24)),
+        tx,
+        on_change,
+        pick: Mutex::new(None),
+    });
+    shared.update(|s| s.connecting());
+    let task_shared = Arc::downgrade(&shared);
+    let (base, computer, project) = (base_url.to_owned(), computer_id.to_owned(), project.to_owned());
+    crate::services::services().rt.spawn(async move {
+        if let Err(e) = view(&task_shared, &base, &computer, &project, rx).await {
+            if let Some(shared) = task_shared.upgrade() {
+                shared.update(|s| s.fail(e.to_string()));
+            }
+        }
+        if let Some(shared) = task_shared.upgrade() {
+            shared.update(|s| s.disconnected());
+        }
+    });
+    TerminalHandle { shared }
+}
+
+async fn view(
+    shared: &std::sync::Weak<Shared>,
+    base: &str,
+    computer: &str,
+    project: &str,
+    rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+) -> Result<(), ClientError> {
+    let token = ember_client::token::token_allowed_for(base)
+        .then(ember_client::token::server_token_from_env)
+        .flatten();
+    let mut get = reqwest::Client::new().get(terms_list_url(base, computer, project, Some("agent"), true));
+    if let Some(token) = &token {
+        get = get.bearer_auth(token);
+    }
+    let list: Vec<TermInfo> = get.send().await?.error_for_status()?.json().await?;
+    let pick = pick_agent_terminal(&list);
+    let TermPick::One(term_id) = &pick else {
+        if let Some(strong) = shared.upgrade() {
+            *strong.pick.lock().unwrap_or_else(|e| e.into_inner()) = Some(pick);
+        }
+        return Ok(());
+    };
+    stream(shared, base, computer, term_id, TermHello::viewer(), token, rx).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l18_a_viewer_attaches_read_only_without_resizing_the_shared_terminal() {
+        let hello = serde_json::to_value(TermHello::viewer()).unwrap();
+        assert_eq!(hello["read_only"], true);
+        assert_eq!(hello["active"], false, "a viewer must not take the terminal's size");
+        assert_eq!(hello["snapshot"], true);
+        assert_eq!(hello["kind"], "ember-app");
+        assert!(hello["size"].is_null());
+    }
+
+    #[test]
+    fn fr_l18_the_project_terminal_list_url_carries_project_origin_and_running() {
+        assert_eq!(
+            terms_list_url("http://s:1/", "c 1", "my proj", Some("agent"), true),
+            "http://s:1/api/computers/c%201/terms?project=my%20proj&origin=agent&running=true"
+        );
+        assert_eq!(terms_list_url("http://s:1", "c", "p", None, false), "http://s:1/api/computers/c/terms?project=p");
+    }
+
+    fn term(id: &str, origin: &str, state: &str) -> TermInfo {
+        TermInfo { id: id.into(), origin: origin.into(), state: state.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn fr_l18_a_member_terminal_is_picked_only_when_it_is_the_one_running_agent_terminal() {
+        assert_eq!(pick_agent_terminal(&[]), TermPick::None);
+        assert_eq!(pick_agent_terminal(&[term("a", "agent", "running")]), TermPick::One("a".into()));
+        let mixed = [term("e", "ide-ember", "running"), term("x", "agent", "exited"), term("a", "agent", "running")];
+        assert_eq!(pick_agent_terminal(&mixed), TermPick::One("a".into()), "other origins and ended terminals do not count");
+        let two = [term("a", "agent", "running"), term("b", "agent", "running")];
+        assert_eq!(pick_agent_terminal(&two), TermPick::Ambiguous, "two candidates and no link to a member: no guess");
+        assert_eq!(pick_agent_terminal(&[term("e", "ide-ember", "running")]), TermPick::None);
+    }
 
     #[test]
     fn fr_l31_terminal_starts_disconnected_with_korean_message() {

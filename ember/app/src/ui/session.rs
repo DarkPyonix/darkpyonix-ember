@@ -20,7 +20,8 @@
 //!   with their own buttons;
 //! - only three size classes (GAPS: 창 폭 레이아웃): expanded shows the side list as a column
 //!   and two panes per row; medium and compact use a sheet and one pane at a time;
-//! - no terminal data in the client: the 터미널 toggle says "준비 중입니다";
+//! - the Terminal toggle is read-only (`term_pane`) and says "no terminal" for a member until
+//!   there is a way to attach to an agent session's terminal (TODO(#325));
 //! - the server has no context, outputs, changes, PR, timeline or port APIs for a session.
 
 use std::collections::HashSet;
@@ -49,7 +50,6 @@ const NO_PROJECT: &str = "프로젝트가 없습니다";
 const NO_MEMBERS: &str = "표시할 팀원이 없습니다";
 const PICK_FROM_LIST: &str = "목록에서 팀원을 고르면 이 탭에 추가됩니다";
 const NO_CONVERSATION: &str = "아직 대화가 없습니다";
-const TERMINAL_SOON: &str = "터미널은 준비 중입니다";
 const MODEL_LOCKED: &str = "실행 중인 세션의 모델은 바꿀 수 없습니다";
 const WEB_LOADING: &str = "불러오는 중입니다";
 const WEB_EMPTY: &str = "열려 있는 웹 포트가 없습니다";
@@ -162,7 +162,9 @@ pub const UI_STRINGS: &[&str] = &[
     NO_MEMBERS,
     PICK_FROM_LIST,
     NO_CONVERSATION,
-    TERMINAL_SOON,
+    crate::ui::term_pane::CONNECTING,
+    crate::ui::term_pane::NO_TERMINAL,
+    crate::ui::term_pane::FAILED,
     MODEL_LOCKED,
     WEB_LOADING,
     WEB_EMPTY,

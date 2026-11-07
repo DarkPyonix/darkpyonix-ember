@@ -49,6 +49,7 @@ pub struct Shared {
     pub palette_mode: Signal<crate::ui::palette::Mode>,
     pub palette_query: Signal<String>,
     pub palette_sel: Signal<usize>,
+    pub recent_files: Signal<Vec<String>>,
     pub theme: Signal<crate::ui::theme::ThemePref>,
     pub position: Signal<(usize, usize)>,
     pub stripes: Signal<Stripes>,
@@ -108,6 +109,7 @@ fn init(target: EditorTarget) {
     let palette_mode = use_hook(|| Signal::new_in_scope(crate::ui::palette::Mode::Commands, root));
     let palette_query = use_hook(|| Signal::new_in_scope(String::new(), root));
     let palette_sel = use_hook(|| Signal::new_in_scope(0usize, root));
+    let recent_files = use_hook(|| Signal::new_in_scope(Vec::<String>::new(), root));
     let prompt_at = use_hook(|| Signal::new_in_scope(0u64, root));
     let prompt_text = use_hook(|| Signal::new_in_scope(String::new(), root));
     let bottom_max = use_hook(|| Signal::new_in_scope(false, root));
@@ -120,7 +122,7 @@ fn init(target: EditorTarget) {
     let open_errors = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
     let editor_versions = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
     let last_find_cmd = use_hook(|| Rc::new(RefCell::new(0u64)));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -303,13 +305,23 @@ pub mod page {
         }
     }
 
+    fn record_recent_file(recent: &mut super::Signal<Vec<String>>, path: &str) {
+        let mut list = recent.read().clone();
+        crate::ui::palette::record_recent_path(&mut list, path);
+        recent.set(list);
+    }
+
     fn open_palette(s: &Shared, mode: crate::ui::palette::Mode) {
         let (mut open, mut query, mut sel, mut palette_mode) = (s.palette_open, s.palette_query, s.palette_sel, s.palette_mode);
         palette_mode.set(mode);
-        if mode != crate::ui::palette::Mode::Commands {
+        if mode != crate::ui::palette::Mode::Commands && mode != crate::ui::palette::Mode::GotoLine {
             s.host.send(HostCommand::IndexFiles);
         }
-        query.set(String::new());
+        if mode == crate::ui::palette::Mode::GotoLine {
+            query.set(":".to_string());
+        } else {
+            query.set(String::new());
+        }
         sel.set(0);
         open.set(true);
     }
@@ -321,7 +333,31 @@ pub mod page {
             crate::ui::palette::Payload::File(path) => {
                 let mut tabs = s.tabs;
                 tabs.write().open(&path);
-                s.host.send(HostCommand::Open(path));
+                s.host.send(HostCommand::Open(path.clone()));
+                let mut recent = s.recent_files;
+                record_recent_file(&mut recent, &path);
+            }
+            crate::ui::palette::Payload::FileAt { path, line, column } => {
+                let mut tabs = s.tabs;
+                tabs.write().open(&path);
+                s.host.send(HostCommand::Open(path.clone()));
+                let mut recent = s.recent_files;
+                record_recent_file(&mut recent, &path);
+                let line0 = line.saturating_sub(1) as u32;
+                let col0 = column.unwrap_or(1).saturating_sub(1) as u32;
+                find_send(s, Some(crate::ui::find::Match { line: line0, start: col0, end: col0 }), Vec::new());
+                let mut pos_sig = s.position;
+                pos_sig.set((line, column.unwrap_or(1)));
+            }
+            crate::ui::palette::Payload::GotoLine { line, column } => {
+                let line0 = line.saturating_sub(1) as u32;
+                let col0 = column.unwrap_or(1).saturating_sub(1) as u32;
+                find_send(s, Some(crate::ui::find::Match { line: line0, start: col0, end: col0 }), Vec::new());
+                let mut pos_sig = s.position;
+                pos_sig.set((line, column.unwrap_or(1)));
+            }
+            crate::ui::palette::Payload::ExtensionCommand(id) => {
+                s.host.send(HostCommand::ExecuteCommand(id));
             }
         }
     }
@@ -330,21 +366,38 @@ pub mod page {
     /// Enter does the highlighted one, Escape or a click outside closes it. The design follows the
     /// app's sheet rules in the mockup's tokens (the mockup has no palette).
     fn palette_sheet(s: &Shared, keymap: Keymap) -> Element {
-        use crate::ui::palette::{highlight_segments, items_for, move_selection, placeholder, rank, Payload};
-        let (mut open, mut query, mut sel) = (s.palette_open, s.palette_query, s.palette_sel);
-        let mode = *s.palette_mode.read();
-        let (files, index_running, index_capped) = {
-            let state = s.host.state.lock().unwrap();
-            (state.file_items.clone(), state.index_running, state.index_capped)
+        use crate::ui::palette::{
+            apply_line_suffix, effective_mode, goto_line_item, highlight_segments, items_for_workbench,
+            move_selection, parse_path_line_suffix, placeholder, rank, Payload,
         };
-        let items = items_for(mode, keymap, Os::current(), &files);
+        let (mut open, mut query, mut sel) = (s.palette_open, s.palette_query, s.palette_sel);
+        let base_mode = *s.palette_mode.read();
+        let raw_text = query.read().clone();
+        let (mode, effective_query) = effective_mode(base_mode, &raw_text);
+        let (files, index_running, index_capped, ext_commands) = {
+            let state = s.host.state.lock().unwrap();
+            (state.file_items.clone(), state.index_running, state.index_capped, state.extension_commands.clone())
+        };
+        let recent = s.recent_files.read().clone();
+        let (items, ranked, line_suffix) = if mode == crate::ui::palette::Mode::GotoLine {
+            let item = goto_line_item(&effective_query);
+            let items = vec![item];
+            let ranked = vec![crate::ui::palette::Ranked { index: 0, score: 100, matched: Vec::new() }];
+            (items, ranked, None)
+        } else {
+            let (file_q, suffix) = parse_path_line_suffix(&effective_query);
+            let items = items_for_workbench(mode, keymap, Os::current(), &s.folder, &files, &ext_commands, &recent);
+            let ranked = rank(file_q, &items);
+            (items, ranked, suffix)
+        };
         let hint_text = placeholder(mode, keymap);
-        let text = query.read().clone();
-        let ranked = rank(&text, &items);
         let shown: Vec<_> = ranked.iter().take(50).cloned().collect();
         let chosen = (*sel.read()).min(shown.len().saturating_sub(1));
         // A command the editor cannot do yet is listed but does nothing: Enter on it leaves the sheet open.
-        let enter_payload = shown.get(chosen).filter(|r| items[r.index].enabled).map(|r| items[r.index].payload.clone());
+        let enter_payload = shown
+            .get(chosen)
+            .filter(|r| items[r.index].enabled)
+            .map(|r| apply_line_suffix(items[r.index].payload.clone(), line_suffix));
         let count = shown.len();
         let run_s = s.clone();
         rsx! {
@@ -354,7 +407,7 @@ pub mod page {
                 div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
                     {icon("search")}
                     input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
-                        "aria-label": "{crate::ui::palette::search_label(mode)}", placeholder: "{hint_text}", value: "{text}", autofocus: true,
+                        "aria-label": "{crate::ui::palette::search_label(mode)}", placeholder: "{hint_text}", value: "{raw_text}", autofocus: true,
                         oninput: move |event| { query.set(event.value()); sel.set(0); },
                         onkeydown: move |event| {
                             match event.key() {
@@ -373,10 +426,10 @@ pub mod page {
                         },
                     }
                 }
-                if mode != crate::ui::palette::Mode::Commands && index_running && !shown.is_empty() {
+                if mode != crate::ui::palette::Mode::Commands && mode != crate::ui::palette::Mode::GotoLine && index_running && !shown.is_empty() {
                     div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일을 더 찾는 중입니다…" }
                 }
-                if mode != crate::ui::palette::Mode::Commands && index_capped {
+                if mode != crate::ui::palette::Mode::Commands && mode != crate::ui::palette::Mode::GotoLine && index_capped {
                     div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일이 많아 일부만 표시합니다." }
                 }
                 div { style: "max-height:320px; overflow:auto;", role: "listbox",
@@ -386,8 +439,8 @@ pub mod page {
                             let item = &items[r.index];
                             let segments = highlight_segments(&item.title, &r.matched);
                             let enabled = item.enabled;
-                            let hint = if enabled { item.hint.clone() } else { "준비 중".to_string() };
-                            let payload = item.payload.clone();
+                            let hint = if enabled { item.hint.clone() } else if mode == crate::ui::palette::Mode::GotoLine { String::new() } else { "준비 중".to_string() };
+                            let payload = apply_line_suffix(item.payload.clone(), line_suffix);
                             let click_s = s.clone();
                             let class = if row == chosen { "ed-tn sel" } else { "ed-tn" };
                             let row_style = if enabled { "--d:0; height:34px;" } else { "--d:0; height:34px; color:var(--muted);" };
@@ -992,6 +1045,7 @@ pub mod page {
                         {
                             let path = row.path.clone();
                             let host = s.host.clone();
+                            let mut recent_files = s.recent_files;
                             let open_errors = s.open_errors.clone();
                             let is_dir = row.is_dir;
                             let chosen = selected.as_ref().map(|(p, _)| p.as_str()) == Some(row.path.as_str());
@@ -1013,7 +1067,12 @@ pub mod page {
                                         let was_open = expanded.read().contains(&path);
                                         if was_open { expanded.write().remove(&path); }
                                         else { expanded.write().insert(path.clone()); host.send(HostCommand::List(path.clone())); }
-                                    } else { open_errors.borrow_mut().remove(&path); tabs.write().open(&path); host.send(HostCommand::Open(path.clone())); }
+                                    } else {
+                                        open_errors.borrow_mut().remove(&path);
+                                        tabs.write().open(&path);
+                                        record_recent_file(&mut recent_files, &path);
+                                        host.send(HostCommand::Open(path.clone()));
+                                    }
                                 },
                                 if is_dir { if row.open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} } } else { span { class: "chev-sp" } }
                                 if is_dir { {icon_px("folder", 15)} } else { {icon_px("file", 15)} }
@@ -1051,6 +1110,7 @@ pub mod page {
                     {
                         let path = path.clone(); let close_path = path.clone();
                         let host = s.host.clone(); let close_host = s.host.clone();
+                        let mut recent_files = s.recent_files;
                         let selected = current == Some(path.as_str());
                         let label = base_name(&path).to_string();
                                                 let class = if selected { "ed-tab on" } else { "ed-tab" };
@@ -1058,6 +1118,7 @@ pub mod page {
                         let close_label = format!("닫기: {label}");
                         rsx! { div { class, role: "tab", "aria-selected": "{selected}", "aria-label": "{tab_label}", onclick: move |_| {
                             tabs.write().activate(&path);
+                            record_recent_file(&mut recent_files, &path);
                             host.send(HostCommand::Focus(path.clone()));
                         }, {icon_px(if selected { "file-w" } else { "file" }, 14)} "{label}" if dirty[i] { span { class: "ed-dirty" } } button { class: "ed-tx", "aria-label": "{close_label}", onclick: move |event| { event.stop_propagation(); tabs.write().close(&close_path); close_host.send(HostCommand::Close(close_path.clone())); if let Some(next) = tabs.read().current_path() { close_host.send(HostCommand::Focus(next.to_string())); } }, {icon_px(if selected { "close-w" } else { "close" }, 12)} } } }
                     }
@@ -1216,10 +1277,12 @@ pub mod page {
                 for (i, (path, severity, message, location, source)) in rows.into_iter().enumerate() {
                     {
                         let host = s.host.clone();
+                        let mut recent_files = s.recent_files;
                         let dot = match severity { Severity::Error => "ed-pdot err", Severity::Warning => "ed-pdot warn", _ => "ed-pdot" };
                         let row_label = crate::ui::editor::problem_aria_label(match severity { Severity::Error => "오류", Severity::Warning => "경고", _ => "정보" }, &message, &location);
                         rsx! { div { key: "{i}", class: "ed-prow", role: "listitem", "aria-label": "{row_label}", onclick: move |_| {
                             tabs.write().open(&path);
+                            record_recent_file(&mut recent_files, &path);
                             host.send(HostCommand::Open(path.clone()));
                         },
                             span { class: "{dot}" }

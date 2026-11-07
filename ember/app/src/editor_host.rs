@@ -21,6 +21,7 @@ pub enum HostCommand {
     /// List every file below the project folder for quick open.
     IndexFiles,
     Delete { path: String, is_dir: bool },
+    ExecuteCommand(String),
 }
 
 #[derive(Default)]
@@ -42,6 +43,8 @@ pub struct HostState {
     pub gone: Vec<String>,
     /// (old, new) paths an explorer edit renamed, for the window to move their tabs.
     pub renamed: Vec<(String, String)>,
+    /// Extension commands from contributes.commands.
+    pub extension_commands: Vec<ember_editor::ContributedCommand>,
     pub updates: Vec<SessionUpdate>,
 }
 
@@ -89,6 +92,9 @@ impl HostState {
     pub fn apply_update(&mut self, update: SessionUpdate) {
         if let SessionUpdate::ConnectionLost { reason } = &update {
             self.connection_lost(reason);
+        }
+        if let SessionUpdate::Commands { commands } = &update {
+            self.extension_commands = commands.clone();
         }
         self.updates.push(update);
     }
@@ -260,6 +266,7 @@ impl EditorHost {
                         Some(HostCommand::Focus(path)) => { let _ = session.focus(session.uri(&path)); }
                         Some(HostCommand::Widget(uri, generation, event)) => { let _ = session.widget_event(uri, generation, event); }
                         Some(HostCommand::Resync(uri)) => { let _ = session.resync(uri); }
+                        Some(HostCommand::ExecuteCommand(id)) => { let _ = session.execute_command(id, Vec::new()); }
                         None => break,
                     },
                     update = updates.recv() => match update {

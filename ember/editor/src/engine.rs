@@ -94,6 +94,8 @@ pub enum Input {
     FilesChanged(Vec<FileChange>),
     /// The highlighting worker finished a batch of jobs.
     Highlighted(HighlightOutput),
+    /// Execute a command (dispatches to extension host or workbench).
+    ExecuteCommand { id: String, arguments: Vec<Value> },
     /// Nothing happened; run due timers.
     Tick,
 }
@@ -154,6 +156,8 @@ pub enum SessionUpdate {
     ConnectionLost { reason: String },
     /// The problems list changed: every marker of every file, errors first.
     Problems { problems: Vec<crate::diagnostics::Problem> },
+    /// Commands contributed by extensions or registered at runtime.
+    Commands { commands: Vec<crate::commands::ContributedCommand> },
 }
 
 #[derive(Debug, Clone)]
@@ -256,6 +260,9 @@ impl SessionCore {
             Input::FileWritten { uri, token, result } => self.on_file_written(&uri, token, result),
             Input::FilesChanged(changes) => self.on_files_changed(changes),
             Input::Highlighted(output) => self.on_highlighted(output),
+            Input::ExecuteCommand { id, arguments } => {
+                self.run_command(CommandDto { id, title: String::new(), tooltip: None, arguments });
+            }
             Input::Tick => {}
         }
         self.run_timers();

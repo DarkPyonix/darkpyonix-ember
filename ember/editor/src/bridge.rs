@@ -235,6 +235,7 @@ impl WidgetBridge {
                 self.problems = problems;
                 BridgeAction::None
             }
+            SessionUpdate::Commands { .. } => BridgeAction::None,
         }
     }
 

@@ -244,6 +244,7 @@ impl EditorSession {
         // two bootstrap calls below are outstanding.
         let (tx, rx) = mpsc::unbounded_channel();
         let (updates_tx, updates_rx) = mpsc::unbounded_channel();
+        let commands = crate::commands::parse_contributed_commands(&extensions);
         let mut core = SessionCore::new(LanguageRegistry::from_extensions(&extensions), config.core.clone(), Instant::now());
         core.set_grammar_catalog(crate::textmate::GrammarCatalog::from_extensions(&extensions));
         let driver = Driver {
@@ -255,6 +256,7 @@ impl EditorSession {
             updates: updates_tx,
             reqs: HashMap::new(),
             watches: Arc::new(Mutex::new(HashMap::new())),
+            commands,
         };
         let task = tokio::spawn(driver.run(rx, rpc_events, changes, ipc_lifecycle));
 
@@ -377,6 +379,11 @@ impl EditorSession {
         self.send(Command::Input(Input::TriggerInline { uri, generation, pos }))
     }
 
+    /// Run a command by its id, dispatching to the extension host or workbench.
+    pub fn execute_command(&self, id: impl Into<String>, arguments: Vec<Value>) -> Result<(), Error> {
+        self.send(Command::Input(Input::ExecuteCommand { id: id.into(), arguments }))
+    }
+
     /// After [`SessionUpdate::Desync`]: re-send the session's text as a new generation.
     pub fn resync(&self, uri: UriComponents) -> Result<(), Error> {
         self.send(Command::Resync(uri))
@@ -409,6 +416,7 @@ struct Driver {
     reqs: HashMap<Token, u32>,
     /// uri key → watch request id.
     watches: Arc<Mutex<HashMap<String, String>>>,
+    commands: Vec<crate::commands::ContributedCommand>,
 }
 
 /// How many jobs may wait for the highlighting thread. A job that does not fit is not lost silently: its
@@ -456,6 +464,9 @@ impl Driver {
     ) {
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<Input>();
         self.highlight = Some(spawn_highlighter(internal_tx.clone()));
+        if !self.commands.is_empty() {
+            let _ = self.updates.send(SessionUpdate::Commands { commands: self.commands.clone() });
+        }
         let mut changes = Some(changes);
         let mut lifecycle = Some(ipc_lifecycle);
         loop {

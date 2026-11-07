@@ -853,6 +853,11 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 
 **Rejected.** Loopback trust alone, which is today's model and is documented in `docs/guide/en/install.html` as "anyone who can reach `EMBER_LISTEN` can use every route"; a per-process secret; session tokens only. The issue lists the last two as options and gives no reason against them, so none is recorded here.
 
+**OSE socket relay and connection token lifetime (C2, #458, #461).** [provisional] The OSE process accepts only one connection token for its life (`--connection-token-file`, read once at start). Option B (minting a fresh OSE token on every `GET /api/sessions/{id}/ide` call) is **rejected**: starting a new OSE process per launch would drop every other open window on that folder and break one-process-per-folder reuse, and rotating the token file while running is not supported by OSE and would break reconnects (`reconnectionToken`) for existing windows. Instead, Ember uses **C2 (server-side token substitution on the authenticated relay)**:
+- `OseManager` keeps the real 64-hex token in the 0600 token file and in server memory only; it never leaves the server.
+- `GET /api/sessions/{id}/ide` returns `relay: "/api/computers/{computer}/ide/relay/{launch_id}"` and a per-process 64-hex `placeholder` as `connection_token` (alongside `endpoint` for one release of backward compatibility).
+- `GET /api/computers/{computer}/ide/relay/{launch_id}` (behind `auth::protect` on the local listener, `check_origin`, and the `FR-N3`/`FR-N7` device gate on the transport; never on the guest door) upgrades to a binary WebSocket, dials the launch's `127.0.0.1:<port>`, and in the first 8 KiB of client-to-OSE bytes replaces every occurrence of the 64-byte ASCII `placeholder` with the real 64-hex token (including across frame boundaries). Revoking a device (`FR-N3`) drops its relay streams within one heartbeat, and the device never held the real OSE token.
+
 ### D38: Ember 에디터 = the functions of Code-OSS (OSE), the design of the mockup
 
 **Decision.** [user, 2026-11-06: "내가 요구하는건 기능은 oss랑 동일하고 디자인은 목업인거란다 제발 좀 똑바로 일하자."] The Ember 에디터 window does everything Code-OSS (the OSE runtime the server starts) does, and looks like the mockup `.scratch/mockup-v8/editor.html` with `editor.css`: the island style of D25 (rounded island panels for the code area, tabs and tool windows, 40 px icon-only tool-window stripes, breadcrumbs under the tabs), with the light and dark tokens of the mockup's `style.css`. Function parity is tracked row by row in `docs/design/EDITOR-PARITY.md`.
@@ -924,4 +929,22 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 **Why.** GitHub data is already reachable through the same `gh` path as the pull request screen, so the card costs an API and a view, not an identity system.
 
 **Status.** Specified (`FR-L35`, `FR-G13`, #498). The server API is in progress; the card is built by the Home owner against it.
+
+### D42: Per-node OSE deployment for the Ember editor
+
+**Decision.** [provisional, #457] When the Ember editor opens a session whose computer is a registered node, the OSE runtime (`dpx-ose-server`) runs on **that node**, spawned and managed by `ember-node` (`FR-W4a` to `FR-W4c`), not on the main server against the project mount.
+
+- [provisional] `ember-node` manages one OSE process per canonical workspace folder under its allowed roots (`PathPolicy`), passing `--server-data-dir <state_dir>/ose-data`, `--extensions-dir <state_dir>/ose-data/extensions` and `--connection-token-file <state_dir>/ose-data/tokens/<hash>.token` (mode 0600, deleted on exit), with the same cleared environment allowlist (`HOME`, `PATH`, `LANG`, `LC_ALL`, `TMPDIR`, `USER`) and 120 s extension-install rules as the server's local `OseManager` (#459, #461).
+- [provisional] `ember-node` exposes three authenticated routes behind the node bearer token (and the peer allowlist over the `FR-N5` transport): `POST /ide/ose` (`{folder}` -> `{launch_id, port}`), `GET /ide/ose/{launch_id}/relay` (WebSocket binary byte relay to the node's `127.0.0.1:<port>` OSE listener, where the node performs the C2 placeholder-to-real-token substitution in the first 8 KiB of the client-to-OSE stream so the real OSE connection token never leaves the node), and `POST /ide/extensions` (`{id, version?}` -> `{installed, id, output}`).
+- [provisional] `ember-server` relays `GET /api/sessions/{id}/ide`, `GET /api/computers/{computer}/ide/relay/{launch_id}` and `POST /api/computers/{computer}/ide/extensions` to the target computer's `ember-node` over HTTP or the `FR-N5` peer-to-peer transport. The editor client always connects to the main server's `/api/computers/{computer}/ide/relay/{launch_id}` and never holds a node credential or dials a node directly.
+
+**Rejected** *[provisional]*. Option (b), running one OSE on the main server against the project mount (`ember/server/src/computers/mount.rs`):
+1. The project mount exists only while a Claude Code turn is live (`COMPUTERS.md` "Project mount / When"); opening the editor on an idle Claude session, a Codex session, or a server built without `mount-nfs`/`mount-fuse` finds no mount at all.
+2. Language servers (`rust-analyzer`, `pyright`, `tsserver`), formatters, linters and build tasks spawned by the OSE extension host would execute on the main server's CPU, OS and toolchain instead of the node where the project's compilers, virtual environments and SDKs live.
+3. The project mount has a 1 s attribute/listing cache (`EMBER_MOUNT_TTL_MS`), no file-watcher change feed (`inotify`/`FSEvents` do not cross the mount), no exclusive rename, and is not compiled or verified in CI.
+
+**Why.** Running the OSE on the node puts `remoteFilesystem`, native file watching (`fs.watch`), language servers and extension hosts on the same machine and filesystem as the project and the node's persistent terminals (`§P`), while the server relay keeps authentication, device revocation (`FR-N3`) and the guest-door exclusion (`FR-T14`) at one boundary.
+
+**Status.** Specified (`FR-W4a` to `FR-W4c`, Draft; issue #457). Local server OSE and its relay are in #458/#459/#461; node OSE routes and server-to-node relay follow this spec.
+
 

@@ -31,19 +31,31 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::computers::{Computer, Computers, LOCAL, LOCAL_NAME};
-use crate::ose::OseManager;
+use crate::ose::{valid_computer_id, OseManager, RelayLookupError, RelayTarget};
 use crate::session::Sessions;
 use crate::store::SessionRecord;
+
+/// Byte window at the start of the client-to-OSE stream in which the C2 placeholder is replaced
+/// with the real OSE connection token (`FR-W4`, `#458`, `#461`).
+pub const RELAY_SUBSTITUTION_WINDOW: usize = 8 * 1024;
+/// Timeout for opening the loopback TCP connection to the local OSE process.
+const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Maximum chunk size read from the OSE TCP socket per WebSocket binary frame.
+const RELAY_READ_CHUNK: usize = 32 * 1024;
 
 /// One computer's IDE endpoints.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -153,13 +165,18 @@ pub struct EmberLaunch {
 #[derive(Clone, Serialize, PartialEq)]
 pub struct EmberOseConnection {
     pub endpoint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
     pub connection_token: String,
 }
 
 impl std::fmt::Debug for EmberOseConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EmberOseConnection").field("endpoint", &self.endpoint)
-            .field("connection_token", &"[REDACTED]").finish()
+        f.debug_struct("EmberOseConnection")
+            .field("endpoint", &self.endpoint)
+            .field("relay", &self.relay)
+            .field("connection_token", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -462,13 +479,284 @@ fn build(
     computers: Option<Arc<Computers>>,
     ose: Arc<OseManager>,
 ) -> Router {
-    Router::new().route("/api/sessions/{id}/ide", get(ide_targets)).with_state(IdeState {
-        sessions,
-        config,
-        ose,
-        computers,
-        warned: Arc::new(Mutex::new(HashSet::new())),
-    })
+    Router::new()
+        .route("/api/sessions/{id}/ide", get(ide_targets))
+        .route("/api/computers/{computer}/ide/relay/{launch_id}", get(ide_relay))
+        .with_state(IdeState {
+            sessions,
+            config,
+            ose,
+            computers,
+            warned: Arc::new(Mutex::new(HashSet::new())),
+        })
+}
+
+/// Rolling C2 placeholder-to-real-token substitution for the first `window` bytes of the
+/// client-to-OSE byte stream (`FR-W4`, `#458`, `#461`).
+///
+/// While inside the window, the last `placeholder.len() - 1` bytes that cannot yet be proven not
+/// to start a match are held in `pending`, so a 64-byte placeholder split across two WebSocket
+/// binary frames is still replaced in place. Once `seen` reaches `window`, buffered bytes are
+/// flushed and all later bytes pass through untouched.
+struct TokenSubstituter {
+    placeholder: Vec<u8>,
+    real_token: Vec<u8>,
+    window: usize,
+    seen: usize,
+    pending: Vec<u8>,
+}
+
+impl TokenSubstituter {
+    fn new(placeholder: &str, real_token: &str, window: usize) -> Self {
+        Self {
+            placeholder: placeholder.as_bytes().to_vec(),
+            real_token: real_token.as_bytes().to_vec(),
+            window,
+            seen: 0,
+            pending: Vec::new(),
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        !self.placeholder.is_empty()
+            && self.placeholder.len() == self.real_token.len()
+            && self.placeholder != self.real_token
+    }
+
+    fn feed(&mut self, chunk: &[u8]) -> Vec<u8> {
+        if !self.enabled() || chunk.is_empty() {
+            return chunk.to_vec();
+        }
+        if self.seen >= self.window {
+            let mut out = std::mem::take(&mut self.pending);
+            out.extend_from_slice(chunk);
+            return out;
+        }
+        let remaining = self.window - self.seen;
+        let in_win = chunk.len().min(remaining);
+        self.seen += in_win;
+        self.pending.extend_from_slice(&chunk[..in_win]);
+        let tail = &chunk[in_win..];
+
+        let pat_len = self.placeholder.len();
+        let mut out = Vec::with_capacity(self.pending.len() + tail.len());
+        let mut i = 0;
+        let flush_all = self.seen >= self.window;
+        // Keep only the longest suffix of `pending[i..]` that is a prefix of `placeholder`.
+        let mut keep = 0;
+        if !flush_all {
+            let max_k = (pat_len - 1).min(self.pending.len());
+            for k in (1..=max_k).rev() {
+                if self.pending[self.pending.len() - k..] == self.placeholder[..k] {
+                    keep = k;
+                    break;
+                }
+            }
+        }
+        let stop = self.pending.len().saturating_sub(keep);
+        while i < stop {
+            if i + pat_len <= self.pending.len() && self.pending[i..i + pat_len] == self.placeholder[..] {
+                out.extend_from_slice(&self.real_token);
+                i += pat_len;
+            } else {
+                out.push(self.pending[i]);
+                i += 1;
+            }
+        }
+        if flush_all || i >= self.pending.len() {
+            self.pending.clear();
+        } else {
+            self.pending.drain(..i);
+        }
+        out.extend_from_slice(tail);
+        out
+    }
+
+    fn flush(&mut self) -> Vec<u8> {
+        if !self.enabled() || self.pending.is_empty() {
+            return std::mem::take(&mut self.pending);
+        }
+        let pat_len = self.placeholder.len();
+        let mut out = Vec::with_capacity(self.pending.len());
+        let mut i = 0;
+        while i < self.pending.len() {
+            if i + pat_len <= self.pending.len() && self.pending[i..i + pat_len] == self.placeholder[..] {
+                out.extend_from_slice(&self.real_token);
+                i += pat_len;
+            } else {
+                out.push(self.pending[i]);
+                i += 1;
+            }
+        }
+        self.pending.clear();
+        out
+    }
+}
+
+async fn ide_relay(
+    State(st): State<IdeState>,
+    Path((computer, launch_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if let Err(code) = crate::api::origin::check_origin(&headers) {
+        return error(code, "origin not allowed".into());
+    }
+    if !valid_computer_id(&computer) {
+        return error(StatusCode::BAD_REQUEST, "invalid computer id".into());
+    }
+    if computer != LOCAL {
+        if let Some(c) = &st.computers {
+            match c.registry().get(&computer) {
+                Ok(Some(_)) => {
+                    return error(StatusCode::BAD_REQUEST, "OSE server is only available on the local computer".into())
+                }
+                Ok(None) => return error(StatusCode::NOT_FOUND, format!("unknown computer: {computer}")),
+                Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+            }
+        } else {
+            return error(StatusCode::NOT_FOUND, format!("unknown computer: {computer}"));
+        }
+    }
+    let target = match st.ose.open_relay(&computer, &launch_id) {
+        Ok(t) => t,
+        Err(RelayLookupError::NotFound) => {
+            return error(StatusCode::NOT_FOUND, format!("unknown OSE launch: {launch_id}"))
+        }
+        Err(RelayLookupError::TooManyRelays) => {
+            return error(StatusCode::TOO_MANY_REQUESTS, "too many active IDE relays".into())
+        }
+    };
+    ws.on_upgrade(move |socket| pump_ose_relay(socket, target)).into_response()
+}
+
+async fn pump_ose_relay(socket: WebSocket, target: RelayTarget) {
+    let tcp = match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, tokio::net::TcpStream::connect(target.address)).await {
+        Ok(Ok(s)) => {
+            let _ = s.set_nodelay(true);
+            s
+        }
+        _ => {
+            let mut socket = socket;
+            let _ = socket
+                .send(Message::Close(Some(CloseFrame {
+                    code: 1011,
+                    reason: "cannot connect to OSE server".into(),
+                })))
+                .await;
+            return;
+        }
+    };
+    let (mut tcp_read, mut tcp_write) = tcp.into_split();
+    let (mut ws_out, mut ws_in) = socket.split();
+    let mut sub = TokenSubstituter::new(&target.placeholder, &target.real_token, RELAY_SUBSTITUTION_WINDOW);
+    let idle = target.idle_timeout;
+    let last_activity_ns = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let started = std::time::Instant::now();
+    let touch = {
+        let last = last_activity_ns.clone();
+        move || {
+            last.store(
+                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+    };
+
+    // Bounded channel (capacity 4) for control frames (Pong / 1003 Close) from the reader side so
+    // `ws_in` and `ws_out` never block each other across `tokio::select!`.
+    let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::channel::<Message>(4);
+
+    let touch_in = touch.clone();
+    let c2s = async move {
+        while let Some(msg) = ws_in.next().await {
+            touch_in();
+            match msg {
+                Ok(Message::Binary(bytes)) => {
+                    let out = sub.feed(&bytes);
+                    if !out.is_empty() && tcp_write.write_all(&out).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(Message::Text(_)) => {
+                    let _ = ctrl_tx
+                        .send(Message::Close(Some(CloseFrame {
+                            code: 1003,
+                            reason: "text frames are not allowed on the OSE binary relay".into(),
+                        })))
+                        .await;
+                    let _ = tcp_write.shutdown().await;
+                    break;
+                }
+                Ok(Message::Ping(p)) => {
+                    if ctrl_tx.send(Message::Pong(p)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(Message::Pong(_)) => {}
+                Ok(Message::Close(_)) | Err(_) => break,
+            }
+        }
+        let rest = sub.flush();
+        if !rest.is_empty() {
+            let _ = tcp_write.write_all(&rest).await;
+        }
+        let _ = tcp_write.shutdown().await;
+    };
+
+    let s2c = async move {
+        let mut read_buf = vec![0u8; RELAY_READ_CHUNK];
+        loop {
+            tokio::select! {
+                biased;
+                ctrl = ctrl_rx.recv(), if !ctrl_rx.is_closed() => {
+                    if let Some(frame) = ctrl {
+                        let is_close = matches!(frame, Message::Close(_));
+                        if ws_out.send(frame).await.is_err() || is_close {
+                            break;
+                        }
+                    }
+                }
+                n = tcp_read.read(&mut read_buf) => {
+                    match n {
+                        Ok(0) | Err(_) => {
+                            if let Ok(frame) = ctrl_rx.try_recv() {
+                                let _ = ws_out.send(frame).await;
+                            } else {
+                                let _ = ws_out.close().await;
+                            }
+                            break;
+                        }
+                        Ok(n) => {
+                            touch();
+                            if ws_out.send(Message::Binary(read_buf[..n].to_vec().into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    let idle_watchdog = async {
+        let check_step = (idle / 4).clamp(Duration::from_millis(20), Duration::from_secs(5));
+        loop {
+            tokio::time::sleep(check_step).await;
+            let last = Duration::from_nanos(last_activity_ns.load(std::sync::atomic::Ordering::Relaxed));
+            if started.elapsed().saturating_sub(last) >= idle {
+                break;
+            }
+        }
+    };
+
+    let both = async {
+        tokio::join!(c2s, s2c);
+    };
+    tokio::select! {
+        _ = both => {}
+        _ = idle_watchdog => {}
+    }
 }
 
 #[derive(Deserialize)]
@@ -549,10 +837,15 @@ mod tests {
         let launch = EmberLaunch {
             session: "s".into(), project: "p".into(), computer: "local".into(), computer_name: None,
             folder: "/w".into(), server_url: None,
-            ose: Some(EmberOseConnection { endpoint: "http://localhost:9000".into(), connection_token: "secret".into() }),
+            ose: Some(EmberOseConnection {
+                endpoint: "http://localhost:9000".into(),
+                relay: Some("/api/computers/local/ide/relay/abc".into()),
+                connection_token: "secret".into(),
+            }),
         };
         let value = serde_json::to_value(launch).unwrap();
         assert_eq!(value["ose"]["endpoint"], "http://localhost:9000");
+        assert_eq!(value["ose"]["relay"], "/api/computers/local/ide/relay/abc");
         assert_eq!(value["ose"]["connection_token"], "secret");
     }
 

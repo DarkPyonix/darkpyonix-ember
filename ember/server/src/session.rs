@@ -205,6 +205,23 @@ pub const MEM_LIMIT_MAX_MB: u64 = 262_144;
 /// The fixed refusal text for an out-of-range limit.
 pub const MEM_LIMIT_RANGE_MESSAGE: &str = "mem_limit_mb must be 0 (clear) or between 256 and 262144 MiB";
 
+/// The synthetic `harness_settings.harness` row used for global new-member defaults (FR-L20, #481, #670).
+pub const DEFAULTS_HARNESS_ID: &str = "_defaults";
+pub const DEFAULT_AGENT_KEY: &str = "agent";
+pub const DEFAULT_MODEL_KEY: &str = "model";
+pub const DEFAULT_EFFORT_KEY: &str = "effort";
+pub const DEFAULT_MODE_KEY: &str = "mode";
+pub const EFFORT_LEVELS: &[&str] = &["Low", "Medium", "High"];
+
+/// Global new-member defaults (`새 팀원 기본값`, FR-L20, #481, #670).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDefaults {
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub mode: Option<String>,
+}
+
 pub struct Sessions {
     store: Arc<Store>,
     start_hooks: std::sync::Mutex<Vec<StartHook>>,
@@ -324,6 +341,41 @@ impl Sessions {
     /// The memory limit in MiB for the next agent of `agent`, if one was set.
     pub fn mem_limit_mb(&self, agent: AgentKind) -> Option<u64> {
         self.mem_limits.lock().unwrap().get(&agent).copied()
+    }
+
+    /// Read the stored new-member defaults (`새 팀원 기본값`, FR-L20, #481, #670). Any invalid row in
+    /// the database is ignored rather than returned.
+    pub fn agent_defaults(&self) -> anyhow::Result<AgentDefaults> {
+        let agent = self
+            .store
+            .harness_setting(DEFAULTS_HARNESS_ID, DEFAULT_AGENT_KEY)?
+            .and_then(|a| match AgentKind::parse(&a) {
+                Some(k) if k != AgentKind::Scripted => Some(k.as_str().to_string()),
+                _ => None,
+            });
+        let model = self
+            .store
+            .harness_setting(DEFAULTS_HARNESS_ID, DEFAULT_MODEL_KEY)?
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty() && m.chars().count() <= 128 && !m.chars().any(char::is_control));
+        let effort = self
+            .store
+            .harness_setting(DEFAULTS_HARNESS_ID, DEFAULT_EFFORT_KEY)?
+            .filter(|e| EFFORT_LEVELS.contains(&e.as_str()));
+        let mode = self
+            .store
+            .harness_setting(DEFAULTS_HARNESS_ID, DEFAULT_MODE_KEY)?
+            .filter(|m| crate::projects::PERMISSION_MODES.contains(&m.as_str()));
+        Ok(AgentDefaults { agent, model, effort, mode })
+    }
+
+    /// Store or clear a single new-member default key (`agent`, `model`, `effort`, `mode`).
+    pub fn set_agent_default_key(&self, key: &str, value: Option<&str>) -> anyhow::Result<()> {
+        match value.map(str::trim).filter(|v| !v.is_empty()) {
+            Some(v) => self.store.set_harness_setting(DEFAULTS_HARNESS_ID, key, v)?,
+            None => self.store.clear_harness_setting(DEFAULTS_HARNESS_ID, key)?,
+        }
+        Ok(())
     }
 
     /// Register a hook that adds environment to every agent process this server starts.

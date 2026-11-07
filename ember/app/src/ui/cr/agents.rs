@@ -71,6 +71,84 @@ fn local_save(store: LocalStore) {
     }
 }
 
+/// Apply the server's stored `AgentDefaults` and `AgentSettingsResponse` into the local store
+/// and wake any mounted `AgentsScreen` (FR-L20, #481, #670).
+pub fn sync_from_server(
+    defaults: Option<&crate::server::AgentDefaults>,
+    settings: Option<&crate::server::AgentSettingsResponse>,
+) {
+    let mut cur = local_load();
+    let before = cur.clone();
+    if let Some(d) = defaults {
+        cur.apply_server_defaults(d);
+    }
+    if let Some(s) = settings {
+        cur.apply_server_settings(s);
+    }
+    if cur != before {
+        local_save(cur);
+        if let Some(s) = crate::services::try_services() {
+            crate::ui::coexist::SharedLive::bump(&s.ui.live.agent_store_rev);
+        }
+    }
+}
+
+/// Persist the current default harness, model, effort and mode to `PUT /api/agents/defaults`.
+fn save_server_defaults(defaults: crate::server::AgentDefaults) {
+    if crate::services::try_services().is_none() {
+        return;
+    }
+    crate::services::run_shared(
+        async move {
+            let s = crate::services::services();
+            if s.demo.is_some() {
+                return None;
+            }
+            match s.server.put_agent_defaults(&defaults).await {
+                Ok(saved) => {
+                    s.ui.live.agent_defaults.set(saved);
+                    None
+                }
+                Err(e) => Some(crate::ui::agents::server_error_status(&e)),
+            }
+        },
+        |failed| {
+            if let Some(status) = failed {
+                post_notice(&format!(
+                    "기본값을 저장하지 못했습니다. {}",
+                    crate::ui::agents::account_error_ko(status)
+                ));
+            }
+        },
+    );
+}
+
+/// Persist a harness's memory limit to `PUT /api/agents/{agent}/settings` (FR-L20, FR-S8).
+fn save_server_mem_limit(h: AgentHarness, mem_limit_mb: Option<u32>) {
+    let Some(agent) = h.kind().map(str::to_string) else { return };
+    if crate::services::try_services().is_none() {
+        return;
+    }
+    crate::services::run_shared(
+        async move {
+            let s = crate::services::services();
+            if s.demo.is_some() {
+                return None;
+            }
+            let mb = mem_limit_mb.map(u64::from);
+            s.server.put_agent_mem_limit(&agent, mb).await.err().map(|e| crate::ui::agents::server_error_status(&e))
+        },
+        |failed| {
+            if let Some(status) = failed {
+                post_notice(&format!(
+                    "메모리 한도를 저장하지 못했습니다. {}",
+                    crate::ui::agents::account_error_ko(status)
+                ));
+            }
+        },
+    );
+}
+
 /// Change the store and keep it for the next time the screen opens.
 fn edit(store: &MutableState<LocalStore>, f: impl FnOnce(&mut LocalStore)) {
     let mut cur = store.get_untracked();
@@ -235,6 +313,14 @@ pub fn AgentsScreenWith(
     let p = ember_theme().palette;
     let section = remember(move || mutable_state_of(initial_section));
     let store = remember(|| mutable_state_of(local_load()));
+    if let Some(s) = crate::services::try_services() {
+        let rev = s.ui.live.agent_store_rev.get();
+        let seen = remember(move || mutable_state_of(rev));
+        if seen.get_untracked() != rev {
+            seen.set(rev);
+            store.set(local_load());
+        }
+    }
     let window = compose_rust::runtime::current_window_size();
     let compact = window.is_compact() || window.width_dp <= 900.0;
     let pad = if compact { SP[3] } else { SP[6] };
@@ -1142,7 +1228,11 @@ fn HarnessCard(
                             .modifier(Modifier::new().width(120.0))
                             .on_change(move |v| {
                                 let gb = v.round().clamp(1.0, 16.0) as u32;
-                                edit(&store_mem, |s| s.settings_mut(h).mem_limit_mb = Some(gb * 1024));
+                                let mb = gb * 1024;
+                                edit(&store_mem, |s| s.settings_mut(h).mem_limit_mb = Some(mb));
+                                if !example {
+                                    save_server_mem_limit(h, Some(mb));
+                                }
                             });
                         Label(&format!("{} GB", cur_gb as u32), Fs::Sm, Weight::Medium, None, Some(1));
                     });
@@ -1319,10 +1409,22 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
                     let (st, list) = (store.clone(), rows.clone());
                     OptionSheet(pick_open.get(), &row_labels, row_chosen, 320.0, close, move |i| {
                         if let Some(r) = list.get(i) {
-                            // Device-local, so the demo may keep it; nothing is sent.
+                            let mut payload = None;
                             edit(&st, |s| {
-                                crate::ui::agents::apply_pick(s, r);
+                                if crate::ui::agents::apply_pick(s, r) {
+                                    if let Some(m) = r.model.as_ref() {
+                                        s.settings_mut(r.harness).model = Some(m.clone());
+                                    }
+                                    payload = Some(s.to_server_defaults());
+                                }
                             });
+                            if let Some(d) = payload {
+                                if example {
+                                    post_notice(crate::ui::agents::DEMO_CHOICE_NOTE);
+                                } else {
+                                    save_server_defaults(d);
+                                }
+                            }
                         }
                     });
                     let close = {
@@ -1354,20 +1456,20 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
 
     if compact {
         for h in harnesses {
-            ModelCard(h, store, compact);
+            ModelCard(h, store, compact, example);
         }
     } else {
         cu::Row().spacing(18.0).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                ModelCard(harnesses[0], store, compact);
+                ModelCard(harnesses[0], store, compact, example);
             });
             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                ModelCard(harnesses[1], store, compact);
+                ModelCard(harnesses[1], store, compact, example);
             });
         });
         cu::Row().spacing(18.0).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                ModelCard(harnesses[2], store, compact);
+                ModelCard(harnesses[2], store, compact, example);
             });
             cu::Spacer().modifier(Modifier::new().weight(1.0));
         });
@@ -1543,7 +1645,7 @@ fn check_login(add: &MutableState<crate::ui::agents::AddAccount>, id: String) {
     );
 }
 
-fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool) {
+fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, example: bool) {
     let p = ember_theme().palette;
     let settings = store.get().settings(h).clone();
     let specs: &'static [ModelSpec] = match h {
@@ -1583,7 +1685,18 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool) 
                             &EFFORT_OPTIONS,
                             cur_effort,
                             move |e| {
-                                edit(&store_eff, |s| s.settings_mut(h).effort = Some(e.to_string()));
+                                let mut payload = None;
+                                edit(&store_eff, |s| {
+                                    s.settings_mut(h).effort = Some(e.to_string());
+                                    if s.default_harness == Some(h) {
+                                        payload = Some(s.to_server_defaults());
+                                    }
+                                });
+                                if let Some(d) = payload {
+                                    if !example {
+                                        save_server_defaults(d);
+                                    }
+                                }
                             },
                         );
                     }
@@ -1591,13 +1704,33 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool) 
             );
 
             // Row 2: 기본 권한 모드
+            let store_mode = store.clone();
             SettingRow(
                 "기본 권한 모드",
                 "새 팀원이 도구를 쓸 때 확인하는 방식입니다. 바이패스는 모든 명령을 묻지 않고 실행합니다.",
-                || {
+                move || {
+                    let modes: Vec<crate::ui::home::PermMode> = h
+                        .picker_harness()
+                        .map(crate::ui::home::modes_for)
+                        .unwrap_or(&[crate::ui::home::PermMode::Ask])
+                        .to_vec();
+                    let cur_mode = settings.mode;
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                        ModelPickerPill("명령마다 확인", Some(super::shell::ICON_GEAR_SVG), move || {
-                            post_notice("기본 권한 모드를 선택합니다");
+                        let st = store_mode.clone();
+                        ModelPickerPill(cur_mode.label(), Some(super::shell::ICON_GEAR_SVG), move || {
+                            let next = cycle(&modes, Some(&cur_mode)).unwrap_or(crate::ui::home::PermMode::Ask);
+                            let mut payload = None;
+                            edit(&st, |s| {
+                                s.settings_mut(h).mode = next;
+                                if s.default_harness == Some(h) {
+                                    payload = Some(s.to_server_defaults());
+                                }
+                            });
+                            if let Some(d) = payload {
+                                if !example {
+                                    save_server_defaults(d);
+                                }
+                            }
                         });
                         if settings.mode.is_bypass() {
                             Pill("주의", PillTone::Orange, true);
@@ -1632,7 +1765,19 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool) 
                         let m_id = m_id.clone();
                         ModelRadio(&format!("{} 기본 모델로 선택", m.name), is_def, move || {
                             let m_id = m_id.clone();
-                            edit(&store_m, |s| s.settings_mut(h).model = Some(m_id));
+                            let mut payload = None;
+                            edit(&store_m, |s| {
+                                s.settings_mut(h).model = Some(m_id.clone());
+                                if s.default_harness == Some(h) {
+                                    s.default_model = Some(m_id);
+                                    payload = Some(s.to_server_defaults());
+                                }
+                            });
+                            if let Some(d) = payload {
+                                if !example {
+                                    save_server_defaults(d);
+                                }
+                            }
                             post_notice("기본 모델을 바꿨습니다");
                         });
                     });

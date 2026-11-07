@@ -742,6 +742,7 @@ mod tests {
                     Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } if *s == mode.label() => {
                         Some(*node_id)
                     }
+                    Mutation::SetText { node_id, text, .. } if *text == mode.label() => Some(*node_id),
                     _ => None,
                 })
                 .unwrap_or_else(|| panic!("no button named {}", mode.label()));

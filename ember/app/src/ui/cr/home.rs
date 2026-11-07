@@ -392,6 +392,22 @@ pub fn Dot(color: compose_rust::Color) {
     cu::Spacer().modifier(Modifier::new().size(8.0, 8.0).background(paint(color)).shape_role(ShapeRole::Full));
 }
 
+/// A legend dot: solid in `solid`, or an 8 px hatched square in `hatch` (the bars' hatch, FR-L23).
+fn DotOrHatch(hatched: bool, hatch: compose_rust::Color, solid: compose_rust::Color) {
+    if !hatched {
+        Dot(solid);
+        return;
+    }
+    // The bars' pattern: same colour for fill and lines, same step (`legend_hatch_style`).
+    // TODO(compose-rust#428, #429): the dots have no accessible label; the Label beside them is the text.
+    let (step, _alpha) = usage::legend_hatch_style();
+    let mut list = DrawList::builder().round_rect(paint(hatch), 0.0, 0.0, 8.0, 8.0, 2.0, 1.0);
+    for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(0.0, 0.0, 8.0, 8.0, step) {
+        list = list.line(paint(hatch), x1, y1, x2, y2, 1.0);
+    }
+    cu::Canvas(list.build()).modifier(Modifier::new().size(8.0, 8.0));
+}
+
 // ---------------------------------------------------------------------------------------------
 // The screen
 // ---------------------------------------------------------------------------------------------
@@ -1566,16 +1582,26 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
         if h > 0.0 {
             let color = paint(if i == now { p.orange.strong } else { p.grey.strong });
             list = list.round_rect(color, x, y, w, h, 3.0, 1.0);
-            for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(x, y, w, h, 5.0) {
+            for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(x, y, w, h, usage::legend_hatch_style().0) {
                 list = list.line(color, x1, y1, x2, y2, 1.0);
             }
         }
     }
     let commands = list.build();
+    let legend = usage::cost_legend(
+        usage::period_cost(&load, days.get()).is_some(),
+        usage::window_total(&load, days.get()).is_some(),
+        layout(compose_rust::runtime::current_window_size().width_dp).compact,
+    );
     let first = series.first().map(|(d, _)| d.clone()).unwrap_or_default();
     let last = series.last().map(|(d, _)| d.clone()).unwrap_or_default();
     Tile(|| {
         CardHead(shell::ICON_GAUGE_SVG, "비용과 토큰 추이", || {
+            for e in &legend {
+                DotOrHatch(e.hatched, p.grey.strong, p.text);
+                Label(e.label, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            }
             for n in [7usize, 14] {
                 let d = days.clone();
                 // The mockup's toggle pill is 42 x 26.
@@ -1598,8 +1624,6 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
                 cu::Spacer().modifier(Modifier::new().width(SP[0]));
             }
         });
-        // Legend above the chart: says what the bars are.
-        Label(&usage::cost_legend(&load, days.get()), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         cu::Canvas(commands).modifier(Modifier::new().size(chart_w, H + 1.0));
         cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
             Label(&first, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));

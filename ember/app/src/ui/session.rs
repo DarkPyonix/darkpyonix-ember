@@ -78,6 +78,8 @@ pub fn timeline_summary(demo: bool) -> &'static str {
 
 pub const UI_STRINGS: &[&str] = &[
     crate::ui::home::INTEGRATIONS_TITLE,
+    crate::ui::usage::LEGEND_COST,
+    crate::ui::usage::LEGEND_TOKENS,
     crate::ui::enrol_flow::NAME_HELP,
     crate::ui::enrol_flow::STDIN_NOTE,
     crate::ui::enrol_flow::STDIN_FORM_NOTE,

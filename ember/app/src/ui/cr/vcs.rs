@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{commit_action_branch_line, commit_failure_reloads_snapshot, commit_action_gate, commit_action_key, commit_detail_from, commit_detail_view, commit_files_shown, fetch_commit_detail, file_stat_text, run_branch_from, run_commit_cherry_pick, run_commit_revert, snapshot_dirty, CommitAction, CommitDetailLoad, CommitDetailView, choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, MemberCwd, TeamRow, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState, banner_sub, banner_title, fetch_merge_state, banner_button_text, merge_tap, merge_tap_key, run_merge_abort, run_merge_commit, MergeAction, MergeLoad, MergeView, MERGE_ABORT_NOTE, MERGE_COMMIT_NOTE, merge_answer_reloads, pick_all_key, pick_all_note, pick_all_text};
+use crate::ui::vcs::{branch_switch_allowed, branch_matches, branch_bar_text, BRANCH_SWITCH_NOTE, BRANCH_CREATE_NOTE, STASH_NOW_NOTE, commit_action_branch_line, commit_failure_reloads_snapshot, commit_action_gate, commit_action_key, commit_detail_from, commit_detail_view, commit_files_shown, fetch_commit_detail, file_stat_text, run_branch_from, run_commit_cherry_pick, run_commit_revert, snapshot_dirty, CommitAction, CommitDetailLoad, CommitDetailView, choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, MemberCwd, TeamRow, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState, banner_sub, banner_title, fetch_merge_state, banner_button_text, merge_tap, merge_tap_key, run_merge_abort, run_merge_commit, MergeAction, MergeLoad, MergeView, MERGE_ABORT_NOTE, MERGE_COMMIT_NOTE, merge_answer_reloads, pick_all_key, pick_all_note, pick_all_text};
 use ember_client::api::{GitPrMergeMethod, GitPrReviewAction};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
@@ -1067,6 +1067,7 @@ fn FilesHeader(
         cu::Spacer().modifier(Modifier::new().width(SP[0]));
         Label(&format!("변경 파일 {}", diffs_len), Fs::Sm, Weight::Semibold, Some(paint(p.text)), Some(1));
         cu::Spacer().modifier(Modifier::new().weight(1.0));
+        Label(STASH_NOW_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
         CircleIconButton(ICON_STASH_SVG, remote_button_labels()[3], move || {
             match &stash {
                 Some(a) => a.stash_now(diffs_len),
@@ -3396,12 +3397,15 @@ fn BranchRow(e: &BranchEntry, busy: bool, on_switch: impl FnMut() + 'static) {
                 if e.current {
                     Pill("현재", PillTone::Green, true);
                 }
+                if e.default {
+                    Pill("기본", PillTone::Sky, true);
+                }
                 if let Some(w) = &e.worktree {
                     Pill(&format!("워크트리 {}", worktree_tail(w)), PillTone::Sky, true);
                 }
             });
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                Txt(&e.sync_text(), TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+                Txt(&if show_bars { branch_bar_text(e.ahead, e.behind) } else { e.sync_text() }, TypeRole::Caption, Some(paint(p.text_2)), Some(2), Some(TextOverflow::Ellipsis), None, None);
                 if show_bars {
                     BranchBar(a, paint(p.green.strong));
                     BranchBar(b, paint(p.orange.strong));
@@ -3424,12 +3428,15 @@ fn BranchRow(e: &BranchEntry, busy: bool, on_switch: impl FnMut() + 'static) {
 fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layout: PaneLayout) {
     let p = ember_theme().palette;
     let key_project = actions.as_ref().map(|a| a.project.clone());
-    let state = remember_with_key(key_project, || mutable_state_of(BranchLoad::Loading));
+    let state = remember_with_key(key_project.clone(), || mutable_state_of(BranchLoad::Loading));
     let retry = remember(|| mutable_state_of(0_u64));
     let name = remember(|| mutable_state_of(String::new()));
     let generation = remember(|| mutable_state_of(0_u64));
     let base = remember(|| mutable_state_of(None::<String>));
     let base_menu = remember(|| mutable_state_of(false));
+    let query = remember_with_key(key_project.clone(), || mutable_state_of(String::new()));
+    let switch_busy = remember_with_key(key_project.clone(), || mutable_state_of(false));
+    let switch_last = remember_with_key(key_project.clone(), || mutable_state_of(None::<i64>));
     if let Some(a) = actions.clone() {
         let (st, cnt) = (state.clone(), count.clone());
         launched_effect((a.project.clone(), a.reload.get(), retry.get()), move || async move {
@@ -3475,8 +3482,10 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
                     let open = base_menu.clone();
                     AppButton(&base_text, None, ButtonKind::Default, false, !names.is_empty(), true, move || open.set(true));
                     SmallNote(if base.get().is_some() { "고른 브랜치에서 만듭니다" } else { "현재 브랜치에서 만듭니다" });
+                    Label(BRANCH_CREATE_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
                     let (act, nm, gn, bs) = (actions.clone(), name.clone(), generation.clone(), base.clone());
-                    AppButton("만들고 전환", None, ButtonKind::Primary, false, actions.is_some() && valid_branch_name(nm.get().trim()), true, move || {
+                    let create_enabled = actions.is_some() && valid_branch_name(nm.get().trim());
+                    AppButton("만들고 전환", None, if create_enabled { ButtonKind::Primary } else { ButtonKind::Default }, false, create_enabled, true, move || {
                         if let (Some(a), Some(new_name)) = (act.as_ref(), branch_input(&nm.get())) {
                             let submitted = nm.get();
                             let (value, gn, bs) = (nm.clone(), gn.clone(), bs.clone());
@@ -3498,6 +3507,15 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
     let list = move || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
             creator();
+            Label(BRANCH_SWITCH_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
+            let search = query.clone();
+            EmberField(FieldOptions {
+                fill_max_width: true,
+                text: Some(query.get()),
+                placeholder: "브랜치 검색".to_string(),
+                on_value_change: Some(Box::new(move |v| search.set(v))),
+                ..Default::default()
+            });
             match status {
                 BranchLoad::Loading => {
                     Label("브랜치를 불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
@@ -3513,12 +3531,31 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
                         });
                         return;
                     }
-                    let (default, rest) = split_branches(&entries);
+                    let filtered: Vec<_> = entries.into_iter().filter(|e| branch_matches(&e.name, &query.get())).collect();
+                    if filtered.is_empty() {
+                        Label("검색 결과가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                        return;
+                    }
+                    let (default, rest) = split_branches(&filtered);
                     let row = |e: &BranchEntry| {
                         let (a, target) = (switch_actions.clone(), e.name.clone());
-                        BranchRow(e, false, move || {
+                        let (busy, last) = (switch_busy.clone(), switch_last.clone());
+                        BranchRow(e, switch_busy.get() || a.is_none(), move || {
+                            let now = crate::demo::now_ms();
+                            if !branch_switch_allowed(busy.get(), last.get(), now) { return; }
                             if let Some(a) = &a {
-                                a.branch(target.clone(), false, || {});
+                                busy.set(true);
+                                last.set(Some(now));
+                                let (project, reload, busy, target) = (a.project.clone(), a.reload.clone(), busy.clone(), target.clone());
+                                crate::services::run_shared(async move {
+                                    git_call::<Value>(&project, "checkout", json!({"branch": target})).await
+                                }, move |result| {
+                                    match result {
+                                        Ok(_) => { notice::post("브랜치를 전환했습니다".to_string()); reload.set(reload.get() + 1); }
+                                        Err(e) => notice::post(failure_text("브랜치 전환을 ", &e)),
+                                    }
+                                    busy.set(false);
+                                });
                             }
                         });
                     };
@@ -4972,6 +5009,20 @@ mod tests {
     #[compose_rust::runtime::composable]
     fn branches_sample_compact() {
         BranchesPane(None, mutable_state_of(None), PaneLayout::Tabs);
+    }
+
+    #[test]
+    fn fr_l19_branches_render_search_guidance_default_and_bar_text() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        for content in [branches_sample_wide as fn(), branches_sample_compact as fn()] {
+            let text = text_of(content);
+            assert!(text.contains("브랜치 검색"));
+            assert!(text.contains(BRANCH_SWITCH_NOTE));
+            assert!(text.contains(BRANCH_CREATE_NOTE));
+            assert!(text.contains("기본"));
+            assert!(text.contains(branch_bar_text(2, 1).as_str()));
+        }
     }
 
     #[test]

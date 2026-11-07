@@ -2234,6 +2234,54 @@ pub fn pr_created_notice(number: u64) -> String {
 // Branches (FR-G9)
 // ---------------------------------------------------------------------------------------------
 
+#[cfg(test)]
+mod fr_l19_branch_followup_tests {
+    use super::*;
+
+    #[test]
+    fn fr_l19_switch_guard_covers_flight_and_600_ms() {
+        assert!(!branch_switch_allowed(true, None, 1000));
+        assert!(!branch_switch_allowed(false, Some(1000), 1599));
+        assert!(branch_switch_allowed(false, Some(1000), 1600));
+        assert!(branch_switch_allowed(false, None, 1000));
+    }
+
+    #[test]
+    fn fr_l19_branch_search_ignores_case_and_whitespace() {
+        assert!(branch_matches("feature/Hello", "  HELLO "));
+        assert!(!branch_matches("main", "hello"));
+        assert!(branch_matches("main", " "));
+    }
+
+    #[test]
+    fn fr_l19_branch_and_stash_notes_are_clear() {
+        assert!(BRANCH_SWITCH_NOTE.contains("변경"));
+        assert!(BRANCH_CREATE_NOTE.contains("변경"));
+        assert!(STASH_NOW_NOTE.contains("추적하지 않는 파일"));
+        for note in [BRANCH_SWITCH_NOTE, BRANCH_CREATE_NOTE, STASH_NOW_NOTE] {
+            assert!(note.ends_with("합니다.") || note.ends_with("입니다.") || note.ends_with("습니다."));
+        }
+        assert_eq!(branch_bar_text(2, 1), "원격보다 2개 앞서고 1개 뒤처져 있습니다.");
+    }
+}
+
+/// Guidance shown before branch and stash actions.
+pub const BRANCH_SWITCH_NOTE: &str = "전환할 때 커밋하지 않은 변경 사항이 함께 이동할 수 있습니다.";
+pub const BRANCH_CREATE_NOTE: &str = "만들고 전환할 때 커밋하지 않은 변경 사항이 함께 이동할 수 있습니다.";
+pub const STASH_NOW_NOTE: &str = "스태시는 추적하지 않는 파일을 포함하지 않습니다.";
+
+pub fn branch_switch_allowed(busy: bool, last: Option<i64>, now: i64) -> bool {
+    !busy && last.map_or(true, |time| now.saturating_sub(time) >= 600)
+}
+
+pub fn branch_matches(name: &str, query: &str) -> bool {
+    name.to_lowercase().contains(&query.trim().to_lowercase())
+}
+
+pub fn branch_bar_text(ahead: u32, behind: u32) -> String {
+    format!("원격보다 {ahead}개 앞서고 {behind}개 뒤처져 있습니다.")
+}
+
 /// Commits the ahead/behind bars show at full width; more is drawn as full.
 pub const BRANCH_BAR_CAP: u32 = 10;
 

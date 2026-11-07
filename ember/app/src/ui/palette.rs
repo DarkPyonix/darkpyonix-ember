@@ -6,6 +6,7 @@
 //! letters in a row, and a late start all count. Equal scores: the shorter title, then the list's order.
 
 use super::keymap::{Action, Keymap, Os};
+pub use ember_editor::{parse_contributed_commands, ContributedCommand};
 
 /// What choosing an item does.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +15,12 @@ pub enum Payload {
     Action(Action),
     /// A file, by its path.
     File(String),
+    /// A file, by its path, with line and optional column.
+    FileAt { path: String, line: usize, column: Option<usize> },
+    /// Jump caret to a line and optional column in the current file.
+    GotoLine { line: usize, column: Option<usize> },
+    /// An extension command, by its id.
+    ExtensionCommand(String),
 }
 
 /// One line of the palette.
@@ -163,6 +170,19 @@ pub fn action_items(keymap: Keymap, os: Os) -> Vec<Item> {
         .collect()
 }
 
+/// Palette items for extension commands.
+pub fn extension_command_items(commands: &[ContributedCommand]) -> Vec<Item> {
+    commands
+        .iter()
+        .map(|cmd| Item {
+            payload: Payload::ExtensionCommand(cmd.id.clone()),
+            title: cmd.display_title(),
+            hint: String::new(),
+            enabled: true,
+        })
+        .collect()
+}
+
 /// A title cut into runs for drawing: `(text, matched)`, where a matched run is bold. `matched` holds
 /// character positions, as [`Ranked`] reports them.
 pub fn highlight_segments(title: &str, matched: &[usize]) -> Vec<(String, bool)> {
@@ -188,13 +208,14 @@ pub fn move_selection(selected: usize, len: usize, down: bool) -> usize {
     }
 }
 
-/// What the palette lists: commands (the palette action), files (find in a keymap that means "go to
-/// file"), or both (find in a keymap that means "search everywhere").
+/// What the palette lists: commands, files, both, go-to-line, or recent files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Commands,
     Files,
     Everything,
+    GotoLine,
+    Recent,
 }
 
 /// The mode an action opens the palette in. `Find` follows the keymap's own meaning of it.
@@ -203,6 +224,8 @@ pub fn mode_for(action: Action, keymap: Keymap) -> Option<Mode> {
         (Action::Palette, _) => Some(Mode::Commands),
         (Action::Find, Keymap::VsCode) => Some(Mode::Files),
         (Action::Find, Keymap::JetBrains) => Some(Mode::Everything),
+        (Action::Recent, _) => Some(Mode::Recent),
+        (Action::GotoLine, _) => Some(Mode::GotoLine),
         _ => None,
     }
 }
@@ -212,6 +235,8 @@ pub fn placeholder(mode: Mode, keymap: Keymap) -> &'static str {
     match mode {
         Mode::Commands => keymap.palette_label(),
         Mode::Files | Mode::Everything => keymap.find_label(),
+        Mode::GotoLine => "이동할 줄 번호 입력",
+        Mode::Recent => "최근 파일",
     }
 }
 
@@ -241,17 +266,201 @@ pub fn file_items(folder: &str, paths: &[String]) -> Vec<Item> {
     items
 }
 
+/// Record a path in a recent files list in MRU order (most recent first, no duplicates, capped at 50).
+pub fn record_recent_path(recent: &mut Vec<String>, path: &str) {
+    let path = path.trim();
+    if path.is_empty() {
+        return;
+    }
+    recent.retain(|p| p != path);
+    recent.insert(0, path.to_string());
+    if recent.len() > 50 {
+        recent.truncate(50);
+    }
+}
+
+/// Order `files` so that recently accessed files come first in MRU order.
+pub fn prioritize_recent_files(folder: &str, files: &[Item], recent_paths: &[String]) -> Vec<Item> {
+    if recent_paths.is_empty() {
+        return files.to_vec();
+    }
+    let mut recent_items = Vec::new();
+    let mut matched_recent = std::collections::HashSet::new();
+    for r_path in recent_paths {
+        if let Some(item) = files.iter().find(|i| match &i.payload {
+            Payload::File(p) => p == r_path,
+            _ => false,
+        }) {
+            recent_items.push(item.clone());
+            matched_recent.insert(r_path.clone());
+        } else {
+            let root = folder.trim_end_matches('/');
+            let title = r_path.strip_prefix(root).and_then(|rest| rest.strip_prefix('/')).unwrap_or(r_path).to_string();
+            recent_items.push(Item {
+                payload: Payload::File(r_path.clone()),
+                title,
+                hint: String::new(),
+                enabled: true,
+            });
+            matched_recent.insert(r_path.clone());
+        }
+    }
+    let mut result = recent_items;
+    for item in files {
+        if let Payload::File(path) = &item.payload {
+            if matched_recent.contains(path) {
+                continue;
+            }
+        }
+        result.push(item.clone());
+    }
+    result
+}
+
+/// The items for a mode, including extension commands and prioritized recent files.
+pub fn items_for_workbench(
+    mode: Mode,
+    keymap: Keymap,
+    os: Os,
+    folder: &str,
+    files: &[Item],
+    extension_commands: &[ContributedCommand],
+    recent_paths: &[String],
+) -> Vec<Item> {
+    match mode {
+        Mode::Commands => {
+            let mut items = action_items(keymap, os);
+            items.extend(extension_command_items(extension_commands));
+            items
+        }
+        Mode::Files | Mode::Recent => prioritize_recent_files(folder, files, recent_paths),
+        Mode::Everything => {
+            let mut items = action_items(keymap, os);
+            items.extend(extension_command_items(extension_commands));
+            items.extend(prioritize_recent_files(folder, files, recent_paths));
+            items
+        }
+        Mode::GotoLine => Vec::new(),
+    }
+}
+
 /// The items for a mode: commands, files, or commands then files. `files` are the indexed files as
 /// [`file_items`] makes them.
 pub fn items_for(mode: Mode, keymap: Keymap, os: Os, files: &[Item]) -> Vec<Item> {
-    match mode {
-        Mode::Commands => action_items(keymap, os),
-        Mode::Files => files.to_vec(),
-        Mode::Everything => {
-            let mut items = action_items(keymap, os);
-            items.extend_from_slice(files);
-            items
+    items_for_workbench(mode, keymap, os, "", files, &[], &[])
+}
+
+/// Resolve the effective palette mode and the query string after stripping prefix markers.
+/// `>` in file/everything/recent modes switches to `Mode::Commands`.
+/// `:` in file/everything/commands/recent modes switches to `Mode::GotoLine`.
+pub fn effective_mode(mode: Mode, query: &str) -> (Mode, String) {
+    let trimmed = query.trim_start();
+    if mode == Mode::GotoLine {
+        let q = if let Some(rest) = trimmed.strip_prefix(':') { rest.trim() } else { trimmed };
+        (Mode::GotoLine, q.to_string())
+    } else if matches!(mode, Mode::Files | Mode::Recent | Mode::Everything) && trimmed.starts_with('>') {
+        (Mode::Commands, trimmed[1..].trim_start().to_string())
+    } else if matches!(mode, Mode::Files | Mode::Commands | Mode::Recent | Mode::Everything) && trimmed.starts_with(':') {
+        (Mode::GotoLine, trimmed[1..].trim().to_string())
+    } else {
+        (mode, query.to_string())
+    }
+}
+
+/// Parse line and optional column from go-to-line query text (`42` or `42:10`).
+pub fn parse_goto_line(text: &str) -> Option<(usize, Option<usize>)> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some((l_str, c_str)) = text.split_once(':') {
+        let line = l_str.trim().parse::<usize>().ok()?;
+        if line == 0 {
+            return None;
         }
+        let c_str = c_str.trim();
+        let col = if c_str.is_empty() {
+            None
+        } else {
+            let c = c_str.parse::<usize>().ok()?;
+            if c == 0 {
+                return None;
+            }
+            Some(c)
+        };
+        Some((line, col))
+    } else {
+        let line = text.parse::<usize>().ok()?;
+        if line == 0 {
+            return None;
+        }
+        Some((line, None))
+    }
+}
+
+/// Create a row item for GotoLine mode.
+pub fn goto_line_item(query: &str) -> Item {
+    match parse_goto_line(query) {
+        Some((line, None)) => Item {
+            payload: Payload::GotoLine { line, column: None },
+            title: format!("{line}번 줄로 이동"),
+            hint: String::new(),
+            enabled: true,
+        },
+        Some((line, Some(col))) => Item {
+            payload: Payload::GotoLine { line, column: Some(col) },
+            title: format!("{line}번 줄, {col}번째 칸으로 이동"),
+            hint: String::new(),
+            enabled: true,
+        },
+        None => {
+            let title = if query.trim().is_empty() {
+                "이동할 줄 번호를 입력하세요".to_string()
+            } else {
+                "올바른 줄 번호를 입력하세요".to_string()
+            };
+            Item {
+                payload: Payload::GotoLine { line: 1, column: None },
+                title,
+                hint: String::new(),
+                enabled: false,
+            }
+        }
+    }
+}
+
+/// Parse a `:line` or `:line:col` suffix from the end of a file search query.
+/// Returns `(path_query, Option<(line, Option<col>)>)`.
+pub fn parse_path_line_suffix(query: &str) -> (&str, Option<(usize, Option<usize>)>) {
+    let query_trimmed = query.trim();
+    if query_trimmed.starts_with(':') {
+        return (query, None);
+    }
+    if let Some((path_part, suffix)) = query_trimmed.rsplit_once(':') {
+        if path_part.is_empty() {
+            return (query, None);
+        }
+        if let Some((path_inner, line_part)) = path_part.rsplit_once(':') {
+            if let (Ok(line), Ok(col)) = (line_part.trim().parse::<usize>(), suffix.trim().parse::<usize>()) {
+                if line > 0 && col > 0 && !path_inner.trim().is_empty() {
+                    return (path_inner.trim(), Some((line, Some(col))));
+                }
+            }
+        }
+        if let Ok(line) = suffix.trim().parse::<usize>() {
+            if line > 0 {
+                return (path_part.trim(), Some((line, None)));
+            }
+        }
+    }
+    (query, None)
+}
+
+/// Attach line and column information to a `Payload::File` when chosen.
+pub fn apply_line_suffix(payload: Payload, suffix: Option<(usize, Option<usize>)>) -> Payload {
+    match (payload, suffix) {
+        (Payload::File(path), Some((line, col))) => Payload::FileAt { path, line, column: col },
+        (p, _) => p,
     }
 }
 
@@ -261,12 +470,14 @@ pub fn search_label(mode: Mode) -> &'static str {
         Mode::Commands => "명령 검색",
         Mode::Files => "파일 검색",
         Mode::Everything => "파일과 명령 검색",
+        Mode::GotoLine => "줄 번호 검색",
+        Mode::Recent => "최근 파일 검색",
     }
 }
 
 /// What the list says when nothing is listed: the index is still being built, or nothing matches.
 pub fn empty_text(mode: Mode, index_running: bool) -> &'static str {
-    if index_running && mode != Mode::Commands {
+    if index_running && matches!(mode, Mode::Files | Mode::Everything | Mode::Recent) {
         "파일을 찾는 중입니다…"
     } else {
         "일치하는 항목이 없습니다."

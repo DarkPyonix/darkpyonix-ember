@@ -695,6 +695,7 @@ dependencies = [
  "croner",
  "ember-hub",
  "ember-node",
+ "ember-transfer",
  "ember-transport",
  "futures",
  "http-body-util",
@@ -715,6 +716,21 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "ember-transfer"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ember-transport",
+ "getrandom 0.3.4",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

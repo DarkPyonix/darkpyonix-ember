@@ -234,11 +234,26 @@ impl Registry {
             created_at: now_ms(),
         };
         let peer_json = c.peer.as_ref().map(serde_json::to_string).transpose().map_err(anyhow::Error::from)?;
+        let peer_id = c.peer.as_ref().map(|p| p.peer.to_string());
         // One hold of the connection for the duplicate check and the INSERT, so two concurrent
         // registrations of one peer id cannot both pass the check.
         let conn = self.store.conn();
         if let Some(new_peer) = c.peer.as_ref().map(|p| p.peer) {
-            let mut stmt = conn.prepare("SELECT peer_json FROM computers WHERE peer_json IS NOT NULL")?;
+            let new_peer_str = new_peer.to_string();
+            let indexed_dup: Option<i64> = conn
+                .query_row(
+                    "SELECT 1 FROM computers WHERE peer_id = ?1 LIMIT 1",
+                    params![new_peer_str],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if indexed_dup.is_some() {
+                return Err(ComputerError::BadRequest(DUPLICATE_PEER.into()));
+            }
+            // Fallback for rows inserted directly in tests without populating `peer_id`.
+            let mut stmt = conn.prepare(
+                "SELECT peer_json FROM computers WHERE peer_id IS NULL AND peer_json IS NOT NULL",
+            )?;
             let stored = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
             // Only the PeerId is compared, never the address list. A row whose stored identity
             // no longer parses carries no usable peer id (see `row_to_computer`) and is skipped.
@@ -259,16 +274,20 @@ impl Registry {
             }
         }
         let res = conn.execute(
-            "INSERT INTO computers (id, name, url, token, created_at, peer_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![c.id, c.name, c.url, c.token, c.created_at, peer_json],
+            "INSERT INTO computers (id, name, url, token, created_at, peer_json, peer_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![c.id, c.name, c.url, c.token, c.created_at, peer_json, peer_id],
         );
         match res {
             Ok(_) => Ok(c),
-            Err(rusqlite::Error::SqliteFailure(e, _))
+            Err(rusqlite::Error::SqliteFailure(e, msg))
                 if e.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                Err(ComputerError::BadRequest(format!("a computer named {name:?} already exists")))
+                if msg.as_deref().is_some_and(|m| m.contains("peer_id")) {
+                    Err(ComputerError::BadRequest(DUPLICATE_PEER.into()))
+                } else {
+                    Err(ComputerError::BadRequest(format!("a computer named {name:?} already exists")))
+                }
             }
             Err(e) => Err(e.into()),
         }
@@ -720,6 +739,18 @@ impl Computers {
         shim: Option<PathBuf>,
         dialer: Option<Dialer>,
     ) -> Arc<Computers> {
+        if let Some(d) = &dialer {
+            if let Ok(existing) = registry.list() {
+                for c in existing {
+                    if let Some(addr) = &c.peer {
+                        d.transport().allow_peer(addr.peer);
+                        if !addr.is_empty() {
+                            d.transport().add_peer_addr(addr.clone());
+                        }
+                    }
+                }
+            }
+        }
         Arc::new(Computers {
             registry,
             connector,
@@ -884,21 +915,33 @@ impl Computers {
         if token.is_empty() {
             return Err(ComputerError::BadRequest("token must not be empty".into()));
         }
-        if self.dialer.is_none() {
+        let Some(dialer) = &self.dialer else {
             return Err(ComputerError::BadRequest(format!(
                 "this server has no transport; set {}=1 to register computers by peer",
                 crate::transport::ENABLE_ENV
             )));
+        };
+        let c = self.registry.insert_peer(name, peer, token)?;
+        dialer.transport().allow_peer(peer.peer);
+        if !peer.is_empty() {
+            dialer.transport().add_peer_addr(peer.clone());
         }
-        self.registry.insert_peer(name, peer, token)
+        Ok(c)
     }
 
     pub fn remove(&self, id: &str) -> Result<(), ComputerError> {
         if id == LOCAL {
             return Err(ComputerError::BadRequest("the local computer cannot be removed".into()));
         }
+        let existing = self.registry.get(id)?;
         if !self.registry.remove(id)? {
             return Err(ComputerError::NotFound(id.to_string()));
+        }
+        if let (Some(c), Some(dialer)) = (existing, &self.dialer) {
+            if let Some(peer) = &c.peer {
+                dialer.disconnect(&peer.peer);
+                dialer.transport().revoke_peer(peer.peer);
+            }
         }
         self.relays.lock().unwrap().remove(id);
         self.bridges.lock().unwrap().remove(id);
@@ -1606,6 +1649,27 @@ mod tests {
         }
         let with_id = r.list().unwrap().iter().filter(|c| c.peer.as_ref().is_some_and(|p| p.peer == id)).count();
         assert_eq!(with_id, 1);
+    }
+
+    #[test]
+    fn fr_c2_peer_id_unique_index_enforces_uniqueness_in_sqlite() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        assert!(crate::store::migration_position(schema::PEER_ID_UNIQUE_MIGRATION).is_some());
+        let id = ember_transport::SecretKey::generate().peer_id();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO computers (id, name, url, token, created_at, peer_json, peer_id)
+                 VALUES ('c1', 'one', '', 't1', 0, ?1, ?2)",
+                params![format!(r#"{{"peer":"{id}"}}"#), id.to_string()],
+            )
+            .unwrap();
+        let dup = store.conn().execute(
+            "INSERT INTO computers (id, name, url, token, created_at, peer_json, peer_id)
+             VALUES ('c2', 'two', '', 't2', 0, ?1, ?2)",
+            params![format!(r#"{{"peer":"{id}"}}"#), id.to_string()],
+        );
+        assert!(dup.is_err(), "partial UNIQUE index on computers(peer_id) must reject a second row");
     }
 
     #[test]

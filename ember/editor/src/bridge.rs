@@ -65,6 +65,8 @@ pub enum BridgeAction {
         message: String,
         source: Option<String>,
     },
+    /// Running an extension command failed.
+    CommandFailed { id: String, error: String },
 }
 
 impl BridgeAction {
@@ -248,6 +250,7 @@ impl WidgetBridge {
                 BridgeAction::None
             }
             SessionUpdate::SaveFailed { uri, error } => BridgeAction::SaveFailed { uri, error },
+            SessionUpdate::CommandFailed { id, error } => BridgeAction::CommandFailed { id, error },
             SessionUpdate::ExternalChange { uri, change } => {
                 if let Some(doc) = self.docs.get_mut(&uri.key()) {
                     doc.external_change = Some(change);
@@ -289,6 +292,7 @@ impl WidgetBridge {
                 });
                 BridgeAction::ExtensionNotice { severity, message, source }
             }
+            SessionUpdate::Commands { .. } => BridgeAction::None,
             // Search and replace results are the search panel's, not a document's (FR-E7).
             SessionUpdate::SearchHits { .. } | SessionUpdate::SearchDone { .. } | SessionUpdate::ReplaceDone { .. } => BridgeAction::None,
         }

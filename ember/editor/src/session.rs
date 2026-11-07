@@ -244,6 +244,7 @@ impl EditorSession {
         // two bootstrap calls below are outstanding.
         let (tx, rx) = mpsc::unbounded_channel();
         let (updates_tx, updates_rx) = mpsc::unbounded_channel();
+        let commands = crate::commands::parse_contributed_commands(&extensions);
         let mut core = SessionCore::new(LanguageRegistry::from_extensions(&extensions), config.core.clone(), Instant::now());
         core.set_grammar_catalog(crate::textmate::GrammarCatalog::from_extensions(&extensions));
         let driver = Driver {
@@ -255,6 +256,7 @@ impl EditorSession {
             updates: updates_tx,
             reqs: HashMap::new(),
             watches: Arc::new(Mutex::new(HashMap::new())),
+            commands,
         };
         let task = tokio::spawn(driver.run(rx, rpc_events, changes, ipc_lifecycle));
 
@@ -322,6 +324,23 @@ impl EditorSession {
         Ok(path)
     }
 
+    /// Reads the UTF-8 text of `path` on the remote server.
+    pub async fn read_file_text(&self, path: &str) -> Result<String, Error> {
+        let path = crate::paths::target_path(&self.workspace_path, path).map_err(Error::Path)?;
+        let bytes = self.fs.read_file(&self.uri(&path)).await.map_err(Error::Conn)?;
+        let (text, _bom) = crate::document::decode(&bytes)
+            .map_err(|_| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "file is not UTF-8")))?;
+        Ok(text)
+    }
+
+    /// Writes content to `path`. Creates or overwrites the file.
+    pub async fn write_file(&self, path: &str, content: &[u8]) -> Result<(), Error> {
+        let path = crate::paths::target_path(&self.workspace_path, path).map_err(Error::Path)?;
+        let opts = WriteOptions { create: true, overwrite: true, unlock: false, atomic: false };
+        self.fs.write_file(&self.uri(&path), content.to_vec(), &opts).await.map_err(Error::Conn)?;
+        Ok(())
+    }
+
     /// Creates a directory named `name` in the directory `parent`. Returns the new path.
     pub async fn create_dir(&self, parent: &str, name: &str) -> Result<String, Error> {
         let path = crate::paths::child_path(&self.workspace_path, parent, name).map_err(Error::Path)?;
@@ -362,6 +381,11 @@ impl EditorSession {
         self.send(Command::Input(Input::Close { uri }))
     }
 
+    /// Reload an open document from disk even if its buffer has unsaved edits (e.g. after discard).
+    pub fn reload(&self, uri: UriComponents) -> Result<(), Error> {
+        self.send(Command::Input(Input::Reload { uri }))
+    }
+
     /// The editor showing `uri` got focus.
     pub fn focus(&self, uri: UriComponents) -> Result<(), Error> {
         self.send(Command::Input(Input::Focus { uri }))
@@ -375,6 +399,11 @@ impl EditorSession {
     /// Ask for inline completions at `pos` now (explicit trigger).
     pub fn trigger_inline_completion(&self, uri: UriComponents, generation: u64, pos: WidgetPos) -> Result<(), Error> {
         self.send(Command::Input(Input::TriggerInline { uri, generation, pos }))
+    }
+
+    /// Run a command by its id, dispatching to the extension host or workbench.
+    pub fn execute_command(&self, id: impl Into<String>, arguments: Vec<Value>) -> Result<(), Error> {
+        self.send(Command::Input(Input::ExecuteCommand { id: id.into(), arguments }))
     }
 
     /// Search the workspace folder (FR-E7): answered with [`SessionUpdate::SearchHits`] and one
@@ -426,6 +455,7 @@ struct Driver {
     reqs: HashMap<Token, u32>,
     /// uri key → watch request id.
     watches: Arc<Mutex<HashMap<String, String>>>,
+    commands: Vec<crate::commands::ContributedCommand>,
 }
 
 /// How many jobs may wait for the highlighting thread. A job that does not fit is not lost silently: its
@@ -473,6 +503,9 @@ impl Driver {
     ) {
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<Input>();
         self.highlight = Some(spawn_highlighter(internal_tx.clone()));
+        if !self.commands.is_empty() {
+            let _ = self.updates.send(SessionUpdate::Commands { commands: self.commands.clone() });
+        }
         let mut changes = Some(changes);
         let mut lifecycle = Some(ipc_lifecycle);
         loop {

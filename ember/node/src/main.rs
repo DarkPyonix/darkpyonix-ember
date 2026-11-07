@@ -80,7 +80,7 @@ async fn serve() -> anyhow::Result<()> {
     let cfg = NodeConfig::from_env()?;
     let state_dir = cfg.state_dir.clone();
     let token = cfg.token.clone();
-    let mode = transport::TransportMode::from_env()?;
+    let mode = transport::TransportMode::from_env_or_state(state_dir.as_deref())?;
     let node = Node::new(cfg)?;
     if let Some(socks) = std::env::var("EMBER_NODE_SOCKS_LISTEN").ok().filter(|s| !s.is_empty()) {
         let listener = tokio::net::TcpListener::bind(socks.parse::<std::net::SocketAddr>()?).await?;

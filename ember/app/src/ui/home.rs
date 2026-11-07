@@ -358,7 +358,7 @@ pub struct ComposerAttachment {
 }
 
 pub const ATTACH_EMPTY: &str = "파일 경로를 입력해 주세요";
-pub const ATTACH_INVALID: &str = "읽을 수 있는 파일 경로가 아닙니다";
+pub const ATTACH_INVALID: &str = "파일 경로를 읽을 수 없습니다";
 pub const ATTACH_HINT: &str = "파일 경로가 메시지에 포함됩니다. 파일 내용은 전송되지 않습니다";
 
 pub fn stage_attachment(items: &mut Vec<ComposerAttachment>, input: &str) -> Result<(), &'static str> {

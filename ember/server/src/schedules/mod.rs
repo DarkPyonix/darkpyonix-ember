@@ -555,6 +555,15 @@ impl Scheduler {
         if patch.prompt.as_deref().is_some_and(|p| p.trim().is_empty()) {
             return Err(bad("prompt must not be empty"));
         }
+        if matches!(current.target, ScheduleTarget::Continue { .. })
+            && matches!(patch.target, Some(ScheduleTarget::New { .. }))
+            && patch.cwd.as_deref().is_none_or(|c| c.trim().is_empty())
+            && current.cwd.as_deref().is_none_or(|c| c.trim().is_empty())
+        {
+            return Err(bad(
+                "cannot convert a continue-session schedule to a new-session schedule without cwd",
+            ));
+        }
         let target = patch.target.clone().unwrap_or_else(|| current.target.clone());
         let (agent, computer_id, cwd) = match &target {
             ScheduleTarget::Continue { session_id } => {

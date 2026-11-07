@@ -23,9 +23,9 @@ use compose_rust::{Alignment, ButtonVariant, Color, DrawList, IconRole, Paint, S
 use ember_client::api::ApiError;
 
 pub use crate::ui::routines::{
-    begin_demo_run, changed_patch, current_value_line, demo_run_allowed, demo_session_title,
+    begin_demo_run, changed_patch, demo_run_allowed, demo_session_title,
     finish_demo_run, patch_is_empty, run_is_simulated, DEMO_RUN_DONE, DEMO_RUN_MS,
-    DEMO_RUN_STARTED, SAMPLE_FLAG, DEMO_SESSION_PREFIX, NAME_SERVER_REASON, SERVER_CANNOT_CHANGE,
+    DEMO_RUN_STARTED, SAMPLE_FLAG, DEMO_SESSION_PREFIX,
     not_saved_sentence, run_row_text, unsaved_fields,
     ago, big_time, civil_from_days, cron_valid, days_from_civil,
     describe_cron, filter_projects, format_next, group_by_project, kind_text, kpis,
@@ -675,7 +675,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                 }
                 remote_action(tick_ref.clone(), async move {
                     services().client.api().update_schedule(&id, &patch).await?;
-                    Ok(not_saved_sentence(&unsaved).map(|n| format!("{n}. 프롬프트와 일정만 저장했습니다")))
+                    Ok(not_saved_sentence(&unsaved).map(|n| format!("{n}. 나머지 변경 사항은 저장했습니다")))
                 });
                 panel_ref.set(Panel::View);
                 return;
@@ -1998,7 +1998,6 @@ fn FormFields(ctx: &FormCtx) {
         match f {
             FormField::Name => {
                 FormLabel("이름");
-                CurrentValue(editing, &initial.name);
                 let draft_name = draft.clone();
                 EmberField(FieldOptions {
                     fill_max_width: true,
@@ -2048,7 +2047,6 @@ fn FormFields(ctx: &FormCtx) {
             }
             FormField::Schedule => {
                 FormLabel(if d.trigger == Trigger::Time { "cron" } else { "이벤트" });
-                CurrentValue(editing && initial.trigger == d.trigger, &initial.cron);
                 let sel_cron = draft.clone();
                 let ph = if editing && initial.trigger == d.trigger {
                     "바꾸려면 새 값을 입력하세요".to_string()
@@ -2111,7 +2109,6 @@ fn FormFields(ctx: &FormCtx) {
             }
             FormField::Prompt => {
                 FormLabel("프롬프트");
-                CurrentValue(editing, &initial.prompt);
                 let sel_p = draft.clone();
                 EmberField(FieldOptions {
                     fill_max_width: true,
@@ -2135,14 +2132,6 @@ fn FormFields(ctx: &FormCtx) {
         for e in errors {
             Label(e.message(), Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
         }
-    }
-}
-
-/// The stored value of a text field in the edit form, as a muted line above the field (#493).
-fn CurrentValue(show: bool, value: &str) {
-    let line = current_value_line(value);
-    if show && !line.is_empty() {
-        Label(&line, Fs::Xs, Weight::Regular, Some(paint(ember_theme().palette.text_2)), Some(4));
     }
 }
 
@@ -2173,6 +2162,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::ClaudeCode),
                     computer: Some("mac-mini".into()),
                 },
+                continue_session: None,
             },
             runs: vec![
                 Run {
@@ -2207,6 +2197,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::Codex),
                     computer: Some("mac-mini".into()),
                 },
+                continue_session: None,
             },
             runs: vec![
                 Run {
@@ -2236,6 +2227,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::ClaudeCode),
                     computer: Some("ws-linux-01".into()),
                 },
+                continue_session: None,
             },
             runs: vec![Run {
                 at: now - 5 * 1440,
@@ -2258,6 +2250,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::Codex),
                     computer: Some("win-desktop".into()),
                 },
+                continue_session: None,
             },
             runs: vec![
                 Run {
@@ -2287,6 +2280,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::ClaudeCode),
                     computer: Some("ws-linux-01".into()),
                 },
+                continue_session: None,
             },
             runs: vec![
                 Run {
@@ -2316,6 +2310,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::Gemini),
                     computer: Some("win-desktop".into()),
                 },
+                continue_session: None,
             },
             runs: vec![Run {
                 at: now - 3 * 1440,
@@ -2338,6 +2333,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::ClaudeCode),
                     computer: Some("mac-mini".into()),
                 },
+                continue_session: None,
             },
             runs: vec![Run {
                 at: now - 1440,
@@ -2379,6 +2375,7 @@ mod tests {
                 project: project.into(),
                 ..Selection::initial()
             },
+            continue_session: None,
         }
     }
 
@@ -3435,6 +3432,7 @@ mod tests {
                 prompt: "로컬 프롬프트".into(),
                 enabled: true,
                 sel: Selection::initial(),
+                continue_session: None,
             });
         });
         assert!(with_store(|s| s.entries().iter().any(|e| e.routine.id == "test-rt-local")));
@@ -3450,6 +3448,7 @@ mod tests {
                 prompt: "로컬 프롬프트 2".into(),
                 enabled: true,
                 sel: Selection::initial(),
+                continue_session: None,
             });
         });
         assert!(with_store(|s| s.entries().iter().any(|e| e.routine.id == "test-rt-local-2")));

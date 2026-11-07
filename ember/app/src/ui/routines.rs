@@ -317,6 +317,8 @@ pub struct Routine {
     pub enabled: bool,
     /// Project, model and effort, mode and computer, the same choices as the Home composer.
     pub sel: Selection,
+    /// Session id when this routine continues an existing session (`ScheduleTarget::Continue`).
+    pub continue_session: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -715,6 +717,7 @@ impl FormDraft {
             prompt: self.prompt.trim().into(),
             enabled,
             sel: self.sel.clone(),
+            continue_session: None,
         }
     }
 }
@@ -967,9 +970,14 @@ pub fn run_from_server(r: &ScheduleRun) -> Run {
 /// non-empty, falling back to [`name_from_prompt`].
 pub fn schedule_to_routine(s: &Schedule) -> Routine {
     let harness = Harness::from_kind(&s.agent).unwrap_or(Harness::ClaudeCode);
-    let name = match &s.target {
-        ScheduleTarget::New { title: Some(t) } if !t.trim().is_empty() => t.trim().to_string(),
-        _ => name_from_prompt(&s.prompt),
+    let (name, continue_session) = match &s.target {
+        ScheduleTarget::New { title: Some(t) } if !t.trim().is_empty() => {
+            (t.trim().to_string(), None)
+        }
+        ScheduleTarget::New { .. } => (name_from_prompt(&s.prompt), None),
+        ScheduleTarget::Continue { session_id } => {
+            (name_from_prompt(&s.prompt), Some(session_id.clone()))
+        }
     };
     Routine {
         id: s.id.clone(),
@@ -984,6 +992,7 @@ pub fn schedule_to_routine(s: &Schedule) -> Routine {
             mode: default_mode(harness),
             computer: s.computer_id.clone().filter(|c| c != "local"),
         },
+        continue_session,
     }
 }
 
@@ -1053,25 +1062,25 @@ pub const LOCAL_NOTE: &str =
 pub const RUN_NOTICE: &str = "서버에 연결되지 않아 지금 실행할 수 없습니다";
 pub const NO_CWD_NOTICE: &str =
     "이 프로젝트의 작업 폴더를 알 수 없습니다. 프로젝트에서 세션을 한 번 시작하셔야 합니다";
-pub const FROZEN_NOTICE: &str =
-    "프로젝트, 에이전트, 컴퓨터는 만든 뒤에 바꿀 수 없어 프롬프트와 일정만 저장했습니다";
 
 /// The `PATCH` body for an edit: only what differs from the stored routine (FR-L25, #493).
 /// Includes `project`, `agent`, `computer` (empty string when cleared to `None`), `target` (`title`),
-/// `prompt`, and `kind`. An empty patch means nothing to send.
+/// `prompt`, and `kind`. A `ScheduleTarget::Continue` routine keeps its target on the server and
+/// does not send `ScheduleTarget::New`. An empty patch means nothing to send.
 pub fn changed_patch(d: &FormDraft, old: &Routine) -> SchedulePatch {
     let name = d.name.trim();
     let prompt = d.prompt.trim();
     let cron = d.cron.trim();
     let schedule_changed = d.trigger != old.trigger || cron != old.cron.trim();
+    let cont = old.continue_session.is_some();
     SchedulePatch {
-        project: (d.sel.project != old.sel.project).then(|| d.sel.project.clone()),
-        agent: (d.sel.option.harness != old.sel.option.harness)
+        project: (!cont && d.sel.project != old.sel.project).then(|| d.sel.project.clone()),
+        agent: (!cont && d.sel.option.harness != old.sel.option.harness)
             .then(|| d.sel.option.harness.kind().to_string()),
-        computer: (d.sel.computer != old.sel.computer)
+        computer: (!cont && d.sel.computer != old.sel.computer)
             .then(|| d.sel.computer.clone().unwrap_or_default()),
         cwd: None,
-        target: (name != old.name.trim()).then(|| ScheduleTarget::New {
+        target: (!cont && name != old.name.trim()).then(|| ScheduleTarget::New {
             title: Some(name.to_string()),
         }),
         prompt: (prompt != old.prompt.trim()).then(|| prompt.to_string()),
@@ -1083,15 +1092,31 @@ pub fn changed_patch(d: &FormDraft, old: &Routine) -> SchedulePatch {
     }
 }
 
-/// Legacy message kept for compatibility with callers.
-pub const SERVER_CANNOT_CHANGE: &str = "서버가 아직 바꿀 수 없습니다";
-pub const NAME_SERVER_REASON: &str = "이름은 서버가 아직 바꿀 수 없습니다";
-
 /// The fields of a draft that differ from `old` and that the server cannot store, in form order.
-/// Name, project, harness, and computer are all stored by `SchedulePatch` (#493), so this is empty
-/// for server-supported fields.
-pub fn unsaved_fields(_d: &FormDraft, _old: &Routine) -> Vec<&'static str> {
-    Vec::new()
+/// `Schedule` stores the harness (`agent`), not a per-schedule model or permission mode; a
+/// `Continue`-target routine also keeps its session's title, project, harness and computer.
+pub fn unsaved_fields(d: &FormDraft, old: &Routine) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    let cont = old.continue_session.is_some();
+    if cont && d.name.trim() != old.name.trim() {
+        out.push("이름");
+    }
+    if cont && d.sel.project != old.sel.project {
+        out.push("프로젝트");
+    }
+    if cont && d.sel.option.harness != old.sel.option.harness {
+        out.push("하네스");
+    }
+    if d.sel.option != default_option(d.sel.option.harness) {
+        out.push("모델");
+    }
+    if d.sel.mode != default_mode(d.sel.option.harness) {
+        out.push("권한 모드");
+    }
+    if cont && d.sel.computer != old.sel.computer {
+        out.push("컴퓨터");
+    }
+    out
 }
 
 /// The sentence for an edit whose patch holds nothing the server takes: it names what was not
@@ -1131,17 +1156,6 @@ pub fn patch_is_empty(p: &SchedulePatch) -> bool {
         && p.prompt.is_none()
         && p.kind.is_none()
         && p.catch_up.is_none()
-}
-
-/// The line above an edit field that shows the stored value, because the toolkit's text field
-/// has no initial value (compose-rust#374). Empty for an empty value.
-pub fn current_value_line(value: &str) -> String {
-    let v = value.trim();
-    if v.is_empty() {
-        String::new()
-    } else {
-        format!("현재 값: {v}")
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1217,6 +1231,7 @@ mod tests {
                 project: project.into(),
                 ..Selection::initial()
             },
+            continue_session: None,
         }
     }
 
@@ -1882,7 +1897,6 @@ mod tests {
             LOCAL_NOTE.into(),
             RUN_NOTICE.into(),
             NO_CWD_NOTICE.into(),
-            FROZEN_NOTICE.into(),
         ];
         strings.extend(Trigger::ALL.iter().map(|t| t.label().to_string()));
         for e in [
@@ -1950,6 +1964,34 @@ mod tests {
         assert_eq!(p.computer.as_deref(), Some(""), "clearing computer sends empty string");
         assert!(unsaved_fields(&d, &old).is_empty(), "server stores all four fields");
 
+        // Non-default model or mode on a server routine is reported in unsaved_fields.
+        let mut custom = FormDraft::from_routine(&old);
+        if let Some(other_opt) = crate::ui::home::model_catalog()
+            .iter()
+            .copied()
+            .find(|o| o.harness == old.sel.option.harness && *o != default_option(old.sel.option.harness))
+        {
+            custom.sel = custom.sel.with_option(other_opt);
+        }
+        custom.sel = custom.sel.with_mode(PermMode::Plan);
+        let unsaved = unsaved_fields(&custom, &old);
+        assert_eq!(unsaved, vec!["모델", "권한 모드"]);
+
+        // Continue-target routine preserves its Continue target and reports unsupported edits.
+        let mut cont_sched = schedule(cron_kind("0 9 * * *"), false);
+        cont_sched.target = ScheduleTarget::Continue {
+            session_id: "sess_1".into(),
+        };
+        let cont_old = schedule_to_routine(&cont_sched);
+        assert_eq!(cont_old.continue_session.as_deref(), Some("sess_1"));
+        let mut cont_draft = FormDraft::from_routine(&cont_old);
+        cont_draft.name = "바꾼 이름".into();
+        cont_draft.prompt = "바꾼 프롬프트".into();
+        let cont_patch = changed_patch(&cont_draft, &cont_old);
+        assert!(cont_patch.target.is_none(), "Continue target must not become New");
+        assert_eq!(cont_patch.prompt.as_deref(), Some("바꾼 프롬프트"));
+        assert_eq!(unsaved_fields(&cont_draft, &cont_old), vec!["이름"]);
+
         // Round-trip: schedule_to_routine reads title from ScheduleTarget::New { title }.
         let mut s = schedule(cron_kind("0 9 * * *"), false);
         s.target = ScheduleTarget::New {
@@ -1993,8 +2035,6 @@ mod tests {
         assert_eq!(d.cron, "0 9 * * *");
         assert_eq!(d.prompt, old.prompt);
         assert_eq!(d.sel, old.sel, "project, harness, model, mode and computer");
-        assert_eq!(current_value_line(" CI 요약 "), "현재 값: CI 요약");
-        assert_eq!(current_value_line("  "), "");
         // Project, agent and computer can change and travel with the draft.
         let mut d2 = d.clone();
         d2.sel.project = "core".into();

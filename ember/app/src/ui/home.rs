@@ -473,9 +473,36 @@ impl GithubCard {
     }
 }
 
-/// What tapping the composer's attach button says (FR-L11, #500): picking files needs the
-/// toolkit's file picker (compose-rust#483, planned for v0.0.8).
-pub const ATTACH_UNSUPPORTED: &str = "파일 고르기는 아직 지원하지 않습니다";
+/// A local file reference staged for the next Home message. No file data is uploaded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComposerAttachment {
+    pub path: String,
+    pub name: String,
+}
+
+pub const ATTACH_EMPTY: &str = "파일 경로를 입력해 주세요";
+pub const ATTACH_INVALID: &str = "파일 경로를 읽을 수 없습니다";
+pub const ATTACH_HINT: &str = "파일 경로가 메시지에 포함됩니다. 파일 내용은 전송되지 않습니다";
+
+pub fn stage_attachment(items: &mut Vec<ComposerAttachment>, input: &str) -> Result<(), &'static str> {
+    let path = input.trim();
+    if path.is_empty() { return Err(ATTACH_EMPTY); }
+    let p = std::path::Path::new(path);
+    if !p.is_absolute() || !p.is_file() || std::fs::File::open(p).is_err() {
+        return Err(ATTACH_INVALID);
+    }
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).ok_or(ATTACH_INVALID)?;
+    if !items.iter().any(|item| item.path == path) {
+        items.push(ComposerAttachment { path: path.to_string(), name });
+    }
+    Ok(())
+}
+
+pub fn attachment_message(message: &str, items: &[ComposerAttachment]) -> String {
+    if items.is_empty() { return message.to_string(); }
+    let paths = items.iter().map(|item| format!("- {}", item.path)).collect::<Vec<_>>().join("\n");
+    format!("{}\n\n첨부 파일 경로:\n{}", message.trim(), paths).trim().to_string()
+}
 
 pub const GREETING: &str = "무엇을 도와줄까요?";
 pub const COMPOSER_PLACEHOLDER: &str =
@@ -1888,10 +1915,19 @@ mod tests {
     }
 
     #[test]
-    fn fr_l11_attach_is_disabled_with_a_reason() {
-        assert_ne!(ATTACH_UNSUPPORTED, UNAVAILABLE);
-        assert!(ATTACH_UNSUPPORTED.contains("지원하지 않습니다"));
-        assert!(ATTACH_UNSUPPORTED.ends_with("습니다"));
+    fn fr_l11_attachments_validate_remove_and_form_message() {
+        let mut items = Vec::new();
+        assert_eq!(stage_attachment(&mut items, ""), Err(ATTACH_EMPTY));
+        assert_eq!(stage_attachment(&mut items, "/no/such/ember-file"), Err(ATTACH_INVALID));
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let path = path.to_str().unwrap();
+        stage_attachment(&mut items, path).unwrap();
+        stage_attachment(&mut items, path).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "Cargo.toml");
+        assert!(attachment_message("hello", &items).contains(path));
+        items.remove(0);
+        assert_eq!(attachment_message("hello", &items), "hello");
     }
 
     #[test]

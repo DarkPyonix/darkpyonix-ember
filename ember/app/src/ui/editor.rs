@@ -782,7 +782,7 @@ impl Stripes {
 pub fn is_implemented(action: Action) -> bool {
     // The right tool windows (agent, notifications) have no panel in the window yet: toggling one shows nothing.
     ToolWindow::from_action(action).is_some_and(|w| w.side() != Side::Right)
-        || matches!(action, Action::Close | Action::HideTool | Action::FindInFile | Action::ReplaceInFiles)
+        || matches!(action, Action::Close | Action::HideTool | Action::FindInFile | Action::ReplaceInFiles | Action::Recent | Action::GotoLine)
 }
 
 /// Do what a keymap action does. Returns false for an action the editor cannot do yet (the
@@ -817,6 +817,232 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
     // is only reached when a Compose root asks for it, and draws nothing.
     let _ = target;
     rsx! {}
+}
+
+/// The kind of change for a line in a diff against HEAD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffLineKind {
+    Added,
+    Modified,
+    Deleted,
+}
+
+/// A line diff marker for the editor gutter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffLineMarker {
+    pub line: u32,
+    pub kind: DiffLineKind,
+}
+
+/// Maximum number of LCS matrix cells (`old_mid.len() * new_mid.len()`) allocated by [`compute_line_diffs`].
+/// When the changed middle region exceeds this cap, [`compute_line_diffs`] pairs lines in O(n) memory.
+pub const MAX_DIFF_MATRIX_CELLS: usize = 250_000;
+
+/// Compute line-level diff markers (added, modified, deleted lines) comparing new_text against old_text.
+pub fn compute_line_diffs(old_text: &str, new_text: &str) -> Vec<DiffLineMarker> {
+    if old_text == new_text {
+        return Vec::new();
+    }
+    let norm_old = old_text.replace("\r\n", "\n").replace('\r', "\n");
+    let norm_new = new_text.replace("\r\n", "\n").replace('\r', "\n");
+
+    let old_lines: Vec<&str> = if norm_old.is_empty() {
+        Vec::new()
+    } else {
+        norm_old.split('\n').collect()
+    };
+    let new_lines: Vec<&str> = if norm_new.is_empty() {
+        Vec::new()
+    } else {
+        norm_new.split('\n').collect()
+    };
+
+    if old_lines.is_empty() {
+        return new_lines
+            .iter()
+            .enumerate()
+            .map(|(i, _)| DiffLineMarker {
+                line: i as u32,
+                kind: DiffLineKind::Added,
+            })
+            .collect();
+    }
+    if new_lines.is_empty() {
+        return vec![DiffLineMarker {
+            line: 0,
+            kind: DiffLineKind::Deleted,
+        }];
+    }
+
+    // 1. Common prefix
+    let mut prefix = 0;
+    while prefix < old_lines.len()
+        && prefix < new_lines.len()
+        && old_lines[prefix] == new_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    // 2. Common suffix
+    let mut suffix = 0;
+    while suffix < (old_lines.len() - prefix)
+        && suffix < (new_lines.len() - prefix)
+        && old_lines[old_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let old_mid = &old_lines[prefix..old_lines.len() - suffix];
+    let new_mid = &new_lines[prefix..new_lines.len() - suffix];
+
+    let mut markers = Vec::new();
+
+    if old_mid.is_empty() {
+        for i in 0..new_mid.len() {
+            markers.push(DiffLineMarker {
+                line: (prefix + i) as u32,
+                kind: DiffLineKind::Added,
+            });
+        }
+        return markers;
+    }
+
+    if new_mid.is_empty() {
+        let del_line = prefix.min(new_lines.len().saturating_sub(1));
+        markers.push(DiffLineMarker {
+            line: del_line as u32,
+            kind: DiffLineKind::Deleted,
+        });
+        return markers;
+    }
+
+    let m = old_mid.len();
+    let n = new_mid.len();
+    if m.saturating_mul(n) > MAX_DIFF_MATRIX_CELLS {
+        let mod_count = m.min(n);
+        for idx in 0..n {
+            let kind = if idx < mod_count { DiffLineKind::Modified } else { DiffLineKind::Added };
+            markers.push(DiffLineMarker { line: (prefix + idx) as u32, kind });
+        }
+        return markers;
+    }
+    let mut dp = vec![vec![0u32; n + 1]; m + 1];
+
+    for i in 0..m {
+        for j in 0..n {
+            if old_mid[i] == new_mid[j] {
+                dp[i + 1][j + 1] = dp[i][j] + 1;
+            } else {
+                dp[i + 1][j + 1] = dp[i + 1][j].max(dp[i][j + 1]);
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Edit {
+        Equal(usize, usize),
+        Delete(usize),
+        Insert(usize),
+    }
+
+    let mut edits = Vec::new();
+    let mut i = m;
+    let mut j = n;
+    while i > 0 || j > 0 {
+        if i > 0 && j > 0 && old_mid[i - 1] == new_mid[j - 1] {
+            edits.push(Edit::Equal(i - 1, j - 1));
+            i -= 1;
+            j -= 1;
+        } else if j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
+            edits.push(Edit::Insert(j - 1));
+            j -= 1;
+        } else {
+            edits.push(Edit::Delete(i - 1));
+            i -= 1;
+        }
+    }
+    edits.reverse();
+
+    let mut k = 0;
+    while k < edits.len() {
+        match edits[k] {
+            Edit::Equal(_, _) => {
+                k += 1;
+            }
+            Edit::Delete(_) | Edit::Insert(_) => {
+                let mut del_count = 0;
+                let mut ins_indices = Vec::new();
+                while k < edits.len() {
+                    match edits[k] {
+                        Edit::Delete(_) => {
+                            del_count += 1;
+                            k += 1;
+                        }
+                        Edit::Insert(new_idx) => {
+                            ins_indices.push(new_idx);
+                            k += 1;
+                        }
+                        Edit::Equal(_, _) => break,
+                    }
+                }
+                if del_count == 0 {
+                    for idx in ins_indices {
+                        markers.push(DiffLineMarker {
+                            line: (prefix + idx) as u32,
+                            kind: DiffLineKind::Added,
+                        });
+                    }
+                } else if ins_indices.is_empty() {
+                    let line_in_new = if k < edits.len() {
+                        if let Edit::Equal(_, new_idx) = edits[k] {
+                            prefix + new_idx
+                        } else {
+                            prefix + new_mid.len()
+                        }
+                    } else {
+                        prefix + new_mid.len()
+                    };
+                    let del_line = line_in_new.min(new_lines.len().saturating_sub(1));
+                    markers.push(DiffLineMarker {
+                        line: del_line as u32,
+                        kind: DiffLineKind::Deleted,
+                    });
+                } else {
+                    let mod_count = del_count.min(ins_indices.len());
+                    for (idx_pos, &idx) in ins_indices.iter().enumerate() {
+                        let kind = if idx_pos < mod_count {
+                            DiffLineKind::Modified
+                        } else {
+                            DiffLineKind::Added
+                        };
+                        markers.push(DiffLineMarker {
+                            line: (prefix + idx) as u32,
+                            kind,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    markers
+}
+
+/// Convert diff line markers into compose_rust GutterDecorations for CodeEditor.
+pub fn diff_gutter_decorations(version: u32, markers: &[DiffLineMarker]) -> compose_rust::code::GutterDecorations {
+    use compose_rust::code::GutterDecoration;
+    use compose_rust::ColorRole;
+    let list = markers.iter().map(|m| match m.kind {
+        DiffLineKind::Added => GutterDecoration::bar(version, m.line, 0).with_color(ColorRole::DiffAdded),
+        DiffLineKind::Modified => GutterDecoration::bar(version, m.line, 0).with_color(ColorRole::DiffModified),
+        DiffLineKind::Deleted => GutterDecoration::dot(version, m.line, 0).with_color(ColorRole::DiffRemoved),
+    });
+    compose_rust::code::GutterDecorations::new(list)
+}
+
+/// The 0-indexed line number of the first change between old and new text.
+pub fn first_diff_line(old_text: &str, new_text: &str) -> Option<u32> {
+    compute_line_diffs(old_text, new_text).first().map(|m| m.line)
 }
 
 
@@ -883,9 +1109,9 @@ mod tests {
     #[test]
     fn fr_l31_is_implemented_matches_what_apply_action_does() {
         for action in Action::ALL {
-            // The palette, find and find-in-file open sheets and bars in the window: they are not
-            // tab or tool window changes, so `apply_action` does not do them.
-            if matches!(action, Action::Palette | Action::Find | Action::FindInFile | Action::ReplaceInFiles) {
+            // The palette, find, find-in-file, replace-in-files, recent files and goto-line open sheets and bars in the window:
+            // they are not tab or tool window changes, so `apply_action` does not do them.
+            if matches!(action, Action::Palette | Action::Find | Action::FindInFile | Action::ReplaceInFiles | Action::Recent | Action::GotoLine) {
                 continue;
             }
             let mut tabs = EditorTabs::default();
@@ -965,5 +1191,85 @@ mod tests {
         assert!(text.contains("[REDACTED]"));
         assert!(text.contains("127.0.0.1:9000"));
         assert!(text.contains("http://srv:1") && text.contains("node-a"));
+    }
+
+    #[test]
+    fn fr_l31_2_compute_line_diffs_identifies_added_modified_and_deleted_lines() {
+        let old = "line 1\nline 2\nline 3\nline 4";
+        let new = "line 1\nline 2 mod\nline 3\nline 4\nline 5 add";
+        let markers = compute_line_diffs(old, new);
+        assert_eq!(markers, vec![
+            DiffLineMarker { line: 1, kind: DiffLineKind::Modified },
+            DiffLineMarker { line: 4, kind: DiffLineKind::Added },
+        ]);
+        assert_eq!(first_diff_line(old, new), Some(1));
+
+        let deleted_new = "line 1\nline 3\nline 4";
+        let del_markers = compute_line_diffs(old, deleted_new);
+        assert_eq!(del_markers, vec![
+            DiffLineMarker { line: 1, kind: DiffLineKind::Deleted },
+        ]);
+
+        let identical = compute_line_diffs(old, old);
+        assert!(identical.is_empty());
+        assert_eq!(first_diff_line(old, old), None);
+
+        let brand_new = compute_line_diffs("", "a\nb");
+        assert_eq!(brand_new, vec![
+            DiffLineMarker { line: 0, kind: DiffLineKind::Added },
+            DiffLineMarker { line: 1, kind: DiffLineKind::Added },
+        ]);
+
+        let all_deleted = compute_line_diffs("a\nb", "");
+        assert_eq!(all_deleted, vec![
+            DiffLineMarker { line: 0, kind: DiffLineKind::Deleted },
+        ]);
+    }
+
+    #[test]
+    fn fr_l31_2_compute_line_diffs_caps_large_middle_region_without_quadratic_table() {
+        let old_lines: Vec<String> = (0..20_000).map(|i| format!("old_{i}")).collect();
+        let new_lines: Vec<String> = (0..20_005).map(|i| format!("new_{i}")).collect();
+        let old = old_lines.join("\n");
+        let new = new_lines.join("\n");
+        let markers = compute_line_diffs(&old, &new);
+        assert_eq!(markers.len(), 20_005);
+        assert_eq!(markers[0], DiffLineMarker { line: 0, kind: DiffLineKind::Modified });
+        assert_eq!(markers[19_999], DiffLineMarker { line: 19_999, kind: DiffLineKind::Modified });
+        assert_eq!(markers[20_000], DiffLineMarker { line: 20_000, kind: DiffLineKind::Added });
+        assert_eq!(markers[20_004], DiffLineMarker { line: 20_004, kind: DiffLineKind::Added });
+    }
+
+    #[test]
+    fn fr_l31_2_diff_gutter_decorations_maps_to_color_roles() {
+        use compose_rust::{ColorRole, GutterDecorationKind};
+
+        let markers = vec![
+            DiffLineMarker { line: 0, kind: DiffLineKind::Added },
+            DiffLineMarker { line: 2, kind: DiffLineKind::Modified },
+            DiffLineMarker { line: 5, kind: DiffLineKind::Deleted },
+        ];
+        let decs = diff_gutter_decorations(4, &markers);
+        assert!(!decs.is_empty());
+        let list = decs.decorations();
+        assert_eq!(list.len(), 3);
+
+        assert_eq!(list[0].line, 0);
+        assert_eq!(list[0].version, 4);
+        assert_eq!(list[0].kind, GutterDecorationKind::Bar);
+        assert_eq!(list[0].color, Some(ColorRole::DiffAdded));
+
+        assert_eq!(list[1].line, 2);
+        assert_eq!(list[1].version, 4);
+        assert_eq!(list[1].kind, GutterDecorationKind::Bar);
+        assert_eq!(list[1].color, Some(ColorRole::DiffModified));
+
+        assert_eq!(list[2].line, 5);
+        assert_eq!(list[2].version, 4);
+        assert_eq!(list[2].kind, GutterDecorationKind::Dot);
+        assert_eq!(list[2].color, Some(ColorRole::DiffRemoved));
+
+        let empty = diff_gutter_decorations(1, &[]);
+        assert!(empty.is_empty());
     }
 }

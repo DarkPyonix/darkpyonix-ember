@@ -614,6 +614,511 @@ impl Stripes {
     }
 }
 
+/// Paths in the index or work tree, including a file in both lists when both changed.
+pub fn scm_paths(status: &ember_client::api::GitStatus, staged: bool) -> Vec<&str> {
+    status.files.iter().filter(|f| {
+        if staged { !matches!(f.index, '.' | ' ' | '?') }
+        else { !matches!(f.worktree, '.' | ' ') }
+    }).map(|f| f.path.as_str()).collect()
+}
+
+/// The kind of change for a line in a diff against HEAD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffLineKind {
+    Added,
+    Modified,
+    Deleted,
+}
+
+/// A line diff marker for the editor gutter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffLineMarker {
+    pub line: u32,
+    pub kind: DiffLineKind,
+}
+
+/// Compute line-level diff markers (added, modified, deleted lines) comparing new_text against old_text.
+pub fn compute_line_diffs(old_text: &str, new_text: &str) -> Vec<DiffLineMarker> {
+    if old_text == new_text {
+        return Vec::new();
+    }
+    let norm_old = old_text.replace("\r\n", "\n").replace('\r', "\n");
+    let norm_new = new_text.replace("\r\n", "\n").replace('\r', "\n");
+
+    let old_lines: Vec<&str> = if norm_old.is_empty() {
+        Vec::new()
+    } else {
+        norm_old.split('\n').collect()
+    };
+    let new_lines: Vec<&str> = if norm_new.is_empty() {
+        Vec::new()
+    } else {
+        norm_new.split('\n').collect()
+    };
+
+    if old_lines.is_empty() {
+        return new_lines
+            .iter()
+            .enumerate()
+            .map(|(i, _)| DiffLineMarker {
+                line: i as u32,
+                kind: DiffLineKind::Added,
+            })
+            .collect();
+    }
+    if new_lines.is_empty() {
+        return vec![DiffLineMarker {
+            line: 0,
+            kind: DiffLineKind::Deleted,
+        }];
+    }
+
+    // 1. Common prefix
+    let mut prefix = 0;
+    while prefix < old_lines.len()
+        && prefix < new_lines.len()
+        && old_lines[prefix] == new_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    // 2. Common suffix
+    let mut suffix = 0;
+    while suffix < (old_lines.len() - prefix)
+        && suffix < (new_lines.len() - prefix)
+        && old_lines[old_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let old_mid = &old_lines[prefix..old_lines.len() - suffix];
+    let new_mid = &new_lines[prefix..new_lines.len() - suffix];
+
+    let mut markers = Vec::new();
+
+    if old_mid.is_empty() {
+        for i in 0..new_mid.len() {
+            markers.push(DiffLineMarker {
+                line: (prefix + i) as u32,
+                kind: DiffLineKind::Added,
+            });
+        }
+        return markers;
+    }
+
+    if new_mid.is_empty() {
+        let del_line = prefix.min(new_lines.len().saturating_sub(1));
+        markers.push(DiffLineMarker {
+            line: del_line as u32,
+            kind: DiffLineKind::Deleted,
+        });
+        return markers;
+    }
+
+    let m = old_mid.len();
+    let n = new_mid.len();
+    let mut dp = vec![vec![0u32; n + 1]; m + 1];
+
+    for i in 0..m {
+        for j in 0..n {
+            if old_mid[i] == new_mid[j] {
+                dp[i + 1][j + 1] = dp[i][j] + 1;
+            } else {
+                dp[i + 1][j + 1] = dp[i + 1][j].max(dp[i][j + 1]);
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Edit {
+        Equal(usize, usize),
+        Delete(usize),
+        Insert(usize),
+    }
+
+    let mut edits = Vec::new();
+    let mut i = m;
+    let mut j = n;
+    while i > 0 || j > 0 {
+        if i > 0 && j > 0 && old_mid[i - 1] == new_mid[j - 1] {
+            edits.push(Edit::Equal(i - 1, j - 1));
+            i -= 1;
+            j -= 1;
+        } else if j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
+            edits.push(Edit::Insert(j - 1));
+            j -= 1;
+        } else {
+            edits.push(Edit::Delete(i - 1));
+            i -= 1;
+        }
+    }
+    edits.reverse();
+
+    let mut k = 0;
+    while k < edits.len() {
+        match edits[k] {
+            Edit::Equal(_, _) => {
+                k += 1;
+            }
+            Edit::Delete(_) | Edit::Insert(_) => {
+                let mut del_count = 0;
+                let mut ins_indices = Vec::new();
+                while k < edits.len() {
+                    match edits[k] {
+                        Edit::Delete(_) => {
+                            del_count += 1;
+                            k += 1;
+                        }
+                        Edit::Insert(new_idx) => {
+                            ins_indices.push(new_idx);
+                            k += 1;
+                        }
+                        Edit::Equal(_, _) => break,
+                    }
+                }
+                if del_count == 0 {
+                    for idx in ins_indices {
+                        markers.push(DiffLineMarker {
+                            line: (prefix + idx) as u32,
+                            kind: DiffLineKind::Added,
+                        });
+                    }
+                } else if ins_indices.is_empty() {
+                    let line_in_new = if k < edits.len() {
+                        if let Edit::Equal(_, new_idx) = edits[k] {
+                            prefix + new_idx
+                        } else {
+                            prefix + new_mid.len()
+                        }
+                    } else {
+                        prefix + new_mid.len()
+                    };
+                    let del_line = line_in_new.min(new_lines.len().saturating_sub(1));
+                    markers.push(DiffLineMarker {
+                        line: del_line as u32,
+                        kind: DiffLineKind::Deleted,
+                    });
+                } else {
+                    let mod_count = del_count.min(ins_indices.len());
+                    for (idx_pos, &idx) in ins_indices.iter().enumerate() {
+                        let kind = if idx_pos < mod_count {
+                            DiffLineKind::Modified
+                        } else {
+                            DiffLineKind::Added
+                        };
+                        markers.push(DiffLineMarker {
+                            line: (prefix + idx) as u32,
+                            kind,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    markers
+}
+
+/// Convert diff line markers into compose_rust GutterDecorations for CodeEditor.
+pub fn diff_gutter_decorations(version: u32, markers: &[DiffLineMarker]) -> compose_rust::code::GutterDecorations {
+    use compose_rust::code::GutterDecoration;
+    use compose_rust::ColorRole;
+    let list = markers.iter().map(|m| match m.kind {
+        DiffLineKind::Added => GutterDecoration::bar(version, m.line, 0).with_color(ColorRole::DiffAdded),
+        DiffLineKind::Modified => GutterDecoration::bar(version, m.line, 0).with_color(ColorRole::DiffModified),
+        DiffLineKind::Deleted => GutterDecoration::dot(version, m.line, 0).with_color(ColorRole::DiffRemoved),
+    });
+    compose_rust::code::GutterDecorations::new(list)
+}
+
+/// The 0-indexed line number of the first change between old and new text.
+pub fn first_diff_line(old_text: &str, new_text: &str) -> Option<u32> {
+    compute_line_diffs(old_text, new_text).first().map(|m| m.line)
+}
+
+/// Parse porcelain v1 branch and status format into GitStatus.
+pub fn parse_git_status_porcelain_v1(output: &str) -> ember_client::api::GitStatus {
+    use ember_client::api::{GitFile, GitStatus};
+    let mut status = GitStatus {
+        branch: String::new(),
+        upstream: None,
+        ahead: 0,
+        behind: 0,
+        fetched_age_secs: None,
+        branches: Vec::new(),
+        files: Vec::new(),
+    };
+    for line in output.lines() {
+        if let Some(branch_info) = line.strip_prefix("## ") {
+            let info = branch_info.trim();
+            if let Some(b) = info.strip_prefix("Initial commit on ") {
+                status.branch = b.trim().to_string();
+            } else if let Some(b) = info.strip_prefix("No commits yet on ") {
+                status.branch = b.trim().to_string();
+            } else {
+                let (branch_part, rest) = match info.split_once(' ') {
+                    Some((b, r)) => (b, Some(r)),
+                    None => (info, None),
+                };
+                if let Some((b, u)) = branch_part.split_once("...") {
+                    status.branch = b.to_string();
+                    status.upstream = Some(u.to_string());
+                } else {
+                    status.branch = branch_part.to_string();
+                }
+                if let Some(r) = rest {
+                    let bracketed = r.trim_matches(|c| c == '[' || c == ']');
+                    for part in bracketed.split(',') {
+                        let part = part.trim();
+                        if let Some(n) = part.strip_prefix("ahead ") {
+                            status.ahead = n.trim().parse().unwrap_or(0);
+                        } else if let Some(n) = part.strip_prefix("behind ") {
+                            status.behind = n.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if line.len() < 3 {
+            continue;
+        }
+        let index = line.chars().next().unwrap_or(' ');
+        let worktree = line.chars().nth(1).unwrap_or(' ');
+        let path_part = line[3..].trim();
+        let (path, old_path) = if let Some((old, new)) = path_part.split_once(" -> ") {
+            (new.to_string(), Some(old.to_string()))
+        } else {
+            (path_part.to_string(), None)
+        };
+        status.files.push(GitFile {
+            path,
+            old_path,
+            index,
+            worktree,
+        });
+    }
+    if !status.branch.is_empty() && status.branches.is_empty() {
+        status.branches.push(status.branch.clone());
+    }
+    status
+}
+
+/// Run git status locally on a directory.
+pub fn git_status_local(dir: &std::path::Path) -> Result<ember_client::api::GitStatus, String> {
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain=v1", "-b"])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut status = parse_git_status_porcelain_v1(&text);
+
+    if let Ok(branches_output) = std::process::Command::new("git")
+        .args(["branch", "--list", "--format=%(refname:short)"])
+        .current_dir(dir)
+        .output()
+    {
+        if branches_output.status.success() {
+            let b_text = String::from_utf8_lossy(&branches_output.stdout);
+            let branches: Vec<String> = b_text
+                .lines()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            if !branches.is_empty() {
+                status.branches = branches;
+            }
+        }
+    }
+    Ok(status)
+}
+
+/// Read recent commits from a local git repository.
+pub fn git_log_local(dir: &std::path::Path, limit: usize) -> Result<Vec<ember_client::api::GitLogCommit>, String> {
+    let limit_str = format!("-n{}", limit.max(1));
+    let output = std::process::Command::new("git")
+        .args(["log", &limit_str, "--format=%H\x1f%P\x1f%an\x1f%ae\x1f%at\x1f%s"])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut commits = Vec::new();
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split('\x1f').collect();
+        if parts.len() >= 6 {
+            let sha = parts[0].to_string();
+            let parents = parts[1].split_whitespace().map(str::to_string).collect();
+            let author = parts[2].to_string();
+            let email = parts[3].to_string();
+            let time = parts[4].parse::<i64>().unwrap_or(0);
+            let subject = parts[5].to_string();
+            commits.push(ember_client::api::GitLogCommit {
+                sha,
+                parents,
+                author,
+                email,
+                time,
+                subject,
+                refs: Vec::new(),
+            });
+        }
+    }
+    Ok(commits)
+}
+
+/// Execute a local git action on a directory.
+pub fn git_action_local(dir: &std::path::Path, op: &str, body: &serde_json::Value) -> Result<(), String> {
+    match op {
+        "stage" => {
+            let paths = body.get("paths").and_then(|v| v.as_array());
+            let mut cmd = std::process::Command::new("git");
+            cmd.arg("add").arg("--");
+            let mut has_paths = false;
+            if let Some(paths) = paths {
+                for p in paths {
+                    if let Some(s) = p.as_str() {
+                        cmd.arg(s);
+                        has_paths = true;
+                    }
+                }
+            }
+            if !has_paths {
+                cmd.arg(".");
+            }
+            let output = cmd.current_dir(dir).output().map_err(|e| e.to_string())?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).to_string());
+            }
+            Ok(())
+        }
+        "unstage" => {
+            let paths = body.get("paths").and_then(|v| v.as_array());
+            let mut cmd = std::process::Command::new("git");
+            cmd.arg("restore").arg("--staged").arg("--");
+            let mut has_paths = false;
+            if let Some(paths) = paths {
+                for p in paths {
+                    if let Some(s) = p.as_str() {
+                        cmd.arg(s);
+                        has_paths = true;
+                    }
+                }
+            }
+            if !has_paths {
+                cmd.arg(".");
+            }
+            let output = cmd.current_dir(dir).output().map_err(|e| e.to_string())?;
+            if !output.status.success() {
+                let mut reset_cmd = std::process::Command::new("git");
+                reset_cmd.arg("reset").arg("HEAD").arg("--");
+                if let Some(paths) = paths {
+                    for p in paths {
+                        if let Some(s) = p.as_str() {
+                            reset_cmd.arg(s);
+                        }
+                    }
+                }
+                let reset_out = reset_cmd.current_dir(dir).output().map_err(|e| e.to_string())?;
+                if !reset_out.status.success() {
+                    return Err(String::from_utf8_lossy(&reset_out.stderr).to_string());
+                }
+            }
+            Ok(())
+        }
+        "commit" => {
+            let summary = body.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+            if summary.trim().is_empty() {
+                return Err("커밋 메시지가 비어 있습니다.".to_string());
+            }
+            let output = std::process::Command::new("git")
+                .args(["commit", "-m", summary])
+                .current_dir(dir)
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).to_string());
+            }
+            Ok(())
+        }
+        "checkout" => {
+            let branch = body.get("branch").and_then(|v| v.as_str()).ok_or_else(|| "브랜치 이름이 없습니다.".to_string())?;
+            let output = std::process::Command::new("git")
+                .args(["checkout", branch])
+                .current_dir(dir)
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).to_string());
+            }
+            Ok(())
+        }
+        "fetch" => {
+            let output = std::process::Command::new("git")
+                .args(["fetch"])
+                .current_dir(dir)
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).to_string());
+            }
+            Ok(())
+        }
+        "pull" => {
+            let output = std::process::Command::new("git")
+                .args(["pull"])
+                .current_dir(dir)
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).to_string());
+            }
+            Ok(())
+        }
+        "push" => {
+            let output = std::process::Command::new("git")
+                .args(["push"])
+                .current_dir(dir)
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).to_string());
+            }
+            Ok(())
+        }
+        other => Err(format!("지원하지 않는 git 명령입니다: {other}")),
+    }
+}
+
+/// Read text of a file at HEAD from a local git repository.
+pub fn git_show_head_local(dir: &std::path::Path, rel_path: &str) -> Option<String> {
+    let spec = format!("HEAD:{rel_path}");
+    let output = std::process::Command::new("git")
+        .args(["show", &spec])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        None
+    }
+}
+
+/// First changed line in the repository relative to HEAD.
+pub fn first_changed_line_in_repo(folder: &std::path::Path, rel_path: &str) -> Option<u32> {
+    let head = git_show_head_local(folder, rel_path).unwrap_or_default();
+    let current_path = folder.join(rel_path);
+    let current = std::fs::read_to_string(&current_path).ok()?;
+    first_diff_line(&head, &current)
+}
 
 /// Whether the editor does something for `action` today ([`apply_action`] returns true for it
 /// when it can act). The palette shows the others as not ready instead of as live commands.
@@ -661,6 +1166,106 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_e_scm_stripes_switch_between_left_views() {
+        let mut stripes = Stripes::default();
+        for view in [ToolWindow::Commit, ToolWindow::Git, ToolWindow::Project] {
+            stripes.toggle(view);
+            assert_eq!(stripes.selected(Side::Left), Some(view));
+        }
+    }
+
+    #[test]
+    fn fr_e_scm_status_separates_index_and_worktree() {
+        use ember_client::api::{GitFile, GitStatus};
+        let status = GitStatus { files: vec![
+            GitFile { path: "both".into(), old_path: None, index: 'M', worktree: 'M' },
+            GitFile { path: "new".into(), old_path: None, index: '?', worktree: '?' },
+        ], ..Default::default() };
+        assert_eq!(scm_paths(&status, true), vec!["both"]);
+        assert_eq!(scm_paths(&status, false), vec!["both", "new"]);
+    }
+
+    #[test]
+    fn fr_e10_compute_line_diffs_added_modified_deleted() {
+        let old = "line 1\nline 2\nline 3\nline 4";
+        let new = "line 1\nline 2 mod\nline 3\nline 4\nline 5 add";
+        let markers = compute_line_diffs(old, new);
+        assert_eq!(markers, vec![
+            DiffLineMarker { line: 1, kind: DiffLineKind::Modified },
+            DiffLineMarker { line: 4, kind: DiffLineKind::Added },
+        ]);
+        assert_eq!(first_diff_line(old, new), Some(1));
+
+        let deleted_new = "line 1\nline 3\nline 4";
+        let del_markers = compute_line_diffs(old, deleted_new);
+        assert_eq!(del_markers, vec![
+            DiffLineMarker { line: 1, kind: DiffLineKind::Deleted },
+        ]);
+
+        let identical = compute_line_diffs(old, old);
+        assert!(identical.is_empty());
+        assert_eq!(first_diff_line(old, old), None);
+
+        let brand_new = compute_line_diffs("", "a\nb");
+        assert_eq!(brand_new, vec![
+            DiffLineMarker { line: 0, kind: DiffLineKind::Added },
+            DiffLineMarker { line: 1, kind: DiffLineKind::Added },
+        ]);
+
+        let all_deleted = compute_line_diffs("a\nb", "");
+        assert_eq!(all_deleted, vec![
+            DiffLineMarker { line: 0, kind: DiffLineKind::Deleted },
+        ]);
+    }
+
+    #[test]
+    fn fr_e10_diff_gutter_decorations_maps_to_color_roles() {
+        use compose_rust::{ColorRole, GutterDecorationKind};
+
+        let markers = vec![
+            DiffLineMarker { line: 0, kind: DiffLineKind::Added },
+            DiffLineMarker { line: 2, kind: DiffLineKind::Modified },
+            DiffLineMarker { line: 5, kind: DiffLineKind::Deleted },
+        ];
+        let decs = diff_gutter_decorations(4, &markers);
+        assert!(!decs.is_empty());
+        let list = decs.decorations();
+        assert_eq!(list.len(), 3);
+
+        assert_eq!(list[0].line, 0);
+        assert_eq!(list[0].version, 4);
+        assert_eq!(list[0].kind, GutterDecorationKind::Bar);
+        assert_eq!(list[0].color, Some(ColorRole::DiffAdded));
+
+        assert_eq!(list[1].line, 2);
+        assert_eq!(list[1].version, 4);
+        assert_eq!(list[1].kind, GutterDecorationKind::Bar);
+        assert_eq!(list[1].color, Some(ColorRole::DiffModified));
+
+        assert_eq!(list[2].line, 5);
+        assert_eq!(list[2].version, 4);
+        assert_eq!(list[2].kind, GutterDecorationKind::Dot);
+        assert_eq!(list[2].color, Some(ColorRole::DiffRemoved));
+
+        let empty = diff_gutter_decorations(1, &[]);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn fr_e10_parse_git_status_porcelain_v1() {
+        let porcelain = "## feat/editor-scm...origin/feat/editor-scm [ahead 2, behind 1]\n M src/lib.rs\n?? new.txt\nA  added.rs\nR  old.rs -> new.rs\n";
+        let status = parse_git_status_porcelain_v1(porcelain);
+        assert_eq!(status.branch, "feat/editor-scm");
+        assert_eq!(status.upstream.as_deref(), Some("origin/feat/editor-scm"));
+        assert_eq!(status.ahead, 2);
+        assert_eq!(status.behind, 1);
+        assert_eq!(status.files.len(), 4);
+
+        assert_eq!(scm_paths(&status, true), vec!["added.rs", "new.rs"]);
+        assert_eq!(scm_paths(&status, false), vec!["src/lib.rs", "new.txt"]);
+    }
 
     #[test]
     fn fr_e6_every_syntax_role_has_its_own_widget_colour_role() {

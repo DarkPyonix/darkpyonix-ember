@@ -51,6 +51,12 @@ struct Shared {
     theme: Signal<crate::ui::theme::ThemePref>,
     position: Signal<(usize, usize)>,
     stripes: Signal<Stripes>,
+    scm: Signal<Option<ember_client::api::GitStatus>>,
+    scm_error: Signal<Option<String>>,
+    scm_busy: Signal<bool>,
+    scm_message: Signal<String>,
+    scm_log: Signal<Vec<ember_client::api::GitLogCommit>>,
+    scm_head: Signal<Option<(String, String)>>,
     menu_open: Signal<bool>,
     keymap: Signal<Keymap>,
     folder: String,
@@ -109,12 +115,20 @@ fn init(target: EditorTarget) {
     let bottom_max = use_hook(|| Signal::new_in_scope(false, root));
     let position = use_hook(|| Signal::new_in_scope((1, 1), root));
     let stripes = use_hook(|| Signal::new_in_scope(Stripes::default(), root));
+    let scm = use_hook(|| Signal::new_in_scope(None, root));
+    let scm_error = use_hook(|| Signal::new_in_scope(None, root));
+    let scm_busy = use_hook(|| Signal::new_in_scope(false, root));
+    let scm_message = use_hook(|| Signal::new_in_scope(String::new(), root));
+    let scm_log = use_hook(|| Signal::new_in_scope(Vec::new(), root));
+    let scm_head = use_hook(|| Signal::new_in_scope(None::<(String, String)>, root));
     let menu_open = use_hook(|| Signal::new_in_scope(false, root));
     let keymap = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().keymap, root));
     let bridge = use_hook(|| Rc::new(RefCell::new(WidgetBridge::new())));
     let uris = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
     let open_errors = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, theme, position, stripes, scm, scm_error, scm_busy, scm_message, scm_log, scm_head, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors }));
+    let s = shared();
+    page::scm_refresh(&s);
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -174,6 +188,31 @@ fn editor_pane() -> Element {
             }
         }
     }
+    let gutter_decorations = {
+        let current_path = s.tabs.read().current_path().map(str::to_string);
+        let scm_status = s.scm.read();
+        if let (Some(status), Some(path)) = (scm_status.as_ref(), &current_path) {
+            let folder = s.folder.trim_end_matches('/');
+            let rel_path = match path.strip_prefix(folder) {
+                Some(r) => r.trim_start_matches('/'),
+                None => path.as_str(),
+            };
+            let file_in_status = status.files.iter().find(|f| f.path == rel_path);
+            if file_in_status.is_none() {
+                compose_rust::code::GutterDecorations::default()
+            } else {
+                let head_entry = s.scm_head.read();
+                let head_text = match head_entry.as_ref() {
+                    Some((p, text)) if p == path => text.as_str(),
+                    _ => "",
+                };
+                let markers = crate::ui::editor::compute_line_diffs(head_text, &doc.text);
+                crate::ui::editor::diff_gutter_decorations(version, &markers)
+            }
+        } else {
+            compose_rust::code::GutterDecorations::default()
+        }
+    };
     let change_s = s.clone(); let change_uri = uri.clone();
     let save_s = s.clone(); let save_uri = uri.clone();
     let hover_s = s.clone(); let hover_uri = uri.clone();
@@ -182,8 +221,9 @@ fn editor_pane() -> Element {
     rsx! { CodeEditor {
         key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
         text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), tab_width: Some(doc.tab_width),
+        gutter_decorations,
         on_change: move |e: compose_rust::code::CodeChange| { EDITOR_VERSION.with(|v| v.set((generation, e.version))); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); },
-        on_save: move |e: compose_rust::code::SaveRequest| { let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); },
+        on_save: move |e: compose_rust::code::SaveRequest| { let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); page::scm_refresh(&save_s); page::refresh_active_diff_base(&save_s); },
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
         on_decoration_click: move |id| { let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id); send(&click_s, event); },
         on_selection_change: move |e: compose_rust::code::SelectionChange| { let mut position = selection_s.position; position.set((e.active.line as usize + 1, e.active.column as usize + 1)); let event = selection_s.bridge.borrow().on_selection_changed(&selection_uri, e.version, pos(e.anchor), pos(e.active)); send(&selection_s, event); },
@@ -274,6 +314,7 @@ pub mod page {
             let next = tabs.read().current_path().map(str::to_owned);
             if let Some(next) = next { s.host.send(HostCommand::Focus(next)); }
         }
+        if handled && matches!(action, Action::Commit | Action::Git) { scm_refresh(s); }
         if !handled {
             notice(format!("{}: {SOON}", action.label()));
         }
@@ -669,7 +710,7 @@ pub mod page {
                         if w == ToolWindow::Project {
                             {project_tree(&s, current.as_deref())}
                         } else {
-                            {side_note(w, "ed-left")}
+                            {scm_panel(&s, w)}
                         }
                     }
                     section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
@@ -788,12 +829,13 @@ pub mod page {
 
     fn stripe_button(s: &Shared, w: ToolWindow, selected: bool, keymap: Keymap) -> Element {
         let mut stripes = s.stripes;
+        let stripe_s = s.clone();
         let hint = w.action().map(|a| keymap.hint(a, Os::current())).unwrap_or_default();
         let tip = tooltip_text(w.label(), &hint);
         let class = if selected { "ed-sb on" } else { "ed-sb" };
         rsx! {
             button { key: "{w.label()}", class, title: "{tip}", "aria-label": "{tip}", onclick: move |_| {
-                if w.side() == Side::Right { notice(format!("{}: {SOON}", w.label())); } else { stripes.write().toggle(w); }
+                if w.side() == Side::Right { notice(format!("{}: {SOON}", w.label())); } else { stripes.write().toggle(w); if matches!(w, ToolWindow::Commit | ToolWindow::Git) { scm_refresh(&stripe_s); } }
             }, {icon(icon_name(w))} }
         }
     }
@@ -825,6 +867,255 @@ pub mod page {
                 for w in windows.iter().copied() { {stripe_button(s, w, sel.is_selected(w), keymap)} }
             }
         }
+    }
+
+    pub(super) fn refresh_active_diff_base(s: &Shared) {
+        let current_path = s.tabs.read().current_path().map(str::to_string);
+        let Some(current_path) = current_path else { return; };
+        let folder = s.folder.clone();
+        let mut scm_head = s.scm_head;
+        crate::services::run(async move {
+            let rel_path = match current_path.strip_prefix(&folder) {
+                Some(r) => r.trim_start_matches('/'),
+                None => &current_path,
+            };
+            let dir = std::path::Path::new(&folder);
+            if dir.is_dir() {
+                if let Some(text) = crate::ui::editor::git_show_head_local(dir, rel_path) {
+                    return Some((current_path, text));
+                }
+            }
+            Some((current_path, String::new()))
+        }, move |result| {
+            scm_head.set(result);
+        });
+    }
+
+    pub(super) fn scm_refresh(s: &Shared) {
+        let project = s.project.clone();
+        let folder = s.folder.clone();
+        let (mut status, mut error, mut log) = (s.scm, s.scm_error, s.scm_log);
+        let refresh_diff_s = s.clone();
+        crate::services::run(async move {
+            let has_remote = crate::services::try_services().is_some() && !project.is_empty();
+            if has_remote {
+                let status_res = crate::ui::vcs::git_call::<ember_client::api::GitStatus>(&project, "status", serde_json::json!({})).await;
+                if let Ok(st) = status_res {
+                    let log_res = crate::ui::vcs::git_call::<ember_client::api::GitLog>(&project, "log", serde_json::json!({"limit": 30, "skip": 0, "branch": null})).await;
+                    let commits = log_res.map(|l| l.commits).unwrap_or_default();
+                    return (Ok(st), commits);
+                }
+            }
+            let dir = std::path::Path::new(&folder);
+            if dir.is_dir() {
+                let st = crate::ui::editor::git_status_local(dir);
+                let commits = crate::ui::editor::git_log_local(dir, 30).unwrap_or_default();
+                (st, commits)
+            } else {
+                (Err("저장소 경로가 올바르지 않습니다".to_string()), Vec::new())
+            }
+        }, move |(result, commits)| {
+            match result {
+                Ok(value) => { status.set(Some(value)); error.set(None); },
+                Err(e) => error.set(Some(e)),
+            }
+            log.set(commits);
+            refresh_active_diff_base(&refresh_diff_s);
+        });
+    }
+
+    fn scm_action(s: &Shared, op: &'static str, body: serde_json::Value) {
+        if *s.scm_busy.read() { return; }
+        let mut busy = s.scm_busy;
+        busy.set(true);
+        let project = s.project.clone();
+        let folder = s.folder.clone();
+        let after = s.clone();
+        crate::services::run(async move {
+            let has_remote = crate::services::try_services().is_some() && !project.is_empty();
+            if has_remote {
+                let remote_res = crate::ui::vcs::git_call::<serde_json::Value>(&project, op, body.clone()).await;
+                if remote_res.is_ok() {
+                    return Ok(());
+                }
+            }
+            let dir = std::path::Path::new(&folder);
+            if dir.is_dir() {
+                crate::ui::editor::git_action_local(dir, op, &body)
+            } else {
+                Err("저장소 경로가 올바르지 않습니다".to_string())
+            }
+        }, move |result| {
+            busy.set(false);
+            match result {
+                Ok(_) => {
+                    if op == "commit" { let mut message = after.scm_message; message.set(String::new()); }
+                    scm_refresh(&after);
+                    refresh_active_diff_base(&after);
+                }
+                Err(e) => { let mut error = after.scm_error; error.set(Some(e)); }
+            }
+        });
+    }
+
+    fn scm_panel(s: &Shared, view: ToolWindow) -> Element {
+        let status = s.scm.read().clone();
+        let error = s.scm_error.read().clone();
+        let history = s.scm_log.read().clone();
+        let message = s.scm_message.read().clone();
+        let mut message_signal = s.scm_message;
+        let refresh = s.clone();
+        let commit = s.clone();
+        let git = s.clone();
+        let rows = s.clone();
+        let staged_all = s.clone();
+        let unstaged_all = s.clone();
+        let busy = *s.scm_busy.read();
+        rsx! {
+            section { class: "ed-tw ed-left", "aria-label": "{view.label()}",
+                div { class: "ed-twh",
+                    b { class: "ed-twt", "{view.label()}" }
+                    div { class: "spacer" }
+                    button { class: "ed-ib", title: "새로고침", onclick: move |_| scm_refresh(&refresh), {icon("play")} }
+                    button { class: "ed-ib", title: "숨기기", onclick: { let mut st = s.stripes; move |_| st.write().hide(Side::Left) }, {icon("close")} }
+                }
+                div { style: "padding:12px; overflow:auto;",
+                    if let Some(error) = error { div { style: "color:var(--c-red); font-size:12px; margin-bottom:8px;", "{error}" } }
+                    if let Some(status) = status {
+                        div { style: "font-size:12px; font-weight:600; margin-bottom:10px;", "브랜치: {status.branch}" }
+                        if view == ToolWindow::Commit {
+                            input {
+                                class: "field",
+                                style: "margin-bottom:8px;",
+                                value: "{message}",
+                                placeholder: "커밋 메시지",
+                                oninput: move |e| message_signal.set(e.value()),
+                            }
+                            button {
+                                class: "btn primary sm",
+                                style: "width:100%; justify-content:center; margin-bottom:12px;",
+                                disabled: busy || message.trim().is_empty(),
+                                onclick: move |_| {
+                                    let summary = commit.scm_message.read().trim().to_string();
+                                    scm_action(&commit, "commit", serde_json::json!({"summary": summary, "description": null, "amend": false}));
+                                },
+                                "커밋"
+                            }
+                            for staged in [true, false] {
+                                {
+                                    let count = status.files.iter().filter(|f| if staged { !matches!(f.index, '.' | ' ' | '?') } else { !matches!(f.worktree, '.' | ' ') }).count();
+                                    rsx! {
+                                        div {
+                                            style: "display:flex; align-items:center; justify-content:space-between; margin-top:8px; margin-bottom:4px; font-weight:600; font-size:12px; color:var(--muted);",
+                                            span { if staged { "스테이징됨 ({count})" } else { "변경 사항 ({count})" } }
+                                            button {
+                                                class: "btn sm",
+                                                style: "height:22px; padding:0 6px; font-size:11px;",
+                                                disabled: busy || count == 0,
+                                                onclick: {
+                                                    let status = status.clone(); let action = if staged { unstaged_all.clone() } else { staged_all.clone() };
+                                                    move |_| {
+                                                        let paths = crate::ui::editor::scm_paths(&status, staged);
+                                                        scm_action(&action, if staged { "unstage" } else { "stage" }, serde_json::json!({"paths": paths}));
+                                                    }
+                                                },
+                                                if staged { "모두 해제" } else { "모두 스테이지" }
+                                            }
+                                        }
+                                        for file in status.files.iter().filter(|f| if staged { !matches!(f.index, '.' | ' ' | '?') } else { !matches!(f.worktree, '.' | ' ') }) {
+                                            {scm_file_row(&rows, file, staged, busy)}
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            div { style: "display:flex; gap:6px; margin-bottom:12px;",
+                                for op in ["fetch", "pull", "push"] {
+                                    button {
+                                        class: "btn sm",
+                                        style: "flex:1; justify-content:center;",
+                                        disabled: busy,
+                                        onclick: { let git = git.clone(); move |_| scm_action(&git, op, serde_json::json!({"remote": null})) },
+                                        "{op}"
+                                    }
+                                }
+                            }
+                            div { style: "font-weight:600; font-size:12px; color:var(--muted); margin-bottom:6px;", "브랜치" }
+                            for branch in status.branches.iter() {
+                                {
+                                    let is_cur = *branch == status.branch;
+                                    let b_name = branch.clone();
+                                    rsx! {
+                                        button {
+                                            class: if is_cur { "btn primary sm" } else { "btn sm" },
+                                            style: "width:100%; justify-content:flex-start; margin-bottom:4px;",
+                                            disabled: busy || is_cur,
+                                            onclick: { let git = git.clone(); let b = b_name.clone(); move |_| scm_action(&git, "checkout", serde_json::json!({"branch": b})) },
+                                            if is_cur { {icon_px("git", 14)} }
+                                            "{b_name}"
+                                        }
+                                    }
+                                }
+                            }
+                            div { style: "font-weight:600; font-size:12px; color:var(--muted); margin-top:12px; margin-bottom:6px;", "히스토리" }
+                            for entry in history {
+                                {scm_history_row(&entry)}
+                            }
+                        }
+                    } else { div { "저장소를 불러오는 중" } }
+                }
+            }
+        }
+    }
+
+    fn scm_history_row(entry: &ember_client::api::GitLogCommit) -> Element {
+        let short: String = entry.sha.chars().take(7).collect();
+        rsx! {
+            div { style: "padding:6px 0; border-bottom:1px solid var(--line); font-size:12px;",
+                div { style: "display:flex; gap:6px; font-weight:500;",
+                    span { style: "font-family:monospace; color:var(--muted);", "{short}" }
+                    span { style: "overflow:hidden; text-overflow:ellipsis; white-space:nowrap;", "{entry.subject}" }
+                }
+                div { style: "color:var(--muted); font-size:11px; margin-top:2px;", "{entry.author}" }
+            }
+        }
+    }
+
+    fn scm_file_row(s: &Shared, file: &ember_client::api::GitFile, staged: bool, busy: bool) -> Element {
+        let path = file.path.clone();
+        let full = join_path(&s.folder, &path);
+        let open_path = path.clone();
+        let action_path = path.clone();
+        let badge = if staged { file.index } else { file.worktree };
+        let mut tabs = s.tabs;
+        let host = s.host.clone();
+        let open_s = s.clone();
+        let action = s.clone();
+        let goto_s = s.clone();
+        let folder = s.folder.clone();
+        rsx! { div {
+            style: "display:flex; align-items:center; gap:8px; padding:4px 0;",
+            button {
+                style: "flex:1; text-align:left; background:none; border:none; color:inherit; cursor:pointer; font-family:inherit; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:0;",
+                onclick: move |_| {
+                    tabs.write().open(&full);
+                    host.send(HostCommand::Open(full.clone()));
+                    refresh_active_diff_base(&open_s);
+                    if let Some(target_line) = crate::ui::editor::first_changed_line_in_repo(std::path::Path::new(&folder), &open_path) {
+                        find_send(&goto_s, Some(crate::ui::find::Match { line: target_line, start: 0, end: 0 }), Vec::new());
+                    }
+                },
+                span { style: "display:inline-block; width:16px; font-weight:bold; color:var(--accent, #4285f4);", "{badge}" }
+                "{path}"
+            }
+            button {
+                class: "ed-ib",
+                style: "width:24px; height:24px; font-size:14px;",
+                disabled: busy,
+                onclick: move |_| scm_action(&action, if staged { "unstage" } else { "stage" }, serde_json::json!({"paths": [action_path]})),
+                if staged { "-" } else { "+" }
+            }
+        } }
     }
 
     fn side_note(w: ToolWindow, area: &str) -> Element {
@@ -943,6 +1234,7 @@ pub mod page {
                             let path = row.path.clone();
                             let host = s.host.clone();
                             let open_errors = s.open_errors.clone();
+                            let tree_s = s.clone();
                             let is_dir = row.is_dir;
                             let chosen = selected.as_ref().map(|(p, _)| p.as_str()) == Some(row.path.as_str());
                             let class = if chosen || (selected.is_none() && current == Some(row.path.as_str())) { "ed-tn sel" } else { "ed-tn" };
@@ -963,7 +1255,7 @@ pub mod page {
                                         let was_open = expanded.read().contains(&path);
                                         if was_open { expanded.write().remove(&path); }
                                         else { expanded.write().insert(path.clone()); host.send(HostCommand::List(path.clone())); }
-                                    } else { open_errors.borrow_mut().remove(&path); tabs.write().open(&path); host.send(HostCommand::Open(path.clone())); }
+                                    } else { open_errors.borrow_mut().remove(&path); tabs.write().open(&path); host.send(HostCommand::Open(path.clone())); refresh_active_diff_base(&tree_s); }
                                 },
                                 if is_dir { if row.open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} } } else { span { class: "chev-sp" } }
                                 if is_dir { {icon_px("folder", 15)} } else { {icon_px("file", 15)} }
@@ -1001,6 +1293,7 @@ pub mod page {
                     {
                         let path = path.clone(); let close_path = path.clone();
                         let host = s.host.clone(); let close_host = s.host.clone();
+                        let tab_s = s.clone();
                         let selected = current == Some(path.as_str());
                         let label = base_name(&path).to_string();
                                                 let class = if selected { "ed-tab on" } else { "ed-tab" };
@@ -1009,6 +1302,7 @@ pub mod page {
                         rsx! { div { class, role: "tab", "aria-selected": "{selected}", "aria-label": "{tab_label}", onclick: move |_| {
                             tabs.write().activate(&path);
                             host.send(HostCommand::Focus(path.clone()));
+                            refresh_active_diff_base(&tab_s);
                         }, {icon_px(if selected { "file-w" } else { "file" }, 14)} "{label}" if dirty[i] { span { class: "ed-dirty" } } button { class: "ed-tx", "aria-label": "{close_label}", onclick: move |event| { event.stop_propagation(); tabs.write().close(&close_path); close_host.send(HostCommand::Close(close_path.clone())); if let Some(next) = tabs.read().current_path() { close_host.send(HostCommand::Focus(next.to_string())); } }, {icon_px(if selected { "close-w" } else { "close" }, 12)} } } }
                     }
                 }

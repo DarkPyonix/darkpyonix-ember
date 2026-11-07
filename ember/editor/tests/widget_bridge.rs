@@ -576,3 +576,90 @@ fn replace_all_multi_edit_with_hangul_and_emoji_preserves_utf8_boundaries() {
         "반가워요 ✨ 세상 🚀 반가워요 ✨ 모두 🚀\n한글 🦀 테스트 🦀 한글\n"
     );
 }
+
+#[test]
+fn bridge_handles_output_channels_and_extension_notifications() {
+    let mut bridge = WidgetBridge::new();
+    assert!(bridge.output_channels().is_empty());
+    assert!(bridge.extension_messages().is_empty());
+
+    // Output channels update
+    let ch1 = ember_editor::OutputChannel::new("c1", "Git");
+    let ch2 = ember_editor::OutputChannel::new("c2", "Tasks");
+    bridge.apply(ember_editor::SessionUpdate::OutputChannels {
+        channels: vec![ch1, ch2],
+        active_id: Some("c1".into()),
+    });
+    assert_eq!(bridge.output_channels().len(), 2);
+    assert_eq!(bridge.active_output_channel(), Some("c1"));
+
+    // Clear output channel
+    bridge.clear_output_channel("c1");
+
+    // Extension message update
+    let action = bridge.apply(ember_editor::SessionUpdate::ExtensionMessage {
+        severity: ember_editor::MessageSeverity::Warning,
+        message: "Extension warning".into(),
+        source: Some("Rust Analyzer".into()),
+    });
+    assert_eq!(
+        action,
+        BridgeAction::ExtensionNotice {
+            severity: ember_editor::MessageSeverity::Warning,
+            message: "Extension warning".into(),
+            source: Some("Rust Analyzer".into()),
+        }
+    );
+    assert_eq!(bridge.extension_messages().len(), 1);
+}
+
+#[test]
+fn bridge_closed_clears_markers_for_that_file() {
+    let mut bridge = WidgetBridge::new();
+    let u1 = uri("/w/a.rs");
+    let u2 = uri("/w/b.rs");
+    bridge.apply(ember_editor::SessionUpdate::Opened {
+        uri: u1.clone(),
+        generation: 1,
+        text: "fn main() {}".into(),
+        language_id: "rust".into(),
+        tab_width: 4,
+    });
+    bridge.apply(ember_editor::SessionUpdate::Opened {
+        uri: u2.clone(),
+        generation: 2,
+        text: "fn test() {}".into(),
+        language_id: "rust".into(),
+        tab_width: 4,
+    });
+
+    // Populate problems for both files
+    bridge.apply(ember_editor::SessionUpdate::Problems {
+        problems: vec![
+            ember_editor::diagnostics::Problem {
+                uri: u1.clone(),
+                owner: "rustc".into(),
+                severity: Severity::Error,
+                message: "error in a".into(),
+                source: Some("rustc".into()),
+                code: None,
+                range: r(0, 0, 0, 2),
+            },
+            ember_editor::diagnostics::Problem {
+                uri: u2.clone(),
+                owner: "rustc".into(),
+                severity: Severity::Warning,
+                message: "warn in b".into(),
+                source: Some("rustc".into()),
+                code: None,
+                range: r(0, 0, 0, 2),
+            },
+        ],
+    });
+    assert_eq!(bridge.problems().len(), 2);
+
+    // Close u1: markers for u1 are cleared, u2 remains
+    bridge.apply(ember_editor::SessionUpdate::Closed { uri: u1 });
+    assert_eq!(bridge.problems().len(), 1);
+    assert_eq!(bridge.problems()[0].uri.path, "/w/b.rs");
+}

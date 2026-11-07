@@ -1,5 +1,5 @@
 //! Remote editor workbench.
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 use dioxus_compose::prelude::*;
 use ember_editor::{BridgeAction, WidgetBridge, WidgetPos, WidgetRange};
 use ember_editor::widget::HoverPhase as EditorHoverPhase;
@@ -29,6 +29,15 @@ pub struct FindCmd {
     pub goto: Option<crate::ui::find::Match>,
     /// Replacements, last first, each written against the same document version.
     pub replacements: Vec<(crate::ui::find::Match, String)>,
+}
+
+/// A pending cursor / caret move target requested by the problems list or a goto command.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingGoto {
+    pub id: u64,
+    pub path: String,
+    pub line: u32,
+    pub col: u32,
 }
 
 #[derive(Clone)]
@@ -65,6 +74,12 @@ pub struct Shared {
     pub open_errors: Rc<RefCell<HashMap<String, String>>>,
     pub editor_versions: Rc<RefCell<HashMap<u64, u32>>>,
     pub last_find_cmd: Rc<RefCell<u64>>,
+    pub pending_goto: Signal<Option<PendingGoto>>,
+    pub next_goto_id: Signal<u64>,
+    pub last_goto_id: Rc<RefCell<u64>>,
+    pub problems_limit: Signal<usize>,
+    pub selected_output_channel: Signal<String>,
+    pub workbench_logs: Signal<Vec<String>>,
     /// Source control of the 커밋 and Git windows (FR-L31.2).
     pub scm: crate::ui::editor_scm::Scm,
 }
@@ -124,9 +139,15 @@ fn init(target: EditorTarget) {
     let open_errors = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
     let editor_versions = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
     let last_find_cmd = use_hook(|| Rc::new(RefCell::new(0u64)));
+    let pending_goto = use_hook(|| Signal::new_in_scope(None::<PendingGoto>, root));
+    let next_goto_id = use_hook(|| Signal::new_in_scope(1u64, root));
+    let last_goto_id = use_hook(|| Rc::new(RefCell::new(0u64)));
+    let problems_limit = use_hook(|| Signal::new_in_scope(crate::ui::editor::MAX_VISIBLE_PROBLEMS, root));
+    let selected_output_channel = use_hook(|| Signal::new_in_scope("ember-workbench".to_string(), root));
+    let workbench_logs = use_hook(|| Signal::new_in_scope(Vec::<String>::new(), root));
     // The branch in the bars comes from the first status read, so it starts with the window.
     let scm = use_hook(|| { let scm = crate::ui::editor_scm::Scm::new(&target.project, revision); scm.refresh(); scm });
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, scm }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -185,6 +206,20 @@ fn editor_pane() -> Element {
             }
         }
     }
+    if let Some(goto) = s.pending_goto.read().clone() {
+        if goto.path == doc.uri.path {
+            let mut last_goto = s.last_goto_id.borrow_mut();
+            if *last_goto != goto.id {
+                *last_goto = goto.id;
+                use compose_rust::code::{CodeRange, Position};
+                let pos = Position::new(goto.line, goto.col);
+                handle.select(version, pos, pos);
+                handle.reveal(version, CodeRange::of(goto.line, goto.col, goto.line, goto.col), compose_rust::schema::RevealAlign::Center);
+                let mut pos_sig = s.position;
+                pos_sig.set((goto.line as usize + 1, goto.col as usize + 1));
+            }
+        }
+    }
     let gutter_decorations = {
         let current_path = s.tabs.read().current_path().map(str::to_string);
         if let Some(abs_path) = current_path {
@@ -217,7 +252,7 @@ pub mod page {
     use dioxus_compose::html::prelude::*;
     use std::sync::Arc;
     use crate::terminal_stream::{self, ChangeCallback, TerminalHandle, TerminalState};
-    use super::{DOUBLE_SHIFT, now_ms, send, editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, Shared};
+    use super::{DOUBLE_SHIFT, now_ms, send, editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, PendingGoto, Shared};
     use crate::ui::editor::{
         action_for_key, agent_status_text, apply_action, tooltip_text, Side, Stripes, ToolWindow,
     };
@@ -713,6 +748,12 @@ pub mod page {
                     tracing::warn!(path = %uri.path, %error, "saving a file failed");
                     notice(format!("{}을(를) 저장하지 못했습니다: {}", crate::ui::editor::display_name(base_name(&uri.path)), crate::ui::editor::file_failure_reason(&error)));
                 }
+                BridgeAction::ExtensionNotice { severity, message, source } => {
+                    let prefix = source.as_deref().unwrap_or("알림");
+                    notice(format!("{prefix}: {message}"));
+                    let mut logs = s.workbench_logs;
+                    crate::ui::editor::push_workbench_log(&mut logs.write(), format!("[{prefix}] [{}] {message}", severity.label()));
+                }
                 BridgeAction::CommandFailed { id, error } => {
                     tracing::warn!(%id, %error, "extension command failed");
                     notice(format!("명령 {id}을(를) 실행하지 못했습니다: {error}"));
@@ -977,6 +1018,7 @@ pub mod page {
             ToolWindow::Terminal => "code",
             ToolWindow::Run => "play",
             ToolWindow::Problems => "warn",
+            ToolWindow::Output => "code",
         }
     }
 
@@ -1455,30 +1497,137 @@ pub mod page {
         }
     }
 
-    /// The problems list: a row per marker, errors first; a click opens the file.
-    fn problems_body(s: &Shared, rows: Vec<(String, ember_editor::widget::Severity, String, String, String)>) -> Element {
+    /// The problems list: a row per marker, errors first; a click opens the file and moves the caret.
+    fn problems_body(s: &Shared, rows: Vec<(String, ember_editor::widget::Severity, String, String, String, u32, u32)>) -> Element {
         use ember_editor::widget::Severity;
         let mut tabs = s.tabs;
         if rows.is_empty() {
             return rsx! { div { class: "ed-term", style: "color:var(--muted);", "문제가 없습니다." } };
         }
+        let limit = *s.problems_limit.read();
+        let (visible_rows, overflow) = crate::ui::editor::paginate_problems(&rows, limit);
+        let mut problems_limit = s.problems_limit;
         rsx! {
             div { class: "ed-plist", role: "list", "aria-label": "문제 목록",
-                for (i, (path, severity, message, location, source)) in rows.into_iter().enumerate() {
+                for (i, (path, severity, message, location, source, start_line, start_col)) in visible_rows.iter().cloned().enumerate() {
                     {
                         let host = s.host.clone();
                         let mut recent_files = s.recent_files;
                         let dot = match severity { Severity::Error => "ed-pdot err", Severity::Warning => "ed-pdot warn", _ => "ed-pdot" };
                         let row_label = crate::ui::editor::problem_aria_label(match severity { Severity::Error => "오류", Severity::Warning => "경고", _ => "정보" }, &message, &location);
+                        let mut pending_goto = s.pending_goto;
+                        let mut next_goto_id = s.next_goto_id;
                         rsx! { div { key: "{i}", class: "ed-prow", role: "listitem", "aria-label": "{row_label}", onclick: move |_| {
                             tabs.write().open(&path);
                             record_recent_file(&mut recent_files, &path);
                             host.send(HostCommand::Open(path.clone()));
+                            host.send(HostCommand::Focus(path.clone()));
+                            let gid = *next_goto_id.read();
+                            *next_goto_id.write() += 1;
+                            pending_goto.set(Some(PendingGoto {
+                                id: gid,
+                                path: path.clone(),
+                                line: start_line,
+                                col: start_col,
+                            }));
                         },
                             span { class: "{dot}" }
                             span { style: "flex:1; min-width:0; overflow:hidden; white-space:nowrap;", "{message}" }
                             span { style: "color:var(--muted); font-size:var(--fs-xs); white-space:nowrap;", "{source} {location}" }
                         } }
+                    }
+                }
+                if overflow > 0 {
+                    button {
+                        class: "ed-pj ed-prow-more",
+                        style: "width:100%; justify-content:center; padding:var(--sp2); color:var(--c-blue); font-size:var(--fs-xs);",
+                        onclick: move |_| {
+                            let cur = *problems_limit.read();
+                            problems_limit.set(cur.saturating_add(crate::ui::editor::MAX_VISIBLE_PROBLEMS));
+                        },
+                        "외 {overflow}개 항목 더 보기…"
+                    }
+                }
+            }
+        }
+    }
+
+    /// The output panel: channel selector, log text, and clear button.
+    fn output_body(s: &Shared) -> Element {
+        let bridge = s.bridge.borrow();
+        let channels = bridge.output_channels().to_vec();
+        drop(bridge);
+
+        let selected_sig = s.selected_output_channel;
+        let selected_id = selected_sig.read().clone();
+
+        let all_channels: Vec<(String, String)> = std::iter::once(("ember-workbench".into(), "워크벤치".into()))
+            .chain(channels.iter().map(|c| (c.id.clone(), c.label.clone())))
+            .collect();
+
+        let active_id = if all_channels.iter().any(|(id, _)| id == &selected_id) {
+            selected_id
+        } else {
+            "ember-workbench".into()
+        };
+
+        let text = if active_id == "ember-workbench" {
+            s.workbench_logs.read().join("\n")
+        } else {
+            channels.iter().find(|c| c.id == active_id).map(|c| c.text.clone()).unwrap_or_default()
+        };
+
+        let clear_id = active_id.clone();
+        let mut clear_s = s.clone();
+
+        rsx! {
+            div { class: "ed-tsub", style: "display:flex; align-items:center; gap:var(--sp2); padding:var(--sp1) var(--sp2);",
+                div { role: "group", "aria-label": "출력 채널", style: "display:flex; gap:var(--sp1); align-items:center; overflow-x:auto;",
+                    for (id, label) in all_channels {
+                        {
+                            let is_on = id == active_id;
+                            let cid = id.clone();
+                            let mut sel = selected_sig;
+                            let bridge = s.bridge.clone();
+                            rsx! {
+                                button {
+                                    key: "{id}",
+                                    class: if is_on { "ed-pj on" } else { "ed-pj" },
+                                    "aria-pressed": "{is_on}",
+                                    onclick: move |_| {
+                                        sel.set(cid.clone());
+                                        bridge.borrow_mut().set_active_output_channel(cid.clone());
+                                    },
+                                    "{label}"
+                                }
+                            }
+                        }
+                    }
+                }
+                div { class: "spacer" }
+                button {
+                    class: "ed-pj",
+                    title: "지우기",
+                    "aria-label": "지우기",
+                    style: "border:1px solid var(--line);",
+                    onclick: move |_| {
+                        if clear_id == "ember-workbench" {
+                            clear_s.workbench_logs.write().clear();
+                        } else {
+                            clear_s.bridge.borrow_mut().clear_output_channel(&clear_id);
+                            let mut rev = clear_s.revision;
+                            *rev.write() += 1;
+                        }
+                    },
+                    "지우기"
+                }
+            }
+            div { class: "ed-term", style: "flex:1; overflow-y:auto; padding:var(--sp2); font-family:var(--font-mono); white-space:pre-wrap; outline:none;",
+                if text.trim().is_empty() {
+                    div { style: "color:var(--muted);", "출력이 없습니다." }
+                } else {
+                    for (i, line) in text.lines().enumerate() {
+                        div { key: "{i}", class: "tl", "{line}" }
                     }
                 }
             }
@@ -1490,12 +1639,20 @@ pub mod page {
         let mut bottom_max = s.bottom_max;
         let max = *bottom_max.read();
         let has_left = s.stripes.read().selected(Side::Left).is_some();
-        let problem_rows: Vec<(String, ember_editor::widget::Severity, String, String, String)> = s
+        let problem_rows: Vec<(String, ember_editor::widget::Severity, String, String, String, u32, u32)> = s
             .bridge
             .borrow()
             .problems()
             .iter()
-            .map(|p| (p.uri.path.clone(), p.severity, p.message.clone(), crate::ui::editor::problem_location(&p.uri.path, &s.folder, p.range.start.line), p.source.clone().unwrap_or_default()))
+            .map(|p| (
+                p.uri.path.clone(),
+                p.severity,
+                p.message.clone(),
+                crate::ui::editor::problem_location(&p.uri.path, &s.folder, p.range.start.line),
+                p.source.clone().unwrap_or_default(),
+                p.range.start.line,
+                p.range.start.col,
+            ))
             .collect();
         let problem_count = problem_rows.len();
         let body = match w {
@@ -1523,6 +1680,8 @@ pub mod page {
                     {terminal_body(s)}
                 } else if w == ToolWindow::Problems {
                     {problems_body(s, problem_rows)}
+                } else if w == ToolWindow::Output {
+                    {output_body(s)}
                 } else {
                     div { class: "ed-term", style: "color:var(--muted);", "{body}" }
                 }

@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use compose_rust::{asset, AssetKind, Color, ColorRole, ColorScheme, DesignSystem, FontStack, Palette, Theme};
+use compose_rust::{asset, AssetKind, ColorRole, ColorScheme, DesignSystem, FontStack, Palette, Theme};
 
 /// One bundled face: its file name under `assets/fonts/` and its bytes.
 pub struct Face {
@@ -52,14 +52,15 @@ pub fn app_font() -> u32 {
 }
 
 // Overlay surfaces and ink follow the same tokens as Ember's own components.
+use crate::ui::cr::theme::{DARK, LIGHT};
 const APP_PALETTE: Palette = Palette::new()
-    .with(ColorRole::Background, Color::rgb(0xf3f2ee), Color::rgb(0x151514))
-    .with(ColorRole::Surface, Color::rgb(0xffffff), Color::rgb(0x1f1f1d))
-    .with(ColorRole::SurfaceContainer, Color::rgb(0xffffff), Color::rgb(0x1f1f1d))
-    .with(ColorRole::SurfaceVariant, Color::rgb(0xf7f6f2), Color::rgb(0x252523))
-    .with(ColorRole::OnSurface, Color::rgb(0x1c1b19), Color::rgb(0xf0eee9))
-    .with(ColorRole::OnSurfaceVariant, Color::rgb(0x56534d), Color::rgb(0xc3bfb7))
-    .with(ColorRole::OutlineVariant, Color::rgb(0xebe9e4), Color::rgb(0x2f2e2b));
+    .with(ColorRole::Background, LIGHT.bg, DARK.bg)
+    .with(ColorRole::Surface, LIGHT.surface, DARK.surface)
+    .with(ColorRole::SurfaceContainer, LIGHT.surface, DARK.surface)
+    .with(ColorRole::SurfaceVariant, LIGHT.surface_2, DARK.surface_2)
+    .with(ColorRole::OnSurface, LIGHT.text, DARK.text)
+    .with(ColorRole::OnSurfaceVariant, LIGHT.text_2, DARK.text_2)
+    .with(ColorRole::OutlineVariant, LIGHT.line, DARK.line);
 
 /// The toolkit theme the app launches with: every role except Mono in the bundled font.
 pub fn app_theme(scheme: ColorScheme) -> Theme {
@@ -79,5 +80,10 @@ mod tests {
         assert!(!theme.adaptive);
         assert_eq!(theme.design_system, DesignSystem::Cupertino);
         assert_eq!(theme.color_scheme, ColorScheme::Light);
+        let palette = theme.palette.expect("app palette");
+        assert_eq!(palette.get(ColorRole::Surface, ColorScheme::Light), Some(LIGHT.surface));
+        assert_eq!(palette.get(ColorRole::Surface, ColorScheme::Dark), Some(DARK.surface));
+        assert_eq!(palette.get(ColorRole::OnSurface, ColorScheme::Light), Some(LIGHT.text));
+        assert_eq!(palette.get(ColorRole::OnSurface, ColorScheme::Dark), Some(DARK.text));
     }
 }

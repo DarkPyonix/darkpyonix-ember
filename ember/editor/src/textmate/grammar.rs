@@ -1,8 +1,8 @@
 //! One TextMate grammar file, parsed into the raw rule model.
 //!
-//! Only the JSON form (`*.tmLanguage.json`, `*.json`) is read. VS Code also accepts plist and YAML
-//! grammar files; a path with another extension is refused with [`GrammarError::UnsupportedFormat`]
-//! so the caller can say so rather than tokenize nothing silently.
+//! Two forms are read: JSON (`*.tmLanguage.json`, `*.json`) and XML property lists (`*.tmLanguage`, `*.plist`,
+//! see [`super::plist`]). VS Code also accepts YAML grammar files; a path with another extension is refused with
+//! [`GrammarError::UnsupportedFormat`] so the caller can say so rather than tokenize nothing silently.
 //!
 //! A grammar file comes from an extension, so it is input from outside the editor. The reader is as
 //! forgiving as vscode-textmate: a value of the wrong type (`"patterns": null`, `"name": 5`, a string
@@ -36,8 +36,10 @@ pub enum GrammarError {
     Json { line: usize, column: usize },
     #[error("grammar has no scopeName")]
     MissingScopeName,
-    #[error("grammar file {0} is not JSON (only .json grammars are read)")]
+    #[error("grammar file {0} is neither JSON nor an XML property list (only .json, .tmLanguage and .plist are read)")]
     UnsupportedFormat(String),
+    #[error("{0}")]
+    Plist(super::plist::PlistError),
     #[error("grammar file is larger than {MAX_GRAMMAR_BYTES} bytes")]
     TooLarge,
     #[error("grammar has more than {MAX_RULES} rules")]
@@ -180,16 +182,28 @@ impl RawGrammar {
     }
 }
 
-/// Parses the text of a grammar file. `path` is only used to refuse formats that are not JSON.
+/// Parses the text of a grammar file. `path` decides the format: `.json` is JSON, `.tmLanguage` and `.plist` are an XML
+/// property list, anything else is refused.
 pub fn parse_grammar(path: &str, content: &str) -> Result<RawGrammar, GrammarError> {
-    if !path.to_lowercase().ends_with(".json") {
+    let lower = path.to_lowercase();
+    let is_plist = lower.ends_with(".tmlanguage") || lower.ends_with(".plist");
+    if !lower.ends_with(".json") && !is_plist {
         return Err(GrammarError::UnsupportedFormat(path.chars().filter(|c| !c.is_control()).take(120).collect()));
     }
     if content.len() as u64 > MAX_GRAMMAR_BYTES {
         return Err(GrammarError::TooLarge);
     }
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
-    let value: Value = serde_json::from_str(content).map_err(|e| GrammarError::Json { line: e.line(), column: e.column() })?;
+    let value: Value = if is_plist {
+        super::plist::parse_plist(content).map_err(GrammarError::Plist)?
+    } else {
+        serde_json::from_str(content).map_err(|e| GrammarError::Json { line: e.line(), column: e.column() })?
+    };
+    grammar_from_value(value)
+}
+
+/// The rule model of a grammar read into a value, whatever its format.
+fn grammar_from_value(value: Value) -> Result<RawGrammar, GrammarError> {
     let Value::Object(root) = value else {
         return Err(GrammarError::MissingScopeName);
     };

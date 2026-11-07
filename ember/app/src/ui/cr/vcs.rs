@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{can_approve_pr, merge_method_text, pr_created_notice, pr_merge_method_label, pr_review_notice, PR_DELETE_BRANCH_LABEL, PR_DELETE_BRANCH_NOTE, PR_MERGE_METHODS, PR_SELF_APPROVAL_DISALLOWED, copy_sha_to_clipboard, filter_history_entries, HistoryFilter, branch_switch_allowed, branch_matches, branch_bar_text, BRANCH_SWITCH_NOTE, BRANCH_CREATE_NOTE, STASH_NOW_NOTE, commit_action_branch_line, commit_failure_reloads_snapshot, commit_action_gate, commit_action_key, commit_detail_from, commit_detail_view, commit_files_shown, fetch_commit_detail, file_stat_text, run_branch_from, run_commit_cherry_pick, run_commit_revert, snapshot_dirty, CommitAction, CommitDetailLoad, CommitDetailView, choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, MemberCwd, TeamMember, TeamRow, TeamPrStatus, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState, banner_sub, banner_title, fetch_merge_state, banner_button_text, merge_tap, merge_tap_key, run_merge_abort, run_merge_commit, MergeAction, MergeLoad, MergeView, MERGE_ABORT_NOTE, MERGE_COMMIT_NOTE, merge_answer_reloads, pick_all_key, pick_all_note, pick_all_text};
+use crate::ui::vcs::{can_approve_pr, merge_method_text, pr_created_notice, pr_merge_method_label, pr_review_notice, PR_DELETE_BRANCH_LABEL, PR_DELETE_BRANCH_NOTE, PR_MERGE_METHODS, PR_SELF_APPROVAL_DISALLOWED, copy_sha_to_clipboard, filter_history_entries, HistoryFilter, branch_switch_allowed, branch_matches, branch_bar_text, BRANCH_SWITCH_NOTE, BRANCH_CREATE_NOTE, STASH_NOW_NOTE, commit_action_branch_line, commit_failure_reloads_snapshot, commit_action_gate, commit_action_key, commit_detail_from, commit_detail_view, commit_files_shown, fetch_commit_detail, file_stat_text, run_branch_from, run_commit_cherry_pick, run_commit_revert, snapshot_dirty, CommitAction, CommitDetailLoad, CommitDetailView, choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, team_rows_with_pr_load, MemberCwd, TeamMember, TeamRow, TeamPrStatus, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState, banner_sub, banner_title, fetch_merge_state, banner_button_text, merge_tap, merge_tap_key, run_merge_abort, run_merge_commit, MergeAction, MergeLoad, MergeView, MERGE_ABORT_NOTE, MERGE_COMMIT_NOTE, merge_answer_reloads, pick_all_key, pick_all_note, pick_all_text};
 use ember_client::api::{GitPrMergeMethod, GitPrReviewAction};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
@@ -1582,6 +1582,7 @@ fn SectionContent(
     branch_count: MutableState<Option<usize>>,
     team_count: MutableState<Option<usize>>,
     pr_list: MutableState<Option<Vec<PrEntry>>>,
+    selected_pr: MutableState<Option<u64>>,
     sec_state: Option<MutableState<Section>>,
     diff_width: f32,
 ) {
@@ -1600,8 +1601,8 @@ fn SectionContent(
         (Some(s), Section::Conflicts) => ConflictsPane(&s.conflicts, actions, layout),
         (Some(s), Section::History) => HistoryPane(actions, layout, snapshot_dirty(s), s.branch.clone()),
         (Some(s), Section::Stash) => StashPane(actions, stash_count, layout, !s.changes.is_empty()),
-        (Some(s), Section::PullRequests) => PullRequestsPane(actions, pr_count, pr_list, layout, Some(s.branch.clone())),
-        (_, Section::Team) => TeamPane(actions, team_count, pr_list, layout, sec_state, snap),
+        (Some(s), Section::PullRequests) => PullRequestsPane(actions, pr_count, pr_list, selected_pr, layout, Some(s.branch.clone())),
+        (_, Section::Team) => TeamPane(actions, team_count, pr_list, Some(selected_pr), layout, sec_state, snap),
         (Some(_), Section::Branches) => BranchesPane(actions, branch_count, layout),
         _ => Unavailable(sec),
     }
@@ -3103,14 +3104,12 @@ fn PrDetailActions<R: Fn(GitPrReviewAction) + Clone + 'static, M: Fn() + Clone +
 /// requests. `count` is written for the section list (the open ones). `branch` is the current
 /// branch, the head of a new pull request. The wide layout shows the list and the detail side by
 /// side (the first one selected until a tap); the compact one shows one at a time, with 목록으로.
-fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>, shared: MutableState<Option<Vec<PrEntry>>>, layout: PaneLayout, branch: Option<String>) {
+fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>, shared: MutableState<Option<Vec<PrEntry>>>, selected: MutableState<Option<u64>>, layout: PaneLayout, branch: Option<String>) {
     let p = ember_theme().palette;
     let key_project = actions.as_ref().map(|a| a.project.clone());
     let state = remember_with_key(key_project.clone(), || mutable_state_of(PrLoad::Loading));
     let filter = remember(|| mutable_state_of(PrFilter::Open));
     let retry = remember(|| mutable_state_of(0_u64));
-    // `EMBER_CR_VCS_PR=<n>` opens that pull request directly, for captures without clicks.
-    let selected = remember_with_key(key_project.clone(), || mutable_state_of(std::env::var("EMBER_CR_VCS_PR").ok().and_then(|v| v.parse::<u64>().ok())));
     let detail = remember_with_key(key_project, || mutable_state_of(PrDetailLoad::Idle));
     let wanted = remember(|| mutable_state_of(None::<u64>));
     let busy = remember(|| mutable_state_of(false));
@@ -3836,14 +3835,26 @@ fn sample_members() -> Vec<MemberCwd> {
 
 /// The sample rows of 팀 작업 (the sample branches, members and pull requests).
 fn sample_team_rows() -> Vec<TeamRow> {
-    let (BranchLoad::Ready(branches), PrLoad::Ready(prs)) = (sample_branches(), sample_prs()) else { return Vec::new() };
+    let (BranchLoad::Ready(mut branches), PrLoad::Ready(prs)) = (sample_branches(), sample_prs()) else { return Vec::new() };
+    branches.push(BranchEntry {
+        name: "fix/egress-stop".to_string(),
+        current: false,
+        default: false,
+        upstream_text: "origin/fix/egress-stop".to_string(),
+        has_upstream: true,
+        ahead: 1,
+        behind: 0,
+        last_line: "b4c5d6e \u{00b7} Fix: stop egress when a session detaches \u{00b7} 5시간 전".to_string(),
+        worktree: Some("/Users/demo/worktrees/egress-stop".to_string()),
+    });
     let mut rows = team_rows(&branches, &sample_members(), Some(&prs));
     if let Some(r) = rows.get_mut(0) {
-        r.computer = "mac-mini".to_string();
+        r.computer = Some("mac-mini".to_string());
+        r.dirty_count = Some(0);
     }
     if let Some(r) = rows.get_mut(1) {
-        r.computer = "mac-mini".to_string();
-        r.dirty_count = 2;
+        r.computer = Some("mac-mini".to_string());
+        r.dirty_count = Some(2);
     }
     rows
 }
@@ -3855,7 +3866,7 @@ fn sample_team_len() -> usize {
 /// One worktree card: the member's character, name, subtitle (title and harness), state pill,
 /// the inset box with branch, worktree folder, computer and dirty status, last-commit line,
 /// and action buttons (PR chip, 충돌 해결 when conflicts exist, 브랜치 보기, and 세션).
-pub(crate) fn TeamRowView(
+fn TeamRowView(
     r: &TeamRow,
     project: &str,
     on_branch: impl Fn() + Clone + 'static,
@@ -3952,7 +3963,7 @@ pub(crate) fn TeamRowView(
                                 });
                                 // Worktree folder line
                                 cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                                    Txt("worktree", TypeRole::Caption, Some(paint(p.text_2)), Some(1), None, None, None);
+                                    Txt("워크트리", TypeRole::Caption, Some(paint(p.text_2)), Some(1), None, None, None);
                                     cu::Spacer().modifier(Modifier::new().width(SP[1]));
                                     Txt(&r.worktree, TypeRole::Mono, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
                                 });
@@ -3960,12 +3971,13 @@ pub(crate) fn TeamRowView(
                                 cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                                     Txt("컴퓨터", TypeRole::Caption, Some(paint(p.text_2)), Some(1), None, None, None);
                                     cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                                    Txt(&r.computer, TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+                                    Txt(r.computer_text(), TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
                                     cu::Spacer().modifier(Modifier::new().weight(1.0));
-                                    let (dirty_lbl, dirty_paint) = if r.dirty_count > 0 {
-                                        (format!("변경 {}개", r.dirty_count), paint(p.orange.strong))
+                                    let dirty_lbl = r.dirty_text();
+                                    let dirty_paint = if r.dirty_count.is_some_and(|n| n > 0) {
+                                        paint(p.orange.strong)
                                     } else {
-                                        ("깨끗함".to_string(), paint(p.text_2))
+                                        paint(p.text_2)
                                     };
                                     Txt(&dirty_lbl, TypeRole::Caption, Some(dirty_paint), Some(1), None, None, None);
                                 });
@@ -3992,6 +4004,9 @@ pub(crate) fn TeamRowView(
                         match &r.pr_status {
                             TeamPrStatus::Checking => {
                                 Pill("PR 확인 중", PillTone::Grey, true);
+                            }
+                            TeamPrStatus::Failed => {
+                                Pill("PR 확인 실패", PillTone::Red, true);
                             }
                             TeamPrStatus::None => {
                                 Pill("PR 없음", PillTone::Grey, true);
@@ -4041,19 +4056,21 @@ pub(crate) fn TeamRowView(
 /// 팀 작업: one card per worktree with its member, branch, ahead/behind and pull request. The
 /// branches come from the branches API; the members from the project's sessions (a session belongs
 /// to the worktree that holds its folder). `prs` are the pull requests the 풀 리퀘스트 section has
-/// read (or loaded here if unread). `None` actions show sample rows. `count` is written for
-/// the section list.
-pub(crate) fn TeamPane(
+/// read (or loaded here across all states if unread). `None` actions show sample rows. `count` is
+/// written for the section list.
+fn TeamPane(
     actions: Option<Actions>,
     count: MutableState<Option<usize>>,
     prs: MutableState<Option<Vec<PrEntry>>>,
+    selected_pr: Option<MutableState<Option<u64>>>,
     layout: PaneLayout,
     sec_state: Option<MutableState<Section>>,
     snap: Option<&RepoSnapshot>,
 ) {
     let p = ember_theme().palette;
     let key_project = actions.as_ref().map(|a| a.project.clone());
-    let state = remember_with_key(key_project, || mutable_state_of(BranchLoad::Loading));
+    let state = remember_with_key(key_project.clone(), || mutable_state_of(BranchLoad::Loading));
+    let team_pr_load = remember_with_key(key_project, || mutable_state_of(PrLoad::Loading));
     let retry = remember(|| mutable_state_of(0_u64));
     let compact = current_window_size().class == WindowSizeClass::Compact;
 
@@ -4082,63 +4099,65 @@ pub(crate) fn TeamPane(
             }
         });
 
-        // Load PR list inside TeamPane if not loaded yet
+        // Load PR list across all states (`PrFilter::All`) so merged and closed PRs match too,
+        // and surface fetch failures as `TeamPrStatus::Failed` instead of leaving `Checking` forever.
+        let pr_load_state = team_pr_load.clone();
         let prs_state = prs.clone();
         let proj_pr = a.project.clone();
         launched_effect((a.project.clone(), a.reload.get(), retry.get()), move || async move {
-            if prs_state.get().is_none() && crate::services::try_services().is_some() {
+            if crate::services::try_services().is_some() {
+                if !matches!(pr_load_state.get(), PrLoad::Ready(_)) {
+                    pr_load_state.set(PrLoad::Loading);
+                }
                 let (project, now) = (proj_pr.clone(), crate::demo::now_ms() / 1000);
                 crate::services::run_shared(
-                    async move { prs_from(fetch_prs(&project, PrFilter::Open).await, now) },
+                    async move { prs_from(fetch_prs(&project, PrFilter::All).await, now) },
                     move |result| {
-                        if let PrLoad::Ready(list) = result {
-                            prs_state.set(Some(list));
+                        if let PrLoad::Ready(ref list) = result {
+                            if prs_state.get().is_none() {
+                                prs_state.set(Some(list.clone()));
+                            }
                         }
+                        pr_load_state.set(result);
                     },
                 );
+            } else {
+                pr_load_state.set(PrLoad::Failed("서버에 연결되어 있지 않아 풀 리퀘스트를 불러올 수 없습니다.".to_string()));
             }
         });
     }
 
     let project = actions.as_ref().map(|a| a.project.clone()).unwrap_or_default();
     let status = if actions.is_some() { state.get() } else { sample_branches() };
+    let is_demo = crate::services::try_services().is_some_and(|s| s.demo.is_some());
     let members = match &actions {
         // Demo sessions run in temporary folders that no demo worktree path can match, so demo
         // mode uses the sample members (the same two as the sample route).
-        Some(_) if crate::services::try_services().is_some_and(|s| s.demo.is_some()) => sample_members(),
+        Some(_) if is_demo => sample_members(),
         Some(a) => crate::services::try_services().map(|s| s.client.read(|st| member_cwds(st, &a.project))).unwrap_or_default(),
         None => sample_members(),
     };
 
-    let pr_entries = if actions.is_some() {
-        prs.get()
-    } else if let PrLoad::Ready(l) = sample_prs() {
-        Some(l)
+    let pr_load_for_rows = if actions.is_some() {
+        match team_pr_load.get() {
+            PrLoad::Loading => {
+                if let Some(shared) = prs.get() {
+                    PrLoad::Ready(shared)
+                } else {
+                    PrLoad::Loading
+                }
+            }
+            other => other,
+        }
     } else {
-        Some(Vec::new())
-    };
-
-    let computer = if !project.is_empty() {
-        crate::services::try_services()
-            .and_then(|s| s.client.read(|st| {
-                let assigned = st.project_computers(&project);
-                assigned.first().map(|id| {
-                    if id == "local" {
-                        "로컬".to_string()
-                    } else {
-                        st.computers().iter().find(|c| &c.id == id).map(|c| c.name.clone()).unwrap_or_else(|| id.clone())
-                    }
-                })
-            }))
-            .unwrap_or_else(|| "로컬".to_string())
-    } else {
-        "로컬".to_string()
+        sample_prs()
     };
 
     let retry_state = retry.clone();
     let sec_nav = sec_state.clone();
-    let snap_dirty = snap.map(|s| s.changes.len()).unwrap_or(0);
-    let snap_conflict = snap.map(|s| !s.conflicts.is_empty()).unwrap_or(false);
+    let sel_pr_nav = selected_pr.clone();
+    let snap_dirty = snap.map(|s| s.changes.len());
+    let snap_conflict = snap.is_some_and(|s| !s.conflicts.is_empty());
     let has_actions = actions.is_some();
 
     let list = move || {
@@ -4152,7 +4171,7 @@ pub(crate) fn TeamPane(
             }
             BranchLoad::Ready(entries) => {
                 let mut rows = if has_actions {
-                    team_rows(&entries, &members, pr_entries.as_deref())
+                    team_rows_with_pr_load(&entries, &members, &pr_load_for_rows)
                 } else {
                     sample_team_rows()
                 };
@@ -4164,10 +4183,16 @@ pub(crate) fn TeamPane(
                 }
                 if has_actions {
                     for r in &mut rows {
-                        r.computer = computer.clone();
+                        if is_demo {
+                            r.computer = Some("mac-mini".to_string());
+                        }
                         if r.current {
-                            r.dirty_count = snap_dirty;
-                            r.conflict = snap_conflict;
+                            if let Some(d) = snap_dirty {
+                                r.dirty_count = Some(d);
+                                r.conflict = snap_conflict;
+                            }
+                        } else if is_demo {
+                            r.dirty_count = Some(2);
                         }
                     }
                 }
@@ -4175,6 +4200,7 @@ pub(crate) fn TeamPane(
                     let nav_br = sec_nav.clone();
                     let nav_cf = sec_nav.clone();
                     let nav_pr = sec_nav.clone();
+                    let pick_pr = sel_pr_nav.clone();
                     TeamRowView(
                         r,
                         &project,
@@ -4193,7 +4219,10 @@ pub(crate) fn TeamPane(
                                 s.set(Section::Conflicts);
                             }
                         },
-                        move |_num: u64| {
+                        move |num: u64| {
+                            if let Some(p) = &pick_pr {
+                                p.set(Some(num));
+                            }
                             if let Some(s) = &nav_pr {
                                 s.set(Section::PullRequests);
                             }
@@ -4548,6 +4577,8 @@ fn VcsScreenWithLoad(
     let team_count = remember(|| mutable_state_of(None::<usize>));
     // Keyed by the project: the PR pills of another project's branches must not carry over.
     let pr_list = remember_with_key(selected_proj.get(), || mutable_state_of(None::<Vec<PrEntry>>));
+    // `EMBER_CR_VCS_PR=<n>` opens that pull request directly, and clicking a PR chip in 팀 작업 selects it too.
+    let selected_pr = remember_with_key(selected_proj.get(), || mutable_state_of(std::env::var("EMBER_CR_VCS_PR").ok().and_then(|v| v.parse::<u64>().ok())));
 
     let current = selected_proj.get();
     let project = current.as_ref().and_then(|id| boxes.iter().find(|b| &b.id == id).cloned());
@@ -4624,7 +4655,7 @@ fn VcsScreenWithLoad(
                                 SectionListWithSample(sec, snap.as_ref(), sample, stash_count.get(), pr_count.get(), branch_count.get(), team_count.get(), move |s| sec_for_list.set(s));
                             });
                             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
-                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone(), Some(sec_state.clone()), diff_width);
+                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone(), selected_pr.clone(), Some(sec_state.clone()), diff_width);
                             });
                         });
                     } else {
@@ -4636,7 +4667,7 @@ fn VcsScreenWithLoad(
                                 let tab_state = tab.clone();
                                 PaneTabs(sec, active_tab, move |t| tab_state.set(t));
                             }
-                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone(), Some(sec_state.clone()), diff_width);
+                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone(), selected_pr.clone(), Some(sec_state.clone()), diff_width);
                         });
                     }
                 } else {
@@ -5524,12 +5555,18 @@ mod tests {
 
     #[compose_rust::runtime::composable]
     fn prs_sample_wide() {
-        PullRequestsPane(None, mutable_state_of(None), mutable_state_of(Some(Vec::new())), PaneLayout::Two, Some("feat/x".to_string()));
+        let cnt = remember(|| mutable_state_of(None));
+        let shared = remember(|| mutable_state_of(Some(Vec::new())));
+        let selected = remember(|| mutable_state_of(None));
+        PullRequestsPane(None, cnt, shared, selected, PaneLayout::Two, Some("feat/x".to_string()));
     }
 
     #[compose_rust::runtime::composable]
     fn prs_sample_compact() {
-        PullRequestsPane(None, mutable_state_of(None), mutable_state_of(Some(Vec::new())), PaneLayout::Tabs, None);
+        let cnt = remember(|| mutable_state_of(None));
+        let shared = remember(|| mutable_state_of(Some(Vec::new())));
+        let selected = remember(|| mutable_state_of(None));
+        PullRequestsPane(None, cnt, shared, selected, PaneLayout::Tabs, None);
     }
 
     #[test]
@@ -6498,7 +6535,7 @@ mod tests {
             let p = prs.clone();
             let s = sec.clone();
             Box::new(Recomposer::new(move || {
-                TeamPane(None, cnt.clone(), p.clone(), PaneLayout::Two, Some(s.clone()), None);
+                TeamPane(None, cnt.clone(), p.clone(), None, PaneLayout::Two, Some(s.clone()), None);
             }))
         });
 
@@ -6521,7 +6558,8 @@ mod tests {
         assert!(texts.iter().any(|t| t.contains("claude-code")), "should render harness");
         assert!(texts.iter().any(|t| t == "리더"), "should render leader pill");
         assert!(texts.iter().any(|t| t == "브랜치"), "should render branch label");
-        assert!(texts.iter().any(|t| t == "worktree"), "should render worktree label");
+        assert!(texts.iter().any(|t| t == "워크트리"), "should render Korean worktree label");
+        assert!(!texts.iter().any(|t| t == "worktree"), "must not render English 'worktree' label");
         assert!(texts.iter().any(|t| t == "컴퓨터"), "should render computer label");
         assert!(texts.iter().any(|t| t == "mac-mini"), "should render computer name");
         assert!(texts.iter().any(|t| t == "깨끗함"), "should render clean status");
@@ -6535,7 +6573,7 @@ mod tests {
         let _guard = crate::services::test_guard();
         compose_rust::window::reset_window_size();
 
-        // 1. Checking state
+        // 1. Checking state (and unknown computer & dirty count)
         let row_checking = TeamRow {
             branch: "feat/check".to_string(),
             worktree: "/w/check".to_string(),
@@ -6545,8 +6583,8 @@ mod tests {
             pr_text: None,
             pr_status: TeamPrStatus::Checking,
             current: false,
-            computer: "로컬".to_string(),
-            dirty_count: 0,
+            computer: None,
+            dirty_count: None,
             last_commit: "init commit".to_string(),
             conflict: false,
         };
@@ -6566,8 +6604,41 @@ mod tests {
             })
             .collect();
         assert!(texts_chk.iter().any(|t| t == "PR 확인 중"), "should render 'PR 확인 중' pill");
+        assert!(texts_chk.iter().any(|t| t == "알 수 없음"), "unknown computer should render '알 수 없음'");
+        assert!(texts_chk.iter().any(|t| t == "확인 안 됨"), "unknown dirty count should render '확인 안 됨'");
 
-        // 2. None state
+        // 2. Failed state
+        let row_failed = TeamRow {
+            branch: "feat/failed".to_string(),
+            worktree: "/w/failed".to_string(),
+            member: None,
+            extra_members: 0,
+            sync_text: "원격과 같음".to_string(),
+            pr_text: None,
+            pr_status: TeamPrStatus::Failed,
+            current: false,
+            computer: None,
+            dirty_count: Some(0),
+            last_commit: "".to_string(),
+            conflict: false,
+        };
+        let mut host_fail = Host::new(move || {
+            let r = row_failed.clone();
+            Box::new(Recomposer::new(move || {
+                TeamRowView(&r, "test", || {}, |_| {}, || {}, |_| {});
+            }))
+        });
+        let texts_fail: Vec<String> = decode_batch(host_fail.rebuild().expect("rebuild"))
+            .expect("decode")
+            .into_iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { property: PropertyKind::Text, value: PropertyValue::String(s), .. } => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts_fail.iter().any(|t| t == "PR 확인 실패"), "should render 'PR 확인 실패' pill");
+
+        // 3. None state
         let row_none = TeamRow {
             branch: "feat/none".to_string(),
             worktree: "/w/none".to_string(),
@@ -6577,8 +6648,8 @@ mod tests {
             pr_text: None,
             pr_status: TeamPrStatus::None,
             current: false,
-            computer: "로컬".to_string(),
-            dirty_count: 0,
+            computer: Some("로컬".to_string()),
+            dirty_count: Some(0),
             last_commit: "".to_string(),
             conflict: false,
         };
@@ -6600,7 +6671,7 @@ mod tests {
             .collect();
         assert!(texts_none.iter().any(|t| t == "PR 없음"), "should render 'PR 없음' pill");
 
-        // 3. Matched with passed checks
+        // 4. Matched with passed checks and PR chip click navigation
         let mut row_matched = row_none.clone();
         row_matched.pr_status = TeamPrStatus::Matched {
             number: 100,
@@ -6609,21 +6680,35 @@ mod tests {
             merged: false,
         };
 
+        let clicked_pr = mutable_state_of(None::<u64>);
+        let clicked_pr_cap = clicked_pr.clone();
         let mut host_matched = Host::new(move || {
             let r = row_matched.clone();
+            let cp = clicked_pr_cap.clone();
             Box::new(Recomposer::new(move || {
-                TeamRowView(&r, "test", || {}, |_| {}, || {}, |_| {});
+                let cp_in = cp.clone();
+                TeamRowView(&r, "test", || {}, |_| {}, || {}, move |n| cp_in.set(Some(n)));
             }))
         });
-        let texts_matched: Vec<String> = decode_batch(host_matched.rebuild().expect("rebuild"))
-            .expect("decode")
-            .into_iter()
-            .filter_map(|m| match m {
-                Mutation::SetProp { property: PropertyKind::Text, value: PropertyValue::String(s), .. } => Some(s.to_string()),
-                _ => None,
-            })
-            .collect();
-        assert!(texts_matched.iter().any(|t| t == "#100 통과"), "should render '#100 통과' chip");
+        let batch_matched = decode_batch(host_matched.rebuild().expect("rebuild")).expect("decode");
+        let mut texts_matched: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut clickables: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        for m in &batch_matched {
+            match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                    texts_matched.insert(*node_id, s.to_string());
+                }
+                Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                    clickables.insert(*node_id, *h as u64);
+                }
+                _ => {}
+            }
+        }
+        assert!(texts_matched.values().any(|t| t == "#100 통과"), "should render '#100 통과' chip");
+        let pr_btn = texts_matched.iter().find(|(id, t)| *t == "#100 통과" && clickables.contains_key(id)).map(|(id, _)| *id).expect("clickable PR chip");
+        let pr_handler = clickables[&pr_btn];
+        host_matched.dispatch(HostEvent { node_id: pr_btn, handler_id: pr_handler, payload: EventPayload::Clicked }).expect("dispatch PR click");
+        assert_eq!(clicked_pr.get(), Some(100), "clicking PR chip must pass its PR number");
     }
 
     #[test]
@@ -6648,8 +6733,8 @@ mod tests {
             pr_text: None,
             pr_status: TeamPrStatus::None,
             current: true,
-            computer: "로컬".to_string(),
-            dirty_count: 5,
+            computer: Some("로컬".to_string()),
+            dirty_count: Some(5),
             last_commit: "commit msg".to_string(),
             conflict: true,
         };
@@ -6680,15 +6765,18 @@ mod tests {
         compose_rust::window::reset_window_size();
         let count = mutable_state_of(None::<usize>);
         let prs = mutable_state_of(Some(vec![]));
+        let selected_pr = mutable_state_of(None::<u64>);
         let sec = mutable_state_of(Section::Team);
 
         let sec_capture = sec.clone();
+        let sel_pr_capture = selected_pr.clone();
         let mut host = Host::new(move || {
             let cnt = count.clone();
             let p = prs.clone();
+            let sp = sel_pr_capture.clone();
             let s = sec_capture.clone();
             Box::new(Recomposer::new(move || {
-                TeamPane(None, cnt.clone(), p.clone(), PaneLayout::Two, Some(s.clone()), None);
+                TeamPane(None, cnt.clone(), p.clone(), Some(sp.clone()), PaneLayout::Two, Some(s.clone()), None);
             }))
         });
 
@@ -6718,6 +6806,17 @@ mod tests {
                 assert_eq!(sec.get(), Section::Branches, "clicking '브랜치 보기' should navigate to Section::Branches");
             }
         }
+
+        // Clicking the PR chip (#409 실패 on fix/egress-stop) selects PR 409 and navigates to Section::PullRequests
+        let pr_chip = button_texts.iter().find(|(id, text)| text.starts_with("#409") && clickables.contains_key(id)).map(|(id, _)| *id);
+        assert!(pr_chip.is_some(), "expected clickable '#409 ...' PR chip in sample team pane");
+        if let Some(node_id) = pr_chip {
+            if let Some(&handler_id) = clickables.get(&node_id) {
+                host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch PR chip");
+                assert_eq!(selected_pr.get(), Some(409), "clicking PR chip should set selected_pr to 409");
+                assert_eq!(sec.get(), Section::PullRequests, "clicking PR chip should navigate to Section::PullRequests");
+            }
+        }
     }
 
     #[compose_rust::runtime::composable]
@@ -6725,7 +6824,7 @@ mod tests {
         let cnt = compose_rust::runtime::remember(|| mutable_state_of(None::<usize>));
         let p = compose_rust::runtime::remember(|| mutable_state_of(Some(Vec::<PrEntry>::new())));
         let s = compose_rust::runtime::remember(|| mutable_state_of(Section::Team));
-        TeamPane(None, cnt, p, PaneLayout::Tabs, Some(s), None);
+        TeamPane(None, cnt, p, None, PaneLayout::Tabs, Some(s), None);
     }
 
     #[test]

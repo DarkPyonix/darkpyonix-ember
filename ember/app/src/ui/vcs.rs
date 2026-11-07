@@ -3113,6 +3113,8 @@ pub struct TeamMember {
 pub enum TeamPrStatus {
     /// The pull request list is still loading ("PR 확인 중").
     Checking,
+    /// Loading the pull request list failed ("PR 확인 실패").
+    Failed,
     /// The pull request list is loaded and none matches this branch ("PR 없음").
     None,
     /// A pull request matches the branch, with its number, label, CI status and whether it is merged.
@@ -3129,6 +3131,7 @@ impl TeamPrStatus {
     pub fn chip_text(&self) -> String {
         match self {
             TeamPrStatus::Checking => "PR 확인 중".to_string(),
+            TeamPrStatus::Failed => "PR 확인 실패".to_string(),
             TeamPrStatus::None => "PR 없음".to_string(),
             TeamPrStatus::Matched { label, .. } => label.clone(),
         }
@@ -3152,10 +3155,10 @@ pub struct TeamRow {
     pub pr_status: TeamPrStatus,
     /// The branch the project's main checkout has open.
     pub current: bool,
-    /// The computer the worktree lives on, or an honest fallback ("로컬").
-    pub computer: String,
-    /// Dirty file count (0 = "깨끗함").
-    pub dirty_count: usize,
+    /// The computer the worktree lives on (`None` when unknown -> "알 수 없음").
+    pub computer: Option<String>,
+    /// Dirty file count (`None` when unknown -> "확인 안 됨", `Some(0)` -> "깨끗함").
+    pub dirty_count: Option<usize>,
     /// The last commit summary line.
     pub last_commit: String,
     /// Whether this worktree has merge conflicts.
@@ -3163,12 +3166,17 @@ pub struct TeamRow {
 }
 
 impl TeamRow {
-    /// "깨끗함" when clean, or "변경 N개".
+    /// The computer label: the known computer name, or "알 수 없음".
+    pub fn computer_text(&self) -> &str {
+        self.computer.as_deref().unwrap_or("알 수 없음")
+    }
+
+    /// "확인 안 됨" when unknown, "깨끗함" when clean, or "변경 N개".
     pub fn dirty_text(&self) -> String {
-        if self.dirty_count == 0 {
-            "깨끗함".to_string()
-        } else {
-            format!("변경 {}개", self.dirty_count)
+        match self.dirty_count {
+            None => "확인 안 됨".to_string(),
+            Some(0) => "깨끗함".to_string(),
+            Some(n) => format!("변경 {n}개"),
         }
     }
 }
@@ -3198,6 +3206,65 @@ fn cwd_in_worktree(cwd: &str, worktree: &str) -> bool {
     !w.is_empty() && (c == w || (c.starts_with(w) && c[w.len()..].starts_with('/')))
 }
 
+/// Resolve a branch's pull request chip status from a loaded list of pull requests.
+fn match_branch_pr(branch: &str, list: &[PrEntry]) -> (TeamPrStatus, Option<String>) {
+    let matched = list
+        .iter()
+        .filter(|p| p.head == branch)
+        .max_by_key(|p| {
+            let state_rank = match p.state {
+                GitPrState::Open => 2,
+                GitPrState::Merged => 1,
+                GitPrState::Closed => 0,
+            };
+            (state_rank, p.number)
+        });
+    match matched {
+        Some(p) => {
+            let (label, ci, merged) = if p.state == GitPrState::Merged {
+                (format!("#{} 병합됨", p.number), None, true)
+            } else if p.state == GitPrState::Closed {
+                (format!("#{} 닫힘", p.number), None, false)
+            } else if p.checks_failed > 0 {
+                (format!("#{} 실패", p.number), Some(CheckClass::Failed), false)
+            } else if p.checks_pending > 0 {
+                (format!("#{} 진행 중", p.number), Some(CheckClass::Pending), false)
+            } else if p.checks_text == "체크 없음" {
+                (format!("#{} {}", p.number, p.state_text), None, false)
+            } else {
+                (format!("#{} 통과", p.number), Some(CheckClass::Passed), false)
+            };
+            let text = format!("#{} {}", p.number, p.state_text);
+            (
+                TeamPrStatus::Matched {
+                    number: p.number,
+                    label,
+                    ci,
+                    merged,
+                },
+                Some(text),
+            )
+        }
+        None => (TeamPrStatus::None, None),
+    }
+}
+
+/// The rows of 팀 작업 from a [`PrLoad`] state (distinguishing `Loading`, `Failed`, and `Ready`).
+pub fn team_rows_with_pr_load(branches: &[BranchEntry], members: &[MemberCwd], prs: &PrLoad) -> Vec<TeamRow> {
+    match prs {
+        PrLoad::Loading => team_rows(branches, members, None),
+        PrLoad::Ready(list) => team_rows(branches, members, Some(list.as_slice())),
+        PrLoad::Failed(_) => {
+            let mut rows = team_rows(branches, members, None);
+            for r in &mut rows {
+                r.pr_status = TeamPrStatus::Failed;
+                r.pr_text = None;
+            }
+            rows
+        }
+    }
+}
+
 /// The rows of 팀 작업, one per branch that has a worktree: the leader first, then the current
 /// branch (main checkout), then other worktrees by branch name. A member belongs to the worktree
 /// with the longest path that holds its folder; when several members share one worktree the leader,
@@ -3216,30 +3283,7 @@ pub fn team_rows(branches: &[BranchEntry], members: &[MemberCwd], prs: Option<&[
             let extra_members = if mine.len() > 1 { mine.len() - 1 } else { 0 };
             let (pr_status, pr_text) = match prs {
                 None => (TeamPrStatus::Checking, None),
-                Some(list) => {
-                    let matched = list
-                        .iter()
-                        .filter(|p| p.head == b.name)
-                        .max_by_key(|p| (p.state == GitPrState::Open, p.number));
-                    match matched {
-                        Some(p) => {
-                            let (label, ci, merged) = if p.state == GitPrState::Merged {
-                                (format!("#{} 병합됨", p.number), None, true)
-                            } else if p.checks_failed > 0 {
-                                (format!("#{} 실패", p.number), Some(CheckClass::Failed), false)
-                            } else if p.checks_pending > 0 {
-                                (format!("#{} 진행 중", p.number), Some(CheckClass::Pending), false)
-                            } else if p.checks_text == "체크 없음" {
-                                (format!("#{} {}", p.number, p.state_text), None, false)
-                            } else {
-                                (format!("#{} 통과", p.number), Some(CheckClass::Passed), false)
-                            };
-                            let text = format!("#{} {}", p.number, p.state_text);
-                            (TeamPrStatus::Matched { number: p.number, label, ci, merged }, Some(text))
-                        }
-                        None => (TeamPrStatus::None, None),
-                    }
-                }
+                Some(list) => match_branch_pr(&b.name, list),
             };
             TeamRow {
                 branch: b.name.clone(),
@@ -3258,8 +3302,8 @@ pub fn team_rows(branches: &[BranchEntry], members: &[MemberCwd], prs: Option<&[
                 pr_text,
                 pr_status,
                 current: b.current,
-                computer: "로컬".to_string(),
-                dirty_count: 0,
+                computer: None,
+                dirty_count: None,
                 last_commit: b.last_line.clone(),
                 conflict: false,
             }
@@ -5506,6 +5550,42 @@ rename to new.txt
             ci: None,
             merged: true,
         });
+
+        // When pr list has closed (non-merged) PR
+        let pr_closed = [pr_entry(&a_pr(14, GitPrState::Closed, GitPrReview::None, (0, 1, 0), (false, "")), 0)];
+        let rows_closed = team_rows(&b, &[], Some(&pr_closed));
+        let x_closed = rows_closed.iter().find(|r| r.branch == "feat/x").unwrap();
+        assert_eq!(x_closed.pr_status, TeamPrStatus::Matched {
+            number: 14,
+            label: "#14 닫힘".to_string(),
+            ci: None,
+            merged: false,
+        });
+        assert_eq!(x_closed.pr_status.chip_text(), "#14 닫힘");
+
+        // When pr load failed (`PrLoad::Failed`)
+        let rows_err = team_rows_with_pr_load(&b, &[], &PrLoad::Failed("오류".to_string()));
+        assert_eq!(rows_err[0].pr_status, TeamPrStatus::Failed);
+        assert_eq!(rows_err[0].pr_status.chip_text(), "PR 확인 실패");
+    }
+
+    #[test]
+    fn fr_l19_team_rows_leave_unknown_computer_and_dirty_count_as_none() {
+        let b = branches_of(&[("feat/x", false, Some("/w/x")), ("main", true, Some("/r"))]);
+        let rows = team_rows(&b, &[], None);
+        for r in &rows {
+            assert_eq!(r.computer, None);
+            assert_eq!(r.computer_text(), "알 수 없음");
+            assert_eq!(r.dirty_count, None);
+            assert_eq!(r.dirty_text(), "확인 안 됨");
+            assert!(!r.conflict);
+        }
+        let mut clean = rows[0].clone();
+        clean.dirty_count = Some(0);
+        assert_eq!(clean.dirty_text(), "깨끗함");
+        let mut dirty = rows[0].clone();
+        dirty.dirty_count = Some(3);
+        assert_eq!(dirty.dirty_text(), "변경 3개");
     }
 
     // ---- FR-G10 to FR-G12: pull request detail, review, merge, create (#483) ----

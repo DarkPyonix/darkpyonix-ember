@@ -319,6 +319,110 @@ mod tree {
     }
 }
 
+mod selection {
+    use super::*;
+    use ember_app::ui::editor::{prune_redundant_selection, update_tree_selection, TreeRow};
+
+    fn make_rows() -> Vec<TreeRow> {
+        vec![
+            TreeRow { path: "/p/a".into(), name: "a".into(), depth: 0, is_dir: true, open: false },
+            TreeRow { path: "/p/b".into(), name: "b".into(), depth: 0, is_dir: false, open: false },
+            TreeRow { path: "/p/c".into(), name: "c".into(), depth: 0, is_dir: false, open: false },
+            TreeRow { path: "/p/d".into(), name: "d".into(), depth: 0, is_dir: true, open: false },
+            TreeRow { path: "/p/e".into(), name: "e".into(), depth: 0, is_dir: false, open: false },
+        ]
+    }
+
+    #[test]
+    fn single_click_selects_just_clicked_item() {
+        let rows = make_rows();
+        let sel = update_tree_selection(&[("/p/a".into(), true)], ("/p/b".into(), false), &rows, false, false);
+        assert_eq!(sel, vec![("/p/b".to_string(), false)]);
+    }
+
+    #[test]
+    fn cmd_ctrl_toggle_adds_new_item_and_removes_existing_item() {
+        let rows = make_rows();
+        // Toggle non-existing item: append
+        let sel1 = update_tree_selection(&[("/p/a".into(), true)], ("/p/b".into(), false), &rows, false, true);
+        assert_eq!(sel1, vec![("/p/a".to_string(), true), ("/p/b".to_string(), false)]);
+
+        // Toggle existing item: remove
+        let sel2 = update_tree_selection(&sel1, ("/p/a".into(), true), &rows, false, true);
+        assert_eq!(sel2, vec![("/p/b".to_string(), false)]);
+
+        // Toggle remaining item: empty
+        let sel3 = update_tree_selection(&sel2, ("/p/b".into(), false), &rows, false, true);
+        assert!(sel3.is_empty());
+    }
+
+    #[test]
+    fn shift_selects_contiguous_range_between_anchor_and_clicked() {
+        let rows = make_rows();
+        // Downward range: from /p/b (idx 1) to /p/d (idx 3)
+        let sel = update_tree_selection(&[("/p/b".into(), false)], ("/p/d".into(), true), &rows, true, false);
+        assert_eq!(
+            sel,
+            vec![
+                ("/p/b".to_string(), false),
+                ("/p/c".to_string(), false),
+                ("/p/d".to_string(), true),
+            ]
+        );
+
+        // Upward range: from /p/d (idx 3) to /p/a (idx 0)
+        let sel_up = update_tree_selection(&[("/p/d".into(), true)], ("/p/a".into(), true), &rows, true, false);
+        assert_eq!(
+            sel_up,
+            vec![
+                ("/p/a".to_string(), true),
+                ("/p/b".to_string(), false),
+                ("/p/c".to_string(), false),
+                ("/p/d".to_string(), true),
+            ]
+        );
+
+        // Shift with empty current: defaults to clicked item
+        let sel_empty = update_tree_selection(&[], ("/p/c".into(), false), &rows, true, false);
+        assert_eq!(sel_empty, vec![("/p/c".to_string(), false)]);
+    }
+
+    #[test]
+    fn prune_redundant_selection_filters_out_items_below_selected_directory() {
+        let items = vec![
+            ("/p/src".to_string(), true),
+            ("/p/src/main.rs".to_string(), false),
+            ("/p/src/nested/deep.rs".to_string(), false),
+            ("/p/README.md".to_string(), false),
+        ];
+        let pruned = prune_redundant_selection(&items);
+        assert_eq!(
+            pruned,
+            vec![
+                ("/p/src".to_string(), true),
+                ("/p/README.md".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn prune_redundant_selection_filters_nested_directories_and_keeps_siblings() {
+        let items = vec![
+            ("/p/dir".to_string(), true),
+            ("/p/dir/child".to_string(), true),
+            ("/p/dir2".to_string(), true),
+        ];
+        let pruned = prune_redundant_selection(&items);
+        assert_eq!(
+            pruned,
+            vec![
+                ("/p/dir".to_string(), true),
+                ("/p/dir2".to_string(), true),
+            ]
+        );
+    }
+}
+
 // FR-L31 (D38): the page grid is the mockup's; a closed tool window leaves a 0 wide column or a
 // 0 high row, and the stripes decide which.
 mod grid {
@@ -931,6 +1035,68 @@ mod keyboard_navigation {
             Some("/w/p/src/lib.rs".to_string())
         );
         assert_eq!(editor_focus_target(None), None);
+    }
+
+    #[test]
+    fn fr_l31_tree_ignores_keys_while_prompt_is_open() {
+        use ember_app::ui::editor::{tree_handles_key, TreePrompt};
+        assert!(tree_handles_key(None));
+        for p in [
+            TreePrompt::NewFile { parent: "/p".into() },
+            TreePrompt::NewDir { parent: "/p".into() },
+            TreePrompt::Rename { path: "/p/a.rs".into() },
+            TreePrompt::Delete { path: "/p/a.rs".into(), is_dir: false },
+            TreePrompt::DeleteMany { items: vec![("/p/a.rs".into(), false), ("/p/b.rs".into(), false)] },
+        ] {
+            assert!(!tree_handles_key(Some(&p)), "prompt {p:?} must block tree key handling");
+        }
+    }
+
+    #[test]
+    fn fr_l31_4_select_all_cut_selection_and_clipboard_badge() {
+        use ember_app::ui::editor::{
+            clipboard_badge_text, cut_selection, select_all_tree_rows, ClipboardKind, TreeClipboard,
+        };
+        let rows = sample_tree();
+        let (all, last) = select_all_tree_rows(&rows);
+        assert_eq!(all.len(), rows.len());
+        assert_eq!(all[0], ("/p/src".to_string(), true));
+        assert_eq!(last, Some(("/p/README.md".to_string(), false)));
+
+        let (empty_all, empty_last) = select_all_tree_rows(&[]);
+        assert!(empty_all.is_empty());
+        assert_eq!(empty_last, None);
+
+        // Cutting when row_path is part of multi_sel cuts all non-redundant selected items.
+        let clip = cut_selection(&all, "/p/README.md", false).expect("non-empty cut");
+        assert_eq!(clip.kind, ClipboardKind::Cut);
+        // `/p/src/deep` and `/p/src/lib.rs` are pruned because `/p/src` is selected.
+        assert_eq!(
+            clip.paths,
+            vec![
+                ("/p/src".to_string(), true),
+                ("/p/README.md".to_string(), false),
+            ]
+        );
+        assert_eq!(clipboard_badge_text(Some(&clip)).as_deref(), Some("잘라냄 2개"));
+
+        // Cutting a row outside multi_sel cuts only that row.
+        let single = cut_selection(&[("/p/Cargo.toml".to_string(), false)], "/p/README.md", false)
+            .expect("single cut");
+        assert_eq!(single.paths, vec![("/p/README.md".to_string(), false)]);
+        assert_eq!(clipboard_badge_text(Some(&single)).as_deref(), Some("잘라냄 1개"));
+
+        // Copy badge formatting and empty clipboard handling.
+        let copy_clip = TreeClipboard {
+            kind: ClipboardKind::Copy,
+            paths: vec![("/p/Cargo.toml".to_string(), false), ("/p/README.md".to_string(), false)],
+        };
+        assert_eq!(clipboard_badge_text(Some(&copy_clip)).as_deref(), Some("복사됨 2개"));
+        assert_eq!(
+            clipboard_badge_text(Some(&TreeClipboard { kind: ClipboardKind::Cut, paths: Vec::new() })),
+            None
+        );
+        assert_eq!(clipboard_badge_text(None), None);
     }
 }
 

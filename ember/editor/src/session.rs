@@ -368,6 +368,52 @@ impl EditorSession {
         self.fs.delete(&self.uri(&path), &opts).await.map_err(Error::Conn)
     }
 
+    /// Moves a file or directory at `src` into `dest_dir`.
+    pub async fn move_path(&self, src: &str, dest_dir: &str) -> Result<String, Error> {
+        let from = crate::paths::target_path(&self.workspace_path, src).map_err(Error::Path)?;
+        self.refuse_symlink_parent(dest_dir).await?;
+        let to = crate::paths::paste_destination(&self.workspace_path, &from, dest_dir, &[], true).map_err(Error::Path)?;
+        self.fs.rename(&self.uri(&from), &self.uri(&to), false).await.map_err(Error::Conn)?;
+        Ok(to)
+    }
+
+    /// Helper that recursively copies an entry from `from` to `to`.
+    async fn copy_entry(&self, from: &str, to: &str) -> Result<(), Error> {
+        let mut stack = vec![(from.to_string(), to.to_string())];
+        let opts = WriteOptions { create: true, overwrite: false, unlock: false, atomic: false };
+        while let Some((src, dst)) = stack.pop() {
+            let stat = self.fs.stat(&self.uri(&src)).await.map_err(Error::Conn)?;
+            if stat.file_type & ember_editor_conn::remote_fs::file_type::SYMBOLIC_LINK != 0 {
+                return Err(Error::Path(crate::paths::PathError::Symlink));
+            }
+            if stat.file_type & ember_editor_conn::remote_fs::file_type::DIRECTORY != 0 {
+                self.fs.mkdir(&self.uri(&dst)).await.map_err(Error::Conn)?;
+                let entries = self.fs.readdir(&self.uri(&src)).await.map_err(Error::Conn)?;
+                for (name, _) in entries {
+                    let child_src = format!("{}/{}", src.trim_end_matches('/'), name);
+                    let child_dst = format!("{}/{}", dst.trim_end_matches('/'), name);
+                    stack.push((child_src, child_dst));
+                }
+            } else {
+                let bytes = self.fs.read_file(&self.uri(&src)).await.map_err(Error::Conn)?;
+                self.fs.write_file(&self.uri(&dst), bytes, &opts).await.map_err(Error::Conn)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Copies a file or directory at `src` into `dest_dir`.
+    pub async fn copy_path(&self, src: &str, dest_dir: &str) -> Result<String, Error> {
+        let from = crate::paths::target_path(&self.workspace_path, src).map_err(Error::Path)?;
+        let dest_norm = crate::paths::folder_path(&self.workspace_path, dest_dir).map_err(Error::Path)?;
+        self.refuse_symlink_parent(&dest_norm).await?;
+        let entries = self.fs.readdir(&self.uri(&dest_norm)).await.map_err(Error::Conn)?;
+        let existing: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+        let to = crate::paths::paste_destination(&self.workspace_path, &from, &dest_norm, &existing, false).map_err(Error::Path)?;
+        self.copy_entry(&from, &to).await?;
+        Ok(to)
+    }
+
     fn send(&self, c: Command) -> Result<(), Error> {
         self.tx.send(c).map_err(|_| Error::Closed)
     }

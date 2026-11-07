@@ -38,6 +38,7 @@ pub mod engine;
 pub mod fallback;
 pub mod diagnostics;
 pub mod paths;
+pub mod output;
 pub mod document;
 pub mod highlight;
 pub mod hover;
@@ -58,6 +59,7 @@ pub use crate::fallback::{fallback_for, vscode_fallback_url, ConnectOutcome, Fal
 pub use crate::engine::{CoreOptions, Effect, ExternalChange, Input, SessionCore, SessionUpdate};
 pub use crate::coords::{WidgetPos, WidgetRange};
 pub use crate::session::{DirLister, EditorSession, SessionConfig};
+pub use crate::output::{ExtensionMessage, MessageSeverity, OutputChannel, MAX_OUTPUT_CHANNEL_BYTES};
 pub use crate::widget::{
     Decoration, DecorationId, DecorationKind, HoverPhase, Severity, WidgetCommand, WidgetEvent,
     DECORATION_RECORD_LEN,

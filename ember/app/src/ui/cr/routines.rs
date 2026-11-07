@@ -25,8 +25,8 @@ use ember_client::api::ApiError;
 pub use crate::ui::routines::{
     apply_server_run_started, begin_demo_run, changed_patch, current_value_line, demo_run_allowed,
     demo_session_title, finish_demo_run, has_running_remote_run, patch_is_empty,
-    resolve_run_session_id, run_is_simulated, DEMO_RUN_BUSY, DEMO_RUN_DONE, DEMO_RUN_MS,
-    DEMO_RUN_STARTED, DEMO_SESSION_PREFIX, NAME_SERVER_REASON, REMOTE_RUN_POLL_MS,
+    resolve_run_session_id, rollback_optimistic_run, run_is_simulated, DEMO_RUN_BUSY, DEMO_RUN_DONE,
+    DEMO_RUN_MS, DEMO_RUN_STARTED, DEMO_SESSION_PREFIX, NAME_SERVER_REASON, REMOTE_RUN_POLL_MS,
     REMOTE_RUN_STARTED, SAMPLE_FLAG, SERVER_CANNOT_CHANGE,
     not_saved_sentence, run_row_text, unsaved_fields,
     ago, big_time, civil_from_days, cron_valid, days_from_civil,
@@ -85,10 +85,14 @@ pub fn should_use_sample_entries(route_env: Option<&str>, demo_active: bool) -> 
 }
 
 fn sample_mode() -> bool {
-    should_use_sample_entries(
-        std::env::var("EMBER_CR_ROUTE").ok().as_deref(),
-        crate::demo::active_from_env() || try_services().is_some_and(|s| s.demo.is_some()),
-    )
+    let has_server = std::env::var("EMBER_SERVER_URL")
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty());
+    !has_server
+        && should_use_sample_entries(
+            std::env::var("EMBER_CR_ROUTE").ok().as_deref(),
+            crate::demo::active_from_env() || try_services().is_some_and(|s| s.demo.is_some()),
+        )
 }
 
 /// Whether the demo is on. The simulated run needs this, not just the sample route (#494).
@@ -217,7 +221,11 @@ pub fn is_remote(id: &str) -> bool {
 
 /// The server's schedules with their recent runs.
 pub async fn load_remote() -> Result<Vec<Entry>, ApiError> {
-    let api = services().client.api();
+    load_remote_from(services().client.api()).await
+}
+
+/// Loads all schedules and their recent runs from `api` (FR-L25, #494).
+pub async fn load_remote_from(api: &ember_client::api::Api) -> Result<Vec<Entry>, ApiError> {
     let mut out = Vec::new();
     for s in api.schedules(None).await? {
         let runs = api.schedule_runs(&s.id, Some(RUNS_SHOWN)).await?;
@@ -288,6 +296,71 @@ fn remote_action<F>(
     );
 }
 
+/// Inserts the optimistic `RunStatus::Running` placeholder into `entries_st` and `REMOTE` for
+/// `id` before calling `POST /api/schedules/{id}/run` (FR-L25, #494).
+pub fn begin_remote_run_now(
+    id: &str,
+    now: Minutes,
+    entries_st: &MutableState<Vec<Entry>>,
+) -> Result<(), &'static str> {
+    let mut list = entries_st.get();
+    let Some(e) = list.iter_mut().find(|e| e.routine.id == id) else {
+        return Err("루틴을 찾을 수 없습니다");
+    };
+    begin_demo_run(e, now)?;
+    entries_st.set(list);
+    with_remote(|r| {
+        if let Some(re) = r.entries.iter_mut().find(|e| e.routine.id == id) {
+            let _ = begin_demo_run(re, now);
+        }
+    });
+    Ok(())
+}
+
+/// Applies the result of `POST /api/schedules/{id}/run` (`run_res`) and the refreshed
+/// schedule list (`list`) to `REMOTE`, `entries_st` and `online_st`, rolling back any
+/// optimistic placeholder on error and returning the user-facing notice text (FR-L25, #494).
+pub fn finish_remote_run_now(
+    id: &str,
+    run_res: Result<ember_client::wire::ScheduleRun, ApiError>,
+    list: Result<Vec<Entry>, ApiError>,
+    entries_st: &MutableState<Vec<Entry>>,
+    online_st: &MutableState<bool>,
+) -> String {
+    apply_load(list);
+    match run_res {
+        Ok(run) => {
+            let msg = with_remote(|r| {
+                r.entries
+                    .iter_mut()
+                    .find(|e| e.routine.id == id)
+                    .map(|e| apply_server_run_started(e, &run))
+                    .unwrap_or_else(|| match &run.error {
+                        Some(err) => format!("실행하지 못했습니다: {err}"),
+                        None => REMOTE_RUN_STARTED.to_string(),
+                    })
+            });
+            sync_from_remote(entries_st, online_st);
+            msg
+        }
+        Err(e) => {
+            with_remote(|r| {
+                if let Some(re) = r.entries.iter_mut().find(|e| e.routine.id == id) {
+                    rollback_optimistic_run(re);
+                }
+            });
+            sync_from_remote(entries_st, online_st);
+            let mut cur = entries_st.get();
+            if let Some(le) = cur.iter_mut().find(|e| e.routine.id == id) {
+                if rollback_optimistic_run(le) {
+                    entries_st.set(cur);
+                }
+            }
+            format!("서버가 요청을 처리하지 못했습니다: {e}")
+        }
+    }
+}
+
 /// Start a remote schedule run (`POST /api/schedules/{id}/run`), immediately marking the
 /// routine as `"실행 중"` (`RunStatus::Running`), refreshing the client's session list when a
 /// session is created, and syncing the updated run list from the server (FR-L25, #494).
@@ -297,26 +370,15 @@ fn remote_run_now(
     online_st: &MutableState<bool>,
     tick: &MutableState<u32>,
 ) {
-    let now = now_local();
-    let mut list = entries_st.get();
-    let Some(e) = list.iter_mut().find(|e| e.routine.id == id) else {
-        notice::post("루틴을 찾을 수 없습니다");
+    if try_services().is_none() {
+        notice::post(RUN_NOTICE);
         return;
-    };
-    if let Err(msg) = begin_demo_run(e, now) {
+    }
+    if let Err(msg) = begin_remote_run_now(id, now_local(), entries_st) {
         notice::post(msg);
         return;
     }
-    entries_st.set(list);
-    with_remote(|r| {
-        if let Some(re) = r.entries.iter_mut().find(|e| e.routine.id == id) {
-            let _ = begin_demo_run(re, now);
-        }
-    });
     tick.update(|v| *v += 1);
-    if try_services().is_none() {
-        return;
-    }
     let id = id.to_string();
     let entries_st = entries_st.clone();
     let online_st = online_st.clone();
@@ -337,27 +399,8 @@ fn remote_run_now(
             (id, run_res, list)
         },
         move |(id, run_res, list)| {
-            apply_load(list);
-            match run_res {
-                Ok(run) => {
-                    let msg = with_remote(|r| {
-                        r.entries
-                            .iter_mut()
-                            .find(|e| e.routine.id == id)
-                            .map(|e| apply_server_run_started(e, &run))
-                            .unwrap_or_else(|| match &run.error {
-                                Some(err) => format!("실행하지 못했습니다: {err}"),
-                                None => REMOTE_RUN_STARTED.to_string(),
-                            })
-                    });
-                    sync_from_remote(&entries_st, &online_st);
-                    notice::post(msg);
-                }
-                Err(e) => {
-                    sync_from_remote(&entries_st, &online_st);
-                    notice::post(format!("서버가 요청을 처리하지 못했습니다: {e}"));
-                }
-            }
+            let msg = finish_remote_run_now(&id, run_res, list, &entries_st, &online_st);
+            notice::post(msg);
             tick.update(|v| *v += 1);
         },
     );
@@ -788,7 +831,6 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                         .map(|e| e.routine.clone())
                 });
                 let unsaved = old.as_ref().map(|o| unsaved_fields(&draft, o)).unwrap_or_default();
-                let _frozen = !unsaved.is_empty();
                 let patch = match &old {
                     Some(o) => changed_patch(&draft, o),
                     None => schedule_patch(&draft),
@@ -1856,8 +1898,8 @@ fn DetailPane(
             cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
 
             cu::Column()
-                .spacing(SP[4])
-                .modifier(Modifier::new().fill_max_width().padding(if compact { 12.0 } else { 16.0 }))
+                .spacing(SP[3])
+                .modifier(Modifier::new().fill_max_width().padding(if compact { 12.0 } else { 14.0 }))
                 .content(move || {
                     // Schedule & Ring
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(move || {
@@ -1884,13 +1926,26 @@ fn DetailPane(
                             });
                     });
 
-                    // Inset cards: 3 cards in one row on wide
+                    // Inset cards: 3 cards in one row on wide, 2x2 grid on narrow so the run
+                    // history below stays visible above the fold on 390 dp phone screens.
                     if tile_cols < 3 {
                         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                            KeyValue("프로젝트", &project_name, "");
-                            KeyValue("에이전트", &harness_label, &model_title);
-                            KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다");
-                            KeyValue("권한 모드", &mode_label, "");
+                            cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                                    KeyValue("프로젝트", &project_name, "");
+                                });
+                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                                    KeyValue("에이전트", &harness_label, &model_title);
+                                });
+                            });
+                            cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                                    KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다");
+                                });
+                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                                    KeyValue("권한 모드", &mode_label, "");
+                                });
+                            });
                         });
                     } else {
                         cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
@@ -3805,5 +3860,165 @@ mod tests {
             "clicking '지금 실행' must post DEMO_RUN_STARTED notice"
         );
         compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l25_remote_run_now_live_progress_and_error_rollback() {
+        let _guard = crate::services::test_guard();
+        let svc = crate::services::test_services();
+        with_store(|s| *s = LocalStore::default());
+        with_remote(|r| *r = Remote::default());
+
+        let state = std::sync::Arc::new(std::sync::Mutex::new((
+            None::<ember_client::wire::RunStatus>,
+            false,
+        )));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let addr = listener.local_addr().expect("local addr");
+        let state_srv = std::sync::Arc::clone(&state);
+
+        svc.rt.spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let state_req = std::sync::Arc::clone(&state_srv);
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or("");
+                    let (run_st, fail_run) = *state_req.lock().unwrap();
+                    let status_str = match run_st {
+                        Some(ember_client::wire::RunStatus::Completed) => "completed",
+                        Some(ember_client::wire::RunStatus::Running) | None => "running",
+                        _ => "failed",
+                    };
+                    let (code, body) = if first_line.starts_with("POST /api/schedules/sch-live/run") {
+                        if fail_run {
+                            ("500 Internal Server Error", r#"{"error":"runner down"}"#.to_string())
+                        } else {
+                            (
+                                "200 OK",
+                                format!(
+                                    r#"{{"id":"run-1","schedule_id":"sch-live","scheduled_at":1700000000000,"started_at":1700000000000,"ended_at":null,"status":"{status_str}","session_id":"ses-live-1","error":null}}"#
+                                ),
+                            )
+                        }
+                    } else if first_line.starts_with("GET /api/schedules/sch-live/runs") {
+                        let runs_json = match (fail_run, run_st) {
+                            (true, _) | (_, None) => "[]".to_string(),
+                            (false, Some(_)) => format!(
+                                r#"[{{"id":"run-1","schedule_id":"sch-live","scheduled_at":1700000000000,"started_at":1700000000000,"ended_at":1700000005000,"status":"{status_str}","session_id":"ses-live-1","error":null}}]"#
+                            ),
+                        };
+                        ("200 OK", runs_json)
+                    } else if first_line.starts_with("GET /api/schedules") {
+                        (
+                            "200 OK",
+                            r#"[{"id":"sch-live","project":"ember","agent":"claude-code","computer_id":null,"cwd":"/tmp","prompt":"CI 요약\n자세히","kind":{"type":"cron","expr":"0 9 * * *","tz":"UTC"},"target":{"type":"new","title":"CI 요약"},"catch_up":false,"paused":false,"next_run_at":1700003600000,"last_run_at":null,"created_at":1700000000000}]"#
+                                .to_string(),
+                        )
+                    } else {
+                        ("404 Not Found", r#"{"error":"not found"}"#.to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {code}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let api = ember_client::api::Api::new(&format!("http://{addr}")).expect("api");
+
+        // 1. Initial load from server populates REMOTE and entries_st with 0 runs.
+        let initial_list = svc.rt.block_on(load_remote_from(&api)).expect("initial load");
+        assert_eq!(initial_list.len(), 1);
+        assert_eq!(initial_list[0].routine.id, "sch-live");
+        assert!(initial_list[0].runs.is_empty());
+
+        let entries_st = mutable_state_of(Vec::<Entry>::new());
+        let online_st = mutable_state_of(false);
+        apply_load(Ok(initial_list));
+        sync_from_remote(&entries_st, &online_st);
+        assert!(online_st.get());
+        assert_eq!(entries_st.get().len(), 1);
+        assert!(!has_running_remote_run(false, online_st.get(), &entries_st.get()));
+
+        // 2. Error path first: if POST /api/schedules/{id}/run fails, the optimistic Running
+        // placeholder is rolled back even if load_remote also fails.
+        state.lock().unwrap().1 = true;
+        begin_remote_run_now("sch-live", 100, &entries_st).expect("begin optimistic run");
+        assert!(has_running_remote_run(false, online_st.get(), &entries_st.get()));
+        let err_res = svc.rt.block_on(api.run_schedule("sch-live"));
+        assert!(err_res.is_err());
+        let err_list = svc.rt.block_on(load_remote_from(&api));
+        let err_msg = finish_remote_run_now("sch-live", err_res, err_list, &entries_st, &online_st);
+        assert!(
+            err_msg.starts_with("서버가 요청을 처리하지 못했습니다:"),
+            "unexpected error notice: {err_msg}"
+        );
+        assert!(
+            entries_st.get()[0].runs.is_empty(),
+            "optimistic Running placeholder must be rolled back when run_schedule fails"
+        );
+        assert!(!has_running_remote_run(false, online_st.get(), &entries_st.get()));
+
+        // Also verify rollback when load_remote itself fails with a status error.
+        begin_remote_run_now("sch-live", 101, &entries_st).expect("begin optimistic run 2");
+        let err_res2 = svc.rt.block_on(api.run_schedule("sch-live"));
+        let err_load = Err(ember_client::api::ApiError::Status {
+            status: 500,
+            message: "db locked".into(),
+            code: None,
+        });
+        let _ = finish_remote_run_now("sch-live", err_res2, err_load, &entries_st, &online_st);
+        assert!(
+            entries_st.get()[0].runs.is_empty(),
+            "optimistic placeholder must be rolled back even when load_remote fails"
+        );
+
+        // 3. Live progress path: Running -> polling -> Completed (완료).
+        *state.lock().unwrap() = (Some(ember_client::wire::RunStatus::Running), false);
+        begin_remote_run_now("sch-live", 102, &entries_st).expect("begin live run");
+        assert_eq!(entries_st.get()[0].runs.len(), 1);
+        assert_eq!(entries_st.get()[0].runs[0].status, RunStatus::Running);
+        assert_eq!(entries_st.get()[0].runs[0].session, None);
+
+        let ok_res = svc.rt.block_on(api.run_schedule("sch-live"));
+        let list_running = svc.rt.block_on(load_remote_from(&api));
+        let ok_msg = finish_remote_run_now("sch-live", ok_res, list_running, &entries_st, &online_st);
+        assert_eq!(ok_msg, REMOTE_RUN_STARTED);
+        assert_eq!(entries_st.get()[0].runs.len(), 1);
+        assert_eq!(entries_st.get()[0].runs[0].status, RunStatus::Running);
+        assert_eq!(
+            entries_st.get()[0].runs[0].session.as_deref(),
+            Some("ses-live-1")
+        );
+        assert!(
+            has_running_remote_run(false, online_st.get(), &entries_st.get()),
+            "while server run is Running, has_running_remote_run must stay true to keep polling"
+        );
+
+        // Server transitions run-1 to Completed; next poll syncs Done ("완료") and stops polling.
+        state.lock().unwrap().0 = Some(ember_client::wire::RunStatus::Completed);
+        let polled = svc.rt.block_on(load_remote_from(&api));
+        apply_load(polled);
+        sync_from_remote(&entries_st, &online_st);
+        assert_eq!(entries_st.get()[0].runs.len(), 1);
+        assert_eq!(entries_st.get()[0].runs[0].status, RunStatus::Done);
+        assert_eq!(entries_st.get()[0].runs[0].status.label(), "완료");
+        assert_eq!(
+            entries_st.get()[0].runs[0].session.as_deref(),
+            Some("ses-live-1")
+        );
+        assert!(
+            !has_running_remote_run(false, online_st.get(), &entries_st.get()),
+            "once server run is Completed, polling stops"
+        );
+
+        with_remote(|r| *r = Remote::default());
     }
 }

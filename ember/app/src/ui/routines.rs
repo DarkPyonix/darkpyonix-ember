@@ -1218,6 +1218,21 @@ pub fn finish_demo_run(e: &mut Entry, session: Option<String>) -> bool {
     }
 }
 
+/// Removes an optimistic `RunStatus::Running` placeholder (`session: None`) from `e` when a
+/// server `run_schedule` request fails before creating a run.
+pub fn rollback_optimistic_run(e: &mut Entry) -> bool {
+    if let Some(pos) = e
+        .runs
+        .iter()
+        .position(|r| r.status == RunStatus::Running && r.session.is_none())
+    {
+        e.runs.remove(pos);
+        true
+    } else {
+        false
+    }
+}
+
 /// The title of the sample session a simulated run creates.
 pub fn demo_session_title(routine_name: &str) -> String {
     format!("{} ({SAMPLE_FLAG})", routine_name.trim())

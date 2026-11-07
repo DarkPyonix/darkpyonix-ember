@@ -650,11 +650,20 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                         .map(|e| e.routine.clone())
                 });
                 let unsaved = old.as_ref().map(|o| unsaved_fields(&draft, o)).unwrap_or_default();
-                let frozen = !unsaved.is_empty();
-                let patch = match &old {
+                let mut patch = match &old {
                     Some(o) => changed_patch(&draft, o),
                     None => schedule_patch(&draft),
                 };
+                if patch.project.is_some() {
+                    let cwd = try_services().and_then(|svc| {
+                        svc.client.read(|s| crate::model::latest_cwd(s, &draft.sel.project))
+                    });
+                    let Some(cwd) = cwd else {
+                        notice::post(NO_CWD_NOTICE);
+                        return;
+                    };
+                    patch.cwd = Some(cwd);
+                }
                 if patch_is_empty(&patch) {
                     // Nothing the server can store changed; do not send an empty PATCH.
                     panel_ref.set(Panel::View);
@@ -1841,7 +1850,6 @@ struct FormCtx {
     tried: MutableState<bool>,
     initial: FormDraft,
     editing: bool,
-    server: bool,
     computers: Vec<(String, String)>,
     projects: Vec<String>,
 }
@@ -1865,7 +1873,7 @@ fn form_save_handler(
 fn RoutineForm(
     initial: FormDraft,
     editing: Option<String>,
-    server: bool,
+    _server: bool,
     computers: &[(String, String)],
     projects: &[String],
     layout: FormLayout,
@@ -1881,7 +1889,6 @@ fn RoutineForm(
         tried,
         initial: initial.clone(),
         editing: editing.is_some(),
-        server,
         computers: computers.to_vec(),
         projects: projects.to_vec(),
     };
@@ -1956,7 +1963,7 @@ fn RoutineForm(
 /// The fields, in `FORM_FIELDS` order, for both shells.
 fn FormFields(ctx: &FormCtx) {
     let p = ember_theme().palette;
-    let (draft, tried, initial, server) = (&ctx.draft, &ctx.tried, &ctx.initial, ctx.server);
+    let (draft, tried, initial) = (&ctx.draft, &ctx.tried, &ctx.initial);
     let editing = ctx.editing;
     let agents = live_agents();
     let d = draft.get();
@@ -1970,7 +1977,7 @@ fn FormFields(ctx: &FormCtx) {
         .copied()
         .filter(|h| harness_block(*h, &agents, &[]).is_none())
         .collect();
-    let models = model_choices(&model_catalog(), &allowed, d.sel.option.harness, server);
+    let models = model_choices(&model_catalog(), &allowed, d.sel.option.harness, false);
     let model_labels: Vec<String> = models.iter().map(|o| o.chip_label()).collect();
     let model_at = models.iter().position(|o| *o == d.sel.option).unwrap_or(0);
     let modes: Vec<crate::ui::home::PermMode> = modes_for(d.sel.option.harness).to_vec();
@@ -1980,33 +1987,22 @@ fn FormFields(ctx: &FormCtx) {
 
     if editing {
         Label(
-            "입력하지 않은 항목은 지금 값을 유지합니다",
+            "바꾸지 않은 항목은 지금 값을 유지합니다",
             Fs::Xs,
             Weight::Regular,
             Some(paint(p.muted)),
             None,
         );
     }
-    // TODO(compose-rust#374): the text field has no initial value, so each text field shows the
-    // stored value on a "현재 값" line above it and stays empty; typing replaces the value,
-    // leaving it empty keeps it. The pickers start on the stored project, harness, model, mode
-    // and computer (the draft is built by `FormDraft::from_routine`).
     for f in FORM_FIELDS {
         match f {
             FormField::Name => {
                 FormLabel("이름");
-                if server {
-                    Label(NAME_SERVER_REASON, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-                } else {
-                    CurrentValue(editing, &initial.name);
-                }
+                CurrentValue(editing, &initial.name);
                 let draft_name = draft.clone();
                 EmberField(FieldOptions {
                     fill_max_width: true,
-                    // TODO(server): `SchedulePatch` takes no name, so a server routine's name is
-                    // shown as is and cannot be edited.
-                    text: server.then(|| initial.name.clone()),
-                    enabled: server.then_some(false),
+                    text: Some(d.name.clone()),
                     placeholder: if editing {
                         "바꾸려면 새 이름을 입력하세요".to_string()
                     } else {
@@ -2020,7 +2016,6 @@ fn FormFields(ctx: &FormCtx) {
             }
             FormField::Project => {
                 FormLabel("프로젝트");
-                FrozenReason(server);
                 cu::ScrollRow()
                     .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
                     .content(|| {
@@ -2029,9 +2024,6 @@ fn FormFields(ctx: &FormCtx) {
                             let n = name.clone();
                             let selected = d.sel.project == *name;
                             PickChip(name, None, selected, false, move || {
-                                if server {
-                                    return;
-                                }
                                 sel_proj.update(|d| d.sel.project = n.clone());
                             });
                             cu::Spacer().modifier(Modifier::new().width(SP[1]));
@@ -2067,6 +2059,7 @@ fn FormFields(ctx: &FormCtx) {
                 };
                 EmberField(FieldOptions {
                     fill_max_width: true,
+                    text: Some(d.cron.clone()),
                     placeholder: ph,
                     on_value_change: Some(Box::new(move |v| {
                         sel_cron.update(|d| d.cron = v);
@@ -2076,7 +2069,6 @@ fn FormFields(ctx: &FormCtx) {
             }
             FormField::Model => {
                 FormLabel("하네스 · 모델 · 추론 강도");
-                FrozenReason(server);
                 let (pick, choices) = (draft.clone(), models.clone());
                 Select(&model_labels[model_at.min(model_labels.len().saturating_sub(1))], &model_labels, model_at, 320.0, move |i| {
                     if let Some(o) = choices.get(i).copied() {
@@ -2098,15 +2090,12 @@ fn FormFields(ctx: &FormCtx) {
             }
             FormField::Computer => {
                 FormLabel("컴퓨터");
-                FrozenReason(server);
                 cu::ScrollRow()
                     .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
                     .content(|| {
                         let sel_c = draft.clone();
                         PickChip("이 서버", None, d.sel.computer.is_none(), false, move || {
-                            if !server {
-                                sel_c.update(|d| d.sel.computer = None);
-                            }
+                            sel_c.update(|d| d.sel.computer = None);
                         });
                         cu::Spacer().modifier(Modifier::new().width(SP[1]));
                         for (cid, cname) in &ctx.computers {
@@ -2114,9 +2103,7 @@ fn FormFields(ctx: &FormCtx) {
                             let cid_clone = cid.clone();
                             let selected = d.sel.computer.as_deref() == Some(cid.as_str());
                             PickChip(cname, None, selected, false, move || {
-                                if !server {
-                                    sel_c.update(|d| d.sel.computer = Some(cid_clone.clone()));
-                                }
+                                sel_c.update(|d| d.sel.computer = Some(cid_clone.clone()));
                             });
                             cu::Spacer().modifier(Modifier::new().width(SP[1]));
                         }
@@ -2130,6 +2117,7 @@ fn FormFields(ctx: &FormCtx) {
                     fill_max_width: true,
                     height: Some(120.0),
                     multiline: true,
+                    text: Some(d.prompt.clone()),
                     placeholder: if editing {
                         "바꾸려면 새 지시를 입력하세요".to_string()
                     } else {
@@ -2147,13 +2135,6 @@ fn FormFields(ctx: &FormCtx) {
         for e in errors {
             Label(e.message(), Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
         }
-    }
-}
-
-/// The reason beside the chips a server routine cannot change (TODO(server)).
-fn FrozenReason(server: bool) {
-    if server {
-        Label(SERVER_CANNOT_CHANGE, Fs::Xs, Weight::Regular, Some(paint(ember_theme().palette.muted)), Some(1));
     }
 }
 
@@ -3527,6 +3508,93 @@ mod tests {
                 );
             }
         }
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l25_host_edit_form_prefills_fields_and_allows_editing() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let entries = sample_entries();
+        let target = &entries[0].routine;
+        let initial = FormDraft::from_routine(target);
+        let draft = mutable_state_of(initial.clone());
+        let computers = vec![("mac-mini".to_string(), "Mac mini".to_string())];
+        let projects = vec!["ember".to_string(), "core".to_string()];
+
+        let mut host = Host::new({
+            let initial = initial.clone();
+            let draft = draft.clone();
+            move || {
+                let initial = initial.clone();
+                let draft = draft.clone();
+                let computers = computers.clone();
+                let projects = projects.clone();
+                Box::new(Recomposer::new(move || {
+                    RoutineForm(
+                        initial.clone(),
+                        Some("rt1".to_string()),
+                        true,
+                        &computers,
+                        &projects,
+                        FormLayout::Inline,
+                        &draft,
+                        |_| {},
+                        || {},
+                    );
+                }))
+            }
+        });
+
+        let mutations = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let text_fields: Vec<u32> = mutations
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create {
+                    node_id,
+                    widget: WidgetKind::TextField,
+                } => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text_fields.len(), 3, "expected Name, Schedule, and Prompt TextFields");
+
+        let field_texts: Vec<&str> = mutations
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::Text,
+                    value: PropertyValue::String(s),
+                } if text_fields.contains(node_id) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            field_texts.contains(&target.name.as_str()),
+            "expected Name TextField pre-filled with '{}', got {field_texts:?}",
+            target.name
+        );
+        assert!(
+            field_texts.contains(&target.cron.as_str()),
+            "expected Schedule TextField pre-filled with '{}', got {field_texts:?}",
+            target.cron
+        );
+        assert!(
+            field_texts.contains(&target.prompt.as_str()),
+            "expected Prompt TextField pre-filled with '{}', got {field_texts:?}",
+            target.prompt
+        );
+
+        let any_disabled = mutations.iter().any(|m| match m {
+            Mutation::SetProp {
+                node_id,
+                property: PropertyKind::Enabled,
+                value: PropertyValue::Bool(false),
+            } if text_fields.contains(node_id) => true,
+            _ => false,
+        });
+        assert!(!any_disabled, "none of the edit form text fields should be disabled");
         compose_rust::window::reset_window_size();
     }
 }

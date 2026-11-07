@@ -316,7 +316,7 @@ fn StatusCard(c: &ComputerChip, feed: &MonitorFeed, online: bool, height: Option
             super::home::ring_image(72.0, 8.0, fill.as_slice());
         });
         if c.projects.is_empty() {
-            Label("할당된 프로젝트가 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
+            Label("할당된 프로젝트가 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(3));
         } else {
             cu::Row().space_role(SpaceRole::Xs).modifier(Modifier::new().fill_max_width()).content(|| {
                 for pr in c.projects.iter() {

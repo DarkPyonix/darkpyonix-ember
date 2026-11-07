@@ -288,6 +288,29 @@ pub fn letter_color(letter: char) -> &'static str {
     }
 }
 
+/// The set of absolute paths below `root` that `load` reports as modified, added, renamed, copied,
+/// untracked or conflicted in the index or working tree. Returns an empty set unless `load` is
+/// [`ScmLoad::Ready`]: without a real `git/status` answer no file is highlighted.Deleted-only files
+/// (`D` with no surviving path) are excluded because they do not appear in the explorer or tabs.
+pub fn modified_paths_set(root: &str, load: &ScmLoad) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let ScmLoad::Ready(status) = load else { return out };
+    for f in &status.files {
+        let deleted_only = (f.index == 'D' && matches!(f.worktree, '.' | ' '))
+            || (f.worktree == 'D' && matches!(f.index, '.' | ' '));
+        if deleted_only {
+            continue;
+        }
+        let changed = is_conflict(f)
+            || !matches!(f.index, '.' | '!' | ' ')
+            || !matches!(f.worktree, '.' | '!' | ' ');
+        if changed {
+            out.insert(super::editor_workbench::join_path(root, &f.path));
+        }
+    }
+    out
+}
+
 /// Group a status as Code-OSS does: a conflict is listed once under 병합 충돌; otherwise a file
 /// changed in the index is under 스테이지된 변경 사항 and a file changed in the work tree under
 /// 변경 사항, so a file with both is in both lists. Each list is sorted by path.
@@ -635,6 +658,12 @@ impl Scm {
     /// The branch the bars show, once a status has been read.
     pub fn branch_line(&self) -> Option<String> {
         self.with(|s| s.load.status().map(branch_line))
+    }
+
+    /// The absolute paths below `root` that `git/status` reported as modified, added or conflicted.
+    /// Empty when no status has been read yet.
+    pub fn modified_paths(&self, root: &str) -> std::collections::HashSet<String> {
+        self.with(|s| modified_paths_set(root, &s.load))
     }
 
     /// Whether the diff covers the editor area for this current tab.

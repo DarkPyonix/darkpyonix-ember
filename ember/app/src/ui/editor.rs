@@ -192,6 +192,81 @@ impl EditorTabs {
     pub fn current_path(&self) -> Option<&str> {
         self.current.map(|i| self.tabs[i].0.as_str())
     }
+
+    /// Close every tab except the currently active one, returning the paths of the tabs that closed.
+    pub fn close_others(&mut self) -> Vec<String> {
+        let Some(cur) = self.current else { return Vec::new() };
+        let keep = self.tabs[cur].clone();
+        let closed: Vec<String> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (p, _))| (i != cur).then(|| p.clone()))
+            .collect();
+        self.tabs = vec![keep];
+        self.current = Some(0);
+        closed
+    }
+}
+
+/// The ancestor directories (from `root` down to the parent of `file_path`) to expand in the explorer
+/// tree so that `file_path` becomes visible (`열린 파일 찾기`). Returns an empty list when `file_path`
+/// is not strictly inside `root`.
+pub fn ancestor_dirs_to_expand(root: &str, file_path: &str) -> Vec<String> {
+    let root = root.trim_end_matches('/');
+    if root.is_empty() || !is_at_or_below(file_path, root) || file_path.trim_end_matches('/') == root {
+        return Vec::new();
+    }
+    let rel = file_path[root.len()..].trim_start_matches('/');
+    let parts: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    let mut dirs = vec![root.to_string()];
+    let mut cur = root.to_string();
+    for dir_seg in &parts[..parts.len() - 1] {
+        cur = super::editor_workbench::join_path(&cur, dir_seg);
+        dirs.push(cur.clone());
+    }
+    dirs
+}
+
+/// The two shortcut hint pairs `(hint, label)` shown inside `.ed-empty` when no file is open:
+/// `(find_hint, find_label)` and `(project_hint, "프로젝트 창")`.
+pub fn empty_state_hints(
+    keymap: crate::ui::keymap::Keymap,
+    os: crate::ui::keymap::Os,
+) -> ((String, &'static str), (String, &'static str)) {
+    (
+        (keymap.hint(Action::Find, os), keymap.find_label()),
+        (keymap.hint(Action::Project, os), "프로젝트 창"),
+    )
+}
+
+/// The CSS class of a tree row (`ed-tn`, with `.sel` when chosen and `.mod` when modified in git).
+pub fn tree_row_class(selected: bool, modified: bool) -> &'static str {
+    match (selected, modified) {
+        (true, true) => "ed-tn sel mod",
+        (true, false) => "ed-tn sel",
+        (false, true) => "ed-tn mod",
+        (false, false) => "ed-tn",
+    }
+}
+
+/// The CSS class of a file tab (`ed-tab`, with `.on` when active and `.vc-mod` when modified in git).
+pub fn tab_class(active: bool, modified: bool) -> &'static str {
+    match (active, modified) {
+        (true, true) => "ed-tab on vc-mod",
+        (true, false) => "ed-tab on",
+        (false, true) => "ed-tab vc-mod",
+        (false, false) => "ed-tab",
+    }
+}
+
+/// The status bar tab width label (`"4칸"` when `tab_width` is 0, else `"{tab_width}칸"`).
+pub fn tab_width_text(tab_width: u32) -> String {
+    let w = if tab_width == 0 { 4 } else { tab_width };
+    format!("{w}칸")
 }
 
 /// The path segments the breadcrumbs show: the path below the project folder when it lies

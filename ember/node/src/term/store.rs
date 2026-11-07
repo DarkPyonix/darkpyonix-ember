@@ -15,9 +15,12 @@ impl Store {
     pub fn open(state_dir: &Path) -> io::Result<Self> {
         let dir = state_dir.join("terms");
         std::fs::create_dir_all(&dir)?;
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(state_dir, std::fs::Permissions::from_mode(0o700));
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(state_dir, std::fs::Permissions::from_mode(0o700));
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        }
         Ok(Self { dir })
     }
 

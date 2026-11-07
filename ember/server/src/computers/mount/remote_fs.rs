@@ -21,7 +21,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -108,6 +107,10 @@ impl FsErr {
 
     /// The local errno (for FUSE).
     pub fn errno(&self) -> i32 {
+        #[cfg(unix)]
+        let (eloop, enotsup, estale, etimedout) = (libc::ELOOP, libc::ENOTSUP, libc::ESTALE, libc::ETIMEDOUT);
+        #[cfg(not(unix))]
+        let (eloop, enotsup, estale, etimedout) = (62, 45, 70, 60);
         match self {
             FsErr::NoEnt => libc::ENOENT,
             FsErr::Exist => libc::EEXIST,
@@ -122,11 +125,11 @@ impl FsErr {
             FsErr::Rofs => libc::EROFS,
             FsErr::Busy => libc::EBUSY,
             FsErr::XDev => libc::EXDEV,
-            FsErr::Loop => libc::ELOOP,
-            FsErr::NotSupp => libc::ENOTSUP,
-            FsErr::Stale => libc::ESTALE,
+            FsErr::Loop => eloop,
+            FsErr::NotSupp => enotsup,
+            FsErr::Stale => estale,
             FsErr::Io(_) | FsErr::Unreachable(_) => libc::EIO,
-            FsErr::TimedOut => libc::ETIMEDOUT,
+            FsErr::TimedOut => etimedout,
         }
     }
 
@@ -492,7 +495,7 @@ impl RemoteFs {
     }
 
     fn child_path(&self, dir: u64, name: &OsStr) -> FsResult<PathBuf> {
-        let bytes = name.as_bytes();
+        let bytes = name.as_encoded_bytes();
         if bytes.is_empty() || bytes.contains(&b'/') || bytes.contains(&0) || name == "." || name == ".." {
             return Err(FsErr::Inval);
         }
@@ -1270,7 +1273,10 @@ pub(crate) mod tests {
         let started = Instant::now();
         let e = fs.read(a.id, 0, 1).await.unwrap_err();
         assert_eq!(e, FsErr::TimedOut);
+        #[cfg(unix)]
         assert_eq!(e.errno(), libc::ETIMEDOUT);
+        #[cfg(not(unix))]
+        assert_eq!(e.errno(), 60);
         assert!(started.elapsed() < Duration::from_secs(5), "the deadline bounds the wait");
 
         node.hang.store(false, Ordering::SeqCst);

@@ -71,6 +71,13 @@ pub struct Terms {
 
 /// The default program: the user's shell, as a login shell on macOS (as VS Code does there).
 pub fn default_argv() -> Vec<String> {
+    if cfg!(windows) {
+        let shell = std::env::var("COMSPEC")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "powershell.exe".into());
+        return vec![shell];
+    }
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
     if cfg!(target_os = "macos") {
         vec![shell, "-l".into()]
@@ -123,27 +130,30 @@ impl Terms {
 
     /// Recover a session from its keeper, or mark it lost.
     fn readopt(&self, rec: &mut TermRecord) -> Arc<Session> {
-        let store = self.shared.store.as_ref().expect("load only runs with a store");
-        let fd = match (rec.pid, &rec.keeper_socket) {
-            (Some(pid), Some(sock)) if pty::alive(pid) => match pty::fetch_from_keeper(sock) {
-                Ok(fd) => Some(fd),
-                Err(e) => {
-                    tracing::warn!(term = %rec.id, "keeper unreachable: {e}");
-                    None
+        #[cfg(unix)]
+        {
+            let store = self.shared.store.as_ref().expect("load only runs with a store");
+            let fd = match (rec.pid, &rec.keeper_socket) {
+                (Some(pid), Some(sock)) if pty::alive(pid) => match pty::fetch_from_keeper(sock) {
+                    Ok(fd) => Some(fd),
+                    Err(e) => {
+                        tracing::warn!(term = %rec.id, "keeper unreachable: {e}");
+                        None
+                    }
+                },
+                _ => None,
+            };
+            let restore = store.take_snapshot(&rec.id);
+            if let Some(fd) = fd {
+                rec.adopted = true;
+                match Session::start(self.shared.clone(), rec.clone(), Pty::from_fd(fd), Child::Adopted, restore) {
+                    Ok(s) => {
+                        tracing::info!(term = %rec.id, pid = ?rec.pid, "re-adopted terminal session");
+                        self.shared.emit(NodeEventKind::TermStarted { term: s.info() });
+                        return s;
+                    }
+                    Err(e) => tracing::warn!(term = %rec.id, "could not re-adopt: {e:#}"),
                 }
-            },
-            _ => None,
-        };
-        let restore = store.take_snapshot(&rec.id);
-        if let Some(fd) = fd {
-            rec.adopted = true;
-            match Session::start(self.shared.clone(), rec.clone(), Pty::from_fd(fd), Child::Adopted, restore) {
-                Ok(s) => {
-                    tracing::info!(term = %rec.id, pid = ?rec.pid, "re-adopted terminal session");
-                    self.shared.emit(NodeEventKind::TermStarted { term: s.info() });
-                    return s;
-                }
-                Err(e) => tracing::warn!(term = %rec.id, "could not re-adopt: {e:#}"),
             }
         }
         if let Some(sock) = &rec.keeper_socket {

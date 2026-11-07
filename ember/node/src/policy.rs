@@ -187,6 +187,7 @@ fn canonical_or_lexical(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn rejects_dotdot_and_symlink_escape() {
         let t = tempfile::tempdir().unwrap();
@@ -207,6 +208,7 @@ mod tests {
         assert!(ok.ends_with("root/a/b/new.txt"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn denied_paths_are_refused_like_outside_paths() {
         let t = tempfile::tempdir().unwrap();
@@ -242,6 +244,7 @@ mod tests {
         assert!(q.resolve_existing(&root.join(".ember/sub")).is_ok());
     }
 
+    #[cfg(unix)]
     #[test]
     fn nofollow_keeps_the_final_link_but_checks_its_parent() {
         let t = tempfile::tempdir().unwrap();

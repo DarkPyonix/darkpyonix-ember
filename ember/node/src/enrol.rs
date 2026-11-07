@@ -125,7 +125,9 @@ pub fn lock_state_dir(state_dir: &Path) -> anyhow::Result<EnrolLock> {
         .with_context(|| format!("cannot open {}", path.display()))?;
     let meta = file.metadata().with_context(|| format!("cannot stat {}", path.display()))?;
     check_lock_file(meta.file_type().is_file(), meta.uid(), &path)?;
-    // SAFETY: the descriptor is open for the whole call.
+    // Clear FD_CLOEXEC protection is already default in Rust std, but we also explicitly unlock
+    // on drop so even if another thread forked while this lock was open, the flock is released
+    // immediately when `EnrolLock` is dropped.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         let err = io::Error::last_os_error();
         if err.kind() == io::ErrorKind::WouldBlock {
@@ -134,6 +136,16 @@ pub fn lock_state_dir(state_dir: &Path) -> anyhow::Result<EnrolLock> {
         return Err(anyhow::Error::new(err).context(format!("cannot lock {}", path.display())));
     }
     Ok(EnrolLock { _file: file, dir: state_dir.to_path_buf() })
+}
+
+impl Drop for EnrolLock {
+    fn drop(&mut self) {
+        // Explicit LOCK_UN releases the kernel flock entry immediately even if the file descriptor
+        // was duplicated across a concurrent fork in another test thread.
+        unsafe {
+            let _ = libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
 }
 
 /// The contents of `enrol.json`. `node_token` is a secret: `Debug` redacts it.

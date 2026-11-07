@@ -200,13 +200,16 @@ pub enum MountPointError {
 /// Inspect `at` (blocking: it touches the filesystem). `allow_shadow` permits mounting over a
 /// non-empty directory.
 pub fn inspect(os: Os, at: &Path, allow_shadow: bool) -> Result<MountPoint, MountPointError> {
-    use std::os::unix::fs::MetadataExt;
     match std::fs::symlink_metadata(at) {
         Ok(m) if !m.is_dir() => Err(MountPointError::NotADirectory(at.into())),
-        Ok(m) => {
-            let parent_dev = at.parent().and_then(|p| std::fs::metadata(p).ok()).map(|p| p.dev());
-            if parent_dev.is_some_and(|d| d != m.dev()) {
-                return Ok(MountPoint::Mounted);
+        Ok(_m) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let parent_dev = at.parent().and_then(|p| std::fs::metadata(p).ok()).map(|p| p.dev());
+                if parent_dev.is_some_and(|d| d != _m.dev()) {
+                    return Ok(MountPoint::Mounted);
+                }
             }
             let empty = std::fs::read_dir(at).map(|mut r| r.next().is_none()).unwrap_or(false);
             if empty || allow_shadow {
@@ -239,11 +242,17 @@ pub fn inspect(os: Os, at: &Path, allow_shadow: bool) -> Result<MountPoint, Moun
     }
 }
 
+#[cfg(unix)]
 fn writable(dir: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else { return false };
     // SAFETY: `c` is a valid NUL-terminated path.
     unsafe { libc::access(c.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
+}
+
+#[cfg(not(unix))]
+fn writable(dir: &Path) -> bool {
+    std::fs::metadata(dir).is_ok_and(|m| m.is_dir() && !m.permissions().readonly())
 }
 
 /// The one-time privileged step that makes `at` usable, per OS.

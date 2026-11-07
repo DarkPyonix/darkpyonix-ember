@@ -623,16 +623,29 @@ Security boundary:
   dir's settings (`ember/ose/smoke.sh` writes it for the Machine and User scopes). The route does not set it and
   does not verify any signature, so an install from the route either fails on the signature check or, with the
   setting off, runs unverified code, and installed extension code later runs in the editor's extension host.
-- **The connection token is not on the command line (#461).** The OSE start writes the token to
+- **The connection token is not on the command line, and never leaves the server (C2, #458, #461).** The OSE start writes the real 64-hex token to
   `<data root>/<computer id>/tokens/<first 16 hex of SHA-256 of the canonical folder>.token` and passes
   `--connection-token-file <path>`, so `ps` shows no secret. The `tokens` directory is made 0700 (a symlink is
   refused); the file is created with `create_new` and mode 0600, so it never exists with wider permissions,
   and holds the 64-hex token without a trailing newline. A stale file at the path is removed first (a
   directory there is refused). The file is deleted when the process entry goes away (child exited, manager
-  dropped) and when the start fails. The token is still returned in the IdeLaunch JSON. Test:
-  `fr_w4_ose_token_file_*` in `ember/server/tests/fr_w4_ose_data_dir.rs` (written, not yet run). Unverified
-  with the real `dpx-ose-server`: that it reads the file once at start and honours it, and whether it expects
-  or trims a trailing newline (`ember/ose/README.md` only names the flag). The `tokens` dir lies inside
+  dropped) and when the start fails. Each process entry also mints an opaque 32-hex `launch_id` and a 64-hex
+  `placeholder` token distinct from the real token. `GET /api/sessions/{id}/ide` returns
+  `relay: "/api/computers/{computer}/ide/relay/{launch_id}"` and `connection_token: <placeholder>` (never the real
+  token). `GET /api/computers/{computer}/ide/relay/{launch_id}` (behind `auth::protect` on the local listener,
+  `check_origin`, and the device gate on the transport; 404 on the guest door) validates `{computer}` (`local`;
+  unknown computer 404, non-local registered computer 400, invalid id 400) and `launch_id` (unknown 404 before
+  upgrade), enforces 16 concurrent relays per launch and 64 per server (429 before upgrade, held by RAII guards),
+  upgrades to a binary WebSocket, dials `127.0.0.1:<port>` (3 s timeout, 1011 on failure), pumps binary frames both
+  ways with backpressure (text frames from the client close with 1003), closes both sides after 120 s of idle in
+  both directions, and in the first 8 KiB (`8192` bytes) of client-to-OSE bytes replaces every occurrence of the
+  64-byte ASCII `placeholder` with the 64-byte real token (including across frame boundaries). Revoking a device
+  (`FR-N3`) ends its open relay within one heartbeat and drops the TCP connection to the OSE. Tests:
+  `fr_w4_ose_token_file_*` in `ember/server/tests/fr_w4_ose_data_dir.rs` and `fr_w4_relay_*`, `fr_n3_ide_relay_*`,
+  `fr_t14_guest_door_does_not_serve_the_ide_relay` in `ember/server/tests/fr_w4_ose_relay.rs`. Unverified
+  with the real `dpx-ose-server`: that it reads the file once at start and honours it, whether it expects
+  or trims a trailing newline (`ember/ose/README.md` only names the flag), and whether `GET /version` answers
+  without a token when `--connection-token-file` is set. The `tokens` dir lies inside
   `--server-data-dir`; the OSE is not known to serve or list it (unverified).
 - The 200 and 502 `output` is what the OSE printed and can contain absolute paths of the server machine; only the
   owner sees it.

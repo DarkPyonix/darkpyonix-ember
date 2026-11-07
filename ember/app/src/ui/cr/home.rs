@@ -19,7 +19,7 @@ pub use crate::ui::home::{
     harness_block, kpis, mode_after_harness_change, composer_chip_budget, composer_chip_rows, composer_chip_width, mode_header, mode_picker_rows_pending, mode_tap, popover_width, model_catalog, modes_for, needs_approve_all,
     project_options, project_tile_line, resolve_cwd, shortcut_label, split_chip_rows,
     success_percent, title_from_message, CrewMember, Dash, Harness, HarnessBar, Kpi, ModelOption,
-    ModeRow, PermMode, ProjectTile, Selection, StatusCounts, ATTACH_UNSUPPORTED, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
+    ModeRow, PermMode, ProjectTile, Selection, StatusCounts, ComposerAttachment, ATTACH_HINT, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
     EMPTY_CREW, EMPTY_HARNESS_USAGE, CiResult, GithubCard, GithubPill, INTEGRATIONS_TITLE, LATER_INTEGRATIONS, LATER_LINE, LATER_PILL, GITHUB_NAME, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
 };
 use super::components::{
@@ -510,6 +510,10 @@ pub fn HomeScreen() {
 struct Composer {
     selection: MutableState<Selection>,
     typed: MutableState<String>,
+    attachments: MutableState<Vec<ComposerAttachment>>,
+    attachment_open: MutableState<bool>,
+    attachment_path: MutableState<String>,
+    attachment_error: MutableState<Option<String>>,
     suggestion: MutableState<Option<String>>,
     busy: MutableState<bool>,
     open: MutableState<Option<Pick>>,
@@ -527,6 +531,10 @@ impl Composer {
                 None => Selection::initial(),
             }),
             typed: mutable_state_of(String::new()),
+            attachments: mutable_state_of(Vec::new()),
+            attachment_open: mutable_state_of(false),
+            attachment_path: mutable_state_of(String::new()),
+            attachment_error: mutable_state_of(None),
             suggestion: mutable_state_of(initial_suggestion()),
             busy: mutable_state_of(false),
             open: mutable_state_of(initial_pick()),
@@ -563,8 +571,22 @@ impl Composer {
             .unwrap_or_else(|| "이 서버".to_string())
     }
 
+    fn add_attachment(&self) {
+        let mut items = self.attachments.get_untracked();
+        match crate::ui::home::stage_attachment(&mut items, &self.attachment_path.get_untracked()) {
+            Ok(()) => {
+                self.attachments.set(items);
+                self.attachment_error.set(None);
+                self.attachment_open.set(false);
+            }
+            Err(e) => self.attachment_error.set(Some(e.to_string())),
+        }
+    }
+
     fn send(&self, ui: &SharedUi) {
         let message = effective_message(&self.typed.get_untracked(), self.suggestion.get_untracked().as_deref());
+        let staged = self.attachments.get_untracked();
+        let message = crate::ui::home::attachment_message(&message, &staged);
         if !can_send(&message, self.busy.get_untracked()) {
             return;
         }
@@ -602,7 +624,7 @@ impl Composer {
             cwd,
         };
         let project_name = sel.project.clone();
-        let (ui, busy) = (ui.clone(), self.busy.clone());
+        let (ui, busy, attachments) = (ui.clone(), self.busy.clone(), self.attachments.clone());
         run_shared(
             async move {
                 let s = services();
@@ -625,6 +647,9 @@ impl Composer {
                 busy.set(false);
                 match r {
                     Ok((rec, note)) => {
+                        let mut remaining = attachments.get_untracked();
+                        remaining.retain(|item| !staged.contains(item));
+                        attachments.set(remaining);
                         ui.update_prefs(|p| {
                             p.last_used.insert(project_name.clone(), remember);
                             p.last_project = Some(project_name);
@@ -1047,7 +1072,7 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     let sel = c.selection.get();
     let (_, computers) = c.live(ui);
     let message = effective_message(&c.typed.get(), c.suggestion.get().as_deref());
-    let sendable = can_send(&message, c.busy.get());
+    let sendable = can_send(&crate::ui::home::attachment_message(&message, &c.attachments.get()), c.busy.get());
     let placeholder = c.suggestion.get().unwrap_or_else(|| COMPOSER_PLACEHOLDER.to_string());
     let computer_text = crate::ui::home::computer_chip_text(sel.computer.as_deref(), &computers);
     let computer_text = if sel.computer.is_none() { c.local_name(ui) } else { computer_text };
@@ -1062,12 +1087,8 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
         ComposerChip(text, icon, chip_has_chevron(pick), selected, icon_only && pick != Pick::Project, icon_only && pick == Pick::Project, move || open.set(Some(pick)));
     };
     let add = || {
-        // TODO(compose-rust#483, #500): attachments need the file picker (planned for v0.0.8)
-        // and an upload API. Until then the button is dimmed and says why when tapped.
-        // TODO(compose-rust#429): the dimmed wrapper has no disabled accessible name.
-        cu::Box().modifier(Modifier::new().alpha(0.5)).content(|| {
-            super::components::IconButton(IconRole::Add, true, || notice::post(ATTACH_UNSUPPORTED));
-        });
+        let open = c.attachment_open.clone();
+        super::components::IconButton(IconRole::Add, true, move || open.set(!open.get_untracked()));
     };
     let send = || {
         let (c2, ui2) = (c.clone(), ui.clone());
@@ -1089,6 +1110,35 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
         )
         .content(|| {
             cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                for item in c.attachments.get() {
+                    let attachments = c.attachments.clone();
+                    let path = item.path.clone();
+                    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                        Label(&item.name, Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                        PickChip("×", None, false, false, move || {
+                            let mut items = attachments.get_untracked();
+                            items.retain(|item| item.path != path);
+                            attachments.set(items);
+                        });
+                    });
+                }
+                if c.attachment_open.get() {
+                    Label(ATTACH_HINT, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                    let path = c.attachment_path.clone();
+                    let add = c.clone();
+                    EmberField(FieldOptions {
+                        fill_max_width: true,
+                        placeholder: "파일의 절대 경로".to_string(),
+                        on_value_change: Some(Box::new(move |v| path.set(v))),
+                        on_submit: Some(Box::new(move |_| add.add_attachment())),
+                        ..Default::default()
+                    });
+                    if let Some(error) = c.attachment_error.get() {
+                        Label(&error, Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), Some(2));
+                    }
+                    let add = c.clone();
+                    PickChip("첨부", None, false, false, move || add.add_attachment());
+                }
                 let (typed, ui2, c2) = (c.typed.clone(), ui.clone(), c.clone());
                 // TODO(compose-rust#374, #376): the field is uncontrolled with no initial value
                 // and carries the toolkit frame, so a suggestion shows as the placeholder.
@@ -1905,6 +1955,23 @@ mod tests {
         let p = layout(390.0);
         assert!(p.compact);
         assert_eq!(p.proj_cols, 1);
+    }
+
+    #[test]
+    fn fr_l11_attachment_bar_and_chip_render() {
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| {
+            let c = Composer::new();
+            c.attachment_open.set(true);
+            c.attachments.set(vec![ComposerAttachment { path: "/sample/file.png".into(), name: "file.png".into() }]);
+            ComposerCard(&c, shared_ui(), 720.0, layout(1440.0));
+        })));
+        let bytes = host.rebuild().expect("rebuild");
+        let batch = decode_batch(bytes).expect("decode");
+        let all = texts(&batch);
+        for expected in ["file.png", "×", ATTACH_HINT, "파일의 절대 경로"] {
+            assert!(all.iter().any(|text| text == expected), "missing {expected}: {all:?}");
+        }
     }
 
     #[test]

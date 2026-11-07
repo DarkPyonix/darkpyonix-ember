@@ -21,12 +21,17 @@
 //! re-adopted session's model); after a crash the re-adopted session starts with an empty model.
 //! Exit status of a re-adopted session is unknown (the process is no longer node's child).
 
+#[cfg(unix)]
 use std::fs::File;
 use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::time::Duration;
 
 use portable_pty::{native_pty_system, CommandBuilder};
@@ -34,10 +39,12 @@ use portable_pty::{native_pty_system, CommandBuilder};
 use crate::proto::PtySize;
 
 /// The master side of a session's PTY.
+#[cfg(unix)]
 pub struct Pty {
     fd: OwnedFd,
 }
 
+#[cfg(unix)]
 impl Pty {
     pub fn from_fd(fd: OwnedFd) -> Self {
         Self { fd }
@@ -72,6 +79,49 @@ impl Pty {
         match unsafe { libc::tcgetpgrp(self.raw()) } {
             p if p > 0 => Some(p),
             _ => None,
+        }
+    }
+}
+
+/// The master side of a session's PTY on non-Unix platforms (Windows ConPTY).
+#[cfg(not(unix))]
+pub struct Pty {
+    master: std::sync::Mutex<Box<dyn portable_pty::MasterPty + Send>>,
+    writer: std::sync::Mutex<Option<Box<dyn Write + Send>>>,
+    child: std::sync::Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>,
+}
+
+#[cfg(not(unix))]
+impl Pty {
+    pub fn reader(&self) -> io::Result<Box<dyn Read + Send>> {
+        self.master.lock().unwrap().try_clone_reader().map_err(io::Error::other)
+    }
+
+    pub fn writer(&self) -> io::Result<Box<dyn Write + Send>> {
+        self.writer
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| io::Error::other("pty writer already taken"))
+    }
+
+    pub fn resize(&self, size: PtySize) -> io::Result<()> {
+        self.master
+            .lock()
+            .unwrap()
+            .resize(portable_pty::PtySize { rows: size.rows, cols: size.cols, pixel_width: 0, pixel_height: 0 })
+            .map_err(io::Error::other)
+    }
+
+    pub fn foreground_pgrp(&self) -> Option<i32> {
+        None
+    }
+
+    pub fn wait_child(&self) -> (Option<i32>, Option<i32>) {
+        let child = self.child.lock().unwrap().take();
+        match child.map(|mut c| c.wait()) {
+            Some(Ok(status)) => (Some(status.exit_code() as i32), None),
+            _ => (None, None),
         }
     }
 }
@@ -115,20 +165,41 @@ pub fn spawn(
     // The parent must not keep the slave open, or the reader never sees end-of-file.
     drop(pair.slave);
     let pid = child.process_id().ok_or_else(|| anyhow::anyhow!("pty child has no pid"))?;
-    // Reaped by the session with waitpid, which reports the exact signal number.
-    drop(child);
-    let raw = pair.master.as_raw_fd().ok_or_else(|| anyhow::anyhow!("pty master has no fd"))?;
-    // SAFETY: `raw` is open for as long as `pair.master` lives; we duplicate it (CLOEXEC) first.
-    let fd = unsafe { BorrowedFd::borrow_raw(raw) }.try_clone_to_owned()?;
-    drop(pair.master);
-    Ok((Pty { fd }, pid))
+    #[cfg(unix)]
+    {
+        // Reaped by the session with waitpid, which reports the exact signal number.
+        drop(child);
+        let raw = pair.master.as_raw_fd().ok_or_else(|| anyhow::anyhow!("pty master has no fd"))?;
+        // SAFETY: `raw` is open for as long as `pair.master` lives; we duplicate it (CLOEXEC) first.
+        let fd = unsafe { BorrowedFd::borrow_raw(raw) }.try_clone_to_owned()?;
+        drop(pair.master);
+        Ok((Pty { fd }, pid))
+    }
+    #[cfg(not(unix))]
+    {
+        let writer = pair.master.take_writer()?;
+        Ok((
+            Pty {
+                master: std::sync::Mutex::new(pair.master),
+                writer: std::sync::Mutex::new(Some(writer)),
+                child: std::sync::Mutex::new(Some(child)),
+            },
+            pid,
+        ))
+    }
 }
 
 /// Is `pid` still a live process (or one we may not signal)?
+#[cfg(unix)]
 pub fn alive(pid: u32) -> bool {
     // SAFETY: signal 0 only checks existence and permission.
     let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
     r == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+pub fn alive(_pid: u32) -> bool {
+    false
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -138,11 +209,13 @@ pub fn alive(pid: u32) -> bool {
 pub const KEEPER_SUBCOMMAND: &str = "__keep-pty";
 
 /// Unix socket paths are limited to ~104 bytes (macOS); longer ones are refused up front.
+#[cfg(unix)]
 const MAX_SOCKET_PATH: usize = 100;
 
 /// How long session creation waits for a new keeper to listen. Generous: a loaded machine or a
 /// first exec of a fresh binary can take seconds, and a session without a keeper is lost on the
 /// next node restart.
+#[cfg(unix)]
 const KEEPER_READY_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// A keeper started by this node run.
@@ -152,6 +225,7 @@ pub struct KeeperHandle {
 }
 
 /// Start a keeper holding a duplicate of `pty`'s master. `exe` is the `ember-node` binary.
+#[cfg(unix)]
 pub fn spawn_keeper(exe: &Path, socket: &Path, pty: &Pty, session_pid: u32) -> io::Result<KeeperHandle> {
     if socket.as_os_str().len() > MAX_SOCKET_PATH {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("socket path too long: {}", socket.display())));
@@ -211,7 +285,13 @@ pub fn spawn_keeper(exe: &Path, socket: &Path, pty: &Pty, session_pid: u32) -> i
     Ok(KeeperHandle { socket: socket.to_path_buf(), pid })
 }
 
+#[cfg(not(unix))]
+pub fn spawn_keeper(_exe: &Path, _socket: &Path, _pty: &Pty, _session_pid: u32) -> io::Result<KeeperHandle> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "PTY keeper is only supported on Unix"))
+}
+
 /// Ask the keeper at `socket` for the master fd.
+#[cfg(unix)]
 pub fn fetch_from_keeper(socket: &Path) -> io::Result<OwnedFd> {
     let mut s = UnixStream::connect(socket)?;
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -220,14 +300,19 @@ pub fn fetch_from_keeper(socket: &Path) -> io::Result<OwnedFd> {
 }
 
 /// Tell the keeper at `socket` to exit (the session ended or was killed). Best effort.
+#[cfg(unix)]
 pub fn stop_keeper(socket: &Path) {
     if let Ok(mut s) = UnixStream::connect(socket) {
         let _ = s.write_all(b"Q");
     }
 }
 
+#[cfg(not(unix))]
+pub fn stop_keeper(_socket: &Path) {}
+
 /// `ember-node __keep-pty --socket <path> --pid <session pid> --fd <master fd>`.
 /// Returns the process exit code.
+#[cfg(unix)]
 pub fn keeper_main(args: &[String]) -> i32 {
     let mut socket = None;
     let mut pid = None;
@@ -283,9 +368,17 @@ pub fn keeper_main(args: &[String]) -> i32 {
     0
 }
 
+#[cfg(not(unix))]
+pub fn keeper_main(_args: &[String]) -> i32 {
+    eprintln!("ember-node {KEEPER_SUBCOMMAND} is only supported on Unix");
+    1
+}
+
 /// Room for one `SCM_RIGHTS` fd, aligned for `cmsghdr`.
+#[cfg(unix)]
 type CmsgBuf = [u64; 8];
 
+#[cfg(unix)]
 fn send_fd(sock: &UnixStream, fd: RawFd) -> io::Result<()> {
     let mut byte = *b"F";
     let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
@@ -314,6 +407,7 @@ fn send_fd(sock: &UnixStream, fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn recv_fd(sock: &UnixStream) -> io::Result<OwnedFd> {
     let mut byte = [0u8; 1];
     let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
@@ -346,7 +440,7 @@ fn recv_fd(sock: &UnixStream) -> io::Result<OwnedFd> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

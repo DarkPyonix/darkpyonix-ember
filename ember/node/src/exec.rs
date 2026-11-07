@@ -21,6 +21,11 @@ use crate::proto::{CommandSpec, ExecEvent, Program, PtySize};
 
 pub const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
+pub const SIGHUP: i32 = 1;
+pub const SIGINT: i32 = 2;
+pub const SIGKILL: i32 = 9;
+pub const SIGTERM: i32 = 15;
+
 /// A started command: its output stream and the means to control it.
 pub struct Running {
     pub pid: u32,
@@ -73,6 +78,7 @@ impl Control {
 }
 
 /// Signal a process group. Errors (e.g. it already exited) are ignored.
+#[cfg(unix)]
 pub fn kill_group(pid: u32, signal: i32) {
     // SAFETY: plain syscall; a stale pid at worst signals nothing (ESRCH).
     unsafe {
@@ -80,14 +86,29 @@ pub fn kill_group(pid: u32, signal: i32) {
     }
 }
 
+/// Terminate a process tree on Windows.
+#[cfg(not(unix))]
+pub fn kill_group(pid: u32, _signal: i32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 pub fn argv(program: &Program) -> anyhow::Result<Vec<String>> {
     match program {
         Program::Argv(v) if v.is_empty() => anyhow::bail!("empty argv"),
         Program::Argv(v) => Ok(v.clone()),
+        #[cfg(unix)]
         Program::Shell(s) => Ok(vec!["/bin/sh".into(), "-c".into(), s.clone()]),
+        #[cfg(not(unix))]
+        Program::Shell(s) => Ok(vec!["cmd.exe".into(), "/C".into(), s.clone()]),
     }
 }
 
+#[cfg(unix)]
 fn exit_event_from_wait(status: libc::c_int) -> ExecEvent {
     if libc::WIFEXITED(status) {
         ExecEvent::Exit { code: Some(libc::WEXITSTATUS(status)), signal: None }
@@ -124,8 +145,9 @@ pub fn spawn_pipes(spec: &CommandSpec, cwd: &Path, stdin: bool) -> anyhow::Resul
         .current_dir(cwd)
         .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    cmd.process_group(0);
     if spec.env_clear {
         cmd.env_clear();
     }
@@ -146,8 +168,14 @@ pub fn spawn_pipes(spec: &CommandSpec, cwd: &Path, stdin: bool) -> anyhow::Resul
         .await;
         let ev = match status {
             Ok(s) => {
-                use std::os::unix::process::ExitStatusExt;
-                ExecEvent::Exit { code: s.code(), signal: s.signal() }
+                #[cfg(unix)]
+                let signal = {
+                    use std::os::unix::process::ExitStatusExt;
+                    s.signal()
+                };
+                #[cfg(not(unix))]
+                let signal = None;
+                ExecEvent::Exit { code: s.code(), signal }
             }
             Err(e) => ExecEvent::Error { message: format!("wait: {e}") },
         };
@@ -175,10 +203,12 @@ pub fn spawn_pty(spec: &CommandSpec, cwd: &Path, size: PtySize) -> anyhow::Resul
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
-    let child = pair.slave.spawn_command(cmd)?;
+    #[allow(unused_mut)]
+    let mut child = pair.slave.spawn_command(cmd)?;
     // The parent must not keep the slave open, or the reader never sees end-of-file.
     drop(pair.slave);
     let pid = child.process_id().ok_or_else(|| anyhow::anyhow!("pty child has no pid"))?;
+    #[cfg(unix)]
     // The child is reaped below with waitpid, which reports the exact signal number.
     drop(child);
 
@@ -204,6 +234,7 @@ pub fn spawn_pty(spec: &CommandSpec, cwd: &Path, size: PtySize) -> anyhow::Resul
             let _ = done_tx.send(());
         });
     }
+    #[cfg(unix)]
     tokio::spawn(async move {
         let status = tokio::task::spawn_blocking(move || {
             let mut status: libc::c_int = 0;
@@ -222,6 +253,17 @@ pub fn spawn_pty(spec: &CommandSpec, cwd: &Path, size: PtySize) -> anyhow::Resul
             Ok(Ok(s)) => exit_event_from_wait(s),
             Ok(Err(e)) => ExecEvent::Error { message: format!("waitpid: {e}") },
             Err(e) => ExecEvent::Error { message: format!("waitpid: {e}") },
+        };
+        let _ = tx.send(ev).await;
+    });
+    #[cfg(not(unix))]
+    tokio::spawn(async move {
+        let status = tokio::task::spawn_blocking(move || child.wait()).await;
+        let _ = tokio::time::timeout(DRAIN_GRACE, done_rx).await;
+        let ev = match status {
+            Ok(Ok(s)) => ExecEvent::Exit { code: Some(s.exit_code() as i32), signal: None },
+            Ok(Err(e)) => ExecEvent::Error { message: format!("wait: {e}") },
+            Err(e) => ExecEvent::Error { message: format!("wait: {e}") },
         };
         let _ = tx.send(ev).await;
     });

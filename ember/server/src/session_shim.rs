@@ -24,17 +24,26 @@
 //! start offset tells the client about the gap.
 
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
 use std::sync::{Arc, Mutex as StdMutex};
+#[cfg(unix)]
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::{unix::OwnedWriteHalf, UnixListener, UnixStream};
-use tokio::sync::{mpsc, oneshot, watch, Mutex, Notify};
+use tokio::sync::mpsc;
+#[cfg(unix)]
+use tokio::sync::{oneshot, watch, Mutex, Notify};
 
 /// Most unacknowledged stdout bytes a shim keeps.
 pub const BUFFER_CAP: usize = 64 * 1024 * 1024;
@@ -105,6 +114,7 @@ fn cleanup(dir: &Path, id: &str) {
 // Shim side
 // ---------------------------------------------------------------------------------------------
 
+#[cfg(unix)]
 struct Inner {
     /// Absolute offset of `data[0]`.
     base: u64,
@@ -113,6 +123,7 @@ struct Inner {
     memory_killed: bool,
 }
 
+#[cfg(unix)]
 struct Shared {
     inner: StdMutex<Inner>,
     tx: watch::Sender<u64>,
@@ -121,6 +132,7 @@ struct Shared {
     generation: AtomicU64,
 }
 
+#[cfg(unix)]
 impl Shared {
     fn bump(&self) {
         self.tx.send_modify(|v| *v += 1);
@@ -129,6 +141,7 @@ impl Shared {
 
 /// Run a shim until its agent has ended and the last output was acknowledged. Called by the
 /// `ember-shim` binary.
+#[cfg(unix)]
 pub async fn run_shim(dir: &Path, id: &str) -> anyhow::Result<()> {
     let spec: ShimSpec = serde_json::from_slice(&std::fs::read(spec_path(dir, id))?)?;
     let _ = std::fs::remove_file(spec_path(dir, id));
@@ -264,6 +277,12 @@ pub async fn run_shim(dir: &Path, id: &str) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(not(unix))]
+pub async fn run_shim(_dir: &Path, _id: &str) -> anyhow::Result<()> {
+    anyhow::bail!("ember-shim is only supported on Unix")
+}
+
+#[cfg(unix)]
 fn kill_group(pid: u32) {
     if pid > 0 {
         // SAFETY: plain signal to the agent's own process group (it is its group leader).
@@ -273,6 +292,7 @@ fn kill_group(pid: u32) {
     }
 }
 
+#[cfg(unix)]
 /// Resident memory of `root` and its descendants, from `ps` (works on macOS and Linux).
 async fn tree_rss_bytes(root: u32) -> Option<u64> {
     let out = tokio::process::Command::new("ps")
@@ -307,6 +327,7 @@ async fn tree_rss_bytes(root: u32) -> Option<u64> {
     Some(in_tree.values().sum::<u64>() * 1024)
 }
 
+#[cfg(unix)]
 async fn serve(
     stream: UnixStream,
     shared: Arc<Shared>,
@@ -381,6 +402,7 @@ async fn serve(
     }
 }
 
+#[cfg(unix)]
 async fn read_commands(
     mut r: BufReader<tokio::net::unix::OwnedReadHalf>,
     shared: &Arc<Shared>,
@@ -446,12 +468,14 @@ pub enum ShimEvent {
 }
 
 /// A server's connection to one shim. Dropping it detaches; the agent keeps running.
+#[cfg(unix)]
 pub struct ShimClient {
     pub session: String,
     pub events: mpsc::Receiver<ShimEvent>,
     writer: Arc<Mutex<OwnedWriteHalf>>,
 }
 
+#[cfg(unix)]
 impl ShimClient {
     pub async fn send_stdin(&self, bytes: &[u8]) -> anyhow::Result<()> {
         let mut w = self.writer.lock().await;
@@ -479,7 +503,36 @@ impl ShimClient {
     }
 }
 
+#[cfg(not(unix))]
+pub struct ShimClient {
+    pub session: String,
+    pub events: mpsc::Receiver<ShimEvent>,
+}
+
+#[cfg(not(unix))]
+impl ShimClient {
+    pub async fn send_stdin(&self, _bytes: &[u8]) -> anyhow::Result<()> {
+        anyhow::bail!("ember-shim is only supported on Unix")
+    }
+
+    /// Tell the shim everything before `offset` is stored, so it may drop it.
+    pub async fn ack(&self, _offset: u64) -> anyhow::Result<()> {
+        anyhow::bail!("ember-shim is only supported on Unix")
+    }
+
+    /// Close the agent's stdin (it ends its input stream; the agent usually exits).
+    pub async fn close_stdin(&self) -> anyhow::Result<()> {
+        anyhow::bail!("ember-shim is only supported on Unix")
+    }
+
+    /// Kill the agent's process group (the session ends).
+    pub async fn kill(&self) -> anyhow::Result<()> {
+        anyhow::bail!("ember-shim is only supported on Unix")
+    }
+}
+
 /// Connect to a running shim and replay output from `from_offset`.
+#[cfg(unix)]
 pub async fn attach(dir: &Path, id: &str, from_offset: u64) -> anyhow::Result<ShimClient> {
     let stream = UnixStream::connect(sock_path(dir, id)).await?;
     let (r, mut w) = stream.into_split();
@@ -516,7 +569,13 @@ pub async fn attach(dir: &Path, id: &str, from_offset: u64) -> anyhow::Result<Sh
     Ok(ShimClient { session: id.to_string(), events: rx, writer: Arc::new(Mutex::new(w)) })
 }
 
+#[cfg(not(unix))]
+pub async fn attach(_dir: &Path, _id: &str, _from_offset: u64) -> anyhow::Result<ShimClient> {
+    anyhow::bail!("ember-shim is only supported on Unix")
+}
+
 /// Start a shim (detached from this process, in its own session) and attach to it.
+#[cfg(unix)]
 pub async fn spawn_shim(
     shim_bin: &Path,
     dir: &Path,
@@ -561,6 +620,15 @@ pub async fn spawn_shim(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     anyhow::bail!("shim for session {id} did not come up (see {})", log_path(dir, &id).display())
+}
+
+#[cfg(not(unix))]
+pub async fn spawn_shim(
+    _shim_bin: &Path,
+    _dir: &Path,
+    _spec: &ShimSpec,
+) -> anyhow::Result<ShimClient> {
+    anyhow::bail!("ember-shim is only supported on Unix")
 }
 
 /// Sessions that have shim metadata in `dir`.
@@ -612,7 +680,13 @@ pub async fn reattach_all(dir: &Path, offsets: &HashMap<String, u64>) -> Vec<(St
 }
 
 /// Whether a process id is alive (used by tests and diagnostics).
+#[cfg(unix)]
 pub fn pid_alive(pid: u32) -> bool {
     // SAFETY: signal 0 only checks existence.
     unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+pub fn pid_alive(_pid: u32) -> bool {
+    false
 }

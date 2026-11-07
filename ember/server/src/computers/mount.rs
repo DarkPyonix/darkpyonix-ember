@@ -658,6 +658,7 @@ pub struct CtlSocket {
 
 impl CtlSocket {
     /// Bind `<dir>/ctl.sock` in a fresh 0700 directory under the temp dir.
+    #[cfg(unix)]
     pub fn start(mounts: std::sync::Weak<ProjectMounts>) -> anyhow::Result<CtlSocket> {
         use std::os::unix::fs::DirBuilderExt;
         let dir = std::env::temp_dir().join(format!("ember-mount-{}", uuid::Uuid::new_v4().simple()));
@@ -676,6 +677,11 @@ impl CtlSocket {
         });
         Ok(CtlSocket { path, task })
     }
+
+    #[cfg(not(unix))]
+    pub fn start(_mounts: std::sync::Weak<ProjectMounts>) -> anyhow::Result<CtlSocket> {
+        anyhow::bail!("mount control socket is only supported on Unix")
+    }
 }
 
 impl Drop for CtlSocket {
@@ -689,12 +695,16 @@ impl Drop for CtlSocket {
 }
 
 /// Shim side: tell the server that a command ran (best effort, never blocks).
+#[cfg(unix)]
 pub fn notify_invalidate(ctl: &Path) {
     if let Ok(s) = std::os::unix::net::UnixDatagram::unbound() {
         let _ = s.set_nonblocking(true);
         let _ = s.send_to(b"invalidate", ctl);
     }
 }
+
+#[cfg(not(unix))]
+pub fn notify_invalidate(_ctl: &Path) {}
 
 #[cfg(test)]
 pub(crate) mod tests {

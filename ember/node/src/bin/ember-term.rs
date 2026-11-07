@@ -33,6 +33,7 @@ use ember_node::client::NodeClient;
 use ember_node::config::LocalEndpoint;
 use ember_node::proto::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 
 #[derive(Debug, Default)]
@@ -134,6 +135,13 @@ fn parse(args: Vec<String>) -> (Cmd, Opts) {
 }
 
 fn user_shell() -> String {
+    if cfg!(windows) {
+        return std::env::var("EMBER_TERM_SHELL")
+            .ok()
+            .or_else(|| std::env::var("COMSPEC").ok())
+            .filter(|s| !s.is_empty() && !s.ends_with("ember-term.exe") && s != "ember-term")
+            .unwrap_or_else(|| "powershell.exe".into());
+    }
     std::env::var("EMBER_TERM_SHELL")
         .ok()
         .or_else(|| std::env::var("SHELL").ok())
@@ -162,6 +170,7 @@ fn device_name(o: &Opts) -> String {
 }
 
 /// The local terminal's size.
+#[cfg(unix)]
 fn local_size() -> Option<PtySize> {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     for fd in [1, 0, 2] {
@@ -173,11 +182,18 @@ fn local_size() -> Option<PtySize> {
     None
 }
 
+#[cfg(not(unix))]
+fn local_size() -> Option<PtySize> {
+    None
+}
+
 /// Raw mode on stdin while attached; restored on drop.
+#[cfg(unix)]
 struct RawMode {
     orig: libc::termios,
 }
 
+#[cfg(unix)]
 impl RawMode {
     fn enable() -> Option<Self> {
         // SAFETY: termios calls on fd 0 with properly initialised structs.
@@ -199,12 +215,23 @@ impl RawMode {
     }
 }
 
+#[cfg(unix)]
 impl Drop for RawMode {
     fn drop(&mut self) {
         // SAFETY: restoring the attributes read in `enable`.
         unsafe {
             libc::tcsetattr(0, libc::TCSANOW, &self.orig);
         }
+    }
+}
+
+#[cfg(not(unix))]
+struct RawMode;
+
+#[cfg(not(unix))]
+impl RawMode {
+    fn enable() -> Option<Self> {
+        None
     }
 }
 
@@ -343,12 +370,16 @@ async fn attach(client: &NodeClient, id: &str, o: &Opts) -> anyhow::Result<i32> 
     let (mut tx, mut rx) = att.into_split();
     let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
+    #[cfg(unix)]
     let mut winch = signal(SignalKind::window_change())?;
+    #[cfg(unix)]
     let mut hup = signal(SignalKind::hangup())?;
+    #[cfg(unix)]
     let mut term = signal(SignalKind::terminate())?;
     let mut buf = vec![0u8; 16 * 1024];
     let mut last_notice: Option<Instant> = None;
     let mut stdin_open = true;
+    #[cfg(unix)]
     let code = loop {
         tokio::select! {
             ev = rx.recv() => match ev? {
@@ -388,6 +419,39 @@ async fn attach(client: &NodeClient, id: &str, o: &Opts) -> anyhow::Result<i32> 
             // The VS Code terminal (or window) went away: detach, the session lives on.
             _ = hup.recv() => break 129,
             _ = term.recv() => break 143,
+        }
+    };
+    #[cfg(not(unix))]
+    let code = loop {
+        tokio::select! {
+            ev = rx.recv() => match ev? {
+                Some(TermEvent::Snapshot { data, .. }) | Some(TermEvent::Output { data }) => {
+                    stdout.write_all(&data).await?;
+                    stdout.flush().await?;
+                }
+                Some(TermEvent::Exit { code, signal }) => break status_code(code, signal),
+                Some(TermEvent::Refused { reason, controller }) => {
+                    if last_notice.is_none_or(|t| t.elapsed() > Duration::from_secs(3)) {
+                        last_notice = Some(Instant::now());
+                        let who = controller.map(|c| c.device).unwrap_or_default();
+                        let msg = match reason {
+                            TermRefusal::Controlled => format!("read-only: controlled by {who}"),
+                            TermRefusal::ReadOnly => "read-only".to_string(),
+                            TermRefusal::NotRunning => "session ended".to_string(),
+                        };
+                        stdout.write_all(format!("\x07\x1b]0;{msg}\x07").as_bytes()).await?;
+                        stdout.flush().await?;
+                    }
+                }
+                Some(TermEvent::Error { message }) => anyhow::bail!("{message}"),
+                Some(_) => {}
+                None => anyhow::bail!("ember node closed the connection"),
+            },
+            n = stdin.read(&mut buf), if stdin_open => match n {
+                Ok(0) | Err(_) => stdin_open = false,
+                Ok(n) => tx.input(buf[..n].to_vec()).await?,
+            },
+            _ = tokio::signal::ctrl_c() => break 130,
         }
     };
     let _ = tx.detach().await;

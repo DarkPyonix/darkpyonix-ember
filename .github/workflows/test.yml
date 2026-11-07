@@ -12,6 +12,7 @@
 #   no-em-dash           .github/scripts/checks/check-no-em-dash.sh (AGENTS.md writing rules)
 #   rust                 cargo test for each ember/<crate> dir that exists
 #   oniguruma            the editor core links Oniguruma (a C library) on Windows and macOS too
+#   windows-node-server  ember-node and ember-server binaries build on Windows (#200)
 name: Test
 
 on:
@@ -185,6 +186,27 @@ jobs:
       - name: cargo test (Oniguruma link test)
         working-directory: ember/editor
         run: cargo test --locked --test onig_link
+
+  windows-node-server:
+    name: Windows node and server (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ember/node
+            ember/server
+      - name: cargo build (ember-node bins)
+        run: cargo build --locked --manifest-path ember/node/Cargo.toml --bins
+      - name: cargo build (ember-server bins)
+        run: cargo build --locked --manifest-path ember/server/Cargo.toml --bins
 
   rust:
     name: Cargo test (${{ matrix.crate }})

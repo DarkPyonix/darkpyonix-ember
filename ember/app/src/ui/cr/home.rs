@@ -553,10 +553,13 @@ struct Composer {
 
 impl Composer {
     fn new() -> Self {
+        let base_sel = crate::services::try_services()
+            .map(|s| Selection::initial_with_defaults(&s.ui.live.agent_defaults.get_untracked()))
+            .unwrap_or_else(Selection::initial);
         Composer {
             selection: mutable_state_of(match mode_from(std::env::var("EMBER_CR_HOME_MODE").ok().as_deref()) {
-                Some(m) => Selection::initial().with_mode(m),
-                None => Selection::initial(),
+                Some(m) => base_sel.with_mode(m),
+                None => base_sel,
             }),
             typed: mutable_state_of(String::new()),
             attachments: mutable_state_of(Vec::new()),

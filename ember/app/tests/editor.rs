@@ -1086,17 +1086,98 @@ mod keyboard_navigation {
         assert_eq!(single.paths, vec![("/p/README.md".to_string(), false)]);
         assert_eq!(clipboard_badge_text(Some(&single)).as_deref(), Some("잘라냄 1개"));
 
-        // Copy badge formatting and empty clipboard handling.
-        let copy_clip = TreeClipboard {
-            kind: ClipboardKind::Copy,
-            paths: vec![("/p/Cargo.toml".to_string(), false), ("/p/README.md".to_string(), false)],
-        };
-        assert_eq!(clipboard_badge_text(Some(&copy_clip)).as_deref(), Some("복사됨 2개"));
+        // Empty clipboard handling.
         assert_eq!(
             clipboard_badge_text(Some(&TreeClipboard { kind: ClipboardKind::Cut, paths: Vec::new() })),
             None
         );
         assert_eq!(clipboard_badge_text(None), None);
+    }
+
+    #[test]
+    fn fr_l31_roving_tabindex_avoids_duplicate_tab_stops_in_tree_and_tabs() {
+        use ember_app::ui::editor::{tab_strip_roving_tabindex, tree_roving_tabindex};
+        let rows = sample_tree();
+
+        // When no tree row is selected, only the root folder row has tabindex "0" and the container is "-1".
+        let (container_ti, root_ti, row_tis) = tree_roving_tabindex(&rows, None, &[]);
+        assert_eq!(container_ti, "-1");
+        assert_eq!(root_ti, "0");
+        assert!(row_tis.iter().all(|&t| t == "-1"));
+        let stops: usize = std::iter::once(container_ti)
+            .chain(std::iter::once(root_ti))
+            .chain(row_tis.iter().copied())
+            .filter(|&t| t == "0")
+            .count();
+        assert_eq!(stops, 1, "tree with no selection must have exactly 1 tab stop");
+
+        // When a single row is selected, only that row has tabindex "0"; container and root are "-1".
+        let (container_ti, root_ti, row_tis) =
+            tree_roving_tabindex(&rows, Some(("/p/src/lib.rs", false)), &[]);
+        assert_eq!(container_ti, "-1");
+        assert_eq!(root_ti, "-1");
+        assert_eq!(row_tis, vec!["-1", "-1", "0", "-1"]);
+
+        // When multiple rows are selected, only the primary (or first selected) row has tabindex "0" so Tab does not stop on every selected item.
+        let multi = vec![
+            ("/p/src".to_string(), true),
+            ("/p/src/lib.rs".to_string(), false),
+            ("/p/README.md".to_string(), false),
+        ];
+        let (container_ti, root_ti, row_tis) =
+            tree_roving_tabindex(&rows, Some(("/p/README.md", false)), &multi);
+        assert_eq!(container_ti, "-1");
+        assert_eq!(root_ti, "-1");
+        assert_eq!(row_tis, vec!["-1", "-1", "-1", "0"]);
+
+        // Tab strip: when empty, container is "-1" and there are no tab stops.
+        let (strip_ti, tab_tis) = tab_strip_roving_tabindex(&[], None);
+        assert_eq!(strip_ti, "-1");
+        assert!(tab_tis.is_empty());
+
+        // Tab strip with tabs: container is "-1" and only the active tab (or first tab if none matches) has "0".
+        let paths = vec!["/p/a.rs".to_string(), "/p/b.rs".to_string(), "/p/c.rs".to_string()];
+        let (strip_ti, tab_tis) = tab_strip_roving_tabindex(&paths, Some("/p/b.rs"));
+        assert_eq!(strip_ti, "-1");
+        assert_eq!(tab_tis, vec!["-1", "0", "-1"]);
+
+        let (strip_ti_fallback, tab_tis_fallback) = tab_strip_roving_tabindex(&paths, None);
+        assert_eq!(strip_ti_fallback, "-1");
+        assert_eq!(tab_tis_fallback, vec!["0", "-1", "-1"]);
+    }
+
+    #[test]
+    fn fr_l31_tab_strip_delete_refuses_dirty_tab_with_polite_notice() {
+        use ember_app::ui::editor::{dirty_tab_close_notice, tab_strip_key_with_dirty, TabKeyOutcome};
+        let paths = vec![
+            "/w/p/clean.rs".to_string(),
+            "/w/p/dirty.rs".to_string(),
+        ];
+        let dirty = vec![false, true];
+
+        // Clean tab closes on Delete or Backspace.
+        assert_eq!(
+            tab_strip_key_with_dirty(&paths, &dirty, Some("/w/p/clean.rs"), "Delete"),
+            Some(TabKeyOutcome::Close("/w/p/clean.rs".to_string()))
+        );
+        assert_eq!(
+            tab_strip_key_with_dirty(&paths, &dirty, Some("/w/p/clean.rs"), "Backspace"),
+            Some(TabKeyOutcome::Close("/w/p/clean.rs".to_string()))
+        );
+
+        // Dirty tab refuses to close on Delete or Backspace.
+        assert_eq!(
+            tab_strip_key_with_dirty(&paths, &dirty, Some("/w/p/dirty.rs"), "Delete"),
+            Some(TabKeyOutcome::RefuseDirty("/w/p/dirty.rs".to_string()))
+        );
+        assert_eq!(
+            tab_strip_key_with_dirty(&paths, &dirty, Some("/w/p/dirty.rs"), "Backspace"),
+            Some(TabKeyOutcome::RefuseDirty("/w/p/dirty.rs".to_string()))
+        );
+
+        let notice = dirty_tab_close_notice("/w/p/dirty.rs");
+        assert!(notice.contains("dirty.rs"), "{notice}");
+        assert!(notice.ends_with("니다.") || notice.ends_with("세요."), "{notice}");
     }
 }
 

@@ -662,8 +662,8 @@ pub mod page {
                         },
                     }
                 }
-                button { class: on(case_on), title: "대소문자 구분", "aria-pressed": "{case_on}", style: "border:1px solid var(--line);", onclick: move |_| { case_sensitive.set(!case_on); current.set(None); }, "Aa" }
-                button { class: on(word_on), title: "단어 단위", "aria-pressed": "{word_on}", style: "border:1px solid var(--line);", onclick: move |_| { whole_word.set(!word_on); current.set(None); }, "단어" }
+                button { class: on(case_on), title: "대소문자 구분", "aria-label": "대소문자 구분", "aria-pressed": "{case_on}", style: "border:1px solid var(--line);", onclick: move |_| { case_sensitive.set(!case_on); current.set(None); }, "Aa" }
+                button { class: on(word_on), title: "단어 단위", "aria-label": "단어 단위", "aria-pressed": "{word_on}", style: "border:1px solid var(--line);", onclick: move |_| { whole_word.set(!word_on); current.set(None); }, "단어" }
                 span { class: "ed-sbi", role: "status", "{counter}" }
                 button { class: "ed-ib", title: "이전 결과", "aria-label": "이전 결과", disabled: !has_matches, onclick: move |_| find_go(&prev_s, false), {icon("up")} }
                 button { class: "ed-ib", title: "다음 결과", "aria-label": "다음 결과", disabled: !has_matches, onclick: move |_| find_go(&next_s, true), {icon("down")} }
@@ -824,7 +824,7 @@ pub mod page {
         let ed_style = format!("width:100vw; height:{height}; {grid}");
         rsx! {
             // TODO(#320): shrinking the window does not reflow this page; growing does.
-            div { class: "{ed_class}", "data-theme": if dark { "dark" } else { "light" }, tabindex: "0", style: "{ed_style}",
+            div { class: "{ed_class}", "data-theme": if dark { "dark" } else { "light" }, tabindex: "-1", style: "{ed_style}",
                 onkeydown: move |event| {
                     let m = event.modifiers();
                     let keymap = *key_s.keymap.read();
@@ -1069,7 +1069,7 @@ pub mod page {
         let tip = tooltip_text(w.label(), &hint);
         let class = if selected { "ed-sb on" } else { "ed-sb" };
         rsx! {
-            button { key: "{w.label()}", class, title: "{tip}", "aria-label": "{tip}", onclick: move |_| {
+            button { key: "{w.label()}", class, title: "{tip}", "aria-label": "{tip}", "aria-pressed": "{selected}", onclick: move |_| {
                 if w.side() == Side::Right { notice(format!("{}: {SOON}", w.label())); } else { stripes.write().toggle(w); }
                 if matches!(w, ToolWindow::Commit | ToolWindow::Git) && stripes.read().is_selected(w) { scm_s.scm.refresh(); }
             }, {icon(icon_name(w))} }
@@ -1238,6 +1238,11 @@ pub mod page {
         let root_for_key = root.clone();
         let root_for_drop = root.clone();
         let drop_root_host = s.host.clone();
+        let (tree_container_ti, tree_root_ti, tree_row_tis) = crate::ui::editor::tree_roving_tabindex(
+            &rows,
+            selected.as_ref().map(|(p, d)| (p.as_str(), *d)),
+            &tree_multi_sel.read(),
+        );
         let reveal_current = current.map(str::to_string);
         let reveal_root = root.clone();
         let reveal_host = s.host.clone();
@@ -1275,7 +1280,7 @@ pub mod page {
                     button { class: "ed-ib", title: "파일 검색", "aria-label": "파일 검색", onclick: move |_| crate::ui::editor_search::view::open(&search_s, false), {icon("search")} }
                     button { class: "ed-ib", title: "숨기기", "aria-label": "숨기기", onclick: move |_| stripes.write().hide(Side::Left), {icon("close")} }
                 }
-                div { class: "ed-tree", role: "tree", "aria-label": "프로젝트 트리", "aria-multiselectable": "true", tabindex: "0",
+                div { class: "ed-tree", role: "tree", "aria-label": "프로젝트 트리", "aria-multiselectable": "true", tabindex: "{tree_container_ti}",
                     onkeydown: move |event| {
                         if !crate::ui::editor::tree_handles_key(prompt.read().as_ref()) {
                             return;
@@ -1404,7 +1409,7 @@ pub mod page {
                             }
                         }
                     },
-                    div { class: "ed-tn", role: "treeitem", "aria-expanded": "true", "aria-label": "{root_name} 폴더", tabindex: "-1", style: "--d:0;",
+                    div { class: "ed-tn", role: "treeitem", "aria-expanded": "true", "aria-label": "{root_name} 폴더", tabindex: "{tree_root_ti}", style: "--d:0;",
                         ondragover: move |event| { event.prevent_default(); },
                         ondrop: move |event| {
                             event.prevent_default();
@@ -1460,8 +1465,9 @@ pub mod page {
                         }
                     }
                     {prompt_row}
-                    for row in rows.iter() {
+                    for (row_idx, row) in rows.iter().enumerate() {
                         {
+                            let row_ti = tree_row_tis.get(row_idx).copied().unwrap_or("-1");
                             let path = row.path.clone();
                             let host = s.host.clone();
                             let mut recent_files = s.recent_files;
@@ -1491,7 +1497,7 @@ pub mod page {
                             let drop_is_dir = is_dir;
                             let drop_host = s.host.clone();
                             let drop_root = root.clone();
-                            rsx! { div { key: "{row.path}", class, role: "treeitem", "aria-label": "{row_label}", "aria-selected": "{chosen}", tabindex: if chosen { "0" } else { "-1" }, style: "{row_style}",
+                            rsx! { div { key: "{row.path}", class, role: "treeitem", "aria-label": "{row_label}", "aria-selected": "{chosen}", tabindex: "{row_ti}", style: "{row_style}",
                                 "aria-expanded": if is_dir { "{row.open}" } else { "" },
                                 draggable: "true",
                                 ondragstart: move |_| {
@@ -1636,9 +1642,11 @@ pub mod page {
         let scm = s.scm.clone();
         let modified = s.scm.modified_paths(&s.folder);
         let paths_owned: Vec<String> = paths.to_vec();
+        let dirty_owned: Vec<bool> = dirty.to_vec();
         let current_owned: Option<String> = current.map(str::to_string);
+        let (strip_ti, tab_tis) = crate::ui::editor::tab_strip_roving_tabindex(paths, current);
         rsx! {
-            div { class: "ed-tabs", role: "tablist", "aria-label": "열린 파일", tabindex: "0",
+            div { class: "ed-tabs", role: "tablist", "aria-label": "열린 파일", tabindex: "{strip_ti}",
                 onkeydown: move |event| {
                     if event.key() == Key::Escape {
                         event.stop_propagation();
@@ -1648,8 +1656,9 @@ pub mod page {
                         return;
                     }
                     let key_str = key_name(&event.key());
-                    let outcome = crate::ui::editor::tab_strip_key(
+                    let outcome = crate::ui::editor::tab_strip_key_with_dirty(
                         &paths_owned,
+                        &dirty_owned,
                         current_owned.as_deref(),
                         &key_str,
                     );
@@ -1668,11 +1677,15 @@ pub mod page {
                                     host.send(HostCommand::Focus(next.to_string()));
                                 }
                             }
+                            crate::ui::editor::TabKeyOutcome::RefuseDirty(path) => {
+                                notice(crate::ui::editor::dirty_tab_close_notice(&path));
+                            }
                         }
                     }
                 },
                 for (i, path) in paths.iter().enumerate() {
                     {
+                        let tab_ti = tab_tis.get(i).copied().unwrap_or("-1");
                         let path = path.clone(); let close_path = path.clone();
                         let close_path_key = path.clone();
                         let host = s.host.clone(); let key_host = s.host.clone(); let close_host = s.host.clone();
@@ -1688,7 +1701,7 @@ pub mod page {
                         let scm = s.scm.clone();
                         let key_scm = s.scm.clone();
                         let tab_path = path.clone();
-                        rsx! { div { class, role: "tab", "aria-selected": "{selected}", "aria-label": "{tab_label}", tabindex: if selected { "0" } else { "-1" },
+                        rsx! { div { class, role: "tab", "aria-selected": "{selected}", "aria-label": "{tab_label}", tabindex: "{tab_ti}",
                             onclick: move |_| {
                                 scm.close_diff();
                                 tabs.write().activate(&path);
@@ -1709,7 +1722,7 @@ pub mod page {
                             if dirty[i] { span { class: "ed-dirty" } }
                             button {
                                 class: "ed-tx",
-                                tabindex: "0",
+                                tabindex: "-1",
                                 title: "{close_label}",
                                 "aria-label": "{close_label}",
                                 onclick: move |event| {
@@ -1816,7 +1829,7 @@ pub mod page {
 
     fn terminal_body(s: &Shared) -> Element {
         let Some(handle) = terminal_handle(s) else {
-            return rsx! { div { class: "ed-term", style: "color:var(--muted);", "터미널은 서버에 연결했을 때만 사용할 수 있습니다. 이 창에는 서버 주소나 컴퓨터가 없습니다." } };
+            return rsx! { div { class: "ed-term", role: "log", "aria-label": "터미널 출력", style: "color:var(--muted);", "터미널은 서버에 연결했을 때만 사용할 수 있습니다. 이 창에는 서버 주소나 컴퓨터가 없습니다." } };
         };
         let view = panel_view(&handle.snapshot());
         let key_handle = handle.clone();
@@ -1827,10 +1840,10 @@ pub mod page {
         let computer = if s.computer.is_empty() { "로컬".to_string() } else { s.computer.clone() };
         rsx! {
             div { class: "ed-tsub",
-                button { class: "on", {icon_px("code", 14)} "{computer}" }
+                button { class: "on", "aria-pressed": "true", {icon_px("code", 14)} "{computer}" }
                 button { class: "ed-ib", title: "새 터미널", "aria-label": "새 터미널", onclick: move |_| notice(format!("새 터미널: {SOON}")), {icon("plus")} }
             }
-            div { class: "ed-term", tabindex: "0", style: "outline:none;",
+            div { class: "ed-term", role: "log", "aria-label": "터미널 출력", tabindex: "0", style: "outline:none;",
                 // TODO(#335): paste and IME. Only key presses are forwarded; pasted and composed text is not.
                 onkeydown: move |event| {
                     let m = event.modifiers();
@@ -1892,25 +1905,47 @@ pub mod page {
                 for (i, (path, severity, message, location, source, start_line, start_col)) in visible_rows.iter().cloned().enumerate() {
                     {
                         let host = s.host.clone();
+                        let key_host = s.host.clone();
                         let mut recent_files = s.recent_files;
+                        let mut key_recent_files = s.recent_files;
                         let dot = match severity { Severity::Error => "ed-pdot err", Severity::Warning => "ed-pdot warn", _ => "ed-pdot" };
                         let row_label = crate::ui::editor::problem_aria_label(match severity { Severity::Error => "오류", Severity::Warning => "경고", _ => "정보" }, &message, &location);
                         let mut pending_goto = s.pending_goto;
                         let mut next_goto_id = s.next_goto_id;
-                        rsx! { div { key: "{i}", class: "ed-prow", role: "listitem", "aria-label": "{row_label}", onclick: move |_| {
-                            tabs.write().open(&path);
-                            record_recent_file(&mut recent_files, &path);
-                            host.send(HostCommand::Open(path.clone()));
-                            host.send(HostCommand::Focus(path.clone()));
-                            let gid = *next_goto_id.read();
-                            *next_goto_id.write() += 1;
-                            pending_goto.set(Some(PendingGoto {
-                                id: gid,
-                                path: path.clone(),
-                                line: start_line,
-                                col: start_col,
-                            }));
-                        },
+                        let key_path = path.clone();
+                        rsx! { div { key: "{i}", class: "ed-prow", role: "listitem", "aria-label": "{row_label}", tabindex: "0",
+                            onclick: move |_| {
+                                tabs.write().open(&path);
+                                record_recent_file(&mut recent_files, &path);
+                                host.send(HostCommand::Open(path.clone()));
+                                host.send(HostCommand::Focus(path.clone()));
+                                let gid = *next_goto_id.read();
+                                *next_goto_id.write() += 1;
+                                pending_goto.set(Some(PendingGoto {
+                                    id: gid,
+                                    path: path.clone(),
+                                    line: start_line,
+                                    col: start_col,
+                                }));
+                            },
+                            onkeydown: move |event| {
+                                if matches!(event.key(), Key::Enter) || matches!(event.key(), Key::Character(ref c) if c == " ") {
+                                    event.stop_propagation();
+                                    event.prevent_default();
+                                    tabs.write().open(&key_path);
+                                    record_recent_file(&mut key_recent_files, &key_path);
+                                    key_host.send(HostCommand::Open(key_path.clone()));
+                                    key_host.send(HostCommand::Focus(key_path.clone()));
+                                    let gid = *next_goto_id.read();
+                                    *next_goto_id.write() += 1;
+                                    pending_goto.set(Some(PendingGoto {
+                                        id: gid,
+                                        path: key_path.clone(),
+                                        line: start_line,
+                                        col: start_col,
+                                    }));
+                                }
+                            },
                             span { class: "{dot}" }
                             span { style: "flex:1; min-width:0; overflow:hidden; white-space:nowrap;", "{message}" }
                             span { style: "color:var(--muted); font-size:var(--fs-xs); white-space:nowrap;", "{source} {location}" }
@@ -2002,7 +2037,7 @@ pub mod page {
                     "지우기"
                 }
             }
-            div { class: "ed-term", style: "flex:1; overflow-y:auto; padding:var(--sp2); font-family:var(--font-mono); white-space:pre-wrap; outline:none;",
+            div { class: "ed-term", role: "log", "aria-label": "출력 로그", style: "flex:1; overflow-y:auto; padding:var(--sp2); font-family:var(--font-mono); white-space:pre-wrap; outline:none;",
                 if text.trim().is_empty() {
                     div { style: "color:var(--muted);", "출력이 없습니다." }
                 } else {

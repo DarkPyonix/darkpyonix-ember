@@ -532,3 +532,90 @@ mod aria {
         assert_eq!(problem_aria_label("오류", "Value expected", "package.json:2"), "오류: Value expected (package.json:2)");
     }
 }
+
+// FR-E2, #448: Problems capping and navigation, output channels, and run commands.
+mod problems_and_output {
+    use ember_app::ui::editor::{paginate_problems, MAX_VISIBLE_PROBLEMS};
+    use ember_app::ui::editor_workbench::PendingGoto;
+    use ember_app::ui::run::{detect_run_command, RunSession, RunStatus};
+
+    #[test]
+    fn fr_e2_problems_list_cap_and_overflow_count() {
+        assert_eq!(MAX_VISIBLE_PROBLEMS, 200);
+
+        // Under cap: all visible, no overflow
+        let short_list: Vec<usize> = (0..50).collect();
+        let (visible, overflow) = paginate_problems(&short_list, MAX_VISIBLE_PROBLEMS);
+        assert_eq!(visible.len(), 50);
+        assert_eq!(overflow, 0);
+
+        // Over cap: capped at limit, remainder reported as overflow
+        let long_list: Vec<usize> = (0..250).collect();
+        let (visible, overflow) = paginate_problems(&long_list, MAX_VISIBLE_PROBLEMS);
+        assert_eq!(visible.len(), 200);
+        assert_eq!(overflow, 50);
+
+        // Load-more increment renders subsequent slice
+        let (visible_more, overflow_more) = paginate_problems(&long_list, 400);
+        assert_eq!(visible_more.len(), 250);
+        assert_eq!(overflow_more, 0);
+    }
+
+    #[test]
+    fn fr_e2_pending_goto_records_line_and_col() {
+        let goto = PendingGoto {
+            id: 42,
+            path: "/w/src/main.rs".into(),
+            line: 15,
+            col: 8,
+        };
+        assert_eq!(goto.id, 42);
+        assert_eq!(goto.path, "/w/src/main.rs");
+        assert_eq!(goto.line, 15);
+        assert_eq!(goto.col, 8);
+    }
+
+    #[test]
+    fn fr_e2_output_channels_and_message_severity() {
+        use ember_editor::output::{MessageSeverity, OutputChannel, MAX_OUTPUT_CHANNEL_BYTES};
+
+        let mut ch = OutputChannel::new("ember-output-1", "Git");
+        assert_eq!(ch.label, "Git");
+        ch.append("line 1\n");
+        ch.append("line 2\n");
+        assert_eq!(ch.text, "line 1\nline 2\n");
+
+        ch.clear();
+        assert_eq!(ch.text, "");
+
+        // Huge append is capped at 64 KiB
+        ch.append(&"x".repeat(MAX_OUTPUT_CHANNEL_BYTES + 500));
+        assert_eq!(ch.text.len(), MAX_OUTPUT_CHANNEL_BYTES);
+
+        assert_eq!(MessageSeverity::from_u8(1).label(), "정보");
+        assert_eq!(MessageSeverity::from_u8(2).label(), "경고");
+        assert_eq!(MessageSeverity::from_u8(3).label(), "오류");
+    }
+
+    #[test]
+    fn fr_e2_detect_run_command_for_different_file_types() {
+        assert_eq!(detect_run_command(Some("/w/main.py"), "/w"), ("python3".into(), vec!["/w/main.py".into()]));
+        assert_eq!(detect_run_command(Some("/w/test.sh"), "/w"), ("sh".into(), vec!["/w/test.sh".into()]));
+        assert_eq!(detect_run_command(Some("/w/index.js"), "/w"), ("node".into(), vec!["/w/index.js".into()]));
+        assert_eq!(detect_run_command(Some("/w/lib.rs"), "/w"), ("cargo".into(), vec!["run".into()]));
+    }
+
+    #[test]
+    fn fr_e2_run_session_stop_and_clear() {
+        let session = RunSession::new();
+        let (status, lines) = session.snapshot();
+        assert_eq!(status, RunStatus::Idle);
+        assert!(lines.is_empty());
+
+        session.stop();
+        assert_eq!(session.snapshot().0, RunStatus::Idle);
+
+        session.clear();
+        assert!(session.snapshot().1.is_empty());
+    }
+}

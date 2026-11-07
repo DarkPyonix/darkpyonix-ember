@@ -540,3 +540,112 @@ fn problems_list_every_reported_marker_errors_first_and_follows_clear() {
     let fx = c.handle(t0, request(2, "MainThreadDiagnostics", "$clear", vec![json!("json")]));
     assert_eq!(problems(&fx), Some(&Vec::new()));
 }
+
+#[test]
+fn file_close_clears_markers_for_that_file() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+    let a = uri("/w/a.json");
+    let b = uri("/w/b.json");
+    open(&mut c, t0, "/w/a.json", "{\n  \"ok\": true,,\n}\n");
+    open(&mut c, t0, "/w/b.json", "{\n}\n");
+
+    let fx = c.handle(
+        t0,
+        request(
+            1,
+            "MainThreadDiagnostics",
+            "$changeMany",
+            vec![json!("json"), json!([[a, [marker(8, "Error in a", 1, 1, 2)]], [b, [marker(4, "Warn in b", 1, 1, 2)]]])],
+        ),
+    );
+    assert_eq!(problems(&fx).expect("problems").len(), 2);
+
+    // Close a: problems update is emitted with only b's markers
+    let fx = c.handle(t0, Input::Close { uri: a });
+    let remaining = problems(&fx).expect("problems update after close");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].uri.path, "/w/b.json");
+}
+
+#[test]
+fn output_service_and_message_service_flow() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+
+    // Register an output channel
+    let fx = c.handle(
+        t0,
+        request(
+            1,
+            "MainThreadOutputService",
+            "$register",
+            vec![json!("Git"), json!(null), json!("git"), json!("vscode.git")],
+        ),
+    );
+    assert!(fx.contains(&Effect::Respond {
+        req: 1,
+        result: Ok(Reply::Json(json!("ember-output-1"))),
+    }));
+    let up = updates(&fx).into_iter().find_map(|u| match u {
+        SessionUpdate::OutputChannels { channels, active_id } => Some((channels, active_id)),
+        _ => None,
+    }).expect("OutputChannels update");
+    assert_eq!(up.0.len(), 1);
+    assert_eq!(up.0[0].label, "Git");
+    assert_eq!(up.1.as_deref(), Some("ember-output-1"));
+
+    // Append to the channel
+    let fx = c.handle(
+        t0,
+        request(
+            2,
+            "MainThreadOutputService",
+            "$append",
+            vec![json!("ember-output-1"), json!("git status output\n")],
+        ),
+    );
+    let up = updates(&fx).into_iter().find_map(|u| match u {
+        SessionUpdate::OutputChannels { channels, .. } => Some(channels),
+        _ => None,
+    }).expect("OutputChannels update on append");
+    assert_eq!(up[0].text, "git status output\n");
+
+    // Clear the channel
+    let fx = c.handle(
+        t0,
+        request(
+            3,
+            "MainThreadOutputService",
+            "$clear",
+            vec![json!("ember-output-1")],
+        ),
+    );
+    let up = updates(&fx).into_iter().find_map(|u| match u {
+        SessionUpdate::OutputChannels { channels, .. } => Some(channels),
+        _ => None,
+    }).expect("OutputChannels update on clear");
+    assert_eq!(up[0].text, "");
+
+    // Show message
+    let fx = c.handle(
+        t0,
+        request(
+            4,
+            "MainThreadMessageService",
+            "$showMessage",
+            vec![json!(3), json!("Rust analyzer crashed"), json!({"source": "rust-analyzer"}), json!([])],
+        ),
+    );
+    assert!(fx.contains(&Effect::Respond {
+        req: 4,
+        result: Ok(Reply::Empty),
+    }));
+    let msg = updates(&fx).into_iter().find_map(|u| match u {
+        SessionUpdate::ExtensionMessage { severity, message, source } => Some((*severity, message, source)),
+        _ => None,
+    }).expect("ExtensionMessage update");
+    assert_eq!(msg.0, ember_editor::MessageSeverity::Error);
+    assert_eq!(msg.1, "Rust analyzer crashed");
+    assert_eq!(msg.2.as_deref(), Some("rust-analyzer"));
+}

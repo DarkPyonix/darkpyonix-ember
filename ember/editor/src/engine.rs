@@ -154,6 +154,10 @@ pub enum SessionUpdate {
     ConnectionLost { reason: String },
     /// The problems list changed: every marker of every file, errors first.
     Problems { problems: Vec<crate::diagnostics::Problem> },
+    /// Output channels changed (channels list, or an append/clear).
+    OutputChannels { channels: Vec<crate::output::OutputChannel>, active_id: Option<String> },
+    /// An extension surfaced a notification message ($showMessage).
+    ExtensionMessage { severity: crate::output::MessageSeverity, message: String, source: Option<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +196,8 @@ pub struct SessionCore {
     next_editor: u64,
     next_edit_request: u32,
     reply_seq: u64,
+    output_seq: u64,
+    output_channels: Vec<crate::output::OutputChannel>,
     touched: BTreeSet<String>,
     out: Vec<Effect>,
     now: Instant,
@@ -235,6 +241,8 @@ impl SessionCore {
             next_editor: 0,
             next_edit_request: 0,
             reply_seq: 0,
+            output_seq: 0,
+            output_channels: Vec::new(),
             touched: BTreeSet::new(),
             out: Vec::new(),
             now,
@@ -475,6 +483,9 @@ impl SessionCore {
         let (tokens, _) = self.hover.end_for(&key);
         self.cancel(tokens);
         self.ids.forget_document(&key);
+        if self.diagnostics.remove_document(&key) {
+            self.ui(SessionUpdate::Problems { problems: self.diagnostics.problems() });
+        }
         if self.active.as_deref() == Some(key.as_str()) {
             self.active = self.docs.keys().next().cloned();
         }
@@ -945,6 +956,63 @@ impl SessionCore {
                     };
                     self.ui(SessionUpdate::RunCommand { command: CommandDto { id, title: String::new(), tooltip: None, arguments } });
                 }
+                self.respond(r.req, Ok(Reply::Empty));
+            }
+            Ok(MainThreadCall::OutputRegister { label, .. }) => {
+                self.output_seq += 1;
+                let id = format!("ember-output-{}", self.output_seq);
+                self.output_channels.push(crate::output::OutputChannel::new(id.clone(), label));
+                self.ui(SessionUpdate::OutputChannels {
+                    channels: self.output_channels.clone(),
+                    active_id: Some(id.clone()),
+                });
+                self.respond(r.req, Ok(Reply::Json(serde_json::json!(id))));
+            }
+            Ok(MainThreadCall::OutputAppend { channel_id, value }) => {
+                if let Some(ch) = self.output_channels.iter_mut().find(|c| c.id == channel_id) {
+                    ch.append(&value);
+                    self.ui(SessionUpdate::OutputChannels {
+                        channels: self.output_channels.clone(),
+                        active_id: None,
+                    });
+                }
+                self.respond(r.req, Ok(Reply::Empty));
+            }
+            Ok(MainThreadCall::OutputUpdate { .. }) => {
+                self.respond(r.req, Ok(Reply::Empty));
+            }
+            Ok(MainThreadCall::OutputClear { channel_id, .. }) => {
+                if let Some(ch) = self.output_channels.iter_mut().find(|c| c.id == channel_id) {
+                    ch.clear();
+                    self.ui(SessionUpdate::OutputChannels {
+                        channels: self.output_channels.clone(),
+                        active_id: None,
+                    });
+                }
+                self.respond(r.req, Ok(Reply::Empty));
+            }
+            Ok(MainThreadCall::OutputReveal { channel_id, .. }) => {
+                self.ui(SessionUpdate::OutputChannels {
+                    channels: self.output_channels.clone(),
+                    active_id: Some(channel_id),
+                });
+                self.respond(r.req, Ok(Reply::Empty));
+            }
+            Ok(MainThreadCall::OutputDispose { channel_id }) => {
+                self.output_channels.retain(|c| c.id != channel_id);
+                self.ui(SessionUpdate::OutputChannels {
+                    channels: self.output_channels.clone(),
+                    active_id: None,
+                });
+                self.respond(r.req, Ok(Reply::Empty));
+            }
+            Ok(MainThreadCall::ShowMessage { severity, message, options, .. }) => {
+                let source = options.get("source").and_then(|v| v.as_str()).map(str::to_owned);
+                self.ui(SessionUpdate::ExtensionMessage {
+                    severity: crate::output::MessageSeverity::from_u8(severity),
+                    message,
+                    source,
+                });
                 self.respond(r.req, Ok(Reply::Empty));
             }
             Ok(MainThreadCall::Other { proxy: Some("MainThreadDocuments"), method }) if method == "$tryOpenDocument" => {

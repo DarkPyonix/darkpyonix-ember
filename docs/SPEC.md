@@ -762,7 +762,7 @@ tests run in CI; the rows stay a draft until the editor opens a project on scree
 | ID | Requirement (draft) |
 | -- | ------------------- |
 | **FR-E1** | Compose-native text buffer and cursor/selection model, IME-correct for CJK, reusing `dioxus-compose`'s IME work. |
-| **FR-E2** | Diagnostics from unmodified extensions render correctly positioned. |
+| **FR-E2** | Diagnostics from unmodified extensions render correctly positioned: squiggles follow edits; the Problems tab lists all markers errors-first; clicking a row opens the file and places the caret at `(line, col)`; rows are capped at `MAX_VISIBLE_PROBLEMS` (200) with an overflow load-more button; closing a file clears its markers. Extension output channels (`MainThreadOutputService`: `$register`, `$append`, `$clear`, `$reveal`, `$dispose`) and notifications (`MainThreadMessageService.$showMessage`) are decoded and surfaced in the bottom Output panel and toast notices. |
 | **FR-E3** | CodeLens and hover overlays from unmodified extensions render correctly positioned. |
 | **FR-E4** | Inline completion (ghost text) providers work; this is the highest priority within §E. |
 | **FR-E5** | Extension webview panels still work, contained to their panel. |

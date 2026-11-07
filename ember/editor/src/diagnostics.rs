@@ -155,6 +155,17 @@ impl Diagnostics {
         touched
     }
 
+    /// Remove all markers recorded for a document key (e.g. when a file closes).
+    /// Returns true if markers were present for this document.
+    pub fn remove_document(&mut self, key: &str) -> bool {
+        self.uris.remove(key);
+        let removed = self.by_doc.remove(key).is_some();
+        if removed {
+            self.by_id.retain(|_, (doc, _)| doc != key);
+        }
+        removed
+    }
+
     /// Carry every marker of a document through one widget edit; markers whose range was deleted
     /// disappear (as their squiggles do in the widget).
     pub fn on_edit(&mut self, doc: &str, edit: WidgetRange, text: &str) {
@@ -368,5 +379,26 @@ mod tests {
         // Deleting its text removes it.
         d.on_edit(&k, WidgetRange::new(WidgetPos::new(2, 0), WidgetPos::new(2, 9)), "");
         assert_eq!(d.markers(&k).count(), 0);
+    }
+
+    #[test]
+    fn remove_document_clears_markers_and_updates_problems() {
+        let mut d = Diagnostics::new();
+        let a = UriComponents::remote("h", "/w/a.json");
+        let b = UriComponents::remote("h", "/w/b.json");
+        d.change_many("json", vec![
+            (a.clone(), Some(vec![marker(8, "error in a", 1, 1, 2)])),
+            (b.clone(), Some(vec![marker(4, "warn in b", 2, 1, 2)])),
+        ]);
+        assert_eq!(d.problems().len(), 2);
+
+        // Remove document a: only b remains
+        assert!(d.remove_document(&a.key()));
+        let problems = d.problems();
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].uri.path, "/w/b.json");
+
+        // Removing non-existent returns false
+        assert!(!d.remove_document(&a.key()));
     }
 }

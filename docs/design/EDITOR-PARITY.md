@@ -28,8 +28,8 @@ The owner's rule [user, 2026-11-06, `INTENT.md` D38]: the Ember editor does what
 | Command palette, quick open | Quick-access over all commands, files and symbols | 없음 (menu items post 준비 중) | Commands from `$registerCommand` (EXISTS) plus Ember's; files from the explorer or search | #447 |
 | Settings UI, settings.json | Settings editor, profiles | 없음 (only the keymap choice) | Native screen; `SessionConfig.user_settings` feeds the extension host once | #449 |
 | Keybindings, keymap | Keybinding service and editor | 부분 (VS Code and JetBrains tables, 19 actions, most post 준비 중) | Native (FR-L30) | #447, #449 |
-| Problems panel, Output panel | Marker service list; output channels | 없음 (static text) | EH-REG for output channels; diagnostics data EXISTS | #448 |
-| Notifications, progress, extension quick picks | MainThreadMessageService, Progress, QuickOpen | 없음 (auto-dismissed with default replies) | EH-REG | #448 |
+| Problems panel, Output panel | Marker service list; output channels | 있음 (Problems panel with caret navigation, 200 cap and overflow load-more; Output panel with channel selector, logs and clear) | EH-REG for output channels; diagnostics data EXISTS | #448 |
+| Notifications, progress, extension quick picks | MainThreadMessageService, Progress, QuickOpen | 부분 (MainThreadMessageService $showMessage decoded and surfaced to notices/logs; Progress, QuickOpen auto-dismissed) | EH-REG | #448 |
 | Status bar, language mode, encoding, EOL | Status bar items | 부분 (cursor position live, LF and UTF-8 constants) | Native plus document data | #453 |
 | Breadcrumbs | Path and symbols | 부분 (path only) | Document symbols need the language providers | #453, #442 |
 | Workspace trust | Trust service and restricted mode | 없음 (always trusted) | EH-REG `$requestWorkspaceTrust` plus a native dialog | #450 |

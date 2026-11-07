@@ -28,6 +28,7 @@ pub mod keymap;
 pub mod monitor;
 pub mod project;
 pub mod routines;
+pub mod run;
 pub mod safe_area;
 pub mod session;
 pub mod shell;

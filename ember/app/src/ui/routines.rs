@@ -1130,13 +1130,57 @@ pub fn current_value_line(value: &str) -> String {
 
 /// How long the simulated run shows "실행 중" before it finishes.
 pub const DEMO_RUN_MS: u64 = 2500;
+/// How often the Routines screen polls the server while a schedule run is `Running` (FR-L25, #494).
+pub const REMOTE_RUN_POLL_MS: u64 = 1000;
 /// The id prefix the demo gives a session it creates; a run linked to one is a simulation.
 pub const DEMO_SESSION_PREFIX: &str = "demo-new-";
 pub const DEMO_RUN_STARTED: &str = "예시 실행을 시작했습니다. 데모에서 시뮬레이션하는 실행입니다";
 pub const DEMO_RUN_DONE: &str = "예시 실행이 끝났습니다. 예시 세션이 목록에 추가되었습니다";
 pub const DEMO_RUN_BUSY: &str = "이 루틴은 이미 실행 중입니다";
+pub const REMOTE_RUN_STARTED: &str = "루틴을 지금 실행했습니다";
 /// The flag shown beside a simulated run.
 pub const SAMPLE_FLAG: &str = "예시";
+
+/// Maps a demo routine's session id (`s1`..`s9` or `demo-s1`..`demo-s9` or `demo-new-*`) to the
+/// client session id in demo mode (`demo-s1`..`demo-s9`), or leaves real server session ids as-is.
+pub fn resolve_run_session_id(id: &str, demo_active: bool) -> String {
+    if demo_active
+        && id.starts_with('s')
+        && id.len() > 1
+        && id[1..].chars().all(|c| c.is_ascii_digit())
+    {
+        format!("demo-{id}")
+    } else {
+        id.to_string()
+    }
+}
+
+/// Applies the server's `POST /api/schedules/{id}/run` response (`ScheduleRun`) to `entry`:
+/// replaces the optimistic `Running` placeholder (if any) or inserts the server run at the top
+/// of the history, and returns the user-facing notice string.
+pub fn apply_server_run_started(e: &mut Entry, run: &ScheduleRun) -> String {
+    let mapped = run_from_server(run);
+    if let Some(slot) = e.runs.iter_mut().find(|r| r.status == RunStatus::Running && r.session.is_none()) {
+        *slot = mapped;
+    } else if let Some(slot) = e.runs.iter_mut().find(|r| r.session.is_some() && r.session == mapped.session) {
+        *slot = mapped;
+    } else {
+        e.runs.insert(0, mapped);
+    }
+    match &run.error {
+        Some(err) => format!("실행하지 못했습니다: {err}"),
+        None => REMOTE_RUN_STARTED.to_string(),
+    }
+}
+
+/// Whether `entries` has any run still in `RunStatus::Running` that should be polled on the server.
+pub fn has_running_remote_run(sample_mode: bool, online: bool, entries: &[Entry]) -> bool {
+    !sample_mode
+        && online
+        && entries
+            .iter()
+            .any(|e| e.runs.iter().any(|r| r.status == RunStatus::Running))
+}
 
 /// Whether the simulated run is allowed: only in demo mode, never with a server.
 pub fn demo_run_allowed(demo_active: bool, sample_entry: bool) -> bool {
@@ -2006,10 +2050,45 @@ mod tests {
     #[test]
     fn fr_l25_demo_run_session_is_flagged_as_a_sample() {
         assert_eq!(demo_session_title(" 아침 요약 "), "아침 요약 (예시)");
-        for s in [DEMO_RUN_STARTED, DEMO_RUN_DONE, DEMO_RUN_BUSY] {
+        for s in [DEMO_RUN_STARTED, DEMO_RUN_DONE, DEMO_RUN_BUSY, REMOTE_RUN_STARTED] {
             assert!(!s.contains('\u{2014}'));
+            assert!(s.ends_with("니다"), "{s}");
         }
         assert!(DEMO_RUN_STARTED.contains("시뮬레이션"));
+    }
+
+    #[test]
+    fn fr_l25_resolve_run_session_id_maps_demo_ids_only_in_demo_mode() {
+        assert_eq!(resolve_run_session_id("s9", true), "demo-s9");
+        assert_eq!(resolve_run_session_id("s4", true), "demo-s4");
+        assert_eq!(resolve_run_session_id("demo-s9", true), "demo-s9");
+        assert_eq!(resolve_run_session_id("demo-new-1", true), "demo-new-1");
+        assert_eq!(resolve_run_session_id("s9", false), "s9");
+        assert_eq!(resolve_run_session_id("ses_1234", true), "ses_1234");
+    }
+
+    #[test]
+    fn fr_l25_apply_server_run_started_replaces_optimistic_placeholder_and_tracks_running() {
+        let mut e = entry(routine("sch1", "a", "ember", "0 9 * * *"), vec![run(10, RunStatus::Done)]);
+        assert!(!has_running_remote_run(false, true, std::slice::from_ref(&e)));
+        begin_demo_run(&mut e, 100).unwrap();
+        assert!(has_running_remote_run(false, true, std::slice::from_ref(&e)));
+        assert!(!has_running_remote_run(true, true, std::slice::from_ref(&e)));
+        assert!(!has_running_remote_run(false, false, std::slice::from_ref(&e)));
+
+        let srv_running = server_run(wire::RunStatus::Running);
+        let msg = apply_server_run_started(&mut e, &srv_running);
+        assert_eq!(msg, REMOTE_RUN_STARTED);
+        assert_eq!(e.runs.len(), 2, "optimistic placeholder is replaced, not duplicated");
+        assert_eq!(e.runs[0].status, RunStatus::Running);
+        assert_eq!(e.runs[0].session.as_deref(), Some("s9"));
+
+        let mut srv_failed = server_run(wire::RunStatus::Failed);
+        srv_failed.error = Some("cwd missing".into());
+        let fail_msg = apply_server_run_started(&mut e, &srv_failed);
+        assert_eq!(fail_msg, "실행하지 못했습니다: cwd missing");
+        assert_eq!(e.runs[0].status, RunStatus::Failed);
+        assert!(!has_running_remote_run(false, true, std::slice::from_ref(&e)));
     }
 
     #[test]

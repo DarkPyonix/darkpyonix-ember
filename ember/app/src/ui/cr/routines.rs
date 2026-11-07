@@ -23,9 +23,11 @@ use compose_rust::{Alignment, ButtonVariant, Color, DrawList, IconRole, Paint, S
 use ember_client::api::ApiError;
 
 pub use crate::ui::routines::{
-    begin_demo_run, changed_patch, current_value_line, demo_run_allowed, demo_session_title,
-    finish_demo_run, patch_is_empty, run_is_simulated, DEMO_RUN_DONE, DEMO_RUN_MS,
-    DEMO_RUN_STARTED, SAMPLE_FLAG, DEMO_SESSION_PREFIX, NAME_SERVER_REASON, SERVER_CANNOT_CHANGE,
+    apply_server_run_started, begin_demo_run, changed_patch, current_value_line, demo_run_allowed,
+    demo_session_title, finish_demo_run, has_running_remote_run, patch_is_empty,
+    resolve_run_session_id, run_is_simulated, DEMO_RUN_BUSY, DEMO_RUN_DONE, DEMO_RUN_MS,
+    DEMO_RUN_STARTED, DEMO_SESSION_PREFIX, NAME_SERVER_REASON, REMOTE_RUN_POLL_MS,
+    REMOTE_RUN_STARTED, SAMPLE_FLAG, SERVER_CANNOT_CHANGE,
     not_saved_sentence, run_row_text, unsaved_fields,
     ago, big_time, civil_from_days, cron_valid, days_from_civil,
     describe_cron, filter_projects, format_next, group_by_project, kind_text, kpis,
@@ -126,7 +128,12 @@ fn demo_run(id: &str, entries_st: &MutableState<Vec<Entry>>, tick: &MutableState
                 title: Some(demo_session_title(&r.name)),
                 account: None,
             };
-            services().create_session(&body).await.ok().map(|rec| rec.id)
+            let svc = services();
+            let sid = svc.create_session(&body).await.ok().map(|rec| rec.id);
+            if let (Some(id), Some(demo)) = (&sid, &svc.demo) {
+                demo.send_message(&svc.client, id, &r.prompt);
+            }
+            sid
         },
         move |session| {
             let mut list = entries_st.get();
@@ -163,7 +170,8 @@ fn capture_demo_run(entries: &mut [Entry], selected: Option<&str>) {
     if !matches!(mode.as_str(), "1" | "running" | "done") {
         return;
     }
-    let Some(id) = selected else { return };
+    let fallback = entries.first().map(|e| e.routine.id.clone());
+    let Some(id) = selected.map(str::to_string).or(fallback) else { return };
     let Some(e) = entries.iter_mut().find(|e| e.routine.id == id) else { return };
     if !demo_run_allowed(true, sample_entries().iter().any(|s| s.routine.id == id)) {
         return;
@@ -171,6 +179,14 @@ fn capture_demo_run(entries: &mut [Entry], selected: Option<&str>) {
     if begin_demo_run(e, now_local()).is_ok() && mode == "done" {
         finish_demo_run(e, Some(format!("{DEMO_SESSION_PREFIX}capture")));
     }
+}
+
+/// Sync `entries_st` and `online_st` from [`Remote`] and [`LocalStore`].
+pub fn sync_from_remote(entries_st: &MutableState<Vec<Entry>>, online_st: &MutableState<bool>) {
+    let (on, mut remote_entries) = with_remote(|r| (r.online, r.entries.clone()));
+    remote_entries.extend(with_store(|s| s.entries()));
+    online_st.set(on);
+    entries_st.set(remote_entries);
 }
 
 /// What the server last answered: `online` is false until a load succeeds.
@@ -243,8 +259,12 @@ fn refresh(tick: MutableState<u32>) {
     );
 }
 
-fn remote_action<F>(tick: MutableState<u32>, work: F)
-where
+fn remote_action<F>(
+    tick: MutableState<u32>,
+    entries_st: MutableState<Vec<Entry>>,
+    online_st: MutableState<bool>,
+    work: F,
+) where
     F: Future<Output = Result<Option<String>, ApiError>> + Send + 'static,
 {
     if try_services().is_none() {
@@ -257,10 +277,86 @@ where
         },
         move |(done, list)| {
             apply_load(list);
+            sync_from_remote(&entries_st, &online_st);
             match done {
                 Ok(Some(text)) => notice::post(text),
                 Ok(None) => {}
                 Err(e) => notice::post(format!("서버가 요청을 처리하지 못했습니다: {e}")),
+            }
+            tick.update(|v| *v += 1);
+        },
+    );
+}
+
+/// Start a remote schedule run (`POST /api/schedules/{id}/run`), immediately marking the
+/// routine as `"실행 중"` (`RunStatus::Running`), refreshing the client's session list when a
+/// session is created, and syncing the updated run list from the server (FR-L25, #494).
+fn remote_run_now(
+    id: &str,
+    entries_st: &MutableState<Vec<Entry>>,
+    online_st: &MutableState<bool>,
+    tick: &MutableState<u32>,
+) {
+    let now = now_local();
+    let mut list = entries_st.get();
+    let Some(e) = list.iter_mut().find(|e| e.routine.id == id) else {
+        notice::post("루틴을 찾을 수 없습니다");
+        return;
+    };
+    if let Err(msg) = begin_demo_run(e, now) {
+        notice::post(msg);
+        return;
+    }
+    entries_st.set(list);
+    with_remote(|r| {
+        if let Some(re) = r.entries.iter_mut().find(|e| e.routine.id == id) {
+            let _ = begin_demo_run(re, now);
+        }
+    });
+    tick.update(|v| *v += 1);
+    if try_services().is_none() {
+        return;
+    }
+    let id = id.to_string();
+    let entries_st = entries_st.clone();
+    let online_st = online_st.clone();
+    let tick = tick.clone();
+    run_shared(
+        async move {
+            let svc = services();
+            let api = svc.client.api();
+            let run_res = api.run_schedule(&id).await;
+            if let Ok(run) = &run_res {
+                if run.session_id.is_some() {
+                    if let Ok(sessions) = api.sessions(None).await {
+                        svc.client.apply(ember_client::Input::SessionsLoaded(sessions));
+                    }
+                }
+            }
+            let list = load_remote().await;
+            (id, run_res, list)
+        },
+        move |(id, run_res, list)| {
+            apply_load(list);
+            match run_res {
+                Ok(run) => {
+                    let msg = with_remote(|r| {
+                        r.entries
+                            .iter_mut()
+                            .find(|e| e.routine.id == id)
+                            .map(|e| apply_server_run_started(e, &run))
+                            .unwrap_or_else(|| match &run.error {
+                                Some(err) => format!("실행하지 못했습니다: {err}"),
+                                None => REMOTE_RUN_STARTED.to_string(),
+                            })
+                    });
+                    sync_from_remote(&entries_st, &online_st);
+                    notice::post(msg);
+                }
+                Err(e) => {
+                    sync_from_remote(&entries_st, &online_st);
+                    notice::post(format!("서버가 요청을 처리하지 못했습니다: {e}"));
+                }
             }
             tick.update(|v| *v += 1);
         },
@@ -538,8 +634,46 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
     let online_state = remember_with_key(launch_tick, move || mutable_state_of(online));
 
     let _ = tick.get();
+    if !sample_mode() {
+        let (remote_online, mut remote_entries) = with_remote(|r| (r.online, r.entries.clone()));
+        if remote_online || !remote_entries.is_empty() {
+            remote_entries.extend(with_store(|s| s.entries()));
+            if online_state.get_untracked() != remote_online {
+                online_state.set(remote_online);
+            }
+            if entries_state.get_untracked() != remote_entries {
+                entries_state.set(remote_entries);
+            }
+        }
+    }
     let cur_entries = entries_state.get();
     let cur_online = online_state.get();
+    let any_running = has_running_remote_run(sample_mode(), cur_online, &cur_entries);
+    if any_running {
+        let tick_poll = tick.clone();
+        let entries_poll = entries_state.clone();
+        let online_poll = online_state.clone();
+        launched_effect((any_running, tick.get()), move || async move {
+            if try_services().is_none() {
+                return;
+            }
+            run_shared(
+                async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(REMOTE_RUN_POLL_MS)).await;
+                    let list = load_remote().await;
+                    if let Ok(sessions) = services().client.api().sessions(None).await {
+                        services().client.apply(ember_client::Input::SessionsLoaded(sessions));
+                    }
+                    list
+                },
+                move |list| {
+                    apply_load(list);
+                    sync_from_remote(&entries_poll, &online_poll);
+                    tick_poll.update(|v| *v += 1);
+                },
+            );
+        });
+    }
     let device_only = with_store(|s| !s.entries().is_empty());
     let now = now_local();
     let (computers, existing_projects) = live_choices();
@@ -577,18 +711,24 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
 
     let on_toggle = {
         let entries_st = entries_state.clone();
+        let online_st = online_state.clone();
         let tick_ref = tick.clone();
         move |id: String, on: bool| {
             if is_remote(&id) {
-                remote_action(tick_ref.clone(), async move {
-                    let api = services().client.api();
-                    if on {
-                        api.resume_schedule(&id).await?;
-                    } else {
-                        api.pause_schedule(&id).await?;
-                    }
-                    Ok(None)
-                });
+                remote_action(
+                    tick_ref.clone(),
+                    entries_st.clone(),
+                    online_st.clone(),
+                    async move {
+                        let api = services().client.api();
+                        if on {
+                            api.resume_schedule(&id).await?;
+                        } else {
+                            api.pause_schedule(&id).await?;
+                        }
+                        Ok(None)
+                    },
+                );
             } else {
                 if with_store(|s| s.set_enabled(&id, on)).is_err() {
                     if let Some(e) = entries_st.get().iter().find(|e| e.routine.id == id) {
@@ -610,12 +750,10 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
     let on_run_now = {
         let tick_ref = tick.clone();
         let entries_st = entries_state.clone();
+        let online_st = online_state.clone();
         move |id: String| {
             if is_remote(&id) {
-                remote_action(tick_ref.clone(), async move {
-                    let run = services().client.api().run_schedule(&id).await?;
-                    Ok(run.error.map(|e| format!("실행하지 못했습니다: {e}")))
-                });
+                remote_run_now(&id, &entries_st, &online_st, &tick_ref);
                 return;
             }
             let sample = sample_entries().iter().any(|e| e.routine.id == id);
@@ -650,7 +788,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                         .map(|e| e.routine.clone())
                 });
                 let unsaved = old.as_ref().map(|o| unsaved_fields(&draft, o)).unwrap_or_default();
-                let frozen = !unsaved.is_empty();
+                let _frozen = !unsaved.is_empty();
                 let patch = match &old {
                     Some(o) => changed_patch(&draft, o),
                     None => schedule_patch(&draft),
@@ -664,10 +802,15 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                     );
                     return;
                 }
-                remote_action(tick_ref.clone(), async move {
-                    services().client.api().update_schedule(&id, &patch).await?;
-                    Ok(not_saved_sentence(&unsaved).map(|n| format!("{n}. 프롬프트와 일정만 저장했습니다")))
-                });
+                remote_action(
+                    tick_ref.clone(),
+                    entries_st.clone(),
+                    online_st.clone(),
+                    async move {
+                        services().client.api().update_schedule(&id, &patch).await?;
+                        Ok(not_saved_sentence(&unsaved).map(|n| format!("{n}. 프롬프트와 일정만 저장했습니다")))
+                    },
+                );
                 panel_ref.set(Panel::View);
                 return;
             }
@@ -1821,7 +1964,8 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool) {
                 if let Some(id) = session {
                     AppButton("세션 열기", None, ButtonKind::Default, true, true, false, move || {
                         if let Some(svc) = try_services() {
-                            svc.ui.open_conversation(&id);
+                            let target = resolve_run_session_id(&id, demo_active());
+                            svc.ui.open_conversation(&target);
                         }
                     });
                 }
@@ -3527,6 +3671,139 @@ mod tests {
                 );
             }
         }
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l25_host_open_session_button_resolves_demo_session_and_opens_conversation() {
+        let _guard = crate::services::test_guard();
+        let svc = crate::services::test_services();
+        svc.reset_demo();
+        compose_rust::window::reset_window_size();
+
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreenWith(sample_entries(), true))));
+        let mut texts: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut clickables: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        let mut scan = |batch: &[Mutation<'_>]| {
+            for m in batch {
+                match m {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        texts.insert(*node_id, s.to_string());
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                        clickables.insert(*node_id, *h as u64);
+                    }
+                    _ => {}
+                }
+            }
+        };
+        scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+        let resize = HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: 1440.0,
+                height_dp: 900.0,
+                class: WindowSizeClass::Expanded,
+                height_class: WindowHeightClass::Medium,
+                safe_area_top: 0.0,
+                safe_area_leading: 0.0,
+                safe_area_trailing: 0.0,
+            },
+        };
+        let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
+        scan(&decode_batch(bytes).expect("decode"));
+
+        let open_btn = texts
+            .iter()
+            .find(|(id, t)| *t == "세션 열기" && clickables.contains_key(id))
+            .map(|(id, _)| *id)
+            .expect("expected clickable '세션 열기' button in detail pane");
+        let handler_id = clickables[&open_btn];
+        host.dispatch(HostEvent {
+            node_id: open_btn,
+            handler_id,
+            payload: EventPayload::Clicked,
+        })
+        .expect("dispatch click on 세션 열기");
+
+        assert_eq!(
+            svc.ui.route.get(),
+            crate::ui::Route::Conversation("demo-s9".to_string()),
+            "clicking '세션 열기' on sample run 's9' in demo mode should open conversation 'demo-s9'"
+        );
+        let is_open = svc.client.read(|st| {
+            st.session("demo-s9")
+                .is_some_and(|v| v.open && st.transcript("demo-s9").is_some())
+        });
+        assert!(is_open, "opening 'demo-s9' must mark it open and load its demo transcript");
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l25_host_run_now_click_starts_running_state_and_posts_notice() {
+        let _guard = crate::services::test_guard();
+        let svc = crate::services::test_services();
+        svc.reset_demo();
+        compose_rust::window::reset_window_size();
+
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreenWith(sample_entries(), true))));
+        let mut texts: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut clickables: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        let mut scan = |batch: &[Mutation<'_>]| {
+            for m in batch {
+                match m {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        texts.insert(*node_id, s.to_string());
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                        clickables.insert(*node_id, *h as u64);
+                    }
+                    _ => {}
+                }
+            }
+        };
+        scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+        let resize = HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: 1440.0,
+                height_dp: 900.0,
+                class: WindowSizeClass::Expanded,
+                height_class: WindowHeightClass::Medium,
+                safe_area_top: 0.0,
+                safe_area_leading: 0.0,
+                safe_area_trailing: 0.0,
+            },
+        };
+        let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
+        scan(&decode_batch(bytes).expect("decode"));
+
+        let run_btn = texts
+            .iter()
+            .find(|(id, t)| *t == "지금 실행" && clickables.contains_key(id))
+            .map(|(id, _)| *id)
+            .expect("expected clickable '지금 실행' button in detail header");
+        let handler_id = clickables[&run_btn];
+        let (after_click, _) = host
+            .dispatch(HostEvent {
+                node_id: run_btn,
+                handler_id,
+                payload: EventPayload::Clicked,
+            })
+            .expect("dispatch click on 지금 실행");
+        let after_mutations = decode_batch(after_click).expect("decode after click");
+        let after_text: String = after_mutations.iter().map(|m| format!("{m:?}")).collect();
+        assert!(
+            after_text.contains("실행 중") && after_text.contains(SAMPLE_FLAG),
+            "clicking '지금 실행' must immediately render '실행 중' and '{SAMPLE_FLAG}' in the detail run history"
+        );
+        assert_eq!(
+            svc.ui.notice.get().map(|(_, s)| s).as_deref(),
+            Some(DEMO_RUN_STARTED),
+            "clicking '지금 실행' must post DEMO_RUN_STARTED notice"
+        );
         compose_rust::window::reset_window_size();
     }
 }

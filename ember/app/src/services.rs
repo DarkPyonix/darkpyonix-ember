@@ -138,6 +138,25 @@ impl Services {
         self.client.answer(sid, approval_id, decision).await.map_err(|e| e.to_string())
     }
 
+    /// Answer or skip an agent's question (FR-T11): on the server, or in the demo state, which
+    /// calls nothing. The error is the kind of failure only; the server's text never reaches
+    /// the UI.
+    pub async fn answer_question(
+        &self,
+        sid: &str,
+        question_id: &str,
+        reply: &ember_client::api::QuestionReply,
+    ) -> Result<(), ember_client::api::QuestionCallError> {
+        if let Some(d) = &self.demo {
+            d.answer_question(&self.client, sid, question_id, reply);
+            return Ok(());
+        }
+        self.client
+            .answer_question(sid, question_id, reply)
+            .await
+            .map_err(|e| ember_client::api::QuestionCallError::from_error(&e))
+    }
+
     /// Create a session: on the server, or in the demo state (#199).
     pub async fn create_session(&self, body: &crate::server::CreateSession) -> Result<ember_client::wire::SessionRecord, String> {
         if let Some(d) = &self.demo {

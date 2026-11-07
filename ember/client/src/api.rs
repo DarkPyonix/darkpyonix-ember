@@ -22,7 +22,7 @@ use tokio_tungstenite::WebSocketStream;
 
 use crate::wire::{
     ApprovalDecision, DailyUsage, DetectedAgent, MentionCandidate, NewSession, Project, SearchHit, SessionDetail, SessionPatch,
-    SessionRecord, StoredEvent, TeamMail, TeamMember, TeamView,
+    QuestionAnswer, SessionRecord, StoredEvent, TeamMail, TeamMember, TeamView,
 };
 use crate::channels::{Allowance, AllowanceBody, Channel, ChannelMessage, CreatedInvite, Guest, Invite, FeedAnswer, FeedDecision, FeedItem, MentionPreview, MentionPreviewRequest, MessagesQuery, NewChannel, NewChannelMessage, ReadBody};
 use crate::wire::{NewSchedule, Schedule, SchedulePatch, ScheduleRun};
@@ -56,6 +56,92 @@ pub enum ApiError {
     Push(String),
     #[error("invalid base url {0:?}")]
     BadUrl(String),
+}
+
+/// What the person sends for a question: the answers, or a skip (`{"decline":true}`).
+/// `Debug` shows only the count: the values may be a password.
+#[derive(Clone, PartialEq)]
+pub enum QuestionReply {
+    Answers(Vec<QuestionAnswer>),
+    Skip,
+}
+
+impl std::fmt::Debug for QuestionReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QuestionReply::Answers(a) => write!(f, "QuestionReply::Answers({} answers, values hidden)", a.len()),
+            QuestionReply::Skip => write!(f, "QuestionReply::Skip"),
+        }
+    }
+}
+
+/// Path of `POST /sessions/{id}/questions/{question_id}/answer`, segments encoded.
+pub(crate) fn question_answer_path(id: &str, question_id: &str) -> String {
+    format!("/sessions/{}/questions/{}/answer", seg(id), seg(question_id))
+}
+
+/// The request body: exactly one of `answers` or `decline` (the server refuses both or neither).
+pub(crate) fn question_reply_body(reply: &QuestionReply) -> serde_json::Value {
+    match reply {
+        QuestionReply::Answers(a) => json!({ "answers": a }),
+        QuestionReply::Skip => json!({ "decline": true }),
+    }
+}
+
+/// Why sending a question's answer failed, as the card tells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuestionCallError {
+    /// 404: unknown session, or the question is not pending any more. Terminal for the card.
+    Gone,
+    /// 400: the answers do not fit the question.
+    Invalid,
+    /// 409: the session has no running agent. Terminal for the card.
+    NoAgent,
+    /// 401 or 403: only the owner answers.
+    NotOwner,
+    /// 422: the request shape is not understood (app older than the server).
+    Unsupported,
+    /// Anything else, including transport.
+    Failed,
+}
+
+impl QuestionCallError {
+    pub fn from_error(e: &ApiError) -> QuestionCallError {
+        match e {
+            ApiError::Unauthorized(_) => QuestionCallError::NotOwner,
+            ApiError::Status { status: 404, .. } => QuestionCallError::Gone,
+            ApiError::Status { status: 400, .. } | ApiError::NotAMember { .. } => QuestionCallError::Invalid,
+            ApiError::Status { status: 409, .. } => QuestionCallError::NoAgent,
+            ApiError::Status { status: 401 | 403, .. } => QuestionCallError::NotOwner,
+            ApiError::Status { status: 422, .. } => QuestionCallError::Unsupported,
+            _ => QuestionCallError::Failed,
+        }
+    }
+
+    /// A card that cannot be answered any more stays disabled.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, QuestionCallError::Gone | QuestionCallError::NoAgent)
+    }
+}
+
+impl QuestionCallError {
+    /// The fixed sentence for this failure. Never the server's text, which is English and could
+    /// echo input.
+    pub fn text_ko(self) -> &'static str {
+        match self {
+            QuestionCallError::Gone => "이 질문은 이미 답했거나 끝난 질문입니다.",
+            QuestionCallError::Invalid => "답이 질문과 맞지 않습니다. 선택을 확인해 주세요.",
+            QuestionCallError::NoAgent => "에이전트가 실행 중이 아니어서 답을 보낼 수 없습니다.",
+            QuestionCallError::NotOwner => "이 질문에는 소유자만 답할 수 있습니다.",
+            QuestionCallError::Unsupported => "답을 보낼 수 없습니다. 앱을 업데이트해 주세요.",
+            QuestionCallError::Failed => "답을 보내지 못했습니다. 연결을 확인하고 다시 시도해 주세요.",
+        }
+    }
+}
+
+/// The fixed sentence for a failed answer (see [`QuestionCallError::text_ko`]).
+pub fn question_error_ko(e: &ApiError) -> &'static str {
+    QuestionCallError::from_error(e).text_ko()
 }
 
 /// `POST /sessions/{id}/fork` body: `{turn_seq?}` (server `ForkBody`).
@@ -851,6 +937,14 @@ impl Api {
         Ok(())
     }
 
+    /// Answer, or skip, an agent's question (FR-T11, FR-A5). Owner token only. The error
+    /// carries the server's text, which the UI never shows: it maps the error with
+    /// [`question_error_ko`].
+    pub async fn answer_question(&self, id: &str, question_id: &str, reply: &QuestionReply) -> ApiResult<()> {
+        self.post(&question_answer_path(id, question_id), question_reply_body(reply)).await?;
+        Ok(())
+    }
+
     /// Switch a session's approve-everything mode (FR-A5). The server answers the approvals
     /// already pending, and pushes the change to every client.
     pub async fn set_approve_all(&self, id: &str, enabled: bool) -> ApiResult<()> {
@@ -1624,6 +1718,42 @@ mod metrics_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_t11_answer_question_posts_exact_body() {
+        assert_eq!(question_answer_path("s 1", "r/1"), "/sessions/s%201/questions/r%2F1/answer");
+        let a = QuestionAnswer { question_id: "q0".into(), values: vec!["blue".into()] };
+        assert_eq!(
+            question_reply_body(&QuestionReply::Answers(vec![a])),
+            json!({"answers": [{"question_id": "q0", "values": ["blue"]}]})
+        );
+        assert_eq!(question_reply_body(&QuestionReply::Skip), json!({"decline": true}));
+        let secret = QuestionReply::Answers(vec![QuestionAnswer { question_id: "q".into(), values: vec!["hunter2".into()] }]);
+        assert!(!format!("{secret:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn fr_t11_question_error_texts_are_fixed_korean() {
+        let st = |status: u16| ApiError::Status { status, message: "secret server text".into(), code: None };
+        let all = [
+            (st(404), QuestionCallError::Gone),
+            (st(400), QuestionCallError::Invalid),
+            (st(409), QuestionCallError::NoAgent),
+            (st(403), QuestionCallError::NotOwner),
+            (ApiError::Unauthorized("x".into()), QuestionCallError::NotOwner),
+            (st(422), QuestionCallError::Unsupported),
+            (st(500), QuestionCallError::Failed),
+            (ApiError::Peer("p".into()), QuestionCallError::Failed),
+        ];
+        for (e, want) in all {
+            assert_eq!(QuestionCallError::from_error(&e), want);
+            let t = question_error_ko(&e);
+            assert!(!t.contains("secret server text"));
+            assert!(t.ends_with('.') && t.chars().any(|c| ('가'..='힣').contains(&c)));
+        }
+        assert!(QuestionCallError::Gone.is_terminal() && QuestionCallError::NoAgent.is_terminal());
+        assert!(!QuestionCallError::Invalid.is_terminal() && !QuestionCallError::Failed.is_terminal());
+    }
 
     #[test]
     fn fr_s11_http_client_sends_bearer_only_with_a_token() {

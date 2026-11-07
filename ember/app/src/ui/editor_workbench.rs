@@ -80,6 +80,8 @@ pub struct Shared {
     pub selected_output_channel: Signal<String>,
     pub workbench_logs: Signal<Vec<String>>,
     pub run_session: Arc<crate::ui::run::RunSession>,
+    /// Source control of the 커밋 and Git windows (FR-L31.2).
+    pub scm: crate::ui::editor_scm::Scm,
 }
 
 // WidgetView accepts a function without props and owns a separate tree. Share signals between
@@ -143,7 +145,9 @@ fn init(target: EditorTarget) {
     let selected_output_channel = use_hook(|| Signal::new_in_scope("ember-workbench".to_string(), root));
     let workbench_logs = use_hook(|| Signal::new_in_scope(Vec::<String>::new(), root));
     let run_session = use_hook(|| Arc::new(crate::ui::run::RunSession::new()));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, run_session }));
+    // The branch in the bars comes from the first status read, so it starts with the window.
+    let scm = use_hook(|| { let scm = crate::ui::editor_scm::Scm::new(&target.project, revision); scm.refresh(); scm });
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, run_session, scm }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -302,6 +306,10 @@ pub mod page {
             open_find_bar(s);
             return;
         }
+        if matches!(action, Action::FindInFiles | Action::ReplaceInFiles) {
+            crate::ui::editor_search::view::open(s, action == Action::ReplaceInFiles);
+            return;
+        }
         if action == Action::Save {
             save_current(s);
             return;
@@ -333,6 +341,9 @@ pub mod page {
         }
         if !handled {
             notice(format!("{}: {SOON}", action.label()));
+        }
+        if handled && matches!(action, Action::Commit | Action::Git) && stripes.read().selected(Side::Left).is_some() {
+            s.scm.refresh();
         }
     }
 
@@ -660,6 +671,7 @@ pub mod page {
             let mut tree_sel = s.tree_sel;
             tree_sel.set(None);
         }
+        let saved = updates.iter().any(|u| matches!(u, ember_editor::SessionUpdate::Saved { .. }));
         for update in updates {
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.uris.borrow_mut().insert(uri.path.clone(), uri.clone()); }
             if let ember_editor::SessionUpdate::Closed { uri } = &update { s.uris.borrow_mut().remove(&uri.path); }
@@ -684,6 +696,10 @@ pub mod page {
                 _ => {}
             }
         }
+        if saved {
+            // A save changes the work tree: the changes list and the open diff follow it.
+            s.scm.refresh();
+        }
         let tabs = s.tabs;
         let current = tabs.read().current_path().map(str::to_owned);
         let paths: Vec<String> = tabs.read().paths().into_iter().map(str::to_owned).collect();
@@ -696,10 +712,14 @@ pub mod page {
         let dirty: Vec<bool> = paths.iter().map(|p| uris.get(p).and_then(|u| bridge.document(u)).is_some_and(|d| d.dirty)).collect();
         drop(uris);
         drop(bridge);
+        crate::ui::editor_search::view::apply_pending_reveal(&s);
         let (line, col) = *s.position.read();
         let sel = *s.stripes.read();
         let keymap = *s.keymap.read();
-        let (agent_state, branch) = project_status(&s.project);
+        let (agent_state, project_branch) = project_status(&s.project);
+        // The branch git/status returned; the project row's until the first answer.
+        let branch = s.scm.branch_line().unwrap_or(project_branch);
+        let diff_shown = s.scm.diff_visible(current.as_deref());
         let key_s = s.clone();
         let has_left = sel.selected(Side::Left).is_some();
         let has_bottom = sel.selected(Side::Bottom).is_some();
@@ -769,6 +789,12 @@ pub mod page {
                     if let (Some(w), false) = (sel.selected(Side::Left), maximized) {
                         if w == ToolWindow::Project {
                             {project_tree(&s, current.as_deref())}
+                        } else if w == ToolWindow::Search {
+                            {crate::ui::editor_search::view::panel(&s)}
+                        } else if w == ToolWindow::Commit {
+                            {crate::ui::editor_scm::view::commit_window(&s)}
+                        } else if w == ToolWindow::Git {
+                            {crate::ui::editor_scm::view::git_window(&s)}
                         } else {
                             {side_note(w, "ed-left")}
                         }
@@ -778,9 +804,10 @@ pub mod page {
                         if let Some(path) = current.as_deref() {
                             {breadcrumbs(path, &s.folder)}
                         }
-                        if *s.find.open.read() && active.is_some() { {find_bar(&s)} }
+                        if *s.find.open.read() && active.is_some() && !diff_shown { {find_bar(&s)} }
                         div { style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
-                            if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
+                            if diff_shown { {crate::ui::editor_scm::view::diff_pane(&s)} }
+                            else if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
                             else if let Some(error) = current.as_ref().and_then(|p| open_error.clone().map(|e| (p.clone(), e))) {
                                 div { class: "ed-empty", role: "alert",
                                     b { "{crate::ui::editor::display_name(base_name(&error.0))} 파일을 열 수 없습니다" }
@@ -804,12 +831,12 @@ pub mod page {
     /// A mockup icon as an image: the HTML path draws SVG through `img`, which cannot take
     /// `currentColor`, so the stroke is the text colour of the light palette.
     // TODO(editor-redesign step 4): tint per theme once the dark palette is switched on.
-    pub(super) fn icon(name: &str) -> Element {
+    pub(crate) fn icon(name: &str) -> Element {
         icon_px(name, 16)
     }
 
     /// A mockup icon at `px` dp (the mockup sizes tree, tab and breadcrumb icons by context).
-    pub(super) fn icon_px(name: &str, px: u32) -> Element {
+    pub(crate) fn icon_px(name: &str, px: u32) -> Element {
         let dark = if super::ICON_DARK.with(|d| d.get()) { "@dark" } else { "" };
         rsx! { img { class: "i", src: "icon:{name}{dark}", width: "{px}", height: "{px}" } }
     }
@@ -827,6 +854,7 @@ pub mod page {
         let run_cfg_s = s.clone();
         let run_s = s.clone();
         let stop_s = s.clone();
+        let git_s = s.clone();
         let open = *menu_open.read();
         // The traffic lights float over the top bar's left end under FullSize.
         let strip_pad = crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), crate::ui::safe_area::safe_area().leading);
@@ -834,7 +862,7 @@ pub mod page {
             header { class: "ed-top", style: "{strip_pad}",
                 img { class: "logo logo-img", src: "icon:mark", width: "28", height: "28", alt: "Ember" }
                 button { class: "ed-pj", title: "닫기", onclick: move |_| crate::services::services().ui.close_editor(), "{name}" {icon_px("chev-dn", 12)} }
-                button { class: "ed-pj", title: "브랜치", onclick: move |_| notice(format!("브랜치: {SOON}")), {icon("git")} "{branch}" {icon_px("chev-dn", 12)} }
+                button { class: "ed-pj", title: "브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon("git")} "{branch}" {icon_px("chev-dn", 12)} }
                 div { class: "spacer" }
                 button { class: "ed-find", title: "{find}", onclick: move |_| run_action(&find_s, Action::Find),
                     {icon("search")}
@@ -892,12 +920,14 @@ pub mod page {
 
     fn stripe_button(s: &Shared, w: ToolWindow, selected: bool, keymap: Keymap) -> Element {
         let mut stripes = s.stripes;
+        let scm_s = s.clone();
         let hint = w.action().map(|a| keymap.hint(a, Os::current())).unwrap_or_default();
         let tip = tooltip_text(w.label(), &hint);
         let class = if selected { "ed-sb on" } else { "ed-sb" };
         rsx! {
             button { key: "{w.label()}", class, title: "{tip}", "aria-label": "{tip}", onclick: move |_| {
                 if w.side() == Side::Right { notice(format!("{}: {SOON}", w.label())); } else { stripes.write().toggle(w); }
+                if matches!(w, ToolWindow::Commit | ToolWindow::Git) && stripes.read().is_selected(w) { scm_s.scm.refresh(); }
             }, {icon(icon_name(w))} }
         }
     }
@@ -908,6 +938,7 @@ pub mod page {
     fn icon_name(w: ToolWindow) -> &'static str {
         match w {
             ToolWindow::Project => "folder",
+            ToolWindow::Search => "search",
             ToolWindow::Commit => "commit",
             ToolWindow::Git => "git",
             ToolWindow::Agent => "spark",
@@ -1111,7 +1142,9 @@ pub mod page {
                                                 let class = if selected { "ed-tab on" } else { "ed-tab" };
                         let tab_label = crate::ui::editor::tab_aria_label(&label, dirty[i]);
                         let close_label = format!("닫기: {label}");
+                        let scm = s.scm.clone();
                         rsx! { div { class, role: "tab", "aria-selected": "{selected}", "aria-label": "{tab_label}", onclick: move |_| {
+                            scm.close_diff();
                             tabs.write().activate(&path);
                             host.send(HostCommand::Focus(path.clone()));
                         }, {icon_px(if selected { "file-w" } else { "file" }, 14)} "{label}" if dirty[i] { span { class: "ed-dirty" } } button { class: "ed-tx", "aria-label": "{close_label}", onclick: move |event| { event.stop_propagation(); tabs.write().close(&close_path); close_host.send(HostCommand::Close(close_path.clone())); if let Some(next) = tabs.read().current_path() { close_host.send(HostCommand::Focus(next.to_string())); } }, {icon_px(if selected { "close-w" } else { "close" }, 12)} } } }
@@ -1524,6 +1557,7 @@ pub mod page {
         let position = position_text(line, col);
         let branch = branch.to_string();
         let has_file = current.is_some();
+        let git_s = s.clone();
         rsx! {
             footer { class: "ed-status", role: "group", "aria-label": "상태 표시줄",
                 span { class: "ed-sbi crumbs-s", "{crumbs}" }
@@ -1535,7 +1569,7 @@ pub mod page {
                     span { class: "ed-sbi hide-md", "UTF-8" }
                     span { class: "ed-sbi hide-md", "4칸" }
                 }
-                span { class: "ed-sbi", {icon("git")} "{branch}" }
+                button { class: "ed-sbi", title: "Git 브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon("git")} "{branch}" }
             }
         }
     }

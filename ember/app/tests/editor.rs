@@ -619,3 +619,53 @@ mod problems_and_output {
         assert!(session.snapshot().1.is_empty());
     }
 }
+
+// FR-L31.2: the editor's source control rules against the demo git source, which takes the same op
+// names and bodies the project relay (FR-G4) does: grouping, stage and unstage per file (a rename
+// with its old path), the commit gate and the commit body.
+#[test]
+fn fr_l31_2_stage_unstage_and_commit_against_the_demo_repository() {
+    use ember_app::demo::DemoSource;
+    use ember_app::ui::editor_scm::{commit_gate, groups, op_paths, Group, ScmLoad, NEED_MESSAGE};
+    use ember_app::ui::vcs::{commit_body, git_result};
+    use ember_client::api::{GitCommitted, GitStatus};
+    use serde_json::json;
+
+    let scratch = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let dir = tempfile::tempdir_in(scratch).unwrap();
+    let d = DemoSource::new(0, dir.path().to_path_buf());
+    let status = |d: &DemoSource| -> GitStatus { git_result(d.git("demo-project", "status", &json!({}))).unwrap() };
+
+    let g = groups(&status(&d));
+    // A file with staged and unstaged hunks is listed in both groups.
+    assert!(g.staged.iter().any(|e| e.path == "ember/app/src/ui/vcs.rs" && e.letter == 'M'));
+    assert!(g.changes.iter().any(|e| e.path == "ember/app/src/ui/vcs.rs" && e.letter == 'M'));
+    let docs = g.changes.iter().find(|e| e.path == "docs/GIT.md").unwrap().clone();
+    assert_eq!(docs.letter, 'U');
+
+    d.git("demo-project", "stage", &json!({ "paths": op_paths(&[docs]) })).unwrap();
+    let g = groups(&status(&d));
+    assert!(g.staged.iter().any(|e| e.path == "docs/GIT.md" && e.letter == 'A' && e.group == Group::Staged));
+    assert!(!g.changes.iter().any(|e| e.path == "docs/GIT.md"));
+
+    // A rename staged, then unstaged with its old path.
+    let renamed = g.changes.iter().find(|e| e.old_path.is_some()).unwrap().clone();
+    d.git("demo-project", "stage", &json!({ "paths": op_paths(&[renamed.clone()]) })).unwrap();
+    let g = groups(&status(&d));
+    let staged_rename = g.staged.iter().find(|e| e.path == renamed.path).unwrap().clone();
+    assert_eq!(op_paths(&[staged_rename.clone()]).len(), 2);
+    d.git("demo-project", "unstage", &json!({ "paths": op_paths(&[staged_rename]) })).unwrap();
+    assert!(groups(&status(&d)).changes.iter().any(|e| e.path == renamed.path));
+
+    // Commit what is staged; the committed file leaves the staged group and the branch is one ahead more.
+    let load = ScmLoad::Ready(status(&d));
+    let ahead = load.status().unwrap().ahead;
+    let req = commit_gate(&load, "Docs: Add GIT.md\n\nWhy.", false).unwrap();
+    let done: GitCommitted = git_result(d.git("demo-project", "commit", &commit_body(&req))).unwrap();
+    assert_eq!(done.sha.len(), 40);
+    let after = ScmLoad::Ready(status(&d));
+    assert!(!groups(after.status().unwrap()).staged.iter().any(|e| e.path == "docs/GIT.md"));
+    assert_eq!(after.status().unwrap().ahead, ahead + 1);
+    assert_eq!(commit_gate(&after, "\n  \n", false).unwrap_err(), NEED_MESSAGE);
+}

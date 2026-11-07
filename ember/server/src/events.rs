@@ -87,6 +87,21 @@ pub struct QuestionOption {
     pub description: Option<String>,
 }
 
+/// Strip control and bidi formatting characters and collapse whitespace in agent-supplied question
+/// strings (FR-T11).
+pub fn clean_question_text(s: &str) -> String {
+    let kept: String = s
+        .chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(*c as u32, 0x200B..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069 | 0xFEFF)
+                || c.is_whitespace() && *c != '\u{85}'
+        })
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    kept.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// The answer to one question: the chosen labels or the free text, one value per entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuestionAnswer {
@@ -189,7 +204,11 @@ pub fn redact_secret_answers(questions: &[Question], answers: &[QuestionAnswer])
             let secret = questions.iter().any(|q| q.id == a.question_id && q.secret);
             QuestionAnswer {
                 question_id: a.question_id.clone(),
-                values: if secret { a.values.iter().map(|_| "***".to_string()).collect() } else { a.values.clone() },
+                values: if secret {
+                    a.values.iter().map(|_| "***".to_string()).collect()
+                } else {
+                    a.values.iter().map(|v| clean_question_text(v)).collect()
+                },
             }
         })
         .collect()

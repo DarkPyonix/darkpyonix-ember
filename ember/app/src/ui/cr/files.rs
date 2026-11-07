@@ -28,7 +28,7 @@ pub use crate::ui::files::{
     user_actions, visible_offers, Answer, Device, DeviceKind, Direction, FilesKpi, FilesModel,
     HistoryEntry, HistoryResult, Offer, PathKind, Presence, ReceivedFile, SendDraft, SendTarget,
     Transfer, TransferAction, TransferService, TransferState, FILE_PICKER_AVAILABLE, FILE_PICK_REASON,
-    FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE,
+    FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE, clean_member_name, demo_files, is_demo,
 };
 use crate::ui::files::{choose_target, chip_avail, chip_label, chip_rows, chip_text_max_for, chip_width_est, files_line, fit_chip_text, send_state};
 use super::characters::{CharState, Character};
@@ -360,6 +360,7 @@ struct State {
     filter: MutableState<HistoryFilter>,
     /// The history's device filter: 0 is every device, then the devices in the history.
     peer: MutableState<usize>,
+    version: MutableState<u64>,
 }
 
 impl State {
@@ -369,6 +370,7 @@ impl State {
             answered: mutable_state_of(Vec::new()),
             filter: mutable_state_of(HistoryFilter::All),
             peer: mutable_state_of(0),
+            version: mutable_state_of(0),
         }
     }
 }
@@ -379,28 +381,40 @@ pub fn FilesScreen() {
     // The service has no change signal yet: redraw with the launcher state.
     let _ = ui.live.launcher.get();
     let svc = transfer_service();
-    if std::env::var("EMBER_CR_FILES_SAMPLE").as_deref() == Ok("1") {
-        let (model, offers) = sample_model();
-        let members = services().client.read(|s| crew(s, 4));
-        return FilesScreenWith(&model, offers, members, &sample_extras());
-    }
+    let demo = is_demo();
+    let extras = if demo { sample_extras() } else { Extras::default() };
     let (computers, members): (Vec<Computer>, Vec<CrewMember>) =
         services().client.read(|s| (s.computers().to_vec(), crew(s, 4)));
-    FilesScreenWith(&build_model(&computers, svc), svc.pending_offers(), members, &Extras::default());
+    let model = build_model(&computers, svc);
+    let pending = svc.pending_offers();
+    FilesScreenWith(&model, pending, members, &extras);
 }
 
 pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<CrewMember>, extras: &Extras) {
     let ui = shared_ui().clone();
     let st = remember(State::new);
+    let _ = st.version.get();
+    let svc = transfer_service();
+    let (computers, _): (Vec<Computer>, _) = services().client.read(|s| (s.computers().to_vec(), ()));
+    let live_model = if st.version.get() > 0 {
+        build_model(&computers, svc)
+    } else {
+        model.clone()
+    };
+    let live_pending = if st.version.get() > 0 {
+        svc.pending_offers()
+    } else {
+        pending
+    };
     // `EMBER_CR_FILES_SHEET=share` opens the share sheet at the start, for review captures.
     let share_open = remember(|| mutable_state_of(std::env::var("EMBER_CR_FILES_SHEET").as_deref() == Ok("share")));
     let window = compose_rust::runtime::current_window_size();
     let w = window.width_dp;
     let compact = w <= 560.0;
     let pad = page_pad(w);
-    let cells = kpi_cells(model);
-    let offers = visible_offers(&pending, &st.answered.get());
-    let ready = model.ready;
+    let cells = kpi_cells(&live_model);
+    let offers = visible_offers(&live_pending, &st.answered.get());
+    let ready = live_model.ready;
     let skip = Skip::from_env(EST_HEAD + EST_DEVICES + EST_AGENTS + EST_TRAY + EST_TRANSFERS + EST_HISTORY, window.height_dp);
 
     cu::Box().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
@@ -439,10 +453,10 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                         cells.iter().map(|c| -> Part { Box::new(move || KpiView(c)) }).collect(),
                     );
                 }
-                Stage(model, &members, extras, &st, &ui, w, &skip);
+                Stage(&live_model, &members, extras, &st, &ui, w, &skip);
                 if skip.show(EST_TRANSFERS) {
-                    let transfers = || TransfersCard(model, ready);
-                    let received = || ReceivedCard(model, extras, ready, w);
+                    let transfers = || TransfersCard(&live_model, &st, ready);
+                    let received = || ReceivedCard(&live_model, extras, ready, w);
                     if side_by_side(w) {
                         cu::Row().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
                             cu::Column().modifier(Modifier::new().weight(1.1)).content(transfers);
@@ -454,16 +468,16 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                     }
                 }
                 if skip.show(EST_HISTORY) {
-                    HistoryCard(model, &st, ready, w);
+                    HistoryCard(&live_model, &st, ready, w);
                 }
             });
         });
         // The incoming offer floats over the page, at the top right (above the tab bar on a phone).
         if let Some(offer) = offers.first() {
-            OfferCard(offer, &pending, &model.devices, &st, w);
+            OfferCard(offer, &live_pending, &live_model.devices, &st, w);
         }
-        SendSheet(&st, &model.devices, &members, ready, w);
-        ShareSheet(&share_open, &model.devices, &members, ready);
+        SendSheet(&st, &live_model.devices, &members, ready, w);
+        ShareSheet(&share_open, &live_model.devices, &members, ready);
     });
 }
 
@@ -687,9 +701,25 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                         .iter()
                         .map(|d| -> Part {
                             let s = st.sheet.clone();
+                            let d_id = d.id.clone();
+                            let d_name = d.name.clone();
+                            let is_online = d.presence == Presence::Online;
+                            let demo = is_demo();
                             Box::new(move || {
-                                DeviceTile(d, extras.devices.get(&d.id), move |id| {
-                                    s.set(Some(SendDraft { target: Some(SendTarget::Device(id)), files: Vec::new() }))
+                                DeviceTile(d, extras.devices.get(&d.id), move |_| {
+                                    if !is_online {
+                                        notice::post(format!("{d_name}은(는) 지금 연결되어 있지 않습니다."));
+                                    } else {
+                                        let initial_files = if demo {
+                                            vec![demo_files()[0].to_string()]
+                                        } else {
+                                            Vec::new()
+                                        };
+                                        s.set(Some(SendDraft {
+                                            target: Some(SendTarget::Device(d_id.clone())),
+                                            files: initial_files,
+                                        }));
+                                    }
                                 })
                             })
                         })
@@ -721,9 +751,18 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                         .iter()
                         .map(|m| -> Part {
                             let s = st.sheet.clone();
+                            let demo = is_demo();
                             Box::new(move || {
                                 AgentTile(m, ui, text_w, move |id| {
-                                    s.set(Some(SendDraft { target: Some(SendTarget::Agent(id)), files: Vec::new() }))
+                                    let initial_files = if demo {
+                                        vec![demo_files()[0].to_string()]
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    s.set(Some(SendDraft {
+                                        target: Some(SendTarget::Agent(id)),
+                                        files: initial_files,
+                                    }))
                                 })
                             })
                         })
@@ -731,17 +770,27 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                 );
             }
             if tray {
-                // `.fl-tray`: the files to send. TODO(compose-rust#483 file dialog, #166 dropped files): no file picker or drag
-                // and drop yet, so the tray is empty and its button says so.
+                // `.fl-tray`: the files to send.
                 cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                 cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                     Label("보낼 파일", Fs::Md, Weight::Semibold, None, Some(1));
                     Label(if w > 560.0 { "장비를 누르면 받는 곳을 고르고 파일을 보냅니다." } else { "장비를 누르면 보낼 파일을 고릅니다." }, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                 });
-                // Disabled with its reason beside it while the toolkit has no file dialog (compose-rust#483).
+                let demo = is_demo();
+                let can_pick = FILE_PICKER_AVAILABLE || demo;
+                let s = st.sheet.clone();
                 cu::Column().spacing(SP[1]).content(|| {
-                    AppButton("파일 고르기", Some(IconRole::Add), ButtonKind::Default, true, FILE_PICKER_AVAILABLE, false, || notice::post(FILE_PICK_UNAVAILABLE));
-                    if !FILE_PICKER_AVAILABLE {
+                    AppButton("파일 고르기", Some(IconRole::Add), ButtonKind::Default, true, can_pick, false, move || {
+                        if demo {
+                            s.set(Some(SendDraft {
+                                target: None,
+                                files: vec![demo_files()[0].to_string()],
+                            }));
+                        } else {
+                            notice::post(FILE_PICK_UNAVAILABLE);
+                        }
+                    });
+                    if !can_pick {
                         Label(FILE_PICK_REASON, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
                     }
                 });
@@ -830,7 +879,7 @@ fn AgentTile(m: &CrewMember, ui: &SharedUi, text_w: f32, on_send: impl FnMut(Str
     let send_id = m.id.clone();
     let open_id = m.id.clone();
     let ui_open = ui.clone();
-    let name = crate::ui::project::member_name(None, &m.project, &m.agent, &m.title);
+    let name = clean_member_name(&m.project, &m.agent, &m.title);
     let state = if m.waiting { CharState::Wait } else { CharState::Run };
     let host = agent_host(&m.project);
     let send = Rc::new(RefCell::new(on_send));
@@ -915,11 +964,18 @@ fn OfferCard(offer: &Offer, pending: &[Offer], devices: &[Device], st: &State, w
                     cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                         for (text, kind, answer) in [("거절", ButtonKind::Default, Answer::Decline), ("받기", ButtonKind::Primary, Answer::Accept)] {
                             let (id, pending, answered) = (offer.id.clone(), pending.to_vec(), st.answered.clone());
+                            let st_ver = st.version.clone();
                             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                                 AppButton(text, None, kind, false, true, true, move || {
                                     let mut list = answered.get_untracked();
                                     answer_offer(transfer_service(), &pending, &mut list, &id, answer);
                                     answered.set(list);
+                                    st_ver.set(st_ver.get_untracked() + 1);
+                                    let msg = match answer {
+                                        Answer::Accept => "파일 전송 요청을 수락했습니다.",
+                                        Answer::Decline => "파일 전송 요청을 거절했습니다.",
+                                    };
+                                    notice::post(msg);
                                 });
                             });
                         }
@@ -972,7 +1028,7 @@ fn Bar(pct: u32, height: f32, fill: compose_rust::Color) {
     super::components::TrackBar(pct.min(100) as f32, height, fill);
 }
 
-fn TransfersCard(model: &FilesModel, ready: bool) {
+fn TransfersCard(model: &FilesModel, st: &State, ready: bool) {
     let p = ember_theme().palette;
     EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -986,7 +1042,7 @@ fn TransfersCard(model: &FilesModel, ready: bool) {
                 if i > 0 {
                     cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                 }
-                TransferRow(t, &model.devices);
+                TransferRow(t, &model.devices, st);
             }
         });
     });
@@ -1002,7 +1058,7 @@ pub fn route_line(path: Option<PathKind>) -> String {
     }
 }
 
-fn TransferRow(t: &Transfer, devices: &[Device]) {
+fn TransferRow(t: &Transfer, devices: &[Device], st: &State) {
     let p = ember_theme().palette;
     let svc = transfer_service();
     let dir = match t.direction {
@@ -1044,9 +1100,14 @@ fn TransferRow(t: &Transfer, devices: &[Device]) {
                     TransferAction::Resume | TransferAction::Retry | TransferAction::Start => Some(ICON_PLAY),
                     _ => None,
                 };
+                let st_ver = st.version.clone();
+                let on_act = move || {
+                    svc.control(&id, action);
+                    st_ver.set(st_ver.get_untracked() + 1);
+                };
                 match glyph {
-                    Some(g) => RoundGlyph(g, move || svc.control(&id, action)),
-                    None => IconButton(IconRole::Close, true, move || svc.control(&id, action)),
+                    Some(g) => RoundGlyph(g, on_act),
+                    None => IconButton(IconRole::Close, true, on_act),
                 }
             }
         });
@@ -1215,23 +1276,33 @@ fn HistoryRow(h: &HistoryEntry) {
 /// A receiver chip of the send sheet (`.fl-tg`): an outlined pill with the device glyph or the
 /// agent's character; the selected one takes the `ink` border, an offline one is dimmed.
 /// TODO(compose-rust#372): a pointer-up `Clickable`.
-fn TargetChip(label: &str, icon: TargetIcon, selected: bool, on_click: impl FnMut() + 'static) {
+fn TargetChip(label: &str, icon: TargetIcon, selected: bool, disabled: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let fill = if selected { p.sel } else { p.surface };
     let border = if selected { p.ink } else { p.line };
-    let m = Modifier::new().height(H_CTL).background(paint(fill)).border(1.0, paint(border)).shape_role(ShapeRole::Full);
+    let mut m = Modifier::new().height(H_CTL).background(paint(fill)).border(1.0, paint(border)).shape_role(ShapeRole::Full);
+    if disabled {
+        m = m.alpha(0.5);
+    }
     Clickable(m, Alignment::CenterStart, on_click, || {
         cu::Row().alignment(Alignment::CenterStart).content(|| {
             cu::Spacer().modifier(Modifier::new().width(12.0));
             match &icon {
-                TargetIcon::Kind(k) => NavIcon(kind_icon(*k), p.text_2.to_argb(), 16.0),
+                TargetIcon::Kind(k) => NavIcon(kind_icon(*k), (if disabled { p.muted } else { p.text_2 }).to_argb(), 16.0),
                 TargetIcon::Agent(m) => {
-                    let name = crate::ui::project::member_name(None, &m.project, &m.agent, &m.title);
+                    let name = clean_member_name(&m.project, &m.agent, &m.title);
                     Character(&m.agent, false, 22.0, &name, &m.project, if m.waiting { CharState::Wait } else { CharState::Run }, None);
                 }
             }
             cu::Spacer().modifier(Modifier::new().width(SP[1]));
-            Label(label, Fs::Sm, Weight::Regular, Some(paint(if selected { p.text } else { p.text_2 })), Some(1));
+            let text_color = if disabled {
+                p.muted
+            } else if selected {
+                p.text
+            } else {
+                p.text_2
+            };
+            Label(label, Fs::Sm, Weight::Regular, Some(paint(text_color)), Some(1));
             cu::Spacer().modifier(Modifier::new().width(12.0));
         });
     });
@@ -1258,7 +1329,8 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
     let draft = st.sheet.get();
     let open = draft.is_some();
     let d = draft.unwrap_or_default();
-    let (blocker, can_send) = send_state(&d, devices, FILE_PICKER_AVAILABLE, ready);
+    let demo = is_demo();
+    let (blocker, can_send) = send_state(&d, devices, FILE_PICKER_AVAILABLE || demo, ready);
     let target_device = match &d.target {
         Some(SendTarget::Device(id)) => Some(id.clone()),
         _ => None,
@@ -1269,7 +1341,7 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
         Some(SendTarget::Agent(id)) => members
             .iter()
             .find(|m| m.id == *id)
-            .map(|m| crate::ui::project::member_name(None, &m.project, &m.agent, &m.title)),
+            .map(|m| clean_member_name(&m.project, &m.agent, &m.title)),
         None => None,
     };
     let sheet_w = super::components::sheet_width(w, super::components::SHEET_WIDTH_DEFAULT);
@@ -1281,11 +1353,12 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
     // The receivers flow left to right and wrap: devices first, then agents.
     let mut chips: Vec<(String, TargetIcon, bool, bool, SendTarget)> = Vec::new();
     for dev in devices {
-        let sel = target_device.as_deref() == Some(dev.id.as_str());
-        chips.push((dev.name.clone(), TargetIcon::Kind(dev.kind), sel, dev.presence != Presence::Online, SendTarget::Device(dev.id.clone())));
+        let is_online = dev.presence == Presence::Online;
+        let sel = is_online && target_device.as_deref() == Some(dev.id.as_str());
+        chips.push((dev.name.clone(), TargetIcon::Kind(dev.kind), sel, !is_online, SendTarget::Device(dev.id.clone())));
     }
     for m in members {
-        let name = crate::ui::project::member_name(None, &m.project, &m.agent, &m.title);
+        let name = clean_member_name(&m.project, &m.agent, &m.title);
         let sel = matches!(&d.target, Some(SendTarget::Agent(id)) if *id == m.id);
         chips.push((name, TargetIcon::Agent(m.clone()), sel, false, SendTarget::Agent(m.id.clone())));
     }
@@ -1313,6 +1386,7 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
                         let (label, icon, sel, dim, target) = &chips[i];
                         let (s, base) = (st.sheet.clone(), d.clone());
                         let target = target.clone();
+                        let is_disabled = *dim;
                         let glyph = if matches!(icon, TargetIcon::Agent(_)) { 22.0 } else { 16.0 };
                         let shown = shown_label(label, *dim, glyph, inner);
                         let devs: Vec<Device> = devices.to_vec();
@@ -1320,7 +1394,7 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
                             TargetIcon::Kind(k) => TargetIcon::Kind(*k),
                             TargetIcon::Agent(m) => TargetIcon::Agent(m.clone()),
                         };
-                        TargetChip(&shown, icon, *sel, move || {
+                        TargetChip(&shown, icon, *sel, is_disabled, move || {
                             match choose_target(&base, &devs, target.clone()) {
                                 Ok(next) => s.set(Some(next)),
                                 Err(note) => notice::post(note),
@@ -1330,8 +1404,27 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
                 });
             }
             Label("파일", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-            // TODO(compose-rust#483): a file dialog (dropped files stay with compose-rust#166); until then the files stay empty.
-            Label(&files_line(d.files.len(), FILE_PICKER_AVAILABLE), Fs::Sm, Weight::Regular, None, Some(2));
+            Label(&files_line(d.files.len(), FILE_PICKER_AVAILABLE || demo), Fs::Sm, Weight::Regular, None, Some(2));
+            if demo {
+                cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL)).content(|| {
+                    for fname in demo_files() {
+                        let fname_str = fname.to_string();
+                        let is_file_sel = d.files.iter().any(|f| f == fname);
+                        let s = st.sheet.clone();
+                        let base = d.clone();
+                        FilterChip(fname, is_file_sel, move || {
+                            let mut next = base.clone();
+                            if is_file_sel {
+                                next.files.retain(|f| f != &fname_str);
+                            } else {
+                                next.files.push(fname_str.clone());
+                            }
+                            s.set(Some(next));
+                        });
+                        cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                    }
+                });
+            }
             if let Some(text) = blocker {
                 Label(text, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
             }
@@ -1343,10 +1436,17 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
             cu::Spacer().modifier(Modifier::new().weight(1.0));
             let (files, s) = (d.files.clone(), st.sheet.clone());
             let target = target_device.clone();
+            let st_ver = st.version.clone();
             AppButton("보내기", Some(IconRole::Send), ButtonKind::Primary, true, can_send, false, move || {
                 if let Some(id) = target.as_deref() {
-                    if transfer_service().send(id, files.clone()).is_ok() {
-                        s.set(None);
+                    let svc = transfer_service();
+                    match svc.send(id, files.clone()) {
+                        Ok(()) => {
+                            st_ver.set(st_ver.get_untracked() + 1);
+                            s.set(None);
+                            notice::post("파일 전송을 시작했습니다.");
+                        }
+                        Err(why) => notice::post(why),
                     }
                 }
             });
@@ -1470,7 +1570,7 @@ fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMemb
                     cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
                         for &i in line {
                             let m = &agents[i];
-                            let name = crate::ui::project::member_name(None, &m.project, &m.agent, &m.title);
+                            let name = clean_member_name(&m.project, &m.agent, &m.title);
                             let (t, id) = (tap.clone(), m.id.clone());
                             let host = agent_host(&m.project);
                             ShareTile(&name, &host, false, move || t(SendTarget::Agent(id.clone())), || {
@@ -1783,5 +1883,96 @@ mod tests {
         assert_eq!(SHARE_SHEET_WIDTH, 400.0);
         assert_eq!(super::super::components::sheet_width(1440.0, SHARE_SHEET_WIDTH), 400.0);
         assert_eq!(super::super::components::sheet_width(390.0, SHARE_SHEET_WIDTH), 390.0);
+    }
+
+    #[test]
+    fn fr_l27_5_offline_device_target_selection_is_prevented_and_notified() {
+        let (model, _) = sample_model();
+        let draft = SendDraft::default();
+        // Online device can be chosen.
+        let ok = choose_target(&draft, &model.devices, SendTarget::Device("d1".into()));
+        assert!(ok.is_ok());
+        assert_eq!(ok.unwrap().target, Some(SendTarget::Device("d1".into())));
+
+        // Offline device is rejected with honest reason.
+        let err = choose_target(&draft, &model.devices, SendTarget::Device("d6".into()));
+        assert!(err.is_err());
+        assert_eq!(err.unwrap_err(), "win-desktop은(는) 지금 연결되어 있지 않습니다");
+
+        // Sleeping device is also rejected as send target.
+        let err_sleep = choose_target(&draft, &model.devices, SendTarget::Device("d5".into()));
+        assert!(err_sleep.is_err());
+        assert_eq!(err_sleep.unwrap_err(), "Pixel 10은(는) 지금 연결되어 있지 않습니다");
+    }
+
+    #[test]
+    fn fr_l27_5_demo_mode_allows_picking_demo_files_and_sending_updates_transfers_and_kpis() {
+        let _guard = crate::services::test_guard();
+        let svc = crate::ui::files::DemoTransferService::new();
+        let initial_transfers = svc.transfers().len();
+        let (model_before, _) = sample_model();
+        let kpis_before = kpi_cells(&model_before);
+
+        // Stage demo files and send to online device "d1".
+        let demo_fls = demo_files();
+        assert!(!demo_fls.is_empty());
+        let send_res = svc.send("d1", vec![demo_fls[0].to_string()]);
+        assert!(send_res.is_ok());
+
+        // Transfers increased by 1 (inserted at index 0).
+        let transfers_after = svc.transfers();
+        assert_eq!(transfers_after.len(), initial_transfers + 1);
+        let first = transfers_after.first().unwrap();
+        assert_eq!(first.name, demo_fls[0]);
+        assert_eq!(first.device, "macbook-pro");
+        assert_eq!(first.direction, Direction::Send);
+
+        // Model built with updated service reflects the new transfer and KPI count.
+        let model_after = FilesModel {
+            transfers: transfers_after,
+            ..model_before
+        };
+        let kpis_after = kpi_cells(&model_after);
+        let before_active: usize = kpis_before[1].value.parse().unwrap();
+        let after_active: usize = kpis_after[1].value.parse().unwrap();
+        assert_eq!(after_active, before_active + 1);
+    }
+
+    #[test]
+    fn fr_l27_4_demo_mode_offers_accept_and_decline_interactively() {
+        let _guard = crate::services::test_guard();
+        let svc = crate::ui::files::DemoTransferService::new();
+        let pending = svc.pending_offers();
+        assert!(!pending.is_empty());
+        let target_id = pending[0].id.clone();
+        let expected_files = pending[0].files.len().max(1);
+        let mut answered = Vec::new();
+
+        // Accept offer adds active receiving transfers and removes the offer.
+        let trs_before = svc.transfers().len();
+        let ok = answer_offer(&svc, &pending, &mut answered, &target_id, Answer::Accept);
+        assert!(ok);
+        assert_eq!(svc.transfers().len(), trs_before + expected_files);
+        assert!(answered.contains(&target_id));
+
+        // Visible offers now excludes answered
+        let visible = visible_offers(&pending, &answered);
+        assert!(!visible.iter().any(|o| o.id == target_id));
+    }
+
+    #[test]
+    fn fr_l27_2_clean_member_names_prevent_awkward_agent_tile_ellipsis() {
+        assert_eq!(
+            clean_member_name("demo-project", "claude-code", "개발"),
+            "demo-claude"
+        );
+        assert_eq!(
+            clean_member_name("darkpyonix-ember", "gemini-cli", "기획"),
+            "ember-gemini"
+        );
+        assert_eq!(
+            clean_member_name("core-repo", "codex", "테스트"),
+            "core-codex"
+        );
     }
 }

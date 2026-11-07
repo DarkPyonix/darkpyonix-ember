@@ -319,6 +319,110 @@ mod tree {
     }
 }
 
+mod selection {
+    use super::*;
+    use ember_app::ui::editor::{prune_redundant_selection, update_tree_selection, TreeRow};
+
+    fn make_rows() -> Vec<TreeRow> {
+        vec![
+            TreeRow { path: "/p/a".into(), name: "a".into(), depth: 0, is_dir: true, open: false },
+            TreeRow { path: "/p/b".into(), name: "b".into(), depth: 0, is_dir: false, open: false },
+            TreeRow { path: "/p/c".into(), name: "c".into(), depth: 0, is_dir: false, open: false },
+            TreeRow { path: "/p/d".into(), name: "d".into(), depth: 0, is_dir: true, open: false },
+            TreeRow { path: "/p/e".into(), name: "e".into(), depth: 0, is_dir: false, open: false },
+        ]
+    }
+
+    #[test]
+    fn single_click_selects_just_clicked_item() {
+        let rows = make_rows();
+        let sel = update_tree_selection(&[("/p/a".into(), true)], ("/p/b".into(), false), &rows, false, false);
+        assert_eq!(sel, vec![("/p/b".to_string(), false)]);
+    }
+
+    #[test]
+    fn cmd_ctrl_toggle_adds_new_item_and_removes_existing_item() {
+        let rows = make_rows();
+        // Toggle non-existing item: append
+        let sel1 = update_tree_selection(&[("/p/a".into(), true)], ("/p/b".into(), false), &rows, false, true);
+        assert_eq!(sel1, vec![("/p/a".to_string(), true), ("/p/b".to_string(), false)]);
+
+        // Toggle existing item: remove
+        let sel2 = update_tree_selection(&sel1, ("/p/a".into(), true), &rows, false, true);
+        assert_eq!(sel2, vec![("/p/b".to_string(), false)]);
+
+        // Toggle remaining item: empty
+        let sel3 = update_tree_selection(&sel2, ("/p/b".into(), false), &rows, false, true);
+        assert!(sel3.is_empty());
+    }
+
+    #[test]
+    fn shift_selects_contiguous_range_between_anchor_and_clicked() {
+        let rows = make_rows();
+        // Downward range: from /p/b (idx 1) to /p/d (idx 3)
+        let sel = update_tree_selection(&[("/p/b".into(), false)], ("/p/d".into(), true), &rows, true, false);
+        assert_eq!(
+            sel,
+            vec![
+                ("/p/b".to_string(), false),
+                ("/p/c".to_string(), false),
+                ("/p/d".to_string(), true),
+            ]
+        );
+
+        // Upward range: from /p/d (idx 3) to /p/a (idx 0)
+        let sel_up = update_tree_selection(&[("/p/d".into(), true)], ("/p/a".into(), true), &rows, true, false);
+        assert_eq!(
+            sel_up,
+            vec![
+                ("/p/a".to_string(), true),
+                ("/p/b".to_string(), false),
+                ("/p/c".to_string(), false),
+                ("/p/d".to_string(), true),
+            ]
+        );
+
+        // Shift with empty current: defaults to clicked item
+        let sel_empty = update_tree_selection(&[], ("/p/c".into(), false), &rows, true, false);
+        assert_eq!(sel_empty, vec![("/p/c".to_string(), false)]);
+    }
+
+    #[test]
+    fn prune_redundant_selection_filters_out_items_below_selected_directory() {
+        let items = vec![
+            ("/p/src".to_string(), true),
+            ("/p/src/main.rs".to_string(), false),
+            ("/p/src/nested/deep.rs".to_string(), false),
+            ("/p/README.md".to_string(), false),
+        ];
+        let pruned = prune_redundant_selection(&items);
+        assert_eq!(
+            pruned,
+            vec![
+                ("/p/src".to_string(), true),
+                ("/p/README.md".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn prune_redundant_selection_filters_nested_directories_and_keeps_siblings() {
+        let items = vec![
+            ("/p/dir".to_string(), true),
+            ("/p/dir/child".to_string(), true),
+            ("/p/dir2".to_string(), true),
+        ];
+        let pruned = prune_redundant_selection(&items);
+        assert_eq!(
+            pruned,
+            vec![
+                ("/p/dir".to_string(), true),
+                ("/p/dir2".to_string(), true),
+            ]
+        );
+    }
+}
+
 // FR-L31 (D38): the page grid is the mockup's; a closed tool window leaves a 0 wide column or a
 // 0 high row, and the stripes decide which.
 mod grid {
@@ -533,6 +637,469 @@ mod aria {
     }
 }
 
+// FR-L31, #448: Problems capping and navigation, and output channels.
+mod problems_and_output {
+    use ember_app::ui::editor::{
+        paginate_problems, push_workbench_log, MAX_VISIBLE_PROBLEMS, MAX_WORKBENCH_LOGS,
+    };
+    use ember_app::ui::editor_workbench::PendingGoto;
+
+    #[test]
+    fn fr_l31_problems_list_cap_and_overflow_count() {
+        assert_eq!(MAX_VISIBLE_PROBLEMS, 200);
+
+        // Under cap: all visible, no overflow
+        let short_list: Vec<usize> = (0..50).collect();
+        let (visible, overflow) = paginate_problems(&short_list, MAX_VISIBLE_PROBLEMS);
+        assert_eq!(visible.len(), 50);
+        assert_eq!(overflow, 0);
+
+        // Over cap: capped at limit, remainder reported as overflow
+        let long_list: Vec<usize> = (0..250).collect();
+        let (visible, overflow) = paginate_problems(&long_list, MAX_VISIBLE_PROBLEMS);
+        assert_eq!(visible.len(), 200);
+        assert_eq!(overflow, 50);
+
+        // Load-more increment renders subsequent slice
+        let (visible_more, overflow_more) = paginate_problems(&long_list, 400);
+        assert_eq!(visible_more.len(), 250);
+        assert_eq!(overflow_more, 0);
+    }
+
+    #[test]
+    fn fr_l31_pending_goto_records_line_and_col() {
+        let goto = PendingGoto {
+            id: 42,
+            path: "/w/src/main.rs".into(),
+            line: 15,
+            col: 8,
+        };
+        assert_eq!(goto.id, 42);
+        assert_eq!(goto.path, "/w/src/main.rs");
+        assert_eq!(goto.line, 15);
+        assert_eq!(goto.col, 8);
+    }
+
+    #[test]
+    fn fr_l31_output_channels_and_message_severity() {
+        use ember_editor::output::{MessageSeverity, OutputChannel, MAX_OUTPUT_CHANNEL_BYTES};
+
+        let mut ch = OutputChannel::new("ember-output-1", "Git");
+        assert_eq!(ch.label, "Git");
+        ch.append("line 1\n");
+        ch.append("line 2\n");
+        assert_eq!(ch.text, "line 1\nline 2\n");
+
+        ch.clear();
+        assert_eq!(ch.text, "");
+
+        // Huge append is capped at 64 KiB
+        ch.append(&"x".repeat(MAX_OUTPUT_CHANNEL_BYTES + 500));
+        assert_eq!(ch.text.len(), MAX_OUTPUT_CHANNEL_BYTES);
+
+        assert_eq!(MessageSeverity::from_u8(1).label(), "정보");
+        assert_eq!(MessageSeverity::from_u8(2).label(), "경고");
+        assert_eq!(MessageSeverity::from_u8(3).label(), "오류");
+    }
+
+    #[test]
+    fn fr_l31_workbench_logs_capped_at_max_lines() {
+        let mut logs = Vec::new();
+        for i in 0..(MAX_WORKBENCH_LOGS + 25) {
+            push_workbench_log(&mut logs, format!("line {i}"));
+        }
+        assert_eq!(logs.len(), MAX_WORKBENCH_LOGS);
+        assert_eq!(logs.first().map(String::as_str), Some("line 25"));
+        assert_eq!(
+            logs.last().map(String::as_str),
+            Some(format!("line {}", MAX_WORKBENCH_LOGS + 24).as_str())
+        );
+    }
+}
+
+// #302: Keyboard navigation and roving tabindex in the editor window (tree and tab strip).
+mod keyboard_navigation {
+    use ember_app::ui::editor::{
+        editor_focus_target, tab_strip_key, tree_key_action, TabKeyOutcome, TreeKeyOutcome, TreeRow,
+    };
+
+    #[test]
+    fn fr_l31_tab_strip_arrow_keys_navigate_and_wrap() {
+        let paths = vec![
+            "/w/p/a.rs".to_string(),
+            "/w/p/b.rs".to_string(),
+            "/w/p/c.rs".to_string(),
+        ];
+
+        // ArrowRight from first tab moves to second.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/a.rs"), "ArrowRight"),
+            Some(TabKeyOutcome::Activate("/w/p/b.rs".to_string()))
+        );
+
+        // ArrowRight from middle tab moves to third.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/b.rs"), "ArrowRight"),
+            Some(TabKeyOutcome::Activate("/w/p/c.rs".to_string()))
+        );
+
+        // ArrowRight from last tab wraps around to first.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/c.rs"), "ArrowRight"),
+            Some(TabKeyOutcome::Activate("/w/p/a.rs".to_string()))
+        );
+
+        // ArrowRight with unknown current tab defaults to first tab.
+        assert_eq!(
+            tab_strip_key(&paths, None, "ArrowRight"),
+            Some(TabKeyOutcome::Activate("/w/p/a.rs".to_string()))
+        );
+        assert_eq!(
+            tab_strip_key(&paths, Some("/unknown.rs"), "ArrowRight"),
+            Some(TabKeyOutcome::Activate("/w/p/a.rs".to_string()))
+        );
+
+        // ArrowLeft from middle tab moves to first.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/b.rs"), "ArrowLeft"),
+            Some(TabKeyOutcome::Activate("/w/p/a.rs".to_string()))
+        );
+
+        // ArrowLeft from first tab wraps around to last.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/a.rs"), "ArrowLeft"),
+            Some(TabKeyOutcome::Activate("/w/p/c.rs".to_string()))
+        );
+
+        // ArrowLeft with unknown current tab defaults to last tab.
+        assert_eq!(
+            tab_strip_key(&paths, None, "ArrowLeft"),
+            Some(TabKeyOutcome::Activate("/w/p/c.rs".to_string()))
+        );
+    }
+
+    #[test]
+    fn fr_l31_tab_strip_home_end_delete_and_activate() {
+        let paths = vec![
+            "/w/p/a.rs".to_string(),
+            "/w/p/b.rs".to_string(),
+            "/w/p/c.rs".to_string(),
+        ];
+
+        // Home activates first tab.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/c.rs"), "Home"),
+            Some(TabKeyOutcome::Activate("/w/p/a.rs".to_string()))
+        );
+
+        // End activates last tab.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/a.rs"), "End"),
+            Some(TabKeyOutcome::Activate("/w/p/c.rs".to_string()))
+        );
+
+        // Enter and Space activate the current tab.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/b.rs"), "Enter"),
+            Some(TabKeyOutcome::Activate("/w/p/b.rs".to_string()))
+        );
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/b.rs"), " "),
+            Some(TabKeyOutcome::Activate("/w/p/b.rs".to_string()))
+        );
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/b.rs"), "Space"),
+            Some(TabKeyOutcome::Activate("/w/p/b.rs".to_string()))
+        );
+
+        // Delete and Backspace close the current tab.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/b.rs"), "Delete"),
+            Some(TabKeyOutcome::Close("/w/p/b.rs".to_string()))
+        );
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/c.rs"), "Backspace"),
+            Some(TabKeyOutcome::Close("/w/p/c.rs".to_string()))
+        );
+
+        // Delete with no current tab returns None.
+        assert_eq!(tab_strip_key(&paths, None, "Delete"), None);
+
+        // Unrelated key returns None.
+        assert_eq!(tab_strip_key(&paths, Some("/w/p/a.rs"), "Escape"), None);
+        assert_eq!(tab_strip_key(&paths, Some("/w/p/a.rs"), "x"), None);
+
+        // Empty paths always returns None.
+        assert_eq!(tab_strip_key(&[], Some("/w/p/a.rs"), "ArrowRight"), None);
+        assert_eq!(tab_strip_key(&[], None, "Home"), None);
+    }
+
+    fn sample_tree() -> Vec<TreeRow> {
+        vec![
+            TreeRow {
+                path: "/p/src".to_string(),
+                name: "src".to_string(),
+                depth: 0,
+                is_dir: true,
+                open: true,
+            },
+            TreeRow {
+                path: "/p/src/deep".to_string(),
+                name: "deep".to_string(),
+                depth: 1,
+                is_dir: true,
+                open: false,
+            },
+            TreeRow {
+                path: "/p/src/lib.rs".to_string(),
+                name: "lib.rs".to_string(),
+                depth: 1,
+                is_dir: false,
+                open: false,
+            },
+            TreeRow {
+                path: "/p/README.md".to_string(),
+                name: "README.md".to_string(),
+                depth: 0,
+                is_dir: false,
+                open: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn fr_l31_tree_arrow_down_up_home_end() {
+        let rows = sample_tree();
+
+        // ArrowDown with no selection selects first row.
+        assert_eq!(
+            tree_key_action(&rows, None, "/p", "ArrowDown"),
+            Some(TreeKeyOutcome::Select("/p/src".to_string(), true))
+        );
+
+        // ArrowDown from row 0 selects row 1.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "ArrowDown"),
+            Some(TreeKeyOutcome::Select("/p/src/deep".to_string(), true))
+        );
+
+        // ArrowDown from row 2 selects row 3.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/lib.rs", false)), "/p", "ArrowDown"),
+            Some(TreeKeyOutcome::Select("/p/README.md".to_string(), false))
+        );
+
+        // ArrowDown from last row stays on last row.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/README.md", false)), "/p", "ArrowDown"),
+            Some(TreeKeyOutcome::Select("/p/README.md".to_string(), false))
+        );
+
+        // ArrowUp from last row selects row 2.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/README.md", false)), "/p", "ArrowUp"),
+            Some(TreeKeyOutcome::Select("/p/src/lib.rs".to_string(), false))
+        );
+
+        // ArrowUp from first row stays on first row.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "ArrowUp"),
+            Some(TreeKeyOutcome::Select("/p/src".to_string(), true))
+        );
+
+        // ArrowUp with no selection selects first row.
+        assert_eq!(
+            tree_key_action(&rows, None, "/p", "ArrowUp"),
+            Some(TreeKeyOutcome::Select("/p/src".to_string(), true))
+        );
+
+        // Home selects first row.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/README.md", false)), "/p", "Home"),
+            Some(TreeKeyOutcome::Select("/p/src".to_string(), true))
+        );
+
+        // End selects last row.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "End"),
+            Some(TreeKeyOutcome::Select("/p/README.md".to_string(), false))
+        );
+
+        // Empty rows returns None.
+        assert_eq!(tree_key_action(&[], None, "/p", "ArrowDown"), None);
+    }
+
+    #[test]
+    fn fr_l31_tree_arrow_right_expands_or_descends() {
+        let rows = sample_tree();
+
+        // ArrowRight on closed directory returns Expand.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/deep", true)), "/p", "ArrowRight"),
+            Some(TreeKeyOutcome::Expand("/p/src/deep".to_string()))
+        );
+
+        // ArrowRight on open directory moves to its first child.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "ArrowRight"),
+            Some(TreeKeyOutcome::Select("/p/src/deep".to_string(), true))
+        );
+
+        // ArrowRight on file does nothing.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/lib.rs", false)), "/p", "ArrowRight"),
+            None
+        );
+
+        // ArrowRight with no selection does nothing.
+        assert_eq!(tree_key_action(&rows, None, "/p", "ArrowRight"), None);
+    }
+
+    #[test]
+    fn fr_l31_tree_arrow_left_collapses_or_ascends() {
+        let rows = sample_tree();
+
+        // ArrowLeft on open directory returns Collapse.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "ArrowLeft"),
+            Some(TreeKeyOutcome::Collapse("/p/src".to_string()))
+        );
+
+        // ArrowLeft on child row (file lib.rs at depth 1) moves to parent directory.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/lib.rs", false)), "/p", "ArrowLeft"),
+            Some(TreeKeyOutcome::Select("/p/src".to_string(), true))
+        );
+
+        // ArrowLeft on closed child directory (deep at depth 1) moves to parent directory.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/deep", true)), "/p", "ArrowLeft"),
+            Some(TreeKeyOutcome::Select("/p/src".to_string(), true))
+        );
+
+        // ArrowLeft on root-level file (depth 0) does nothing.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/README.md", false)), "/p", "ArrowLeft"),
+            None
+        );
+
+        // ArrowLeft with no selection does nothing.
+        assert_eq!(tree_key_action(&rows, None, "/p", "ArrowLeft"), None);
+    }
+
+    #[test]
+    fn fr_l31_tree_enter_and_space_open_file_or_toggle_dir() {
+        let rows = sample_tree();
+
+        // Enter on file opens the file.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/lib.rs", false)), "/p", "Enter"),
+            Some(TreeKeyOutcome::OpenFile("/p/src/lib.rs".to_string()))
+        );
+
+        // Space on file opens the file.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/lib.rs", false)), "/p", " "),
+            Some(TreeKeyOutcome::OpenFile("/p/src/lib.rs".to_string()))
+        );
+
+        // Enter on closed directory expands it.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/deep", true)), "/p", "Enter"),
+            Some(TreeKeyOutcome::Expand("/p/src/deep".to_string()))
+        );
+
+        // Enter on open directory collapses it.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "Enter"),
+            Some(TreeKeyOutcome::Collapse("/p/src".to_string()))
+        );
+
+        // Space on open directory collapses it.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "Space"),
+            Some(TreeKeyOutcome::Collapse("/p/src".to_string()))
+        );
+
+        // Unrelated key returns None.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "Tab"),
+            None
+        );
+    }
+
+    #[test]
+    fn fr_l31_editor_focus_target_returns_current_path() {
+        assert_eq!(
+            editor_focus_target(Some("/w/p/src/lib.rs")),
+            Some("/w/p/src/lib.rs".to_string())
+        );
+        assert_eq!(editor_focus_target(None), None);
+    }
+
+    #[test]
+    fn fr_l31_tree_ignores_keys_while_prompt_is_open() {
+        use ember_app::ui::editor::{tree_handles_key, TreePrompt};
+        assert!(tree_handles_key(None));
+        for p in [
+            TreePrompt::NewFile { parent: "/p".into() },
+            TreePrompt::NewDir { parent: "/p".into() },
+            TreePrompt::Rename { path: "/p/a.rs".into() },
+            TreePrompt::Delete { path: "/p/a.rs".into(), is_dir: false },
+            TreePrompt::DeleteMany { items: vec![("/p/a.rs".into(), false), ("/p/b.rs".into(), false)] },
+        ] {
+            assert!(!tree_handles_key(Some(&p)), "prompt {p:?} must block tree key handling");
+        }
+    }
+
+    #[test]
+    fn fr_l31_4_select_all_cut_selection_and_clipboard_badge() {
+        use ember_app::ui::editor::{
+            clipboard_badge_text, cut_selection, select_all_tree_rows, ClipboardKind, TreeClipboard,
+        };
+        let rows = sample_tree();
+        let (all, last) = select_all_tree_rows(&rows);
+        assert_eq!(all.len(), rows.len());
+        assert_eq!(all[0], ("/p/src".to_string(), true));
+        assert_eq!(last, Some(("/p/README.md".to_string(), false)));
+
+        let (empty_all, empty_last) = select_all_tree_rows(&[]);
+        assert!(empty_all.is_empty());
+        assert_eq!(empty_last, None);
+
+        // Cutting when row_path is part of multi_sel cuts all non-redundant selected items.
+        let clip = cut_selection(&all, "/p/README.md", false).expect("non-empty cut");
+        assert_eq!(clip.kind, ClipboardKind::Cut);
+        // `/p/src/deep` and `/p/src/lib.rs` are pruned because `/p/src` is selected.
+        assert_eq!(
+            clip.paths,
+            vec![
+                ("/p/src".to_string(), true),
+                ("/p/README.md".to_string(), false),
+            ]
+        );
+        assert_eq!(clipboard_badge_text(Some(&clip)).as_deref(), Some("잘라냄 2개"));
+
+        // Cutting a row outside multi_sel cuts only that row.
+        let single = cut_selection(&[("/p/Cargo.toml".to_string(), false)], "/p/README.md", false)
+            .expect("single cut");
+        assert_eq!(single.paths, vec![("/p/README.md".to_string(), false)]);
+        assert_eq!(clipboard_badge_text(Some(&single)).as_deref(), Some("잘라냄 1개"));
+
+        // Copy badge formatting and empty clipboard handling.
+        let copy_clip = TreeClipboard {
+            kind: ClipboardKind::Copy,
+            paths: vec![("/p/Cargo.toml".to_string(), false), ("/p/README.md".to_string(), false)],
+        };
+        assert_eq!(clipboard_badge_text(Some(&copy_clip)).as_deref(), Some("복사됨 2개"));
+        assert_eq!(
+            clipboard_badge_text(Some(&TreeClipboard { kind: ClipboardKind::Cut, paths: Vec::new() })),
+            None
+        );
+        assert_eq!(clipboard_badge_text(None), None);
+    }
+}
+
 // FR-L31.2: the editor's source control rules against the demo git source, which takes the same op
 // names and bodies the project relay (FR-G4) does: grouping, stage and unstage per file (a rename
 // with its old path), the commit gate and the commit body.
@@ -581,4 +1148,101 @@ fn fr_l31_2_stage_unstage_and_commit_against_the_demo_repository() {
     assert!(!groups(after.status().unwrap()).staged.iter().any(|e| e.path == "docs/GIT.md"));
     assert_eq!(after.status().unwrap().ahead, ahead + 1);
     assert_eq!(commit_gate(&after, "\n  \n", false).unwrap_err(), NEED_MESSAGE);
+}
+
+// FR-L31.2 and #444: Diff gutter and editor source control tests.
+#[test]
+fn fr_l31_2_diff_gutter_and_scm_helpers() {
+    use ember_app::ui::editor::{compute_line_diffs, diff_gutter_decorations, DiffLineKind, DiffLineMarker};
+    use ember_app::ui::editor_scm::{
+        commit_gate_with_amend, discard_patch, discard_tap, markers_from_file_diff, reconstruct_base_text,
+        side_by_side_rows, ScmLoad,
+    };
+    use ember_app::ui::vcs::{
+        parse_unified, ConflictChoice, ConflictFile, ConflictSegment, DeleteTap, FileDiff, LineKind,
+    };
+    use ember_client::api::{GitFile, GitStatus};
+
+    // 1. Line diff markers
+    let old_text = "alpha\nbeta\ngamma\ndelta";
+    let new_text = "alpha\nbeta_mod\ngamma\ndelta\nepsilon";
+    let markers = compute_line_diffs(old_text, new_text);
+    assert_eq!(markers, vec![
+        DiffLineMarker { line: 1, kind: DiffLineKind::Modified },
+        DiffLineMarker { line: 4, kind: DiffLineKind::Added },
+    ]);
+
+    // 2. Diff gutter decorations
+    let decs = diff_gutter_decorations(1, &markers);
+    assert_eq!(decs.decorations().len(), 2);
+
+    // 3. Reconstruct base text
+    let patch = "diff --git a/test.rs b/test.rs\n--- a/test.rs\n+++ b/test.rs\n@@ -1,4 +1,5 @@\n alpha\n-beta\n+beta_mod\n gamma\n delta\n+epsilon\n";
+    let diff = parse_unified(patch).into_iter().next().unwrap();
+    let base = reconstruct_base_text(new_text, &diff);
+    assert_eq!(base, old_text);
+
+    // 4. Markers from file diff
+    let m_fd = markers_from_file_diff(&diff, 5);
+    assert_eq!(m_fd, vec![
+        DiffLineMarker { line: 1, kind: DiffLineKind::Modified },
+        DiffLineMarker { line: 4, kind: DiffLineKind::Added },
+    ]);
+
+    // 5. Side by side rows
+    let sbs = side_by_side_rows(&diff.hunks[0]);
+    assert_eq!(sbs.len(), 5);
+    // Context alpha
+    assert_eq!(sbs[0].0.as_ref().unwrap().1, LineKind::Context);
+    assert_eq!(sbs[0].1.as_ref().unwrap().1, LineKind::Context);
+    // beta (del on left, mod on right)
+    assert_eq!(sbs[1].0.as_ref().unwrap().1, LineKind::Del);
+    assert_eq!(sbs[1].1.as_ref().unwrap().1, LineKind::Add);
+    // Context gamma
+    assert_eq!(sbs[2].0.as_ref().unwrap().1, LineKind::Context);
+    // Context delta
+    assert_eq!(sbs[3].0.as_ref().unwrap().1, LineKind::Context);
+    // epsilon (None on left, Add on right)
+    assert!(sbs[4].0.is_none());
+    assert_eq!(sbs[4].1.as_ref().unwrap().1, LineKind::Add);
+
+    // 6. Amend commit gate
+    let status = GitStatus {
+        branch: "main".into(),
+        files: vec![GitFile { path: "a.rs".into(), old_path: None, index: '.', worktree: 'M' }],
+        ..GitStatus::default()
+    };
+    let ready = ScmLoad::Ready(status);
+    let req = commit_gate_with_amend(&ready, "Fix: amend previous\n\nDetails", true, false).unwrap();
+    assert!(req.amend);
+
+    // 7. Discard patch and confirmation tap
+    let dp = discard_patch(&diff).unwrap();
+    assert!(dp.contains("+beta_mod"));
+    assert_eq!(discard_tap(None, "test.rs", 100), DeleteTap::Arm);
+    assert_eq!(discard_tap(Some(("test.rs", 100)), "test.rs", 300), DeleteTap::Wait);
+    assert_eq!(discard_tap(Some(("test.rs", 100)), "test.rs", 800), DeleteTap::Confirm);
+    assert_eq!(discard_tap(Some(("test.rs", 100)), "test.rs", 4200), DeleteTap::Expired);
+
+    // 8. Conflict file resolution
+    let cf = ConflictFile {
+        path: "conf.rs".into(),
+        segments: vec![
+            ConflictSegment::Common("fn main() {\n".into()),
+            ConflictSegment::Block {
+                ours_label: "HEAD".into(),
+                theirs_label: "feature".into(),
+                ours: "    println!(\"ours\");\n".into(),
+                theirs: "    println!(\"theirs\");\n".into(),
+                choice: ConflictChoice::Unresolved,
+            },
+            ConflictSegment::Common("}\n".into()),
+        ],
+    };
+    assert!(!cf.is_resolved());
+    let cf_ours = cf.with_choice(0, ConflictChoice::Ours);
+    assert!(cf_ours.is_resolved());
+    assert_eq!(cf_ours.resolved_content().unwrap(), "fn main() {\n    println!(\"ours\");\n}\n");
+    let cf_both = cf.with_choice(0, ConflictChoice::Both);
+    assert_eq!(cf_both.resolved_content().unwrap(), "fn main() {\n    println!(\"ours\");\n    println!(\"theirs\");\n}\n");
 }

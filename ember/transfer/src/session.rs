@@ -24,9 +24,11 @@ use ember_transport::{BiStream, PeerId, RecvHalf, SendHalf};
 
 use crate::limits::{LimitError, Limits};
 use crate::mode::{decide, Decision, ReceiveMode};
-use crate::names::clean_relative_path;
+use crate::names::{clean_offer_paths, MAX_OFFER_FILES};
 use crate::state::{Clock, Event, State, Transfer, TransitionError};
+use crate::store::{DeclaredFile, ReceiveWriter, StoreError, StoredFile, DEFAULT_CHUNK_BYTES};
 use crate::wire::{read_message, write_message, DeclineCode, FileEntry, Message, WireError};
+use sha2::{Digest, Sha256};
 
 /// Default time limit for an unanswered offer.
 pub const DEFAULT_OFFER_TTL: Duration = Duration::from_secs(60);
@@ -37,14 +39,17 @@ pub enum Error {
     Wire(#[from] WireError),
     #[error(transparent)]
     Transition(#[from] TransitionError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
     #[error("protocol error: {0}")]
     Protocol(String),
 }
 
-fn random_id() -> String {
+fn random_id() -> Result<String, Error> {
     let mut b = [0u8; 8];
-    getrandom::fill(&mut b).expect("OS random source unavailable");
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    getrandom::fill(&mut b)
+        .map_err(|e| Error::Protocol(format!("OS random source unavailable: {e}")))?;
+    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
 }
 
 /// Which peers are the user's registered, not revoked devices (`FR-F9`, `FR-N3`).
@@ -113,6 +118,111 @@ impl Handled {
         }
         self.halves = None;
         Ok(())
+    }
+
+    /// Receives all files of this accepted offer into `received_dir` (`FR-F4`, `FR-F5`, `FR-F8`,
+    /// `FR-F9`, `FR-F10`). Resumes any existing partial files from their verified byte offsets,
+    /// checks every chunk and final SHA-256 digest, and moves completed files into `received_dir`
+    /// with mode `0644`. If cancelled or failed, removes partial files (`FR-F4`).
+    pub async fn receive_into(
+        &mut self,
+        received_dir: &std::path::Path,
+        limits: Limits,
+    ) -> Result<Vec<StoredFile>, Error> {
+        let Some(mut halves) = self.halves.take() else {
+            return Err(Error::Protocol("offer is not in an accepted state with open stream".into()));
+        };
+        if self.transfer.state() == &State::Accepted {
+            self.transfer.apply(Event::Start, self.clock.now())?;
+        }
+        let declared: Vec<DeclaredFile> = self
+            .files
+            .iter()
+            .map(|f| DeclaredFile { name: f.name.clone(), size: f.size, sha256: None })
+            .collect();
+        let mut writer = ReceiveWriter::open(
+            received_dir,
+            &self.id,
+            &self.from.to_string(),
+            &declared,
+            limits,
+        )?;
+        for idx in 0..declared.len() {
+            let offset = writer.resume_offset(idx)?;
+            if offset > 0 {
+                write_message(
+                    &mut halves.send,
+                    &Message::ResumeFrom {
+                        id: self.id.clone(),
+                        file: idx as u32,
+                        offset,
+                    },
+                )
+                .await?;
+            }
+        }
+
+        loop {
+            let Some(msg) = read_message(&mut halves.recv).await? else {
+                writer.abort();
+                let _ = self.transfer.apply(Event::Fail("stream closed before done".into()), self.clock.now());
+                return Err(Error::Protocol("stream closed before done".into()));
+            };
+            if msg.id() != self.id {
+                writer.abort();
+                return Err(Error::Protocol("message for another offer".into()));
+            }
+            match msg {
+                Message::Chunk { file, offset, data, sha256, .. } => {
+                    match writer.write_chunk(file as usize, offset, &data, sha256.as_deref()) {
+                        Ok(total) => {
+                            let _ = self.transfer.apply(Event::Progress(total), self.clock.now());
+                        }
+                        Err(e) => {
+                            writer.abort();
+                            let _ = self.transfer.apply(Event::Fail(e.to_string()), self.clock.now());
+                            return Err(Error::Store(e));
+                        }
+                    }
+                }
+                Message::Pause { .. } | Message::Resume { .. } => {}
+                Message::Cancel { .. } => {
+                    writer.abort();
+                    self.transfer.apply(Event::Cancel, self.clock.now())?;
+                    return Err(Error::Protocol("cancelled by sender".into()));
+                }
+                Message::Done { sha256, .. } => {
+                    let stored = writer.finalize()?;
+                    if !sha256.is_empty() && sha256.len() != stored.len() {
+                        for s in &stored {
+                            let _ = std::fs::remove_file(&s.path);
+                        }
+                        let _ = self.transfer.apply(Event::Fail("digest count mismatch".into()), self.clock.now());
+                        return Err(Error::Protocol("digest count mismatch".into()));
+                    }
+                    for (s, want) in stored.iter().zip(sha256.iter()) {
+                        if !s.sha256.eq_ignore_ascii_case(want) {
+                            for st in &stored {
+                                let _ = std::fs::remove_file(&st.path);
+                            }
+                            let err = StoreError::HashMismatch {
+                                name: s.name.clone(),
+                                expected: want.clone(),
+                                got: s.sha256.clone(),
+                            };
+                            let _ = self.transfer.apply(Event::Fail(err.to_string()), self.clock.now());
+                            return Err(Error::Store(err));
+                        }
+                    }
+                    self.transfer.apply(Event::Finish, self.clock.now())?;
+                    return Ok(stored);
+                }
+                _ => {
+                    writer.abort();
+                    return Err(Error::Protocol("unexpected message while receiving chunks".into()));
+                }
+            }
+        }
     }
 }
 
@@ -185,6 +295,11 @@ impl Service {
         if files.is_empty() {
             return self.refuse(handled, send, DeclineCode::Invalid, "the offer has no files").await;
         }
+        if files.len() > MAX_OFFER_FILES {
+            return self
+                .refuse(handled, send, DeclineCode::Invalid, "the offer has too many files")
+                .await;
+        }
         let mut sum: u64 = 0;
         for f in &files {
             match sum.checked_add(f.size) {
@@ -203,10 +318,13 @@ impl Service {
             };
             return self.refuse(handled, send, code, &e.to_string()).await;
         }
-        // 3. Names.
+        // 3. Names (disambiguating duplicate cleaned paths within the offer, #527).
+        let raw_names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+        let cleaned_paths = clean_offer_paths(&raw_names);
         let cleaned: Vec<FileEntry> = files
             .iter()
-            .map(|f| FileEntry { name: clean_relative_path(&f.name).join("/"), size: f.size })
+            .zip(cleaned_paths.into_iter())
+            .map(|(f, comps)| FileEntry { name: comps.join("/"), size: f.size })
             .collect();
         handled.files = cleaned.clone();
         let incoming = IncomingOffer { id: id.clone(), from: peer, files: cleaned, total };
@@ -346,7 +464,7 @@ impl Outgoing {
                 .checked_add(f.size)
                 .ok_or_else(|| Error::Protocol("the sizes overflow 64 bits".into()))?;
         }
-        let id = random_id();
+        let id = random_id()?;
         let stream = conn
             .open_bi()
             .await
@@ -392,6 +510,7 @@ impl Outgoing {
                 Ok(Reply::Cancelled)
             }
             Message::Offer { .. } => Err(Error::Protocol("an offer came back".into())),
+            _ => Err(Error::Protocol("unexpected message before the answer".into())),
         }
     }
 
@@ -411,5 +530,48 @@ impl Outgoing {
         self.transfer.apply(Event::Cancel, self.clock.now())?;
         write_message(&mut self.send, &Message::Cancel { id: self.id.clone() }).await?;
         Ok(())
+    }
+
+    /// Streams `payloads` (one byte slice per file in the offer) in chunks of at most `chunk_size`
+    /// bytes, honouring any `ResumeFrom` offsets sent by the receiver, and finishes with `Done`
+    /// carrying each file's SHA-256 digest (`FR-F5`).
+    pub async fn send_bytes(&mut self, payloads: &[&[u8]], chunk_size: usize) -> Result<Vec<String>, Error> {
+        let step = chunk_size.clamp(1, DEFAULT_CHUNK_BYTES);
+        if self.transfer.state() == &State::Accepted {
+            self.transfer.apply(Event::Start, self.clock.now())?;
+        }
+        let mut digests = Vec::with_capacity(payloads.len());
+        let mut sent_total: u64 = 0;
+        for (idx, bytes) in payloads.iter().enumerate() {
+            let full_hash = hex::encode(Sha256::digest(bytes));
+            digests.push(full_hash);
+            let mut offset = 0usize;
+            while offset < bytes.len() {
+                let end = (offset + step).min(bytes.len());
+                let slice = &bytes[offset..end];
+                let chunk_hash = hex::encode(Sha256::digest(slice));
+                write_message(
+                    &mut self.send,
+                    &Message::Chunk {
+                        id: self.id.clone(),
+                        file: idx as u32,
+                        offset: offset as u64,
+                        data: slice.to_vec(),
+                        sha256: Some(chunk_hash),
+                    },
+                )
+                .await?;
+                offset = end;
+                sent_total = sent_total.saturating_add(slice.len() as u64);
+                let _ = self.transfer.apply(Event::Progress(sent_total), self.clock.now());
+            }
+        }
+        write_message(
+            &mut self.send,
+            &Message::Done { id: self.id.clone(), sha256: digests.clone() },
+        )
+        .await?;
+        self.transfer.apply(Event::Finish, self.clock.now())?;
+        Ok(digests)
     }
 }

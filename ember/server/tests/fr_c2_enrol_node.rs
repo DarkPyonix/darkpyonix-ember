@@ -853,3 +853,323 @@ async fn fr_c2_node_stub_a_malformed_delivered_server_id_aborts() {
     assert!(!said.contains(STUB_TOKEN) && !err.contains(STUB_TOKEN), "the token is in no output");
     assert!(!said.contains(&bad), "the malformed id is not echoed");
 }
+
+// ---- end-to-end transport-only (behind NAT) enrolment & revocation (FR-C2, #625) -------------
+
+/// Send a JSON request directly into an axum Router (`oneshot`) and decode `(StatusCode, Value)`.
+async fn app_req(app: &axum::Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+    use tower::ServiceExt;
+    let bytes = body.map(|b| serde_json::to_vec(&b).unwrap()).unwrap_or_default();
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(bytes))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    let raw = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    let val = serde_json::from_slice(&raw).unwrap_or(Value::Null);
+    (status, val)
+}
+
+/// FR-C2 & #625: a transport-only (behind NAT, `url = None`, `transport = true`) node enrols
+/// through the real `EnrolDoor` and `ComputersRegistrar` (backed by `Computers::with_transport`),
+/// starts its in-process `Node` over the transport with the token from `enrol.json` and the
+/// `allowed-peers` written by `enrol_cli::run`, and is listed online by `GET /api/computers`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2_enrolled_node_authenticates_and_is_listed_online() {
+    use ember_node::api::Node;
+    use ember_node::config::NodeConfig;
+    use ember_server::agents::scripted::ScriptedAdapter;
+    use ember_server::agents::AgentAdapter;
+    use ember_server::computers::enrol::{ComputersRegistrar, DoorUrl};
+    use ember_server::computers::{self, Computers, Registry};
+    use ember_server::session::Sessions;
+    use ember_transport::mem::MemNetwork;
+    use ember_transport::{Dialer, PeerGate, SecretKey};
+
+    let net = MemNetwork::new();
+    let server_t = net.transport();
+    let server_id = server_t.peer_id().to_string();
+    let dialer = Dialer::new(server_t.clone());
+
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let sessions = Sessions::new(store.clone(), vec![Arc::new(ScriptedAdapter) as Arc<dyn AgentAdapter>]);
+    let computers = Computers::with_transport(
+        Registry::new(store.clone()),
+        computers::connector(Some(dialer.clone())),
+        None,
+        Some(dialer),
+    );
+    let registrar = Arc::new(ComputersRegistrar::new(computers.clone()).with_server_peer_id(Some(server_id.clone())));
+    let enrol = Enrol::with_server_peer_id(store.clone(), Some(server_id.clone()));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let door_base = format!("http://127.0.0.1:{port}");
+    let vars: HashMap<String, String> = [(ENROL_LISTEN_VAR.to_string(), format!("127.0.0.1:{port}"))].into_iter().collect();
+    let door = EnrolDoor::from_lookup(|k| vars.get(k).cloned(), "127.0.0.1:1".parse().unwrap(), None)
+        .unwrap()
+        .expect("door on");
+    let door_app = door.app(enrol.clone());
+    let (_stop, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(EnrolDoor::serve(listener, door_app, async move {
+        let _ = rx.await;
+    }));
+
+    let owner_app = computers::api::router(computers.clone(), sessions.clone()).merge(computers::enrol::router(
+        enrol.clone(),
+        DoorUrl::Url(door_base.clone()),
+        registrar.clone(),
+    ));
+
+    // 1. Owner mints an enrol code over HTTP.
+    let (st, minted) = app_req(
+        &owner_app,
+        "POST",
+        "/api/computers/enrol-codes",
+        Some(serde_json::json!({ "name": "nat-box" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{minted}");
+    let code = minted["code"].as_str().unwrap().to_string();
+    let enrol_id = minted["id"].as_str().unwrap().to_string();
+    assert_eq!(minted["server_peer_id"].as_str(), Some(server_id.as_str()));
+
+    // 2. Prepare node state dir and pre-generate its transport key so MemNetwork uses the same key.
+    let node_dir = tempfile::tempdir().unwrap();
+    let node_key = SecretKey::load_or_generate(node_dir.path().join(ember_node::transport::KEY_FILE)).unwrap();
+    let node_peer_id = node_key.peer_id().to_string();
+    let node_fp = fp(&node_peer_id);
+
+    // 3. Owner task waits for `awaiting_confirmation`, checks `registered_by == "peer"`, and confirms
+    //    with `expect_fingerprint`.
+    let owner_for_confirm = owner_app.clone();
+    let enrol_for_wait = enrol.clone();
+    let enrol_id_clone = enrol_id.clone();
+    let node_fp_clone = node_fp.clone();
+    let confirm_task = tokio::spawn(async move {
+        wait_redeemed(&enrol_for_wait, &enrol_id_clone).await;
+        let (st, detail) = app_req(
+            &owner_for_confirm,
+            "GET",
+            &format!("/api/computers/enrol-codes/{enrol_id_clone}"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{detail}");
+        assert_eq!(detail["registered_by"].as_str(), Some("peer"));
+        assert_eq!(detail["fingerprint"].as_str(), Some(node_fp_clone.as_str()));
+
+        let (st, confirmed) = app_req(
+            &owner_for_confirm,
+            "POST",
+            &format!("/api/computers/enrol-codes/{enrol_id_clone}/confirm"),
+            Some(serde_json::json!({ "expect_fingerprint": node_fp_clone })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{confirmed}");
+        confirmed["computer_id"].as_str().unwrap().to_string()
+    });
+
+    // 4. Node runs `enrol_cli::run` behind NAT (`url = None`, `transport = true`).
+    let mut o = Options::new(code, door_base, node_dir.path().to_path_buf());
+    o.poll_every = POLL;
+    o.yes = true;
+    o.transport = true;
+    o.pin = Some(server_id.clone());
+    let mut io = Script::new(false, &[]);
+    let out = run(o, &mut io).await.unwrap();
+    let confirmed_cid = confirm_task.await.unwrap();
+    assert_eq!(out.computer_id, confirmed_cid);
+    assert!(out.server_trusted && out.peer_added);
+
+    // 5. Start the in-process `Node` over the transport using only what `enrol` wrote on disk.
+    let token = ember_node::config::token_from(None, Some(node_dir.path())).unwrap();
+    let allowed = ember_node::transport::allowed_peers(Some(node_dir.path())).unwrap();
+    assert_eq!(allowed, vec![server_t.peer_id()]);
+    let node_t = net.transport_with_key(node_key);
+    let mut cfg = NodeConfig::new(token, vec![node_dir.path().to_path_buf()]);
+    cfg.state_dir = Some(node_dir.path().to_path_buf());
+    let node = Node::new(cfg).unwrap();
+    let gate = PeerGate::allow_list(allowed);
+    let node_srv = tokio::spawn(ember_node::transport::serve(&node_t, node, gate).unwrap());
+
+    // 6. `GET /api/computers` and `GET /api/computers/{id}` list the transport-only node online!
+    let (st, list) = app_req(&owner_app, "GET", "/api/computers", None).await;
+    assert_eq!(st, StatusCode::OK, "{list}");
+    let items = list.as_array().expect("computers array");
+    let entry = items
+        .iter()
+        .find(|c| c["id"].as_str() == Some(out.computer_id.as_str()))
+        .expect("enrolled transport node in list");
+    assert_eq!(entry["name"].as_str(), Some("nat-box"));
+    assert_eq!(entry["url"].as_str(), Some(""));
+    assert_eq!(entry["peer"].as_str(), Some(node_peer_id.as_str()));
+    assert_eq!(entry["reachable"].as_bool(), Some(true), "{entry}");
+
+    let (st, status) = app_req(&owner_app, "GET", &format!("/api/computers/{}", out.computer_id), None).await;
+    assert_eq!(st, StatusCode::OK, "{status}");
+    assert_eq!(status["reachable"].as_bool(), Some(true), "{status}");
+    assert!(status["env"]["hostname"].as_str().is_some(), "{status}");
+
+    node_srv.abort();
+}
+
+/// FR-C2: a revoked computer's old credential is refused, and a fresh code with `--replace`
+/// re-enrols the transport-only node with a new token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2_a_revoked_computer_needs_a_new_code() {
+    use ember_node::api::Node;
+    use ember_node::config::NodeConfig;
+    use ember_server::agents::scripted::ScriptedAdapter;
+    use ember_server::agents::AgentAdapter;
+    use ember_server::computers::enrol::{ComputersRegistrar, DoorUrl};
+    use ember_server::computers::{self, Computers, Registry};
+    use ember_server::session::Sessions;
+    use ember_transport::mem::MemNetwork;
+    use ember_transport::{Dialer, PeerAddr, PeerGate, SecretKey};
+
+    let net = MemNetwork::new();
+    let server_t = net.transport();
+    let server_id = server_t.peer_id().to_string();
+    let dialer = Dialer::new(server_t.clone());
+
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let sessions = Sessions::new(store.clone(), vec![Arc::new(ScriptedAdapter) as Arc<dyn AgentAdapter>]);
+    let computers = Computers::with_transport(
+        Registry::new(store.clone()),
+        computers::connector(Some(dialer.clone())),
+        None,
+        Some(dialer.clone()),
+    );
+    let registrar = Arc::new(ComputersRegistrar::new(computers.clone()).with_server_peer_id(Some(server_id.clone())));
+    let enrol = Enrol::with_server_peer_id(store.clone(), Some(server_id.clone()));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let door_base = format!("http://127.0.0.1:{port}");
+    let vars: HashMap<String, String> = [(ENROL_LISTEN_VAR.to_string(), format!("127.0.0.1:{port}"))].into_iter().collect();
+    let door = EnrolDoor::from_lookup(|k| vars.get(k).cloned(), "127.0.0.1:1".parse().unwrap(), None)
+        .unwrap()
+        .expect("door on");
+    let (_stop, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(EnrolDoor::serve(listener, door.app(enrol.clone()), async move {
+        let _ = rx.await;
+    }));
+
+    let owner_app = computers::api::router(computers.clone(), sessions.clone()).merge(computers::enrol::router(
+        enrol.clone(),
+        DoorUrl::Url(door_base.clone()),
+        registrar.clone(),
+    ));
+
+    let node_dir = tempfile::tempdir().unwrap();
+    let node_key = SecretKey::load_or_generate(node_dir.path().join(ember_node::transport::KEY_FILE)).unwrap();
+    let node_fp = fp(&node_key.peer_id().to_string());
+
+    // First enrolment.
+    let (_, m1) = app_req(
+        &owner_app,
+        "POST",
+        "/api/computers/enrol-codes",
+        Some(serde_json::json!({ "name": "nat-box" })),
+    )
+    .await;
+    let code1 = m1["code"].as_str().unwrap().to_string();
+    let eid1 = m1["id"].as_str().unwrap().to_string();
+    let owner1 = owner_app.clone();
+    let enrol1 = enrol.clone();
+    let fp1 = node_fp.clone();
+    let c1 = tokio::spawn(async move {
+        wait_redeemed(&enrol1, &eid1).await;
+        let (st, _) = app_req(
+            &owner1,
+            "POST",
+            &format!("/api/computers/enrol-codes/{eid1}/confirm"),
+            Some(serde_json::json!({ "expect_fingerprint": fp1 })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+    });
+    let mut o1 = Options::new(code1.clone(), door_base.clone(), node_dir.path().to_path_buf());
+    o1.poll_every = POLL;
+    o1.yes = true;
+    o1.transport = true;
+    o1.pin = Some(server_id.clone());
+    let out1 = run(o1, &mut Script::new(false, &[])).await.unwrap();
+    c1.await.unwrap();
+    let old_token = ember_node::config::token_from(None, Some(node_dir.path())).unwrap();
+
+    // Revoke the computer on the server (`DELETE /api/computers/{id}`).
+    let (st, _) = app_req(&owner_app, "DELETE", &format!("/api/computers/{}", out1.computer_id), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (st, _) = app_req(&owner_app, "GET", &format!("/api/computers/{}", out1.computer_id), None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    // Reusing the old code is refused.
+    let mut reuse = Options::new(code1, door_base.clone(), node_dir.path().to_path_buf());
+    reuse.poll_every = POLL;
+    reuse.yes = true;
+    reuse.replace = true;
+    reuse.transport = true;
+    reuse.pin = Some(server_id.clone());
+    assert!(run(reuse, &mut Script::new(false, &[])).await.is_err());
+
+    // Mint a new code and re-enrol with `--replace`.
+    let (_, m2) = app_req(
+        &owner_app,
+        "POST",
+        "/api/computers/enrol-codes",
+        Some(serde_json::json!({ "name": "nat-box" })),
+    )
+    .await;
+    let code2 = m2["code"].as_str().unwrap().to_string();
+    let eid2 = m2["id"].as_str().unwrap().to_string();
+    let owner2 = owner_app.clone();
+    let enrol2 = enrol.clone();
+    let fp2 = node_fp.clone();
+    let c2 = tokio::spawn(async move {
+        wait_redeemed(&enrol2, &eid2).await;
+        let (st, _) = app_req(
+            &owner2,
+            "POST",
+            &format!("/api/computers/enrol-codes/{eid2}/confirm"),
+            Some(serde_json::json!({ "expect_fingerprint": fp2 })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+    });
+    let mut o2 = Options::new(code2, door_base, node_dir.path().to_path_buf());
+    o2.poll_every = POLL;
+    o2.yes = true;
+    o2.replace = true;
+    o2.transport = true;
+    o2.pin = Some(server_id);
+    let out2 = run(o2, &mut Script::new(false, &[])).await.unwrap();
+    c2.await.unwrap();
+
+    let new_token = ember_node::config::token_from(None, Some(node_dir.path())).unwrap();
+    assert_ne!(old_token, new_token, "re-enrolment must mint a fresh token");
+    assert_ne!(out1.computer_id, out2.computer_id);
+
+    // Start the node with the new token; the old token is rejected (401) and the new one works.
+    let node_t = net.transport_with_key(node_key.clone());
+    let allowed = ember_node::transport::allowed_peers(Some(node_dir.path())).unwrap();
+    let node = Node::new(NodeConfig::new(new_token, vec![node_dir.path().to_path_buf()])).unwrap();
+    let node_srv = tokio::spawn(ember_node::transport::serve(&node_t, node, PeerGate::allow_list(allowed)).unwrap());
+
+    let stale_client = ember_node::client::NodeClient::over_transport(
+        dialer.clone(),
+        PeerAddr::new(node_key.peer_id()),
+        &old_token,
+    );
+    assert!(stale_client.env().await.is_err(), "old token must be refused by the re-enrolled node");
+
+    let (st, status) = app_req(&owner_app, "GET", &format!("/api/computers/{}", out2.computer_id), None).await;
+    assert_eq!(st, StatusCode::OK, "{status}");
+    assert_eq!(status["reachable"].as_bool(), Some(true), "{status}");
+
+    node_srv.abort();
+}

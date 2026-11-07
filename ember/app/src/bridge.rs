@@ -274,8 +274,10 @@ static WATCHED_PROJECTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// Ask for the 14-day summary now (a screen opened). Cheap to call once per mount; the slow
 /// timer keeps it current after that.
 pub fn request_usage_summary() {
-    let s = services();
-    s.spawn(async move { fetch_usage_summary(services()).await });
+    let Some(s) = crate::services::try_services() else {
+        return;
+    };
+    s.spawn(async move { fetch_usage_summary(s).await });
 }
 
 pub use crate::ui::home::{should_fetch_github, should_poll_github, GITHUB_MIN_GAP};
@@ -514,6 +516,16 @@ async fn refresh_slow(s: &'static Services, live: Option<Live>, first: bool) {
             }
         }
         Err(e) => tracing::debug!("agents refresh failed: {e}"),
+    }
+    let defaults = s.server.agent_defaults().await.ok();
+    let settings = s.server.agent_settings().await.ok();
+    if let Some(ref d) = defaults {
+        if s.ui.live.agent_defaults.get_untracked() != *d {
+            s.ui.live.agent_defaults.set(d.clone());
+        }
+    }
+    if defaults.is_some() || settings.is_some() {
+        crate::ui::cr::agents::sync_from_server(defaults.as_ref(), settings.as_ref());
     }
     // Probing asks every node and can take a while; last.
     match s.server.computers(true).await {

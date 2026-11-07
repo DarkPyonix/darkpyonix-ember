@@ -688,7 +688,17 @@ impl Registrar for ComputersRegistrar {
             Target::Peer(peer) => self.computers.register_peer(name, &ember_transport::PeerAddr::from(peer), token),
         };
         match result {
-            Ok(c) => Ok(c.id),
+            Ok(c) => {
+                // FR-C2c: probe the registered computer once without blocking confirm.
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    let computers = self.computers.clone();
+                    let cid = c.id.clone();
+                    handle.spawn(async move {
+                        let _ = computers.status(&cid).await;
+                    });
+                }
+                Ok(c.id)
+            }
             Err(_) if self.name_taken(name) => Err(RegisterError::NameTaken),
             Err(super::ComputerError::BadRequest(m)) if m == super::DUPLICATE_PEER => Err(RegisterError::Failed(m)),
             Err(_) => Err(RegisterError::Failed("the computer could not be registered at that address".into())),

@@ -2,7 +2,7 @@
 //! mistakes inside the project folder; they are a safeguard, not a security boundary (the OSE
 //! channel writes with the server user's rights).
 
-use ember_editor::paths::{child_path, normalize, renamed_path, target_path, PathError};
+use ember_editor::paths::{child_path, normalize, paste_destination, renamed_path, target_path, PathError};
 
 const FOLDER: &str = "/w/p";
 
@@ -65,4 +65,114 @@ fn child_path_allows_ordinary_names_with_dots_and_spaces_inside() {
     for name in [".gitignore", "a b.txt", "한글.md", "x.tar.gz", "a-b_c"] {
         assert!(child_path(FOLDER, "/w/p", name).is_ok(), "name {name:?}");
     }
+}
+
+#[test]
+fn paste_destination_copies_into_another_directory_without_name_collision() {
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p/src/a.rs", "/w/p/target", &[], false),
+        Ok("/w/p/target/a.rs".to_string())
+    );
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p/src/a.rs", "/w/p/target", &["other.rs"], false),
+        Ok("/w/p/target/a.rs".to_string())
+    );
+}
+
+#[test]
+fn paste_destination_copies_with_copy_suffix_when_name_collides() {
+    // "main.rs" -> "main copy.rs", then "main copy 2.rs"
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p/src/main.rs", "/w/p/src", &["main.rs"], false),
+        Ok("/w/p/src/main copy.rs".to_string())
+    );
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p/src/main.rs", "/w/p/src", &["main.rs", "main copy.rs"], false),
+        Ok("/w/p/src/main copy 2.rs".to_string())
+    );
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p/src/main.rs", "/w/p/src", &["main.rs", "main copy.rs", "main copy 2.rs"], false),
+        Ok("/w/p/src/main copy 3.rs".to_string())
+    );
+
+    // "README" without extension
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p/README", "/w/p", &["README"], false),
+        Ok("/w/p/README copy".to_string())
+    );
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p/README", "/w/p", &["README", "README copy"], false),
+        Ok("/w/p/README copy 2".to_string())
+    );
+
+    // ".gitignore" hidden file without base stem
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p/.gitignore", "/w/p", &[".gitignore"], false),
+        Ok("/w/p/.gitignore copy".to_string())
+    );
+}
+
+#[test]
+fn paste_destination_cuts_into_another_directory_and_refuses_same_destination() {
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p/src/a.rs", "/w/p/other", &[], true),
+        Ok("/w/p/other/a.rs".to_string())
+    );
+    // Cutting into the same directory returns SameName error
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p/src/a.rs", "/w/p/src", &[], true),
+        Err(PathError::SameName)
+    );
+}
+
+#[test]
+fn paste_destination_refuses_moving_or_copying_directory_into_itself() {
+    // Exactly itself
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p/src", "/w/p/src", &[], true),
+        Err(PathError::IntoSelf)
+    );
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p/src", "/w/p/src", &[], false),
+        Err(PathError::IntoSelf)
+    );
+
+    // Subdirectory below itself
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p/src", "/w/p/src/sub", &[], true),
+        Err(PathError::IntoSelf)
+    );
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p/src", "/w/p/src/sub/nested", &[], false),
+        Err(PathError::IntoSelf)
+    );
+
+    // Sibling directory that starts with same prefix is allowed
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p/src", "/w/p/src2", &[], true),
+        Ok("/w/p/src2/src".to_string())
+    );
+}
+
+#[test]
+fn paste_destination_refuses_outside_workspace() {
+    // Source outside
+    assert_eq!(
+        paste_destination(FOLDER, "/etc/passwd", "/w/p/src", &[], true),
+        Err(PathError::OutsideFolder)
+    );
+    // Source is folder root
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p", "/w/p/src", &[], true),
+        Err(PathError::FolderRoot)
+    );
+    // Destination outside
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p/src/a.rs", "/etc", &[], true),
+        Err(PathError::OutsideFolder)
+    );
+    assert_eq!(
+        paste_destination(FOLDER, "/w/p/src/a.rs", "/w/other", &[], false),
+        Err(PathError::OutsideFolder)
+    );
 }

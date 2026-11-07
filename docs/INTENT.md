@@ -925,3 +925,21 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 
 **Status.** Specified (`FR-L35`, `FR-G13`, #498). The server API is in progress; the card is built by the Home owner against it.
 
+### D42: Per-node OSE deployment for the Ember editor
+
+**Decision.** [provisional, #457] When the Ember editor opens a session whose computer is a registered node, the OSE runtime (`dpx-ose-server`) runs on **that node**, spawned and managed by `ember-node` (`FR-W4a` to `FR-W4c`), not on the main server against the project mount.
+
+- [provisional] `ember-node` manages one OSE process per canonical workspace folder under its allowed roots (`PathPolicy`), passing `--server-data-dir <state_dir>/ose-data`, `--extensions-dir <state_dir>/ose-data/extensions` and `--connection-token-file <state_dir>/ose-data/tokens/<hash>.token` (mode 0600, deleted on exit), with the same cleared environment allowlist (`HOME`, `PATH`, `LANG`, `LC_ALL`, `TMPDIR`, `USER`) and 120 s extension-install rules as the server's local `OseManager` (#459, #461).
+- [provisional] `ember-node` exposes three authenticated routes behind the node bearer token (and the peer allowlist over the `FR-N5` transport): `POST /ide/ose` (`{folder}` -> `{launch_id, port}`), `GET /ide/ose/{launch_id}/relay` (WebSocket binary byte relay to the node's `127.0.0.1:<port>` OSE listener, where the node performs the C2 placeholder-to-real-token substitution in the first 8 KiB of the client-to-OSE stream so the real OSE connection token never leaves the node), and `POST /ide/extensions` (`{id, version?}` -> `{installed, id, output}`).
+- [provisional] `ember-server` relays `GET /api/sessions/{id}/ide`, `GET /api/computers/{computer}/ide/relay/{launch_id}` and `POST /api/computers/{computer}/ide/extensions` to the target computer's `ember-node` over HTTP or the `FR-N5` peer-to-peer transport. The editor client always connects to the main server's `/api/computers/{computer}/ide/relay/{launch_id}` and never holds a node credential or dials a node directly.
+
+**Rejected** *[provisional]*. Option (b), running one OSE on the main server against the project mount (`ember/server/src/computers/mount.rs`):
+1. The project mount exists only while a Claude Code turn is live (`COMPUTERS.md` "Project mount / When"); opening the editor on an idle Claude session, a Codex session, or a server built without `mount-nfs`/`mount-fuse` finds no mount at all.
+2. Language servers (`rust-analyzer`, `pyright`, `tsserver`), formatters, linters and build tasks spawned by the OSE extension host would execute on the main server's CPU, OS and toolchain instead of the node where the project's compilers, virtual environments and SDKs live.
+3. The project mount has a 1 s attribute/listing cache (`EMBER_MOUNT_TTL_MS`), no file-watcher change feed (`inotify`/`FSEvents` do not cross the mount), no exclusive rename, and is not compiled or verified in CI.
+
+**Why.** Running the OSE on the node puts `remoteFilesystem`, native file watching (`fs.watch`), language servers and extension hosts on the same machine and filesystem as the project and the node's persistent terminals (`§P`), while the server relay keeps authentication, device revocation (`FR-N3`) and the guest-door exclusion (`FR-T14`) at one boundary.
+
+**Status.** Specified (`FR-W4a` to `FR-W4c`, Draft; issue #457). Local server OSE and its relay are in #458/#459/#461; node OSE routes and server-to-node relay follow this spec.
+
+

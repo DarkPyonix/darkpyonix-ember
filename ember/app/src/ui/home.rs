@@ -567,6 +567,25 @@ pub enum PermMode {
 }
 
 impl PermMode {
+    pub fn key(self) -> &'static str {
+        match self {
+            PermMode::Ask => "ask",
+            PermMode::Edits => "edits",
+            PermMode::Bypass => "bypass",
+            PermMode::Plan => "plan",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<PermMode> {
+        match key {
+            "ask" => Some(PermMode::Ask),
+            "edits" => Some(PermMode::Edits),
+            "bypass" => Some(PermMode::Bypass),
+            "plan" => Some(PermMode::Plan),
+            _ => None,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             PermMode::Ask => "명령마다 확인",
@@ -1029,6 +1048,39 @@ impl Selection {
             mode: default_mode(Harness::ClaudeCode),
             computer: None,
         }
+    }
+
+    /// Like [`Selection::initial`], applying any global new-member defaults (`새 팀원 기본값`, FR-L20, #481, #670).
+    pub fn initial_with_defaults(defaults: &crate::server::AgentDefaults) -> Selection {
+        let mut sel = Selection::initial();
+        let harness = defaults
+            .agent
+            .as_deref()
+            .and_then(Harness::from_kind)
+            .unwrap_or(sel.option.harness);
+        sel = sel.with_harness(harness);
+        if let Some(model_id) = defaults.model.as_deref() {
+            let want_effort = defaults.effort.as_deref().or(sel.option.effort);
+            let cat = model_catalog();
+            if let Some(found) = cat
+                .iter()
+                .find(|o| o.harness == harness && o.model == model_id && o.effort == want_effort)
+                .or_else(|| cat.iter().find(|o| o.harness == harness && o.model == model_id))
+            {
+                sel = sel.with_option(*found);
+            }
+        } else if let Some(effort) = defaults.effort.as_deref() {
+            let cat = model_catalog();
+            if let Some(found) = cat.iter().find(|o| {
+                o.harness == harness && o.model == sel.option.model && o.effort == Some(effort)
+            }) {
+                sel = sel.with_option(*found);
+            }
+        }
+        if let Some(mode) = defaults.mode.as_deref().and_then(PermMode::from_key) {
+            sel = sel.with_mode(mode);
+        }
+        sel
     }
 
     /// Choosing a row of the picker. A changed harness moves the mode chip to that harness

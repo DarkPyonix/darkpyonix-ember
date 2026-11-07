@@ -646,8 +646,11 @@ impl FormError {
 }
 
 impl FormDraft {
-    /// A new routine: every day at 09:00, Claude Code's default, ask mode, the main server.
+    /// A new routine: every day at 09:00, the stored new-member defaults (or Claude Code's default, ask mode), the main server.
     pub fn new(project: &str) -> FormDraft {
+        let base = crate::services::try_services()
+            .map(|s| Selection::initial_with_defaults(&s.ui.live.agent_defaults.get_untracked()))
+            .unwrap_or_else(Selection::initial);
         FormDraft {
             name: String::new(),
             trigger: Trigger::Time,
@@ -655,7 +658,7 @@ impl FormDraft {
             prompt: String::new(),
             sel: Selection {
                 project: project.into(),
-                ..Selection::initial()
+                ..base
             },
         }
     }

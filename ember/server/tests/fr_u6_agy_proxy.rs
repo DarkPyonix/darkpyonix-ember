@@ -12,9 +12,14 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ember_server::agents::antigravity::{proxy_args, PROXY_BASE_ENV, PROXY_KEY_ENV};
-use ember_server::agents::AgentKind;
+use ember_server::agents::antigravity::{
+    proxy_args, router as hook_router, AntigravityAdapter, HookBroker, PROXY_ALT_KEY_ENV,
+    PROXY_BASE_ENV, PROXY_KEY_ENV,
+};
+use ember_server::agents::{AgentAdapter, AgentKind, StartRequest};
+use ember_server::events::{AgentEvent, TurnOutcome};
 use ember_server::members::{proxy_env, ProxySpec};
+use tokio::sync::mpsc;
 
 fn agy_bin() -> std::ffi::OsString {
     std::env::var_os("EMBER_AGY_BIN").unwrap_or_else(|| "agy".into())
@@ -59,6 +64,7 @@ fn fr_u6_agy_member_env_names_the_gemini_base_url_and_key() {
     let env = proxy_env(AgentKind::Antigravity, &p, |k| (k == "K").then(|| "member-key".into())).unwrap();
     assert!(env.iter().any(|(k, v)| k == PROXY_BASE_ENV && v == "http://127.0.0.1:9000"));
     assert!(env.iter().any(|(k, v)| k == PROXY_KEY_ENV && v == "member-key"));
+    assert!(env.iter().any(|(k, v)| k == PROXY_ALT_KEY_ENV && v == "member-key"));
     assert_eq!(proxy_args(&env), ["--settings", r#"{"modelProvider":"gemini"}"#]);
 }
 
@@ -74,12 +80,14 @@ fn fr_u6_agy_turn_goes_to_the_member_proxy_endpoint() {
     let p = ProxySpec { endpoint: format!("http://127.0.0.1:{port}"), key_env: Some("K".into()) };
     let env = proxy_env(AgentKind::Antigravity, &p, |_| Some("member-key-146".into())).unwrap();
     let mut cmd = Command::new(agy_bin());
+    // Set an ambient `GOOGLE_API_KEY` first, then apply `env` (as `spawn_agent` does), proving
+    // `proxy_env` overrides any server-side `GOOGLE_API_KEY`.
     cmd.args(["-p", "hi", "--output-format", "stream-json", "--print-timeout", "30s"])
         .args(proxy_args(&env))
+        .env("GOOGLE_API_KEY", "wrong-ambient-server-key")
         .envs(env.iter().map(|(k, v)| (k, v)))
         .current_dir(work.path())
         .env("HOME", home.path())
-        .env_remove("GOOGLE_API_KEY")
         .env_remove("HTTPS_PROXY")
         .env_remove("https_proxy")
         .env_remove("HTTP_PROXY")
@@ -98,4 +106,85 @@ fn fr_u6_agy_turn_goes_to_the_member_proxy_endpoint() {
     assert!(!seen.is_empty(), "the fake upstream saw no request: agy ignored the proxy endpoint");
     assert!(seen.iter().all(|(line, _)| line.contains("/v1beta/models/")), "{seen:?}");
     assert!(seen.iter().all(|(_, k)| k == "member-key-146"), "{seen:?}");
+}
+
+#[tokio::test]
+async fn fr_u6_agy_adapter_routes_turn_through_member_proxy_with_hooks_and_version_pin() {
+    if Command::new(agy_bin()).arg("--version").stdout(Stdio::null()).status().map_or(true, |s| !s.success()) {
+        eprintln!("skipped: no agy binary");
+        return;
+    }
+    let (port, seen) = fake_upstream();
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+
+    let broker = HookBroker::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook_addr = listener.local_addr().unwrap();
+    broker.set_base_url(&format!("http://{hook_addr}"));
+    let app = hook_router(broker.clone());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let p = ProxySpec { endpoint: format!("http://127.0.0.1:{port}"), key_env: Some("K".into()) };
+    // Start with an ambient `GOOGLE_API_KEY` before `proxy_env` entries so `AntigravityAdapter`
+    // proves the member key wins through the full adapter path (`check_version`, `check_hook`, and
+    // `spawn_agent`).
+    let mut env = vec![
+        ("HOME".into(), home.to_string_lossy().into_owned()),
+        ("GOOGLE_API_KEY".into(), "wrong-ambient-server-key".into()),
+        ("NO_PROXY".into(), "127.0.0.1,localhost".into()),
+    ];
+    env.extend(
+        proxy_env(AgentKind::Antigravity, &p, |k| {
+            (k == "K").then(|| "member-adapter-key-146".into())
+        })
+        .unwrap(),
+    );
+
+    let adapter = AntigravityAdapter::new(agy_bin(), dir.path().join("agy"), broker);
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut run = adapter
+        .start(
+            StartRequest {
+                cwd: work,
+                env,
+                ..Default::default()
+            },
+            tx,
+        )
+        .await
+        .expect("start AntigravityAdapter");
+
+    run.send("hi").await.expect("send turn through AntigravityAdapter");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    let mut ended = false;
+    while tokio::time::Instant::now() < deadline {
+        if !seen.lock().unwrap().is_empty() {
+            break;
+        }
+        match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+            Ok(Some(AgentEvent::TurnEnded { outcome: TurnOutcome::Failed })) => {
+                ended = true;
+                break;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(_) => {}
+        }
+    }
+    let _ = run.shutdown().await;
+
+    let seen = seen.lock().unwrap();
+    assert!(
+        !seen.is_empty(),
+        "AntigravityAdapter sent no request to the member proxy (ended={ended})"
+    );
+    assert!(seen.iter().all(|(line, _)| line.contains("/v1beta/models/")), "{seen:?}");
+    assert!(seen.iter().all(|(_, k)| k == "member-adapter-key-146"), "{seen:?}");
 }

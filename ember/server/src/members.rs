@@ -158,6 +158,8 @@ pub fn proxy_env(
             // agy talks to the Gemini API (`<base>/v1beta/models/<m>:streamGenerateContent`) with
             // the key in `x-goog-api-key`, so the proxy must speak that wire format. The adapter
             // adds `--settings {"modelProvider":"gemini"}` when it sees the base URL variable.
+            // agy gives `GOOGLE_API_KEY` precedence over `GEMINI_API_KEY`, so both are set to the
+            // member's proxy key so an ambient `GOOGLE_API_KEY` on the server never overrides it.
             let key = proxy
                 .key_env
                 .as_deref()
@@ -165,7 +167,8 @@ pub fn proxy_env(
                 .unwrap_or_else(|| PLACEHOLDER_KEY.to_string());
             Ok(vec![
                 (crate::agents::antigravity::PROXY_BASE_ENV.into(), endpoint.to_string()),
-                (crate::agents::antigravity::PROXY_KEY_ENV.into(), key),
+                (crate::agents::antigravity::PROXY_KEY_ENV.into(), key.clone()),
+                (crate::agents::antigravity::PROXY_ALT_KEY_ENV.into(), key),
             ])
         }
         other => Err(MemberError::Unsupported(format!(
@@ -305,5 +308,6 @@ mod tests {
         let env = proxy_env(AgentKind::Antigravity, &p, |k| (k == "K").then(|| "sekret".into())).unwrap();
         assert!(env.contains(&("GOOGLE_GEMINI_BASE_URL".into(), "http://127.0.0.1:9000".into())));
         assert!(env.contains(&("GEMINI_API_KEY".into(), "sekret".into())));
+        assert!(env.contains(&("GOOGLE_API_KEY".into(), "sekret".into())));
     }
 }

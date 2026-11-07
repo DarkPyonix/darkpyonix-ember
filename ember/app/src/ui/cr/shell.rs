@@ -936,6 +936,62 @@ mod tests {
     }
 
     #[composable]
+    fn rail_probe() {
+        Sidebar(true, NavMenu::Sessions, NavCounts::default(), || {}, || {});
+    }
+
+    #[test]
+    fn fr_l10_sidebar_and_rail_search_clicks_open_search() {
+        use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
+        use compose_rust::{EventPayload, Host, PropertyKind, Recomposer};
+        use std::collections::HashMap;
+
+        let _guard = crate::services::test_guard();
+        // Locate the labelled sidebar row, then use its position among the sidebar click
+        // handlers for the icon-only rail, whose search icon has no text node.
+        let mut sidebar = Host::new(|| Box::new(Recomposer::new(sidebar_probe)));
+        let batch = decode_batch(sidebar.rebuild().expect("rebuild sidebar")).expect("decode sidebar");
+        let mut parents = HashMap::new();
+        let mut handlers = Vec::new();
+        let mut label = None;
+        for mutation in &batch {
+            match mutation {
+                Mutation::Insert { parent_id, node_id, .. } => { parents.insert(*node_id, *parent_id); }
+                Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                    handlers.push((*node_id, *h as u64));
+                }
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } if *s == "검색" => {
+                    label = Some(*node_id);
+                }
+                _ => {}
+            }
+        }
+        let mut node = label.expect("sidebar search label");
+        let index = loop {
+            if let Some(index) = handlers.iter().position(|(id, _)| *id == node) { break index; }
+            node = *parents.get(&node).expect("search label has a clickable ancestor");
+        };
+        let ui = shared_ui();
+        ui.go(Route::Projects);
+        let (node_id, handler_id) = handlers[index];
+        sidebar.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click sidebar search");
+        assert_eq!(ui.route.get_untracked(), Route::Search);
+
+        let mut rail = Host::new(|| Box::new(Recomposer::new(rail_probe)));
+        let rail_batch = decode_batch(rail.rebuild().expect("rebuild rail")).expect("decode rail");
+        let rail_handlers: Vec<_> = rail_batch.iter().filter_map(|m| match m {
+            Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => Some((*node_id, *h as u64)),
+            _ => None,
+        }).collect();
+        assert_eq!(rail_handlers.len(), handlers.len());
+        ui.go(Route::Projects);
+        let (node_id, handler_id) = rail_handlers[index];
+        rail.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click rail search");
+        assert_eq!(ui.route.get_untracked(), Route::Search);
+        ui.go(Route::Projects);
+    }
+
+    #[composable]
     fn phone_menu_probe() {
         let open = remember(|| mutable_state_of(true));
         PhoneMenu(open, || {});

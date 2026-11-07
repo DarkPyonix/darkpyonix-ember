@@ -1710,6 +1710,10 @@ impl GitState {
                     .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                     .ok_or_else(|| GitError::bad("paths is required"))?;
                 for p in &paths {
+                    // The old name of a rename is part of that file here, as `git reset -- new old` treats it.
+                    if self.files.iter().any(|f| f.old_path.as_deref() == Some(p.as_str()) && f.path != *p) {
+                        continue;
+                    }
                     let f = self.find(p)?;
                     if op == "stage" {
                         let mut moved = std::mem::take(&mut f.unstaged);

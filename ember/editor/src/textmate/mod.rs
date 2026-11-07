@@ -1,0 +1,23 @@
+//! TextMate grammars for syntax highlighting (FR-E6): the loader half.
+//!
+//! The editor tokenizes with grammars that installed extensions contribute (`contributes.grammars`);
+//! none is bundled. This module reads them: [`catalog`] lists which extension offers which grammar
+//! (scope name, language id, file, injection targets) from the `scanExtensions` descriptions, and
+//! [`grammar`] parses one grammar file into the raw rule model. The interpreter that runs the rules
+//! builds on this model: [`interpreter`] compiles grammars and tokenizes a line at a time.
+
+pub mod catalog;
+pub mod grammar;
+pub mod interpreter;
+pub mod plist;
+pub mod roles;
+pub mod selector;
+pub mod tokens;
+
+pub use catalog::{GrammarCatalog, GrammarEntry};
+pub use plist::{parse_plist, PlistError, MAX_PLIST_BYTES, MAX_PLIST_DEPTH, MAX_PLIST_NODES};
+pub use selector::{Matcher, Selector, MAX_SELECTOR_CHARS, MAX_SELECTOR_DEPTH, MAX_SELECTOR_TOKENS};
+pub use roles::{role_for_scopes, SyntaxRole};
+pub use tokens::{Changed, ColorRun, DocRun, DocumentTokens, EditError, TooLarge, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_LINES};
+pub use interpreter::{Grammar, GrammarSet, LineTokens, Scope, StateStack, Token, MAX_COMPILED_RULES, MAX_INJECTIONS, MAX_LINE_BYTES, MAX_SEARCH_BUDGET, MAX_STACK_DEPTH};
+pub use grammar::{parse_grammar, read_grammar, GrammarError, RawGrammar, RawRule, MAX_GRAMMAR_BYTES, MAX_RULES};

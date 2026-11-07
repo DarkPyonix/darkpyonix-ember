@@ -80,7 +80,7 @@
     </div>
     <p>
       서버는 시작할 때와 요청이 있을 때 설치된 에이전트와 그 버전을 찾습니다
-      (<code>GET /api/v1/agents</code>). 없는 에이전트는 오류가 아니라 미설치로 표시합니다. 각
+      (<code>GET /api/agents</code>). 없는 에이전트는 오류가 아니라 미설치로 표시합니다. 각
       에이전트의 바이너리는 <code>EMBER_CLAUDE_BIN</code>, <code>EMBER_CODEX_BIN</code>,
       <code>EMBER_AGY_BIN</code>, <code>EMBER_OMP_BIN</code> 으로 지정하고, 지정하지 않으면
       <code>PATH</code> 에서 이름으로 찾습니다.
@@ -88,9 +88,7 @@
     <p>
       유휴 세션은 <code>EMBER_IDLE_SECS</code>(기본 300) 뒤에 에이전트 프로세스를 내려놓습니다. 다음
       메시지가 오면 에이전트 자체의 재개 기능으로 다시 시작하므로, 대화는 하던 곳에서 이어집니다.
-      이 페이지의 REST 경로는 지금 코드가 제공하는 그대로 적었습니다.
-      <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/63">#63</a> 이
-      <code>/api/v1/...</code> 을 <code>/api/...</code> 로 바꿉니다.
+      REST 경로에는 버전이 없어서 모두 <code>/api/</code> 로 시작합니다.
     </p>
 
     <h2 id="claude">Claude Code <span class="pill works">구현</span></h2>
@@ -144,11 +142,11 @@
       꺼지고, darkpyonix.dev를 통해서는 절대 제공하지 않습니다.
     </p>
     <ol>
-      <li><code>POST /api/v1/chatgpt/signin</code> 이 인증 URL을 돌려줍니다. 브라우저에서 엽니다.</li>
+      <li><code>POST /api/chatgpt/signin</code> 이 인증 URL을 돌려줍니다. 브라우저에서 엽니다.</li>
       <li>OpenAI는 서버의 <code>http://127.0.0.1:&lt;port&gt;/auth/callback</code> 으로 돌려보냅니다
           (<code>EMBER_CHATGPT_REDIRECT_PORT</code>, 기본값은 서버 포트).</li>
       <li>브라우저가 다른 기기에서 돌면 그 주소는 서버에 닿지 않습니다. 마지막 URL을
-          <code>POST /api/v1/chatgpt/signin/complete</code> 에 붙여 넣습니다.</li>
+          <code>POST /api/chatgpt/signin/complete</code> 에 붙여 넣습니다.</li>
     </ol>
     <p>
       토큰은 암호화해 저장하고 API가 돌려주지 않습니다. 주간 한도는 사용자가 ChatGPT 설정에서
@@ -241,13 +239,13 @@
       CLI도 고치지 않고 인증 정보, 설정, 원래 세션 파일이 서로 분리됩니다.
     </p>
     <ol>
-      <li>계정을 만듭니다: <code>POST /api/v1/accounts</code> 에
+      <li>계정을 만듭니다: <code>POST /api/accounts</code> 에
           <code>{"agent": "claude-code", "label": "work"}</code>.</li>
       <li>응답에 정확한 로그인 명령이 들어 있습니다. 예:
           <code>CLAUDE_CONFIG_DIR=&lt;dir&gt; claude auth login</code>. ember가 실행되는 사용자로
           서버에서 실행합니다. Ember는 로그인을 자동화하지 않습니다. 화면 없는 서버의 Codex라면
           <code>--device-auth</code> 를 붙입니다.</li>
-      <li><code>POST /api/v1/accounts/{id}/check</code> 는 에이전트의 읽기 전용 상태 명령을
+      <li><code>POST /api/accounts/{id}/check</code> 는 에이전트의 읽기 전용 상태 명령을
           실행합니다.</li>
     </ol>
     <p>
@@ -255,8 +253,8 @@
       않은 계정 가운데 오늘(UTC) 토큰을 가장 적게 쓴 계정을 고르고, 같으면 기본 계정, 그다음
       오래된 계정을 고릅니다. 고른 계정과 그 이유는 세션에 저장되고 조용히 바뀌지 않습니다. 사용량
       제한에 걸린 계정은 초기화 시점까지 건너뛰고, 그 계정에서 턴이 끝까지 완료되면 표시가
-      풀립니다. <code>GET /api/v1/accounts/route?agent=…</code> 는 지금 라우터가 무엇을 고를지,
-      <code>GET /api/v1/usage?days=7</code> 은 계정별 일별 토큰을 보여 줍니다.
+      풀립니다. <code>GET /api/accounts/route?agent=…</code> 는 지금 라우터가 무엇을 고를지,
+      <code>GET /api/usage?days=7</code> 은 계정별 일별 토큰을 보여 줍니다.
     </p>
     <div class="warn">
       <span class="label">서버 환경 변수의 키</span>
@@ -267,7 +265,7 @@
       </p>
     </div>
     <p>
-      API 키 제공자(OpenAI 호환이나 공급사 API)는 <code>POST /api/v1/providers</code> 로 추가합니다.
+      API 키 제공자(OpenAI 호환이나 공급사 API)는 <code>POST /api/providers</code> 로 추가합니다.
       키는 암호화해 저장하고 돌려주지 않습니다.
     </p>
 
@@ -281,7 +279,7 @@
 
     <figure class="codeblock" data-copy="복사" data-copied="복사됨">
       <figcaption>http</figcaption>
-<pre><code><span class="k">POST</span> /api/v1/mcp
+<pre><code><span class="k">POST</span> /api/mcp
 { <span class="at">"name"</span>: <span class="s">"github"</span>, <span class="at">"command"</span>: <span class="s">"github-mcp-server"</span>, <span class="at">"args"</span>: [<span class="s">"stdio"</span>],
   <span class="at">"env"</span>: { <span class="at">"GITHUB_TOKEN"</span>: <span class="s">"..."</span> }, <span class="at">"scope"</span>: <span class="s">"all"</span> }   <span class="c"># 또는 "project:&lt;name&gt;"</span></code></pre>
     </figure>
@@ -304,7 +302,7 @@
           남깁니다. <code>catch_up</code> 을 켜면 놓친 것 중 마지막 하나만 실행합니다.</li>
       <li>cron 시각은 일광 절약 시간 변경을 거쳐도 시간대를 따릅니다. 두 번 오는 시각에는 한 번만
           실행합니다.</li>
-      <li>예약은 <code>/api/v1/schedules</code> 로 관리합니다(만들기, 일시 정지, 재개, 지금 실행,
+      <li>예약은 <code>/api/schedules</code> 로 관리합니다(만들기, 일시 정지, 재개, 지금 실행,
           실행 기록). 에이전트도 대화 중에 만들 수 있습니다.</li>
     </ul>
 
@@ -339,8 +337,8 @@ ember-a2a show &lt;message-id&gt;</code></pre>
           재시작 뒤에도 남습니다.</li>
       <li>루프 방지: 10분 안에 세션당 최대 20개, 세션 쌍당 최대 10개입니다. 서로 끝없이 답하라고
           지시받은 두 에이전트는 알림과 함께 멈춥니다.</li>
-      <li>A2A는 서버 전체(<code>EMBER_A2A=0</code> 또는 <code>PUT /api/v1/a2a/settings</code>)나 세션
-          단위(<code>/api/v1/sessions/{id}/a2a</code>)로 끌 수 있습니다. 꺼진 세션과 주고받는 메시지는
+      <li>A2A는 서버 전체(<code>EMBER_A2A=0</code> 또는 <code>PUT /api/a2a/settings</code>)나 세션
+          단위(<code>/api/sessions/{id}/a2a</code>)로 끌 수 있습니다. 꺼진 세션과 주고받는 메시지는
           이유와 함께 거절합니다.</li>
     </ul>
 

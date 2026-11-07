@@ -40,6 +40,8 @@ use tokio::task::JoinHandle;
 
 use crate::coords::WidgetPos;
 use crate::engine::{CoreOptions, Effect, Input, SessionCore, SessionUpdate, Token};
+use crate::fallback::{ConnectOutcome, FallbackTarget};
+use crate::highlight::{HighlightJob, Worker};
 use crate::languages::LanguageRegistry;
 use crate::widget::WidgetEvent;
 use crate::Error;
@@ -61,6 +63,9 @@ pub struct SessionConfig {
     /// User settings, dotted keys (`"json.validate.enable"`).
     pub user_settings: Vec<(String, Value)>,
     pub core: CoreOptions,
+    /// Optional VS Code Web target URL (or base URL) used when the server version is unsupported
+    /// or unknown and the session falls back to the VS Code target.
+    pub vscode_url: Option<String>,
 }
 
 impl SessionConfig {
@@ -77,7 +82,13 @@ impl SessionConfig {
             app_language: "en".into(),
             user_settings: Vec::new(),
             core: CoreOptions::default(),
+            vscode_url: None,
         }
+    }
+
+    pub fn with_vscode_url(mut self, url: impl Into<String>) -> Self {
+        self.vscode_url = Some(url.into());
+        self
     }
 }
 
@@ -88,9 +99,26 @@ enum Command {
 }
 
 /// A connected editor session. Cheap to share by reference; every method is a non-blocking send.
+/// Lists directories on the remote server: [`EditorSession::lister`].
+#[derive(Clone)]
+pub struct DirLister {
+    fs: Arc<RemoteFs>,
+    authority: String,
+}
+
+impl DirLister {
+    /// `(name, FileType)` entries of the directory at `path`.
+    pub async fn read_dir(&self, path: &str) -> Result<Vec<(String, u32)>, Error> {
+        let uri = UriComponents::remote(&self.authority, path);
+        self.fs.readdir(&uri).await.map_err(Error::Conn)
+    }
+}
+
 pub struct EditorSession {
     tx: mpsc::UnboundedSender<Command>,
     authority: String,
+    workspace_path: String,
+    fs: Arc<RemoteFs>,
     task: Option<JoinHandle<()>>,
 }
 
@@ -109,6 +137,44 @@ impl EditorSession {
         .await
     }
 
+    /// Connect over plain TCP, returning [`ConnectOutcome::Fallback`] if the server's version is
+    /// unsupported or unknown.
+    pub async fn connect_tcp_or_fallback(config: SessionConfig) -> Result<ConnectOutcome, Error> {
+        let addr = config.host.clone();
+        Self::connect_or_fallback(config, move || {
+            let addr = addr.clone();
+            async move {
+                let s = tokio::net::TcpStream::connect(addr).await?;
+                let _ = s.set_nodelay(true);
+                Ok::<_, std::io::Error>(s)
+            }
+        })
+        .await
+    }
+
+    /// Connect with `dial`, checking the server version at connect time and falling back to the VS
+    /// Code target ([`ConnectOutcome::Fallback`]) when the server commit differs from
+    /// [`ember_editor_conn::PINNED_COMMIT`] or is unknown.
+    pub async fn connect_or_fallback<D, F, S>(config: SessionConfig, dial: D) -> Result<ConnectOutcome, Error>
+    where
+        D: Fn() -> F,
+        F: Future<Output = std::io::Result<S>>,
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let vscode_url = config.vscode_url.clone();
+        let workspace_path = config.workspace_path.clone();
+        match Self::connect(config, dial).await {
+            Ok((session, updates)) => Ok(ConnectOutcome::Connected { session, updates }),
+            Err(err) => {
+                if let Some(target) = FallbackTarget::from_error(&err, vscode_url.as_deref(), &workspace_path) {
+                    Ok(ConnectOutcome::Fallback(target))
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
     /// Connect with `dial` opening a fresh byte stream to the server each time it is called (three
     /// times: `GET /version`, management, extension host). TCP, TLS or an ember-transport stream.
     pub async fn connect<D, F, S>(config: SessionConfig, dial: D) -> Result<(Self, mpsc::UnboundedReceiver<SessionUpdate>), Error>
@@ -118,6 +184,7 @@ impl EditorSession {
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let authority = config.remote_authority.clone();
+        let workspace_path = config.workspace_path.clone();
         let mut base = ConnectOptions::new(config.host.clone());
         base.connection_token = config.connection_token.clone();
 
@@ -177,15 +244,19 @@ impl EditorSession {
         // two bootstrap calls below are outstanding.
         let (tx, rx) = mpsc::unbounded_channel();
         let (updates_tx, updates_rx) = mpsc::unbounded_channel();
-        let core = SessionCore::new(LanguageRegistry::from_extensions(&extensions), config.core.clone(), Instant::now());
+        let commands = crate::commands::parse_contributed_commands(&extensions);
+        let mut core = SessionCore::new(LanguageRegistry::from_extensions(&extensions), config.core.clone(), Instant::now());
+        core.set_grammar_catalog(crate::textmate::GrammarCatalog::from_extensions(&extensions));
         let driver = Driver {
             core,
+            highlight: None,
             peer: peer.clone(),
-            fs,
+            fs: Arc::clone(&fs),
             ipc,
             updates: updates_tx,
             reqs: HashMap::new(),
             watches: Arc::new(Mutex::new(HashMap::new())),
+            commands,
         };
         let task = tokio::spawn(driver.run(rx, rpc_events, changes, ipc_lifecycle));
 
@@ -200,7 +271,7 @@ impl EditorSession {
             call.start(&peer)?.wait().await?;
         }
 
-        Ok((Self { tx, authority, task: Some(task) }, updates_rx))
+        Ok((Self { tx, authority, workspace_path, fs, task: Some(task) }, updates_rx))
     }
 
     /// The remote authority URIs of this session use.
@@ -211,6 +282,136 @@ impl EditorSession {
     /// `vscode-remote://<authority><path>` for a server path.
     pub fn uri(&self, path: &str) -> UriComponents {
         UriComponents::remote(&self.authority, path)
+    }
+
+    /// `vscode-remote://<authority><workspace_path>` for the root workspace folder.
+    pub fn workspace_uri(&self) -> UriComponents {
+        self.uri(&self.workspace_path)
+    }
+
+    /// A cheap handle that can list directories on its own, so a long walk runs in a task of its
+    /// own and does not hold the session's command loop.
+    pub fn lister(&self) -> DirLister {
+        DirLister { fs: Arc::clone(&self.fs), authority: self.authority.clone() }
+    }
+
+    /// List entries `(name, FileType)` in a directory on the remote server.
+    pub async fn read_dir(&self, uri: &UriComponents) -> Result<Vec<(String, u32)>, Error> {
+        self.fs.readdir(uri).await.map_err(Error::Conn)
+    }
+
+    /// Stat a file or directory on the remote server.
+    pub async fn stat(&self, uri: &UriComponents) -> Result<ember_editor_conn::remote_fs::Stat, Error> {
+        self.fs.stat(uri).await.map_err(Error::Conn)
+    }
+
+    /// Refuses a directory that is a symbolic link: an item made in it would land wherever the link points.
+    async fn refuse_symlink_parent(&self, parent: &str) -> Result<(), Error> {
+        let stat = self.fs.stat(&self.uri(parent)).await.map_err(Error::Conn)?;
+        if stat.file_type & ember_editor_conn::remote_fs::file_type::SYMBOLIC_LINK != 0 {
+            return Err(Error::Path(crate::paths::PathError::Symlink));
+        }
+        Ok(())
+    }
+
+    /// Creates an empty file named `name` in the directory `parent`. Never overwrites: an existing
+    /// file is an error. Returns the new path.
+    pub async fn create_file(&self, parent: &str, name: &str) -> Result<String, Error> {
+        let path = crate::paths::child_path(&self.workspace_path, parent, name).map_err(Error::Path)?;
+        self.refuse_symlink_parent(parent).await?;
+        let opts = WriteOptions { create: true, overwrite: false, unlock: false, atomic: false };
+        self.fs.write_file(&self.uri(&path), Vec::new(), &opts).await.map_err(Error::Conn)?;
+        Ok(path)
+    }
+
+    /// Reads the UTF-8 text of `path` on the remote server.
+    pub async fn read_file_text(&self, path: &str) -> Result<String, Error> {
+        let path = crate::paths::target_path(&self.workspace_path, path).map_err(Error::Path)?;
+        let bytes = self.fs.read_file(&self.uri(&path)).await.map_err(Error::Conn)?;
+        let (text, _bom) = crate::document::decode(&bytes)
+            .map_err(|_| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "file is not UTF-8")))?;
+        Ok(text)
+    }
+
+    /// Writes content to `path`. Creates or overwrites the file.
+    pub async fn write_file(&self, path: &str, content: &[u8]) -> Result<(), Error> {
+        let path = crate::paths::target_path(&self.workspace_path, path).map_err(Error::Path)?;
+        let opts = WriteOptions { create: true, overwrite: true, unlock: false, atomic: false };
+        self.fs.write_file(&self.uri(&path), content.to_vec(), &opts).await.map_err(Error::Conn)?;
+        Ok(())
+    }
+
+    /// Creates a directory named `name` in the directory `parent`. Returns the new path.
+    pub async fn create_dir(&self, parent: &str, name: &str) -> Result<String, Error> {
+        let path = crate::paths::child_path(&self.workspace_path, parent, name).map_err(Error::Path)?;
+        self.refuse_symlink_parent(parent).await?;
+        self.fs.mkdir(&self.uri(&path)).await.map_err(Error::Conn)?;
+        Ok(path)
+    }
+
+    /// Renames `path` to `new_name` in the same directory. Never overwrites. A symbolic link is
+    /// renamed itself. Returns the new path.
+    pub async fn rename_path(&self, path: &str, new_name: &str) -> Result<String, Error> {
+        let to = crate::paths::renamed_path(&self.workspace_path, path, new_name).map_err(Error::Path)?;
+        let from = crate::paths::target_path(&self.workspace_path, path).map_err(Error::Path)?;
+        self.fs.rename(&self.uri(&from), &self.uri(&to), false).await.map_err(Error::Conn)?;
+        Ok(to)
+    }
+
+    /// Deletes one file or directory (a directory with everything in it). There is no trash: it
+    /// cannot be undone. A symbolic link is removed itself and never recursed into.
+    pub async fn delete_path(&self, path: &str, is_dir: bool) -> Result<(), Error> {
+        let path = crate::paths::target_path(&self.workspace_path, path).map_err(Error::Path)?;
+        let stat = self.fs.stat(&self.uri(&path)).await.map_err(Error::Conn)?;
+        let is_link = stat.file_type & ember_editor_conn::remote_fs::file_type::SYMBOLIC_LINK != 0;
+        let opts = ember_editor_conn::remote_fs::DeleteOptions { recursive: is_dir && !is_link, use_trash: false, atomic: false };
+        self.fs.delete(&self.uri(&path), &opts).await.map_err(Error::Conn)
+    }
+
+    /// Moves a file or directory at `src` into `dest_dir`.
+    pub async fn move_path(&self, src: &str, dest_dir: &str) -> Result<String, Error> {
+        let from = crate::paths::target_path(&self.workspace_path, src).map_err(Error::Path)?;
+        self.refuse_symlink_parent(dest_dir).await?;
+        let to = crate::paths::paste_destination(&self.workspace_path, &from, dest_dir, &[], true).map_err(Error::Path)?;
+        self.fs.rename(&self.uri(&from), &self.uri(&to), false).await.map_err(Error::Conn)?;
+        Ok(to)
+    }
+
+    /// Helper that recursively copies an entry from `from` to `to`.
+    async fn copy_entry(&self, from: &str, to: &str) -> Result<(), Error> {
+        let mut stack = vec![(from.to_string(), to.to_string())];
+        let opts = WriteOptions { create: true, overwrite: false, unlock: false, atomic: false };
+        while let Some((src, dst)) = stack.pop() {
+            let stat = self.fs.stat(&self.uri(&src)).await.map_err(Error::Conn)?;
+            if stat.file_type & ember_editor_conn::remote_fs::file_type::SYMBOLIC_LINK != 0 {
+                return Err(Error::Path(crate::paths::PathError::Symlink));
+            }
+            if stat.file_type & ember_editor_conn::remote_fs::file_type::DIRECTORY != 0 {
+                self.fs.mkdir(&self.uri(&dst)).await.map_err(Error::Conn)?;
+                let entries = self.fs.readdir(&self.uri(&src)).await.map_err(Error::Conn)?;
+                for (name, _) in entries {
+                    let child_src = format!("{}/{}", src.trim_end_matches('/'), name);
+                    let child_dst = format!("{}/{}", dst.trim_end_matches('/'), name);
+                    stack.push((child_src, child_dst));
+                }
+            } else {
+                let bytes = self.fs.read_file(&self.uri(&src)).await.map_err(Error::Conn)?;
+                self.fs.write_file(&self.uri(&dst), bytes, &opts).await.map_err(Error::Conn)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Copies a file or directory at `src` into `dest_dir`.
+    pub async fn copy_path(&self, src: &str, dest_dir: &str) -> Result<String, Error> {
+        let from = crate::paths::target_path(&self.workspace_path, src).map_err(Error::Path)?;
+        let dest_norm = crate::paths::folder_path(&self.workspace_path, dest_dir).map_err(Error::Path)?;
+        self.refuse_symlink_parent(&dest_norm).await?;
+        let entries = self.fs.readdir(&self.uri(&dest_norm)).await.map_err(Error::Conn)?;
+        let existing: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+        let to = crate::paths::paste_destination(&self.workspace_path, &from, &dest_norm, &existing, false).map_err(Error::Path)?;
+        self.copy_entry(&from, &to).await?;
+        Ok(to)
     }
 
     fn send(&self, c: Command) -> Result<(), Error> {
@@ -226,6 +427,11 @@ impl EditorSession {
         self.send(Command::Input(Input::Close { uri }))
     }
 
+    /// Reload an open document from disk even if its buffer has unsaved edits (e.g. after discard).
+    pub fn reload(&self, uri: UriComponents) -> Result<(), Error> {
+        self.send(Command::Input(Input::Reload { uri }))
+    }
+
     /// The editor showing `uri` got focus.
     pub fn focus(&self, uri: UriComponents) -> Result<(), Error> {
         self.send(Command::Input(Input::Focus { uri }))
@@ -239,6 +445,28 @@ impl EditorSession {
     /// Ask for inline completions at `pos` now (explicit trigger).
     pub fn trigger_inline_completion(&self, uri: UriComponents, generation: u64, pos: WidgetPos) -> Result<(), Error> {
         self.send(Command::Input(Input::TriggerInline { uri, generation, pos }))
+    }
+
+    /// Run a command by its id, dispatching to the extension host or workbench.
+    pub fn execute_command(&self, id: impl Into<String>, arguments: Vec<Value>) -> Result<(), Error> {
+        self.send(Command::Input(Input::ExecuteCommand { id: id.into(), arguments }))
+    }
+
+    /// Search the workspace folder (FR-E7): answered with [`SessionUpdate::SearchHits`] and one
+    /// [`SessionUpdate::SearchDone`] for `id`. A running search is cancelled.
+    pub fn search(&self, id: u64, request: crate::search::SearchRequest) -> Result<(), Error> {
+        let folder = self.workspace_uri();
+        self.send(Command::Input(Input::Search { id, request, folder }))
+    }
+
+    /// Stop search `id`; answered with [`SessionUpdate::SearchDone`] (`Cancelled`).
+    pub fn cancel_search(&self, id: u64) -> Result<(), Error> {
+        self.send(Command::Input(Input::CancelSearch { id }))
+    }
+
+    /// Replace the chosen matches (FR-E7); answered with [`SessionUpdate::ReplaceDone`].
+    pub fn replace(&self, id: u64, request: crate::search::ReplaceRequest) -> Result<(), Error> {
+        self.send(Command::Input(Input::Replace { id, request }))
     }
 
     /// After [`SessionUpdate::Desync`]: re-send the session's text as a new generation.
@@ -263,6 +491,8 @@ impl Drop for EditorSession {
 
 struct Driver {
     core: SessionCore,
+    /// Jobs for the highlighting thread (started in [`Driver::run`]).
+    highlight: Option<std::sync::mpsc::SyncSender<HighlightJob>>,
     peer: RpcPeer,
     fs: Arc<RemoteFs>,
     ipc: IpcClient,
@@ -271,6 +501,35 @@ struct Driver {
     reqs: HashMap<Token, u32>,
     /// uri key → watch request id.
     watches: Arc<Mutex<HashMap<String, String>>>,
+    commands: Vec<crate::commands::ContributedCommand>,
+}
+
+/// How many jobs may wait for the highlighting thread. A job that does not fit is not lost silently: its
+/// document is rebuilt from the session's text.
+const HIGHLIGHT_QUEUE: usize = 1024;
+/// How long a grammar file may take to arrive.
+const GRAMMAR_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The thread that tokenizes documents: a first pass over a long file takes a second, which the session's own
+/// task must not spend. Jobs arrive in order; the ones that queued up while it worked are run as one batch.
+fn spawn_highlighter(answers: mpsc::UnboundedSender<Input>) -> std::sync::mpsc::SyncSender<HighlightJob> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<HighlightJob>(HIGHLIGHT_QUEUE);
+    let spawned = std::thread::Builder::new().name("ember-highlight".into()).spawn(move || {
+        let mut worker = Worker::new();
+        while let Ok(first) = rx.recv() {
+            let mut batch = vec![first];
+            batch.extend(rx.try_iter());
+            for output in crate::highlight::guard(&mut worker, batch, Worker::run) {
+                if answers.send(Input::Highlighted(output)).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("ember-editor: cannot start the highlighting thread: {e}");
+    }
+    tx
 }
 
 async fn recv_opt<T>(rx: &mut Option<mpsc::UnboundedReceiver<T>>) -> Option<T> {
@@ -289,6 +548,10 @@ impl Driver {
         ipc_lifecycle: mpsc::UnboundedReceiver<IpcLifecycle>,
     ) {
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<Input>();
+        self.highlight = Some(spawn_highlighter(internal_tx.clone()));
+        if !self.commands.is_empty() {
+            let _ = self.updates.send(SessionUpdate::Commands { commands: self.commands.clone() });
+        }
         let mut changes = Some(changes);
         let mut lifecycle = Some(ipc_lifecycle);
         loop {
@@ -393,10 +656,41 @@ impl Driver {
                     }
                 }
                 Effect::Respond { req, result } => self.peer.respond(req, result),
+                Effect::Highlight(job) => {
+                    if let Some(tx) = &self.highlight {
+                        if let Err(std::sync::mpsc::TrySendError::Full(job)) = tx.try_send(job) {
+                            // The thread is far behind: drop the job and have the document built again from the
+                            // session's text instead of leaving the colours wrong.
+                            if let Some((key, seq)) = job.target() {
+                                let rebuild = crate::highlight::HighlightOutput::rebuild(key, seq);
+                                let _ = internal.send(Input::Highlighted(rebuild));
+                            }
+                        }
+                    }
+                }
                 Effect::ReadFile { uri, purpose } => {
                     let (fs, tx) = (Arc::clone(&self.fs), internal.clone());
+                    // A grammar file comes from an extension on the server: ask how big it is before reading it.
+                    let cap = matches!(purpose, crate::engine::ReadPurpose::Grammar { .. }).then_some(crate::textmate::MAX_GRAMMAR_BYTES);
                     tokio::spawn(async move {
-                        let result = fs.read_file(&uri).await.map_err(|e| e.to_string());
+                        let read = async {
+                            if let Some(cap) = cap {
+                                match fs.stat(&uri).await {
+                                    Ok(st) if st.size > cap => return Err("the grammar file is too large".to_owned()),
+                                    Ok(_) => {}
+                                    Err(e) => return Err(e.to_string()),
+                                }
+                            }
+                            fs.read_file(&uri).await.map_err(|e| e.to_string())
+                        };
+                        // A grammar read is bounded in time as well as in size.
+                        let result = match cap {
+                            Some(_) => match tokio::time::timeout(GRAMMAR_READ_TIMEOUT, read).await {
+                                Ok(r) => r,
+                                Err(_) => Err("reading the grammar file timed out".to_owned()),
+                            },
+                            None => read.await,
+                        };
                         let _ = tx.send(Input::FileRead { uri, purpose, result });
                     });
                 }

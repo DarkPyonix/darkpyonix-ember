@@ -64,8 +64,7 @@ impl<O: WindowOpener> BridgeHost<O> {
 
     /// Handles one string posted by a webview.
     ///
-    /// Version skew does not drop the message: `decode` logs it, and a best-effort decode
-    /// is acted on (FR-B2).
+    /// An unknown kind is not dropped silently: `decode` logs it (FR-B2).
     pub fn handle_from_webview(&mut self, payload: &str) -> HostOutcome {
         let inbound = match decode(payload) {
             Ok(i) => i,
@@ -73,10 +72,6 @@ impl<O: WindowOpener> BridgeHost<O> {
         };
         let msg = match inbound {
             Inbound::Message(m) => m,
-            Inbound::VersionMismatch { decoded: Some(m), .. } => m,
-            Inbound::VersionMismatch { kind, decoded: None, .. } => {
-                return HostOutcome::Ignored { kind, reason: "version mismatch, fields unreadable (logged)" }
-            }
             Inbound::UnknownKind { kind, .. } => {
                 return HostOutcome::Ignored { kind, reason: "unknown kind (logged)" }
             }
@@ -132,18 +127,17 @@ mod tests {
         }
     }
 
-    fn detach_json(version: u32) -> String {
-        format!(
-            r#"{{"kind":"tab_detach","version":{version},"sourceWindowId":"src",
-                "workspace":{{"folder":"/p"}},"fileUri":"vscode-remote://h/p/a.rs",
-                "cursor":{{"line":4,"column":2}},"scroll":{{"top":80}},"selection":null}}"#
-        )
+    fn detach_json() -> String {
+        r#"{"kind":"tab_detach","sourceWindowId":"src",
+            "workspace":{"folder":"/p"},"fileUri":"vscode-remote://h/p/a.rs",
+            "cursor":{"line":4,"column":2},"scroll":{"top":80},"selection":null}"#
+            .to_owned()
     }
 
     #[test]
     fn detach_opens_a_window_at_the_same_project_with_the_state() {
         let mut host = BridgeHost::new(RecordingOpener::default(), "t");
-        let out = host.handle_from_webview(&detach_json(1));
+        let out = host.handle_from_webview(&detach_json());
         let HostOutcome::Opened(req) = out else { panic!("expected HostOutcome::Opened") };
         assert_eq!(req.window_id, "t-1");
         assert_eq!(req.source_window_id.as_deref(), Some("src"));
@@ -155,17 +149,10 @@ mod tests {
     }
 
     #[test]
-    fn a_newer_detach_version_is_still_acted_on() {
-        let mut host = BridgeHost::new(RecordingOpener::default(), "t");
-        assert!(matches!(host.handle_from_webview(&detach_json(2)), HostOutcome::Opened(_)));
-        assert_eq!(host.opener().opened.len(), 1);
-    }
-
-    #[test]
     fn window_ids_are_unique() {
         let mut host = BridgeHost::new(RecordingOpener::default(), "t");
-        host.handle_from_webview(&detach_json(1));
-        host.handle_from_webview(&detach_json(1));
+        host.handle_from_webview(&detach_json());
+        host.handle_from_webview(&detach_json());
         let ids: Vec<_> = host.opener().opened.iter().map(|r| r.window_id.clone()).collect();
         assert_eq!(ids, vec!["t-1", "t-2"]);
     }
@@ -192,7 +179,7 @@ mod tests {
     #[test]
     fn opener_failure_is_reported() {
         let mut host = BridgeHost::new(RecordingOpener { fail: true, ..Default::default() }, "t");
-        assert!(matches!(host.handle_from_webview(&detach_json(1)), HostOutcome::OpenFailed { .. }));
+        assert!(matches!(host.handle_from_webview(&detach_json()), HostOutcome::OpenFailed { .. }));
     }
 
     #[test]
@@ -200,11 +187,11 @@ mod tests {
         let mut host = BridgeHost::new(RecordingOpener::default(), "t");
         assert!(matches!(host.handle_from_webview("{"), HostOutcome::Rejected(_)));
         assert!(matches!(
-            host.handle_from_webview(r#"{"kind":"nope","version":1}"#),
+            host.handle_from_webview(r#"{"kind":"nope"}"#),
             HostOutcome::Ignored { .. }
         ));
         assert!(matches!(
-            host.handle_from_webview(r#"{"kind":"sibling_window_closed","version":1,"windowId":"w"}"#),
+            host.handle_from_webview(r#"{"kind":"sibling_window_closed","windowId":"w"}"#),
             HostOutcome::Ignored { .. }
         ));
         assert!(host.opener().opened.is_empty());
@@ -218,7 +205,6 @@ mod tests {
         assert_eq!(sent.len(), 1);
         let v: serde_json::Value = serde_json::from_str(&sent[0]).unwrap();
         assert_eq!(v["kind"], "sibling_window_closed");
-        assert_eq!(v["version"], 1);
         assert_eq!(v["windowId"], "w9");
     }
 

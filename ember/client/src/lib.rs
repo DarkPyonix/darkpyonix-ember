@@ -1,10 +1,12 @@
 //! Ember native client core: everything below the UI (SPEC §L, PR-1, FR-S6).
 //!
 //! - [`wire`]: the main server's JSON types.
-//! - [`api`]: HTTP client for `/api/v1`.
+//! - [`api`]: HTTP client for `/api`.
+//! - [`channels`]: wire types of the channels API (FR-T10).
 //! - [`push`]: push-message decoding (with version check) and reconnect backoff.
 //! - [`transcript`] and [`state`]: the pure reducer a UI binds to: projects, sessions with
 //!   launcher status (incl. finished-unread), transcripts, computers, connection state.
+//! - [`token`]: the server token every HTTP and WebSocket call carries (FR-S11).
 //! - [`cache`]: the cold-start snapshot file.
 //! - [`client`]: the sync engine tying them together.
 //!
@@ -13,9 +15,11 @@
 
 pub mod api;
 pub mod cache;
+pub mod channels;
 pub mod client;
 pub mod push;
 pub mod state;
+pub mod token;
 pub mod transcript;
 pub mod wire;
 

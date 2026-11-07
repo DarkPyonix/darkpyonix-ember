@@ -44,6 +44,7 @@
       <ul>
         <li><a href="#requirements">준비물</a></li>
         <li><a href="#checkout">코드 받기</a></li>
+        <li><a href="#release">릴리스로 설치</a></li>
         <li><a href="#server">ember server</a></li>
         <li><a href="#node">ember node</a></li>
         <li><a href="#client">클라이언트</a></li>
@@ -69,6 +70,18 @@
       <li><strong>C 컴파일러.</strong> 서버가 SQLite를 자기 안에 컴파일해 넣기 때문입니다.</li>
       <li><strong>에이전트 CLI, 메인 서버에만</strong>: <code>claude</code>, <code>codex</code>, <code>agy</code>, <code>omp</code> 를 각 제조사의 안내대로 설치하고, <code>ember-server</code> 를 실행할 사용자로 로그인해 둡니다. Ember는 <code>PATH</code> 에서 이들을 찾고, 없는 것은 오류 대신 "설치되지 않음"으로 표시합니다.</li>
     </ul>
+
+    <h2 id="release">릴리스로 설치</h2>
+    <p>태그 릴리스 <span class="pill planned">계획</span> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/72">#72</a>)는 macOS arm64, Linux x86_64, Linux aarch64용 <code>ember-server</code>와 <code>ember-node</code> 압축 파일을 <code>SHA256SUMS</code>와 함께 올립니다. 워크플로는 작성되었지만 아직 태그를 낸 적이 없어서, 위 버전은 예시입니다.</p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell</figcaption>
+<pre><code>gh release download v0.1.0 --repo DarkPyonix/darkpyonix-ember \
+  --pattern <span class="s">'ember-*-macos-arm64.tar.gz'</span> --pattern SHA256SUMS
+shasum -a 256 -c --ignore-missing SHA256SUMS
+tar -xzf ember-server-v0.1.0-macos-arm64.tar.gz</code></pre>
+    </figure>
+    <p>각 압축 파일에는 아래에서 설명하는 프로그램(<code>ember-server</code>, <code>ember-exec</code>, <code>ember-a2a</code>와 <code>ember-node</code>, <code>ember-term</code>)이 들어 있습니다. 한 묶음은 한 디렉터리에 두십시오. macOS 바이너리와 앱은 임시(ad hoc) 서명만 되어 있고 공증은 하지 않으므로(Apple 계정 없음) Gatekeeper가 첫 실행을 막습니다. 풀어낸 파일에는 <code>xattr -d com.apple.quarantine</code>을, <code>.app</code>에는 <code>xattr -dr com.apple.quarantine Ember.app</code>을 실행해 격리 표시를 지우거나, 우클릭 후 열기를 고릅니다. Windows <code>.msix</code>는 서명되어 있지 않으므로 개발자 모드를 켜거나 신뢰하는 인증서로 다시 서명합니다.</p>
+    <p>릴리스 워크플로의 클라이언트 작업은 활성화되면(<code>EMBER_CLIENT_RELEASE=true</code>) macOS <code>.app</code>과 <code>.dmg</code>, Windows <code>.zip</code>과 <code>.msix</code>, Linux <code>.AppImage</code>를 함께 묶습니다. 첫 태그 릴리스가 올라오기 전까지는 <a href="#client">클라이언트</a>에 나온 대로 소스에서 빌드하십시오.</p>
 
     <h2 id="checkout">코드 받기</h2>
     <p>
@@ -103,17 +116,25 @@ cargo build --release --locked
     </p>
     <figure class="codeblock" data-copy="복사" data-copied="복사됨">
       <figcaption>shell</figcaption>
-<pre><code>curl http://127.0.0.1:8740/api/v1/health
-<span class="c"># {"ok":true,"push_version":1}</span></code></pre>
+<pre><code>curl http://127.0.0.1:8740/api/health
+<span class="c"># {"ok":true}</span></code></pre>
     </figure>
     <div class="warn">
-      <span class="label">HTTP 리스너에는 로그인이 없습니다</span>
+      <span class="label">HTTP 리스너에는 아직 로그인이 없습니다</span>
       <p>
         <code>EMBER_LISTEN</code> 에 닿을 수 있는 사람은 계정, 장치, 허브 등록을 포함한 모든 경로를
         쓸 수 있습니다. 기본값인 루프백이나 믿을 수 있는 네트워크에만 두세요. 인증되는 경로는 서버의
         허용 목록에 있는 장치만 받아들이는 P2P 전송입니다(<a href="computers.html#peer">컴퓨터와 허브</a>).
         지금 다른 기계에서 클라이언트를 쓰려면 SSH로 포트를 전달합니다:
         <code>ssh -N -L 8740:127.0.0.1:8740 you@mini.local</code>.
+        이 부분은 막기로 정했습니다. 원격 장치는 기기 키를 그대로 쓰고, 같은 컴퓨터의 앱과 도구는
+        로컬 토큰을 보내게 됩니다(이슈 #338). 진행 중이며 아직 구현되지 않았습니다.
+      </p>
+      <p>
+        <span class="pill partial">일부</span> WebSocket 경로(터미널 연결, 푸시 채널, 브라우저 보기와 DevTools 중계)는
+        브라우저 <code>Origin</code> 이 서버 자신의 호스트도 루프백도 아니면 거절합니다. 그래서 열어 둔 웹 페이지가 다른
+        사이트에서 셸에 붙을 수 없습니다. 네이티브 클라이언트는 <code>Origin</code> 을 보내지 않아 영향이 없습니다. 로그인은
+        아닙니다. 루프백 신뢰를 넘어 누가 붙을 수 있는지는 아직 정해지지 않았습니다(FR-P3).
       </p>
     </div>
 

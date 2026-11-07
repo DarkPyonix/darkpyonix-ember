@@ -6,7 +6,7 @@
 //!
 //! - [`api`]: the authenticated HTTP/WebSocket API and [`api::serve`], generic over the listener:
 //!   TCP, or the peer-to-peer transport via [`transport`].
-//! - [`transport`]: serving the API over the transport (service `ember-node/1`) to allowed
+//! - [`transport`]: serving the API over the transport (service `ember-node`) to allowed
 //!   peers only (SPEC `FR-N1`, `FR-N3`).
 //! - [`hub`]: registering this computer to the user's darkpyonix.dev account, and the hub's
 //!   address directory and relay (SPEC `FR-N2`).
@@ -19,20 +19,26 @@
 //! Known limits: jobs live in the daemon's memory and do not survive a daemon restart (terminal
 //! sessions do, best effort, through their PTY keepers; see [`term`]); the path
 //! policy confines the file API and working directories, not what a command does.
-//! - [`egress`]: the SOCKS5 exit for the remote browser (FR-R1), served as `/v1/egress` (one
+//! - [`egress`]: the SOCKS5 exit for the remote browser (FR-R1), served as `/egress` (one
 //!   WebSocket per proxied TCP connection) and optionally as a plain SOCKS5 listener.
 
 pub mod api;
 pub mod client;
 pub mod config;
 pub mod egress;
+pub mod enrol;
+pub mod enrol_cli;
 pub mod envinfo;
 pub mod exec;
 pub mod exec_server;
 pub mod fs;
+pub mod git;
+pub mod git_conflict;
 pub mod hub;
 pub mod jobs;
+pub mod metrics;
 pub mod policy;
+pub mod ports;
 pub mod proto;
 pub mod term;
 pub mod transport;

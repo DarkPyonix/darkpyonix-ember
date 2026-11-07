@@ -33,7 +33,8 @@
 //!   observed with 2.1.288) and ends the turn with a `result` of subtype `error_during_execution`,
 //!   which the adapter reports as `TurnEnded { Interrupted }` without an `Error`.
 //! * stdout, `control_cancel_request` `{"request_id": …}` withdraws a pending permission prompt
-//!   (SDK `query.py`).
+//!   (SDK `query.py`). The adapter drops the approval or question it holds and emits
+//!   `PromptWithdrawn { prompt_id }`; for an id it does not hold it emits nothing.
 //!
 //! # Approvals
 //!
@@ -41,7 +42,20 @@
 //! `request_id`. `AllowAlways` remembers the tool name for the lifetime of this process; later
 //! requests for that tool are answered `allow` by the adapter immediately and emit **no** event
 //! (the tool call itself is still visible as `ToolCall`/`ToolResult`). Requests that were already
-//! pending when `AllowAlways` was given stay pending until answered.
+//! pending when `AllowAlways` was given stay pending until answered. Which tools may be
+//! remembered is [`approval_policy`]; the frame's `requires_user_interaction: true` (measured on
+//! 2.1.319, absent on ordinary tools) becomes `needs_person`.
+//!
+//! # Questions
+//!
+//! `AskUserQuestion` (measured on 2.1.319, fixtures `question_*_2.1.319.jsonl`) arrives as a
+//! `can_use_tool` request with `input.questions[{question, header, options[{label, description}],
+//! multiSelect}]` and becomes `QuestionAsked` (`question_id` = the request id, question ids `q0`,
+//! `q1`, ...). The reply is an `allow` whose `updatedInput` is the original input plus `answers`
+//! keyed by the question text (a multi-select question joins its values with ", "). An `allow`
+//! without `answers` makes Claude Code tell the model "The user did not answer the questions."
+//! (skipping a question). A question waits for a person without end: this adapter times nothing
+//! out. An input that does not parse stays an `ApprovalRequested` with `needs_person`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -52,11 +66,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex};
 
-use super::{AgentAdapter, AgentKind, AgentRun, Detected, StartRequest};
-use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
+use super::proc::{spawn_agent, AgentCommand, AgentStdin, AgentStdout, ProcHandle};
+use super::{AgentAdapter, AgentKind, AgentRun, Detected, NativeFork, StartRequest};
+use crate::events::{
+    approval_policy, validate_question_answers, AgentEvent, AnswerInvalid, ApprovalDecision, Question,
+    QuestionAnswer, QuestionOption, TurnOutcome,
+};
 
 /// How long to wait for a `result` after the interrupt control request before sending SIGINT.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(10);
@@ -85,7 +103,7 @@ impl ClaudeCodeAdapter {
     /// The CLI arguments; `mcp_file` is a private file holding the `--mcp-config` JSON, used
     /// instead of the inline JSON when an MCP server has environment (possibly secrets, which
     /// must not appear on a command line other local users can read).
-    fn args_with(req: &StartRequest, mcp_file: Option<&std::path::Path>) -> Vec<String> {
+    pub(crate) fn args_with(req: &StartRequest, mcp_file: Option<&std::path::Path>) -> Vec<String> {
         let mut args: Vec<String> = [
             "--print",
             "--input-format",
@@ -111,6 +129,20 @@ impl ClaudeCodeAdapter {
         if let Some(id) = &req.resume_native_id {
             // Equals form, as the SDK does, so an id can never be read as a flag.
             args.push(format!("--resume={id}"));
+        } else if let Some(fork) = &req.fork_from {
+            // FR-S5: `--fork-session` makes the resume a copy under a new session id, which the
+            // init event announces like any other.
+            args.push(format!("--resume={}", fork.native_id));
+            args.push("--fork-session".into());
+        }
+        // `--allowedTools <tools...>` is variadic: it must be followed by another flag or by the
+        // end of the arguments, never by a positional. It stays right before `--mcp-config=` (or
+        // last). Measured on claude 2.1.319 (FR-T12): the call of an MCP tool is denied in `-p`
+        // mode without the rule and passes with the exact tool name.
+        let allowed: Vec<&String> = req.allowed_tools.iter().filter(|t| allowed_tool_ok(t)).collect();
+        if !allowed.is_empty() {
+            args.push("--allowedTools".into());
+            args.extend(allowed.into_iter().cloned());
         }
         // `--mcp-config <configs...>` takes JSON files or strings (claude 2.1.288 --help) and is
         // variadic: the equals form keeps it to exactly this one value. Without
@@ -124,8 +156,22 @@ impl ClaudeCodeAdapter {
     }
 }
 
+/// Whether `tool` may be passed as an `--allowedTools` rule: one exact MCP tool name. A wildcard,
+/// whitespace (which would split into several rules) or a non-MCP rule (`Bash`, ...) is refused,
+/// so this field can never widen what the agent may do unasked.
+fn allowed_tool_ok(tool: &str) -> bool {
+    let ok = tool.starts_with("mcp__")
+        && tool.len() > "mcp__".len()
+        && !tool.contains('*')
+        && !tool.chars().any(char::is_whitespace);
+    if !ok {
+        tracing::warn!(len = tool.len(), "ignoring an allowed tool that is not one exact MCP tool name");
+    }
+    ok
+}
+
 /// Whether any MCP server in `req` carries environment (which goes through a private file).
-fn mcp_needs_file(req: &StartRequest) -> bool {
+pub(crate) fn mcp_needs_file(req: &StartRequest) -> bool {
     req.mcp_servers.iter().any(|s| !s.env.is_empty())
 }
 
@@ -161,6 +207,61 @@ impl PrivateConfigFile {
 impl Drop for PrivateConfigFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Whether `name` is exactly `ember-mcp-` + 32 lowercase hex digits + `.json`, the name
+/// [`PrivateConfigFile::create`] gives (a simple v4 UUID).
+fn is_mcp_file_name(name: &str) -> bool {
+    name.strip_prefix("ember-mcp-")
+        .and_then(|r| r.strip_suffix(".json"))
+        .is_some_and(|h| h.len() == 32 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+}
+
+/// Remove `ember-mcp-<32 hex>.json` files that a crashed server left in `dir` (they hold env
+/// values such as the runtime token). Called once at server start. A file goes only when it is a
+/// regular file (not a symlink) owned by this user with mode exactly 0600, last modified before
+/// `started` (this process's start) and at least one hour ago: an agent that survived the previous
+/// server run (FR-S8) may still re-read its MCP servers from a recent file. Removal errors are
+/// ignored (one debug line). Returns the number removed; logs it at info when above zero.
+pub fn cleanup_stale_mcp_files(dir: &std::path::Path, started: std::time::SystemTime) -> usize {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        const MIN_AGE: Duration = Duration::from_secs(3600);
+        let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+        let now = std::time::SystemTime::now();
+        // SAFETY: geteuid has no preconditions.
+        let me = unsafe { libc::geteuid() };
+        let mut removed = 0;
+        for entry in entries.flatten() {
+            if !entry.file_name().to_str().is_some_and(is_mcp_file_name) {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+            if !meta.file_type().is_file() || meta.uid() != me || meta.mode() & 0o777 != 0o600 {
+                continue;
+            }
+            let Ok(modified) = meta.modified() else { continue };
+            let old_enough = now.duration_since(modified).is_ok_and(|age| age >= MIN_AGE);
+            if modified >= started || !old_enough {
+                continue;
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => removed += 1,
+                Err(e) => tracing::debug!("removing stale MCP config file failed: {e}"),
+            }
+        }
+        if removed > 0 {
+            tracing::info!("removed {removed} stale MCP config file(s) from a previous run");
+        }
+        removed
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (dir, started);
+        0
     }
 }
 
@@ -204,6 +305,19 @@ impl AgentAdapter for ClaudeCodeAdapter {
         AgentKind::ClaudeCode
     }
 
+    /// `--resume <id> --fork-session` forks the whole session (FR-S5).
+    fn native_fork(&self) -> NativeFork {
+        NativeFork::Latest
+    }
+
+    fn rejoins_shim(&self) -> bool {
+        true
+    }
+
+    fn binary(&self) -> Option<PathBuf> {
+        Some(self.bin.clone())
+    }
+
     async fn detect(&self) -> Detected {
         let out = Command::new(&self.bin)
             .arg("--version")
@@ -219,7 +333,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 version: String::from_utf8_lossy(&o.stdout)
                     .split_whitespace()
                     .next()
-                    .map(String::from),
+                    .and_then(super::version_token),
             },
             _ => Detected { kind: AgentKind::ClaudeCode, installed: false, version: None },
         }
@@ -246,48 +360,63 @@ impl AgentAdapter for ClaudeCodeAdapter {
             (true, Some(config)) => Some(PrivateConfigFile::create(&std::env::temp_dir(), &config)?),
             _ => None,
         };
-        let mut child = Command::new(&self.bin)
-            .envs(mcp_timeout_env(&req))
-            .envs(req.env.iter().map(|(k, v)| (k, v)))
-            .args(Self::args_with(&req, mcp_file.as_ref().map(PrivateConfigFile::path)))
-            .current_dir(&req.cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("failed to start {}: {e}", self.bin.display()))?;
-        let pid = child.id();
-        let stdin = Arc::new(Mutex::new(child.stdin.take()));
-        let stdout = child.stdout.take().expect("stdout is piped");
-        let stderr = child.stderr.take().expect("stderr is piped");
+        let mut env: Vec<(String, String)> = mcp_timeout_env(&req).into_iter().collect();
+        env.extend(req.env.iter().cloned());
+        let proc = spawn_agent(AgentCommand {
+            program: self.bin.clone(),
+            args: Self::args_with(&req, mcp_file.as_ref().map(PrivateConfigFile::path)),
+            env,
+            cwd: req.cwd.clone(),
+            // stream-json has no handshake state, so a running agent can be rejoined (FR-S8).
+            reattachable: true,
+            mem_limit_mb: req.mem_limit_mb,
+        })
+        .await?;
+        let pid = proc.pid;
+        let reattached = proc.reattached;
+        let stdin: SharedStdin = Arc::new(Mutex::new(Some(proc.stdin)));
+        let stdout = proc.stdout;
+        let stderr = proc.stderr;
         let state = Arc::new(StdMutex::new(RunState::default()));
 
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::warn!(target: "ember::claude", pid, "stderr: {line}");
-            }
-        });
+        if let Some(stderr) = stderr {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::warn!(target: "ember::claude", pid, "stderr: {line}");
+                }
+            });
+        }
 
         tokio::spawn(read_stdout(stdout, stdin.clone(), state.clone(), events));
 
         Ok(Box::new(ClaudeRun {
-            child: Arc::new(Mutex::new(Some(child))),
+            child: Arc::new(Mutex::new(Some(proc.handle))),
             pid,
             stdin,
             state,
             request_counter: 0,
+            reattached,
             _mcp_file: mcp_file,
         }))
     }
 }
 
+/// Drop the approval or question `request_id` from `st`; whether the adapter held one.
+fn withdraw_prompt(st: &mut RunState, request_id: &str) -> bool {
+    let approval = st.pending.remove(request_id).is_some();
+    let question = st.pending_questions.remove(request_id).is_some();
+    approval || question
+}
+
 /// State shared between the run handle and its stdout reader.
 #[derive(Default)]
 struct RunState {
-    /// Permission prompts waiting on the user: request_id -> (tool name, original input).
-    pending: HashMap<String, (String, Value)>,
+    /// Permission prompts waiting on the user: request_id -> (tool name, original input,
+    /// whether the request carried `requires_user_interaction`).
+    pending: HashMap<String, (String, Value, bool)>,
+    /// Questions waiting on the user: request_id -> the original input and the parsed questions.
+    pending_questions: HashMap<String, PendingQuestion>,
     /// Tools the user allowed for the rest of this session.
     always_allowed: HashSet<String>,
     /// A user message was sent and its `result` has not arrived yet.
@@ -298,7 +427,15 @@ struct RunState {
     shutting_down: bool,
 }
 
-type SharedStdin = Arc<Mutex<Option<ChildStdin>>>;
+/// A question request kept until it is answered or skipped.
+#[derive(Clone)]
+struct PendingQuestion {
+    /// The request's input as the CLI sent it; the reply repeats it.
+    input: Value,
+    questions: Vec<Question>,
+}
+
+type SharedStdin = Arc<Mutex<Option<AgentStdin>>>;
 
 async fn write_line(stdin: &SharedStdin, msg: &Value) -> anyhow::Result<()> {
     let mut guard = stdin.lock().await;
@@ -321,6 +458,105 @@ fn allow_response(request_id: &str, input: &Value) -> Value {
     })
 }
 
+/// The input of a question request rebuilt from the stored questions, for a question restored
+/// after a rejoin (the stored event keeps the parsed questions, not the raw input).
+fn input_from_questions(questions: &[Question]) -> Value {
+    let list: Vec<Value> = questions
+        .iter()
+        .map(|q| {
+            let options: Vec<Value> = q
+                .options
+                .iter()
+                .map(|o| match &o.description {
+                    Some(d) => json!({ "label": o.label, "description": d }),
+                    None => json!({ "label": o.label }),
+                })
+                .collect();
+            let mut v = json!({ "question": q.text, "options": options, "multiSelect": q.multi_select });
+            if let Some(h) = &q.header {
+                v["header"] = json!(h);
+            }
+            v
+        })
+        .collect();
+    json!({ "questions": list })
+}
+
+/// The `control_response` that answers a question request (measured on 2.1.319): `allow` with the
+/// original input plus `answers`, keyed by question text, a multi-select question's values joined
+/// with ", ". Validates `answers` against `questions` first.
+fn question_reply(
+    request_id: &str,
+    input: &Value,
+    questions: &[Question],
+    answers: &[QuestionAnswer],
+) -> Result<Value, AnswerInvalid> {
+    validate_question_answers(questions, answers)?;
+    let mut by_text = serde_json::Map::new();
+    for q in questions {
+        let a = answers.iter().find(|a| a.question_id == q.id).ok_or(AnswerInvalid::MissingAnswer)?;
+        let values: Vec<&str> = a.values.iter().map(|v| v.trim()).collect();
+        by_text.insert(q.text.clone(), Value::String(values.join(", ")));
+    }
+    let mut updated = if input.is_object() { input.clone() } else { json!({}) };
+    if let Some(o) = updated.as_object_mut() {
+        o.insert("answers".into(), Value::Object(by_text));
+    }
+    Ok(allow_response(request_id, &updated))
+}
+
+/// The questions of an `AskUserQuestion` input, or `None` when it does not parse: a non-empty
+/// `questions` array of objects with a string `question`, optional string `header`, optional
+/// `options` array of objects with a string `label` (and optional string `description`), optional
+/// bool `multiSelect`. Two questions with the same text are refused too, because the reply is
+/// keyed by the text.
+fn parse_questions(input: &Value) -> Option<Vec<Question>> {
+    use crate::events::clean_question_text;
+    let list = input.get("questions")?.as_array()?;
+    if list.is_empty() {
+        return None;
+    }
+    let mut out: Vec<Question> = Vec::new();
+    for (i, q) in list.iter().enumerate() {
+        let text = clean_question_text(q.get("question")?.as_str()?);
+        if text.is_empty() || out.iter().any(|o| o.text == text) {
+            return None;
+        }
+        let header = q
+            .get("header")
+            .and_then(Value::as_str)
+            .map(clean_question_text)
+            .filter(|h| !h.is_empty());
+        let mut options = Vec::new();
+        if let Some(opts) = q.get("options") {
+            for o in opts.as_array()? {
+                let label = clean_question_text(o.get("label")?.as_str()?);
+                if label.is_empty() {
+                    return None;
+                }
+                options.push(QuestionOption {
+                    label,
+                    description: o
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(clean_question_text)
+                        .filter(|d| !d.is_empty()),
+                });
+            }
+        }
+        out.push(Question {
+            id: format!("q{i}"),
+            header,
+            text,
+            options,
+            multi_select: q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
+            secret: false,
+            allow_other: true,
+        });
+    }
+    Some(out)
+}
+
 fn deny_response(request_id: &str, message: &str) -> Value {
     json!({
         "type": "control_response",
@@ -341,7 +577,7 @@ fn error_response(request_id: &str, error: &str) -> Value {
 
 /// Read stdout until the process closes it, translating each line.
 async fn read_stdout(
-    stdout: tokio::process::ChildStdout,
+    stdout: AgentStdout,
     stdin: SharedStdin,
     state: Arc<StdMutex<RunState>>,
     events: mpsc::Sender<AgentEvent>,
@@ -361,13 +597,21 @@ async fn read_stdout(
         for out in parser.parse(&line) {
             let event = match out {
                 Parsed::Event(e) => e,
-                Parsed::PermissionRequest { request_id, tool, input } => {
+                Parsed::QuestionRequest { request_id, input, questions } => {
+                    state.lock().unwrap().pending_questions.insert(
+                        request_id.clone(),
+                        PendingQuestion { input, questions: questions.clone() },
+                    );
+                    AgentEvent::QuestionAsked { question_id: request_id, questions }
+                }
+                Parsed::PermissionRequest { request_id, tool, input, needs_person } => {
                     let auto = {
                         let mut st = state.lock().unwrap();
-                        if st.always_allowed.contains(&tool) {
+                        // A tool that needs a person is never answered from the memory.
+                        if approval_policy(&tool, needs_person).remember_always && st.always_allowed.contains(&tool) {
                             true
                         } else {
-                            st.pending.insert(request_id.clone(), (tool.clone(), input.clone()));
+                            st.pending.insert(request_id.clone(), (tool.clone(), input.clone(), needs_person));
                             false
                         }
                     };
@@ -379,11 +623,17 @@ async fn read_stdout(
                         }
                         continue;
                     }
-                    AgentEvent::ApprovalRequested { approval_id: request_id, tool, input }
+                    AgentEvent::ApprovalRequested { approval_id: request_id, tool, input, needs_person }
                 }
                 Parsed::CancelRequest { request_id } => {
-                    state.lock().unwrap().pending.remove(&request_id);
-                    continue;
+                    // The CLI withdrew the prompt: say so, or the feed and the API keep showing
+                    // it as pending until the turn ends. An id this adapter does not hold (it was
+                    // answered already) emits nothing.
+                    let removed = withdraw_prompt(&mut state.lock().unwrap(), &request_id);
+                    if !removed {
+                        continue;
+                    }
+                    AgentEvent::PromptWithdrawn { prompt_id: request_id }
                 }
                 Parsed::UnsupportedRequest { request_id, subtype } => {
                     tracing::warn!(target: "ember::claude", "unsupported control request {subtype}");
@@ -398,6 +648,7 @@ async fn read_stdout(
                         st.interrupt_requested = false;
                         st.turn_active = false;
                         st.pending.clear();
+                        st.pending_questions.clear();
                         interrupted
                     };
                     // An interrupted turn ends with an error `result`
@@ -439,11 +690,13 @@ async fn read_stdout(
 }
 
 struct ClaudeRun {
-    child: Arc<Mutex<Option<Child>>>,
+    child: Arc<Mutex<Option<ProcHandle>>>,
     pid: Option<u32>,
     stdin: SharedStdin,
     state: Arc<StdMutex<RunState>>,
     request_counter: u64,
+    /// The agent was already running (FR-S8): its prompts may be waiting for an answer.
+    reattached: bool,
     /// The private `--mcp-config` file, removed with the run.
     _mcp_file: Option<PrivateConfigFile>,
 }
@@ -473,11 +726,13 @@ impl AgentRun for ClaudeRun {
     ) -> anyhow::Result<()> {
         let (tool, input) = {
             let mut st = self.state.lock().unwrap();
-            let (tool, input) = st
+            let (tool, input, needs_person) = st
                 .pending
                 .remove(approval_id)
                 .ok_or_else(|| anyhow::anyhow!("unknown approval {approval_id}"))?;
-            if decision == ApprovalDecision::AllowAlways {
+            // "Allow always" on a tool that needs a person (a question, a plan) is an allow-once:
+            // the next one asks again.
+            if decision == ApprovalDecision::AllowAlways && approval_policy(&tool, needs_person).remember_always {
                 st.always_allowed.insert(tool.clone());
             }
             (tool, input)
@@ -491,6 +746,62 @@ impl AgentRun for ClaudeRun {
             }
         };
         write_line(&self.stdin, &msg).await
+    }
+
+    async fn answer_question(&mut self, question_id: &str, answers: &[QuestionAnswer]) -> anyhow::Result<()> {
+        let msg = {
+            let mut st = self.state.lock().unwrap();
+            let pq = st
+                .pending_questions
+                .get(question_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown question {question_id}"))?;
+            let msg = question_reply(question_id, &pq.input, &pq.questions, answers)?;
+            st.pending_questions.remove(question_id);
+            msg
+        };
+        write_line(&self.stdin, &msg).await
+    }
+
+    async fn decline_question(&mut self, question_id: &str) -> anyhow::Result<()> {
+        let msg = {
+            let mut st = self.state.lock().unwrap();
+            let pq = st
+                .pending_questions
+                .remove(question_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown question {question_id}"))?;
+            allow_response(question_id, &pq.input)
+        };
+        write_line(&self.stdin, &msg).await
+    }
+
+    async fn restore_pending_questions(&mut self, pending: Vec<(String, Vec<Question>)>) {
+        if !self.reattached || pending.is_empty() {
+            return;
+        }
+        let mut st = self.state.lock().unwrap();
+        for (id, questions) in pending {
+            let input = input_from_questions(&questions);
+            st.pending_questions.entry(id).or_insert(PendingQuestion { input, questions });
+        }
+        st.turn_active = true;
+    }
+
+    /// A rejoined CLI may be blocked on a permission prompt whose request line this process never
+    /// saw (it was stored by the previous server). Rebuild the entry, so the answer can go out.
+    async fn restore_pending_approvals(
+        &mut self,
+        pending: Vec<(String, String, Value, bool)>,
+    ) {
+        if !self.reattached || pending.is_empty() {
+            return;
+        }
+        let mut st = self.state.lock().unwrap();
+        for (id, tool, input, needs_person) in pending {
+            // The stored flag is kept: a flagged tool the CLI marked as needing a person must not
+            // lose that safety net (approval_policy) across a server restart.
+            st.pending.entry(id).or_insert((tool, input, needs_person));
+        }
+        st.turn_active = true;
     }
 
     async fn interrupt(&mut self) -> anyhow::Result<()> {
@@ -534,15 +845,10 @@ impl AgentRun for ClaudeRun {
         self.state.lock().unwrap().shutting_down = true;
         // Closing stdin ends the CLI's input stream; it exits after the current work.
         self.stdin.lock().await.take();
-        if let Some(mut child) = self.child.lock().await.take() {
-            match tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await {
-                Ok(status) => {
-                    status?;
-                }
-                Err(_) => {
-                    tracing::warn!(target: "ember::claude", "claude did not exit; killing");
-                    child.kill().await?;
-                }
+        if let Some(handle) = self.child.lock().await.take() {
+            if let Err(e) = handle.shutdown(SHUTDOWN_GRACE).await {
+                tracing::warn!(target: "ember::claude", "claude shutdown: {e:#}");
+                return Err(e);
             }
         }
         Ok(())
@@ -569,8 +875,16 @@ pub enum Parsed {
         request_id: String,
         tool: String,
         input: Value,
+        /// `requires_user_interaction: true` on the frame (absent on ordinary tools).
+        needs_person: bool,
     },
-    /// `control_cancel_request`: a pending permission prompt was withdrawn.
+    /// `control_request` / `can_use_tool` for `AskUserQuestion` whose input parses.
+    QuestionRequest {
+        request_id: String,
+        input: Value,
+        questions: Vec<Question>,
+    },
+    /// `control_cancel_request`: a pending permission prompt or question was withdrawn.
     CancelRequest {
         request_id: String,
     },
@@ -697,11 +1011,22 @@ impl LineParser {
                 let request_id = v["request_id"].as_str().unwrap_or_default().to_string();
                 let req = &v["request"];
                 match req["subtype"].as_str().unwrap_or_default() {
-                    "can_use_tool" => out.push(Parsed::PermissionRequest {
-                        request_id,
-                        tool: req["tool_name"].as_str().unwrap_or_default().to_string(),
-                        input: req["input"].clone(),
-                    }),
+                    "can_use_tool" => {
+                        let tool = req["tool_name"].as_str().unwrap_or_default().to_string();
+                        let input = req["input"].clone();
+                        let questions = if tool == "AskUserQuestion" { parse_questions(&input) } else { None };
+                        match questions {
+                            Some(questions) => {
+                                out.push(Parsed::QuestionRequest { request_id, input, questions })
+                            }
+                            None => out.push(Parsed::PermissionRequest {
+                                request_id,
+                                tool,
+                                input,
+                                needs_person: req["requires_user_interaction"].as_bool() == Some(true),
+                            }),
+                        }
+                    }
                     other => out.push(Parsed::UnsupportedRequest {
                         request_id,
                         subtype: other.to_string(),
@@ -814,7 +1139,7 @@ mod tests {
             native_id: "64224439-15e9-4763-942c-be8d6e8a9723".into()
         })));
         let perm = out.iter().find_map(|p| match p {
-            Parsed::PermissionRequest { request_id, tool, input } => {
+            Parsed::PermissionRequest { request_id, tool, input, .. } => {
                 Some((request_id.clone(), tool.clone(), input.clone()))
             }
             _ => None,
@@ -832,6 +1157,179 @@ mod tests {
             input_tokens: 18 + 12378 + 38098,
             output_tokens: 297,
         })));
+    }
+
+    const QUESTION_ANSWERED: &str = include_str!("../../tests/fixtures/claude/question_answered_2.1.319.jsonl");
+    const QUESTION_UNANSWERED: &str = include_str!("../../tests/fixtures/claude/question_unanswered_2.1.319.jsonl");
+
+    /// The recorded lines of one direction, as the `msg` objects.
+    fn recorded(text: &str, dir: &str) -> Vec<Value> {
+        text.lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .filter(|l| l["dir"] == dir)
+            .map(|l| l["msg"].clone())
+            .collect()
+    }
+
+    /// The recorded `control_request` line (compact JSON) and the parsed result.
+    fn recorded_question() -> (String, String, Vec<Question>, Value) {
+        let line = recorded(QUESTION_ANSWERED, "in")
+            .into_iter()
+            .find(|m| m["type"] == "control_request")
+            .unwrap()
+            .to_string();
+        match LineParser::default().parse(&line).remove(0) {
+            Parsed::QuestionRequest { request_id, input, questions } => (line, request_id, questions, input),
+            other => panic!("not a question: {other:?}"),
+        }
+    }
+
+    /// Measured on Claude Code 2.1.319: the recorded AskUserQuestion request becomes one question.
+    #[test]
+    fn fr_a5_recorded_ask_user_question_becomes_a_question() {
+        let (_, id, questions, _) = recorded_question();
+        assert_eq!(id, "364602b5-0a1e-4b36-9dc1-8910841b10ac");
+        assert_eq!(
+            questions,
+            vec![Question {
+                id: "q0".into(),
+                header: Some("Colour".into()),
+                text: "Which colour do you prefer?".into(),
+                options: vec![
+                    QuestionOption { label: "Red".into(), description: Some("Choose red".into()) },
+                    QuestionOption { label: "Blue".into(), description: Some("Choose blue".into()) },
+                ],
+                multi_select: false,
+                secret: false,
+                allow_other: true,
+            }]
+        );
+    }
+
+    /// Measured: the answer reply equals the recorded outgoing frame.
+    #[test]
+    fn fr_a5_question_reply_equals_the_recorded_answer_frame() {
+        let (_, id, questions, input) = recorded_question();
+        let want = recorded(QUESTION_ANSWERED, "out")
+            .into_iter()
+            .find(|m| m["type"] == "control_response")
+            .unwrap();
+        let answers = [QuestionAnswer { question_id: "q0".into(), values: vec!["blue".into()] }];
+        let got = question_reply(&id, &input, &questions, &answers).unwrap();
+        assert_eq!(got, want);
+        assert_eq!(got["response"]["response"]["updatedInput"]["answers"], json!({"Which colour do you prefer?": "blue"}));
+        // Only the request id differs for another request.
+        let mut other = want.clone();
+        other["response"]["request_id"] = json!("another");
+        assert_eq!(question_reply("another", &input, &questions, &answers).unwrap(), other);
+    }
+
+    /// Measured: skipping a question replies allow with the original input (no `answers`).
+    #[test]
+    fn fr_a5_declining_a_question_equals_the_recorded_unanswered_frame() {
+        let line = recorded(QUESTION_UNANSWERED, "in")
+            .into_iter()
+            .find(|m| m["type"] == "control_request")
+            .unwrap()
+            .to_string();
+        let Parsed::QuestionRequest { request_id, input, .. } = LineParser::default().parse(&line).remove(0) else {
+            panic!("not a question")
+        };
+        let want = recorded(QUESTION_UNANSWERED, "out")
+            .into_iter()
+            .find(|m| m["type"] == "control_response")
+            .unwrap();
+        assert_eq!(allow_response(&request_id, &input), want);
+        assert!(want["response"]["response"]["updatedInput"].get("answers").is_none());
+    }
+
+    #[test]
+    fn fr_a5_question_reply_validates_and_joins_multi_select() {
+        let (_, id, _, _) = recorded_question();
+        let input = json!({"questions": [
+            {"question": "Pick one", "options": [{"label": "a"}]},
+            {"question": "Pick many", "multiSelect": true, "options": [{"label": "x"}, {"label": "y"}]},
+        ]});
+        let questions = parse_questions(&input).unwrap();
+        assert_eq!(questions.iter().map(|q| q.id.as_str()).collect::<Vec<_>>(), ["q0", "q1"]);
+        assert!(!questions[0].multi_select && questions[1].multi_select);
+        let ans = |q: &str, v: &[&str]| QuestionAnswer {
+            question_id: q.into(),
+            values: v.iter().map(|s| s.to_string()).collect(),
+        };
+        let reply = |a: &[QuestionAnswer]| question_reply(&id, &input, &questions, a);
+        // A multi-select question joins its values with ", ".
+        let ok = reply(&[ans("q0", &["a"]), ans("q1", &["x", "y"])]).unwrap();
+        assert_eq!(
+            ok["response"]["response"]["updatedInput"]["answers"],
+            json!({"Pick one": "a", "Pick many": "x, y"})
+        );
+        assert_eq!(ok["response"]["response"]["updatedInput"]["questions"], input["questions"]);
+        // Free text is passed as it is (trimmed).
+        let free = reply(&[ans("q0", &["  something else "]), ans("q1", &["z"])]).unwrap();
+        assert_eq!(free["response"]["response"]["updatedInput"]["answers"]["Pick one"], "something else");
+        // Validation.
+        assert_eq!(reply(&[ans("q0", &["a"])]).unwrap_err(), AnswerInvalid::MissingAnswer);
+        assert_eq!(
+            reply(&[ans("q0", &["a"]), ans("q1", &["x"]), ans("q7", &["x"])]).unwrap_err(),
+            AnswerInvalid::UnknownQuestion
+        );
+        assert_eq!(reply(&[ans("q0", &[]), ans("q1", &["x"])]).unwrap_err(), AnswerInvalid::ValueCount);
+        assert_eq!(reply(&[ans("q0", &["a"]), ans("q1", &["v"; 9])]).unwrap_err(), AnswerInvalid::ValueCount);
+        let long = "x".repeat(1001);
+        assert_eq!(reply(&[ans("q0", &[long.as_str()]), ans("q1", &["x"])]).unwrap_err(), AnswerInvalid::ValueLength);
+        assert_eq!(
+            reply(&[ans("q0", &["a", "b"]), ans("q1", &["x"])]).unwrap_err(),
+            AnswerInvalid::SingleSelect
+        );
+    }
+
+    #[test]
+    fn fr_a5_unparsable_question_input_stays_an_approval_that_needs_a_person() {
+        let frame = |input: Value| {
+            json!({"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool",
+                "tool_name":"AskUserQuestion","input":input,"requires_user_interaction":true}})
+            .to_string()
+        };
+        for bad in [
+            json!({}),
+            json!({"questions": []}),
+            json!({"questions": "x"}),
+            json!({"questions": [{"header": "no text"}]}),
+            json!({"questions": [{"question": "q", "options": [{"description": "no label"}]}]}),
+            json!({"questions": [{"question": "same"}, {"question": "same"}]}),
+        ] {
+            assert_eq!(
+                LineParser::default().parse(&frame(bad.clone())),
+                [Parsed::PermissionRequest {
+                    request_id: "r".into(),
+                    tool: "AskUserQuestion".into(),
+                    input: bad,
+                    needs_person: true
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn fr_a5_needs_person_is_the_frames_flag_and_absent_means_false() {
+        let mut p = LineParser::default();
+        let flagged = r#"{"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"p"},"requires_user_interaction":true}}"#;
+        let plain = r#"{"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool","tool_name":"Write","input":{}}}"#;
+        let falsy = r#"{"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool","tool_name":"Write","input":{},"requires_user_interaction":false}}"#;
+        let mut np = |l: &str| match p.parse(l).remove(0) {
+            Parsed::PermissionRequest { needs_person, .. } => needs_person,
+            other => panic!("{other:?}"),
+        };
+        assert!(np(flagged));
+        assert!(!np(plain));
+        assert!(!np(falsy));
+    }
+
+    #[test]
+    fn fr_a5_restored_question_input_has_the_recorded_shape() {
+        let (_, _, questions, input) = recorded_question();
+        assert_eq!(input_from_questions(&questions), input);
     }
 
     #[test]
@@ -888,6 +1386,26 @@ mod tests {
     }
 
     #[test]
+    fn fr_a5_a_cancel_request_withdraws_the_approval_or_question_it_names() {
+        let mut st = RunState::default();
+        st.pending.insert("a1".into(), ("Bash".into(), json!({}), false));
+        st.pending_questions.insert("q1".into(), PendingQuestion { input: json!({}), questions: Vec::new() });
+        assert!(withdraw_prompt(&mut st, "a1"));
+        assert!(st.pending.is_empty() && st.pending_questions.len() == 1);
+        assert!(withdraw_prompt(&mut st, "q1"));
+        assert!(st.pending_questions.is_empty());
+        // An id the adapter does not hold (answered already, or never seen) emits nothing.
+        assert!(!withdraw_prompt(&mut st, "q1"));
+        assert!(!withdraw_prompt(&mut st, "nope"));
+        // The frame parses to the cancel item the reader turns into `PromptWithdrawn`.
+        assert_eq!(
+            LineParser::default().parse(r#"{"type":"control_cancel_request","request_id":"q1"}"#),
+            [Parsed::CancelRequest { request_id: "q1".into() }]
+        );
+        assert!(LineParser::default().parse(r#"{"type":"control_cancel_request"}"#).is_empty());
+    }
+
+    #[test]
     fn control_lines() {
         let mut p = LineParser::default();
         assert_eq!(
@@ -932,6 +1450,9 @@ mod tests {
             remote: None,
             mcp_servers: Vec::new(),
             computer: None,
+            fork_from: None,
+            mem_limit_mb: None,
+            allowed_tools: Vec::new(),
         };
         let args = ClaudeCodeAdapter::args(&req);
         assert!(!args.iter().any(|a| a.starts_with("--mcp-config")));
@@ -939,6 +1460,20 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["--permission-prompt-tool", "stdio"]));
         assert!(args.windows(2).any(|w| w == ["--model", "haiku"]));
         assert!(args.contains(&"--resume=abc".to_string()));
+    }
+
+    #[test]
+    fn fork_resumes_the_parent_as_a_new_session() {
+        let req = StartRequest {
+            cwd: ".".into(),
+            fork_from: Some(crate::agents::ForkFrom { native_id: "parent".into(), keep_turns: None }),
+            ..Default::default()
+        };
+        let args = ClaudeCodeAdapter::args(&req);
+        assert!(args.contains(&"--resume=parent".to_string()));
+        assert!(args.contains(&"--fork-session".to_string()));
+        let plain = ClaudeCodeAdapter::args(&StartRequest { cwd: ".".into(), ..Default::default() });
+        assert!(!plain.contains(&"--fork-session".to_string()));
     }
 
     #[test]
@@ -999,5 +1534,178 @@ mod tests {
         let path = file.path().to_path_buf();
         drop(file);
         assert!(!path.exists(), "removed with the run");
+    }
+
+    /// FR-T12: without allowed tools there is no `--allowedTools` (byte-for-byte as before).
+    #[test]
+    fn fr_t12_no_allowed_tools_means_no_flag() {
+        let args = ClaudeCodeAdapter::args(&StartRequest { cwd: ".".into(), ..Default::default() });
+        assert!(!args.iter().any(|a| a.starts_with("--allowedTools")), "{args:?}");
+    }
+
+    /// FR-T12: the flag, then exactly the one tool, then a flag (it is variadic) or the end.
+    #[test]
+    fn fr_t12_allowed_tools_is_the_flag_then_the_one_tool_then_a_flag_or_the_end() {
+        let tool = "mcp__ember-channels__channel_post".to_string();
+        let mut req = StartRequest {
+            cwd: ".".into(),
+            instructions: Some("hello".into()),
+            resume_native_id: Some("abc".into()),
+            allowed_tools: vec![tool.clone()],
+            ..Default::default()
+        };
+        let args = ClaudeCodeAdapter::args(&req);
+        let i = args.iter().position(|a| a == "--allowedTools").expect("--allowedTools");
+        assert_eq!(args[i + 1], tool);
+        assert_eq!(args.len(), i + 2, "last argument when there is no MCP config: {args:?}");
+        req.mcp_servers = vec![crate::agents::McpServer {
+            name: "ember-channels".into(),
+            command: "/bin/ember-a2a".into(),
+            args: vec!["mcp".into()],
+            startup_timeout_secs: Some(10),
+            env: Vec::new(),
+        }];
+        let args = ClaudeCodeAdapter::args(&req);
+        let i = args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert_eq!(args[i + 1], tool);
+        assert!(args[i + 2].starts_with("--"), "a flag follows the tools: {args:?}");
+    }
+
+    /// FR-T12: a wildcard or a non-MCP rule never reaches the command line.
+    #[test]
+    fn fr_t12_allowed_tools_rejects_wildcards_and_non_mcp_rules() {
+        for bad in [
+            "mcp__*",
+            "*",
+            "Bash",
+            "Bash(rm -rf /)",
+            "mcp__ember-channels__*",
+            "mcp__a b",
+            "mcp__a\tb",
+            "mcp__",
+            "",
+            "--dangerously-skip-permissions",
+        ] {
+            let req = StartRequest {
+                cwd: ".".into(),
+                allowed_tools: vec![bad.to_string()],
+                ..Default::default()
+            };
+            let args = ClaudeCodeAdapter::args(&req);
+            assert!(!args.iter().any(|a| a == "--allowedTools"), "{bad:?} gave {args:?}");
+            assert!(!args.iter().any(|a| a == bad && !bad.is_empty()), "{bad:?} reached argv");
+        }
+        let req = StartRequest {
+            cwd: ".".into(),
+            allowed_tools: vec!["Bash".into(), "mcp__ember-channels__channel_post".into(), "mcp__x*".into()],
+            ..Default::default()
+        };
+        let args = ClaudeCodeAdapter::args(&req);
+        let i = args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert_eq!(args[i..], ["--allowedTools", "mcp__ember-channels__channel_post"]);
+    }
+
+    #[cfg(unix)]
+    mod stale_mcp_files {
+        use super::super::cleanup_stale_mcp_files;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::time::{Duration, SystemTime};
+
+        const HEX: &str = "0123456789abcdef0123456789abcdef";
+
+        fn name(hex: &str) -> String {
+            format!("ember-mcp-{hex}.json")
+        }
+
+        fn make(dir: &std::path::Path, file: &str, mode: u32, age: Duration) -> std::path::PathBuf {
+            let p = dir.join(file);
+            std::fs::write(&p, "{}").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+            let f = std::fs::File::options().write(true).open(&p).unwrap();
+            f.set_modified(SystemTime::now() - age).unwrap();
+            p
+        }
+
+        const DAY: Duration = Duration::from_secs(86_400);
+
+        #[test]
+        fn fr_t12_cleanup_removes_an_old_matching_private_file_and_counts_it() {
+            let d = tempfile::tempdir().unwrap();
+            let a = make(d.path(), &name(HEX), 0o600, DAY);
+            let b = make(d.path(), &name(&"f".repeat(32)), 0o600, 2 * DAY);
+            let started = SystemTime::now() - Duration::from_secs(60);
+            assert_eq!(cleanup_stale_mcp_files(d.path(), started), 2);
+            assert!(!a.exists() && !b.exists());
+            assert_eq!(cleanup_stale_mcp_files(d.path(), started), 0);
+        }
+
+        #[test]
+        fn fr_t12_cleanup_keeps_a_file_newer_than_the_server_start() {
+            let d = tempfile::tempdir().unwrap();
+            // Two hours old, but the server started three hours ago.
+            let p = make(d.path(), &name(HEX), 0o600, Duration::from_secs(2 * 3600));
+            let started = SystemTime::now() - Duration::from_secs(3 * 3600);
+            assert_eq!(cleanup_stale_mcp_files(d.path(), started), 0);
+            assert!(p.exists());
+        }
+
+        #[test]
+        fn fr_t12_cleanup_keeps_a_file_younger_than_one_hour() {
+            let d = tempfile::tempdir().unwrap();
+            let p = make(d.path(), &name(HEX), 0o600, Duration::from_secs(30 * 60));
+            assert_eq!(cleanup_stale_mcp_files(d.path(), SystemTime::now()), 0);
+            assert!(p.exists());
+        }
+
+        #[test]
+        fn fr_t12_cleanup_keeps_a_file_with_another_mode() {
+            let d = tempfile::tempdir().unwrap();
+            let p = make(d.path(), &name(HEX), 0o644, DAY);
+            assert_eq!(cleanup_stale_mcp_files(d.path(), SystemTime::now()), 0);
+            assert!(p.exists());
+        }
+
+        #[test]
+        fn fr_t12_cleanup_keeps_a_symlink_and_its_target() {
+            let d = tempfile::tempdir().unwrap();
+            let target = make(d.path(), "target.txt", 0o600, DAY);
+            let link = d.path().join(name(HEX));
+            symlink(&target, &link).unwrap();
+            assert_eq!(cleanup_stale_mcp_files(d.path(), SystemTime::now()), 0);
+            assert!(link.symlink_metadata().is_ok());
+            assert!(target.exists());
+        }
+
+        #[test]
+        fn fr_t12_cleanup_keeps_a_directory_with_a_matching_name() {
+            let d = tempfile::tempdir().unwrap();
+            let p = d.path().join(name(HEX));
+            std::fs::create_dir(&p).unwrap();
+            assert_eq!(cleanup_stale_mcp_files(d.path(), SystemTime::now()), 0);
+            assert!(p.is_dir());
+        }
+
+        #[test]
+        fn fr_t12_cleanup_keeps_names_that_do_not_match_exactly() {
+            let d = tempfile::tempdir().unwrap();
+            let names = [
+                name(&HEX.to_uppercase()),
+                name(&HEX[..31]),
+                name(&format!("{HEX}0")),
+                format!("{}.bak", name(HEX)),
+                name(&"g".repeat(32)),
+                "ember-mcp-.json".to_string(),
+                "unrelated.json".to_string(),
+            ];
+            let paths: Vec<_> = names.iter().map(|n| make(d.path(), n, 0o600, DAY)).collect();
+            assert_eq!(cleanup_stale_mcp_files(d.path(), SystemTime::now()), 0);
+            assert!(paths.iter().all(|p| p.exists()));
+        }
+
+        #[test]
+        fn fr_t12_cleanup_of_a_missing_directory_is_zero() {
+            let d = tempfile::tempdir().unwrap();
+            assert_eq!(cleanup_stale_mcp_files(&d.path().join("nope"), SystemTime::now()), 0);
+        }
     }
 }

@@ -8,7 +8,7 @@ use ember_transport::PeerId;
 use crate::client::{DevicesPoll, HubClient, HubError};
 use crate::types::{Device, HubInfo};
 
-/// How long one long-poll asks the hub to hold `GET /v1/devices` (`?wait=`). Below the 30 s
+/// How long one long-poll asks the hub to hold `GET /devices` (`?wait=`). Below the 30 s
 /// many proxies and the Workers runtime are comfortable with.
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(25);
 
@@ -19,14 +19,14 @@ const EARLY_LIMIT: u32 = 3;
 /// Cap of the retry delay after errors in long-poll mode.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
-/// Follows `GET /v1/devices` for one credential. [`DeviceWatcher::next`] returns the list the
+/// Follows `GET /devices` for one credential. [`DeviceWatcher::next`] returns the list the
 /// first time, then again each time it changes.
 ///
 /// - **Long-poll** (the hub advertises it, [`HubInfo::supports_devices_wait`]):
-///   `GET /v1/devices?wait=25` with `If-None-Match`; the hub answers when the list changes, so a
+///   `GET /devices?wait=25` with `If-None-Match`; the hub answers when the list changes, so a
 ///   removal is seen within a round trip. A hub that turns out to ignore `wait` (answers
 ///   immediately without a change, three times in a row) or rejects it (`400`) is polled instead.
-/// - **Poll** (fallback): one conditional `GET /v1/devices` every `period` (60 s in ember server
+/// - **Poll** (fallback): one conditional `GET /devices` every `period` (60 s in ember server
 ///   and node); a `304` costs no body.
 ///
 /// Errors are returned to the caller (who decides what a revocation means for it); the next call

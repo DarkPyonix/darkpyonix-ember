@@ -1,0 +1,26 @@
+{
+  "name": "Demo",
+  "scopeName": "source.demo",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "match": "\\b(if|else|fn)\\b", "captures": { "1": { "name": "keyword.control.demo" } } },
+    { "match": "\\b\\d+(\\.\\d+)?\\b", "name": "constant.numeric.demo" }
+  ],
+  "repository": {
+    "comment": {
+      "begin": "/\\*",
+      "end": "\\*/",
+      "name": "comment.block.demo",
+      "beginCaptures": { "0": { "name": "punctuation.definition.comment.begin.demo" } },
+      "endCaptures": { "0": { "name": "punctuation.definition.comment.end.demo" } }
+    },
+    "string": {
+      "begin": "\"",
+      "end": "\"",
+      "name": "string.quoted.double.demo",
+      "contentName": "meta.string-contents.demo",
+      "patterns": [ { "match": "\\\\.", "name": "constant.character.escape.demo" } ]
+    }
+  }
+}

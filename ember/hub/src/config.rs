@@ -4,49 +4,49 @@ use ember_transport::{HubDirectory, RelayConfig, SecretKey, TransportConfig, REL
 use reqwest::Url;
 
 use crate::client::HubClient;
-use crate::types::HubInfo;
+use crate::types::{AddressRecord, HubInfo};
 
 /// The hub's base URL. Unset: [`DEFAULT_HUB_URL`]. `off` / `none` / `disabled`: no hub.
 pub const HUB_URL_ENV: &str = "EMBER_HUB_URL";
 /// The hub's relay, when it cannot be derived from the hub URL (or to override it).
 pub const HUB_RELAY_URL_ENV: &str = "EMBER_HUB_RELAY_URL";
-pub const DEFAULT_HUB_URL: &str = "https://darkpyonix.dev";
+pub const DEFAULT_HUB_URL: &str = "https://api.darkpyonix.dev";
 
 /// Where [`HubConfig::relay_url`] came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelaySource {
-    /// `https://relay.<hub host>` (or none, for an IP-address / `localhost` hub).
+    /// Nothing was advertised or given: no relay (the main server is the relay, INTENT D36).
     Derived,
     /// `EMBER_HUB_RELAY_URL` / [`HubConfig::with_relay`]: never replaced by discovery.
     Explicit,
-    /// The hub's `GET /v1/config` `relay_urls`.
+    /// The hub's `GET /config` `relay_urls`.
     Hub,
 }
 
 /// A hub: its API base URL, its relay and its address directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HubConfig {
-    /// `https://darkpyonix.dev` (no trailing slash).
+    /// `https://api.darkpyonix.dev` (no trailing slash).
     pub url: String,
     /// The hub's (first) relay (`/relay` on the relay host, given to the transport as the relay
     /// base URL). `None` when it could not be derived (an IP-address hub, e.g. a test fake) and
     /// was not given: the transport then keeps its own relay setting.
     pub relay_url: Option<String>,
-    /// Further relays the hub advertised in `/v1/config` (after `relay_url`).
+    /// Further relays the hub advertised in `/config` (after `relay_url`).
     pub extra_relay_urls: Vec<String>,
     pub relay_source: RelaySource,
     /// The pkarr directory the hub advertised (`pkarr_url`); `None`: `<url>/pkarr`.
     pub pkarr_override: Option<String>,
-    /// What `GET /v1/config` said ([`HubConfig::discover`]); `None`: not asked, or the hub does
+    /// What `GET /config` said ([`HubConfig::discover`]); `None`: not asked, or the hub does
     /// not serve it (then everything is derived as before and the device list is polled).
     pub info: Option<HubInfo>,
 }
 
 impl HubConfig {
-    /// A hub at `url`; the relay is derived ([`HubConfig::derive_relay_url`]).
+    /// A hub at `url`. No relay is derived: the main server is the relay (INTENT D36).
     pub fn new(url: impl Into<String>) -> Self {
         let url = url.into().trim().trim_end_matches('/').to_string();
-        let relay_url = Self::derive_relay_url(&url);
+        let relay_url = None;
         Self {
             url,
             relay_url,
@@ -65,7 +65,7 @@ impl HubConfig {
         self
     }
 
-    /// Takes the relay and directory the hub advertised (`GET /v1/config`). An explicit relay
+    /// Takes the relay and directory the hub advertised (`GET /config`). An explicit relay
     /// (`EMBER_HUB_RELAY_URL`) is kept; an empty `relay_urls` or a missing `pkarr_url` keeps the
     /// derived value.
     pub fn apply_info(&mut self, info: HubInfo) {
@@ -92,8 +92,8 @@ impl HubConfig {
         self.info = Some(info);
     }
 
-    /// Asks the hub for its configuration (`GET /v1/config`) and applies it. Falls back to the
-    /// derived URLs (`https://relay.<host>`, `<hub>/pkarr`) when the hub does not serve the
+    /// Asks the hub for its configuration (`GET /config`) and applies it. Falls back to the
+    /// derived directory (`<hub>/pkarr`) and no relay when the hub does not serve the
     /// endpoint (`404`) or cannot be reached; never fails.
     pub async fn discover(mut self) -> Self {
         match HubClient::new(&self.url).config().await {
@@ -101,8 +101,8 @@ impl HubConfig {
                 tracing::debug!(hub = %self.url, ?info, "hub configuration discovered");
                 self.apply_info(info);
             }
-            Ok(None) => tracing::debug!(hub = %self.url, "the hub has no /v1/config; relay and directory derived"),
-            Err(e) => tracing::info!(hub = %self.url, "could not read the hub's /v1/config ({e}); relay and directory derived"),
+            Ok(None) => tracing::debug!(hub = %self.url, "the hub has no /config; directory derived"),
+            Err(e) => tracing::info!(hub = %self.url, "could not read the hub's /config ({e}); directory derived"),
         }
         self
     }
@@ -144,22 +144,6 @@ impl HubConfig {
         Some(config)
     }
 
-    /// The relay host of a hub: `https://<host>` → `https://relay.<host>` (the hub's two-host
-    /// layout: the Worker cannot take the relay's UDP). An IP-address or `localhost` hub has no
-    /// derivable relay. This is the fallback when the hub does not advertise its relay in
-    /// `GET /v1/config` ([`HubConfig::discover`]).
-    pub fn derive_relay_url(hub_url: &str) -> Option<String> {
-        let url = Url::parse(hub_url).ok()?;
-        let host = url.host_str()?;
-        if host == "localhost" || host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[') {
-            return None;
-        }
-        let mut relay = url.clone();
-        relay.set_host(Some(&format!("relay.{host}"))).ok()?;
-        relay.set_path("");
-        Some(relay.as_str().trim_end_matches('/').to_string())
-    }
-
     /// The address directory in the pkarr relay protocol: the advertised `pkarr_url`, else
     /// `<hub>/pkarr`.
     pub fn pkarr_url(&self) -> String {
@@ -186,7 +170,25 @@ impl HubConfig {
     /// A transport configuration for a device of this hub: the hub's relay and its address
     /// directory. `token` is the device token once registered.
     pub fn transport_config(&self, key: SecretKey, token: Option<String>) -> TransportConfig {
-        TransportConfig::new(key).relay(self.relay_config()).hub(self.directory(token))
+        // The environment first (backend, EMBER_LETIFY_*), so a hub never resets the backend choice.
+        TransportConfig::from_env(key).relay(self.relay_config()).hub(self.directory(token))
+    }
+
+    /// Like [`HubConfig::relay_config`], for a node or client that knows the main server's device
+    /// record (INTENT D36): `EMBER_RELAY_URL` wins, then the `letify://` relay the server
+    /// published in its record, then the hub's own list.
+    pub fn relay_config_for(&self, server: Option<&AddressRecord>) -> RelayConfig {
+        if std::env::var_os(RELAY_URL_ENV).is_some() {
+            return RelayConfig::from_env();
+        }
+        let relays: Vec<String> = server
+            .map(|r| r.relay_urls.iter().filter(|u| u.starts_with("letify://")).cloned().collect())
+            .unwrap_or_default();
+        if relays.is_empty() {
+            self.relay_config()
+        } else {
+            RelayConfig::Custom(relays)
+        }
     }
 }
 
@@ -197,9 +199,9 @@ mod tests {
     #[test]
     fn hub_urls() {
         let d = HubConfig::parse("", None).unwrap();
-        assert_eq!(d.url, "https://darkpyonix.dev");
-        assert_eq!(d.relay_url.as_deref(), Some("https://relay.darkpyonix.dev"));
-        assert_eq!(d.pkarr_url(), "https://darkpyonix.dev/pkarr");
+        assert_eq!(d.url, "https://api.darkpyonix.dev");
+        assert_eq!(d.relay_url, None, "no relay is derived: the main server is the relay");
+        assert_eq!(d.pkarr_url(), "https://api.darkpyonix.dev/pkarr");
         assert!(HubConfig::parse("off", None).is_none());
 
         let local = HubConfig::parse("http://127.0.0.1:9000/", None).unwrap();
@@ -209,7 +211,11 @@ mod tests {
         assert_eq!(local.relay_url.as_deref(), Some("http://127.0.0.1:9001"));
 
         let staging = HubConfig::new("https://staging.darkpyonix.dev");
-        assert_eq!(staging.relay_url.as_deref(), Some("https://relay.staging.darkpyonix.dev"));
+        assert_eq!(staging.relay_url, None);
+        let staging_hub = HubConfig::new("https://hub.staging.darkpyonix.dev");
+        assert_eq!(staging_hub.relay_url, None);
+        let bare = HubConfig::new("https://hub.example");
+        assert_eq!(bare.relay_url, None);
     }
 
     #[test]
@@ -217,7 +223,6 @@ mod tests {
         let info = HubInfo {
             relay_urls: vec!["https://relay-eu.example.net/".into(), "not a url".into(), "https://relay-us.example.net".into()],
             pkarr_url: Some("/dir/pkarr".into()),
-            api_version: Some(1),
             hub_version: Some("test".into()),
             link_url: Some("https://hub.example.net/link".into()),
         };
@@ -239,9 +244,12 @@ mod tests {
         // An empty advertisement keeps the derived values.
         let mut c = HubConfig::new("https://hub.example.net");
         c.apply_info(HubInfo::default());
-        assert_eq!(c.relay_url.as_deref(), Some("https://relay.hub.example.net"));
+        assert_eq!(c.relay_url, None);
         assert_eq!(c.relay_source, RelaySource::Derived);
         assert_eq!(c.pkarr_url(), "https://hub.example.net/pkarr");
-        assert!(!c.supports_devices_wait());
+        // A hub that serves /config serves the documented `wait` on GET /devices.
+        assert!(c.supports_devices_wait());
+        // Without /config (never discovered), the watcher polls.
+        assert!(!HubConfig::new("https://hub.example.net").supports_devices_wait());
     }
 }

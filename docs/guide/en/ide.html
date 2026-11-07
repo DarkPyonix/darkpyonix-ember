@@ -100,7 +100,7 @@
 
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
       <figcaption>http: the request behind Open IDE</figcaption>
-<pre><code><span class="k">GET</span> /api/v1/sessions/{id}/ide?computer=studio   <span class="c"># ?computer= is optional</span></code></pre>
+<pre><code><span class="k">GET</span> /api/sessions/{id}/ide?computer=studio   <span class="c"># ?computer= is optional</span></code></pre>
     </figure>
 
     <p>
@@ -119,9 +119,7 @@
           computer.</li>
     </ul>
     <p>
-      REST paths on this page are shown as the code serves them today. Issue
-      <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/63">#63</a> drops the version, so
-      <code>/api/v1/...</code> becomes <code>/api/...</code>.
+      REST paths carry no version, so they all begin with <code>/api/</code>.
     </p>
 
     <h2 id="computer">Which computer opens <span class="pill partial">Partial</span></h2>

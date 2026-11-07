@@ -13,6 +13,8 @@ ember-node = { path = "../node" }
 ember-transport = { path = "../transport" }
 # The darkpyonix.dev hub: registration, device list, address directory (SPEC FR-N2).
 ember-hub = { path = "../hub" }
+# Device-to-device file transfer over ember-transport streams (SPEC FR-F1..FR-F10, #487).
+ember-transfer = { path = "../transfer" }
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
@@ -31,8 +33,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+# In-process node for the local computer (git relay, FR-G4).
+tower = { version = "0.5", features = ["util"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-tungstenite = "0.29"
+# The guest door's own HTTP/1 server (header-read timeout, which axum::serve lacks): both are
+# already in the tree through axum, no new crate. Features checked in the registry sources
+# (hyper 1.11.1, hyper-util 0.1.21): `server-graceful` is hyper-util's graceful shutdown helper.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "server-graceful", "tokio", "http1"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.10"
@@ -40,6 +49,10 @@ uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = "1"
 # Project mount, macOS server: loopback NFSv3 server (BSD-3-Clause). See src/computers/mount.rs.
 nfsserve = { version = "0.11", optional = true }
+
+# axum::body::to_bytes reports a size-limit error as http_body_util::LengthLimitError; the enrol door tells it
+# apart from other read errors by type (it was a dev dependency only until #591).
+http-body-util = "0.1"
 
 # Project mount, Linux server: FUSE through fusermount3 (MIT; edition 2024, rustc >= 1.85).
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -50,10 +63,11 @@ fuser = { version = "0.18", optional = true }
 # macOS: `mount-nfs`; Linux: `mount-fuse` (or `mount-nfs`, which needs root to mount there).
 mount-nfs = ["dep:nfsserve"]
 mount-fuse = ["dep:fuser"]
+# The letify transport backend (EMBER_TRANSPORT_BACKEND=letify; SPEC FR-N5). Already on through ember-transport's default features (INTENT D36).
+letify = ["ember-transport/letify"]
 
 [dev-dependencies]
 ember-hub = { path = "../hub", features = ["fake"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }

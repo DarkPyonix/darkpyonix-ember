@@ -22,6 +22,14 @@ Usage:
   ember-a2a show <message-id>
       A message you sent or received, with its delivery time.
 
+Terminal access (FR-T9):
+  ember-a2a terminal read <session-id> [--lines <n>] [--since <seq>] [--wait-ms <ms>] [--json]
+      Read recent output or follow after a sequence. JSON includes last_seq.
+  ember-a2a terminal send-text <session-id> <text...>
+      Send input; use `-` (or no text) to read from stdin.
+  ember-a2a terminal interrupt <session-id>
+      Interrupt the target turn. These commands require terminal permission.
+
 Teams (FR-T7):
   ember-a2a team list [--json]
       Your team: members (name, session, agent, status) and tasks.
@@ -50,8 +58,18 @@ Schedules (FR-A8):
   ember-a2a schedule rm <schedule-id>
       Delete a schedule of this project.
 
+Channels (FR-T12):
+  ember-a2a channel post <channel-id> <text...>
+      Answer in a channel where a person mentioned you (within 30 minutes; 6 posts a minute at
+      most). Use `-` (or no text) to read the text from stdin. `channel_post` is accepted too.
+  ember-a2a mcp
+      The stdio MCP server exposing the tool `channel_post`, started by the harness, not for people.
+
 Environment (set by Ember for every agent session):
   EMBER_URL, EMBER_RUNTIME_TOKEN";
+
+/// The one error text for a base URL the client refuses. Fixed: the URL may hold credentials.
+pub const BAD_BASE_URL: &str = "EMBER_URL is not a plain http://host[:port] address";
 
 pub struct Client {
     host: String,
@@ -61,27 +79,53 @@ pub struct Client {
 }
 
 impl Client {
-    /// `base_url` must be `http://host[:port][/prefix]`.
+    /// `base_url` must be `http://host[:port][/prefix]`. A URL with userinfo (`@`), a `\`, `?` or
+    /// `#` before the path, an empty host, or a port that is not 1..=65535 in ASCII digits is
+    /// refused with [`BAD_BASE_URL`]; the URL (it may hold credentials) is never put in an error.
     pub fn new(base_url: &str, token: &str) -> anyhow::Result<Client> {
-        let rest = base_url
-            .strip_prefix("http://")
-            .with_context(|| format!("EMBER_URL must start with http:// (got {base_url})"))?;
-        let (authority, prefix) = match rest.find('/') {
-            Some(i) => (&rest[..i], rest[i..].trim_end_matches('/')),
+        let rest = base_url.strip_prefix("http://").ok_or_else(|| anyhow::anyhow!(BAD_BASE_URL))?;
+        // The authority ends at the first `/`, `\`, `?` or `#`, as in WHATWG URL parsing. Only a
+        // `/` may follow it: the other three would make the host differ between parsers.
+        let end = rest.find(['/', '\\', '?', '#']);
+        let (authority, prefix) = match end {
+            Some(i) if rest.as_bytes()[i] == b'/' => (&rest[..i], rest[i..].trim_end_matches('/')),
+            Some(_) => bail!(BAD_BASE_URL),
             None => (rest, ""),
         };
-        // The port follows the last ':' that is not inside an IPv6 literal.
-        let port_sep = authority
-            .rfind(':')
-            .filter(|i| !authority[*i..].contains(']'));
-        let (host, port) = match port_sep {
-            Some(i) => (
-                authority[..i].to_string(),
-                authority[i + 1..]
-                    .parse()
-                    .with_context(|| format!("bad port in {base_url}"))?,
-            ),
-            None => (authority.to_string(), 80),
+        if authority.contains('@') {
+            bail!(BAD_BASE_URL);
+        }
+        // IPv6 literals are bracketed; the port follows the closing bracket or the one `:`.
+        let (host, port_text) = if let Some(inner) = authority.strip_prefix('[') {
+            let Some((addr, after)) = inner.split_once(']') else { bail!(BAD_BASE_URL) };
+            if addr.is_empty() {
+                bail!(BAD_BASE_URL);
+            }
+            let port = match after {
+                "" => None,
+                _ => Some(after.strip_prefix(':').ok_or_else(|| anyhow::anyhow!(BAD_BASE_URL))?),
+            };
+            (authority[..addr.len() + 2].to_string(), port)
+        } else {
+            match authority.split_once(':') {
+                Some((h, p)) => (h.to_string(), Some(p)),
+                None => (authority.to_string(), None),
+            }
+        };
+        if host.is_empty() || (!host.starts_with('[') && host.contains([':', '[', ']'])) {
+            bail!(BAD_BASE_URL);
+        }
+        let port = match port_text {
+            None => 80,
+            Some(p) => {
+                if p.is_empty() || p.len() > 5 || !p.bytes().all(|b| b.is_ascii_digit()) {
+                    bail!(BAD_BASE_URL);
+                }
+                match p.parse::<u16>() {
+                    Ok(n) if n != 0 => n,
+                    _ => bail!(BAD_BASE_URL),
+                }
+            }
         };
         Ok(Client {
             host,
@@ -145,69 +189,96 @@ impl Client {
     }
 
     pub fn targets(&self) -> anyhow::Result<Value> {
-        self.ok("GET", "/api/v1/a2a/targets", None)
+        self.ok("GET", "/api/a2a/targets", None)
     }
 
     pub fn send(&self, to: &str, text: &str, reply_to: Option<&str>) -> anyhow::Result<Value> {
         let body = json!({ "to": to, "text": text, "reply_to": reply_to });
-        self.ok("POST", "/api/v1/a2a/messages", Some(&body))
+        self.ok("POST", "/api/a2a/messages", Some(&body))
     }
 
     pub fn show(&self, id: &str) -> anyhow::Result<Value> {
-        self.ok("GET", &format!("/api/v1/a2a/messages/{id}"), None)
+        self.ok("GET", &format!("/api/a2a/messages/{id}"), None)
+    }
+
+    pub fn terminal_read(&self, target: &str, lines: Option<usize>, since: Option<i64>, wait_ms: Option<u64>) -> anyhow::Result<Value> {
+        let mut query = Vec::new();
+        if let Some(n) = lines { query.push(format!("lines={n}")); }
+        if let Some(n) = since { query.push(format!("since={n}")); }
+        if let Some(n) = wait_ms { query.push(format!("wait_ms={n}")); }
+        let suffix = if query.is_empty() { String::new() } else { format!("?{}", query.join("&")) };
+        self.ok("GET", &format!("/api/a2a/terminal/{}{suffix}", path_seg(target)), None)
+    }
+
+    pub fn terminal_text(&self, target: &str, text: &str) -> anyhow::Result<Value> {
+        self.ok("POST", &format!("/api/a2a/terminal/{}/text", path_seg(target)), Some(&json!({ "text": text })))
+    }
+
+    pub fn terminal_interrupt(&self, target: &str) -> anyhow::Result<Value> {
+        self.ok("POST", &format!("/api/a2a/terminal/{}/interrupt", path_seg(target)), None)
     }
 
     pub fn team(&self) -> anyhow::Result<Value> {
-        self.ok("GET", "/api/v1/a2a/team", None)
+        self.ok("GET", "/api/a2a/team", None)
     }
 
     pub fn spawn(&self, body: &Value) -> anyhow::Result<Value> {
-        self.ok("POST", "/api/v1/a2a/team/members", Some(body))
+        self.ok("POST", "/api/a2a/team/members", Some(body))
     }
 
     pub fn end(&self, member: &str) -> anyhow::Result<Value> {
-        self.ok("DELETE", &format!("/api/v1/a2a/team/members/{}", path_seg(member)), None)
+        self.ok("DELETE", &format!("/api/a2a/team/members/{}", path_seg(member)), None)
     }
 
     pub fn tasks(&self) -> anyhow::Result<Value> {
-        self.ok("GET", "/api/v1/a2a/team/tasks", None)
+        self.ok("GET", "/api/a2a/team/tasks", None)
     }
 
     pub fn add_task(&self, body: &Value) -> anyhow::Result<Value> {
-        self.ok("POST", "/api/v1/a2a/team/tasks", Some(body))
+        self.ok("POST", "/api/a2a/team/tasks", Some(body))
     }
 
     pub fn update_task(&self, number: &str, body: &Value) -> anyhow::Result<Value> {
-        self.ok("PATCH", &format!("/api/v1/a2a/team/tasks/{}", path_seg(number)), Some(body))
+        self.ok("PATCH", &format!("/api/a2a/team/tasks/{}", path_seg(number)), Some(body))
     }
 
     pub fn send_mail(&self, to: Option<&str>, text: &str) -> anyhow::Result<Value> {
         let body = json!({ "to": to, "text": text });
-        self.ok("POST", "/api/v1/a2a/team/mail", Some(&body))
+        self.ok("POST", "/api/a2a/team/mail", Some(&body))
     }
 
     pub fn read_mail(&self, after: i64, limit: Option<usize>) -> anyhow::Result<Value> {
-        let mut path = format!("/api/v1/a2a/team/mail?after={after}");
+        let mut path = format!("/api/a2a/team/mail?after={after}");
         if let Some(n) = limit {
             path.push_str(&format!("&limit={n}"));
         }
         self.ok("GET", &path, None)
     }
 
+    /// `POST /api/channels/{id}/post`: answer in a channel (FR-T12).
+    pub fn channel_post(&self, channel: &str, text: &str) -> anyhow::Result<Value> {
+        self.ok("POST", &channel_post_path(channel), Some(&json!({ "text": text })))
+    }
+
     pub fn schedules(&self) -> anyhow::Result<Value> {
-        self.ok("GET", "/api/v1/a2a/schedules", None)
+        self.ok("GET", "/api/a2a/schedules", None)
     }
 
     pub fn add_schedule(&self, body: &Value) -> anyhow::Result<Value> {
-        self.ok("POST", "/api/v1/a2a/schedules", Some(body))
+        self.ok("POST", "/api/a2a/schedules", Some(body))
     }
 
     pub fn remove_schedule(&self, id: &str) -> anyhow::Result<Value> {
-        self.ok("DELETE", &format!("/api/v1/a2a/schedules/{}", path_seg(id)), None)
+        self.ok("DELETE", &format!("/api/a2a/schedules/{}", path_seg(id)), None)
     }
 }
 
 /// Percent-encode one path segment.
+/// The route `channel post` calls for `channel`.
+pub fn channel_post_path(channel: &str) -> String {
+    format!("/api/channels/{}/post", path_seg(channel))
+}
+
 fn path_seg(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -381,6 +452,14 @@ fn dechunk(mut data: &[u8]) -> anyhow::Result<Vec<u8>> {
 
 /// Entry point of `ember-a2a`; returns the process exit code.
 pub fn run(args: &[String]) -> i32 {
+    // `mcp` owns stdout for protocol frames, so it never goes through the `println!` below.
+    if args.first().map(String::as_str) == Some("mcp") {
+        if args.len() > 1 {
+            eprintln!("ember-a2a: mcp takes no arguments\n\n{USAGE}");
+            return 2;
+        }
+        return super::mcp::run_stdio();
+    }
     match run_inner(args) {
         Ok(out) => {
             println!("{out}");
@@ -449,6 +528,7 @@ fn run_inner(args: &[String]) -> Result<String, CliError> {
                 ),
             })
         }
+        "terminal" => run_terminal(&args[1..]),
         "team" => run_team(&args[1..]),
         "task" => run_task(&args[1..]),
         "mail" => run_mail(&args[1..]),
@@ -460,7 +540,45 @@ fn run_inner(args: &[String]) -> Result<String, CliError> {
             Ok(serde_json::to_string_pretty(&v).unwrap_or_default())
         }
         "schedule" => run_schedule(&args[1..]),
+        "channel" => run_channel(&args[1..]),
+        "channel_post" => run_channel_post(&args[1..]),
         other => Err(CliError::Usage(format!("unknown command {other}"))),
+    }
+}
+
+fn run_terminal(args: &[String]) -> Result<String, CliError> {
+    let sub = args.first().ok_or_else(|| CliError::Usage("missing terminal command (read, send-text, interrupt)".into()))?;
+    let rest = &args[1..];
+    match sub.as_str() {
+        "read" => {
+            let a = parse_args(rest, &["lines", "since", "wait-ms"], &["json"])?;
+            if a.positional.len() != 1 { return Err(CliError::Usage("give one <session-id>".into())); }
+            let number = |key: &str| -> Result<Option<u64>, CliError> {
+                a.flags.get(key).map(|s| s.parse().map_err(|_| CliError::Usage(format!("bad --{key} {s}")))).transpose()
+            };
+            let lines = number("lines")?.map(|n| usize::try_from(n).map_err(|_| CliError::Usage("bad --lines".into()))).transpose()?;
+            let since = number("since")?.map(|n| i64::try_from(n).map_err(|_| CliError::Usage("bad --since".into()))).transpose()?;
+            let v = Client::from_env()?.terminal_read(&a.positional[0], lines, since, number("wait-ms")?)?;
+            if a.switches.iter().any(|s| s == "json") { return Ok(pretty(&v)); }
+            let mut out = v["lines"].as_array().into_iter().flatten().map(|line| format!("{}: {}", line["seq"], line["text"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n");
+            if !out.is_empty() { out.push('\n'); }
+            out.push_str(&format!("last_seq: {}", v["last_seq"]));
+            Ok(out)
+        }
+        "send-text" => {
+            let a = parse_args(rest, &[], &[])?;
+            let (target, words) = a.positional.split_first().ok_or_else(|| CliError::Usage("missing <session-id>".into()))?;
+            let text = text_or_stdin(words)?;
+            Client::from_env()?.terminal_text(target, &text)?;
+            Ok(format!("Sent text to {target}."))
+        }
+        "interrupt" => {
+            let a = parse_args(rest, &[], &[])?;
+            if a.positional.len() != 1 { return Err(CliError::Usage("give one <session-id>".into())); }
+            Client::from_env()?.terminal_interrupt(&a.positional[0])?;
+            Ok(format!("Interrupted {}.", a.positional[0]))
+        }
+        other => Err(CliError::Usage(format!("unknown terminal command {other}"))),
     }
 }
 
@@ -560,6 +678,28 @@ fn run_task(args: &[String]) -> Result<String, CliError> {
         }
         other => Err(CliError::Usage(format!("unknown task command {other}"))),
     }
+}
+
+fn run_channel(args: &[String]) -> Result<String, CliError> {
+    match args.first().map(String::as_str) {
+        Some("post") => run_channel_post(&args[1..]),
+        Some(other) => Err(CliError::Usage(format!("unknown channel command {other} (post)"))),
+        None => Err(CliError::Usage("missing channel command (post)".into())),
+    }
+}
+
+fn run_channel_post(args: &[String]) -> Result<String, CliError> {
+    let a = parse_args(args, &[], &[])?;
+    let (channel, words) = a
+        .positional
+        .split_first()
+        .ok_or_else(|| CliError::Usage("missing <channel-id>".into()))?;
+    let text = text_or_stdin(words)?;
+    if text.trim().is_empty() {
+        return Err(CliError::Usage("missing <text>".into()));
+    }
+    let v = Client::from_env()?.channel_post(channel, &text)?;
+    Ok(format!("Posted message {} in channel {channel}.", v["id"].as_str().unwrap_or("?")))
 }
 
 fn run_mail(args: &[String]) -> Result<String, CliError> {
@@ -800,6 +940,61 @@ mod tests {
     }
 
     #[test]
+    fn accepts_plain_addresses_with_one_optional_trailing_slash() {
+        for (url, host, port) in [
+            ("http://127.0.0.1:8740", "127.0.0.1", 8740),
+            ("http://127.0.0.1:8740/", "127.0.0.1", 8740),
+            ("http://localhost:8740", "localhost", 8740),
+            ("http://[::1]:8740", "[::1]", 8740),
+            ("http://[::1]:8740/", "[::1]", 8740),
+            ("http://[::1]", "[::1]", 80),
+            ("http://example.com", "example.com", 80),
+            ("http://example.com/", "example.com", 80),
+            ("http://example.com:65535", "example.com", 65535),
+            ("http://example.com:1", "example.com", 1),
+        ] {
+            let c = Client::new(url, "t").unwrap_or_else(|e| panic!("{url}: {e}"));
+            assert_eq!((c.host.as_str(), c.port, c.prefix.as_str()), (host, port, ""), "{url}");
+        }
+    }
+
+    #[test]
+    fn refuses_userinfo_separators_bad_ports_and_empty_hosts_without_echoing_the_url() {
+        for url in [
+            "http://user:SECRET-PW@127.0.0.1:8740",
+            "http://user@127.0.0.1",
+            "http://a@b@host.example",
+            "http://127.0.0.1\\@evil.com",
+            "http://evil.com\\@127.0.0.1",
+            "http://127.0.0.1?x@evil.com",
+            "http://127.0.0.1#frag",
+            "http://127.0.0.1:8740?x=1",
+            "http://127.0.0.1:8740#x",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:65536",
+            "http://127.0.0.1:99999999999",
+            "http://127.0.0.1:+80",
+            "http://127.0.0.1:-1",
+            "http://127.0.0.1:8a",
+            "http://127.0.0.1:",
+            "http://:8740",
+            "http://",
+            "http:///path",
+            "http://[]:80",
+            "http://[::1",
+            "http://[::1]x:80",
+            "http://::1:80",
+            "https://SECRET-HOST.example",
+            "ftp://SECRET-HOST.example",
+        ] {
+            let e = Client::new(url, "t").err().unwrap_or_else(|| panic!("accepted {url}"));
+            let text = format!("{e:#}");
+            assert_eq!(text, BAD_BASE_URL, "{url}");
+            assert!(!text.contains("SECRET") && !text.contains("127.0.0.1") && !text.contains("evil"), "{text}");
+        }
+    }
+
+    #[test]
     fn parses_flags_and_positionals() {
         let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let a = parse_args(&v(&["alice", "--agent", "codex", "fix", "--title=T x", "it"]), &["agent", "title"], &[]).ok().unwrap();
@@ -851,6 +1046,24 @@ mod tests {
         assert_eq!(parse_duration_secs("15m"), Some(900));
         assert_eq!(parse_duration_secs("1d"), Some(86_400));
         assert_eq!(parse_duration_secs("1w"), None);
+    }
+
+    #[test]
+    fn fr_t12_cli_channel_post_builds_request() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(channel_post_path("c1"), "/api/channels/c1/post");
+        assert_eq!(channel_post_path("a/b"), "/api/channels/a%2Fb/post");
+        assert!(USAGE.contains("ember-a2a channel post <channel-id>"));
+        assert!(matches!(run_inner(&args(&["channel"])), Err(CliError::Usage(_))));
+        assert!(matches!(run_inner(&args(&["channel", "shout"])), Err(CliError::Usage(_))));
+        assert!(matches!(run_inner(&args(&["channel", "post"])), Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn fr_t12_mcp_usage_names_the_subcommand() {
+        assert!(USAGE.contains("ember-a2a mcp\n"));
+        assert!(USAGE.contains("`channel_post`"));
+        assert!(USAGE.contains("not for people"));
     }
 
     #[test]

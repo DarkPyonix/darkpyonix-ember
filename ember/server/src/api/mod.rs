@@ -1,6 +1,6 @@
 //! HTTP API and push channel for clients (SPEC §L via FR-S*, PR-1).
 //!
-//! All routes live under `/api/v1`. The push channel is a WebSocket at `/api/v1/push`; on connect
+//! All routes live under `/api`. The push channel is a WebSocket at `/api/push`; on connect
 //! a client sends nothing and receives every [`Push`] from then on. To catch up after a gap, it
 //! reads `/sessions/{id}/events?after=<seq>` and then relies on the stream.
 //!
@@ -11,20 +11,45 @@
 //!
 //! | Method | Path | Body → Response |
 //! | ------ | ---- | --------------- |
-//! | GET    | `/api/v1/projects` | → `[Project]` (`{name, created_at, computers}`) |
-//! | POST   | `/api/v1/projects` | `{name}` → 201 `Project` (200 when it existed) |
-//! | GET    | `/api/v1/projects/{name}` | → `Project` |
-//! | PUT    | `/api/v1/projects/{name}/computers/{computer_id}` | → `Project` (assign; idempotent) |
-//! | DELETE | `/api/v1/projects/{name}/computers/{computer_id}` | → `Project` (unassign; idempotent) |
-//! | PATCH  | `/api/v1/sessions/{id}` | `{title?, pinned?, archived?}` → `SessionRecord` |
-//! | GET    | `/api/v1/search?q=&limit=` | → `[SearchHit]` (`{session_id, seq, kind, snippet, title, project, archived}`) |
-//! | GET    | `/api/v1/sessions/{id}/export` | → transcript file (JSON, `Content-Disposition: attachment`) |
-//! | POST   | `/api/v1/sessions/{id}/fork` | → 501 `{error, reason}`: no agent supports forking yet |
+//! | GET    | `/api/projects` | → `[Project]` (`{name, created_at, computers, repository, default_branch, member_defaults, character_style, archived}`) |
+//! | POST   | `/api/projects` | `{name}` → 201 `Project` (200 when it existed) |
+//! | GET    | `/api/projects/{name}` | → `Project` |
+//! | PATCH  | `/api/projects/{name}` | `{name?, repository?, default_branch?, member_defaults?, character_style?}` → `Project` (FR-L26); errors `{error, code}` |
+//! | PUT    | `/api/projects/{name}/computers/{computer_id}` | → `Project` (assign; idempotent) |
+//! | DELETE | `/api/projects/{name}/computers/{computer_id}` | → `Project` (unassign; idempotent) |
+//! | PATCH  | `/api/sessions/{id}` | `{title?, pinned?, archived?}` → `SessionRecord` |
+//! | GET    | `/api/search?q=&limit=` | → `[SearchHit]` (`{session_id, seq, kind, snippet, title, project, archived}`) |
+//! | GET    | `/api/sessions/{id}/export` | → transcript file (JSON, `Content-Disposition: attachment`) |
+//! | POST   | `/api/sessions/{id}/questions/{question_id}/answer` | `{answers:[{question_id, values}]}` or `{decline:true}` (exactly one; unknown field 422) → `{status: "answered"\|"declined"}`; 404 unknown session or question not pending, 400 invalid answers or both/neither, 409 no running agent (FR-A5; owner token only) |
+//! | PUT    | `/api/sessions/{id}/approve-all` | `{enabled}` → `{approve_all}` (FR-A5; `GET /sessions/{id}` carries `approve_all`; push `approve_all`) |
+//! | POST   | `/api/sessions/{id}/fork` | `{turn_seq?, title?}` → 201 new session; 409 without a completed turn |
+//! | GET    | `/api/agents/settings` | → `{settings: {<agent>: {mem_limit_mb}}}`, only harnesses with a stored value (FR-L20, FR-S8) |
+//! | PUT    | `/api/agents/{agent}/settings` | `{mem_limit_mb: 256..=262144 \| 0 \| null}` → `{agent, mem_limit_mb, applies: "next_session"}`; unknown field or missing key 422, bad value 400, unknown agent or `scripted` 404 |
+//! | GET    | `/api/agents/defaults` | → `{agent, model, effort, mode}` (new-member defaults, FR-L20, #481, #670) |
+//! | PUT    | `/api/agents/defaults` | `{agent?, model?, effort?, mode?}` → `{agent, model, effort, mode}`; unknown field or non-object 422, bad value 400 |
+//!
+//! Tokens (FR-U7; cost is always `null`, the response says why in `cost_note`):
+//!
+//! | Method | Path | Response |
+//! | ------ | ---- | -------- |
+//! | GET    | `/api/usage/summary?days=7&project=` or `?day=YYYY-MM-DD` | `{from, to, days:[{day, input_tokens, output_tokens, total_tokens, turns, cost_usd, sessions, by_agent:[{agent, ...}]}], input_tokens, output_tokens, total_tokens, turns, cost_usd, by_agent, cost_note}` |
+//! | GET    | `/api/sessions/{id}/usage` | `{session_id, input_tokens, output_tokens, total_tokens, turns, cost_usd, reported, cost_note}`; also `usage` in `GET /sessions/{id}` |
+//!
+//! (`GET /api/usage` is per account, in `crate::accounts::api`.)
+//!
+//! Git per project (FR-G4) is in [`git`]: `POST /api/projects/{name}/git/<op>`.
+//!
+//! GitHub card data (FR-G13) is in [`integrations`]: `GET /api/integrations/github`.
 //!
 //! Project names are path segments: clients percent-encode them. Assignment and metadata
 //! changes are pushed (`project_updated`, `session_updated`).
 
+pub mod git;
+pub mod harnesses;
 pub mod ide;
+pub mod ide_extensions;
+pub mod integrations;
+pub mod origin;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -43,27 +68,39 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::agents::AgentKind;
 use crate::events::ApprovalDecision;
 use crate::projects::ProjectError;
-use crate::session::{NewSession, Push, SessionError, Sessions, PUSH_VERSION};
+use crate::session::{
+    NewSession, Push, QuestionAnswerBody, QuestionError, SessionError, Sessions, DEFAULT_AGENT_KEY,
+    DEFAULT_EFFORT_KEY, DEFAULT_MODEL_KEY, DEFAULT_MODE_KEY, EFFORT_LEVELS, MEM_LIMIT_KEY,
+    MEM_LIMIT_MAX_MB, MEM_LIMIT_MIN_MB, MEM_LIMIT_RANGE_MESSAGE,
+};
 use crate::store::{now_ms, SessionPatch};
 
 pub fn router(sessions: Arc<Sessions>) -> Router {
     Router::new()
-        .route("/api/v1/health", get(|| async { Json(json!({ "ok": true, "push_version": PUSH_VERSION })) }))
-        .route("/api/v1/agents", get(agents))
-        .route("/api/v1/sessions", get(list_sessions).post(create_session))
-        .route("/api/v1/sessions/{id}", get(get_session).patch(patch_session))
-        .route("/api/v1/sessions/{id}/export", get(export_session))
-        .route("/api/v1/sessions/{id}/fork", post(fork_session))
-        .route("/api/v1/search", get(search))
-        .route("/api/v1/projects", get(list_projects).post(create_project))
-        .route("/api/v1/projects/{name}", get(get_project))
-        .route("/api/v1/projects/{name}/computers/{computer_id}", put(assign).delete(unassign))
-        .route("/api/v1/sessions/{id}/events", get(events))
-        .route("/api/v1/sessions/{id}/messages", post(send_message))
-        .route("/api/v1/sessions/{id}/approvals/{approval_id}", post(answer))
-        .route("/api/v1/sessions/{id}/interrupt", post(interrupt))
-        .route("/api/v1/sessions/{id}/lease", post(lease))
-        .route("/api/v1/push", get(push))
+        .route("/api/health", get(|| async { Json(json!({ "ok": true })) }))
+        .route("/api/agents", get(agents))
+        // `/api/agents/settings` has three segments, `/api/agents/{agent}/settings` four: no overlap.
+        .route("/api/agents/settings", get(get_agent_settings))
+        .route("/api/agents/defaults", get(get_agent_defaults).put(put_agent_defaults))
+        .route("/api/agents/{agent}/settings", put(put_agent_settings))
+        .route("/api/sessions", get(list_sessions).post(create_session))
+        .route("/api/sessions/{id}", get(get_session).patch(patch_session))
+        .route("/api/sessions/{id}/export", get(export_session))
+        .route("/api/sessions/{id}/fork", post(fork_session))
+        .route("/api/search", get(search))
+        .route("/api/usage/summary", get(usage_summary))
+        .route("/api/sessions/{id}/usage", get(session_usage))
+        .route("/api/projects", get(list_projects).post(create_project))
+        .route("/api/projects/{name}", get(get_project).patch(patch_project))
+        .route("/api/projects/{name}/computers/{computer_id}", put(assign).delete(unassign))
+        .route("/api/sessions/{id}/events", get(events))
+        .route("/api/sessions/{id}/messages", post(send_message))
+        .route("/api/sessions/{id}/approvals/{approval_id}", post(answer))
+        .route("/api/sessions/{id}/questions/{question_id}/answer", post(answer_question))
+        .route("/api/sessions/{id}/approve-all", put(set_approve_all))
+        .route("/api/sessions/{id}/interrupt", post(interrupt))
+        .route("/api/sessions/{id}/lease", post(lease))
+        .route("/api/push", get(push))
         .with_state(sessions)
 }
 
@@ -98,6 +135,8 @@ impl From<ProjectError> for ApiError {
         let code = match &e {
             ProjectError::NotFound(_) | ProjectError::ComputerNotFound(_) => StatusCode::NOT_FOUND,
             ProjectError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ProjectError::Protected(_) => StatusCode::FORBIDDEN,
+            ProjectError::NameTaken(_) => StatusCode::CONFLICT,
             ProjectError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError(code, format!("{e:#}"))
@@ -107,7 +146,156 @@ impl From<ProjectError> for ApiError {
 type ApiResult<T> = Result<T, ApiError>;
 
 async fn agents(State(s): State<Arc<Sessions>>) -> impl IntoResponse {
-    Json(s.detect_agents().await)
+    Json(s.probe_agents().await)
+}
+
+/// `GET /api/agents/settings`: the stored per-harness settings (FR-L20, FR-S8), only for
+/// harnesses with a value.
+async fn get_agent_settings(State(s): State<Arc<Sessions>>) -> ApiResult<impl IntoResponse> {
+    let mut settings = serde_json::Map::new();
+    for (harness, value) in s.store().harness_settings_with_key(MEM_LIMIT_KEY)? {
+        // Rows of a harness that is gone, or values the loader would ignore, are not reported.
+        let (Some(_), Ok(mb)) = (AgentKind::parse(&harness), value.parse::<u64>()) else { continue };
+        if (MEM_LIMIT_MIN_MB..=MEM_LIMIT_MAX_MB).contains(&mb) {
+            settings.insert(harness, json!({ "mem_limit_mb": mb }));
+        }
+    }
+    Ok(Json(json!({ "settings": settings })))
+}
+
+/// `PUT /api/agents/{agent}/settings` with exactly `{"mem_limit_mb": <u64> | null}`. The value
+/// applies to agents started after the change (`applies: "next_session"`).
+async fn put_agent_settings(
+    State(s): State<Arc<Sessions>>,
+    Path(agent): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<impl IntoResponse> {
+    let kind = match AgentKind::parse(&agent) {
+        Some(k) if k != AgentKind::Scripted => k,
+        _ => return Err(ApiError(StatusCode::NOT_FOUND, format!("unknown agent {agent}"))),
+    };
+    let unprocessable =
+        |m: &str| ApiError(StatusCode::UNPROCESSABLE_ENTITY, m.to_string());
+    let obj = body.as_object().ok_or_else(|| unprocessable("body must be an object"))?;
+    if let Some(k) = obj.keys().find(|k| k.as_str() != MEM_LIMIT_KEY) {
+        return Err(unprocessable(&format!("unknown field {k}")));
+    }
+    let value = obj.get(MEM_LIMIT_KEY).ok_or_else(|| unprocessable("missing field mem_limit_mb"))?;
+    let range = || ApiError(StatusCode::BAD_REQUEST, MEM_LIMIT_RANGE_MESSAGE.to_string());
+    let limit = match value {
+        serde_json::Value::Null => None,
+        v => Some(v.as_u64().ok_or_else(range)?),
+    };
+    if limit.is_some_and(|mb| mb != 0 && !(MEM_LIMIT_MIN_MB..=MEM_LIMIT_MAX_MB).contains(&mb)) {
+        return Err(range());
+    }
+    s.set_mem_limit_persisted(kind, limit)?;
+    let stored = limit.filter(|mb| *mb > 0);
+    tracing::info!(harness = kind.as_str(), mem_limit_mb = ?stored, "agent memory limit set");
+    Ok(Json(json!({ "agent": kind.as_str(), "mem_limit_mb": stored, "applies": "next_session" })))
+}
+
+/// `GET /api/agents/defaults`: the stored global new-member defaults (FR-L20, #481, #670).
+async fn get_agent_defaults(State(s): State<Arc<Sessions>>) -> ApiResult<impl IntoResponse> {
+    Ok(Json(s.agent_defaults()?))
+}
+
+/// `PUT /api/agents/defaults` with optional `agent`, `model`, `effort` and `mode` (FR-L20, #481, #670).
+async fn put_agent_defaults(
+    State(s): State<Arc<Sessions>>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<impl IntoResponse> {
+    let unprocessable = |m: &str| ApiError(StatusCode::UNPROCESSABLE_ENTITY, m.to_string());
+    let bad = |m: &str| ApiError(StatusCode::BAD_REQUEST, m.to_string());
+    let obj = body.as_object().ok_or_else(|| unprocessable("body must be an object"))?;
+    const KNOWN_KEYS: &[&str] =
+        &[DEFAULT_AGENT_KEY, DEFAULT_MODEL_KEY, DEFAULT_EFFORT_KEY, DEFAULT_MODE_KEY];
+    if let Some(k) = obj.keys().find(|k| !KNOWN_KEYS.contains(&k.as_str())) {
+        return Err(unprocessable(&format!("unknown field {k}")));
+    }
+
+    let parse_opt_str = |v: &serde_json::Value, field: &str| -> Result<Option<String>, ApiError> {
+        match v {
+            serde_json::Value::Null => Ok(None),
+            serde_json::Value::String(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(trimmed.to_string()))
+                }
+            }
+            _ => Err(bad(&format!("{field} must be a string or null"))),
+        }
+    };
+
+    let agent_patch = match obj.get(DEFAULT_AGENT_KEY) {
+        None => None,
+        Some(v) => {
+            let parsed = parse_opt_str(v, DEFAULT_AGENT_KEY)?;
+            if let Some(ref a) = parsed {
+                match AgentKind::parse(a) {
+                    Some(k) if k != AgentKind::Scripted => {}
+                    _ => return Err(bad(&format!("unknown agent {a}"))),
+                }
+            }
+            Some(parsed)
+        }
+    };
+    let model_patch = match obj.get(DEFAULT_MODEL_KEY) {
+        None => None,
+        Some(v) => {
+            let parsed = parse_opt_str(v, DEFAULT_MODEL_KEY)?;
+            if let Some(ref m) = parsed {
+                if m.chars().count() > 128 || m.chars().any(char::is_control) {
+                    return Err(bad("invalid model"));
+                }
+            }
+            Some(parsed)
+        }
+    };
+    let effort_patch = match obj.get(DEFAULT_EFFORT_KEY) {
+        None => None,
+        Some(v) => {
+            let parsed = parse_opt_str(v, DEFAULT_EFFORT_KEY)?;
+            if let Some(ref e) = parsed {
+                if !EFFORT_LEVELS.contains(&e.as_str()) {
+                    return Err(bad(&format!("invalid effort {e}")));
+                }
+            }
+            Some(parsed)
+        }
+    };
+    let mode_patch = match obj.get(DEFAULT_MODE_KEY) {
+        None => None,
+        Some(v) => {
+            let parsed = parse_opt_str(v, DEFAULT_MODE_KEY)?;
+            if let Some(ref m) = parsed {
+                if !crate::projects::PERMISSION_MODES.contains(&m.as_str()) {
+                    return Err(bad(&format!("invalid mode {m}")));
+                }
+            }
+            Some(parsed)
+        }
+    };
+
+    if let Some(ref a) = agent_patch {
+        s.set_agent_default_key(DEFAULT_AGENT_KEY, a.as_deref())?;
+        if a.is_none() && model_patch.is_none() {
+            s.set_agent_default_key(DEFAULT_MODEL_KEY, None)?;
+        }
+    }
+    if let Some(ref m) = model_patch {
+        s.set_agent_default_key(DEFAULT_MODEL_KEY, m.as_deref())?;
+    }
+    if let Some(ref e) = effort_patch {
+        s.set_agent_default_key(DEFAULT_EFFORT_KEY, e.as_deref())?;
+    }
+    if let Some(ref m) = mode_patch {
+        s.set_agent_default_key(DEFAULT_MODE_KEY, m.as_deref())?;
+    }
+
+    Ok(Json(s.agent_defaults()?))
 }
 
 #[derive(Deserialize)]
@@ -157,8 +345,53 @@ async fn get_session(
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
     let rec = s.store().session(&id)?.ok_or_else(|| SessionError::NotFound(id.clone()))?;
-    // `can_fork`: whether the fork action is offered (FR-S5: disabled, not failing).
-    Ok(Json(json!({ "session": rec, "live": s.is_live(&id).await, "can_fork": false })))
+    // `can_fork`: whether the fork action is offered (FR-S5: disabled, not failing). It needs a
+    // completed turn; `fork_turns` lists the sequence numbers a fork may start after.
+    let turns = crate::fork::completed_turns(&s.store().events_after(&id, 0)?);
+    Ok(Json(json!({
+        "session": rec,
+        "live": s.is_live(&id).await,
+        "can_fork": !turns.is_empty(),
+        "fork_turns": turns,
+        "fork_of": s.store().fork_origin(&id)?,
+        "approve_all": s.approve_all(&id),
+        "usage": s.store().session_usage(&id)?,
+    })))
+}
+
+/// FR-U7: tokens one session's harness reported.
+async fn session_usage(
+    State(s): State<Arc<Sessions>>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let u = s.store().session_usage(&id)?.ok_or_else(|| SessionError::NotFound(id.clone()))?;
+    Ok(Json(u))
+}
+
+#[derive(Deserialize)]
+struct UsageQuery {
+    /// One UTC day, `YYYY-MM-DD`; wins over `days`.
+    day: Option<String>,
+    /// The last N UTC days including today (default 7, 1..=366).
+    days: Option<i64>,
+    project: Option<String>,
+}
+
+/// FR-U7: tokens per UTC day (and per harness), from the usage events the agents reported.
+async fn usage_summary(
+    State(s): State<Arc<Sessions>>,
+    Query(q): Query<UsageQuery>,
+) -> ApiResult<impl IntoResponse> {
+    let (now, days) = match &q.day {
+        Some(day) => {
+            let start = s.store().day_start_ms(day)?.ok_or_else(|| {
+                ApiError(StatusCode::BAD_REQUEST, format!("day must be a date like 2026-11-06, got {day:?}"))
+            })?;
+            (start, 1)
+        }
+        None => (now_ms(), q.days.unwrap_or(7)),
+    };
+    Ok(Json(s.store().usage_summary(now, days, q.project.as_deref())?))
 }
 
 /// FR-L9: rename, pin, archive.
@@ -201,17 +434,29 @@ fn file_safe(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
 }
 
-/// FR-S5. No wrapped agent forks yet: Claude Code has no fork-from-turn in its headless mode
-/// and Codex's `thread/fork` is not wired into the adapter (it forks a whole thread, not from a
-/// chosen turn, and needs a second app-server thread per session). Clients read `can_fork`
-/// from `GET /sessions/{id}` and disable the action; this answers 501 for anyone who calls it.
+#[derive(Deserialize, Default)]
+struct ForkBody {
+    /// Sequence number of a completed turn's `turn_ended`; the last completed turn when absent.
+    #[serde(default)]
+    turn_seq: Option<i64>,
+    #[serde(default)]
+    title: Option<String>,
+}
+
+/// FR-S5: a new session that starts after a completed turn of this one. 409 when the session has
+/// no such turn (the client reads `can_fork` and does not offer the action).
 async fn fork_session(
     State(s): State<Arc<Sessions>>,
     Path(id): Path<String>,
+    body: Option<Json<ForkBody>>,
 ) -> ApiResult<Response> {
-    let rec = s.store().session(&id)?.ok_or_else(|| SessionError::NotFound(id.clone()))?;
-    let reason = format!("forking is not supported for {} sessions yet", rec.agent.as_str());
-    Ok((StatusCode::NOT_IMPLEMENTED, Json(json!({ "error": reason, "reason": reason }))).into_response())
+    let b = body.map(|Json(b)| b).unwrap_or_default();
+    match s.fork(&id, b.turn_seq, b.title.as_deref()) {
+        Ok(rec) => Ok((StatusCode::CREATED, Json(rec)).into_response()),
+        Err(crate::fork::ForkError::NotFound(_)) => Err(SessionError::NotFound(id).into()),
+        Err(crate::fork::ForkError::BadTurn(m)) => Err(ApiError(StatusCode::CONFLICT, m)),
+        Err(crate::fork::ForkError::Other(e)) => Err(e.into()),
+    }
 }
 
 #[derive(Deserialize)]
@@ -246,7 +491,7 @@ async fn create_project(
 ) -> ApiResult<impl IntoResponse> {
     let (project, created) = s.store().ensure_project(&b.name)?;
     if created {
-        s.publish(Push::ProjectUpdated { v: PUSH_VERSION, project: project.clone() });
+        s.publish(Push::ProjectUpdated { project: project.clone() });
     }
     Ok((if created { StatusCode::CREATED } else { StatusCode::OK }, Json(project)))
 }
@@ -255,13 +500,65 @@ async fn get_project(State(s): State<Arc<Sessions>>, Path(name): Path<String>) -
     Ok(Json(s.store().project(&name)?.ok_or(ProjectError::NotFound(name))?))
 }
 
+/// A failed project change as `{error, code}` (FR-L26).
+fn coded(status: StatusCode, code: &str, error: impl std::fmt::Display) -> Response {
+    (status, Json(json!({ "error": error.to_string(), "code": code }))).into_response()
+}
+
+fn project_error(e: ProjectError) -> Response {
+    let code = match &e {
+        ProjectError::NotFound(_) | ProjectError::ComputerNotFound(_) => "not_found",
+        ProjectError::BadRequest(_) => "invalid_field",
+        ProjectError::Protected(_) => "protected_project",
+        ProjectError::NameTaken(_) => "name_taken",
+        ProjectError::Other(_) => "internal",
+    };
+    let message = format!("{e:#}");
+    coded(ApiError::from(e).0, code, message)
+}
+
+/// Fields of the settings sheet whose server side is not built yet. They are refused by name so
+/// the client sees a clean error and not a silent no-op (leader: blocked on an owner decision,
+/// archive: #384 PR 4).
+const NOT_YET_PROJECT_FIELDS: [&str; 2] = ["leader_session", "archived"];
+
+/// FR-L26: change project settings. Body fields are optional; unknown fields are 400
+/// `unknown_field`, unbuilt ones 400 `not_yet`. Pushes `project_updated` with the new state.
+async fn patch_project(
+    State(s): State<Arc<Sessions>>,
+    Path(name): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return coded(StatusCode::BAD_REQUEST, "invalid_body", "the body must be a JSON object");
+    };
+    if let Some(field) = NOT_YET_PROJECT_FIELDS.iter().find(|f| map.contains_key(**f)) {
+        return coded(StatusCode::BAD_REQUEST, "not_yet", format!("{field} cannot be changed yet"));
+    }
+    let patch: crate::projects::ProjectPatch = match serde_json::from_value(serde_json::Value::Object(map)) {
+        Ok(p) => p,
+        Err(e) => {
+            let msg = e.to_string();
+            let code = if msg.contains("unknown field") { "unknown_field" } else { "invalid_field" };
+            return coded(StatusCode::BAD_REQUEST, code, msg);
+        }
+    };
+    match s.store().patch_project(&name, &patch) {
+        Ok(project) => {
+            s.publish(Push::ProjectUpdated { project: project.clone() });
+            Json(project).into_response()
+        }
+        Err(e) => project_error(e),
+    }
+}
+
 /// FR-L4: assign a computer to a project.
 async fn assign(
     State(s): State<Arc<Sessions>>,
     Path((name, computer_id)): Path<(String, String)>,
 ) -> ApiResult<impl IntoResponse> {
     let project = s.store().assign_computer(&name, &computer_id)?;
-    s.publish(Push::ProjectUpdated { v: PUSH_VERSION, project: project.clone() });
+    s.publish(Push::ProjectUpdated { project: project.clone() });
     Ok(Json(project))
 }
 
@@ -271,7 +568,7 @@ async fn unassign(
     Path((name, computer_id)): Path<(String, String)>,
 ) -> ApiResult<impl IntoResponse> {
     let project = s.store().unassign_computer(&name, &computer_id)?;
-    s.publish(Push::ProjectUpdated { v: PUSH_VERSION, project: project.clone() });
+    s.publish(Push::ProjectUpdated { project: project.clone() });
     Ok(Json(project))
 }
 
@@ -319,6 +616,44 @@ async fn answer(
     Ok(StatusCode::ACCEPTED)
 }
 
+impl From<QuestionError> for ApiError {
+    fn from(e: QuestionError) -> Self {
+        let code = match &e {
+            QuestionError::NoSession(_) | QuestionError::NotPending(_) => StatusCode::NOT_FOUND,
+            QuestionError::Invalid(_) | QuestionError::BadBody => StatusCode::BAD_REQUEST,
+            QuestionError::NoAgent(_) => StatusCode::CONFLICT,
+            QuestionError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError(code, format!("{e:#}"))
+    }
+}
+
+/// FR-A5: answer or skip a pending question. Only the owner's server token reaches it (the
+/// route is not exempt in `auth.rs`), so no team leader or A2A runtime token can answer.
+async fn answer_question(
+    State(s): State<Arc<Sessions>>,
+    Path((id, question_id)): Path<(String, String)>,
+    Json(b): Json<QuestionAnswerBody>,
+) -> ApiResult<impl IntoResponse> {
+    let status = s.resolve_question_body(&id, &question_id, b).await?;
+    Ok(Json(json!({ "status": status })))
+}
+
+#[derive(Deserialize)]
+struct ApproveAllBody {
+    enabled: bool,
+}
+
+/// FR-A5: switch a session's approve-everything mode.
+async fn set_approve_all(
+    State(s): State<Arc<Sessions>>,
+    Path(id): Path<String>,
+    Json(b): Json<ApproveAllBody>,
+) -> ApiResult<impl IntoResponse> {
+    s.set_approve_all(&id, b.enabled).await?;
+    Ok(Json(json!({ "approve_all": b.enabled })))
+}
+
 async fn interrupt(
     State(s): State<Arc<Sessions>>,
     Path(id): Path<String>,
@@ -338,10 +673,15 @@ async fn lease(
     Ok(Json(json!({ "ttl_secs": LEASE_TTL.as_secs() })))
 }
 
-async fn push(State(s): State<Arc<Sessions>>, ws: WebSocketUpgrade) -> impl IntoResponse {
+async fn push(
+    State(s): State<Arc<Sessions>>,
+    headers: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<impl IntoResponse, StatusCode> {
+    origin::check_origin(&headers)?;
     // Subscribe before the upgrade response goes out, so an event stored in between is not lost.
     let rx = s.subscribe();
-    ws.on_upgrade(move |socket| push_loop(socket, rx))
+    Ok(ws.on_upgrade(move |socket| push_loop(socket, rx)))
 }
 
 async fn push_loop(mut socket: WebSocket, mut rx: tokio::sync::broadcast::Receiver<Push>) {
@@ -350,7 +690,7 @@ async fn push_loop(mut socket: WebSocket, mut rx: tokio::sync::broadcast::Receiv
             Ok(p) => p,
             // A slow client missed messages: tell it to resync from the events endpoint.
             Err(RecvError::Lagged(n)) => {
-                let lag = json!({ "type": "lagged", "v": PUSH_VERSION, "missed": n }).to_string();
+                let lag = json!({ "type": "lagged", "missed": n }).to_string();
                 if socket.send(Message::Text(lag.into())).await.is_err() {
                     return;
                 }

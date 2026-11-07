@@ -18,32 +18,52 @@
 //! | [`registry`] | provider registrations (`$register…`) and extension-host commands |
 //! | [`selector`] | `languages.score` port: document selector matching |
 //! | [`languages`] | file → language id from `contributes.languages` |
+//! | [`textmate`] | FR-E6: the grammars extensions contribute (`contributes.grammars`), read into the raw rule model |
 //! | [`ids`] | stable, non-zero, session-unique decoration ids |
 //! | [`coords`] | widget (0-based) ↔ extension host (1-based) positions, UTF-16 helpers, ranges through edits |
+//! | [`widget`] | the FR-38 `CodeEditor` wire contract (44-byte decoration records, events, commands) |
+//! | [`bridge`] | [`WidgetBridge`]: `SessionUpdate` → per-document widget state and encoded `Decorations` bytes |
+//! | [`fallback`] | connect-time version check outcome: when to offer "Open in VS Code" instead |
 //! | [`replies`] | answers for the extension host's other requests |
+//! | [`search`] | FR-E7: search across files through the extension host, unsaved buffers, replace with re-check |
 //!
 //! **Status: written without compiling** (no cargo was run for this change). See
 //! `docs/design/EDITOR-SESSION.md` §7 for the APIs that are uncertain.
 
+pub mod bridge;
 pub mod codelens;
+pub mod commands;
 pub mod coords;
 pub mod engine;
+pub mod fallback;
 pub mod diagnostics;
+pub mod paths;
+pub mod output;
 pub mod document;
+pub mod highlight;
 pub mod hover;
 pub mod ids;
 pub mod inline;
 pub mod languages;
 pub mod registry;
 pub mod replies;
+pub mod search;
 pub mod selector;
+pub mod textmate;
 pub mod session;
 pub mod widget;
 
+pub use crate::bridge::{apply_text_change, BridgeAction, DocumentWidgetState, SyntaxRuns, WidgetBridge};
+pub use crate::commands::{parse_contributed_commands, ContributedCommand};
+pub use crate::fallback::{fallback_for, vscode_fallback_url, ConnectOutcome, Fallback, FallbackTarget};
 pub use crate::engine::{CoreOptions, Effect, ExternalChange, Input, SessionCore, SessionUpdate};
 pub use crate::coords::{WidgetPos, WidgetRange};
-pub use crate::session::{EditorSession, SessionConfig};
-pub use crate::widget::{Decoration, DecorationId, DecorationKind, HoverPhase, Severity, WidgetCommand, WidgetEvent};
+pub use crate::session::{DirLister, EditorSession, SessionConfig};
+pub use crate::output::{ExtensionMessage, MessageSeverity, OutputChannel, MAX_OUTPUT_CHANNEL_BYTES};
+pub use crate::widget::{
+    Decoration, DecorationId, DecorationKind, HoverPhase, Severity, WidgetCommand, WidgetEvent,
+    DECORATION_RECORD_LEN,
+};
 
 /// Errors from connecting or talking to a session.
 #[derive(Debug, thiserror::Error)]
@@ -60,4 +80,7 @@ pub enum Error {
     /// The session task has ended.
     #[error("session closed")]
     Closed,
+    /// An explorer edit named a path or a name that is not allowed.
+    #[error("{0}")]
+    Path(crate::paths::PathError),
 }

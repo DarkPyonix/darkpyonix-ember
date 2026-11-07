@@ -25,13 +25,18 @@ use crate::codelens::{CodeLenses, CommandDto};
 use crate::coords::{WidgetPos, WidgetRange};
 use crate::diagnostics::Diagnostics;
 use crate::document::{decode, OpenDocument};
+use crate::highlight::{Action as HighlightAction, HighlightJob, HighlightOutput, Highlights, Problem};
 use crate::hover::{HoverPopup, HoverState};
 use crate::ids::{DecorationIds, IdSpace};
 use crate::inline::{self, EndReason, Ghost, InlineDoc, ReplyOutcome, TypeThrough};
 use crate::languages::LanguageRegistry;
 use crate::registry::{KindTag, Registry, RegistryChange};
 use crate::replies::session_reply;
+use crate::search::{FileHits, ReplaceReport, ReplaceRequest, SearchEnd, SearchRequest, Target};
 use crate::widget::{Decoration, DecorationKind, WidgetCommand, WidgetEvent};
+
+/// How many versions behind the document an answer of the highlighter may be and still be shown.
+const MAX_SPAN_VERSION_LAG: u32 = 500;
 
 /// Identifies an outstanding RPC call or file write of the core.
 pub type Token = u64;
@@ -67,14 +72,22 @@ pub enum ReadPurpose {
     Open,
     /// The watcher reported a change to an open file.
     Reload,
+    /// An explicit reload of an open file after a work-tree discard (replaces the buffer even if dirty).
+    ForceReload,
     /// `MainThreadDocuments.$tryOpenDocument` from the extension host (`workspace.openTextDocument`).
     ExtHostOpen { req: u32 },
+    /// A grammar file the syntax highlighting needs (`scope` is the grammar's scope name).
+    Grammar { scope: String },
+    /// A file that is not open, read for replace `id` (FR-E7).
+    Replace { id: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Input {
     Open { uri: UriComponents },
     Close { uri: UriComponents },
+    /// Reload an open document from disk even if its buffer has unsaved edits (e.g. after discard).
+    Reload { uri: UriComponents },
     /// The editor of `uri` became the active one.
     Focus { uri: UriComponents },
     /// An event from the `CodeEditor` node rendered with key `generation`.
@@ -86,6 +99,16 @@ pub enum Input {
     FileRead { uri: UriComponents, purpose: ReadPurpose, result: Result<Vec<u8>, String> },
     FileWritten { uri: UriComponents, token: Token, result: Result<(), String> },
     FilesChanged(Vec<FileChange>),
+    /// The highlighting worker finished a batch of jobs.
+    Highlighted(HighlightOutput),
+    /// Execute a command (dispatches to extension host or workbench).
+    ExecuteCommand { id: String, arguments: Vec<Value> },
+    /// Search the workspace folder `folder` (FR-E7). A running search is cancelled first.
+    Search { id: u64, request: SearchRequest, folder: UriComponents },
+    /// Stop search `id`.
+    CancelSearch { id: u64 },
+    /// Replace the chosen matches (FR-E7); answered with [`SessionUpdate::ReplaceDone`].
+    Replace { id: u64, request: ReplaceRequest },
     /// Nothing happened; run due timers.
     Tick,
 }
@@ -103,6 +126,8 @@ pub enum Effect {
     WriteFile { uri: UriComponents, bytes: Vec<u8>, token: Token },
     Watch { uri: UriComponents },
     Unwatch { uri: UriComponents },
+    /// Work for the highlighting thread; its answer comes back as [`Input::Highlighted`].
+    Highlight(HighlightJob),
     Ui(SessionUpdate),
 }
 
@@ -117,6 +142,9 @@ pub enum ExternalChange {
 /// What the UI layer applies to the widget and around it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionUpdate {
+    /// The coloured runs of the lines in `window` (first, last inclusive) of the node with key `generation`,
+    /// written against document `version`; lines outside the window carry none. Replaces the earlier list.
+    Syntax { uri: UriComponents, generation: u64, version: u32, window: (u32, u32), runs: Vec<crate::textmate::DocRun> },
     /// Render a `CodeEditor` with key `generation`, `Text = text`, `TabWidth = tab_width`.
     Opened { uri: UriComponents, generation: u64, text: String, language_id: String, tab_width: u32 },
     OpenFailed { uri: UriComponents, error: String },
@@ -130,15 +158,31 @@ pub enum SessionUpdate {
     Saved { uri: UriComponents },
     SaveFailed { uri: UriComponents, error: String },
     ExternalChange { uri: UriComponents, change: ExternalChange },
-    /// A command neither the extension host nor Ember implements (a workbench command such as
+    /// Acommand neither the extension host nor Ember implements (a workbench command such as
     /// `editor.action.showReferences`); the UI may handle it or ignore it.
     RunCommand { command: CommandDto },
+    /// An extension command execution failed (`$executeContributedCommand`).
+    CommandFailed { id: String, error: String },
     /// The widget and the session disagree about the document (lost event, bad range). The UI
     /// should call `EditorSession::resync` (re-sends the session's text as a new generation).
     Desync { uri: UriComponents, error: String },
     Closed { uri: UriComponents },
     /// The extension-host or management connection is gone.
     ConnectionLost { reason: String },
+    /// The problems list changed: every marker of every file, errors first.
+    Problems { problems: Vec<crate::diagnostics::Problem> },
+    /// Output channels changed (channels list, or an append/clear).
+    OutputChannels { channels: Vec<crate::output::OutputChannel>, active_id: Option<String> },
+    /// An extension surfaced a notification message ($showMessage).
+    ExtensionMessage { severity: crate::output::MessageSeverity, message: String, source: Option<String> },
+    /// Commands contributed by extensions or registered at runtime.
+    Commands { commands: Vec<crate::commands::ContributedCommand> },
+    /// More matches of search `id` (FR-E7), in arrival order.
+    SearchHits { id: u64, files: Vec<FileHits> },
+    /// Search `id` ended; no hits for it follow.
+    SearchDone { id: u64, end: SearchEnd },
+    /// Replace `id` finished.
+    ReplaceDone { id: u64, report: ReplaceReport },
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +194,38 @@ enum Pending {
     /// `$activateByEvent("onCommand:<id>")` before running a command not registered yet.
     ActivateThenRun { command: CommandDto },
     Command { id: String },
+    /// `$provideTextSearchResults` of search `id`.
+    Search { id: u64 },
+}
+
+/// The running search: the window's id, the provider session, its call, and the open documents whose
+/// unsaved text was searched instead of the disk (their provider matches are dropped).
+#[derive(Debug, Clone)]
+struct ActiveSearch {
+    id: u64,
+    session: i64,
+    token: Token,
+    overlaid: HashSet<String>,
+}
+
+/// One replace in progress: what to replace, the matches per file key, files left, and the report so far.
+#[derive(Debug, Clone)]
+struct ReplaceJob {
+    request: ReplaceRequest,
+    targets: HashMap<String, Vec<Target>>,
+    remaining: usize,
+    report: ReplaceReport,
+}
+
+/// A file write of a replace: the job, the file, the counts it carries, and for an open document its
+/// extension-host version when the new text was made, and that text.
+#[derive(Debug, Clone)]
+struct ReplaceWrite {
+    id: u64,
+    key: String,
+    replaced: usize,
+    skipped: usize,
+    open: Option<(u64, String)>,
 }
 
 pub struct SessionCore {
@@ -164,6 +240,7 @@ pub struct SessionCore {
     registry: Registry,
     diagnostics: Diagnostics,
     lenses: CodeLenses,
+    highlights: Highlights,
     codelens_due: HashMap<String, inline::Debouncer>,
     codelens_inflight: HashMap<(String, i64), Token>,
     hover: HoverState,
@@ -171,11 +248,19 @@ pub struct SessionCore {
     ids: DecorationIds,
     pending: HashMap<Token, Pending>,
     saves: HashMap<Token, (String, u64, Vec<u8>)>,
+    /// Handle of the extension host's text search provider for the workspace's scheme (FR-E7).
+    search_provider: Option<i64>,
+    search_session: i64,
+    search: Option<ActiveSearch>,
+    replaces: HashMap<u64, ReplaceJob>,
+    replace_writes: HashMap<Token, ReplaceWrite>,
     next_token: Token,
     next_generation: u64,
     next_editor: u64,
     next_edit_request: u32,
     reply_seq: u64,
+    output_seq: u64,
+    output_channels: Vec<crate::output::OutputChannel>,
     touched: BTreeSet<String>,
     out: Vec<Effect>,
     now: Instant,
@@ -206,6 +291,7 @@ impl SessionCore {
             registry: Registry::new(),
             diagnostics: Diagnostics::new(),
             lenses: CodeLenses::new(),
+            highlights: Highlights::new(),
             codelens_due: HashMap::new(),
             codelens_inflight: HashMap::new(),
             hover: HoverState::new(),
@@ -213,11 +299,18 @@ impl SessionCore {
             ids: DecorationIds::new(),
             pending: HashMap::new(),
             saves: HashMap::new(),
+            search_provider: None,
+            search_session: 0,
+            search: None,
+            replaces: HashMap::new(),
+            replace_writes: HashMap::new(),
             next_token: 0,
             next_generation: 0,
             next_editor: 0,
             next_edit_request: 0,
             reply_seq: 0,
+            output_seq: 0,
+            output_channels: Vec::new(),
             touched: BTreeSet::new(),
             out: Vec::new(),
             now,
@@ -230,6 +323,7 @@ impl SessionCore {
         match input {
             Input::Open { uri } => self.on_open(uri),
             Input::Close { uri } => self.on_close(&uri),
+            Input::Reload { uri } => self.on_reload(uri),
             Input::Focus { uri } => self.on_focus(&uri),
             Input::Widget { uri, generation, event } => self.on_widget(&uri, generation, event),
             Input::TriggerInline { uri, generation, pos } => self.on_trigger_inline(&uri, generation, pos),
@@ -238,11 +332,27 @@ impl SessionCore {
             Input::FileRead { uri, purpose, result } => self.on_file_read(uri, purpose, result),
             Input::FileWritten { uri, token, result } => self.on_file_written(&uri, token, result),
             Input::FilesChanged(changes) => self.on_files_changed(changes),
+            Input::Highlighted(output) => self.on_highlighted(output),
+            Input::ExecuteCommand { id, arguments } => {
+                self.run_command(CommandDto { id, title: String::new(), tooltip: None, arguments });
+            }
+            Input::Search { id, request, folder } => self.on_search(id, request, folder),
+            Input::CancelSearch { id } => self.on_cancel_search(id),
+            Input::Replace { id, request } => self.on_replace(id, request),
             Input::Tick => {}
         }
         self.run_timers();
         self.flush_decorations();
         std::mem::take(&mut self.out)
+    }
+
+    /// The grammars the installed extensions contribute (`contributes.grammars`); documents opened after this
+    /// are highlighted when their language has one.
+    pub fn set_grammar_catalog(&mut self, catalog: crate::textmate::GrammarCatalog) {
+        for why in catalog.skipped() {
+            tracing::debug!("ember-editor: grammar skipped: {why}");
+        }
+        self.highlights.set_catalog(catalog);
     }
 
     /// When [`Input::Tick`] must be delivered next (earliest debounce deadline).
@@ -410,6 +520,7 @@ impl SessionCore {
             tab_width: self.opts.tab_width,
         });
         self.docs.insert(key.clone(), doc);
+        self.highlight_open(&key);
         self.active = Some(key.clone());
         self.out.push(Effect::Watch { uri });
         self.send_tab_model();
@@ -421,6 +532,9 @@ impl SessionCore {
         let key = uri.key();
         let Some(doc) = self.docs.remove(&key) else { return };
         self.rpc(doc.remove_call());
+        if let Some(job) = self.highlights.close(&key) {
+            self.out.push(Effect::Highlight(job));
+        }
         self.out.push(Effect::Unwatch { uri: doc.uri.clone() });
         for (handle, cache_id) in self.lenses.close(&key) {
             self.rpc(exthost::release_code_lenses(handle, cache_id));
@@ -444,6 +558,9 @@ impl SessionCore {
         let (tokens, _) = self.hover.end_for(&key);
         self.cancel(tokens);
         self.ids.forget_document(&key);
+        if self.diagnostics.remove_document(&key) {
+            self.ui(SessionUpdate::Problems { problems: self.diagnostics.problems() });
+        }
         if self.active.as_deref() == Some(key.as_str()) {
             self.active = self.docs.keys().next().cloned();
         }
@@ -457,6 +574,12 @@ impl SessionCore {
         self.rpc(call);
         self.active = Some(key);
         self.send_tab_model();
+    }
+
+    fn on_reload(&mut self, uri: UriComponents) {
+        if self.docs.contains_key(&uri.key()) {
+            self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::ForceReload });
+        }
     }
 
     // ---- widget events ------------------------------------------------------------------------
@@ -475,12 +598,14 @@ impl SessionCore {
             WidgetEvent::CodeEditRejected { request_id, base_version, current_version, .. } => {
                 tracing::debug!("ember-editor: EditCode {request_id} on {key} rejected (base {base_version}, now {current_version})");
             }
-            WidgetEvent::CodeHovered { pos, phase, .. } => match phase {
-                crate::widget::HoverPhase::Rest => self.on_hover_rest(&key, pos),
+            WidgetEvent::CodeHovered { decoration, pos, phase } => match phase {
+                crate::widget::HoverPhase::Rest => self.on_hover_rest(&key, decoration, pos),
                 crate::widget::HoverPhase::Leave => self.end_hover(),
             },
             WidgetEvent::CodeSaveRequested { .. } => self.on_save(&key),
             WidgetEvent::DecorationActivated { decoration } => self.on_activated(&key, decoration),
+            WidgetEvent::SelectionChanged { active, .. } => self.on_selection_changed(&key, active),
+            WidgetEvent::VisibleRangeChanged { first_line, last_line, .. } => self.on_visible_range_changed(&key, first_line, last_line),
         }
     }
 
@@ -505,6 +630,7 @@ impl SessionCore {
         }
         self.diagnostics.on_edit(key, range, text);
         self.lenses.on_edit(key, range, text);
+        self.highlight_edit(key, version, range, text);
         // Monaco hides the hover on typing.
         let (tokens, shown) = self.hover.end_for(key);
         self.cancel(tokens);
@@ -517,6 +643,28 @@ impl SessionCore {
         let delay = self.opts.codelens_debounce;
         self.schedule_codelens(key, delay);
         self.touched.insert(key.to_owned());
+    }
+
+    fn on_selection_changed(&mut self, key: &str, active: WidgetPos) {
+        if let Some(doc) = self.docs.get_mut(key) {
+            doc.set_cursor(active);
+        }
+        if self.inline.get(key).and_then(|s| s.ghost.as_ref()).is_some_and(|g| g.pos != active) {
+            self.end_ghost(key, EndReason::Ignored { user_typing_disagreed: false });
+        }
+    }
+
+    fn on_visible_range_changed(&mut self, key: &str, first_line: u32, last_line: u32) {
+        if let Some(job) = self.highlights.visible(key, first_line, last_line) {
+            self.out.push(Effect::Highlight(job));
+        }
+        let to_resolve = self.lenses.set_visible_range(key, first_line, last_line);
+        for (handle, serial, index, dto) in to_resolve {
+            self.rpc_with(
+                exthost::resolve_code_lens(handle, &dto),
+                Pending::CodeLensResolve { doc: key.to_owned(), handle, serial, index },
+            );
+        }
     }
 
     fn on_trigger_inline(&mut self, uri: &UriComponents, generation: u64, pos: WidgetPos) {
@@ -532,15 +680,32 @@ impl SessionCore {
 
     // ---- hover --------------------------------------------------------------------------------
 
-    fn on_hover_rest(&mut self, key: &str, pos: WidgetPos) {
+    fn on_hover_rest(&mut self, key: &str, decoration: u64, pos: WidgetPos) {
+        let had_anchor = self.hover.active_range(key).is_some();
         let Some(doc) = self.docs.get(key) else { return };
         let (uri, generation, version, language) = (doc.uri.clone(), doc.generation(), doc.widget_version(), doc.language_id.clone());
-        let diags = self.diagnostics.at(key, pos);
+        let lookup_pos = if decoration != 0 {
+            let dec_range = match DecorationIds::space_of(decoration) {
+                Some(IdSpace::Diagnostic) => self.diagnostics.range_of_id(key, decoration, doc.lines(), &mut self.ids),
+                Some(IdSpace::HoverAnchor) => self.hover.range_of_id(key, decoration, &mut self.ids),
+                _ => None,
+            };
+            match dec_range {
+                Some(r) if !r.contains(pos) => r.start,
+                _ => pos,
+            }
+        } else {
+            pos
+        };
+        let diags = self.diagnostics.at(key, lookup_pos);
         let handles: Vec<i64> = self.registry.matching(KindTag::Hover, &uri, &language).iter().map(|p| p.handle).collect();
-        let cancel = self.hover.begin(key, generation, version, pos, diags);
+        let cancel = self.hover.begin(key, generation, version, lookup_pos, diags);
         self.cancel(cancel);
+        if had_anchor {
+            self.touched.insert(key.to_owned());
+        }
         for (order, handle) in handles.into_iter().enumerate() {
-            let t = self.rpc_with(exthost::provide_hover(handle, &uri, pos.to_exthost()), Pending::Hover { doc: key.to_owned() });
+            let t = self.rpc_with(exthost::provide_hover(handle, &uri, lookup_pos.to_exthost()), Pending::Hover { doc: key.to_owned() });
             self.hover.add_pending(t, order);
         }
         if let Some(p) = self.hover.initial() {
@@ -549,8 +714,12 @@ impl SessionCore {
     }
 
     fn end_hover(&mut self) {
+        let had_anchor_doc = self.docs.keys().find(|k| self.hover.active_range(k).is_some()).cloned();
         let (tokens, shown) = self.hover.end();
         self.cancel(tokens);
+        if let Some(key) = had_anchor_doc {
+            self.touched.insert(key);
+        }
         if let Some(key) = shown {
             if let Some(uri) = self.uri_of(&key) {
                 self.ui(SessionUpdate::HoverHidden { uri });
@@ -570,6 +739,10 @@ impl SessionCore {
     }
 
     fn on_file_written(&mut self, uri: &UriComponents, token: Token, result: Result<(), String>) {
+        if let Some(write) = self.replace_writes.remove(&token) {
+            self.on_replace_written(uri, write, result);
+            return;
+        }
         let Some((key, ext_version, bytes)) = self.saves.remove(&token) else { return };
         match result {
             Ok(()) => {
@@ -848,11 +1021,13 @@ impl SessionCore {
             Ok(MainThreadCall::DiagnosticsChangeMany { owner, entries }) => {
                 let keys = self.diagnostics.change_many(&owner, entries);
                 self.touched.extend(keys);
+                self.ui(SessionUpdate::Problems { problems: self.diagnostics.problems() });
                 self.respond(r.req, Ok(Reply::Empty));
             }
             Ok(MainThreadCall::DiagnosticsClear { owner }) => {
                 let keys = self.diagnostics.clear(&owner);
                 self.touched.extend(keys);
+                self.ui(SessionUpdate::Problems { problems: self.diagnostics.problems() });
                 self.respond(r.req, Ok(Reply::Empty));
             }
             Ok(MainThreadCall::ExecuteCommand { id, args }) => {
@@ -867,6 +1042,80 @@ impl SessionCore {
                     self.ui(SessionUpdate::RunCommand { command: CommandDto { id, title: String::new(), tooltip: None, arguments } });
                 }
                 self.respond(r.req, Ok(Reply::Empty));
+            }
+            Ok(MainThreadCall::OutputRegister { label, .. }) => {
+                self.output_seq += 1;
+                let id = format!("ember-output-{}", self.output_seq);
+                self.output_channels.push(crate::output::OutputChannel::new(id.clone(), label));
+                self.ui(SessionUpdate::OutputChannels {
+                    channels: self.output_channels.clone(),
+                    active_id: Some(id.clone()),
+                });
+                self.respond(r.req, Ok(Reply::Json(serde_json::json!(id))));
+            }
+            Ok(MainThreadCall::OutputAppend { channel_id, value }) => {
+                if let Some(ch) = self.output_channels.iter_mut().find(|c| c.id == channel_id) {
+                    ch.append(&value);
+                    self.ui(SessionUpdate::OutputChannels {
+                        channels: self.output_channels.clone(),
+                        active_id: None,
+                    });
+                }
+                self.respond(r.req, Ok(Reply::Empty));
+            }
+            Ok(MainThreadCall::OutputUpdate { .. }) => {
+                self.respond(r.req, Ok(Reply::Empty));
+            }
+            Ok(MainThreadCall::OutputClear { channel_id, .. }) => {
+                if let Some(ch) = self.output_channels.iter_mut().find(|c| c.id == channel_id) {
+                    ch.clear();
+                    self.ui(SessionUpdate::OutputChannels {
+                        channels: self.output_channels.clone(),
+                        active_id: None,
+                    });
+                }
+                self.respond(r.req, Ok(Reply::Empty));
+            }
+            Ok(MainThreadCall::OutputReveal { channel_id, .. }) => {
+                self.ui(SessionUpdate::OutputChannels {
+                    channels: self.output_channels.clone(),
+                    active_id: Some(channel_id),
+                });
+                self.respond(r.req, Ok(Reply::Empty));
+            }
+            Ok(MainThreadCall::OutputDispose { channel_id }) => {
+                self.output_channels.retain(|c| c.id != channel_id);
+                self.ui(SessionUpdate::OutputChannels {
+                    channels: self.output_channels.clone(),
+                    active_id: None,
+                });
+                self.respond(r.req, Ok(Reply::Empty));
+            }
+            Ok(MainThreadCall::ShowMessage { severity, message, options, .. }) => {
+                let source = options.get("source").and_then(|v| v.as_str()).map(str::to_owned);
+                self.ui(SessionUpdate::ExtensionMessage {
+                    severity: crate::output::MessageSeverity::from_u8(severity),
+                    message,
+                    source,
+                });
+                self.respond(r.req, Ok(Reply::Empty));
+            }
+            Ok(MainThreadCall::RegisterTextSearchProvider { handle, scheme }) => {
+                // The remote scheme wins over `file` should both ever be registered.
+                if scheme == ember_editor_conn::uri::SCHEME_REMOTE || (scheme == "file" && self.search_provider.is_none()) {
+                    self.search_provider = Some(handle);
+                }
+                self.respond(r.req, Ok(Reply::Empty));
+            }
+            Ok(MainThreadCall::UnregisterSearchProvider { handle }) => {
+                if self.search_provider == Some(handle) {
+                    self.search_provider = None;
+                }
+                self.respond(r.req, Ok(Reply::Empty));
+            }
+            Ok(MainThreadCall::HandleTextMatch { session, matches, .. }) => {
+                self.respond(r.req, Ok(Reply::Empty));
+                self.on_text_matches(session, matches);
             }
             Ok(MainThreadCall::Other { proxy: Some("MainThreadDocuments"), method }) if method == "$tryOpenDocument" => {
                 self.on_try_open_document(&r);
@@ -979,8 +1228,12 @@ impl SessionCore {
             }
             Pending::Hover { doc } => {
                 let Some(version) = self.docs.get(&doc).map(OpenDocument::widget_version) else { return };
+                let prev_range = self.hover.active_range(&doc);
                 if let Some(p) = self.hover.reply(token, version, result.as_ref().map_err(|_| ())) {
                     self.ui(SessionUpdate::Hover(p));
+                }
+                if self.hover.active_range(&doc) != prev_range {
+                    self.touched.insert(doc);
                 }
             }
             Pending::Inline { doc } => self.on_inline_reply(token, &doc, result),
@@ -993,10 +1246,12 @@ impl SessionCore {
                 }
             }
             Pending::Command { id } => {
-                if let Err(e) = result {
-                    tracing::warn!("ember-editor: command {id} failed: {e}");
+                if let Err(error) = result {
+                    tracing::warn!("ember-editor: command {id} failed: {error}");
+                    self.ui(SessionUpdate::CommandFailed { id, error });
                 }
             }
+            Pending::Search { id } => self.on_search_reply(id, result),
         }
     }
 
@@ -1029,7 +1284,315 @@ impl SessionCore {
                 }
                 self.reset_doc(&key, &text, Some(bom));
             }
+            ReadPurpose::ForceReload => {
+                let key = uri.key();
+                let Ok(bytes) = result else { return };
+                if !self.docs.contains_key(&key) {
+                    return;
+                }
+                let Ok((text, bom)) = decode(&bytes) else { return };
+                self.reset_doc(&key, &text, Some(bom));
+                self.ui(SessionUpdate::Dirty { uri, dirty: false });
+            }
             ReadPurpose::ExtHostOpen { req } => self.finish_exthost_open(uri, req, result),
+            ReadPurpose::Grammar { scope } => self.on_grammar_read(&scope, &uri, result),
+            ReadPurpose::Replace { id } => self.on_replace_read(id, uri, result),
+        }
+    }
+
+    // ---- search and replace (FR-E7) -----------------------------------------------------------
+
+    fn on_search(&mut self, id: u64, request: SearchRequest, folder: UriComponents) {
+        if let Some(old) = self.search.take() {
+            self.cancel(vec![old.token]);
+            self.ui(SessionUpdate::SearchDone { id: old.id, end: SearchEnd::Cancelled });
+        }
+        let Some(handle) = self.search_provider else {
+            self.ui(SessionUpdate::SearchDone { id, end: SearchEnd::Unavailable });
+            return;
+        };
+        let query = request.query(folder.clone());
+        // Open documents with unsaved edits are searched in their buffer, as Code-OSS does.
+        let mut overlaid = HashSet::new();
+        let mut local: Vec<FileHits> = Vec::new();
+        if let Ok(matcher) = crate::search::Matcher::new(&request.options) {
+            let excludes = query.effective_excludes();
+            let mut keys: Vec<&String> = self.docs.keys().collect();
+            keys.sort();
+            for key in keys {
+                let doc = &self.docs[key];
+                if !doc.is_dirty() {
+                    continue;
+                }
+                let Some(relative) = crate::search::relative_to(&folder.path, &doc.uri.path) else { continue };
+                if !crate::search::path_included(relative, &query.include, &excludes) {
+                    continue;
+                }
+                overlaid.insert(key.clone());
+                let hits = matcher.hits_in_lines(doc.lines());
+                if !hits.is_empty() {
+                    local.push(FileHits { uri: doc.uri.clone(), hits });
+                }
+            }
+        }
+        self.search_session += 1;
+        let session = self.search_session;
+        let token = self.rpc_with(ember_editor_conn::search::provide_text_search_results(handle, session, &query), Pending::Search { id });
+        self.search = Some(ActiveSearch { id, session, token, overlaid });
+        if !local.is_empty() {
+            self.ui(SessionUpdate::SearchHits { id, files: local });
+        }
+    }
+
+    fn on_cancel_search(&mut self, id: u64) {
+        if self.search.as_ref().is_some_and(|s| s.id == id) {
+            if let Some(s) = self.search.take() {
+                self.cancel(vec![s.token]);
+            }
+            self.ui(SessionUpdate::SearchDone { id, end: SearchEnd::Cancelled });
+        }
+    }
+
+    fn on_text_matches(&mut self, session: i64, matches: Vec<ember_editor_conn::search::FileMatch>) {
+        let Some(active) = self.search.as_ref().filter(|s| s.session == session) else { return };
+        let id = active.id;
+        let kept: Vec<_> = matches.into_iter().filter(|m| !active.overlaid.contains(&m.resource.key())).collect();
+        let files = crate::search::hits_from_matches(kept);
+        if !files.is_empty() {
+            self.ui(SessionUpdate::SearchHits { id, files });
+        }
+    }
+
+    fn on_search_reply(&mut self, id: u64, result: Result<Value, String>) {
+        if self.search.as_ref().is_some_and(|s| s.id == id) {
+            self.search = None;
+        }
+        let end = match result {
+            Ok(v) => SearchEnd::Complete { limit_hit: ember_editor_conn::search::SearchComplete::from_json(&v).limit_hit },
+            Err(e) if e.contains("Canceled") => SearchEnd::Cancelled,
+            Err(e) => SearchEnd::Failed(e),
+        };
+        self.ui(SessionUpdate::SearchDone { id, end });
+    }
+
+    fn on_replace(&mut self, id: u64, request: ReplaceRequest) {
+        let mut targets: HashMap<String, Vec<Target>> = HashMap::new();
+        let mut uris: Vec<UriComponents> = Vec::new();
+        for (uri, t) in &request.files {
+            if t.is_empty() {
+                continue;
+            }
+            let key = uri.key();
+            if !targets.contains_key(&key) {
+                uris.push(uri.clone());
+            }
+            targets.entry(key).or_default().extend(t.iter().copied());
+        }
+        if uris.is_empty() {
+            self.ui(SessionUpdate::ReplaceDone { id, report: ReplaceReport::default() });
+            return;
+        }
+        let job = ReplaceJob { request, targets, remaining: uris.len(), report: ReplaceReport::default() };
+        self.replaces.insert(id, job);
+        for uri in uris {
+            let key = uri.key();
+            match self.docs.get(&key) {
+                // An open document is replaced in its buffer, unsaved edits included (Code-OSS saves it after).
+                Some(doc) => {
+                    let (text, bom) = match decode(&doc.save_bytes()) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            self.replace_file_failed(id, &uri, e.to_string());
+                            continue;
+                        }
+                    };
+                    let version = doc.ext_version();
+                    self.replace_text(id, uri, &text, bom, Some(version));
+                }
+                None => self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::Replace { id } }),
+            }
+        }
+    }
+
+    fn on_replace_read(&mut self, id: u64, uri: UriComponents, result: Result<Vec<u8>, String>) {
+        if !self.replaces.contains_key(&id) {
+            return;
+        }
+        let decoded = result.and_then(|bytes| decode(&bytes).map_err(|e| e.to_string()));
+        match decoded {
+            Ok((text, bom)) => self.replace_text(id, uri, &text, bom, None),
+            Err(e) => self.replace_file_failed(id, &uri, e),
+        }
+    }
+
+    /// Replace in one file's text and write it; `open` is the open document's version the text came from.
+    fn replace_text(&mut self, id: u64, uri: UriComponents, text: &str, bom: bool, open: Option<u64>) {
+        let key = uri.key();
+        let Some(job) = self.replaces.get(&id) else { return };
+        let targets = job.targets.get(&key).cloned().unwrap_or_default();
+        match crate::search::replace_in_text(text, &job.request.options, &job.request.replacement, &targets) {
+            Ok(r) if r.replaced == 0 => {
+                if let Some(job) = self.replaces.get_mut(&id) {
+                    job.report.skipped += r.skipped;
+                }
+                self.replace_file_done(id);
+            }
+            Ok(r) => {
+                let mut bytes = Vec::with_capacity(r.text.len() + 3);
+                if bom {
+                    bytes.extend_from_slice("\u{feff}".as_bytes());
+                }
+                bytes.extend_from_slice(r.text.as_bytes());
+                let token = self.token();
+                let write = ReplaceWrite { id, key, replaced: r.replaced, skipped: r.skipped, open: open.map(|v| (v, r.text)) };
+                self.replace_writes.insert(token, write);
+                self.out.push(Effect::WriteFile { uri, bytes, token });
+            }
+            Err(e) => self.replace_file_failed(id, &uri, e),
+        }
+    }
+
+    fn on_replace_written(&mut self, uri: &UriComponents, write: ReplaceWrite, result: Result<(), String>) {
+        match result {
+            Ok(()) => {
+                if let Some(job) = self.replaces.get_mut(&write.id) {
+                    job.report.replaced += write.replaced;
+                    job.report.skipped += write.skipped;
+                    job.report.files += 1;
+                }
+                // The buffer takes the new text only now that it is on disk, and only if nobody typed meanwhile;
+                // otherwise the watcher reports the change like any other.
+                if let Some((version, text)) = write.open {
+                    if self.docs.get(&write.key).is_some_and(|d| d.ext_version() == version) {
+                        self.reset_doc(&write.key, &text, None);
+                        self.ui(SessionUpdate::Dirty { uri: uri.clone(), dirty: false });
+                        self.ui(SessionUpdate::Saved { uri: uri.clone() });
+                    }
+                }
+                self.replace_file_done(write.id);
+            }
+            Err(e) => {
+                if let Some(job) = self.replaces.get_mut(&write.id) {
+                    job.report.skipped += write.replaced + write.skipped;
+                    job.report.failures.push((uri.path.clone(), e));
+                }
+                self.replace_file_done(write.id);
+            }
+        }
+    }
+
+    fn replace_file_failed(&mut self, id: u64, uri: &UriComponents, error: String) {
+        if let Some(job) = self.replaces.get_mut(&id) {
+            job.report.skipped += job.targets.get(&uri.key()).map_or(0, Vec::len);
+            job.report.failures.push((uri.path.clone(), error));
+        }
+        self.replace_file_done(id);
+    }
+
+    fn replace_file_done(&mut self, id: u64) {
+        let finished = match self.replaces.get_mut(&id) {
+            Some(job) => {
+                job.remaining = job.remaining.saturating_sub(1);
+                job.remaining == 0
+            }
+            None => false,
+        };
+        if finished {
+            if let Some(job) = self.replaces.remove(&id) {
+                self.ui(SessionUpdate::ReplaceDone { id, report: job.report });
+            }
+        }
+    }
+
+    // ---- syntax highlighting ------------------------------------------------------------------
+
+    /// Turns what [`Highlights`] asks for into effects. `like` is any URI of the server: grammar files live on
+    /// the same machine as the document.
+    fn run_highlight_actions(&mut self, like: &UriComponents, actions: Vec<HighlightAction>) {
+        for action in actions {
+            match action {
+                HighlightAction::Read { scope, path } => {
+                    let uri = UriComponents::remote(&like.authority, &path);
+                    self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::Grammar { scope } });
+                }
+                HighlightAction::Job(job) => self.out.push(Effect::Highlight(job)),
+                HighlightAction::Off { key, why } => tracing::debug!("ember-editor: no colours for {key}: {why}"),
+            }
+        }
+    }
+
+    fn highlight_build(&mut self, key: &str) {
+        let Some(doc) = self.docs.get(key) else { return };
+        let (text, version) = (doc.lines().join("\n"), doc.widget_version());
+        if let Some(job) = self.highlights.build_job(key, text, version) {
+            self.out.push(Effect::Highlight(job));
+        }
+    }
+
+    /// A document was opened, or its text replaced (reload, resync): colour it from the start.
+    fn highlight_open(&mut self, key: &str) {
+        let Some(doc) = self.docs.get(key) else { return };
+        let (language, like) = (doc.language_id.clone(), doc.uri.clone());
+        let (actions, ready) = self.highlights.open(key, &language);
+        self.run_highlight_actions(&like, actions);
+        if ready {
+            self.highlight_build(key);
+        }
+    }
+
+    fn highlight_edit(&mut self, key: &str, version: u32, range: WidgetRange, text: &str) {
+        if let Some(job) = self.highlights.edit(key, range, text, version) {
+            self.out.push(Effect::Highlight(job));
+        }
+    }
+
+    fn on_grammar_read(&mut self, scope: &str, uri: &UriComponents, result: Result<Vec<u8>, String>) {
+        let result = result.and_then(|bytes| {
+            if bytes.len() as u64 > crate::textmate::MAX_GRAMMAR_BYTES {
+                return Err("the grammar file is too large".to_owned());
+            }
+            String::from_utf8(bytes).map_err(|_| "not UTF-8".to_owned())
+        });
+        let (actions, ready) = self.highlights.grammar_read(scope, &uri.path, result);
+        self.run_highlight_actions(uri, actions);
+        for key in ready {
+            self.highlight_build(&key);
+        }
+    }
+
+    fn on_highlighted(&mut self, output: HighlightOutput) {
+        if !self.highlights.accept(&output) {
+            return;
+        }
+        let key = output.key.clone();
+        // Runs written against a version the document has not reached cannot be right, and ones far behind it
+        // are past what the widget can move them across: neither is shown.
+        if let Some(doc) = self.docs.get(&key) {
+            let current = doc.widget_version();
+            if output.problem.is_none() && (output.version > current || current - output.version > MAX_SPAN_VERSION_LAG) {
+                tracing::debug!("ember-editor: dropped runs for version {} of {key} (document at {current})", output.version);
+                return;
+            }
+        }
+        match output.problem {
+            Some(Problem::Rebuild) => {
+                self.highlights.rebuild(&key);
+                self.highlight_build(&key);
+            }
+            Some(Problem::Off(why)) => {
+                tracing::debug!("ember-editor: no colours for {key}: {why}");
+                self.highlights.turn_off(&key);
+                if let Some(doc) = self.docs.get(&key) {
+                    let (uri, generation) = (doc.uri.clone(), doc.generation());
+                    self.ui(SessionUpdate::Syntax { uri, generation, version: 0, window: (0, 0), runs: Vec::new() });
+                }
+            }
+            None => {
+                if let Some(doc) = self.docs.get(&key) {
+                    let (uri, generation) = (doc.uri.clone(), doc.generation());
+                    self.ui(SessionUpdate::Syntax { uri, generation, version: output.version, window: output.window, runs: output.runs });
+                }
+            }
         }
     }
 
@@ -1073,6 +1636,7 @@ impl SessionCore {
         }
         self.ids.forget_document(key);
         self.ui(SessionUpdate::Command { uri, command: WidgetCommand::SetText { generation, text: widget_text } });
+        self.highlight_open(key);
         self.send_tab_model();
         self.schedule_codelens(key, Duration::ZERO);
         self.touched.insert(key.to_owned());
@@ -1102,6 +1666,26 @@ impl SessionCore {
             let version = doc.widget_version();
             let mut decorations = self.diagnostics.decorations(&key, version, doc.lines(), &mut self.ids);
             decorations.extend(self.lenses.decorations(&key, version, doc.lines(), &mut self.ids));
+            let mut live_hover = HashSet::new();
+            if let Some(range) = self.hover.active_range(&key) {
+                let clamped = crate::coords::clamp_range(doc.lines(), range);
+                let id = self.ids.id(
+                    IdSpace::HoverAnchor,
+                    &key,
+                    &format!("hover|{}:{}..{}:{}", range.start.line, range.start.col, range.end.line, range.end.col),
+                );
+                live_hover.insert(id.get());
+                decorations.push(Decoration {
+                    id,
+                    version,
+                    kind: DecorationKind::HoverAnchor,
+                    severity: None,
+                    color: 0,
+                    range: clamped,
+                    text: String::new(),
+                });
+            }
+            self.ids.retain(IdSpace::HoverAnchor, &key, &live_hover);
             if let Some(g) = self.inline.get(&key).and_then(|s| s.ghost.as_ref()) {
                 if !g.text.is_empty() {
                     decorations.push(Decoration {

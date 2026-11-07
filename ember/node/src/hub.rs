@@ -5,17 +5,17 @@
 //!   code at the verification URL (or types it into Ember, which approves it as the account's
 //!   main server). The device token and the read-only resolve token are kept in
 //!   `<state dir>/hub.json`, mode 0600. A link waiting for approval is remembered in
-//!   `<state dir>/hub-link.json` and resumed (`GET /v1/device-links/{id}`) if `register` runs
+//!   `<state dir>/hub-link.json` and resumed (`GET /device-links/{id}`) if `register` runs
 //!   again. A node the hub removed can rejoin with the same key after the account owner
 //!   re-admits it on the hub (FR-H11); the new link is approved in the browser.
 //! - **App record** (FR-H10): after registering and at start the node reports
-//!   `{kind: "ember-node", version, services: ["ember-node-v1"]}` with its own token.
+//!   `{kind: "ember-node", version, services: ["ember-node"]}` with its own token.
 //! - **Leaving** (`ember-node hub forget`): removes the node on the hub with its own token, then
 //!   deletes `hub.json` (`--local`: only the file).
 //! - **Transport**: a registered node publishes its address to the hub's directory and uses the
 //!   hub's relay ([`transport_config`]); the server then adds it by picking it from the account's
 //!   device list instead of pasting an address.
-//! - **Discovery**: the relay and directory come from the hub's `GET /v1/config` when it serves
+//! - **Discovery**: the relay and directory come from the hub's `GET /config` when it serves
 //!   it ([`discovered_transport_config`]); otherwise `https://relay.<host>` and `<hub>/pkarr`.
 //! - **Revocation**: [`spawn_watch`] holds a long-poll on the account's device list when the hub
 //!   offers it (a removal is seen at once), else asks the hub every minute. When the hub removed
@@ -95,7 +95,7 @@ pub async fn ensure_resolve(file: &RegistrationFile, mut reg: Registration) -> R
     reg
 }
 
-/// Reports the node's app on the hub with its own token (`PATCH /v1/devices/{id} {app}`),
+/// Reports the node's app on the hub with its own token (`PATCH /devices/{id} {app}`),
 /// unless the stored device already shows it. Failures are logged (the record is a hint).
 pub async fn publish_app(file: &RegistrationFile, reg: &Registration) {
     let app = node_app();
@@ -228,7 +228,7 @@ pub fn transport_config(state_dir: &Path, key: SecretKey) -> anyhow::Result<Tran
     })
 }
 
-/// [`transport_config`], with the relay and directory the hub advertises in `GET /v1/config`
+/// [`transport_config`], with the relay and directory the hub advertises in `GET /config`
 /// (falling back to the derived ones when it does not serve it or cannot be reached), after
 /// fetching a resolve token for a registration that has none.
 pub async fn discovered_transport_config(state_dir: &Path, key: SecretKey) -> anyhow::Result<TransportConfig> {
@@ -319,8 +319,8 @@ fn on_revoked(
 /// directory token, and (with `allow_servers`) narrows `gate` back to `base_allowed`. While
 /// active with `allow_servers`, keeps `gate` = `base_allowed` ∪ the account's main servers.
 ///
-/// When the hub advertises the device-list long-poll (`GET /v1/config`, asked once per watch),
-/// a held `GET /v1/devices?wait=` sees removal and server changes as they happen; otherwise
+/// When the hub advertises the device-list long-poll (`GET /config`, asked once per watch),
+/// a held `GET /devices?wait=` sees removal and server changes as they happen; otherwise
 /// the hub is asked every `period`.
 pub fn spawn_watch(
     state_dir: &Path,

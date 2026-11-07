@@ -3,11 +3,11 @@
 //! codex app-server attaches a remote executor with `environment/add {environmentId,
 //! execServerUrl}` and connects to that URL as a WebSocket client, one JSON-RPC message per Text
 //! frame **[U]** (the exec-server's own `--listen ws://` transport). The node exposes the
-//! executor as a raw byte stream (`/v1/exec-server`, bearer token, codex on stdio). This relay
+//! executor as a raw byte stream (`/exec-server`, bearer token, codex on stdio). This relay
 //! sits between them, inside ember server:
 //!
 //! ```text
-//! codex app-server ──ws://127.0.0.1:<port>/<secret>──▶ relay ──/v1/exec-server (+token)──▶ node
+//! codex app-server ──ws://127.0.0.1:<port>/<secret>──▶ relay ──/exec-server (+token)──▶ node
 //!    Text frame (one message)  ─── + "\n" ───────────▶ Binary bytes ──▶ codex exec-server stdin
 //!    Text frame per line       ◀── split on "\n" ──── Binary bytes ◀── codex exec-server stdout
 //! ```
@@ -92,7 +92,7 @@ async fn serve(stream: TcpStream, path: String, node: NodeClient) -> anyhow::Res
         }
     };
     let codex = tokio_tungstenite::accept_hdr_async(stream, check).await?;
-    let upstream = node.exec_server().await.context("opening the node's /v1/exec-server")?;
+    let upstream = node.exec_server().await.context("opening the node's /exec-server")?;
     let (mut codex_tx, mut codex_rx) = codex.split();
     let (mut node_tx, mut node_rx) = upstream.split();
 

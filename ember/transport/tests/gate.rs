@@ -1,6 +1,9 @@
 //! FR-N3 admission and revocation, and the dialer's connection cache, on the fake transport.
 #![cfg(feature = "http")]
 
+#[cfg(feature = "iroh")]
+mod common;
+
 use std::time::Duration;
 
 use axum::routing::get;
@@ -90,4 +93,84 @@ async fn open_gate_admits_everyone_until_revoked() {
     gate.revoke(&a.peer_id());
     assert!(!gate.is_allowed(&a.peer_id()));
     assert!(ping(&da, &server).await.is_err());
+}
+
+/// One heartbeat, the bound FR-N3 gives for closing a revoked device's connections.
+#[cfg(feature = "iroh")]
+const HEARTBEAT: Duration = Duration::from_secs(5);
+
+/// FR-N3 on the real iroh backend: a revoked device's open connection is closed, as seen by the
+/// device itself, within one heartbeat, and its re-dial is refused.
+#[cfg(feature = "iroh")]
+#[tokio::test]
+async fn revoked_device_is_dropped_within_a_heartbeat_over_iroh() {
+    let (device, server, _dir) = common::iroh_pair().await;
+    let gate = PeerGate::allow_list([device.peer_id()]);
+    serve(&server, gate.clone());
+
+    let d = Dialer::new(device.clone());
+    assert_eq!(ping(&d, &server).await.unwrap(), "pong");
+    let conn = d.connection(&PeerAddr::new(server.peer_id()), SERVICE).await.unwrap();
+    assert_eq!(gate.live_connections(&device.peer_id()), 1);
+
+    let start = std::time::Instant::now();
+    assert_eq!(gate.revoke(&device.peer_id()), 1);
+    let reason = tokio::time::timeout(HEARTBEAT, conn.closed())
+        .await
+        .expect("revoked connection still open after one heartbeat");
+    assert!(start.elapsed() < HEARTBEAT);
+    assert!(
+        matches!(reason, CloseReason::Remote { code: ember_transport::gate::CLOSE_REVOKED, .. }),
+        "{reason:?}"
+    );
+    assert!(ping(&d, &server).await.is_err());
+
+    gate.allow(device.peer_id());
+    assert_eq!(ping(&d, &server).await.unwrap(), "pong");
+    device.close().await;
+    server.close().await;
+}
+
+/// FR-N3 on iroh: a peer outside the allow-list is refused at accept.
+#[cfg(feature = "iroh")]
+#[tokio::test]
+async fn stranger_is_refused_over_iroh() {
+    let (stranger, server, _dir) = common::iroh_pair().await;
+    let gate = PeerGate::allow_list([]);
+    serve(&server, gate.clone());
+    let s = Dialer::new(stranger.clone());
+    assert!(ping(&s, &server).await.is_err());
+    assert_eq!(gate.live_connections(&stranger.peer_id()), 0);
+    stranger.close().await;
+    server.close().await;
+}
+
+/// `FR-N6`: the points A and -A share one X25519 key, so a transport that derives its key
+/// exchange from the Ed25519 key sees one device, and the holder of the secret of A can present
+/// -A. The gate therefore compares ids modulo the sign bit: a revoked device cannot come back as
+/// its alias, and an alias of an allowed device is the same device.
+#[test]
+fn fr_n6_gate_compares_ids_modulo_the_sign_bit() {
+    use ember_transport::{PeerId, SecretKey};
+    let device = SecretKey::generate().peer_id();
+    let mut flipped = *device.as_bytes();
+    flipped[31] ^= 0x80;
+    let alias = PeerId::from_bytes(flipped).expect("the sign-flipped point is a valid key");
+    assert_ne!(alias, device);
+
+    // Allow list: the alias is the same device; revoking either removes both.
+    let gate = PeerGate::allow_list([device]);
+    assert!(gate.is_allowed(&alias));
+    assert_eq!(gate.revoke(&alias), 0);
+    assert!(!gate.is_allowed(&device) && !gate.is_allowed(&alias));
+    gate.allow(device);
+    assert!(gate.is_allowed(&alias));
+    assert_eq!(gate.allowed(), Some(vec![device]), "the stored id keeps its own encoding");
+
+    // Open gate: a revoked device stays refused under its alias until it is allowed again.
+    let open = PeerGate::open();
+    open.revoke(&device);
+    assert!(!open.is_allowed(&alias));
+    open.allow(alias);
+    assert!(open.is_allowed(&device));
 }

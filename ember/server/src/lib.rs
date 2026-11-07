@@ -6,16 +6,33 @@ pub mod a2a;
 pub mod accounts;
 pub mod agents;
 pub mod api;
+pub mod auth;
 pub mod browser;
+pub mod channels;
 pub mod chatgpt;
 pub mod computers;
 pub mod devices;
+pub mod door;
+pub mod egress_proxy;
+pub mod enrol_door;
 pub mod events;
+pub mod fork;
+pub mod guest_door;
 pub mod history;
 pub mod mcp;
+pub mod members;
+pub mod ose;
 pub mod projects;
 pub mod schedules;
 pub mod hub;
 pub mod session;
+pub mod session_shim;
 pub mod store;
+pub mod transfers;
 pub mod transport;
+pub mod usage;
+
+/// Shared script helper for unit tests (one source with `tests/common/mod.rs`).
+#[cfg(all(test, unix))]
+#[path = "../tests/common/mod.rs"]
+pub(crate) mod test_exec;

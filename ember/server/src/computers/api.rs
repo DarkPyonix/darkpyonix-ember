@@ -1,14 +1,15 @@
 //! HTTP API for computers and a session's current computer (FR-X3). Merged into the main
-//! router by `main.rs`; all routes are under `/api/v1`.
+//! router by `main.rs`; all routes are under `/api`.
 //!
 //! | Method | Path | Body → Response |
 //! | ------ | ---- | --------------- |
-//! | GET    | `/api/v1/computers?probe=<bool>` | → `[ComputerStatus]` (`local` first; probe default true) |
-//! | POST   | `/api/v1/computers` | `{name, url, token}` or `{name, peer, token}` → 201 `Computer` (token never returned) |
-//! | GET    | `/api/v1/computers/{id}` | → `ComputerStatus` with `env` |
-//! | DELETE | `/api/v1/computers/{id}` | → 204 (409 while a session is on it or a browser egresses through it); its project assignments are removed |
-//! | GET    | `/api/v1/sessions/{id}/computer` | → `CurrentComputer` |
-//! | PUT    | `/api/v1/sessions/{id}/computer` | `{computer_id}` → `SwitchOutcome` (409 mid-turn, 502 unreachable) |
+//! | GET    | `/api/computers?probe=<bool>` | → `[ComputerStatus]` (`local` first; probe default true) |
+//! | POST   | `/api/computers` | `{name, url, token}` or `{name, peer, token}` → 201 `Computer` (token never returned) |
+//! | GET    | `/api/computers/{id}` | → `ComputerStatus` with `env` |
+//! | DELETE | `/api/computers/{id}` | → 204 (409 while a session is on it or a browser egresses through it); its project assignments are removed |
+//! | GET    | `/api/sessions/{id}/computer` | → `CurrentComputer` |
+//! | PUT    | `/api/sessions/{id}/computer` | `{computer_id}` → `SwitchOutcome` (409 mid-turn, 502 unreachable) |
+//! | PUT    | `/api/sessions/{id}/designated-computer` | `{computer_id}` (null clears) → 204; the session falls back to the main server when it is lost and returns (FR-X3) |
 //!
 //! `peer` registers a node reached over the transport (`FR-N1`): either its peer id (64 hex
 //! chars) or a full `PeerAddr` JSON object `{peer, relays, direct}` as the node prints at start.
@@ -25,7 +26,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::{ComputerError, Computers};
-use crate::session::{Push, Sessions, PUSH_VERSION};
+use crate::session::{Push, Sessions};
 
 #[derive(Clone)]
 struct AppState {
@@ -35,9 +36,10 @@ struct AppState {
 
 pub fn router(computers: Arc<Computers>, sessions: Arc<Sessions>) -> Router {
     Router::new()
-        .route("/api/v1/computers", get(list).post(register))
-        .route("/api/v1/computers/{id}", get(status).delete(remove))
-        .route("/api/v1/sessions/{id}/computer", get(current).put(switch))
+        .route("/api/computers", get(list).post(register))
+        .route("/api/computers/{id}", get(status).delete(remove))
+        .route("/api/sessions/{id}/computer", get(current).put(switch))
+        .route("/api/sessions/{id}/designated-computer", axum::routing::put(designate))
         .with_state(AppState { computers, sessions })
 }
 
@@ -118,7 +120,7 @@ async fn remove(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<
     s.computers.remove(&id)?;
     for name in assigned {
         if let Ok(Some(project)) = s.sessions.store().project(&name) {
-            s.sessions.publish(Push::ProjectUpdated { v: PUSH_VERSION, project });
+            s.sessions.publish(Push::ProjectUpdated { project });
         }
     }
     Ok(StatusCode::NO_CONTENT)
@@ -139,4 +141,18 @@ async fn switch(
     Json(b): Json<SwitchBody>,
 ) -> ApiResult<impl IntoResponse> {
     Ok(Json(s.computers.switch(&s.sessions, &id, &b.computer_id).await?))
+}
+
+#[derive(Deserialize)]
+struct DesignateBody {
+    computer_id: Option<String>,
+}
+
+async fn designate(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<DesignateBody>,
+) -> ApiResult<impl IntoResponse> {
+    s.computers.designate(&id, b.computer_id.as_deref())?;
+    Ok(StatusCode::NO_CONTENT)
 }

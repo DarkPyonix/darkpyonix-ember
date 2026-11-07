@@ -17,6 +17,14 @@
 //!   stops with `cancelled` if the turn was cancelled.
 //! - `elicit`: an `elicitation/create` request; answers `elicitation error <code>`.
 //! - `exit`: the agent goes away mid-turn.
+//! - `auth-fail`: the prompt fails with JSON-RPC error `-32000` "Authentication required".
+//! - `quota-secret`: like `quota`, with a fake API key and an e-mail address in the message.
+//! - `quota`: the prompt fails with `RESOURCE_EXHAUSTED: Quota exceeded ...` (code `-32603`).
+//! - `boom`: the prompt fails with an unclassified error (`-32603` "boom").
+//!
+//! With [`FakeOptions::require_auth`], `session/new` fails with `-32000` until `authenticate`
+//! with method `gemini-api-key` (listed in the `initialize` answer) succeeded; that succeeds only
+//! when [`FakeOptions::key_ok`].
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, Lines, ReadHalf, WriteHalf};
@@ -27,13 +35,19 @@ pub struct FakeOptions {
     pub load: bool,
     /// Advertise `sessionCapabilities.resume`.
     pub resume: bool,
+    /// Advertise `sessionCapabilities.fork`.
+    pub fork: bool,
     /// The protocol version to answer `initialize` with.
     pub version: u64,
+    /// `session/new` needs `authenticate` first.
+    pub require_auth: bool,
+    /// `authenticate` succeeds (the user's API key is set).
+    pub key_ok: bool,
 }
 
 impl Default for FakeOptions {
     fn default() -> FakeOptions {
-        FakeOptions { load: false, resume: false, version: 1 }
+        FakeOptions { load: false, resume: false, fork: false, version: 1, require_auth: false, key_ok: true }
     }
 }
 
@@ -46,6 +60,7 @@ struct Fake {
     setup: &'static str,
     mcp: Vec<String>,
     cancelled: bool,
+    authed: bool,
 }
 
 pub async fn run(io: DuplexStream, opts: FakeOptions) {
@@ -59,6 +74,7 @@ pub async fn run(io: DuplexStream, opts: FakeOptions) {
         setup: "",
         mcp: Vec::new(),
         cancelled: false,
+        authed: false,
     };
     fake.serve().await;
 }
@@ -124,14 +140,36 @@ impl Fake {
                     assert_eq!(params["clientCapabilities"]["fs"]["readTextFile"], true);
                     assert_eq!(params["clientCapabilities"]["fs"]["writeTextFile"], true);
                     assert_eq!(params["clientCapabilities"]["terminal"], true);
-                    let session_caps = if self.opts.resume { json!({ "resume": {} }) } else { json!({}) };
+                    let mut session_caps = if self.opts.resume { json!({ "resume": {} }) } else { json!({}) };
+                    if self.opts.fork {
+                        session_caps["fork"] = json!({});
+                    }
                     let result = json!({
                         "protocolVersion": self.opts.version,
                         "agentCapabilities": { "loadSession": self.opts.load, "sessionCapabilities": session_caps },
                         "agentInfo": { "name": "fake", "version": "0" },
-                        "authMethods": [],
+                        "authMethods": if self.opts.require_auth {
+                            json!([{ "id": "gemini-api-key", "name": "Gemini API key" }])
+                        } else {
+                            json!([])
+                        },
                     });
                     self.reply(id, result).await;
+                }
+                Some("authenticate") => {
+                    if params["methodId"] == "gemini-api-key" && self.opts.key_ok {
+                        self.authed = true;
+                        self.reply(id, json!({})).await;
+                    } else {
+                        self.send(json!({ "jsonrpc": "2.0", "id": id,
+                                          "error": { "code": -32000, "message": "GEMINI_API_KEY is not set" } }))
+                            .await;
+                    }
+                }
+                Some("session/new") if self.opts.require_auth && !self.authed => {
+                    self.send(json!({ "jsonrpc": "2.0", "id": id,
+                                      "error": { "code": -32000, "message": "Authentication required" } }))
+                        .await;
                 }
                 Some("session/new") => {
                     assert!(params["cwd"].as_str().is_some_and(|c| c.starts_with('/')));
@@ -158,6 +196,13 @@ impl Fake {
                                         "title": "old tool", "status": "completed" }))
                         .await;
                     self.reply(id, json!({})).await;
+                }
+                Some("session/fork") => {
+                    assert!(self.opts.fork, "session/fork without the capability");
+                    let parent = params["sessionId"].as_str().unwrap();
+                    self.session = format!("{parent}-fork");
+                    self.setup = "fork";
+                    self.reply(id, json!({ "sessionId": self.session })).await;
                 }
                 Some("session/resume") => {
                     assert!(self.opts.resume, "session/resume without the capability");
@@ -349,6 +394,20 @@ impl Fake {
             "exit" => {
                 self.say("bye").await;
                 return false;
+            }
+            "auth-fail" | "quota" | "quota-secret" | "boom" => {
+                let (code, message) = match first {
+                    "auth-fail" => (-32000, "Authentication required"),
+                    "quota-secret" => (
+                        -32603,
+                        "RESOURCE_EXHAUSTED: quota for key AIzaSyD-FAKEFAKEFAKEFAKEFAKEFAKEFAKE123 of dev.person@example.com",
+                    ),
+                    "quota" => (-32603, "RESOURCE_EXHAUSTED: Quota exceeded for quota metric 'requests per minute'"),
+                    _ => (-32603, "boom"),
+                };
+                self.send(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }))
+                    .await;
+                return true;
             }
             _ => self.say("?").await,
         }

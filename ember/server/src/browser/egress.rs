@@ -21,7 +21,7 @@ pub enum Egress {
     Direct,
     /// A configured proxy (`socks5://`, `socks4://`, `http://`, `https://`; no credentials).
     Proxy { url: String },
-    /// A registered computer's ember node (its `/v1/egress` SOCKS5 exit). The local computer
+    /// A registered computer's ember node (its `/egress` SOCKS5 exit). The local computer
     /// (`"local"`) is [`Egress::Direct`].
     Computer { id: String },
 }

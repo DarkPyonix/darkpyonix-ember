@@ -1,0 +1,22 @@
+[package]
+name = "ember-transfer"
+version = "0.1.0"
+edition = "2021"
+description = "Ember file transfer between the user's devices: offer, answer and cancel over ember-transport streams (SPEC FR-F1..FR-F10)"
+license = "Apache-2.0"
+
+[dependencies]
+# Peers are reached only through ember-transport streams (SPEC FR-F6, FR-N5).
+ember-transport = { path = "../transport", default-features = false }
+async-trait = "0.1"
+getrandom = "0.3"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }

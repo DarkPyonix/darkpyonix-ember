@@ -59,3 +59,22 @@ BEGIN
     VALUES (json_extract(NEW.event, '$.text'), NEW.session_id, NEW.seq, json_extract(NEW.event, '$.kind'));
 END;
 ";
+
+/// Migration 23: project settings (FR-L26, #384). Repository, default branch, new-member
+/// defaults (a JSON object `{agent?, model?, mode?}`), the team character style (FR-L22) and an
+/// `archived` flag, all on `projects`. The leader and profile override columns follow in a later
+/// migration. Existing rows get no repository, no branch, `{}` defaults, no style, not archived.
+pub const SETTINGS_MIGRATION: &str = "
+ALTER TABLE projects ADD COLUMN repository TEXT;
+ALTER TABLE projects ADD COLUMN default_branch TEXT;
+ALTER TABLE projects ADD COLUMN member_defaults TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE projects ADD COLUMN character_style TEXT;
+ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+";
+
+/// Migration 25: the per-project profile override (FR-L26, FR-L20, #384 PR 3). `profile_overrides`
+/// is a nullable TEXT holding a JSON object that maps a harness name to an account id
+/// (`{"claude-code":"<account id>"}`); `NULL` means none. Existing rows get `NULL`.
+pub const PROFILE_OVERRIDES_MIGRATION: &str = "
+ALTER TABLE projects ADD COLUMN profile_overrides TEXT;
+";

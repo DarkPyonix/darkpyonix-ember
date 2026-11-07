@@ -232,7 +232,9 @@ fn parse_version_response(raw: &[u8]) -> Result<String> {
     let head = String::from_utf8_lossy(&raw[..end]);
     let status = head.lines().next().unwrap_or_default();
     if status.split_whitespace().nth(1) != Some("200") {
-        return Err(Error::Handshake(format!("GET /version: {status}")));
+        // No `/version` route (not a Code-OSS agent server, or one too old/new to tell): the
+        // commit is unknown, which the version gate treats like a mismatch.
+        return Err(Error::UnsupportedServerVersion { server: None });
     }
     let body = &raw[end + 4..];
     let chunked = head.lines().skip(1).any(|l| {
@@ -535,7 +537,17 @@ mod tests {
             crate::PINNED_COMMIT
         );
         assert_eq!(parse_version_response(chunked.as_bytes()).unwrap(), crate::PINNED_COMMIT);
-        assert!(parse_version_response(b"HTTP/1.1 404 Not Found\r\n\r\n").is_err());
+        assert!(matches!(
+            parse_version_response(b"HTTP/1.1 404 Not Found\r\n\r\n"),
+            Err(Error::UnsupportedServerVersion { server: None })
+        ));
+        assert!(matches!(
+            parse_version_response(b"HTTP/1.1 500 Internal Server Error\r\n\r\n"),
+            Err(Error::UnsupportedServerVersion { server: None })
+        ));
+        // empty body: dev build without a commit
+        let empty = parse_version_response(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+        assert!(matches!(crate::check_server_commit(&empty), Err(Error::UnsupportedServerVersion { .. })));
     }
 
     #[tokio::test]

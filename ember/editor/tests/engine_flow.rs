@@ -275,6 +275,28 @@ fn hover_merges_diagnostics_and_provider_markdown_and_cancels() {
 }
 
 #[test]
+fn selection_and_visible_range_events_drive_ghost_cancellation_and_codelens_priority() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+    let u = uri("/w/data.json");
+    let (_, g) = open(&mut c, t0, "/w/data.json", "fo\nbar\nbaz\n");
+    c.handle(t0, request(1, "MainThreadLanguageFeatures", "$registerInlineCompletionsSupport", inline_registration(9, 0)));
+    let w = |e| Input::Widget { uri: u.clone(), generation: g, event: e };
+
+    // Typing triggers ghost text at (0, 3).
+    let fx = c.handle(t0, w(changed(1, p(0, 2), "o")));
+    let (t, _) = call(&fx, "$provideInlineCompletions");
+    let fx = c.handle(t0, Input::RpcReply { token: t.unwrap(), result: Ok(json!({"pid": 1, "items": [{"insertText": "()", "idx": 0}]})) });
+    assert!(decorations(&fx).iter().any(|d| d.kind == DecorationKind::GhostText));
+
+    // Moving selection away from (0, 3) ends the ghost text as Ignored(userTypingDisagreed: false).
+    let fx = c.handle(t0, w(WidgetEvent::SelectionChanged { version: 1, anchor: p(1, 0), active: p(1, 0) }));
+    assert!(!decorations(&fx).iter().any(|d| d.kind == DecorationKind::GhostText));
+    let end = call(&fx, "$handleInlineCompletionEndOfLifetime").1;
+    assert_eq!(arg(end, 3), json!({"kind": 2, "userTypingDisagreed": false}));
+}
+
+#[test]
 fn code_lens_is_requested_resolved_drawn_and_clicked() {
     let t0 = Instant::now();
     let mut c = core(t0);
@@ -320,6 +342,11 @@ fn code_lens_is_requested_resolved_drawn_and_clicked() {
     assert_eq!(arg(ac, 0), json!("onCommand:workbench.action.x"));
     let fx = c.handle(t0, Input::RpcReply { token: at.unwrap(), result: Ok(Value::Null) });
     assert!(matches!(updates(&fx)[0], SessionUpdate::RunCommand { command } if command.id == "workbench.action.x"));
+
+    // Executing a command through Input::ExecuteCommand dispatches $executeContributedCommand.
+    let fx = c.handle(t0, Input::ExecuteCommand { id: "__vsc1".into(), arguments: vec![json!("hello")] });
+    let ec = call(&fx, "$executeContributedCommand").1;
+    assert_eq!((arg(ec, 0), arg(ec, 1)), (json!("__vsc1"), json!("hello")));
 
     // $emitCodeLensEvent re-requests; the replaced list is released.
     c.handle(t0, request(3, "MainThreadLanguageFeatures", "$emitCodeLensEvent", vec![json!(8)]));
@@ -475,4 +502,155 @@ fn exthost_open_document_and_other_requests() {
     assert_eq!(fx, vec![Effect::Respond { req: 7, result: Ok(Reply::Empty) }]);
     let fx = c.handle(t0, request(8, "MainThreadCommands", "$executeCommand", vec![json!("setContext"), json!(["k", true]), json!(false)]));
     assert_eq!(fx, vec![Effect::Respond { req: 8, result: Ok(Reply::Empty) }]);
+}
+
+fn problems(effects: &[Effect]) -> Option<&Vec<ember_editor::diagnostics::Problem>> {
+    updates(effects).into_iter().rev().find_map(|u| match u {
+        SessionUpdate::Problems { problems } => Some(problems),
+        _ => None,
+    })
+}
+
+// FR-E2 (D38 problems list): the markers of every file the extension host reports are listed as
+// problems, errors first, then by file and position, and the list follows `$changeMany` and `$clear`.
+#[test]
+fn problems_list_every_reported_marker_errors_first_and_follows_clear() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+    let a = uri("/w/a.json");
+    let b = uri("/w/b.json");
+    open(&mut c, t0, "/w/a.json", "{\n  \"ok\": true,,\n}\n");
+    let fx = c.handle(
+        t0,
+        request(
+            1,
+            "MainThreadDiagnostics",
+            "$changeMany",
+            vec![json!("json"), json!([[a, [marker(4, "Trailing comma", 2, 14, 15), marker(8, "Value expected", 2, 14, 15)]], [b, [marker(8, "Unexpected end", 1, 1, 2)]]])],
+        ),
+    );
+    let list = problems(&fx).expect("a Problems update");
+    let seen: Vec<(&str, Severity, &str, u32)> =
+        list.iter().map(|p| (p.uri.path.as_str(), p.severity, p.message.as_str(), p.range.start.line)).collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("/w/a.json", Severity::Error, "Value expected", 1),
+            ("/w/b.json", Severity::Error, "Unexpected end", 0),
+            ("/w/a.json", Severity::Warning, "Trailing comma", 1),
+        ]
+    );
+    assert_eq!(list[0].source.as_deref(), Some("json"));
+
+    let fx = c.handle(t0, request(2, "MainThreadDiagnostics", "$clear", vec![json!("json")]));
+    assert_eq!(problems(&fx), Some(&Vec::new()));
+}
+
+#[test]
+fn file_close_clears_markers_for_that_file() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+    let a = uri("/w/a.json");
+    let b = uri("/w/b.json");
+    open(&mut c, t0, "/w/a.json", "{\n  \"ok\": true,,\n}\n");
+    open(&mut c, t0, "/w/b.json", "{\n}\n");
+
+    let fx = c.handle(
+        t0,
+        request(
+            1,
+            "MainThreadDiagnostics",
+            "$changeMany",
+            vec![json!("json"), json!([[a, [marker(8, "Error in a", 1, 1, 2)]], [b, [marker(4, "Warn in b", 1, 1, 2)]]])],
+        ),
+    );
+    assert_eq!(problems(&fx).expect("problems").len(), 2);
+
+    // Close a: problems update is emitted with only b's markers
+    let fx = c.handle(t0, Input::Close { uri: a });
+    let remaining = problems(&fx).expect("problems update after close");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].uri.path, "/w/b.json");
+}
+
+#[test]
+fn output_service_and_message_service_flow() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+
+    // Register an output channel
+    let fx = c.handle(
+        t0,
+        request(
+            1,
+            "MainThreadOutputService",
+            "$register",
+            vec![json!("Git"), json!(null), json!("git"), json!("vscode.git")],
+        ),
+    );
+    assert!(fx.contains(&Effect::Respond {
+        req: 1,
+        result: Ok(Reply::Json(json!("ember-output-1"))),
+    }));
+    let up = updates(&fx).into_iter().find_map(|u| match u {
+        SessionUpdate::OutputChannels { channels, active_id } => Some((channels, active_id)),
+        _ => None,
+    }).expect("OutputChannels update");
+    assert_eq!(up.0.len(), 1);
+    assert_eq!(up.0[0].label, "Git");
+    assert_eq!(up.1.as_deref(), Some("ember-output-1"));
+
+    // Append to the channel
+    let fx = c.handle(
+        t0,
+        request(
+            2,
+            "MainThreadOutputService",
+            "$append",
+            vec![json!("ember-output-1"), json!("git status output\n")],
+        ),
+    );
+    let up = updates(&fx).into_iter().find_map(|u| match u {
+        SessionUpdate::OutputChannels { channels, .. } => Some(channels),
+        _ => None,
+    }).expect("OutputChannels update on append");
+    assert_eq!(up[0].text, "git status output\n");
+
+    // Clear the channel
+    let fx = c.handle(
+        t0,
+        request(
+            3,
+            "MainThreadOutputService",
+            "$clear",
+            vec![json!("ember-output-1")],
+        ),
+    );
+    let up = updates(&fx).into_iter().find_map(|u| match u {
+        SessionUpdate::OutputChannels { channels, .. } => Some(channels),
+        _ => None,
+    }).expect("OutputChannels update on clear");
+    assert_eq!(up[0].text, "");
+
+    // Show message
+    let fx = c.handle(
+        t0,
+        request(
+            4,
+            "MainThreadMessageService",
+            "$showMessage",
+            vec![json!(3), json!("Rust analyzer crashed"), json!({"source": "rust-analyzer"}), json!([])],
+        ),
+    );
+    assert!(fx.contains(&Effect::Respond {
+        req: 4,
+        result: Ok(Reply::Empty),
+    }));
+    let msg = updates(&fx).into_iter().find_map(|u| match u {
+        SessionUpdate::ExtensionMessage { severity, message, source } => Some((*severity, message, source)),
+        _ => None,
+    }).expect("ExtensionMessage update");
+    assert_eq!(msg.0, ember_editor::MessageSeverity::Error);
+    assert_eq!(msg.1, "Rust analyzer crashed");
+    assert_eq!(msg.2.as_deref(), Some("rust-analyzer"));
 }

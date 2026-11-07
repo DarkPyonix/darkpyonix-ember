@@ -2,7 +2,7 @@
 //!
 //! Agents run on the ember server, next to the browser. Each is given an off-the-shelf
 //! DevTools-protocol browser MCP server pointed at ember's CDP relay,
-//! `ws://<server>/api/v1/browsers/<project>/cdp`:
+//! `ws://<server>/api/browsers/<project>/cdp`:
 //!
 //! - **chrome-devtools-mcp** (default): `npx -y chrome-devtools-mcp@latest --wsEndpoint=<relay>`
 //! - **Playwright MCP**: `npx -y @playwright/mcp@latest --cdp-endpoint=<relay>`
@@ -143,7 +143,24 @@ pub fn cdp_ws_url(base: &str, project: &str) -> String {
     } else {
         base.to_string()
     };
-    format!("{}/api/v1/browsers/{project}/cdp", ws.trim_end_matches('/'))
+    format!("{}/api/browsers/{project}/cdp", ws.trim_end_matches('/'))
+}
+
+/// The relay URL an agent's MCP server connects to: [`cdp_ws_url`] plus the per-run nonce path
+/// segment (FR-S9), because the MCP server sends no `Authorization` header.
+pub fn agent_cdp_ws_url(base: &str, project: &str) -> String {
+    format!("{}/{}", cdp_ws_url(base, project), crate::auth::agent_cdp_nonce())
+}
+
+/// The DevTools discovery document (`/json/version`) for `project`. Its `webSocketDebuggerUrl` is
+/// the nonce URL ([`agent_cdp_ws_url`]), never the bare relay URL, because the bare one needs the
+/// server token and a tool that discovers the relay sends none (FR-S9).
+pub fn cdp_version_doc(base: &str, project: &str) -> Value {
+    json!({
+        "Browser": "ember-remote-browser",
+        "Protocol-Version": "1.3",
+        "webSocketDebuggerUrl": agent_cdp_ws_url(base, project),
+    })
 }
 
 /// Ready-to-use configuration for each agent CLI.
@@ -203,7 +220,7 @@ pub(crate) fn toml_str(s: &str) -> String {
 
 /// The browser MCP server for `project`, as the adapters take it.
 pub fn mcp_server(base: &str, project: &str, mcp: BrowserMcp, runner: &Runner) -> McpServer {
-    let (command, args) = mcp.command_with(runner, &cdp_ws_url(base, project));
+    let (command, args) = mcp.command_with(runner, &agent_cdp_ws_url(base, project));
     McpServer {
         name: MCP_NAME.into(),
         command,
@@ -222,7 +239,7 @@ pub fn start_config_hook(base: String, mcp: BrowserMcp, runner: Runner) -> Start
         if super::check_project(&rec.project).is_err() {
             return Ok(());
         }
-        let cfg = agent_config_with(&cdp_ws_url(&base, &rec.project), mcp, &runner);
+        let cfg = agent_config_with(&agent_cdp_ws_url(&base, &rec.project), mcp, &runner);
         req.env.push(("EMBER_BROWSER_CDP_WS".into(), cfg.cdp_ws));
         req.env.push(("EMBER_BROWSER_MCP_CONFIG".into(), cfg.claude_code_mcp_config.to_string()));
         req.mcp_servers.push(mcp_server(&base, &rec.project, mcp, &runner));
@@ -242,7 +259,7 @@ pub fn start_hook(base: String, mcp: BrowserMcp) -> StartHook {
         if super::check_project(&rec.project).is_err() {
             return Vec::new();
         }
-        let cfg = agent_config(&cdp_ws_url(&base, &rec.project), mcp);
+        let cfg = agent_config(&agent_cdp_ws_url(&base, &rec.project), mcp);
         vec![
             ("EMBER_BROWSER_CDP_WS".into(), cfg.cdp_ws),
             ("EMBER_BROWSER_MCP_CONFIG".into(), cfg.claude_code_mcp_config.to_string()),
@@ -257,7 +274,7 @@ mod tests {
     #[test]
     fn configs() {
         let ws = cdp_ws_url("http://127.0.0.1:8740/", "acme");
-        assert_eq!(ws, "ws://127.0.0.1:8740/api/v1/browsers/acme/cdp");
+        assert_eq!(ws, "ws://127.0.0.1:8740/api/browsers/acme/cdp");
         let c = agent_config(&ws, BrowserMcp::ChromeDevtools);
         assert_eq!(
             c.claude_code_mcp_config["mcpServers"][MCP_NAME]["args"][2],
@@ -269,7 +286,7 @@ mod tests {
 
     #[test]
     fn runners_and_servers() {
-        let ws = "ws://127.0.0.1:8740/api/v1/browsers/acme/cdp";
+        let ws = &agent_cdp_ws_url("http://127.0.0.1:8740", "acme");
         let (cmd, args) = BrowserMcp::Playwright.command_with(&Runner::Bunx("/b/bunx".into()), ws);
         assert_eq!(cmd, "/b/bunx");
         assert_eq!(args, ["@playwright/mcp@latest".to_string(), format!("--cdp-endpoint={ws}")]);
@@ -290,7 +307,7 @@ mod tests {
         hook(&rec, &mut req).unwrap();
         assert_eq!(req.mcp_servers.len(), 1);
         assert_eq!(req.mcp_servers[0].command, "/n/npx");
-        assert!(req.env.iter().any(|(k, v)| k == "EMBER_BROWSER_CDP_WS" && v.ends_with("/browsers/acme/cdp")));
+        assert!(req.env.iter().any(|(k, v)| k == "EMBER_BROWSER_CDP_WS" && v.ends_with(&format!("/browsers/acme/cdp/{}", crate::auth::agent_cdp_nonce()))));
         // The adapter flag carries it.
         let flag = crate::agents::claude_code::mcp_config(&req.mcp_servers).unwrap();
         assert!(flag.contains("chrome-devtools-mcp@latest"));

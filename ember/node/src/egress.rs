@@ -5,7 +5,7 @@
 //! node open the outbound connection. Pages then see this computer's public IP, its LAN and its
 //! `localhost`.
 //!
-//! # `/v1/egress` (WebSocket, bearer token like every other route)
+//! # `/egress` (WebSocket, bearer token like every other route)
 //!
 //! One WebSocket = one proxied TCP connection. The WebSocket carries a **raw SOCKS5 byte
 //! stream** (RFC 1928) in Binary frames (Text frames are treated as bytes too), chunked
@@ -129,7 +129,7 @@ fn keyword(k: &str) -> Option<Vec<Cidr>> {
 /// Which destinations the egress may reach.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EgressPolicy {
-    /// `false`: `/v1/egress` refuses every connection (403).
+    /// `false`: `/egress` refuses every connection (403).
     pub enabled: bool,
     pub deny: Vec<Cidr>,
 }
@@ -199,7 +199,7 @@ pub mod reply {
 /// What a SOCKS5 client must present.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SocksAuth {
-    /// Method `0x00` (loopback clients, and `/v1/egress` whose upgrade carried the token).
+    /// Method `0x00` (loopback clients, and `/egress` whose upgrade carried the token).
     None,
     /// Method `0x02` (RFC 1929): any username, this password.
     Password(String),
@@ -419,9 +419,9 @@ pub fn auth_for_peer(peer: SocketAddr, token: &str) -> SocksAuth {
 }
 
 // ---------------------------------------------------------------------------------------------
-// `/v1/egress` (node side)
+// `/egress` (node side)
 
-/// Route handler for `GET /v1/egress`.
+/// Route handler for `GET /egress`.
 pub async fn ws(State(node): State<Node>, ws: WebSocketUpgrade) -> Response {
     let policy = node.egress_policy().clone();
     if !policy.enabled {
@@ -489,17 +489,17 @@ async fn pump_axum<IO: AsyncRead + AsyncWrite>(ws: WebSocket, io: IO) {
 // ---------------------------------------------------------------------------------------------
 // Client side
 
-/// Client side of `/v1/egress`: one raw SOCKS5 byte stream to the node.
+/// Client side of `/egress`: one raw SOCKS5 byte stream to the node.
 pub type EgressStream = tokio_tungstenite::WebSocketStream<crate::client::NodeIo>;
 
 impl NodeClient {
-    /// Open `/v1/egress`. Bytes go both ways as Binary frames; see the module docs.
+    /// Open `/egress`. Bytes go both ways as Binary frames; see the module docs.
     pub async fn egress(&self) -> Result<EgressStream, ClientError> {
-        self.websocket("/v1/egress").await
+        self.websocket("/egress").await
     }
 }
 
-/// Copy bytes between `io` (e.g. a TCP connection from Chrome) and an `/v1/egress` stream until
+/// Copy bytes between `io` (e.g. a TCP connection from Chrome) and an `/egress` stream until
 /// both directions are done or either side closes. ember server's loopback SOCKS listener calls
 /// this once per accepted connection.
 pub async fn bridge<IO: AsyncRead + AsyncWrite>(io: IO, ws: EgressStream) -> anyhow::Result<()> {

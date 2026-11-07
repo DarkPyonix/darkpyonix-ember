@@ -37,7 +37,9 @@ async fn start() -> Fixture {
 }
 
 async fn within<T>(fut: impl std::future::Future<Output = T>) -> T {
-    tokio::time::timeout(Duration::from_secs(20), fut).await.expect("timed out")
+    // Generous: the suite runs in parallel with many shells, and a slow machine must not turn
+    // that into a failure. A hang still ends the test.
+    tokio::time::timeout(Duration::from_secs(90), fut).await.expect("timed out")
 }
 
 #[tokio::test]
@@ -45,7 +47,6 @@ async fn health_is_open_but_everything_else_needs_the_token() {
     let f = start().await;
     let h = NodeClient::new(&f.base, "wrong").unwrap().health().await.unwrap();
     assert!(h.ok);
-    assert_eq!(h.protocol, PROTOCOL_VERSION);
 
     for token in ["wrong", ""] {
         let bad = NodeClient::new(&f.base, token).unwrap();
@@ -60,7 +61,7 @@ async fn health_is_open_but_everything_else_needs_the_token() {
     }
 
     // Raw request without any Authorization header.
-    let r = reqwest::Client::new().get(format!("{}/v1/jobs", f.base)).send().await.unwrap();
+    let r = reqwest::Client::new().get(format!("{}/jobs", f.base)).send().await.unwrap();
     assert_eq!(r.status(), 401);
     assert!(f.client.stat(&f.root).await.is_ok());
 }
@@ -318,7 +319,10 @@ async fn dropping_the_exec_connection_kills_the_command() {
 /// Collect PTY output until `needle` appears.
 async fn pty_until(s: &mut ember_node::client::ExecSession, out: &mut String, needle: &str) {
     while !out.contains(needle) {
-        match s.recv().await.unwrap() {
+        let next = tokio::time::timeout(Duration::from_secs(60), s.recv())
+            .await
+            .unwrap_or_else(|_| panic!("no output while waiting for {needle:?}; output so far {out:?}"));
+        match next.unwrap() {
             Some(ExecEvent::Stdout { data }) => out.push_str(&String::from_utf8_lossy(&data)),
             Some(other) => panic!("unexpected {other:?} while waiting for {needle:?}; output so far {out:?}"),
             None => panic!("closed while waiting for {needle:?}; output so far {out:?}"),
@@ -339,7 +343,8 @@ async fn pty_echoes_input_resizes_and_reports_a_tty() {
             .await
             .unwrap();
         let mut out = String::new();
-        s.tx.stdin("stty size; test -t 0 && echo IS_A_TTY\n").await.unwrap();
+        // `IS_A_''TTY` in the typed line, so the terminal's echo of it cannot satisfy the wait.
+        s.tx.stdin("stty size; test -t 0 && echo IS_A_''TTY\n").await.unwrap();
         pty_until(&mut s, &mut out, "24 80").await;
         pty_until(&mut s, &mut out, "IS_A_TTY\r\n").await;
 
@@ -568,4 +573,22 @@ async fn namespace_operations_for_the_mount() {
     let e = c.remove(f.outside.join("secret"), false).await.unwrap_err();
     assert_eq!(e.code(), Some(ErrorCode::ForbiddenPath));
     assert!(f.outside.join("secret").exists());
+}
+
+#[tokio::test]
+async fn fr_x7_metrics_sample_over_the_api_and_needs_the_token() {
+    let f = start().await;
+    let s = within(f.client.metrics(Some(3))).await.unwrap();
+    assert!(!s.cpu.cores.is_empty());
+    assert!(s.memory.as_ref().is_some_and(|m| m.total_bytes > 0));
+    assert!(s.processes.len() <= 3);
+    assert!(s.gpu.devices.is_empty() && s.gpu.reason.is_some());
+    // The default list length applies without `top`, and `top` is capped.
+    let d = within(f.client.metrics(None)).await.unwrap();
+    assert!(d.processes.len() <= 20);
+    let big = within(f.client.metrics(Some(100_000))).await.unwrap();
+    assert!(big.processes.len() <= 200);
+
+    let e = NodeClient::new(&f.base, "wrong").unwrap().metrics(None).await.unwrap_err();
+    assert!(matches!(&e, ClientError::Api { status: 401, .. }), "{e:?}");
 }

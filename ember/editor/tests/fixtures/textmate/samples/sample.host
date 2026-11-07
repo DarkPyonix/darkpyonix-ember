@@ -1,0 +1,6 @@
+let a = "plain ${x} text Word (12)" // note TODO
+/* TODO fix @user ERROR
+   still FIXME and let */
+if "ERROR here ${y} Other" let b
+let c = a // trailing @done
+let d = "NOTE in a string" // NOTE in a line comment

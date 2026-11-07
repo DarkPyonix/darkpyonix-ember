@@ -3,14 +3,14 @@
 | Method | Path                          | ember node                          |
 |--------|-------------------------------|-------------------------------------|
 | GET    | `/__terms/_status`            | (is the daemon reachable?)          |
-| GET    | `/__terms?project=&origin=&running=` | `GET /v1/terms`              |
-| POST   | `/__terms`                    | `POST /v1/terms` (IDE origins only) |
-| GET    | `/__terms/{id}`               | `GET /v1/terms/{id}`                |
-| DELETE | `/__terms/{id}`               | `DELETE /v1/terms/{id}`             |
-| GET    | `/__terms/{id}/snapshot`      | `GET /v1/terms/{id}/snapshot`       |
-| POST   | `/__terms/{id}/control`       | `POST /v1/terms/{id}/control`       |
-| POST   | `/__terms/{id}/kill`          | `POST /v1/terms/{id}/kill`          |
-| WS     | `/__terms/{id}/attach`        | `WS /v1/terms/{id}/attach` (frames passed through unchanged) |
+| GET    | `/__terms?project=&origin=&running=` | `GET /terms`              |
+| POST   | `/__terms`                    | `POST /terms` (IDE origins only) |
+| GET    | `/__terms/{id}`               | `GET /terms/{id}`                |
+| DELETE | `/__terms/{id}`               | `DELETE /terms/{id}`             |
+| GET    | `/__terms/{id}/snapshot`      | `GET /terms/{id}/snapshot`       |
+| POST   | `/__terms/{id}/control`       | `POST /terms/{id}/control`       |
+| POST   | `/__terms/{id}/kill`          | `POST /terms/{id}/kill`          |
+| WS     | `/__terms/{id}/attach`        | `WS /terms/{id}/attach` (frames passed through unchanged) |
 
 HTTP routes are behind the session gate of `main.py`'s middleware (they are not public). The
 WebSocket route is not seen by that HTTP middleware, so it checks the session cookie and the
@@ -78,7 +78,7 @@ async def terms_status():
     if ep is None:
         return {"available": False, "reason": "ember node endpoint not found"}
     try:
-        r = await CLIENT.get(ep.http("/v1/health"))
+        r = await CLIENT.get(ep.http("/health"))
         return {"available": r.status_code == 200}
     except httpx.RequestError as exc:
         return {"available": False, "reason": str(exc)}
@@ -90,7 +90,7 @@ async def list_terms(request: Request):
         q = node.sanitize_query(request.query_params)
     except ValueError as exc:
         return _error(400, str(exc))
-    return await _forward("GET", "/v1/terms", params=q)
+    return await _forward("GET", "/terms", params=q)
 
 
 @router.post("/__terms")
@@ -99,28 +99,28 @@ async def create_term(request: Request):
         body = node.sanitize_create(await _json_body(request), str(Path.home()))
     except ValueError as exc:
         return _error(400, str(exc))
-    return await _forward("POST", "/v1/terms", body=body)
+    return await _forward("POST", "/terms", body=body)
 
 
 @router.get("/__terms/{term_id}")
 async def get_term(term_id: str):
     if not node.valid_id(term_id):
         return _error(400, "bad session id")
-    return await _forward("GET", f"/v1/terms/{term_id}")
+    return await _forward("GET", f"/terms/{term_id}")
 
 
 @router.delete("/__terms/{term_id}")
 async def remove_term(term_id: str):
     if not node.valid_id(term_id):
         return _error(400, "bad session id")
-    return await _forward("DELETE", f"/v1/terms/{term_id}")
+    return await _forward("DELETE", f"/terms/{term_id}")
 
 
 @router.get("/__terms/{term_id}/snapshot")
 async def term_snapshot(term_id: str):
     if not node.valid_id(term_id):
         return _error(400, "bad session id")
-    return await _forward("GET", f"/v1/terms/{term_id}/snapshot")
+    return await _forward("GET", f"/terms/{term_id}/snapshot")
 
 
 @router.post("/__terms/{term_id}/control")
@@ -131,7 +131,7 @@ async def term_control(term_id: str, request: Request):
         body = node.sanitize_control(await _json_body(request))
     except ValueError as exc:
         return _error(400, str(exc))
-    return await _forward("POST", f"/v1/terms/{term_id}/control", body=body)
+    return await _forward("POST", f"/terms/{term_id}/control", body=body)
 
 
 @router.post("/__terms/{term_id}/kill")
@@ -142,7 +142,7 @@ async def kill_term(term_id: str, request: Request):
         body = node.sanitize_kill(await _json_body(request))
     except ValueError as exc:
         return _error(400, str(exc))
-    return await _forward("POST", f"/v1/terms/{term_id}/kill", body=body)
+    return await _forward("POST", f"/terms/{term_id}/kill", body=body)
 
 
 def _ws_authorized(websocket: WebSocket) -> bool:
@@ -169,7 +169,7 @@ async def attach_term(websocket: WebSocket, term_id: str):
         return
     try:
         async with websockets.connect(
-            ep.ws(f"/v1/terms/{term_id}/attach"),
+            ep.ws(f"/terms/{term_id}/attach"),
             extra_headers=ep.headers(),   # websockets 12.x name (see requirements.txt)
             open_timeout=10,
             close_timeout=5,

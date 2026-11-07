@@ -15,6 +15,7 @@ EMBER_SERVER_URL=http://127.0.0.1:8740 cargo run      # the main server (default
 | Variable | Default | Meaning |
 |---|---|---|
 | `EMBER_SERVER_URL` | `http://127.0.0.1:8740` | Main server base URL |
+| `EMBER_DEMO_DATA` | off | `1` with no `EMBER_SERVER_URL`: the app serves demo data itself and contacts no server (demo only) |
 | `EMBER_DATA_DIR` | `<OS data dir>/ember` | Cache (`client-cache.json`), prefs (`prefs.json`), `exports/` |
 | `EMBER_LOG` | `warn,ember_app=info,ember_client=info` | `tracing` filter |
 | `DIOXUS_COMPOSE_RENDERER_DIR` | (download) | Use a renderer you built instead of the released one (absolute path) |
@@ -90,3 +91,18 @@ pattern).
   server; they are dropped on the next prefs save.
 - **Ember IDE target**: placeholder until the editor core (M8).
 - **Auto-scroll** to the newest message: `LazyColumn` has no scroll-to API yet.
+
+### Linux GUI test container
+
+On an arm64 Docker host, run `scripts/linux-gui/start.sh` from this checkout. The first
+start builds the release binary in the container with two Cargo jobs. The named
+`ember-linux-gui-target` volume caches build output. Check progress with
+`docker logs -f ember-linux-gui`.
+
+Use `scripts/linux-gui/capture.sh home` to save `.scratch/linux-gui/home.png`,
+`scripts/linux-gui/click.sh 100 100` to click, and `scripts/linux-gui/key.sh Tab` to
+send a key. The display is 1440 by 900 and uses Mesa software rendering. The app
+runs with demo data and without a server.
+
+When finished, remove the container with `docker rm -f ember-linux-gui` and the
+build cache with `docker volume rm ember-linux-gui-target`.

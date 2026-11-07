@@ -4,15 +4,15 @@
 //!
 //! | Method | Path | Body → Response |
 //! | ------ | ---- | --------------- |
-//! | GET    | `/api/v1/schedules?project=` | → `[Schedule]` |
-//! | POST   | `/api/v1/schedules` | `NewSchedule` → 201 `Schedule` |
-//! | GET    | `/api/v1/schedules/{id}` | → `Schedule` |
-//! | PATCH  | `/api/v1/schedules/{id}` | `{prompt?, kind?, catch_up?}` → `Schedule` |
-//! | DELETE | `/api/v1/schedules/{id}` | → 204 |
-//! | POST   | `/api/v1/schedules/{id}/pause` | → `Schedule` |
-//! | POST   | `/api/v1/schedules/{id}/resume` | → `Schedule` |
-//! | POST   | `/api/v1/schedules/{id}/run` | → 202 `ScheduleRun` (run now) |
-//! | GET    | `/api/v1/schedules/{id}/runs?limit=` | → `[ScheduleRun]`, newest first |
+//! | GET    | `/api/schedules?project=` | → `[Schedule]` |
+//! | POST   | `/api/schedules` | `NewSchedule` → 201 `Schedule` |
+//! | GET    | `/api/schedules/{id}` | → `Schedule` |
+//! | PATCH  | `/api/schedules/{id}` | `{prompt?, kind?, catch_up?}` → `Schedule` |
+//! | DELETE | `/api/schedules/{id}` | → 204 |
+//! | POST   | `/api/schedules/{id}/pause` | → `Schedule` |
+//! | POST   | `/api/schedules/{id}/resume` | → `Schedule` |
+//! | POST   | `/api/schedules/{id}/run` | → 202 `ScheduleRun` (run now) |
+//! | GET    | `/api/schedules/{id}/runs?limit=` | → `[ScheduleRun]`, newest first |
 //!
 //! `NewSchedule` is `{project, agent?, account?, computer?, cwd?, prompt, kind, target,
 //! catch_up?, paused?}` with `kind` one of `{"type":"cron","expr":"0 9 * * 1-5","tz":"Asia/Seoul"}`,
@@ -25,9 +25,9 @@
 //!
 //! | Method | Path | Body → Response |
 //! | ------ | ---- | --------------- |
-//! | GET    | `/api/v1/a2a/schedules` | → `[Schedule]` of the caller's project |
-//! | POST   | `/api/v1/a2a/schedules` | `{prompt, kind, target?, agent?, cwd?, catch_up?}` → 201 `Schedule` |
-//! | DELETE | `/api/v1/a2a/schedules/{id}` | → 204 |
+//! | GET    | `/api/a2a/schedules` | → `[Schedule]` of the caller's project |
+//! | POST   | `/api/a2a/schedules` | `{prompt, kind, target?, agent?, cwd?, catch_up?}` → 201 `Schedule` |
+//! | DELETE | `/api/a2a/schedules/{id}` | → 204 |
 //!
 //! For agents, `target` defaults to continuing the calling session, `agent` and `cwd` to the
 //! caller's, and new sessions use the caller's account. Changes are pushed
@@ -49,20 +49,20 @@ use crate::a2a::A2a;
 
 pub fn router(scheduler: Arc<Scheduler>) -> Router {
     Router::new()
-        .route("/api/v1/schedules", get(list).post(create))
-        .route("/api/v1/schedules/{id}", get(one).patch(update).delete(remove))
-        .route("/api/v1/schedules/{id}/pause", post(pause))
-        .route("/api/v1/schedules/{id}/resume", post(resume))
-        .route("/api/v1/schedules/{id}/run", post(run_now))
-        .route("/api/v1/schedules/{id}/runs", get(runs))
+        .route("/api/schedules", get(list).post(create))
+        .route("/api/schedules/{id}", get(one).patch(update).delete(remove))
+        .route("/api/schedules/{id}/pause", post(pause))
+        .route("/api/schedules/{id}/resume", post(resume))
+        .route("/api/schedules/{id}/run", post(run_now))
+        .route("/api/schedules/{id}/runs", get(runs))
         .with_state(scheduler)
 }
 
 /// The agent-side routes; `a2a` authenticates runtime tokens.
 pub fn agent_router(scheduler: Arc<Scheduler>, a2a: Arc<A2a>) -> Router {
     Router::new()
-        .route("/api/v1/a2a/schedules", get(agent_list).post(agent_create))
-        .route("/api/v1/a2a/schedules/{id}", delete(agent_remove))
+        .route("/api/a2a/schedules", get(agent_list).post(agent_create))
+        .route("/api/a2a/schedules/{id}", delete(agent_remove))
         .with_state(AgentState { scheduler, a2a })
 }
 

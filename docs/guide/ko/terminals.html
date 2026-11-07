@@ -260,12 +260,12 @@ ember-term kill &lt;id&gt;</code></pre>
       <table>
         <thead><tr><th scope="col">경로</th><th scope="col">하는 일</th></tr></thead>
         <tbody>
-          <tr><td><code>POST /v1/terms</code></td><td>세션을 만듭니다. <code>key</code> 를 주면 있으면 붙고 없으면 만듭니다.</td></tr>
-          <tr><td><code>GET /v1/terms?project=&amp;origin=&amp;running=</code></td><td>세션 목록, 오래된 것부터.</td></tr>
-          <tr><td><code>GET /v1/terms/{id}/snapshot</code></td><td>붙지 않고 현재 화면만 가져옵니다.</td></tr>
-          <tr><td><code>GET /v1/terms/{id}/attach</code></td><td>WebSocket: hello를 보낸 뒤 입력을 보내고 이벤트를 받습니다.</td></tr>
-          <tr><td><code>POST /v1/terms/{id}/control</code></td><td>제어권을 가져오거나 놓습니다.</td></tr>
-          <tr><td><code>POST /v1/terms/{id}/kill</code></td><td>SIGHUP, 3초 뒤 SIGKILL.</td></tr>
+          <tr><td><code>POST /terms</code></td><td>세션을 만듭니다. <code>key</code> 를 주면 있으면 붙고 없으면 만듭니다.</td></tr>
+          <tr><td><code>GET /terms?project=&amp;origin=&amp;running=</code></td><td>세션 목록, 오래된 것부터.</td></tr>
+          <tr><td><code>GET /terms/{id}/snapshot</code></td><td>붙지 않고 현재 화면만 가져옵니다.</td></tr>
+          <tr><td><code>GET /terms/{id}/attach</code></td><td>WebSocket: hello를 보낸 뒤 입력을 보내고 이벤트를 받습니다.</td></tr>
+          <tr><td><code>POST /terms/{id}/control</code></td><td>제어권을 가져오거나 놓습니다.</td></tr>
+          <tr><td><code>POST /terms/{id}/kill</code></td><td>SIGHUP, 3초 뒤 SIGKILL.</td></tr>
         </tbody>
       </table>
     </div>

@@ -231,7 +231,10 @@ pub fn github_sample_hook_with(value: Option<&str>, active: bool) -> Option<Gith
 
 /// Read the `EMBER_CR_GITHUB` environment variable for capture hooks.
 pub fn github_sample_from_env() -> Option<GithubState> {
-    github_sample_hook_with(std::env::var("EMBER_CR_GITHUB").ok().as_deref(), true)
+    github_sample_hook_with(
+        std::env::var("EMBER_CR_GITHUB").ok().as_deref(),
+        cfg!(debug_assertions),
+    )
 }
 
 /// Whether to fetch the GitHub card (FR-L35, FR-G13, #621).
@@ -1755,6 +1758,9 @@ mod tests {
         assert_eq!(parse_github_sample_hook(None, true), None);
         assert_eq!(parse_github_sample_hook(Some("ok"), false), None);
         assert_eq!(parse_github_sample_hook(Some("warn"), false), None);
+        assert!(github_sample_hook_with(Some("ok"), false).is_none());
+        assert!(github_sample_hook_with(Some("warn"), false).is_none());
+        assert!(github_sample_hook_with(Some("off"), false).is_none());
 
         // Ok sample state: connected, numbers shown, no action note.
         let ok = sample_github_state(GithubSampleKind::Ok);

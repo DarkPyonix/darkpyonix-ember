@@ -488,7 +488,7 @@ pub fn HomeScreen() {
     let _ = ui.live.launcher.get();
     let dash = services().client.read(crate::ui::home::read_dash);
 
-    // Initial fetch each time Home is shown again (force = true, FR-L35, #621).
+    // Initial fetch when HomeScreen mounts directly (and `shell()` also triggers on route transitions to Home, FR-L35, #621).
     let _requested = remember(|| {
         crate::bridge::request_github_summary();
         0u8
@@ -2079,5 +2079,27 @@ mod tests {
             assert!(has(s), "missing suggestion {s}");
         }
         compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l35_home_requests_github_summary_on_mount_and_on_returning_to_home() {
+        let _guard = crate::services::test_guard();
+        let ui = shared_ui();
+        ui.set_menu(crate::ui::shell::NavMenu::Home);
+        let before = crate::bridge::github_request_count();
+        let mut host = Host::new(|| Box::new(Recomposer::new(HomeScreen)));
+        host.rebuild().expect("first home mount");
+        let after_mount = crate::bridge::github_request_count();
+        assert_eq!(after_mount, before + 1);
+
+        // Staying on Home and rebuilding does not re-request.
+        host.rebuild().expect("still on home");
+        assert_eq!(crate::bridge::github_request_count(), after_mount);
+
+        // Switching to another menu does not request; returning to Home requests immediately.
+        ui.set_menu(crate::ui::shell::NavMenu::Projects);
+        assert_eq!(crate::bridge::github_request_count(), after_mount);
+        ui.set_menu(crate::ui::shell::NavMenu::Home);
+        assert_eq!(crate::bridge::github_request_count(), after_mount + 1);
     }
 }

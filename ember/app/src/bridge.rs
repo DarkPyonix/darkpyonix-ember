@@ -280,9 +280,18 @@ pub fn request_usage_summary() {
 
 pub use crate::ui::home::{should_fetch_github, should_poll_github, GITHUB_MIN_GAP};
 static GITHUB_LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+#[cfg(test)]
+static GITHUB_REQUEST_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub fn github_request_count() -> usize {
+    GITHUB_REQUEST_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
 
 /// Ask for the GitHub card now (Home opened or shown again, FR-L35, #621). Not in the demo, which shows a sample.
 pub fn request_github_summary() {
+    #[cfg(test)]
+    GITHUB_REQUEST_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let s = services();
     if s.demo.is_some() || crate::ui::home::github_sample_from_env().is_some() {
         return;

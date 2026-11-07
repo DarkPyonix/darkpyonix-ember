@@ -24,9 +24,9 @@ const versions = {
 const here = __dirname;
 const grammarsDir = path.join(here, "grammars");
 const byScope = {};
-for (const file of fs.readdirSync(grammarsDir).filter((f) => f.endsWith(".json"))) {
+for (const file of fs.readdirSync(grammarsDir).filter((f) => f.endsWith(".json") || f.endsWith(".tmLanguage"))) {
   const full = path.join(grammarsDir, file);
-  byScope[JSON.parse(fs.readFileSync(full, "utf8")).scopeName] = full;
+  byScope[textmate.parseRawGrammar(fs.readFileSync(full, "utf8"), full).scopeName] = full;
 }
 
 // Grammars injected into a scope (what an extension's `injectTo` says).

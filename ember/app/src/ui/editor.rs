@@ -383,6 +383,18 @@ pub fn problems_tab_label(count: usize) -> String {
 /// Maximum number of problems rendered in the DOM before offering a load-more button.
 pub const MAX_VISIBLE_PROBLEMS: usize = 200;
 
+/// Maximum number of workbench log entries kept in memory.
+pub const MAX_WORKBENCH_LOGS: usize = 500;
+
+/// Append a workbench log line, keeping at most [`MAX_WORKBENCH_LOGS`] newest lines.
+pub fn push_workbench_log(logs: &mut Vec<String>, line: String) {
+    if logs.len() >= MAX_WORKBENCH_LOGS {
+        let excess = logs.len() + 1 - MAX_WORKBENCH_LOGS;
+        logs.drain(0..excess);
+    }
+    logs.push(line);
+}
+
 /// Return visible problems slice and overflow count.
 pub fn paginate_problems<'a, T>(items: &'a [T], limit: usize) -> (&'a [T], usize) {
     let cap = limit.min(items.len());
@@ -392,6 +404,162 @@ pub fn paginate_problems<'a, T>(items: &'a [T], limit: usize) -> (&'a [T], usize
 /// Where a problem is, as a row shows it: the file below the project folder and the 1-based line.
 pub fn problem_location(path: &str, folder: &str, line: u32) -> String {
     format!("{}:{}", breadcrumb_segments(path, folder).join("/"), line + 1)
+}
+
+/// What an arrow, Home, End, or Delete/Close key does in the tab strip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TabKeyOutcome {
+    /// Activate and focus this tab path.
+    Activate(String),
+    /// Close this tab path.
+    Close(String),
+}
+
+/// Handles ArrowLeft, ArrowRight, Home, End, Enter, Space, and Delete/Backspace on the tab strip.
+pub fn tab_strip_key(paths: &[String], current: Option<&str>, key: &str) -> Option<TabKeyOutcome> {
+    if paths.is_empty() {
+        return None;
+    }
+    match key {
+        "ArrowRight" => {
+            let idx = current.and_then(|c| paths.iter().position(|p| p == c));
+            let next = match idx {
+                Some(i) => (i + 1) % paths.len(),
+                None => 0,
+            };
+            Some(TabKeyOutcome::Activate(paths[next].clone()))
+        }
+        "ArrowLeft" => {
+            let idx = current.and_then(|c| paths.iter().position(|p| p == c));
+            let prev = match idx {
+                Some(i) => {
+                    if i == 0 {
+                        paths.len() - 1
+                    } else {
+                        i - 1
+                    }
+                }
+                None => paths.len() - 1,
+            };
+            Some(TabKeyOutcome::Activate(paths[prev].clone()))
+        }
+        "Home" => Some(TabKeyOutcome::Activate(paths[0].clone())),
+        "End" => Some(TabKeyOutcome::Activate(paths.last().unwrap().clone())),
+        "Enter" | " " | "Space" => {
+            let chosen = current
+                .filter(|c| paths.iter().any(|p| p == *c))
+                .unwrap_or(&paths[0]);
+            Some(TabKeyOutcome::Activate(chosen.to_string()))
+        }
+        "Delete" | "Backspace" => {
+            current
+                .filter(|c| paths.iter().any(|p| p == *c))
+                .map(|c| TabKeyOutcome::Close(c.to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// What an arrow, Home, End, Enter, or Space key does in the explorer tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TreeKeyOutcome {
+    /// Select the row `(path, is_dir)`.
+    Select(String, bool),
+    /// Expand a directory and list its contents.
+    Expand(String),
+    /// Collapse an expanded directory.
+    Collapse(String),
+    /// Open a file in the editor.
+    OpenFile(String),
+}
+
+/// Handles WAI-ARIA treeview keyboard navigation (`ArrowDown`, `ArrowUp`, `ArrowRight`, `ArrowLeft`, `Home`, `End`, `Enter`, `" "`)
+/// over `rows`, given `selected` (`Option<(&str, bool)>`) and `root`.
+pub fn tree_key_action(
+    rows: &[TreeRow],
+    selected: Option<(&str, bool)>,
+    root: &str,
+    key: &str,
+) -> Option<TreeKeyOutcome> {
+    if rows.is_empty() {
+        return None;
+    }
+    let current_idx = selected.and_then(|(sel_path, _)| rows.iter().position(|r| r.path == sel_path));
+
+    match key {
+        "ArrowDown" => {
+            let next_idx = match current_idx {
+                Some(i) => (i + 1).min(rows.len() - 1),
+                None => 0,
+            };
+            Some(TreeKeyOutcome::Select(rows[next_idx].path.clone(), rows[next_idx].is_dir))
+        }
+        "ArrowUp" => {
+            let prev_idx = match current_idx {
+                Some(i) => i.saturating_sub(1),
+                None => 0,
+            };
+            Some(TreeKeyOutcome::Select(rows[prev_idx].path.clone(), rows[prev_idx].is_dir))
+        }
+        "Home" => Some(TreeKeyOutcome::Select(rows[0].path.clone(), rows[0].is_dir)),
+        "End" => {
+            let last = rows.last().unwrap();
+            Some(TreeKeyOutcome::Select(last.path.clone(), last.is_dir))
+        }
+        "ArrowRight" => {
+            let i = current_idx?;
+            let row = &rows[i];
+            if row.is_dir && !row.open {
+                Some(TreeKeyOutcome::Expand(row.path.clone()))
+            } else if row.is_dir && row.open {
+                if i + 1 < rows.len() && rows[i + 1].depth == row.depth + 1 {
+                    Some(TreeKeyOutcome::Select(rows[i + 1].path.clone(), rows[i + 1].is_dir))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        "ArrowLeft" => {
+            let i = current_idx?;
+            let row = &rows[i];
+            if row.is_dir && row.open {
+                Some(TreeKeyOutcome::Collapse(row.path.clone()))
+            } else if row.depth > 0 {
+                let parent_path = new_item_parent(Some((&row.path, false)), root);
+                if let Some(parent_row) = rows.iter().find(|r| r.path == parent_path && r.is_dir) {
+                    Some(TreeKeyOutcome::Select(parent_row.path.clone(), true))
+                } else {
+                    (0..i)
+                        .rev()
+                        .find(|&idx| rows[idx].depth == row.depth - 1 && rows[idx].is_dir)
+                        .map(|idx| TreeKeyOutcome::Select(rows[idx].path.clone(), true))
+                }
+            } else {
+                None
+            }
+        }
+        "Enter" | " " | "Space" => {
+            let i = current_idx?;
+            let row = &rows[i];
+            if row.is_dir {
+                if row.open {
+                    Some(TreeKeyOutcome::Collapse(row.path.clone()))
+                } else {
+                    Some(TreeKeyOutcome::Expand(row.path.clone()))
+                }
+            } else {
+                Some(TreeKeyOutcome::OpenFile(row.path.clone()))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// What path to focus in the editor when returning focus from a tool window or tree, if any.
+pub fn editor_focus_target(current: Option<&str>) -> Option<String> {
+    current.map(str::to_string)
 }
 
 /// The status bar's agent dot: orange while waiting for approval, blue while running, green otherwise.

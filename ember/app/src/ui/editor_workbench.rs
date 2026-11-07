@@ -79,7 +79,6 @@ pub struct Shared {
     pub problems_limit: Signal<usize>,
     pub selected_output_channel: Signal<String>,
     pub workbench_logs: Signal<Vec<String>>,
-    pub run_session: Arc<crate::ui::run::RunSession>,
     /// Source control of the 커밋 and Git windows (FR-L31.2).
     pub scm: crate::ui::editor_scm::Scm,
 }
@@ -144,10 +143,9 @@ fn init(target: EditorTarget) {
     let problems_limit = use_hook(|| Signal::new_in_scope(crate::ui::editor::MAX_VISIBLE_PROBLEMS, root));
     let selected_output_channel = use_hook(|| Signal::new_in_scope("ember-workbench".to_string(), root));
     let workbench_logs = use_hook(|| Signal::new_in_scope(Vec::<String>::new(), root));
-    let run_session = use_hook(|| Arc::new(crate::ui::run::RunSession::new()));
     // The branch in the bars comes from the first status read, so it starts with the window.
     let scm = use_hook(|| { let scm = crate::ui::editor_scm::Scm::new(&target.project, revision); scm.refresh(); scm });
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, run_session, scm }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -312,14 +310,6 @@ pub mod page {
         }
         if action == Action::Save {
             save_current(s);
-            return;
-        }
-        if action == Action::Run || action == Action::RunConfig {
-            start_run(s);
-            return;
-        }
-        if action == Action::Stop {
-            stop_run(s);
             return;
         }
         if let Some(mode) = crate::ui::palette::mode_for(action, *s.keymap.read()) {
@@ -595,8 +585,8 @@ pub mod page {
                 button { class: on(case_on), title: "대소문자 구분", "aria-pressed": "{case_on}", style: "border:1px solid var(--line);", onclick: move |_| { case_sensitive.set(!case_on); current.set(None); }, "Aa" }
                 button { class: on(word_on), title: "단어 단위", "aria-pressed": "{word_on}", style: "border:1px solid var(--line);", onclick: move |_| { whole_word.set(!word_on); current.set(None); }, "단어" }
                 span { class: "ed-sbi", role: "status", "{counter}" }
-                button { class: "ed-ib", title: "이전 결과", disabled: !has_matches, onclick: move |_| find_go(&prev_s, false), {icon("up")} }
-                button { class: "ed-ib", title: "다음 결과", disabled: !has_matches, onclick: move |_| find_go(&next_s, true), {icon("down")} }
+                button { class: "ed-ib", title: "이전 결과", "aria-label": "이전 결과", disabled: !has_matches, onclick: move |_| find_go(&prev_s, false), {icon("up")} }
+                button { class: "ed-ib", title: "다음 결과", "aria-label": "다음 결과", disabled: !has_matches, onclick: move |_| find_go(&next_s, true), {icon("down")} }
                 div { class: "ed-find", style: "width:200px; height:28px;",
                     input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
                         "aria-label": "바꿀 내용", placeholder: "바꾸기", value: "{replacement}",
@@ -613,7 +603,7 @@ pub mod page {
                 button { class: "ed-pj", style: "border:1px solid var(--line);", disabled: !has_matches, onclick: move |_| find_replace_one(&one_s), "바꾸기" }
                 button { class: "ed-pj", style: "border:1px solid var(--line);", disabled: !has_matches, onclick: move |_| find_replace_all(&all_s), "모두 바꾸기" }
                 div { class: "spacer" }
-                button { class: "ed-ib", title: "닫기", onclick: move |_| open.set(false), {icon("close")} }
+                button { class: "ed-ib", title: "닫기", "aria-label": "닫기", onclick: move |_| open.set(false), {icon("close")} }
             }
         }
     }
@@ -691,7 +681,7 @@ pub mod page {
                     let prefix = source.as_deref().unwrap_or("알림");
                     notice(format!("{prefix}: {message}"));
                     let mut logs = s.workbench_logs;
-                    logs.write().push(format!("[{prefix}] [{}] {message}", severity.label()));
+                    crate::ui::editor::push_workbench_log(&mut logs.write(), format!("[{prefix}] [{}] {message}", severity.label()));
                 }
                 _ => {}
             }
@@ -751,6 +741,11 @@ pub mod page {
                     let m = event.modifiers();
                     let keymap = *key_s.keymap.read();
                     let name = key_name(&event.key());
+                    if event.key() == Key::Escape && !m.contains(Modifiers::CONTROL) && !m.contains(Modifiers::ALT) && !m.contains(Modifiers::META) && !m.contains(Modifiers::SHIFT) {
+                        if let Some(target) = crate::ui::editor::editor_focus_target(key_s.tabs.read().current_path()) {
+                            key_s.host.send(HostCommand::Focus(target));
+                        }
+                    }
                     let double = DOUBLE_SHIFT.with(|d| {
                         d.borrow_mut().press(
                             &name,
@@ -851,9 +846,6 @@ pub mod page {
         let find = tooltip_text(keymap.find_label(), &keymap.hint(Action::Find, Os::current()));
         let find_hint = keymap.hint(Action::Find, Os::current());
         let find_s = s.clone();
-        let run_cfg_s = s.clone();
-        let run_s = s.clone();
-        let stop_s = s.clone();
         let git_s = s.clone();
         let open = *menu_open.read();
         // The traffic lights float over the top bar's left end under FullSize.
@@ -861,25 +853,25 @@ pub mod page {
         rsx! {
             header { class: "ed-top", style: "{strip_pad}",
                 img { class: "logo logo-img", src: "icon:mark", width: "28", height: "28", alt: "Ember" }
-                button { class: "ed-pj", title: "닫기", onclick: move |_| crate::services::services().ui.close_editor(), "{name}" {icon_px("chev-dn", 12)} }
-                button { class: "ed-pj", title: "브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon("git")} "{branch}" {icon_px("chev-dn", 12)} }
+                button { class: "ed-pj", title: "닫기", "aria-label": "닫기", onclick: move |_| crate::services::services().ui.close_editor(), "{name}" {icon_px("chev-dn", 12)} }
+                button { class: "ed-pj", title: "브랜치", "aria-label": "브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon("git")} "{branch}" {icon_px("chev-dn", 12)} }
                 div { class: "spacer" }
-                button { class: "ed-find", title: "{find}", onclick: move |_| run_action(&find_s, Action::Find),
+                button { class: "ed-find", title: "{find}", "aria-label": "{find}", onclick: move |_| run_action(&find_s, Action::Find),
                     {icon("search")}
                     span { class: "hide-md", "{keymap.find_label()}" }
                     kbd { class: "ed-sc", "{find_hint}" }
                 }
                 div { class: "ed-runcfg",
-                    button { class: "ed-pj", title: "실행 구성", onclick: move |_| start_run(&run_cfg_s), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
-                    button { class: "ed-ib run", title: "실행", onclick: move |_| start_run(&run_s), {icon("play")} }
-                    button { class: "ed-ib", title: "중지", onclick: move |_| stop_run(&stop_s), {icon("pause")} }
-                    button { class: "ed-ib", title: "{theme_title}", onclick: move |_| {
+                    button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| notice(format!("실행 구성: {SOON}")), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
+                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| notice(format!("실행: {SOON}")), {icon("play")} }
+                    button { class: "ed-ib", title: "중지", "aria-label": "중지", onclick: move |_| notice(format!("중지: {SOON}")), {icon("pause")} }
+                    button { class: "ed-ib", title: "{theme_title}", "aria-label": "{theme_title}", onclick: move |_| {
                         let next = theme_pref.next();
                         theme.set(next);
                         crate::services::services().ui.update_prefs(|p| p.theme = next);
                     }, {icon(if super::ICON_DARK.with(|d| d.get()) { "moon" } else { "sun" })} }
-                    button { class: "ed-ib", title: "에이전트에게 묻기", onclick: move |_| notice(format!("에이전트에게 묻기: {SOON}")), {icon("spark")} }
-                    button { class: "ed-ib", title: "메뉴", onclick: move |_| menu_open.set(!open), {icon("more")} }
+                    button { class: "ed-ib", title: "에이전트에게 묻기", "aria-label": "에이전트에게 묻기", onclick: move |_| notice(format!("에이전트에게 묻기: {SOON}")), {icon("spark")} }
+                    button { class: "ed-ib", title: "메뉴", "aria-label": "메뉴", onclick: move |_| menu_open.set(!open), {icon("more")} }
                 }
                 if open { {menu(s, keymap)} }
             }
@@ -993,6 +985,10 @@ pub mod page {
         };
         let root_name = base_name(&root).to_string();
         let selected: Option<(String, bool)> = tree_sel.read().clone();
+        let tree_rows_owned = rows.clone();
+        let tree_root = root.clone();
+        let tree_host = s.host.clone();
+        let tree_open_errors = s.open_errors.clone();
         let pending = prompt.read().clone();
         let parent_for_new = crate::ui::editor::new_item_parent(selected.as_ref().map(|(p, d)| (p.as_str(), *d)), &root);
         let (new_file_parent, new_dir_parent) = (parent_for_new.clone(), parent_for_new);
@@ -1065,14 +1061,55 @@ pub mod page {
                 div { class: "ed-twh",
                     b { class: "ed-twt", "프로젝트" }
                     div { class: "spacer" }
-                    button { class: "ed-ib", title: "새 파일", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewFile { parent: new_file_parent.clone() })); }, {icon("plus")} }
-                    button { class: "ed-ib", title: "새 폴더", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewDir { parent: new_dir_parent.clone() })); }, {icon("folder")} }
-                    button { class: "ed-ib", title: "모두 접기", onclick: move |_| expanded.write().clear(), {icon_px("chev", 16)} }
-                    button { class: "ed-ib", title: "파일 검색", onclick: move |_| notice(format!("파일 검색: {SOON}")), {icon("search")} }
-                    button { class: "ed-ib", title: "숨기기", onclick: move |_| stripes.write().hide(Side::Left), {icon("close")} }
+                    button { class: "ed-ib", title: "새 파일", "aria-label": "새 파일", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewFile { parent: new_file_parent.clone() })); }, {icon("plus")} }
+                    button { class: "ed-ib", title: "새 폴더", "aria-label": "새 폴더", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewDir { parent: new_dir_parent.clone() })); }, {icon("folder")} }
+                    button { class: "ed-ib", title: "모두 접기", "aria-label": "모두 접기", onclick: move |_| expanded.write().clear(), {icon_px("chev", 16)} }
+                    button { class: "ed-ib", title: "파일 검색", "aria-label": "파일 검색", onclick: move |_| notice(format!("파일 검색: {SOON}")), {icon("search")} }
+                    button { class: "ed-ib", title: "숨기기", "aria-label": "숨기기", onclick: move |_| stripes.write().hide(Side::Left), {icon("close")} }
                 }
-                div { class: "ed-tree", role: "tree", "aria-label": "프로젝트 트리",
-                    div { class: "ed-tn", role: "treeitem", "aria-expanded": "true", "aria-label": "{root_name} 폴더", style: "--d:0;", {icon_px("chev-dn", 12)} {icon_px("folder", 15)} "{root_name}" }
+                div { class: "ed-tree", role: "tree", "aria-label": "프로젝트 트리", tabindex: "0",
+                    onkeydown: move |event| {
+                        if prompt.read().is_some() {
+                            return;
+                        }
+                        if event.key() == Key::Escape {
+                            event.stop_propagation();
+                            if let Some(current_path) = tabs.read().current_path() {
+                                tree_host.send(HostCommand::Focus(current_path.to_string()));
+                            }
+                            return;
+                        }
+                        let key_str = key_name(&event.key());
+                        let cur_sel = tree_sel.read().clone();
+                        let outcome = crate::ui::editor::tree_key_action(
+                            &tree_rows_owned,
+                            cur_sel.as_ref().map(|(p, d)| (p.as_str(), *d)),
+                            &tree_root,
+                            &key_str,
+                        );
+                        if let Some(action) = outcome {
+                            event.stop_propagation();
+                            match action {
+                                crate::ui::editor::TreeKeyOutcome::Select(p, is_dir) => {
+                                    tree_sel.set(Some((p, is_dir)));
+                                }
+                                crate::ui::editor::TreeKeyOutcome::Expand(p) => {
+                                    expanded.write().insert(p.clone());
+                                    tree_host.send(HostCommand::List(p));
+                                }
+                                crate::ui::editor::TreeKeyOutcome::Collapse(p) => {
+                                    expanded.write().remove(&p);
+                                }
+                                crate::ui::editor::TreeKeyOutcome::OpenFile(p) => {
+                                    tree_open_errors.borrow_mut().remove(&p);
+                                    tabs.write().open(&p);
+                                    tree_host.send(HostCommand::Open(p.clone()));
+                                    tree_host.send(HostCommand::Focus(p));
+                                }
+                            }
+                        }
+                    },
+                    div { class: "ed-tn", role: "treeitem", "aria-expanded": "true", "aria-label": "{root_name} 폴더", tabindex: "-1", style: "--d:0;", {icon_px("chev-dn", 12)} {icon_px("folder", 15)} "{root_name}" }
                     {prompt_row}
                     for row in rows {
                         {
@@ -1089,7 +1126,7 @@ pub mod page {
                             let rename_label = row.name.clone();
                             let unsaved_for_rename = unsaved.clone();
                             let row_label = crate::ui::editor::tree_item_aria_label(&row.name, is_dir);
-                            rsx! { div { key: "{row.path}", class, role: "treeitem", "aria-label": "{row_label}", style: "--d:{depth};",
+                            rsx! { div { key: "{row.path}", class, role: "treeitem", "aria-label": "{row_label}", "aria-selected": "{chosen}", tabindex: if chosen { "0" } else { "-1" }, style: "--d:{depth};",
                                 "aria-expanded": if is_dir { "{row.open}" } else { "" },
                                 onclick: move |_| {
                                     let close = prompt.read().as_ref().is_some_and(|p| crate::ui::editor::row_click_closes_prompt(p, &prompt_text.read()));
@@ -1106,7 +1143,7 @@ pub mod page {
                                 "{row.name}"
                                 if chosen {
                                     div { class: "spacer" }
-                                    button { class: "ed-ib", title: "이름 변경: {rename_label}", style: "width:22px; height:22px;",
+                                    button { class: "ed-ib", title: "이름 변경: {rename_label}", "aria-label": "이름 변경: {rename_label}", style: "width:22px; height:22px;",
                                         onclick: move |event| {
                                             event.stop_propagation();
                                             let blocked: Vec<String> = unsaved_for_rename.iter().filter(|p| crate::ui::editor::is_at_or_below(p, &rename_path)).cloned().collect();
@@ -1117,7 +1154,7 @@ pub mod page {
                                             prompt_text.set(rename_name.clone());
                                             prompt.set(Some(TreePrompt::Rename { path: rename_path.clone() }));
                                         }, {icon_px("edit", 13)} }
-                                    button { class: "ed-ib", title: "삭제: {rename_label}", style: "width:22px; height:22px; color:var(--c-red);",
+                                    button { class: "ed-ib", title: "삭제: {rename_label}", "aria-label": "삭제: {rename_label}", style: "width:22px; height:22px; color:var(--c-red);",
                                         onclick: move |event| { event.stop_propagation(); prompt_at.set(now_ms()); prompt.set(Some(TreePrompt::Delete { path: delete_path.clone(), is_dir })); }, {icon_px("close", 13)} }
                                 }
                             } }
@@ -1131,27 +1168,105 @@ pub mod page {
     fn tab_strip(s: &Shared, paths: &[String], dirty: &[bool], current: Option<&str>) -> Element {
         let mut tabs = s.tabs;
         let mut menu_open = s.menu_open;
+        let host = s.host.clone();
+        let scm = s.scm.clone();
+        let paths_owned: Vec<String> = paths.to_vec();
+        let current_owned: Option<String> = current.map(str::to_string);
         rsx! {
-            div { class: "ed-tabs", role: "tablist", "aria-label": "열린 파일",
+            div { class: "ed-tabs", role: "tablist", "aria-label": "열린 파일", tabindex: "0",
+                onkeydown: move |event| {
+                    if event.key() == Key::Escape {
+                        event.stop_propagation();
+                        if let Some(ref current_path) = current_owned {
+                            host.send(HostCommand::Focus(current_path.clone()));
+                        }
+                        return;
+                    }
+                    let key_str = key_name(&event.key());
+                    let outcome = crate::ui::editor::tab_strip_key(
+                        &paths_owned,
+                        current_owned.as_deref(),
+                        &key_str,
+                    );
+                    if let Some(action) = outcome {
+                        event.stop_propagation();
+                        match action {
+                            crate::ui::editor::TabKeyOutcome::Activate(path) => {
+                                scm.close_diff();
+                                tabs.write().activate(&path);
+                                host.send(HostCommand::Focus(path));
+                            }
+                            crate::ui::editor::TabKeyOutcome::Close(path) => {
+                                tabs.write().close(&path);
+                                host.send(HostCommand::Close(path));
+                                if let Some(next) = tabs.read().current_path() {
+                                    host.send(HostCommand::Focus(next.to_string()));
+                                }
+                            }
+                        }
+                    }
+                },
                 for (i, path) in paths.iter().enumerate() {
                     {
                         let path = path.clone(); let close_path = path.clone();
-                        let host = s.host.clone(); let close_host = s.host.clone();
+                        let close_path_key = path.clone();
+                        let host = s.host.clone(); let key_host = s.host.clone(); let close_host = s.host.clone();
+                        let close_host_key = s.host.clone();
                         let selected = current == Some(path.as_str());
                         let label = base_name(&path).to_string();
-                                                let class = if selected { "ed-tab on" } else { "ed-tab" };
+                        let class = if selected { "ed-tab on" } else { "ed-tab" };
                         let tab_label = crate::ui::editor::tab_aria_label(&label, dirty[i]);
                         let close_label = format!("닫기: {label}");
                         let scm = s.scm.clone();
-                        rsx! { div { class, role: "tab", "aria-selected": "{selected}", "aria-label": "{tab_label}", onclick: move |_| {
-                            scm.close_diff();
-                            tabs.write().activate(&path);
-                            host.send(HostCommand::Focus(path.clone()));
-                        }, {icon_px(if selected { "file-w" } else { "file" }, 14)} "{label}" if dirty[i] { span { class: "ed-dirty" } } button { class: "ed-tx", "aria-label": "{close_label}", onclick: move |event| { event.stop_propagation(); tabs.write().close(&close_path); close_host.send(HostCommand::Close(close_path.clone())); if let Some(next) = tabs.read().current_path() { close_host.send(HostCommand::Focus(next.to_string())); } }, {icon_px(if selected { "close-w" } else { "close" }, 12)} } } }
+                        let key_scm = s.scm.clone();
+                        let tab_path = path.clone();
+                        rsx! { div { class, role: "tab", "aria-selected": "{selected}", "aria-label": "{tab_label}", tabindex: if selected { "0" } else { "-1" },
+                            onclick: move |_| {
+                                scm.close_diff();
+                                tabs.write().activate(&path);
+                                host.send(HostCommand::Focus(path.clone()));
+                            },
+                            onkeydown: move |event| {
+                                if matches!(event.key(), Key::Enter) || matches!(event.key(), Key::Character(ref c) if c == " ") {
+                                    event.stop_propagation();
+                                    key_scm.close_diff();
+                                    tabs.write().activate(&tab_path);
+                                    key_host.send(HostCommand::Focus(tab_path.clone()));
+                                }
+                            },
+                            {icon_px(if selected { "file-w" } else { "file" }, 14)}
+                            "{label}"
+                            if dirty[i] { span { class: "ed-dirty" } }
+                            button {
+                                class: "ed-tx",
+                                tabindex: "0",
+                                title: "{close_label}",
+                                "aria-label": "{close_label}",
+                                onclick: move |event| {
+                                    event.stop_propagation();
+                                    tabs.write().close(&close_path);
+                                    close_host.send(HostCommand::Close(close_path.clone()));
+                                    if let Some(next) = tabs.read().current_path() {
+                                        close_host.send(HostCommand::Focus(next.to_string()));
+                                    }
+                                },
+                                onkeydown: move |event| {
+                                    if matches!(event.key(), Key::Enter) || matches!(event.key(), Key::Character(ref c) if c == " ") {
+                                        event.stop_propagation();
+                                        tabs.write().close(&close_path_key);
+                                        close_host_key.send(HostCommand::Close(close_path_key.clone()));
+                                        if let Some(next) = tabs.read().current_path() {
+                                            close_host_key.send(HostCommand::Focus(next.to_string()));
+                                        }
+                                    }
+                                },
+                                {icon_px(if selected { "close-w" } else { "close" }, 12)}
+                            }
+                        } }
                     }
                 }
                 div { class: "spacer" }
-                button { class: "ed-ib", title: "탭 메뉴", onclick: move |_| { let open = *menu_open.read(); menu_open.set(!open); }, {icon("more")} }
+                button { class: "ed-ib", title: "탭 메뉴", "aria-label": "탭 메뉴", onclick: move |_| { let open = *menu_open.read(); menu_open.set(!open); }, {icon("more")} }
             }
         }
     }
@@ -1243,7 +1358,7 @@ pub mod page {
         rsx! {
             div { class: "ed-tsub",
                 button { class: "on", {icon_px("code", 14)} "{computer}" }
-                button { class: "ed-ib", title: "새 터미널", onclick: move |_| notice(format!("새 터미널: {SOON}")), {icon("plus")} }
+                button { class: "ed-ib", title: "새 터미널", "aria-label": "새 터미널", onclick: move |_| notice(format!("새 터미널: {SOON}")), {icon("plus")} }
             }
             div { class: "ed-term", tabindex: "0", style: "outline:none;",
                 // TODO(#335): paste and IME. Only key presses are forwarded; pasted and composed text is not.
@@ -1292,28 +1407,6 @@ pub mod page {
         }
     }
 
-    fn start_run(s: &Shared) {
-        let current_file = s.tabs.read().current_path().map(str::to_owned);
-        let (prog, args) = crate::ui::run::detect_run_command(current_file.as_deref(), &s.folder);
-        if let Err(e) = s.run_session.start(&prog, &args, &s.folder, s.revision) {
-            notice(format!("실행 시작 실패: {e}"));
-        }
-        let mut stripes = s.stripes;
-        if !stripes.read().is_selected(ToolWindow::Run) {
-            stripes.write().toggle(ToolWindow::Run);
-        }
-    }
-
-    fn stop_run(s: &Shared) {
-        if s.run_session.is_running() {
-            s.run_session.stop();
-            let mut rev = s.revision;
-            *rev.write() += 1;
-        } else {
-            notice("실행 중인 프로세스가 없습니다.");
-        }
-    }
-
     /// The problems list: a row per marker, errors first; a click opens the file and moves the caret.
     fn problems_body(s: &Shared, rows: Vec<(String, ember_editor::widget::Severity, String, String, String, u32, u32)>) -> Element {
         use ember_editor::widget::Severity;
@@ -1353,10 +1446,9 @@ pub mod page {
                     }
                 }
                 if overflow > 0 {
-                    div {
-                        class: "ed-prow-more",
-                        role: "button",
-                        style: "padding:var(--sp2); text-align:center; color:var(--c-blue); cursor:pointer; font-size:var(--fs-xs);",
+                    button {
+                        class: "ed-pj ed-prow-more",
+                        style: "width:100%; justify-content:center; padding:var(--sp2); color:var(--c-blue); font-size:var(--fs-xs);",
                         onclick: move |_| {
                             let cur = *problems_limit.read();
                             problems_limit.set(cur.saturating_add(crate::ui::editor::MAX_VISIBLE_PROBLEMS));
@@ -1398,7 +1490,7 @@ pub mod page {
 
         rsx! {
             div { class: "ed-tsub", style: "display:flex; align-items:center; gap:var(--sp2); padding:var(--sp1) var(--sp2);",
-                div { style: "display:flex; gap:var(--sp1); align-items:center; overflow-x:auto;",
+                div { role: "group", "aria-label": "출력 채널", style: "display:flex; gap:var(--sp1); align-items:center; overflow-x:auto;",
                     for (id, label) in all_channels {
                         {
                             let is_on = id == active_id;
@@ -1408,7 +1500,8 @@ pub mod page {
                             rsx! {
                                 button {
                                     key: "{id}",
-                                    class: if is_on { "on" } else { "" },
+                                    class: if is_on { "ed-pj on" } else { "ed-pj" },
+                                    "aria-pressed": "{is_on}",
                                     onclick: move |_| {
                                         sel.set(cid.clone());
                                         bridge.borrow_mut().set_active_output_channel(cid.clone());
@@ -1421,8 +1514,10 @@ pub mod page {
                 }
                 div { class: "spacer" }
                 button {
-                    class: "ed-ib",
+                    class: "ed-pj",
                     title: "지우기",
+                    "aria-label": "지우기",
+                    style: "border:1px solid var(--line);",
                     onclick: move |_| {
                         if clear_id == "ember-workbench" {
                             clear_s.workbench_logs.write().clear();
@@ -1440,57 +1535,6 @@ pub mod page {
                     div { style: "color:var(--muted);", "출력이 없습니다." }
                 } else {
                     for (i, line) in text.lines().enumerate() {
-                        div { key: "{i}", class: "tl", "{line}" }
-                    }
-                }
-            }
-        }
-    }
-
-    /// The run panel: execution status, command, rerun/stop/clear, and output lines.
-    fn run_body(s: &Shared) -> Element {
-        let (status, lines) = s.run_session.snapshot();
-        let run_s = s.clone();
-        let stop_s = s.clone();
-        let clear_s = s.clone();
-
-        let cmd_text = match &status {
-            crate::ui::run::RunStatus::Running { command } => command.clone(),
-            crate::ui::run::RunStatus::Finished { command, .. } => command.clone(),
-            crate::ui::run::RunStatus::Stopped { command } => command.clone(),
-            crate::ui::run::RunStatus::Idle => {
-                let cur = s.tabs.read().current_path().map(str::to_owned);
-                let (p, a) = crate::ui::run::detect_run_command(cur.as_deref(), &s.folder);
-                if a.is_empty() { p } else { format!("{p} {}", a.join(" ")) }
-            }
-        };
-
-        let status_class = match status {
-            crate::ui::run::RunStatus::Running { .. } => "dot run",
-            crate::ui::run::RunStatus::Finished { code: Some(0), .. } => "dot ok",
-            crate::ui::run::RunStatus::Finished { .. } => "dot err",
-            _ => "dot wait",
-        };
-
-        rsx! {
-            div { class: "ed-tsub", style: "display:flex; align-items:center; gap:var(--sp2); padding:var(--sp1) var(--sp2);",
-                span { class: "{status_class}" }
-                span { style: "font-size:var(--fs-xs); font-weight:bold;", "{status.label()}" }
-                span { style: "color:var(--muted); font-size:var(--fs-xs); font-family:var(--font-mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:400px;", "{cmd_text}" }
-                div { class: "spacer" }
-                button { class: "ed-ib", title: "실행", onclick: move |_| start_run(&run_s), {icon("play")} }
-                button { class: "ed-ib", title: "중지", onclick: move |_| stop_run(&stop_s), {icon("pause")} }
-                button { class: "ed-ib", title: "지우기", onclick: move |_| {
-                    clear_s.run_session.clear();
-                    let mut rev = clear_s.revision;
-                    *rev.write() += 1;
-                }, "지우기" }
-            }
-            div { class: "ed-term", style: "flex:1; overflow-y:auto; padding:var(--sp2); font-family:var(--font-mono); white-space:pre-wrap; outline:none;",
-                if lines.is_empty() {
-                    div { style: "color:var(--muted);", "실행 구성이 없습니다. 실행 버튼을 누르면 출력이 이곳에 표시됩니다." }
-                } else {
-                    for (i, line) in lines.iter().enumerate() {
                         div { key: "{i}", class: "tl", "{line}" }
                     }
                 }
@@ -1519,6 +1563,11 @@ pub mod page {
             ))
             .collect();
         let problem_count = problem_rows.len();
+        let body = match w {
+            ToolWindow::Run => "실행 구성이 없습니다. 구성이 연결되면 이곳에 출력이 표시됩니다.",
+            _ => "진단 정보가 아직 연결되지 않았습니다. 연결되면 이곳에 문제가 표시됩니다.",
+        };
+        let max_label = if max { "원래 크기" } else { "최대화" };
         rsx! {
             section { class: "ed-tw ed-bottom", style: if max { "grid-row:2 / 4;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "아래 도구 창",
                 div { class: "ed-twh",
@@ -1532,8 +1581,8 @@ pub mod page {
                         }
                     }
                     div { class: "spacer" }
-                    button { class: "ed-ib", title: if max { "원래 크기" } else { "최대화" }, onclick: move |_| bottom_max.set(!max), {icon(if max { "down" } else { "up" })} }
-                    button { class: "ed-ib", title: "숨기기", onclick: move |_| { bottom_max.set(false); stripes.write().hide(Side::Bottom); }, {icon("close")} }
+                    button { class: "ed-ib", title: "{max_label}", "aria-label": "{max_label}", onclick: move |_| bottom_max.set(!max), {icon(if max { "down" } else { "up" })} }
+                    button { class: "ed-ib", title: "숨기기", "aria-label": "숨기기", onclick: move |_| { bottom_max.set(false); stripes.write().hide(Side::Bottom); }, {icon("close")} }
                 }
                 if w == ToolWindow::Terminal {
                     {terminal_body(s)}
@@ -1541,10 +1590,8 @@ pub mod page {
                     {problems_body(s, problem_rows)}
                 } else if w == ToolWindow::Output {
                     {output_body(s)}
-                } else if w == ToolWindow::Run {
-                    {run_body(s)}
                 } else {
-                    div { class: "ed-term", style: "color:var(--muted);", "도구 창이 준비되지 않았습니다." }
+                    div { class: "ed-term", style: "color:var(--muted);", "{body}" }
                 }
             }
         }
@@ -1569,7 +1616,7 @@ pub mod page {
                     span { class: "ed-sbi hide-md", "UTF-8" }
                     span { class: "ed-sbi hide-md", "4칸" }
                 }
-                button { class: "ed-sbi", title: "Git 브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon("git")} "{branch}" }
+                button { class: "ed-sbi", title: "Git 브랜치", "aria-label": "Git 브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon("git")} "{branch}" }
             }
         }
     }

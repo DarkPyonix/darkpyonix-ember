@@ -53,6 +53,10 @@ pub struct SharedLive {
     pub agents_rescan: MutableState<crate::ui::agents::Rescan>,
     /// When the agent detection last answered (ms since epoch); `None` before the first answer.
     pub agents_checked_ms: MutableState<Option<u64>>,
+    /// Global new-member defaults (`GET /api/agents/defaults`, FR-L20, #481, #670).
+    pub agent_defaults: MutableState<crate::server::AgentDefaults>,
+    /// Revision counter incremented when server-stored agent defaults or settings change.
+    pub agent_store_rev: MutableState<u64>,
     /// Tokens per account per UTC day, last 14 days (FR-U7); empty until loaded.
     pub usage: MutableState<Vec<DailyUsage>>,
     /// Tokens per UTC day over the last 14 days, all harnesses (FR-U7, #332).
@@ -81,6 +85,8 @@ impl SharedLive {
             agents: mutable_state_of(Vec::new()),
             agents_rescan: mutable_state_of(Default::default()),
             agents_checked_ms: mutable_state_of(None),
+            agent_defaults: mutable_state_of(Default::default()),
+            agent_store_rev: mutable_state_of(0),
             usage: mutable_state_of(Vec::new()),
             usage_summary: mutable_state_of(Default::default()),
             github: mutable_state_of(Default::default()),

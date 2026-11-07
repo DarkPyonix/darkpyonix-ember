@@ -892,6 +892,51 @@ impl LocalStore {
     pub fn settings_mut(&mut self, h: AgentHarness) -> &mut HarnessSettings {
         &mut self.harness[Self::index(h)]
     }
+
+    /// Apply the server's global new-member defaults (`GET /api/agents/defaults`, FR-L20, #481, #670).
+    pub fn apply_server_defaults(&mut self, defaults: &crate::server::AgentDefaults) {
+        let harness = defaults.agent.as_deref().and_then(AgentHarness::of_kind);
+        self.default_harness = harness;
+        self.default_model = harness.and_then(|_| defaults.model.clone());
+        if let Some(h) = harness {
+            if let Some(m) = defaults.model.as_ref() {
+                self.settings_mut(h).model = Some(m.clone());
+            }
+            if let Some(e) = defaults.effort.as_ref() {
+                self.settings_mut(h).effort = Some(e.clone());
+            }
+            if let Some(mode) = defaults.mode.as_deref().and_then(home::PermMode::from_key) {
+                self.settings_mut(h).mode = mode;
+            }
+        }
+    }
+
+    /// Apply the server's per-harness settings (`GET /api/agents/settings`, FR-L20, FR-S8).
+    pub fn apply_server_settings(&mut self, settings: &crate::server::AgentSettingsResponse) {
+        for h in AgentHarness::ALL {
+            if let Some(kind) = h.kind() {
+                self.settings_mut(h).mem_limit_mb = settings
+                    .settings
+                    .get(kind)
+                    .and_then(|s| s.mem_limit_mb)
+                    .and_then(|mb| u32::try_from(mb).ok());
+            }
+        }
+    }
+
+    /// Build the `PUT /api/agents/defaults` payload for the current default harness (`FR-L20`, #481, #670).
+    pub fn to_server_defaults(&self) -> crate::server::AgentDefaults {
+        let Some(h) = self.default_harness else {
+            return crate::server::AgentDefaults::default();
+        };
+        let s = self.settings(h);
+        crate::server::AgentDefaults {
+            agent: h.kind().map(str::to_string),
+            model: self.default_model.clone().or_else(|| s.model.clone()),
+            effort: s.effort.clone(),
+            mode: Some(s.mode.key().to_string()),
+        }
+    }
 }
 
 impl Default for LocalStore {
@@ -974,11 +1019,9 @@ pub const NOT_CHOSEN: &str = "아직 정하지 않았습니다";
 pub const NO_ACCOUNTS: &str = "계정이 없습니다";
 /// The only row of the account sheet when there is no account.
 pub const ADD_ACCOUNT_FIRST: &str = "계정 추가에서 먼저 추가하세요";
-/// Under the default chips: what is stored where (the server keeps only the default account).
-/// TODO(server): the server has no default-harness or default-model field (#670); the choice
-/// lives in memory for this run only.
+/// Under the default chips: what is stored where (`PUT /api/agents/defaults`, `POST /api/accounts/{id}/default`, FR-L20, #481, #670).
 pub const DEFAULTS_STORAGE_NOTE: &str =
-    "고른 하네스와 모델은 이번 실행에서만 유지됩니다. 서버 저장은 준비 중입니다 (#670). 기본 계정만 서버에 저장됩니다.";
+    "고른 하네스와 모델, 기본 계정은 서버에 저장되어 새 팀원에 적용됩니다.";
 /// Why a harness cannot be picked: the server found no binary.
 pub const NOT_INSTALLED_REASON: &str = "감지되지 않았습니다";
 /// Why Gemini cannot be picked: the server has no adapter yet (D40).
@@ -2204,7 +2247,43 @@ mod tests {
         let old = ["계정 추가 창이", " 열립니다"].concat();
         assert!(!production.contains(&old));
         assert!(NO_LOGIN_WINDOW_NOTE.contains("로그인 창을 여는 기능은 아직 없습니다"));
-        assert!(DEFAULTS_STORAGE_NOTE.contains("이번 실행에서만 유지됩니다. 서버 저장은 준비 중입니다 (#670)"));
+        assert!(DEFAULTS_STORAGE_NOTE.contains("서버에 저장되어 새 팀원에 적용됩니다"));
+        assert!(!DEFAULTS_STORAGE_NOTE.contains("이번 실행에서만 유지됩니다"));
+    }
+
+    #[test]
+    fn fr_l20_local_store_server_defaults_and_settings_roundtrip() {
+        let mut store = LocalStore::new();
+        assert_eq!(store.default_harness, None);
+        assert_eq!(store.default_model, None);
+        let d = crate::server::AgentDefaults {
+            agent: Some("codex".into()),
+            model: Some("gpt-5-codex".into()),
+            effort: Some("High".into()),
+            mode: Some("edits".into()),
+        };
+        store.apply_server_defaults(&d);
+        assert_eq!(store.default_harness, Some(AgentHarness::Codex));
+        assert_eq!(store.default_model.as_deref(), Some("gpt-5-codex"));
+        assert_eq!(store.settings(AgentHarness::Codex).model.as_deref(), Some("gpt-5-codex"));
+        assert_eq!(store.settings(AgentHarness::Codex).effort.as_deref(), Some("High"));
+        assert_eq!(store.settings(AgentHarness::Codex).mode, home::PermMode::Edits);
+        assert_eq!(store.to_server_defaults(), d);
+
+        let mut settings = std::collections::HashMap::new();
+        settings.insert(
+            "claude-code".to_string(),
+            crate::server::AgentHarnessSettings { mem_limit_mb: Some(2048) },
+        );
+        store.apply_server_settings(&crate::server::AgentSettingsResponse { settings });
+        assert_eq!(store.settings(AgentHarness::ClaudeCode).mem_limit_mb, Some(2048));
+        assert_eq!(store.settings(AgentHarness::Codex).mem_limit_mb, None);
+
+        let sel = home::Selection::initial_with_defaults(&d);
+        assert_eq!(sel.option.harness, home::Harness::Codex);
+        assert_eq!(sel.option.model, "gpt-5-codex");
+        assert_eq!(sel.option.effort, Some("High"));
+        assert_eq!(sel.mode, home::PermMode::Edits);
     }
 
     #[test]

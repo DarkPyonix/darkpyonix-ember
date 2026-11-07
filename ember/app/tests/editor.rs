@@ -533,14 +533,15 @@ mod aria {
     }
 }
 
-// FR-E2, #448: Problems capping and navigation, output channels, and run commands.
+// FR-L31, #448: Problems capping and navigation, and output channels.
 mod problems_and_output {
-    use ember_app::ui::editor::{paginate_problems, MAX_VISIBLE_PROBLEMS};
+    use ember_app::ui::editor::{
+        paginate_problems, push_workbench_log, MAX_VISIBLE_PROBLEMS, MAX_WORKBENCH_LOGS,
+    };
     use ember_app::ui::editor_workbench::PendingGoto;
-    use ember_app::ui::run::{detect_run_command, RunSession, RunStatus};
 
     #[test]
-    fn fr_e2_problems_list_cap_and_overflow_count() {
+    fn fr_l31_problems_list_cap_and_overflow_count() {
         assert_eq!(MAX_VISIBLE_PROBLEMS, 200);
 
         // Under cap: all visible, no overflow
@@ -562,7 +563,7 @@ mod problems_and_output {
     }
 
     #[test]
-    fn fr_e2_pending_goto_records_line_and_col() {
+    fn fr_l31_pending_goto_records_line_and_col() {
         let goto = PendingGoto {
             id: 42,
             path: "/w/src/main.rs".into(),
@@ -576,7 +577,7 @@ mod problems_and_output {
     }
 
     #[test]
-    fn fr_e2_output_channels_and_message_severity() {
+    fn fr_l31_output_channels_and_message_severity() {
         use ember_editor::output::{MessageSeverity, OutputChannel, MAX_OUTPUT_CHANNEL_BYTES};
 
         let mut ch = OutputChannel::new("ember-output-1", "Git");
@@ -598,25 +599,338 @@ mod problems_and_output {
     }
 
     #[test]
-    fn fr_e2_detect_run_command_for_different_file_types() {
-        assert_eq!(detect_run_command(Some("/w/main.py"), "/w"), ("python3".into(), vec!["/w/main.py".into()]));
-        assert_eq!(detect_run_command(Some("/w/test.sh"), "/w"), ("sh".into(), vec!["/w/test.sh".into()]));
-        assert_eq!(detect_run_command(Some("/w/index.js"), "/w"), ("node".into(), vec!["/w/index.js".into()]));
-        assert_eq!(detect_run_command(Some("/w/lib.rs"), "/w"), ("cargo".into(), vec!["run".into()]));
+    fn fr_l31_workbench_logs_capped_at_max_lines() {
+        let mut logs = Vec::new();
+        for i in 0..(MAX_WORKBENCH_LOGS + 25) {
+            push_workbench_log(&mut logs, format!("line {i}"));
+        }
+        assert_eq!(logs.len(), MAX_WORKBENCH_LOGS);
+        assert_eq!(logs.first().map(String::as_str), Some("line 25"));
+        assert_eq!(
+            logs.last().map(String::as_str),
+            Some(format!("line {}", MAX_WORKBENCH_LOGS + 24).as_str())
+        );
+    }
+}
+
+// #302: Keyboard navigation and roving tabindex in the editor window (tree and tab strip).
+mod keyboard_navigation {
+    use ember_app::ui::editor::{
+        editor_focus_target, tab_strip_key, tree_key_action, TabKeyOutcome, TreeKeyOutcome, TreeRow,
+    };
+
+    #[test]
+    fn fr_l31_tab_strip_arrow_keys_navigate_and_wrap() {
+        let paths = vec![
+            "/w/p/a.rs".to_string(),
+            "/w/p/b.rs".to_string(),
+            "/w/p/c.rs".to_string(),
+        ];
+
+        // ArrowRight from first tab moves to second.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/a.rs"), "ArrowRight"),
+            Some(TabKeyOutcome::Activate("/w/p/b.rs".to_string()))
+        );
+
+        // ArrowRight from middle tab moves to third.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/b.rs"), "ArrowRight"),
+            Some(TabKeyOutcome::Activate("/w/p/c.rs".to_string()))
+        );
+
+        // ArrowRight from last tab wraps around to first.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/c.rs"), "ArrowRight"),
+            Some(TabKeyOutcome::Activate("/w/p/a.rs".to_string()))
+        );
+
+        // ArrowRight with unknown current tab defaults to first tab.
+        assert_eq!(
+            tab_strip_key(&paths, None, "ArrowRight"),
+            Some(TabKeyOutcome::Activate("/w/p/a.rs".to_string()))
+        );
+        assert_eq!(
+            tab_strip_key(&paths, Some("/unknown.rs"), "ArrowRight"),
+            Some(TabKeyOutcome::Activate("/w/p/a.rs".to_string()))
+        );
+
+        // ArrowLeft from middle tab moves to first.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/b.rs"), "ArrowLeft"),
+            Some(TabKeyOutcome::Activate("/w/p/a.rs".to_string()))
+        );
+
+        // ArrowLeft from first tab wraps around to last.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/a.rs"), "ArrowLeft"),
+            Some(TabKeyOutcome::Activate("/w/p/c.rs".to_string()))
+        );
+
+        // ArrowLeft with unknown current tab defaults to last tab.
+        assert_eq!(
+            tab_strip_key(&paths, None, "ArrowLeft"),
+            Some(TabKeyOutcome::Activate("/w/p/c.rs".to_string()))
+        );
     }
 
     #[test]
-    fn fr_e2_run_session_stop_and_clear() {
-        let session = RunSession::new();
-        let (status, lines) = session.snapshot();
-        assert_eq!(status, RunStatus::Idle);
-        assert!(lines.is_empty());
+    fn fr_l31_tab_strip_home_end_delete_and_activate() {
+        let paths = vec![
+            "/w/p/a.rs".to_string(),
+            "/w/p/b.rs".to_string(),
+            "/w/p/c.rs".to_string(),
+        ];
 
-        session.stop();
-        assert_eq!(session.snapshot().0, RunStatus::Idle);
+        // Home activates first tab.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/c.rs"), "Home"),
+            Some(TabKeyOutcome::Activate("/w/p/a.rs".to_string()))
+        );
 
-        session.clear();
-        assert!(session.snapshot().1.is_empty());
+        // End activates last tab.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/a.rs"), "End"),
+            Some(TabKeyOutcome::Activate("/w/p/c.rs".to_string()))
+        );
+
+        // Enter and Space activate the current tab.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/b.rs"), "Enter"),
+            Some(TabKeyOutcome::Activate("/w/p/b.rs".to_string()))
+        );
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/b.rs"), " "),
+            Some(TabKeyOutcome::Activate("/w/p/b.rs".to_string()))
+        );
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/b.rs"), "Space"),
+            Some(TabKeyOutcome::Activate("/w/p/b.rs".to_string()))
+        );
+
+        // Delete and Backspace close the current tab.
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/b.rs"), "Delete"),
+            Some(TabKeyOutcome::Close("/w/p/b.rs".to_string()))
+        );
+        assert_eq!(
+            tab_strip_key(&paths, Some("/w/p/c.rs"), "Backspace"),
+            Some(TabKeyOutcome::Close("/w/p/c.rs".to_string()))
+        );
+
+        // Delete with no current tab returns None.
+        assert_eq!(tab_strip_key(&paths, None, "Delete"), None);
+
+        // Unrelated key returns None.
+        assert_eq!(tab_strip_key(&paths, Some("/w/p/a.rs"), "Escape"), None);
+        assert_eq!(tab_strip_key(&paths, Some("/w/p/a.rs"), "x"), None);
+
+        // Empty paths always returns None.
+        assert_eq!(tab_strip_key(&[], Some("/w/p/a.rs"), "ArrowRight"), None);
+        assert_eq!(tab_strip_key(&[], None, "Home"), None);
+    }
+
+    fn sample_tree() -> Vec<TreeRow> {
+        vec![
+            TreeRow {
+                path: "/p/src".to_string(),
+                name: "src".to_string(),
+                depth: 0,
+                is_dir: true,
+                open: true,
+            },
+            TreeRow {
+                path: "/p/src/deep".to_string(),
+                name: "deep".to_string(),
+                depth: 1,
+                is_dir: true,
+                open: false,
+            },
+            TreeRow {
+                path: "/p/src/lib.rs".to_string(),
+                name: "lib.rs".to_string(),
+                depth: 1,
+                is_dir: false,
+                open: false,
+            },
+            TreeRow {
+                path: "/p/README.md".to_string(),
+                name: "README.md".to_string(),
+                depth: 0,
+                is_dir: false,
+                open: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn fr_l31_tree_arrow_down_up_home_end() {
+        let rows = sample_tree();
+
+        // ArrowDown with no selection selects first row.
+        assert_eq!(
+            tree_key_action(&rows, None, "/p", "ArrowDown"),
+            Some(TreeKeyOutcome::Select("/p/src".to_string(), true))
+        );
+
+        // ArrowDown from row 0 selects row 1.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "ArrowDown"),
+            Some(TreeKeyOutcome::Select("/p/src/deep".to_string(), true))
+        );
+
+        // ArrowDown from row 2 selects row 3.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/lib.rs", false)), "/p", "ArrowDown"),
+            Some(TreeKeyOutcome::Select("/p/README.md".to_string(), false))
+        );
+
+        // ArrowDown from last row stays on last row.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/README.md", false)), "/p", "ArrowDown"),
+            Some(TreeKeyOutcome::Select("/p/README.md".to_string(), false))
+        );
+
+        // ArrowUp from last row selects row 2.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/README.md", false)), "/p", "ArrowUp"),
+            Some(TreeKeyOutcome::Select("/p/src/lib.rs".to_string(), false))
+        );
+
+        // ArrowUp from first row stays on first row.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "ArrowUp"),
+            Some(TreeKeyOutcome::Select("/p/src".to_string(), true))
+        );
+
+        // ArrowUp with no selection selects first row.
+        assert_eq!(
+            tree_key_action(&rows, None, "/p", "ArrowUp"),
+            Some(TreeKeyOutcome::Select("/p/src".to_string(), true))
+        );
+
+        // Home selects first row.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/README.md", false)), "/p", "Home"),
+            Some(TreeKeyOutcome::Select("/p/src".to_string(), true))
+        );
+
+        // End selects last row.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "End"),
+            Some(TreeKeyOutcome::Select("/p/README.md".to_string(), false))
+        );
+
+        // Empty rows returns None.
+        assert_eq!(tree_key_action(&[], None, "/p", "ArrowDown"), None);
+    }
+
+    #[test]
+    fn fr_l31_tree_arrow_right_expands_or_descends() {
+        let rows = sample_tree();
+
+        // ArrowRight on closed directory returns Expand.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/deep", true)), "/p", "ArrowRight"),
+            Some(TreeKeyOutcome::Expand("/p/src/deep".to_string()))
+        );
+
+        // ArrowRight on open directory moves to its first child.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "ArrowRight"),
+            Some(TreeKeyOutcome::Select("/p/src/deep".to_string(), true))
+        );
+
+        // ArrowRight on file does nothing.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/lib.rs", false)), "/p", "ArrowRight"),
+            None
+        );
+
+        // ArrowRight with no selection does nothing.
+        assert_eq!(tree_key_action(&rows, None, "/p", "ArrowRight"), None);
+    }
+
+    #[test]
+    fn fr_l31_tree_arrow_left_collapses_or_ascends() {
+        let rows = sample_tree();
+
+        // ArrowLeft on open directory returns Collapse.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "ArrowLeft"),
+            Some(TreeKeyOutcome::Collapse("/p/src".to_string()))
+        );
+
+        // ArrowLeft on child row (file lib.rs at depth 1) moves to parent directory.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/lib.rs", false)), "/p", "ArrowLeft"),
+            Some(TreeKeyOutcome::Select("/p/src".to_string(), true))
+        );
+
+        // ArrowLeft on closed child directory (deep at depth 1) moves to parent directory.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/deep", true)), "/p", "ArrowLeft"),
+            Some(TreeKeyOutcome::Select("/p/src".to_string(), true))
+        );
+
+        // ArrowLeft on root-level file (depth 0) does nothing.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/README.md", false)), "/p", "ArrowLeft"),
+            None
+        );
+
+        // ArrowLeft with no selection does nothing.
+        assert_eq!(tree_key_action(&rows, None, "/p", "ArrowLeft"), None);
+    }
+
+    #[test]
+    fn fr_l31_tree_enter_and_space_open_file_or_toggle_dir() {
+        let rows = sample_tree();
+
+        // Enter on file opens the file.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/lib.rs", false)), "/p", "Enter"),
+            Some(TreeKeyOutcome::OpenFile("/p/src/lib.rs".to_string()))
+        );
+
+        // Space on file opens the file.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/lib.rs", false)), "/p", " "),
+            Some(TreeKeyOutcome::OpenFile("/p/src/lib.rs".to_string()))
+        );
+
+        // Enter on closed directory expands it.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/deep", true)), "/p", "Enter"),
+            Some(TreeKeyOutcome::Expand("/p/src/deep".to_string()))
+        );
+
+        // Enter on open directory collapses it.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "Enter"),
+            Some(TreeKeyOutcome::Collapse("/p/src".to_string()))
+        );
+
+        // Space on open directory collapses it.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "Space"),
+            Some(TreeKeyOutcome::Collapse("/p/src".to_string()))
+        );
+
+        // Unrelated key returns None.
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "Tab"),
+            None
+        );
+    }
+
+    #[test]
+    fn fr_l31_editor_focus_target_returns_current_path() {
+        assert_eq!(
+            editor_focus_target(Some("/w/p/src/lib.rs")),
+            Some("/w/p/src/lib.rs".to_string())
+        );
+        assert_eq!(editor_focus_target(None), None);
     }
 }
 

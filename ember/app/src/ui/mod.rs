@@ -31,7 +31,6 @@ pub mod monitor;
 pub mod project;
 pub mod question;
 pub mod routines;
-pub mod run;
 pub mod safe_area;
 pub mod session;
 pub mod shell;

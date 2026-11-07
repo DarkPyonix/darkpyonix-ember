@@ -801,6 +801,61 @@ pub fn harness_block(
     None
 }
 
+/// The harness whose models the picker lists while nothing is typed (FR-L15, mockup v8
+/// `.mp-rail`): the one the rail picked, else the chosen model's harness. The rail has one
+/// entry per harness and no "all" entry; a search looks across every harness instead.
+pub fn model_view(rail: Option<Harness>, current: Harness) -> Harness {
+    rail.unwrap_or(current)
+}
+
+/// The row Enter in the search field takes (FR-L15, mockup `st.act`): with a query the first
+/// match, else the chosen model's row, else the first row. `None` when nothing is listed.
+pub fn model_active_row(rows: &[ModelOption], current: ModelOption, query: &str) -> Option<usize> {
+    if rows.is_empty() {
+        return None;
+    }
+    if !query.trim().is_empty() {
+        return Some(0);
+    }
+    Some(rows.iter().position(|o| *o == current).unwrap_or(0))
+}
+
+/// What Enter in the model search field does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelEnter {
+    /// Choose this row and close the picker.
+    Choose(ModelOption),
+    /// The active row cannot be chosen; say why and keep the picker open.
+    Blocked(&'static str),
+    /// Nothing is listed.
+    Nothing,
+}
+
+/// Enter in the search field of the model picker (FR-L15 "Keyboard: Enter"): takes the active
+/// row ([`model_active_row`]) unless its harness is blocked (`block`, as [`harness_block`]).
+pub fn model_enter(
+    rows: &[ModelOption],
+    current: ModelOption,
+    query: &str,
+    block: impl Fn(Harness) -> Option<&'static str>,
+) -> ModelEnter {
+    let Some(i) = model_active_row(rows, current, query) else { return ModelEnter::Nothing };
+    let o = rows[i];
+    match block(o.harness) {
+        Some(reason) => ModelEnter::Blocked(reason),
+        None => ModelEnter::Choose(o),
+    }
+}
+
+/// The second line of a model row (mockup `.mp-h`): the harness, then the reason the row cannot
+/// be chosen. No profile name: profiles (FR-L17) are not built, so none is shown or invented.
+pub fn model_row_detail(o: &ModelOption, block: Option<&str>) -> String {
+    match block {
+        Some(reason) => format!("{} \u{b7} {}", o.harness.label(), reason),
+        None => o.harness.label().to_string(),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The composer's choices (FR-L11)
 // ---------------------------------------------------------------------------------------------
@@ -2009,6 +2064,56 @@ mod tests {
         assert!(filter_models(&all, None, "zzz").is_empty());
         // A blank query is not a search.
         assert_eq!(filter_models(&all, Some(Harness::Gemini), "  ").len(), 2);
+    }
+
+    #[test]
+    fn fr_l15_rail_opens_on_the_chosen_harness_and_has_no_all_entry() {
+        assert_eq!(model_view(None, Harness::Codex), Harness::Codex);
+        assert_eq!(model_view(Some(Harness::ClaudeCode), Harness::Codex), Harness::ClaudeCode);
+        let all = model_catalog();
+        let rows = filter_models(&all, Some(model_view(None, Harness::ClaudeCode)), "");
+        assert!(rows.iter().all(|o| o.harness == Harness::ClaudeCode));
+    }
+
+    #[test]
+    fn fr_l15_enter_takes_the_chosen_row_or_the_first_match() {
+        let all = model_catalog();
+        let current = default_option(Harness::ClaudeCode);
+        let rows = filter_models(&all, Some(Harness::ClaudeCode), "");
+        let at = model_active_row(&rows, current, "").expect("a row");
+        assert_eq!(rows[at], current);
+        // Typing moves the active row to the first match.
+        let hits = filter_models(&all, Some(Harness::ClaudeCode), "gpt-5 mini");
+        assert_eq!(model_active_row(&hits, current, "gpt-5 mini"), Some(0));
+        assert_eq!(model_enter(&hits, current, "gpt-5 mini", |_| None), ModelEnter::Choose(hits[0]));
+        // A current model that is not listed falls back to the first row.
+        let codex = filter_models(&all, Some(Harness::Codex), "");
+        assert_eq!(model_active_row(&codex, current, ""), Some(0));
+        assert_eq!(model_active_row(&[], current, ""), None);
+        assert_eq!(model_enter(&[], current, "", |_| None), ModelEnter::Nothing);
+    }
+
+    #[test]
+    fn fr_l15_enter_on_a_blocked_row_says_why_and_chooses_nothing() {
+        let all = model_catalog();
+        let current = default_option(Harness::ClaudeCode);
+        let gemini = filter_models(&all, None, "gemini flash");
+        let block = |h: Harness| harness_block(h, &[], &[]);
+        assert_eq!(model_enter(&gemini, current, "gemini flash", block), ModelEnter::Blocked("준비 중입니다"));
+    }
+
+    #[test]
+    fn fr_l15_row_detail_names_the_harness_and_the_reason_and_no_profile() {
+        let o = default_option(Harness::Codex);
+        assert_eq!(model_row_detail(&o, None), "Codex");
+        assert_eq!(
+            model_row_detail(&o, Some("이 컴퓨터에 설치되어 있지 않습니다")),
+            "Codex · 이 컴퓨터에 설치되어 있지 않습니다"
+        );
+        for o in model_catalog() {
+            let d = model_row_detail(&o, None);
+            assert!(!d.contains("개인") && !d.contains("팀"), "no invented profile: {d}");
+        }
     }
 
     #[test]

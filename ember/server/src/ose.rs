@@ -9,20 +9,56 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::api::ide::EmberOseConnection;
 
 struct Process {
-    child: Child,
+    child: Option<Child>,
+    launch_id: String,
+    address: SocketAddr,
+    real_token: String,
+    placeholder: String,
     connection: EmberOseConnection,
+    active_relays: Arc<AtomicUsize>,
     /// Removed when the entry goes away (child exited, manager dropped, start failed).
-    _token_file: TokenFile,
+    _token_file: Option<TokenFile>,
+}
+
+/// Target and credentials resolved for one active OSE relay stream (`FR-W4`, `#458`, `#461`).
+pub struct RelayTarget {
+    pub address: SocketAddr,
+    pub real_token: String,
+    pub placeholder: String,
+    pub idle_timeout: Duration,
+    _permit: RelayPermit,
+}
+
+/// RAII guard for one active OSE relay stream: decrements the per-launch and per-server counters on drop.
+struct RelayPermit {
+    launch: Arc<AtomicUsize>,
+    server: Arc<AtomicUsize>,
+}
+
+impl Drop for RelayPermit {
+    fn drop(&mut self) {
+        self.launch.fetch_sub(1, Ordering::SeqCst);
+        self.server.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Why a relay stream could not be opened before the WebSocket upgrade.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RelayLookupError {
+    /// 404: no live launch with this `(computer_id, launch_id)`.
+    NotFound,
+    /// 429: per-launch or per-server relay concurrency limit reached.
+    TooManyRelays,
 }
 
 /// The connection token file of one OSE process. The file is deleted on drop.
@@ -72,8 +108,10 @@ fn write_token_file(tokens_dir: &Path, folder: &Path, token: &str) -> std::io::R
 
 impl Drop for Process {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -83,6 +121,12 @@ pub const LOCAL_COMPUTER: &str = "local";
 pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// The most captured output returned for one install (stdout then stderr).
 pub const OUTPUT_CAP: usize = 16 * 1024;
+/// Default idle timeout for one relayed OSE connection (`FR-W4`, `#458`).
+pub const RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Maximum concurrent relays per OSE launch (`FR-W4`, `#458`).
+pub const MAX_RELAYS_PER_LAUNCH: usize = 16;
+/// Maximum concurrent relays across the server (`FR-W4`, `#458`).
+pub const MAX_RELAYS_PER_SERVER: usize = 64;
 
 /// The server CLI flags this module passes. `--server-data-dir`, `--install-extension` and
 /// `--extensions-dir` are documented in `ember/ose/README.md` and used by `ember/ose/smoke.sh`.
@@ -101,6 +145,10 @@ pub struct OseManager {
     /// `Err` when no root can be resolved (no override and no HOME): every use answers the message.
     data_root: Result<PathBuf, String>,
     install_timeout: Duration,
+    relay_idle_timeout: Duration,
+    max_relays_per_launch: usize,
+    max_relays_per_server: usize,
+    active_relays: Arc<AtomicUsize>,
     installing: Arc<Mutex<HashSet<String>>>,
     processes: Arc<Mutex<HashMap<(String, PathBuf), Process>>>,
 }
@@ -407,12 +455,19 @@ impl OseManager {
             std::thread::sleep(Duration::from_secs(1));
             let Some(processes) = weak.upgrade() else { break };
             let mut processes = processes.lock().unwrap_or_else(|e| e.into_inner());
-            processes.retain(|_, process| matches!(process.child.try_wait(), Ok(None)));
+            processes.retain(|_, process| match &mut process.child {
+                Some(child) => matches!(child.try_wait(), Ok(None)),
+                None => true,
+            });
         });
         Self {
             binary,
             data_root,
             install_timeout: INSTALL_TIMEOUT,
+            relay_idle_timeout: RELAY_IDLE_TIMEOUT,
+            max_relays_per_launch: MAX_RELAYS_PER_LAUNCH,
+            max_relays_per_server: MAX_RELAYS_PER_SERVER,
+            active_relays: Arc::new(AtomicUsize::new(0)),
             installing: Arc::new(Mutex::new(HashSet::new())),
             processes,
         }
@@ -422,6 +477,97 @@ impl OseManager {
     pub fn with_install_timeout(mut self, timeout: Duration) -> Self {
         self.install_timeout = timeout;
         self
+    }
+
+    /// Overrides the relay idle timeout (tests).
+    pub fn with_relay_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.relay_idle_timeout = timeout;
+        self
+    }
+
+    /// Overrides the per-launch and per-server relay concurrency limits (tests).
+    pub fn with_relay_limits(mut self, per_launch: usize, per_server: usize) -> Self {
+        self.max_relays_per_launch = per_launch;
+        self.max_relays_per_server = per_server;
+        self
+    }
+
+    /// Registers an existing OSE TCP listener for `(computer_id, folder)` without spawning a
+    /// child process (used by relay integration tests).
+    pub fn register_launch_for_test(
+        &self,
+        computer_id: &str,
+        folder: &Path,
+        address: SocketAddr,
+        real_token: &str,
+    ) -> EmberOseConnection {
+        let launch_id = uuid::Uuid::new_v4().simple().to_string();
+        let mut placeholder = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        while placeholder == real_token {
+            placeholder = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        }
+        let relay = format!("/api/computers/{computer_id}/ide/relay/{launch_id}");
+        let connection = EmberOseConnection {
+            endpoint: format!("http://{address}"),
+            relay: Some(relay),
+            connection_token: placeholder.clone(),
+        };
+        let folder = folder.canonicalize().unwrap_or_else(|_| folder.to_path_buf());
+        let key = (computer_id.to_string(), folder);
+        let mut processes = self.processes.lock().unwrap_or_else(|e| e.into_inner());
+        processes.insert(
+            key,
+            Process {
+                child: None,
+                launch_id,
+                address,
+                real_token: real_token.to_string(),
+                placeholder,
+                connection: connection.clone(),
+                active_relays: Arc::new(AtomicUsize::new(0)),
+                _token_file: None,
+            },
+        );
+        connection
+    }
+
+    /// Resolves `(computer_id, launch_id)` and acquires a concurrency permit for one relay stream.
+    pub fn open_relay(&self, computer_id: &str, launch_id: &str) -> Result<RelayTarget, RelayLookupError> {
+        let mut processes = self.processes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut found = None;
+        for ((comp, _), p) in processes.iter_mut() {
+            if comp == computer_id
+                && p.launch_id == launch_id
+                && match &mut p.child {
+                    Some(c) => matches!(c.try_wait(), Ok(None)),
+                    None => true,
+                }
+            {
+                found = Some(p);
+                break;
+            }
+        }
+        let Some(process) = found else {
+            return Err(RelayLookupError::NotFound);
+        };
+        let launch_active = process.active_relays.load(Ordering::SeqCst);
+        let server_active = self.active_relays.load(Ordering::SeqCst);
+        if launch_active >= self.max_relays_per_launch || server_active >= self.max_relays_per_server {
+            return Err(RelayLookupError::TooManyRelays);
+        }
+        process.active_relays.fetch_add(1, Ordering::SeqCst);
+        self.active_relays.fetch_add(1, Ordering::SeqCst);
+        let permit = RelayPermit {
+            launch: process.active_relays.clone(),
+            server: self.active_relays.clone(),
+        };
+        Ok(RelayTarget {
+            address: process.address,
+            real_token: process.real_token.clone(),
+            placeholder: process.placeholder.clone(),
+            idle_timeout: self.relay_idle_timeout,
+            _permit: permit,
+        })
     }
 
     pub fn data_root(&self) -> Result<&Path, String> {
@@ -520,22 +666,31 @@ impl OseManager {
 
     /// The server of `computer_id` for `folder`, started with that computer's data dir.
     pub fn connection_for(&self, computer_id: &str, folder: &Path) -> Result<EmberOseConnection, String> {
-        let binary = self.binary.as_ref().filter(|p| p.is_file())
-            .ok_or_else(|| "OSE server binary is not installed".to_string())?;
         let folder = folder.canonicalize().map_err(|e| format!("cannot open project folder: {e}"))?;
-        let data_dir = self.computer_data_dir(computer_id)?;
         let key = (computer_id.to_string(), folder.clone());
         let mut processes = self.processes.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(process) = processes.get_mut(&key) {
-            if matches!(process.child.try_wait(), Ok(None)) {
+            let alive = match &mut process.child {
+                Some(child) => matches!(child.try_wait(), Ok(None)),
+                None => true,
+            };
+            if alive {
                 return Ok(process.connection.clone());
             }
         }
         processes.remove(&key);
+        let binary = self.binary.as_ref().filter(|p| p.is_file())
+            .ok_or_else(|| "OSE server binary is not installed".to_string())?;
+        let data_dir = self.computer_data_dir(computer_id)?;
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("cannot allocate OSE port: {e}"))?;
         let address = listener.local_addr().map_err(|e| format!("cannot read OSE port: {e}"))?;
         drop(listener);
         let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        let mut placeholder = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        while placeholder == token {
+            placeholder = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        }
+        let launch_id = uuid::Uuid::new_v4().simple().to_string();
         let token_file = write_token_file(&data_dir.join("tokens"), &folder, &token)
             .map_err(|e| format!("cannot write the OSE token file: {e}"))?;
         let child = ose_command(binary)
@@ -546,12 +701,27 @@ impl OseManager {
             .current_dir(&folder)
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
             .spawn().map_err(|e| format!("cannot start OSE server: {e}"))?;
-        let connection = EmberOseConnection { endpoint: format!("http://{address}"), connection_token: token };
-        let mut process = Process { child, connection: connection.clone(), _token_file: token_file };
+        let connection = EmberOseConnection {
+            endpoint: format!("http://{address}"),
+            relay: Some(format!("/api/computers/{computer_id}/ide/relay/{launch_id}")),
+            connection_token: placeholder.clone(),
+        };
+        let mut process = Process {
+            child: Some(child),
+            launch_id,
+            address,
+            real_token: token,
+            placeholder,
+            connection: connection.clone(),
+            active_relays: Arc::new(AtomicUsize::new(0)),
+            _token_file: Some(token_file),
+        };
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            if let Ok(Some(status)) = process.child.try_wait() {
-                return Err(format!("OSE server exited during startup: {status}"));
+            if let Some(child) = &mut process.child {
+                if let Ok(Some(status)) = child.try_wait() {
+                    return Err(format!("OSE server exited during startup: {status}"));
+                }
             }
             if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() { break; }
             if Instant::now() >= deadline { return Err("OSE server did not start in time".into()); }

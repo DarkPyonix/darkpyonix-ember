@@ -92,6 +92,7 @@ fn NewSessionForm(preset: &str) {
     // with it (FR-L8).
     let initial = remember_with_key(key.clone(), || {
         let prefs = ui.prefs.get_untracked();
+        let defaults = ui.live.agent_defaults.get_untracked();
         let p = if preset.is_empty() {
             prefs
                 .last_project
@@ -102,8 +103,13 @@ fn NewSessionForm(preset: &str) {
         } else {
             preset.to_string()
         };
-        let last = prefs.last_used.get(&p).cloned().unwrap_or_default();
-        (p, last)
+        let mut last = prefs.last_used.get(&p).cloned().unwrap_or_default();
+        if last.agent.is_empty() {
+            if let Some(a) = defaults.agent.clone() {
+                last.agent = a;
+            }
+        }
+        (p, last, defaults.model.unwrap_or_default())
     });
     let project = remember_with_key(key.clone(), || mutable_state_of(initial.0.clone()));
     let new_project = remember_with_key(key.clone(), || mutable_state_of(String::new()));
@@ -111,7 +117,7 @@ fn NewSessionForm(preset: &str) {
     let account = remember_with_key(key.clone(), || mutable_state_of(initial.1.account.clone()));
     let computer = remember_with_key(key.clone(), || mutable_state_of(initial.1.computer.clone()));
     let cwd = remember_with_key(key.clone(), || mutable_state_of(String::new()));
-    let model_text = remember_with_key(key.clone(), || mutable_state_of(String::new()));
+    let model_text = remember_with_key(key.clone(), || mutable_state_of(initial.2.clone()));
     let title = remember_with_key(key.clone(), || mutable_state_of(String::new()));
     let busy = remember_with_key(key, || mutable_state_of(false));
 

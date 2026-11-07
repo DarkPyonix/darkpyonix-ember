@@ -25,6 +25,7 @@
 //! | [`bridge`] | [`WidgetBridge`]: `SessionUpdate` → per-document widget state and encoded `Decorations` bytes |
 //! | [`fallback`] | connect-time version check outcome: when to offer "Open in VS Code" instead |
 //! | [`replies`] | answers for the extension host's other requests |
+//! | [`search`] | FR-E7: search across files through the extension host, unsaved buffers, replace with re-check |
 //!
 //! **Status: written without compiling** (no cargo was run for this change). See
 //! `docs/design/EDITOR-SESSION.md` §7 for the APIs that are uncertain.
@@ -44,6 +45,7 @@ pub mod inline;
 pub mod languages;
 pub mod registry;
 pub mod replies;
+pub mod search;
 pub mod selector;
 pub mod textmate;
 pub mod session;

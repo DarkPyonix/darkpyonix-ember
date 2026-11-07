@@ -32,6 +32,7 @@ use crate::inline::{self, EndReason, Ghost, InlineDoc, ReplyOutcome, TypeThrough
 use crate::languages::LanguageRegistry;
 use crate::registry::{KindTag, Registry, RegistryChange};
 use crate::replies::session_reply;
+use crate::search::{FileHits, ReplaceReport, ReplaceRequest, SearchEnd, SearchRequest, Target};
 use crate::widget::{Decoration, DecorationKind, WidgetCommand, WidgetEvent};
 
 /// How many versions behind the document an answer of the highlighter may be and still be shown.
@@ -75,6 +76,8 @@ pub enum ReadPurpose {
     ExtHostOpen { req: u32 },
     /// A grammar file the syntax highlighting needs (`scope` is the grammar's scope name).
     Grammar { scope: String },
+    /// A file that is not open, read for replace `id` (FR-E7).
+    Replace { id: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -94,6 +97,12 @@ pub enum Input {
     FilesChanged(Vec<FileChange>),
     /// The highlighting worker finished a batch of jobs.
     Highlighted(HighlightOutput),
+    /// Search the workspace folder `folder` (FR-E7). A running search is cancelled first.
+    Search { id: u64, request: SearchRequest, folder: UriComponents },
+    /// Stop search `id`.
+    CancelSearch { id: u64 },
+    /// Replace the chosen matches (FR-E7); answered with [`SessionUpdate::ReplaceDone`].
+    Replace { id: u64, request: ReplaceRequest },
     /// Nothing happened; run due timers.
     Tick,
 }
@@ -154,6 +163,12 @@ pub enum SessionUpdate {
     ConnectionLost { reason: String },
     /// The problems list changed: every marker of every file, errors first.
     Problems { problems: Vec<crate::diagnostics::Problem> },
+    /// More matches of search `id` (FR-E7), in arrival order.
+    SearchHits { id: u64, files: Vec<FileHits> },
+    /// Search `id` ended; no hits for it follow.
+    SearchDone { id: u64, end: SearchEnd },
+    /// Replace `id` finished.
+    ReplaceDone { id: u64, report: ReplaceReport },
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +180,38 @@ enum Pending {
     /// `$activateByEvent("onCommand:<id>")` before running a command not registered yet.
     ActivateThenRun { command: CommandDto },
     Command { id: String },
+    /// `$provideTextSearchResults` of search `id`.
+    Search { id: u64 },
+}
+
+/// The running search: the window's id, the provider session, its call, and the open documents whose
+/// unsaved text was searched instead of the disk (their provider matches are dropped).
+#[derive(Debug, Clone)]
+struct ActiveSearch {
+    id: u64,
+    session: i64,
+    token: Token,
+    overlaid: HashSet<String>,
+}
+
+/// One replace in progress: what to replace, the matches per file key, files left, and the report so far.
+#[derive(Debug, Clone)]
+struct ReplaceJob {
+    request: ReplaceRequest,
+    targets: HashMap<String, Vec<Target>>,
+    remaining: usize,
+    report: ReplaceReport,
+}
+
+/// A file write of a replace: the job, the file, the counts it carries, and for an open document its
+/// extension-host version when the new text was made, and that text.
+#[derive(Debug, Clone)]
+struct ReplaceWrite {
+    id: u64,
+    key: String,
+    replaced: usize,
+    skipped: usize,
+    open: Option<(u64, String)>,
 }
 
 pub struct SessionCore {
@@ -187,6 +234,12 @@ pub struct SessionCore {
     ids: DecorationIds,
     pending: HashMap<Token, Pending>,
     saves: HashMap<Token, (String, u64, Vec<u8>)>,
+    /// Handle of the extension host's text search provider for the workspace's scheme (FR-E7).
+    search_provider: Option<i64>,
+    search_session: i64,
+    search: Option<ActiveSearch>,
+    replaces: HashMap<u64, ReplaceJob>,
+    replace_writes: HashMap<Token, ReplaceWrite>,
     next_token: Token,
     next_generation: u64,
     next_editor: u64,
@@ -230,6 +283,11 @@ impl SessionCore {
             ids: DecorationIds::new(),
             pending: HashMap::new(),
             saves: HashMap::new(),
+            search_provider: None,
+            search_session: 0,
+            search: None,
+            replaces: HashMap::new(),
+            replace_writes: HashMap::new(),
             next_token: 0,
             next_generation: 0,
             next_editor: 0,
@@ -256,6 +314,9 @@ impl SessionCore {
             Input::FileWritten { uri, token, result } => self.on_file_written(&uri, token, result),
             Input::FilesChanged(changes) => self.on_files_changed(changes),
             Input::Highlighted(output) => self.on_highlighted(output),
+            Input::Search { id, request, folder } => self.on_search(id, request, folder),
+            Input::CancelSearch { id } => self.on_cancel_search(id),
+            Input::Replace { id, request } => self.on_replace(id, request),
             Input::Tick => {}
         }
         self.run_timers();
@@ -647,6 +708,10 @@ impl SessionCore {
     }
 
     fn on_file_written(&mut self, uri: &UriComponents, token: Token, result: Result<(), String>) {
+        if let Some(write) = self.replace_writes.remove(&token) {
+            self.on_replace_written(uri, write, result);
+            return;
+        }
         let Some((key, ext_version, bytes)) = self.saves.remove(&token) else { return };
         match result {
             Ok(()) => {
@@ -947,6 +1012,23 @@ impl SessionCore {
                 }
                 self.respond(r.req, Ok(Reply::Empty));
             }
+            Ok(MainThreadCall::RegisterTextSearchProvider { handle, scheme }) => {
+                // The remote scheme wins over `file` should both ever be registered.
+                if scheme == ember_editor_conn::uri::SCHEME_REMOTE || (scheme == "file" && self.search_provider.is_none()) {
+                    self.search_provider = Some(handle);
+                }
+                self.respond(r.req, Ok(Reply::Empty));
+            }
+            Ok(MainThreadCall::UnregisterSearchProvider { handle }) => {
+                if self.search_provider == Some(handle) {
+                    self.search_provider = None;
+                }
+                self.respond(r.req, Ok(Reply::Empty));
+            }
+            Ok(MainThreadCall::HandleTextMatch { session, matches, .. }) => {
+                self.respond(r.req, Ok(Reply::Empty));
+                self.on_text_matches(session, matches);
+            }
             Ok(MainThreadCall::Other { proxy: Some("MainThreadDocuments"), method }) if method == "$tryOpenDocument" => {
                 self.on_try_open_document(&r);
             }
@@ -1080,6 +1162,7 @@ impl SessionCore {
                     tracing::warn!("ember-editor: command {id} failed: {e}");
                 }
             }
+            Pending::Search { id } => self.on_search_reply(id, result),
         }
     }
 
@@ -1114,6 +1197,211 @@ impl SessionCore {
             }
             ReadPurpose::ExtHostOpen { req } => self.finish_exthost_open(uri, req, result),
             ReadPurpose::Grammar { scope } => self.on_grammar_read(&scope, &uri, result),
+            ReadPurpose::Replace { id } => self.on_replace_read(id, uri, result),
+        }
+    }
+
+    // ---- search and replace (FR-E7) -----------------------------------------------------------
+
+    fn on_search(&mut self, id: u64, request: SearchRequest, folder: UriComponents) {
+        if let Some(old) = self.search.take() {
+            self.cancel(vec![old.token]);
+            self.ui(SessionUpdate::SearchDone { id: old.id, end: SearchEnd::Cancelled });
+        }
+        let Some(handle) = self.search_provider else {
+            self.ui(SessionUpdate::SearchDone { id, end: SearchEnd::Unavailable });
+            return;
+        };
+        let query = request.query(folder.clone());
+        // Open documents with unsaved edits are searched in their buffer, as Code-OSS does.
+        let mut overlaid = HashSet::new();
+        let mut local: Vec<FileHits> = Vec::new();
+        if let Ok(matcher) = crate::search::Matcher::new(&request.options) {
+            let excludes = query.effective_excludes();
+            let mut keys: Vec<&String> = self.docs.keys().collect();
+            keys.sort();
+            for key in keys {
+                let doc = &self.docs[key];
+                if !doc.is_dirty() {
+                    continue;
+                }
+                let Some(relative) = crate::search::relative_to(&folder.path, &doc.uri.path) else { continue };
+                if !crate::search::path_included(relative, &query.include, &excludes) {
+                    continue;
+                }
+                overlaid.insert(key.clone());
+                let hits = matcher.hits_in_lines(doc.lines());
+                if !hits.is_empty() {
+                    local.push(FileHits { uri: doc.uri.clone(), hits });
+                }
+            }
+        }
+        self.search_session += 1;
+        let session = self.search_session;
+        let token = self.rpc_with(ember_editor_conn::search::provide_text_search_results(handle, session, &query), Pending::Search { id });
+        self.search = Some(ActiveSearch { id, session, token, overlaid });
+        if !local.is_empty() {
+            self.ui(SessionUpdate::SearchHits { id, files: local });
+        }
+    }
+
+    fn on_cancel_search(&mut self, id: u64) {
+        if self.search.as_ref().is_some_and(|s| s.id == id) {
+            if let Some(s) = self.search.take() {
+                self.cancel(vec![s.token]);
+            }
+            self.ui(SessionUpdate::SearchDone { id, end: SearchEnd::Cancelled });
+        }
+    }
+
+    fn on_text_matches(&mut self, session: i64, matches: Vec<ember_editor_conn::search::FileMatch>) {
+        let Some(active) = self.search.as_ref().filter(|s| s.session == session) else { return };
+        let id = active.id;
+        let kept: Vec<_> = matches.into_iter().filter(|m| !active.overlaid.contains(&m.resource.key())).collect();
+        let files = crate::search::hits_from_matches(kept);
+        if !files.is_empty() {
+            self.ui(SessionUpdate::SearchHits { id, files });
+        }
+    }
+
+    fn on_search_reply(&mut self, id: u64, result: Result<Value, String>) {
+        if self.search.as_ref().is_some_and(|s| s.id == id) {
+            self.search = None;
+        }
+        let end = match result {
+            Ok(v) => SearchEnd::Complete { limit_hit: ember_editor_conn::search::SearchComplete::from_json(&v).limit_hit },
+            Err(e) if e.contains("Canceled") => SearchEnd::Cancelled,
+            Err(e) => SearchEnd::Failed(e),
+        };
+        self.ui(SessionUpdate::SearchDone { id, end });
+    }
+
+    fn on_replace(&mut self, id: u64, request: ReplaceRequest) {
+        let mut targets: HashMap<String, Vec<Target>> = HashMap::new();
+        let mut uris: Vec<UriComponents> = Vec::new();
+        for (uri, t) in &request.files {
+            if t.is_empty() {
+                continue;
+            }
+            let key = uri.key();
+            if !targets.contains_key(&key) {
+                uris.push(uri.clone());
+            }
+            targets.entry(key).or_default().extend(t.iter().copied());
+        }
+        if uris.is_empty() {
+            self.ui(SessionUpdate::ReplaceDone { id, report: ReplaceReport::default() });
+            return;
+        }
+        let job = ReplaceJob { request, targets, remaining: uris.len(), report: ReplaceReport::default() };
+        self.replaces.insert(id, job);
+        for uri in uris {
+            let key = uri.key();
+            match self.docs.get(&key) {
+                // An open document is replaced in its buffer, unsaved edits included (Code-OSS saves it after).
+                Some(doc) => {
+                    let (text, bom) = match decode(&doc.save_bytes()) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            self.replace_file_failed(id, &uri, e.to_string());
+                            continue;
+                        }
+                    };
+                    let version = doc.ext_version();
+                    self.replace_text(id, uri, &text, bom, Some(version));
+                }
+                None => self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::Replace { id } }),
+            }
+        }
+    }
+
+    fn on_replace_read(&mut self, id: u64, uri: UriComponents, result: Result<Vec<u8>, String>) {
+        if !self.replaces.contains_key(&id) {
+            return;
+        }
+        let decoded = result.and_then(|bytes| decode(&bytes).map_err(|e| e.to_string()));
+        match decoded {
+            Ok((text, bom)) => self.replace_text(id, uri, &text, bom, None),
+            Err(e) => self.replace_file_failed(id, &uri, e),
+        }
+    }
+
+    /// Replace in one file's text and write it; `open` is the open document's version the text came from.
+    fn replace_text(&mut self, id: u64, uri: UriComponents, text: &str, bom: bool, open: Option<u64>) {
+        let key = uri.key();
+        let Some(job) = self.replaces.get(&id) else { return };
+        let targets = job.targets.get(&key).cloned().unwrap_or_default();
+        match crate::search::replace_in_text(text, &job.request.options, &job.request.replacement, &targets) {
+            Ok(r) if r.replaced == 0 => {
+                if let Some(job) = self.replaces.get_mut(&id) {
+                    job.report.skipped += r.skipped;
+                }
+                self.replace_file_done(id);
+            }
+            Ok(r) => {
+                let mut bytes = Vec::with_capacity(r.text.len() + 3);
+                if bom {
+                    bytes.extend_from_slice("\u{feff}".as_bytes());
+                }
+                bytes.extend_from_slice(r.text.as_bytes());
+                let token = self.token();
+                let write = ReplaceWrite { id, key, replaced: r.replaced, skipped: r.skipped, open: open.map(|v| (v, r.text)) };
+                self.replace_writes.insert(token, write);
+                self.out.push(Effect::WriteFile { uri, bytes, token });
+            }
+            Err(e) => self.replace_file_failed(id, &uri, e),
+        }
+    }
+
+    fn on_replace_written(&mut self, uri: &UriComponents, write: ReplaceWrite, result: Result<(), String>) {
+        match result {
+            Ok(()) => {
+                if let Some(job) = self.replaces.get_mut(&write.id) {
+                    job.report.replaced += write.replaced;
+                    job.report.skipped += write.skipped;
+                    job.report.files += 1;
+                }
+                // The buffer takes the new text only now that it is on disk, and only if nobody typed meanwhile;
+                // otherwise the watcher reports the change like any other.
+                if let Some((version, text)) = write.open {
+                    if self.docs.get(&write.key).is_some_and(|d| d.ext_version() == version) {
+                        self.reset_doc(&write.key, &text, None);
+                        self.ui(SessionUpdate::Dirty { uri: uri.clone(), dirty: false });
+                        self.ui(SessionUpdate::Saved { uri: uri.clone() });
+                    }
+                }
+                self.replace_file_done(write.id);
+            }
+            Err(e) => {
+                if let Some(job) = self.replaces.get_mut(&write.id) {
+                    job.report.skipped += write.replaced + write.skipped;
+                    job.report.failures.push((uri.path.clone(), e));
+                }
+                self.replace_file_done(write.id);
+            }
+        }
+    }
+
+    fn replace_file_failed(&mut self, id: u64, uri: &UriComponents, error: String) {
+        if let Some(job) = self.replaces.get_mut(&id) {
+            job.report.skipped += job.targets.get(&uri.key()).map_or(0, Vec::len);
+            job.report.failures.push((uri.path.clone(), error));
+        }
+        self.replace_file_done(id);
+    }
+
+    fn replace_file_done(&mut self, id: u64) {
+        let finished = match self.replaces.get_mut(&id) {
+            Some(job) => {
+                job.remaining = job.remaining.saturating_sub(1);
+                job.remaining == 0
+            }
+            None => false,
+        };
+        if finished {
+            if let Some(job) = self.replaces.remove(&id) {
+                self.ui(SessionUpdate::ReplaceDone { id, report: job.report });
+            }
         }
     }
 

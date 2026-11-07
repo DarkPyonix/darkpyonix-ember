@@ -212,27 +212,7 @@ pub fn usage(now: i64) -> Vec<DailyUsage> {
 /// sample numbers. The cost stays unknown, as on the server.
 /// The Home GitHub card's sample in the demo (FR-L35). The card marks it (예시).
 pub fn github_state() -> crate::ui::home::GithubState {
-    use crate::ui::home::{CiResult as C, GithubConn, GithubRepo, GithubState, GithubTotals};
-    let repo = |name: &str, prs, rev, ci: Vec<C>| GithubRepo {
-        name_with_owner: name.into(),
-        default_branch: "main".into(),
-        open_prs: Some(prs),
-        review_requested: Some(rev),
-        ci: Some(ci),
-        error: None,
-        capped: false,
-    };
-    GithubState {
-        state: GithubConn::On,
-        reason: None,
-        account: Some("데모 계정".into()),
-        repos: vec![
-            repo("demo/ember", 4, 1, vec![C::Success, C::Success, C::Failure, C::Success]),
-            repo("demo/notes", 1, 0, vec![C::Success, C::Success, C::Success]),
-        ],
-        totals: GithubTotals { repos: Some(2), open_prs: Some(5), review_requested: Some(1), ci_pass_percent: Some(86.0) },
-        checked_at: None,
-    }
+    crate::ui::home::sample_github_state(crate::ui::home::GithubSampleKind::Ok)
 }
 
 pub fn usage_summary(now: i64) -> ember_client::api::UsageSummary {
@@ -547,6 +527,24 @@ fn ask(approval_id: &str, command: &str, description: &str) -> AgentEvent {
     }
 }
 
+/// A sample question marked 예시: answering it calls nothing (FR-T11).
+fn sample_question() -> AgentEvent {
+    use ember_client::wire::{Question, QuestionOption};
+    let opt = |l: &str, d: &str| QuestionOption { label: l.into(), description: Some(d.into()) };
+    AgentEvent::QuestionAsked {
+        question_id: "demo-question-1".into(),
+        questions: vec![Question {
+            id: "q0".into(),
+            header: Some("예시".into()),
+            text: "(예시) 링크 목록을 어떤 순서로 정리할까요?".into(),
+            options: vec![opt("가나다순", "제목 기준으로 정렬합니다."), opt("최근 수정순", "마지막 수정 시각 기준으로 정렬합니다.")],
+            multi_select: false,
+            secret: false,
+            allow_other: true,
+        }],
+    }
+}
+
 fn decided(approval_id: &str, decision: ApprovalDecision) -> AgentEvent {
     AgentEvent::ApprovalResolved {
         approval_id: approval_id.into(),
@@ -651,7 +649,10 @@ fn script_brief(id: &str, status: SessionStatus, prompt: &str, reply: &str, now:
             json!({ "command": "ls", "description": "List files" }),
         )),
         SessionStatus::WaitingForApproval => {
-            events.push(ask(&format!("demo-approval-{id}"), "git status", "Show the status"))
+            events.push(ask(&format!("demo-approval-{id}"), "git status", "Show the status"));
+            if id == "demo-s6" {
+                events.push(sample_question());
+            }
         }
         SessionStatus::Failed => {
             events.push(AgentEvent::Error {
@@ -939,6 +940,27 @@ impl DemoSource {
             AgentEvent::TurnEnded {
                 outcome: TurnOutcome::Completed,
             },
+        );
+    }
+
+    /// The user answered or skipped the sample question (FR-T11). Nothing leaves the process;
+    /// the sample has no secret question, and a secret value would be stored as `***` anyway.
+    pub fn answer_question(
+        &self,
+        client: &Client,
+        id: &str,
+        question_id: &str,
+        reply: &ember_client::api::QuestionReply,
+    ) {
+        let answers = match reply {
+            ember_client::api::QuestionReply::Answers(a) => a.clone(),
+            ember_client::api::QuestionReply::Skip => Vec::new(),
+        };
+        self.emit(
+            client,
+            id,
+            SessionStatus::WaitingForApproval,
+            AgentEvent::QuestionAnswered { question_id: question_id.into(), answers },
         );
     }
 
@@ -1710,6 +1732,10 @@ impl GitState {
                     .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                     .ok_or_else(|| GitError::bad("paths is required"))?;
                 for p in &paths {
+                    // The old name of a rename is part of that file here, as `git reset -- new old` treats it.
+                    if self.files.iter().any(|f| f.old_path.as_deref() == Some(p.as_str()) && f.path != *p) {
+                        continue;
+                    }
                     let f = self.find(p)?;
                     if op == "stage" {
                         let mut moved = std::mem::take(&mut f.unstaged);

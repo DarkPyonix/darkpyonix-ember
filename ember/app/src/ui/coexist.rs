@@ -216,9 +216,13 @@ impl SharedUi {
     }
 
     pub fn set_menu(&self, menu: NavMenu) {
+        let prev = self.menu.get_untracked();
         self.menu.set(menu);
         if let Some(mut m) = self.mirrors() {
             m.menu.set(menu);
+        }
+        if menu == NavMenu::Home && prev != NavMenu::Home && try_services().is_some() {
+            crate::bridge::request_github_summary();
         }
     }
 

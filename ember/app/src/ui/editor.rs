@@ -483,6 +483,8 @@ pub enum Side {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolWindow {
     Project,
+    /// Search across files and replace (FR-E7).
+    Search,
     Commit,
     Git,
     Agent,
@@ -493,8 +495,9 @@ pub enum ToolWindow {
 }
 
 impl ToolWindow {
-    pub const ALL: [ToolWindow; 8] = [
+    pub const ALL: [ToolWindow; 9] = [
         ToolWindow::Project,
+        ToolWindow::Search,
         ToolWindow::Commit,
         ToolWindow::Git,
         ToolWindow::Agent,
@@ -503,7 +506,7 @@ impl ToolWindow {
         ToolWindow::Run,
         ToolWindow::Problems,
     ];
-    pub const LEFT: [ToolWindow; 3] = [ToolWindow::Project, ToolWindow::Commit, ToolWindow::Git];
+    pub const LEFT: [ToolWindow; 4] = [ToolWindow::Project, ToolWindow::Search, ToolWindow::Commit, ToolWindow::Git];
     pub const RIGHT: [ToolWindow; 2] = [ToolWindow::Agent, ToolWindow::Notifications];
     pub const BOTTOM: [ToolWindow; 3] =
         [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems];
@@ -511,6 +514,7 @@ impl ToolWindow {
     pub fn label(self) -> &'static str {
         match self {
             ToolWindow::Project => "프로젝트",
+            ToolWindow::Search => "검색",
             ToolWindow::Commit => "커밋",
             ToolWindow::Git => "Git",
             ToolWindow::Agent => "에이전트",
@@ -523,7 +527,7 @@ impl ToolWindow {
 
     pub fn side(self) -> Side {
         match self {
-            ToolWindow::Project | ToolWindow::Commit | ToolWindow::Git => Side::Left,
+            ToolWindow::Project | ToolWindow::Search | ToolWindow::Commit | ToolWindow::Git => Side::Left,
             ToolWindow::Agent | ToolWindow::Notifications => Side::Right,
             ToolWindow::Terminal | ToolWindow::Run | ToolWindow::Problems => Side::Bottom,
         }
@@ -533,6 +537,7 @@ impl ToolWindow {
     pub fn action(self) -> Option<Action> {
         match self {
             ToolWindow::Project => Some(Action::Project),
+            ToolWindow::Search => Some(Action::FindInFiles),
             ToolWindow::Commit => Some(Action::Commit),
             ToolWindow::Git => Some(Action::Git),
             ToolWindow::Agent => Some(Action::Ask),
@@ -554,6 +559,7 @@ impl ToolWindow {
     pub fn icon(self) -> IconRole {
         match self {
             ToolWindow::Project => IconRole::Library,
+            ToolWindow::Search => IconRole::Search,
             ToolWindow::Commit => IconRole::Check,
             ToolWindow::Git => IconRole::History,
             ToolWindow::Agent => IconRole::Compose,
@@ -620,7 +626,7 @@ impl Stripes {
 pub fn is_implemented(action: Action) -> bool {
     // The right tool windows (agent, notifications) have no panel in the window yet: toggling one shows nothing.
     ToolWindow::from_action(action).is_some_and(|w| w.side() != Side::Right)
-        || matches!(action, Action::Close | Action::HideTool | Action::FindInFile)
+        || matches!(action, Action::Close | Action::HideTool | Action::FindInFile | Action::ReplaceInFiles)
 }
 
 /// Do what a keymap action does. Returns false for an action the editor cannot do yet (the
@@ -723,7 +729,7 @@ mod tests {
         for action in Action::ALL {
             // The palette, find and find-in-file open sheets and bars in the window: they are not
             // tab or tool window changes, so `apply_action` does not do them.
-            if matches!(action, Action::Palette | Action::Find | Action::FindInFile) {
+            if matches!(action, Action::Palette | Action::Find | Action::FindInFile | Action::ReplaceInFiles) {
                 continue;
             }
             let mut tabs = EditorTabs::default();

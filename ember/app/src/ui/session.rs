@@ -20,7 +20,8 @@
 //!   with their own buttons;
 //! - only three size classes (GAPS: 창 폭 레이아웃): expanded shows the side list as a column
 //!   and two panes per row; medium and compact use a sheet and one pane at a time;
-//! - no terminal data in the client: the 터미널 toggle says "준비 중입니다";
+//! - the Terminal toggle is read-only (`term_pane`) and says "no terminal" for a member until
+//!   there is a way to attach to an agent session's terminal (TODO(#325));
 //! - the server has no context, outputs, changes, PR, timeline or port APIs for a session.
 
 use std::collections::HashSet;
@@ -49,7 +50,6 @@ const NO_PROJECT: &str = "프로젝트가 없습니다";
 const NO_MEMBERS: &str = "표시할 팀원이 없습니다";
 const PICK_FROM_LIST: &str = "목록에서 팀원을 고르면 이 탭에 추가됩니다";
 const NO_CONVERSATION: &str = "아직 대화가 없습니다";
-const TERMINAL_SOON: &str = "터미널은 준비 중입니다";
 const MODEL_LOCKED: &str = "실행 중인 세션의 모델은 바꿀 수 없습니다";
 const WEB_LOADING: &str = "불러오는 중입니다";
 const WEB_EMPTY: &str = "열려 있는 웹 포트가 없습니다";
@@ -77,7 +77,21 @@ pub fn timeline_summary(demo: bool) -> &'static str {
 }
 
 pub const UI_STRINGS: &[&str] = &[
+    crate::ui::question::WITHDRAWN_LINE,
+    crate::ui::question::CARD_TITLE,
+    crate::ui::question::NEEDS_ANSWER,
+    crate::ui::question::SEND_LABEL,
+    crate::ui::question::SKIP_LABEL,
+    crate::ui::question::SKIP_CONFIRM_LABEL,
+    crate::ui::question::SKIP_CONFIRM_NOTE,
+    crate::ui::question::SECRET_ON_TERMINAL,
+    crate::ui::question::SECRET_ONLY_SKIP,
+    crate::ui::question::SAMPLE_NOTE,
+    crate::ui::question::SENT_WAITING,
+    crate::ui::question::ABANDONED_LINE,
     crate::ui::home::INTEGRATIONS_TITLE,
+    crate::ui::usage::LEGEND_COST,
+    crate::ui::usage::LEGEND_TOKENS,
     crate::ui::enrol_flow::NAME_HELP,
     crate::ui::enrol_flow::STDIN_NOTE,
     crate::ui::enrol_flow::STDIN_FORM_NOTE,
@@ -124,10 +138,14 @@ pub const UI_STRINGS: &[&str] = &[
     crate::ui::home::GITHUB_LOGIN_HINT,
     crate::ui::home::GITHUB_UNAVAILABLE_HINT,
     crate::ui::home::GITHUB_INSTALL_HINT,
+    crate::ui::home::GITHUB_SAMPLE_WARN_REASON,
+    crate::ui::home::GITHUB_SAMPLE_OFF_REASON,
     crate::ui::home::GITHUB_HOW,
     crate::ui::home::LATER_PILL,
     crate::ui::home::LATER_LINE,
-    crate::ui::home::ATTACH_UNSUPPORTED,
+    crate::ui::home::ATTACH_EMPTY,
+    crate::ui::home::ATTACH_INVALID,
+    crate::ui::home::ATTACH_HINT,
     SOON,
     crate::ui::agents::NOT_CHOSEN,
     crate::ui::agents::NO_ACCOUNTS,
@@ -144,7 +162,9 @@ pub const UI_STRINGS: &[&str] = &[
     NO_MEMBERS,
     PICK_FROM_LIST,
     NO_CONVERSATION,
-    TERMINAL_SOON,
+    crate::ui::term_pane::CONNECTING,
+    crate::ui::term_pane::NO_TERMINAL,
+    crate::ui::term_pane::FAILED,
     MODEL_LOCKED,
     WEB_LOADING,
     WEB_EMPTY,

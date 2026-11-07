@@ -1,10 +1,13 @@
-//! The team character screen (FR-L22, INTENT D29, #489): the catalog of the six styles, the
-//! 18-member team preview in the chosen style and the editor of one sample member.
+//! The team character screen (FR-L22, INTENT D29, #489), laid out as the mockup
+//! `characters.html`: the six styles as numbered sections of nine cells, the team preview with
+//! its style switch, and the editor of one member (a stage and a form).
 //!
 //! It is not a sidebar entry (D26, #503): it opens from the project settings sheet and has a
-//! back button. What is real: the project's style (read from the server, saved with the
-//! project API). What is a preview: the 18 members and the editor's name, harness, role, state
-//! and silhouette, which no storage holds yet (TODO(#489): per-member edits).
+//! back button (the mockup reaches it only from its design index). What is real: the project's
+//! style (read from the server, saved with the project API) and the members of the team
+//! preview (the project's sessions). What is a preview: the sample team of a project without
+//! members, and the editor's name, harness, role, style, state and silhouette, which no storage
+//! holds yet (TODO(#489): per-member edits).
 
 #![allow(non_snake_case)]
 
@@ -18,7 +21,7 @@ use super::components::{AppButton, ButtonKind, EmberField, FieldOptions, Label, 
 use super::theme::*;
 use crate::services::{run_shared, services};
 use crate::ui::characters::{
-    characters_project, harness_label, preview_team, state_label, style_apply_needed, supports_pin, team_cols,
+    characters_project, harness_label, state_label, style_apply_needed, supports_pin, team_cols, team_preview, with_topic,
     EDITOR_HARNESSES, EDITOR_ROLES, SILHOUETTES,
 };
 use crate::ui::coexist::shared_ui;
@@ -64,24 +67,16 @@ fn Grid<T>(items: &[T], cols: usize, gap: f32, mut cell: impl FnMut(&T)) {
     });
 }
 
-fn Card(content: impl FnOnce()) {
-    let p = ember_theme().palette;
-    cu::Column()
-        .spacing(SP[2])
-        .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[3]))
-        .content(content);
-}
-
 fn Section(title: &str, note: &str, preview: bool, content: impl FnOnce()) {
     let p = ember_theme().palette;
     cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
         cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
-            Label(title, Fs::Lg, Weight::Semibold, None, Some(1));
+            Label(title, Fs::Xl, Weight::Semibold, None, Some(1));
             if preview {
                 Pill("미리보기", PillTone::Grey, true);
             }
         });
-        Label(note, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+        Label(note, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
         content();
     });
 }
@@ -107,11 +102,48 @@ fn spec(style: CharStyle, name: &str, agent: &str, role: &str, state: CharState,
     }
 }
 
+/// One catalog cell (`.cell`): the character on a card with its caption.
+fn Cell(spec: &CharSpec, caption: &str) {
+    let p = ember_theme().palette;
+    cu::Column()
+        .alignment(Alignment::TopCenter)
+        .spacing(6.0)
+        .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[2]))
+        .content(|| {
+            draw(spec, 64.0);
+            Label(caption, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+        });
+}
+
+/// One numbered style section of the catalog (mockup `#cands`): the five states, the three
+/// harnesses and the leader crown, nine cells.
+fn StyleSection(index: usize, style: CharStyle, cols: usize) {
+    let p = ember_theme().palette;
+    cu::Column().spacing(6.0).modifier(Modifier::new().fill_max_width()).content(|| {
+        cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).content(|| {
+            Label(&format!("{}. {}", index + 1, style.label()), Fs::Xl, Weight::Semibold, None, Some(1));
+            Pill(style.id(), PillTone::Grey, true);
+        });
+        Label(style.blurb(), Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+        let mut cells: Vec<(CharSpec, &str)> = CharState::ALL
+            .iter()
+            .map(|&s| (spec(style, "ember-리더", "claude", "리뷰어", s, false, None), state_label(s)))
+            .collect();
+        for (i, (id, _)) in EDITOR_HARNESSES.iter().enumerate() {
+            cells.push((spec(style, "core-구현", id, ["테스터", "디자인", "문서"][i], CharState::Idle, false, None), harness_label(id)));
+        }
+        cells.push((spec(style, "ember-리더", "claude", "리더", CharState::Done, true, None), "리더 왕관"));
+        Grid(&cells, cols, SP[2], |(s, label)| Cell(s, label));
+    });
+}
+
 pub fn CharactersScreen() {
     let ui = shared_ui().clone();
     let p = ember_theme().palette;
     let width = compose_rust::runtime::current_window_size().width_dp;
     let compact = width <= 560.0;
+    let wide = width > 1000.0;
+    let cols = team_cols(width);
     let asked = ui.characters.get().unwrap_or_default();
     let svc = crate::services::try_services();
     let names: Vec<String> = svc.as_ref().map(|s| s.client.read(|st| st.projects().into_iter().map(|v| v.name).collect())).unwrap_or_default();
@@ -119,8 +151,22 @@ pub fn CharactersScreen() {
     let project_name = project.clone().unwrap_or_default();
     let server = svc.as_ref().and_then(|s| s.client.read(|st| st.project(&project_name).and_then(|pr| pr.character_style.clone())));
     let current = effective_style(server.as_deref(), ui.prefs.get().saved_character_style(&project_name));
+    // The project's real members, for the team preview (sessions of the project).
+    let members = svc
+        .as_ref()
+        .map(|s| {
+            s.client.read(|st| {
+                crate::ui::project::project_boxes(st)
+                    .into_iter()
+                    .find(|b| b.id == project_name)
+                    .map(|b| b.members)
+                    .unwrap_or_default()
+            })
+        })
+        .unwrap_or_default();
+    let team = team_preview(&project_name, &members);
 
-    // The chosen style starts as the project's own; a pick only previews until it is applied.
+    // The team style starts as the project's own; a switch only previews until it is applied.
     let chosen = remember(|| mutable_state_of(None::<CharStyle>));
     let style = chosen.get().unwrap_or(current);
     let saving = remember(|| mutable_state_of(false));
@@ -128,11 +174,12 @@ pub fn CharactersScreen() {
     let ed_name = remember(|| mutable_state_of("ember-리더".to_string()));
     let ed_harness = remember(|| mutable_state_of(0usize));
     let ed_role = remember(|| mutable_state_of(0usize));
+    let ed_style = remember(|| mutable_state_of(None::<CharStyle>));
     let ed_state = remember(|| mutable_state_of(CharState::Idle));
     let ed_pin = remember(|| mutable_state_of(None::<usize>));
 
     cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-        cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+        cu::Column().spacing(SP[5]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
             // Back to where it was opened from; no sidebar entry (D26).
             cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                 let u = ui.clone();
@@ -142,37 +189,45 @@ pub fn CharactersScreen() {
                     cu::Spacer().modifier(Modifier::new().width(super::project::PHONE_MENU_ROOM));
                 }
             });
-            cu::Column().spacing(4.0).modifier(Modifier::new().fill_max_width()).content(|| {
-                Label("팀 캐릭터", if compact { Fs::Xl2 } else { Fs::Xl3 }, Weight::Medium, None, Some(1));
+            cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                Label("팀 캐릭터", if compact { Fs::Xl } else { Fs::Xl2 }, Weight::Regular, None, Some(1));
+                Label(LEAD, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
                 let sub = match &project {
-                    Some(n) => format!("{n} 프로젝트의 팀원은 모두 고른 스타일로 보입니다. 모양과 색은 팀원 이름과 하네스로 정해집니다."),
+                    Some(n) => format!("{n} 프로젝트의 스타일은 {}입니다.", current.label()),
                     None => "프로젝트가 아직 없어 기본 스타일로 보여 드립니다.".to_string(),
                 };
                 Label(&sub, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
             });
 
-            // 1. The catalog.
-            Section("스타일 여섯 가지", "하나를 누르면 아래 미리보기가 바뀝니다. 프로젝트에 쓰려면 적용하세요", false, || {
-                let cols = if width > 1000.0 { 3 } else { 2 };
-                Grid(&CharStyle::ALL, cols, SP[2], |&s| {
-                    Card(|| {
-                        cu::Column().alignment(Alignment::TopCenter).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                            draw(&spec(s, "ember-리더", "claude", "리뷰어", CharState::Idle, false, None), 64.0);
-                            Label(s.label(), Fs::Md, Weight::Semibold, None, Some(1));
-                            Label(s.blurb(), Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(3));
-                            let c = chosen.clone();
+            // 1. The catalog: one numbered section per style.
+            for (i, s) in CharStyle::ALL.iter().copied().enumerate() {
+                StyleSection(i, s, cols);
+            }
+
+            // 2. The team preview with its style switch and the apply button.
+            let team_note = if team.sample {
+                "이 프로젝트에 아직 팀원이 없어 예시 팀원 18명을 고른 스타일로 그립니다. 리더에게는 왕관이 붙고, 기본 프로젝트에는 리더가 없습니다".to_string()
+            } else {
+                format!("{} 프로젝트의 팀원을 고른 스타일로 그립니다. 리더에게는 왕관이 붙고, 기본 프로젝트에는 리더가 없습니다", project_name)
+            };
+            Section("팀 미리보기", &team_note, team.sample, || {
+                // `.segx`: six style buttons; a phone puts three on a line.
+                let per_line = if compact { 3 } else { CharStyle::ALL.len() };
+                for line in CharStyle::ALL.chunks(per_line) {
+                    cu::Row().spacing(6.0).alignment(Alignment::CenterStart).content(|| {
+                        for &s in line {
+                            let (c, m) = (chosen.clone(), message.clone());
+                            // TODO(compose-rust#473): no pressed state for a screen reader (aria-pressed).
                             let kind = if s == style { ButtonKind::Primary } else { ButtonKind::Default };
-                            let text = if s == current { "현재 스타일" } else if s == style { "선택됨" } else { "보기" };
-                            let m = message.clone();
-                            AppButton(text, None, kind, true, true, false, move || {
+                            AppButton(s.label(), None, kind, true, true, false, move || {
                                 c.set(Some(s));
                                 m.set(None);
                             });
-                        });
+                        }
                     });
-                });
+                }
                 let needed = style_apply_needed(current, style);
-                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                     let (pr, sv, ms) = (project.clone(), saving.clone(), message.clone());
                     AppButton(
                         if saving.get() { "저장 중" } else { "이 프로젝트에 적용" },
@@ -189,6 +244,7 @@ pub fn CharactersScreen() {
                     );
                     let note = match &project {
                         None => "적용할 프로젝트가 없습니다".to_string(),
+                        Some(_) if !needed => format!("{} 이미 이 프로젝트의 스타일입니다", with_topic(style.label())),
                         Some(n) => format!("{n}의 현재 스타일은 {}입니다", current.label()),
                     };
                     Label(&note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
@@ -196,54 +252,44 @@ pub fn CharactersScreen() {
                 if let Some(m) = message.get() {
                     Label(&m, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
                 }
-            });
-
-            // 2. The chosen style across states and harnesses.
-            Section(&format!("{}의 상태와 하네스", style.label()), "상태는 정지한 자세로 보입니다. 리더에게는 왕관이 붙습니다", true, || {
-                let mut cells: Vec<(CharSpec, &str)> = CharState::ALL
-                    .iter()
-                    .map(|&s| (spec(style, "ember-리더", "claude", "리뷰어", s, false, None), state_label(s)))
-                    .collect();
-                for (i, (id, _)) in EDITOR_HARNESSES.iter().enumerate() {
-                    cells.push((spec(style, "core-구현", id, ["테스터", "디자인", "문서"][i], CharState::Idle, false, None), harness_label(id)));
-                }
-                cells.push((spec(style, "ember-리더", "claude", "리더", CharState::Done, true, None), "리더 왕관"));
-                Card(|| {
-                    Grid(&cells, team_cols(width), SP[2], |(s, label)| {
-                        draw(s, 56.0);
-                        Label(label, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+                cu::Column()
+                    .spacing(SP[3])
+                    .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[4]))
+                    .content(|| {
+                        Grid(&team.cells, cols, SP[3], |m| {
+                            draw(&spec(style, &m.name, &m.agent, m.role.as_deref().unwrap_or(""), m.state, m.crown, None), 64.0);
+                            Label(&m.name, Fs::Xs, Weight::Semibold, None, Some(1));
+                            Label(harness_label(&m.agent), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        });
+                        if team.more > 0 {
+                            Label(&format!("외 {}명", team.more), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        }
                     });
-                });
             });
 
-            // 3. The team preview.
-            Section(&format!("팀 미리보기 ({})", style.label()), "예시 팀원 18명을 고른 스타일로 그립니다. 이 프로젝트의 실제 팀원이 아닙니다. 기본 프로젝트에는 리더가 없습니다", true, || {
-                let team = preview_team();
-                Card(|| {
-                    Grid(&team, team_cols(width), SP[3], |m| {
-                        draw(&spec(style, &m.name(), m.agent, m.role, m.state, m.crown(), None), 56.0);
-                        Label(&m.name(), Fs::Xs, Weight::Semibold, None, Some(1));
-                        Label(harness_label(m.agent), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    });
-                });
-            });
-
-            // 4. The editor.
-            Section("편집기", "이름을 바꾸면 캐릭터가 바뀝니다. 팀원별 수정은 아직 저장되지 않고, 이 화면에서만 보입니다", true, || {
+            // 3. The editor: a stage and a form side by side (one column up to 1000 dp).
+            Section("편집기", "이름을 바꾸면 캐릭터가 바뀝니다. 말랑과 키링은 실루엣을 고정할 수 있습니다. 팀원별 수정은 아직 저장되지 않고 이 화면에서만 보입니다", true, || {
                 let name = ed_name.get();
                 let shown_name = if name.trim().is_empty() { "이름 없음".to_string() } else { name.trim().to_string() };
                 let (agent_id, _) = EDITOR_HARNESSES[ed_harness.get().min(EDITOR_HARNESSES.len() - 1)];
                 let role = EDITOR_ROLES[ed_role.get().min(EDITOR_ROLES.len() - 1)];
-                let pin = if supports_pin(style) { ed_pin.get() } else { None };
-                Card(|| {
-                    cu::Column().alignment(Alignment::TopCenter).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        draw(&spec(style, &shown_name, agent_id, role, ed_state.get(), role == "리더", pin), 160.0);
-                        cu::Row().spacing(SP[1]).content(|| {
-                            for suffix in ["-2", "-리뷰", "-테스트", "-문서", "-조사"] {
-                                draw(&spec(style, &format!("{shown_name}{suffix}"), agent_id, &suffix[1..], CharState::Idle, false, pin), 36.0);
-                            }
+                let ed_v = ed_style.get().unwrap_or(style);
+                let pin = if supports_pin(ed_v) { ed_pin.get() } else { None };
+                let stage = || {
+                    cu::Column()
+                        .alignment(Alignment::Center)
+                        .spacing(SP[3])
+                        .modifier(Modifier::new().fill_max_width().height(if compact { 300.0 } else { 320.0 }).background(paint(p.surface_2)).corner_radius(CORNER_MD))
+                        .content(|| {
+                            draw(&spec(ed_v, &shown_name, agent_id, role, ed_state.get(), role == "리더", pin), if compact { 160.0 } else { 200.0 });
+                            cu::Row().spacing(10.0).content(|| {
+                                for suffix in ["-2", "-리뷰", "-테스트", "-문서", "-조사"] {
+                                    draw(&spec(ed_v, &format!("{shown_name}{suffix}"), agent_id, &suffix[1..], CharState::Idle, false, pin), 44.0);
+                                }
+                            });
                         });
-                    });
+                };
+                let name_field = || {
                     FieldRow("이름", || {
                         let n = ed_name.clone();
                         EmberField(FieldOptions {
@@ -254,43 +300,102 @@ pub fn CharactersScreen() {
                             ..Default::default()
                         });
                     });
+                };
+                // TODO(compose-rust#473): the Select trigger is a Clickable with no accessible
+                // name; the visible label above it names it for sighted users only.
+                let harness_field = || {
                     FieldRow("하네스", || {
                         let labels: Vec<String> = EDITOR_HARNESSES.iter().map(|(_, l)| l.to_string()).collect();
                         let at = ed_harness.get().min(labels.len() - 1);
                         let h = ed_harness.clone();
                         Select(&labels[at], &labels, at, 260.0, move |i| h.set(i));
                     });
+                };
+                let role_field = || {
                     FieldRow("역할", || {
                         let labels: Vec<String> = EDITOR_ROLES.iter().map(|r| r.to_string()).collect();
                         let at = ed_role.get().min(labels.len() - 1);
                         let r = ed_role.clone();
                         Select(&labels[at], &labels, at, 260.0, move |i| r.set(i));
                     });
-                    FieldRow("상태", || {
-                        cu::Row().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
-                            for s in CharState::ALL {
-                                let st = ed_state.clone();
-                                let kind = if ed_state.get() == s { ButtonKind::Primary } else { ButtonKind::Default };
-                                AppButton(state_label(s), None, kind, true, true, false, move || st.set(s));
-                            }
-                        });
+                };
+                let style_field = || {
+                    FieldRow("스타일", || {
+                        let labels: Vec<String> = CharStyle::ALL.iter().map(|s| s.label().to_string()).collect();
+                        let at = CharStyle::ALL.iter().position(|&s| s == ed_v).unwrap_or(0);
+                        let v = ed_style.clone();
+                        Select(&labels[at], &labels, at, 260.0, move |i| v.set(CharStyle::ALL.get(i).copied()));
                     });
+                };
+                let pin_field = || {
                     FieldRow("실루엣 고정", || {
-                        if supports_pin(style) {
+                        if supports_pin(ed_v) {
                             let mut labels = vec!["자동 (이름이 정합니다)".to_string()];
                             labels.extend(SILHOUETTES.iter().map(|s| s.to_string()));
                             let at = pin.map(|i| i + 1).unwrap_or(0);
                             let pn = ed_pin.clone();
                             Select(&labels[at], &labels, at, 260.0, move |i| pn.set(i.checked_sub(1)));
                         } else {
-                            Label(&format!("{}은 실루엣을 고정할 수 없습니다. 말랑과 키링에서 고를 수 있습니다", style.label()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                            Label(&format!("{} 실루엣을 고정할 수 없습니다", with_topic(ed_v.label())), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                         }
                     });
-                });
+                };
+                let state_field = || {
+                    FieldRow("상태", || {
+                        let per_line = if compact { 3 } else { CharState::ALL.len() };
+                        for line in CharState::ALL.chunks(per_line) {
+                            cu::Row().spacing(6.0).content(|| {
+                                for &s in line {
+                                    let st = ed_state.clone();
+                                    let kind = if ed_state.get() == s { ButtonKind::Primary } else { ButtonKind::Default };
+                                    AppButton(state_label(s), None, kind, true, true, false, move || st.set(s));
+                                }
+                            });
+                        }
+                    });
+                };
+                let form = || {
+                    cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        name_field();
+                        if compact {
+                            harness_field();
+                            role_field();
+                            style_field();
+                            pin_field();
+                        } else {
+                            Pair(harness_field, role_field);
+                            Pair(style_field, pin_field);
+                        }
+                        state_field();
+                    });
+                };
+                let card = Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[5]);
+                if wide {
+                    cu::Row().spacing(SP[5]).alignment(Alignment::CenterStart).modifier(card).content(|| {
+                        cu::Column().modifier(Modifier::new().weight(1.0)).content(stage);
+                        cu::Column().modifier(Modifier::new().weight(1.2)).content(form);
+                    });
+                } else {
+                    cu::Column().spacing(SP[5]).modifier(card).content(|| {
+                        stage();
+                        form();
+                    });
+                }
             });
         });
     });
 }
+
+/// Two form fields side by side, equal width (`.ed-form` two columns).
+fn Pair(a: impl FnOnce(), b: impl FnOnce()) {
+    cu::Row().spacing(SP[3]).alignment(Alignment::TopStart).modifier(Modifier::new().fill_max_width()).content(|| {
+        cu::Column().modifier(Modifier::new().weight(1.0)).content(a);
+        cu::Column().modifier(Modifier::new().weight(1.0)).content(b);
+    });
+}
+
+/// The mockup's lead paragraph (`.lead`).
+const LEAD: &str = "팀(프로젝트)을 만들 때 캐릭터 스타일 여섯 가지 중 하나를 고릅니다. 고른 스타일은 그 팀의 모든 팀원에게 적용됩니다. 모양과 색은 팀원 이름과 하네스로 정해지므로 같은 팀원은 어디서나 같은 모습입니다. 하네스는 앱 팔레트의 색 계열(Claude 주황, Codex 파랑, Gemini 하늘)을 따릅니다. 상태는 아직 움직임 대신 정지한 자세로 보입니다.";
 
 #[cfg(test)]
 mod tests {
@@ -314,6 +419,130 @@ mod tests {
         assert!(text.contains("미리보기"));
         assert!(text.contains("편집기"));
         assert!(text.contains("뒤로"));
+    }
+
+    #[test]
+    fn fr_l22_the_catalog_is_six_numbered_sections_of_nine_cells() {
+        let _guard = crate::services::test_guard();
+        let text = rendered();
+        for (i, s) in CharStyle::ALL.iter().enumerate() {
+            let heading = format!("{}. {}", i + 1, s.label());
+            assert!(text.contains(&heading), "missing {heading}");
+            assert!(text.contains(s.id()), "missing the id pill {}", s.id());
+        }
+        // Each section ends with the crown cell, so six of them.
+        assert_eq!(text.matches("리더 왕관").count(), 6);
+        for want in ["팀 미리보기", "이 프로젝트에 적용", "이름", "하네스", "역할", "스타일", "실루엣 고정", "상태"] {
+            assert!(text.contains(want), "missing {want}");
+        }
+    }
+
+    #[test]
+    fn fr_l22_team_cells_draw_the_project_members_or_the_labelled_sample() {
+        let _guard = crate::services::test_guard();
+        let svc = crate::services::try_services().expect("test services");
+        let ui = shared_ui();
+        let names: Vec<String> = svc.client.read(|st| st.projects().into_iter().map(|v| v.name).collect());
+        let asked = ui.characters.get_untracked().unwrap_or_default();
+        let project = characters_project(&asked, ui.selected_project.get_untracked().as_deref(), &names).unwrap_or_default();
+        let members = svc.client.read(|st| {
+            crate::ui::project::project_boxes(st).into_iter().find(|b| b.id == project).map(|b| b.members).unwrap_or_default()
+        });
+        let text = rendered();
+        if members.is_empty() {
+            assert!(text.contains("예시 팀원 18명"), "a project without members says the team is a sample");
+        } else {
+            assert!(text.contains("프로젝트의 팀원을 고른 스타일로 그립니다"));
+            assert!(text.contains(&members[0].name), "missing the member {}", members[0].name);
+            assert!(!text.contains("예시 팀원 18명"));
+        }
+    }
+
+    fn texts_of<'a>(batch: &'a [compose_rust::protocol::Mutation<'a>]) -> Vec<(u32, &'a str)> {
+        use compose_rust::protocol::{Mutation, PropertyValue};
+        use compose_rust::PropertyKind;
+        batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => Some((*node_id, *s)),
+                Mutation::SetText { node_id, text, .. } => Some((*node_id, *text)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fr_l22_every_button_on_the_screen_has_a_name() {
+        use compose_rust::protocol::Mutation;
+        use compose_rust::WidgetKind;
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(CharactersScreen)));
+        let batch = compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let texts = texts_of(&batch);
+        let buttons: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create { node_id, widget: WidgetKind::Button } => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert!(!buttons.is_empty());
+        for b in buttons {
+            let name = texts.iter().find(|(n, _)| *n == b).map(|(_, t)| *t).unwrap_or("");
+            assert!(!name.trim().is_empty(), "button {b} has no name");
+        }
+    }
+
+    /// The latest text and click handler of every node across batches.
+    #[derive(Default)]
+    struct Nodes {
+        text: std::collections::HashMap<u32, String>,
+        click: std::collections::HashMap<u32, u64>,
+    }
+
+    impl Nodes {
+        fn take(&mut self, batch: &[compose_rust::protocol::Mutation<'_>]) {
+            use compose_rust::protocol::{Mutation, PropertyValue};
+            use compose_rust::PropertyKind;
+            for (n, t) in texts_of(batch) {
+                self.text.insert(n, t.to_string());
+            }
+            for m in batch {
+                if let Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } = m {
+                    self.click.insert(*node_id, *h as u64);
+                }
+            }
+        }
+
+        fn button(&self, name: &str) -> (u32, u64) {
+            self.click
+                .iter()
+                .find(|(n, _)| self.text.get(n).is_some_and(|t| t == name))
+                .map(|(n, h)| (*n, *h))
+                .unwrap_or_else(|| panic!("no {name} button with a click handler"))
+        }
+    }
+
+    #[test]
+    fn fr_l22_the_team_style_switch_redraws_the_editor_style() {
+        use compose_rust::protocol::HostEvent;
+        use compose_rust::EventPayload;
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(CharactersScreen)));
+        let mut nodes = Nodes::default();
+        nodes.take(&compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+        // Two clicks, so the second one changes the style whatever the project's style is.
+        let mut last = Vec::new();
+        for name in ["크루", "포켓"] {
+            let (node_id, handler_id) = nodes.button(name);
+            let (bytes, _) = host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch");
+            let batch = compose_rust::protocol::decode_batch(bytes).expect("decode");
+            last = texts_of(&batch).into_iter().map(|(n, t)| (n, t.to_string())).collect::<Vec<_>>();
+            nodes.take(&batch);
+            last.retain(|(n, _)| *n != node_id);
+        }
+        // The editor's style select follows the team style until it is picked on its own.
+        assert!(last.iter().any(|(_, t)| t == "포켓"), "the editor style did not change to 포켓: {last:?}");
     }
 
     #[test]

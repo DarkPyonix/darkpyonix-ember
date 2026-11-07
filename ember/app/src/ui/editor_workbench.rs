@@ -1430,10 +1430,10 @@ pub mod page {
                         {icon_px("chev-dn", 12)} {icon_px("folder", 15)} span { class: "ellipsis", b { "{root_name}" } }
                     }
                     if let Some(badge) = clip_badge {
-                        div { class: "ed-tn", style: "--d:0; padding-left:20px; gap:6px; background:var(--surface-2);",
-                            span { class: "ed-sc", "{badge}" }
+                        div { class: "ed-tn", style: "--d:0; padding:0 var(--sp2); background:var(--surface-2);",
+                            span { class: "ed-sc", style: "flex:none;", "{badge}" }
                             div { class: "spacer" }
-                            button { class: "ed-sc", title: "붙여넣기", "aria-label": "붙여넣기", style: "cursor:pointer; color:var(--text); flex-shrink:0;", onclick: move |event| {
+                            button { class: "ed-sc", title: "붙여넣기", "aria-label": "붙여넣기", style: "flex:none; cursor:pointer; color:var(--text);", onclick: move |event| {
                                 event.stop_propagation();
                                 let clip = tree_clipboard.read().clone();
                                 if let Some(clip) = clip {

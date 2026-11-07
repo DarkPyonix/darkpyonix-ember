@@ -72,6 +72,7 @@ ember/server/scripts/real-server-smoke.sh steps            # print the manual st
 ember/server/scripts/real-server-smoke.sh status           # processes, computers, sessions, channels
 ember/server/scripts/real-server-smoke.sh app              # restart the app only
 ember/server/scripts/real-server-smoke.sh server-restart   # restart the server only, keeping its data
+ember/server/scripts/real-server-smoke.sh server-update    # replace the server while shims run (FR-S8, #128)
 ember/server/scripts/real-server-smoke.sh down             # stop app, server, node and the session agents
 ember/server/scripts/real-server-smoke.sh reset            # down, then delete the live run directory
 ```
@@ -107,6 +108,7 @@ failed. The app is not started.
 | `@@beta` in alpha's message reaches beta as an `[ember a2a]` message | FR-T6, FR-T3 |
 | A channel with both sessions; a post with `@beta` reaches beta, a post without a mention reaches no agent; both are in the channel log | FR-T10, FR-T12 |
 | After a server restart both sessions and alpha's whole transcript are there, and alpha runs a new turn | FR-S2, FR-S3 |
+| Three `claude-code` sessions running under `ember-shim` survive stopping and updating/restarting the server mid-turn: all three agent PIDs stay alive while the server is down, the new server rejoins all three shims at startup, and all 30 ticks per session complete in order without loss (`EMBER_SERVER_UPDATE_BIN` optionally points at the updated server binary) | FR-S8 (#128) |
 | The project is assigned to the node computer | FR-L4 |
 
 `check` cannot prove: push over the WebSocket (the app shows it), a real model's streaming, an
@@ -128,9 +130,12 @@ steps:
 3. **Approval.** In alpha: `Run the shell command date and tell me what it printed.` A Bash
    approval card appears; allow once, and the result follows. Ask again and deny. In gamma any
    message gives an approval card without a model call.
-4. **Survives an app restart.** Run `real-server-smoke.sh app`; reopen alpha and find the whole
-   transcript and the right status. Optionally `real-server-smoke.sh server-restart`, then ask
-   alpha `What did I ask you first?` (native resume).
+4. **Survives an app restart and server update.** Run `real-server-smoke.sh app`; reopen alpha and
+   find the whole transcript and the right status. Optionally `real-server-smoke.sh server-restart`,
+   then ask alpha `What did I ask you first?` (native resume). While a streaming turn is running in
+   alpha and beta, run `real-server-smoke.sh server-update` (optionally with
+   `EMBER_SERVER_UPDATE_BIN` set): it verifies each shim and agent PID stays alive while the server
+   is down and that the new server rejoins the active turns (`FR-S8`, #128).
 5. **A2A between two sessions.** In alpha: `@@beta Reply to alpha with the single word PONG using
    ember-a2a, then stop.` beta gets an `[ember a2a]` message from alpha and alpha gets the reply.
 6. **Channel post.** In `smoke-room`: `@beta say hello in this channel with channel_post`. Only beta

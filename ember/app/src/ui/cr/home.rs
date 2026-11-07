@@ -20,7 +20,7 @@ pub use crate::ui::home::{
     project_options, project_tile_line, resolve_cwd, shortcut_label, split_chip_rows,
     success_percent, title_from_message, CrewMember, Dash, Harness, HarnessBar, Kpi, ModelOption,
     ModeRow, PermMode, ProjectTile, Selection, StatusCounts, ATTACH_UNSUPPORTED, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
-    EMPTY_CREW, EMPTY_HARNESS_USAGE, CiResult, GithubCard, GithubPill, INTEGRATIONS_TITLE, LATER_INTEGRATIONS, LATER_LINE, LATER_PILL, GITHUB_NAME, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
+    EMPTY_CREW, EMPTY_HARNESS_USAGE, CiResult, GithubCard, GithubPill, GithubSampleKind, INTEGRATIONS_TITLE, LATER_INTEGRATIONS, LATER_LINE, LATER_PILL, GITHUB_NAME, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
 };
 use super::components::{
     AppButton, ButtonKind, Clickable, EmberField, EmberSheet, FieldOptions, FilterChip, Label,
@@ -487,6 +487,12 @@ pub fn HomeScreen() {
     let ui = shared_ui().clone();
     let _ = ui.live.launcher.get();
     let dash = services().client.read(crate::ui::home::read_dash);
+
+    // Initial fetch each time Home is shown again (force = true, FR-L35, #621).
+    let _requested = remember(|| {
+        crate::bridge::request_github_summary();
+        0u8
+    });
 
     // The lists are modals; they sit beside the scroller so no parent's spacing counts them.
     let composer = remember(|| Composer::new());
@@ -1265,15 +1271,13 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
 fn IntegrationsArea() {
     let p = ember_theme().palette;
     let s = services();
-    let _requested = remember(|| {
-        crate::bridge::request_github_summary();
-        0u8
-    });
     let demo = s.demo.is_some();
     let fetched = s.ui.live.github.get();
-    let sample = demo.then(crate::demo::github_state);
-    let card = GithubCard::from_state(if demo { sample.as_ref() } else { fetched.state() });
-    let header_line = if demo { crate::ui::home::sample_header(&card.header_line) } else { card.header_line.clone() };
+    let hook_sample = crate::ui::home::github_sample_from_env();
+    let is_sample = demo || hook_sample.is_some();
+    let sample = hook_sample.or_else(|| demo.then(crate::demo::github_state));
+    let card = GithubCard::from_state(if is_sample { sample.as_ref() } else { fetched.state() });
+    let header_line = if is_sample { crate::ui::home::sample_header(&card.header_line) } else { card.header_line.clone() };
     let guidance = remember(|| mutable_state_of(false));
     cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
         Label(INTEGRATIONS_TITLE, Fs::Lg, Weight::Semibold, None, Some(1));

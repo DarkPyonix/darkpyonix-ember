@@ -212,27 +212,7 @@ pub fn usage(now: i64) -> Vec<DailyUsage> {
 /// sample numbers. The cost stays unknown, as on the server.
 /// The Home GitHub card's sample in the demo (FR-L35). The card marks it (예시).
 pub fn github_state() -> crate::ui::home::GithubState {
-    use crate::ui::home::{CiResult as C, GithubConn, GithubRepo, GithubState, GithubTotals};
-    let repo = |name: &str, prs, rev, ci: Vec<C>| GithubRepo {
-        name_with_owner: name.into(),
-        default_branch: "main".into(),
-        open_prs: Some(prs),
-        review_requested: Some(rev),
-        ci: Some(ci),
-        error: None,
-        capped: false,
-    };
-    GithubState {
-        state: GithubConn::On,
-        reason: None,
-        account: Some("데모 계정".into()),
-        repos: vec![
-            repo("demo/ember", 4, 1, vec![C::Success, C::Success, C::Failure, C::Success]),
-            repo("demo/notes", 1, 0, vec![C::Success, C::Success, C::Success]),
-        ],
-        totals: GithubTotals { repos: Some(2), open_prs: Some(5), review_requested: Some(1), ci_pass_percent: Some(86.0) },
-        checked_at: None,
-    }
+    crate::ui::home::sample_github_state(crate::ui::home::GithubSampleKind::Ok)
 }
 
 pub fn usage_summary(now: i64) -> ember_client::api::UsageSummary {

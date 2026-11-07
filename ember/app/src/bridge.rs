@@ -278,35 +278,29 @@ pub fn request_usage_summary() {
     s.spawn(async move { fetch_usage_summary(services()).await });
 }
 
-/// Minimum gap between two timer reads of the GitHub card (the server caches for 90 s).
-const GITHUB_MIN_GAP: Duration = Duration::from_secs(90);
+pub use crate::ui::home::{should_fetch_github, should_poll_github, GITHUB_MIN_GAP};
 static GITHUB_LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
-/// Whether the timer may read the GitHub card now (FR-G13): only while Home is shown, never in
-/// the demo, and not before the server cache time has passed since the last read.
-pub fn should_poll_github(route_is_home: bool, last_fetch_age: Option<Duration>, min_gap: Duration, demo: bool) -> bool {
-    route_is_home && !demo && last_fetch_age.is_none_or(|a| a >= min_gap)
-}
-
-/// Ask for the GitHub card now (Home opened, FR-L35). Not in the demo, which shows a sample.
+/// Ask for the GitHub card now (Home opened or shown again, FR-L35, #621). Not in the demo, which shows a sample.
 pub fn request_github_summary() {
     let s = services();
-    if s.demo.is_some() {
+    if s.demo.is_some() || crate::ui::home::github_sample_from_env().is_some() {
         return;
     }
     s.spawn(async move { fetch_github(services(), true).await });
 }
 
 /// Read `GET /api/integrations/github`. The timer passes `force = false` and is held to the
-/// server cache time. A failed call keeps the last answer.
+/// server cache time (90 s). When `force = true` (Home opened or shown again), the fetch runs at once,
+/// ignoring the cooldown. A failed call keeps the last answer.
 async fn fetch_github(s: &'static Services, force: bool) {
-    if s.demo.is_some() {
+    if s.demo.is_some() || crate::ui::home::github_sample_from_env().is_some() {
         return;
     }
     {
         let mut last = GITHUB_LAST.lock().unwrap_or_else(|e| e.into_inner());
         let home = s.ui.menu.get_untracked() == crate::ui::shell::NavMenu::Home;
-        if !force && !should_poll_github(home, last.map(|t| t.elapsed()), GITHUB_MIN_GAP, false) {
+        if !should_fetch_github(force, home, last.map(|t| t.elapsed()), GITHUB_MIN_GAP, false) {
             return;
         }
         *last = Some(std::time::Instant::now());

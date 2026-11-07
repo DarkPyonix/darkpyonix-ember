@@ -240,6 +240,17 @@ pub struct NewSchedule {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SchedulePatch {
     #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// For `new` sessions: `Some("")` clears `computer_id` to `None` (this server).
+    #[serde(default)]
+    pub computer: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub target: Option<ScheduleTarget>,
+    #[serde(default)]
     pub prompt: Option<String>,
     #[serde(default)]
     pub kind: Option<ScheduleKind>,
@@ -531,8 +542,97 @@ impl Scheduler {
 
     pub fn update(&self, id: &str, patch: SchedulePatch) -> Result<Schedule, ScheduleError> {
         let current = self.get(id)?;
+        let project = match &patch.project {
+            Some(p) => {
+                let p = p.trim();
+                if p.is_empty() {
+                    return Err(bad("project must not be empty"));
+                }
+                p.to_string()
+            }
+            None => current.project.clone(),
+        };
         if patch.prompt.as_deref().is_some_and(|p| p.trim().is_empty()) {
             return Err(bad("prompt must not be empty"));
+        }
+        if matches!(current.target, ScheduleTarget::Continue { .. })
+            && matches!(patch.target, Some(ScheduleTarget::New { .. }))
+            && patch.cwd.as_deref().is_none_or(|c| c.trim().is_empty())
+            && current.cwd.as_deref().is_none_or(|c| c.trim().is_empty())
+        {
+            return Err(bad(
+                "cannot convert a continue-session schedule to a new-session schedule without cwd",
+            ));
+        }
+        let target = patch.target.clone().unwrap_or_else(|| current.target.clone());
+        let (agent, computer_id, cwd) = match &target {
+            ScheduleTarget::Continue { session_id } => {
+                if patch.computer.is_some() || patch.cwd.is_some() {
+                    return Err(bad(
+                        "account, computer and cwd apply to new sessions only; a continued session keeps its own",
+                    ));
+                }
+                let rec = self
+                    .sessions
+                    .store()
+                    .session(session_id)?
+                    .ok_or_else(|| bad(format!("session {session_id} not found")))?;
+                if rec.project != project {
+                    return Err(bad(format!("session {session_id} is not in project {project:?}")));
+                }
+                if let Some(a) = patch.agent.as_deref() {
+                    if AgentKind::parse(a) != Some(rec.agent) {
+                        return Err(bad(format!(
+                            "session {session_id} runs {}, not {a}",
+                            rec.agent.as_str()
+                        )));
+                    }
+                }
+                (rec.agent, None, None)
+            }
+            ScheduleTarget::New { .. } => {
+                let agent = match patch.agent.as_deref() {
+                    Some(a) => AgentKind::parse(a).ok_or_else(|| bad(format!("unknown agent {a}")))?,
+                    None => current.agent,
+                };
+                let computer_id = match &patch.computer {
+                    Some(c) => {
+                        let c = c.trim();
+                        if c.is_empty() || c == "local" {
+                            None
+                        } else {
+                            Some(c.to_string())
+                        }
+                    }
+                    None => current.computer_id.clone(),
+                };
+                let cwd = match &patch.cwd {
+                    Some(c) => {
+                        let c = c.trim();
+                        if c.is_empty() {
+                            return Err(bad("cwd is required for schedules that start new sessions"));
+                        }
+                        Some(c.to_string())
+                    }
+                    None => {
+                        if current.cwd.as_deref().is_none_or(|c| c.trim().is_empty()) {
+                            return Err(bad("cwd is required for schedules that start new sessions"));
+                        }
+                        current.cwd.clone()
+                    }
+                };
+                (agent, computer_id, cwd)
+            }
+        };
+        if project != current.project {
+            let count: i64 = self.conn().query_row(
+                "SELECT COUNT(*) FROM schedules WHERE project = ?1",
+                params![project],
+                |r| r.get(0),
+            )?;
+            if count as usize >= MAX_SCHEDULES_PER_PROJECT {
+                return Err(bad(format!("project {project:?} already has {MAX_SCHEDULES_PER_PROJECT} schedules")));
+            }
         }
         let now = self.now();
         let (kind, anchor, next) = match &patch.kind {
@@ -543,11 +643,17 @@ impl Scheduler {
             None => (current.kind.clone(), current.anchor_at, current.next_run_at),
         };
         self.conn().execute(
-            "UPDATE schedules SET prompt = COALESCE(?2, prompt), kind = ?3, catch_up = COALESCE(?4, catch_up),
-                 anchor_at = ?5, next_run_at = ?6, updated_at = ?7
+            "UPDATE schedules SET project = ?2, agent = ?3, computer_id = ?4, cwd = ?5, target = ?6,
+                 prompt = COALESCE(?7, prompt), kind = ?8, catch_up = COALESCE(?9, catch_up),
+                 anchor_at = ?10, next_run_at = ?11, updated_at = ?12
              WHERE id = ?1",
             params![
                 id,
+                project,
+                agent.as_str(),
+                computer_id,
+                cwd,
+                serde_json::to_string(&target).map_err(anyhow::Error::from)?,
                 patch.prompt,
                 serde_json::to_string(&kind).map_err(anyhow::Error::from)?,
                 patch.catch_up,

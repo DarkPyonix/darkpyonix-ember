@@ -1997,7 +1997,7 @@ pub fn pr_detail_view(d: &GitPrDetail) -> PrDetailView {
         number: pr.number,
         title: pr.title.clone(),
         state_text: pr_state_text(pr.state),
-        body_lines: d.body.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).take(PR_BODY_LINES).map(String::from).collect(),
+        body_lines: clean_body(&d.body).lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).take(PR_BODY_LINES).map(String::from).collect(),
         author: pr.author.clone(),
         head: pr.head.clone(),
         base: pr.base.clone(),
@@ -2060,6 +2060,56 @@ pub const MERGE_NO_HEAD: &str = "헤드를 확인할 수 없어 병합할 수 �
 /// The first line of the armed merge: the method is squash.
 pub const MERGE_METHOD_TEXT: &str = "스쿼시로 병합합니다";
 
+/// Labels for the merge method chips.
+pub fn pr_merge_method_label(method: GitPrMergeMethod) -> &'static str {
+    match method {
+        GitPrMergeMethod::Squash => "스쿼시",
+        GitPrMergeMethod::Merge => "병합 커밋",
+        GitPrMergeMethod::Rebase => "리베이스",
+    }
+}
+
+/// All available merge methods in UI display order.
+pub const PR_MERGE_METHODS: [GitPrMergeMethod; 3] = [
+    GitPrMergeMethod::Squash,
+    GitPrMergeMethod::Merge,
+    GitPrMergeMethod::Rebase,
+];
+
+/// Text explaining how the pull request will be merged based on the chosen method.
+pub fn merge_method_text(method: GitPrMergeMethod) -> &'static str {
+    match method {
+        GitPrMergeMethod::Squash => MERGE_METHOD_TEXT,
+        GitPrMergeMethod::Merge => "병합 커밋을 만들어 병합합니다",
+        GitPrMergeMethod::Rebase => "리베이스하여 병합합니다",
+    }
+}
+
+/// Toggle label for deleting the branch after merge.
+pub const PR_DELETE_BRANCH_LABEL: &str = "병합 후 브랜치 삭제";
+
+/// Honest note explaining branch deletion (#572 finding 3).
+pub const PR_DELETE_BRANCH_NOTE: &str = "원격 브랜치를 삭제합니다. 작업 중인 브랜치인 경우 로컬 브랜치도 함께 삭제되고 기본 브랜치로 전환될 수 있습니다.";
+
+/// The note shown when an author tries to approve their own pull request.
+pub const PR_SELF_APPROVAL_DISALLOWED: &str = "본인이 연 풀 리퀘스트는 직접 승인할 수 없습니다.";
+
+/// Whether the signed-in GitHub account is allowed to approve the pull request.
+/// An author cannot approve their own pull request.
+pub fn can_approve_pr(author: &str, signed_in: Option<&str>) -> Result<(), &'static str> {
+    fn clean(s: &str) -> &str {
+        s.trim().trim_start_matches('@').trim()
+    }
+    let author_clean = clean(author);
+    if let Some(user) = signed_in {
+        let user_clean = clean(user);
+        if !author_clean.is_empty() && !user_clean.is_empty() && author_clean.eq_ignore_ascii_case(user_clean) {
+            return Err(PR_SELF_APPROVAL_DISALLOWED);
+        }
+    }
+    Ok(())
+}
+
 /// The label of the merge button; the armed second tap reads "정말 병합합니다".
 pub fn merge_button_text(armed: bool) -> &'static str {
     if armed { "정말 병합합니다" } else { "병합" }
@@ -2092,10 +2142,36 @@ pub fn pr_create_gate(title: &str) -> Result<(), &'static str> {
     }
 }
 
+/// Format markdown bullet lines (`- item`, `* item`) to `• item` and strip raw `# ` heading markers.
+fn format_markdown_line(line: &str) -> String {
+    let trimmed_start = line.trim_start();
+    let indent = &line[..line.len() - trimmed_start.len()];
+    if let Some(rest) = trimmed_start.strip_prefix("- ") {
+        return format!("{indent}\u{2022} {rest}");
+    }
+    if let Some(rest) = trimmed_start.strip_prefix("* ") {
+        return format!("{indent}\u{2022} {rest}");
+    }
+    if trimmed_start.starts_with('#') {
+        let hashes = trimmed_start.chars().take_while(|&c| c == '#').count();
+        if hashes > 0 && trimmed_start[hashes..].starts_with(' ') {
+            let after_hashes = trimmed_start[hashes..].trim_start();
+            return format!("{indent}{after_hashes}");
+        }
+    }
+    line.to_string()
+}
+
 /// A review or description body without control characters, except newline and tab. Pasted
-/// text can carry escapes; the node and the host should never see them.
+/// text can carry escapes; the node and the host should never see them. Formats markdown
+/// bullet lines (`- item`, `* item`) to bullet points (`• `) and strips raw `# ` heading markers.
 pub fn clean_body(body: &str) -> String {
-    body.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect()
+    let filtered: String = body.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect();
+    filtered
+        .split('\n')
+        .map(format_markdown_line)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The key of the review draft: the project and the selected pull request, so a draft typed
@@ -2182,9 +2258,9 @@ pub fn pr_review_body(number: u64, action: GitPrReviewAction, body: &str) -> Val
     json!({ "number": number, "action": action, "body": non_empty(&clean_body(body)), "confirm": true })
 }
 
-/// The `pr/merge` body (squash by default; the branch stays). `head_sha` is the head the user saw.
-pub fn pr_merge_body(number: u64, method: GitPrMergeMethod, head_sha: &str) -> Value {
-    json!({ "number": number, "method": method, "delete_branch": false, "head_sha": head_sha, "confirm": true })
+/// The `pr/merge` body. `head_sha` is the head the user saw.
+pub fn pr_merge_body(number: u64, method: GitPrMergeMethod, delete_branch: bool, head_sha: &str) -> Value {
+    json!({ "number": number, "method": method, "delete_branch": delete_branch, "head_sha": head_sha, "confirm": true })
 }
 
 /// The `pr/create` body; an empty base or head is left to the node.
@@ -2207,11 +2283,11 @@ pub async fn run_pr_review(project: &str, number: u64, action: GitPrReviewAction
 }
 
 /// Merge. `Ok` is the notice to show, `Err` the Korean line (a closed gate or a moved head answers 409).
-pub async fn run_pr_merge(project: &str, number: u64, method: GitPrMergeMethod, head_sha: &str) -> Result<String, String> {
+pub async fn run_pr_merge(project: &str, number: u64, method: GitPrMergeMethod, delete_branch: bool, head_sha: &str) -> Result<String, String> {
     if head_sha.trim().is_empty() {
         return Err(MERGE_NO_HEAD.to_string());
     }
-    git_call::<Value>(project, "pr/merge", pr_merge_body(number, method, head_sha))
+    git_call::<Value>(project, "pr/merge", pr_merge_body(number, method, delete_branch, head_sha))
         .await
         .map(|_| "병합했습니다".to_string())
         .map_err(|e| korean_failure("병합", &e))
@@ -5004,7 +5080,7 @@ rename to new.txt
 
     #[test]
     fn fr_g11_merge_body_carries_the_head_sha() {
-        let body = pr_merge_body(7, GitPrMergeMethod::Squash, A_HEAD);
+        let body = pr_merge_body(7, GitPrMergeMethod::Squash, false, A_HEAD);
         assert_eq!(body["head_sha"], json!(A_HEAD));
         assert_eq!(body["confirm"], json!(true));
     }
@@ -5088,7 +5164,8 @@ rename to new.txt
     fn fr_g11_the_request_bodies_confirm_and_trim() {
         assert_eq!(pr_review_body(7, GitPrReviewAction::RequestChanges, " 고쳐 주세요 "), json!({ "number": 7, "action": "request_changes", "body": "고쳐 주세요", "confirm": true }));
         assert_eq!(pr_review_body(7, GitPrReviewAction::Approve, ""), json!({ "number": 7, "action": "approve", "body": null, "confirm": true }));
-        assert_eq!(pr_merge_body(7, GitPrMergeMethod::Squash, "abc"), json!({ "number": 7, "method": "squash", "delete_branch": false, "head_sha": "abc", "confirm": true }));
+        assert_eq!(pr_merge_body(7, GitPrMergeMethod::Squash, false, "abc"), json!({ "number": 7, "method": "squash", "delete_branch": false, "head_sha": "abc", "confirm": true }));
+        assert_eq!(pr_merge_body(7, GitPrMergeMethod::Merge, true, "def"), json!({ "number": 7, "method": "merge", "delete_branch": true, "head_sha": "def", "confirm": true }));
         assert_eq!(pr_review_notice(GitPrReviewAction::Approve), "승인했습니다");
     }
 
@@ -5182,6 +5259,49 @@ rename to new.txt
         let gate = ApiError::Status { status: 409, message: "CI 체크가 실패했습니다.".into(), code: None };
         assert_eq!(korean_failure("병합", &gate), "CI 체크가 실패했습니다.");
         assert!(!korean_failure("병합", &ApiError::Peer("refused".into())).contains("refused"));
+    }
+
+    #[test]
+    fn fr_g11_merge_method_choice_and_delete_branch_note() {
+        assert_eq!(pr_merge_method_label(GitPrMergeMethod::Squash), "스쿼시");
+        assert_eq!(pr_merge_method_label(GitPrMergeMethod::Merge), "병합 커밋");
+        assert_eq!(pr_merge_method_label(GitPrMergeMethod::Rebase), "리베이스");
+
+        assert_eq!(merge_method_text(GitPrMergeMethod::Squash), "스쿼시로 병합합니다");
+        assert_eq!(merge_method_text(GitPrMergeMethod::Merge), "병합 커밋을 만들어 병합합니다");
+        assert_eq!(merge_method_text(GitPrMergeMethod::Rebase), "리베이스하여 병합합니다");
+
+        assert_eq!(PR_DELETE_BRANCH_LABEL, "병합 후 브랜치 삭제");
+        assert!(PR_DELETE_BRANCH_NOTE.contains("원격 브랜치를 삭제합니다"));
+        assert!(PR_DELETE_BRANCH_NOTE.contains("로컬 브랜치도 함께 삭제되고 기본 브랜치로 전환될 수 있습니다"));
+    }
+
+    #[test]
+    fn fr_g11_can_approve_pr_blocks_self_approval() {
+        // Same author and signed-in account: blocked.
+        assert_eq!(can_approve_pr("alice", Some("alice")), Err(PR_SELF_APPROVAL_DISALLOWED));
+        // Case-insensitive.
+        assert_eq!(can_approve_pr("Alice", Some("alice")), Err(PR_SELF_APPROVAL_DISALLOWED));
+        assert_eq!(can_approve_pr("alice", Some("ALICE")), Err(PR_SELF_APPROVAL_DISALLOWED));
+        // Trims leading @ and whitespace.
+        assert_eq!(can_approve_pr("@alice", Some("alice")), Err(PR_SELF_APPROVAL_DISALLOWED));
+        assert_eq!(can_approve_pr("alice", Some("@alice")), Err(PR_SELF_APPROVAL_DISALLOWED));
+        assert_eq!(can_approve_pr("  @Alice  ", Some("  alice  ")), Err(PR_SELF_APPROVAL_DISALLOWED));
+
+        // Different user: allowed.
+        assert_eq!(can_approve_pr("alice", Some("bob")), Ok(()));
+        // Not signed in: allowed.
+        assert_eq!(can_approve_pr("alice", None), Ok(()));
+        // Empty author or empty signed-in: allowed.
+        assert_eq!(can_approve_pr("", Some("alice")), Ok(()));
+        assert_eq!(can_approve_pr("alice", Some("")), Ok(()));
+    }
+
+    #[test]
+    fn fr_g11_clean_body_formats_markdown_bullets_and_headings() {
+        let input = "# Heading 1\n## Heading 2\n- first item\n* second item\n  - nested\n  * nested star\n#tag\n-notbullet\nplain text";
+        let expected = "Heading 1\nHeading 2\n\u{2022} first item\n\u{2022} second item\n  \u{2022} nested\n  \u{2022} nested star\n#tag\n-notbullet\nplain text";
+        assert_eq!(clean_body(input), expected);
     }
 
     // ---- merge banner and pick-all (FR-G16, FR-G17, FR-G7, #382) ----

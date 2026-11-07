@@ -429,13 +429,25 @@ while True: s.accept()[0].close()' "$D" "$@"
     let file = PathBuf::from(arg_after(&v, "--connection-token-file"));
     assert!(file.starts_with(root.join("local").join("tokens")), "{file:?}");
     assert!(!v.iter().any(|a| a == "--connection-token"), "{v:?}");
-    assert!(!v.iter().any(|a| a.contains(&first.connection_token)), "token in argv: {v:?}");
+    let real_token = std::fs::read_to_string(dir.path().join("start-token.txt")).unwrap();
+    assert_eq!(real_token.len(), 64);
+    assert!(!v.iter().any(|a| a.contains(&real_token)), "real token in argv: {v:?}");
+    assert!(!v.iter().any(|a| a.contains(&first.connection_token)), "placeholder token in argv: {v:?}");
     assert_eq!(first.connection_token.len(), 64);
-    assert_eq!(std::fs::read_to_string(dir.path().join("start-token.txt")).unwrap(), first.connection_token);
+    assert_ne!(
+        first.connection_token, real_token,
+        "C2 (#458, #461): the returned connection_token is a placeholder, never the real token"
+    );
+    assert!(
+        first.relay.as_deref().unwrap_or("").starts_with("/api/computers/local/ide/relay/"),
+        "relay missing: {:?}",
+        first.relay
+    );
     assert_eq!(std::fs::read_to_string(dir.path().join("start-mode.txt")).unwrap(), "600 700");
     assert_eq!(mode(&file), 0o600);
     assert_eq!(mode(&root.join("local").join("tokens")), 0o700);
     assert_eq!(second.connection_token, first.connection_token, "the running process is reused");
+    assert_eq!(second.relay, first.relay);
     assert_eq!(second.endpoint, first.endpoint);
     drop(m);
     let deadline = std::time::Instant::now() + Duration::from_secs(5);

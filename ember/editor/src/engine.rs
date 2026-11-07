@@ -154,9 +154,11 @@ pub enum SessionUpdate {
     Saved { uri: UriComponents },
     SaveFailed { uri: UriComponents, error: String },
     ExternalChange { uri: UriComponents, change: ExternalChange },
-    /// A command neither the extension host nor Ember implements (a workbench command such as
+    /// Acommand neither the extension host nor Ember implements (a workbench command such as
     /// `editor.action.showReferences`); the UI may handle it or ignore it.
     RunCommand { command: CommandDto },
+    /// An extension command execution failed (`$executeContributedCommand`).
+    CommandFailed { id: String, error: String },
     /// The widget and the session disagree about the document (lost event, bad range). The UI
     /// should call `EditorSession::resync` (re-sends the session's text as a new generation).
     Desync { uri: UriComponents, error: String },
@@ -1165,8 +1167,9 @@ impl SessionCore {
                 }
             }
             Pending::Command { id } => {
-                if let Err(e) = result {
-                    tracing::warn!("ember-editor: command {id} failed: {e}");
+                if let Err(error) = result {
+                    tracing::warn!("ember-editor: command {id} failed: {error}");
+                    self.ui(SessionUpdate::CommandFailed { id, error });
                 }
             }
             Pending::Search { id } => self.on_search_reply(id, result),

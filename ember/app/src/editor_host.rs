@@ -302,7 +302,11 @@ impl EditorHost {
                         Some(HostCommand::Focus(path)) => { let _ = session.focus(session.uri(&path)); }
                         Some(HostCommand::Widget(uri, generation, event)) => { let _ = session.widget_event(uri, generation, event); }
                         Some(HostCommand::Resync(uri)) => { let _ = session.resync(uri); }
-                        Some(HostCommand::ExecuteCommand(id)) => { let _ = session.execute_command(id, Vec::new()); }
+                        Some(HostCommand::ExecuteCommand(id)) => {
+                            if let Err(error) = session.execute_command(id.clone(), Vec::new()) {
+                                shared.lock().unwrap().edit_errors.push(format!("명령 {id}을(를) 실행하지 못했습니다: {error}"));
+                            }
+                        }
                         None => break,
                     },
                     update = updates.recv() => match update {

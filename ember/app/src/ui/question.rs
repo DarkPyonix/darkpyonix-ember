@@ -25,6 +25,70 @@ pub const SENT_WAITING: &str = "답을 보냈습니다. 에이전트의 응답�
 pub const SKIPPED_LINE: &str = "건너뜀";
 pub const ABANDONED_LINE: &str = "답하지 않고 끝났습니다";
 pub const SECRET_STARS: &str = "***";
+pub const WITHDRAWN_LINE: &str = "에이전트가 이 질문을 거두었습니다";
+pub const CARD_TITLE: &str = "에이전트의 질문";
+pub const NEEDS_ANSWER: &str = "답 필요";
+pub const SEND_LABEL: &str = "보내기";
+pub const SKIP_LABEL: &str = "건너뛰기";
+pub const SKIP_CONFIRM_LABEL: &str = "정말 건너뛰기";
+pub const SKIP_CONFIRM_NOTE: &str = "이 질문을 거절하고 건너뜁니다. 다시 누르면 보내게 됩니다";
+/// Seconds after which a first tap on 건너뛰기 is forgotten.
+pub const SKIP_CONFIRM_SECS: u64 = 5;
+/// Characters of a question text or an option label the card shows before an ellipsis.
+pub const SHOWN_CHARS_MAX: usize = 300;
+
+/// Every fixed sentence and title of the card, for the NFR-L4 check.
+pub const STRINGS: &[&str] = &[
+    WITHDRAWN_LINE,
+    CARD_TITLE,
+    NEEDS_ANSWER,
+    SEND_LABEL,
+    SKIP_LABEL,
+    SKIP_CONFIRM_LABEL,
+    SKIP_CONFIRM_NOTE,
+    SKIPPED_LINE,
+    OTHER_PLACEHOLDER,
+];
+
+/// The two-tap skip (a skip tells the agent "declined"): the first tap asks, the second sends.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SkipStep {
+    #[default]
+    Idle,
+    Confirm,
+}
+
+impl SkipStep {
+    /// A tap on 건너뛰기: the new step and whether to send now.
+    pub fn tap(self) -> (SkipStep, bool) {
+        match self {
+            SkipStep::Idle => (SkipStep::Confirm, false),
+            SkipStep::Confirm => (SkipStep::Idle, true),
+        }
+    }
+
+    /// Changing an option or the text, or five seconds passing, forgets the first tap.
+    pub fn reset(self) -> SkipStep {
+        SkipStep::Idle
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SkipStep::Idle => SKIP_LABEL,
+            SkipStep::Confirm => SKIP_CONFIRM_LABEL,
+        }
+    }
+}
+
+/// `text` cut to `SHOWN_CHARS_MAX` characters with an ellipsis (on a character boundary).
+pub fn shown(text: &str) -> String {
+    if text.chars().count() <= SHOWN_CHARS_MAX {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(SHOWN_CHARS_MAX).collect();
+    out.push('\u{2026}');
+    out
+}
 
 /// What the person has picked or typed so far, per question id.
 #[derive(Clone, Default, PartialEq)]
@@ -207,6 +271,11 @@ pub const DEBUG_SAMPLE_ID: &str = "demo-question-debug";
 
 /// `EMBER_CR_QUESTION=single|multi|secret|answered`: a sample question item for review
 /// captures, in debug builds only. Marked 예시 and never sent anywhere.
+/// `EMBER_CR_QUESTION_FIRST=1` puts the sample before the approvals, so a narrow capture shows it.
+pub fn debug_first(value: Option<&str>, debug_build: bool) -> bool {
+    debug_build && value == Some("1")
+}
+
 pub fn debug_sample(hook: Option<&str>, debug_build: bool, seq: i64) -> Option<TranscriptItem> {
     use ember_client::transcript::QuestionState;
     use ember_client::wire::QuestionOption;
@@ -390,6 +459,63 @@ mod tests {
         for k in ["single", "multi", "secret", "answered"] {
             assert!(matches!(debug_sample(Some(k), true, 9), Some(TranscriptItem::Question { seq: 9, .. })));
         }
+    }
+
+    #[test]
+    fn fr_t11_question_skip_needs_a_second_tap() {
+        let (step, send) = SkipStep::Idle.tap();
+        assert_eq!((step, send), (SkipStep::Confirm, false));
+        assert_eq!(step.label(), "정말 건너뛰기");
+        assert_eq!(step.reset(), SkipStep::Idle);
+        assert_eq!(SkipStep::Idle.label(), "건너뛰기");
+        let (step, send) = step.tap();
+        assert_eq!((step, send), (SkipStep::Idle, true));
+        assert!(SKIP_CONFIRM_NOTE.contains("다시 누르면 보내게 됩니다"));
+        assert_eq!(SKIP_CONFIRM_SECS, 5);
+    }
+
+    #[test]
+    fn fr_t11_question_text_is_capped_with_an_ellipsis() {
+        let long = "가".repeat(SHOWN_CHARS_MAX + 50);
+        let s = shown(&long);
+        assert_eq!(s.chars().count(), SHOWN_CHARS_MAX + 1);
+        assert!(s.ends_with('\u{2026}'));
+        let exact = "나".repeat(SHOWN_CHARS_MAX);
+        assert_eq!(shown(&exact), exact);
+        assert_eq!(shown("짧음"), "짧음");
+    }
+
+    #[test]
+    fn fr_t11_question_debug_first_is_debug_only() {
+        assert!(debug_first(Some("1"), true));
+        assert!(!debug_first(Some("1"), false));
+        assert!(!debug_first(None, true));
+        assert!(!debug_first(Some("0"), true));
+    }
+
+    #[test]
+    fn nfr_l4_question_card_text_has_plain_endings() {
+        use ember_client::api::QuestionCallError as E;
+        let errors = [E::Gone, E::Invalid, E::NoAgent, E::NotOwner, E::Unsupported, E::Failed].map(E::text_ko);
+        for s in STRINGS.iter().copied().chain(errors) {
+            let t = s.trim().trim_end_matches('.');
+            assert!(
+                !t.ends_with('다')
+                    || t.ends_with("입니다")
+                    || t.ends_with("합니다")
+                    || t.ends_with("습니다")
+                    || t.ends_with("됩니다"),
+                "{t}"
+            );
+            assert!(!t.contains('\u{2014}'), "{t}");
+        }
+    }
+
+    #[test]
+    fn fr_l5_question_card_height_makes_room_for_every_option() {
+        let qs = vec![q("q0", false, false, true)];
+        // 3 options + the text field + the question line, 44 each, plus the frame.
+        assert_eq!(estimate_height(&qs, true), 120.0 + 44.0 * 5.0);
     }
 
     #[test]

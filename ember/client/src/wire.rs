@@ -84,6 +84,9 @@ pub enum AgentEvent {
     /// A question was answered (`answers` empty: skipped). Values of a secret question arrive as
     /// `***`; the client never holds the typed secret after sending it.
     QuestionAnswered { question_id: String, #[serde(default)] answers: Vec<QuestionAnswer> },
+    /// The agent withdrew an approval or a question that was still waiting (server
+    /// `PromptWithdrawn`). Nothing can be answered for `prompt_id` any more.
+    PromptWithdrawn { prompt_id: String },
     /// An event kind this client does not know yet. Ignored by the reducer.
     #[serde(other)]
     Unknown,

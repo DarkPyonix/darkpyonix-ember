@@ -45,6 +45,8 @@ pub enum ApprovalState {
     Resolved(ApprovalDecision),
     /// The turn ended without an answer (e.g. interrupted); it can no longer be answered.
     Abandoned,
+    /// The agent withdrew the request; it can no longer be answered.
+    Withdrawn,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -56,6 +58,8 @@ pub enum QuestionState {
     Skipped,
     /// The turn ended without an answer; it can no longer be answered.
     Abandoned,
+    /// The agent withdrew the question; it can no longer be answered.
+    Withdrawn,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,6 +213,18 @@ impl Transcript {
                     *state = ApprovalState::Resolved(*decision);
                 }
             }
+            AgentEvent::PromptWithdrawn { prompt_id } => {
+                if let Some(TranscriptItem::Approval { state: s @ ApprovalState::Pending, .. }) =
+                    self.approval_index.get(prompt_id).and_then(|&i| self.items.get_mut(i))
+                {
+                    *s = ApprovalState::Withdrawn;
+                }
+                if let Some(TranscriptItem::Question { state: s @ QuestionState::Pending, .. }) =
+                    self.question_index.get(prompt_id).and_then(|&i| self.items.get_mut(i))
+                {
+                    *s = QuestionState::Withdrawn;
+                }
+            }
             AgentEvent::QuestionAsked { question_id, questions } => {
                 self.end_stream();
                 self.question_index.insert(question_id.clone(), self.items.len());
@@ -220,10 +236,14 @@ impl Transcript {
                 });
             }
             AgentEvent::QuestionAnswered { question_id, answers } => {
+                // Only a pending card moves: a late event never revives an abandoned or
+                // withdrawn one.
                 if let Some(TranscriptItem::Question { state, .. }) =
                     self.question_index.get(question_id).and_then(|&i| self.items.get_mut(i))
                 {
-                    *state = if answers.is_empty() { QuestionState::Skipped } else { QuestionState::Answered(answers.clone()) };
+                    if *state == QuestionState::Pending {
+                        *state = if answers.is_empty() { QuestionState::Skipped } else { QuestionState::Answered(answers.clone()) };
+                    }
                 }
             }
             AgentEvent::Usage { input_tokens, output_tokens } => {
@@ -360,6 +380,39 @@ mod tests {
         t.apply(&ev(2, AgentEvent::QuestionAnswered { question_id: "r1".into(), answers: vec![] }));
         let TranscriptItem::Question { state, .. } = &t.items[0] else { panic!() };
         assert_eq!(*state, QuestionState::Skipped);
+    }
+
+    #[test]
+    fn fr_t11_a_withdrawn_question_is_closed() {
+        let mut t = Transcript::new();
+        t.apply(&ev(1, asked("r1")));
+        t.apply(&ev(2, AgentEvent::ApprovalRequested { approval_id: "a1".into(), tool: "Bash".into(), input: serde_json::json!({}) }));
+        t.apply(&ev(3, AgentEvent::PromptWithdrawn { prompt_id: "r1".into() }));
+        t.apply(&ev(4, AgentEvent::PromptWithdrawn { prompt_id: "a1".into() }));
+        assert_eq!(t.pending_questions().count(), 0);
+        assert_eq!(t.pending_approvals().count(), 0);
+        let TranscriptItem::Question { state, .. } = &t.items[0] else { panic!() };
+        assert_eq!(*state, QuestionState::Withdrawn);
+        let TranscriptItem::Approval { state, .. } = &t.items[1] else { panic!() };
+        assert_eq!(*state, ApprovalState::Withdrawn);
+        let ev: AgentEvent = serde_json::from_str(r#"{"kind":"prompt_withdrawn","prompt_id":"x"}"#).unwrap();
+        assert_eq!(ev, AgentEvent::PromptWithdrawn { prompt_id: "x".into() });
+    }
+
+    #[test]
+    fn fr_t11_a_late_answer_does_not_revive_an_abandoned_question() {
+        let mut t = Transcript::new();
+        t.apply(&ev(1, asked("r1")));
+        t.apply(&ev(2, AgentEvent::TurnEnded { outcome: TurnOutcome::Interrupted }));
+        t.apply(&ev(3, AgentEvent::QuestionAnswered { question_id: "r1".into(), answers: vec![] }));
+        let TranscriptItem::Question { state, .. } = &t.items[0] else { panic!() };
+        assert_eq!(*state, QuestionState::Abandoned);
+        let mut w = Transcript::new();
+        w.apply(&ev(1, asked("r1")));
+        w.apply(&ev(2, AgentEvent::PromptWithdrawn { prompt_id: "r1".into() }));
+        w.apply(&ev(3, AgentEvent::QuestionAnswered { question_id: "r1".into(), answers: vec![] }));
+        let TranscriptItem::Question { state, .. } = &w.items[0] else { panic!() };
+        assert_eq!(*state, QuestionState::Withdrawn);
     }
 
     #[test]

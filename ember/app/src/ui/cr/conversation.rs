@@ -28,6 +28,8 @@ use compose_rust::{
 
 use ember_client::api::{QuestionCallError, QuestionReply};
 use ember_client::transcript::{ApprovalState, QuestionState, TranscriptItem};
+use compose_rust::runtime::delay;
+use std::time::Duration;
 use ember_client::wire::{ApprovalDecision, MentionCandidate, Question, SessionPatch, TurnOutcome};
 use ember_client::LauncherStatus;
 
@@ -436,8 +438,13 @@ pub fn ConversationView(id: &str, embedded: bool) {
     ) {
         Some(extra) => {
             let (mut i, mut k) = (items, keys);
-            k.push(item_key(&extra));
-            i.push(extra);
+            if qv::debug_first(std::env::var("EMBER_CR_QUESTION_FIRST").ok().as_deref(), cfg!(debug_assertions)) {
+                k.insert(0, item_key(&extra));
+                i.insert(0, extra);
+            } else {
+                k.push(item_key(&extra));
+                i.push(extra);
+            }
             (i, k)
         }
         None => (items, keys),
@@ -1237,6 +1244,34 @@ fn OptionRow(label: &str, description: Option<&str>, chosen: bool, multi: bool, 
     );
 }
 
+/// A pill button whose text is on the same step as the option rows (Fs::Sm).
+fn QuestionButton(text: &str, primary: bool, enabled: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let (fill, border, fg) = match (primary, enabled) {
+        (true, true) => (p.ink, p.ink, p.ink_text),
+        (_, false) => (p.surface, p.line, p.muted),
+        (false, true) => (p.surface, p.line, p.text),
+    };
+    let text = text.to_string();
+    let mut on_click = on_click;
+    Clickable(
+        Modifier::new().height(super::theme::H_CTL).background(paint(fill)).border(1.0, paint(border)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        move || {
+            if enabled {
+                on_click();
+            }
+        },
+        move || {
+            cu::Row().alignment(Alignment::Center).content(move || {
+                cu::Spacer().modifier(Modifier::new().width(14.0));
+                Label(&text, Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
+                cu::Spacer().modifier(Modifier::new().width(14.0));
+            });
+        },
+    );
+}
+
 /// The agent's question (FR-T11, FR-A5): the questions with their options, 보내기 and 건너뛰기.
 /// A secret question is never typed here (compose-rust has no masked field): the card says it
 /// is answered on the computer's own terminal and offers only 건너뛰기. The draft is a local
@@ -1254,6 +1289,18 @@ pub fn QuestionCard(
     let draft = remember_with_key(key.clone(), || mutable_state_of(QuestionDraft::default()));
     let sent = remember_with_key(key.clone(), || mutable_state_of(false));
     let failed = remember_with_key(key.clone(), || mutable_state_of(None::<QuestionCallError>));
+    let skip_step = remember_with_key(key.clone(), || mutable_state_of(qv::SkipStep::Idle));
+    let confirming = skip_step.get() == qv::SkipStep::Confirm;
+    {
+        // The first tap on 건너뛰기 is forgotten after a few seconds.
+        let step = skip_step.clone();
+        launched_effect(confirming, move || async move {
+            if confirming {
+                delay(Duration::from_secs(qv::SKIP_CONFIRM_SECS)).await;
+                step.set(qv::SkipStep::Idle.reset());
+            }
+        });
+    }
     let flight_key = format!("q:{question_id}");
     let in_flight = answering.get().contains(&flight_key);
     let dead = failed.get().is_some_and(QuestionCallError::is_terminal);
@@ -1310,6 +1357,16 @@ pub fn QuestionCard(
         }
     };
     let (send_ok, send_skip) = (send.clone(), send);
+    let tap_skip = {
+        let step = skip_step.clone();
+        move || {
+            let (next, go) = step.get_untracked().tap();
+            step.set(next);
+            if go {
+                send_skip(true);
+            }
+        }
+    };
 
     let border = if pending { Some(p.orange.strong) } else { None };
     EmberCard(false, true, None, Some(SP[2]), border, move || {
@@ -1323,10 +1380,10 @@ pub fn QuestionCard(
                     .modifier(Modifier::new().fill_max_width())
                     .content(move || {
                         NavIcon(ICON_SHIELD_SVG, p.orange.strong.to_argb(), 16.0);
-                        Label("에이전트의 질문", Fs::Md, Weight::Semibold, None, Some(1));
+                        Label(qv::CARD_TITLE, Fs::Md, Weight::Semibold, None, Some(1));
                         cu::Spacer().modifier(Modifier::new().weight(1.0));
                         if pending {
-                            Pill("답 필요", PillTone::Orange, true);
+                            Pill(qv::NEEDS_ANSWER, PillTone::Orange, true);
                         }
                     });
                 if sample {
@@ -1336,6 +1393,7 @@ pub fn QuestionCard(
                     QuestionState::Pending => {
                         for q in questions.iter().cloned() {
                             let d = draft.clone();
+                            let ss = skip_step.clone();
                             cu::Column()
                                 .spacing(6.0)
                                 .modifier(Modifier::new().fill_max_width())
@@ -1343,7 +1401,7 @@ pub fn QuestionCard(
                                     if let Some(h) = q.header.as_deref().filter(|h| !h.trim().is_empty()) {
                                         Label(h, Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1));
                                     }
-                                    Label(&q.text, Fs::Sm, Weight::Medium, None, Some(6));
+                                    Label(&qv::shown(&q.text), Fs::Sm, Weight::Medium, None, Some(6));
                                     if q.secret {
                                         Label(qv::SECRET_ON_TERMINAL, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(3));
                                         Label(qv::SECRET_ONLY_SKIP, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
@@ -1351,22 +1409,28 @@ pub fn QuestionCard(
                                     }
                                     for o in q.options.iter() {
                                         let (d2, q2, label) = (d.clone(), q.clone(), o.label.clone());
+                                        let step2 = ss.clone();
                                         OptionRow(
-                                            &o.label,
+                                            &qv::shown(&o.label),
                                             o.description.as_deref(),
                                             d.get().picked(&q.id, &o.label),
                                             q.multi_select,
                                             !locked,
-                                            move || d2.update(|v| *v = qv::toggle(std::mem::take(v), &q2, &label)),
+                                            move || {
+                                                step2.set(qv::SkipStep::Idle.reset());
+                                                d2.update(|v| *v = qv::toggle(std::mem::take(v), &q2, &label))
+                                            },
                                         );
                                     }
                                     if q.allow_other {
                                         let (d2, q2) = (d.clone(), q.clone());
+                                        let step2 = ss.clone();
                                         EmberField(FieldOptions {
                                             fill_max_width: true,
                                             placeholder: qv::OTHER_PLACEHOLDER.to_string(),
                                             enabled: Some(!locked),
                                             on_value_change: Some(Box::new(move |text: String| {
+                                                step2.set(qv::SkipStep::Idle.reset());
                                                 d2.update(|v| *v = qv::set_other(std::mem::take(v), &q2, &text))
                                             })),
                                             ..Default::default()
@@ -1379,14 +1443,18 @@ pub fn QuestionCard(
                             .spacing(6.0)
                             .modifier(Modifier::new().fill_max_width())
                             .content(move || {
+                                // Same text step as the options (Fs::Sm), not the toolkit button's.
                                 if !secret {
-                                    AppButton("보내기", None, ButtonKind::Primary, true, can_send, false, move || send_ok(false));
+                                    QuestionButton(qv::SEND_LABEL, true, can_send, move || send_ok(false));
                                 }
-                                AppButton("건너뛰기", None, ButtonKind::Default, true, pending && !locked, false, move || send_skip(true));
+                                QuestionButton(skip_step.get().label(), false, pending && !locked, tap_skip);
                                 if in_flight {
                                     Spinner(14.0);
                                 }
                             });
+                        if confirming {
+                            Label(qv::SKIP_CONFIRM_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(3));
+                        }
                         if sent.get() {
                             Label(qv::SENT_WAITING, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                         }
@@ -1404,6 +1472,9 @@ pub fn QuestionCard(
                     }
                     QuestionState::Abandoned => {
                         Label(qv::ABANDONED_LINE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    }
+                    QuestionState::Withdrawn => {
+                        Label(qv::WITHDRAWN_LINE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                     }
                 }
             });
@@ -1742,6 +1813,15 @@ pub fn TranscriptRow(
                                     ApprovalDecision::Deny => ("거부함", p.red.strong),
                                 };
                                 Label(txt, Fs::Xs, Weight::Medium, Some(paint(col)), Some(1));
+                            }
+                            ApprovalState::Withdrawn => {
+                                Label(
+                                    "에이전트가 이 요청을 거두었습니다",
+                                    Fs::Xs,
+                                    Weight::Regular,
+                                    Some(paint(p.muted)),
+                                    Some(2),
+                                );
                             }
                             ApprovalState::Abandoned => {
                                 Label(

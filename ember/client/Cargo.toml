@@ -30,6 +30,7 @@ tracing = "0.1"
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["ws"] }
+ember-node = { path = "../node" }
 ember-server = { path = "../server" }
 ember-transport = { path = "../transport", default-features = false, features = ["http", "letify"] }
 tempfile = "3"

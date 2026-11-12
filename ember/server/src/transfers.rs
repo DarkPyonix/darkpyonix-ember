@@ -691,59 +691,10 @@ impl TransferManager {
 }
 
 /// Checks a requested received-files folder and returns its canonical path (`FR-F12`, #773).
-///
-/// The folder must be absolute, must not be a symlink, must be a directory (created when
-/// missing), and its canonical path must not be the data folder, inside it (except
-/// `<data_dir>/received`), or a parent of it. The checks run on the canonical path so `..` and
-/// symlinked parents cannot reach a refused place.
+/// The rules are shared with the node (`FR-F13`): [`ember_transfer::received_dir::check`].
 fn check_received_dir(data_dir: &Path, dir: &Path) -> Result<PathBuf, TransferApiError> {
-    let bad = |why: &str| TransferApiError::BadRequest(format!("invalid received_dir: {why}"));
-    if !dir.is_absolute() {
-        return Err(bad("must be an absolute path"));
-    }
-    match std::fs::symlink_metadata(dir) {
-        Ok(m) if m.file_type().is_symlink() => return Err(bad("must not be a symlink")),
-        Ok(m) if !m.is_dir() => return Err(bad("not a directory")),
-        Ok(_) => {}
-        Err(_) => {
-            // Check the would-be location before creating anything.
-            let mut probe = dir.to_path_buf();
-            let mut tail = Vec::new();
-            while !probe.exists() {
-                match (probe.file_name().map(|n| n.to_os_string()), probe.parent()) {
-                    (Some(n), Some(p)) => {
-                        tail.push(n);
-                        probe = p.to_path_buf();
-                    }
-                    _ => return Err(bad("cannot be created")),
-                }
-            }
-            let mut planned = std::fs::canonicalize(&probe).map_err(|e| bad(&e.to_string()))?;
-            for n in tail.into_iter().rev() {
-                planned.push(n);
-            }
-            check_canonical(data_dir, &planned)?;
-            std::fs::create_dir_all(dir).map_err(|e| bad(&e.to_string()))?;
-        }
-    }
-    let canonical = std::fs::canonicalize(dir).map_err(|e| bad(&e.to_string()))?;
-    check_canonical(data_dir, &canonical)?;
-    Ok(canonical)
-}
-
-fn check_canonical(data_dir: &Path, canonical: &Path) -> Result<(), TransferApiError> {
-    let allowed = data_dir.join("received");
-    if canonical == allowed {
-        return Ok(());
-    }
-    if canonical.starts_with(data_dir) || data_dir.starts_with(canonical) {
-        return Err(TransferApiError::BadRequest(
-            "invalid received_dir: the data folder, anything inside it except received/, \
-             and its parents are refused"
-                .into(),
-        ));
-    }
-    Ok(())
+    ember_transfer::received_dir::check(data_dir, dir)
+        .map_err(|why| TransferApiError::BadRequest(format!("invalid received_dir: {why}")))
 }
 
 #[derive(Deserialize)]

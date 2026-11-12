@@ -25,12 +25,25 @@ pub struct NodeConfig {
     pub pty_keeper: Option<PathBuf>,
     /// Which destinations `/egress` may reach (FR-R1); default: enabled, everything allowed.
     pub egress: crate::egress::EgressPolicy,
+    /// Where received files go (`FR-F13`); `None`: `<state_dir>/received`.
+    pub received_dir: Option<PathBuf>,
+    /// Who may start a transfer without an answer on this node (`FR-F15`).
+    pub receive: crate::transfers::ReceivePolicy,
 }
 
 impl NodeConfig {
     /// A configuration with no persistent state (tests, embedding).
     pub fn new(token: impl Into<String>, roots: Vec<PathBuf>) -> Self {
-        Self { token: token.into(), roots, denied: Vec::new(), state_dir: None, pty_keeper: None, egress: Default::default() }
+        Self {
+            token: token.into(),
+            roots,
+            denied: Vec::new(),
+            state_dir: None,
+            pty_keeper: None,
+            egress: Default::default(),
+            received_dir: None,
+            receive: Default::default(),
+        }
     }
 
     /// Sets the denied paths (builder).
@@ -48,6 +61,8 @@ impl NodeConfig {
     /// - `EMBER_NODE_STATE_DIR`: state directory (default `$HOME/.ember/node`).
     /// - `EMBER_NODE_KEEP_PTY`: `0` disables PTY keepers (terminal sessions then end with the
     ///   daemon).
+    /// - `EMBER_NODE_RECEIVED_DIR`: received-files folder (default `<state dir>/received`,
+    ///   `FR-F13`); `EMBER_NODE_RECEIVE`: `owner` (default), `ask` or `off` (`FR-F15`).
     /// - `EMBER_NODE_EGRESS`, `EMBER_NODE_EGRESS_DENY`: the browser egress policy
     ///   ([`crate::egress::EgressPolicy::from_env`]).
     pub fn from_env() -> anyhow::Result<Self> {
@@ -80,7 +95,9 @@ impl NodeConfig {
         };
         let egress = crate::egress::EgressPolicy::from_env()?;
         let denied = parse_deny(std::env::var_os("EMBER_NODE_DENY").as_deref());
-        Ok(Self { token, roots, denied, state_dir, pty_keeper, egress })
+        let received_dir = std::env::var_os("EMBER_NODE_RECEIVED_DIR").filter(|v| !v.is_empty()).map(PathBuf::from);
+        let receive = crate::transfers::ReceivePolicy::parse(std::env::var("EMBER_NODE_RECEIVE").ok().as_deref())?;
+        Ok(Self { token, roots, denied, state_dir, pty_keeper, egress, received_dir, receive })
     }
 }
 

@@ -107,12 +107,31 @@ impl Runner {
 /// `name` on `PATH`, as an absolute path (agents get it verbatim, whatever their own `PATH`).
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(name)).find(|p| is_executable(p))
+    for d in std::env::split_paths(&path) {
+        let candidate = d.join(name);
+        if is_executable(&candidate) {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        for ext in [".cmd", ".exe", ".bat"] {
+            let with_ext = d.join(format!("{name}{ext}"));
+            if is_executable(&with_ext) {
+                return Some(with_ext);
+            }
+        }
+    }
+    None
 }
 
+#[cfg(unix)]
 fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(p: &Path) -> bool {
+    std::fs::metadata(p).is_ok_and(|m| m.is_file())
 }
 
 /// `EMBER_BROWSER_MCP` → which server, if any. `None` = off (the default), or an unknown value,

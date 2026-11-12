@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use compose_rust::{asset, AssetKind, ColorScheme, DesignSystem, FontStack, Theme};
+use compose_rust::{asset, AssetKind, ColorRole, ColorScheme, DesignSystem, FontStack, Palette, Theme};
 
 /// One bundled face: its file name under `assets/fonts/` and its bytes.
 pub struct Face {
@@ -51,9 +51,39 @@ pub fn app_font() -> u32 {
     })
 }
 
+// Overlay surfaces and ink follow the same tokens as Ember's own components.
+use crate::ui::cr::theme::{DARK, LIGHT};
+const APP_PALETTE: Palette = Palette::new()
+    .with(ColorRole::Background, LIGHT.bg, DARK.bg)
+    .with(ColorRole::Surface, LIGHT.surface, DARK.surface)
+    .with(ColorRole::SurfaceContainer, LIGHT.surface, DARK.surface)
+    .with(ColorRole::SurfaceVariant, LIGHT.surface_2, DARK.surface_2)
+    .with(ColorRole::OnSurface, LIGHT.text, DARK.text)
+    .with(ColorRole::OnSurfaceVariant, LIGHT.text_2, DARK.text_2)
+    .with(ColorRole::OutlineVariant, LIGHT.line, DARK.line);
+
 /// The toolkit theme the app launches with: every role except Mono in the bundled font.
 pub fn app_theme(scheme: ColorScheme) -> Theme {
-    Theme::adaptive(DesignSystem::Material3)
+    Theme::unified(DesignSystem::Cupertino)
+        .with_palette(&APP_PALETTE)
         .with_color_scheme(scheme)
         .with_default_font(app_font())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nfr_l3_app_theme_is_unified() {
+        let theme = app_theme(ColorScheme::Light);
+        assert!(!theme.adaptive);
+        assert_eq!(theme.design_system, DesignSystem::Cupertino);
+        assert_eq!(theme.color_scheme, ColorScheme::Light);
+        let palette = theme.palette.expect("app palette");
+        assert_eq!(palette.get(ColorRole::Surface, ColorScheme::Light), Some(LIGHT.surface));
+        assert_eq!(palette.get(ColorRole::Surface, ColorScheme::Dark), Some(DARK.surface));
+        assert_eq!(palette.get(ColorRole::OnSurface, ColorScheme::Light), Some(LIGHT.text));
+        assert_eq!(palette.get(ColorRole::OnSurface, ColorScheme::Dark), Some(DARK.text));
+    }
 }

@@ -192,6 +192,81 @@ impl EditorTabs {
     pub fn current_path(&self) -> Option<&str> {
         self.current.map(|i| self.tabs[i].0.as_str())
     }
+
+    /// Close every tab except the currently active one, returning the paths of the tabs that closed.
+    pub fn close_others(&mut self) -> Vec<String> {
+        let Some(cur) = self.current else { return Vec::new() };
+        let keep = self.tabs[cur].clone();
+        let closed: Vec<String> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (p, _))| (i != cur).then(|| p.clone()))
+            .collect();
+        self.tabs = vec![keep];
+        self.current = Some(0);
+        closed
+    }
+}
+
+/// The ancestor directories (from `root` down to the parent of `file_path`) to expand in the explorer
+/// tree so that `file_path` becomes visible (`열린 파일 찾기`). Returns an empty list when `file_path`
+/// is not strictly inside `root`.
+pub fn ancestor_dirs_to_expand(root: &str, file_path: &str) -> Vec<String> {
+    let root = root.trim_end_matches('/');
+    if root.is_empty() || !is_at_or_below(file_path, root) || file_path.trim_end_matches('/') == root {
+        return Vec::new();
+    }
+    let rel = file_path[root.len()..].trim_start_matches('/');
+    let parts: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    let mut dirs = vec![root.to_string()];
+    let mut cur = root.to_string();
+    for dir_seg in &parts[..parts.len() - 1] {
+        cur = super::editor_workbench::join_path(&cur, dir_seg);
+        dirs.push(cur.clone());
+    }
+    dirs
+}
+
+/// The two shortcut hint pairs `(hint, label)` shown inside `.ed-empty` when no file is open:
+/// `(find_hint, find_label)` and `(project_hint, "프로젝트 창")`.
+pub fn empty_state_hints(
+    keymap: crate::ui::keymap::Keymap,
+    os: crate::ui::keymap::Os,
+) -> ((String, &'static str), (String, &'static str)) {
+    (
+        (keymap.hint(Action::Find, os), keymap.find_label()),
+        (keymap.hint(Action::Project, os), "프로젝트 창"),
+    )
+}
+
+/// The CSS class of a tree row (`ed-tn`, with `.sel` when chosen and `.mod` when modified in git).
+pub fn tree_row_class(selected: bool, modified: bool) -> &'static str {
+    match (selected, modified) {
+        (true, true) => "ed-tn sel mod",
+        (true, false) => "ed-tn sel",
+        (false, true) => "ed-tn mod",
+        (false, false) => "ed-tn",
+    }
+}
+
+/// The CSS class of a file tab (`ed-tab`, with `.on` when active and `.vc-mod` when modified in git).
+pub fn tab_class(active: bool, modified: bool) -> &'static str {
+    match (active, modified) {
+        (true, true) => "ed-tab on vc-mod",
+        (true, false) => "ed-tab on",
+        (false, true) => "ed-tab vc-mod",
+        (false, false) => "ed-tab",
+    }
+}
+
+/// The status bar tab width label (`"4칸"` when `tab_width` is 0, else `"{tab_width}칸"`).
+pub fn tab_width_text(tab_width: u32) -> String {
+    let w = if tab_width == 0 { 4 } else { tab_width };
+    format!("{w}칸")
 }
 
 /// The path segments the breadcrumbs show: the path below the project folder when it lies
@@ -532,6 +607,81 @@ pub enum TabKeyOutcome {
     Activate(String),
     /// Close this tab path.
     Close(String),
+    /// Refuse to close this dirty tab via keyboard Delete/Backspace without saving first.
+    RefuseDirty(String),
+}
+
+/// Roving `tabindex` values for the explorer tree: `(container_tabindex, root_tabindex, row_tabindices)`.
+/// The tree container (`role="tree"`) is always `"-1"` so it is never a duplicate tab stop;
+/// when a child row is active (matching `selected`, else the first item in `multi_sel` present in `rows`),
+/// that single child row has `"0"` and all other rows (including the root folder row) have `"-1"`.
+/// When no child row is selected, the root folder row (`role="treeitem"`) has `"0"`.
+pub fn tree_roving_tabindex(
+    rows: &[TreeRow],
+    selected: Option<(&str, bool)>,
+    multi_sel: &[(String, bool)],
+) -> (&'static str, &'static str, Vec<&'static str>) {
+    let active_idx = selected
+        .and_then(|(p, _)| rows.iter().position(|r| r.path == p))
+        .or_else(|| {
+            rows.iter()
+                .position(|r| multi_sel.iter().any(|(mp, _)| mp == &r.path))
+        });
+    let root_ti = if active_idx.is_none() { "0" } else { "-1" };
+    let row_tis = (0..rows.len())
+        .map(|i| if active_idx == Some(i) { "0" } else { "-1" })
+        .collect();
+    ("-1", root_ti, row_tis)
+}
+
+/// Roving `tabindex` values for the tab strip: `(strip_tabindex, tab_tabindices)`.
+/// The tablist container (`role="tablist"`) is always `"-1"`; when tabs exist, only the active tab
+/// (or the first tab if `current` does not match any open tab) has `"0"`.
+pub fn tab_strip_roving_tabindex(
+    paths: &[String],
+    current: Option<&str>,
+) -> (&'static str, Vec<&'static str>) {
+    if paths.is_empty() {
+        return ("-1", Vec::new());
+    }
+    let active_idx = current
+        .and_then(|c| paths.iter().position(|p| p == c))
+        .unwrap_or(0);
+    let tab_tis = (0..paths.len())
+        .map(|i| if i == active_idx { "0" } else { "-1" })
+        .collect();
+    ("-1", tab_tis)
+}
+
+/// Polite Korean notice shown when keyboard `Delete` or `Backspace` is pressed on an unsaved tab.
+pub fn dirty_tab_close_notice(path: &str) -> String {
+    let name = display_name(base_name(path));
+    format!("{name} 파일에 저장하지 않은 변경이 있어 바로 닫지 않았습니다. 먼저 저장하세요.")
+}
+
+/// Handles ArrowLeft, ArrowRight, Home, End, Enter, Space, and Delete/Backspace on the tab strip,
+/// refusing to close a dirty tab when `dirty[i]` is true.
+pub fn tab_strip_key_with_dirty(
+    paths: &[String],
+    dirty: &[bool],
+    current: Option<&str>,
+    key: &str,
+) -> Option<TabKeyOutcome> {
+    if paths.is_empty() {
+        return None;
+    }
+    match key {
+        "Delete" | "Backspace" => {
+            let idx = current.and_then(|c| paths.iter().position(|p| p == c))?;
+            let path = paths[idx].clone();
+            if dirty.get(idx).copied().unwrap_or(false) {
+                Some(TabKeyOutcome::RefuseDirty(path))
+            } else {
+                Some(TabKeyOutcome::Close(path))
+            }
+        }
+        _ => tab_strip_key(paths, current, key),
+    }
 }
 
 /// Handles ArrowLeft, ArrowRight, Home, End, Enter, Space, and Delete/Backspace on the tab strip.

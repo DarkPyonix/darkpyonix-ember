@@ -705,12 +705,14 @@ pub async fn cli(args: &[String]) -> anyhow::Result<()> {
 
 /// The three signals that end a terminal session or a process: SIGINT (Ctrl-C), SIGTERM and SIGHUP.
 /// Registered together, once, before the code is redeemed (see `run`).
+#[cfg(unix)]
 struct Signals {
     int: tokio::signal::unix::Signal,
     term: tokio::signal::unix::Signal,
     hup: tokio::signal::unix::Signal,
 }
 
+#[cfg(unix)]
 impl Signals {
     fn register() -> anyhow::Result<Signals> {
         use tokio::signal::unix::{signal, SignalKind};
@@ -729,6 +731,20 @@ impl Signals {
             _ = self.term.recv() => {}
             _ = self.hup.recv() => {}
         }
+    }
+}
+
+#[cfg(not(unix))]
+struct Signals;
+
+#[cfg(not(unix))]
+impl Signals {
+    fn register() -> anyhow::Result<Signals> {
+        Ok(Signals)
+    }
+
+    async fn recv(&mut self) {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 
@@ -1461,6 +1477,7 @@ mod tests {
 
     /// The port is closed: reaching the network would give "cannot connect". The preflight error
     /// must come first.
+    #[cfg(unix)]
     #[tokio::test]
     async fn fr_c2_node_cli_run_preflight_refuses_before_any_request() {
         let dir = tempfile::tempdir().unwrap();
@@ -1476,6 +1493,7 @@ mod tests {
         assert!(!dir.path().join(ENROL_FILE).exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn fr_c2_node_cli_run_preflight_refuses_an_unreadable_enrol_json_with_replace() {
         let dir = tempfile::tempdir().unwrap();

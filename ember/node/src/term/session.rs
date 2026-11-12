@@ -192,7 +192,17 @@ impl Session {
             std::thread::Builder::new().name(format!("term-{short}-x")).spawn(move || {
                 let Some(pid) = pid else { return };
                 let (code, signal) = match child {
-                    Child::Ours => wait_status(pid),
+                    Child::Ours => {
+                        #[cfg(unix)]
+                        {
+                            wait_status(pid)
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            let pty = s.inner.lock().unwrap().pty.clone();
+                            pty.map(|p| p.wait_child()).unwrap_or((None, None))
+                        }
+                    }
                     Child::Adopted => {
                         while pty::alive(pid) {
                             std::thread::sleep(Duration::from_millis(500));
@@ -487,13 +497,13 @@ impl Session {
             (g.rec.pid, g.pty.clone())
         };
         let Some(pid) = pid else { return };
-        signal_session(pid, pty.as_deref(), signal.unwrap_or(libc::SIGHUP));
+        signal_session(pid, pty.as_deref(), signal.unwrap_or(crate::exec::SIGHUP));
         if signal.is_none() {
             let s = self.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(KILL_GRACE);
                 if s.is_running() {
-                    signal_session(pid, pty.as_deref(), libc::SIGKILL);
+                    signal_session(pid, pty.as_deref(), crate::exec::SIGKILL);
                 }
             });
         }
@@ -510,6 +520,7 @@ fn signal_session(pid: u32, pty: Option<&Pty>, signal: i32) {
 }
 
 /// `waitpid` on our own child; (exit code, signal).
+#[cfg(unix)]
 fn wait_status(pid: u32) -> (Option<i32>, Option<i32>) {
     let mut status: libc::c_int = 0;
     loop {

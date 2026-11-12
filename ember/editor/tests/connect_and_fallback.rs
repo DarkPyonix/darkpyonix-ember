@@ -295,7 +295,7 @@ async fn run_fake_management(mut server: DuplexStream, disk: Arc<Mutex<Vec<u8>>>
     assert_eq!(ct["desiredConnectionType"], 1);
 
     let mut srv_id = 0u32;
-    let mut last_client_id = 0u32;
+    let mut last_client_id: u32;
     let mut send_regular = |server: &mut DuplexStream, payload: Vec<u8>, ack: u32| {
         srv_id += 1;
         let frame = Frame::new(MessageType::Regular, srv_id, ack, payload).encode();

@@ -1519,6 +1519,7 @@ fn SettingsSheet(
                     // `.ps-chips` of `.ps-check`: a check box, the computer's icon, its name and
                     // the status dot, wrapping. Ticking assigns at once (FR-L4), as before.
                     // TODO(FR-X7): one icon for every kind, because node does not report the kind.
+                    // TODO(compose-rust#521): no FlowRow; lines are cut by estimated width.
                     let avail = window.width_dp.min(760.0) - 2.0 * SP[4];
                     let widths: Vec<f32> = chips.iter().map(|c| crate::ui::project::computer_check_width(&c.name) + 26.0).collect();
                     cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -1690,7 +1691,6 @@ fn ComputerCheck(c: &ComputerChip, on: bool, project: String) {
         .content(|| {
             cu::Spacer().modifier(Modifier::new().width(SP[1]));
             let id = c.id.clone();
-            // TODO(compose-rust#428): Checkbox has no ink fill or tick style.
             cu::Checkbox(on).modifier(Modifier::new().size(16.0, 16.0)).on_change(move |v| set_assignment(project.clone(), id.clone(), v));
             NavIcon(shell::ICON_CPU_SVG, p.text_2.to_argb(), 16.0);
             Label(&c.name, Fs::Sm, Weight::Regular, None, Some(1));
@@ -1708,7 +1708,7 @@ fn LeaderOption(m: &Member) {
         .alignment(Alignment::CenterStart)
         .modifier(Modifier::new().fill_max_width().padding(10.0).border(1.0, paint(if m.leader { p.ink } else { p.line })).corner_radius(CORNER_MD))
         .content(|| {
-            // TODO(compose-rust): no radio button; a ring with a filled centre stands in.
+            // TODO(compose-rust#545): no RadioButton; a ring with a filled centre stands in.
             cu::Box().alignment(Alignment::Center).modifier(Modifier::new().size(16.0, 16.0).border(1.5, paint(p.text_2)).shape_role(ShapeRole::Full)).content(|| {
                 if m.leader {
                     cu::Spacer().modifier(Modifier::new().size(8.0, 8.0).background(paint(p.ink)).shape_role(ShapeRole::Full));

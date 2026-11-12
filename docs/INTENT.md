@@ -958,3 +958,13 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 **Why.** Extension webviews are extension programs written for a browser engine; they cannot be drawn without one. The cases users meet daily (reading markdown, looking at an image, a notebook's printed output and plots) need no extension code, so they can follow the mockup's design natively, and the rest still works one click away in VS Code Web, which already is the IDE window exception of E1.
 
 **Status.** Proposed, not built. Waits for the owner; if the owner wants option A, D9a changes first.
+
+### D45: Node file operations open first and check the handle; the write relay waits for the namespace operations
+
+**Decision.** [provisional, #468, 2026-11-13] The node's content file operations (read, pwrite, setattr, grep, and on Unix the atomic write) open first and check the opened handle against the path policy (resolve again, and on Unix compare device and inode), with `O_NOFOLLOW` on the final component and, for the atomic write, a checked directory handle (`openat`, `renameat`). Namespace operations (mkdir, remove, rename, symlink, stat, lstat, readlink, list, glob) keep acting on paths for now. The server write relay may relay only the covered content operations until those move to directory handles too.
+
+**Rejected** *[provisional]*. Accepting the race under D37 without code (an admitted device has full authority, but the local node and denied paths narrow the API on purpose, and a narrowing that a symlink swap defeats is not one). Resolving every component with `openat` from the root on every call (correct, but a rewrite of every operation; it is the next step for the namespace operations). Linux-only `openat2(RESOLVE_BENEATH)` (not on macOS or Windows).
+
+**Why.** The check-then-open gap is reachable remotely through the server relay (#463). Checking the handle closes it for every operation that reads or writes content, with no change to the API.
+
+**Status.** Written, not yet compiled or run (`ember/node/tests/fs_toctou.rs`). SPEC `FR-X1` (open, then check, #468).

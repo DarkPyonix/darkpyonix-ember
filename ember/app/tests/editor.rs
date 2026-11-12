@@ -1432,7 +1432,9 @@ fn fr_l31_empty_state_hints_and_row_tab_classes_and_tab_width_text() {
 
 // FR-L31.5 (#439): tabs pin, preview, reorder, close others / right / all and the unsaved confirm, as Code-OSS.
 mod fr_l31_tabs {
-    use ember_app::ui::editor::{tab_class_with, tab_menu_items, tab_move_key, CloseResolution, DirtyChoice, EditorTabs, TabMenuItem};
+    use ember_app::ui::editor::{tab_class_with, tab_menu_items, tab_move_key, CloseResolution, DirtyChoice, EditorTabs, SaveOutcome, TabMenuItem};
+
+    const SAVED_AT_7: SaveOutcome = SaveOutcome { ok: true, version: Some(7), dirty: false };
 
     fn tabs(paths: &[&str]) -> EditorTabs {
         let mut t = EditorTabs::default();
@@ -1626,24 +1628,40 @@ mod fr_l31_tabs {
         t.set_dirty("/w/c.rs", true);
         let request = t.close_all_request();
         // 저장: the clean tab closes now, the dirty ones wait for their saves.
-        let now = t.begin_close(&request, DirtyChoice::Save);
+        let now = t.begin_close(&request, DirtyChoice::Save, |_| Some(7));
         assert_eq!(now, vec!["/w/a.rs"]);
         t.close_many(&now, None);
         assert!(t.is_closing("/w/b.rs") && t.is_closing("/w/c.rs"));
         assert_eq!(t.paths(), vec!["/w/b.rs", "/w/c.rs"]);
         // Success closes the tab.
         t.set_dirty("/w/b.rs", false);
-        assert!(t.save_finished("/w/b.rs", true));
+        assert!(t.save_finished("/w/b.rs", SAVED_AT_7));
         t.close("/w/b.rs");
         assert!(!t.is_closing("/w/b.rs"));
         // Failure keeps the tab open and dirty.
-        assert!(!t.save_finished("/w/c.rs", false));
+        assert!(!t.save_finished("/w/c.rs", SaveOutcome { ok: false, ..SAVED_AT_7 }));
         assert_eq!(t.paths(), vec!["/w/c.rs"]);
         assert!(t.is_dirty("/w/c.rs"));
         assert!(!t.is_closing("/w/c.rs"));
         // A later save of that tab (Cmd+S) no longer closes it.
-        assert!(!t.save_finished("/w/c.rs", true));
+        assert!(!t.save_finished("/w/c.rs", SAVED_AT_7));
         assert_eq!(t.paths(), vec!["/w/c.rs"]);
+    }
+
+    #[test]
+    fn fr_l31_tabs_an_edit_typed_while_the_save_is_in_flight_keeps_the_tab_open_and_dirty() {
+        let mut t = tabs(&["/w/a.rs", "/w/b.rs"]);
+        t.set_dirty("/w/a.rs", true);
+        t.set_dirty("/w/b.rs", true);
+        let request = t.close_all_request();
+        assert!(t.begin_close(&request, DirtyChoice::Save, |_| Some(7)).is_empty());
+        // The document moved past the saved version: the save succeeded but the tab stays.
+        assert!(!t.save_finished("/w/a.rs", SaveOutcome { version: Some(8), ..SAVED_AT_7 }));
+        assert!(t.is_dirty("/w/a.rs") && !t.is_closing("/w/a.rs"));
+        // The session still reports it dirty after the save: the tab stays.
+        assert!(!t.save_finished("/w/b.rs", SaveOutcome { dirty: true, ..SAVED_AT_7 }));
+        assert!(t.is_dirty("/w/b.rs") && !t.is_closing("/w/b.rs"));
+        assert_eq!(t.paths(), vec!["/w/a.rs", "/w/b.rs"]);
     }
 
     #[test]
@@ -1651,9 +1669,9 @@ mod fr_l31_tabs {
         let mut t = tabs(&["/w/a.rs", "/w/b.rs"]);
         t.set_dirty("/w/b.rs", true);
         let request = t.close_all_request();
-        assert!(t.begin_close(&request, DirtyChoice::Cancel).is_empty());
+        assert!(t.begin_close(&request, DirtyChoice::Cancel, |_| None).is_empty());
         assert!(!t.is_closing("/w/b.rs"));
-        assert_eq!(t.begin_close(&request, DirtyChoice::DontSave), vec!["/w/a.rs", "/w/b.rs"]);
+        assert_eq!(t.begin_close(&request, DirtyChoice::DontSave, |_| None), vec!["/w/a.rs", "/w/b.rs"]);
         assert!(!t.is_closing("/w/b.rs"));
     }
 }

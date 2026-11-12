@@ -134,8 +134,9 @@ pub struct EditorTabs {
     tabs: Vec<Tab>,
     current: Option<usize>,
     /// Tabs whose close waits on their save (저장 in the unsaved-changes question): each closes when its
-    /// save succeeds and stays open and dirty when it fails, as in Code-OSS.
-    closing: Vec<String>,
+    /// save succeeds and stays open and dirty when it fails, as in Code-OSS. Each holds the document
+    /// version the save was asked for, so an edit typed while the save was in flight keeps the tab.
+    closing: Vec<(String, Option<u32>)>,
 }
 
 /// What closing one or more tabs needs (FR-L31.5): the tabs to close, the ones among them with unsaved
@@ -146,6 +147,15 @@ pub struct CloseRequest {
     pub paths: Vec<String>,
     pub dirty: Vec<String>,
     pub anchor: Option<String>,
+}
+
+/// How a save a closing tab waited on ended: whether it succeeded, and the document's version and unsaved
+/// mark once the session answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SaveOutcome {
+    pub ok: bool,
+    pub version: Option<u32>,
+    pub dirty: bool,
 }
 
 /// The answer to the unsaved-changes question.
@@ -351,7 +361,7 @@ impl EditorTabs {
     pub fn close(&mut self, path: &str) {
         let Some(i) = self.index(path) else { return };
         self.tabs.remove(i);
-        self.closing.retain(|p| p != path);
+        self.closing.retain(|(p, _)| p != path);
         self.current = match self.current {
             _ if self.tabs.is_empty() => None,
             Some(c) if c == i => Some(i.min(self.tabs.len() - 1)),
@@ -363,11 +373,12 @@ impl EditorTabs {
     /// Act on the answer to the unsaved-changes question. Returns the tabs to close now: every tab asked
     /// for after 저장 안 함; after 저장 the clean ones only, while each dirty one waits for its save
     /// ([`EditorTabs::save_finished`]); none after 취소.
-    pub fn begin_close(&mut self, request: &CloseRequest, choice: DirtyChoice) -> Vec<String> {
+    /// `version_of` gives each document's version when its save is asked for.
+    pub fn begin_close(&mut self, request: &CloseRequest, choice: DirtyChoice, version_of: impl Fn(&str) -> Option<u32>) -> Vec<String> {
         let resolution = request.resolve(choice);
         for p in &resolution.save {
-            if self.index(p).is_some() && !self.closing.contains(p) {
-                self.closing.push(p.clone());
+            if self.index(p).is_some() && !self.is_closing(p) {
+                self.closing.push((p.clone(), version_of(p)));
             }
         }
         resolution.close.into_iter().filter(|p| !resolution.save.contains(p)).collect()
@@ -375,18 +386,22 @@ impl EditorTabs {
 
     /// Whether the tab waits to close on its save.
     pub fn is_closing(&self, path: &str) -> bool {
-        self.closing.iter().any(|p| p == path)
+        self.closing.iter().any(|(p, _)| p == path)
     }
 
-    /// A save finished. Returns whether the tab is to close now: it waited on this save and the save
-    /// succeeded. On a failure it stays open and dirty.
-    pub fn save_finished(&mut self, path: &str, ok: bool) -> bool {
-        let Some(i) = self.closing.iter().position(|p| p == path) else { return false };
-        self.closing.remove(i);
-        if !ok {
+    /// A save finished. Returns whether the tab is to close now: it waited on this save, the save
+    /// succeeded, and the document is still at the version that was saved and not dirty again. On a
+    /// failure, or after an edit typed while the save was in flight, it stays open and dirty and the
+    /// pending close is dropped (Code-OSS keeps an editor open that is dirty after its save).
+    pub fn save_finished(&mut self, path: &str, outcome: SaveOutcome) -> bool {
+        let Some(i) = self.closing.iter().position(|(p, _)| p == path) else { return false };
+        let (_, saved_version) = self.closing.remove(i);
+        let edited = outcome.dirty || outcome.version != saved_version;
+        if !outcome.ok || edited {
             self.set_dirty(path, true);
+            return false;
         }
-        ok && self.index(path).is_some()
+        self.index(path).is_some()
     }
 
     /// Close several tabs, then activate `anchor` when it is still open.

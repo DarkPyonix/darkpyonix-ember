@@ -452,7 +452,13 @@ pub mod page {
         let mut confirm = s.close_confirm;
         let Some(request) = confirm.read().clone() else { return };
         confirm.set(None);
-        let now = { let mut tabs = s.tabs; tabs.write().begin_close(&request, choice) };
+        // The version each save is asked at: an edit after it keeps the tab open (`save_result`).
+        let versions: HashMap<String, u32> = {
+            let bridge = s.bridge.borrow();
+            let uris = s.uris.borrow();
+            request.dirty.iter().filter_map(|p| uris.get(p).and_then(|u| bridge.document(u)).map(|d| (p.clone(), d.version))).collect()
+        };
+        let now = { let mut tabs = s.tabs; tabs.write().begin_close(&request, choice, |p| versions.get(p).copied()) };
         if choice == crate::ui::editor::DirtyChoice::Save {
             for p in &request.dirty {
                 let uri = s.uris.borrow().get(p).cloned();
@@ -460,16 +466,27 @@ pub mod page {
                 match event {
                     Some(event) => send(s, Some(event)),
                     // No document to save: the tab stays open, as after a failed save.
-                    None => { let mut tabs = s.tabs; tabs.write().save_finished(p, false); }
+                    None => { let mut tabs = s.tabs; tabs.write().save_finished(p, crate::ui::editor::SaveOutcome { ok: false, version: None, dirty: true }); }
                 }
             }
         }
         finish_close(s, &now, request.anchor.as_deref());
     }
 
-    /// A save finished: a tab that waited on it to close closes on success and stays open on failure.
+    /// A save finished: a tab that waited on it to close closes on success when its document is still at
+    /// the saved version and clean, and stays open otherwise. Called after the session's updates of the
+    /// same batch are applied, so the unsaved mark that follows `Saved` is already in the bridge.
     fn save_result(s: &Shared, path: &str, ok: bool) {
-        let close = { let mut tabs = s.tabs; tabs.write().save_finished(path, ok) };
+        let (version, dirty) = {
+            let bridge = s.bridge.borrow();
+            let uris = s.uris.borrow();
+            match uris.get(path).and_then(|u| bridge.document(u)) {
+                Some(d) => (Some(d.version), d.dirty),
+                None => (None, true),
+            }
+        };
+        let outcome = crate::ui::editor::SaveOutcome { ok, version, dirty };
+        let close = { let mut tabs = s.tabs; tabs.write().save_finished(path, outcome) };
         if close {
             finish_close(s, &[path.to_string()], None);
         }
@@ -860,11 +877,12 @@ pub mod page {
             tree_sel.set(None);
         }
         let saved = updates.iter().any(|u| matches!(u, ember_editor::SessionUpdate::Saved { .. }));
+        let mut saved_paths: Vec<String> = Vec::new();
         for update in updates {
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.uris.borrow_mut().insert(uri.path.clone(), uri.clone()); }
             if let ember_editor::SessionUpdate::Closed { uri } = &update { s.uris.borrow_mut().remove(&uri.path); }
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.open_errors.borrow_mut().remove(&uri.path); }
-            if let ember_editor::SessionUpdate::Saved { uri } = &update { save_result(&s, &uri.path, true); }
+            if let ember_editor::SessionUpdate::Saved { uri } = &update { saved_paths.push(uri.path.clone()); }
             let action = s.bridge.borrow_mut().apply(update);
             match action {
                 BridgeAction::Resync(uri) => { s.host.send(HostCommand::Resync(uri)); }
@@ -893,6 +911,9 @@ pub mod page {
                 _ => {}
             }
         }
+        // After the whole batch, so the unsaved mark the session sends with `Saved` is in the bridge. If it
+        // came in a later batch the mark is still the old dirty one and the tab stays open: the safe side.
+        for path in saved_paths { save_result(&s, &path, true); }
         if saved {
             // A save changes the work tree: the changes list and the open diff follow it.
             s.scm.refresh();

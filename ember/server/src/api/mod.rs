@@ -684,9 +684,19 @@ async fn push(
     Ok(ws.on_upgrade(move |socket| push_loop(socket, rx)))
 }
 
+/// Forwards pushes to one socket. It also reads the socket, so a close (or a dead connection)
+/// ends the task and drops its broadcast receiver at once, not on the next push (#369). Anything
+/// the client sends is ignored; axum answers pings itself.
 async fn push_loop(mut socket: WebSocket, mut rx: tokio::sync::broadcast::Receiver<Push>) {
     loop {
-        let msg = match rx.recv().await {
+        let next = tokio::select! {
+            m = rx.recv() => m,
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                Some(Ok(_)) => continue,
+            },
+        };
+        let msg = match next {
             Ok(p) => p,
             // A slow client missed messages: tell it to resync from the events endpoint.
             Err(RecvError::Lagged(n)) => {

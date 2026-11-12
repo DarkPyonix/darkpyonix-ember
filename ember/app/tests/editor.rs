@@ -1618,4 +1618,42 @@ mod fr_l31_tabs {
         assert_eq!(tab_move_key("PageDown", true, true, false, true), None);
         assert_eq!(tab_move_key("ArrowLeft", true, true, false, false), None);
     }
+
+    #[test]
+    fn fr_l31_tabs_save_in_the_confirm_closes_a_dirty_tab_only_after_its_save_succeeds() {
+        let mut t = tabs(&["/w/a.rs", "/w/b.rs", "/w/c.rs"]);
+        t.set_dirty("/w/b.rs", true);
+        t.set_dirty("/w/c.rs", true);
+        let request = t.close_all_request();
+        // 저장: the clean tab closes now, the dirty ones wait for their saves.
+        let now = t.begin_close(&request, DirtyChoice::Save);
+        assert_eq!(now, vec!["/w/a.rs"]);
+        t.close_many(&now, None);
+        assert!(t.is_closing("/w/b.rs") && t.is_closing("/w/c.rs"));
+        assert_eq!(t.paths(), vec!["/w/b.rs", "/w/c.rs"]);
+        // Success closes the tab.
+        t.set_dirty("/w/b.rs", false);
+        assert!(t.save_finished("/w/b.rs", true));
+        t.close("/w/b.rs");
+        assert!(!t.is_closing("/w/b.rs"));
+        // Failure keeps the tab open and dirty.
+        assert!(!t.save_finished("/w/c.rs", false));
+        assert_eq!(t.paths(), vec!["/w/c.rs"]);
+        assert!(t.is_dirty("/w/c.rs"));
+        assert!(!t.is_closing("/w/c.rs"));
+        // A later save of that tab (Cmd+S) no longer closes it.
+        assert!(!t.save_finished("/w/c.rs", true));
+        assert_eq!(t.paths(), vec!["/w/c.rs"]);
+    }
+
+    #[test]
+    fn fr_l31_tabs_dont_save_closes_all_at_once_and_cancel_closes_none() {
+        let mut t = tabs(&["/w/a.rs", "/w/b.rs"]);
+        t.set_dirty("/w/b.rs", true);
+        let request = t.close_all_request();
+        assert!(t.begin_close(&request, DirtyChoice::Cancel).is_empty());
+        assert!(!t.is_closing("/w/b.rs"));
+        assert_eq!(t.begin_close(&request, DirtyChoice::DontSave), vec!["/w/a.rs", "/w/b.rs"]);
+        assert!(!t.is_closing("/w/b.rs"));
+    }
 }

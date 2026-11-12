@@ -133,6 +133,9 @@ struct Tab {
 pub struct EditorTabs {
     tabs: Vec<Tab>,
     current: Option<usize>,
+    /// Tabs whose close waits on their save (저장 in the unsaved-changes question): each closes when its
+    /// save succeeds and stays open and dirty when it fails, as in Code-OSS.
+    closing: Vec<String>,
 }
 
 /// What closing one or more tabs needs (FR-L31.5): the tabs to close, the ones among them with unsaved
@@ -348,12 +351,42 @@ impl EditorTabs {
     pub fn close(&mut self, path: &str) {
         let Some(i) = self.index(path) else { return };
         self.tabs.remove(i);
+        self.closing.retain(|p| p != path);
         self.current = match self.current {
             _ if self.tabs.is_empty() => None,
             Some(c) if c == i => Some(i.min(self.tabs.len() - 1)),
             Some(c) if c > i => Some(c - 1),
             other => other,
         };
+    }
+
+    /// Act on the answer to the unsaved-changes question. Returns the tabs to close now: every tab asked
+    /// for after 저장 안 함; after 저장 the clean ones only, while each dirty one waits for its save
+    /// ([`EditorTabs::save_finished`]); none after 취소.
+    pub fn begin_close(&mut self, request: &CloseRequest, choice: DirtyChoice) -> Vec<String> {
+        let resolution = request.resolve(choice);
+        for p in &resolution.save {
+            if self.index(p).is_some() && !self.closing.contains(p) {
+                self.closing.push(p.clone());
+            }
+        }
+        resolution.close.into_iter().filter(|p| !resolution.save.contains(p)).collect()
+    }
+
+    /// Whether the tab waits to close on its save.
+    pub fn is_closing(&self, path: &str) -> bool {
+        self.closing.iter().any(|p| p == path)
+    }
+
+    /// A save finished. Returns whether the tab is to close now: it waited on this save and the save
+    /// succeeded. On a failure it stays open and dirty.
+    pub fn save_finished(&mut self, path: &str, ok: bool) -> bool {
+        let Some(i) = self.closing.iter().position(|p| p == path) else { return false };
+        self.closing.remove(i);
+        if !ok {
+            self.set_dirty(path, true);
+        }
+        ok && self.index(path).is_some()
     }
 
     /// Close several tabs, then activate `anchor` when it is still open.

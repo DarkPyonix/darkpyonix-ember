@@ -445,23 +445,34 @@ pub mod page {
         }
     }
 
-    /// The answer to the unsaved-changes question: saves what it says, then closes what it says. The save
-    /// request reaches the session before the close, which writes the text it held.
+    /// The answer to the unsaved-changes question. 저장 sends the saves and closes the clean tabs now; each
+    /// dirty tab closes when its save succeeds (`save_result`) and stays open and dirty when it fails, as in
+    /// Code-OSS. 저장 안 함 closes them all; 취소 none.
     fn answer_close(s: &Shared, choice: crate::ui::editor::DirtyChoice) {
         let mut confirm = s.close_confirm;
         let Some(request) = confirm.read().clone() else { return };
         confirm.set(None);
-        let resolution = request.resolve(choice);
-        for p in &resolution.save {
-            let uri = s.uris.borrow().get(p).cloned();
-            if let Some(uri) = uri {
-                send(s, s.bridge.borrow().on_save_requested(&uri, 0));
+        let now = { let mut tabs = s.tabs; tabs.write().begin_close(&request, choice) };
+        if choice == crate::ui::editor::DirtyChoice::Save {
+            for p in &request.dirty {
+                let uri = s.uris.borrow().get(p).cloned();
+                let event = uri.and_then(|uri| s.bridge.borrow().on_save_requested(&uri, 0));
+                match event {
+                    Some(event) => send(s, Some(event)),
+                    // No document to save: the tab stays open, as after a failed save.
+                    None => { let mut tabs = s.tabs; tabs.write().save_finished(p, false); }
+                }
             }
         }
-        if !resolution.save.is_empty() {
-            s.scm.refresh();
+        finish_close(s, &now, request.anchor.as_deref());
+    }
+
+    /// A save finished: a tab that waited on it to close closes on success and stays open on failure.
+    fn save_result(s: &Shared, path: &str, ok: bool) {
+        let close = { let mut tabs = s.tabs; tabs.write().save_finished(path, ok) };
+        if close {
+            finish_close(s, &[path.to_string()], None);
         }
-        finish_close(s, &resolution.close, request.anchor.as_deref());
     }
 
     /// Opens a file as the preview tab (a single click in the explorer or the search results); the
@@ -853,6 +864,7 @@ pub mod page {
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.uris.borrow_mut().insert(uri.path.clone(), uri.clone()); }
             if let ember_editor::SessionUpdate::Closed { uri } = &update { s.uris.borrow_mut().remove(&uri.path); }
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.open_errors.borrow_mut().remove(&uri.path); }
+            if let ember_editor::SessionUpdate::Saved { uri } = &update { save_result(&s, &uri.path, true); }
             let action = s.bridge.borrow_mut().apply(update);
             match action {
                 BridgeAction::Resync(uri) => { s.host.send(HostCommand::Resync(uri)); }
@@ -862,6 +874,7 @@ pub mod page {
                 }
                 BridgeAction::SaveFailed { uri, error } => {
                     tracing::warn!(path = %uri.path, %error, "saving a file failed");
+                    save_result(&s, &uri.path, false);
                     notice(format!("{}을(를) 저장하지 못했습니다: {}", crate::ui::editor::display_name(base_name(&uri.path)), crate::ui::editor::file_failure_reason(&error)));
                 }
                 BridgeAction::ExtensionNotice { severity, message, source } => {

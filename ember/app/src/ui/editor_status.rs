@@ -103,7 +103,7 @@ pub const PICKER_VISIBLE_ROWS: usize = 9;
 
 /// The rows `[start, end)` of a picker list of `len` rows that are drawn so the highlighted row
 /// `selected` is in view: the first page while it is on it, else the page that ends with it. The
-/// toolkit has no scroll-into-view, so the list is windowed instead (Code-OSS reveals the active
+/// toolkit has no scroll-into-view (TODO(dioxus-compose#200)), so the list is windowed instead (Code-OSS reveals the active
 /// item the same way when a quick pick opens).
 pub fn list_window(selected: usize, len: usize, visible: usize) -> (usize, usize) {
     let visible = visible.max(1);

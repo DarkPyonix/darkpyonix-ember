@@ -92,6 +92,9 @@
 .ed-tsub{display:flex;align-items:center;gap:var(--sp1);padding:var(--sp2) var(--sp3) 0;flex:none;overflow-x:auto;scrollbar-width:none}
 .ed-tsub>button:not(.ed-ib){display:flex;align-items:center;gap:6px;height:28px;padding:0 var(--sp3);border:1px solid var(--line);border-radius:var(--pill);background:none;font-size:var(--fs-xs);cursor:pointer;white-space:nowrap;color:var(--text-2)}
 .ed-tsub>button.on{background:var(--surface-2);color:var(--text)}
+/* FR-L31.23: the rename field takes the tab's place, the trash sits inside the tab. */
+.ed-tsub>input.ed-tren{height:28px;padding:0 var(--sp3);border:1px solid var(--c-blue);border-radius:var(--pill);background:var(--surface);font-size:var(--fs-xs);color:var(--text);outline:none;width:140px}
+.ed-tsub>button>.ed-ib{width:18px;height:18px;margin-right:-6px}
 .ed-term{flex:1;overflow:auto;padding:var(--sp3) var(--sp4);font:var(--code-fs)/var(--code-lh) var(--mono);min-height:0}
 .tl{white-space:pre-wrap;word-break:break-all}
 .tl .pr,.ed-tin .pr{color:var(--c-green)}

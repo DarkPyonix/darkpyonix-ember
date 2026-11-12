@@ -14,6 +14,14 @@ pub enum HostCommand {
     Focus(String),
     Widget(UriComponents, u64, WidgetEvent),
     Resync(UriComponents),
+    /// Show `text` as the buffer of `path`, opening it if needed (FR-L31.6, after a reconnect).
+    Restore { path: String, text: String },
+    /// Take the disk version of an open file even with unsaved edits (디스크 버전으로 되돌리기).
+    Reload(String),
+    /// Read the disk version of `path` for the compare view; the answer is [`HostState::compare`].
+    CompareWithDisk(String),
+    /// Connect again after the connection was lost; the window then puts its tabs back.
+    Reconnect,
     /// Explorer edits through the OSE file channel; each lists the parent directory again after.
     CreateFile { parent: String, name: String },
     CreateDir { parent: String, name: String },
@@ -31,6 +39,8 @@ pub enum HostCommand {
     /// A debounced search whose pause is over (sent by the host to itself).
     SearchNow { id: u64, request: ember_editor::search::SearchRequest },
     CancelSearch(u64),
+    /// A language feature at the caret: completion, definition, rename and the rest (FR-L31.13).
+    Language(ember_editor::LanguageRequest),
     Replace { id: u64, request: ember_editor::search::ReplaceRequest },
     /// Discard working-tree changes for a file by reading it through the session, reconstructing
     /// the base text from `diff`, and writing it back only if reading succeeds.
@@ -39,12 +49,37 @@ pub enum HostCommand {
     SetEol { path: String, eol: ember_editor::Eol },
     SetEncoding { path: String, encoding: ember_editor::Encoding, mode: ember_editor::EncodingMode },
     SetLanguage { path: String, language_id: Option<String> },
+    /// The answer to the workspace trust prompt (FR-L31.18); the window has saved it already.
+    DecideTrust(bool),
+    /// Answer extension message `id` with the chosen button's handle, or `undefined` (FR-L31.16).
+    AnswerMessage { id: u64, handle: Option<i64> },
+    /// Read the project's `.vscode/tasks.json` for the 실행 window (FR-L31.16).
+    LoadTasks,
+    /// Read the extension scan again on the management connection (FR-L31.14): after an install,
+    /// an uninstall, or on the panel's refresh.
+    RescanExtensions,
+    /// Write one setting into the user's or the workspace's settings.json; `None` removes the key (FR-L31.17).
+    WriteSetting { scope: ember_editor::SettingsScope, key: String, value: Option<serde_json::Value> },
+    /// Open a settings file as a document, making it first when it is not there (FR-L31.17).
+    OpenSettingsFile(crate::ui::editor_settings::SettingsFile),
 }
 
 #[derive(Default)]
 pub struct HostState {
     pub connected: bool,
+    /// Why the window cannot work at all (no endpoint, the first connection failed).
     pub error: Option<String>,
+    /// The connection was lost after it worked: why (the server's words, for the log and a tooltip).
+    /// The window stays as it is, with a banner and 다시 연결 (FR-L31.6).
+    pub lost: Option<String>,
+    /// A reconnect is running.
+    pub reconnecting: bool,
+    /// How many reconnects succeeded; the window puts its tabs back each time it grows.
+    pub reconnects: u64,
+    /// The disk version read for the compare view: (path, text or the error).
+    pub compare: Option<(String, Result<String, String>)>,
+    /// Auto-save waits that ran out: (path, wait number) (FR-L31.6).
+    pub autosave_due: Vec<(String, u64)>,
     pub entries: Vec<(String, u32)>,
     /// Every directory listed so far, by path, for the explorer tree.
     pub listings: std::collections::HashMap<String, Vec<(String, u32)>>,
@@ -66,7 +101,17 @@ pub struct HostState {
     pub languages: Vec<ember_editor::LanguageInfo>,
     /// The search panel's matches and the last replace's report (FR-E7).
     pub search: crate::ui::editor_search::SearchResults,
+    /// The tasks of `.vscode/tasks.json` (FR-L31.16); `None` until the 실행 window asks.
+    pub tasks: Option<crate::ui::editor_tasks::TasksLoad>,
+    /// The extensions the OSE has and the ones the extension host runs (FR-L31.14).
+    pub extensions: crate::ui::editor_extensions::ExtensionScan,
+    /// The settings of every scope, the list the settings view shows and the user's key bindings (FR-L31.17).
+    pub settings: crate::ui::editor_settings::SettingsState,
+    /// The language features' sheet, messages and symbols (FR-L31.13).
+    pub language: crate::ui::editor_language::LanguageState,
     pub updates: Vec<SessionUpdate>,
+    /// Workspace trust of the folder: the prompt and the restricted-mode banner (FR-L31.18).
+    pub trust: crate::ui::workspace_trust::TrustState,
 }
 
 const CONNECT_ERROR: &str = "서버에 연결할 수 없습니다";
@@ -82,10 +127,25 @@ impl HostState {
         self.error = Some(format!("{CONNECT_ERROR}: {error}"));
     }
 
-    /// The connection is lost: the host is no longer connected.
+    /// The connection is lost: the host is no longer connected, and the window shows the banner while
+    /// it keeps its tabs and buffers.
     pub fn connection_lost(&mut self, reason: &str) {
         self.connected = false;
-        self.error = Some(format!("{CONNECT_ERROR}: {reason}"));
+        self.reconnecting = false;
+        self.lost = Some(reason.to_owned());
+    }
+
+    /// A reconnect failed: still lost, with the new reason.
+    pub fn reconnect_failed(&mut self, error: impl std::fmt::Display) {
+        self.connection_lost(&error.to_string());
+    }
+
+    /// Connected again: the banner goes and the window puts its tabs back.
+    pub fn reconnected(&mut self) {
+        self.connected = true;
+        self.reconnecting = false;
+        self.lost = None;
+        self.reconnects += 1;
     }
 
     /// Store a directory listing, or surface its error.
@@ -112,11 +172,15 @@ impl HostState {
     /// Handle one session update: search and replace results go to the search panel, connection loss is
     /// recorded, every other update is queued in order.
     pub fn apply_update(&mut self, update: SessionUpdate) {
-        if self.search.apply(&update) {
+        if self.search.apply(&update) || self.language.apply(&update) {
             return;
         }
         if let SessionUpdate::ConnectionLost { reason } = &update {
             self.connection_lost(reason);
+        }
+        if let SessionUpdate::WorkspaceTrustRequested = &update {
+            self.trust.requested();
+            return;
         }
         if let SessionUpdate::Commands { commands } = &update {
             self.extension_commands = commands.clone();
@@ -204,6 +268,22 @@ async fn finish_edit(session: &ember_editor::EditorSession, shared: &Arc<Mutex<H
     shared.lock().unwrap().set_dir_listing(parent, listed);
 }
 
+/// While the connection is lost: wait for 다시 연결. Other commands have no session to go to and are
+/// dropped. False when the window is gone.
+async fn wait_for_reconnect(rx: &mut mpsc::UnboundedReceiver<HostCommand>, shared: &Arc<Mutex<HostState>>, mut revision: SyncSignal<u64>) -> bool {
+    loop {
+        match rx.recv().await {
+            Some(HostCommand::Reconnect) => {
+                shared.lock().unwrap().reconnecting = true;
+                *revision.write() += 1;
+                return true;
+            }
+            Some(_) => {}
+            None => return false,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct EditorHost {
     pub state: Arc<Mutex<HostState>>,
@@ -212,10 +292,18 @@ pub struct EditorHost {
 
 impl EditorHost {
     pub fn start(target: EditorTarget, mut revision: SyncSignal<u64>) -> Self {
-        let state = Arc::new(Mutex::new(HostState::default()));
+        let saved = crate::ui::workspace_trust::decision(
+            &crate::services::services().ui.prefs.get_untracked().workspace_trust,
+            &target.computer,
+            &target.folder,
+        );
+        let trust = crate::ui::workspace_trust::TrustState::at_open(saved);
+        let state = Arc::new(Mutex::new(HostState { trust, ..HostState::default() }));
         let (tx, mut rx) = mpsc::unbounded_channel();
         let shared = state.clone();
         let self_tx = tx.clone();
+        // Extensions the user disabled on this computer are scanned but not run (FR-L31.14).
+        let disabled_extensions = crate::services::services().ui.prefs.get_untracked().disabled_extensions_for(&target.computer);
         crate::services::services().rt.spawn(async move {
             if target.endpoint.trim().is_empty() {
                 shared.lock().unwrap().error = HostState::missing_endpoint().error;
@@ -223,64 +311,87 @@ impl EditorHost {
                 return;
             }
             let root = target.folder.clone();
-            let mut config = SessionConfig::new(target.endpoint, target.folder);
-            config.connection_token = (!target.token.is_empty()).then_some(target.token);
-            config.app_language = "ko".into();
-            let (session, mut updates) = match EditorSession::connect_tcp(config).await {
-                Ok(pair) => pair,
-                Err(error) => {
-                    shared.lock().unwrap().connect_failed(error);
-                    *revision.write() += 1;
-                    return;
-                }
-            };
-            {
-                let entries = session.read_dir(&session.workspace_uri()).await;
-                let mut state = shared.lock().unwrap();
-                state.connected = true;
-                state.set_dir_listing(&root, entries);
-            }
-            *revision.write() += 1;
-            let mut index_task: Option<tokio::task::JoinHandle<()>> = None;
-            // The newest search the window asked for: a debounced one that is no longer it is dropped.
-            let mut latest_search = 0u64;
+            // A lost connection ends the session (`EditorSession` does not resume its sockets); 다시 연결
+            // starts a new one and the window puts its tabs and buffers back (FR-L31.6).
+            let mut attempt = 0u32;
             loop {
-                tokio::select! {
-                    command = rx.recv() => match command {
-                        Some(HostCommand::List(path)) => {
-                            let result = session.read_dir(&session.uri(&path)).await;
-                            shared.lock().unwrap().set_dir_listing(&path, result);
+                attempt += 1;
+                let mut config = SessionConfig::new(target.endpoint.clone(), target.folder.clone());
+                config.connection_token = (!target.token.is_empty()).then(|| target.token.clone());
+                config.app_language = "ko".into();
+                // The answer given since the window opened holds across a reconnect (FR-L31.18, FR-L31.6).
+                config.workspace_trusted = shared.lock().unwrap().trust.trusted;
+                config.disabled_extensions = disabled_extensions.clone();
+                // Settings (FR-L31.17): the user's files are on this machine, the workspace's and the
+                // server's own are read by the session while it connects.
+                let user_files = crate::ui::editor_settings::UserFiles::in_dir(crate::services::services().config.editor_user_dir());
+                let (user_layer, user_error) = crate::ui::editor_settings::read_user_layer(&user_files);
+                config.user_settings = user_layer;
+                config.user_files = user_files.paths();
+                config.server_settings = true;
+                let (session, mut updates) = match EditorSession::connect_tcp(config).await {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        if attempt == 1 {
+                            shared.lock().unwrap().connect_failed(error);
+                            *revision.write() += 1;
+                            return;
                         }
-                        Some(HostCommand::CreateFile { parent, name }) => {
-                            let result = session.create_file(&parent, &name).await;
-                            finish_edit(&session, &shared, "새 파일", &parent, result.map(|_| ())).await;
-                        }
-                        Some(HostCommand::CreateDir { parent, name }) => {
-                            let result = session.create_dir(&parent, &name).await;
-                            finish_edit(&session, &shared, "새 폴더", &parent, result.map(|_| ())).await;
-                        }
-                        Some(HostCommand::Rename { path, new_name }) => {
-                            let parent = parent_of(&path);
-                            let result = session.rename_path(&path, &new_name).await;
-                            if let Ok(new_path) = &result {
-                                let mut state = shared.lock().unwrap();
-                                state.forget_below(&path);
-                                state.renamed.push((path.clone(), new_path.clone()));
+                        shared.lock().unwrap().reconnect_failed(error);
+                        *revision.write() += 1;
+                        if wait_for_reconnect(&mut rx, &shared, revision).await { continue } else { return }
+                    }
+                };
+                {
+                    let entries = session.read_dir(&session.workspace_uri()).await;
+                    let mut state = shared.lock().unwrap();
+                    if attempt == 1 {
+                        state.connected = true;
+                        state.set_dir_listing(&root, entries);
+                    } else {
+                        state.reconnected();
+                        // A failed listing after a reconnect keeps the tree it had instead of replacing the window.
+                        if let Ok(entries) = entries { state.set_dir_listing(&root, Ok::<_, String>(entries)); }
+                    }
+                    // The scopes this session read, on the first connection and after a reconnect (FR-L31.17).
+                    state.settings = crate::ui::editor_settings::start_state(&session, &user_files, user_error);
+                    // The scan of this connection, on the first one and after a reconnect (FR-L31.14).
+                    state.extensions.connected(session.installed_extensions().to_vec(), session.running_extensions());
+                    if attempt == 1 && crate::ui::editor_extensions::capture_hook().is_some_and(|c| c.adds_samples()) {
+                        state.extensions.add_capture_samples();
+                    }
+                }
+                *revision.write() += 1;
+                let mut index_task: Option<tokio::task::JoinHandle<()>> = None;
+                // The newest search the window asked for: a debounced one that is no longer it is dropped.
+                let mut latest_search = 0u64;
+                let mut lost = false;
+                loop {
+                    tokio::select! {
+                        command = rx.recv() => match command {
+                            Some(HostCommand::List(path)) => {
+                                let result = session.read_dir(&session.uri(&path)).await;
+                                shared.lock().unwrap().set_dir_listing(&path, result);
                             }
-                            finish_edit(&session, &shared, "이름 변경", &parent, result.map(|_| ())).await;
-                        }
-                        Some(HostCommand::Delete { path, is_dir }) => {
-                            let parent = parent_of(&path);
-                            let result = session.delete_path(&path, is_dir).await;
-                            if result.is_ok() {
-                                let mut state = shared.lock().unwrap();
-                                state.forget_below(&path);
-                                state.gone.push(path.clone());
+                            Some(HostCommand::CreateFile { parent, name }) => {
+                                let result = session.create_file(&parent, &name).await;
+                                finish_edit(&session, &shared, "새 파일", &parent, result.map(|_| ())).await;
                             }
-                            finish_edit(&session, &shared, "삭제", &parent, result).await;
-                        }
-                        Some(HostCommand::DeleteMany { items }) => {
-                            for (path, is_dir) in items {
+                            Some(HostCommand::CreateDir { parent, name }) => {
+                                let result = session.create_dir(&parent, &name).await;
+                                finish_edit(&session, &shared, "새 폴더", &parent, result.map(|_| ())).await;
+                            }
+                            Some(HostCommand::Rename { path, new_name }) => {
+                                let parent = parent_of(&path);
+                                let result = session.rename_path(&path, &new_name).await;
+                                if let Ok(new_path) = &result {
+                                    let mut state = shared.lock().unwrap();
+                                    state.forget_below(&path);
+                                    state.renamed.push((path.clone(), new_path.clone()));
+                                }
+                                finish_edit(&session, &shared, "이름 변경", &parent, result.map(|_| ())).await;
+                            }
+                            Some(HostCommand::Delete { path, is_dir }) => {
                                 let parent = parent_of(&path);
                                 let result = session.delete_path(&path, is_dir).await;
                                 if result.is_ok() {
@@ -290,111 +401,188 @@ impl EditorHost {
                                 }
                                 finish_edit(&session, &shared, "삭제", &parent, result).await;
                             }
-                        }
-                        Some(HostCommand::CopyPaths { sources, dest_dir }) => {
-                            for src in sources {
-                                let result = session.copy_path(&src, &dest_dir).await;
-                                finish_edit(&session, &shared, "복사", &dest_dir, result.map(|_| ())).await;
-                            }
-                        }
-                        Some(HostCommand::MovePaths { sources, dest_dir }) => {
-                            for src in sources {
-                                let old_parent = parent_of(&src);
-                                let result = session.move_path(&src, &dest_dir).await;
-                                if let Ok(new_path) = &result {
-                                    let mut state = shared.lock().unwrap();
-                                    state.forget_below(&src);
-                                    state.renamed.push((src.clone(), new_path.clone()));
-                                }
-                                let listed = session.read_dir(&session.uri(&old_parent)).await;
-                                shared.lock().unwrap().set_dir_listing(&old_parent, listed);
-                                finish_edit(&session, &shared, "이동", &dest_dir, result.map(|_| ())).await;
-                            }
-                        }
-                        Some(HostCommand::DiscardFile { path, diff }) => {
-                            let parent = parent_of(&path);
-                            if !diff.hunks.is_empty() {
-                                let cur = session.read_file_text(&path).await;
-                                let result = match crate::ui::editor_scm::reconstruct_base_from_read(|| cur, &diff) {
-                                    Ok(base) => {
-                                        let write_res = session.write_file(&path, base.as_bytes()).await;
-                                        if write_res.is_ok() {
-                                            let _ = session.reload(session.uri(&path));
-                                        }
-                                        write_res
+                            Some(HostCommand::DeleteMany { items }) => {
+                                for (path, is_dir) in items {
+                                    let parent = parent_of(&path);
+                                    let result = session.delete_path(&path, is_dir).await;
+                                    if result.is_ok() {
+                                        let mut state = shared.lock().unwrap();
+                                        state.forget_below(&path);
+                                        state.gone.push(path.clone());
                                     }
-                                    Err(err) => Err(err),
-                                };
-                                finish_edit(&session, &shared, "변경 사항 취소", &parent, result).await;
+                                    finish_edit(&session, &shared, "삭제", &parent, result).await;
+                                }
                             }
-                        }
-                        Some(HostCommand::IndexFiles) => {
-                            // A fresh index replaces the last one and a running one is cancelled; the walk runs
-                            // in a task of its own so the session keeps answering while it goes.
-                            if let Some(task) = index_task.take() { task.abort(); }
-                            {
-                                let mut state = shared.lock().unwrap();
-                                state.file_items = Arc::new(Vec::new());
-                                state.index_running = true;
-                                state.index_capped = false;
+                            Some(HostCommand::CopyPaths { sources, dest_dir }) => {
+                                for src in sources {
+                                    let result = session.copy_path(&src, &dest_dir).await;
+                                    finish_edit(&session, &shared, "복사", &dest_dir, result.map(|_| ())).await;
+                                }
                             }
-                            *revision.write() += 1;
-                            index_task = Some(tokio::spawn(index_files(session.lister(), root.clone(), shared.clone(), revision)));
-                        }
-                        Some(HostCommand::Search { id, request, debounce }) => {
-                            latest_search = id;
-                            if debounce {
-                                let tx = self_tx.clone();
-                                tokio::spawn(async move {
-                                    tokio::time::sleep(std::time::Duration::from_millis(crate::ui::editor_search::SEARCH_DEBOUNCE_MS)).await;
-                                    let _ = tx.send(HostCommand::SearchNow { id, request });
-                                });
-                            } else {
-                                let _ = session.search(id, request);
+                            Some(HostCommand::MovePaths { sources, dest_dir }) => {
+                                for src in sources {
+                                    let old_parent = parent_of(&src);
+                                    let result = session.move_path(&src, &dest_dir).await;
+                                    if let Ok(new_path) = &result {
+                                        let mut state = shared.lock().unwrap();
+                                        state.forget_below(&src);
+                                        state.renamed.push((src.clone(), new_path.clone()));
+                                    }
+                                    let listed = session.read_dir(&session.uri(&old_parent)).await;
+                                    shared.lock().unwrap().set_dir_listing(&old_parent, listed);
+                                    finish_edit(&session, &shared, "이동", &dest_dir, result.map(|_| ())).await;
+                                }
                             }
-                        }
-                        Some(HostCommand::SearchNow { id, request }) => {
-                            if id == latest_search { let _ = session.search(id, request); }
-                        }
-                        Some(HostCommand::CancelSearch(id)) => {
-                            if id == latest_search { latest_search = 0; }
-                            let _ = session.cancel_search(id);
-                        }
-                        Some(HostCommand::Replace { id, request }) => { let _ = session.replace(id, request); }
-                        Some(HostCommand::Open(path)) => { let _ = session.open(session.uri(&path)); }
-                        Some(HostCommand::Close(path)) => { let _ = session.close(session.uri(&path)); }
-                        Some(HostCommand::Focus(path)) => { let _ = session.focus(session.uri(&path)); }
-                        Some(HostCommand::Widget(uri, generation, event)) => { let _ = session.widget_event(uri, generation, event); }
-                        Some(HostCommand::Resync(uri)) => { let _ = session.resync(uri); }
-                        Some(HostCommand::SetEol { path, eol }) => { let _ = session.set_eol(session.uri(&path), eol); }
-                        Some(HostCommand::SetEncoding { path, encoding, mode }) => { let _ = session.set_encoding(session.uri(&path), encoding, mode); }
-                        Some(HostCommand::SetLanguage { path, language_id }) => { let _ = session.set_language(session.uri(&path), language_id); }
-                        Some(HostCommand::ExecuteCommand(id)) => {
-                            if let Err(error) = session.execute_command(id.clone(), Vec::new()) {
-                                shared.lock().unwrap().edit_errors.push(format!("명령 {id}을(를) 실행하지 못했습니다: {error}"));
+                            Some(HostCommand::DiscardFile { path, diff }) => {
+                                let parent = parent_of(&path);
+                                if !diff.hunks.is_empty() {
+                                    let cur = session.read_file_text(&path).await;
+                                    let result = match crate::ui::editor_scm::reconstruct_base_from_read(|| cur, &diff) {
+                                        Ok(base) => {
+                                            let write_res = session.write_file(&path, base.as_bytes()).await;
+                                            if write_res.is_ok() {
+                                                let _ = session.reload(session.uri(&path));
+                                            }
+                                            write_res
+                                        }
+                                        Err(err) => Err(err),
+                                    };
+                                    finish_edit(&session, &shared, "변경 사항 취소", &parent, result).await;
+                                }
                             }
-                        }
-                        None => break,
-                    },
-                    update = updates.recv() => match update {
-                        Some(update) => {
-                            // After a replace the search runs again so the list shows what is left.
-                            let refresh = {
-                                let mut state = shared.lock().unwrap();
-                                state.apply_update(update);
-                                state.search.take_refresh()
-                            };
-                            if let Some((id, request)) = refresh {
+                            Some(HostCommand::RescanExtensions) => {
+                                shared.lock().unwrap().extensions.begin_rescan();
+                                *revision.write() += 1;
+                                let result = session.rescan_extensions().await;
+                                shared.lock().unwrap().extensions.finish_rescan(result);
+                            }
+                            Some(HostCommand::IndexFiles) => {
+                                // A fresh index replaces the last one and a running one is cancelled; the walk runs
+                                // in a task of its own so the session keeps answering while it goes.
+                                if let Some(task) = index_task.take() { task.abort(); }
+                                {
+                                    let mut state = shared.lock().unwrap();
+                                    state.file_items = Arc::new(Vec::new());
+                                    state.index_running = true;
+                                    state.index_capped = false;
+                                }
+                                *revision.write() += 1;
+                                index_task = Some(tokio::spawn(index_files(session.lister(), root.clone(), shared.clone(), revision)));
+                            }
+                            Some(HostCommand::Search { id, request, debounce }) => {
                                 latest_search = id;
-                                let _ = session.search(id, request);
+                                if debounce {
+                                    let tx = self_tx.clone();
+                                    tokio::spawn(async move {
+                                        tokio::time::sleep(std::time::Duration::from_millis(crate::ui::editor_search::SEARCH_DEBOUNCE_MS)).await;
+                                        let _ = tx.send(HostCommand::SearchNow { id, request });
+                                    });
+                                } else {
+                                    let _ = session.search(id, request);
+                                }
+                            }
+                            Some(HostCommand::SearchNow { id, request }) => {
+                                if id == latest_search { let _ = session.search(id, request); }
+                            }
+                            Some(HostCommand::CancelSearch(id)) => {
+                                if id == latest_search { latest_search = 0; }
+                                let _ = session.cancel_search(id);
+                            }
+                            Some(HostCommand::Replace { id, request }) => { let _ = session.replace(id, request); }
+                            Some(HostCommand::Language(request)) => { let _ = session.language(request); }
+                            Some(HostCommand::AnswerMessage { id, handle }) => { let _ = session.answer_message(id, handle); }
+                            Some(HostCommand::LoadTasks) => {
+                                shared.lock().unwrap().tasks = Some(crate::ui::editor_tasks::TasksLoad::Loading);
+                                *revision.write() += 1;
+                                let read = session.read_file_text(&crate::ui::editor_tasks::tasks_json_path(&root)).await;
+                                shared.lock().unwrap().tasks = Some(crate::ui::editor_tasks::TasksLoad::from_read(read.map_err(|e| e.to_string())));
+                                *revision.write() += 1;
+                            }
+                            // The settings view is a tab but not a document: the session never hears of it.
+                            Some(HostCommand::Open(path) | HostCommand::Close(path) | HostCommand::Focus(path)) if crate::ui::editor_settings::is_settings_tab(&path) => {}
+                            Some(HostCommand::Open(path)) => { let _ = session.open(session.document_uri(&path)); }
+                            Some(HostCommand::Close(path)) => { let _ = session.close(session.document_uri(&path)); }
+                            Some(HostCommand::Focus(path)) => { let _ = session.focus(session.document_uri(&path)); }
+                            Some(HostCommand::WriteSetting { scope, key, value }) => {
+                                crate::ui::editor_settings::write_setting(&session, &shared, &user_files, scope, &key, value).await;
+                            }
+                            Some(HostCommand::OpenSettingsFile(file)) => {
+                                let path = crate::ui::editor_settings::file_tab_path(&shared.lock().unwrap().settings, file);
+                                match crate::ui::editor_settings::ensure_file(&session, &user_files, file).await {
+                                    Ok(()) => {
+                                        if let Some(path) = path {
+                                            let uri = session.document_uri(&path);
+                                            let _ = session.open(uri.clone());
+                                            let _ = session.focus(uri);
+                                        }
+                                    }
+                                    Err(error) => shared.lock().unwrap().edit_errors.push(format!("설정 파일을 열지 못했습니다: {error}")),
+                                }
+                            }
+                            Some(HostCommand::Widget(uri, generation, event)) => { let _ = session.widget_event(uri, generation, event); }
+                            Some(HostCommand::Resync(uri)) => { let _ = session.resync(uri); }
+                            Some(HostCommand::DecideTrust(trusted)) => {
+                                shared.lock().unwrap().trust.answer(trusted);
+                                let _ = session.decide_workspace_trust(trusted);
+                            }
+                            Some(HostCommand::SetEol { path, eol }) => { let _ = session.set_eol(session.document_uri(&path), eol); }
+                            Some(HostCommand::SetEncoding { path, encoding, mode }) => { let _ = session.set_encoding(session.document_uri(&path), encoding, mode); }
+                            Some(HostCommand::SetLanguage { path, language_id }) => { let _ = session.set_language(session.document_uri(&path), language_id); }
+                            Some(HostCommand::Restore { path, text }) => { let _ = session.restore(session.document_uri(&path), text); }
+                            Some(HostCommand::Reload(path)) => { let _ = session.reload(session.document_uri(&path)); }
+                            Some(HostCommand::CompareWithDisk(path)) => {
+                                let result = session.read_file_text(&path).await.map_err(|e| e.to_string());
+                                shared.lock().unwrap().compare = Some((path, result));
+                            }
+                            // Connected: nothing to do.
+                            Some(HostCommand::Reconnect) => {}
+                            Some(HostCommand::ExecuteCommand(id)) => {
+                                if let Err(error) = session.execute_command(id.clone(), Vec::new()) {
+                                    shared.lock().unwrap().edit_errors.push(format!("명령 {id}을(를) 실행하지 못했습니다: {error}"));
+                                }
+                            }
+                            None => break,
+                        },
+                        update = updates.recv() => match update {
+                            Some(update) => {
+                                let is_lost = matches!(update, SessionUpdate::ConnectionLost { .. });
+                                // After a replace the search runs again so the list shows what is left.
+                                let (refresh, saved_settings) = {
+                                    let mut state = shared.lock().unwrap();
+                                    let saved_settings = crate::ui::editor_settings::saved_settings_file(&state.settings, &update);
+                                    state.apply_update(update);
+                                    (state.search.take_refresh(), saved_settings)
+                                };
+                                // A saved settings file takes effect at once (FR-L31.17).
+                                if let Some(file) = saved_settings {
+                                    crate::ui::editor_settings::reload_after_save(&session, &shared, &user_files, file).await;
+                                }
+                                if let Some((id, request)) = refresh {
+                                    latest_search = id;
+                                    let _ = session.search(id, request);
+                                }
+                                if is_lost {
+                                    lost = true;
+                                    break;
+                                }
+                            }
+                            None => {
+                                // The session ended without saying why.
+                                shared.lock().unwrap().connection_lost("session ended");
+                                lost = true;
+                                break;
                             }
                         }
-                        None => break,
                     }
+                    *revision.write() += 1;
                 }
+                if let Some(task) = index_task.take() { task.abort(); }
+                drop(session);
                 *revision.write() += 1;
+                if !lost || !wait_for_reconnect(&mut rx, &shared, revision).await {
+                    return;
+                }
             }
-            if let Some(task) = index_task.take() { task.abort(); }
         });
         Self { state, tx }
     }
@@ -421,12 +609,28 @@ mod tests {
     }
 
     #[test]
-    fn fr_e1_connection_lost_clears_connected_and_sets_korean_error() {
+    fn fr_l31_save_states_connection_lost_keeps_the_window_and_records_why() {
         let mut state = HostState { connected: true, ..Default::default() };
         state.apply_update(lost("socket closed"));
         assert!(!state.connected);
-        assert_eq!(state.error.as_deref(), Some("서버에 연결할 수 없습니다: socket closed"));
+        // The window is not replaced by an error page: it keeps its tabs and shows the banner.
+        assert_eq!(state.error, None);
+        assert_eq!(state.lost.as_deref(), Some("socket closed"));
         assert_eq!(state.updates.len(), 1);
+    }
+
+    #[test]
+    fn fr_l31_save_states_reconnect_clears_the_banner_and_counts() {
+        let mut state = HostState { connected: true, ..Default::default() };
+        state.apply_update(lost("socket closed"));
+        state.reconnecting = true;
+        state.reconnect_failed("refused");
+        assert_eq!(state.lost.as_deref(), Some("refused"));
+        assert!(!state.reconnecting);
+        state.reconnected();
+        assert!(state.connected);
+        assert_eq!(state.lost, None);
+        assert_eq!(state.reconnects, 1);
     }
 
     #[test]
@@ -467,6 +671,16 @@ mod tests {
         assert!(!state.search.running);
         state.apply_update(lost("x"));
         assert_eq!(state.updates.len(), 1);
+    }
+
+    #[test]
+    fn fr_l31_13_language_updates_go_to_the_language_state_not_the_queue() {
+        use ember_editor::language::{Feature, LanguageUpdate};
+        let mut state = HostState::default();
+        let uri = UriComponents::remote("h", "/w/a.rs");
+        state.apply_update(SessionUpdate::Language(LanguageUpdate::Unavailable { uri, feature: Feature::Format }));
+        assert!(state.updates.is_empty());
+        assert_eq!(state.language.notices.len(), 1);
     }
 
     #[test]

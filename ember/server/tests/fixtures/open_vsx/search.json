@@ -1,0 +1,46 @@
+{
+  "extensions": [
+    {
+      "averageRating": 4.521739130434782,
+      "deprecated": false,
+      "description": "Rust language support for Visual Studio Code",
+      "displayName": "rust-analyzer",
+      "downloadCount": 7713255,
+      "files": {
+        "download": "https://open-vsx.org/api/rust-lang/rust-analyzer/0.4.3116/file/rust-lang.rust-analyzer-0.4.3116.vsix",
+        "signature": "https://open-vsx.org/api/rust-lang/rust-analyzer/0.4.3116/file/rust-lang.rust-analyzer-0.4.3116.sigzip",
+        "icon": "https://open-vsx.org/api/rust-lang/rust-analyzer/0.4.3116/file/icon.png",
+        "sha256": "https://open-vsx.org/api/rust-lang/rust-analyzer/0.4.3116/file/rust-lang.rust-analyzer-0.4.3116.sha256",
+        "publicKey": "https://open-vsx.org/api/-/public-key/14ccb407-4e79-41ed-be5a-6d608325c45a"
+      },
+      "name": "rust-analyzer",
+      "namespace": "rust-lang",
+      "reviewCount": 23,
+      "timestamp": "2026-11-12T00:45:33.051528Z",
+      "url": "https://open-vsx.org/api/rust-lang/rust-analyzer",
+      "verified": true,
+      "version": "0.4.3116"
+    },
+    {
+      "deprecated": false,
+      "description": "Rust analyzer extension without bundled server, see https://github.com/loongcodium/rust-analyzer-no-server",
+      "displayName": "rust-analyzer-no-server",
+      "downloadCount": 35474,
+      "files": {
+        "download": "https://open-vsx.org/api/loong-vsx/rust-analyzer/0.3.2997/file/loong-vsx.rust-analyzer-0.3.2997.vsix",
+        "signature": "https://open-vsx.org/api/loong-vsx/rust-analyzer/0.3.2997/file/loong-vsx.rust-analyzer-0.3.2997.sigzip",
+        "icon": "https://open-vsx.org/api/loong-vsx/rust-analyzer/0.3.2997/file/icon.png",
+        "sha256": "https://open-vsx.org/api/loong-vsx/rust-analyzer/0.3.2997/file/loong-vsx.rust-analyzer-0.3.2997.sha256",
+        "publicKey": "https://open-vsx.org/api/-/public-key/14ccb407-4e79-41ed-be5a-6d608325c45a"
+      },
+      "name": "rust-analyzer",
+      "namespace": "loong-vsx",
+      "timestamp": "2026-08-04T02:41:10.897142Z",
+      "url": "https://open-vsx.org/api/loong-vsx/rust-analyzer",
+      "verified": true,
+      "version": "0.3.2997"
+    }
+  ],
+  "offset": 0,
+  "totalSize": 566
+}

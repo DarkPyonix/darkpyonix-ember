@@ -347,6 +347,11 @@ impl Screen {
         self.term.mode().contains(TermMode::ALT_SCREEN)
     }
 
+    /// True while the program asked for bracketed paste (DECSET 2004, `ESC[?2004h`).
+    pub fn bracketed_paste(&self) -> bool {
+        self.term.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
     pub fn mode_bits(&self) -> u32 {
         self.term.mode().bits()
     }

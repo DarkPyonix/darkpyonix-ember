@@ -1958,6 +1958,19 @@ impl GitState {
                 }
                 Ok(Value::Null)
             }
+            // FR-L31.8: a changed file or an unsaved buffer is not committed; any other line
+            // takes a commit of the log by its number.
+            "blame" => {
+                let line = body.get("line").and_then(Value::as_u64).filter(|n| *n >= 1).ok_or_else(|| GitError::bad("line은 1 이상이어야 합니다."))?;
+                let path = str_of(body, "path").ok_or_else(|| GitError::bad("path가 필요합니다."))?;
+                let changed = body.get("contents").is_some_and(|c| !c.is_null()) || self.files.iter().any(|f| f.path == path);
+                let log = self.full_log(now_ms() / 1000);
+                let commit = match log.get(line as usize % log.len().max(1)) {
+                    Some(c) if !changed => json!({ "sha": c["sha"], "author": c["author"], "email": c["email"], "time": c["time"], "summary": c["subject"] }),
+                    _ => Value::Null,
+                };
+                Ok(json!({ "line": line, "commit": commit }))
+            }
             "log" => {
                 let limit = body["limit"].as_u64().unwrap_or(50) as usize;
                 let skip = body["skip"].as_u64().unwrap_or(0) as usize;
@@ -2719,6 +2732,20 @@ mod tests {
 
     fn stash_list(d: &DemoSource) -> Vec<Value> {
         gs(d, "stash/list", json!({})).unwrap().as_array().unwrap().clone()
+    }
+
+    #[test]
+    fn fr_l31_8_demo_blame_names_a_commit_unless_the_file_changed() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let b = gs(&d, "blame", json!({ "path": "README.md", "line": 2 })).unwrap();
+        assert_eq!(b["line"], 2);
+        assert!(b["commit"]["sha"].as_str().is_some_and(|s| !s.is_empty()));
+        assert!(b["commit"]["summary"].is_string());
+        let changed = gs(&d, "blame", json!({ "path": "ember/app/src/ui/vcs.rs", "line": 1 })).unwrap();
+        assert_eq!(changed["commit"], Value::Null);
+        let unsaved = gs(&d, "blame", json!({ "path": "README.md", "line": 1, "contents": "x" })).unwrap();
+        assert_eq!(unsaved["commit"], Value::Null);
+        assert_eq!(gs(&d, "blame", json!({ "path": "README.md", "line": 0 })).unwrap_err().status, 400);
     }
 
     #[test]

@@ -581,7 +581,6 @@ fn replace_all_multi_edit_with_hangul_and_emoji_preserves_utf8_boundaries() {
 fn bridge_handles_output_channels_and_extension_notifications() {
     let mut bridge = WidgetBridge::new();
     assert!(bridge.output_channels().is_empty());
-    assert!(bridge.extension_messages().is_empty());
 
     // Output channels update
     let ch1 = ember_editor::OutputChannel::new("c1", "Git");
@@ -596,21 +595,18 @@ fn bridge_handles_output_channels_and_extension_notifications() {
     // Clear output channel
     bridge.clear_output_channel("c1");
 
-    // Extension message update
-    let action = bridge.apply(ember_editor::SessionUpdate::ExtensionMessage {
+    // Extension message update: forwarded whole, the workbench keeps the notifications (FR-L31.16).
+    let message = ember_editor::ExtensionMessage {
+        id: 1,
         severity: ember_editor::MessageSeverity::Warning,
         message: "Extension warning".into(),
         source: Some("Rust Analyzer".into()),
-    });
-    assert_eq!(
-        action,
-        BridgeAction::ExtensionNotice {
-            severity: ember_editor::MessageSeverity::Warning,
-            message: "Extension warning".into(),
-            source: Some("Rust Analyzer".into()),
-        }
-    );
-    assert_eq!(bridge.extension_messages().len(), 1);
+        actions: vec![ember_editor::MessageAction { title: "Retry".into(), handle: 0, is_close_affordance: false }],
+        modal: false,
+        detail: None,
+    };
+    let action = bridge.apply(ember_editor::SessionUpdate::ExtensionMessage(message.clone()));
+    assert_eq!(action, BridgeAction::ExtensionNotice(message));
 }
 
 #[test]

@@ -19,6 +19,7 @@
 //! | POST | `/fs/pwrite` | [`PwriteRequest`] → [`Stat`] (in-place positional write) |
 //! | POST | `/fs/glob` | [`GlobRequest`] → [`GlobResponse`] |
 //! | POST | `/fs/grep` | [`GrepRequest`] → [`GrepResponse`] |
+//! | POST | `/git/blame` | [`git_blame::GitBlameRequest`] → [`git_blame::GitBlameResponse`] (FR-L31.8: one line's last commit, `commit: null` when none holds it; 400 for a path outside the work tree or a line past the end; 504 `timeout` after 10 s) |
 //! | POST | `/git/log` | [`git_log::GitLogRequest`] → [`git_log::GitLogResponse`] |
 //! | POST | `/git/commit/show` | [`git_commit::GitCommitShowRequest`] → [`git_commit::GitCommitShowResponse`] (FR-G14: one commit with its changed files; 400 for a bad sha, 404 `not_found` for an unknown one) |
 //! | POST | `/git/revert`, `/git/cherry-pick` | [`git_commit::GitCommitActionRequest`] → [`git_commit::GitCommitActionResponse`] (FR-G15; need `confirm: true`; 409 for a dirty tree or a conflict, which is aborted) |
@@ -186,6 +187,7 @@ pub fn router(node: Node) -> Router {
         .route("/fs/grep", post(grep))
         // FR-G5: history route.
         .route("/git/log", post(git_log_handler))
+        .route("/git/blame", post(git_blame_handler))
         .route("/git/commit/show", post(git_commit_show_handler))
         .route("/git/revert", post(git_revert_handler))
         .route("/git/cherry-pick", post(git_cherry_pick_handler))
@@ -300,6 +302,14 @@ impl From<PolicyError> for ApiError {
             }
             // A NUL byte or similar malformed path is the caller's error, not the node's.
             PolicyError::Io(_, io) if io.kind() == std::io::ErrorKind::InvalidInput => {
+                ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, e.to_string())
+            }
+            // Linux canonicalize answers ENOTDIR for a trailing slash after a file (macOS drops
+            // the slash, handled in `resolve_existing`); like ENAMETOOLONG and ELOOP it is the
+            // caller's path, not the node's fault.
+            PolicyError::Io(_, io)
+                if matches!(crate::fs::io_errno(io), Some("ENOTDIR" | "EINVAL" | "ENAMETOOLONG" | "ELOOP")) =>
+            {
                 ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, e.to_string())
             }
             PolicyError::Io(..) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, e.to_string()),
@@ -558,6 +568,11 @@ async fn git_log_handler(State(n): State<Node>, Json(r): Json<git_log::GitLogReq
     Ok(Json(git_log::log(&n.0.policy, &r).await?))
 }
 // End FR-G5.
+
+// FR-L31.8: blame of one line (reads only, holds no lock).
+async fn git_blame_handler(State(n): State<Node>, Json(r): Json<git_blame::GitBlameRequest>) -> ApiResult<git_blame::GitBlameResponse> {
+    Ok(Json(git_blame::blame(&n.0.policy, &r).await?))
+}
 
 // FR-G9: branch list handler.
 async fn git_branches_handler(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<git_branches::GitBranchesResponse> {

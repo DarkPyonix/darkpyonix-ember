@@ -1775,7 +1775,7 @@ pub mod page {
 
     /// Fits the PTY to the panel on every render (FR-L31.20, #334): the panel's size from the last
     /// layout, debounced, to [`TerminalHandle::resize`]. A held-back size asks for one more render.
-    // TODO: dioxus-compose sends no `onresize` (its `convert_resize_data` is "not sent"), so a size
+    // TODO(dioxus-compose#207): dioxus-compose sends no `onresize` (its `convert_resize_data` is "not sent"), so a size
     // change is seen on the next render (panel drag, output, the wake below), not by an observer.
     fn fit_terminal(s: &Shared, handle: &TerminalHandle) {
         use futures_util::FutureExt;

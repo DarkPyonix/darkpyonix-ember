@@ -18,8 +18,8 @@ pub struct CellSize {
 
 /// The `.ed-term` cell: `--code-fs` 13 px in `--mono` (JetBrains Mono and the system monospace
 /// fallbacks advance 0.6 em) on `--code-lh` 22 px lines (`assets/editor/editor.css`).
-// TODO: measure the advance from the font the renderer actually uses once dioxus-compose reports
-// text metrics; a fixed 0.6 em is a stand-in (dioxus-compose#196 can also drop the font family).
+// TODO(dioxus-compose#196): a fixed 0.6 em is a stand-in. The renderer can drop the font family
+// and reports no text metrics; measure the advance from the font actually used once it does.
 pub const PANEL_CELL: CellSize = CellSize { width: 13.0 * 0.6, height: 22.0 };
 
 /// The `.ed-term` padding, `var(--sp3) var(--sp4)`: (left plus right, top plus bottom).

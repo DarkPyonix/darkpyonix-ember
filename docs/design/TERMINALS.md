@@ -84,7 +84,11 @@ two grids while a TUI uses the alternate screen) + encoded scrollback (10,000 li
 output ≈ 0.5–1.5 MB, hard cap 3 MB for pathological long coloured lines) + three parked threads
 (PTY reader, writer, exit waiter; small stacks, mostly virtual) + alacritty's row cache, released
 by `Screen::compact` after 10 s idle. Typical sessions stay under 2 MB; a session that printed
-10,000 very long coloured lines can exceed it (bounded by the 3 MB cap). Not measured yet.
+10,000 very long coloured lines can exceed it (bounded by the 3 MB cap). Measured in
+`ember/node/tests/term_nfr.rs` (`fifty_idle_sessions_cost_under_2_mb_each`, macOS arm64): 50 idle
+sessions after `Screen::compact` add 2,326,528 B of RSS total, or **46,530 B (45.4 KiB) per
+session** (limit 2 MiB); loopback attach-to-snapshot (`attach_to_snapshot_is_under_500_ms_on_loopback`)
+is **662.25 µs** worst of 10 (limit 500 ms). Two-machine LAN attach latency is not measured yet.
 
 ## 2. Attach API (for the Ember editor and any other client)
 
@@ -159,13 +163,14 @@ terminal tab by the user = `kill`; the window going away = just close the socket
 `control`; scale the PTY size to the viewport. Through ember server the same messages are relayed
 over the node link.
 
-Built (not yet compiled or run, #26) [provisional]: ember server relays the node routes under
+Built (#318, #352, #455) [provisional]: ember server relays the node routes under
 `/api/computers/{id}/terms` (list, create, get, snapshot, control, kill, remove) and
 `/api/computers/{id}/terms/{tid}/attach` (WebSocket), in `ember/server/src/computers/terms.rs`.
 The server keeps no terminal state, so a dropped client connection or a server restart leaves the
 sessions on the node. The attach socket carries the `TermHello` first, then `TermInput` frames, and
-returns `TermEvent` frames unchanged. The local computer has no node client: its terminal routes
-answer 400. Tests: `ember/server/tests/terms_relay.rs`.
+returns `TermEvent` frames unchanged. For `id = local`, the server lazily starts one in-process
+loopback node (`ember/server/src/computers/local_node.rs`, #455) and relays `/api/computers/local/terms*`
+through it. Tests: `ember/server/tests/terms_relay.rs`, `ember/server/tests/fr_w4_local_terms.rs`.
 
 ## 3. VS Code Web (no VS Code source patch)
 
@@ -367,4 +372,6 @@ the adapter reasons above.
   smaller than the PTY sees wrapped lines instead of a scaled view (the Ember editor can scale).
 - Crash restarts of ember node lose the model (scrollback) of re-adopted sessions; exit status of
   re-adopted sessions is unknown. Windows has no PTY keeper (node's PTY code is unix-only).
-- The memory figure of NFR-P1 and the ≤ 500 ms re-attach are estimated, not measured.
+- `NFR-P1` idle-session memory (46,530 B per session) and attach-to-snapshot latency (662.25 µs
+  worst of 10) are measured on loopback (`ember/node/tests/term_nfr.rs`); two-machine LAN attach
+  latency is not measured yet.

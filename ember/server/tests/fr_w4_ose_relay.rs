@@ -612,10 +612,10 @@ async fn fr_n3_ide_relay_ends_on_revoke() {
     let mut laptop_ws: WebSocketStream<BiStream> = open_device_ws(&laptop, &server_t, &relay_path).await.unwrap();
 
     // Verify both relays pump short frames before revocation.
-    phone_ws.send(Message::Binary(b"ping-phone".to_vec().into())).await.unwrap();
-    assert_eq!(phone_ws.next().await.unwrap().unwrap(), Message::Binary(b"ping-phone".to_vec().into()));
-    laptop_ws.send(Message::Binary(b"ping-laptop".to_vec().into())).await.unwrap();
-    assert_eq!(laptop_ws.next().await.unwrap().unwrap(), Message::Binary(b"ping-laptop".to_vec().into()));
+    phone_ws.send(Message::Binary(b"ping-phone-client".to_vec().into())).await.unwrap();
+    assert_eq!(phone_ws.next().await.unwrap().unwrap(), Message::Binary(b"ping-phone-client".to_vec().into()));
+    laptop_ws.send(Message::Binary(b"ping-laptop-client".to_vec().into())).await.unwrap();
+    assert_eq!(laptop_ws.next().await.unwrap().unwrap(), Message::Binary(b"ping-laptop-client".to_vec().into()));
 
     // Revoke phone: its relay ends within one heartbeat (5 s), while laptop's relay keeps working.
     let started = Instant::now();

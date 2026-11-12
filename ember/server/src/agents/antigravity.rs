@@ -144,6 +144,9 @@ pub const HOOK_NAME: &str = "ember-approvals";
 pub const PROXY_BASE_ENV: &str = "GOOGLE_GEMINI_BASE_URL";
 /// The key agy sends to the proxy (as `x-goog-api-key`) in that mode.
 pub const PROXY_KEY_ENV: &str = "GEMINI_API_KEY";
+/// agy checks `GOOGLE_API_KEY` before `GEMINI_API_KEY`, so `members::proxy_env` sets both to the
+/// member's proxy key to prevent a server-side `GOOGLE_API_KEY` from overriding the member key.
+pub const PROXY_ALT_KEY_ENV: &str = "GOOGLE_API_KEY";
 
 /// Extra agy arguments when the spawn env carries a proxy base URL: a per-session `--settings`
 /// (never saved to `~/.gemini`) that switches agy from its Google sign-in to the Gemini API route.
@@ -1002,6 +1005,7 @@ impl AgyRun {
         let out = Command::new(&self.bin)
             .args(["-p", "/hooks", "--output-format", "json", "--add-dir"])
             .arg(&self.root)
+            .args(proxy_args(&self.req.env))
             .envs(self.req.env.iter().map(|(k, v)| (k, v)))
             .current_dir(&self.req.cwd)
             .stdin(Stdio::null())

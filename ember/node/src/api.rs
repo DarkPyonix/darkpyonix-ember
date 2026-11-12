@@ -673,7 +673,7 @@ async fn exec_session(node: Node, mut ws: WebSocket) {
     let pid = running.pid;
     tracing::debug!(pid, pty = req.pty.is_some(), "exec started");
     if !send_json(&mut ws, &ExecEvent::Started { pid }).await {
-        kill_group(pid, libc::SIGKILL);
+        kill_group(pid, crate::exec::SIGKILL);
         return;
     }
 
@@ -703,7 +703,7 @@ async fn exec_session(node: Node, mut ws: WebSocket) {
                     Ok(ExecInput::Stdin { data }) => running.control.write_stdin(data).await,
                     Ok(ExecInput::CloseStdin) => { running.control.close_stdin(); Ok(()) }
                     Ok(ExecInput::Resize { size }) => running.control.resize(size),
-                    Ok(ExecInput::Kill { signal }) => { kill_group(pid, signal.unwrap_or(libc::SIGTERM)); Ok(()) }
+                    Ok(ExecInput::Kill { signal }) => { kill_group(pid, signal.unwrap_or(crate::exec::SIGTERM)); Ok(()) }
                     Err(e) => Err(anyhow::anyhow!("bad input: {e}")),
                 };
                 if let Err(e) = res {
@@ -715,7 +715,7 @@ async fn exec_session(node: Node, mut ws: WebSocket) {
     if !finished {
         // The controlling connection went away: a foreground command does not outlive it.
         tracing::debug!(pid, "exec connection closed; killing process group");
-        kill_group(pid, libc::SIGKILL);
+        kill_group(pid, crate::exec::SIGKILL);
     }
     let _ = sink.close().await;
     // Read whatever the client still sends until it answers the close. Dropping the socket with

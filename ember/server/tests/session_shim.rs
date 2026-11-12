@@ -172,3 +172,64 @@ fn fr_s8_linger_is_configurable_and_defaults_to_one_hour() {
     assert_eq!(linger_secs(Some(5), Some("90")), 5, "the spec wins over the environment");
     assert_eq!(linger_secs(None, Some("nope")), 3600);
 }
+
+/// #544: the agent's stderr reaches `<id>.log` through the upstream redaction, the file is 0600
+/// in a 0700 directory, and a long line is not cut at 300 characters.
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_s8_shim_stderr_log_is_redacted_and_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("shims");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let key = format!("AIza{}", "Q".repeat(17) + &"7".repeat(18));
+    let long = "w ".repeat(400);
+    let script = format!(
+        "echo \"request failed for key {key} and user dev.person@mail.example.com\" >&2; echo \"{long}end\" >&2; echo done"
+    );
+    let mut s = spec("redact", root.path());
+    s.program = PathBuf::from("/bin/sh");
+    s.args = vec!["-c".into(), script];
+    let mut c = spawn_shim(&shim_bin(), &dir, &s).await.unwrap();
+    read_until(&mut c, "done").await;
+    wait_exit(&mut c).await;
+    let log = dir.join("redact.log");
+    let mut text = String::new();
+    for _ in 0..100 {
+        text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text.contains("end") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!text.contains(&key), "the key must not reach the log: {text}");
+    assert!(!text.contains("dev.person@mail.example.com"), "{text}");
+    assert!(text.contains("request failed for key [redacted]"), "{text}");
+    let long_line = text.lines().find(|l| l.ends_with("end")).expect("the long line");
+    assert!(long_line.chars().count() > 300, "a debugging log keeps the whole line");
+    assert_eq!(std::fs::metadata(&log).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+}
+
+/// #544: logs of ended shims older than the retention are removed; a recent one and a live
+/// shim's old one stay.
+#[test]
+fn fr_s8_shim_logs_older_than_the_retention_are_swept() {
+    use ember_server::session_shim::{sweep_old_logs, LOG_RETENTION};
+    let dir = tempfile::tempdir().unwrap();
+    let old = std::time::SystemTime::now() - LOG_RETENTION - Duration::from_secs(60);
+    let set_old = |p: &Path| std::fs::File::options().write(true).open(p).unwrap().set_modified(old).unwrap();
+    for name in ["gone.log", "live.log", "fresh.log", "other.txt"] {
+        std::fs::write(dir.path().join(name), "x").unwrap();
+    }
+    set_old(&dir.path().join("gone.log"));
+    set_old(&dir.path().join("live.log"));
+    set_old(&dir.path().join("other.txt"));
+    std::fs::write(dir.path().join("live.json"), "{}").unwrap();
+    assert_eq!(sweep_old_logs(dir.path(), LOG_RETENTION), 1);
+    assert!(!dir.path().join("gone.log").exists());
+    for keep in ["live.log", "fresh.log", "other.txt"] {
+        assert!(dir.path().join(keep).exists(), "{keep}");
+    }
+}

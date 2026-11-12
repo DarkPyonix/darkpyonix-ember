@@ -1517,6 +1517,92 @@ fn authority_addr(authority: &str) -> (String, u16) {
     }
 }
 
+// ---- file transfer (FR-F3, FR-F4, FR-F5, FR-F8, #487) ---------------------------------------
+
+impl Api {
+    /// Everything the receiving computer holds: devices, transfers, offers, received files,
+    /// history and settings.
+    pub async fn transfers(&self) -> ApiResult<crate::transfers::TransfersSnapshot> {
+        self.get("/transfers").await
+    }
+
+    /// Offers files as device `from`. With `peer_id` the receiver requires a registered device.
+    pub async fn offer_transfer(
+        &self,
+        from: &str,
+        peer_id: Option<&str>,
+        files: &[crate::transfers::DeclaredFile],
+    ) -> ApiResult<crate::transfers::OfferCreated> {
+        let body = json!({ "from": from, "peer_id": peer_id, "files": files });
+        Self::decode(self.post("/transfers/offers", body).await?)
+    }
+
+    pub async fn accept_transfer_offer(&self, id: &str) -> ApiResult<crate::transfers::TransferItem> {
+        Self::decode(self.post(&format!("/transfers/offers/{}/accept", seg(id)), json!({})).await?)
+    }
+
+    pub async fn decline_transfer_offer(&self, id: &str) -> ApiResult<crate::transfers::HistoryRecord> {
+        Self::decode(self.post(&format!("/transfers/offers/{}/decline", seg(id)), json!({})).await?)
+    }
+
+    /// Appends `data` to file `file` of transfer `id` at `offset`. `sha256` is the chunk's hash
+    /// (lowercase hex); the receiver refuses a chunk that does not match it (`FR-F5`).
+    pub async fn transfer_chunk(
+        &self,
+        id: &str,
+        file: usize,
+        offset: u64,
+        data: &[u8],
+        sha256: Option<&str>,
+    ) -> ApiResult<crate::transfers::TransferItem> {
+        use base64::Engine;
+        let body = json!({
+            "file": file,
+            "offset": offset,
+            "data_base64": base64::engine::general_purpose::STANDARD.encode(data),
+            "sha256": sha256,
+        });
+        Self::decode(self.post(&format!("/transfers/{}/chunks", seg(id)), body).await?)
+    }
+
+    /// The receiver's verified byte offset of file `file` (`FR-F5`): where to continue.
+    pub async fn transfer_resume_offset(&self, id: &str, file: usize) -> ApiResult<u64> {
+        let r: crate::transfers::ResumeOffset =
+            self.get(&format!("/transfers/{}/resume-offset/{file}", seg(id))).await?;
+        Ok(r.offset)
+    }
+
+    /// Asks the receiver to verify and store the files of transfer `id`.
+    pub async fn complete_transfer(&self, id: &str) -> ApiResult<Vec<crate::transfers::StoredFile>> {
+        let r: crate::transfers::Completed =
+            Self::decode(self.post(&format!("/transfers/{}/complete", seg(id)), json!({})).await?)?;
+        Ok(r.stored)
+    }
+
+    pub async fn pause_transfer(&self, id: &str) -> ApiResult<crate::transfers::TransferItem> {
+        Self::decode(self.post(&format!("/transfers/{}/pause", seg(id)), json!({})).await?)
+    }
+
+    pub async fn resume_transfer(&self, id: &str) -> ApiResult<crate::transfers::TransferItem> {
+        Self::decode(self.post(&format!("/transfers/{}/resume", seg(id)), json!({})).await?)
+    }
+
+    /// Cancels an offer or a transfer; the receiver removes the partial files (`FR-F4`).
+    pub async fn cancel_transfer(&self, id: &str) -> ApiResult<crate::transfers::HistoryRecord> {
+        Self::decode(self.post(&format!("/transfers/{}/cancel", seg(id)), json!({})).await?)
+    }
+
+    pub async fn transfer_history(&self) -> ApiResult<Vec<crate::transfers::HistoryRecord>> {
+        self.get("/transfers/history").await
+    }
+
+    /// Clears the history; received files stay on disk (`FR-F8`).
+    pub async fn clear_transfer_history(&self) -> ApiResult<()> {
+        Self::check(self.send(Method::DELETE, "/transfers/history", None).await?)?;
+        Ok(())
+    }
+}
+
 /// Percent-encode one path segment (ids are UUIDs today, but approval ids come from agents).
 pub(crate) fn seg(s: &str) -> String {
     let mut out = String::with_capacity(s.len());

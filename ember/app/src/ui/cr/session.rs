@@ -35,7 +35,7 @@ pub use crate::ui::session::{
     PaneToggle, ProjectPanes, SIDE_LIST_W, SOON, Section, SessionView, SideListMode, UI_STRINGS,
     add_pane, can_move, close_pane, current_mode, environment_rows, ide_choices, kanban,
     kanban_column, lease_plan, mode_chip_label, mode_chip_warns, mode_rows, model_chip_label,
-    move_pane, page_step, pane_layout, pane_rows, reorder_pane, resolve_project, side_list_mode,
+    move_pane, multi_pane_layout, pane_rows, swipe_pane_width, SWIPE_GAP, reorder_pane, resolve_project, side_list_mode,
     side_sections, single_target, toolbar_fold_level, toolbar_width, view_chips_below,
     view_from_saved, visible_panes,
 };
@@ -1608,14 +1608,7 @@ pub fn MultiView(
     let ui = shared_ui().clone();
     let window = current_window_size();
     let p = ember_theme().palette;
-    let layout = if window.width_dp >= 700.0 {
-        PaneLayout {
-            per_row: 2,
-            paged: false,
-        }
-    } else {
-        pane_layout(window.class)
-    };
+    let layout = multi_pane_layout(window.width_dp, window.class);
     let proj_owned = project.to_string();
     let members_vec = members.to_vec();
 
@@ -1633,7 +1626,6 @@ pub fn MultiView(
         .cloned()
         .collect();
     let n = vis.len();
-    let cur = page.get().min(n.saturating_sub(1));
     let show_help = window.width_dp >= 1280.0;
 
     cu::Box()
@@ -1844,47 +1836,39 @@ pub fn MultiView(
                                     });
                             });
                     } else if layout.paged {
-                        cu::Row()
-                            .alignment(Alignment::CenterStart)
-                            .space_role(SpaceRole::Sm)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
-                                let pg1 = page.clone();
-                                AppButton(
-                                    "이전",
-                                    Some(IconRole::Back),
-                                    ButtonKind::Default,
-                                    true,
-                                    cur > 0,
-                                    false,
-                                    move || pg1.set(page_step(cur, n, false)),
-                                );
-                                Label(
-                                    &format!("{} / {}", cur + 1, n),
-                                    Fs::Sm,
-                                    Weight::Regular,
-                                    Some(paint(p.text_2)),
-                                    Some(1),
-                                );
-                                let pg2 = page.clone();
-                                AppButton(
-                                    "다음",
-                                    Some(IconRole::Forward),
-                                    ButtonKind::Default,
-                                    true,
-                                    cur + 1 < n,
-                                    false,
-                                    move || pg2.set(page_step(cur, n, true)),
-                                );
-                            });
-                        cu::Box()
+                        // Sideways strip, one pane per screen width with the next one peeking
+                        // in (mockup `.mv` at 560 px), instead of a previous / next pager.
+                        // TODO(compose-rust#547): no scroll snapping, so a swipe can stop between
+                        // two panes (mockup `scroll-snap-type:x mandatory`).
+                        let pane_w = swipe_pane_width(window.width_dp);
+                        cu::ScrollRow()
                             .modifier(Modifier::new().fill_max_width().weight(1.0))
                             .content(|| {
-                                if let Some(m) =
-                                    members_vec.iter().find(|m| m.session_id == vis[cur])
-                                {
-                                    Pane(&proj_owned, m, &all, &vis, on_enlarge.clone());
-                                }
+                                cu::Row()
+                                    .spacing(SWIPE_GAP)
+                                    .modifier(Modifier::new().fill_max_height())
+                                    .content(|| {
+                                        for sid in &vis {
+                                            if let Some(m) =
+                                                members_vec.iter().find(|m| &m.session_id == sid)
+                                            {
+                                                let m = m.clone();
+                                                let pr = proj_owned.clone();
+                                                let all_s = all.clone();
+                                                let vis_s = vis.clone();
+                                                let enl = on_enlarge.clone();
+                                                cu::Box()
+                                                    .modifier(
+                                                        Modifier::new()
+                                                            .width(pane_w)
+                                                            .fill_max_height(),
+                                                    )
+                                                    .content(move || {
+                                                        Pane(&pr, &m, &all_s, &vis_s, enl.clone());
+                                                    });
+                                            }
+                                        }
+                                    });
                             });
                     } else {
                         let rows_idx = pane_rows(n, layout.per_row);
@@ -4395,7 +4379,6 @@ pub fn SessionScreen(focus: Option<String>) {
         mutable_state_of(std::env::var("EMBER_CR_SESSION_NEW_MEMBER").as_deref() == Ok("1"))
     });
     let project_menu = remember(|| mutable_state_of(false));
-    let more_menu = remember(|| mutable_state_of(false));
     let web_menu = remember(|| mutable_state_of(false));
     // 버전 관리 opens as a sheet over the conversation (FR-L18, #495); `EMBER_CR_SESSION_VCS=1`
     // opens it at start for captures.
@@ -4723,12 +4706,14 @@ pub fn SessionScreen(focus: Option<String>) {
                                         let sv = set_view.clone();
                                         ViewSeg(view_now, hide_view_lbl, false, move |v| sv(v));
                                     }
-                                    if !is_phone {
+                                    {
+                                        // Phone keeps the same row of buttons, icon only
+                                        // (mockup `.sesshead` at 560 px hides `.hide-xl` labels).
                                         let nm = new_member_open.clone();
                                         ToolbarBtn(
                                             ICON_PLUS_SVG,
                                             "새 팀원",
-                                            show_btn_lbl,
+                                            show_btn_lbl && !is_phone,
                                             false,
                                             move || nm.set(true),
                                         );
@@ -4736,7 +4721,7 @@ pub fn SessionScreen(focus: Option<String>) {
                                         ToolbarBtn(
                                             ICON_GIT_SVG,
                                             "버전 관리",
-                                            show_btn_lbl,
+                                            show_btn_lbl && !is_phone,
                                             false,
                                             move || vo.set(true),
                                         );
@@ -4744,21 +4729,9 @@ pub fn SessionScreen(focus: Option<String>) {
                                         ToolbarBtn(
                                             ICON_GLOBE_SVG,
                                             "웹 페이지",
-                                            show_web_lbl,
-                                            true,
+                                            show_web_lbl && !is_phone,
+                                            !is_phone,
                                             move || wm(),
-                                        );
-                                    } else {
-                                        let mm = more_menu.clone();
-                                        Clickable(
-                                            Modifier::new()
-                                                .size(32.0, 32.0)
-                                                .background(paint(p.surface))
-                                                .border(1.0, paint(p.line))
-                                                .shape_role(ShapeRole::Full),
-                                            Alignment::Center,
-                                            move || mm.set(true),
-                                            || NavIcon(ICON_MORE_H_SVG, p.text_2.to_argb(), 16.0),
                                         );
                                     }
                                     if let Some(t) = target.clone() {
@@ -4947,36 +4920,39 @@ pub fn SessionScreen(focus: Option<String>) {
                 },
             );
 
-            // Phone folded toolbar actions OptionSheet
-            if is_phone {
-                let more_opts = vec![
-                    "새 팀원".to_string(),
-                    "버전 관리".to_string(),
-                    "웹 페이지".to_string(),
-                ];
-                let mm_d = more_menu.clone();
-                let nm_m = new_member_open.clone();
-                let vcs_m = vcs_open.clone();
-                let open_web = open_web_menu.clone();
-                OptionSheet(
-                    more_menu.get(),
-                    &more_opts,
-                    None,
-                    POPUP_W,
-                    move || mm_d.set(false),
-                    move |idx| match idx {
-                        0 => nm_m.set(true),
-                        1 => vcs_m.set(true),
-                        2 => open_web(),
-                        _ => {}
-                    },
-                );
-            }
         });
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l18_phone_header_keeps_icon_buttons_instead_of_a_folded_menu() {
+        let src = include_str!("session.rs").split("mod tests {").next().unwrap();
+        let head = src.split("// Top toolbar (.sesshead)").nth(1).unwrap();
+        let head = head.split("if chips_below {").next().unwrap();
+        assert!(!head.contains("ICON_MORE_H_SVG"));
+        assert!(head.contains("show_btn_lbl && !is_phone"));
+        for icon in ["ICON_PLUS_SVG", "ICON_GIT_SVG", "ICON_GLOBE_SVG", "IdeMenu(&t)"] {
+            assert!(head.contains(icon), "{icon}");
+        }
+        assert!(!src.contains("more_menu"));
+    }
+
+    #[test]
+    fn fr_l18_one_pane_layout_is_a_sideways_strip_not_a_pager() {
+        let src = include_str!("session.rs").split("mod tests {").next().unwrap();
+        let mv = src.split("pub fn MultiView(").nth(1).unwrap();
+        let mv = mv.split("\npub fn ").next().unwrap();
+        let paged = mv.split("} else if layout.paged {").nth(1).unwrap();
+        let paged = paged.split("let rows_idx = pane_rows(").next().unwrap();
+        assert!(paged.contains("cu::ScrollRow()"));
+        assert!(paged.contains(".width(pane_w)"));
+        assert!(paged.contains("TODO(compose-rust#547)"));
+        assert!(mv.contains("multi_pane_layout(window.width_dp, window.class)"));
+        assert!(!paged.contains("\"이전\""));
+        assert!(!paged.contains("\"다음\""));
+    }
+
     #[test]
     fn fr_l18_drawer_state_resets_and_scrim_and_navigation_close_it() {
         let src = include_str!("session.rs").split("mod tests {").next().unwrap();

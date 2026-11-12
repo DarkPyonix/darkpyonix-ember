@@ -108,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
     let shim_runtime = match ember_server::agents::proc::find_shim_bin() {
         Some(bin) if ember_server::agents::proc::shim_enabled() => {
             let dir = data_dir.join("shims");
-            std::fs::create_dir_all(&dir)?;
+            ember_server::session_shim::private_dir(&dir)?;
             let rt = ember_server::agents::proc::ShimRuntime { bin, dir, store: store.clone() };
             ember_server::agents::proc::install_runtime(rt.clone());
             Some(rt)
@@ -430,6 +430,8 @@ async fn main() -> anyhow::Result<()> {
     // (FR-L7, FR-W4); EMBER_IDE_COMPUTERS stays as an override merged onto them.
     let ide = Arc::new(ember_server::api::ide::IdeConfig::from_env()?);
     let ose = Arc::new(ember_server::ose::OseManager::default());
+    // A SIGKILL of the previous server skips the token file drop (#521).
+    ose.sweep_stale_tokens();
     let transfers = ember_server::transfers::TransferManager::new(
         &data_dir,
         Some(devices.clone()),

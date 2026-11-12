@@ -40,25 +40,53 @@ pub fn server_token(env_token: Option<&str>, data_dir: Option<&Path>, home: Opti
 /// open and the check is caught by comparing the path's own `symlink_metadata` (a symlink, or a
 /// different dev/inode, is refused) with the handle's.
 fn read_token_file(path: &Path) -> Option<String> {
-    read_token_file_with(path, || {})
+    read_token_file_hooks(path, || {}, || {})
 }
 
 /// `O_NONBLOCK` for the platforms the client runs on, so opening a FIFO at the token path returns
 /// at once instead of waiting for a writer (the kind is refused right after). `ember-client` has no
-/// `libc`, so the value is spelled here; an unknown platform opens without the flag and relies on
-/// the kind check made before the open.
+/// `libc` dependency, so the value is spelled here (#430). It is checked twice so no platform gets
+/// a wrong flag silently: a unix target not listed here fails to COMPILE (below), and the test
+/// `fr_s11_o_nonblock_matches_libc` compares the value with `libc::O_NONBLOCK` (a dev-dependency).
 #[cfg(unix)]
-const O_NONBLOCK: Option<i32> = if cfg!(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly")) {
-    Some(0x0004)
-} else if cfg!(any(target_os = "linux", target_os = "android")) {
-    Some(0x0800)
+const O_NONBLOCK: i32 = if cfg!(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+)) {
+    0x0004
 } else {
-    None
+    0x0800
 };
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        target_os = "linux",
+        target_os = "android"
+    ))
+))]
+compile_error!("ember-client: O_NONBLOCK is not known for this unix target; add it in token.rs");
 
 /// [`read_token_file`] with `between` run after the open and before the path is checked, so a test
 /// can swap the path in that window (FR-S11).
+#[cfg(test)]
 fn read_token_file_with(path: &Path, between: impl FnOnce()) -> Option<String> {
+    read_token_file_hooks(path, || {}, between)
+}
+
+/// [`read_token_file`] with `before_open` run after the kind check and before the open (a test
+/// swaps in a FIFO there, #430) and `between` run after the open.
+fn read_token_file_hooks(path: &Path, before_open: impl FnOnce(), between: impl FnOnce()) -> Option<String> {
     use std::io::Read;
     // A FIFO, a device or a symlink at the path is refused before anything is opened, so an open
     // cannot block on it.
@@ -74,12 +102,13 @@ fn read_token_file_with(path: &Path, between: impl FnOnce()) -> Option<String> {
         Ok(_) => {}
         Err(_) => return None,
     }
+    before_open();
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
-    if let Some(flag) = O_NONBLOCK {
+    {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(flag);
+        options.custom_flags(O_NONBLOCK);
     }
     let mut file = options.open(path).ok()?;
     between();
@@ -131,7 +160,32 @@ fn owner_matches(file_uid: u32, dir_uid: Option<u32>) -> bool {
 /// accident. Any other server is reached by device key, not by this token.
 pub fn token_allowed_for(base_url: &str) -> bool {
     let extra = std::env::var("EMBER_TOKEN_HOSTS").unwrap_or_default();
-    token_allowed_for_hosts(base_url, &extra)
+    let allowed = token_allowed_for_hosts(base_url, &extra);
+    if !allowed && withheld_by_scheme(base_url, &extra) {
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                "server token withheld from {base_url}: a bare EMBER_TOKEN_HOSTS entry covers https only; \
+                 list http://host:port to send it over plain http"
+            );
+        }
+    }
+    allowed
+}
+
+/// Whether the token is withheld from `base_url` only because of its scheme (#429): the target is
+/// plain `http` to a non-loopback host that a bare `EMBER_TOKEN_HOSTS` entry names. The caller
+/// logs one warning for it, because otherwise the entry silently does nothing.
+pub fn withheld_by_scheme(base_url: &str, extra_hosts: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url) else { return false };
+    let Some(host) = url.host_str() else { return false };
+    let host = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    url.scheme() == "http"
+        && !token_allowed_for_hosts(base_url, extra_hosts)
+        && extra_hosts
+            .split(',')
+            .map(str::trim)
+            .any(|e| !e.is_empty() && !e.contains("://") && e.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase() == host)
 }
 
 /// [`token_allowed_for`] with the extra host list given.
@@ -376,6 +430,56 @@ mod tests {
         });
         let got = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the read of a FIFO must not block");
         assert_eq!(got, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_s11_o_nonblock_matches_libc() {
+        assert_eq!(O_NONBLOCK, libc::O_NONBLOCK);
+    }
+
+    /// #430: the path passes the kind check as a regular file and is replaced by a FIFO before the
+    /// open. The O_NONBLOCK open returns at once and the handle's kind is refused.
+    #[cfg(unix)]
+    #[test]
+    fn fr_s11_a_fifo_swapped_in_before_the_open_is_refused_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = token_in(dir.path(), 0o600);
+        let probe = dir.path().join("probe-fifo");
+        if !matches!(std::process::Command::new("mkfifo").arg(&probe).status(), Ok(s) if s.success()) {
+            return; // no mkfifo on this machine
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let p = path.clone();
+        std::thread::spawn(move || {
+            let swap = || {
+                std::fs::remove_file(&p).unwrap();
+                let made = std::process::Command::new("mkfifo").arg(&p).status().unwrap();
+                assert!(made.success());
+            };
+            let _ = tx.send(read_token_file_hooks(&p, swap, || {}));
+        });
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the open of a FIFO swapped in after the kind check must not block");
+        assert_eq!(got, None);
+        use std::os::unix::fs::FileTypeExt;
+        assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_fifo(), "the swap happened");
+    }
+
+    #[test]
+    fn fr_s11_a_bare_host_over_http_is_reported_as_withheld_by_scheme() {
+        // A bare entry over plain http: withheld, and the caller warns.
+        assert!(withheld_by_scheme("http://dev.example.com:8740", "dev.example.com"));
+        assert!(withheld_by_scheme("http://DEV.example.com", "a.org, Dev.Example.com"));
+        assert!(withheld_by_scheme("http://[fd00::1]:8740", "[fd00::1]"));
+        // Allowed, or not listed at all, or not because of the scheme: no warning.
+        assert!(!withheld_by_scheme("https://dev.example.com:8740", "dev.example.com"));
+        assert!(!withheld_by_scheme("http://dev.example.com:8740", "http://dev.example.com:8740"));
+        assert!(!withheld_by_scheme("http://dev.example.com:8740", "other.org"));
+        assert!(!withheld_by_scheme("http://dev.example.com:9", "http://dev.example.com:8740"));
+        assert!(!withheld_by_scheme("http://127.0.0.1:8740", "127.0.0.1"));
+        assert!(!withheld_by_scheme("not a url", "dev.example.com"));
     }
 
     #[cfg(unix)]

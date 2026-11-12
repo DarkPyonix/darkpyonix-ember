@@ -26,6 +26,9 @@ pub enum ClientError {
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
     #[error("protocol: {0}")]
     Protocol(String),
+    /// A fixed Korean sentence for the panel (NFR-L4); the detail is logged, not shown.
+    #[error("{0}")]
+    Refused(&'static str),
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -66,6 +69,18 @@ pub fn relay_allowed_with_hosts(base: &str, extra_hosts: &str) -> Result<(), Str
 /// [`relay_allowed_with_hosts`] with `EMBER_TOKEN_HOSTS` read from the environment.
 pub fn relay_allowed(base: &str) -> Result<(), String> {
     relay_allowed_with_hosts(base, &std::env::var("EMBER_TOKEN_HOSTS").unwrap_or_default())
+}
+
+/// The fixed Korean sentence the panel shows when [`relay_allowed`] refuses (NFR-L4); the English
+/// reason goes to the log only.
+pub const RELAY_REFUSED: &str =
+    "이 서버 주소로는 터미널을 열 수 없습니다. https 주소를 쓰거나 같은 컴퓨터의 서버에 연결하세요.";
+
+fn check_relay(base: &str) -> Result<(), ClientError> {
+    relay_allowed(base).map_err(|reason| {
+        tracing::warn!("terminal relay refused: {reason}");
+        ClientError::Refused(RELAY_REFUSED)
+    })
 }
 
 /// Installs the ring provider as rustls' process default, once. reqwest and tokio-tungstenite
@@ -807,7 +822,7 @@ async fn run(
         tags: Default::default(),
     };
     // FR-L31.19: https is verified (webpki roots); plain http only where FR-S11 allows it.
-    relay_allowed(base).map_err(ClientError::Protocol)?;
+    check_relay(base)?;
     ensure_tls_provider();
     // The shared loader; the token goes only to a server this machine may trust with it.
     let token = ember_client::token::token_allowed_for(base)
@@ -847,7 +862,7 @@ async fn stream(
 ) -> Result<(), ClientError> {
     let live = || shared.upgrade().ok_or_else(|| ClientError::Protocol("terminal closed".into()));
     // FR-L31.19: wss for an https server, verified against the webpki roots.
-    relay_allowed(base).map_err(ClientError::Protocol)?;
+    check_relay(base)?;
     ensure_tls_provider();
     let mut upgrade = attach_url(base, computer, term_id).into_client_request()?;
     if let Some(token) = &token {
@@ -1129,6 +1144,16 @@ mod tests {
         assert!(relay_allowed_with_hosts("ws://127.0.0.1:8740", "").is_err());
         assert!(relay_allowed_with_hosts("ftp://srv", "").is_err());
         assert!(relay_allowed_with_hosts("not a url", "").is_err());
+    }
+
+    #[test]
+    fn fr_l31_19_the_refusal_the_panel_shows_is_korean() {
+        let err = check_relay("http://srv.example:8740").unwrap_err();
+        assert_eq!(err.to_string(), RELAY_REFUSED, "the panel text carries no English reason");
+        let mut session = TerminalSession::new();
+        session.fail(err.to_string());
+        assert_eq!(session.state.error_text().as_deref(), Some(format!("터미널 오류: {RELAY_REFUSED}").as_str()));
+        assert!(RELAY_REFUSED.ends_with("하세요."));
     }
 
     #[test]

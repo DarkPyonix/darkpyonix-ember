@@ -99,7 +99,8 @@ async fn register_server(f: &Fixture) {
 
     // The person approves it in the browser.
     assert!(f.hub.approve(&code));
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let approved = std::time::Instant::now();
+    let deadline = approved + Duration::from_secs(10);
     loop {
         let (_, status) = call(&f.app, Method::GET, "/api/hub", None).await;
         // `registered` turns true when the registration is saved; the server then asks the hub's
@@ -112,8 +113,12 @@ async fn register_server(f: &Fixture) {
             assert!(status["pending"].is_null());
             break;
         }
-        assert!(status["last_error"].is_null(), "{status}");
-        assert!(std::time::Instant::now() < deadline, "registration never completed");
+        assert!(status["last_error"].is_null(), "after {:?}: {status}", approved.elapsed());
+        assert!(
+            std::time::Instant::now() < deadline,
+            "registration (registered and long_poll) not complete {:?} after approval: {status}",
+            approved.elapsed()
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }

@@ -44,7 +44,7 @@ use crate::ui::home::{
 };
 use super::components::{
     pill_colors, pill_metrics, AppButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
-    FieldOptions, Label, PickChip, Pill, PillTone, Select, SheetFooter,
+    FieldOptions, Label, Pill, PillTone, Select, SheetFooter,
 };
 use super::project::PHONE_MENU_ROOM;
 use super::shell::NavIcon;
@@ -1129,15 +1129,28 @@ fn RoutineSwitch(routine_name: &str, checked: bool, mut on_change: impl FnMut(bo
         });
 }
 
-/// A filter segment pill button matching the mockup (`.seg button`): 32px height, pill shape,
-/// ink fill when selected, surface with line border when unselected.
-fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
-    let p = ember_theme().palette;
-    let (bg, border, fg) = if selected {
+/// The segment's type step: the mockup's `.seg button` is `--fs-sm` (13) at 500.
+pub const SEG_FS: Fs = Fs::Sm;
+
+/// `(fill, border, text)` of a segment: `ink` with `ink-text` when chosen (`.seg button.on`),
+/// `surface` on a `line` border with `text-2` when not.
+pub fn seg_colors(selected: bool, p: &Palette) -> (Color, Color, Color) {
+    if selected {
         (p.ink, p.ink, p.ink_text)
     } else {
         (p.surface, p.line, p.text_2)
-    };
+    }
+}
+
+/// A segment pill button matching the mockup (`.seg button`): 32px height, pill shape, 13/500
+/// text, ink fill when selected, surface with line border when unselected. The list's project
+/// filter and the form's one-of choices (프로젝트, 트리거, 컴퓨터) both use it: the shared
+/// `PickChip` is the composer's dropdown chip (`.pickchip`), whose label takes the toolkit's
+/// button type and whose chosen state is `sel` on `surface-2`, too faint to read as chosen
+/// (#493).
+fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let (bg, border, fg) = seg_colors(selected, p);
     let advance: f32 = text
         .chars()
         .map(|c| if c.is_ascii() { 8.0 } else { 13.0 })
@@ -1154,7 +1167,7 @@ fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static)
         )
         .alignment(Alignment::Center)
         .content(move || {
-            Label(text, Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
+            Label(text, SEG_FS, Weight::Medium, Some(paint(fg)), Some(1));
             FocusOverlay(text, on_click);
         });
 }
@@ -2022,7 +2035,7 @@ fn FormFields(ctx: &FormCtx) {
                             let sel_proj = draft.clone();
                             let n = name.clone();
                             let selected = d.sel.project == *name;
-                            PickChip(name, None, selected, false, move || {
+                            FilterSegButton(name, selected, move || {
                                 sel_proj.update(|d| d.sel.project = n.clone());
                             });
                             cu::Spacer().modifier(Modifier::new().width(SP[1]));
@@ -2034,7 +2047,7 @@ fn FormFields(ctx: &FormCtx) {
                 cu::Row().spacing(SP[1]).content(|| {
                     for t in Trigger::ALL {
                         let sel_trig = draft.clone();
-                        PickChip(t.label(), None, d.trigger == t, false, move || {
+                        FilterSegButton(t.label(), d.trigger == t, move || {
                             sel_trig.update(|d| *d = d.with_trigger(t));
                         });
                     }
@@ -2092,7 +2105,7 @@ fn FormFields(ctx: &FormCtx) {
                     .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
                     .content(|| {
                         let sel_c = draft.clone();
-                        PickChip("이 서버", None, d.sel.computer.is_none(), false, move || {
+                        FilterSegButton("이 서버", d.sel.computer.is_none(), move || {
                             sel_c.update(|d| d.sel.computer = None);
                         });
                         cu::Spacer().modifier(Modifier::new().width(SP[1]));
@@ -2100,7 +2113,7 @@ fn FormFields(ctx: &FormCtx) {
                             let sel_c = draft.clone();
                             let cid_clone = cid.clone();
                             let selected = d.sel.computer.as_deref() == Some(cid.as_str());
-                            PickChip(cname, None, selected, false, move || {
+                            FilterSegButton(cname, selected, move || {
                                 sel_c.update(|d| d.sel.computer = Some(cid_clone.clone()));
                             });
                             cu::Spacer().modifier(Modifier::new().width(SP[1]));
@@ -2706,6 +2719,24 @@ mod tests {
         assert!(!screen.contains("pan.set(Panel::Edit"));
         assert!(!screen.contains("panel_new.set"));
         assert_eq!(ROUTINE_DISCARD_QUESTION, "변경 사항을 버릴까요?");
+    }
+
+    /// The form's one-of choices are the mockup's `.seg` buttons: 13/500 text, and the chosen
+    /// one in `ink`, not the composer's dropdown chip with its faint `sel` fill (#493).
+    #[test]
+    fn fr_l25_form_choices_are_segments_with_an_ink_chosen_state() {
+        assert_eq!((SEG_FS, SEG_FS.size()), (Fs::Sm, 13.0));
+        for p in [&LIGHT, &DARK] {
+            assert_eq!(seg_colors(true, p), (p.ink, p.ink, p.ink_text));
+            assert_eq!(seg_colors(false, p), (p.surface, p.line, p.text_2));
+        }
+        let src = include_str!("routines.rs");
+        let form = src.split("fn FormFields(").nth(1).unwrap().split("\nfn FormLabel(").next().unwrap();
+        for field in ["FormField::Project", "FormField::Trigger", "FormField::Computer"] {
+            let arm = form.split(field).nth(1).unwrap().split("FormField::").next().unwrap();
+            assert!(arm.contains("FilterSegButton("), "{field} uses the segment");
+            assert!(!arm.contains("PickChip("), "{field} does not use the dropdown chip");
+        }
     }
 
     #[test]

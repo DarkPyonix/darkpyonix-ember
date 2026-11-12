@@ -34,6 +34,7 @@ struct Fx {
     cid: String,
     root: std::path::PathBuf,
     outside: std::path::PathBuf,
+    node_url: String,
     c: reqwest::Client,
     _dir: tempfile::TempDir,
 }
@@ -41,6 +42,13 @@ struct Fx {
 impl Fx {
     async fn post(&self, op: &str, body: Value) -> (StatusCode, Value) {
         let r = self.c.post(format!("{}/api/computers/{}/fs/{op}", self.base, self.cid)).json(&body).send().await.unwrap();
+        let st = StatusCode::from_u16(r.status().as_u16()).unwrap();
+        (st, r.json::<Value>().await.unwrap_or(Value::Null))
+    }
+
+    /// The same operation sent straight to the node, bypassing the server.
+    async fn direct(&self, op: &str, body: Value) -> (StatusCode, Value) {
+        let r = self.c.post(format!("{}/fs/{op}", self.node_url)).bearer_auth(TOKEN).json(&body).send().await.unwrap();
         let st = StatusCode::from_u16(r.status().as_u16()).unwrap();
         (st, r.json::<Value>().await.unwrap_or(Value::Null))
     }
@@ -79,7 +87,7 @@ async fn fx() -> Fx {
     let r = c.post(format!("{base}/api/computers")).json(&json!({ "name": "box", "url": node_url, "token": TOKEN })).send().await.unwrap();
     assert_eq!(r.status(), 201);
     let cid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
-    Fx { base, cid, root, outside, c, _dir: dir }
+    Fx { base, cid, root, outside, node_url, c, _dir: dir }
 }
 
 #[tokio::test]
@@ -315,4 +323,174 @@ async fn fr_w4_fs_relay_needs_the_server_token() {
     // The write operations stay unrouted behind the token too.
     let st = status(&app, "POST", "/api/computers/local/fs/write", Some(&format!("Bearer {token}"))).await;
     assert_eq!(st, 404);
+}
+
+// ---- #467: limits, deadline, path edge cases ----
+
+#[tokio::test]
+async fn fr_w4_fs_relay_glob_and_grep_limit_is_clamped_by_the_server() {
+    within(async {
+        let f = fx().await;
+        let many = f.root.join("many");
+        std::fs::create_dir_all(&many).unwrap();
+        let n = computers::fs::MAX_SEARCH_LIMIT + 50;
+        for i in 0..n {
+            std::fs::write(many.join(format!("f{i}.txt")), "needle\n").unwrap();
+        }
+        let (st, v) = f.post("glob", json!({ "root": many, "pattern": "*.txt", "limit": u64::MAX })).await;
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(v["paths"].as_array().unwrap().len(), computers::fs::MAX_SEARCH_LIMIT);
+        assert_eq!(v["truncated"], true);
+        let (st, v) = f.post("grep", json!({ "root": many, "pattern": "needle", "limit": 1_000_000_000u64 })).await;
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(v["matches"].as_array().unwrap().len(), computers::fs::MAX_SEARCH_LIMIT);
+        // A smaller limit passes unchanged.
+        let (st, v) = f.post("glob", json!({ "root": many, "pattern": "*.txt", "limit": 3 })).await;
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(v["paths"].as_array().unwrap().len(), 3);
+    })
+    .await;
+}
+
+/// The node's answer to an odd path is relayed unchanged: same status, same body.
+#[tokio::test]
+async fn fr_w4_fs_relay_path_edge_cases_pass_the_nodes_answer_unchanged() {
+    within(async {
+        let f = fx().await;
+        // A backslash is an ordinary file name byte on Unix.
+        std::fs::write(f.root.join("back\\slash.txt"), "x").unwrap();
+        // NFC name on disk; the NFD spelling may or may not resolve (APFS yes, ext4 no).
+        std::fs::write(f.root.join("caf\u{e9}.txt"), "x").unwrap();
+        let root = f.root.to_string_lossy().to_string();
+        let long = format!("{root}/{}", "a".repeat(5000));
+        let cases: Vec<(&str, Value)> = vec![
+            ("stat", json!({ "path": format!("{root}/hello\u{0}.txt") })),
+            ("read", json!({ "path": format!("{root}/hello.txt\u{0}/../../outside/secret.txt") })),
+            ("stat", json!({ "path": format!("{root}/back\\slash.txt") })),
+            ("stat", json!({ "path": format!("{root}\\..\\outside\\secret.txt") })),
+            ("stat", json!({ "path": format!("{root}/caf\u{e9}.txt") })),
+            ("stat", json!({ "path": format!("{root}/cafe\u{301}.txt") })),
+            ("stat", json!({ "path": long })),
+            ("list", json!({ "path": format!("{root}/sub/") })),
+            ("stat", json!({ "path": format!("{root}/hello.txt/") })),
+            ("glob", json!({ "root": format!("{root}/"), "pattern": "*.txt" })),
+        ];
+        for (op, body) in cases {
+            let relayed = f.post(op, body.clone()).await;
+            let direct = f.direct(op, body.clone()).await;
+            assert_eq!(relayed, direct, "{op} {body}");
+            assert!(!relayed.1.to_string().contains("TOP-SECRET"), "{op} {body}");
+        }
+        // The node refuses a NUL byte and a file with a trailing slash; nothing is read.
+        let (st, _) = f.post("stat", json!({ "path": format!("{root}/hello\u{0}.txt") })).await;
+        assert!(st.is_client_error(), "NUL: {st}");
+        let (st, _) = f.post("read", json!({ "path": format!("{root}/hello.txt/") })).await;
+        assert!(st.is_client_error(), "trailing slash on a file: {st}");
+        let (st, _) = f.post("stat", json!({ "path": format!("{root}/back\\slash.txt") })).await;
+        assert_eq!(st, 200);
+    })
+    .await;
+}
+
+/// A fake node that answers `/fs/stat` only after `delay`.
+async fn slow_node(delay: Duration, started: Arc<std::sync::atomic::AtomicUsize>) -> String {
+    use axum::routing::post;
+    let app = Router::new().route(
+        "/fs/stat",
+        post(move || {
+            let started = started.clone();
+            async move {
+                started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(delay).await;
+                axum::Json(json!({ "kind": "file", "size": 0 }))
+            }
+        }),
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    url
+}
+
+async fn limited_server(limits: computers::fs::FsLimits, node_url: &str) -> (String, String) {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let adapters: Vec<Arc<dyn AgentAdapter>> = vec![Arc::new(ScriptedAdapter)];
+    let sessions = Sessions::new(store.clone(), adapters);
+    let computers = Computers::new(Registry::new(store), computers::default_connector());
+    let app = computers::fs::router_with(computers.clone(), limits).merge(computers::api::router(computers, sessions));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    let r = reqwest::Client::new()
+        .post(format!("{base}/api/computers"))
+        .json(&json!({ "name": "slow", "url": node_url, "token": TOKEN }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let cid = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+    (base, cid)
+}
+
+#[tokio::test]
+async fn fr_w4_fs_relay_times_out_with_504() {
+    within(async {
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let node = slow_node(Duration::from_secs(30), started).await;
+        let limits = computers::fs::FsLimits { concurrent: 4, timeout: Duration::from_millis(300) };
+        let (base, cid) = limited_server(limits, &node).await;
+        let t = std::time::Instant::now();
+        let r = reqwest::Client::new().post(format!("{base}/api/computers/{cid}/fs/stat")).json(&json!({ "path": "/x" })).send().await.unwrap();
+        assert_eq!(r.status(), 504);
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn fr_w4_fs_relay_concurrency_is_bounded_by_the_semaphore() {
+    within(async {
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let node = slow_node(Duration::from_millis(1500), started.clone()).await;
+        let limits = computers::fs::FsLimits { concurrent: 2, timeout: Duration::from_millis(800) };
+        let (base, cid) = limited_server(limits, &node).await;
+        let c = reqwest::Client::new();
+        let mut tasks = Vec::new();
+        for _ in 0..5 {
+            let (c, url) = (c.clone(), format!("{base}/api/computers/{cid}/fs/stat"));
+            tasks.push(tokio::spawn(async move { c.post(url).json(&json!({ "path": "/x" })).send().await.unwrap().status().as_u16() }));
+        }
+        let mut codes = Vec::new();
+        for t in tasks {
+            codes.push(t.await.unwrap());
+        }
+        codes.sort();
+        // Two hold the permits and hit the deadline (504); three never get a permit (503).
+        assert_eq!(codes, vec![503, 503, 503, 504, 504], "{codes:?}");
+        assert_eq!(started.load(std::sync::atomic::Ordering::SeqCst), 2, "only two reached the node");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn fr_w4_fs_relay_client_drop_releases_the_permit() {
+    within(async {
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let node = slow_node(Duration::from_secs(20), started.clone()).await;
+        let limits = computers::fs::FsLimits { concurrent: 1, timeout: Duration::from_secs(30) };
+        let (base, cid) = limited_server(limits, &node).await;
+        let url = format!("{base}/api/computers/{cid}/fs/stat");
+        // The first client gives up after 300 ms and closes its connection.
+        let c1 = reqwest::Client::builder().timeout(Duration::from_millis(300)).build().unwrap();
+        assert!(c1.post(&url).json(&json!({ "path": "/x" })).send().await.is_err());
+        drop(c1);
+        // The dropped request released its permit: a second one reaches the node.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while started.load(std::sync::atomic::Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+            let c2 = reqwest::Client::builder().timeout(Duration::from_millis(300)).build().unwrap();
+            let _ = c2.post(&url).json(&json!({ "path": "/x" })).send().await;
+        }
+        assert!(started.load(std::sync::atomic::Ordering::SeqCst) >= 2, "the permit was not released on client drop");
+    })
+    .await;
 }

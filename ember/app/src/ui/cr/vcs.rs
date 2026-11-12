@@ -598,6 +598,15 @@ pub fn diff_pane_width(window_width_dp: f32, layout: PaneLayout) -> f32 {
     }
 }
 
+/// Placeholder of the search field at the top of the branch popover (mockup `vcsBrQ`).
+pub const BRANCH_MENU_SEARCH: &str = "브랜치 찾기";
+
+/// Indices of the branches the popover lists for `query`: every branch for an empty query,
+/// else the names containing it, ignoring case (the same rule as the 브랜치 tab, #558).
+pub fn branch_menu_rows(branches: &[String], query: &str) -> Vec<usize> {
+    branches.iter().enumerate().filter(|(_, b)| branch_matches(b, query)).map(|(i, _)| i).collect()
+}
+
 /// The bar of three: repository, current branch, remote origin in ONE split card.
 pub fn RepoBar(
     projects: &[(String, String)],
@@ -615,6 +624,7 @@ fn RepoBarWithActions(
 ) {
     let project_menu = remember(|| mutable_state_of(false));
     let branch_menu = remember(|| mutable_state_of(false));
+    let branch_query = remember(|| mutable_state_of(String::new()));
     let new_branch = remember(|| mutable_state_of(String::new()));
     let branch_generation = remember(|| mutable_state_of(0_u64));
 
@@ -747,7 +757,22 @@ fn RepoBarWithActions(
             .on_dismiss(move || b_dismiss.set(false))
             .content(|| {
                 cu::Column().modifier(Modifier::new().fill_max_width()).spacing(SP[1]).content(|| {
+                    // The mockup's popover opens with a 브랜치 찾기 field above the list (#513).
+                    let q_state = branch_query.clone();
+                    EmberField(FieldOptions {
+                        fill_max_width: true,
+                        text: Some(branch_query.get()),
+                        placeholder: BRANCH_MENU_SEARCH.to_string(),
+                        type_role: Some(VCS_FIELD_ROLE),
+                        on_value_change: Some(Box::new(move |v| q_state.set(v))),
+                        ..Default::default()
+                    });
+                    let shown = branch_menu_rows(&branches, &branch_query.get());
+                    if !branches.is_empty() && shown.is_empty() {
+                        Label("검색 결과가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    }
                     for (idx, name) in branch_opts.iter().enumerate() {
+                        if !branches.is_empty() && !shown.contains(&idx) { continue; }
                         let dismiss = branch_menu.clone();
                         let select_actions = actions.clone();
                         let selected_name = branches.get(idx).cloned();
@@ -4775,6 +4800,16 @@ pub fn preview() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fr_l19_branch_popover_search_filters_ignoring_case() {
+        let b: Vec<String> = ["main", "develop", "feat/Git-API", "feat/ui"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(branch_menu_rows(&b, ""), vec![0, 1, 2, 3]);
+        assert_eq!(branch_menu_rows(&b, "  git "), vec![2]);
+        assert_eq!(branch_menu_rows(&b, "FEAT"), vec![2, 3]);
+        assert!(branch_menu_rows(&b, "zzz").is_empty());
+        assert_eq!(BRANCH_MENU_SEARCH, "브랜치 찾기");
+    }
+
     #[test]
     fn fr_l19_success_clears_only_submitted_text() {
         assert_eq!(text_after_success("요약", "요약"), "");

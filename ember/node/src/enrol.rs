@@ -11,7 +11,9 @@
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
@@ -28,13 +30,20 @@ const MAX_TOKEN_CHARS: usize = 512;
 /// `<state dir>/.enrol.lock`, held (flock) for the whole of one enrol.
 pub const LOCK_FILE: &str = ".enrol.lock";
 
+#[cfg(unix)]
 fn euid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() }
 }
 
+#[cfg(not(unix))]
+fn euid() -> u32 {
+    0
+}
+
 /// Warns (path only) when an existing state dir is not ours or is writable by group or others.
 /// It never refuses and never changes the mode: an existing setup must keep working.
+#[cfg(unix)]
 fn warn_state_dir(dir: &Path) {
     if let Ok(m) = fs::metadata(dir) {
         if m.uid() != euid() || m.mode() & 0o022 != 0 {
@@ -43,9 +52,13 @@ fn warn_state_dir(dir: &Path) {
     }
 }
 
+#[cfg(not(unix))]
+fn warn_state_dir(_dir: &Path) {}
+
 /// Opens an existing file for reading without following a symlink and without blocking on a FIFO,
 /// and requires a regular file owned by this user. Errors name the path and the reason, never the
 /// contents. A missing file is a plain `io::Error` of kind `NotFound` (see [`is_not_found`]).
+#[cfg(unix)]
 fn open_regular_owned(path: &Path) -> anyhow::Result<fs::File> {
     let file = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path) {
         Ok(f) => f,
@@ -57,6 +70,18 @@ fn open_regular_owned(path: &Path) -> anyhow::Result<fs::File> {
     anyhow::ensure!(meta.file_type().is_file(), "{} is not a regular file", path.display());
     anyhow::ensure!(meta.uid() == euid(), "{} is not owned by this user", path.display());
     Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_regular_owned(path: &Path) -> anyhow::Result<fs::File> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(anyhow::Error::new(e)),
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("cannot stat {}", path.display()))),
+    };
+    anyhow::ensure!(!meta.file_type().is_symlink(), "{} is a symbolic link", path.display());
+    anyhow::ensure!(meta.file_type().is_file(), "{} is not a regular file", path.display());
+    OpenOptions::new().read(true).open(path).with_context(|| format!("cannot open {}", path.display()))
 }
 
 fn is_not_found(err: &anyhow::Error) -> bool {
@@ -104,6 +129,7 @@ impl EnrolLock {
 /// then two enrols on different machines are not kept apart. Readers ([`read_enrolment`], and so
 /// `config::from_env`) do not take the lock on purpose: replacing `enrol.json` is one `rename`, so
 /// a reader sees either the old or the new complete file.
+#[cfg(unix)]
 pub fn lock_state_dir(state_dir: &Path) -> anyhow::Result<EnrolLock> {
     if state_dir.exists() {
         warn_state_dir(state_dir);
@@ -125,7 +151,9 @@ pub fn lock_state_dir(state_dir: &Path) -> anyhow::Result<EnrolLock> {
         .with_context(|| format!("cannot open {}", path.display()))?;
     let meta = file.metadata().with_context(|| format!("cannot stat {}", path.display()))?;
     check_lock_file(meta.file_type().is_file(), meta.uid(), &path)?;
-    // SAFETY: the descriptor is open for the whole call.
+    // Clear FD_CLOEXEC protection is already default in Rust std, but we also explicitly unlock
+    // on drop so even if another thread forked while this lock was open, the flock is released
+    // immediately when `EnrolLock` is dropped.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         let err = io::Error::last_os_error();
         if err.kind() == io::ErrorKind::WouldBlock {
@@ -134,6 +162,44 @@ pub fn lock_state_dir(state_dir: &Path) -> anyhow::Result<EnrolLock> {
         return Err(anyhow::Error::new(err).context(format!("cannot lock {}", path.display())));
     }
     Ok(EnrolLock { _file: file, dir: state_dir.to_path_buf() })
+}
+
+#[cfg(not(unix))]
+pub fn lock_state_dir(state_dir: &Path) -> anyhow::Result<EnrolLock> {
+    use std::os::windows::fs::OpenOptionsExt;
+    if !state_dir.exists() {
+        fs::create_dir_all(state_dir).with_context(|| format!("cannot create {}", state_dir.display()))?;
+    }
+    let path = state_dir.join(LOCK_FILE);
+    if let Ok(m) = fs::symlink_metadata(&path) {
+        anyhow::ensure!(!m.file_type().is_symlink(), "{} is a symbolic link", path.display());
+        check_lock_file(m.file_type().is_file(), euid(), &path)?;
+    }
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .share_mode(0)
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(err) if err.raw_os_error() == Some(32) => {
+            anyhow::bail!("another ember-node enrol is running for this state directory");
+        }
+        Err(err) => return Err(anyhow::Error::new(err).context(format!("cannot open {}", path.display()))),
+    };
+    Ok(EnrolLock { _file: file, dir: state_dir.to_path_buf() })
+}
+
+impl Drop for EnrolLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        // Explicit LOCK_UN releases the kernel flock entry immediately even if the file descriptor
+        // was duplicated across a concurrent fork in another test thread.
+        unsafe {
+            let _ = libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
 }
 
 /// The contents of `enrol.json`. `node_token` is a secret: `Debug` redacts it.
@@ -198,6 +264,7 @@ pub fn read_enrolment(state_dir: &Path) -> anyhow::Result<Option<Enrolment>> {
     };
     let meta = file.metadata().with_context(|| format!("cannot stat {}", path.display()))?;
     anyhow::ensure!(meta.len() <= MAX_FILE_BYTES, "{} is larger than {} bytes", path.display(), MAX_FILE_BYTES);
+    #[cfg(unix)]
     if meta.permissions().mode() & 0o077 != 0 {
         tracing::warn!(path = %path.display(), "enrol file is accessible to group or others; run chmod 600 on it");
     }
@@ -305,10 +372,17 @@ fn temp_name(dir: &Path, name: &str, suffix: &str) -> PathBuf {
 /// symlink at that name is an error, never followed), writes `bytes`, sets `mode`, syncs.
 fn stage_file(dir: &Path, name: &str, suffix: &str, bytes: &[u8], mode: u32) -> io::Result<PathBuf> {
     let path = temp_name(dir, name, suffix);
-    let mut f = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+    let mut opts = OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    let mut f = opts.open(&path)?;
     let result = (|| {
         f.write_all(bytes)?;
+        #[cfg(unix)]
         f.set_permissions(fs::Permissions::from_mode(mode))?;
+        #[cfg(not(unix))]
+        let _ = mode;
         f.sync_all()
     })();
     match result {
@@ -336,8 +410,14 @@ fn stage_retry(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> anyhow::Resul
 }
 
 /// Flushes the directory entries (the renames and removals) to disk.
+#[cfg(unix)]
 fn sync_dir(dir: &Path) -> io::Result<()> {
     fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 /// The previous `enrol.json` could not be put back: say plainly what is on disk now.
@@ -448,7 +528,10 @@ fn write_with(
 /// insufficient.
 fn read_previous_enrol(path: &Path) -> anyhow::Result<(Vec<u8>, u32)> {
     let file = open_regular_owned(path)?;
+    #[cfg(unix)]
     let mode = file.metadata().with_context(|| format!("cannot stat {}", path.display()))?.permissions().mode() & 0o777;
+    #[cfg(not(unix))]
+    let mode = 0o600;
     Ok((read_capped(file, path)?, mode))
 }
 
@@ -466,9 +549,13 @@ fn read_peers_file(peers_dst: &Path) -> anyhow::Result<Option<(String, u32)>> {
                 peers_dst.display()
             );
             anyhow::ensure!(m.file_type().is_file(), "{} is not a regular file; it is not replaced", peers_dst.display());
+            #[cfg(unix)]
             anyhow::ensure!(m.uid() == euid(), "{} is not owned by this user; it is not replaced", peers_dst.display());
             let file = open_regular_owned(peers_dst)?;
+            #[cfg(unix)]
             let mode = file.metadata().map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
+            #[cfg(not(unix))]
+            let mode = 0o600;
             // Capped like enrol.json: a bigger file is refused, never read whole.
             let bytes = read_capped(file, peers_dst)?;
             let text = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{} is not valid UTF-8", peers_dst.display()))?;
@@ -514,7 +601,11 @@ pub fn preflight(lock: &EnrolLock, replace: bool) -> anyhow::Result<()> {
         crate::transport::parse_peer_list(&text).map_err(|e| fix(e.context(format!("{} does not parse", peers_dst.display()))))?;
     }
     let probe = temp_name(dir, ".enrol-preflight", &suffix());
-    match OpenOptions::new().write(true).create_new(true).mode(0o600).open(&probe) {
+    let mut opts = OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    match opts.open(&probe) {
         Ok(f) => {
             drop(f);
             let _ = fs::remove_file(&probe);
@@ -576,7 +667,7 @@ fn prepare(
     Ok((Staged { enrol_tmp, enrol_dst, peers }, previous))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::cell::Cell;
@@ -833,6 +924,7 @@ mod tests {
         assert!(names(d.path()).is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn fr_c2_node_write_never_follows_a_planted_name_create_new() {
         let d = tempfile::tempdir().unwrap();
@@ -997,6 +1089,7 @@ mod tests {
         assert!(enrol.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn fr_c2_node_read_refuses_a_symlinked_enrol_json_without_quoting_the_target() {
         let d = tempfile::tempdir().unwrap();
@@ -1009,6 +1102,7 @@ mod tests {
         assert!(!err.contains("tok_SECRET"), "{err}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn fr_c2_node_read_of_a_fifo_named_enrol_json_fails_without_hanging() {
         use std::os::unix::ffi::OsStrExt;
@@ -1049,6 +1143,7 @@ mod tests {
         assert_eq!(names(d.path()), vec![ENROL_FILE.to_string()]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn fr_c2_node_write_symlinked_allowed_peers_is_refused() {
         let d = tempfile::tempdir().unwrap();
@@ -1162,6 +1257,7 @@ mod tests {
     // A file owned by another user cannot be made portably without root: the "is not owned by this
     // user" branch of open_regular_owned has no test here.
 
+    #[cfg(unix)]
     #[test]
     fn fr_c2_node_write_refuses_a_symlinked_allowed_peers_and_changes_nothing() {
         let d = tempfile::tempdir().unwrap();
@@ -1227,6 +1323,7 @@ mod tests {
         assert_eq!(names(d.path()), vec!["allowed-peers".to_string(), ENROL_FILE.to_string()]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn fr_c2_node_preflight_replace_refuses_an_unreadable_enrol_json() {
         // A symlink.
@@ -1256,6 +1353,7 @@ mod tests {
         assert!(!names(d.path()).iter().any(|n| n.contains("preflight")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn fr_c2_node_preflight_refuses_a_bad_allowed_peers() {
         let cases: Vec<(&str, Box<dyn Fn(&Path)>, &str)> = vec![

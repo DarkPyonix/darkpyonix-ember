@@ -12,6 +12,7 @@
 
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -71,10 +72,12 @@ pub fn sha256_bytes(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
+#[cfg(unix)]
 fn ms_of(secs: i64, nsecs: i64) -> Option<u64> {
     (secs >= 0).then(|| secs as u64 * 1000 + (nsecs.max(0) as u64) / 1_000_000)
 }
 
+#[cfg(unix)]
 fn stat_of(path: PathBuf, m: &Metadata) -> Stat {
     Stat {
         kind: kind_of(m.file_type()),
@@ -86,6 +89,32 @@ fn stat_of(path: PathBuf, m: &Metadata) -> Stat {
         nlink: Some(m.nlink()),
         atime_ms: ms_of(m.atime(), m.atime_nsec()),
         ctime_ms: ms_of(m.ctime(), m.ctime_nsec()),
+        path,
+    }
+}
+
+#[cfg(not(unix))]
+fn stat_of(path: PathBuf, m: &Metadata) -> Stat {
+    let readonly = m.permissions().readonly();
+    let mode = if m.is_dir() {
+        if readonly { 0o555 } else { 0o755 }
+    } else if readonly {
+        0o444
+    } else {
+        0o644
+    };
+    let atime_ms = m.accessed().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64);
+    let ctime_ms = m.created().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64);
+    Stat {
+        kind: kind_of(m.file_type()),
+        size: m.len(),
+        mtime_ms: mtime_ms(m),
+        mode,
+        readonly,
+        ino: None,
+        nlink: None,
+        atime_ms,
+        ctime_ms,
         path,
     }
 }
@@ -103,6 +132,7 @@ pub fn errno_name(raw: i32) -> Option<&'static str> {
         libc::ENOTDIR => "ENOTDIR",
         libc::EISDIR => "EISDIR",
         libc::EINVAL => "EINVAL",
+        #[cfg(unix)]
         libc::ETXTBSY => "ETXTBSY",
         libc::EFBIG => "EFBIG",
         libc::ENOSPC => "ENOSPC",
@@ -110,8 +140,11 @@ pub fn errno_name(raw: i32) -> Option<&'static str> {
         libc::EMLINK => "EMLINK",
         libc::ENAMETOOLONG => "ENAMETOOLONG",
         libc::ENOTEMPTY => "ENOTEMPTY",
+        #[cfg(unix)]
         libc::ELOOP => "ELOOP",
+        #[cfg(unix)]
         libc::EDQUOT => "EDQUOT",
+        #[cfg(unix)]
         libc::ENOTSUP => "ENOTSUP",
         _ => return None,
     })
@@ -172,17 +205,29 @@ pub fn readlink(policy: &PathPolicy, path: &Path) -> Result<ReadlinkResponse, Fs
 
 pub fn symlink(policy: &PathPolicy, req: &SymlinkRequest) -> Result<Stat, FsError> {
     let p = policy.resolve_nofollow(&req.path)?;
+    #[cfg(unix)]
     std::os::unix::fs::symlink(&req.target, &p)?;
+    #[cfg(windows)]
+    {
+        let is_dir = req.target.is_dir()
+            || p.parent().map(|d| d.join(&req.target).is_dir()).unwrap_or(false);
+        if is_dir {
+            std::os::windows::fs::symlink_dir(&req.target, &p)?;
+        } else {
+            std::os::windows::fs::symlink_file(&req.target, &p)?;
+        }
+    }
     let m = fs::symlink_metadata(&p)?;
     Ok(stat_of(p, &m))
 }
 
 pub fn mkdir(policy: &PathPolicy, req: &MkdirRequest) -> Result<Stat, FsError> {
-    use std::os::unix::fs::DirBuilderExt;
     let p = if req.parents { policy.resolve_for_write(&req.path)? } else { policy.resolve_nofollow(&req.path)? };
     let mut b = fs::DirBuilder::new();
     b.recursive(req.parents);
+    #[cfg(unix)]
     if let Some(mode) = req.mode {
+        use std::os::unix::fs::DirBuilderExt;
         b.mode(mode & 0o7777);
     }
     b.create(&p)?;
@@ -227,6 +272,7 @@ pub fn rename(policy: &PathPolicy, req: &RenameRequest) -> Result<(), FsError> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn timespec(t: Option<SetTime>) -> libc::timespec {
     match t {
         None => libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT as _ },
@@ -249,8 +295,16 @@ pub fn setattr(policy: &PathPolicy, req: &SetAttrRequest) -> Result<Stat, FsErro
         fs::OpenOptions::new().write(true).open(&p)?.set_len(size)?;
     }
     if let Some(mode) = req.mode {
+        #[cfg(unix)]
         fs::set_permissions(&p, fs::Permissions::from_mode(mode & 0o7777))?;
+        #[cfg(not(unix))]
+        {
+            let mut perms = fs::metadata(&p)?.permissions();
+            perms.set_readonly(mode & 0o200 == 0);
+            fs::set_permissions(&p, perms)?;
+        }
     }
+    #[cfg(unix)]
     if req.atime.is_some() || req.mtime.is_some() {
         use std::os::unix::ffi::OsStrExt;
         let c = std::ffi::CString::new(p.as_os_str().as_bytes())
@@ -263,20 +317,44 @@ pub fn setattr(policy: &PathPolicy, req: &SetAttrRequest) -> Result<Stat, FsErro
             return Err(io::Error::last_os_error().into());
         }
     }
+    #[cfg(not(unix))]
+    if req.atime.is_some() || req.mtime.is_some() {
+        let to_sys = |t: SetTime| match t {
+            SetTime::Now => std::time::SystemTime::now(),
+            SetTime::UnixMs(ms) => UNIX_EPOCH + std::time::Duration::from_millis(ms),
+        };
+        let mut times = fs::FileTimes::new();
+        if let Some(a) = req.atime {
+            times = times.set_accessed(to_sys(a));
+        }
+        if let Some(m) = req.mtime {
+            times = times.set_modified(to_sys(m));
+        }
+        fs::OpenOptions::new().write(true).open(&p)?.set_times(times)?;
+    }
     let m = fs::metadata(&p)?;
     Ok(stat_of(p, &m))
 }
 
 /// Positional in-place write into an existing regular file (see [`PwriteRequest`]).
 pub fn pwrite(policy: &PathPolicy, req: &PwriteRequest) -> Result<Stat, FsError> {
-    use std::os::unix::fs::FileExt;
     let p = policy.resolve_existing(&req.path)?;
-    let f = fs::OpenOptions::new().write(true).open(&p)?;
+    #[allow(unused_mut)]
+    let mut f = fs::OpenOptions::new().write(true).open(&p)?;
     let m = f.metadata()?;
     if !m.is_file() {
         return Err(io_err(libc::EINVAL, format!("{} is not a regular file", p.display())));
     }
-    f.write_all_at(&req.data, req.offset)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        f.write_all_at(&req.data, req.offset)?;
+    }
+    #[cfg(not(unix))]
+    {
+        f.seek(SeekFrom::Start(req.offset))?;
+        f.write_all(&req.data)?;
+    }
     let m = f.metadata()?;
     Ok(stat_of(p, &m))
 }
@@ -337,7 +415,10 @@ pub fn write(policy: &PathPolicy, req: &WriteRequest) -> Result<WriteResponse, F
         let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         f.write_all(&req.data)?;
         if let Some(m) = &existing {
+            #[cfg(unix)]
             f.set_permissions(fs::Permissions::from_mode(m.permissions().mode()))?;
+            #[cfg(not(unix))]
+            let _ = f.set_permissions(m.permissions());
         }
         f.sync_all()?;
         drop(f);
@@ -380,8 +461,14 @@ pub fn list(policy: &PathPolicy, path: &Path) -> Result<ListResponse, FsError> {
             kind: kind_of(m.file_type()),
             size: m.len(),
             mtime_ms: mtime_ms(&m),
+            #[cfg(unix)]
             mode: Some(m.permissions().mode()),
+            #[cfg(not(unix))]
+            mode: None,
+            #[cfg(unix)]
             ino: Some(m.ino()),
+            #[cfg(not(unix))]
+            ino: None,
         });
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));

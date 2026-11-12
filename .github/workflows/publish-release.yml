@@ -76,13 +76,14 @@ jobs:
           path: dist/*
 
   client:
-    # TODO(dioxus-compose): ember-app (ember/app) cannot link until dioxus-compose publishes a renderer
-    # matching the pinned rev (undefined symbol dioxus_compose_host_release_batch, see test.yml).
-    # TODO(compose-rust): the packager lives in open PRs #115 (macOS .app/.dmg, tools/packager),
-    # #114 (Linux .AppImage, scripts/packager-linux) and #116 (Windows .msix, tools/msix); the
-    # Velopack formats (Setup.exe, .msi, .pkg, .deb, .rpm, Flatpak) are spec only (FR-22.6).
+    # TODO(compose-rust): the packagers live in compose-rust #505 (#115 macOS .app/.dmg in
+    # scripts/packager-macos/package-macos, #114 Linux .AppImage in
+    # scripts/packager-linux/appimage.sh and #116 Windows .msix in
+    # scripts/packager-windows/Cargo.toml); the Velopack formats (Setup.exe, .msi, .pkg, .deb,
+    # .rpm, Flatpak) are spec only (FR-22.6).
     # Set COMPOSE_RUST_REF to a pinned commit and the variable EMBER_CLIENT_RELEASE to "true"
-    # once those land; adjust the packager flags then.
+    # once #505 lands on compose-rust develop ([OWNER ACTION REQUIRED] for tag push and
+    # external distribution).
     name: Client app (${{ matrix.target }})
     if: vars.EMBER_CLIENT_RELEASE == 'true'
     runs-on: ${{ matrix.os }}
@@ -106,6 +107,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ember/app
+      - name: Renderer system libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxext-dev libgl1-mesa-dev libfontconfig1-dev libfreetype-dev
       - name: Build ember-app
         run: cd ember/app && cargo build --release --locked
       - uses: actions/checkout@v5
@@ -117,12 +121,12 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           mkdir -p dist
-          python3 compose-rust/tools/packager/package-macos app \
+          python3 compose-rust/scripts/packager-macos/package-macos app \
             --manifest-dir ember/app --executable ember/app/target/release/ember-app \
-            --updater none --out stage
+            --out stage
           codesign --force --deep -s - stage/*.app
           codesign --verify --deep --verbose stage/*.app
-          python3 compose-rust/tools/packager/package-macos dmg --app stage/*.app --out "dist/ember-app-${{ github.ref_name }}-${{ matrix.target }}.dmg"
+          python3 compose-rust/scripts/packager-macos/package-macos dmg --app stage/*.app --out "dist/ember-app-${{ github.ref_name }}-${{ matrix.target }}.dmg"
           ditto -c -k --keepParent stage/*.app "dist/ember-app-${{ github.ref_name }}-${{ matrix.target }}.app.zip"
       - name: Package the client (Windows .zip and .msix)
         if: runner.os == 'Windows'
@@ -131,8 +135,9 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Compress-Archive ember/app/target/release/ember-app.exe "dist/ember-app-${{ github.ref_name }}-${{ matrix.target }}.zip"
           # MSIX stays unsigned (FR-22.6 criterion 4); the install guide explains how to trust it.
-          cargo run --release --manifest-path compose-rust/tools/msix/Cargo.toml -- --help
-          # TODO(compose-rust): call dioxus-compose-msix with the app's identity once #116 documents the flags.
+          cargo run --release --manifest-path compose-rust/scripts/packager-windows/Cargo.toml -- \
+            --project ember/app --exe ember/app/target/release/ember-app.exe \
+            --version "${{ github.ref_name }}" --out dist
       - name: Package the client (Linux .AppImage)
         if: runner.os == 'Linux'
         run: |
@@ -141,7 +146,6 @@ jobs:
             --dioxus-toml ember/app/Dioxus.toml --exec ember-app \
             --payload ember/app/target/release/ember-app \
             --version "${GITHUB_REF_NAME#v}" --out-dir dist
-          # TODO(compose-rust): the flags are read from PR #114's workflow; confirm them on merge.
       - name: Checksums
         shell: bash
         run: |

@@ -319,6 +319,110 @@ mod tree {
     }
 }
 
+mod selection {
+    use super::*;
+    use ember_app::ui::editor::{prune_redundant_selection, update_tree_selection, TreeRow};
+
+    fn make_rows() -> Vec<TreeRow> {
+        vec![
+            TreeRow { path: "/p/a".into(), name: "a".into(), depth: 0, is_dir: true, open: false },
+            TreeRow { path: "/p/b".into(), name: "b".into(), depth: 0, is_dir: false, open: false },
+            TreeRow { path: "/p/c".into(), name: "c".into(), depth: 0, is_dir: false, open: false },
+            TreeRow { path: "/p/d".into(), name: "d".into(), depth: 0, is_dir: true, open: false },
+            TreeRow { path: "/p/e".into(), name: "e".into(), depth: 0, is_dir: false, open: false },
+        ]
+    }
+
+    #[test]
+    fn single_click_selects_just_clicked_item() {
+        let rows = make_rows();
+        let sel = update_tree_selection(&[("/p/a".into(), true)], ("/p/b".into(), false), &rows, false, false);
+        assert_eq!(sel, vec![("/p/b".to_string(), false)]);
+    }
+
+    #[test]
+    fn cmd_ctrl_toggle_adds_new_item_and_removes_existing_item() {
+        let rows = make_rows();
+        // Toggle non-existing item: append
+        let sel1 = update_tree_selection(&[("/p/a".into(), true)], ("/p/b".into(), false), &rows, false, true);
+        assert_eq!(sel1, vec![("/p/a".to_string(), true), ("/p/b".to_string(), false)]);
+
+        // Toggle existing item: remove
+        let sel2 = update_tree_selection(&sel1, ("/p/a".into(), true), &rows, false, true);
+        assert_eq!(sel2, vec![("/p/b".to_string(), false)]);
+
+        // Toggle remaining item: empty
+        let sel3 = update_tree_selection(&sel2, ("/p/b".into(), false), &rows, false, true);
+        assert!(sel3.is_empty());
+    }
+
+    #[test]
+    fn shift_selects_contiguous_range_between_anchor_and_clicked() {
+        let rows = make_rows();
+        // Downward range: from /p/b (idx 1) to /p/d (idx 3)
+        let sel = update_tree_selection(&[("/p/b".into(), false)], ("/p/d".into(), true), &rows, true, false);
+        assert_eq!(
+            sel,
+            vec![
+                ("/p/b".to_string(), false),
+                ("/p/c".to_string(), false),
+                ("/p/d".to_string(), true),
+            ]
+        );
+
+        // Upward range: from /p/d (idx 3) to /p/a (idx 0)
+        let sel_up = update_tree_selection(&[("/p/d".into(), true)], ("/p/a".into(), true), &rows, true, false);
+        assert_eq!(
+            sel_up,
+            vec![
+                ("/p/a".to_string(), true),
+                ("/p/b".to_string(), false),
+                ("/p/c".to_string(), false),
+                ("/p/d".to_string(), true),
+            ]
+        );
+
+        // Shift with empty current: defaults to clicked item
+        let sel_empty = update_tree_selection(&[], ("/p/c".into(), false), &rows, true, false);
+        assert_eq!(sel_empty, vec![("/p/c".to_string(), false)]);
+    }
+
+    #[test]
+    fn prune_redundant_selection_filters_out_items_below_selected_directory() {
+        let items = vec![
+            ("/p/src".to_string(), true),
+            ("/p/src/main.rs".to_string(), false),
+            ("/p/src/nested/deep.rs".to_string(), false),
+            ("/p/README.md".to_string(), false),
+        ];
+        let pruned = prune_redundant_selection(&items);
+        assert_eq!(
+            pruned,
+            vec![
+                ("/p/src".to_string(), true),
+                ("/p/README.md".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn prune_redundant_selection_filters_nested_directories_and_keeps_siblings() {
+        let items = vec![
+            ("/p/dir".to_string(), true),
+            ("/p/dir/child".to_string(), true),
+            ("/p/dir2".to_string(), true),
+        ];
+        let pruned = prune_redundant_selection(&items);
+        assert_eq!(
+            pruned,
+            vec![
+                ("/p/dir".to_string(), true),
+                ("/p/dir2".to_string(), true),
+            ]
+        );
+    }
+}
+
 // FR-L31 (D38): the page grid is the mockup's; a closed tool window leaves a 0 wide column or a
 // 0 high row, and the stripes decide which.
 mod grid {
@@ -530,6 +634,86 @@ mod aria {
     #[test]
     fn fr_l31_a_problem_row_says_what_where_and_how_bad() {
         assert_eq!(problem_aria_label("오류", "Value expected", "package.json:2"), "오류: Value expected (package.json:2)");
+    }
+}
+
+// FR-L31, #448: Problems capping and navigation, and output channels.
+mod problems_and_output {
+    use ember_app::ui::editor::{
+        paginate_problems, push_workbench_log, MAX_VISIBLE_PROBLEMS, MAX_WORKBENCH_LOGS,
+    };
+    use ember_app::ui::editor_workbench::PendingGoto;
+
+    #[test]
+    fn fr_l31_problems_list_cap_and_overflow_count() {
+        assert_eq!(MAX_VISIBLE_PROBLEMS, 200);
+
+        // Under cap: all visible, no overflow
+        let short_list: Vec<usize> = (0..50).collect();
+        let (visible, overflow) = paginate_problems(&short_list, MAX_VISIBLE_PROBLEMS);
+        assert_eq!(visible.len(), 50);
+        assert_eq!(overflow, 0);
+
+        // Over cap: capped at limit, remainder reported as overflow
+        let long_list: Vec<usize> = (0..250).collect();
+        let (visible, overflow) = paginate_problems(&long_list, MAX_VISIBLE_PROBLEMS);
+        assert_eq!(visible.len(), 200);
+        assert_eq!(overflow, 50);
+
+        // Load-more increment renders subsequent slice
+        let (visible_more, overflow_more) = paginate_problems(&long_list, 400);
+        assert_eq!(visible_more.len(), 250);
+        assert_eq!(overflow_more, 0);
+    }
+
+    #[test]
+    fn fr_l31_pending_goto_records_line_and_col() {
+        let goto = PendingGoto {
+            id: 42,
+            path: "/w/src/main.rs".into(),
+            line: 15,
+            col: 8,
+        };
+        assert_eq!(goto.id, 42);
+        assert_eq!(goto.path, "/w/src/main.rs");
+        assert_eq!(goto.line, 15);
+        assert_eq!(goto.col, 8);
+    }
+
+    #[test]
+    fn fr_l31_output_channels_and_message_severity() {
+        use ember_editor::output::{MessageSeverity, OutputChannel, MAX_OUTPUT_CHANNEL_BYTES};
+
+        let mut ch = OutputChannel::new("ember-output-1", "Git");
+        assert_eq!(ch.label, "Git");
+        ch.append("line 1\n");
+        ch.append("line 2\n");
+        assert_eq!(ch.text, "line 1\nline 2\n");
+
+        ch.clear();
+        assert_eq!(ch.text, "");
+
+        // Huge append is capped at 64 KiB
+        ch.append(&"x".repeat(MAX_OUTPUT_CHANNEL_BYTES + 500));
+        assert_eq!(ch.text.len(), MAX_OUTPUT_CHANNEL_BYTES);
+
+        assert_eq!(MessageSeverity::from_u8(1).label(), "정보");
+        assert_eq!(MessageSeverity::from_u8(2).label(), "경고");
+        assert_eq!(MessageSeverity::from_u8(3).label(), "오류");
+    }
+
+    #[test]
+    fn fr_l31_workbench_logs_capped_at_max_lines() {
+        let mut logs = Vec::new();
+        for i in 0..(MAX_WORKBENCH_LOGS + 25) {
+            push_workbench_log(&mut logs, format!("line {i}"));
+        }
+        assert_eq!(logs.len(), MAX_WORKBENCH_LOGS);
+        assert_eq!(logs.first().map(String::as_str), Some("line 25"));
+        assert_eq!(
+            logs.last().map(String::as_str),
+            Some(format!("line {}", MAX_WORKBENCH_LOGS + 24).as_str())
+        );
     }
 }
 
@@ -852,6 +1036,149 @@ mod keyboard_navigation {
         );
         assert_eq!(editor_focus_target(None), None);
     }
+
+    #[test]
+    fn fr_l31_tree_ignores_keys_while_prompt_is_open() {
+        use ember_app::ui::editor::{tree_handles_key, TreePrompt};
+        assert!(tree_handles_key(None));
+        for p in [
+            TreePrompt::NewFile { parent: "/p".into() },
+            TreePrompt::NewDir { parent: "/p".into() },
+            TreePrompt::Rename { path: "/p/a.rs".into() },
+            TreePrompt::Delete { path: "/p/a.rs".into(), is_dir: false },
+            TreePrompt::DeleteMany { items: vec![("/p/a.rs".into(), false), ("/p/b.rs".into(), false)] },
+        ] {
+            assert!(!tree_handles_key(Some(&p)), "prompt {p:?} must block tree key handling");
+        }
+    }
+
+    #[test]
+    fn fr_l31_4_select_all_cut_selection_and_clipboard_badge() {
+        use ember_app::ui::editor::{
+            clipboard_badge_text, cut_selection, select_all_tree_rows, ClipboardKind, TreeClipboard,
+        };
+        let rows = sample_tree();
+        let (all, last) = select_all_tree_rows(&rows);
+        assert_eq!(all.len(), rows.len());
+        assert_eq!(all[0], ("/p/src".to_string(), true));
+        assert_eq!(last, Some(("/p/README.md".to_string(), false)));
+
+        let (empty_all, empty_last) = select_all_tree_rows(&[]);
+        assert!(empty_all.is_empty());
+        assert_eq!(empty_last, None);
+
+        // Cutting when row_path is part of multi_sel cuts all non-redundant selected items.
+        let clip = cut_selection(&all, "/p/README.md", false).expect("non-empty cut");
+        assert_eq!(clip.kind, ClipboardKind::Cut);
+        // `/p/src/deep` and `/p/src/lib.rs` are pruned because `/p/src` is selected.
+        assert_eq!(
+            clip.paths,
+            vec![
+                ("/p/src".to_string(), true),
+                ("/p/README.md".to_string(), false),
+            ]
+        );
+        assert_eq!(clipboard_badge_text(Some(&clip)).as_deref(), Some("잘라냄 2개"));
+
+        // Cutting a row outside multi_sel cuts only that row.
+        let single = cut_selection(&[("/p/Cargo.toml".to_string(), false)], "/p/README.md", false)
+            .expect("single cut");
+        assert_eq!(single.paths, vec![("/p/README.md".to_string(), false)]);
+        assert_eq!(clipboard_badge_text(Some(&single)).as_deref(), Some("잘라냄 1개"));
+
+        // Empty clipboard handling.
+        assert_eq!(
+            clipboard_badge_text(Some(&TreeClipboard { kind: ClipboardKind::Cut, paths: Vec::new() })),
+            None
+        );
+        assert_eq!(clipboard_badge_text(None), None);
+    }
+
+    #[test]
+    fn fr_l31_roving_tabindex_avoids_duplicate_tab_stops_in_tree_and_tabs() {
+        use ember_app::ui::editor::{tab_strip_roving_tabindex, tree_roving_tabindex};
+        let rows = sample_tree();
+
+        // When no tree row is selected, only the root folder row has tabindex "0" and the container is "-1".
+        let (container_ti, root_ti, row_tis) = tree_roving_tabindex(&rows, None, &[]);
+        assert_eq!(container_ti, "-1");
+        assert_eq!(root_ti, "0");
+        assert!(row_tis.iter().all(|&t| t == "-1"));
+        let stops: usize = std::iter::once(container_ti)
+            .chain(std::iter::once(root_ti))
+            .chain(row_tis.iter().copied())
+            .filter(|&t| t == "0")
+            .count();
+        assert_eq!(stops, 1, "tree with no selection must have exactly 1 tab stop");
+
+        // When a single row is selected, only that row has tabindex "0"; container and root are "-1".
+        let (container_ti, root_ti, row_tis) =
+            tree_roving_tabindex(&rows, Some(("/p/src/lib.rs", false)), &[]);
+        assert_eq!(container_ti, "-1");
+        assert_eq!(root_ti, "-1");
+        assert_eq!(row_tis, vec!["-1", "-1", "0", "-1"]);
+
+        // When multiple rows are selected, only the primary (or first selected) row has tabindex "0" so Tab does not stop on every selected item.
+        let multi = vec![
+            ("/p/src".to_string(), true),
+            ("/p/src/lib.rs".to_string(), false),
+            ("/p/README.md".to_string(), false),
+        ];
+        let (container_ti, root_ti, row_tis) =
+            tree_roving_tabindex(&rows, Some(("/p/README.md", false)), &multi);
+        assert_eq!(container_ti, "-1");
+        assert_eq!(root_ti, "-1");
+        assert_eq!(row_tis, vec!["-1", "-1", "-1", "0"]);
+
+        // Tab strip: when empty, container is "-1" and there are no tab stops.
+        let (strip_ti, tab_tis) = tab_strip_roving_tabindex(&[], None);
+        assert_eq!(strip_ti, "-1");
+        assert!(tab_tis.is_empty());
+
+        // Tab strip with tabs: container is "-1" and only the active tab (or first tab if none matches) has "0".
+        let paths = vec!["/p/a.rs".to_string(), "/p/b.rs".to_string(), "/p/c.rs".to_string()];
+        let (strip_ti, tab_tis) = tab_strip_roving_tabindex(&paths, Some("/p/b.rs"));
+        assert_eq!(strip_ti, "-1");
+        assert_eq!(tab_tis, vec!["-1", "0", "-1"]);
+
+        let (strip_ti_fallback, tab_tis_fallback) = tab_strip_roving_tabindex(&paths, None);
+        assert_eq!(strip_ti_fallback, "-1");
+        assert_eq!(tab_tis_fallback, vec!["0", "-1", "-1"]);
+    }
+
+    #[test]
+    fn fr_l31_tab_strip_delete_refuses_dirty_tab_with_polite_notice() {
+        use ember_app::ui::editor::{dirty_tab_close_notice, tab_strip_key_with_dirty, TabKeyOutcome};
+        let paths = vec![
+            "/w/p/clean.rs".to_string(),
+            "/w/p/dirty.rs".to_string(),
+        ];
+        let dirty = vec![false, true];
+
+        // Clean tab closes on Delete or Backspace.
+        assert_eq!(
+            tab_strip_key_with_dirty(&paths, &dirty, Some("/w/p/clean.rs"), "Delete"),
+            Some(TabKeyOutcome::Close("/w/p/clean.rs".to_string()))
+        );
+        assert_eq!(
+            tab_strip_key_with_dirty(&paths, &dirty, Some("/w/p/clean.rs"), "Backspace"),
+            Some(TabKeyOutcome::Close("/w/p/clean.rs".to_string()))
+        );
+
+        // Dirty tab refuses to close on Delete or Backspace.
+        assert_eq!(
+            tab_strip_key_with_dirty(&paths, &dirty, Some("/w/p/dirty.rs"), "Delete"),
+            Some(TabKeyOutcome::RefuseDirty("/w/p/dirty.rs".to_string()))
+        );
+        assert_eq!(
+            tab_strip_key_with_dirty(&paths, &dirty, Some("/w/p/dirty.rs"), "Backspace"),
+            Some(TabKeyOutcome::RefuseDirty("/w/p/dirty.rs".to_string()))
+        );
+
+        let notice = dirty_tab_close_notice("/w/p/dirty.rs");
+        assert!(notice.contains("dirty.rs"), "{notice}");
+        assert!(notice.ends_with("니다.") || notice.ends_with("세요."), "{notice}");
+    }
 }
 
 // FR-L31.2: the editor's source control rules against the demo git source, which takes the same op
@@ -999,4 +1326,106 @@ fn fr_l31_2_diff_gutter_and_scm_helpers() {
     assert_eq!(cf_ours.resolved_content().unwrap(), "fn main() {\n    println!(\"ours\");\n}\n");
     let cf_both = cf.with_choice(0, ConflictChoice::Both);
     assert_eq!(cf_both.resolved_content().unwrap(), "fn main() {\n    println!(\"ours\");\n    println!(\"theirs\");\n}\n");
+}
+
+
+// #477: Remaining mockup differences (FR-L31): close_others, locate ancestors, modified path set from real SCM status, empty state hints, tab_width text, tree/tab classes.
+#[test]
+fn fr_l31_close_others_keeps_only_active_tab_and_returns_closed_paths() {
+    use ember_app::ui::editor::EditorTabs;
+    let mut tabs = EditorTabs::default();
+    assert!(tabs.close_others().is_empty());
+
+    tabs.open("/w/a.rs");
+    tabs.open("/w/b.rs");
+    tabs.open("/w/c.rs");
+    tabs.set_dirty("/w/b.rs", true);
+    tabs.activate("/w/b.rs");
+
+    let closed = tabs.close_others();
+    assert_eq!(closed, vec!["/w/a.rs".to_string(), "/w/c.rs".to_string()]);
+    assert_eq!(tabs.paths(), vec!["/w/b.rs"]);
+    assert_eq!(tabs.current_path(), Some("/w/b.rs"));
+    assert!(tabs.is_dirty("/w/b.rs"));
+}
+
+#[test]
+fn fr_l31_ancestor_dirs_to_expand_reveals_active_file_below_root() {
+    use ember_app::ui::editor::ancestor_dirs_to_expand;
+    assert_eq!(
+        ancestor_dirs_to_expand("/w/p", "/w/p/ember/proxy/src/shim.rs"),
+        vec![
+            "/w/p".to_string(),
+            "/w/p/ember".to_string(),
+            "/w/p/ember/proxy".to_string(),
+            "/w/p/ember/proxy/src".to_string(),
+        ]
+    );
+    assert_eq!(
+        ancestor_dirs_to_expand("/w/p/", "/w/p/README.md"),
+        vec!["/w/p".to_string()]
+    );
+    assert!(ancestor_dirs_to_expand("/w/p", "/other/README.md").is_empty());
+}
+
+#[test]
+fn fr_l31_modified_paths_set_reflects_only_real_scm_status() {
+    use ember_app::ui::editor_scm::{modified_paths_set, ScmLoad};
+    use ember_client::api::{GitFile, GitStatus};
+
+    // Without a ready SCM status, no file is marked modified.
+    assert!(modified_paths_set("/w/p", &ScmLoad::NoProject).is_empty());
+    assert!(modified_paths_set("/w/p", &ScmLoad::Loading).is_empty());
+    assert!(modified_paths_set("/w/p", &ScmLoad::NotRepo).is_empty());
+    assert!(modified_paths_set("/w/p", &ScmLoad::Unavailable("offline".into())).is_empty());
+
+    // With a ready status, modified/added/conflict files are included as absolute paths, while clean/ignored or deleted-only are not.
+    let status = GitStatus {
+        branch: "develop".into(),
+        files: vec![
+            GitFile { path: "src/shim.rs".into(), old_path: None, index: '.', worktree: 'M' },
+            GitFile { path: "src/router.rs".into(), old_path: None, index: 'M', worktree: '.' },
+            GitFile { path: "docs/SPEC.md".into(), old_path: None, index: '?', worktree: '?' },
+            GitFile { path: "src/deleted.rs".into(), old_path: None, index: '.', worktree: 'D' },
+        ],
+        ..GitStatus::default()
+    };
+    let set = modified_paths_set("/w/p", &ScmLoad::Ready(status));
+    assert!(set.contains("/w/p/src/shim.rs"));
+    assert!(set.contains("/w/p/src/router.rs"));
+    assert!(set.contains("/w/p/docs/SPEC.md"));
+    assert!(!set.contains("/w/p/src/deleted.rs"));
+    assert!(!set.contains("/w/p/Cargo.toml"));
+}
+
+#[test]
+fn fr_l31_empty_state_hints_and_row_tab_classes_and_tab_width_text() {
+    use ember_app::ui::editor::{empty_state_hints, tab_class, tab_width_text, tree_row_class};
+    use ember_app::ui::keymap::{Keymap, Os};
+
+    let ((find_hint, find_label), (proj_hint, proj_label)) = empty_state_hints(Keymap::VsCode, Os::Mac);
+    assert_eq!(find_hint, "\u{2318}P");
+    assert_eq!(find_label, "파일로 이동");
+    assert_eq!(proj_hint, "\u{21E7}\u{2318}E");
+    assert_eq!(proj_label, "프로젝트 창");
+
+    let ((jb_find_hint, jb_find_label), (jb_proj_hint, jb_proj_label)) = empty_state_hints(Keymap::JetBrains, Os::Mac);
+    assert_eq!(jb_find_hint, "\u{21E7}\u{21E7}");
+    assert_eq!(jb_find_label, "모든 곳에서 찾기");
+    assert_eq!(jb_proj_hint, "\u{2318}1");
+    assert_eq!(jb_proj_label, "프로젝트 창");
+
+    assert_eq!(tree_row_class(false, false), "ed-tn");
+    assert_eq!(tree_row_class(true, false), "ed-tn sel");
+    assert_eq!(tree_row_class(false, true), "ed-tn mod");
+    assert_eq!(tree_row_class(true, true), "ed-tn sel mod");
+
+    assert_eq!(tab_class(false, false), "ed-tab");
+    assert_eq!(tab_class(true, false), "ed-tab on");
+    assert_eq!(tab_class(false, true), "ed-tab vc-mod");
+    assert_eq!(tab_class(true, true), "ed-tab on vc-mod");
+
+    assert_eq!(tab_width_text(4), "4칸");
+    assert_eq!(tab_width_text(2), "2칸");
+    assert_eq!(tab_width_text(0), "4칸");
 }

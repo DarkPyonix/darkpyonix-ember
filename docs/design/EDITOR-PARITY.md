@@ -10,7 +10,7 @@ The owner's rule [user, 2026-11-06, `INTENT.md` D38]: the Ember editor does what
 
 | Function | OSE behaviour | Ember today | Connection (ember-editor-conn) | Issue |
 |---|---|---|---|---|
-| Open folder, explorer tree | Explorer view over the file service; expand, create, rename, delete, copy, drag | 부분 (the tree is a flat list; a folder on another computer cannot be opened at all, see Server and node) | FS-CH: the `remoteFilesystem` channel (stat, readdir, mkdir, delete, rename, writeFile, watch) is wrapped in `RemoteFs`; `EditorSession` exposes only read_dir and stat | #438 |
+| Open folder, explorer tree | Explorer view over the file service; expand, create, rename, delete, copy, drag | 부분 (`FR-L31`, `ember/app/src/ui/editor_workbench.rs`: 펼치기/접기, 새 파일/새 폴더, 이름 변경, 삭제 확인, Shift/Cmd 다중 선택, 복사/잘라내기/붙여넣기, 드래그 앤 드롭 이동, 파일 검색 버튼으로 검색 창 열기 있음; 다른 컴퓨터의 폴더 열기는 서버/노드 측 차단 사항 참조) | FS-CH: the `remoteFilesystem` channel (stat, readdir, mkdir, delete, rename, writeFile, readFile, watch) is wrapped in `RemoteFs` and exposed on `EditorSession` | #438 |
 | Tabs (open, close, dirty) | Editor groups: pin, preview, split, reorder, close others, confirm on dirty close | 부분 (open, close, dirty dot 있음; pin, split, reorder 없음) | In the window (no wire) | #439, #305 (label clipped) |
 | Editing core: undo, clipboard, auto-indent | Monaco | 있음 (CodeEditor widget) | Widget in the renderer; edits go `on_change` -> bridge -> extension-host mirror | - |
 | Editing core: find/replace, multi-cursor, minimap, word wrap, bracket match | Monaco | 부분: 현재 파일 찾기/바꾸기(대소문자, 단어 옵션, 결과 상한 10000 장식 보관, 상한 초과 결과 탐색 가능, 전체 바꾸기는 되돌리기 한 번이 아님: compose-rust#496)는 있고 정규식, 선택 영역 안 찾기, 모두 강조, 다중 커서, 미니맵, 괄호 일치는 없음 | Renderer widget work (compose-rust), then wiring | #440, #628 |
@@ -28,8 +28,8 @@ The owner's rule [user, 2026-11-06, `INTENT.md` D38]: the Ember editor does what
 | Command palette, quick open | Quick-access over all commands, files and symbols | 부분: 명령 팔레트(F1, Shift+Cmd+P), 빠른 열기(Cmd+P), 최근 파일(Cmd+E/Ctrl+R), 줄로 이동(Ctrl+G/Cmd+L, :line[:col] 접미사), 확장 기여 명령(contributes.commands 및 $executeContributedCommand), 접두어 모드 전환(> 및 :) 있음; 문서 심볼(@) 및 워크스페이스 심볼(#) 빠른 이동은 #442 이후 | Commands from $registerCommand and contributes.commands plus Ember's; files from the explorer index with MRU recent ordering | #447 |
 | Settings UI, settings.json | Settings editor, profiles | 없음 (only the keymap choice) | Native screen; `SessionConfig.user_settings` feeds the extension host once | #449 |
 | Keybindings, keymap | Keybinding service and editor | 부분 (VS Code and JetBrains tables, 19 actions, 팔레트/빠른열기/최근파일/줄로이동/문서찾기/저장/닫기/도구창 연동) | Native (FR-L30) | #447, #449 |
-| Problems panel, Output panel | Marker service list; output channels | 없음 (static text) | EH-REG for output channels; diagnostics data EXISTS | #448 |
-| Notifications, progress, extension quick picks | MainThreadMessageService, Progress, QuickOpen | 없음 (auto-dismissed with default replies) | EH-REG | #448 |
+| Problems panel, Output panel | Marker service list; output channels | 부분 (`FR-L31`, `ember/app/src/ui/editor_workbench.rs`: 문제 패널 클릭 시 해당 줄/열로 커서 이동, 200개 상한 및 더 보기 버튼; 출력 패널에 `MainThreadOutputService` 채널 선택기, 64 KiB 채널 상한, 500줄 워크벤치 로그 상한 및 지우기 버튼 있음; 파일 기반 출력 채널 `$register/update`는 미지원) | EH-REG for output channels; diagnostics data EXISTS | #448 |
+| Notifications, progress, extension quick picks | MainThreadMessageService, Progress, QuickOpen | 부분 (MainThreadMessageService $showMessage decoded and surfaced to notices/logs; Progress, QuickOpen auto-dismissed) | EH-REG | #448 |
 | Status bar, language mode, encoding, EOL | Status bar items | 부분 (cursor position live, LF and UTF-8 constants) | Native plus document data | #453 |
 | Breadcrumbs | Path and symbols | 부분 (path only) | Document symbols need the language providers | #453, #442 |
 | Workspace trust | Trust service and restricted mode | 없음 (always trusted) | EH-REG `$requestWorkspaceTrust` plus a native dialog | #450 |

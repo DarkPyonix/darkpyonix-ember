@@ -78,7 +78,7 @@ pub fn display_name(name: &str) -> String {
 pub fn row_click_closes_prompt(prompt: &TreePrompt, typed: &str) -> bool {
     match prompt {
         TreePrompt::NewFile { .. } | TreePrompt::NewDir { .. } | TreePrompt::Rename { .. } => typed.trim().is_empty(),
-        TreePrompt::Delete { .. } => false,
+        TreePrompt::Delete { .. } | TreePrompt::DeleteMany { .. } => false,
     }
 }
 
@@ -192,6 +192,81 @@ impl EditorTabs {
     pub fn current_path(&self) -> Option<&str> {
         self.current.map(|i| self.tabs[i].0.as_str())
     }
+
+    /// Close every tab except the currently active one, returning the paths of the tabs that closed.
+    pub fn close_others(&mut self) -> Vec<String> {
+        let Some(cur) = self.current else { return Vec::new() };
+        let keep = self.tabs[cur].clone();
+        let closed: Vec<String> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (p, _))| (i != cur).then(|| p.clone()))
+            .collect();
+        self.tabs = vec![keep];
+        self.current = Some(0);
+        closed
+    }
+}
+
+/// The ancestor directories (from `root` down to the parent of `file_path`) to expand in the explorer
+/// tree so that `file_path` becomes visible (`열린 파일 찾기`). Returns an empty list when `file_path`
+/// is not strictly inside `root`.
+pub fn ancestor_dirs_to_expand(root: &str, file_path: &str) -> Vec<String> {
+    let root = root.trim_end_matches('/');
+    if root.is_empty() || !is_at_or_below(file_path, root) || file_path.trim_end_matches('/') == root {
+        return Vec::new();
+    }
+    let rel = file_path[root.len()..].trim_start_matches('/');
+    let parts: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    let mut dirs = vec![root.to_string()];
+    let mut cur = root.to_string();
+    for dir_seg in &parts[..parts.len() - 1] {
+        cur = super::editor_workbench::join_path(&cur, dir_seg);
+        dirs.push(cur.clone());
+    }
+    dirs
+}
+
+/// The two shortcut hint pairs `(hint, label)` shown inside `.ed-empty` when no file is open:
+/// `(find_hint, find_label)` and `(project_hint, "프로젝트 창")`.
+pub fn empty_state_hints(
+    keymap: crate::ui::keymap::Keymap,
+    os: crate::ui::keymap::Os,
+) -> ((String, &'static str), (String, &'static str)) {
+    (
+        (keymap.hint(Action::Find, os), keymap.find_label()),
+        (keymap.hint(Action::Project, os), "프로젝트 창"),
+    )
+}
+
+/// The CSS class of a tree row (`ed-tn`, with `.sel` when chosen and `.mod` when modified in git).
+pub fn tree_row_class(selected: bool, modified: bool) -> &'static str {
+    match (selected, modified) {
+        (true, true) => "ed-tn sel mod",
+        (true, false) => "ed-tn sel",
+        (false, true) => "ed-tn mod",
+        (false, false) => "ed-tn",
+    }
+}
+
+/// The CSS class of a file tab (`ed-tab`, with `.on` when active and `.vc-mod` when modified in git).
+pub fn tab_class(active: bool, modified: bool) -> &'static str {
+    match (active, modified) {
+        (true, true) => "ed-tab on vc-mod",
+        (true, false) => "ed-tab on",
+        (false, true) => "ed-tab vc-mod",
+        (false, false) => "ed-tab",
+    }
+}
+
+/// The status bar tab width label (`"4칸"` when `tab_width` is 0, else `"{tab_width}칸"`).
+pub fn tab_width_text(tab_width: u32) -> String {
+    let w = if tab_width == 0 { 4 } else { tab_width };
+    format!("{w}칸")
 }
 
 /// The path segments the breadcrumbs show: the path below the project folder when it lies
@@ -288,6 +363,20 @@ pub fn breadcrumb_text(path: &str, folder: &str) -> String {
     breadcrumb_segments(path, folder).join(" \u{203A} ")
 }
 
+/// How an item was placed on the clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardKind {
+    Copy,
+    Cut,
+}
+
+/// Paths held on the explorer clipboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeClipboard {
+    pub kind: ClipboardKind,
+    pub paths: Vec<(String, bool)>,
+}
+
 /// A pending explorer edit the tree is asking a name or a confirmation for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreePrompt {
@@ -295,6 +384,97 @@ pub enum TreePrompt {
     NewDir { parent: String },
     Rename { path: String },
     Delete { path: String, is_dir: bool },
+    DeleteMany { items: Vec<(String, bool)> },
+}
+
+/// Updates the explorer selection based on shift (range) or toggle (Cmd/Ctrl) modifiers.
+pub fn update_tree_selection(
+    current: &[(String, bool)],
+    clicked: (String, bool),
+    rows: &[TreeRow],
+    shift: bool,
+    toggle: bool,
+) -> Vec<(String, bool)> {
+    if shift {
+        if let Some(anchor) = current.first() {
+            let anchor_idx = rows.iter().position(|r| r.path == anchor.0);
+            let clicked_idx = rows.iter().position(|r| r.path == clicked.0);
+            if let (Some(a), Some(c)) = (anchor_idx, clicked_idx) {
+                let (start, end) = if a <= c { (a, c) } else { (c, a) };
+                return rows[start..=end]
+                    .iter()
+                    .map(|r| (r.path.clone(), r.is_dir))
+                    .collect();
+            }
+        }
+        vec![clicked]
+    } else if toggle {
+        if let Some(pos) = current.iter().position(|(p, _)| p == &clicked.0) {
+            let mut next = current.to_vec();
+            next.remove(pos);
+            next
+        } else {
+            let mut next = current.to_vec();
+            next.push(clicked);
+            next
+        }
+    } else {
+        vec![clicked]
+    }
+}
+
+/// Removes any item whose ancestor directory is also in `items`.
+pub fn prune_redundant_selection(items: &[(String, bool)]) -> Vec<(String, bool)> {
+    items
+        .iter()
+        .filter(|(p, _)| {
+            !items
+                .iter()
+                .any(|(other, is_dir)| *is_dir && other != p && is_at_or_below(p, other))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Selects every visible row in the explorer tree (FR-L31.4), returning `(multi_selection, primary_selection)`.
+pub fn select_all_tree_rows(rows: &[TreeRow]) -> (Vec<(String, bool)>, Option<(String, bool)>) {
+    let all: Vec<(String, bool)> = rows.iter().map(|r| (r.path.clone(), r.is_dir)).collect();
+    let last = all.last().cloned();
+    (all, last)
+}
+
+/// Builds a cut [`TreeClipboard`] from either the multi-selection (when `row_path` belongs to it)
+/// or `(row_path, is_dir)` alone, pruning redundant descendant paths (FR-L31.4).
+pub fn cut_selection(
+    multi_sel: &[(String, bool)],
+    row_path: &str,
+    is_dir: bool,
+) -> Option<TreeClipboard> {
+    let items = if multi_sel.iter().any(|(p, _)| p == row_path) && !multi_sel.is_empty() {
+        multi_sel.to_vec()
+    } else {
+        vec![(row_path.to_string(), is_dir)]
+    };
+    let pruned = prune_redundant_selection(&items);
+    if pruned.is_empty() {
+        None
+    } else {
+        Some(TreeClipboard {
+            kind: ClipboardKind::Cut,
+            paths: pruned,
+        })
+    }
+}
+
+/// Formats the status badge (`"복사됨 N개"` / `"잘라냄 N개"`) shown on the explorer root row when the
+/// tree clipboard holds items (FR-L31.4).
+pub fn clipboard_badge_text(clipboard: Option<&TreeClipboard>) -> Option<String> {
+    let clip = clipboard.filter(|c| !c.paths.is_empty())?;
+    let verb = match clip.kind {
+        ClipboardKind::Copy => "복사됨",
+        ClipboardKind::Cut => "잘라냄",
+    };
+    Some(format!("{verb} {}개", clip.paths.len()))
 }
 
 /// The directory a new file or folder goes in: the selected directory, the directory of the
@@ -319,6 +499,20 @@ pub fn delete_confirmation(path: &str, folder: &str, is_dir: bool, unsaved: &[St
     } else {
         format!("파일 {name}을 삭제할까요? 휴지통이 없어 되돌릴 수 없습니다.")
     };
+    if !unsaved.is_empty() {
+        let names: Vec<String> = unsaved.iter().map(|p| breadcrumb_segments(p, folder).join("/")).collect();
+        text.push_str(&format!(" 저장하지 않은 변경이 있는 파일: {}. 삭제하면 그 편집도 사라집니다.", names.join(", ")));
+    }
+    text
+}
+
+/// What the delete confirmation says when multiple items are selected.
+pub fn delete_many_confirmation(items: &[(String, bool)], folder: &str, unsaved: &[String]) -> String {
+    if items.len() == 1 {
+        return delete_confirmation(&items[0].0, folder, items[0].1, unsaved);
+    }
+    let count = items.len();
+    let mut text = format!("선택한 항목 {count}개를 삭제할까요? 휴지통이 없어 되돌릴 수 없습니다.");
     if !unsaved.is_empty() {
         let names: Vec<String> = unsaved.iter().map(|p| breadcrumb_segments(p, folder).join("/")).collect();
         text.push_str(&format!(" 저장하지 않은 변경이 있는 파일: {}. 삭제하면 그 편집도 사라집니다.", names.join(", ")));
@@ -380,6 +574,27 @@ pub fn problems_tab_label(count: usize) -> String {
     if count == 0 { ToolWindow::Problems.label().to_string() } else { format!("{} {count}", ToolWindow::Problems.label()) }
 }
 
+/// Maximum number of problems rendered in the DOM before offering a load-more button.
+pub const MAX_VISIBLE_PROBLEMS: usize = 200;
+
+/// Maximum number of workbench log entries kept in memory.
+pub const MAX_WORKBENCH_LOGS: usize = 500;
+
+/// Append a workbench log line, keeping at most [`MAX_WORKBENCH_LOGS`] newest lines.
+pub fn push_workbench_log(logs: &mut Vec<String>, line: String) {
+    if logs.len() >= MAX_WORKBENCH_LOGS {
+        let excess = logs.len() + 1 - MAX_WORKBENCH_LOGS;
+        logs.drain(0..excess);
+    }
+    logs.push(line);
+}
+
+/// Return visible problems slice and overflow count.
+pub fn paginate_problems<'a, T>(items: &'a [T], limit: usize) -> (&'a [T], usize) {
+    let cap = limit.min(items.len());
+    (&items[..cap], items.len().saturating_sub(cap))
+}
+
 /// Where a problem is, as a row shows it: the file below the project folder and the 1-based line.
 pub fn problem_location(path: &str, folder: &str, line: u32) -> String {
     format!("{}:{}", breadcrumb_segments(path, folder).join("/"), line + 1)
@@ -392,6 +607,81 @@ pub enum TabKeyOutcome {
     Activate(String),
     /// Close this tab path.
     Close(String),
+    /// Refuse to close this dirty tab via keyboard Delete/Backspace without saving first.
+    RefuseDirty(String),
+}
+
+/// Roving `tabindex` values for the explorer tree: `(container_tabindex, root_tabindex, row_tabindices)`.
+/// The tree container (`role="tree"`) is always `"-1"` so it is never a duplicate tab stop;
+/// when a child row is active (matching `selected`, else the first item in `multi_sel` present in `rows`),
+/// that single child row has `"0"` and all other rows (including the root folder row) have `"-1"`.
+/// When no child row is selected, the root folder row (`role="treeitem"`) has `"0"`.
+pub fn tree_roving_tabindex(
+    rows: &[TreeRow],
+    selected: Option<(&str, bool)>,
+    multi_sel: &[(String, bool)],
+) -> (&'static str, &'static str, Vec<&'static str>) {
+    let active_idx = selected
+        .and_then(|(p, _)| rows.iter().position(|r| r.path == p))
+        .or_else(|| {
+            rows.iter()
+                .position(|r| multi_sel.iter().any(|(mp, _)| mp == &r.path))
+        });
+    let root_ti = if active_idx.is_none() { "0" } else { "-1" };
+    let row_tis = (0..rows.len())
+        .map(|i| if active_idx == Some(i) { "0" } else { "-1" })
+        .collect();
+    ("-1", root_ti, row_tis)
+}
+
+/// Roving `tabindex` values for the tab strip: `(strip_tabindex, tab_tabindices)`.
+/// The tablist container (`role="tablist"`) is always `"-1"`; when tabs exist, only the active tab
+/// (or the first tab if `current` does not match any open tab) has `"0"`.
+pub fn tab_strip_roving_tabindex(
+    paths: &[String],
+    current: Option<&str>,
+) -> (&'static str, Vec<&'static str>) {
+    if paths.is_empty() {
+        return ("-1", Vec::new());
+    }
+    let active_idx = current
+        .and_then(|c| paths.iter().position(|p| p == c))
+        .unwrap_or(0);
+    let tab_tis = (0..paths.len())
+        .map(|i| if i == active_idx { "0" } else { "-1" })
+        .collect();
+    ("-1", tab_tis)
+}
+
+/// Polite Korean notice shown when keyboard `Delete` or `Backspace` is pressed on an unsaved tab.
+pub fn dirty_tab_close_notice(path: &str) -> String {
+    let name = display_name(base_name(path));
+    format!("{name} 파일에 저장하지 않은 변경이 있어 바로 닫지 않았습니다. 먼저 저장하세요.")
+}
+
+/// Handles ArrowLeft, ArrowRight, Home, End, Enter, Space, and Delete/Backspace on the tab strip,
+/// refusing to close a dirty tab when `dirty[i]` is true.
+pub fn tab_strip_key_with_dirty(
+    paths: &[String],
+    dirty: &[bool],
+    current: Option<&str>,
+    key: &str,
+) -> Option<TabKeyOutcome> {
+    if paths.is_empty() {
+        return None;
+    }
+    match key {
+        "Delete" | "Backspace" => {
+            let idx = current.and_then(|c| paths.iter().position(|p| p == c))?;
+            let path = paths[idx].clone();
+            if dirty.get(idx).copied().unwrap_or(false) {
+                Some(TabKeyOutcome::RefuseDirty(path))
+            } else {
+                Some(TabKeyOutcome::Close(path))
+            }
+        }
+        _ => tab_strip_key(paths, current, key),
+    }
 }
 
 /// Handles ArrowLeft, ArrowRight, Home, End, Enter, Space, and Delete/Backspace on the tab strip.
@@ -450,6 +740,15 @@ pub enum TreeKeyOutcome {
     Collapse(String),
     /// Open a file in the editor.
     OpenFile(String),
+}
+
+/// Whether the explorer tree container should handle key events (`Escape`, `Cmd/Ctrl+C/X/V`,
+/// `Delete`/`Backspace`, and arrow navigation). While an inline prompt (`NewFile`, `NewDir`,
+/// `Rename`, `Delete`, `DeleteMany`) is open inside `.ed-tree`, the tree container must ignore
+/// keys so `Backspace`, `Delete`, and `Cmd/Ctrl+C/X/V` inside the inline `<input>` are not
+/// intercepted by the tree.
+pub fn tree_handles_key(prompt: Option<&TreePrompt>) -> bool {
+    prompt.is_none()
 }
 
 /// Handles WAI-ARIA treeview keyboard navigation (`ArrowDown`, `ArrowUp`, `ArrowRight`, `ArrowLeft`, `Home`, `End`, `Enter`, `" "`)
@@ -648,10 +947,11 @@ pub enum ToolWindow {
     Terminal,
     Run,
     Problems,
+    Output,
 }
 
 impl ToolWindow {
-    pub const ALL: [ToolWindow; 9] = [
+    pub const ALL: [ToolWindow; 10] = [
         ToolWindow::Project,
         ToolWindow::Search,
         ToolWindow::Commit,
@@ -661,11 +961,12 @@ impl ToolWindow {
         ToolWindow::Terminal,
         ToolWindow::Run,
         ToolWindow::Problems,
+        ToolWindow::Output,
     ];
     pub const LEFT: [ToolWindow; 4] = [ToolWindow::Project, ToolWindow::Search, ToolWindow::Commit, ToolWindow::Git];
     pub const RIGHT: [ToolWindow; 2] = [ToolWindow::Agent, ToolWindow::Notifications];
-    pub const BOTTOM: [ToolWindow; 3] =
-        [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems];
+    pub const BOTTOM: [ToolWindow; 4] =
+        [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems, ToolWindow::Output];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -678,6 +979,7 @@ impl ToolWindow {
             ToolWindow::Terminal => "터미널",
             ToolWindow::Run => "실행",
             ToolWindow::Problems => "문제",
+            ToolWindow::Output => "출력",
         }
     }
 
@@ -685,7 +987,7 @@ impl ToolWindow {
         match self {
             ToolWindow::Project | ToolWindow::Search | ToolWindow::Commit | ToolWindow::Git => Side::Left,
             ToolWindow::Agent | ToolWindow::Notifications => Side::Right,
-            ToolWindow::Terminal | ToolWindow::Run | ToolWindow::Problems => Side::Bottom,
+            ToolWindow::Terminal | ToolWindow::Run | ToolWindow::Problems | ToolWindow::Output => Side::Bottom,
         }
     }
 
@@ -701,6 +1003,7 @@ impl ToolWindow {
             ToolWindow::Terminal => Some(Action::Terminal),
             ToolWindow::Run => Some(Action::Run),
             ToolWindow::Problems => Some(Action::Problems),
+            ToolWindow::Output => None,
         }
     }
 
@@ -723,6 +1026,7 @@ impl ToolWindow {
             ToolWindow::Terminal => IconRole::Menu,
             ToolWindow::Run => IconRole::Forward,
             ToolWindow::Problems => IconRole::Close,
+            ToolWindow::Output => IconRole::Menu,
         }
     }
 }

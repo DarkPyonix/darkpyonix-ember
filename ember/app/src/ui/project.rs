@@ -502,6 +502,62 @@ pub fn danger_allowed(project_id: &str, part: SettingsPart) -> bool {
     part_supported(part) && !is_default_project(project_id)
 }
 
+/// The settings sheet's sections in the mockup's order (`project.js` `projSettings`, #508):
+/// 기본, 컴퓨터, 새 팀원 기본값, 프로필 덮어쓰기, 팀 캐릭터, 리더, 연결, 위험 영역. `Name` stands
+/// for the 기본 section (name, repository, branch) and `Archive` for the danger zone.
+pub const SETTINGS_ORDER: [SettingsPart; 8] = [
+    SettingsPart::Name,
+    SettingsPart::Computers,
+    SettingsPart::MemberDefaults,
+    SettingsPart::ProfileOverride,
+    SettingsPart::CharacterStyle,
+    SettingsPart::Leader,
+    SettingsPart::Links,
+    SettingsPart::Archive,
+];
+
+/// One row of the danger zone (`.ps-danger`): title, explanation and the button's label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DangerRow {
+    pub part: SettingsPart,
+    pub title: &'static str,
+    pub note: String,
+    pub button: &'static str,
+}
+
+/// The danger zone's rows as the mockup: 프로젝트 보관 then 프로젝트 삭제, each with what it does.
+/// The delete note counts the members the client knows; routines are left out because the
+/// client has no per-project routine list (the mockup counts them too).
+pub fn danger_rows(project_id: &str, members: usize) -> [DangerRow; 2] {
+    let delete_note = if is_default_project(project_id) {
+        "기본 프로젝트는 지울 수 없습니다.".to_string()
+    } else {
+        format!("팀원 {members}명의 대화가 함께 지워집니다.")
+    };
+    [
+        DangerRow { part: SettingsPart::Archive, title: "프로젝트 보관", note: "세션과 기록은 남고 목록에서 숨겨집니다.".to_string(), button: "보관" },
+        DangerRow { part: SettingsPart::Delete, title: "프로젝트 삭제", note: delete_note, button: "삭제" },
+    ]
+}
+
+/// Columns of the leader choice (`.ps-leads`): 3, 2 at 900 dp and below, 1 at 560 and below.
+pub fn leader_cols(width_dp: f32) -> usize {
+    if width_dp <= 560.0 {
+        1
+    } else if width_dp <= 900.0 {
+        2
+    } else {
+        3
+    }
+}
+
+/// The width of a computer check chip (`.ps-check`): 12 px padding each side, the 16 px box,
+/// the name and the 8 px status dot, 8 px apart.
+pub fn computer_check_width(name: &str) -> f32 {
+    let text: f32 = name.chars().map(|c| if c.is_ascii() { 0.55 } else { 1.0 }).sum::<f32>() * 13.0;
+    12.0 + 16.0 + 8.0 + text + 8.0 + 8.0 + 12.0
+}
+
 /// Whether 저장 can do anything: the server saves project metadata (FR-L26).
 pub const SETTINGS_SAVE_AVAILABLE: bool = true;
 
@@ -909,6 +965,40 @@ impl NewProjectDraft {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l26_settings_sections_follow_the_mockup_order() {
+        use super::{SettingsPart as P, SETTINGS_ORDER};
+        assert_eq!(
+            SETTINGS_ORDER,
+            [P::Name, P::Computers, P::MemberDefaults, P::ProfileOverride, P::CharacterStyle, P::Leader, P::Links, P::Archive]
+        );
+    }
+
+    #[test]
+    fn fr_l26_danger_rows_say_what_each_does() {
+        let [archive, delete] = super::danger_rows("ember", 3);
+        assert_eq!((archive.title, archive.button), ("프로젝트 보관", "보관"));
+        assert_eq!(archive.note, "세션과 기록은 남고 목록에서 숨겨집니다.");
+        assert_eq!((delete.title, delete.button), ("프로젝트 삭제", "삭제"));
+        assert_eq!(delete.note, "팀원 3명의 대화가 함께 지워집니다.");
+        let [_, d] = super::danger_rows(super::DEFAULT_PROJECT_ID, 3);
+        assert_eq!(d.note, "기본 프로젝트는 지울 수 없습니다.");
+    }
+
+    #[test]
+    fn fr_l26_leader_choice_columns_follow_the_breakpoints() {
+        assert_eq!(super::leader_cols(1440.0), 3);
+        assert_eq!(super::leader_cols(900.0), 2);
+        assert_eq!(super::leader_cols(768.0), 2);
+        assert_eq!(super::leader_cols(390.0), 1);
+    }
+
+    #[test]
+    fn fr_l26_computer_check_width_grows_with_the_name() {
+        assert!(super::computer_check_width("mac-mini-long-name") > super::computer_check_width("mac"));
+        assert!(super::computer_check_width("") >= 64.0);
+    }
+
     #[test]
     fn fr_l22_disabled_characters_link_says_why() {
         assert_eq!(characters_link_reason(true), Some("저장하지 않은 변경 사항이 있어 열 수 없습니다"));

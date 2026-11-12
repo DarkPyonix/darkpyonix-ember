@@ -1,13 +1,53 @@
-//! Find and replace in the open file (D38, #440, #628): the pure model. The matching is a literal
-//! search with case, whole-word and regex options over the lines of the document; columns are UTF-16
-//! code units, the widget's own. The find bar in `editor_workbench` shows the result and moves the
-//! reader with the editor handle.
+//! Find and replace in the open file (D38, #440, #628, FR-L31.12): the pure model. The matching is a
+//! literal or regular-expression search with case and whole-word options over the lines of the document,
+//! optionally limited to a scope (찾기 범위: 선택 영역); columns are UTF-16 code units, the widget's own.
+//! The regex engine is the one search across files uses (`ember_editor::search::Matcher`, Oniguruma), so
+//! a pattern means the same in both. A match never spans lines (Code-OSS can match `\n` in a regex; the
+//! bar here cannot yet). The find bar in `editor_workbench` shows the result and moves the reader with
+//! the editor handle.
+
+use ember_editor::search::{expand_replacement, utf16_col, Matcher, SearchOptions};
+
+/// What 선택 영역에서 찾기 limits the search to: from `start` to `end`, each (line, UTF-16 column).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Scope {
+    pub start: (u32, u32),
+    pub end: (u32, u32),
+}
+
+impl Scope {
+    /// The scope for a selection, as Code-OSS takes it when 선택 영역에서 찾기 is turned on: the two ends in
+    /// order, and a selection over several lines that ends at the start of a line ends at the end of the
+    /// line before. An empty selection gives no scope, so the whole document is searched.
+    pub fn from_selection(anchor: (u32, u32), active: (u32, u32), text: &str) -> Option<Scope> {
+        let (start, mut end) = if anchor <= active { (anchor, active) } else { (active, anchor) };
+        if start == end {
+            return None;
+        }
+        if end.1 == 0 && end.0 > start.0 {
+            let prev = end.0 - 1;
+            let line = text.split('\n').nth(prev as usize).unwrap_or("");
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            end = (prev, line.encode_utf16().count() as u32);
+        }
+        Some(Scope { start, end })
+    }
+
+    /// Whether the match lies wholly inside the scope.
+    pub fn contains(&self, m: &Match) -> bool {
+        (m.line, m.start) >= self.start && (m.line, m.end) <= self.end
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct FindOptions {
     pub case_sensitive: bool,
     pub whole_word: bool,
     pub regex: bool,
+    /// 대소문자 보존: a replacement takes the case of the text it replaces (Code-OSS `preserveCase`).
+    pub preserve_case: bool,
+    /// 선택 영역에서 찾기: only matches inside this scope count.
+    pub scope: Option<Scope>,
 }
 
 impl FindOptions {
@@ -16,8 +56,67 @@ impl FindOptions {
             case_sensitive,
             whole_word,
             regex: false,
+            preserve_case: false,
+            scope: None,
         }
     }
+}
+
+/// How one query finds its matches on a line: a literal needle (folded for case) or a compiled regex.
+enum LineFinder {
+    Literal(Vec<char>),
+    Regex(Matcher),
+}
+
+impl LineFinder {
+    /// `None` for an empty query, a literal query with a line break, or a regex that does not compile.
+    fn new(query: &str, options: FindOptions) -> Option<Self> {
+        if query.is_empty() {
+            return None;
+        }
+        if options.regex {
+            return Matcher::new(&search_options(query, options)).ok().map(LineFinder::Regex);
+        }
+        if query.contains('\n') || query.contains('\r') {
+            return None;
+        }
+        Some(LineFinder::Literal(query.chars().map(|c| fold(c, options.case_sensitive)).collect()))
+    }
+
+    fn line(&self, line: &str, line_no: u32, options: FindOptions) -> Vec<Match> {
+        let mut found = match self {
+            LineFinder::Literal(needle) => matches_in_line(line, line_no, needle, options),
+            LineFinder::Regex(matcher) => {
+                let line = line.strip_suffix('\r').unwrap_or(line);
+                matcher
+                    .find(line)
+                    .into_iter()
+                    .map(|(s, e)| Match { line: line_no, start: utf16_col(line, s), end: utf16_col(line, e) })
+                    .collect()
+            }
+        };
+        if let Some(scope) = options.scope {
+            found.retain(|m| scope.contains(m));
+        }
+        found
+    }
+}
+
+fn search_options(query: &str, options: FindOptions) -> SearchOptions {
+    SearchOptions {
+        pattern: query.to_string(),
+        regex: options.regex,
+        case_sensitive: options.case_sensitive,
+        whole_word: options.whole_word,
+    }
+}
+
+/// The engine's message when 정규식 is on and `query` does not compile, else `None`.
+pub fn regex_error(query: &str, options: FindOptions) -> Option<String> {
+    if !options.regex || query.is_empty() {
+        return None;
+    }
+    Matcher::new(&search_options(query, options)).err()
 }
 
 /// One match: a line and the UTF-16 columns it covers on it (a match never spans lines).
@@ -94,13 +193,12 @@ pub fn find_matches(text: &str, query: &str, options: FindOptions) -> Vec<Match>
 
 /// [`find_matches`] and whether more matches exist than were kept.
 pub fn find_matches_capped(text: &str, query: &str, options: FindOptions) -> (Vec<Match>, bool) {
-    if query.is_empty() || query.contains('\n') || query.contains('\r') {
+    let Some(finder) = LineFinder::new(query, options) else {
         return (Vec::new(), false);
-    }
-    let needle: Vec<char> = query.chars().map(|c| fold(c, options.case_sensitive)).collect();
+    };
     let mut out = Vec::new();
     for (line_no, line) in text.split('\n').enumerate() {
-        let line_matches = matches_in_line(line, line_no as u32, &needle, options);
+        let line_matches = finder.line(line, line_no as u32, options);
         for m in line_matches {
             if out.len() == MAX_MATCHES {
                 return (out, true);
@@ -186,10 +284,7 @@ pub fn scan_match(
     from: (u32, u32),
     forward: bool,
 ) -> Option<Match> {
-    if query.is_empty() || query.contains('\n') || query.contains('\r') {
-        return None;
-    }
-    let needle: Vec<char> = query.chars().map(|c| fold(c, options.case_sensitive)).collect();
+    let finder = LineFinder::new(query, options)?;
     let lines: Vec<&str> = text.split('\n').collect();
     if lines.is_empty() {
         return None;
@@ -199,12 +294,12 @@ pub fn scan_match(
 
     if forward {
         if from_line < total_lines {
-            let m_line = matches_in_line(lines[from_line as usize], from_line, &needle, options);
+            let m_line = finder.line(lines[from_line as usize], from_line, options);
             if let Some(m) = m_line.into_iter().find(|m| m.start >= from_col) {
                 return Some(m);
             }
             for l in (from_line + 1)..total_lines {
-                let m_line = matches_in_line(lines[l as usize], l, &needle, options);
+                let m_line = finder.line(lines[l as usize], l, options);
                 if let Some(m) = m_line.into_iter().next() {
                     return Some(m);
                 }
@@ -212,25 +307,25 @@ pub fn scan_match(
         }
         let wrap_limit = from_line.min(total_lines.saturating_sub(1));
         for l in 0..wrap_limit {
-            let m_line = matches_in_line(lines[l as usize], l, &needle, options);
+            let m_line = finder.line(lines[l as usize], l, options);
             if let Some(m) = m_line.into_iter().next() {
                 return Some(m);
             }
         }
         if from_line < total_lines {
-            let m_line = matches_in_line(lines[from_line as usize], from_line, &needle, options);
+            let m_line = finder.line(lines[from_line as usize], from_line, options);
             if let Some(m) = m_line.into_iter().find(|m| m.start < from_col) {
                 return Some(m);
             }
         }
     } else {
         if from_line < total_lines {
-            let m_line = matches_in_line(lines[from_line as usize], from_line, &needle, options);
+            let m_line = finder.line(lines[from_line as usize], from_line, options);
             if let Some(m) = m_line.into_iter().rfind(|m| m.end <= from_col) {
                 return Some(m);
             }
             for l in (0..from_line).rev() {
-                let m_line = matches_in_line(lines[l as usize], l, &needle, options);
+                let m_line = finder.line(lines[l as usize], l, options);
                 if let Some(m) = m_line.into_iter().next_back() {
                     return Some(m);
                 }
@@ -238,13 +333,13 @@ pub fn scan_match(
         }
         let start_line = total_lines.saturating_sub(1);
         for l in (from_line + 1..=start_line).rev() {
-            let m_line = matches_in_line(lines[l as usize], l, &needle, options);
+            let m_line = finder.line(lines[l as usize], l, options);
             if let Some(m) = m_line.into_iter().next_back() {
                 return Some(m);
             }
         }
         if from_line < total_lines {
-            let m_line = matches_in_line(lines[from_line as usize], from_line, &needle, options);
+            let m_line = finder.line(lines[from_line as usize], from_line, options);
             if let Some(m) = m_line.into_iter().rfind(|m| m.end > from_col) {
                 return Some(m);
             }
@@ -306,6 +401,109 @@ pub fn replace_edits(
             .map(|m| (*m, replacement.to_string()))
             .collect(),
     }
+}
+
+/// The case of `matched` carried over to `replacement`, as Code-OSS's `buildReplaceStringWithCasePreserved`
+/// does: segments split by `-` or `_` (when both have the same number of segments) each keep their case;
+/// otherwise all upper, all lower, a capital first letter or a small first letter.
+pub fn preserve_case(matched: &str, replacement: &str) -> String {
+    if matched.is_empty() {
+        return replacement.to_string();
+    }
+    let same_split = |ch: char| {
+        matched.contains(ch) && replacement.contains(ch) && matched.split(ch).count() == replacement.split(ch).count()
+    };
+    let (hyphens, underscores) = (same_split('-'), same_split('_'));
+    if hyphens != underscores {
+        let ch = if hyphens { '-' } else { '_' };
+        let parts: Vec<String> = matched
+            .split(ch)
+            .zip(replacement.split(ch))
+            .map(|(m, r)| preserve_case(m, r))
+            .collect();
+        return parts.join(&ch.to_string());
+    }
+    let first_as = |upper: bool| -> String {
+        let mut rest = replacement.chars();
+        match rest.next() {
+            Some(c) if upper => c.to_uppercase().collect::<String>() + rest.as_str(),
+            Some(c) => c.to_lowercase().collect::<String>() + rest.as_str(),
+            None => String::new(),
+        }
+    };
+    let m0 = matched.chars().next().unwrap_or_default().to_string();
+    if matched.to_uppercase() == matched {
+        replacement.to_uppercase()
+    } else if matched.to_lowercase() == matched {
+        replacement.to_lowercase()
+    } else if m0.to_lowercase() != m0 {
+        first_as(true)
+    } else if m0.to_uppercase() != m0 {
+        first_as(false)
+    } else {
+        replacement.to_string()
+    }
+}
+
+/// The text between UTF-16 columns `start` and `end` of `line`.
+fn utf16_slice(line: &str, start: u32, end: u32) -> &str {
+    let byte = |col: u32| {
+        let mut units = 0u32;
+        for (b, c) in line.char_indices() {
+            if units >= col {
+                return b;
+            }
+            units += c.len_utf16() as u32;
+        }
+        line.len()
+    };
+    &line[byte(start)..byte(end)]
+}
+
+/// The edits for a replacement as Code-OSS makes them: the one match at `only`, or every match, last
+/// first. With 정규식 each replacement expands `$&`, `$0`, `$1` to `$99`, `$$`, `\n`, `\t` and `\\`
+/// against that match's groups (the rules of search across files); with 대소문자 보존 it then takes the
+/// case of the text it replaces. A match the text no longer has is left out.
+pub fn replacement_edits(
+    text: &str,
+    query: &str,
+    options: FindOptions,
+    matches: &[Match],
+    only: Option<usize>,
+    replacement: &str,
+) -> Vec<(Match, String)> {
+    let chosen: Vec<Match> = match only {
+        Some(i) => matches.get(i).copied().into_iter().collect(),
+        None => matches.iter().rev().copied().collect(),
+    };
+    if !options.regex && !options.preserve_case {
+        return chosen.into_iter().map(|m| (m, replacement.to_string())).collect();
+    }
+    let matcher = if options.regex { Matcher::new(&search_options(query, options)).ok() } else { None };
+    if options.regex && matcher.is_none() {
+        return Vec::new();
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut out = Vec::with_capacity(chosen.len());
+    for m in chosen {
+        let Some(raw) = lines.get(m.line as usize) else { continue };
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        let base = match &matcher {
+            Some(matcher) => {
+                let caps = matcher.captures(line).into_iter().find(|c| {
+                    c.pos(0).map(|(s, e)| (utf16_col(line, s), utf16_col(line, e))) == Some((m.start, m.end))
+                });
+                match caps {
+                    Some(caps) => expand_replacement(replacement, &caps),
+                    None => continue,
+                }
+            }
+            None => replacement.to_string(),
+        };
+        let text = if options.preserve_case { preserve_case(utf16_slice(line, m.start, m.end), &base) } else { base };
+        out.push((m, text));
+    }
+    out
 }
 
 /// The match to go to from the caret at `from` (line, column): the first one that starts at or after

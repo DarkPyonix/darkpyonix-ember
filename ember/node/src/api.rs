@@ -288,6 +288,14 @@ impl From<PolicyError> for ApiError {
             PolicyError::Io(_, io) if io.kind() == std::io::ErrorKind::InvalidInput => {
                 ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, e.to_string())
             }
+            // Linux canonicalize answers ENOTDIR for a trailing slash after a file (macOS drops
+            // the slash, handled in `resolve_existing`); like ENAMETOOLONG and ELOOP it is the
+            // caller's path, not the node's fault.
+            PolicyError::Io(_, io)
+                if matches!(crate::fs::io_errno(io), Some("ENOTDIR" | "EINVAL" | "ENAMETOOLONG" | "ELOOP")) =>
+            {
+                ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, e.to_string())
+            }
             PolicyError::Io(..) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, e.to_string()),
         }
     }

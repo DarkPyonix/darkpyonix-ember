@@ -1034,6 +1034,7 @@ pub mod page {
                     }
                 }
                 // The language features are in the menu too: a key pressed while the code has the focus may not reach the page.
+                // TODO(compose-rust#554): the chords alone are enough once the editor previews keys.
                 for (action, label, hint) in crate::ui::editor_language::MENU {
                     {
                         let s = s.clone();

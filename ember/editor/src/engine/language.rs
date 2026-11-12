@@ -360,6 +360,7 @@ impl SessionCore {
             item.additional_edits = full.additional_edits;
             item.command = full.command.or(item.command);
         }
+        // TODO(compose-rust#556): a snippet goes in as plain text and the caret stays after it.
         let text = if item.is_snippet { expand_snippet(&item.insert_text).0 } else { item.insert_text.clone() };
         let mut edits = vec![TextEdit { range: item.insert_range, text }];
         edits.extend(item.additional_edits.iter().cloned());

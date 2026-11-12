@@ -196,6 +196,7 @@ pub fn filter(items: &[CompletionItem], query: &str) -> Vec<usize> {
 /// A tab stop with a placeholder (`${1:name}`) inserts the placeholder, a choice (`${1|a,b|}`)
 /// its first option, and a variable (`$TM_FILENAME`, `${VAR:default}`) its default or nothing.
 /// Ember has no snippet session: the stops are not linked and Tab does not move between them.
+// TODO(compose-rust#556): hand the snippet to the widget's snippet session and place the caret.
 pub fn expand_snippet(snippet: &str) -> (String, Option<u32>) {
     let chars: Vec<char> = snippet.chars().collect();
     let mut out = String::new();

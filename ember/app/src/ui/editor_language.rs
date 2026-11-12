@@ -11,6 +11,16 @@
 //! to itself while it has the focus (see `docs/design/EDITOR-PARITY.md`, row "Language features").
 //! So a list opens on its command (Ctrl+Space, F12, Shift+F12, F2, Ctrl/Cmd+.), takes the focus,
 //! and is filtered by typing in its own field.
+//!
+//! The stand-ins and the toolkit issue each waits for:
+//! * TODO(compose-rust#553): sheets and a bottom strip instead of popups at the caret (no caret or
+//!   position rectangle from `CodeEditor`).
+//! * TODO(compose-rust#554): the editor menu carries every command, because a chord pressed while
+//!   the code has the focus may not reach the page, and a list cannot take Up, Down, Enter, Tab and
+//!   Escape from the editor (no key preview; related compose-rust#100).
+//! * TODO(compose-rust#555): no Cmd/Ctrl+click to a definition (no pointer press with modifiers and
+//!   position from `CodeEditor`; also compose-rust#417).
+//! * TODO(compose-rust#556): a snippet is inserted as plain text (no snippet session).
 
 use std::collections::HashMap;
 
@@ -35,6 +45,7 @@ pub enum LangAction {
 /// The Code-OSS chord for a language feature, the same on every system: F12 definition, Shift+F12
 /// references, F2 rename, Ctrl+Space suggestions, Ctrl+Shift+Space (or Cmd+Shift+Space) parameter
 /// hints, Ctrl+. (or Cmd+.) quick fix. Format document is in the keymap table (`Action::Format`).
+// TODO(compose-rust#554): these reach the page only when the key is not kept by the focused code.
 pub fn action_for_key(key: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> Option<LangAction> {
     let primary = ctrl != meta;
     match key {
@@ -473,6 +484,7 @@ pub mod view {
     }
 
     /// Start a language feature at the caret of the active file.
+    // TODO(compose-rust#555): Cmd/Ctrl+click on a name should start `Definition` at the pointer.
     pub fn run(s: &Shared, action: LangAction) {
         let Some(uri) = current(s) else {
             notice("열린 파일이 없습니다");
@@ -614,6 +626,7 @@ pub mod view {
 
     /// The parameter hint: the signature with the parameter being typed set off. It sits at the
     /// bottom of the editor area because the widget does not say where the caret is on screen.
+    // TODO(compose-rust#553): anchor the hint above the caret.
     fn hint(s: &Shared, help: &ember_editor::language::SignatureHelp) -> Element {
         let Some((before, active, after)) = signature_parts(help) else { return rsx! {} };
         let count = help.signatures.len();
@@ -633,6 +646,9 @@ pub mod view {
     }
 
     /// The sheet over the window and the parameter hint, when there is one to show.
+    // TODO(compose-rust#553): draw the lists as popups at the caret.
+    // TODO(compose-rust#554): keep the focus in the code and take the list's keys from the editor,
+    // so the lists can open while typing.
     pub fn overlay(s: &Shared) -> Element {
         capture_hook(s);
         let ui = ui();

@@ -152,6 +152,9 @@ pub struct NodeClient {
     token: String,
     /// Bound on each HTTP request ([`NodeClient::with_deadline`]); `None` waits forever.
     deadline: Option<Duration>,
+    /// The HTTP client ignores proxy variables ([`NodeClient::new_local`]); kept across
+    /// [`NodeClient::with_deadline`].
+    no_proxy: bool,
 }
 
 impl fmt::Debug for NodeClient {
@@ -177,7 +180,19 @@ impl NodeClient {
         if !base.starts_with("http://") && !base.starts_with("https://") {
             return Err(ClientError::Url(base));
         }
-        Ok(Self { reach: Reach::Http { base, http: reqwest::Client::new() }, token: token.into(), deadline: None })
+        Ok(Self { reach: Reach::Http { base, http: reqwest::Client::new() }, token: token.into(), deadline: None, no_proxy: false })
+    }
+
+    /// Like [`NodeClient::new`], but the HTTP client ignores `HTTP_PROXY`, `HTTPS_PROXY` and
+    /// `ALL_PROXY` (#474): for a node on this machine's loopback, whose Bearer token must never
+    /// go to a proxy named in the environment. WebSockets never use a proxy.
+    pub fn new_local(base: impl Into<String>, token: impl Into<String>) -> Result<Self> {
+        let mut c = Self::new(base, token)?;
+        if let Reach::Http { http, .. } = &mut c.reach {
+            *http = reqwest::Client::builder().no_proxy().build()?;
+        }
+        c.no_proxy = true;
+        Ok(c)
     }
 
     /// Like [`NodeClient::new`], but every HTTP request fails after `timeout` (and connecting
@@ -197,7 +212,11 @@ impl NodeClient {
     /// terminal attach) are not affected.
     pub fn with_deadline(mut self, deadline: Duration) -> Self {
         if let Reach::Http { http, .. } = &mut self.reach {
-            match reqwest::Client::builder()
+            let mut b = reqwest::Client::builder();
+            if self.no_proxy {
+                b = b.no_proxy();
+            }
+            match b
                 .timeout(deadline)
                 .connect_timeout(deadline.min(Duration::from_secs(5)))
                 .build()
@@ -220,7 +239,7 @@ impl NodeClient {
     /// optional address hints), dialed through `dialer` for [`NODE_SERVICE`]. Clients sharing a
     /// dialer share its connection to the node. The bearer token is still sent.
     pub fn over_transport(dialer: Dialer, addr: impl Into<PeerAddr>, token: impl Into<String>) -> Self {
-        Self { reach: Reach::Peer { dialer, addr: addr.into() }, token: token.into(), deadline: None }
+        Self { reach: Reach::Peer { dialer, addr: addr.into() }, token: token.into(), deadline: None, no_proxy: false }
     }
 
     /// The node's transport address, when reached over the transport.

@@ -797,7 +797,10 @@ async fn create_term(
     let res = tokio::task::spawn_blocking(move || terms.create(&r, cwd))
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, e.to_string()))?
-        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, format!("{e:#}")))?;
+        .map_err(|e| match e.downcast_ref::<crate::term::TermLimit>() {
+            Some(_) => ApiError::new(StatusCode::CONFLICT, ErrorCode::Conflict, format!("{e:#}")),
+            None => ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, format!("{e:#}")),
+        })?;
     let status = if res.created { StatusCode::CREATED } else { StatusCode::OK };
     Ok((status, Json(res)))
 }

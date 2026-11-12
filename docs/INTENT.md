@@ -966,3 +966,13 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 **Rejected** *[provisional]*. Leaving stderr raw and only restricting the mode (a log the owner pastes into an issue would carry a key fragment). Capping log lines at 300 characters like events (a debugging log loses the part that explains the error). Deleting the log with the shim (the log is needed after a crash). A Windows ACL for the token file (the server's OSE start runs on unix first; documented as default ACL).
 
 **Why.** A SIGKILL skips every drop handler, so only a startup sweep bounds the life of a dead token. The redaction is a heuristic, so the mode stays private as well. Seven days covers a debugging session after a weekend and keeps the directory from growing without bound.
+
+### D46: Node file operations open first and check the handle; the write relay waits for the namespace operations
+
+**Decision.** [provisional, #468, 2026-11-13] The node's content file operations (read, pwrite, setattr, grep, and on Unix the atomic write) open first and check the opened handle against the path policy (resolve again, and on Unix compare device and inode), with `O_NOFOLLOW` on the final component and, for the atomic write, a checked directory handle (`openat`, `renameat`). Namespace operations (mkdir, remove, rename, symlink, stat, lstat, readlink, list, glob) keep acting on paths for now. The server write relay may relay only the covered content operations until those move to directory handles too.
+
+**Rejected** *[provisional]*. Accepting the race under D37 without code (an admitted device has full authority, but the local node and denied paths narrow the API on purpose, and a narrowing that a symlink swap defeats is not one). Resolving every component with `openat` from the root on every call (correct, but a rewrite of every operation; it is the next step for the namespace operations). Linux-only `openat2(RESOLVE_BENEATH)` (not on macOS or Windows).
+
+**Why.** The check-then-open gap is reachable remotely through the server relay (#463). Checking the handle closes it for every operation that reads or writes content, with no change to the API.
+
+**Status.** Written, not yet compiled or run (`ember/node/tests/fs_toctou.rs`). SPEC `FR-X1` (open, then check, #468).

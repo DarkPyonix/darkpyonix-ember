@@ -56,7 +56,8 @@ pub enum ErrorCode {
     /// The git API (FR-G1): the path is not a git repository (404).
     NotARepo,
     /// The git API (FR-G2, FR-G3): git refused the operation, e.g. an empty index or a diverged
-    /// pull (409); the message is git's own.
+    /// pull (409); the message is git's own. Also a terminal create refused at the node's
+    /// running-session cap (409, #474).
     Conflict,
     /// The git API: a network operation hit its deadline (504).
     Timeout,

@@ -73,6 +73,11 @@ someone kills it. Attaching and detaching never start or stop it.
     missing. Whether a real systemd or launchd keeps the keepers alive is not yet verified.
   - Disable with `EMBER_NODE_KEEP_PTY=0` (sessions then end with the daemon). Without a state dir
     there are no keepers and no records.
+  - **The server's local node** (`ember/server/src/computers/local_node.rs`, FR-W4, #474) has no
+    state dir, so it starts no keepers and writes no records. Its terminals are children of the
+    server process and end with it: the PTY master closes and the shell gets SIGHUP. A restarted
+    server starts a new, empty local node and does not re-attach; nothing is orphaned. It runs at
+    most 64 terminals at once (`MAX_LOCAL_TERMS`; one more create answers 409). [provisional]
   - Why a minimal keeper rather than a tmux/dtach-style holder that also owns the model: the
     keeper is ~100 lines with a two-command protocol (`F`: send the fd, `Q`: quit), costs a few
     hundred kilobytes, and keeps one session engine in node. The cost is the crash case above.

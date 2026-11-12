@@ -1019,6 +1019,19 @@ fn is_secret_char(c: char) -> bool {
 /// are `...` when cut). A heuristic: a secret that looks like an ordinary word, or a long run of
 /// letters only, passes. Raw text may be logged only at `debug`, which is not for sharing.
 pub(crate) fn redact_upstream(text: &str) -> String {
+    let out = redact_upstream_uncapped(text);
+    if out.chars().count() > UPSTREAM_CAP {
+        let mut cut: String = out.chars().take(UPSTREAM_CAP - 3).collect();
+        cut.push_str("...");
+        cut
+    } else {
+        out
+    }
+}
+
+/// [`redact_upstream`] without the 300-character cap, for one line of the shim's agent stderr log
+/// (#544): a debugging log keeps the whole line, only the secrets are cut out.
+pub(crate) fn redact_upstream_uncapped(text: &str) -> String {
     let flat = text
         .split(|c: char| c.is_whitespace() || c.is_control() || c == '\u{2028}' || c == '\u{2029}')
         .filter(|w| !w.is_empty())
@@ -1028,14 +1041,7 @@ pub(crate) fn redact_upstream(text: &str) -> String {
     let out = redact_prefixed_tokens(&out);
     let out = redact_google_keys(&out);
     let out = redact_emails(&out);
-    let out = redact_long_secrets(&out);
-    if out.chars().count() > UPSTREAM_CAP {
-        let mut cut: String = out.chars().take(UPSTREAM_CAP - 3).collect();
-        cut.push_str("...");
-        cut
-    } else {
-        out
-    }
+    redact_long_secrets(&out)
 }
 
 /// The value after `Authorization:` (and a scheme word such as `Bearer`), and the token after a

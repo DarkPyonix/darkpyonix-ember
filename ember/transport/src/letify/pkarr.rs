@@ -949,7 +949,7 @@ mod tests {
     }
 
     /// Counts `GET`s per key on top of a [`crate::MemoryPkarrStore`].
-    #[derive(Clone, Default)]
+    #[derive(Clone, Debug, Default)]
     struct CountingStore {
         inner: crate::MemoryPkarrStore,
         gets: Arc<Mutex<HashMap<PeerId, usize>>>,

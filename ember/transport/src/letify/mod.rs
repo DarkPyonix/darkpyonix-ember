@@ -955,7 +955,7 @@ mod tests {
             peer_key.clone(),
             Arc::new(store.clone()),
             Arc::new(move || txt.clone()),
-            Duration::from_secs(60),
+            super::pkarr::PollPlan::new(Duration::from_secs(60), Duration::from_secs(60), Duration::ZERO),
         );
         let letify = LetifyConfig { pkarr: Some(Arc::new(store.clone())), ..LetifyConfig::default() };
         let me = Transport::bind(

@@ -20,6 +20,7 @@ pub mod editor_actions;
 pub mod enrol_flow;
 pub mod editor_icons;
 pub mod editor_scm;
+pub mod editor_scm_repo;
 pub mod editor_workbench;
 pub mod find;
 pub mod palette;

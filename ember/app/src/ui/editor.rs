@@ -561,6 +561,40 @@ pub fn tab_menu_items(tabs: &EditorTabs, path: &str) -> Vec<(TabMenuItem, bool)>
     items
 }
 
+/// Two clicks on the same target within this many milliseconds are a double-click (FR-L31.5).
+pub const DOUBLE_CLICK_MS: u64 = 500;
+
+/// Tells a double-click from two clicks out of `onclick` alone. TODO(compose-rust#417): the renderer of
+/// compose-rust v0.0.6 sends no pointer events, so `ondoubleclick` never fires; remove this when it does.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DoubleClick {
+    last: Option<(String, u64)>,
+}
+
+impl DoubleClick {
+    /// A click on `target` at `now_ms`. Returns true when it is the second click on the same target within
+    /// [`DOUBLE_CLICK_MS`]; that pair is used up, so a third click starts over.
+    pub fn click(&mut self, target: &str, now_ms: u64) -> bool {
+        let double = self
+            .last
+            .as_ref()
+            .is_some_and(|(t, at)| t == target && now_ms.saturating_sub(*at) <= DOUBLE_CLICK_MS);
+        self.last = if double { None } else { Some((target.to_string(), now_ms)) };
+        double
+    }
+}
+
+/// Whether a key on the focused tab strip opens the tab menu: Shift+F10 or the ContextMenu key, as in
+/// Code-OSS. TODO(compose-rust#417): the right-click menu does not open while the renderer sends no
+/// pointer events; the key and the ⋯ menu stand in.
+pub fn tab_menu_key(key: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool {
+    match key {
+        "F10" => shift && !ctrl && !alt && !meta,
+        "ContextMenu" => !ctrl && !shift && !alt && !meta,
+        _ => false,
+    }
+}
+
 /// The tab strip's reorder keys (Code-OSS's Move Editor Left and Right): Ctrl+Shift+PageUp and
 /// Ctrl+Shift+PageDown, the same on every OS. `Some(true)` moves right, `Some(false)` left.
 pub fn tab_move_key(key: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> Option<bool> {

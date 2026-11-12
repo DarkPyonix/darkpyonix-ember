@@ -1674,4 +1674,29 @@ mod fr_l31_tabs {
         assert_eq!(t.begin_close(&request, DirtyChoice::DontSave, |_| None), vec!["/w/a.rs", "/w/b.rs"]);
         assert!(!t.is_closing("/w/b.rs"));
     }
+
+    #[test]
+    fn fr_l31_tabs_two_clicks_on_one_target_within_500_ms_are_a_double_click() {
+        use ember_app::ui::editor::{DoubleClick, DOUBLE_CLICK_MS};
+        assert_eq!(DOUBLE_CLICK_MS, 500);
+        let mut d = DoubleClick::default();
+        assert!(!d.click("tab:a", 1_000));
+        assert!(d.click("tab:a", 1_500), "the second click at 500 ms is a double-click");
+        assert!(!d.click("tab:a", 1_600), "the pair is used up: a third click starts over");
+        assert!(!d.click("tab:a", 2_101), "501 ms later is too slow");
+        assert!(!d.click("tab:b", 2_200), "another target is not a double-click");
+        assert!(!d.click("tab:a", 2_300));
+        assert!(d.click("tab:a", 2_400));
+    }
+
+    #[test]
+    fn fr_l31_tabs_shift_f10_and_the_context_menu_key_open_the_tab_menu() {
+        use ember_app::ui::editor::tab_menu_key;
+        assert!(tab_menu_key("F10", false, true, false, false));
+        assert!(tab_menu_key("ContextMenu", false, false, false, false));
+        assert!(!tab_menu_key("F10", false, false, false, false), "F10 alone is not the menu key");
+        assert!(!tab_menu_key("F10", true, true, false, false));
+        assert!(!tab_menu_key("ContextMenu", false, true, false, false));
+        assert!(!tab_menu_key("Enter", false, true, false, false));
+    }
 }

@@ -94,6 +94,8 @@ pub struct Shared {
 // WidgetView accepts a function without props and owns a separate tree. Share signals between
 // the trees until WidgetView supports props and flex stretch sizing (dioxus-compose #160).
 thread_local! { static DOUBLE_SHIFT: RefCell<super::editor::DoubleShift> = RefCell::new(super::editor::DoubleShift::default()); }
+// TODO(compose-rust#417): tells a double-click from two `onclick`s while the renderer sends no pointer events.
+thread_local! { static DOUBLE_CLICK: RefCell<super::editor::DoubleClick> = RefCell::new(super::editor::DoubleClick::default()); }
 
 /// Milliseconds on a clock that only moves forward, for telling two Shift presses apart.
 fn now_ms() -> u64 {
@@ -276,7 +278,7 @@ pub mod page {
     use std::collections::HashMap;
     use std::sync::Arc;
     use crate::terminal_stream::{self, ChangeCallback, TerminalHandle, TerminalState};
-    use super::{DOUBLE_SHIFT, now_ms, send, editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, PendingGoto, Shared};
+    use super::{DOUBLE_CLICK, DOUBLE_SHIFT, now_ms, send, editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, PendingGoto, Shared};
     use crate::ui::editor::{
         action_for_key, agent_status_text, apply_action, tooltip_text, Side, Stripes, ToolWindow,
     };
@@ -1134,11 +1136,36 @@ pub mod page {
 
     fn menu(s: &Shared, keymap: Keymap) -> Element {
         let os = Os::current();
-        let close_others_s = s.clone();
-        let mut close_others_menu = s.menu_open;
         let mut close_editor_menu = s.menu_open;
+        // The current tab's items (FR-L31.5) head the menu. TODO(compose-rust#417): they stand in for the
+        // right-click menu, which does not open while the renderer sends no pointer events; keep them here
+        // or drop them when it lands.
+        let current_tab = s.tabs.read().current_path().map(str::to_owned);
+        let tab_items = current_tab.as_deref().map(|p| crate::ui::editor::tab_menu_items(&s.tabs.read(), p)).unwrap_or_default();
+        let tab_label = current_tab.as_deref().map(|p| format!("탭: {}", crate::ui::editor::display_name(base_name(p)))).unwrap_or_default();
         rsx! {
             div { class: "ed-menu", role: "menu", "aria-label": "편집기 메뉴",
+                if let Some(tab_path) = current_tab.clone() {
+                    div { class: "ed-mlab", "{tab_label}" }
+                    for (item, enabled) in tab_items.into_iter() {
+                        {
+                            let s = s.clone();
+                            let path = tab_path.clone();
+                            let mut menu_open = s.menu_open;
+                            let aria_disabled = (!enabled).to_string();
+                            rsx! {
+                                button { role: "menuitem", disabled: !enabled, "aria-disabled": "{aria_disabled}",
+                                    onclick: move |_| {
+                                        menu_open.set(false);
+                                        if enabled { run_tab_menu_item(&s, item, &path); }
+                                    },
+                                    span { class: "spacer", "{item.label()}" }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "ed-msep" }
+                }
                 for a in [Action::FindInFile, Action::Save, Action::Recent, Action::Format, Action::GotoLine] {
                     {
                         let s = s.clone();
@@ -1152,17 +1179,6 @@ pub mod page {
                             }
                         }
                     }
-                }
-                button { role: "menuitem", onclick: move |_| {
-                    close_others_menu.set(false);
-                    let current = close_others_s.tabs.read().current_path().map(str::to_owned);
-                    if let Some(current) = current {
-                        sync_dirty(&close_others_s);
-                        let request = close_others_s.tabs.read().close_others_request(&current);
-                        request_close(&close_others_s, request);
-                    }
-                },
-                    span { class: "spacer", "다른 탭 모두 닫기" }
                 }
                 {
                     let s = s.clone();
@@ -1725,6 +1741,11 @@ pub mod page {
                                     } else {
                                         // A single click opens the preview tab; a double-click keeps it (FR-L31.5).
                                         open_preview(&preview_s, &path);
+                                        // TODO(compose-rust#417): two clicks within 500 ms stand in for `ondoubleclick`.
+                                        if DOUBLE_CLICK.with(|d| d.borrow_mut().click(&format!("tree:{path}"), now_ms())) {
+                                            let mut tabs = preview_s.tabs;
+                                            tabs.write().keep_open(&path);
+                                        }
                                         record_recent_file(&mut recent_files, &path);
                                     }
                                 },
@@ -1811,6 +1832,24 @@ pub mod page {
                     }
                     let key_str = key_name(&event.key());
                     let m = event.modifiers();
+                    // TODO(compose-rust#417): Shift+F10 / ContextMenu opens the ⋯ menu, which holds the current
+                    // tab's items, while the right-click menu cannot open.
+                    if crate::ui::editor::tab_menu_key(
+                        &key_str,
+                        m.contains(Modifiers::CONTROL),
+                        m.contains(Modifiers::SHIFT),
+                        m.contains(Modifiers::ALT),
+                        m.contains(Modifiers::META),
+                    ) {
+                        event.stop_propagation();
+                        event.prevent_default();
+                        if current_owned.is_some() {
+                            let mut tab_menu = strip_s.tab_menu;
+                            tab_menu.set(None);
+                            menu_open.set(true);
+                        }
+                        return;
+                    }
                     // Move Editor Left / Right (FR-L31.5): the reorder drag cannot do yet.
                     if let Some(right) = crate::ui::editor::tab_move_key(
                         &key_str,
@@ -1877,6 +1916,10 @@ pub mod page {
                             onclick: move |_| {
                                 scm.close_diff();
                                 tabs.write().activate(&path);
+                                // TODO(compose-rust#417): two clicks within 500 ms stand in for `ondoubleclick`.
+                                if DOUBLE_CLICK.with(|d| d.borrow_mut().click(&format!("tab:{path}"), now_ms())) {
+                                    tabs.write().keep_open(&path);
+                                }
                                 record_recent_file(&mut recent_files, &path);
                                 host.send(HostCommand::Focus(path.clone()));
                             },

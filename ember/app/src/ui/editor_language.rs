@@ -407,6 +407,14 @@ impl LanguageState {
     }
 }
 
+/// Where the parameter hint sits (#800): absolute inside the editor area (`.ed-main` is positioned
+/// and clips), so it never covers the bottom panel; its width follows the signature (`max-content`)
+/// up to the area's width less the margins, and only a signature wider than that wraps.
+pub const HINT_STYLE: &str = "position:absolute; z-index:15; left:var(--sp3); bottom:var(--sp3); top:auto; right:auto; width:max-content; min-width:0; max-width:calc(100% - 2 * var(--sp3)); box-sizing:border-box; padding:var(--sp2) var(--sp3); display:flex; align-items:center; gap:var(--sp2);";
+/// The signature text: kept on one line while it fits, broken anywhere (not word by word into a
+/// column) when it is wider than the area.
+pub const HINT_CODE_STYLE: &str = "flex:0 1 auto; min-width:0; font-family:var(--mono); font-size:var(--fs-sm); white-space:pre-wrap; overflow-wrap:anywhere; color:var(--muted);";
+
 pub mod view {
     //! The sheet, the parameter hint and the breadcrumb symbols. The sheet's field and selection are
     //! signals of the window's root scope, kept here so the shared window state does not grow.
@@ -633,8 +641,8 @@ pub mod view {
         let close_s = s.clone();
         rsx! {
             div { class: "ed-menu", role: "status", "aria-label": "매개변수 정보",
-                style: "position:fixed; z-index:38; left:calc(50vw - min(280px, calc(50vw - 12px))); bottom:44px; top:auto; right:auto; max-width:min(560px, calc(100vw - 24px)); padding:var(--sp2) var(--sp3); display:flex; align-items:center; gap:var(--sp2);",
-                code { style: "font-family:var(--mono); font-size:var(--fs-sm); white-space:pre-wrap; color:var(--muted);",
+                style: "{super::HINT_STYLE}",
+                code { style: "{super::HINT_CODE_STYLE}",
                     "{before}"
                     span { style: "font-weight:var(--fw-semibold); color:var(--text);", "{active}" }
                     "{after}"
@@ -645,7 +653,21 @@ pub mod view {
         }
     }
 
-    /// The sheet over the window and the parameter hint, when there is one to show.
+    /// The parameter hint inside the editor area (`.ed-main`, positioned), when no sheet is open: it
+    /// stays above the bottom panel and sizes to its text up to the area's width (#800).
+    pub fn hint_in_editor(s: &Shared) -> Element {
+        capture_hook(s);
+        let (sheet_open, signature) = {
+            let state = s.host.state.lock().unwrap();
+            (state.language.sheet.is_some(), state.language.signature.clone())
+        };
+        match signature {
+            Some(help) if !sheet_open => hint(s, &help),
+            _ => rsx! {},
+        }
+    }
+
+    /// The sheet over the window, when there is one to show.
     // TODO(compose-rust#553): draw the lists as popups at the caret.
     // TODO(compose-rust#554): keep the focus in the code and take the list's keys from the editor,
     // so the lists can open while typing.
@@ -656,12 +678,9 @@ pub mod view {
             let state = s.host.state.lock().unwrap();
             (state.language.sheet.clone(), state.language.sheet_seq, state.language.signature.clone())
         };
-        let Some(sheet) = sheet else {
-            return match signature {
-                Some(help) => hint(s, &help),
-                None => rsx! {},
-            };
-        };
+        // With no sheet, the parameter hint is drawn inside the editor area (`hint_in_editor`, #800).
+        let _ = signature;
+        let Some(sheet) = sheet else { return rsx! {} };
         let (mut query, mut sel, mut seen) = (ui.query, ui.sel, ui.seq);
         if *seen.peek() != seq {
             // Another sheet: its field starts empty, or with the name a rename offers.
@@ -742,6 +761,23 @@ pub mod view {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l31_13_parameter_hint_sizes_to_its_text_within_the_editor_area() {
+        // #800: the hint was fixed to the window, wrapped word by word and covered the bottom panel.
+        use super::{HINT_CODE_STYLE, HINT_STYLE};
+        assert!(HINT_STYLE.contains("position:absolute;"), "the hint must be placed in the editor area, not the window");
+        assert!(!HINT_STYLE.contains("fixed"));
+        assert!(HINT_STYLE.contains("width:max-content;"), "the hint sizes to its text");
+        assert!(HINT_STYLE.contains("max-width:calc(100% - 2 * var(--sp3));"), "the hint is capped at the editor area's width");
+        assert!(!HINT_STYLE.contains("vw"), "no window-relative width");
+        assert!(HINT_CODE_STYLE.contains("min-width:0;") && HINT_CODE_STYLE.contains("overflow-wrap:anywhere;"));
+        let page = include_str!("editor_workbench.rs");
+        let main = page.find(r#"section { class: "ed-main""#).expect("editor area");
+        let hint = page.find("editor_language::view::hint_in_editor(&s)").expect("hint call");
+        let right = page.find("stripe_column(&s, sel, keymap, Strip::Right)").expect("right stripe");
+        assert!(main < hint && hint < right, "the hint is drawn inside the editor area");
+    }
+
     use super::*;
     use ember_editor::language::completion::inflate_item;
     use ember_editor::WidgetRange;

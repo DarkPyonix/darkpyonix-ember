@@ -1346,6 +1346,7 @@ pub mod page {
                                 }
                             }
                         }
+                        {crate::ui::editor_language::view::hint_in_editor(&s)}
                     }
                     {stripe_column(&s, sel, keymap, Strip::Right)}
                     if let Some(w) = sel.selected(Side::Bottom) {

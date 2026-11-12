@@ -114,6 +114,20 @@ impl CharState {
             LauncherStatus::Idle | LauncherStatus::Unknown => CharState::Idle,
         }
     }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            CharState::Run => "run",
+            CharState::Wait => "wait",
+            CharState::Fail => "fail",
+            CharState::Done => "done",
+            CharState::Idle => "idle",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<CharState> {
+        CharState::ALL.into_iter().find(|s| s.id() == id)
+    }
 }
 
 /// The harness colour family (DESIGN section 7).
@@ -927,6 +941,103 @@ pub fn with_topic(word: &str) -> String {
 /// What the apply button does: nothing to save when the chosen style is already the project's.
 pub fn style_apply_needed(current: CharStyle, chosen: CharStyle) -> bool {
     current != chosen
+}
+
+/// Effective per-member character overrides for a project: the server's map when non-empty, else
+/// this device's saved map, else empty (FR-L22, #489).
+pub fn effective_character_overrides(
+    server: Option<&std::collections::BTreeMap<String, ember_client::wire::CharacterOverride>>,
+    device: Option<&std::collections::BTreeMap<String, ember_client::wire::CharacterOverride>>,
+) -> std::collections::BTreeMap<String, ember_client::wire::CharacterOverride> {
+    if let Some(m) = server.filter(|m| !m.is_empty()) {
+        return m.clone();
+    }
+    device.cloned().unwrap_or_default()
+}
+
+/// Apply a saved [`ember_client::wire::CharacterOverride`] to a base [`CharSpec`] (FR-L22, #489).
+pub fn apply_character_override(
+    base: CharSpec,
+    project_id: &str,
+    ov: Option<&ember_client::wire::CharacterOverride>,
+) -> CharSpec {
+    let Some(ov) = ov else { return base };
+    let style = ov.style.as_deref().and_then(CharStyle::from_id).unwrap_or(base.style);
+    let agent = ov.harness.as_deref().filter(|s| !s.is_empty()).unwrap_or(&base.agent).to_string();
+    let role = ov.role.clone().or(base.role);
+    let state = ov.state.as_deref().and_then(CharState::from_id).unwrap_or(base.state);
+    let lead = if let Some(r) = ov.role.as_deref() {
+        crown_shown(project_id, r == "리더")
+    } else {
+        base.lead
+    };
+    let pin = if supports_pin(style) {
+        ov.silhouette.filter(|&i| i < SILHOUETTES.len()).or(base.pin)
+    } else {
+        None
+    };
+    CharSpec { style, name: base.name, agent, state, lead, role, dark: base.dark, pin }
+}
+
+/// Build the [`ember_client::wire::CharacterOverride`] for the editor's current selection
+/// (FR-L22, #489).
+pub fn build_character_override(
+    harness_idx: usize,
+    role_idx: usize,
+    style: Option<CharStyle>,
+    state: CharState,
+    silhouette: Option<usize>,
+    team_style: CharStyle,
+) -> ember_client::wire::CharacterOverride {
+    let (agent_id, _) = EDITOR_HARNESSES[harness_idx.min(EDITOR_HARNESSES.len() - 1)];
+    let role = EDITOR_ROLES[role_idx.min(EDITOR_ROLES.len() - 1)];
+    let effective_style = style.unwrap_or(team_style);
+    let pin = if supports_pin(effective_style) {
+        silhouette.filter(|&i| i < SILHOUETTES.len())
+    } else {
+        None
+    };
+    ember_client::wire::CharacterOverride {
+        harness: Some(agent_id.to_string()),
+        role: Some(role.to_string()),
+        style: style.map(|s| s.id().to_string()),
+        state: Some(state.id().to_string()),
+        silhouette: pin,
+    }
+}
+
+/// Whether the editor's current values for `member` differ from what is already stored in
+/// `overrides` (FR-L22, #489).
+pub fn editor_save_needed(
+    member_name: &str,
+    candidate: &ember_client::wire::CharacterOverride,
+    overrides: &std::collections::BTreeMap<String, ember_client::wire::CharacterOverride>,
+) -> bool {
+    let trimmed = member_name.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > crate::ui::project::NAME_MAX_CHARS || trimmed.chars().any(char::is_control) {
+        return false;
+    }
+    overrides.get(trimmed) != Some(candidate)
+}
+
+/// Build the `character_overrides` patch map after saving or resetting `member_name` (FR-L22, #489).
+pub fn updated_character_overrides(
+    current: &std::collections::BTreeMap<String, ember_client::wire::CharacterOverride>,
+    member_name: &str,
+    next: Option<ember_client::wire::CharacterOverride>,
+) -> std::collections::BTreeMap<String, Option<ember_client::wire::CharacterOverride>> {
+    let trimmed = member_name.trim();
+    let mut map: std::collections::BTreeMap<String, Option<ember_client::wire::CharacterOverride>> =
+        current.iter().map(|(k, v)| (k.clone(), Some(v.clone()))).collect();
+    match next {
+        Some(ov) if !ov.is_empty() => {
+            map.insert(trimmed.to_string(), Some(ov));
+        }
+        _ => {
+            map.remove(trimmed);
+        }
+    }
+    map
 }
 
 #[cfg(test)]

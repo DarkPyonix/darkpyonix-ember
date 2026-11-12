@@ -49,10 +49,22 @@ pub fn Character(
 ) {
     let theme = ember_theme();
     // The server's value first, this device's choice only as a fallback (FR-L26).
-    let server = crate::services::try_services()
-        .and_then(|s| s.client.read(|st| st.project(project).and_then(|p| p.character_style.clone())));
-    let style = crate::ui::project::effective_style(server.as_deref(), shared_ui().prefs.get().saved_character_style(project));
-    let spec = CharSpec {
+    let (server, server_overrides) = crate::services::try_services()
+        .map(|s| {
+            s.client.read(|st| {
+                st.project(project)
+                    .map(|p| (p.character_style.clone(), Some(p.character_overrides.clone())))
+                    .unwrap_or((None, None))
+            })
+        })
+        .unwrap_or((None, None));
+    let prefs = shared_ui().prefs.get();
+    let style = crate::ui::project::effective_style(server.as_deref(), prefs.saved_character_style(project));
+    let overrides = crate::ui::characters::effective_character_overrides(
+        server_overrides.as_ref(),
+        prefs.saved_character_overrides(project),
+    );
+    let base = CharSpec {
         style,
         name: name.to_string(),
         agent: agent.to_string(),
@@ -62,6 +74,7 @@ pub fn Character(
         dark: theme.scheme == Scheme::Dark,
         pin: None,
     };
+    let spec = crate::ui::characters::apply_character_override(base, project, overrides.get(name));
     draw(&spec, size);
 }
 

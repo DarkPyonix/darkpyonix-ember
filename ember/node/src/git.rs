@@ -46,6 +46,17 @@ pub struct GitRepoRequest {
 
 pub type GitStatusRequest = GitRepoRequest;
 
+/// Where the repository of a directory is (`/git/toplevel`, FR-L31.9): `toplevel` is the work
+/// tree root as git prints it (`git rev-parse --show-toplevel`, `/` separated on every OS) and
+/// `prefix` the directory's own path below it (`--show-prefix` without the trailing `/`, empty
+/// at the root). Paths of `status`, `diff`, `stage`, `unstage` and `apply` are relative to
+/// `toplevel`, wherever in the work tree `repo` points.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GitToplevel {
+    pub toplevel: String,
+    pub prefix: String,
+}
+
 /// One changed path. `index` and `worktree` are porcelain v2 status characters (`M`, `A`, `D`,
 /// `R`, `U`, `.` for unchanged); an untracked file is `?`, `?`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -479,6 +490,19 @@ pub(crate) async fn worktree_root(policy: &PathPolicy, repo: &str) -> Result<Pat
     Ok(policy.resolve_existing(Path::new(root))?)
 }
 
+/// The work tree root and the directory's path below it (FR-L31.9). The root must itself be
+/// inside an allowed root, as for [`worktree_root`], so the answer never names a directory the
+/// policy hides.
+pub async fn toplevel(policy: &PathPolicy, r: &GitRepoRequest) -> Result<GitToplevel, GitError> {
+    let dir = open(policy, &r.repo).await?;
+    let out = run_ok(&dir, &["rev-parse", "--show-toplevel", "--show-prefix"], None).await?;
+    let mut lines = out.stdout.split('\n');
+    let toplevel = lines.next().unwrap_or("").trim_end_matches('\r').to_string();
+    let prefix = lines.next().unwrap_or("").trim_end_matches(['\r', '/']).to_string();
+    policy.resolve_existing(Path::new(&toplevel))?;
+    Ok(GitToplevel { toplevel, prefix })
+}
+
 /// A ref, remote or branch name must not look like an option.
 fn name_arg<'a>(what: &str, v: &'a str) -> Result<&'a str, GitError> {
     if v.is_empty() || v.starts_with('-') || v.contains('\0') {
@@ -603,7 +627,8 @@ async fn untracked_patch(dir: &Path, p: &str) -> Result<String, GitError> {
 /// Diff of one file or all. With `include_untracked` (and no `path`, not staged) the untracked
 /// files follow the tracked changes in the same patch; the total is capped by [`max_output`].
 pub async fn diff(policy: &PathPolicy, r: &GitDiffRequest) -> Result<GitDiff, GitError> {
-    let dir = open(policy, &r.repo).await?;
+    // Paths are relative to the work tree root, as `status` gives them (FR-L31.9).
+    let dir = worktree_root(policy, &r.repo).await?;
     if let Some(p) = r.path.as_deref().filter(|_| !r.staged) {
         let u = run_ok(&dir, &["ls-files", "--others", "--exclude-standard", "-z", "--", p], None).await?;
         if !u.stdout.is_empty() {
@@ -640,7 +665,7 @@ fn paths_of(r: &GitPathsRequest) -> Result<(), GitError> {
 
 pub async fn stage(policy: &PathPolicy, r: &GitPathsRequest) -> Result<(), GitError> {
     paths_of(r)?;
-    let dir = open(policy, &r.repo).await?;
+    let dir = worktree_root(policy, &r.repo).await?;
     let mut args = vec!["add", "-A", "--"];
     args.extend(r.paths.iter().map(String::as_str));
     run_ok(&dir, &args, None).await.map(|_| ())
@@ -648,7 +673,7 @@ pub async fn stage(policy: &PathPolicy, r: &GitPathsRequest) -> Result<(), GitEr
 
 pub async fn unstage(policy: &PathPolicy, r: &GitPathsRequest) -> Result<(), GitError> {
     paths_of(r)?;
-    let dir = open(policy, &r.repo).await?;
+    let dir = worktree_root(policy, &r.repo).await?;
     let mut args = if has_head(&dir).await? {
         vec!["reset", "-q", "--"]
     } else {
@@ -663,7 +688,9 @@ pub async fn apply(policy: &PathPolicy, r: &GitApplyRequest) -> Result<(), GitEr
     if r.patch.trim().is_empty() {
         return Err(GitError::Bad("patch가 비어 있습니다.".into()));
     }
-    let dir = open(policy, &r.repo).await?;
+    // At the root: from a subdirectory, `git apply` skips every file outside it and still
+    // exits 0 (FR-L31.9).
+    let dir = worktree_root(policy, &r.repo).await?;
     let mut args = vec!["apply", "--cached", "--recount"];
     if r.reverse {
         args.push("-R");

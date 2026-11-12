@@ -224,8 +224,8 @@ fn end_to_end_session_core_and_widget_bridge_flow() {
     let langs = LanguageRegistry::from_extensions(&[json!({
         "contributes": {"languages": [{"id": "rust", "extensions": [".rs"]}]}
     })]);
-    let mut opts = CoreOptions::default();
-    opts.codelens_resolve_cap = 1; // Cap at 1 so viewport prioritization is exercised!
+    // Cap at 1 so viewport prioritization is exercised.
+    let opts = CoreOptions { codelens_resolve_cap: 1, ..Default::default() };
     let mut core = SessionCore::new(langs, opts, t0);
     let mut bridge = WidgetBridge::new();
     let u = uri("/w/main.rs");

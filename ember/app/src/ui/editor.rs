@@ -82,6 +82,12 @@ pub fn row_click_closes_prompt(prompt: &TreePrompt, typed: &str) -> bool {
     }
 }
 
+/// Whether leaving the new-name field closes its prompt: an empty field has nothing to keep, a typed
+/// name stays so the person can come back to it.
+pub fn blur_closes_prompt(typed: &str) -> bool {
+    typed.trim().is_empty()
+}
+
 /// The widget's colour role for a syntax role: the design system resolves it, light and dark.
 pub fn colour_role(role: ember_editor::textmate::SyntaxRole) -> compose_rust::ColorRole {
     use compose_rust::ColorRole as C;
@@ -111,6 +117,17 @@ pub fn syntax_spans(syntax: &ember_editor::SyntaxRuns) -> compose_rust::code::Sy
     SyntaxSpans::new(
         syntax.runs.iter().map(|r| SyntaxSpan::role(syntax.version, CodeRange::of(r.line, r.start, r.line, r.end), colour_role(r.role))),
     )
+}
+
+/// The `folds` prop for the foldable regions the session reported (FR-E6, #441).
+pub fn folds(regions: &[ember_editor::FoldRegion]) -> compose_rust::code::Folds {
+    use compose_rust::code::{Fold, Folds};
+    Folds::new(regions.iter().map(|f| Fold {
+        version: f.version,
+        start_line: f.start_line,
+        end_line: f.end_line,
+        collapsed: f.collapsed,
+    }))
 }
 
 /// The open files. A tab holds its unsaved mark, so closing a tab drops it.
@@ -1407,6 +1424,14 @@ mod tests {
         assert!(!row_click_closes_prompt(&new_file, "notes.md"));
         assert!(!row_click_closes_prompt(&TreePrompt::Rename { path: "/w/a".into() }, "b"));
         assert!(!row_click_closes_prompt(&TreePrompt::Delete { path: "/w/a".into(), is_dir: false }, ""));
+    }
+
+    #[test]
+    fn fr_l31_leaving_the_name_field_closes_it_only_when_empty() {
+        assert!(blur_closes_prompt(""));
+        assert!(blur_closes_prompt("   "));
+        assert!(!blur_closes_prompt("notes.md"));
+        assert!(!blur_closes_prompt(" a "));
     }
     use crate::ui::keymap::{Keymap, Os};
 

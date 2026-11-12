@@ -391,6 +391,16 @@ impl EditorHost {
 }
 
 #[cfg(test)]
+impl EditorHost {
+    /// A host with no session behind it, for tests that drive the workbench page: the commands
+    /// sent to it wait in the returned receiver instead of running, and the test writes `state`.
+    pub(crate) fn fake() -> (Self, mpsc::UnboundedReceiver<HostCommand>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Self { state: Arc::new(Mutex::new(HostState::default())), tx }, rx)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

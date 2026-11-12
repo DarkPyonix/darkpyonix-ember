@@ -19,7 +19,7 @@ use ember_client::wire::Project;
 use ember_client::LauncherStatus;
 
 pub use crate::ui::project::{
-    agent_options, build_patch, deck_avatars, deck_names, DECK_AVATARS, DECK_NAMES, strip_arrows_visible, strip_scroll_target, chip_line, computer_chips, danger_allowed, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
+    agent_options, build_patch, deck_avatars, deck_names, DECK_AVATARS, DECK_NAMES, strip_arrows_visible, strip_scroll_target, chip_line, computer_chips, danger_allowed, danger_rows, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
     is_default_project, leader_choice_visible, part_supported, project_boxes, project_boxes_with_archived,
     reach_pill, status_pill, validate_settings, visible_tiles, ComputerChip, Member, MemberFilter,
     effective_style, follow_rename, override_harnesses, override_label, override_options, pick_override, AccountsState, CloseAction, SettingsGuard, DISCARD_QUESTION,
@@ -1242,12 +1242,12 @@ const EST_SEC_LINKS: f32 = 100.0;
 const EST_SEC_DANGER: f32 = 150.0;
 
 /// How many dp of the settings sheet body to leave out, from `EMBER_CR_SHEET_SCROLL=<dp|end>`
-/// (`end` shows leader, profile, connections and the danger zone). Same idea as
+/// (`end` shows leader, connections and the danger zone). Same idea as
 /// `EMBER_CR_SCROLL` in home.rs and files.rs: the toolkit cannot scroll a column from code
 /// (TODO(compose-rust#385)), so the sections that would have scrolled out are left out.
 pub fn sheet_scroll_dp(value: Option<&str>) -> f32 {
     match value {
-        Some("end") => EST_SEC_BASIC + EST_SEC_COMPUTERS + EST_SEC_DEFAULTS + EST_SEC_STYLE,
+        Some("end") => EST_SEC_BASIC + EST_SEC_COMPUTERS + EST_SEC_DEFAULTS + EST_SEC_PROFILE + EST_SEC_STYLE,
         Some(n) => n.parse::<f32>().unwrap_or(0.0).max(0.0),
         None => 0.0,
     }
@@ -1513,21 +1513,22 @@ fn SettingsSheet(
                     });
                 });
                 SkipSection(&sheet_skip, EST_SEC_COMPUTERS, "컴퓨터", "이 프로젝트의 팀원이 일할 수 있는 컴퓨터입니다", false, || {
+                    if chips.is_empty() {
+                        Label("등록된 컴퓨터가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
+                    }
+                    // `.ps-chips` of `.ps-check`: a check box, the computer's icon, its name and
+                    // the status dot, wrapping. Ticking assigns at once (FR-L4), as before.
+                    // TODO(FR-X7): one icon for every kind, because node does not report the kind.
+                    // TODO(compose-rust#521): no FlowRow; lines are cut by estimated width.
+                    let avail = window.width_dp.min(760.0) - 2.0 * SP[4];
+                    let widths: Vec<f32> = chips.iter().map(|c| crate::ui::project::computer_check_width(&c.name) + 26.0).collect();
                     cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        if chips.is_empty() {
-                            Label("등록된 컴퓨터가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
-                        }
-                        for c in chips {
-                            let on = b.computers.contains(&c.id);
-                            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                                Label(&c.name, Fs::Md, Weight::Regular, None, Some(1));
-                                Label(reach_pill(c.reachability).0, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
-                                cu::Spacer().modifier(Modifier::new().weight(1.0));
-                                let (pr, id) = (b.id.clone(), c.id.clone());
-                                // TODO(compose-rust#426): a switch; a toggle button stands in.
-                                AppButton(if on { "할당됨" } else { "할당" }, None, if on { ButtonKind::Primary } else { ButtonKind::Default }, true, true, false, move || {
-                                    set_assignment(pr.clone(), id.clone(), !on)
-                                });
+                        for line in wrap_lines(&widths, SP[1], avail) {
+                            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                                for k in line {
+                                    let c = &chips[k];
+                                    ComputerCheck(c, b.computers.contains(&c.id), b.id.clone());
+                                }
                             });
                         }
                     });
@@ -1572,32 +1573,6 @@ fn SettingsSheet(
                         });
                     });
                 });
-                SkipSection(&sheet_skip, EST_SEC_STYLE, "팀 캐릭터", "팀원이 모두 고른 모양으로 보입니다. 저장하면 서버에 기록됩니다", false, || {
-                    let dr = draft.clone();
-                    let device = shared_ui().prefs.get().saved_character_style(&b.id);
-                    let shown = if d.style.is_empty() { effective_style(None, device) } else { effective_style(Some(&d.style), device) };
-                    StylePicker(&b.name, shown, move |st| dr.update(|s| s.style = st.id().to_string()));
-                    // The team character screen is no sidebar entry (D26, #503): this link is the way in.
-                    // It leaves the sheet, so it waits for a clean draft instead of dropping edits.
-                    let (u, closed, id) = (shared_ui().clone(), closed.clone(), b.id.clone());
-                    AppButton("캐릭터 전체 보기", None, ButtonKind::Default, true, patch.is_empty() && !saving.get(), false, move || {
-                        closed.set(None);
-                        u.open_characters(&id);
-                    });
-                    if let Some(reason) = crate::ui::project::characters_link_reason(!patch.is_empty()) {
-                        Label(reason, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-                    }
-                });
-                if leader_choice_visible(&b.id) {
-                    SkipSection(&sheet_skip, EST_SEC_LEADER, "리더 (오케스트레이터)", "리더 지정은 서버가 아직 지원하지 않습니다", false, || match b.leader() {
-                        Some(l) => Label(&format!("현재 리더: {}", l.name), Fs::Md, Weight::Regular, None, Some(1)),
-                        None => Label("리더가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1)),
-                    });
-                } else {
-                    SkipSection(&sheet_skip, EST_SEC_LEADER, "리더 (오케스트레이터)", "기본 프로젝트는 리더를 두지 않습니다", false, || {
-                        Label("리더가 필요하면 프로젝트를 새로 만들어 옮기세요.", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1));
-                    });
-                }
                 SkipSection(&sheet_skip, EST_SEC_PROFILE, "프로필 덮어쓰기", "이 프로젝트에서만 하네스에 고정할 계정입니다. 팀원 정의에 고정 계정이 없을 때 새 세션에 쓰입니다", false, || {
                     cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                         let accounts: Vec<(String, String, String)> = crate::services::try_services()
@@ -1619,13 +1594,62 @@ fn SettingsSheet(
                         }
                     });
                 });
-                SkipSection(&sheet_skip, EST_SEC_LINKS, "연결", "이 프로젝트에 묶인 채널, 루틴, 버전 관리는 서버가 아직 지원하지 않습니다", false, || {
-                    Label("연결된 항목이 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
+                SkipSection(&sheet_skip, EST_SEC_STYLE, "팀 캐릭터", "팀원이 모두 고른 모양으로 보입니다. 저장하면 서버에 기록됩니다", false, || {
+                    let dr = draft.clone();
+                    let device = shared_ui().prefs.get().saved_character_style(&b.id);
+                    let shown = if d.style.is_empty() { effective_style(None, device) } else { effective_style(Some(&d.style), device) };
+                    StylePicker(&b.name, shown, move |st| dr.update(|s| s.style = st.id().to_string()));
+                    // The team character screen is no sidebar entry (D26, #503): this link is the way in.
+                    // It leaves the sheet, so it waits for a clean draft instead of dropping edits.
+                    let (u, closed, id) = (shared_ui().clone(), closed.clone(), b.id.clone());
+                    AppButton("캐릭터 전체 보기", None, ButtonKind::Default, true, patch.is_empty() && !saving.get(), false, move || {
+                        closed.set(None);
+                        u.open_characters(&id);
+                    });
+                    if let Some(reason) = crate::ui::project::characters_link_reason(!patch.is_empty()) {
+                        Label(reason, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                    }
                 });
-                SkipSection(&sheet_skip, EST_SEC_DANGER, "위험 영역", if default_project { "기본 프로젝트는 보관하거나 지울 수 없습니다" } else { "보관과 삭제는 서버가 아직 지원하지 않습니다" }, false, || {
+                if leader_choice_visible(&b.id) {
+                    // `.ps-leads`: one radio per member, the leader ticked. Read only until the
+                    // server takes a leader (400 `not_yet`, TODO(#384)).
+                    SkipSection(&sheet_skip, EST_SEC_LEADER, "리더 (오케스트레이터)", "다른 팀원에게 일을 나누고 모으는 팀원 한 명입니다. 리더 지정은 서버가 아직 지원하지 않습니다", false, || {
+                        if b.members.is_empty() {
+                            Label("팀원이 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                        }
+                        let cols = crate::ui::project::leader_cols(window.width_dp);
+                        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                            for row in b.members.chunks(cols) {
+                                cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                                    for m in row {
+                                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| LeaderOption(m));
+                                    }
+                                    for _ in row.len()..cols {
+                                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                    }
+                                });
+                            }
+                        });
+                    });
+                } else {
+                    SkipSection(&sheet_skip, EST_SEC_LEADER, "리더 (오케스트레이터)", "기본 프로젝트는 리더를 두지 않습니다", false, || {
+                        Label("리더가 필요하면 프로젝트를 새로 만들어 옮기세요.", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                    });
+                }
+                SkipSection(&sheet_skip, EST_SEC_LINKS, "연결", "이 프로젝트에 묶인 채널, 루틴, 버전 관리입니다. 채널과 루틴 연결은 서버가 아직 알려 주지 않습니다", false, || {
+                    // `.ps-chips` of outline chips; only 버전 관리 is known to the client.
+                    let (u, closed, id) = (shared_ui().clone(), closed.clone(), b.id.clone());
+                    AppButton("버전 관리", Some(IconRole::History), ButtonKind::Default, true, patch.is_empty() && !saving.get(), false, move || {
+                        closed.set(None);
+                        u.set_selected_project(Some(id.clone()));
+                        shell::choose(&u, NavMenu::VersionControl);
+                    });
+                });
+                SkipSection(&sheet_skip, EST_SEC_DANGER, "위험 영역", if default_project { "되돌리기 어려운 작업입니다. 기본 프로젝트는 보관하거나 지울 수 없습니다" } else { "되돌리기 어려운 작업입니다. 보관과 삭제는 서버가 아직 지원하지 않습니다" }, false, || {
                     cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        AppButton("프로젝트 보관", None, ButtonKind::Destructive, false, danger_allowed(&b.id, SettingsPart::Archive), false, || {});
-                        AppButton("프로젝트 삭제", None, ButtonKind::Destructive, false, danger_allowed(&b.id, SettingsPart::Delete), false, || {});
+                        for row in danger_rows(&b.id, b.members.len()) {
+                            DangerRowView(&row, danger_allowed(&b.id, row.part));
+                        }
                     });
                 });
             });
@@ -1651,6 +1675,66 @@ fn SettingsSheet(
             });
         });
     }
+}
+
+/// `.ps-check`: a check box, the computer icon, the name and the status dot, ticked when the
+/// computer is assigned. Ticking assigns or unassigns at once (FR-L4).
+fn ComputerCheck(c: &ComputerChip, on: bool, project: String) {
+    let p = ember_theme().palette;
+    let (_, tone) = reach_pill(c.reachability);
+    let dot = super::components::pill_colors(tone.into(), p).0;
+    let (bg, edge) = if on { (p.sel, p.ink) } else { (p.surface, p.line) };
+    cu::Row()
+        .spacing(SP[1])
+        .alignment(Alignment::CenterStart)
+        .modifier(Modifier::new().height(H_CTL).background(paint(bg)).border(1.0, paint(edge)).corner_radius(CORNER_SM))
+        .content(|| {
+            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            let id = c.id.clone();
+            cu::Checkbox(on).modifier(Modifier::new().size(16.0, 16.0)).on_change(move |v| set_assignment(project.clone(), id.clone(), v));
+            NavIcon(shell::ICON_CPU_SVG, p.text_2.to_argb(), 16.0);
+            Label(&c.name, Fs::Sm, Weight::Regular, None, Some(1));
+            super::home::Dot(dot);
+            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+        });
+}
+
+/// `.ps-lead`: a radio mark, the member's name and task. Read only: the server does not take a
+/// leader yet (TODO(#384)), so the mark shows the current leader and does not react.
+fn LeaderOption(m: &Member) {
+    let p = ember_theme().palette;
+    cu::Row()
+        .spacing(10.0)
+        .alignment(Alignment::CenterStart)
+        .modifier(Modifier::new().fill_max_width().padding(10.0).border(1.0, paint(if m.leader { p.ink } else { p.line })).corner_radius(CORNER_MD))
+        .content(|| {
+            // TODO(compose-rust#545): no RadioButton; a ring with a filled centre stands in.
+            cu::Box().alignment(Alignment::Center).modifier(Modifier::new().size(16.0, 16.0).border(1.5, paint(p.text_2)).shape_role(ShapeRole::Full)).content(|| {
+                if m.leader {
+                    cu::Spacer().modifier(Modifier::new().size(8.0, 8.0).background(paint(p.ink)).shape_role(ShapeRole::Full));
+                }
+            });
+            cu::Column().spacing(2.0).modifier(Modifier::new().weight(1.0)).content(|| {
+                Label(&m.name, Fs::Sm, Weight::Semibold, None, Some(1));
+                Label(&m.task, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+            });
+        });
+}
+
+/// `.ps-danger`: the title and what it does at the left, the destructive button at the right.
+fn DangerRowView(row: &crate::ui::project::DangerRow, enabled: bool) {
+    let p = ember_theme().palette;
+    cu::Row()
+        .spacing(SP[2])
+        .alignment(Alignment::CenterStart)
+        .modifier(Modifier::new().fill_max_width().padding(SP[2]).border(1.0, paint(p.red.soft)).corner_radius(CORNER_MD))
+        .content(|| {
+            cu::Column().spacing(2.0).modifier(Modifier::new().weight(1.0)).content(|| {
+                Label(row.title, Fs::Sm, Weight::Semibold, None, Some(1));
+                Label(&row.note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+            });
+            AppButton(row.button, None, ButtonKind::Destructive, true, enabled, false, || {});
+        });
 }
 
 #[cfg(test)]
@@ -1889,6 +1973,6 @@ mod tests {
         assert_eq!(sheet_scroll_dp(None), 0.0);
         assert_eq!(sheet_scroll_dp(Some("120")), 120.0);
         assert_eq!(sheet_scroll_dp(Some("junk")), 0.0);
-        assert_eq!(sheet_scroll_dp(Some("end")), 1330.0);
+        assert_eq!(sheet_scroll_dp(Some("end")), 1450.0);
     }
 }

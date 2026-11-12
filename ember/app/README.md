@@ -32,6 +32,48 @@ where this checkout sits. To build against a local checkout instead:
 cargo run --config 'patch."https://github.com/DarkPyonix/dioxus-compose".dioxus-compose.path="/abs/path/to/dioxus-compose/dioxus-compose"'
 ```
 
+## Android
+
+The same screens run on Android as one APK (FR-L36, #770), built the way the compose-rust
+samples are: this crate is also a `cdylib`, `src/android.rs` declares the entry with
+`compose_rust::android_application!`, and dx (dioxus-cli 0.7, the packager only) generates the
+Gradle project into which compose-rust's build script puts the renderer's Kotlin.
+
+Needs: dx (`cargo install dioxus-cli`), the Android SDK with NDK 27.1.12297006
+(`ANDROID_HOME`, `ANDROID_NDK_HOME`; the script defaults to `~/Library/Android/sdk`), the Rust
+target (`rustup target add aarch64-linux-android`) and a JDK no newer than 21 in `JAVA_HOME`
+(the Android Gradle plugin's `jlink` step fails above 21).
+
+```sh
+cd ember/app
+JAVA_HOME=$(/usr/libexec/java_home -v 21) ./scripts/build-android.sh     # debug APK, arm64-v8a
+adb install -r target/dx/ember-app/debug/android/app/app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n dev.darkpyonix.ember/dev.dioxus.main.MainActivity \
+    --es EMBER_DEMO_DATA 1                                               # demo data, no server
+adb shell am start -n dev.darkpyonix.ember/dev.dioxus.main.MainActivity \
+    --es EMBER_SERVER_URL http://192.168.0.10:8740                       # a main server
+```
+
+The script is `dx build --platform android --target aarch64-linux-android` with
+`COMPOSE_RUST_ANDROID_KOTLIN_DIR` set to the generated project's Kotlin source root, so that
+compose-rust writes no Activity over Ember's own.
+
+| Piece | What |
+|---|---|
+| `android/MainActivity.kt` | The Activity (named by `android_main_activity` in `Dioxus.toml`). It sets `EMBER_DATA_DIR` to the application's files directory, passes the launch settings, and sends the system back to the app. Its package (`dev.dioxus.main`) and the library name (`libmain.so`) are dx's; the application id is `dev.darkpyonix.ember` |
+| `src/android.rs` | The entry point and the JNI function behind back |
+| `src/ui/back.rs` | The back order: sheet, detail view, 홈, then leave the app |
+
+The launch settings are the string extras `EMBER_DEMO_DATA`, `EMBER_SERVER_URL`,
+`EMBER_CR_SHELL` and `EMBER_CR_ROUTE`, read as the variables of the same names. Only a
+debuggable build reads them, and only when the process starts (stop the app first:
+`adb shell am force-stop dev.darkpyonix.ember`). A release build has no way to name a server
+yet (#770). The process is killed, not shut down, so prefs are written when they change and
+the cache by the client's own writer.
+
+Not on Android yet: the Ember 에디터 window and VS Code Web (FR-W5), the share sheet (FR-F7),
+opening a URL in the system browser, a CI job for this build.
+
 ## Tests
 
 `cargo test` runs the view-model, prefs, config, IDE, export and server-shape unit tests, and

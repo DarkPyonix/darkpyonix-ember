@@ -449,15 +449,15 @@ pub mod page {
 
     /// Open one of the status bar's pickers in the palette sheet, on the current item (FR-L31.7).
     fn open_picker(s: &Shared, mode: crate::ui::palette::Mode) {
-        let Some((_, format, _)) = active_format(s) else {
+        if active_format(s).is_none() {
             notice("열린 파일이 없습니다");
             return;
-        };
-        let languages = s.host.state.lock().unwrap().languages.clone();
+        }
         let (mut open, mut query, mut sel, mut palette_mode) = (s.palette_open, s.palette_query, s.palette_sel, s.palette_mode);
         palette_mode.set(mode);
         query.set(String::new());
-        sel.set(crate::ui::editor_status::initial_selection(mode, format.as_ref(), &languages));
+        // Follow the current entry until the person moves: the rows may still grow (FR-L31.7).
+        sel.set(crate::ui::editor_status::FOLLOW_CURRENT);
         open.set(true);
     }
 
@@ -521,8 +521,14 @@ pub mod page {
         // holds the highlighted one, so the current language or encoding is in view when it opens (FR-L31.7).
         let picker = crate::ui::editor_status::is_picker(mode);
         let shown: Vec<_> = ranked.iter().take(if picker { usize::MAX } else { 50 }).cloned().collect();
-        let chosen = (*sel.read()).min(shown.len().saturating_sub(1));
-        let (win_start, win_end) = if picker {
+        let chosen = if picker {
+            let format = active_format(s).and_then(|(_, f, _)| f);
+            let languages = s.host.state.lock().unwrap().languages.clone();
+            crate::ui::editor_status::resolve_selection(*sel.read(), mode, format.as_ref(), &languages, shown.len())
+        } else {
+            (*sel.read()).min(shown.len().saturating_sub(1))
+        };
+        let (win_start, _) = if picker {
             crate::ui::editor_status::list_window(chosen, shown.len(), crate::ui::editor_status::PICKER_VISIBLE_ROWS)
         } else {
             (0, shown.len())
@@ -579,7 +585,7 @@ pub mod page {
                             "{crate::ui::editor_status::more_above_text(win_start)}"
                         }
                     }
-                    for (row, r) in shown.iter().enumerate().skip(win_start).take(win_end - win_start) {
+                    for (row, r) in shown.iter().enumerate().skip(win_start) {
                         {
                             let item = &items[r.index];
                             let segments = highlight_segments(&item.title, &r.matched);

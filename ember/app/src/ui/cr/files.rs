@@ -476,8 +476,10 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
         if let Some(offer) = offers.first() {
             OfferCard(offer, &live_pending, &live_model.devices, &st, w);
         }
-        SendSheet(&st, &live_model.devices, &members, ready, w);
-        ShareSheet(&share_open, &live_model.devices, &members, ready);
+        // The lists stay when the server is lost; only sending is blocked (FR-L27.8).
+        let can_send = ready && transfer_service().can_send();
+        SendSheet(&st, &live_model.devices, &members, can_send, w);
+        ShareSheet(&share_open, &live_model.devices, &members, can_send);
     });
 }
 
@@ -865,7 +867,7 @@ fn DeviceTile(d: &Device, info: Option<&DeviceInfo>, on_send: impl FnMut(String)
 pub fn agent_host(project: &str) -> String {
     services().client.read(|s| {
         let id = s.project_computers(project).first().cloned()?;
-        s.computers().iter().find(|c| c.id == id).map(|c| c.name.clone())
+        s.computers().iter().find(|c| c.id == id).map(|c| crate::ui::files::computer_display_name(&c.id, &c.name))
     })
     .unwrap_or_else(|| format!("컴퓨터 정보는 {UNAVAILABLE}"))
 }
@@ -1066,10 +1068,7 @@ pub fn route_line(path: Option<PathKind>) -> String {
 fn TransferRow(t: &Transfer, devices: &[Device], st: &State) {
     let p = ember_theme().palette;
     let svc = transfer_service();
-    let dir = match t.direction {
-        Direction::Send => "보내는 중",
-        Direction::Receive => "받는 중",
-    };
+    let dir = crate::ui::files::row_subtitle(t.direction, t.state);
     let path = devices.iter().find(|d| d.name == t.device).and_then(|d| d.path);
     let fill = match t.state {
         TransferState::Sending | TransferState::Done => p.blue.strong,
@@ -1258,10 +1257,7 @@ fn HistoryRow(h: &HistoryEntry) {
         (HistoryResult::Declined, _) | (HistoryResult::Cancelled, _) => (h.result.label(), PillTone::Orange),
         (HistoryResult::Failed, _) => (h.result.label(), PillTone::Red),
     };
-    let who = match h.direction {
-        Direction::Send => "받는 곳",
-        Direction::Receive => "보낸 곳",
-    };
+    let who = crate::ui::files::history_peer_label(h.direction);
     let time = split_when(&h.when).1;
     cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
         FileChip(if h.direction == Direction::Send { ICON_UP } else { ICON_DOWN }, tone);

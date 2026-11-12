@@ -36,14 +36,14 @@ use crate::ui::files::{
 };
 
 /// The id of the server computer in the computers list (`ember_server::computers::LOCAL`).
-pub const SERVER_DEVICE: &str = "local";
+pub const SERVER_DEVICE: &str = crate::ui::files::SERVER_COMPUTER_ID;
 
 /// Why a device other than the server computer cannot receive yet.
 pub const SEND_OTHER_DEVICE: &str = "지금은 서버 컴퓨터로만 파일을 보낼 수 있습니다";
 /// Why nothing can be sent while the server does not answer.
 pub const NOT_CONNECTED: &str = "서버에 연결되어 있지 않아 파일을 보낼 수 없습니다";
 /// The server computer's name when the computers list does not have it.
-pub const SERVER_NAME_FALLBACK: &str = "서버 컴퓨터";
+pub const SERVER_NAME_FALLBACK: &str = crate::ui::files::SERVER_COMPUTER_NAME;
 
 const ACTION_FAILED: &str = "요청을 서버에 전하지 못했습니다. 연결을 확인하고 다시 시도해 주세요.";
 
@@ -113,10 +113,20 @@ fn result_of(r: TransferResult) -> HistoryResult {
     }
 }
 
-/// "방금", "10분 전", "3시간 전".
+/// The history groups a real record falls in. The screen groups rows by the first word of
+/// `when` (the mockup's day label). The app has no local time zone to name a calendar day
+/// with, so the groups are the last 24 hours and everything before.
+pub const DAY_RECENT: &str = "최근";
+pub const DAY_EARLIER: &str = "이전";
+
+/// "최근 방금", "최근 10분 전", "이전 3일 전": the group, a space, then how long ago.
 pub fn when_text(now_ms: i64, at_ms: i64) -> String {
     let r = crate::ui::cr::ko::relative_time(now_ms, at_ms);
-    if r.is_empty() || r == "방금" { r } else { format!("{r} 전") }
+    if r.is_empty() {
+        return r;
+    }
+    let day = if now_ms - at_ms < 86_400_000 { DAY_RECENT } else { DAY_EARLIER };
+    if r == "방금" { format!("{day} {r}") } else { format!("{day} {r} 전") }
 }
 
 /// "a.txt", or "a.txt 외 2개" for several files.
@@ -132,9 +142,15 @@ pub fn send_label(paths: &[PathBuf]) -> String {
 }
 
 impl Book {
-    /// Sending and receiving can happen: the server answered the last read and says so.
+    /// The lists are known: the server answered at least once and says transfers work. It stays
+    /// true when the server is lost afterwards, so the screen keeps what it last showed.
     pub fn ready(&self) -> bool {
-        self.online && self.snapshot.as_ref().is_some_and(|s| s.ready)
+        self.snapshot.as_ref().is_some_and(|s| s.ready)
+    }
+
+    /// A send can start: the lists are known and the server answered the last read.
+    pub fn can_send(&self) -> bool {
+        self.online && self.ready()
     }
 
     fn owns(&self, server_id: &str) -> bool {
@@ -256,7 +272,7 @@ impl Book {
 
     /// Queues a send and answers its local id, or says why it cannot be sent.
     pub fn queue_send(&mut self, device_id: &str, device_name: &str, files: &[String]) -> Result<String, String> {
-        if !self.ready() {
+        if !self.can_send() {
             return Err(NOT_CONNECTED.to_string());
         }
         if device_id != SERVER_DEVICE {
@@ -608,9 +624,14 @@ impl TransferService for ServerTransferService {
         }
     }
 
+    fn can_send(&self) -> bool {
+        lock(&self.book).can_send()
+    }
+
     fn send(&self, device_id: &str, files: Vec<String>) -> Result<(), String> {
         let device_name = crate::services::try_services()
             .and_then(|s| s.client.read(|st| st.computers().iter().find(|c| c.id == device_id).map(|c| c.name.clone())))
+            .map(|name| crate::ui::files::computer_display_name(device_id, &name))
             .unwrap_or_else(|| SERVER_NAME_FALLBACK.to_string());
         let local_id = lock(&self.book).queue_send(device_id, &device_name, &files)?;
         self.start_send(local_id);
@@ -715,8 +736,8 @@ mod tests {
         assert_eq!(b.inbox().as_deref(), Some("/data/received"));
 
         let h = b.history(NOW);
-        assert_eq!((h[0].result, h[0].when.as_str()), (HistoryResult::Done, "10분 전"));
-        assert_eq!((h[1].result, h[1].when.as_str()), (HistoryResult::Declined, "방금"));
+        assert_eq!((h[0].result, h[0].when.as_str()), (HistoryResult::Done, "최근 10분 전"));
+        assert_eq!((h[1].result, h[1].when.as_str()), (HistoryResult::Declined, "최근 방금"));
         assert_eq!(h[0].direction, Direction::Receive);
 
         // Only the cleaned name reaches the prompt (FR-F9).
@@ -730,12 +751,17 @@ mod tests {
         b.apply_snapshot(snapshot(json!([receiving("tr-9", 250, "sending")]), json!([])), NOW);
         assert!(b.mark_offline());
         assert!(!b.mark_offline(), "nothing new to draw the second time");
-        assert!(!b.ready());
+        // The lists stay known, so empty sections keep their own text and rows stay (state G).
+        assert!(b.ready());
+        assert!(!b.can_send());
         assert_eq!(b.transfers().len(), 1);
+        assert_eq!(b.received().len(), 1);
+        assert_eq!(b.history(NOW).len(), 2);
+        assert_eq!(b.inbox().as_deref(), Some("/data/received"));
         assert_eq!(b.queue_send(SERVER_DEVICE, "mini", &["/tmp/a.txt".into()]), Err(NOT_CONNECTED.to_string()));
         // Back: the same snapshot is still a change, because sending is possible again.
         assert!(b.apply_snapshot(snapshot(json!([receiving("tr-9", 250, "sending")]), json!([])), NOW));
-        assert!(b.ready());
+        assert!(b.can_send());
     }
 
     #[test]
@@ -886,10 +912,25 @@ mod tests {
             assert!(!text.contains('\u{2014}'), "{text}");
             assert!(text.chars().any(|c| ('가'..='힣').contains(&c)), "{text}");
         }
+        assert_eq!(SERVER_NAME_FALLBACK, "이 서버");
         for text in all.iter().filter(|t| t.as_str() != SERVER_NAME_FALLBACK) {
             assert!(text.contains("니다") || text.contains("주세요"), "not 합니다체: {text}");
         }
-        assert_eq!(when_text(NOW, NOW - 3 * 3_600_000), "3시간 전");
+        assert_eq!(when_text(NOW, NOW - 3 * 3_600_000), "최근 3시간 전");
+        assert_eq!(when_text(NOW, NOW - 3 * 86_400_000), "이전 3일 전");
         assert_eq!(when_text(NOW, 0), "");
+    }
+
+    #[test]
+    fn fr_l27_8_history_rows_group_under_a_day_label_like_the_mockup() {
+        // The screen takes the first word as the group label and the rest as the row's time:
+        // an empty label would leave the label column blank beside the rows.
+        for at in [NOW - 1000, NOW - 600_000, NOW - 5 * 3_600_000, NOW - 2 * 86_400_000, NOW - 30 * 86_400_000] {
+            let when = when_text(NOW, at);
+            let (day, time) = crate::ui::cr::files::split_when(&when);
+            assert!(day == DAY_RECENT || day == DAY_EARLIER, "{when}");
+            assert!(!time.is_empty(), "{when}");
+        }
+        assert!(!DAY_RECENT.contains(' ') && !DAY_EARLIER.contains(' '));
     }
 }

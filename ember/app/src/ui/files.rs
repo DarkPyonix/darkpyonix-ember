@@ -153,13 +153,30 @@ pub fn path_label(path: Option<PathKind>, latency_ms: Option<u32>) -> Option<Str
     })
 }
 
+/// The id and the English name the server gives its own computer
+/// (`ember_server::computers::LOCAL`, `LOCAL_NAME`).
+pub const SERVER_COMPUTER_ID: &str = "local";
+const SERVER_COMPUTER_NAME_EN: &str = "this server";
+/// The server computer's name on screen (NFR-L4: Korean), as the other screens say it.
+pub const SERVER_COMPUTER_NAME: &str = "이 서버";
+
+/// A computer's name as shown: the server's own computer in Korean, any other as registered.
+/// A server computer the user renamed keeps its name.
+pub fn computer_display_name(id: &str, name: &str) -> String {
+    if id == SERVER_COMPUTER_ID && (name.trim().is_empty() || name == SERVER_COMPUTER_NAME_EN) {
+        SERVER_COMPUTER_NAME.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 /// The user's registered computers as devices (the only devices the client knows today).
 pub fn devices_from_computers(computers: &[Computer]) -> Vec<Device> {
     computers
         .iter()
         .map(|c| Device {
             id: c.id.clone(),
-            name: c.name.clone(),
+            name: computer_display_name(&c.id, &c.name),
             kind: DeviceKind::Computer,
             presence: match c.reachability {
                 Reachability::Online => Presence::Online,
@@ -353,6 +370,32 @@ pub struct Transfer {
     pub done: u64,
     pub bytes_per_sec: Option<u64>,
     pub state: TransferState,
+}
+
+/// The line under a transfer's name: what is happening to it, by direction and state. A paused
+/// or failed transfer never reads as moving.
+pub fn row_subtitle(direction: Direction, state: TransferState) -> &'static str {
+    match (state, direction) {
+        (TransferState::Sending, Direction::Send) => "보내는 중",
+        (TransferState::Sending, Direction::Receive) => "받는 중",
+        (TransferState::Queued, Direction::Send) => "보내기 대기 중",
+        (TransferState::Queued, Direction::Receive) => "받기 대기 중",
+        (TransferState::Paused, _) => "일시 정지됨",
+        (TransferState::Failed, Direction::Send) => "보내기 실패",
+        (TransferState::Failed, Direction::Receive) => "받기 실패",
+        (TransferState::Done, Direction::Send) => "보냄",
+        (TransferState::Done, Direction::Receive) => "받음",
+        (TransferState::Cancelled, _) => "취소됨",
+    }
+}
+
+/// The label before the other device's name in a history row (the mockup's `.fl-h`): where a
+/// sent file went, or where a received file came from.
+pub fn history_peer_label(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Send => "받는 곳",
+        Direction::Receive => "보낸 곳",
+    }
 }
 
 /// Apply an action to a transfer. `Err` leaves it unchanged.
@@ -585,6 +628,11 @@ pub trait TransferService: Send + Sync {
     fn control(&self, transfer_id: &str, action: TransferAction);
     /// Offer `files` (paths) to a device.
     fn send(&self, device_id: &str, files: Vec<String>) -> Result<(), String>;
+    /// Whether a send can start now. [`TransferService::ready`] says the lists are known; a
+    /// service that lost its server keeps its lists and answers `false` here.
+    fn can_send(&self) -> bool {
+        self.ready()
+    }
     /// Whether transfers are encrypted end to end. The screen shows the claim only when true.
     fn encrypted(&self) -> bool {
         true
@@ -1418,6 +1466,86 @@ mod tests {
     }
 
     // FR-L27.2
+    #[test]
+    fn fr_l27_3_a_paused_or_failed_row_never_reads_as_moving() {
+        use Direction::{Receive, Send};
+        assert_eq!(row_subtitle(Receive, TransferState::Sending), "받는 중");
+        assert_eq!(row_subtitle(Send, TransferState::Sending), "보내는 중");
+        for d in [Send, Receive] {
+            assert_eq!(row_subtitle(d, TransferState::Paused), "일시 정지됨");
+            for s in [TransferState::Queued, TransferState::Paused, TransferState::Failed, TransferState::Cancelled] {
+                let text = row_subtitle(d, s);
+                assert!(text != "받는 중" && text != "보내는 중", "{d:?} {s:?}: {text}");
+            }
+        }
+        assert_eq!(row_subtitle(Receive, TransferState::Failed), "받기 실패");
+        assert_eq!(row_subtitle(Send, TransferState::Queued), "보내기 대기 중");
+    }
+
+    #[test]
+    fn fr_l27_6_a_history_row_names_the_other_side_by_direction() {
+        // A received file names where it came from; a sent one where it went (mockup `.fl-h`).
+        assert_eq!(history_peer_label(Direction::Receive), "보낸 곳");
+        assert_eq!(history_peer_label(Direction::Send), "받는 곳");
+    }
+
+    #[test]
+    fn nfr_l4_the_server_computer_is_named_in_korean() {
+        assert_eq!(computer_display_name("local", "this server"), "이 서버");
+        assert_eq!(computer_display_name("local", ""), "이 서버");
+        assert_eq!(computer_display_name("local", "mac-mini"), "mac-mini", "a renamed server keeps its name");
+        assert_eq!(computer_display_name("c1", "this server"), "this server", "only the server's own computer");
+        let devices = devices_from_computers(&[computer("local", "this server", Reachability::Online)]);
+        assert_eq!(devices[0].name, "이 서버");
+        assert_eq!(devices[0].id, "local");
+    }
+
+    #[test]
+    fn fr_l27_8_a_service_that_cannot_send_keeps_its_lists() {
+        struct Lost;
+        impl TransferService for Lost {
+            fn ready(&self) -> bool {
+                true
+            }
+            fn can_send(&self) -> bool {
+                false
+            }
+            fn devices(&self) -> Option<Vec<Device>> {
+                None
+            }
+            fn transfers(&self) -> Vec<Transfer> {
+                vec![tr(TransferState::Paused, 10, 4, None)]
+            }
+            fn received(&self) -> Vec<ReceivedFile> {
+                Vec::new()
+            }
+            fn history(&self) -> Vec<HistoryEntry> {
+                Vec::new()
+            }
+            fn pending_offers(&self) -> Vec<Offer> {
+                Vec::new()
+            }
+            fn answer(&self, _: &str, _: Answer) {}
+            fn control(&self, _: &str, _: TransferAction) {}
+            fn send(&self, _: &str, _: Vec<String>) -> Result<(), String> {
+                Err(UNAVAILABLE.to_string())
+            }
+        }
+        let m = build_model(&[], &Lost);
+        assert!(m.ready, "the lists are known");
+        assert_eq!(m.transfers.len(), 1);
+        // Empty sections keep their own text, not "준비 중입니다".
+        assert_eq!(empty_text(Section::Received, m.ready), EMPTY_RECEIVED);
+        assert_eq!(empty_text(Section::History, m.ready), EMPTY_HISTORY);
+        // Sending is what is blocked.
+        let draft = SendDraft { target: Some(SendTarget::Device("local".into())), files: vec!["a".into()] };
+        assert_eq!(send_blocker(&draft, true, m.ready && Lost.can_send()), Some(UNAVAILABLE));
+        assert_eq!(send_blocker(&draft, true, m.ready), None);
+        // The default: a service that is ready can send.
+        assert!(DemoTransferService::new().can_send());
+        assert!(!NoTransferService.can_send());
+    }
+
     #[test]
     fn devices_group_online_first_then_by_name() {
         let out = order_devices(vec![

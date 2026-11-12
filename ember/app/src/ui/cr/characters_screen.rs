@@ -182,6 +182,50 @@ fn StyleSection(index: usize, style: CharStyle, cols: usize) {
     });
 }
 
+/// Where a review capture starts the screen (`EMBER_CR_SCROLL` here, read in debug builds only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureStart {
+    /// The whole screen from the top.
+    Top,
+    /// The team preview first: the head and the style catalog are left out.
+    Team,
+    /// The editor first: the head, the catalog and the team preview are left out.
+    Editor,
+}
+
+/// The start from `EMBER_CR_SCROLL=<team|editor>` and `EMBER_CR_CHARACTER=<index>`: the toolkit
+/// cannot scroll a column from code (TODO(compose-rust#385)), so the blocks above are left out,
+/// as `EMBER_CR_SCROLL` does on the home and files screens. Picking a member alone starts at the
+/// editor, so its 팀원 설정 저장 and 초기화 buttons are in view.
+pub fn capture_start(scroll: Option<&str>, character: Option<&str>) -> CaptureStart {
+    match scroll.map(str::trim) {
+        Some("team") => CaptureStart::Team,
+        Some("editor") => CaptureStart::Editor,
+        _ if capture_member_index(character).is_some() => CaptureStart::Editor,
+        _ => CaptureStart::Top,
+    }
+}
+
+/// The team preview index from `EMBER_CR_CHARACTER`, if it is a number.
+pub fn capture_member_index(character: Option<&str>) -> Option<usize> {
+    character?.trim().parse::<usize>().ok()
+}
+
+/// The member the editor opens with for a capture: the `EMBER_CR_CHARACTER`-th cell of the team
+/// preview (0 is the first), or `None` when the index is missing or past the team.
+pub fn capture_member(character: Option<&str>, team: &[crate::ui::characters::TeamCell]) -> Option<String> {
+    team.get(capture_member_index(character)?).map(|c| c.name.clone())
+}
+
+/// Review captures only: release builds ignore both variables.
+fn capture_env(name: &str) -> Option<String> {
+    if cfg!(debug_assertions) {
+        std::env::var(name).ok()
+    } else {
+        None
+    }
+}
+
 pub fn CharactersScreen() {
     let ui = shared_ui().clone();
     let p = ember_theme().palette;
@@ -224,6 +268,8 @@ pub fn CharactersScreen() {
         })
         .unwrap_or_default();
     let team = team_preview(&project_name, &members);
+    let capture_character = capture_env("EMBER_CR_CHARACTER");
+    let start = capture_start(capture_env("EMBER_CR_SCROLL").as_deref(), capture_character.as_deref());
 
     // The team style starts as the project's own; a switch only previews until it is applied.
     let chosen = remember(|| mutable_state_of(None::<CharStyle>));
@@ -233,9 +279,8 @@ pub fn CharactersScreen() {
     let ed_saving = remember(|| mutable_state_of(false));
     let ed_message = remember(|| mutable_state_of(None::<String>));
     let ed_name = remember(|| {
-        let initial = members
-            .first()
-            .map(|m| m.name.clone())
+        let initial = capture_member(capture_character.as_deref(), &team.cells)
+            .or_else(|| members.first().map(|m| m.name.clone()))
             .filter(|n| !n.trim().is_empty())
             .unwrap_or_else(|| "ember-리더".to_string());
         mutable_state_of(initial)
@@ -271,28 +316,30 @@ pub fn CharactersScreen() {
 
     cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
         cu::Column().spacing(SP[5]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
-            // Back to where it was opened from; no sidebar entry (D26).
-            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                let u = ui.clone();
-                AppButton("뒤로", Some(IconRole::Back), ButtonKind::Default, true, true, false, move || u.close_characters());
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
-                if compact {
-                    cu::Spacer().modifier(Modifier::new().width(super::project::PHONE_MENU_ROOM));
-                }
-            });
-            cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                Label("팀 캐릭터", if compact { Fs::Xl } else { Fs::Xl2 }, Weight::Regular, None, Some(1));
-                Label(LEAD, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
-                let sub = match &project {
-                    Some(n) => format!("{n} 프로젝트의 스타일은 {}입니다.", current.label()),
-                    None => "프로젝트가 아직 없어 기본 스타일로 보여 드립니다.".to_string(),
-                };
-                Label(&sub, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-            });
+            if start == CaptureStart::Top {
+                // Back to where it was opened from; no sidebar entry (D26).
+                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    let u = ui.clone();
+                    AppButton("뒤로", Some(IconRole::Back), ButtonKind::Default, true, true, false, move || u.close_characters());
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    if compact {
+                        cu::Spacer().modifier(Modifier::new().width(super::project::PHONE_MENU_ROOM));
+                    }
+                });
+                cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    Label("팀 캐릭터", if compact { Fs::Xl } else { Fs::Xl2 }, Weight::Regular, None, Some(1));
+                    Label(LEAD, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                    let sub = match &project {
+                        Some(n) => format!("{n} 프로젝트의 스타일은 {}입니다.", current.label()),
+                        None => "프로젝트가 아직 없어 기본 스타일로 보여 드립니다.".to_string(),
+                    };
+                    Label(&sub, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                });
 
-            // 1. The catalog: one numbered section per style.
-            for (i, s) in CharStyle::ALL.iter().copied().enumerate() {
-                StyleSection(i, s, cols);
+                // 1. The catalog: one numbered section per style.
+                for (i, s) in CharStyle::ALL.iter().copied().enumerate() {
+                    StyleSection(i, s, cols);
+                }
             }
 
             // 2. The team preview with its style switch and the apply button.
@@ -301,66 +348,68 @@ pub fn CharactersScreen() {
             } else {
                 format!("{} 프로젝트의 팀원을 고른 스타일로 그립니다. 리더에게는 왕관이 붙고, 기본 프로젝트에는 리더가 없습니다", project_name)
             };
-            Section("팀 미리보기", &team_note, team.sample, || {
-                // `.segx`: six style buttons; a phone puts three on a line.
-                let per_line = if compact { 3 } else { CharStyle::ALL.len() };
-                for line in CharStyle::ALL.chunks(per_line) {
-                    cu::Row().spacing(6.0).alignment(Alignment::CenterStart).content(|| {
-                        for &s in line {
-                            let (c, m) = (chosen.clone(), message.clone());
-                            // TODO(compose-rust#473): no pressed state for a screen reader (aria-pressed).
-                            let kind = if s == style { ButtonKind::Primary } else { ButtonKind::Default };
-                            AppButton(s.label(), None, kind, true, true, false, move || {
-                                c.set(Some(s));
-                                m.set(None);
-                            });
-                        }
-                    });
-                }
-                let needed = style_apply_needed(current, style);
-                cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                    let (pr, sv, ms) = (project.clone(), saving.clone(), message.clone());
-                    AppButton(
-                        if saving.get() { "저장 중" } else { "이 프로젝트에 적용" },
-                        None,
-                        ButtonKind::Primary,
-                        true,
-                        needed && project.is_some() && !saving.get(),
-                        false,
-                        move || {
-                            if let Some(n) = pr.clone() {
-                                apply_style(n, style, sv.clone(), ms.clone());
+            if start != CaptureStart::Editor {
+                Section("팀 미리보기", &team_note, team.sample, || {
+                    // `.segx`: six style buttons; a phone puts three on a line.
+                    let per_line = if compact { 3 } else { CharStyle::ALL.len() };
+                    for line in CharStyle::ALL.chunks(per_line) {
+                        cu::Row().spacing(6.0).alignment(Alignment::CenterStart).content(|| {
+                            for &s in line {
+                                let (c, m) = (chosen.clone(), message.clone());
+                                // TODO(compose-rust#473): no pressed state for a screen reader (aria-pressed).
+                                let kind = if s == style { ButtonKind::Primary } else { ButtonKind::Default };
+                                AppButton(s.label(), None, kind, true, true, false, move || {
+                                    c.set(Some(s));
+                                    m.set(None);
+                                });
                             }
-                        },
-                    );
-                    let note = match &project {
-                        None => "적용할 프로젝트가 없습니다".to_string(),
-                        Some(_) if !needed => format!("{} 이미 이 프로젝트의 스타일입니다", with_topic(style.label())),
-                        Some(n) => format!("{n}의 현재 스타일은 {}입니다", current.label()),
-                    };
-                    Label(&note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-                });
-                if let Some(m) = message.get() {
-                    Label(&m, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
-                }
-                cu::Column()
-                    .spacing(SP[3])
-                    .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[4]))
-                    .content(|| {
-                        let ov_map = current_overrides.clone();
-                        let proj_id = project_name.clone();
-                        Grid(&team.cells, cols, SP[3], |m| {
-                            let base = spec(style, &m.name, &m.agent, m.role.as_deref().unwrap_or(""), m.state, m.crown, None);
-                            let drawn = apply_character_override(base, &proj_id, ov_map.get(&m.name));
-                            draw(&drawn, 64.0);
-                            Label(&m.name, Fs::Xs, Weight::Semibold, None, Some(1));
-                            Label(harness_label(&drawn.agent), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
                         });
-                        if team.more > 0 {
-                            Label(&format!("외 {}명", team.more), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                        }
+                    }
+                    let needed = style_apply_needed(current, style);
+                    cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                        let (pr, sv, ms) = (project.clone(), saving.clone(), message.clone());
+                        AppButton(
+                            if saving.get() { "저장 중" } else { "이 프로젝트에 적용" },
+                            None,
+                            ButtonKind::Primary,
+                            true,
+                            needed && project.is_some() && !saving.get(),
+                            false,
+                            move || {
+                                if let Some(n) = pr.clone() {
+                                    apply_style(n, style, sv.clone(), ms.clone());
+                                }
+                            },
+                        );
+                        let note = match &project {
+                            None => "적용할 프로젝트가 없습니다".to_string(),
+                            Some(_) if !needed => format!("{} 이미 이 프로젝트의 스타일입니다", with_topic(style.label())),
+                            Some(n) => format!("{n}의 현재 스타일은 {}입니다", current.label()),
+                        };
+                        Label(&note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                     });
-            });
+                    if let Some(m) = message.get() {
+                        Label(&m, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
+                    }
+                    cu::Column()
+                        .spacing(SP[3])
+                        .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[4]))
+                        .content(|| {
+                            let ov_map = current_overrides.clone();
+                            let proj_id = project_name.clone();
+                            Grid(&team.cells, cols, SP[3], |m| {
+                                let base = spec(style, &m.name, &m.agent, m.role.as_deref().unwrap_or(""), m.state, m.crown, None);
+                                let drawn = apply_character_override(base, &proj_id, ov_map.get(&m.name));
+                                draw(&drawn, 64.0);
+                                Label(&m.name, Fs::Xs, Weight::Semibold, None, Some(1));
+                                Label(harness_label(&drawn.agent), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            });
+                            if team.more > 0 {
+                                Label(&format!("외 {}명", team.more), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            }
+                        });
+                });
+            }
 
             // 3. The editor: a stage and a form side by side (one column up to 1000 dp).
             Section("편집기", "이름을 바꾸면 캐릭터가 바뀝니다. 말랑과 키링은 실루엣을 고정할 수 있습니다. 저장한 팀원 설정은 프로젝트에 기록됩니다.", false, || {
@@ -478,6 +527,16 @@ pub fn CharactersScreen() {
                         }
                     });
                 };
+                // The form's last full-width row (`.ed-form .full`): the buttons first, the note
+                // beside them, or under them on a phone where two buttons fill the line.
+                let status_note = match &project {
+                    None => "저장할 프로젝트가 없습니다".to_string(),
+                    Some(_) if trimmed_name.is_empty() => "이름을 입력하면 팀원 설정을 저장할 수 있습니다".to_string(),
+                    Some(_) if !can_save_ed && current_overrides.contains_key(&trimmed_name) => {
+                        format!("{trimmed_name} 팀원의 설정이 저장되어 있습니다")
+                    }
+                    Some(n) => format!("{n} 프로젝트에 {trimmed_name} 팀원 설정을 저장합니다"),
+                };
                 let actions_row = || {
                     cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                         cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -524,16 +583,13 @@ pub fn CharactersScreen() {
                                     },
                                 );
                             }
-                            let status_note = match &project {
-                                None => "저장할 프로젝트가 없습니다".to_string(),
-                                Some(_) if trimmed_name.is_empty() => "이름을 입력하면 팀원 설정을 저장할 수 있습니다".to_string(),
-                                Some(_) if !can_save_ed && current_overrides.contains_key(&trimmed_name) => {
-                                    format!("{trimmed_name} 팀원의 설정이 저장되어 있습니다")
-                                }
-                                Some(n) => format!("{n} 프로젝트에 {trimmed_name} 팀원 설정을 저장합니다"),
-                            };
-                            Label(&status_note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                            if !compact {
+                                Label(&status_note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                            }
                         });
+                        if compact {
+                            Label(&status_note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                        }
                         if let Some(m) = ed_message.get() {
                             Label(&m, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
                         }
@@ -732,6 +788,24 @@ mod tests {
         }
         // The editor's style select follows the team style until it is picked on its own.
         assert!(last.iter().any(|(_, t)| t == "포켓"), "the editor style did not change to 포켓: {last:?}");
+    }
+
+    #[test]
+    fn fr_l22_capture_hook_parses_scroll_and_character() {
+        assert_eq!(capture_start(None, None), CaptureStart::Top);
+        assert_eq!(capture_start(Some("team"), None), CaptureStart::Team);
+        assert_eq!(capture_start(Some("editor"), None), CaptureStart::Editor);
+        assert_eq!(capture_start(Some("junk"), None), CaptureStart::Top);
+        // A member alone starts at the editor; an explicit start wins.
+        assert_eq!(capture_start(None, Some("2")), CaptureStart::Editor);
+        assert_eq!(capture_start(Some("team"), Some("2")), CaptureStart::Team);
+        assert_eq!(capture_start(None, Some("x")), CaptureStart::Top);
+        assert_eq!(capture_member_index(Some(" 3 ")), Some(3));
+        assert_eq!(capture_member_index(Some("-1")), None);
+        let team = team_preview("ember", &[]);
+        assert_eq!(capture_member(Some("1"), &team.cells), Some(team.cells[1].name.clone()));
+        assert_eq!(capture_member(Some("999"), &team.cells), None);
+        assert_eq!(capture_member(None, &team.cells), None);
     }
 
     #[test]

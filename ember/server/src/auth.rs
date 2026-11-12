@@ -72,17 +72,42 @@ pub fn load_or_create_token(data_dir: &Path) -> std::io::Result<String> {
         }
     }
     let token = new_token();
+    write_token(&path, &token)?;
+    Ok(token)
+}
+
+/// Writes `token` to `path` (mode 0600) through a temporary file in the same folder and a rename,
+/// so a reader sees the old token or the new one, never half a file.
+fn write_token(path: &Path, token: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4().simple()));
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut f = opts.open(&path)?;
-    f.write_all(token.as_bytes())?;
-    f.write_all(b"\n")?;
-    restrict(&path)?;
+    let res = (|| {
+        let mut f = opts.open(&tmp)?;
+        f.write_all(token.as_bytes())?;
+        f.write_all(b"\n")?;
+        f.sync_all()?;
+        restrict(&tmp)?;
+        std::fs::rename(&tmp, path)
+    })();
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
+}
+
+/// Replaces `<data_dir>/server-token` with a fresh random token and returns it (#369). Used after
+/// revoking a device that could have read the old one (INTENT D37). A running server whose
+/// [`ServerAuth`] watches the file ([`ServerAuth::with_token_file`]) takes the new token on the
+/// next request that presents it; `POST /api/server-token/rotate` does both at once.
+pub fn rotate_token(data_dir: &Path) -> std::io::Result<String> {
+    let token = new_token();
+    write_token(&token_path(data_dir), &token)?;
     Ok(token)
 }
 
@@ -132,7 +157,13 @@ pub fn agent_cdp_path_ok(path: &str) -> bool {
 
 /// What the middleware checks against.
 pub struct ServerAuth {
-    token: String,
+    /// The token in force. Replaced by a rotation (#369); the old one is refused from then on.
+    token: std::sync::RwLock<String>,
+    /// The token file, when the server follows it: a presented token that differs from the one
+    /// in force makes the server re-read the file if it changed since (a CLI rotation).
+    file: Option<PathBuf>,
+    /// The file's modification time when it was last read.
+    file_mtime: std::sync::Mutex<Option<std::time::SystemTime>>,
     listen_ip: IpAddr,
     extra_hosts: HashSet<String>,
 }
@@ -143,7 +174,9 @@ impl ServerAuth {
     /// address and, for a loopback or unspecified listener, the loopback names.
     pub fn new(token: String, listen: SocketAddr, extra_hosts: impl IntoIterator<Item = String>) -> Arc<ServerAuth> {
         Arc::new(ServerAuth {
-            token,
+            token: std::sync::RwLock::new(token),
+            file: None,
+            file_mtime: std::sync::Mutex::new(None),
             listen_ip: listen.ip(),
             extra_hosts: extra_hosts
                 .into_iter()
@@ -151,6 +184,64 @@ impl ServerAuth {
                 .filter(|h| !h.is_empty())
                 .collect(),
         })
+    }
+
+    /// Like [`ServerAuth::new`], with the token read from `<data_dir>/server-token` (created when
+    /// missing) and followed: [`rotate_token`] run by another process (the CLI) takes effect on
+    /// the next request, and [`ServerAuth::rotate`] writes the file (#369).
+    pub fn with_token_file(
+        data_dir: &Path,
+        listen: SocketAddr,
+        extra_hosts: impl IntoIterator<Item = String>,
+    ) -> std::io::Result<Arc<ServerAuth>> {
+        let token = load_or_create_token(data_dir)?;
+        let path = token_path(data_dir);
+        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let a = ServerAuth::new(token, listen, extra_hosts);
+        let mut a = Arc::try_unwrap(a).unwrap_or_else(|_| unreachable!("fresh Arc"));
+        a.file = Some(path);
+        a.file_mtime = std::sync::Mutex::new(mtime);
+        Ok(Arc::new(a))
+    }
+
+    /// True when `presented` is the token in force (constant time). On a mismatch a followed
+    /// token file is re-read once if its modification time changed, so a token rotated by the CLI
+    /// is accepted and the old one is refused from then on.
+    pub fn check(&self, presented: &str) -> bool {
+        if token_eq(presented, &self.token.read().unwrap_or_else(|e| e.into_inner())) {
+            return true;
+        }
+        let Some(path) = &self.file else { return false };
+        let Ok(mtime) = std::fs::metadata(path).and_then(|m| m.modified()) else { return false };
+        {
+            let mut seen = self.file_mtime.lock().unwrap_or_else(|e| e.into_inner());
+            if *seen == Some(mtime) {
+                return false;
+            }
+            *seen = Some(mtime);
+        }
+        let Ok(text) = std::fs::read_to_string(path) else { return false };
+        let fresh = text.lines().next().unwrap_or_default().trim().to_string();
+        if fresh.is_empty() {
+            return false;
+        }
+        let ok = token_eq(presented, &fresh);
+        *self.token.write().unwrap_or_else(|e| e.into_inner()) = fresh;
+        ok
+    }
+
+    /// Rotates the token: a fresh one is written to the followed file (when there is one) and put
+    /// in force at once; the old token gets 401 from the next request (#369). Returns the token
+    /// file's path, never the token.
+    pub fn rotate(&self) -> std::io::Result<Option<PathBuf>> {
+        let token = new_token();
+        if let Some(path) = &self.file {
+            write_token(path, &token)?;
+            let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+            *self.file_mtime.lock().unwrap_or_else(|e| e.into_inner()) = mtime;
+        }
+        *self.token.write().unwrap_or_else(|e| e.into_inner()) = token;
+        Ok(self.file.clone())
     }
 
     fn host_allowed(&self, host: &str) -> bool {
@@ -175,6 +266,30 @@ impl ServerAuth {
 /// Wraps `router` (every route and the fallback) in the Origin/Host check and the token check.
 pub fn protect(router: Router, auth: Arc<ServerAuth>) -> Router {
     router.layer(middleware::from_fn_with_state(auth, guard))
+}
+
+/// `POST /api/server-token/rotate` (#369): rotates the server token. Mount it on the local
+/// listener only, inside [`protect`], so only a caller holding the current token can rotate it.
+/// Answers `{rotated: true, token_file}`; the new token is never in the answer, so a client on
+/// this computer re-reads the file (FR-S11) and a device that only had the old token is locked out.
+pub fn rotate_router(auth: Arc<ServerAuth>) -> Router {
+    Router::new().route(ROTATE_ROUTE, axum::routing::post(rotate_route)).with_state(auth)
+}
+
+/// The rotate route's path.
+pub const ROTATE_ROUTE: &str = "/api/server-token/rotate";
+
+async fn rotate_route(State(auth): State<Arc<ServerAuth>>) -> Response {
+    match auth.rotate() {
+        Ok(file) => {
+            tracing::info!("server token rotated");
+            Json(json!({ "rotated": true, "token_file": file.map(|p| p.display().to_string()) })).into_response()
+        }
+        Err(e) => {
+            tracing::error!("server token rotation failed: {e}");
+            refuse(StatusCode::INTERNAL_SERVER_ERROR, "token rotation failed")
+        }
+    }
 }
 
 fn refuse(status: StatusCode, msg: &str) -> Response {
@@ -265,7 +380,7 @@ async fn guard(State(auth): State<Arc<ServerAuth>>, req: Request<Body>, next: Ne
     }
     if !token_exempt(req.method(), req.uri().path()) {
         match presented(headers) {
-            Some(t) if token_eq(&t, &auth.token) => {}
+            Some(t) if auth.check(&t) => {}
             _ => return refuse(StatusCode::UNAUTHORIZED, "missing or wrong server token"),
         }
     }

@@ -1,4 +1,4 @@
-//! FR-S11: the channel calls go through the common Bearer path (`Api` default headers).
+//! FR-S11: the channel calls go through the common Bearer path (the `Api` auth header).
 
 use std::sync::{Arc, Mutex};
 

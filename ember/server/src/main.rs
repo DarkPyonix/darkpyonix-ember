@@ -25,7 +25,8 @@ use ember_server::store::Store;
 /// - `EMBER_DATA_DIR`: where `ember.db`, `secret.key` and `accounts/` live (default `~/.ember`)
 /// - `EMBER_LISTEN`: listen address (default `127.0.0.1:8740`)
 /// - `EMBER_ALLOWED_HOSTS`: extra host names accepted in `Host` (comma-separated, FR-S10); the
-///   token is in `<data dir>/server-token` (FR-S9)
+///   token is in `<data dir>/server-token` (FR-S9); `ember-server rotate-token` replaces it and
+///   exits, and `POST /api/server-token/rotate` does the same on a running server (#369)
 /// - `EMBER_IDLE_SECS`: release an agent process after this long without activity (default 300)
 /// - `EMBER_CLAUDE_BIN`: the Claude Code CLI (default `claude` on `PATH`)
 /// - `EMBER_CODEX_BIN`: the Codex CLI (default `codex` on `PATH`)
@@ -91,6 +92,16 @@ async fn main() -> anyhow::Result<()> {
         PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".ember")
     });
     std::fs::create_dir_all(&data_dir)?;
+    // `ember-server rotate-token` (#369): replace `<data dir>/server-token` and exit. A running
+    // server takes the new token on the next request that presents it; the old one gets 401.
+    if std::env::args().nth(1).as_deref() == Some("rotate-token") {
+        ember_server::auth::rotate_token(&data_dir)?;
+        println!(
+            "server token rotated: {} (clients on this computer re-read it)",
+            ember_server::auth::token_path(&data_dir).display()
+        );
+        return Ok(());
+    }
     let store = Arc::new(Store::open(&data_dir.join("ember.db"))?);
     // Agents run under per-session shims and outlive this server (FR-S8, EMBER_SESSION_SHIM=off
     // keeps direct children). Stopping the server leaves the shims, and so the agents, running.
@@ -499,7 +510,6 @@ async fn main() -> anyhow::Result<()> {
     // FR-S9, FR-S10: the token and the Origin/Host check on the local listener, every route.
     // The transport above serves `app` unwrapped: its callers passed the device gate (FR-N7).
     let local_app = {
-        let token = ember_server::auth::load_or_create_token(&data_dir)?;
         tracing::info!(
             "server token file: {} (send it as Authorization: Bearer)",
             ember_server::auth::token_path(&data_dir).display()
@@ -514,7 +524,11 @@ async fn main() -> anyhow::Result<()> {
                 hosts.push(ember_server::api::origin::host_of(rest.split('/').next().unwrap_or("")));
             }
         }
-        ember_server::auth::protect(local_app, ember_server::auth::ServerAuth::new(token, addr, hosts))
+        // The token file is followed, so `ember-server rotate-token` and
+        // `POST /api/server-token/rotate` take effect without a restart (#369).
+        let auth = ember_server::auth::ServerAuth::with_token_file(&data_dir, addr, hosts)?;
+        let local_app = local_app.merge(ember_server::auth::rotate_router(auth.clone()));
+        ember_server::auth::protect(local_app, auth)
     };
     if let Some(rt) = &shim_runtime {
         let rejoined = sessions.rejoin_shims(rt).await;

@@ -1151,7 +1151,8 @@ pub fn seg_width(text: &str) -> f32 {
 
 /// The segments of a choice row packed into lines no wider than `avail`, as the mockup's `.seg`
 /// wraps (`flex-wrap: wrap`, `gap: 8px`), so every option and the chosen one stay in view.
-/// The toolkit has no wrapping row (`FlowRow`), so the packing is by measured width. Each line
+/// TODO(compose-rust#521): the toolkit has no wrapping row (`FlowRow`), so the packing is by
+/// estimated width; drop this once `FlowRow` lands. Each line
 /// holds indices into `labels`, in order; a segment wider than `avail` gets a line of its own.
 pub fn seg_lines<S: AsRef<str>>(labels: &[S], avail: f32) -> Vec<Vec<usize>> {
     let mut lines: Vec<Vec<usize>> = Vec::new();

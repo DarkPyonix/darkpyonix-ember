@@ -949,4 +949,12 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 
 **Status.** Specified (`FR-W4a` to `FR-W4c`, Draft; issue #457). Local server OSE and its relay are in #458/#459/#461; node OSE routes and server-to-node relay follow this spec.
 
+### D43: Webviews, custom editors and notebook outputs in the Ember 에디터: native for the common cases, VS Code for the rest
 
+**Decision.** [provisional, #452, needs the owner's confirmation] The Ember 에디터 window hosts no webview, keeping D9a. Markdown preview, image files and notebook outputs that are text, stream, error or image mimes are drawn natively. Every other extension webview panel, webview view, custom editor and notebook output (HTML, JavaScript, widgets) shows a placeholder in its own panel, with the extension's name and `VS Code에서 열기`, which opens the project in the VS Code target (`ember/editor/src/fallback.rs`). FR-E5 ("Extension webview panels still work, contained to their panel") is met through that fallback, not inside the window (`FR-E8`).
+
+**Rejected** *[provisional]*. A platform webview region inside the Ember 에디터 window (E5 allows it, D9a does not; it needs a webview host per OS that does not exist (#30), a secure webview origin, a native view composited into dioxus-compose, and a JS engine in the editor window). Leaving these features out (D38 asks for function parity). The options and their costs are in `docs/design/EDITOR-PARITY.md`, "Webviews, custom editors and notebook outputs".
+
+**Why.** Extension webviews are extension programs written for a browser engine; they cannot be drawn without one. The cases users meet daily (reading markdown, looking at an image, a notebook's printed output and plots) need no extension code, so they can follow the mockup's design natively, and the rest still works one click away in VS Code Web, which already is the IDE window exception of E1.
+
+**Status.** Proposed, not built. Waits for the owner; if the owner wants option A, D9a changes first.

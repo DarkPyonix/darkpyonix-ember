@@ -296,7 +296,7 @@ fn fr_e6_a_line_that_runs_out_of_search_budget_is_cut_short_and_reported() {
     assert!(r.skipped, "the budget ran out and the line says so");
     assert!(r.tokens.iter().all(|t| t.end <= line.len()));
     assert!(started.elapsed() < std::time::Duration::from_secs(30), "bounded work: {:?}", started.elapsed());
-    assert!(MAX_SEARCH_BUDGET >= 1_000_000);
+    const { assert!(MAX_SEARCH_BUDGET >= 1_000_000) };
     // A short ordinary line is not affected.
     assert!(!g.tokenize_line("aaa", None).skipped);
 }

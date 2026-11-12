@@ -403,7 +403,7 @@ pub fn replace_in_text(text: &str, options: &SearchOptions, replacement: &str, t
     let mut rest = text;
     let mut line_no = 0u32;
     loop {
-        let (content, brk, tail) = match rest.find(|c: char| c == '\n' || c == '\r') {
+        let (content, brk, tail) = match rest.find(['\n', '\r']) {
             Some(i) => {
                 let brk_len = if rest[i..].starts_with("\r\n") { 2 } else { 1 };
                 (&rest[..i], &rest[i..i + brk_len], &rest[i + brk_len..])

@@ -118,6 +118,15 @@ pub const TRUST_LABEL: &str = "예, 작성자를 신뢰합니다";
 pub const TRUST_SUB: &str = "폴더를 신뢰하고 모든 기능을 사용합니다";
 pub const RESTRICT_LABEL: &str = "아니요, 작성자를 신뢰하지 않습니다";
 pub const RESTRICT_SUB: &str = "제한 모드에서 폴더를 안전하게 둘러봅니다";
+
+/// The prompt's buttons in Code-OSS's order (trust first, as its primary button), styled as the
+/// window's other dialogs (the unsaved-changes sheet of FR-L31.5): label, tooltip, class, answer (#801).
+pub fn prompt_buttons() -> [(&'static str, &'static str, &'static str, bool); 2] {
+    [
+        (TRUST_LABEL, TRUST_SUB, "btn primary sm", true),
+        (RESTRICT_LABEL, RESTRICT_SUB, "btn sm", false),
+    ]
+}
 pub const BANNER_TEXT: &str = "제한 모드는 안전하게 코드를 둘러보기 위한 모드입니다. 모든 기능을 사용하려면 이 폴더를 신뢰하십시오.";
 pub const BANNER_TRUST: &str = "신뢰";
 pub const BANNER_CLOSE: &str = "배너 닫기";
@@ -185,25 +194,28 @@ pub mod view {
         if !state(s).prompt {
             return rsx! {};
         }
-        let yes = s.clone();
-        let no = s.clone();
         rsx! {
-            div { style: "position:fixed; left:0; top:0; right:0; bottom:0; z-index:49; background:rgba(0,0,0,0.25);" }
-            div { class: "ed-menu", role: "dialog", "aria-modal": "true", "aria-label": "{PROMPT_TITLE}",
-                style: "position:fixed; left:50%; top:120px; transform:translateX(-50%); width:440px; max-width:calc(100% - 32px); z-index:50; padding:var(--sp3); display:flex; flex-direction:column; gap:var(--sp2);",
-                b { "{PROMPT_TITLE}" }
-                p { style: "margin:0;", "{PROMPT_DETAIL}" }
-                p { class: "muted", style: "margin:0;", "{PROMPT_ADVICE}" }
-                p { class: "muted", style: "margin:0;", "{PROMPT_SCOPE}" }
-                button { class: "ed-pj", style: "flex-direction:column; align-items:flex-start; height:auto; padding:8px 10px;", "aria-label": "{TRUST_LABEL}",
-                    onclick: move |_| answer(&yes, true),
-                    span { "{TRUST_LABEL}" }
-                    span { class: "muted", "{TRUST_SUB}" }
-                }
-                button { class: "ed-pj", style: "flex-direction:column; align-items:flex-start; height:auto; padding:8px 10px;", "aria-label": "{RESTRICT_LABEL}",
-                    onclick: move |_| answer(&no, false),
-                    span { "{RESTRICT_LABEL}" }
-                    span { class: "muted", "{RESTRICT_SUB}" }
+            div { class: "modal", role: "presentation",
+                div { class: "card ed-confirm", role: "dialog", "aria-modal": "true", "aria-label": "{PROMPT_TITLE}",
+                    div { class: "card-b",
+                        b { "{PROMPT_TITLE}" }
+                        p { "{PROMPT_DETAIL}" }
+                        p { class: "muted", "{PROMPT_ADVICE}" }
+                        p { class: "muted", "{PROMPT_SCOPE}" }
+                        div { class: "ed-confirm-acts",
+                            for (label, sub, class, trusted) in prompt_buttons() {
+                                {
+                                    let answer_s = s.clone();
+                                    rsx! {
+                                        button { key: "{label}", class: "{class}", title: "{sub}", "aria-label": "{label}",
+                                            onclick: move |_| answer(&answer_s, trusted),
+                                            "{label}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -213,6 +225,15 @@ pub mod view {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l31_18_prompt_choices_are_dialog_buttons_trust_first() {
+        let buttons = prompt_buttons();
+        assert_eq!(buttons[0], (TRUST_LABEL, TRUST_SUB, "btn primary sm", true));
+        assert_eq!(buttons[1], (RESTRICT_LABEL, RESTRICT_SUB, "btn sm", false));
+        let src = include_str!("workspace_trust.rs");
+        assert!(src.contains(r#"div { class: "card ed-confirm", role: "dialog""#), "the prompt is not the window's dialog card");
+    }
 
     #[test]
     fn fr_l31_18_answer_is_remembered_per_computer_and_folder() {

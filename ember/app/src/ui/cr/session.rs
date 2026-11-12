@@ -35,7 +35,7 @@ pub use crate::ui::session::{
     PaneToggle, ProjectPanes, SIDE_LIST_W, SOON, Section, SessionView, SideListMode, UI_STRINGS,
     add_pane, can_move, close_pane, current_mode, environment_rows, ide_choices, kanban,
     kanban_column, lease_plan, mode_chip_label, mode_chip_warns, mode_rows, model_chip_label,
-    move_pane, multi_pane_layout, pane_rows, swipe_pane_width, reorder_pane, resolve_project, side_list_mode,
+    move_pane, multi_pane_layout, pane_rows, swipe_pane_width, SWIPE_GAP, reorder_pane, resolve_project, side_list_mode,
     side_sections, single_target, toolbar_fold_level, toolbar_width, view_chips_below,
     view_from_saved, visible_panes,
 };
@@ -1845,7 +1845,7 @@ pub fn MultiView(
                             .modifier(Modifier::new().fill_max_width().weight(1.0))
                             .content(|| {
                                 cu::Row()
-                                    .spacing(SP[1])
+                                    .spacing(SWIPE_GAP)
                                     .modifier(Modifier::new().fill_max_height())
                                     .content(|| {
                                         for sid in &vis {

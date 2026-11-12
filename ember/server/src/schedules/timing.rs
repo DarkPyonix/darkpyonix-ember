@@ -55,6 +55,15 @@ pub fn validate(kind: &ScheduleKind) -> Result<(), String> {
             Ok(())
         }
         ScheduleKind::Once { .. } => Ok(()),
+        ScheduleKind::Event { repository, branch, .. } => {
+            if super::ci::normalize_repo(repository).is_none() {
+                return Err(format!("repository {repository:?} is not owner/name"));
+            }
+            if branch.as_deref().is_some_and(|b| b.trim().is_empty()) {
+                return Err("branch must not be empty (omit it for any branch)".into());
+            }
+            Ok(())
+        }
     }
 }
 
@@ -63,6 +72,8 @@ pub fn validate(kind: &ScheduleKind) -> Result<(), String> {
 pub fn next_after(kind: &ScheduleKind, anchor_ms: i64, after_ms: i64) -> Result<Option<i64>, String> {
     match kind {
         ScheduleKind::Once { at } => Ok((*at > after_ms).then_some(*at)),
+        // Started by events, never by time.
+        ScheduleKind::Event { .. } => Ok(None),
         ScheduleKind::Interval { seconds } => {
             let period = (*seconds as i64).saturating_mul(1000).max(1);
             let first = anchor_ms.saturating_add(period);

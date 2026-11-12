@@ -26,6 +26,7 @@
 //! | [`bridge`] | [`WidgetBridge`]: `SessionUpdate` → per-document widget state and encoded `Decorations` bytes |
 //! | [`fallback`] | connect-time version check outcome: when to offer "Open in VS Code" instead |
 //! | [`replies`] | answers for the extension host's other requests |
+//! | [`watch`] | FR-L31.24: the recursive watch on the workspace folder, with Code-OSS's default excludes |
 //! | [`search`] | FR-E7: search across files through the extension host, unsaved buffers, replace with re-check |
 //!
 //! **Status: written without compiling** (no cargo was run for this change). See
@@ -55,6 +56,7 @@ pub mod semantic;
 pub mod textmate;
 pub mod text_format;
 pub mod session;
+pub mod watch;
 pub mod widget;
 
 pub use crate::bridge::{apply_text_change, BridgeAction, DocumentWidgetState, SyntaxRuns, WidgetBridge};

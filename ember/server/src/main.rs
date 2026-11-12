@@ -284,9 +284,17 @@ async fn serve_main() -> anyhow::Result<()> {
         sessions.add_end_hook(egress.end_hook());
     }
 
-    let addr: SocketAddr = std::env::var("EMBER_LISTEN")
-        .unwrap_or_else(|_| "127.0.0.1:8740".into())
-        .parse()?;
+    // FR-S10 listen guard: a non-loopback EMBER_LISTEN needs EMBER_ALLOW_NON_LOOPBACK_LISTEN=1.
+    let addr: SocketAddr = ember_server::auth::parse_listen(std::env::var("EMBER_LISTEN").ok().as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let allow = std::env::var(ember_server::auth::ALLOW_NON_LOOPBACK_LISTEN).ok();
+    if ember_server::auth::check_listen(addr, allow.as_deref()).map_err(|e| anyhow::anyhow!(e))?
+        == ember_server::auth::ListenCheck::NonLoopbackAllowed
+    {
+        tracing::warn!(
+            "EMBER_LISTEN={addr} is reachable from that network over plain HTTP; the server token travels in clear. Prefer the transport (EMBER_TRANSPORT=1) for remote devices."
+        );
+    }
     // The guest door (FR-T14): off unless EMBER_GUEST_LISTEN is set. A bad value is a startup error.
     let guest_door = ember_server::guest_door::GuestDoor::from_env(addr)?;
     // The enrol door (FR-C2e): off unless EMBER_ENROL_LISTEN is set. A bad value, or an address
@@ -415,6 +423,15 @@ async fn serve_main() -> anyhow::Result<()> {
     let enrol_listener = match &enrol_door {
         Some(d) => {
             let l = d.bind().await.map_err(|e| anyhow::anyhow!("enrol door: cannot bind {}: {e}", d.listen))?;
+            // An auto-closing door (#539) is bound here only to fail the start on a bad address;
+            // it is released at once and bound again by the first mint.
+            let l = if d.auto_close {
+                drop(l);
+                tracing::info!("enrol door on {} stays closed until a code is minted (EMBER_ENROL_AUTO_CLOSE=0 keeps it open)", d.listen);
+                None
+            } else {
+                Some(l)
+            };
             if d.is_remote() {
                 tracing::warn!(
                     "enrol door on {} is reachable from that network (EMBER_ENROL_LISTEN_ALLOW_REMOTE=1); it \
@@ -425,7 +442,7 @@ async fn serve_main() -> anyhow::Result<()> {
             } else {
                 tracing::info!("enrol door on {} (loopback)", d.listen);
             }
-            Some(l)
+            l
         }
         None => None,
     };
@@ -450,6 +467,12 @@ async fn serve_main() -> anyhow::Result<()> {
         scheduler.set_computer_placer(Arc::new(place));
     }
     let _scheduler_task = scheduler.start();
+    // CI event routines (FR-L23): a failed workflow run of a project's repository starts them.
+    let ci_watcher = ember_server::schedules::ci::CiWatcher::new(
+        scheduler.clone(),
+        Arc::new(ember_server::schedules::ci::NodeCiSource::new(sessions.clone(), computers.clone())),
+    );
+    let _ci_task = ci_watcher.start(ember_server::schedules::ci::CiWatcher::interval_from_env());
     // "Open IDE" takes its computers from the registry and the session's current computer
     // (FR-L7, FR-W4); EMBER_IDE_COMPUTERS stays as an override merged onto them.
     let ide = Arc::new(ember_server::api::ide::IdeConfig::from_env()?);
@@ -476,7 +499,11 @@ async fn serve_main() -> anyhow::Result<()> {
     });
     // The enrol door's router is built only when the door is on, wrapped only by the door's
     // guards, and never merged into `app` or `local_app` (not under auth::protect either).
-    let enrol_app = enrol_door.as_ref().map(|d| d.app(enrol.clone()));
+    let enrol_gate = enrol_door
+        .as_ref()
+        .filter(|d| d.auto_close)
+        .map(|d| ember_server::enrol_door::DoorGate::new(d.clone(), enrol.clone()));
+    let enrol_app = enrol_door.as_ref().filter(|d| !d.auto_close).map(|d| d.app(enrol.clone()));
     let app = ember_server::api::router(sessions.clone())
         .merge(computers::api::router(computers.clone(), sessions.clone()))
         .merge(computers::terms::router(computers.clone()))
@@ -526,13 +553,14 @@ async fn serve_main() -> anyhow::Result<()> {
         // no redeem route (docs/design/COMPUTERS.md, "Adding a computer with an enrol code").
         // FR-C2c: the owner's confirm and deny are on this router too, and so is the registrar
         // that adds the confirmed computer to the registry.
-        .merge(computers::enrol::router(
+        .merge(computers::enrol::router_with_gate(
             enrol.clone(),
             enrol_door_url,
             Arc::new(
                 computers::enrol::ComputersRegistrar::new(computers.clone())
                     .with_server_peer_id(enrol.server_peer_id().map(String::from)),
             ),
+            enrol_gate.clone(),
         ));
     // FR-S9, FR-S10: the token and the Origin/Host check on the local listener, every route.
     // The transport above serves `app` unwrapped: its callers passed the device gate (FR-N7).
@@ -593,6 +621,20 @@ async fn serve_main() -> anyhow::Result<()> {
             }))
         }
         _ => None,
+    };
+    // The auto-closing door's watch: it closes the door when no enrolment needs it, and at stop.
+    let enrol_task = match (enrol_task, &enrol_gate) {
+        (None, Some(gate)) => {
+            let mut stop = stop_rx.clone();
+            let gate = gate.clone();
+            Some(tokio::spawn(async move {
+                let shutdown = async move {
+                    let _ = stop.wait_for(|v| *v).await;
+                };
+                gate.watch(ember_server::enrol_door::ENROL_GATE_CHECK_INTERVAL, shutdown).await;
+            }))
+        }
+        (t, _) => t,
     };
     let served = axum::serve(listener, local_app)
         .with_graceful_shutdown(async {

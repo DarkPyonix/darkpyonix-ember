@@ -36,6 +36,8 @@ pub enum Push {
     SessionUpdated { session: SessionRecord },
     /// A project was created or its computer assignment changed (FR-L4).
     ProjectUpdated { project: Project },
+    /// A project was deleted (FR-L26, #384). Carries only its name.
+    ProjectDeleted { name: String },
     /// A team's members or tasks changed (FR-T7). Carries the whole team.
     TeamUpdated { team: crate::a2a::team::TeamView },
     /// A schedule was created (FR-A8), by a user or by an agent (`ember-a2a schedule add`).

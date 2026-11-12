@@ -120,21 +120,22 @@ cargo build --release --locked
 <span class="c"># {"ok":true}</span></code></pre>
     </figure>
     <div class="warn">
-      <span class="label">HTTP 리스너에는 아직 로그인이 없습니다</span>
+      <span class="label">HTTP 리스너는 서버 토큰을 요구합니다</span>
       <p>
-        <code>EMBER_LISTEN</code> 에 닿을 수 있는 사람은 계정, 장치, 허브 등록을 포함한 모든 경로를
-        쓸 수 있습니다. 기본값인 루프백이나 믿을 수 있는 네트워크에만 두세요. 인증되는 경로는 서버의
-        허용 목록에 있는 장치만 받아들이는 P2P 전송입니다(<a href="computers.html#peer">컴퓨터와 허브</a>).
-        지금 다른 기계에서 클라이언트를 쓰려면 SSH로 포트를 전달합니다:
-        <code>ssh -N -L 8740:127.0.0.1:8740 you@mini.local</code>.
-        이 부분은 막기로 정했습니다. 원격 장치는 기기 키를 그대로 쓰고, 같은 컴퓨터의 앱과 도구는
-        로컬 토큰을 보내게 됩니다(이슈 #338). 진행 중이며 아직 구현되지 않았습니다.
+        <span class="pill works">동작</span> 서버는 처음 시작할 때 무작위 토큰을
+        <code>&lt;데이터 폴더&gt;/server-token</code> (권한 0600)에 쓰고, 모든 경로에서
+        <code>Authorization: Bearer &lt;토큰&gt;</code> 을 요구합니다. 토큰 없이 답하는 것은
+        <code>GET /api/health</code> 뿐입니다. 같은 컴퓨터의 앱과 클라이언트는 이 파일이나
+        <code>EMBER_SERVER_TOKEN</code> 을 읽고, 루프백이나 <code>EMBER_TOKEN_HOSTS</code> 의 호스트에만 보냅니다.
+        모든 요청은 <code>Host</code> 와 <code>Origin</code> 검사도 거치므로 열어 둔 웹 페이지가 다른 사이트에서
+        서버에 닿을 수 없습니다. 이름을 더하려면 <code>EMBER_ALLOWED_HOSTS</code> 를 씁니다.
       </p>
       <p>
-        <span class="pill partial">일부</span> WebSocket 경로(터미널 연결, 푸시 채널, 브라우저 보기와 DevTools 중계)는
-        브라우저 <code>Origin</code> 이 서버 자신의 호스트도 루프백도 아니면 거절합니다. 그래서 열어 둔 웹 페이지가 다른
-        사이트에서 셸에 붙을 수 없습니다. 네이티브 클라이언트는 <code>Origin</code> 을 보내지 않아 영향이 없습니다. 로그인은
-        아닙니다. 루프백 신뢰를 넘어 누가 붙을 수 있는지는 아직 정해지지 않았습니다(FR-P3).
+        리스너는 평문 HTTP라서 루프백에 둡니다. 루프백이 아닌 <code>EMBER_LISTEN</code>
+        (<code>0.0.0.0</code>, <code>::</code>, LAN 주소)은 <code>EMBER_ALLOW_NON_LOOPBACK_LISTEN=1</code> 이
+        없으면 서버가 시작하지 않고, 있으면 경고를 남깁니다. 토큰이 그 네트워크를 평문으로 지나가기 때문입니다.
+        원격 장치는 서버 허용 목록의 장치만 받는 P2P 전송(<a href="computers.html#peer">컴퓨터와 허브</a>)이나
+        SSH로 들어옵니다: <code>ssh -N -L 8740:127.0.0.1:8740 you@mini.local</code>.
       </p>
     </div>
 
@@ -165,7 +166,8 @@ cargo build --release --locked --features mount-fuse</code></pre>
         <thead><tr><th scope="col">변수</th><th scope="col">기본값</th><th scope="col">뜻</th></tr></thead>
         <tbody>
           <tr><td><code>EMBER_DATA_DIR</code></td><td><code>~/.ember</code></td><td>데이터베이스, 키, 계정, 브라우저 프로필을 두는 곳.</td></tr>
-          <tr><td><code>EMBER_LISTEN</code></td><td><code>127.0.0.1:8740</code></td><td>HTTP 리스너.</td></tr>
+          <tr><td><code>EMBER_LISTEN</code></td><td><code>127.0.0.1:8740</code></td><td>HTTP 리스너. 다음 변수가 없으면 루프백만 됩니다.</td></tr>
+          <tr><td><code>EMBER_ALLOW_NON_LOOPBACK_LISTEN</code></td><td>없음</td><td><code>1</code> 이면 <code>EMBER_LISTEN</code> 이 루프백이 아닌 주소에 바인드합니다(평문 HTTP, 시작 시 경고).</td></tr>
           <tr><td><code>EMBER_IDLE_SECS</code></td><td><code>300</code></td><td>활동이 없을 때 에이전트 프로세스를 내려놓기까지의 시간. 다음 메시지가 다시 이어 갑니다.</td></tr>
           <tr><td><code>EMBER_CLAUDE_BIN</code>, <code>EMBER_CODEX_BIN</code>, <code>EMBER_AGY_BIN</code></td><td><code>PATH</code> 의 <code>claude</code>, <code>codex</code>, <code>agy</code></td><td>실행할 에이전트 CLI.</td></tr>
           <tr><td><code>EMBER_ACP_AGENTS</code></td><td>없음</td><td>제공할 ACP 에이전트, JSON으로. 예: <code>["omp"]</code>. <a href="agents.html">에이전트</a> 참고.</td></tr>

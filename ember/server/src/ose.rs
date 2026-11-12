@@ -134,6 +134,25 @@ pub const MAX_RELAYS_PER_SERVER: usize = 64;
 const FLAG_DATA_DIR: &str = "--server-data-dir";
 const FLAG_EXTENSIONS_DIR: &str = "--extensions-dir";
 const FLAG_INSTALL: &str = "--install-extension";
+/// `--file-watcher-polling <ms>` (upstream `serverEnvironmentService.ts`): the OSE's recursive
+/// watcher polls at this interval instead of waiting for native file events
+/// (`remoteFileSystemProviderServer.ts` `getRecursiveWatcherOptions`).
+const FLAG_WATCHER_POLLING: &str = "--file-watcher-polling";
+/// Polling interval for a project on a network share, in milliseconds: Code-OSS's own default
+/// when polling is on (`src/vs/platform/files/common/diskFileSystemProvider.ts` L119, 5000).
+pub const NETWORK_WATCH_POLL_MS: u32 = 5000;
+
+/// The watcher flags of an OSE for a project folder on a `kind` filesystem (SPEC FR-L31.24,
+/// #789). A local disk, wherever it is mounted, uses native file events and gets no flag. Only a
+/// real network filesystem is polled, because native events do not report what another machine
+/// changes on a share.
+pub fn watcher_args(kind: crate::fs_kind::FsKind) -> Vec<String> {
+    match kind {
+        crate::fs_kind::FsKind::Local => Vec::new(),
+        crate::fs_kind::FsKind::Network => vec![FLAG_WATCHER_POLLING.to_string(), NETWORK_WATCH_POLL_MS.to_string()],
+    }
+}
+
 /// UNVERIFIED: `--list-extensions` is not documented or used anywhere in this repository, so no
 /// list route exists. Kept as the one place the flag would be named.
 #[allow(dead_code)]
@@ -818,6 +837,7 @@ impl OseManager {
             .arg(&token_file.0)
             .args(["--accept-server-license-terms", "--telemetry-level", "off"])
             .args(Self::dir_args(&data_dir))
+            .args(watcher_args(crate::fs_kind::fs_kind(&folder)))
             .current_dir(&folder)
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
             .spawn().map_err(|e| format!("cannot start OSE server: {e}"))?;
@@ -867,6 +887,13 @@ fn server_binary() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l31_24_only_a_network_share_makes_the_ose_poll() {
+        use crate::fs_kind::FsKind;
+        assert!(watcher_args(FsKind::Local).is_empty());
+        assert_eq!(watcher_args(FsKind::Network), ["--file-watcher-polling", "5000"]);
+    }
 
     fn fake_env(k: &str) -> Option<std::ffi::OsString> {
         match k {

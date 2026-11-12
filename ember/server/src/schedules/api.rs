@@ -17,7 +17,8 @@
 //! `NewSchedule` is `{project, agent?, account?, computer?, cwd?, prompt, kind, target,
 //! catch_up?, paused?}` with `kind` one of `{"type":"cron","expr":"0 9 * * 1-5","tz":"Asia/Seoul"}`,
 //! `{"type":"interval","seconds":3600}`, `{"type":"once","at":"2026-10-04T09:00:00+09:00"}` (or Unix
-//! ms) and `target` one of `{"type":"continue","session_id":"…"}`, `{"type":"new","title":"…"}`.
+//! ms) or `{"type":"event","on":"ci_failed","repository":"owner/name","branch":"main"}` (`branch`
+//! optional; started by CI failures, see `ci`, never by time) and `target` one of `{"type":"continue","session_id":"…"}`, `{"type":"new","title":"…"}`.
 //! `agent` and `cwd` are required for `new` targets.
 //!
 //! Agent routes (`ember-a2a schedule …`), authenticated with `Authorization: Bearer

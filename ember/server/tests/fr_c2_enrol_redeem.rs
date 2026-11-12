@@ -584,7 +584,7 @@ async fn fr_c2_guard_matrix_is_measured() {
     let app = f.open_app();
     let body = json!({ "code": unknown_code('q'), "node_public_info": node_info() }).to_string();
     let redeem_methods = ["GET", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"];
-    let status_methods = ["POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"];
+    let status_methods = ["POST", "PUT", "PATCH", "OPTIONS", "HEAD"];
     let mut cases: Vec<(&str, &str)> = Vec::new();
     for m in redeem_methods {
         cases.push((m, "/enrol/redeem"));
@@ -595,6 +595,8 @@ async fn fr_c2_guard_matrix_is_measured() {
     // Controls: the two requests that reach a handler.
     cases.push(("POST", "/enrol/redeem"));
     cases.push(("GET", "/enrol/status/x"));
+    // The node's own cancel (FR-C2m, #617) reaches a handler too: without a secret it is the 404.
+    cases.push(("DELETE", "/enrol/status/x"));
     let variants: [(&str, &str, Option<&str>); 3] = [
         ("good_host", HOST, None),
         ("foreign_host", "evil.example", None),
@@ -624,7 +626,8 @@ async fn fr_c2_guard_matrix_is_measured() {
                 parts.status.as_u16()
             );
             // Pinned to the CI measurement (see the doc comment).
-            let is_route = (*method == "POST" && *uri == "/enrol/redeem") || (*method == "GET" && *uri == "/enrol/status/x");
+            let is_route = (*method == "POST" && *uri == "/enrol/redeem")
+                || ((*method == "GET" || *method == "DELETE") && *uri == "/enrol/status/x");
             let want_status = if variant != "good_host" {
                 StatusCode::FORBIDDEN // the GUARD refused: a foreign Host or Origin, on every path and method
             } else if *method == "POST" && *uri == "/enrol/redeem" {
@@ -644,7 +647,8 @@ async fn fr_c2_guard_matrix_is_measured() {
             } else if *uri == "/enrol/redeem" {
                 "POST"
             } else {
-                "GET,HEAD"
+                // Expected, not yet measured: axum lists the methods in registration order.
+                "GET,HEAD,DELETE"
             };
             assert_eq!(allow, want_allow, "{method} {uri} {variant}: Allow");
         }
@@ -1259,4 +1263,81 @@ async fn fr_c2_the_other_answers_never_carry_the_server_peer_id() {
     let (st, _, body) = poll(&f.open_app(), &id, Some("dps_wrong")).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
     clean("wrong secret", &body);
+}
+
+// ---- FR-C2m (#617): the node cancels its own enrolment -----------------------------------------
+
+async fn node_cancel(app: &Router, id: &str, secret: Option<&str>) -> Reply {
+    let bearer = secret.map(|s| format!("Bearer {s}"));
+    let mut h: Vec<(&str, &str)> = Vec::new();
+    if let Some(b) = &bearer {
+        h.push(("authorization", b.as_str()));
+    }
+    send(app, PEER, "DELETE", &format!("/enrol/status/{id}"), &h, Vec::new()).await
+}
+
+#[tokio::test]
+async fn fr_c2_node_cancel_with_the_poll_secret_stops_the_owner_confirm() {
+    let f = fx();
+    let o = open(&f, "laptop", PEER).await;
+    let (st, _, body) = node_cancel(&f.open_app(), &o.id, Some(&o.secret)).await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+    assert_eq!(json_of(&body), json!({ "status": "cancelled" }));
+    // The owner can no longer confirm it, and nothing is registered.
+    let (st, _) = owner(&f, "POST", &api(&o.id, "/confirm"), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::GONE);
+    let (_, s) = owner(&f, "GET", &api(&o.id, ""), None).await;
+    assert_eq!(s["status"], "expired");
+    // The node's own poll now reads expired; a second cancel is 409 with nothing changed.
+    let (_, _, body) = poll(&f.open_app(), &o.id, Some(&o.secret)).await;
+    assert_eq!(json_of(&body), json!({ "status": "expired" }));
+    let (st, _, body) = node_cancel(&f.open_app(), &o.id, Some(&o.secret)).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(json_of(&body), json!({ "status": "expired" }));
+}
+
+#[tokio::test]
+async fn fr_c2_node_cancel_with_a_wrong_or_no_secret_or_unknown_id_is_the_poll_404_and_changes_nothing() {
+    let f = fx();
+    let o = open(&f, "laptop", PEER).await;
+    let (_, _, want_body) = poll(&f.open_app(), "00000000-0000-0000-0000-000000000000", Some(&o.secret)).await;
+    assert_eq!(json_of(&want_body), not_found_body());
+    for (id, secret) in [
+        (o.id.as_str(), Some("dps_wrong")),
+        (o.id.as_str(), None),
+        ("00000000-0000-0000-0000-000000000000", Some(o.secret.as_str())),
+    ] {
+        let (st, _, body) = node_cancel(&f.open_app(), id, secret).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{id} {secret:?}");
+        assert_eq!(body, want_body, "identical to the poll's 404");
+    }
+    let (_, s) = owner(&f, "GET", &api(&o.id, ""), None).await;
+    assert_eq!(s["status"], "awaiting_confirmation");
+}
+
+#[tokio::test]
+async fn fr_c2_node_cancel_after_the_owner_confirmed_is_409_and_the_credential_is_still_delivered() {
+    let f = fx();
+    let o = open(&f, "laptop", PEER).await;
+    let (st, _) = owner(&f, "POST", &api(&o.id, "/confirm"), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _, body) = node_cancel(&f.open_app(), &o.id, Some(&o.secret)).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(json_of(&body), json!({ "status": "confirmed" }));
+    let (_, _, body) = poll(&f.open_app(), &o.id, Some(&o.secret)).await;
+    assert_eq!(json_of(&body)["status"], "joined");
+}
+
+#[tokio::test]
+async fn fr_c2_node_cancel_shares_the_per_enrolment_poll_limit() {
+    let f = fx();
+    let o = open(&f, "laptop", PEER).await;
+    // One router, one poll limiter: a poll then at once a cancel is 429, and nothing changed.
+    let app = f.open_app();
+    let (st, _, _) = poll(&app, &o.id, Some(&o.secret)).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _, _) = node_cancel(&app, &o.id, Some(&o.secret)).await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+    let (_, s) = owner(&f, "GET", &api(&o.id, ""), None).await;
+    assert_eq!(s["status"], "awaiting_confirmation");
 }

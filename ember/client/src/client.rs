@@ -340,6 +340,14 @@ impl Client {
         Ok(p)
     }
 
+    /// Delete an empty project (FR-L26, #384). The state drops it at once; the server's
+    /// `project_deleted` push tells every other client.
+    pub async fn delete_project(&self, name: &str) -> Result<(), crate::api::ProjectPatchError> {
+        self.inner.api.delete_project(name).await?;
+        self.inner.apply(Input::Push(Push::ProjectDeleted { name: name.to_string() }));
+        Ok(())
+    }
+
     /// Assign a computer to a project (FR-L4).
     pub async fn assign_computer(&self, project: &str, computer_id: &str) -> ApiResult<Project> {
         let p = self.inner.api.assign_computer(project, computer_id).await?;

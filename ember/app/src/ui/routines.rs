@@ -1185,6 +1185,13 @@ pub fn has_running_remote_run(sample_mode: bool, online: bool, entries: &[Entry]
             .any(|e| e.runs.iter().any(|r| r.status == RunStatus::Running))
 }
 
+/// Whether 지금 실행 is busy for this routine: a run is in progress, either the optimistic
+/// placeholder that `begin_demo_run` put first or a server run still `Running` (the runs
+/// `has_running_remote_run` polls for). The button is disabled while this holds (FR-L25, #494).
+pub fn run_now_busy(e: &Entry) -> bool {
+    e.runs.iter().any(|r| r.status == RunStatus::Running)
+}
+
 /// Whether the simulated run is allowed: only in demo mode, never with a server.
 pub fn demo_run_allowed(demo_active: bool, sample_entry: bool) -> bool {
     demo_active && sample_entry
@@ -2107,6 +2114,24 @@ mod tests {
         assert_eq!(fail_msg, "실행하지 못했습니다: cwd missing");
         assert_eq!(e.runs[0].status, RunStatus::Failed);
         assert!(!has_running_remote_run(false, true, std::slice::from_ref(&e)));
+    }
+
+    #[test]
+    fn fr_l25_run_now_is_busy_from_the_optimistic_row_until_the_server_run_ends() {
+        let mut e = entry(routine("sch1", "a", "ember", "0 9 * * *"), vec![run(10, RunStatus::Done)]);
+        assert!(!run_now_busy(&e), "finished history leaves 지금 실행 enabled");
+        begin_demo_run(&mut e, 100).unwrap();
+        assert!(run_now_busy(&e), "the optimistic row disables 지금 실행 before the server answers");
+        apply_server_run_started(&mut e, &server_run(wire::RunStatus::Running));
+        assert!(run_now_busy(&e), "a server run still Running keeps it disabled");
+        assert!(has_running_remote_run(false, true, std::slice::from_ref(&e)));
+        apply_server_run_started(&mut e, &server_run(wire::RunStatus::Completed));
+        assert!(!run_now_busy(&e), "the run ended, so 지금 실행 is enabled again");
+
+        let mut rolled = entry(routine("sch2", "b", "ember", "0 9 * * *"), vec![]);
+        begin_demo_run(&mut rolled, 1).unwrap();
+        assert!(rollback_optimistic_run(&mut rolled));
+        assert!(!run_now_busy(&rolled), "a failed call rolls back and enables it again");
     }
 
     #[test]

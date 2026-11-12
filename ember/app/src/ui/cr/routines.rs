@@ -25,7 +25,7 @@ use ember_client::api::ApiError;
 pub use crate::ui::routines::{
     apply_server_run_started, begin_demo_run, changed_patch, current_value_line, demo_run_allowed,
     demo_session_title, finish_demo_run, has_running_remote_run, patch_is_empty,
-    resolve_run_session_id, rollback_optimistic_run, run_is_simulated, DEMO_RUN_BUSY, DEMO_RUN_DONE,
+    resolve_run_session_id, rollback_optimistic_run, run_is_simulated, run_now_busy, DEMO_RUN_BUSY, DEMO_RUN_DONE,
     DEMO_RUN_MS, DEMO_RUN_STARTED, DEMO_SESSION_PREFIX, NAME_SERVER_REASON, REMOTE_RUN_POLL_MS,
     REMOTE_RUN_STARTED, SAMPLE_FLAG, SERVER_CANNOT_CHANGE,
     not_saved_sentence, run_row_text, unsaved_fields,
@@ -48,6 +48,7 @@ use super::components::{
     pill_colors, pill_metrics, AppButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
     FieldOptions, Label, PickChip, Pill, PillTone, Select, SheetFooter,
 };
+use super::compat::Spinner;
 use super::project::PHONE_MENU_ROOM;
 use super::shell::NavIcon;
 use super::theme::*;
@@ -540,6 +541,68 @@ pub fn detail_tile_columns(panel_w: f32) -> usize {
 pub fn detail_prompt_width(panel_w: f32, compact: bool) -> f32 {
     let pad = if compact { SP[2] } else { SP[3] };
     (panel_w - 2.0 * pad - INSET_CHROME).max(0.0)
+}
+
+/// The detail header's height: the mockup's `.rt-dh` (`min-height: 56px`), for every layout
+/// but the stacked one.
+pub const DETAIL_HEADER_H: f32 = 56.0;
+/// The ring beside the big time.
+pub const DETAIL_RING: f32 = 76.0;
+/// One run row: the inset's 12 dp above and below a row as tall as the 32 dp 세션 열기 button.
+pub const RUN_TILE_H: f32 = PAD_ROW_V * 2.0 + H_CTL;
+
+/// The detail body's padding: 14 on a wide panel, 12 on a phone.
+pub fn detail_body_pad(compact: bool) -> f32 {
+    if compact {
+        12.0
+    } else {
+        14.0
+    }
+}
+
+/// The gap between the detail body's sections.
+pub const DETAIL_GAP: f32 = SP[3];
+
+/// The big time's type step: 40 on a wide panel, 28 on a phone (mockup `.rt-hero-when .when`,
+/// `--fs-4xl`, and `--fs-2xl` at 560 px and below).
+pub fn detail_when_fs(compact: bool) -> Fs {
+    if compact {
+        Fs::Xl2
+    } else {
+        Fs::Xl4
+    }
+}
+
+/// One key-value tile: the inset's padding, the label, the value, and `sub_lines` of the muted
+/// line under it. The inset already pads 12 16 (`.inset`), so the tile adds none of its own.
+fn kv_tile_h(sub_lines: u32) -> f32 {
+    let sub = if sub_lines > 0 { SP[0] + sub_lines as f32 * Fs::Xs.line_height() } else { 0.0 };
+    PAD_ROW_V * 2.0 + Fs::Xs.line_height() + SP[0] + Fs::Sm.line_height() + sub
+}
+
+/// How far below the top of the detail card the first 실행 기록 row ends, from the same
+/// constants the drawing uses (FR-L25, #494). `prompt_lines` is how many lines the prompt
+/// takes, `computer_sub_lines` how many the 컴퓨터 tile's note takes (2 on a phone). A time
+/// routine's big time is one line; an event's may take two and is not covered here.
+pub fn detail_first_run_bottom(panel_w: f32, compact: bool, prompt_lines: u32, computer_sub_lines: u32) -> f32 {
+    let header = match detail_header_layout(panel_w, compact) {
+        DetailHeader::Stacked => 2.0 * SP[3] + Fs::Lg.line_height() * 2.0 + SP[2] + H_CTL,
+        _ => DETAIL_HEADER_H,
+    };
+    let when_col = detail_when_fs(compact).line_height()
+        + SP[0]
+        + Fs::Sm.line_height()
+        + SP[0]
+        + Fs::Xs.line_height();
+    let when = when_col.max(DETAIL_RING);
+    let tiles = if detail_tile_columns(panel_w) >= 3 {
+        kv_tile_h(1).max(kv_tile_h(computer_sub_lines))
+    } else {
+        kv_tile_h(1) + SP[2] + kv_tile_h(computer_sub_lines).max(kv_tile_h(0))
+    };
+    let prompt = PAD_ROW_V * 2.0 + Fs::Xs.line_height() + SP[0] + prompt_lines as f32 * Fs::Sm.line_height();
+    let history = Fs::Md.line_height() + SP[1] + RUN_TILE_H;
+    header + 1.0 + detail_body_pad(compact) + when + DETAIL_GAP + tiles + DETAIL_GAP + prompt + DETAIL_GAP + history
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1277,6 +1340,32 @@ fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
         .on_click(on_click);
 }
 
+/// What 지금 실행 reads while its routine has a run in progress.
+pub const RUN_NOW_BUSY_LABEL: &str = "실행 중";
+
+/// The invisible overlay of a control that cannot act now: named, focusable by assistive tech as
+/// a disabled button, and never clickable.
+fn DisabledOverlay(label: &str) {
+    cu::Button(label)
+        .enabled(false)
+        .variant(ButtonVariant::Text)
+        .color(Paint::Literal(Color::argb(0)))
+        .modifier(Modifier::new().fill_max_size());
+}
+
+/// The header's 지금 실행. While a run is in progress it is disabled, reads 실행 중 and has a
+/// spinner beside it, as a CI "run" button does while its job runs (FR-L25, #494).
+fn RunNowButton(busy: bool, on_click: impl FnMut() + 'static) {
+    if busy {
+        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+            Spinner(12.0);
+            AppButton(RUN_NOW_BUSY_LABEL, None, ButtonKind::Primary, true, false, false, || {});
+        });
+    } else {
+        AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, on_click);
+    }
+}
+
 // TODO(compose-rust#426): the toolkit Switch cannot take the ink 36x20 style or an accessible name;
 // drawn on a Canvas under a named Button until it can.
 /// A 36x20 toggle switch matching the mockup (`.switch.on` ink, off `track`, knob `surface`).
@@ -1746,6 +1835,9 @@ fn DetailPane(
     let mode_label = r.sel.mode.label().to_string();
     let prompt_text = r.prompt.clone();
     let computer = computer_chip_text(r.sel.computer.as_deref(), computers);
+    // A run in progress (the optimistic row or a server run still Running) disables 지금 실행,
+    // so a second click cannot start a second run (FR-L25, #494).
+    let busy = run_now_busy(entry);
 
     let layout = detail_header_layout(panel_w, compact);
     let tile_cols = detail_tile_columns(panel_w);
@@ -1778,6 +1870,11 @@ fn DetailPane(
         );
     }
     let ring_cmd = l.build();
+    let sched_text = if routine_trigger == Trigger::Time && cron_valid(&routine_cron) {
+        format!("{routine_line} · {routine_cron}")
+    } else {
+        routine_line
+    };
 
     let on_toggle = std::sync::Arc::new(on_toggle);
     let on_edit = std::sync::Arc::new(on_edit);
@@ -1807,7 +1904,7 @@ fn DetailPane(
                 cu::Row()
                     .alignment(Alignment::CenterStart)
                     .spacing(SP[1])
-                    .modifier(Modifier::new().fill_max_width().height(56.0).padding(12.0))
+                    .modifier(Modifier::new().fill_max_width().height(DETAIL_HEADER_H).padding(PAD_ROW_V))
                     .content(move || {
                         cu::Box()
                             .modifier(Modifier::new().size(32.0, 32.0))
@@ -1837,18 +1934,26 @@ fn DetailPane(
                                 NavIcon(ICON_EDIT_SVG, p.text_2.to_argb(), 16.0);
                                 FocusOverlay("편집", move || edit_fn(edit_id_c.clone()));
                             });
+                        // Busy: the muted fill of a disabled primary button (`button_style_for`)
+                        // with a spinner in place of the play glyph.
+                        let run_fill = if busy { p.muted } else { p.ink };
                         cu::Box()
                             .modifier(
                                 Modifier::new()
                                     .size(32.0, 32.0)
-                                    .background(paint(p.ink))
-                                    .border(1.0, paint(p.ink))
+                                    .background(paint(run_fill))
+                                    .border(1.0, paint(run_fill))
                                     .corner_radius(CORNER_SM),
                             )
                             .alignment(Alignment::Center)
                             .content(move || {
-                                NavIcon(ICON_PLAY_SVG, p.ink_text.to_argb(), 16.0);
-                                FocusOverlay("지금 실행", move || run_fn(run_id_c.clone()));
+                                if busy {
+                                    Spinner(14.0);
+                                    DisabledOverlay(RUN_NOW_BUSY_LABEL);
+                                } else {
+                                    NavIcon(ICON_PLAY_SVG, p.ink_text.to_argb(), 16.0);
+                                    FocusOverlay("지금 실행", move || run_fn(run_id_c.clone()));
+                                }
                             });
                     });
             } else if layout == DetailHeader::Stacked {
@@ -1872,18 +1977,21 @@ fn DetailPane(
                             RoutineSwitch(&routine_name, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
                             cu::Spacer().modifier(Modifier::new().weight(1.0));
                             AppButton("편집", None, ButtonKind::Default, true, true, false, move || edit_fn(edit_id.clone()));
-                            AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, move || run_fn(run_id.clone()));
+                            RunNowButton(busy, move || run_fn(run_id.clone()));
                         });
                     });
             } else {
                 let toggle_fn = on_toggle;
                 let edit_fn = on_edit;
                 let run_fn = on_run;
+                // 56 high as the mockup's `.rt-dh`: 12 above and below the 32 dp buttons, and
+                // 4 more on each side for the card's 16.
                 cu::Row()
                     .alignment(Alignment::CenterStart)
                     .spacing(SP[2])
-                    .modifier(Modifier::new().fill_max_width().height(64.0).padding(16.0))
+                    .modifier(Modifier::new().fill_max_width().height(DETAIL_HEADER_H).padding(PAD_ROW_V))
                     .content(move || {
+                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
                         // The title takes what the actions leave and ellipsizes, so the actions
                         // never leave the panel.
                         cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
@@ -1892,30 +2000,30 @@ fn DetailPane(
                         TriggerPill(routine_trigger, true);
                         RoutineSwitch(&routine_name_w, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
                         AppButton("편집", None, ButtonKind::Default, true, true, false, move || edit_fn(edit_id.clone()));
-                        AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, move || run_fn(run_id.clone()));
+                        RunNowButton(busy, move || run_fn(run_id.clone()));
+                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
                     });
             }
             cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
 
             cu::Column()
-                .spacing(SP[3])
-                .modifier(Modifier::new().fill_max_width().padding(if compact { 12.0 } else { 14.0 }))
+                .spacing(DETAIL_GAP)
+                .modifier(Modifier::new().fill_max_width().padding(detail_body_pad(compact)))
                 .content(move || {
                     // Schedule & Ring
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(move || {
                         cu::Column().modifier(Modifier::new().weight(1.0)).spacing(SP[0]).content(move || {
-                            Label(&when_big, if routine_trigger == Trigger::Event { Fs::Xl2 } else { Fs::Xl4 }, Weight::Semibold, None, Some(when_big_max_lines(routine_trigger)));
-                            Label(&routine_line, Fs::Sm, Weight::Medium, None, Some(1));
-                            if routine_trigger == Trigger::Time && cron_valid(&routine_cron) {
-                                Label(&routine_cron, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                            }
+                            Label(&when_big, if routine_trigger == Trigger::Event { Fs::Xl2 } else { detail_when_fs(compact) }, Weight::Semibold, None, Some(when_big_max_lines(routine_trigger)));
+                            // The cron sits on the schedule's line, as the mockup's `.rt-sched`
+                            // ("매일 오전 9시 · 0 9 * * *"), not on a line of its own.
+                            Label(&sched_text, Fs::Sm, Weight::Medium, None, Some(1));
                             Label(&next, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                         });
                         cu::Box()
-                            .modifier(Modifier::new().size(76.0, 76.0))
+                            .modifier(Modifier::new().size(DETAIL_RING, DETAIL_RING))
                             .alignment(Alignment::Center)
                             .content(move || {
-                                cu::Canvas(ring_cmd).modifier(Modifier::new().size(76.0, 76.0));
+                                cu::Canvas(ring_cmd).modifier(Modifier::new().size(DETAIL_RING, DETAIL_RING));
                                 Label(
                                     &rate.map(|v| format!("{v}%")).unwrap_or_else(|| "-".to_string()),
                                     Fs::Md,
@@ -1960,19 +2068,24 @@ fn DetailPane(
                             });
                         });
                     }
+                    // The inset pads 12 16 itself (`.inset`); no second padding inside it.
                     InsetPanel(true, move || {
-                        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(move || {
+                        cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(move || {
                             Label("프롬프트", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                             Label(&prompt_text, Fs::Sm, Weight::Regular, None, None);
                         });
                     });
-                    Label("실행 기록", Fs::Lg, Weight::Semibold, None, Some(1));
-                    if entry.runs.is_empty() {
-                        Label("아직 실행하지 않았습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    }
-                    for run in &entry.runs {
-                        RunTile(run, now, run_is_simulated(run, demo));
-                    }
+                    // The heading sits 8 above its rows (mockup `.runtiles { margin-top: 8px }`),
+                    // at the body's 14 semibold (`<b>`).
+                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(move || {
+                        Label("실행 기록", Fs::Md, Weight::Semibold, None, Some(1));
+                        if entry.runs.is_empty() {
+                            Label("아직 실행하지 않았습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        }
+                        for run in &entry.runs {
+                            RunTile(run, now, run_is_simulated(run, demo));
+                        }
+                    });
                 });
         });
     });
@@ -1983,10 +2096,11 @@ fn KeyValue(title: &str, value: &str, sub: &str) {
     let t = title.to_string();
     let v = value.to_string();
     let s = sub.to_string();
+    // The inset pads 12 16 itself (`.inset`); a second padding inside doubled it (#494).
     InsetPanel(true, move || {
         cu::Column()
             .spacing(SP[0])
-            .modifier(Modifier::new().fill_max_width().padding(SP[2]))
+            .modifier(Modifier::new().fill_max_width())
             .content(move || {
                 Label(&t, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 // Two lines, then an ellipsis: the tile is at least a third of the panel.
@@ -2004,11 +2118,12 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool) {
     let session = run.session.clone();
     let row = run_row_text(run, now, simulated);
     let (status_lbl, ago_lbl) = (row.status, row.ago);
+    // `RUN_TILE_H` high: the inset's own 12 above and below a row the button's height.
     InsetPanel(true, move || {
         cu::Row()
             .alignment(Alignment::CenterStart)
             .spacing(SP[2])
-            .modifier(Modifier::new().fill_max_width().padding(SP[2]))
+            .modifier(Modifier::new().fill_max_width().height(H_CTL))
             .content(move || {
                 Pill(status_lbl, tone, true);
                 if simulated {
@@ -2998,6 +3113,47 @@ mod tests {
         }
     }
 
+    /// The first 실행 기록 row shows without scrolling at 1440x900 and 390x844 (FR-L25, #494).
+    /// The detail card's top is measured on the r3 captures of PR #721 (`running-1440-*.png`:
+    /// 386; `done-390-*.png`: 84), since the dashboard above it is laid out by the toolkit. The
+    /// prompt is given one line more than the sample prompt takes at each width, so the check
+    /// errs on the safe side.
+    #[test]
+    fn fr_l25_first_run_row_is_visible_without_scrolling_at_1440_and_390() {
+        // (window w, window h, card top, prompt lines, 컴퓨터 note lines, room kept at the bottom)
+        let cases = [
+            (1440.0, 900.0, 386.0, 2, 1, SP[6]),
+            (390.0, 844.0, 84.0, 3, 2, compact_bottom_clearance()),
+        ];
+        for (w, h, top, prompt_lines, sub_lines, room) in cases {
+            let (content, compact) = content_at(w);
+            let pw = detail_panel_width(w, content, compact);
+            let bottom = top + detail_first_run_bottom(pw, compact, prompt_lines, sub_lines);
+            assert!(
+                bottom <= h - room,
+                "first run row ends at {bottom} dp at {w}x{h}, past {} dp",
+                h - room
+            );
+        }
+        // The pieces the sum is made of are the mockup's.
+        assert_eq!(DETAIL_HEADER_H, 56.0, "`.rt-dh` min-height");
+        assert_eq!(RUN_TILE_H, 56.0, "12 + 32 + 12");
+        assert_eq!(detail_when_fs(false), Fs::Xl4);
+        assert_eq!(detail_when_fs(true), Fs::Xl2, "28 px at 560 px and below");
+    }
+
+    #[test]
+    fn fr_l25_detail_tiles_and_run_rows_are_padded_once() {
+        let src = include_str!("routines.rs");
+        let kv = src.split("fn KeyValue(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        let tile = src.split("fn RunTile(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        for (name, body) in [("KeyValue", kv), ("RunTile", tile)] {
+            assert!(body.contains("InsetPanel(true"), "{name} sits in an inset");
+            assert!(!body.contains(".padding("), "{name} adds no padding inside the inset's own");
+        }
+        assert!(tile.contains(".height(H_CTL)"), "a run row is as tall as its button");
+    }
+
     #[test]
     fn fr_l25_detail_prompt_has_paragraph_width_at_every_size() {
         for w in [1440.0, 1024.0, 768.0, 390.0] {
@@ -3860,6 +4016,88 @@ mod tests {
             "clicking '지금 실행' must post DEMO_RUN_STARTED notice"
         );
         compose_rust::window::reset_window_size();
+    }
+
+    /// While the run it started is in progress, 지금 실행 is disabled and reads 실행 중, at the
+    /// wide header and the phone's icon header alike (FR-L25, #494).
+    #[test]
+    fn fr_l25_run_now_is_disabled_while_its_run_is_in_progress() {
+        for (w, h, class) in [(1440.0, 900.0, WindowSizeClass::Expanded), (390.0, 844.0, WindowSizeClass::Compact)] {
+            let _guard = crate::services::test_guard();
+            let svc = crate::services::test_services();
+            svc.reset_demo();
+            compose_rust::window::reset_window_size();
+
+            let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreenWith(sample_entries(), true))));
+            let mut texts: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+            let mut clickables: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+            let mut enabled: std::collections::HashMap<u32, bool> = std::collections::HashMap::new();
+            let mut scan = |batch: &[Mutation<'_>]| {
+                for m in batch {
+                    match m {
+                        Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                            texts.insert(*node_id, s.to_string());
+                        }
+                        Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                            clickables.insert(*node_id, *h as u64);
+                        }
+                        Mutation::SetProp { node_id, property: PropertyKind::Enabled, value: PropertyValue::Bool(b) } => {
+                            enabled.insert(*node_id, *b);
+                        }
+                        Mutation::Remove { node_id } => {
+                            texts.remove(node_id);
+                            clickables.remove(node_id);
+                            enabled.remove(node_id);
+                        }
+                        _ => {}
+                    }
+                }
+            };
+            scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+            let resize = HostEvent {
+                node_id: 0,
+                handler_id: 0,
+                payload: EventPayload::WindowSizeChanged {
+                    width_dp: w,
+                    height_dp: h,
+                    class,
+                    height_class: WindowHeightClass::Medium,
+                    safe_area_top: 0.0,
+                    safe_area_leading: 0.0,
+                    safe_area_trailing: 0.0,
+                },
+            };
+            let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
+            scan(&decode_batch(bytes).expect("decode"));
+            if class == WindowSizeClass::Compact {
+                // The phone shows the list first; open the selected routine's detail.
+                svc.ui.detail_open.set(true);
+                scan(&decode_batch(host.render_frame(16_000_000).expect("render")).expect("decode"));
+            }
+
+            let run_btn = texts
+                .iter()
+                .find(|(id, t)| *t == "지금 실행" && clickables.contains_key(id))
+                .map(|(id, _)| *id)
+                .unwrap_or_else(|| panic!("a clickable 지금 실행 at {w}"));
+            assert_ne!(enabled.get(&run_btn), Some(&false), "지금 실행 starts enabled at {w}");
+            let (bytes, _) = host
+                .dispatch(HostEvent { node_id: run_btn, handler_id: clickables[&run_btn], payload: EventPayload::Clicked })
+                .expect("dispatch click on 지금 실행");
+            scan(&decode_batch(bytes).expect("decode"));
+
+            let live_run_now: Vec<u32> = texts
+                .iter()
+                .filter(|(id, t)| *t == "지금 실행" && enabled.get(id) != Some(&false))
+                .map(|(id, _)| *id)
+                .collect();
+            assert!(live_run_now.is_empty(), "no enabled 지금 실행 while the run is in progress at {w}");
+            assert!(
+                texts.iter().any(|(id, t)| t == RUN_NOW_BUSY_LABEL && enabled.get(id) == Some(&false)),
+                "a disabled {RUN_NOW_BUSY_LABEL} button stands in for it at {w}"
+            );
+            compose_rust::window::reset_window_size();
+        }
     }
 
     #[test]

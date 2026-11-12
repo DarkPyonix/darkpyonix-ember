@@ -56,6 +56,10 @@ pub const RELAY_SUBSTITUTION_WINDOW: usize = 8 * 1024;
 const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Maximum chunk size read from the OSE TCP socket per WebSocket binary frame.
 const RELAY_READ_CHUNK: usize = 32 * 1024;
+/// How long the relay holds client bytes that could start a split placeholder before it sends
+/// them as they are. Without a limit, a frame that ends with the placeholder's first bytes waits
+/// for the next client frame, which a request-and-reply client never sends (#776).
+const RELAY_PENDING_FLUSH: Duration = Duration::from_millis(100);
 
 /// One computer's IDE endpoints.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -572,6 +576,10 @@ impl TokenSubstituter {
         out
     }
 
+    fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     fn flush(&mut self) -> Vec<u8> {
         if !self.enabled() || self.pending.is_empty() {
             return std::mem::take(&mut self.pending);
@@ -669,7 +677,23 @@ async fn pump_ose_relay(socket: WebSocket, target: RelayTarget) {
 
     let touch_in = touch.clone();
     let c2s = async move {
-        while let Some(msg) = ws_in.next().await {
+        loop {
+            let next = if sub.has_pending() {
+                match tokio::time::timeout(RELAY_PENDING_FLUSH, ws_in.next()).await {
+                    Ok(next) => next,
+                    Err(_) => {
+                        // No continuation arrived: the held bytes were not a split placeholder.
+                        let held = sub.flush();
+                        if tcp_write.write_all(&held).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                ws_in.next().await
+            };
+            let Some(msg) = next else { break };
             touch_in();
             match msg {
                 Ok(Message::Binary(bytes)) => {

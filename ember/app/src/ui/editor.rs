@@ -113,6 +113,17 @@ pub fn syntax_spans(syntax: &ember_editor::SyntaxRuns) -> compose_rust::code::Sy
     )
 }
 
+/// The `folds` prop for the foldable regions the session reported (FR-E6, #441).
+pub fn folds(regions: &[ember_editor::FoldRegion]) -> compose_rust::code::Folds {
+    use compose_rust::code::{Fold, Folds};
+    Folds::new(regions.iter().map(|f| Fold {
+        version: f.version,
+        start_line: f.start_line,
+        end_line: f.end_line,
+        collapsed: f.collapsed,
+    }))
+}
+
 /// The open files. A tab holds its unsaved mark, so closing a tab drops it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EditorTabs {

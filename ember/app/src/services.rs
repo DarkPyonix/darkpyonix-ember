@@ -176,6 +176,18 @@ impl Services {
         self.client.patch_session(id, patch).await.map(|_| ()).map_err(|e| e.to_string())
     }
 
+    /// Update a project's settings: on the server, or in the demo state (FR-L26, FR-L22, #489).
+    pub async fn patch_project(
+        &self,
+        name: &str,
+        patch: &ember_client::wire::ProjectPatch,
+    ) -> Result<ember_client::wire::Project, ember_client::api::ProjectPatchError> {
+        if let Some(d) = &self.demo {
+            return d.patch_project(&self.client, name, patch);
+        }
+        self.client.patch_project(name, patch).await
+    }
+
     /// Switch approve-everything: on the server, or in the demo state (#199).
     pub async fn set_approve_all(&self, id: &str, enabled: bool) -> Result<(), String> {
         if self.demo.is_some() {

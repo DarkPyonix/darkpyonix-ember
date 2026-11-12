@@ -25,14 +25,16 @@ use crate::codelens::{CodeLenses, CommandDto};
 use crate::coords::{WidgetPos, WidgetRange};
 use crate::diagnostics::Diagnostics;
 use crate::document::{decode, OpenDocument};
+use crate::folding::{parse_provider_folds, DocFolds, FoldRegion};
 use crate::highlight::{Action as HighlightAction, HighlightJob, HighlightOutput, Highlights, Problem};
 use crate::hover::{HoverPopup, HoverState};
 use crate::ids::{DecorationIds, IdSpace};
 use crate::inline::{self, EndReason, Ghost, InlineDoc, ReplyOutcome, TypeThrough};
 use crate::languages::LanguageRegistry;
-use crate::registry::{KindTag, Registry, RegistryChange};
+use crate::registry::{KindTag, ProviderKind, Registry, RegistryChange};
 use crate::replies::session_reply;
 use crate::search::{FileHits, ReplaceReport, ReplaceRequest, SearchEnd, SearchRequest, Target};
+use crate::semantic::{decode_semantic_tokens, overlay_semantic_runs, DocSemanticTokens};
 use crate::widget::{Decoration, DecorationKind, WidgetCommand, WidgetEvent};
 
 /// How many versions behind the document an answer of the highlighter may be and still be shown.
@@ -149,6 +151,8 @@ pub enum SessionUpdate {
     /// The coloured runs of the lines in `window` (first, last inclusive) of the node with key `generation`,
     /// written against document `version`; lines outside the window carry none. Replaces the earlier list.
     Syntax { uri: UriComponents, generation: u64, version: u32, window: (u32, u32), runs: Vec<crate::textmate::DocRun> },
+    /// The foldable regions of the node with key `generation`, written against document `version` (FR-E6).
+    Folds { uri: UriComponents, generation: u64, version: u32, folds: Vec<FoldRegion> },
     /// Render a `CodeEditor` with key `generation`, `Text = text`, `TabWidth = tab_width`.
     Opened { uri: UriComponents, generation: u64, text: String, language_id: String, tab_width: u32 },
     OpenFailed { uri: UriComponents, error: String },
@@ -193,6 +197,8 @@ pub enum SessionUpdate {
 enum Pending {
     CodeLens { doc: String, handle: i64, version: u32 },
     CodeLensResolve { doc: String, handle: i64, serial: u64, index: usize },
+    Folding { doc: String, handle: i64, version: u32 },
+    SemanticTokens { doc: String, handle: i64, version: u32 },
     Hover { doc: String },
     Inline { doc: String },
     /// `$activateByEvent("onCommand:<id>")` before running a command not registered yet.
@@ -247,6 +253,13 @@ pub struct SessionCore {
     diagnostics: Diagnostics,
     lenses: CodeLenses,
     highlights: Highlights,
+    textmate_runs: HashMap<String, (u32, (u32, u32), Vec<crate::textmate::DocRun>)>,
+    folds: HashMap<String, DocFolds>,
+    folding_due: HashMap<String, inline::Debouncer>,
+    folding_inflight: HashMap<(String, i64), Token>,
+    semantic: HashMap<String, DocSemanticTokens>,
+    semantic_due: HashMap<String, inline::Debouncer>,
+    semantic_inflight: HashMap<(String, i64), Token>,
     codelens_due: HashMap<String, inline::Debouncer>,
     codelens_inflight: HashMap<(String, i64), Token>,
     hover: HoverState,
@@ -299,6 +312,13 @@ impl SessionCore {
             diagnostics: Diagnostics::new(),
             lenses: CodeLenses::new(),
             highlights: Highlights::new(),
+            textmate_runs: HashMap::new(),
+            folds: HashMap::new(),
+            folding_due: HashMap::new(),
+            folding_inflight: HashMap::new(),
+            semantic: HashMap::new(),
+            semantic_due: HashMap::new(),
+            semantic_inflight: HashMap::new(),
             codelens_due: HashMap::new(),
             codelens_inflight: HashMap::new(),
             hover: HoverState::new(),
@@ -367,7 +387,9 @@ impl SessionCore {
     pub fn next_wake(&self) -> Option<Instant> {
         let a = self.inline.values().filter_map(|s| s.debounce.deadline());
         let b = self.codelens_due.values().filter_map(|d| d.deadline());
-        a.chain(b).min()
+        let c = self.folding_due.values().filter_map(|d| d.deadline());
+        let d = self.semantic_due.values().filter_map(|d| d.deadline());
+        a.chain(b).chain(c).chain(d).min()
     }
 
     /// The text the session holds for a document, as the widget should have it.
@@ -434,6 +456,54 @@ impl SessionCore {
         self.codelens_due.entry(key.to_owned()).or_default().schedule(now, delay);
     }
 
+    fn schedule_folding(&mut self, key: &str, delay: Duration) {
+        let now = self.now;
+        self.folding_due.entry(key.to_owned()).or_default().schedule(now, delay);
+    }
+
+    fn schedule_semantic(&mut self, key: &str, delay: Duration) {
+        let now = self.now;
+        self.semantic_due.entry(key.to_owned()).or_default().schedule(now, delay);
+    }
+
+    fn emit_folds(&mut self, key: &str) {
+        let Some(doc) = self.docs.get(key) else { return };
+        let (uri, generation, version) = (doc.uri.clone(), doc.generation(), doc.widget_version());
+        let tab_width = self.opts.tab_width;
+        let folds = self
+            .folds
+            .entry(key.to_owned())
+            .or_default()
+            .regions(version, doc.lines(), tab_width);
+        self.ui(SessionUpdate::Folds { uri, generation, version, folds });
+    }
+
+    fn emit_syntax(&mut self, key: &str) {
+        let Some(doc) = self.docs.get(key) else { return };
+        let (uri, generation, current_version) = (doc.uri.clone(), doc.generation(), doc.widget_version());
+        let default_window = self
+            .highlights
+            .window(key)
+            .unwrap_or((0, crate::highlight::WINDOW_MARGIN * 2));
+        let (tm_version, window, tm_runs) = self
+            .textmate_runs
+            .get(key)
+            .cloned()
+            .unwrap_or((current_version, default_window, Vec::new()));
+        let sem_runs = self
+            .semantic
+            .get(key)
+            .map(|s| s.runs.as_slice())
+            .unwrap_or(&[]);
+        let version = if sem_runs.is_empty() {
+            tm_version
+        } else {
+            tm_version.max(self.semantic.get(key).map_or(0, |s| s.version))
+        };
+        let runs = overlay_semantic_runs(&tm_runs, sem_runs, window);
+        self.ui(SessionUpdate::Syntax { uri, generation, version, window, runs });
+    }
+
     /// `ExtHostEditorTabs.$acceptEditorTabModel`: one group with a tab per open document.
     /// vscode-languageclient uses `window.tabGroups` to decide which documents to pull
     /// diagnostics for (found by the live OSE test).
@@ -477,6 +547,10 @@ impl SessionCore {
                 tab_width: self.opts.tab_width,
             };
             self.ui(u);
+            self.emit_folds(&key);
+            if self.textmate_runs.contains_key(&key) || self.semantic.contains_key(&key) {
+                self.emit_syntax(&key);
+            }
             self.touched.insert(key);
             return;
         }
@@ -528,11 +602,15 @@ impl SessionCore {
             tab_width: self.opts.tab_width,
         });
         self.docs.insert(key.clone(), doc);
+        self.folds.insert(key.clone(), DocFolds::default());
+        self.emit_folds(&key);
         self.highlight_open(&key);
         self.active = Some(key.clone());
         self.out.push(Effect::Watch { uri });
         self.send_tab_model();
         self.schedule_codelens(&key, Duration::ZERO);
+        self.schedule_folding(&key, Duration::ZERO);
+        self.schedule_semantic(&key, Duration::ZERO);
         self.touched.insert(key.clone());
         if let Some(text) = self.restores.remove(&key) {
             self.restore_doc(&key, &text);
@@ -573,6 +651,27 @@ impl SessionCore {
         self.rpc(doc.remove_call());
         if let Some(job) = self.highlights.close(&key) {
             self.out.push(Effect::Highlight(job));
+        }
+        self.textmate_runs.remove(&key);
+        self.folds.remove(&key);
+        self.folding_due.remove(&key);
+        let fold_inflight: Vec<(String, i64)> = self.folding_inflight.keys().filter(|(d, _)| *d == key).cloned().collect();
+        for k in fold_inflight {
+            if let Some(t) = self.folding_inflight.remove(&k) {
+                self.cancel(vec![t]);
+            }
+        }
+        if let Some(sem) = self.semantic.remove(&key) {
+            if let Some((handle, result_id)) = sem.last_result {
+                self.rpc(exthost::release_document_semantic_tokens(handle, result_id));
+            }
+        }
+        self.semantic_due.remove(&key);
+        let sem_inflight: Vec<(String, i64)> = self.semantic_inflight.keys().filter(|(d, _)| *d == key).cloned().collect();
+        for k in sem_inflight {
+            if let Some(t) = self.semantic_inflight.remove(&k) {
+                self.cancel(vec![t]);
+            }
         }
         self.out.push(Effect::Unwatch { uri: doc.uri.clone() });
         for (handle, cache_id) in self.lenses.close(&key) {
@@ -645,6 +744,11 @@ impl SessionCore {
             WidgetEvent::DecorationActivated { decoration } => self.on_activated(&key, decoration),
             WidgetEvent::SelectionChanged { active, .. } => self.on_selection_changed(&key, active),
             WidgetEvent::VisibleRangeChanged { first_line, last_line, .. } => self.on_visible_range_changed(&key, first_line, last_line),
+            WidgetEvent::FoldChanged { start_line, collapsed } => {
+                if self.folds.entry(key.clone()).or_default().set_fold(start_line, collapsed) {
+                    self.emit_folds(&key);
+                }
+            }
         }
     }
 
@@ -669,6 +773,8 @@ impl SessionCore {
         }
         self.diagnostics.on_edit(key, range, text);
         self.lenses.on_edit(key, range, text);
+        self.folds.entry(key.to_owned()).or_default().on_edit(range, text);
+        self.emit_folds(key);
         self.highlight_edit(key, version, range, text);
         // Monaco hides the hover on typing.
         let (tokens, shown) = self.hover.end_for(key);
@@ -681,6 +787,8 @@ impl SessionCore {
         self.inline_after_change(key, range, text);
         let delay = self.opts.codelens_debounce;
         self.schedule_codelens(key, delay);
+        self.schedule_folding(key, delay);
+        self.schedule_semantic(key, delay);
         self.touched.insert(key.to_owned());
     }
 
@@ -696,6 +804,8 @@ impl SessionCore {
     fn on_visible_range_changed(&mut self, key: &str, first_line: u32, last_line: u32) {
         if let Some(job) = self.highlights.visible(key, first_line, last_line) {
             self.out.push(Effect::Highlight(job));
+        } else if self.semantic.get(key).is_some_and(|s| !s.runs.is_empty()) && !self.textmate_runs.contains_key(key) {
+            self.emit_syntax(key);
         }
         let to_resolve = self.lenses.set_visible_range(key, first_line, last_line);
         for (handle, serial, index, dto) in to_resolve {
@@ -1051,6 +1161,118 @@ impl SessionCore {
         self.touched.insert(key);
     }
 
+    // ---- Folding & Semantic tokens (FR-E6) ----------------------------------------------------
+
+    fn fire_folding(&mut self, key: &str) {
+        let Some(doc) = self.docs.get(key) else { return };
+        let (uri, version, language) = (doc.uri.clone(), doc.widget_version(), doc.language_id.clone());
+        let handles: Vec<i64> = self
+            .registry
+            .matching(KindTag::FoldingRange, &uri, &language)
+            .iter()
+            .map(|p| p.handle)
+            .collect();
+        self.folds.entry(key.to_owned()).or_default().order = handles.clone();
+        for handle in handles {
+            if let Some(old) = self.folding_inflight.remove(&(key.to_owned(), handle)) {
+                self.cancel(vec![old]);
+            }
+            let t = self.rpc_with(
+                exthost::provide_folding_ranges(handle, &uri),
+                Pending::Folding { doc: key.to_owned(), handle, version },
+            );
+            self.folding_inflight.insert((key.to_owned(), handle), t);
+        }
+    }
+
+    fn on_folding_reply(&mut self, token: Token, key: String, handle: i64, version: u32, result: Result<Value, String>) {
+        if self.folding_inflight.get(&(key.clone(), handle)) == Some(&token) {
+            self.folding_inflight.remove(&(key.clone(), handle));
+        }
+        let value = match result {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!("ember-editor: $provideFoldingRanges({handle}) failed: {e}");
+                return;
+            }
+        };
+        let Some((current, line_count)) = self.docs.get(&key).map(|d| (d.widget_version(), d.lines().len())) else { return };
+        if current != version {
+            return;
+        }
+        let ranges = parse_provider_folds(&value, line_count);
+        let state = self.folds.entry(key.clone()).or_default();
+        if !state.order.contains(&handle) {
+            state.order.push(handle);
+        }
+        state.providers.insert(handle, ranges);
+        self.emit_folds(&key);
+    }
+
+    fn fire_semantic(&mut self, key: &str) {
+        let Some(doc) = self.docs.get(key) else { return };
+        let (uri, version, language) = (doc.uri.clone(), doc.widget_version(), doc.language_id.clone());
+        let Some(handle) = self
+            .registry
+            .matching(KindTag::DocumentSemanticTokens, &uri, &language)
+            .first()
+            .map(|p| p.handle)
+        else {
+            return;
+        };
+        if let Some(old) = self.semantic_inflight.remove(&(key.to_owned(), handle)) {
+            self.cancel(vec![old]);
+        }
+        let t = self.rpc_with(
+            exthost::provide_document_semantic_tokens(handle, &uri, 0),
+            Pending::SemanticTokens { doc: key.to_owned(), handle, version },
+        );
+        self.semantic_inflight.insert((key.to_owned(), handle), t);
+    }
+
+    fn on_semantic_reply(&mut self, token: Token, key: String, handle: i64, version: u32, result: Result<Value, String>) {
+        if self.semantic_inflight.get(&(key.clone(), handle)) == Some(&token) {
+            self.semantic_inflight.remove(&(key.clone(), handle));
+        }
+        let value = match result {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!("ember-editor: $provideDocumentSemanticTokens({handle}) failed: {e}");
+                return;
+            }
+        };
+        let Some(legend) = self.registry.get(handle).and_then(|p| match &p.kind {
+            ProviderKind::DocumentSemanticTokens { legend, .. } => Some(legend.clone()),
+            _ => None,
+        }) else {
+            return;
+        };
+        let Some((current, lines)) = self.docs.get(&key).map(|d| (d.widget_version(), d.lines().to_vec())) else { return };
+        let Some(bytes) = Reply::buffer_from_json(&value) else {
+            return;
+        };
+        let Some((result_id, runs)) = decode_semantic_tokens(&bytes, &legend, &lines) else {
+            return;
+        };
+        if current != version {
+            if result_id > 0 {
+                self.rpc(exthost::release_document_semantic_tokens(handle, result_id));
+            }
+            return;
+        }
+        let prev = self.semantic.get_mut(&key).and_then(|s| s.last_result.take());
+        if let Some((prev_handle, prev_id)) = prev {
+            if prev_id > 0 {
+                self.rpc(exthost::release_document_semantic_tokens(prev_handle, prev_id));
+            }
+        }
+        let entry = self.semantic.entry(key.clone()).or_default();
+        entry.version = version;
+        entry.runs = runs;
+        entry.last_result = (result_id > 0).then_some((handle, result_id));
+        self.emit_syntax(&key);
+    }
+
     // ---- extension-host requests --------------------------------------------------------------
 
     fn on_exthost_request(&mut self, r: IncomingRequest) {
@@ -1190,6 +1412,33 @@ impl SessionCore {
                 self.lenses.remove_provider(handle);
                 self.touched.extend(keys);
             }
+            RegistryChange::Registered { kind: KindTag::FoldingRange, .. } | RegistryChange::FoldingRangeChanged { .. } => {
+                for k in keys {
+                    self.schedule_folding(&k, Duration::ZERO);
+                }
+            }
+            RegistryChange::Unregistered { handle, kind: KindTag::FoldingRange } => {
+                for k in keys {
+                    if let Some(st) = self.folds.get_mut(&k) {
+                        st.providers.remove(&handle);
+                        st.order.retain(|h| *h != handle);
+                    }
+                    self.emit_folds(&k);
+                }
+            }
+            RegistryChange::Registered { kind: KindTag::DocumentSemanticTokens, .. } | RegistryChange::SemanticTokensChanged { .. } => {
+                for k in keys {
+                    self.schedule_semantic(&k, Duration::ZERO);
+                }
+            }
+            RegistryChange::Unregistered { handle, kind: KindTag::DocumentSemanticTokens } => {
+                for k in keys {
+                    if self.semantic.get(&k).and_then(|s| s.last_result).is_some_and(|(h, _)| h == handle) {
+                        self.semantic.remove(&k);
+                        self.emit_syntax(&k);
+                    }
+                }
+            }
             RegistryChange::Unregistered { handle, kind: KindTag::InlineCompletions } => {
                 for k in keys {
                     if let Some(st) = self.inline.get_mut(&k) {
@@ -1265,6 +1514,8 @@ impl SessionCore {
                     }
                 }
             }
+            Pending::Folding { doc, handle, version } => self.on_folding_reply(token, doc, handle, version, result),
+            Pending::SemanticTokens { doc, handle, version } => self.on_semantic_reply(token, doc, handle, version, result),
             Pending::Hover { doc } => {
                 let Some(version) = self.docs.get(&doc).map(OpenDocument::widget_version) else { return };
                 let prev_range = self.hover.active_range(&doc);
@@ -1624,16 +1875,12 @@ impl SessionCore {
             Some(Problem::Off(why)) => {
                 tracing::debug!("ember-editor: no colours for {key}: {why}");
                 self.highlights.turn_off(&key);
-                if let Some(doc) = self.docs.get(&key) {
-                    let (uri, generation) = (doc.uri.clone(), doc.generation());
-                    self.ui(SessionUpdate::Syntax { uri, generation, version: 0, window: (0, 0), runs: Vec::new() });
-                }
+                self.textmate_runs.remove(&key);
+                self.emit_syntax(&key);
             }
             None => {
-                if let Some(doc) = self.docs.get(&key) {
-                    let (uri, generation) = (doc.uri.clone(), doc.generation());
-                    self.ui(SessionUpdate::Syntax { uri, generation, version: output.version, window: output.window, runs: output.runs });
-                }
+                self.textmate_runs.insert(key.clone(), (output.version, output.window, output.runs));
+                self.emit_syntax(&key);
             }
         }
     }
@@ -1674,6 +1921,24 @@ impl SessionCore {
         for (handle, cache_id) in self.lenses.close(key) {
             self.rpc(exthost::release_code_lenses(handle, cache_id));
         }
+        self.textmate_runs.remove(key);
+        if let Some(sem) = self.semantic.remove(key) {
+            if let Some((handle, result_id)) = sem.last_result {
+                self.rpc(exthost::release_document_semantic_tokens(handle, result_id));
+            }
+        }
+        let fold_inflight: Vec<(String, i64)> = self.folding_inflight.keys().filter(|(d, _)| d == key).cloned().collect();
+        for k in fold_inflight {
+            if let Some(t) = self.folding_inflight.remove(&k) {
+                self.cancel(vec![t]);
+            }
+        }
+        let sem_inflight: Vec<(String, i64)> = self.semantic_inflight.keys().filter(|(d, _)| d == key).cloned().collect();
+        for k in sem_inflight {
+            if let Some(t) = self.semantic_inflight.remove(&k) {
+                self.cancel(vec![t]);
+            }
+        }
         if let Some(st) = self.inline.get_mut(key) {
             let tokens = st.cancel();
             self.cancel(tokens);
@@ -1686,9 +1951,13 @@ impl SessionCore {
         }
         self.ids.forget_document(key);
         self.ui(SessionUpdate::Command { uri, command: WidgetCommand::SetText { generation, text: widget_text } });
+        self.folds.entry(key.to_owned()).or_default().providers.clear();
+        self.emit_folds(key);
         self.highlight_open(key);
         self.send_tab_model();
         self.schedule_codelens(key, Duration::ZERO);
+        self.schedule_folding(key, Duration::ZERO);
+        self.schedule_semantic(key, Duration::ZERO);
         self.touched.insert(key.to_owned());
     }
 
@@ -1705,6 +1974,16 @@ impl SessionCore {
             self.codelens_due.iter_mut().filter_map(|(k, d)| d.take_due(now).then(|| k.clone())).collect();
         for k in due_lens {
             self.fire_codelens(&k);
+        }
+        let due_fold: Vec<String> =
+            self.folding_due.iter_mut().filter_map(|(k, d)| d.take_due(now).then(|| k.clone())).collect();
+        for k in due_fold {
+            self.fire_folding(&k);
+        }
+        let due_sem: Vec<String> =
+            self.semantic_due.iter_mut().filter_map(|(k, d)| d.take_due(now).then(|| k.clone())).collect();
+        for k in due_sem {
+            self.fire_semantic(&k);
         }
     }
 

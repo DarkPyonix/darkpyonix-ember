@@ -645,12 +645,15 @@ pub struct Scm {
     pub state: Arc<Mutex<ScmState>>,
     revision: dioxus_compose::prelude::SyncSignal<u64>,
     project: String,
+    /// The cursor line's blame in the status bar (FR-L31.8); dropped on every status read.
+    pub blame: crate::ui::editor_blame::Blame,
 }
 
 impl Scm {
     pub fn new(project: &str, revision: dioxus_compose::prelude::SyncSignal<u64>) -> Scm {
         let project = project.trim().to_string();
-        Scm { state: Arc::new(Mutex::new(ScmState::new(!project.is_empty()))), revision, project }
+        let blame = crate::ui::editor_blame::Blame::new(&project, revision);
+        Scm { state: Arc::new(Mutex::new(ScmState::new(!project.is_empty()))), revision, project, blame }
     }
 
     pub fn snapshot(&self) -> ScmState {
@@ -715,6 +718,8 @@ impl Scm {
             return;
         }
         self.with(|s| s.gutter_diffs.clear());
+        // A save, a commit or a stage can change what any line's blame is (FR-L31.8).
+        self.blame.invalidate();
         let seq = self.with(ScmState::begin_load);
         // The repository root is asked once (FR-L31.9); a failed answer is asked again next time.
         let need_top = self.with(|s| s.toplevel.is_none());

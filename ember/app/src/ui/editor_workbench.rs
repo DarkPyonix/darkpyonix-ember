@@ -2646,6 +2646,22 @@ pub mod page {
         }
     }
 
+    /// The blame item's text, hover and accessible name for `line` (from 1) of the open file, or
+    /// `None` while there is nothing to show (FR-L31.8).
+    fn blame_item(s: &Shared, current: Option<&str>, line: usize) -> Option<(String, String, String)> {
+        let abs = current?;
+        let (dirty, version, text) = {
+            let bridge = s.bridge.borrow();
+            let doc = bridge.active_document().filter(|d| d.uri.path == abs)?;
+            (doc.dirty, doc.version, doc.dirty.then(|| doc.text.clone()))
+        };
+        let unsaved = if dirty { text.as_deref().map(|t| (version, t)) } else { None };
+        let b = s.scm.blame.item(&s.folder, abs, u32::try_from(line).ok()?, unsaved)?;
+        let now = crate::ui::editor_blame::now_secs();
+        use crate::ui::editor_blame::{aria_text, hover_text, status_text};
+        Some((status_text(&b, now), hover_text(&b, now), aria_text(&b, now)))
+    }
+
     fn status_bar(s: &Shared, agent_state: &str, branch: &str, current: Option<&str>, line: usize, col: usize, tab_width: u32) -> Element {
         let crumbs = crate::ui::editor::status_crumbs(&s.folder, current);
         let agent = agent_status_text(agent_state);
@@ -2661,11 +2677,16 @@ pub mod page {
         let (eol_s, enc_s, lang_s) = (s.clone(), s.clone(), s.clone());
         let goto_s = s.clone();
         let git_s = s.clone();
+        // FR-L31.8: the cursor line's blame, as Code-OSS's git.blame.statusBarItem.
+        let (blame_text, blame_hover, blame_aria) = blame_item(s, current, line).unwrap_or_default();
         rsx! {
             footer { class: "ed-status", role: "group", "aria-label": "상태 표시줄",
                 span { class: "ed-sbi crumbs-s", "{crumbs}" }
                 div { class: "spacer" }
                 span { class: "ed-sbi", span { class: "{dot}" } "{agent}" }
+                if !blame_text.is_empty() {
+                    span { class: "ed-sbi hide-md", title: "{blame_hover}", "aria-label": "{blame_aria}", {icon("commit")} "{blame_text}" }
+                }
                 if has_file {
                     button { class: "ed-sbi", title: "줄/열로 이동", "aria-label": "줄/열로 이동", onclick: move |_| run_action(&goto_s, Action::GotoLine), "{position}" }
                     button { class: "ed-sbi hide-md", title: "줄 끝 시퀀스 선택", "aria-label": "줄 끝 시퀀스 선택: {eol_t}",

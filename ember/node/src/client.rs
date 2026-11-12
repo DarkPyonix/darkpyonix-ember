@@ -343,6 +343,13 @@ impl NodeClient {
         Ok((raw.status.as_u16(), raw.body.to_vec()))
     }
 
+    /// Any method on `path`, with an optional JSON body, answered with the node's status and body
+    /// untouched (the server's transfer relay, FR-F14).
+    pub async fn request_raw(&self, method: Method, path: &str, body: Option<&serde_json::Value>) -> Result<(u16, Vec<u8>)> {
+        let raw = self.send(method, path, body.map(Self::json), true).await?;
+        Ok((raw.status.as_u16(), raw.body.to_vec()))
+    }
+
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         Self::decode(self.send(Method::GET, path, None, true).await?)
     }

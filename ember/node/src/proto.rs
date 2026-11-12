@@ -61,8 +61,12 @@ pub enum ErrorCode {
     Conflict,
     /// The git API: a network operation hit its deadline (504).
     Timeout,
-    /// The git API: the output exceeded the cap (413).
+    /// The git API: the output exceeded the cap (413). The file receiver: above the size limit.
     TooLarge,
+    /// The file receiver (FR-F16): not enough free space for an offer (507).
+    NoSpace,
+    /// The file receiver: the receive mode refuses the offer (403).
+    Forbidden,
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -13,6 +13,8 @@ axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 # The peer-to-peer transport (SPEC FR-N1, FR-N5): serve the API and dial nodes by peer id.
 ember-transport = { path = "../transport" }
+# The shared receive store for files sent to this computer (SPEC FR-F13).
+ember-transfer = { path = "../transfer" }
 # The darkpyonix.dev hub: registering this computer to the user's account (SPEC FR-N2).
 ember-hub = { path = "../hub" }
 futures = "0.3"

@@ -8,6 +8,7 @@
 //!   devices on its allow-list (`FR-N3`). Each request runs on a fresh stream of one cached
 //!   connection; the push socket ([`Api::open_push`]) gets its own stream.
 
+use crate::transfers::TransferTarget;
 use std::fmt;
 use std::sync::Arc;
 
@@ -1517,13 +1518,18 @@ fn authority_addr(authority: &str) -> (String, u16) {
     }
 }
 
-// ---- file transfer (FR-F3, FR-F4, FR-F5, FR-F8, #487) ---------------------------------------
+// ---- file transfer (FR-F3, FR-F4, FR-F5, FR-F8, #487; FR-F14, #773) -------------------------
 
 impl Api {
     /// Everything the receiving computer holds: devices, transfers, offers, received files,
     /// history and settings.
     pub async fn transfers(&self) -> ApiResult<crate::transfers::TransfersSnapshot> {
-        self.get("/transfers").await
+        self.transfers_at(&TransferTarget::Server).await
+    }
+
+    /// [`Api::transfers`] of `target`.
+    pub async fn transfers_at(&self, target: &TransferTarget) -> ApiResult<crate::transfers::TransfersSnapshot> {
+        self.get(&target.prefix()).await
     }
 
     /// Offers files as device `from`. With `peer_id` the receiver requires a registered device.
@@ -1533,8 +1539,19 @@ impl Api {
         peer_id: Option<&str>,
         files: &[crate::transfers::DeclaredFile],
     ) -> ApiResult<crate::transfers::OfferCreated> {
+        self.offer_transfer_at(&TransferTarget::Server, from, peer_id, files).await
+    }
+
+    /// [`Api::offer_transfer`] to `target`.
+    pub async fn offer_transfer_at(
+        &self,
+        target: &TransferTarget,
+        from: &str,
+        peer_id: Option<&str>,
+        files: &[crate::transfers::DeclaredFile],
+    ) -> ApiResult<crate::transfers::OfferCreated> {
         let body = json!({ "from": from, "peer_id": peer_id, "files": files });
-        Self::decode(self.post("/transfers/offers", body).await?)
+        Self::decode(self.post(&format!("{}/offers", target.prefix()), body).await?)
     }
 
     pub async fn accept_transfer_offer(&self, id: &str) -> ApiResult<crate::transfers::TransferItem> {
@@ -1555,6 +1572,19 @@ impl Api {
         data: &[u8],
         sha256: Option<&str>,
     ) -> ApiResult<crate::transfers::TransferItem> {
+        self.transfer_chunk_at(&TransferTarget::Server, id, file, offset, data, sha256).await
+    }
+
+    /// [`Api::transfer_chunk`] to `target`.
+    pub async fn transfer_chunk_at(
+        &self,
+        target: &TransferTarget,
+        id: &str,
+        file: usize,
+        offset: u64,
+        data: &[u8],
+        sha256: Option<&str>,
+    ) -> ApiResult<crate::transfers::TransferItem> {
         use base64::Engine;
         let body = json!({
             "file": file,
@@ -1562,34 +1592,67 @@ impl Api {
             "data_base64": base64::engine::general_purpose::STANDARD.encode(data),
             "sha256": sha256,
         });
-        Self::decode(self.post(&format!("/transfers/{}/chunks", seg(id)), body).await?)
+        Self::decode(self.post(&format!("{}/{}/chunks", target.prefix(), seg(id)), body).await?)
     }
 
     /// The receiver's verified byte offset of file `file` (`FR-F5`): where to continue.
     pub async fn transfer_resume_offset(&self, id: &str, file: usize) -> ApiResult<u64> {
+        self.transfer_resume_offset_at(&TransferTarget::Server, id, file).await
+    }
+
+    /// [`Api::transfer_resume_offset`] at `target`.
+    pub async fn transfer_resume_offset_at(&self, target: &TransferTarget, id: &str, file: usize) -> ApiResult<u64> {
         let r: crate::transfers::ResumeOffset =
-            self.get(&format!("/transfers/{}/resume-offset/{file}", seg(id))).await?;
+            self.get(&format!("{}/{}/resume-offset/{file}", target.prefix(), seg(id))).await?;
         Ok(r.offset)
     }
 
     /// Asks the receiver to verify and store the files of transfer `id`.
     pub async fn complete_transfer(&self, id: &str) -> ApiResult<Vec<crate::transfers::StoredFile>> {
+        self.complete_transfer_at(&TransferTarget::Server, id).await
+    }
+
+    /// [`Api::complete_transfer`] at `target`.
+    pub async fn complete_transfer_at(
+        &self,
+        target: &TransferTarget,
+        id: &str,
+    ) -> ApiResult<Vec<crate::transfers::StoredFile>> {
         let r: crate::transfers::Completed =
-            Self::decode(self.post(&format!("/transfers/{}/complete", seg(id)), json!({})).await?)?;
+            Self::decode(self.post(&format!("{}/{}/complete", target.prefix(), seg(id)), json!({})).await?)?;
         Ok(r.stored)
     }
 
     pub async fn pause_transfer(&self, id: &str) -> ApiResult<crate::transfers::TransferItem> {
-        Self::decode(self.post(&format!("/transfers/{}/pause", seg(id)), json!({})).await?)
+        self.transfer_control_at(&TransferTarget::Server, id, "pause").await
     }
 
     pub async fn resume_transfer(&self, id: &str) -> ApiResult<crate::transfers::TransferItem> {
-        Self::decode(self.post(&format!("/transfers/{}/resume", seg(id)), json!({})).await?)
+        self.transfer_control_at(&TransferTarget::Server, id, "resume").await
+    }
+
+    /// Pauses (`op` `"pause"`) or resumes (`"resume"`) transfer `id` at `target`.
+    pub async fn transfer_control_at(
+        &self,
+        target: &TransferTarget,
+        id: &str,
+        op: &str,
+    ) -> ApiResult<crate::transfers::TransferItem> {
+        Self::decode(self.post(&format!("{}/{}/{}", target.prefix(), seg(id), seg(op)), json!({})).await?)
     }
 
     /// Cancels an offer or a transfer; the receiver removes the partial files (`FR-F4`).
     pub async fn cancel_transfer(&self, id: &str) -> ApiResult<crate::transfers::HistoryRecord> {
-        Self::decode(self.post(&format!("/transfers/{}/cancel", seg(id)), json!({})).await?)
+        self.cancel_transfer_at(&TransferTarget::Server, id).await
+    }
+
+    /// [`Api::cancel_transfer`] at `target`.
+    pub async fn cancel_transfer_at(
+        &self,
+        target: &TransferTarget,
+        id: &str,
+    ) -> ApiResult<crate::transfers::HistoryRecord> {
+        Self::decode(self.post(&format!("{}/{}/cancel", target.prefix(), seg(id)), json!({})).await?)
     }
 
     pub async fn transfer_history(&self) -> ApiResult<Vec<crate::transfers::HistoryRecord>> {

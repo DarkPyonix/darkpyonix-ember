@@ -52,6 +52,7 @@ pub mod search;
 pub mod selector;
 pub mod semantic;
 pub mod textmate;
+pub mod notifications;
 pub mod session;
 pub mod widget;
 
@@ -63,7 +64,7 @@ pub use crate::fallback::{fallback_for, vscode_fallback_url, ConnectOutcome, Fal
 pub use crate::engine::{CoreOptions, Effect, ExternalChange, Input, SessionCore, SessionUpdate};
 pub use crate::coords::{WidgetPos, WidgetRange};
 pub use crate::session::{DirLister, EditorSession, SessionConfig};
-pub use crate::output::{ExtensionMessage, MessageSeverity, OutputChannel, MAX_OUTPUT_CHANNEL_BYTES};
+pub use crate::output::{ExtensionMessage, MessageAction, MessageSeverity, OutputChannel, MAX_OUTPUT_CHANNEL_BYTES};
 pub use crate::widget::{
     Decoration, DecorationId, DecorationKind, HoverPhase, Severity, WidgetCommand, WidgetEvent,
     DECORATION_RECORD_LEN,

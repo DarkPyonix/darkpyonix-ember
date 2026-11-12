@@ -464,6 +464,12 @@ impl EditorSession {
         self.send(Command::Input(Input::CancelSearch { id }))
     }
 
+    /// Answer extension message `id` (FR-L31.16): the chosen button's handle, or `None` when it
+    /// was closed without one.
+    pub fn answer_message(&self, id: u64, handle: Option<i64>) -> Result<(), Error> {
+        self.send(Command::Input(Input::AnswerMessage { id, handle }))
+    }
+
     /// Replace the chosen matches (FR-E7); answered with [`SessionUpdate::ReplaceDone`].
     pub fn replace(&self, id: u64, request: crate::search::ReplaceRequest) -> Result<(), Error> {
         self.send(Command::Input(Input::Replace { id, request }))

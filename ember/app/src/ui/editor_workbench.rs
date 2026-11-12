@@ -85,6 +85,8 @@ pub struct Shared {
     pub workbench_logs: Signal<Vec<String>>,
     /// Source control of the 커밋 and Git windows (FR-L31.2).
     pub scm: crate::ui::editor_scm::Scm,
+    /// Extension notifications: toasts, the center and modal dialogs (FR-L31.16).
+    pub notifications: Rc<RefCell<ember_editor::notifications::Notifications>>,
 }
 
 // WidgetView accepts a function without props and owns a separate tree. Share signals between
@@ -92,7 +94,7 @@ pub struct Shared {
 thread_local! { static DOUBLE_SHIFT: RefCell<super::editor::DoubleShift> = RefCell::new(super::editor::DoubleShift::default()); }
 
 /// Milliseconds on a clock that only moves forward, for telling two Shift presses apart.
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     use std::sync::OnceLock;
     static START: OnceLock<std::time::Instant> = OnceLock::new();
     START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
@@ -154,7 +156,29 @@ fn init(target: EditorTarget) {
     let workbench_logs = use_hook(|| Signal::new_in_scope(Vec::<String>::new(), root));
     // The branch in the bars comes from the first status read, so it starts with the window.
     let scm = use_hook(|| { let scm = crate::ui::editor_scm::Scm::new(&target.project, revision); scm.refresh(); scm });
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm }));
+    let notifications = use_hook(|| {
+        let mut n = ember_editor::notifications::Notifications::new();
+        // Debug-only capture hook (FR-L31.16): seeds toasts and a modal so a builder can capture them
+        // without an extension that calls `$showMessage`. Ids above 1<<40 never match a real call.
+        if cfg!(debug_assertions) && std::env::var("EMBER_EDITOR_DEMO_NOTIFICATIONS").is_ok_and(|v| v == "1") {
+            use ember_editor::{ExtensionMessage, MessageAction, MessageSeverity};
+            let act = |t: &str, h: i64, c: bool| MessageAction { title: t.into(), handle: h, is_close_affordance: c };
+            let base = 1u64 << 40;
+            let demo = [
+                (MessageSeverity::Info, "Git 저장소를 찾았습니다.", vec![], false),
+                (MessageSeverity::Warning, "rust-analyzer가 Cargo.toml을 다시 읽어야 합니다.", vec![act("다시 읽기", 0, false), act("나중에", 1, false)], false),
+                (MessageSeverity::Error, "언어 서버가 종료되었습니다.", vec![act("다시 시작", 0, false)], false),
+            ];
+            for (i, (severity, message, actions, modal)) in demo.into_iter().enumerate() {
+                n.push(ExtensionMessage { id: base + i as u64, severity, message: message.into(), source: Some("rust-analyzer".into()), actions, modal, detail: None }, now_ms());
+            }
+            if std::env::var("EMBER_EDITOR_DEMO_MODAL").is_ok_and(|v| v == "1") {
+                n.push(ExtensionMessage { id: base + 9, severity: MessageSeverity::Warning, message: "변경 내용을 버리시겠습니까?".into(), source: Some("Git".into()), actions: vec![act("버리기", 0, false), act("유지", 1, true)], modal: true, detail: Some("이 작업은 되돌릴 수 없습니다.".into()) }, now_ms());
+            }
+        }
+        Rc::new(RefCell::new(n))
+    });
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -291,7 +315,7 @@ pub mod page {
     }
 
     /// The key's name as the keymap table writes it.
-    pub(super) fn key_name(key: &Key) -> String {
+    pub(crate) fn key_name(key: &Key) -> String {
         match key {
             Key::Character(c) => c.clone(),
             Key::Escape => "Esc".to_string(),
@@ -757,11 +781,11 @@ pub mod page {
                     tracing::warn!(path = %uri.path, %error, "saving a file failed");
                     notice(format!("{}을(를) 저장하지 못했습니다: {}", crate::ui::editor::display_name(base_name(&uri.path)), crate::ui::editor::file_failure_reason(&error)));
                 }
-                BridgeAction::ExtensionNotice { severity, message, source } => {
-                    let prefix = source.as_deref().unwrap_or("알림");
-                    notice(format!("{prefix}: {message}"));
+                BridgeAction::ExtensionNotice(message) => {
+                    let prefix = message.source.clone().unwrap_or_else(|| "알림".to_string());
                     let mut logs = s.workbench_logs;
-                    crate::ui::editor::push_workbench_log(&mut logs.write(), format!("[{prefix}] [{}] {message}", severity.label()));
+                    crate::ui::editor::push_workbench_log(&mut logs.write(), format!("[{prefix}] [{}] {}", message.severity.label(), message.message));
+                    crate::ui::editor_notifications::view::push(&s, message);
                 }
                 BridgeAction::CommandFailed { id, error } => {
                     tracing::warn!(%id, %error, "extension command failed");
@@ -926,6 +950,7 @@ pub mod page {
                         {bottom_window(&s, w)}
                     }
                     if *s.palette_open.read() { {palette_sheet(&s, keymap)} }
+                    {crate::ui::editor_notifications::view::layer(&s)}
                     {status_bar(&s, &agent_state, &branch, current.as_deref().filter(|_| active.is_some()), line, col, active.as_ref().map_or(4, |d| d.tab_width))}
                 }
             }
@@ -956,6 +981,7 @@ pub mod page {
         let find_hint = keymap.hint(Action::Find, Os::current());
         let find_s = s.clone();
         let git_s = s.clone();
+        let (runcfg_s, run_s, stop_s) = (s.clone(), s.clone(), s.clone());
         let mut stripes = s.stripes;
         let project_tip = tooltip_text("프로젝트 창", &keymap.hint(Action::Project, Os::current()));
         let open = *menu_open.read();
@@ -973,9 +999,9 @@ pub mod page {
                     kbd { class: "ed-sc", "{find_hint}" }
                 }
                 div { class: "ed-runcfg",
-                    button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| notice(format!("실행 구성: {SOON}")), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
-                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| notice(format!("실행: {SOON}")), {icon("play")} }
-                    button { class: "ed-ib", title: "중지", "aria-label": "중지", onclick: move |_| notice(format!("중지: {SOON}")), {icon("pause")} }
+                    button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| crate::ui::editor_tasks::view::open(&runcfg_s), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
+                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| crate::ui::editor_tasks::view::run_default(&run_s), {icon("play")} }
+                    button { class: "ed-ib", title: "중지", "aria-label": "중지", onclick: move |_| crate::ui::editor_tasks::view::stop(&stop_s), {icon("pause")} }
                     button { class: "ed-ib", title: "{theme_title}", "aria-label": "{theme_title}", onclick: move |_| {
                         let next = theme_pref.next();
                         theme.set(next);
@@ -1065,12 +1091,16 @@ pub mod page {
     fn stripe_button(s: &Shared, w: ToolWindow, selected: bool, keymap: Keymap) -> Element {
         let mut stripes = s.stripes;
         let scm_s = s.clone();
+        // 알림 opens the notification center, an overlay as in Code-OSS, not a side window (FR-L31.16).
+        let selected = if w == ToolWindow::Notifications { s.notifications.borrow().center_open() } else { selected };
+        let center_s = s.clone();
         let hint = w.action().map(|a| keymap.hint(a, Os::current())).unwrap_or_default();
         let tip = tooltip_text(w.label(), &hint);
         let class = if selected { "ed-sb on" } else { "ed-sb" };
         rsx! {
             button { key: "{w.label()}", class, title: "{tip}", "aria-label": "{tip}", "aria-pressed": "{selected}", onclick: move |_| {
-                if w.side() == Side::Right { notice(format!("{}: {SOON}", w.label())); } else { stripes.write().toggle(w); }
+                if w == ToolWindow::Notifications { crate::ui::editor_notifications::view::toggle_center(&center_s); }
+                else if w.side() == Side::Right { notice(format!("{}: {SOON}", w.label())); } else { stripes.write().toggle(w); }
                 if matches!(w, ToolWindow::Commit | ToolWindow::Git) && stripes.read().is_selected(w) { scm_s.scm.refresh(); }
             }, {icon(icon_name(w))} }
         }
@@ -1803,12 +1833,12 @@ pub mod page {
     }
 
     /// The editor can attach only with both a server URL and a computer id.
-    pub(super) fn can_attach(server_url: &str, computer: &str) -> bool {
+    pub(crate) fn can_attach(server_url: &str, computer: &str) -> bool {
         !server_url.trim().is_empty() && !computer.trim().is_empty()
     }
 
     /// Bytes for a key press in the terminal. The Meta key is the app's, not the shell's.
-    pub(super) fn terminal_input(name: &str, ctrl: bool, alt: bool, shift: bool, meta: bool) -> Option<Vec<u8>> {
+    pub(crate) fn terminal_input(name: &str, ctrl: bool, alt: bool, shift: bool, meta: bool) -> Option<Vec<u8>> {
         if meta {
             return None;
         }
@@ -2097,6 +2127,8 @@ pub mod page {
                     {problems_body(s, problem_rows)}
                 } else if w == ToolWindow::Output {
                     {output_body(s)}
+                } else if w == ToolWindow::Run {
+                    {crate::ui::editor_tasks::view::body(s)}
                 } else {
                     div { class: "ed-term", style: "color:var(--muted);", "{body}" }
                 }

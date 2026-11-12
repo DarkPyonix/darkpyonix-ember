@@ -35,6 +35,10 @@ pub enum HostCommand {
     /// Discard working-tree changes for a file by reading it through the session, reconstructing
     /// the base text from `diff`, and writing it back only if reading succeeds.
     DiscardFile { path: String, diff: crate::ui::vcs::FileDiff },
+    /// Answer extension message `id` with the chosen button's handle, or `undefined` (FR-L31.16).
+    AnswerMessage { id: u64, handle: Option<i64> },
+    /// Read the project's `.vscode/tasks.json` for the 실행 window (FR-L31.16).
+    LoadTasks,
 }
 
 #[derive(Default)]
@@ -60,6 +64,8 @@ pub struct HostState {
     pub extension_commands: Vec<ember_editor::ContributedCommand>,
     /// The search panel's matches and the last replace's report (FR-E7).
     pub search: crate::ui::editor_search::SearchResults,
+    /// The tasks of `.vscode/tasks.json` (FR-L31.16); `None` until the 실행 window asks.
+    pub tasks: Option<crate::ui::editor_tasks::TasksLoad>,
     pub updates: Vec<SessionUpdate>,
 }
 
@@ -352,6 +358,14 @@ impl EditorHost {
                             let _ = session.cancel_search(id);
                         }
                         Some(HostCommand::Replace { id, request }) => { let _ = session.replace(id, request); }
+                        Some(HostCommand::AnswerMessage { id, handle }) => { let _ = session.answer_message(id, handle); }
+                        Some(HostCommand::LoadTasks) => {
+                            shared.lock().unwrap().tasks = Some(crate::ui::editor_tasks::TasksLoad::Loading);
+                            *revision.write() += 1;
+                            let read = session.read_file_text(&crate::ui::editor_tasks::tasks_json_path(&root)).await;
+                            shared.lock().unwrap().tasks = Some(crate::ui::editor_tasks::TasksLoad::from_read(read.map_err(|e| e.to_string())));
+                            *revision.write() += 1;
+                        }
                         Some(HostCommand::Open(path)) => { let _ = session.open(session.uri(&path)); }
                         Some(HostCommand::Close(path)) => { let _ = session.close(session.uri(&path)); }
                         Some(HostCommand::Focus(path)) => { let _ = session.focus(session.uri(&path)); }

@@ -1,6 +1,8 @@
 //! Which hub to use, and the transport configuration that goes with it.
 
-use ember_transport::{HubDirectory, RelayConfig, SecretKey, TransportConfig, RELAY_URL_ENV};
+use std::time::Duration;
+
+use ember_transport::{HubDirectory, PkarrWatch, RelayConfig, SecretKey, TransportConfig, RELAY_URL_ENV};
 use reqwest::Url;
 
 use crate::client::HubClient;
@@ -167,6 +169,35 @@ impl HubConfig {
         HubDirectory::new(self.pkarr_url()).token(token)
     }
 
+    /// The hub's batched pkarr watch for a device with `device_token`, when `/config`
+    /// advertised `pkarr_watch` (core FR-H2 #132). `None` without either: mailboxes are polled.
+    pub fn pkarr_watch(&self, device_token: Option<String>) -> Option<PkarrWatch> {
+        let w = self.info.as_ref()?.pkarr_watch?;
+        let device_token = device_token.filter(|t| !t.is_empty())?;
+        (w.max_keys > 0).then(|| PkarrWatch {
+            max_keys: w.max_keys as usize,
+            max_wait: Duration::from_secs(w.max_wait.into()),
+            device_token,
+        })
+    }
+
+    /// [`HubConfig::directory`] that also watches mailboxes through the hub's batched
+    /// long-poll when it advertises one. `token` is the resolve token, `device_token` the
+    /// device token (the watch accepts only that one).
+    pub fn directory_with_watch(&self, token: Option<String>, device_token: Option<String>) -> HubDirectory {
+        self.directory(token).watch(self.pkarr_watch(device_token))
+    }
+
+    /// [`HubConfig::transport_config`] with [`HubConfig::directory_with_watch`].
+    pub fn transport_config_with_watch(
+        &self,
+        key: SecretKey,
+        token: Option<String>,
+        device_token: Option<String>,
+    ) -> TransportConfig {
+        TransportConfig::from_env(key).relay(self.relay_config()).hub(self.directory_with_watch(token, device_token))
+    }
+
     /// A transport configuration for a device of this hub: the hub's relay and its address
     /// directory. `token` is the device token once registered.
     pub fn transport_config(&self, key: SecretKey, token: Option<String>) -> TransportConfig {
@@ -225,6 +256,7 @@ mod tests {
             pkarr_url: Some("/dir/pkarr".into()),
             hub_version: Some("test".into()),
             link_url: Some("https://hub.example.net/link".into()),
+            pkarr_watch: None,
         };
         let mut c = HubConfig::new("https://hub.example.net");
         assert_eq!(c.relay_source, RelaySource::Derived);
@@ -251,5 +283,22 @@ mod tests {
         assert!(c.supports_devices_wait());
         // Without /config (never discovered), the watcher polls.
         assert!(!HubConfig::new("https://hub.example.net").supports_devices_wait());
+    }
+
+    #[test]
+    fn fr_n2_the_pkarr_watch_is_used_only_when_advertised_and_with_a_device_token() {
+        let mut c = HubConfig::new("https://hub.example.net");
+        assert_eq!(c.pkarr_watch(Some("dpd_x".into())), None, "never discovered: polling");
+        c.apply_info(HubInfo::default());
+        assert_eq!(c.directory_with_watch(Some("dpr_x".into()), Some("dpd_x".into())).watch, None, "absent: polling");
+        let info: HubInfo =
+            serde_json::from_str(r#"{"relay_urls":[],"pkarr_watch":{"max_keys":32,"max_wait":25}}"#).unwrap();
+        c.apply_info(info);
+        let w = c.pkarr_watch(Some("dpd_x".into())).unwrap();
+        assert_eq!((w.max_keys, w.max_wait, w.device_token.as_str()), (32, Duration::from_secs(25), "dpd_x"));
+        assert_eq!(c.pkarr_watch(None), None, "the watch needs the device token");
+        let d = c.directory_with_watch(Some("dpr_x".into()), Some("dpd_x".into()));
+        assert_eq!(d.token.as_deref(), Some("dpr_x"));
+        assert_eq!(d.watch, Some(w));
     }
 }

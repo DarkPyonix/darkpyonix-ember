@@ -413,7 +413,12 @@ impl Inner {
                 let weak = Arc::downgrade(self);
                 let record: pkarr::RecordFn =
                     Arc::new(move || weak.upgrade().map(|i| i.record_txt()).unwrap_or_default());
-                let node = PkarrNode::start(self.secret.clone(), store, record, self.cfg.poll_interval);
+                let plan = pkarr::PollPlan::new(
+                    self.cfg.poll_interval,
+                    self.cfg.idle_poll_interval,
+                    self.cfg.fast_window,
+                );
+                let node = PkarrNode::start(self.secret.clone(), store, record, plan);
                 *slot = Some(node.clone());
                 Some(node)
             }
@@ -548,6 +553,11 @@ impl Inner {
         let fail = |reason: String| TransportError::Connect { peer, reason };
         let node = NodeId::try_from_bytes(*peer.as_bytes()).map_err(|e| fail(e.to_string()))?;
         self.watch(&[peer]);
+        // A dial reads the peer's mailbox fast at once, so its answer is not held for the idle
+        // interval (FR-N2, #783).
+        if let Some(p) = self.pkarr() {
+            p.kick(peer);
+        }
 
         let mut tcp: Vec<SocketAddr> = addr.direct.clone();
         let hinted = self.hints.lock().unwrap().get(&peer).cloned();
@@ -866,11 +876,12 @@ impl TransportBackend for LetifyBackend {
         if let Some(p) = self.inner.pkarr() {
             // Already running: only the token and the direct-address choice can change.
             p.store().set_token(hub.token);
+            p.store().set_watch(hub.watch);
             self.inner.publish_direct.store(hub.publish_direct, Ordering::Relaxed);
             p.republish();
             return Ok(());
         }
-        let store: Arc<dyn PkarrStore> = Arc::new(HttpPkarrStore::new(hub.pkarr_url, hub.token)?);
+        let store: Arc<dyn PkarrStore> = Arc::new(HttpPkarrStore::new(hub.pkarr_url, hub.token)?.with_watch(hub.watch));
         self.inner.start_pkarr(store, hub.publish_direct);
         Ok(())
     }

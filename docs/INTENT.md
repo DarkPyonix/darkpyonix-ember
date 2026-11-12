@@ -958,3 +958,11 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 **Why.** Extension webviews are extension programs written for a browser engine; they cannot be drawn without one. The cases users meet daily (reading markdown, looking at an image, a notebook's printed output and plots) need no extension code, so they can follow the mockup's design natively, and the rest still works one click away in VS Code Web, which already is the IDE window exception of E1.
 
 **Status.** Proposed, not built. Waits for the owner; if the owner wants option A, D9a changes first.
+
+### D45: Local secret files: swept at startup, redacted logs, a week of retention
+
+**Decision** *[provisional, 2026-11-13, #521, #544]*. Files that hold or may hold a secret on the server machine follow three rules. (1) OSE connection token files left by a killed server are removed when the next server starts (`OseManager::sweep_stale_tokens`), not only when the same folder starts again. (2) The agent stderr log of the session shim (`<shim dir>/<id>.log`) is written line by line through the upstream redaction without the 300-character cap, as a 0600 file in a 0700 directory. (3) A log of an ended shim is kept for 7 days and then removed when the next shim starts.
+
+**Rejected** *[provisional]*. Leaving stderr raw and only restricting the mode (a log the owner pastes into an issue would carry a key fragment). Capping log lines at 300 characters like events (a debugging log loses the part that explains the error). Deleting the log with the shim (the log is needed after a crash). A Windows ACL for the token file (the server's OSE start runs on unix first; documented as default ACL).
+
+**Why.** A SIGKILL skips every drop handler, so only a startup sweep bounds the life of a dead token. The redaction is a heuristic, so the mode stays private as well. Seven days covers a debugging session after a weekend and keeps the directory from growing without bound.

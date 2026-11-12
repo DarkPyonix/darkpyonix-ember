@@ -3,7 +3,7 @@
 //!
 //! The node, not the server, enforces the allowed roots. These tests pin what the node does
 //! today for a path outside them, `..` traversal and a symlink pointing out. The write relay
-//! carries `write`, `pwrite` and `setattr` only (INTENT D46); the namespace operations stay
+//! carries `write`, `pwrite` and `setattr` only (INTENT D48); the namespace operations stay
 //! unreachable through the server.
 
 use std::sync::Arc;
@@ -212,7 +212,7 @@ async fn fr_w4_fs_relay_namespace_operations_are_not_routed() {
             ("nonsense", json!({})),
         ] {
             let (st, _) = f.post(op, body).await;
-            assert_eq!(st, 404, "{op} must not reach the node (D46)");
+            assert_eq!(st, 404, "{op} must not reach the node (D48)");
         }
         assert!(!target.exists());
         assert!(!f.root.join("newdir").exists());
@@ -440,7 +440,7 @@ async fn fr_w4_fs_relay_needs_the_server_token() {
         let st = status(&app, "POST", &path, Some(&format!("Bearer {token}"))).await;
         assert!(st == 400 || st == 422, "{op}: {st}");
     }
-    // The namespace operations stay unrouted behind the token too (D46).
+    // The namespace operations stay unrouted behind the token too (D48).
     for op in ["remove", "rename", "mkdir", "symlink"] {
         let st = status(&app, "POST", &format!("/api/computers/local/fs/{op}"), Some(&format!("Bearer {token}"))).await;
         assert_eq!(st, 404, "{op}");

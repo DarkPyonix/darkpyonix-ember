@@ -19,7 +19,7 @@
 //! computer (this server) has no node client, so it answers 400.
 //!
 //! The write relay carries only the content operations `write`, `pwrite` and `setattr`, which
-//! the node opens first and checks by handle (INTENT D46). The namespace operations (`remove`,
+//! the node opens first and checks by handle (INTENT D48). The namespace operations (`remove`,
 //! `rename`, `mkdir`, `symlink`) still act on paths on the node, so they are not routed: any
 //! other `{op}` is 404 until they get the same handle checks. **[provisional]** A failed
 //! `expect` precondition is the node's 412 with its `actual_sha256`, passed unchanged.
@@ -75,7 +75,7 @@ pub const MAX_WRITE_BODY: usize = 24 * 1024 * 1024;
 
 /// The operations relayed with [`MAX_BODY`].
 const READ_OPS: &[&str] = &["stat", "lstat", "read", "list", "readlink", "glob", "grep"];
-/// The operations relayed with [`MAX_WRITE_BODY`] (INTENT D46: content operations only).
+/// The operations relayed with [`MAX_WRITE_BODY`] (INTENT D48: content operations only).
 const WRITE_OPS: &[&str] = &["write", "pwrite", "setattr"];
 
 /// Largest `limit` a relayed `glob` or `grep` may ask the node for.

@@ -466,7 +466,7 @@ pub mod page {
         use crate::ui::palette::{Mode, Payload};
         let Some((path, format, dirty)) = active_format(s) else { return };
         match payload {
-            Payload::SetEol(eol) => s.host.send(HostCommand::SetEol { path, eol }),
+            Payload::SetEol(eol) => { s.host.send(HostCommand::SetEol { path, eol }); }
             Payload::EncodingAction(mode) => open_picker(s, Mode::Encoding(mode)),
             Payload::SetEncoding { mode: ember_editor::EncodingMode::Reopen, encoding }
                 if *s.palette_mode.read() != Mode::ConfirmReopen(encoding)

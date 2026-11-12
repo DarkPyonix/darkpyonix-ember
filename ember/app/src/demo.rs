@@ -1772,6 +1772,8 @@ impl GitState {
                     "files": files,
                 }))
             }
+            // The demo folder is its repository's root (FR-L31.9).
+            "toplevel" => Ok(json!({ "toplevel": "", "prefix": "" })),
             "diff" => {
                 let staged = body.get("staged").and_then(Value::as_bool).unwrap_or(false);
                 let only = str_of(body, "path");

@@ -5,11 +5,13 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use ember_editor::engine::ReadPurpose;
+use ember_editor::engine::{ReadPurpose, Token};
 use ember_editor::highlight::{HighlightJob, HighlightOutput, Problem, Worker};
 use ember_editor::languages::LanguageRegistry;
 use ember_editor::textmate::{DocRun, GrammarCatalog, SyntaxRole};
-use ember_editor::{CoreOptions, Effect, Input, SessionCore, SessionUpdate, WidgetEvent, WidgetPos, WidgetRange};
+use ember_editor::{CoreOptions, Effect, FoldRegion, Input, SessionCore, SessionUpdate, WidgetEvent, WidgetPos, WidgetRange};
+use ember_editor_conn::exthost::{Call, SemanticTokensLegend};
+use ember_editor_conn::rpc::{Arg, IncomingRequest, Reply};
 use ember_editor_conn::uri::UriComponents;
 use serde_json::{json, Value};
 
@@ -54,6 +56,17 @@ fn p(line: u32, col: u32) -> WidgetPos {
     WidgetPos::new(line, col)
 }
 
+fn request(req: u32, proxy: &'static str, method: &str, args: Vec<Value>) -> Input {
+    Input::ExtHostRequest(IncomingRequest {
+        req,
+        rpc_id: ember_editor_conn::rpc_ids::id_of(proxy).unwrap(),
+        proxy: Some(proxy),
+        method: method.into(),
+        args: args.into_iter().map(Arg::Json).collect(),
+        cancellable: false,
+    })
+}
+
 /// A `Syntax` update as the test keeps it: generation, version, window, runs.
 type SyntaxUpdate = (u64, u32, (u32, u32), Vec<DocRun>);
 
@@ -66,12 +79,24 @@ struct Driver {
     jobs: Vec<HighlightJob>,
     reads: Vec<String>,
     open_generation: u64,
+    folds: Vec<Vec<FoldRegion>>,
+    rpcs: Vec<(Option<Token>, Call)>,
 }
 
 impl Driver {
     fn new() -> Self {
         let t = Instant::now();
-        Self { core: core(t), worker: Worker::new(), t, syntax: Vec::new(), jobs: Vec::new(), reads: Vec::new(), open_generation: 0 }
+        Self {
+            core: core(t),
+            worker: Worker::new(),
+            t,
+            syntax: Vec::new(),
+            jobs: Vec::new(),
+            reads: Vec::new(),
+            open_generation: 0,
+            folds: Vec::new(),
+            rpcs: Vec::new(),
+        }
     }
 
     /// Feeds an input and everything it leads to (grammar reads answered from disk, jobs run on the worker).
@@ -92,6 +117,8 @@ impl Driver {
                     }
                     Effect::Ui(SessionUpdate::Syntax { generation, version, window, runs, .. }) => self.syntax.push((generation, version, window, runs)),
                     Effect::Ui(SessionUpdate::Opened { generation, .. }) => self.open_generation = generation,
+                    Effect::Ui(SessionUpdate::Folds { folds, .. }) => self.folds.push(folds),
+                    Effect::Rpc { token, call } => self.rpcs.push((token, call)),
                     _ => {}
                 }
             }
@@ -370,4 +397,112 @@ fn fr_e6_the_grammars_injected_into_a_language_are_read_and_sent_with_the_build(
     });
     assert_eq!(injectors, Some(vec!["documentation.injection.ts".to_owned()]));
     assert_eq!(role_at(d.last_runs(), 1, 0), Some(SyntaxRole::Keyword), "and the file is coloured");
+}
+
+#[test]
+fn fr_e6_folding_ranges_from_indent_and_provider_and_toggle_preserved_on_edit() {
+    let mut d = Driver::new();
+    d.open("/w/a.ts", "function f() {\n  const x = 1;\n  const y = 2;\n}\n");
+
+    // Emitted on open with indentation fold.
+    let initial_folds = d.folds.first().expect("initial folds on open");
+    assert_eq!(initial_folds.len(), 1);
+    assert_eq!(initial_folds[0].start_line, 0);
+    assert!(initial_folds[0].end_line == 2 || initial_folds[0].end_line == 3);
+    assert!(!initial_folds[0].collapsed);
+
+    // Register a folding range provider for typescript.
+    let provider_args = vec![json!(7), json!([{"language": "typescript"}])];
+    d.feed(request(1, "MainThreadLanguageFeatures", "$registerFoldingRangeProvider", provider_args));
+
+    // Handle the call for $provideFoldingRanges and reply with provider ranges.
+    let (token, _) = d
+        .rpcs
+        .iter()
+        .find(|(_, c)| c.method == "$provideFoldingRanges")
+        .expect("a $provideFoldingRanges RPC call");
+    let token = token.expect("token for provide_folding_ranges");
+    d.feed(Input::RpcReply {
+        token,
+        result: Ok(json!([{"start": 1, "end": 3}, {"start": 2, "end": 3}])),
+    });
+
+    // Folds contains fold at line 0 and (1, 2) from provider.
+    let last_folds = d.folds.last().expect("merged folds");
+    assert!(
+        last_folds.iter().any(|f| f.start_line == 0 && (f.end_line == 2 || f.end_line == 3)),
+        "contains line 0 fold: {last_folds:?}"
+    );
+    assert!(
+        last_folds.iter().any(|f| f.start_line == 1 && f.end_line == 2),
+        "contains (1, 2): {last_folds:?}"
+    );
+
+    // Toggle fold on line 0 to collapsed: true.
+    d.feed(Input::Widget {
+        uri: uri("/w/a.ts"),
+        generation: d.open_generation,
+        event: WidgetEvent::FoldChanged { start_line: 0, collapsed: true },
+    });
+    let after_toggle = d.folds.last().expect("folds after toggle");
+    let fold0 = after_toggle.iter().find(|f| f.start_line == 0).expect("fold at line 0");
+    assert!(fold0.collapsed, "fold at line 0 is collapsed");
+
+    // Insert "// header\n" at (0, 0) (version 1) and verify collapsed fold shifts to line 1.
+    d.feed(Input::Widget {
+        uri: uri("/w/a.ts"),
+        generation: d.open_generation,
+        event: WidgetEvent::CodeChanged {
+            version: 1,
+            range: WidgetRange::new(p(0, 0), p(0, 0)),
+            text: "// header\n".to_owned(),
+        },
+    });
+    let after_edit = d.folds.last().expect("folds after edit");
+    let shifted = after_edit.iter().find(|f| f.start_line == 1).expect("shifted fold at line 1");
+    assert!(shifted.collapsed, "shifted fold at line 1 remains collapsed");
+}
+
+#[test]
+fn fr_e6_semantic_tokens_overlay_textmate_runs_and_release_previous_result() {
+    let mut d = Driver::new();
+    d.open("/w/a.ts", "const x = 1;\n");
+    let runs = d.last_runs();
+    assert_eq!(role_at(runs, 0, 0), Some(SyntaxRole::Keyword), "const tokenized by TextMate");
+
+    let legend = SemanticTokensLegend {
+        token_types: vec!["parameter".into(), "type".into()],
+        token_modifiers: vec![],
+    };
+    let args = vec![
+        json!(9),
+        json!([{"language": "typescript"}]),
+        serde_json::to_value(&legend).unwrap(),
+    ];
+    d.feed(request(1, "MainThreadLanguageFeatures", "$registerDocumentSemanticTokensProvider", args));
+
+    let (token, _) = d
+        .rpcs
+        .iter()
+        .find(|(_, c)| c.method == "$provideDocumentSemanticTokens")
+        .expect("a $provideDocumentSemanticTokens RPC call");
+    let token = token.expect("token for provide_document_semantic_tokens");
+
+    let dto = ember_editor::encode_semantic_tokens_dto(42, &[0, 6, 1, 1, 0]);
+    let reply_json = Reply::Buffer(dto).into_json();
+    d.feed(Input::RpcReply { token, result: Ok(reply_json) });
+
+    let runs = d.last_runs();
+    assert_eq!(role_at(runs, 0, 0), Some(SyntaxRole::Keyword), "const preserved from TextMate");
+    assert_eq!(role_at(runs, 0, 6), Some(SyntaxRole::Type), "x overlaid by semantic tokens as Type");
+
+    d.rpcs.clear();
+    d.feed(Input::Close { uri: uri("/w/a.ts") });
+    let (_, release_call) = d
+        .rpcs
+        .iter()
+        .find(|(_, c)| c.method == "$releaseDocumentSemanticTokens")
+        .expect("a $releaseDocumentSemanticTokens RPC call on close");
+    assert_eq!(release_call.args[0].as_json(), Some(&json!(9)));
+    assert_eq!(release_call.args[1].as_json(), Some(&json!(42)));
 }

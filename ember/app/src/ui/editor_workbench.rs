@@ -702,7 +702,7 @@ pub mod page {
         })
     }
 
-    fn workbench_page() -> Element {
+    pub(super) fn workbench_page() -> Element {
         let s = shared();
         let _ = *s.revision.read();
         let (error, updates, edit_errors, gone, renamed) = {
@@ -1214,7 +1214,7 @@ pub mod page {
                         input { style: "flex:1; min-width:0; height:22px; border:1px solid var(--line); border-radius:var(--r-xs); background:var(--surface); color:var(--text); padding:0 6px;",
                             "aria-label": "{label}", placeholder: "{label}", value: "{prompt_text}", autofocus: true,
                             oninput: move |event| prompt_text.set(event.value()),
-                            onblur: move |_| { if prompt_text.read().trim().is_empty() { prompt.set(None); } },
+                            onblur: move |_| { if crate::ui::editor::blur_closes_prompt(&prompt_text.read()) { prompt.set(None); } },
                             onkeydown: move |event| {
                                 match event.key() {
                                     Key::Enter => { event.stop_propagation(); submit_enter(enter.clone()); }
@@ -2130,6 +2130,10 @@ pub mod page {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "editor_workbench_glue_tests.rs"]
+mod glue_tests;
 
 #[cfg(test)]
 mod tests {

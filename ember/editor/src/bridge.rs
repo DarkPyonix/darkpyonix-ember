@@ -332,6 +332,8 @@ impl WidgetBridge {
                 BridgeAction::ExtensionNotice { severity, message, source }
             }
             SessionUpdate::Commands { .. } | SessionUpdate::Languages { .. } => BridgeAction::None,
+            // The window's trust prompt handles it (FR-L31.18).
+            SessionUpdate::WorkspaceTrustRequested => BridgeAction::None,
             SessionUpdate::Format { uri, format } => {
                 if let Some(doc) = self.docs.get_mut(&uri.key()) {
                     doc.format = Some(format);

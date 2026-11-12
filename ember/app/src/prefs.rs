@@ -69,6 +69,11 @@ pub struct Prefs {
     /// have none, which reads as 0 (the system's size).
     #[serde(default)]
     pub editor_zoom_level: i8,
+    /// The editor's workspace trust answers (FR-L31.18), keyed by
+    /// [`crate::ui::workspace_trust::trust_key`] (computer and folder). `true` is trusted, `false`
+    /// restricted mode. Older files have none: every folder asks once.
+    #[serde(default)]
+    pub workspace_trust: BTreeMap<String, bool>,
 }
 
 fn format_default() -> u32 {
@@ -90,6 +95,7 @@ impl Default for Prefs {
             keymap: crate::ui::keymap::Keymap::default(),
             auto_save: crate::ui::editor_states::AutoSave::default(),
             editor_zoom_level: 0,
+            workspace_trust: BTreeMap::new(),
         }
     }
 }

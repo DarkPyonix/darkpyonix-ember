@@ -46,6 +46,7 @@ pub mod theme;
 pub mod usage;
 pub mod vcs;
 pub mod workbench;
+pub mod workspace_trust;
 
 use dioxus_compose::prelude::*;
 

@@ -47,6 +47,8 @@ pub enum HostCommand {
     SetEol { path: String, eol: ember_editor::Eol },
     SetEncoding { path: String, encoding: ember_editor::Encoding, mode: ember_editor::EncodingMode },
     SetLanguage { path: String, language_id: Option<String> },
+    /// The answer to the workspace trust prompt (FR-L31.18); the window has saved it already.
+    DecideTrust(bool),
 }
 
 #[derive(Default)]
@@ -87,6 +89,8 @@ pub struct HostState {
     /// The search panel's matches and the last replace's report (FR-E7).
     pub search: crate::ui::editor_search::SearchResults,
     pub updates: Vec<SessionUpdate>,
+    /// Workspace trust of the folder: the prompt and the restricted-mode banner (FR-L31.18).
+    pub trust: crate::ui::workspace_trust::TrustState,
 }
 
 const CONNECT_ERROR: &str = "서버에 연결할 수 없습니다";
@@ -152,6 +156,10 @@ impl HostState {
         }
         if let SessionUpdate::ConnectionLost { reason } = &update {
             self.connection_lost(reason);
+        }
+        if let SessionUpdate::WorkspaceTrustRequested = &update {
+            self.trust.requested();
+            return;
         }
         if let SessionUpdate::Commands { commands } = &update {
             self.extension_commands = commands.clone();
@@ -263,7 +271,13 @@ pub struct EditorHost {
 
 impl EditorHost {
     pub fn start(target: EditorTarget, mut revision: SyncSignal<u64>) -> Self {
-        let state = Arc::new(Mutex::new(HostState::default()));
+        let saved = crate::ui::workspace_trust::decision(
+            &crate::services::services().ui.prefs.get_untracked().workspace_trust,
+            &target.computer,
+            &target.folder,
+        );
+        let trust = crate::ui::workspace_trust::TrustState::at_open(saved);
+        let state = Arc::new(Mutex::new(HostState { trust, ..HostState::default() }));
         let (tx, mut rx) = mpsc::unbounded_channel();
         let shared = state.clone();
         let self_tx = tx.clone();
@@ -282,6 +296,8 @@ impl EditorHost {
                 let mut config = SessionConfig::new(target.endpoint.clone(), target.folder.clone());
                 config.connection_token = (!target.token.is_empty()).then(|| target.token.clone());
                 config.app_language = "ko".into();
+                // The answer given since the window opened holds across a reconnect (FR-L31.18, FR-L31.6).
+                config.workspace_trusted = shared.lock().unwrap().trust.trusted;
                 let (session, mut updates) = match EditorSession::connect_tcp(config).await {
                     Ok(pair) => pair,
                     Err(error) => {
@@ -434,6 +450,10 @@ impl EditorHost {
                             Some(HostCommand::Focus(path)) => { let _ = session.focus(session.uri(&path)); }
                             Some(HostCommand::Widget(uri, generation, event)) => { let _ = session.widget_event(uri, generation, event); }
                             Some(HostCommand::Resync(uri)) => { let _ = session.resync(uri); }
+                            Some(HostCommand::DecideTrust(trusted)) => {
+                                shared.lock().unwrap().trust.answer(trusted);
+                                let _ = session.decide_workspace_trust(trusted);
+                            }
                             Some(HostCommand::SetEol { path, eol }) => { let _ = session.set_eol(session.uri(&path), eol); }
                             Some(HostCommand::SetEncoding { path, encoding, mode }) => { let _ = session.set_encoding(session.uri(&path), encoding, mode); }
                             Some(HostCommand::SetLanguage { path, language_id }) => { let _ = session.set_language(session.uri(&path), language_id); }

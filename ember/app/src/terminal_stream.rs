@@ -584,8 +584,11 @@ impl TerminalState {
     }
 
     /// Text for an attach or relay failure: one fixed sentence, never the transport's own text.
+    /// The relay refusal (FR-L31.19) is the app's own sentence and says what to do, so it is shown.
     pub fn error_text(&self) -> Option<String> {
-        self.error.as_ref().map(|_| crate::terminal_reconnect::FAILED_TEXT.to_owned())
+        self.error.as_ref().map(|e| {
+            if e == RELAY_REFUSED { format!("터미널 오류: {RELAY_REFUSED}") } else { crate::terminal_reconnect::FAILED_TEXT.to_owned() }
+        })
     }
 
     /// The one line to show instead of (or under) the screen: the reconnect state, else a
@@ -971,7 +974,9 @@ pub fn attach_existing(base_url: &str, computer_id: &str, term_id: &str, on_chan
             snapshot: true,
         };
         let token = server_token(&base);
-        if let Err(e) = stream(&task_shared, &base, &computer, &term, hello, token, rx).await {
+        let mut rx = rx;
+        // No reconnect policy: a reattached tab ends when its stream ends, as in #768.
+        if let Err(e) = stream(&task_shared, &base, &computer, &term, hello, token, &mut rx, None).await {
             if let Some(shared) = task_shared.upgrade() {
                 shared.update(|s| s.fail(e.to_string()));
             }

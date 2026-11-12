@@ -126,7 +126,8 @@ pub mod view {
     //! The prompt and the banner. The state lives in the editor host (`HostState::trust`), so the
     //! window's shared state does not grow.
 
-    use dioxus_compose::prelude::*;
+    use dioxus_compose::html::prelude::dioxus_signals::WritableExt;
+    use dioxus_compose::html::prelude::*;
 
     use super::*;
     use crate::editor_host::HostCommand;

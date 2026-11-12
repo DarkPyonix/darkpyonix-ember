@@ -1504,7 +1504,7 @@ pub mod view {
     /// and given a tab (the current tab stays) when it has unsaved edits (FR-L31.10). Called once a
     /// frame by the page, after the session's updates are applied.
     pub fn sync_diff_document(s: &Shared) {
-        let wanted = s.scm.working_diff_path().map(|rel| join_path(&s.folder, &rel));
+        let wanted = s.scm.working_diff_path().map(|rel| s.scm.editor_path(&s.folder, &rel));
         let requested = DIFF_DOC.with(|d| d.borrow().clone());
         if let Some(owned) = requested.as_deref().filter(|p| wanted.as_deref() != Some(*p)) {
             let has_tab = s.tabs.read().paths().contains(&owned);
@@ -1909,7 +1909,7 @@ pub mod view {
         let (open_s, close_s, side_s, stage_sel_s) = (s.clone(), s.clone(), s.clone(), s.clone());
         let open_path = d.path.clone();
         // The editable side: the file's document, as the session holds it now (FR-L31.10).
-        let abs = join_path(&s.folder, &d.path);
+        let abs = s.scm.editor_path(&s.folder, &d.path);
         let doc = if d.editable() {
             let uri = s.uris.borrow().get(&abs).cloned();
             uri.and_then(|u| s.bridge.borrow().document(&u).cloned())
@@ -2146,7 +2146,7 @@ pub mod diff_editor_view {
     use ember_editor::{WidgetPos, WidgetRange};
 
     use crate::editor_host::HostCommand;
-    use crate::ui::editor_workbench::{join_path, shared, Shared};
+    use crate::ui::editor_workbench::{shared, Shared};
 
     fn pos(p: compose_rust::code::Position) -> WidgetPos {
         WidgetPos::new(p.line, p.column)
@@ -2167,7 +2167,7 @@ pub mod diff_editor_view {
         }
         let _ = *s.revision.read();
         let Some(rel) = s.scm.working_diff_path() else { return rsx! {} };
-        let abs = join_path(&s.folder, &rel);
+        let abs = s.scm.editor_path(&s.folder, &rel);
         let uri = s.uris.borrow().get(&abs).cloned();
         let Some(uri) = uri else { return rsx! {} };
         let doc = s.bridge.borrow().document(&uri).cloned();

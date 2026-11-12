@@ -567,11 +567,12 @@ pub mod view {
                             let label = t.label.clone();
                             let enabled = why.is_none();
                             let tip = why.clone().unwrap_or_else(|| format!("{label} 실행"));
+                            let note = why.clone().unwrap_or(detail);
                             rsx! {
                                 div { key: "{i}", role: "listitem", style: "display:flex; align-items:center; gap:var(--sp2); padding:var(--sp1) var(--sp2); border-radius:var(--r-sm);",
                                     div { style: "flex:1; min-width:0;",
                                         div { style: if enabled { "" } else { "color:var(--muted);" }, "{label}" }
-                                        div { style: "color:var(--muted); font-size:var(--fs-xs); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;", "{why.clone().unwrap_or(detail)}" }
+                                        div { style: "color:var(--muted); font-size:var(--fs-xs); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;", "{note}" }
                                     }
                                     button { class: "ed-ib", title: "{tip}", "aria-label": "{tip}", disabled: !enabled, onclick: move |_| run(&run_s, &t), {icon("play")} }
                                 }

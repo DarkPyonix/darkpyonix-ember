@@ -973,7 +973,7 @@ pub mod page {
 
     /// The find option a key pressed in a find bar field toggles, by the physical key so that macOS's
     /// Option letters (⌥R gives `®`) still match.
-    fn find_option_for_event(event: &KeyboardEvent) -> Option<crate::ui::keymap::FindOption> {
+    fn find_option_for_event(event: &dioxus_elements::KeyboardEvent) -> Option<crate::ui::keymap::FindOption> {
         let m = event.modifiers();
         let code = format!("{:?}", event.code());
         let key = code.strip_prefix("Key").filter(|k| k.len() == 1).map(str::to_string).unwrap_or_else(|| key_name(&event.key()));

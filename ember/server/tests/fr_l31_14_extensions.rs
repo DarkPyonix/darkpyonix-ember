@@ -149,9 +149,10 @@ fn fr_l31_14_a_recorded_open_vsx_answer_is_rebuilt_into_fixed_fields() {
     assert_eq!(first.version, "0.4.3116");
     assert_eq!(first.downloads, 7_713_255);
     assert!(first.verified && !first.deprecated);
-    // No URL of the gallery is passed on to the client.
+    // No URL of the gallery is passed on to the client. A description is the publisher's own text
+    // and may name a link (the recorded second row does), so the check is on the gallery's host.
     let out = serde_json::to_string(&page).unwrap();
-    assert!(!out.contains("http"), "{out}");
+    assert!(!out.contains("open-vsx.org"), "{out}");
     assert!(!out.contains("files") && !out.contains("icon"));
 }
 

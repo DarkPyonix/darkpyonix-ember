@@ -227,6 +227,14 @@ fn editor_pane() -> Element {
             }
         }
     }
+    // Edits the session asks for (an accepted completion, formatting, a rename, a code action) go to
+    // the widget, which applies them as the reader's own and reports them back as changes.
+    for command in s.bridge.borrow_mut().take_pending_edits(&doc.uri) {
+        if let ember_editor::WidgetCommand::EditCode { request_id, base_version, range, text } = command {
+            use compose_rust::code::CodeRange;
+            handle.edit(request_id, base_version, CodeRange::of(range.start.line, range.start.col, range.end.line, range.end.col), text);
+        }
+    }
     let gutter_decorations = {
         let current_path = s.tabs.read().current_path().map(str::to_string);
         if let Some(abs_path) = current_path {
@@ -330,6 +338,10 @@ pub mod page {
         }
         if action == Action::Save {
             save_current(s);
+            return;
+        }
+        if action == Action::Format {
+            crate::ui::editor_language::view::run(s, crate::ui::editor_language::LangAction::Format);
             return;
         }
         if let Some(mode) = crate::ui::palette::mode_for(action, *s.keymap.read()) {
@@ -742,6 +754,7 @@ pub mod page {
             tree_sel.set(None);
         }
         let saved = updates.iter().any(|u| matches!(u, ember_editor::SessionUpdate::Saved { .. }));
+        let widget_edits = updates.iter().any(|u| matches!(u, ember_editor::SessionUpdate::Command { command: ember_editor::WidgetCommand::EditCode { .. }, .. }));
         for update in updates {
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.uris.borrow_mut().insert(uri.path.clone(), uri.clone()); }
             if let ember_editor::SessionUpdate::Closed { uri } = &update { s.uris.borrow_mut().remove(&uri.path); }
@@ -777,6 +790,12 @@ pub mod page {
             // A save changes the work tree: the changes list and the open diff follow it.
             s.scm.refresh();
         }
+        if widget_edits {
+            // The editor pane is a tree of its own: one more render so it takes the queued edits.
+            let mut revision = s.revision;
+            *revision.write() += 1;
+        }
+        crate::ui::editor_language::view::after_updates(&s, saved);
         let tabs = s.tabs;
         let current = tabs.read().current_path().map(str::to_owned);
         let paths: Vec<String> = tabs.read().paths().into_iter().map(str::to_owned).collect();
@@ -833,6 +852,10 @@ pub mod page {
                         if let Some(target) = crate::ui::editor::editor_focus_target(key_s.tabs.read().current_path()) {
                             key_s.host.send(HostCommand::Focus(target));
                         }
+                        crate::ui::editor_language::view::dismiss_hint(&key_s);
+                    }
+                    if let Some(action) = crate::ui::editor_language::action_for_key(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::SHIFT), m.contains(Modifiers::ALT), m.contains(Modifiers::META)) {
+                        crate::ui::editor_language::view::run(&key_s, action);
                     }
                     let double = DOUBLE_SHIFT.with(|d| {
                         d.borrow_mut().press(
@@ -886,7 +909,7 @@ pub mod page {
                         {tab_strip(&s, &paths, &dirty, current.as_deref())}
                         if *s.menu_open.read() { {menu(&s, keymap)} }
                         if let Some(path) = current.as_deref() {
-                            {breadcrumbs(path, &s.folder)}
+                            {breadcrumbs(&s, path)}
                         }
                         if *s.find.open.read() && active.is_some() && !diff_shown && !conflict_shown { {find_bar(&s)} }
                         div { style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
@@ -926,6 +949,7 @@ pub mod page {
                         {bottom_window(&s, w)}
                     }
                     if *s.palette_open.read() { {palette_sheet(&s, keymap)} }
+                    {crate::ui::editor_language::view::overlay(&s)}
                     {status_bar(&s, &agent_state, &branch, current.as_deref().filter(|_| active.is_some()), line, col, active.as_ref().map_or(4, |d| d.tab_width))}
                 }
             }
@@ -1005,6 +1029,19 @@ pub mod page {
                             button { key: "{label}", role: "menuitem", onclick: move |_| { menu_open.set(false); run_action(&s, a); },
                                 span { class: "spacer", "{label}" }
                                 if !hint.is_empty() { span { class: "ed-msc", "{hint}" } }
+                            }
+                        }
+                    }
+                }
+                // The language features are in the menu too: a key pressed while the code has the focus may not reach the page.
+                for (action, label, hint) in crate::ui::editor_language::MENU {
+                    {
+                        let s = s.clone();
+                        let mut menu_open = s.menu_open;
+                        rsx! {
+                            button { key: "{label}", role: "menuitem", onclick: move |_| { menu_open.set(false); crate::ui::editor_language::view::run(&s, action); },
+                                span { class: "spacer", "{label}" }
+                                span { class: "ed-msc", "{hint}" }
                             }
                         }
                     }
@@ -1754,14 +1791,15 @@ pub mod page {
         }
     }
 
-    fn breadcrumbs(path: &str, folder: &str) -> Element {
-        let segments = crate::ui::editor::breadcrumb_segments(path, folder);
+    fn breadcrumbs(s: &Shared, path: &str) -> Element {
+        let segments = crate::ui::editor::breadcrumb_segments(path, &s.folder);
         let last = segments.len().saturating_sub(1);
         rsx! { div { class: "ed-crumbs", role: "navigation", "aria-label": "경로",
             for (i, seg) in segments.iter().enumerate() {
                 if i > 0 { {icon_px("chev", 11)} }
                 span { key: "{i}", class: if i == last { "cur" } else { "" }, "{seg}" }
             }
+            {crate::ui::editor_language::view::symbol_crumbs(s, path)}
         } }
     }
 

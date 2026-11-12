@@ -31,6 +31,8 @@ pub enum HostCommand {
     /// A debounced search whose pause is over (sent by the host to itself).
     SearchNow { id: u64, request: ember_editor::search::SearchRequest },
     CancelSearch(u64),
+    /// A language feature at the caret: completion, definition, rename and the rest (FR-L31.13).
+    Language(ember_editor::LanguageRequest),
     Replace { id: u64, request: ember_editor::search::ReplaceRequest },
     /// Discard working-tree changes for a file by reading it through the session, reconstructing
     /// the base text from `diff`, and writing it back only if reading succeeds.
@@ -60,6 +62,8 @@ pub struct HostState {
     pub extension_commands: Vec<ember_editor::ContributedCommand>,
     /// The search panel's matches and the last replace's report (FR-E7).
     pub search: crate::ui::editor_search::SearchResults,
+    /// The language features' sheet, messages and symbols (FR-L31.13).
+    pub language: crate::ui::editor_language::LanguageState,
     pub updates: Vec<SessionUpdate>,
 }
 
@@ -106,7 +110,7 @@ impl HostState {
     /// Handle one session update: search and replace results go to the search panel, connection loss is
     /// recorded, every other update is queued in order.
     pub fn apply_update(&mut self, update: SessionUpdate) {
-        if self.search.apply(&update) {
+        if self.search.apply(&update) || self.language.apply(&update) {
             return;
         }
         if let SessionUpdate::ConnectionLost { reason } = &update {
@@ -352,6 +356,7 @@ impl EditorHost {
                             let _ = session.cancel_search(id);
                         }
                         Some(HostCommand::Replace { id, request }) => { let _ = session.replace(id, request); }
+                        Some(HostCommand::Language(request)) => { let _ = session.language(request); }
                         Some(HostCommand::Open(path)) => { let _ = session.open(session.uri(&path)); }
                         Some(HostCommand::Close(path)) => { let _ = session.close(session.uri(&path)); }
                         Some(HostCommand::Focus(path)) => { let _ = session.focus(session.uri(&path)); }
@@ -445,6 +450,16 @@ mod tests {
         assert!(!state.search.running);
         state.apply_update(lost("x"));
         assert_eq!(state.updates.len(), 1);
+    }
+
+    #[test]
+    fn fr_l31_13_language_updates_go_to_the_language_state_not_the_queue() {
+        use ember_editor::language::{Feature, LanguageUpdate};
+        let mut state = HostState::default();
+        let uri = UriComponents::remote("h", "/w/a.rs");
+        state.apply_update(SessionUpdate::Language(LanguageUpdate::Unavailable { uri, feature: Feature::Format }));
+        assert!(state.updates.is_empty());
+        assert_eq!(state.language.notices.len(), 1);
     }
 
     #[test]

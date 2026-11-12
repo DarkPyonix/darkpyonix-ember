@@ -1097,7 +1097,7 @@ impl Stripes {
 pub fn is_implemented(action: Action) -> bool {
     // The right tool windows (agent, notifications) have no panel in the window yet: toggling one shows nothing.
     ToolWindow::from_action(action).is_some_and(|w| w.side() != Side::Right)
-        || matches!(action, Action::Close | Action::HideTool | Action::FindInFile | Action::ReplaceInFiles | Action::Recent | Action::GotoLine)
+        || matches!(action, Action::Close | Action::HideTool | Action::FindInFile | Action::ReplaceInFiles | Action::Recent | Action::GotoLine | Action::Format)
 }
 
 /// Do what a keymap action does. Returns false for an action the editor cannot do yet (the
@@ -1426,7 +1426,8 @@ mod tests {
         for action in Action::ALL {
             // The palette, find, find-in-file, replace-in-files, recent files and goto-line open sheets and bars in the window:
             // they are not tab or tool window changes, so `apply_action` does not do them.
-            if matches!(action, Action::Palette | Action::Find | Action::FindInFile | Action::ReplaceInFiles | Action::Recent | Action::GotoLine) {
+            // Format document goes to the language features (FR-L31.13), not to a tab or a tool window.
+            if matches!(action, Action::Palette | Action::Find | Action::FindInFile | Action::ReplaceInFiles | Action::Recent | Action::GotoLine | Action::Format) {
                 continue;
             }
             let mut tabs = EditorTabs::default();

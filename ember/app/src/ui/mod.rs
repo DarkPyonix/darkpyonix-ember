@@ -24,6 +24,7 @@ pub mod find;
 pub mod palette;
 pub mod files;
 pub mod fonts;
+pub mod editor_language;
 pub mod editor_search;
 pub mod home;
 pub mod keymap;

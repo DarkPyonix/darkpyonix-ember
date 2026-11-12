@@ -92,8 +92,8 @@ fn fr_l31_the_palette_starts_with_the_editors_actions_and_not_itself() {
 fn fr_l31_commands_the_editor_cannot_do_yet_are_marked_and_listed_after_the_working_ones() {
     let list = action_items(Keymap::VsCode, Os::Mac);
     let enabled = |a: Action| list.iter().find(|i| i.payload == Payload::Action(a)).unwrap().enabled;
-    assert!(enabled(Action::Terminal) && enabled(Action::Close) && enabled(Action::HideTool) && enabled(Action::Recent) && enabled(Action::GotoLine));
-    for a in [Action::Save, Action::RunConfig, Action::Stop, Action::Format, Action::Ask, Action::NewTerminal, Action::MaximizeTool] {
+    assert!(enabled(Action::Terminal) && enabled(Action::Close) && enabled(Action::HideTool) && enabled(Action::Recent) && enabled(Action::GotoLine) && enabled(Action::Format));
+    for a in [Action::Save, Action::RunConfig, Action::Stop, Action::Ask, Action::NewTerminal, Action::MaximizeTool] {
         assert!(!enabled(a), "{a:?} is not implemented");
     }
     let ranked = rank("", &list);

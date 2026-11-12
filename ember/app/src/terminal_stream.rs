@@ -721,7 +721,7 @@ pub fn start(
     let shared = Arc::new(Shared {
         session: Mutex::new(TerminalSession::new()),
         revision: AtomicU64::new(0),
-        // TODO(#334): PTY resize. The panel never calls resize, so the session stays 80x24.
+        // The size until the panel measures itself (FR-L31.20, `ui::term_fit`).
         size: Mutex::new((80, 24)),
         tx,
         on_change,

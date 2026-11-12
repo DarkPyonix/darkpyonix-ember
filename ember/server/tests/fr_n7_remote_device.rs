@@ -224,3 +224,184 @@ async fn fr_n7_letify_localhost_route_call_and_revocation() {
     server_t.close().await;
     task.abort();
 }
+
+// ---- FR-N8: per-device scope on the transport door (#366) --------------------------------
+// Named `fr_n7_scope_*` so the existing `fr_n7_*` CI filter runs them.
+
+use ember_server::devices::Scope;
+
+/// A server whose transport door enforces device scopes, as `main.rs` serves it.
+fn serve_scoped_server(net: &MemNetwork) -> (Transport, Arc<Devices>) {
+    let (app, store) = router();
+    let devices = Devices::open(store).unwrap();
+    let server_t = net.transport();
+    tokio::spawn(server_transport::serve_scoped(&server_t, app, devices.clone()).unwrap());
+    (server_t, devices)
+}
+
+/// A device with `scope`, dialing `server_t`.
+fn device_with(net: &MemNetwork, devices: &Devices, scope: Scope) -> (Dialer, ember_transport::PeerId) {
+    let t = net.transport();
+    let peer = t.peer_id();
+    devices.add(peer, "phone").unwrap();
+    devices.set_scope(&peer, scope).unwrap();
+    (Dialer::new(t), peer)
+}
+
+/// `method path` with an optional JSON body through the transport as a device.
+async fn device_call(
+    device: &Dialer,
+    server: &Transport,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let fut = async {
+        let stream = device.open_bi(&PeerAddr::new(server.peer_id()), SERVER_SERVICE).await.unwrap();
+        let mut http = http1_handshake::<Full<hyper::body::Bytes>>(stream).await.unwrap();
+        let bytes = body.map(|b| b.to_string()).unwrap_or_default();
+        let req = hyper::Request::builder()
+            .method(method)
+            .uri(format!("http://ember-server{path}"))
+            .header("content-type", "application/json")
+            .body(Full::new(hyper::body::Bytes::from(bytes)))
+            .unwrap();
+        let resp = http.send_request(req).await.unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null))
+    };
+    tokio::time::timeout(Duration::from_secs(5), fut).await.expect("timed out")
+}
+
+fn assert_denied(got: &(StatusCode, serde_json::Value), what: &str) {
+    assert_eq!(got.0, StatusCode::FORBIDDEN, "{what}: {:?}", got.1);
+    assert_eq!(got.1["code"], "scope_denied", "{what}: {:?}", got.1);
+}
+
+fn assert_not_denied(got: &(StatusCode, serde_json::Value), what: &str) {
+    assert!(
+        !(got.0 == StatusCode::FORBIDDEN && got.1["code"] == "scope_denied"),
+        "{what} was refused by the scope: {:?}",
+        got.1
+    );
+}
+
+fn new_session() -> serde_json::Value {
+    serde_json::json!({ "agent": "scripted", "cwd": "/tmp" })
+}
+
+/// Rows from before the migration, and new rows, are `full`.
+#[tokio::test]
+async fn fr_n7_scope_defaults_to_full_and_full_is_unchanged() {
+    let net = MemNetwork::new();
+    let (server_t, devices) = serve_scoped_server(&net);
+    let t = net.transport();
+    devices.add(t.peer_id(), "laptop").unwrap();
+    assert_eq!(devices.scope_of(&t.peer_id()), Some(Scope::Full));
+    let laptop = Dialer::new(t);
+
+    let got = device_call(&laptop, &server_t, "GET", NORMAL_ROUTE, None).await;
+    assert_eq!(got.0, StatusCode::OK);
+    let got = device_call(&laptop, &server_t, "POST", "/api/sessions", Some(new_session())).await;
+    assert_not_denied(&got, "full: POST /api/sessions");
+}
+
+/// `read_only` gets GETs and is refused on every state-changing route and on shells and tokens.
+#[tokio::test]
+async fn fr_n7_scope_read_only_allows_gets_and_refuses_changes() {
+    let net = MemNetwork::new();
+    let (server_t, devices) = serve_scoped_server(&net);
+    let (d, _) = device_with(&net, &devices, Scope::ReadOnly);
+
+    for path in ["/api/health", "/api/sessions", NORMAL_ROUTE] {
+        let got = device_call(&d, &server_t, "GET", path, None).await;
+        assert_eq!(got.0, StatusCode::OK, "GET {path}: {:?}", got.1);
+    }
+    for (m, path) in [
+        ("POST", "/api/sessions"),
+        ("PATCH", "/api/sessions/s1"),
+        ("POST", "/api/sessions/s1/messages"),
+        ("POST", "/api/projects"),
+        ("DELETE", "/api/projects/p"),
+        ("POST", "/api/computers/local/terms"),
+        ("GET", "/api/computers/local/terms/t1/attach"),
+        ("POST", "/api/computers/local/fs/write"),
+        ("GET", "/api/sessions/s1/ide"),
+        ("POST", "/api/server-token/rotate"),
+        ("GET", "/api/devices"),
+    ] {
+        let body = (m != "GET").then(|| serde_json::json!({}));
+        assert_denied(&device_call(&d, &server_t, m, path, body).await, &format!("read_only: {m} {path}"));
+    }
+}
+
+/// `chat_only` talks in channels and to existing sessions, nothing else.
+#[tokio::test]
+async fn fr_n7_scope_chat_only_cannot_create_sessions_shell_fs_or_tokens() {
+    let net = MemNetwork::new();
+    let (server_t, devices) = serve_scoped_server(&net);
+    let (d, _) = device_with(&net, &devices, Scope::ChatOnly);
+
+    for (m, path) in [
+        ("POST", "/api/sessions"),
+        ("POST", "/api/sessions/s1/fork"),
+        ("POST", "/api/sessions/s1/approvals/a1"),
+        ("POST", "/api/computers/local/terms"),
+        ("GET", "/api/computers/local/terms/t1/attach"),
+        ("POST", "/api/a2a/terminal/s1/text"),
+        ("POST", "/api/computers/local/fs/read"),
+        ("GET", NORMAL_ROUTE),
+        ("POST", "/api/channels"),
+        ("POST", "/api/server-token/rotate"),
+        ("GET", "/api/server-token"),
+        ("PATCH", "/api/devices/x"),
+    ] {
+        let body = (m != "GET").then(|| serde_json::json!({}));
+        assert_denied(&device_call(&d, &server_t, m, path, body).await, &format!("chat_only: {m} {path}"));
+    }
+    // Allowed families reach their handler (which may answer 404 for an unknown id).
+    let got = device_call(&d, &server_t, "GET", "/api/sessions", None).await;
+    assert_eq!(got.0, StatusCode::OK, "{:?}", got.1);
+    let msg = serde_json::json!({ "text": "hi" });
+    assert_not_denied(&device_call(&d, &server_t, "POST", "/api/sessions/s1/messages", Some(msg.clone())).await, "message");
+    assert_not_denied(&device_call(&d, &server_t, "POST", "/api/channels/c1/messages", Some(msg)).await, "channel");
+}
+
+/// A device cannot widen its own scope: `/api/devices` is not on the transport, a narrow scope
+/// is refused there outright, and re-adding a device keeps its scope. Only the owner, on the
+/// local listener with the token, sets it.
+#[tokio::test]
+async fn fr_n7_scope_device_cannot_raise_its_own_scope() {
+    let net = MemNetwork::new();
+    let (server_t, devices) = serve_scoped_server(&net);
+    let (narrow, narrow_peer) = device_with(&net, &devices, Scope::ChatOnly);
+    let (full, full_peer) = device_with(&net, &devices, Scope::Full);
+    let raise = serde_json::json!({ "scope": "full" });
+
+    let path = format!("/api/devices/{narrow_peer}");
+    assert_denied(&device_call(&narrow, &server_t, "PATCH", &path, Some(raise.clone())).await, "self raise");
+    let got = device_call(&full, &server_t, "PATCH", &path, Some(raise.clone())).await;
+    assert!(!got.0.is_success(), "a full device changed another's scope over the transport: {:?}", got);
+    assert_eq!(devices.scope_of(&narrow_peer), Some(Scope::ChatOnly));
+    devices.add(narrow_peer, "renamed").unwrap();
+    assert_eq!(devices.scope_of(&narrow_peer), Some(Scope::ChatOnly), "re-adding widened the scope");
+    let _ = full_peer;
+
+    // The owner's door: the devices router behind the token.
+    let (addr, token, _dir) = serve_local(ember_server::devices::api::router(devices.clone())).await;
+    let patch = |bearer: Option<String>| {
+        let path = path.clone();
+        async move {
+            let client = reqwest::Client::new();
+            let mut req = client.patch(format!("http://{addr}{path}")).json(&serde_json::json!({ "scope": "read_only" }));
+            if let Some(t) = bearer {
+                req = req.bearer_auth(t);
+            }
+            req.send().await.unwrap().status().as_u16()
+        }
+    };
+    assert_eq!(patch(None).await, 401);
+    assert_eq!(patch(Some(token)).await, 200);
+    assert_eq!(devices.scope_of(&narrow_peer), Some(Scope::ReadOnly));
+}

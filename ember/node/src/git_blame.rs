@@ -7,6 +7,12 @@
 //! line numbers are the buffer's. A line that no commit holds (an edit, a new or untracked
 //! file, a repository without a commit) answers `commit: null`.
 //!
+//! The editor's buffer arrives with `\n` line breaks (the widget's text form), while the file may
+//! use `\r\n`. Git compares the buffer with the committed blob byte for byte, so a CRLF file sent
+//! as LF would come back with every line not committed. When `contents` has no `\r` and the
+//! saved file in the work tree has CRLF line endings (more CRLF than bare LF, the rule Monaco
+//! uses to pick a document's EOL), the buffer is converted to CRLF first ([`match_eol`]).
+//!
 //! Limits: `path` is relative to the work tree root with plain components only (no `..`, no
 //! absolute path, no NUL), `contents` is at most [`super::max_output`] bytes, and git is stopped
 //! after [`blame_timeout`] (504), because a blame walks history and a long one must not hold a
@@ -99,6 +105,35 @@ pub fn parse_porcelain(text: &str) -> Result<Option<GitBlameCommit>, GitError> {
     Ok(Some(GitBlameCommit { sha: sha.to_string(), author, email, time: time.ok_or_else(bad)?, summary }))
 }
 
+/// Whether `saved` (a file's bytes) uses `\r\n` line endings: more CRLF than bare LF.
+pub fn is_crlf(saved: &[u8]) -> bool {
+    let lf = saved.iter().filter(|b| **b == b'\n').count();
+    let crlf = saved.windows(2).filter(|w| w == b"\r\n").count();
+    crlf > 0 && crlf * 2 > lf
+}
+
+/// `contents` with the saved file's line endings: a buffer with `\n` breaks only becomes
+/// `\r\n` when the saved file is CRLF; a buffer that already has `\r` is sent as it is.
+pub fn match_eol<'a>(contents: &'a str, saved: Option<&[u8]>) -> std::borrow::Cow<'a, str> {
+    match saved {
+        Some(saved) if !contents.contains('\r') && contents.contains('\n') && is_crlf(saved) => {
+            std::borrow::Cow::Owned(contents.replace('\n', "\r\n"))
+        }
+        _ => std::borrow::Cow::Borrowed(contents),
+    }
+}
+
+/// The saved file's bytes, through the path policy (so a symlink cannot lead outside the
+/// allowed roots), at most [`super::max_output`] of them; `None` when it cannot be read.
+async fn saved_bytes(policy: &PathPolicy, root: &Path, path: &str) -> Option<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let file = policy.resolve_existing(&root.join(path)).ok()?;
+    let f = tokio::fs::File::open(file).await.ok()?;
+    let mut bytes = Vec::new();
+    f.take(super::max_output() as u64).read_to_end(&mut bytes).await.ok()?;
+    Some(bytes)
+}
+
 pub async fn blame(policy: &PathPolicy, r: &GitBlameRequest) -> Result<GitBlameResponse, GitError> {
     check_path(&r.path)?;
     if r.line == 0 {
@@ -112,13 +147,20 @@ pub async fn blame(policy: &PathPolicy, r: &GitBlameRequest) -> Result<GitBlameR
     if !has_head(&root).await? {
         return Ok(uncommitted);
     }
+    let contents = match r.contents.as_deref() {
+        Some(c) => Some(match_eol(c, saved_bytes(policy, &root, &r.path).await.as_deref()).into_owned()),
+        None => None,
+    };
+    if contents.as_ref().is_some_and(|c| c.len() > super::max_output()) {
+        return Err(GitError::TooLarge("파일이 너무 커서 blame을 확인할 수 없습니다.".into()));
+    }
     let range = format!("{0},{0}", r.line);
     let mut args: Vec<&str> = vec!["blame", "--porcelain", "-L", range.as_str()];
     if r.contents.is_some() {
         args.extend(["--contents", "-"]);
     }
     args.extend(["--", r.path.as_str()]);
-    let out = match run_with(&root, &args, r.contents.as_deref(), Some(blame_timeout())).await {
+    let out = match run_with(&root, &args, contents.as_deref(), Some(blame_timeout())).await {
         Err(GitError::Timeout(_)) => {
             return Err(GitError::Timeout(format!(
                 "git blame이 {}초 안에 끝나지 않아 중단했습니다.",

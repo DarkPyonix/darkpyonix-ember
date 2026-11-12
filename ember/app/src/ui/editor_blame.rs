@@ -9,7 +9,8 @@
 //!
 //! The answer comes from the project's git relay (`git/blame`, FR-G4): one line per call, the
 //! editor's text sent along while the buffer has unsaved edits, so the line numbers are the
-//! buffer's. A cursor move waits [`DEBOUNCE_MS`] before asking, answers are kept per file, line
+//! buffer's. The text goes with `\n` breaks; the node gives it the saved file's CRLF when the
+//! file has them. A cursor move waits [`DEBOUNCE_MS`] before asking, answers are kept per file, line
 //! and buffer version, and every status read of the window (after a save, a commit, a stage)
 //! drops them.
 use std::collections::HashMap;

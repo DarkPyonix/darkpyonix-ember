@@ -1,7 +1,7 @@
 //! FR-L31.8 blame of one line over HTTP, using repositories under `.scratch/`.
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use ember_node::git::git_blame::{check_path, parse_porcelain};
+use ember_node::git::git_blame::{check_path, is_crlf, match_eol, parse_porcelain};
 use ember_node::{api::{self, Node}, config::NodeConfig};
 use serde_json::{json, Value};
 
@@ -146,5 +146,39 @@ async fn fr_l31_8_rejects_bad_paths_and_lines() {
     ] {
         let (status, out) = post(&client, &url, body.clone()).await;
         assert_eq!(status, 400, "{body} -> {out}");
+    }
+}
+
+#[test]
+fn fr_l31_8_lf_buffer_takes_the_saved_files_crlf() {
+    assert!(is_crlf(b"a\r\nb\r\n"));
+    assert!(is_crlf(b"a\r\nb\r\nc\n"));
+    assert!(!is_crlf(b"a\nb\n"));
+    assert!(!is_crlf(b"a\r\nb\nc\nd\n"));
+    assert!(!is_crlf(b""));
+    assert_eq!(match_eol("a\nb\n", Some(b"a\r\nb\r\n")), "a\r\nb\r\n");
+    assert_eq!(match_eol("a\nb\n", Some(b"a\nb\n")), "a\nb\n");
+    assert_eq!(match_eol("a\nb\n", None), "a\nb\n");
+    // A buffer that already carries CR is the document's own form and is sent as it is.
+    assert_eq!(match_eol("a\r\nb\n", Some(b"a\r\nb\r\n")), "a\r\nb\n");
+}
+
+#[tokio::test]
+async fn fr_l31_8_crlf_file_with_unsaved_edit_blames_only_the_edited_line() {
+    let (_dir, repo, url, client) = setup().await;
+    git(&repo, &["config", "core.autocrlf", "false"]);
+    let first = commit(&repo, "w.txt", "one\r\ntwo\r\nthree\r\n", "crlf file");
+    // The buffer in the document's own CRLF form, and as the editor widget holds it (LF).
+    for contents in ["one\r\nTWO\r\nthree\r\n", "one\nTWO\nthree\n"] {
+        for (line, committed) in [(1, true), (2, false), (3, true)] {
+            let (status, body) =
+                post(&client, &url, json!({"repo": repo, "path": "w.txt", "line": line, "contents": contents})).await;
+            assert_eq!(status, 200, "{body}");
+            if committed {
+                assert_eq!(body["commit"]["sha"], first, "line {line} of {contents:?}");
+            } else {
+                assert_eq!(body["commit"], Value::Null, "line {line} of {contents:?}");
+            }
+        }
     }
 }

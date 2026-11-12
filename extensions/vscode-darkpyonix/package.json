@@ -215,7 +215,8 @@
     "typecheck": "tsc -p . --noEmit",
     "test": "vitest run",
     "test:e2e": "node esbuild.mjs --e2e && node test/e2e/runTest.mjs",
-    "package": "npm run build && vsce package --no-dependencies"
+    "package": "npm run build && vsce package --no-dependencies",
+    "test:real": "vitest run -c vitest.real.config.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

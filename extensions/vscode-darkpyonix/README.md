@@ -66,8 +66,45 @@ npm run typecheck
 npm test            # vitest: format round trip, event application, client + session + runs against a fake manager
 npm run build       # esbuild → dist/extension.js
 npm run test:e2e    # the real extension inside an installed VS Code (VSCODE_PATH; nothing is downloaded)
+DARKPYONIX_CLI=/path/to/darkpyonix npm run test:real   # client, runs and outputs against the real manager
 npm run package     # → vscode-darkpyonix-<version>.vsix
 ```
+
+`npm run test:real` (`test/real/`) spawns the real `darkpyonix manager --ephemeral` named by
+`DARKPYONIX_CLI` with a temporary `DARKPYONIX_HOME` under `.scratch/`, and checks: discovery from
+the stdout line, opening a `.pynb` (kernel start, cells bound), running a cell, live SSE output while
+a cell still runs, interrupting a slow cell (the kernel process and namespace survive), the latest
+outputs per cell on reopen, and the stale mark after an edit. It ends the kernel and the manager it
+started. CI (`test-vscode-extension.yml`, job "Notebook extension against the real manager") builds
+the manager from a pinned darkpyonix-core commit (`CORE_REF`) and runs it.
+
+## Manual check (owner)
+
+Checks that need a person at the screen; CI does not cover them. Install the built `.vsix`
+(`npm run package`, then *Extensions: Install from VSIX...*) and have the `darkpyonix` CLI on `PATH`
+(or set `darkpyonix.cliPath`).
+
+1. **Manager found or spawned like the CLI.** With no `darkpyonix.manager.url` and no
+   `DARKPYONIX_MANAGER_URL`/`DARKPYONIX_TOKEN`, open a notebook: *DarkPyonix: Show Log* says
+   `manager: spawned http://127.0.0.1:... (pid N)` and `<home>/managers/` does not appear. Start
+   VS Code from a shell where `darkpyonix manager` printed `{url, token, pid}` and both variables are
+   exported: the log says `manager: env ...` and no new manager is spawned. Export only one of the
+   two: opening fails with "set both DARKPYONIX_MANAGER_URL and DARKPYONIX_TOKEN, or neither".
+2. **Open.** A `.pynb` file opens as a notebook; a `.py` file opens as one through *Open as
+   DarkPyonix Notebook* (explorer context menu). Cells, titles, Markdown cells and type badges match
+   the file.
+3. **Latest outputs per cell.** For a file that has run before (`darkpyonix run file.pynb`), every
+   cell shows the outputs of the latest run on open. Edit a cell: it shows the "outputs from previous
+   source" badge; other cells do not.
+4. **Run.** Run one cell, then *Run All*: outputs appear in the cells, and the file's `__runs__/`
+   gets a new run log.
+5. **Live outputs.** Run `for i in range(5): print(i, flush=True); time.sleep(1)`: the numbers
+   appear one per second, not at the end.
+6. **Stop.** Run `time.sleep(600)` and press the stop button (*Interrupt Kernel*): the cell ends
+   with `KeyboardInterrupt`, and running `print(x)` for a variable set earlier still works (same
+   kernel, namespace kept).
+7. **Leave.** Quit VS Code: the kernel keeps running (`darkpyonix ps`), and the spawned manager
+   ends by itself after its idle timeout (2 minutes).
 
 `test/corpus/darkpyonix_format.py` is a copy of darkpyonix-core `docs/examples/darkpyonix_format.py`
 (FR-F1 reference file); keep it in sync when the format changes.

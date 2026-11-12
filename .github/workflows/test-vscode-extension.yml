@@ -1,8 +1,9 @@
 name: VS Code extension
 
 # Type check, unit and integration tests (vitest, against the fake manager) and packaging of the
-# VS Code extensions. The in-VS Code e2e run (npm run test:e2e) needs an installed VS Code and is
-# not run here.
+# VS Code extensions, plus the extension's modules against the real DarkPyonix manager built from a
+# pinned darkpyonix-core commit. The in-VS Code e2e run (npm run test:e2e) needs an installed
+# VS Code and is not run here.
 
 on:
   push:
@@ -39,6 +40,49 @@ jobs:
         with:
           name: vscode-darkpyonix
           path: extensions/vscode-darkpyonix/*.vsix
+
+  real-manager:
+    name: Notebook extension against the real manager
+    runs-on: ubuntu-latest
+    env:
+      # darkpyonix-core develop, pinned so a core change cannot break this check unannounced.
+      # Bump it on purpose when the extension follows a new core contract.
+      CORE_REF: 1de32bed50cfd510a21bb096f5a27284d958ea9d
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: DarkPyonix/darkpyonix
+          ref: ${{ env.CORE_REF }}
+          path: .scratch/core
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .scratch/core/darkpyonix/manager
+      - name: Build the manager
+        # The binary embeds the kernel package sources (core darkpyonix/kernel); the kernel runs
+        # from source on the runner's python3 (no install).
+        working-directory: .scratch/core/darkpyonix/manager
+        run: cargo build --release --locked -p darkpyonix
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: extensions/vscode-darkpyonix/package-lock.json
+      - name: Test against the real manager
+        working-directory: extensions/vscode-darkpyonix
+        env:
+          DARKPYONIX_CLI: ${{ github.workspace }}/.scratch/core/darkpyonix/manager/target/release/darkpyonix
+        run: |
+          npm ci
+          # Each test file spawns its own ephemeral manager with a temporary DARKPYONIX_HOME under
+          # .scratch/ and ends it and its kernel. Nothing may be left running afterwards.
+          npm run test:real
+          if pgrep -f "$DARKPYONIX_CLI" >/dev/null || pgrep -f "darkpyonix.__main__" >/dev/null; then
+            echo "processes left running:"; pgrep -af "darkpyonix" || true; exit 1
+          fi
 
   theme:
     name: Package theme

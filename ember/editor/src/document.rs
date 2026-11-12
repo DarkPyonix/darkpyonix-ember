@@ -224,7 +224,7 @@ impl OpenDocument {
     }
 
     /// Replace the buffer with `text` (widget form, `\n` line breaks) that need not be on disk: a buffer
-    /// kept across a reconnect (FR-L31.5). Like [`OpenDocument::reset`], but the disk text, the BOM and
+    /// kept across a reconnect (FR-L31.6). Like [`OpenDocument::reset`], but the disk text, the BOM and
     /// the file's line ending stay, and the document is dirty unless `text` equals the disk text.
     pub fn restore(&mut self, text: &str, generation: u64) -> Vec<Call> {
         let eol = self.mirror.eol().to_owned();

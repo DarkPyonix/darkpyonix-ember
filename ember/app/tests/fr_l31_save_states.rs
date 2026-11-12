@@ -1,4 +1,4 @@
-//! FR-L31.5: what the Ember 에디터 window shows about a file and the connection, and auto-save. The pure
+//! FR-L31.6: what the Ember 에디터 window shows about a file and the connection, and auto-save. The pure
 //! parts, no renderer.
 
 use ember_app::prefs::{self, Prefs};

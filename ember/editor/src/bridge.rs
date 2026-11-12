@@ -34,7 +34,7 @@ pub struct DocumentWidgetState {
     /// `EditCode` commands queued for the widget.
     pub pending_edits: Vec<WidgetCommand>,
     pub external_change: Option<ExternalChange>,
-    /// Why the last save of this document failed, until a save succeeds (FR-L31.5).
+    /// Why the last save of this document failed, until a save succeeds (FR-L31.6).
     pub save_error: Option<String>,
     /// The coloured runs of the syntax and the document version they were written against.
     pub syntax: SyntaxRuns,
@@ -320,7 +320,7 @@ impl WidgetBridge {
         self.docs.get(key)
     }
 
-    /// Hide the failed save of a document (the bar's 닫기); the next failure shows again (FR-L31.5).
+    /// Hide the failed save of a document (the bar's 닫기); the next failure shows again (FR-L31.6).
     pub fn dismiss_save_error(&mut self, uri: &UriComponents) {
         if let Some(doc) = self.docs.get_mut(&uri.key()) {
             doc.save_error = None;

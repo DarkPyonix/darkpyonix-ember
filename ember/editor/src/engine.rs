@@ -91,7 +91,7 @@ pub enum Input {
     /// The editor of `uri` became the active one.
     Focus { uri: UriComponents },
     /// Show `text` (widget form) as the buffer of `uri`, opening the file first if it is not open: the
-    /// window's buffer kept across a reconnect (FR-L31.5). The document is dirty unless `text` equals
+    /// window's buffer kept across a reconnect (FR-L31.6). The document is dirty unless `text` equals
     /// the file on disk; equal text changes nothing.
     Restore { uri: UriComponents, text: String },
     /// An event from the `CodeEditor` node rendered with key `generation`.

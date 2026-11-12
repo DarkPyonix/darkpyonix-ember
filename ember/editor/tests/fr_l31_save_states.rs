@@ -1,4 +1,4 @@
-//! FR-L31.5: the file states the window shows. The session core and the widget bridge keep what
+//! FR-L31.6: the file states the window shows. The session core and the widget bridge keep what
 //! Code-OSS shows for a document: a failed save (until a save succeeds), a change on disk while the
 //! buffer has unsaved edits (a clean buffer reloads silently), a file deleted on disk, and a buffer
 //! restored after a reconnect (dirty unless it equals the disk).

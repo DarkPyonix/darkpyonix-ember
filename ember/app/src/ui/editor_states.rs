@@ -1,4 +1,4 @@
-//! FR-L31.5: what the Ember 에디터 window shows about the state of a file and of the connection, as
+//! FR-L31.6: what the Ember 에디터 window shows about the state of a file and of the connection, as
 //! Code-OSS does: a failed save (with 다시 시도), a change on disk while the buffer has unsaved edits
 //! (비교, 덮어쓰기, 디스크 버전으로 되돌리기; a clean buffer reloads without asking), a file deleted on
 //! disk (the tab is struck through and says 삭제됨), a lost connection (a banner with 다시 연결), and

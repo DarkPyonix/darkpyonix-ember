@@ -14,7 +14,7 @@ pub enum HostCommand {
     Focus(String),
     Widget(UriComponents, u64, WidgetEvent),
     Resync(UriComponents),
-    /// Show `text` as the buffer of `path`, opening it if needed (FR-L31.5, after a reconnect).
+    /// Show `text` as the buffer of `path`, opening it if needed (FR-L31.6, after a reconnect).
     Restore { path: String, text: String },
     /// Take the disk version of an open file even with unsaved edits (디스크 버전으로 되돌리기).
     Reload(String),
@@ -51,7 +51,7 @@ pub struct HostState {
     /// Why the window cannot work at all (no endpoint, the first connection failed).
     pub error: Option<String>,
     /// The connection was lost after it worked: why (the server's words, for the log and a tooltip).
-    /// The window stays as it is, with a banner and 다시 연결 (FR-L31.5).
+    /// The window stays as it is, with a banner and 다시 연결 (FR-L31.6).
     pub lost: Option<String>,
     /// A reconnect is running.
     pub reconnecting: bool,
@@ -59,7 +59,7 @@ pub struct HostState {
     pub reconnects: u64,
     /// The disk version read for the compare view: (path, text or the error).
     pub compare: Option<(String, Result<String, String>)>,
-    /// Auto-save waits that ran out: (path, wait number) (FR-L31.5).
+    /// Auto-save waits that ran out: (path, wait number) (FR-L31.6).
     pub autosave_due: Vec<(String, u64)>,
     pub entries: Vec<(String, u32)>,
     /// Every directory listed so far, by path, for the explorer tree.
@@ -266,7 +266,7 @@ impl EditorHost {
             }
             let root = target.folder.clone();
             // A lost connection ends the session (`EditorSession` does not resume its sockets); 다시 연결
-            // starts a new one and the window puts its tabs and buffers back (FR-L31.5).
+            // starts a new one and the window puts its tabs and buffers back (FR-L31.6).
             let mut attempt = 0u32;
             loop {
                 attempt += 1;

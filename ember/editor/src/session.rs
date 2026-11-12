@@ -17,7 +17,7 @@
 //! (dioxus-compose PR-3: no domain work on the UI thread) and reads [`SessionUpdate`]s.
 //!
 //! A lost connection ends the session with [`SessionUpdate::ConnectionLost`]. The window reconnects
-//! by starting a new session and putting its buffers back with [`EditorSession::restore`] (FR-L31.5);
+//! by starting a new session and putting its buffers back with [`EditorSession::restore`] (FR-L31.6);
 //! `ember_editor_conn::handshake::reconnect_loop` (resuming the same sockets with the reconnection
 //! token) is not used, because the session drops its connection state when the socket goes.
 //! Not yet: several workspace folders, configuration changes at runtime.
@@ -434,7 +434,7 @@ impl EditorSession {
         self.send(Command::Input(Input::Reload { uri }))
     }
 
-    /// Show `text` as the buffer of `uri`, opening the file if needed (FR-L31.5): the window's buffer
+    /// Show `text` as the buffer of `uri`, opening the file if needed (FR-L31.6): the window's buffer
     /// kept across a reconnect. Dirty unless it equals the file on disk.
     pub fn restore(&self, uri: UriComponents, text: String) -> Result<(), Error> {
         self.send(Command::Input(Input::Restore { uri, text }))

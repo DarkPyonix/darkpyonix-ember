@@ -776,7 +776,7 @@ pub mod page {
             // A save changes the work tree: the changes list and the open diff follow it.
             s.scm.refresh();
         }
-        // Reconnect, auto-save and compare follow the updates (FR-L31.5).
+        // Reconnect, auto-save and compare follow the updates (FR-L31.6).
         let now_current = s.tabs.read().current_path().map(str::to_owned);
         crate::ui::editor_states::view::after_updates(&s, now_current.as_deref());
         let tabs = s.tabs;

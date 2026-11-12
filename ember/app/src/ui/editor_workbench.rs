@@ -2529,12 +2529,19 @@ pub mod page {
             let mut revision = revision;
             *revision.write() += 1;
         };
-        let view = terms::view();
+        strip_of(terms::view(), bump)
+    }
+
+    /// The strip for one [`terms::StripView`]. The + sits outside the scrolling tab list, after it,
+    /// so it stays visible in every state as in Code-OSS (#799); inside the scrolling list the
+    /// renderer drew it only while a rename field was open.
+    pub(super) fn strip_of(view: Option<terms::StripView>, bump: impl Fn() + Copy + 'static) -> Element {
         let (tabs, active, renaming, error) = match view {
             Some(v) => (v.tabs, v.active, v.renaming, v.error),
             None => (Vec::new(), None, None, None),
         };
         rsx! {
+            div { class: "ed-tstrip",
             div { class: "ed-tsub", role: "tablist", "aria-label": "터미널",
                 for (id, label) in tabs {
                     if renaming.as_ref().is_some_and(|(r, _)| *r == id) {
@@ -2584,7 +2591,8 @@ pub mod page {
                         }
                     }
                 }
-                button { class: "ed-ib", title: "새 터미널", "aria-label": "새 터미널", onclick: move |_| { terms::new_terminal(); bump(); }, {icon("plus")} }
+            }
+                button { class: "ed-ib ed-tnew", title: "새 터미널", "aria-label": "새 터미널", onclick: move |_| { terms::new_terminal(); bump(); }, {icon("plus")} }
             }
             if let Some(error) = error {
                 div { class: "tl", style: "padding:0 var(--sp3); color:var(--c-red);", "{error}" }
@@ -2958,6 +2966,10 @@ pub mod page {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "editor_terminal_strip_tests.rs"]
+mod terminal_strip_tests;
 
 #[cfg(test)]
 #[path = "editor_workbench_glue_tests.rs"]

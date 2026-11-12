@@ -161,6 +161,7 @@ const MIGRATIONS: &[&str] = &[
     HARNESS_SETTINGS_MIGRATION,
     crate::computers::schema::PEER_ID_UNIQUE_MIGRATION,
     crate::projects::schema::CHARACTER_OVERRIDES_MIGRATION,
+    crate::schedules::schema::EVENTS_MIGRATION,
 ];
 
 /// The position of a registered migration (tests locate migrations by position, never by length).

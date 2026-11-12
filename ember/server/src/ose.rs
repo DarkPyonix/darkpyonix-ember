@@ -134,6 +134,25 @@ pub const MAX_RELAYS_PER_SERVER: usize = 64;
 const FLAG_DATA_DIR: &str = "--server-data-dir";
 const FLAG_EXTENSIONS_DIR: &str = "--extensions-dir";
 const FLAG_INSTALL: &str = "--install-extension";
+/// `--file-watcher-polling <ms>` (upstream `serverEnvironmentService.ts`): the OSE's recursive
+/// watcher polls at this interval instead of waiting for native file events
+/// (`remoteFileSystemProviderServer.ts` `getRecursiveWatcherOptions`).
+const FLAG_WATCHER_POLLING: &str = "--file-watcher-polling";
+/// Polling interval for a project on a network share, in milliseconds: Code-OSS's own default
+/// when polling is on (`src/vs/platform/files/common/diskFileSystemProvider.ts` L119, 5000).
+pub const NETWORK_WATCH_POLL_MS: u32 = 5000;
+
+/// The watcher flags of an OSE for a project folder on a `kind` filesystem (SPEC FR-L31.24,
+/// #789). A local disk, wherever it is mounted, uses native file events and gets no flag. Only a
+/// real network filesystem is polled, because native events do not report what another machine
+/// changes on a share.
+pub fn watcher_args(kind: crate::fs_kind::FsKind) -> Vec<String> {
+    match kind {
+        crate::fs_kind::FsKind::Local => Vec::new(),
+        crate::fs_kind::FsKind::Network => vec![FLAG_WATCHER_POLLING.to_string(), NETWORK_WATCH_POLL_MS.to_string()],
+    }
+}
+
 /// UNVERIFIED: `--list-extensions` is not documented or used anywhere in this repository, so no
 /// list route exists. Kept as the one place the flag would be named.
 #[allow(dead_code)]
@@ -352,17 +371,83 @@ fn secure_token_dir(path: &Path) -> std::io::Result<()> {
 /// The variables an OSE child gets from the server's environment. Everything else (server tokens,
 /// other secrets) is dropped. `ember/ose/smoke.sh` and `regress.sh` set no variable of their own
 /// and call the launcher with the caller's environment, so nothing beyond this list is known to
-/// be needed. Not forwarded, to be added only when proven needed: proxy variables.
+/// be needed. More names come only from [`PASSTHROUGH_VAR`] (#471).
 const ENV_ALLOWLIST: [&str; 6] = ["HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "USER"];
 
-/// A command for the OSE binary with a cleared environment plus the allowlist.
+/// Owner configuration (server environment, never a request field): a comma-separated list of
+/// extra variable NAMES passed to the OSE children, default empty, for example
+/// `HTTPS_PROXY,NO_PROXY,SSL_CERT_FILE` (FR-W4, #471). **[provisional]**
+pub const PASSTHROUGH_VAR: &str = "EMBER_OSE_ENV_PASSTHROUGH";
+
+/// The proxy variables that conventionally exist in lower case too; only these may be listed in
+/// lower case.
+const LOWER_CASE_PROXY: [&str; 4] = ["http_proxy", "https_proxy", "no_proxy", "all_proxy"];
+
+/// Whether `name` may be passed through: `[A-Z_][A-Z0-9_]*`, or a lower-case proxy name.
+pub fn valid_passthrough_name(name: &str) -> bool {
+    if LOWER_CASE_PROXY.contains(&name) {
+        return true;
+    }
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_uppercase() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Parses the passthrough list. Empty entries are skipped; invalid names are returned apart so
+/// the caller can log them, and are never passed.
+pub fn parse_passthrough(raw: &str) -> (Vec<String>, Vec<String>) {
+    let (mut ok, mut bad) = (Vec::new(), Vec::new());
+    for name in raw.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        if valid_passthrough_name(name) {
+            if !ok.iter().any(|n: &String| n == name) {
+                ok.push(name.to_string());
+            }
+        } else {
+            bad.push(name.to_string());
+        }
+    }
+    (ok, bad)
+}
+
+/// The environment of an OSE child: the allowlist plus the valid passthrough names, each taken
+/// from `lookup` when set.
+pub fn ose_env(
+    passthrough: Option<&str>,
+    lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Vec<(String, std::ffi::OsString)> {
+    let mut names: Vec<String> = ENV_ALLOWLIST.iter().map(|s| s.to_string()).collect();
+    if let Some(raw) = passthrough {
+        let (ok, bad) = parse_passthrough(raw);
+        for name in bad {
+            tracing::warn!(name = %name, "{PASSTHROUGH_VAR}: invalid variable name ignored");
+        }
+        for name in ok {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names.into_iter().filter_map(|n| lookup(&n).map(|v| (n, v))).collect()
+}
+
+/// A command for the OSE binary with a cleared environment plus [`ose_env`].
 fn ose_command(binary: &Path) -> Command {
+    let passthrough = std::env::var(PASSTHROUGH_VAR).ok();
+    ose_command_with(binary, passthrough.as_deref(), |k| std::env::var_os(k))
+}
+
+fn ose_command_with(
+    binary: &Path,
+    passthrough: Option<&str>,
+    lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Command {
     let mut cmd = Command::new(binary);
     cmd.env_clear();
-    for key in ENV_ALLOWLIST {
-        if let Some(value) = std::env::var_os(key) {
-            cmd.env(key, value);
-        }
+    for (key, value) in ose_env(passthrough, lookup) {
+        cmd.env(key, value);
     }
     cmd
 }
@@ -570,6 +655,46 @@ impl OseManager {
         })
     }
 
+    /// Removes the `*.token` files a killed server left behind (#521): every regular file named
+    /// `<hex>.token` in `<data root>/<computer id>/tokens/`. Call it once at startup, before any OSE
+    /// start: a SIGKILL skips the [`TokenFile`] drop, so the dead token stays on disk until the
+    /// same folder starts again. Symlinks and directories are left alone, a missing root is not an
+    /// error, and an OSE of ANOTHER server sharing the same data root loses its file too (it read
+    /// the file at its start, see FR-W4). Returns how many files were removed.
+    pub fn sweep_stale_tokens(&self) -> usize {
+        let Ok(root) = self.data_root() else { return 0 };
+        let Ok(computers) = std::fs::read_dir(root) else { return 0 };
+        let mut removed = 0;
+        for computer in computers.flatten() {
+            let name = computer.file_name();
+            if !valid_computer_id(&name.to_string_lossy()) {
+                continue;
+            }
+            let tokens = computer.path().join("tokens");
+            match std::fs::symlink_metadata(&tokens) {
+                Ok(md) if md.is_dir() => {}
+                _ => continue,
+            }
+            let Ok(files) = std::fs::read_dir(&tokens) else { continue };
+            for file in files.flatten() {
+                let path = file.path();
+                let is_token = path.extension().is_some_and(|e| e == "token")
+                    && path.file_stem().is_some_and(|s| {
+                        let s = s.to_string_lossy();
+                        !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit())
+                    });
+                let regular = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file());
+                if is_token && regular && std::fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+        if removed > 0 {
+            tracing::info!(removed, "removed stale OSE token files left by an earlier server");
+        }
+        removed
+    }
+
     pub fn data_root(&self) -> Result<&Path, String> {
         self.data_root.as_deref().map_err(|e| e.clone())
     }
@@ -698,6 +823,7 @@ impl OseManager {
             .arg(&token_file.0)
             .args(["--accept-server-license-terms", "--telemetry-level", "off"])
             .args(Self::dir_args(&data_dir))
+            .args(watcher_args(crate::fs_kind::fs_kind(&folder)))
             .current_dir(&folder)
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
             .spawn().map_err(|e| format!("cannot start OSE server: {e}"))?;
@@ -747,6 +873,64 @@ fn server_binary() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l31_24_only_a_network_share_makes_the_ose_poll() {
+        use crate::fs_kind::FsKind;
+        assert!(watcher_args(FsKind::Local).is_empty());
+        assert_eq!(watcher_args(FsKind::Network), ["--file-watcher-polling", "5000"]);
+    }
+
+    fn fake_env(k: &str) -> Option<std::ffi::OsString> {
+        match k {
+            "HOME" => Some("/home/u".into()),
+            "HTTPS_PROXY" => Some("http://proxy:3128".into()),
+            "https_proxy" => Some("http://lower:3128".into()),
+            "NO_PROXY" => Some("localhost".into()),
+            "SECRET_TOKEN" => Some("s3cret".into()),
+            _ => None,
+        }
+    }
+
+    fn envs(cmd: &Command) -> Vec<(String, Option<String>)> {
+        cmd.get_envs()
+            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
+            .collect()
+    }
+
+    /// FR-W4 (#471): a listed variable reaches the child, an unlisted one does not.
+    #[test]
+    fn fr_w4_ose_env_passthrough_listed_arrives_unlisted_does_not() {
+        let cmd = ose_command_with(Path::new("/bin/true"), Some("HTTPS_PROXY, https_proxy,NO_PROXY"), fake_env);
+        let e = envs(&cmd);
+        assert!(e.contains(&("HTTPS_PROXY".into(), Some("http://proxy:3128".into()))), "{e:?}");
+        assert!(e.contains(&("https_proxy".into(), Some("http://lower:3128".into()))), "{e:?}");
+        assert!(e.contains(&("NO_PROXY".into(), Some("localhost".into()))), "{e:?}");
+        assert!(e.contains(&("HOME".into(), Some("/home/u".into()))), "{e:?}");
+        assert!(!e.iter().any(|(k, _)| k == "SECRET_TOKEN"), "{e:?}");
+        // Without the setting only the allowlist passes.
+        let e = envs(&ose_command_with(Path::new("/bin/true"), None, fake_env));
+        assert!(!e.iter().any(|(k, _)| k == "HTTPS_PROXY"), "{e:?}");
+        let e = envs(&ose_command_with(Path::new("/bin/true"), Some(""), fake_env));
+        assert_eq!(e, vec![("HOME".to_string(), Some("/home/u".to_string()))]);
+    }
+
+    /// FR-W4 (#471): names are validated; an invalid one is ignored, never passed.
+    #[test]
+    fn fr_w4_ose_env_passthrough_names_are_validated() {
+        for ok in ["HTTP_PROXY", "SSL_CERT_FILE", "_X", "XDG_RUNTIME_DIR", "http_proxy", "no_proxy", "all_proxy"] {
+            assert!(valid_passthrough_name(ok), "{ok}");
+        }
+        for bad in ["", "1ABC", "A=B", "HTTPS_PROXY=x", "lower", "Mixed", "A-B", "A B", "ÄBC", "secret_token"] {
+            assert!(!valid_passthrough_name(bad), "{bad}");
+        }
+        let (ok, bad) = parse_passthrough("HTTPS_PROXY,,A=B, SECRET_token ,HTTPS_PROXY");
+        assert_eq!(ok, vec!["HTTPS_PROXY".to_string()]);
+        assert_eq!(bad, vec!["A=B".to_string(), "SECRET_token".to_string()]);
+        // `A=B` must not smuggle a value through.
+        let e = envs(&ose_command_with(Path::new("/bin/true"), Some("HTTPS_PROXY=evil,SECRET_TOKEN=x"), fake_env));
+        assert!(!e.iter().any(|(k, _)| k.contains('=') || k == "SECRET_TOKEN"), "{e:?}");
+    }
 
     /// FR-W4: the per-computer busy flag is released on every path out of an install, including
     /// a panic. (A dropped HTTP future does not cancel the blocking task: `spawn_blocking` keeps

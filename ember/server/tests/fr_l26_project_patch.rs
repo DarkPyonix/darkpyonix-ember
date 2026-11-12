@@ -187,8 +187,7 @@ async fn fr_l26_fields_built_later_are_400_not_yet() {
     for body in [
         json!({ "leader_session": null }),
         json!({ "leader_session": "s1" }),
-        json!({ "archived": true }),
-        json!({ "name": "q", "archived": false }),
+        json!({ "name": "q", "leader_session": null }),
     ] {
         let (st, resp) = patch(&f, "p", body.clone()).await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");

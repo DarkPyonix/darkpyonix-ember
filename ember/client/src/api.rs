@@ -9,6 +9,7 @@
 //!   connection; the push socket ([`Api::open_push`]) gets its own stream.
 
 use std::fmt;
+use std::sync::Arc;
 
 use ember_transport::{Dialer, PeerAddr, PowerState};
 use http::{header, Method, StatusCode};
@@ -688,8 +689,23 @@ pub struct Api {
     base: String,
     /// The `Authorization` header, sent on the plain HTTP reach only (the transport authenticates
     /// by device key, FR-N3). The value is marked sensitive, so `{:?}` prints `Sensitive`, never
-    /// the token; the plaintext is not kept.
-    auth: Option<header::HeaderMap>,
+    /// the token; the plaintext is not kept. Shared by clones, so a token re-read after a
+    /// rotation (`FR-S9`, #369) reaches every clone.
+    auth: Arc<std::sync::RwLock<Option<header::HeaderMap>>>,
+    /// Where the token came from. Unless it was given ([`Api::with_token`]), a 401 re-reads it
+    /// once and retries, so a rotated `server-token` is picked up (#369).
+    source: TokenSource,
+}
+
+/// Where an [`Api`] re-reads its server token after a 401 (#369).
+#[derive(Debug, Clone)]
+enum TokenSource {
+    /// Given by the caller, or no HTTP reach: never re-read.
+    Fixed,
+    /// The environment or the token file, as [`crate::token::server_token_from_env`] finds it.
+    Env,
+    /// This token file (its first line).
+    File(std::path::PathBuf),
 }
 
 /// A status and a fully read body.
@@ -703,11 +719,31 @@ impl Api {
     pub fn new(base_url: &str) -> ApiResult<Api> {
         // A server that is not local gets no token and none is read (FR-S11).
         let token = crate::token::token_allowed_for(base_url).then(crate::token::server_token_from_env).flatten();
-        Api::with_token(base_url, token)
+        let mut api = Api::with_token(base_url, token)?;
+        if crate::token::token_allowed_for(base_url) {
+            api.source = TokenSource::Env;
+        }
+        Ok(api)
+    }
+
+    /// Like [`Api::new`], with the token read from `token_file` (its first line, trimmed) now and
+    /// again after a 401, so a rotated token is picked up without a new `Api` (#369).
+    pub fn with_token_file(base_url: &str, token_file: &std::path::Path) -> ApiResult<Api> {
+        let token = Self::read_first_line(token_file);
+        let mut api = Api::with_token(base_url, token)?;
+        api.source = TokenSource::File(token_file.to_path_buf());
+        Ok(api)
+    }
+
+    fn read_first_line(path: &std::path::Path) -> Option<String> {
+        let s = std::fs::read_to_string(path).ok()?;
+        let s = s.lines().next().unwrap_or_default().trim();
+        (!s.is_empty()).then(|| s.to_owned())
     }
 
     /// Like [`Api::new`] with the server token given (`None` sends no `Authorization` header, as
-    /// an older server expects). The token is read once here, never per request (FR-S11).
+    /// an older server expects). The token is read once here, never per request (FR-S11); a
+    /// token given here is never re-read.
     pub fn with_token(base_url: &str, token: Option<String>) -> ApiResult<Api> {
         let base = base_url.trim_end_matches('/').to_string();
         if !(base.starts_with("http://") || base.starts_with("https://")) {
@@ -718,19 +754,21 @@ impl Api {
             .filter(|_| crate::token::token_allowed_for(&base))
             .as_deref()
             .and_then(crate::token::auth_headers);
-        let mut builder = reqwest::Client::builder();
-        if let Some(headers) = auth.clone() {
-            builder = builder.default_headers(headers);
-        }
-        // A build failure is returned, never answered with a client that lacks the header.
-        Ok(Api { reach: Reach::Http(builder.build()?), base, auth })
+        // The header is added per request from `auth`, so a re-read token replaces it (#369).
+        let builder = reqwest::Client::builder();
+        Ok(Api {
+            reach: Reach::Http(builder.build()?),
+            base,
+            auth: Arc::new(std::sync::RwLock::new(auth)),
+            source: TokenSource::Fixed,
+        })
     }
 
     /// The server reached over the transport at `addr` (dialed through `dialer`, which holds
     /// this device's identity).
     pub fn over_transport(dialer: Dialer, addr: impl Into<PeerAddr>) -> Api {
         let addr = addr.into();
-        Api { base: format!("peer:{}", addr.peer), reach: Reach::Peer { dialer, addr }, auth: None }
+        Api { base: format!("peer:{}", addr.peer), reach: Reach::Peer { dialer, addr }, auth: Arc::default(), source: TokenSource::Fixed }
     }
 
     /// The base URL, or `peer:<id>` over the transport.
@@ -778,13 +816,13 @@ impl Api {
     async fn send(&self, method: Method, path: &str, json: Option<serde_json::Value>) -> ApiResult<Raw> {
         match &self.reach {
             Reach::Http(http) => {
-                let mut req = http.request(method, format!("{}/api{path}", self.base));
-                if let Some(body) = json {
-                    req = req.json(&body);
+                let url = format!("{}/api{path}", self.base);
+                let raw = Self::send_http(http, method.clone(), &url, json.as_ref(), self.auth_headers()).await?;
+                // A rotated server token (#369): re-read it once and retry when it changed.
+                if raw.status == StatusCode::UNAUTHORIZED && self.reload_token() {
+                    return Self::send_http(http, method, &url, json.as_ref(), self.auth_headers()).await;
                 }
-                let res = req.send().await?;
-                let status = res.status();
-                Ok(Raw { status, body: res.bytes().await? })
+                Ok(raw)
             }
             Reach::Peer { dialer, addr } => {
                 let stream = dialer.open_bi(addr, SERVER_SERVICE).await.map_err(peer_err)?;
@@ -808,6 +846,54 @@ impl Api {
                 Ok(Raw { status, body })
             }
         }
+    }
+
+    async fn send_http(
+        http: &reqwest::Client,
+        method: Method,
+        url: &str,
+        json: Option<&serde_json::Value>,
+        auth: Option<header::HeaderMap>,
+    ) -> ApiResult<Raw> {
+        let mut req = http.request(method, url);
+        if let Some(headers) = auth {
+            req = req.headers(headers);
+        }
+        if let Some(body) = json {
+            req = req.json(body);
+        }
+        let res = req.send().await?;
+        let status = res.status();
+        Ok(Raw { status, body: res.bytes().await? })
+    }
+
+    fn auth_headers(&self) -> Option<header::HeaderMap> {
+        self.auth.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Re-reads the server token from the environment or the token file (FR-S11) when this `Api`
+    /// was made by [`Api::new`] or [`Api::with_token_file`]. True when a token was found and
+    /// differs from the one in use, so the caller retries; the server rotated it
+    /// (`POST /api/server-token/rotate`, #369). The token goes only to a loopback or listed host.
+    pub fn reload_token(&self) -> bool {
+        if !crate::token::token_allowed_for(&self.base) {
+            return false;
+        }
+        let token = match &self.source {
+            TokenSource::Fixed => return false,
+            TokenSource::Env => crate::token::server_token_from_env(),
+            TokenSource::File(path) => Self::read_first_line(path),
+        };
+        let Some(fresh) = token.as_deref().and_then(crate::token::auth_headers) else {
+            return false;
+        };
+        let mut cur = self.auth.write().unwrap_or_else(|e| e.into_inner());
+        let same = cur.as_ref().and_then(|h| h.get(header::AUTHORIZATION)) == fresh.get(header::AUTHORIZATION);
+        if same {
+            return false;
+        }
+        *cur = Some(fresh);
+        true
     }
 
     fn check(raw: Raw) -> ApiResult<Raw> {
@@ -887,8 +973,8 @@ impl Api {
     fn push_request(&self, url: &str) -> ApiResult<http::Request<()>> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let mut request = url.into_client_request().map_err(|e| ApiError::Push(e.to_string()))?;
-        if let (Reach::Http(_), Some(headers)) = (&self.reach, &self.auth) {
-            request.headers_mut().extend(headers.clone());
+        if let (Reach::Http(_), Some(headers)) = (&self.reach, self.auth_headers()) {
+            request.headers_mut().extend(headers);
         }
         Ok(request)
     }
@@ -1428,6 +1514,92 @@ fn authority_addr(authority: &str) -> (String, u16) {
             Err(_) => (authority.to_string(), 80),
         },
         None => (authority.to_string(), 80),
+    }
+}
+
+// ---- file transfer (FR-F3, FR-F4, FR-F5, FR-F8, #487) ---------------------------------------
+
+impl Api {
+    /// Everything the receiving computer holds: devices, transfers, offers, received files,
+    /// history and settings.
+    pub async fn transfers(&self) -> ApiResult<crate::transfers::TransfersSnapshot> {
+        self.get("/transfers").await
+    }
+
+    /// Offers files as device `from`. With `peer_id` the receiver requires a registered device.
+    pub async fn offer_transfer(
+        &self,
+        from: &str,
+        peer_id: Option<&str>,
+        files: &[crate::transfers::DeclaredFile],
+    ) -> ApiResult<crate::transfers::OfferCreated> {
+        let body = json!({ "from": from, "peer_id": peer_id, "files": files });
+        Self::decode(self.post("/transfers/offers", body).await?)
+    }
+
+    pub async fn accept_transfer_offer(&self, id: &str) -> ApiResult<crate::transfers::TransferItem> {
+        Self::decode(self.post(&format!("/transfers/offers/{}/accept", seg(id)), json!({})).await?)
+    }
+
+    pub async fn decline_transfer_offer(&self, id: &str) -> ApiResult<crate::transfers::HistoryRecord> {
+        Self::decode(self.post(&format!("/transfers/offers/{}/decline", seg(id)), json!({})).await?)
+    }
+
+    /// Appends `data` to file `file` of transfer `id` at `offset`. `sha256` is the chunk's hash
+    /// (lowercase hex); the receiver refuses a chunk that does not match it (`FR-F5`).
+    pub async fn transfer_chunk(
+        &self,
+        id: &str,
+        file: usize,
+        offset: u64,
+        data: &[u8],
+        sha256: Option<&str>,
+    ) -> ApiResult<crate::transfers::TransferItem> {
+        use base64::Engine;
+        let body = json!({
+            "file": file,
+            "offset": offset,
+            "data_base64": base64::engine::general_purpose::STANDARD.encode(data),
+            "sha256": sha256,
+        });
+        Self::decode(self.post(&format!("/transfers/{}/chunks", seg(id)), body).await?)
+    }
+
+    /// The receiver's verified byte offset of file `file` (`FR-F5`): where to continue.
+    pub async fn transfer_resume_offset(&self, id: &str, file: usize) -> ApiResult<u64> {
+        let r: crate::transfers::ResumeOffset =
+            self.get(&format!("/transfers/{}/resume-offset/{file}", seg(id))).await?;
+        Ok(r.offset)
+    }
+
+    /// Asks the receiver to verify and store the files of transfer `id`.
+    pub async fn complete_transfer(&self, id: &str) -> ApiResult<Vec<crate::transfers::StoredFile>> {
+        let r: crate::transfers::Completed =
+            Self::decode(self.post(&format!("/transfers/{}/complete", seg(id)), json!({})).await?)?;
+        Ok(r.stored)
+    }
+
+    pub async fn pause_transfer(&self, id: &str) -> ApiResult<crate::transfers::TransferItem> {
+        Self::decode(self.post(&format!("/transfers/{}/pause", seg(id)), json!({})).await?)
+    }
+
+    pub async fn resume_transfer(&self, id: &str) -> ApiResult<crate::transfers::TransferItem> {
+        Self::decode(self.post(&format!("/transfers/{}/resume", seg(id)), json!({})).await?)
+    }
+
+    /// Cancels an offer or a transfer; the receiver removes the partial files (`FR-F4`).
+    pub async fn cancel_transfer(&self, id: &str) -> ApiResult<crate::transfers::HistoryRecord> {
+        Self::decode(self.post(&format!("/transfers/{}/cancel", seg(id)), json!({})).await?)
+    }
+
+    pub async fn transfer_history(&self) -> ApiResult<Vec<crate::transfers::HistoryRecord>> {
+        self.get("/transfers/history").await
+    }
+
+    /// Clears the history; received files stay on disk (`FR-F8`).
+    pub async fn clear_transfer_history(&self) -> ApiResult<()> {
+        Self::check(self.send(Method::DELETE, "/transfers/history", None).await?)?;
+        Ok(())
     }
 }
 
@@ -2043,6 +2215,16 @@ impl Api {
         }
         serde_json::from_slice(&raw.body).map_err(|e| ProjectPatchError::Api(ApiError::Decode(e.to_string())))
     }
+
+    /// `DELETE /projects/{name}` (FR-L26, #384): deletes an empty project. A refusal keeps
+    /// status and `code` (`project_not_empty` 409, `protected_project` 403, `not_found` 404).
+    pub async fn delete_project(&self, name: &str) -> Result<(), ProjectPatchError> {
+        let raw = self.send(Method::DELETE, &format!("/projects/{}", seg(name)), None).await?;
+        if !raw.status.is_success() {
+            return Err(ProjectPatchError::from_answer(raw.status.as_u16(), &raw.body));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2090,6 +2272,21 @@ mod project_patch_tests {
         assert_eq!(serde_json::to_value(&p).unwrap(), json!({"profile_overrides": {"codex": "acc-1"}}));
         let p = ProjectPatch { profile_overrides: Some(Default::default()), ..Default::default() };
         assert_eq!(serde_json::to_value(&p).unwrap(), json!({"profile_overrides": {}}), "an empty map clears all");
+    }
+
+    #[test]
+    fn fr_l26_archive_is_sent_as_a_bool() {
+        let p = ProjectPatch { archived: Some(true), ..Default::default() };
+        assert!(!p.is_empty());
+        assert_eq!(serde_json::to_value(&p).unwrap(), json!({"archived": true}));
+        let p = ProjectPatch { archived: Some(false), ..Default::default() };
+        assert_eq!(serde_json::to_value(&p).unwrap(), json!({"archived": false}));
+    }
+
+    #[test]
+    fn fr_l26_a_delete_refusal_keeps_status_and_code() {
+        let e = ProjectPatchError::from_answer(409, br#"{"error":"busy","code":"project_not_empty","sessions":2}"#);
+        assert_eq!((e.status(), e.code()), (Some(409), Some("project_not_empty")));
     }
 
     #[test]

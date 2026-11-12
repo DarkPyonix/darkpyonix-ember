@@ -306,6 +306,9 @@ pub struct ProjectPatch {
     /// all; FR-L22, #489).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub character_overrides: Option<std::collections::BTreeMap<String, Option<CharacterOverride>>>,
+    /// Archive (`Some(true)`) or restore (`Some(false)`) the project (FR-L26, #384). Never `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
 }
 
 impl ProjectPatch {
@@ -470,6 +473,8 @@ pub enum Push {
     SessionUpdated { session: SessionRecord },
     /// A project was created or its computer assignment changed (FR-L4).
     ProjectUpdated { project: Project },
+    /// A project was deleted (FR-L26, #384): only its name.
+    ProjectDeleted { name: String },
     /// A team's members or tasks changed (FR-T7): the whole team.
     TeamUpdated { team: TeamView },
     /// A session's approve-everything mode was switched (FR-A5).
@@ -629,6 +634,22 @@ pub enum ScheduleKind {
     Interval { seconds: u64 },
     /// Once, at `at` (Unix ms).
     Once { at: i64 },
+    /// On an event (FR-L23): `on: ci_failed` fires once per failed GitHub workflow run of
+    /// `repository` (`owner/name`), on `branch` when given. No `next_run_at`.
+    Event {
+        on: EventOn,
+        repository: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+    },
+}
+
+/// What an event schedule waits for (server `EventOn`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventOn {
+    /// A GitHub Actions workflow run concluded `failure`.
+    CiFailed,
 }
 
 /// What each run does (server `ScheduleTarget`).
@@ -751,6 +772,14 @@ pub struct SchedulePatch {
 mod question_wire_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn fr_l23_event_schedule_kind_round_trips() {
+        let k = ScheduleKind::Event { on: EventOn::CiFailed, repository: "o/r".into(), branch: None };
+        let v = serde_json::to_value(&k).unwrap();
+        assert_eq!(v, json!({"type": "event", "on": "ci_failed", "repository": "o/r"}));
+        assert_eq!(serde_json::from_value::<ScheduleKind>(v).unwrap(), k);
+    }
 
     #[test]
     fn fr_t11_question_unknown_fields_and_old_rows_decode() {

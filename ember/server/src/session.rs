@@ -36,6 +36,8 @@ pub enum Push {
     SessionUpdated { session: SessionRecord },
     /// A project was created or its computer assignment changed (FR-L4).
     ProjectUpdated { project: Project },
+    /// A project was deleted (FR-L26, #384). Carries only its name.
+    ProjectDeleted { name: String },
     /// A team's members or tasks changed (FR-T7). Carries the whole team.
     TeamUpdated { team: crate::a2a::team::TeamView },
     /// A schedule was created (FR-A8), by a user or by an agent (`ember-a2a schedule add`).
@@ -438,6 +440,12 @@ impl Sessions {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Push> {
         self.push.subscribe()
+    }
+
+    /// How many push receivers are alive (one per open `/api/push` socket, plus internal
+    /// listeners). Tests use it to see that a closed socket's task ended (#369).
+    pub fn push_receiver_count(&self) -> usize {
+        self.push.receiver_count()
     }
 
     /// Push something that did not come from a session's event pump (project changes, …).

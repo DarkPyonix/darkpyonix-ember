@@ -127,3 +127,35 @@ fn fr_w4_ose_token_dir_symlinked_tokens_dir_is_refused() {
     assert!(!ran(&f));
     assert!(std::fs::read_dir(&real).unwrap().next().is_none());
 }
+
+/// #521 item 2: a SIGKILL leaves `<hex>.token` behind; the startup sweep removes it and nothing
+/// else (another file name, a symlink, a directory, an invalid computer dir).
+#[test]
+fn fr_w4_ose_token_dir_startup_sweep_removes_stale_token_files() {
+    let f = fx(0o700, 0o700);
+    let stale = f.tokens.join("0123456789abcdef.token");
+    std::fs::write(&stale, "dead-token").unwrap();
+    let other = f.tokens.join("notes.txt");
+    std::fs::write(&other, "keep").unwrap();
+    let outside = f.dir.path().join("outside.token");
+    std::fs::write(&outside, "keep").unwrap();
+    let link = f.tokens.join("fedcba9876543210.token");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    let dir_named_token = f.tokens.join("aaaa.token");
+    std::fs::create_dir(&dir_named_token).unwrap();
+    let second = f.computer.parent().unwrap().join("node-2").join("tokens");
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::write(second.join("abcdef0123456789.token"), "dead").unwrap();
+
+    assert_eq!(f.manager.sweep_stale_tokens(), 2);
+    assert!(!stale.exists());
+    assert!(!second.join("abcdef0123456789.token").exists());
+    assert!(other.exists(), "a file that is not <hex>.token stays");
+    assert!(std::fs::symlink_metadata(&link).is_ok(), "a symlink is not followed or removed");
+    assert!(outside.exists(), "the symlink target is untouched");
+    assert!(dir_named_token.is_dir());
+    // A second sweep finds nothing; a manager without a root is a no-op.
+    assert_eq!(f.manager.sweep_stale_tokens(), 0);
+    let none = OseManager::with_data_root(None, f.dir.path().join("missing"));
+    assert_eq!(none.sweep_stale_tokens(), 0);
+}

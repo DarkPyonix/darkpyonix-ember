@@ -28,6 +28,8 @@ pub fn NoticeHost() {
     launched_effect(key, move || async move {
         if let Some((_, text)) = latest {
             // TODO(compose-rust#446): Message has no Modifier for the mockup toast shadow.
+            // TODO(compose-rust#577): Message has no placement, so the toast shows where the
+            // toolkit puts it (top end) and not at the mockup's bottom centre (`.toast`).
             Message::new(text).with_duration(MessageDuration::Long).show();
         }
     });

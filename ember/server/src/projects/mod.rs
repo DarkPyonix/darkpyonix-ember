@@ -118,6 +118,10 @@ pub struct ProjectPatch {
     /// one; `null` is refused for the field itself (send `{}` to clear).
     #[serde(default, deserialize_with = "nullable")]
     pub character_overrides: Option<Option<BTreeMap<String, Option<CharacterOverride>>>>,
+    /// Archive (`true`) or restore (`false`) the project (FR-L26, #384 PR 4). Only a bool;
+    /// `null` is refused.
+    #[serde(default, deserialize_with = "not_null")]
+    pub archived: Option<bool>,
 }
 
 /// Tell an absent field (`None`) from an explicit `null` (`Some(None)`).
@@ -127,6 +131,15 @@ where
     T: Deserialize<'de>,
 {
     Ok(Some(Option::<T>::deserialize(d)?))
+}
+
+/// A present field that must not be `null` (absent stays `None`).
+fn not_null<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(d).map(Some)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -143,6 +156,9 @@ pub enum ProjectError {
     /// A rename onto the name of another project.
     #[error("a project named {0:?} already exists")]
     NameTaken(String),
+    /// A delete of a project that still holds records (FR-L26, #384 PR 5).
+    #[error("project {name:?} still has {sessions} sessions, {channels} channels, {schedules} schedules and {teams} teams")]
+    NotEmpty { name: String, sessions: i64, channels: i64, schedules: i64, teams: i64 },
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -456,7 +472,7 @@ impl Store {
             None => None,
         };
         let renames = new_name.as_deref().is_some_and(|n| n != name);
-        if renames && name == DEFAULT_PROJECT_NAME {
+        if (renames || patch.archived == Some(true)) && name == DEFAULT_PROJECT_NAME {
             return Err(ProjectError::Protected(name.into()));
         }
         let repository = patch.repository.as_ref().map(|v| check_repository(v.as_deref())).transpose()?;
@@ -497,6 +513,9 @@ impl Store {
             if let Some(v) = &style {
                 tx.execute("UPDATE projects SET character_style = ?1 WHERE name = ?2", params![v, name])?;
             }
+            if let Some(v) = patch.archived {
+                tx.execute("UPDATE projects SET archived = ?1 WHERE name = ?2", params![v as i64, name])?;
+            }
             let mut final_name = name.to_string();
             if let (true, Some(new)) = (renames, new_name.as_deref()) {
                 let taken: i64 =
@@ -525,6 +544,51 @@ impl Store {
             final_name
         };
         self.project(&final_name)?.ok_or(ProjectError::NotFound(final_name))
+    }
+
+    /// Delete a project (FR-L26, #384 PR 5) [provisional]. Only a project with no sessions,
+    /// channels, schedules or teams is deleted; otherwise `NotEmpty` with the counts, and the
+    /// owner archives it instead. Its computer assignments and browser egress row go with it, in
+    /// one transaction. 기본 프로젝트 is `Protected`.
+    pub fn delete_project(&self, name: &str) -> Result<(), ProjectError> {
+        if self.project(name)?.is_none() {
+            return Err(ProjectError::NotFound(name.into()));
+        }
+        if name == DEFAULT_PROJECT_NAME {
+            return Err(ProjectError::Protected(name.into()));
+        }
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let count = |table: &str| -> rusqlite::Result<i64> {
+            tx.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE project = ?1"), params![name], |r| r.get(0))
+        };
+        // The default channel is made on demand for every project (FR-T10), so an untouched one
+        // (no messages, agents or invites) is not a record and goes with the project.
+        let count_channels = || -> rusqlite::Result<i64> {
+            tx.query_row(
+                "SELECT COUNT(*) FROM channels c WHERE c.project = ?1 AND (c.is_default = 0
+                   OR EXISTS (SELECT 1 FROM channel_messages m WHERE m.channel_id = c.id)
+                   OR EXISTS (SELECT 1 FROM channel_agents a WHERE a.channel_id = c.id)
+                   OR EXISTS (SELECT 1 FROM channel_invites i WHERE i.channel_id = c.id))",
+                params![name],
+                |r| r.get(0),
+            )
+        };
+        let (sessions, channels, schedules, teams) =
+            (count("sessions")?, count_channels()?, count("schedules")?, count("teams")?);
+        if sessions + channels + schedules + teams > 0 {
+            return Err(ProjectError::NotEmpty { name: name.into(), sessions, channels, schedules, teams });
+        }
+        tx.execute("DELETE FROM project_computers WHERE project = ?1", params![name])?;
+        tx.execute("DELETE FROM browser_egress WHERE project = ?1", params![name])?;
+        tx.execute(
+            "DELETE FROM channel_reads WHERE channel_id IN (SELECT id FROM channels WHERE project = ?1)",
+            params![name],
+        )?;
+        tx.execute("DELETE FROM channels WHERE project = ?1", params![name])?;
+        tx.execute("DELETE FROM projects WHERE name = ?1", params![name])?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Create `name` if it does not exist. Returns the project and whether it was created.

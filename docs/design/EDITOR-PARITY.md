@@ -35,7 +35,7 @@ The owner's rule [user, 2026-11-06, `INTENT.md` D38]: the Ember editor does what
 | Workspace trust | Trust service and restricted mode | 없음 (always trusted) | EH-REG `$requestWorkspaceTrust` plus a native dialog | #450 |
 | Save, auto-save, hot exit | Backup service, auto-save setting | 부분 (save 있음; failure not shown; no auto-save or hot exit) | Native; write through `remoteFilesystem` | #451 |
 | File watching, external change | Server file watcher | 부분 (session reloads clean buffers; the window shows nothing) | EXISTS: watch and fileChange | #451 |
-| Webviews, custom editors, notebooks, markdown preview | Origin-isolated iframes from the webview host | 없음 | Proposed (D43, FR-E8, owner confirmation pending): native markdown preview, image viewer and text/image notebook outputs; everything else a `VS Code에서 열기` placeholder in its panel. See "Webviews, custom editors and notebook outputs" below | #452 |
+| Webviews, custom editors, notebooks, markdown preview | Origin-isolated iframes from the webview host | 없음 | Proposed (D44, FR-E8, owner confirmation pending): native markdown preview, image viewer and text/image notebook outputs; everything else a `VS Code에서 열기` placeholder in its panel. See "Webviews, custom editors and notebook outputs" below | #452 |
 | Remote development (SSH, WSL, containers) | Closed Microsoft remote extensions | 부분 (different model: the OSE server on the node is the remote agent) | Handshake and version pin (`PINNED_COMMIT`), fallback `Open in VS Code` | - |
 | Accessibility | ARIA in the DOM, a11y help, audio cues | 없음 | Native roles and focus order | #302 |
 | Layout, window resize | - | 부분 | dioxus-compose page | #301, #320 |
@@ -94,7 +94,7 @@ Whether `dpx-ose-server` answers `GET /version` and static files without the tok
 
 ## Webviews, custom editors and notebook outputs (scope decision, #452)
 
-Status: proposal. The decision is `INTENT.md` D43 [provisional], the requirement `SPEC.md` FR-E8 [provisional]; both wait for the owner. Nothing below is built.
+Status: proposal. The decision is `INTENT.md` D44 [provisional], the requirement `SPEC.md` FR-E8 [provisional]; both wait for the owner. Nothing below is built.
 
 ### What Code-OSS does
 

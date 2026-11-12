@@ -949,7 +949,7 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 
 **Status.** Specified (`FR-W4a` to `FR-W4c`, Draft; issue #457). Local server OSE and its relay are in #458/#459/#461; node OSE routes and server-to-node relay follow this spec.
 
-### D43: Webviews, custom editors and notebook outputs in the Ember 에디터: native for the common cases, VS Code for the rest
+### D44: Webviews, custom editors and notebook outputs in the Ember 에디터: native for the common cases, VS Code for the rest
 
 **Decision.** [provisional, #452, needs the owner's confirmation] The Ember 에디터 window hosts no webview, keeping D9a. Markdown preview, image files and notebook outputs that are text, stream, error or image mimes are drawn natively. Every other extension webview panel, webview view, custom editor and notebook output (HTML, JavaScript, widgets) shows a placeholder in its own panel, with the extension's name and `VS Code에서 열기`, which opens the project in the VS Code target (`ember/editor/src/fallback.rs`). FR-E5 ("Extension webview panels still work, contained to their panel") is met through that fallback, not inside the window (`FR-E8`).
 

@@ -20,7 +20,7 @@ pub use crate::ui::home::{
     project_options, project_tile_line, resolve_cwd, shortcut_label, split_chip_rows,
     success_percent, title_from_message, CrewMember, Dash, Harness, HarnessBar, Kpi, ModelOption,
     ModeRow, PermMode, ProjectTile, Selection, StatusCounts, ComposerAttachment, ATTACH_HINT, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
-    EMPTY_CREW, EMPTY_HARNESS_USAGE, CiResult, GithubCard, GithubPill, GithubSampleKind, INTEGRATIONS_TITLE, LATER_INTEGRATIONS, LATER_LINE, LATER_PILL, GITHUB_NAME, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
+    EMPTY_CREW, EMPTY_HARNESS_USAGE, CiResult, GithubCard, GithubPill, GithubSampleKind, INTEGRATIONS_TITLE, LATER_INTEGRATIONS, integrations_layout, CI_RULE_WHEN, CI_RULE_THEN, CI_RULE_NOTE, CI_RULE_LINK, LATER_LINE, LATER_PILL, GITHUB_NAME, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
 };
 use crate::ui::home::{model_active_row, model_enter, model_row_detail, model_view, ModelEnter};
 use super::components::{
@@ -1467,10 +1467,9 @@ fn IntegrationsArea() {
     let card = GithubCard::from_state(if is_sample { sample.as_ref() } else { fetched.state() });
     let header_line = if is_sample { crate::ui::home::sample_header(&card.header_line) } else { card.header_line.clone() };
     let guidance = remember(|| mutable_state_of(false));
-    cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-        Label(INTEGRATIONS_TITLE, Fs::Lg, Weight::Semibold, None, Some(1));
-        Label(&header_line, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
-        Tile(|| {
+    let ui = shared_ui().clone();
+    let il = integrations_layout(compose_rust::runtime::current_window_size().width_dp);
+    let github = || Tile(|| {
             cu::Row().spacing(10.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                 cu::Box()
                     .alignment(Alignment::Center)
@@ -1528,18 +1527,53 @@ fn IntegrationsArea() {
             }
             // The server sends no list of what the integration did, so none is drawn.
             Label(card.activity_empty, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+            CiRuleRow(&ui);
         });
-        for name in LATER_INTEGRATIONS {
-            Tile(|| {
-                cu::Row().spacing(10.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                    Label(name, Fs::Md, Weight::Semibold, None, Some(1));
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
-                    Pill(LATER_PILL, PillTone::Grey, true);
-                });
-                Label(LATER_LINE, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
-            });
-        }
+    let later = || {
+        let cards: Vec<Part> = LATER_INTEGRATIONS
+            .into_iter()
+            .map(|name: &'static str| -> Part {
+                Box::new(move || {
+                    let p = ember_theme().palette;
+                    Tile(|| {
+                        cu::Row().spacing(10.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                            Label(name, Fs::Md, Weight::Semibold, None, Some(1));
+                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            Pill(LATER_PILL, PillTone::Grey, true);
+                        });
+                        Label(LATER_LINE, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    })
+                })
+            })
+            .collect();
+        Cols(il.later_cols, GAP_CARD, cards);
+    };
+    cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+        Label(INTEGRATIONS_TITLE, Fs::Lg, Weight::Semibold, None, Some(1));
+        Label(&header_line, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+        // `.int-grid`: GitHub span 6 beside the span-3 cards above 1279, else stacked.
+        Weighted(!il.github_beside, GAP_CARD, vec![(1.0, Box::new(github) as Part), (1.0, Box::new(later) as Part)]);
     });
+}
+
+/// `.int-rule`: CI 실패 -> 루틴, with the honest note and a link to 루틴 (FR-L23, #498). The
+/// server has no field that ties a CI failure to a routine, so nothing runs from here.
+fn CiRuleRow(ui: &SharedUi) {
+    let p = ember_theme().palette;
+    cu::Column()
+        .spacing(SP[1])
+        .modifier(Modifier::new().fill_max_width().background(paint(p.surface_2)).corner_radius(CORNER_SM).padding(SP[2]))
+        .content(|| {
+            cu::Row().spacing(6.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                Label(CI_RULE_WHEN, Fs::Xs, Weight::Semibold, None, Some(1));
+                Label("\u{2192}", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                Label(CI_RULE_THEN, Fs::Xs, Weight::Regular, None, Some(1));
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                let u = ui.clone();
+                AppButton(CI_RULE_LINK, None, ButtonKind::Default, true, true, false, move || shell::choose(&u, NavMenu::Routines));
+            });
+            Label(CI_RULE_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+        });
 }
 
 /// Recent CI results of one repository: small cells, newest first (left).

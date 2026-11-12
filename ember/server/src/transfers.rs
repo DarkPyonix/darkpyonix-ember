@@ -134,7 +134,8 @@ struct Inner {
     history_path: PathBuf,
     limits: Limits,
     mode: ReceiveMode,
-    next_seq: u64,
+    /// Canonical data folder, for the `received_dir` setting check (`FR-F12`).
+    data_dir: PathBuf,
     pending_offers: Vec<PendingOfferItem>,
     transfers: Vec<TransferItem>,
     writers: HashMap<String, ReceiveWriter>,
@@ -165,6 +166,10 @@ impl TransferManager {
     ) -> Arc<Self> {
         let received_dir = data_dir.join("received");
         let _ = std::fs::create_dir_all(&received_dir);
+        // No transfer state survives a restart, so every partial folder left behind is stale
+        // and is removed before any offer can meet it (`FR-F11`, #773).
+        let _ = std::fs::remove_dir_all(received_dir.join(".partial"));
+        let data_dir = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
         let history_path = data_dir.join("transfers-history.json");
         let history: Vec<HistoryRecord> = std::fs::read(&history_path)
             .ok()
@@ -176,7 +181,7 @@ impl TransferManager {
                 history_path,
                 limits: Limits { max_bytes: DEFAULT_MAX_BYTES },
                 mode: ReceiveMode::Ask,
-                next_seq: 1,
+                data_dir,
                 pending_offers: Vec::new(),
                 transfers: Vec::new(),
                 writers: HashMap::new(),
@@ -336,8 +341,8 @@ impl TransferManager {
             })
             .collect();
 
-        let id = format!("tr-{}", g.next_seq);
-        g.next_seq += 1;
+        // 128 random bits, so ids never repeat across restarts (`FR-F11`, #773).
+        let id = format!("tr-{}", uuid::Uuid::new_v4().simple());
 
         let auto_accept = match (&g.mode, peer_id.and_then(|p| p.parse::<PeerId>().ok())) {
             (ReceiveMode::AutoAcceptFrom(set), Some(peer)) => set.contains(&peer),
@@ -643,6 +648,11 @@ impl TransferManager {
         received_dir: Option<PathBuf>,
     ) -> Result<TransferSettingsView, TransferApiError> {
         let mut g = self.inner.lock().unwrap();
+        // Check the folder first so a refused request changes nothing (`FR-F12`).
+        let received_dir = match received_dir {
+            Some(dir) => Some(check_received_dir(&g.data_dir, &dir)?),
+            None => None,
+        };
         if let Some(m) = receive_mode {
             g.mode = match m {
                 "ask" => ReceiveMode::Ask,
@@ -673,13 +683,67 @@ impl TransferManager {
             g.limits = Limits { max_bytes: max };
         }
         if let Some(dir) = received_dir {
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| TransferApiError::BadRequest(format!("invalid received_dir: {e}")))?;
             g.received_dir = dir;
         }
         drop(g);
         Ok(self.snapshot().settings)
     }
+}
+
+/// Checks a requested received-files folder and returns its canonical path (`FR-F12`, #773).
+///
+/// The folder must be absolute, must not be a symlink, must be a directory (created when
+/// missing), and its canonical path must not be the data folder, inside it (except
+/// `<data_dir>/received`), or a parent of it. The checks run on the canonical path so `..` and
+/// symlinked parents cannot reach a refused place.
+fn check_received_dir(data_dir: &Path, dir: &Path) -> Result<PathBuf, TransferApiError> {
+    let bad = |why: &str| TransferApiError::BadRequest(format!("invalid received_dir: {why}"));
+    if !dir.is_absolute() {
+        return Err(bad("must be an absolute path"));
+    }
+    match std::fs::symlink_metadata(dir) {
+        Ok(m) if m.file_type().is_symlink() => return Err(bad("must not be a symlink")),
+        Ok(m) if !m.is_dir() => return Err(bad("not a directory")),
+        Ok(_) => {}
+        Err(_) => {
+            // Check the would-be location before creating anything.
+            let mut probe = dir.to_path_buf();
+            let mut tail = Vec::new();
+            while !probe.exists() {
+                match (probe.file_name().map(|n| n.to_os_string()), probe.parent()) {
+                    (Some(n), Some(p)) => {
+                        tail.push(n);
+                        probe = p.to_path_buf();
+                    }
+                    _ => return Err(bad("cannot be created")),
+                }
+            }
+            let mut planned = std::fs::canonicalize(&probe).map_err(|e| bad(&e.to_string()))?;
+            for n in tail.into_iter().rev() {
+                planned.push(n);
+            }
+            check_canonical(data_dir, &planned)?;
+            std::fs::create_dir_all(dir).map_err(|e| bad(&e.to_string()))?;
+        }
+    }
+    let canonical = std::fs::canonicalize(dir).map_err(|e| bad(&e.to_string()))?;
+    check_canonical(data_dir, &canonical)?;
+    Ok(canonical)
+}
+
+fn check_canonical(data_dir: &Path, canonical: &Path) -> Result<(), TransferApiError> {
+    let allowed = data_dir.join("received");
+    if canonical == allowed {
+        return Ok(());
+    }
+    if canonical.starts_with(data_dir) || data_dir.starts_with(canonical) {
+        return Err(TransferApiError::BadRequest(
+            "invalid received_dir: the data folder, anything inside it except received/, \
+             and its parents are refused"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]

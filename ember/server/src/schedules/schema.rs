@@ -46,3 +46,17 @@ CREATE TABLE schedule_runs (
 CREATE INDEX schedule_runs_by_schedule ON schedule_runs(schedule_id, scheduled_at);
 CREATE INDEX schedule_runs_running ON schedule_runs(status);
 ";
+
+
+/// Events that started an event schedule (FR-L23), one row per (schedule, event): written before
+/// the run, so an event fires a schedule once, also across restarts. `event_id` is
+/// `ci:<owner/name>:<run id>` for CI failures; `run_id` is the `schedule_runs` row it started.
+pub const EVENTS_MIGRATION: &str = "
+CREATE TABLE schedule_events (
+    schedule_id  TEXT NOT NULL,
+    event_id     TEXT NOT NULL,
+    seen_at      INTEGER NOT NULL,
+    run_id       TEXT,
+    PRIMARY KEY (schedule_id, event_id)
+);
+";

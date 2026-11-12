@@ -31,7 +31,7 @@
 //!   is node work (`ember/node/src/fs.rs`, owned by another change) and is recorded in SPEC.
 //! - At most [`FsLimits::concurrent`] relayed operations run at once across all computers (a
 //!   global semaphore, default 8, so at most about 8 x 21 MB of read responses are buffered).
-//!   A request that cannot get a permit within the timeout answers 503.
+//!   A request that cannot get a permit within half the timeout answers 503.
 //! - Every relayed operation has a deadline ([`FsLimits::timeout`], default 60 s). Past it the
 //!   server answers 504 and drops the node request. When the client disconnects, axum drops the
 //!   handler future, which drops the node request (its connection closes); the node may finish
@@ -71,7 +71,7 @@ pub const MAX_SEARCH_LIMIT: usize = 1000;
 pub struct FsLimits {
     /// Relayed operations in flight at once, across all computers.
     pub concurrent: usize,
-    /// Deadline of one operation, waiting for a permit included.
+    /// Deadline of one operation, waiting for a permit (at most half of it) included.
     pub timeout: Duration,
 }
 
@@ -157,7 +157,10 @@ async fn relay(
         Err(e) => return computer_error(e),
     };
     let deadline = tokio::time::Instant::now() + r.timeout;
-    let _permit = match tokio::time::timeout_at(deadline, r.permits.clone().acquire_owned()).await {
+    // Waiting for a permit may use at most half the deadline, so a request that does get one
+    // still has time to run instead of timing out at once.
+    let wait = tokio::time::Instant::now() + r.timeout / 2;
+    let _permit = match tokio::time::timeout_at(wait, r.permits.clone().acquire_owned()).await {
         Ok(Ok(p)) => p,
         _ => return plain(StatusCode::SERVICE_UNAVAILABLE, "too many file operations in flight".into()),
     };

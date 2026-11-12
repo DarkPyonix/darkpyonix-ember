@@ -4,83 +4,101 @@ import dev.darkpyonix.intellij.json.Json
 import dev.darkpyonix.intellij.json.jsonObject
 import dev.darkpyonix.intellij.json.long
 import dev.darkpyonix.intellij.json.str
+import java.io.BufferedReader
 import java.io.File
 import java.io.IOException
+import java.io.InputStreamReader
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.attribute.PosixFilePermissions
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
-/** `<DARKPYONIX_HOME>/managers/<pid>.json` (PROTOCOL §1): `url`, `token`, `mode`, `pid`, `started_at`. */
-data class ManagerRecord(val url: String, val token: String, val mode: String, val pid: Long, val startedAt: String) {
+/** A manager's address and token: what the CLI reads from env or from the spawned manager. */
+data class ManagerEndpoint(val url: String, val token: String)
+
+/** The first stdout line of `darkpyonix manager`: `{url, token, pid}` (SPEC FR-C1, FR-M3). */
+data class ManagerAnnouncement(val url: String, val token: String, val pid: Long) {
     companion object {
-        fun parse(text: String): ManagerRecord? {
-            val m = Json.parseOrNull(text).jsonObject() ?: return null
-            return ManagerRecord(
-                url = m.str("url") ?: return null,
-                token = m.str("token") ?: return null,
-                mode = m.str("mode") ?: "ephemeral",
+        fun parse(line: String): ManagerAnnouncement? {
+            val m = Json.parseOrNull(line.trim()).jsonObject() ?: return null
+            return ManagerAnnouncement(
+                url = m.str("url")?.takeIf { it.isNotEmpty() } ?: return null,
+                token = m.str("token")?.takeIf { it.isNotEmpty() } ?: return null,
                 pid = m.long("pid") ?: return null,
-                startedAt = m.str("started_at") ?: "",
             )
         }
     }
 }
 
+/** A manager this IDE started; [process] stays alive for the IDE session. */
+class SpawnedManager(val announcement: ManagerAnnouncement, val process: Process, val client: ManagerClient)
+
 /**
- * Finding a manager the way the `darkpyonix` CLI does (SPEC FR-C1, mirrored from the CLI's
- * `discovery.rs`): live registrations first (dedicated before ephemeral, then newest), else
- * spawn `darkpyonix manager --ephemeral` and wait for its registration and `/health`.
+ * Finding a manager the way the `darkpyonix` CLI does (SPEC FR-C1, INTENT D4). There are no
+ * registry files: a given manager comes from the settings or from `DARKPYONIX_MANAGER_URL` +
+ * `DARKPYONIX_TOKEN`; otherwise the IDE spawns `darkpyonix manager --ephemeral` as its child
+ * and reads `{url, token, pid}` from the first stdout line. Kernels are found by every manager
+ * (FR-M5), so any manager reaches the same kernel.
  */
 class ManagerDiscovery(
     val home: Path = defaultHome(),
-    private val pidAlive: (Long) -> Boolean = ::processAlive,
+    private val env: Map<String, String> = System.getenv(),
 ) {
     companion object {
+        const val ENV_URL = "DARKPYONIX_MANAGER_URL"
+        const val ENV_TOKEN = "DARKPYONIX_TOKEN"
+        const val SPAWN_TIMEOUT_MS = 15_000L
+
         /** `DARKPYONIX_HOME`, else `~/.darkpyonix`. */
         fun defaultHome(): Path {
             System.getenv("DARKPYONIX_HOME")?.takeIf { it.isNotEmpty() }?.let { return Paths.get(it) }
             return Paths.get(System.getProperty("user.home"), ".darkpyonix")
         }
-
-        fun processAlive(pid: Long): Boolean =
-            ProcessHandle.of(pid).map { it.isAlive }.orElse(false)
-
-        const val SPAWN_TIMEOUT_MS = 10_000L
     }
 
-    private val managersDir: Path get() = home.resolve("managers")
-
-    /** Registered managers whose process is alive, best first. Stale files are left alone. */
-    fun liveRecords(): List<ManagerRecord> {
-        val dir = managersDir.toFile()
-        val files = dir.listFiles { f -> f.isFile && f.name.endsWith(".json") } ?: return emptyList()
-        return files.mapNotNull { f ->
-            try {
-                ManagerRecord.parse(f.readText())
-            } catch (_: IOException) {
-                null
-            }
-        }
-            .filter { pidAlive(it.pid) }
-            .sortedWith(compareByDescending<ManagerRecord> { it.mode == "dedicated" }.thenByDescending { it.startedAt })
-    }
-
-    /** The first registered manager that answers `/health`, or null. Never spawns. */
-    fun findLive(identity: ClientIdentity): ManagerClient? =
-        liveRecords().asSequence().map { ManagerClient(it.url, it.token, identity) }.firstOrNull { it.health() }
+    /** `DARKPYONIX_HOME/manager.log`: the spawned manager's stderr, as the CLI keeps it (FR-C1). */
+    val logFile: Path get() = home.resolve("manager.log")
 
     /**
-     * Starts `<command> manager --ephemeral` detached from the IDE (its own process; stdout
-     * discarded, stderr to `managers/spawn.log`), then waits for `managers/<pid>.json`.
+     * The given manager: the settings pair first, else the environment pair, else null (spawn).
+     * Only one half of a pair is an error, like the CLI (FR-C1).
      */
-    fun spawnEphemeral(command: List<String>, identity: ClientIdentity): ManagerClient {
-        Files.createDirectories(managersDir)
-        val log = managersDir.resolve("spawn.log").toFile()
+    fun configured(settingsUrl: String?, settingsToken: String?): ManagerEndpoint? {
+        pair(settingsUrl, settingsToken, "the DarkPyonix settings (manager URL and token)")?.let { return it }
+        return pair(env[ENV_URL], env[ENV_TOKEN], "$ENV_URL and $ENV_TOKEN")
+    }
+
+    private fun pair(url: String?, token: String?, what: String): ManagerEndpoint? {
+        val u = url?.trim().orEmpty()
+        val t = token?.trim().orEmpty()
+        if (u.isEmpty() && t.isEmpty()) return null
+        if (u.isEmpty() || t.isEmpty()) throw IOException("Set both or neither of $what: only one is set.")
+        return ManagerEndpoint(u, t)
+    }
+
+    /**
+     * Starts [command] (`darkpyonix manager --ephemeral`) and reads its first stdout line. The
+     * rest of stdout is drained on a daemon thread so the manager never blocks on a full pipe;
+     * stderr is appended to [logFile]. The token only travels through the stdout pipe.
+     */
+    fun spawnEphemeral(command: List<String>, identity: ClientIdentity, timeoutMs: Long = SPAWN_TIMEOUT_MS): SpawnedManager {
+        Files.createDirectories(home)
+        val log = logFile.toFile()
+        if (!log.exists()) log.createNewFile()
+        restrict(logFile)
         val pb = ProcessBuilder(command)
             .redirectInput(ProcessBuilder.Redirect.from(nullFile()))
-            .redirectOutput(ProcessBuilder.Redirect.DISCARD)
-            .redirectError(ProcessBuilder.Redirect.to(log))
+            .redirectOutput(ProcessBuilder.Redirect.PIPE)
+            .redirectError(ProcessBuilder.Redirect.appendTo(log))
         pb.environment()["DARKPYONIX_HOME"] = home.toString()
+        // The child is the manager; it must not hand itself a manager to reuse.
+        pb.environment().remove(ENV_URL)
+        pb.environment().remove(ENV_TOKEN)
         val child = try {
             pb.start()
         } catch (e: IOException) {
@@ -90,27 +108,43 @@ class ManagerDiscovery(
                 e,
             )
         }
-        val reg = managersDir.resolve("${child.pid()}.json").toFile()
-        val deadline = System.currentTimeMillis() + SPAWN_TIMEOUT_MS
-        while (true) {
-            if (!child.isAlive) {
-                throw IOException("`${command.joinToString(" ")}` exited with ${child.exitValue()}${logTail(log)}")
-            }
-            if (reg.isFile) {
-                val rec = try {
-                    ManagerRecord.parse(reg.readText())
-                } catch (_: IOException) {
-                    null
+        val first = CompletableFuture<String?>()
+        Thread({
+            try {
+                val reader = BufferedReader(InputStreamReader(child.inputStream, StandardCharsets.UTF_8))
+                first.complete(reader.readLine())
+                val buf = CharArray(8192)
+                while (reader.read(buf) >= 0) {
+                    // Drained and dropped: the manager writes nothing else we need.
                 }
-                if (rec != null) {
-                    val client = ManagerClient(rec.url, rec.token, identity)
-                    if (client.health()) return client
-                }
+            } catch (e: IOException) {
+                first.complete(null)
             }
-            if (System.currentTimeMillis() > deadline) {
-                throw IOException("No healthy registration at $reg within ${SPAWN_TIMEOUT_MS / 1000} s${logTail(log)}")
-            }
-            Thread.sleep(50)
+        }, "DarkPyonix manager stdout").apply { isDaemon = true }.start()
+
+        val line = try {
+            first.get(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (e: TimeoutException) {
+            child.destroy()
+            throw IOException("`${command.joinToString(" ")}` printed no address within ${timeoutMs / 1000} s${logTail(log)}")
+        } catch (e: ExecutionException) {
+            null
+        }
+        val ann = line?.let { ManagerAnnouncement.parse(it) }
+        if (ann == null) {
+            val exited = child.waitFor(2, TimeUnit.SECONDS)
+            if (!exited) child.destroy()
+            val why = if (exited) "exited with ${child.exitValue()}" else "printed no {url, token, pid} line"
+            throw IOException("`${command.joinToString(" ")}` $why${logTail(log)}")
+        }
+        return SpawnedManager(ann, child, ManagerClient(ann.url, ann.token, identity))
+    }
+
+    private fun restrict(path: Path) {
+        try {
+            Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-------"))
+        } catch (_: UnsupportedOperationException) {
+        } catch (_: IOException) {
         }
     }
 

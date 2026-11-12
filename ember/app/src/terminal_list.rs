@@ -187,6 +187,25 @@ impl TerminalTabs {
     }
 }
 
+/// What a key does on a focused terminal tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabKeyAction {
+    /// F2, Code-OSS's `workbench.action.terminal.renameInstance` key on the tabs list.
+    Rename,
+}
+
+/// The action for a key on a focused tab (`key` as the workbench names it, `"F2"`).
+/// Modified presses are not tab keys.
+pub fn tab_key_action(key: &str, ctrl: bool, alt: bool, shift: bool, meta: bool) -> Option<TabKeyAction> {
+    if ctrl || alt || shift || meta {
+        return None;
+    }
+    match key {
+        "F2" => Some(TabKeyAction::Rename),
+        _ => None,
+    }
+}
+
 /// The create request for an editor terminal with `key` in `folder`.
 pub fn create_request(folder: &str, project: &str, key: String) -> TermCreateRequest {
     TermCreateRequest {

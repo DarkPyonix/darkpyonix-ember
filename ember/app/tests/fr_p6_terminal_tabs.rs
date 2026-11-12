@@ -2,7 +2,7 @@
 //! Pure model tests: which terminals are listed, reattach on reopen, new, kill, rename, switch.
 
 use ember_app::terminal_list::{
-    is_folder_terminal, key_index, kill_url, remove_url, tab_key, TermTab, TerminalTabs, EDITOR_ORIGIN,
+    is_folder_terminal, key_index, tab_key_action, TabKeyAction, kill_url, remove_url, tab_key, TermTab, TerminalTabs, EDITOR_ORIGIN,
 };
 use ember_app::terminal_stream::{terms_list_url, TermInfo};
 
@@ -165,4 +165,17 @@ fn fr_p6_list_decodes_the_node_fields_the_tabs_need() {
     let tabs = TerminalTabs::from_list(&list, P, F);
     assert_eq!(ids(&tabs), ["t1"]);
     assert_eq!(list[0].created_ms, 5);
+}
+
+#[test]
+fn fr_p6_f2_on_a_focused_tab_renames() {
+    assert_eq!(tab_key_action("F2", false, false, false, false), Some(TabKeyAction::Rename));
+    assert_eq!(tab_key_action("F2", true, false, false, false), None, "modified F2 is not the rename key");
+    assert_eq!(tab_key_action("F2", false, false, true, false), None);
+    assert_eq!(tab_key_action("Enter", false, false, false, false), None);
+    assert_eq!(tab_key_action("F3", false, false, false, false), None);
+    // The rename that F2 starts goes through the same model call.
+    let mut tabs = TerminalTabs::from_list(&[term("a", Some("proj:/work/app"), 1)], P, F);
+    assert!(tabs.rename("a", "logs"));
+    assert_eq!(tabs.label("a").as_deref(), Some("logs"));
 }

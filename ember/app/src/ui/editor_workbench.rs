@@ -1849,12 +1849,30 @@ pub mod page {
                     } else {
                         {
                             let on = active.as_deref() == Some(id.as_str());
-                            let (sel, ren, del) = (id.clone(), id.clone(), id.clone());
+                            let (sel, ren, del, f2, pen) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
                             rsx! {
                                 button { key: "{id}", class: if on { "on" } else { "" }, role: "tab", "aria-selected": if on { "true" } else { "false" }, title: "{label}",
                                     onclick: move |_| { terms::select(&sel); bump(); },
+                                    // TODO(compose-rust#417): the renderer sends no pointer events yet, so a real
+                                    // double-click never arrives; F2 and the pencil button rename today.
                                     ondoubleclick: move |_| { terms::begin_rename(&ren); bump(); },
+                                    onkeydown: move |event| {
+                                        let m = event.modifiers();
+                                        let name = key_name(&event.key());
+                                        if crate::terminal_list::tab_key_action(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META)).is_some() {
+                                            event.stop_propagation();
+                                            event.prevent_default();
+                                            terms::begin_rename(&f2);
+                                            bump();
+                                        }
+                                    },
                                     {icon_px("code", 14)} "{label}"
+                                    if on {
+                                        span { class: "ed-ib", role: "button", title: "이름 바꾸기", "aria-label": "이름 바꾸기: {label}", tabindex: "-1",
+                                            onclick: move |event| { event.stop_propagation(); terms::begin_rename(&pen); bump(); },
+                                            {icon_px("edit", 12)}
+                                        }
+                                    }
                                     span { class: "ed-ib", role: "button", title: "터미널 종료", "aria-label": "터미널 종료: {label}", tabindex: "-1",
                                         onclick: move |event| { event.stop_propagation(); terms::kill(&del); bump(); },
                                         {icon_px("trash", 12)}

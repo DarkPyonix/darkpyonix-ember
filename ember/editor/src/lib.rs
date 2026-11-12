@@ -26,6 +26,7 @@
 //! | [`fallback`] | connect-time version check outcome: when to offer "Open in VS Code" instead |
 //! | [`replies`] | answers for the extension host's other requests |
 //! | [`search`] | FR-E7: search across files through the extension host, unsaved buffers, replace with re-check |
+//! | [`trust`] | FR-L31.18: workspace trust answers, waiting requests, the grant |
 //!
 //! **Status: written without compiling** (no cargo was run for this change). See
 //! `docs/design/EDITOR-SESSION.md` §7 for the APIs that are uncertain.
@@ -52,6 +53,7 @@ pub mod search;
 pub mod selector;
 pub mod semantic;
 pub mod textmate;
+pub mod trust;
 pub mod session;
 pub mod widget;
 

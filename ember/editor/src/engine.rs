@@ -111,6 +111,8 @@ pub enum Input {
     CancelSearch { id: u64 },
     /// Replace the chosen matches (FR-E7); answered with [`SessionUpdate::ReplaceDone`].
     Replace { id: u64, request: ReplaceRequest },
+    /// The user's answer to the workspace trust prompt (FR-L31.18): `true` grants trust.
+    DecideWorkspaceTrust { trusted: bool },
     /// Nothing happened; run due timers.
     Tick,
 }
@@ -173,6 +175,9 @@ pub enum SessionUpdate {
     Closed { uri: UriComponents },
     /// The extension-host or management connection is gone.
     ConnectionLost { reason: String },
+    /// An extension asked for workspace trust (`$requestWorkspaceTrust`) while the folder is in
+    /// restricted mode: the window shows the trust prompt (FR-L31.18).
+    WorkspaceTrustRequested,
     /// The problems list changed: every marker of every file, errors first.
     Problems { problems: Vec<crate::diagnostics::Problem> },
     /// Output channels changed (channels list, or an append/clear).
@@ -272,6 +277,8 @@ pub struct SessionCore {
     next_editor: u64,
     next_edit_request: u32,
     reply_seq: u64,
+    /// Workspace trust and the trust requests waiting for the user (FR-L31.18).
+    trust: crate::trust::WorkspaceTrust,
     output_seq: u64,
     output_channels: Vec<crate::output::OutputChannel>,
     touched: BTreeSet<String>,
@@ -329,6 +336,7 @@ impl SessionCore {
             next_editor: 0,
             next_edit_request: 0,
             reply_seq: 0,
+            trust: crate::trust::WorkspaceTrust::default(),
             output_seq: 0,
             output_channels: Vec::new(),
             touched: BTreeSet::new(),
@@ -359,6 +367,7 @@ impl SessionCore {
             Input::Search { id, request, folder } => self.on_search(id, request, folder),
             Input::CancelSearch { id } => self.on_cancel_search(id),
             Input::Replace { id, request } => self.on_replace(id, request),
+            Input::DecideWorkspaceTrust { trusted } => self.on_decide_trust(trusted),
             Input::Tick => {}
         }
         self.run_timers();
@@ -428,6 +437,26 @@ impl SessionCore {
 
     fn ui(&mut self, u: SessionUpdate) {
         self.out.push(Effect::Ui(u));
+    }
+
+    /// The trust state the extension host was started with (FR-L31.18); set once, before the
+    /// first input.
+    pub fn set_workspace_trust(&mut self, trust: crate::trust::WorkspaceTrust) {
+        self.trust = trust;
+    }
+
+    pub fn workspace_trusted(&self) -> bool {
+        self.trust.is_trusted()
+    }
+
+    fn on_decide_trust(&mut self, trusted: bool) {
+        let (calls, answers) = self.trust.decide(trusted);
+        for call in calls {
+            self.out.push(Effect::Rpc { token: None, call });
+        }
+        for (req, reply) in answers {
+            self.respond(req, Ok(reply));
+        }
     }
 
     fn respond(&mut self, req: u32, result: Result<Reply, Option<Value>>) {
@@ -1342,10 +1371,15 @@ impl SessionCore {
             Ok(MainThreadCall::Other { proxy: Some("MainThreadDocuments"), method }) if method == "$tryOpenDocument" => {
                 self.on_try_open_document(&r);
             }
-            Ok(MainThreadCall::Other { proxy, method }) => {
-                let reply = session_reply(proxy, &method, self.reply_seq, &self.language_ids);
-                self.respond(r.req, Ok(reply));
-            }
+            Ok(MainThreadCall::Other { proxy, method }) => match self.trust.on_request(proxy, &method, r.req) {
+                // Workspace trust (FR-L31.18).
+                Some(crate::trust::TrustAnswer::Now(reply)) => self.respond(r.req, Ok(reply)),
+                Some(crate::trust::TrustAnswer::Ask) => self.out.push(Effect::Ui(SessionUpdate::WorkspaceTrustRequested)),
+                None => {
+                    let reply = session_reply(proxy, &method, self.reply_seq, &self.language_ids);
+                    self.respond(r.req, Ok(reply));
+                }
+            },
             Ok(call) => {
                 let change = self.registry.apply(&call);
                 self.on_registry_change(change);

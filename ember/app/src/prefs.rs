@@ -61,6 +61,11 @@ pub struct Prefs {
     /// The editor's shortcut set (FR-L30). Older files have none, which reads as VS Code.
     #[serde(default)]
     pub keymap: crate::ui::keymap::Keymap,
+    /// The editor's workspace trust answers (FR-L31.18), keyed by
+    /// [`crate::ui::workspace_trust::trust_key`] (computer and folder). `true` is trusted, `false`
+    /// restricted mode. Older files have none: every folder asks once.
+    #[serde(default)]
+    pub workspace_trust: BTreeMap<String, bool>,
 }
 
 fn format_default() -> u32 {
@@ -80,6 +85,7 @@ impl Default for Prefs {
             character_styles: BTreeMap::new(),
             character_overrides: BTreeMap::new(),
             keymap: crate::ui::keymap::Keymap::default(),
+            workspace_trust: BTreeMap::new(),
         }
     }
 }

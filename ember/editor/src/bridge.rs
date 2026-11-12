@@ -313,6 +313,8 @@ impl WidgetBridge {
                 BridgeAction::ExtensionNotice { severity, message, source }
             }
             SessionUpdate::Commands { .. } => BridgeAction::None,
+            // The window's trust prompt handles it (FR-L31.18).
+            SessionUpdate::WorkspaceTrustRequested => BridgeAction::None,
             // Search and replace results are the search panel's, not a document's (FR-E7).
             SessionUpdate::SearchHits { .. } | SessionUpdate::SearchDone { .. } | SessionUpdate::ReplaceDone { .. } => BridgeAction::None,
         }

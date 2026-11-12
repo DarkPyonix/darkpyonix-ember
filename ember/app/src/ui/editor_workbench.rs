@@ -883,6 +883,7 @@ pub mod page {
                         }
                     }
                     section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
+                        {crate::ui::workspace_trust::view::banner(&s)}
                         {tab_strip(&s, &paths, &dirty, current.as_deref())}
                         if *s.menu_open.read() { {menu(&s, keymap)} }
                         if let Some(path) = current.as_deref() {
@@ -926,6 +927,7 @@ pub mod page {
                         {bottom_window(&s, w)}
                     }
                     if *s.palette_open.read() { {palette_sheet(&s, keymap)} }
+                    {crate::ui::workspace_trust::view::prompt(&s)}
                     {status_bar(&s, &agent_state, &branch, current.as_deref().filter(|_| active.is_some()), line, col, active.as_ref().map_or(4, |d| d.tab_width))}
                 }
             }
@@ -956,6 +958,7 @@ pub mod page {
         let find_hint = keymap.hint(Action::Find, Os::current());
         let find_s = s.clone();
         let git_s = s.clone();
+        let run_s = s.clone();
         let mut stripes = s.stripes;
         let project_tip = tooltip_text("프로젝트 창", &keymap.hint(Action::Project, Os::current()));
         let open = *menu_open.read();
@@ -974,7 +977,7 @@ pub mod page {
                 }
                 div { class: "ed-runcfg",
                     button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| notice(format!("실행 구성: {SOON}")), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
-                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| notice(format!("실행: {SOON}")), {icon("play")} }
+                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| notice(crate::ui::workspace_trust::view::blocked(&run_s, crate::ui::workspace_trust::Restricted::Run).unwrap_or_else(|| format!("실행: {SOON}"))), {icon("play")} }
                     button { class: "ed-ib", title: "중지", "aria-label": "중지", onclick: move |_| notice(format!("중지: {SOON}")), {icon("pause")} }
                     button { class: "ed-ib", title: "{theme_title}", "aria-label": "{theme_title}", onclick: move |_| {
                         let next = theme_pref.next();

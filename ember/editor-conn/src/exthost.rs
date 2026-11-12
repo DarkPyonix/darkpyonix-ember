@@ -831,7 +831,8 @@ impl MainThreadCall {
 /// * `MainThreadWindow.$getInitialState` (L2301): `{ isFocused, isActive }`.
 /// * `MainThreadWorkspace.$checkExists` (L1976): `workspaceContains:` activation; `false` until Ember
 ///   implements glob search over the remote filesystem.
-/// * `MainThreadWorkspace.$isResourceTrusted` / `$requestWorkspaceTrust` (L1986 / L1985): trusted.
+/// * `MainThreadWorkspace.$isResourceTrusted` / `$requestWorkspaceTrust` (L1986 / L1985): trusted
+///   (the session answers these from its workspace trust first, see `ember_editor::trust`).
 /// * `MainThreadCommands.$getCommands` (L139): empty list.
 pub fn default_reply(proxy: Option<&str>, method: &str) -> Reply {
     match (proxy, method) {

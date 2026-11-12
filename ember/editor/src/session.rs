@@ -66,6 +66,11 @@ pub struct SessionConfig {
     /// Optional VS Code Web target URL (or base URL) used when the server version is unsupported
     /// or unknown and the session falls back to the VS Code target.
     pub vscode_url: Option<String>,
+    /// Whether the folder is trusted (FR-L31.18). `false` starts the extension host in restricted
+    /// mode: extensions that do not support untrusted workspaces are not run until
+    /// [`EditorSession::decide_workspace_trust`] grants trust. Defaults to `true`; the editor
+    /// window sets it from its per-device memory.
+    pub workspace_trusted: bool,
 }
 
 impl SessionConfig {
@@ -83,6 +88,7 @@ impl SessionConfig {
             user_settings: Vec::new(),
             core: CoreOptions::default(),
             vscode_url: None,
+            workspace_trusted: true,
         }
     }
 
@@ -238,6 +244,8 @@ impl EditorSession {
             log_level: 3,
         }
         .to_json();
+        let mut init = init;
+        ember_editor_conn::trust::restrict_init_data(&mut init, &extensions, config.workspace_trusted);
         let (peer, rpc_events) = exthost::initialize(econn, &init).await?;
 
         // The driver answers extension-host requests from here on, including any made while the
@@ -247,6 +255,7 @@ impl EditorSession {
         let commands = crate::commands::parse_contributed_commands(&extensions);
         let mut core = SessionCore::new(LanguageRegistry::from_extensions(&extensions), config.core.clone(), Instant::now());
         core.set_grammar_catalog(crate::textmate::GrammarCatalog::from_extensions(&extensions));
+        core.set_workspace_trust(crate::trust::WorkspaceTrust::new(config.workspace_trusted, extensions.clone()));
         let driver = Driver {
             core,
             highlight: None,
@@ -267,7 +276,7 @@ impl EditorSession {
         defaults.push(("editor.inlineSuggest.enabled".into(), json!(config.core.inline_completions), Some(6)));
         defaults.push(("editor.codeLens".into(), json!(true), Some(6)));
         let configuration = exthost::configuration_init_data(&defaults, &config.user_settings);
-        for call in exthost::bootstrap_calls(Some(&workspace), true, &configuration) {
+        for call in exthost::bootstrap_calls(Some(&workspace), config.workspace_trusted, &configuration) {
             call.start(&peer)?.wait().await?;
         }
 
@@ -467,6 +476,13 @@ impl EditorSession {
     /// Replace the chosen matches (FR-E7); answered with [`SessionUpdate::ReplaceDone`].
     pub fn replace(&self, id: u64, request: crate::search::ReplaceRequest) -> Result<(), Error> {
         self.send(Command::Input(Input::Replace { id, request }))
+    }
+
+    /// The user's answer to the workspace trust prompt (FR-L31.18). `true` runs the extensions
+    /// restricted mode held back and tells the host (`$onDidGrantWorkspaceTrust`); either answer
+    /// settles the extensions' waiting `$requestWorkspaceTrust` calls.
+    pub fn decide_workspace_trust(&self, trusted: bool) -> Result<(), Error> {
+        self.send(Command::Input(Input::DecideWorkspaceTrust { trusted }))
     }
 
     /// After [`SessionUpdate::Desync`]: re-send the session's text as a new generation.

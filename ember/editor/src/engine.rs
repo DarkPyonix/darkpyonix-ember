@@ -90,6 +90,10 @@ pub enum Input {
     Reload { uri: UriComponents },
     /// The editor of `uri` became the active one.
     Focus { uri: UriComponents },
+    /// Show `text` (widget form) as the buffer of `uri`, opening the file first if it is not open: the
+    /// window's buffer kept across a reconnect (FR-L31.5). The document is dirty unless `text` equals
+    /// the file on disk; equal text changes nothing.
+    Restore { uri: UriComponents, text: String },
     /// An event from the `CodeEditor` node rendered with key `generation`.
     Widget { uri: UriComponents, generation: u64, event: WidgetEvent },
     /// Explicit inline-completion request at `pos` (a keyboard command).
@@ -234,6 +238,8 @@ pub struct SessionCore {
     language_ids: Vec<String>,
     docs: HashMap<String, OpenDocument>,
     opening: HashSet<String>,
+    /// Buffers to restore once their file has been read ([`Input::Restore`] before the open finished).
+    restores: HashMap<String, String>,
     /// Documents announced to the extension host only (for `$tryOpenDocument`): key → (uri, version).
     exthost_only: HashMap<String, (UriComponents, u64)>,
     active: Option<String>,
@@ -286,6 +292,7 @@ impl SessionCore {
             language_ids,
             docs: HashMap::new(),
             opening: HashSet::new(),
+            restores: HashMap::new(),
             exthost_only: HashMap::new(),
             active: None,
             registry: Registry::new(),
@@ -325,6 +332,7 @@ impl SessionCore {
             Input::Close { uri } => self.on_close(&uri),
             Input::Reload { uri } => self.on_reload(uri),
             Input::Focus { uri } => self.on_focus(&uri),
+            Input::Restore { uri, text } => self.on_restore(uri, text),
             Input::Widget { uri, generation, event } => self.on_widget(&uri, generation, event),
             Input::TriggerInline { uri, generation, pos } => self.on_trigger_inline(&uri, generation, pos),
             Input::ExtHostRequest(r) => self.on_exthost_request(r),
@@ -525,11 +533,42 @@ impl SessionCore {
         self.out.push(Effect::Watch { uri });
         self.send_tab_model();
         self.schedule_codelens(&key, Duration::ZERO);
-        self.touched.insert(key);
+        self.touched.insert(key.clone());
+        if let Some(text) = self.restores.remove(&key) {
+            self.restore_doc(&key, &text);
+        }
+    }
+
+    fn on_restore(&mut self, uri: UriComponents, text: String) {
+        let key = uri.key();
+        if self.docs.contains_key(&key) {
+            self.restore_doc(&key, &text);
+            return;
+        }
+        self.restores.insert(key.clone(), text);
+        if self.opening.insert(key) {
+            self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::Open });
+        }
+    }
+
+    /// Put `text` (widget form) in the buffer of open document `key` as a new generation and tell the
+    /// window whether it is dirty. Text equal to the buffer changes nothing.
+    fn restore_doc(&mut self, key: &str, text: &str) {
+        let normalized = text.replace("\r\n", "\n");
+        match self.docs.get(key) {
+            Some(doc) if doc.widget_text() != normalized => {}
+            _ => return,
+        }
+        self.replace_doc(key, |doc, generation| doc.restore(&normalized, generation));
+        if let Some(doc) = self.docs.get(key) {
+            let (uri, dirty) = (doc.uri.clone(), doc.is_dirty());
+            self.ui(SessionUpdate::Dirty { uri, dirty });
+        }
     }
 
     fn on_close(&mut self, uri: &UriComponents) {
         let key = uri.key();
+        self.restores.remove(&key);
         let Some(doc) = self.docs.remove(&key) else { return };
         self.rpc(doc.remove_call());
         if let Some(job) = self.highlights.close(&key) {
@@ -1263,7 +1302,10 @@ impl SessionCore {
                 self.opening.remove(&uri.key());
                 match result {
                     Ok(bytes) => self.finish_open(uri, bytes),
-                    Err(error) => self.ui(SessionUpdate::OpenFailed { uri, error }),
+                    Err(error) => {
+                        self.restores.remove(&uri.key());
+                        self.ui(SessionUpdate::OpenFailed { uri, error })
+                    }
                 }
             }
             ReadPurpose::Reload => {
@@ -1612,11 +1654,19 @@ impl SessionCore {
     /// Replace a document's content wholesale (reload from disk, resync). `bom: None` keeps the
     /// current BOM setting.
     fn reset_doc(&mut self, key: &str, text: &str, bom: Option<bool>) {
+        self.replace_doc(key, |doc, generation| {
+            let bom = bom.unwrap_or_else(|| doc.save_bytes().starts_with("\u{feff}".as_bytes()));
+            doc.reset(text, bom, generation)
+        });
+    }
+
+    /// Replace a document's content with what `replace` puts in it, as a new widget generation: the
+    /// extension host is re-announced, the overlays of the old text end, and the widget gets `SetText`.
+    fn replace_doc(&mut self, key: &str, replace: impl FnOnce(&mut OpenDocument, u64) -> Vec<Call>) {
         self.next_generation += 1;
         let generation = self.next_generation;
         let Some(doc) = self.docs.get_mut(key) else { return };
-        let bom = bom.unwrap_or_else(|| doc.save_bytes().starts_with("\u{feff}".as_bytes()));
-        let calls = doc.reset(text, bom, generation);
+        let calls = replace(doc, generation);
         let (uri, widget_text) = (doc.uri.clone(), doc.widget_text());
         for c in calls {
             self.rpc(c);

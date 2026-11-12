@@ -949,4 +949,13 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 
 **Status.** Specified (`FR-W4a` to `FR-W4c`, Draft; issue #457). Local server OSE and its relay are in #458/#459/#461; node OSE routes and server-to-node relay follow this spec.
 
+### D43: Hot exit in the Ember 에디터 window waits for a close hook and a backup store
+
+**Decision.** [provisional, #451, #744] The Ember 에디터 window does not implement Code-OSS hot exit (`files.hotExit`: unsaved buffers kept when the window closes and restored when it opens) in #451. #451 implements the other save states of `FR-L31.5` and the building block hot exit needs: a buffer the window holds can be put back into a session dirty (`EditorSession::restore`), which the reconnect uses today. Hot exit follows in #744.
+
+**Rejected** *[provisional]*. (1) Implementing it in #451 with a backup written only by the 에디터 닫기 menu item: the OS window close and the process exit path of `FR-L31.1` do not pass through the window's buffers, so most closes would still lose the edits while the feature looked present. (2) Writing a backup on every edit: a write per keystroke to the device's disk for a feature that is only read after a close, and still no clean-up point without the close hook. (3) Keeping backups on the server: the buffers are the device's unsaved work, and Code-OSS keeps them on the machine of the window too.
+
+**Why.** Code-OSS's backup service writes on close and restores on open; Ember needs the same two points. The window has the restore point now (`HostCommand::Restore`) but no close hook that runs before the process exits for every way the window closes, and no per-device backup store beside the prefs. Shipping half of it would be a function that does not do what Code-OSS does (D38).
+
+**Status.** Deferred; #744 has the completion criteria.
 

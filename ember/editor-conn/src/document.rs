@@ -333,6 +333,12 @@ impl DocumentMirror {
     pub fn mark_saved(&mut self) {
         self.dirty = false;
     }
+
+    /// The content is not what is on disk (a buffer restored after a reconnect, `ember-editor`
+    /// `OpenDocument::restore`). `added_data` then announces the document as dirty.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
 }
 
 /// All documents open in the editor core, producing the RPC calls that keep the extension host

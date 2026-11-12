@@ -57,6 +57,10 @@ pub struct Prefs {
     /// The editor's shortcut set (FR-L30). Older files have none, which reads as VS Code.
     #[serde(default)]
     pub keymap: crate::ui::keymap::Keymap,
+    /// The editor's auto-save (Code-OSS `files.autoSave`, FR-L31.5). Older files have none, which reads
+    /// as off, Code-OSS's default.
+    #[serde(default)]
+    pub auto_save: crate::ui::editor_states::AutoSave,
 }
 
 fn format_default() -> u32 {
@@ -75,6 +79,7 @@ impl Default for Prefs {
             panes: BTreeMap::new(),
             character_styles: BTreeMap::new(),
             keymap: crate::ui::keymap::Keymap::default(),
+            auto_save: crate::ui::editor_states::AutoSave::default(),
         }
     }
 }

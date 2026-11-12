@@ -31,3 +31,7 @@ ember-server = { path = "../server" }
 ember-transport = { path = "../transport", default-features = false, features = ["http", "letify"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
+
+# Only to check the spelled O_NONBLOCK in token.rs against the real value (#430).
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

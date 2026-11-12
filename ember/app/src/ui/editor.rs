@@ -129,6 +129,8 @@ pub fn folds(regions: &[ember_editor::FoldRegion]) -> compose_rust::code::Folds 
 pub struct EditorTabs {
     tabs: Vec<(String, bool)>,
     current: Option<usize>,
+    /// The tabs closed, for 닫은 편집기 다시 열기 (FR-L31.15).
+    closed: super::editor_actions::ClosedEditors,
 }
 
 impl EditorTabs {
@@ -158,6 +160,7 @@ impl EditorTabs {
     /// one before it; closing another one keeps the current tab.
     pub fn close(&mut self, path: &str) {
         let Some(i) = self.index(path) else { return };
+        self.closed.push(path);
         self.tabs.remove(i);
         self.current = match self.current {
             _ if self.tabs.is_empty() => None,
@@ -214,9 +217,26 @@ impl EditorTabs {
             .enumerate()
             .filter_map(|(i, (p, _))| (i != cur).then(|| p.clone()))
             .collect();
+        for p in &closed {
+            self.closed.push(p);
+        }
         self.tabs = vec![keep];
         self.current = Some(0);
         closed
+    }
+
+    /// 닫은 편집기 다시 열기 (`workbench.action.reopenClosedEditor`): open the tab closed last
+    /// that is not open again, and return its path.
+    pub fn reopen_closed(&mut self) -> Option<String> {
+        let open: Vec<String> = self.tabs.iter().map(|(p, _)| p.clone()).collect();
+        let path = self.closed.pop(|p| open.iter().any(|o| o == p))?;
+        self.open(&path);
+        Some(path)
+    }
+
+    /// A path was deleted: its tabs are not reopened.
+    pub fn forget_closed_below(&mut self, path: &str) {
+        self.closed.forget_below(path);
     }
 }
 
@@ -1097,7 +1117,18 @@ impl Stripes {
 pub fn is_implemented(action: Action) -> bool {
     // The right tool windows (agent, notifications) have no panel in the window yet: toggling one shows nothing.
     ToolWindow::from_action(action).is_some_and(|w| w.side() != Side::Right)
-        || matches!(action, Action::Close | Action::HideTool | Action::FindInFile | Action::ReplaceInFiles | Action::Recent | Action::GotoLine)
+        || matches!(
+            action,
+            Action::Close
+                | Action::HideTool
+                | Action::FindInFile
+                | Action::ReplaceInFiles
+                | Action::Recent
+                | Action::GotoLine
+                | Action::Save
+                | Action::MaximizeTool
+                | Action::ReopenClosed
+        )
 }
 
 /// Do what a keymap action does. Returns false for an action the editor cannot do yet (the
@@ -1426,7 +1457,19 @@ mod tests {
         for action in Action::ALL {
             // The palette, find, find-in-file, replace-in-files, recent files and goto-line open sheets and bars in the window:
             // they are not tab or tool window changes, so `apply_action` does not do them.
-            if matches!(action, Action::Palette | Action::Find | Action::FindInFile | Action::ReplaceInFiles | Action::Recent | Action::GotoLine) {
+            // Save, maximize and reopen act on the window's session, panel size and close history (FR-L31.15).
+            if matches!(
+                action,
+                Action::Palette
+                    | Action::Find
+                    | Action::FindInFile
+                    | Action::ReplaceInFiles
+                    | Action::Recent
+                    | Action::GotoLine
+                    | Action::Save
+                    | Action::MaximizeTool
+                    | Action::ReopenClosed
+            ) {
                 continue;
             }
             let mut tabs = EditorTabs::default();
@@ -1434,6 +1477,23 @@ mod tests {
             let mut stripes = Stripes::default();
             assert_eq!(apply_action(action, &mut tabs, &mut stripes), is_implemented(action), "{action:?}");
         }
+    }
+
+    #[test]
+    fn fr_l31_15_reopen_closed_editor_reopens_the_tab_closed_last() {
+        let mut tabs = EditorTabs::default();
+        for p in ["/w/a", "/w/b", "/w/c"] {
+            tabs.open(p);
+        }
+        tabs.close("/w/b");
+        assert_eq!(tabs.reopen_closed().as_deref(), Some("/w/b"));
+        assert_eq!(tabs.current_path(), Some("/w/b"));
+        tabs.activate("/w/a");
+        assert_eq!(tabs.close_others(), vec!["/w/b".to_string(), "/w/c".to_string()]);
+        assert_eq!(tabs.reopen_closed().as_deref(), Some("/w/c"));
+        tabs.forget_closed_below("/w/b");
+        assert_eq!(tabs.reopen_closed(), None);
+        assert_eq!(tabs.paths(), vec!["/w/a", "/w/c"]);
     }
 
     #[test]

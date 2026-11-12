@@ -16,6 +16,7 @@ pub mod channels;
 pub mod components;
 pub mod conversation;
 pub mod editor;
+pub mod editor_actions;
 pub mod enrol_flow;
 pub mod editor_icons;
 pub mod editor_scm;

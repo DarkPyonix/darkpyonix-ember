@@ -336,6 +336,29 @@ pub mod page {
             open_palette(s, mode);
             return;
         }
+        if action == Action::MaximizeTool {
+            let mut bottom_max = s.bottom_max;
+            let max = *bottom_max.read();
+            let mut stripes = s.stripes;
+            let next = crate::ui::editor_actions::toggle_maximized_panel(&mut *stripes.write(), max);
+            bottom_max.set(next);
+            return;
+        }
+        if action == Action::ReopenClosed {
+            let mut tabs = s.tabs;
+            let reopened = tabs.write().reopen_closed();
+            match reopened {
+                Some(path) => {
+                    s.open_errors.borrow_mut().remove(&path);
+                    s.host.send(HostCommand::Open(path.clone()));
+                    s.host.send(HostCommand::Focus(path.clone()));
+                    let mut recent = s.recent_files;
+                    record_recent_file(&mut recent, &path);
+                }
+                None => notice("다시 열 편집기가 없습니다"),
+            }
+            return;
+        }
         let mut tabs = s.tabs;
         let mut stripes = s.stripes;
         let closing = if action == Action::Close { tabs.read().current_path().map(str::to_owned) } else { None };
@@ -350,7 +373,7 @@ pub mod page {
             if let Some(next) = next { s.host.send(HostCommand::Focus(next)); }
         }
         if !handled {
-            notice(format!("{}: {SOON}", action.label()));
+            notice(crate::ui::editor_actions::not_ready_notice(action));
         }
         if handled && matches!(action, Action::Commit | Action::Git) && stripes.read().selected(Side::Left).is_some() {
             s.scm.refresh();
@@ -512,7 +535,7 @@ pub mod page {
                             let item = &items[r.index];
                             let segments = highlight_segments(&item.title, &r.matched);
                             let enabled = item.enabled;
-                            let hint = if enabled { item.hint.clone() } else if mode == crate::ui::palette::Mode::GotoLine { String::new() } else { "준비 중".to_string() };
+                            let hint = if enabled { item.hint.clone() } else if mode == crate::ui::palette::Mode::GotoLine { String::new() } else if let crate::ui::palette::Payload::Action(a) = &item.payload { crate::ui::editor_actions::not_ready_hint(*a) } else { "준비 중".to_string() };
                             let payload = apply_line_suffix(item.payload.clone(), line_suffix);
                             let click_s = s.clone();
                             let class = if row == chosen { "ed-tn sel" } else { "ed-tn" };
@@ -736,6 +759,7 @@ pub mod page {
                 tabs.write().close(&tab);
                 s.host.send(HostCommand::Close(tab));
             }
+            { let mut tabs = s.tabs; tabs.write().forget_closed_below(&path); }
             let mut expanded = s.expanded;
             expanded.write().retain(|p| !crate::ui::editor::is_at_or_below(p, &path));
             let mut tree_sel = s.tree_sel;
@@ -973,9 +997,9 @@ pub mod page {
                     kbd { class: "ed-sc", "{find_hint}" }
                 }
                 div { class: "ed-runcfg",
-                    button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| notice(format!("실행 구성: {SOON}")), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
-                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| notice(format!("실행: {SOON}")), {icon("play")} }
-                    button { class: "ed-ib", title: "중지", "aria-label": "중지", onclick: move |_| notice(format!("중지: {SOON}")), {icon("pause")} }
+                    button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| notice(format!("실행 구성: {SOON} (#445)")), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
+                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| notice(format!("실행: {SOON} (#445)")), {icon("play")} }
+                    button { class: "ed-ib", title: "중지", "aria-label": "중지", onclick: move |_| notice(crate::ui::editor_actions::not_ready_notice(Action::Stop)), {icon("pause")} }
                     button { class: "ed-ib", title: "{theme_title}", "aria-label": "{theme_title}", onclick: move |_| {
                         let next = theme_pref.next();
                         theme.set(next);
@@ -995,7 +1019,7 @@ pub mod page {
         let mut close_editor_menu = s.menu_open;
         rsx! {
             div { class: "ed-menu", role: "menu", "aria-label": "편집기 메뉴",
-                for a in [Action::FindInFile, Action::Save, Action::Recent, Action::Format, Action::GotoLine] {
+                for a in [Action::FindInFile, Action::Save, Action::Recent, Action::ReopenClosed, Action::Format, Action::GotoLine] {
                     {
                         let s = s.clone();
                         let label = a.label();
@@ -1070,7 +1094,7 @@ pub mod page {
         let class = if selected { "ed-sb on" } else { "ed-sb" };
         rsx! {
             button { key: "{w.label()}", class, title: "{tip}", "aria-label": "{tip}", "aria-pressed": "{selected}", onclick: move |_| {
-                if w.side() == Side::Right { notice(format!("{}: {SOON}", w.label())); } else { stripes.write().toggle(w); }
+                if w.side() == Side::Right { notice(crate::ui::editor_actions::tool_window_notice(w)); } else { stripes.write().toggle(w); }
                 if matches!(w, ToolWindow::Commit | ToolWindow::Git) && stripes.read().is_selected(w) { scm_s.scm.refresh(); }
             }, {icon(icon_name(w))} }
         }
@@ -1841,7 +1865,7 @@ pub mod page {
         rsx! {
             div { class: "ed-tsub",
                 button { class: "on", "aria-pressed": "true", {icon_px("code", 14)} "{computer}" }
-                button { class: "ed-ib", title: "새 터미널", "aria-label": "새 터미널", onclick: move |_| notice(format!("새 터미널: {SOON}")), {icon("plus")} }
+                button { class: "ed-ib", title: "새 터미널", "aria-label": "새 터미널", onclick: move |_| notice(crate::ui::editor_actions::not_ready_notice(Action::NewTerminal)), {icon("plus")} }
             }
             div { class: "ed-term", role: "log", "aria-label": "터미널 출력", tabindex: "0", style: "outline:none;",
                 // TODO(#335): paste and IME. Only key presses are forwarded; pasted and composed text is not.

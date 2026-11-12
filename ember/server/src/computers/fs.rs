@@ -24,10 +24,27 @@
 //! with it. The request body is capped at 1 MiB. A read response is bounded by the node
 //! (`MAX_READ`, 16 MiB per call), not by the server.
 //!
+//! Limits added by the server (#467) **[provisional]**:
+//! - `glob` and `grep` `limit` is clamped to [`MAX_SEARCH_LIMIT`] (1000, the node's own default)
+//!   before the request is sent, so a caller cannot ask the node for an unbounded result list.
+//!   The node still collects every glob match before sorting and truncating; bounding that walk
+//!   is node work (`ember/node/src/fs.rs`, owned by another change) and is recorded in SPEC.
+//! - At most [`FsLimits::concurrent`] relayed operations run at once across all computers (a
+//!   global semaphore, default 8, so at most about 8 x 21 MB of read responses are buffered).
+//!   A request that cannot get a permit within the timeout answers 503.
+//! - Every relayed operation has a deadline ([`FsLimits::timeout`], default 60 s). Past it the
+//!   server answers 504 and drops the node request. When the client disconnects, axum drops the
+//!   handler future, which drops the node request (its connection closes); the node may finish
+//!   work it already started, the server no longer waits for it.
+//! - Error text is not scrubbed: an unreachable node's message names its URL and a node error
+//!   body may contain absolute node paths. These routes are owner-only (D37), so the owner sees
+//!   their own addresses and paths. Scrubbing is required before any scoped access (#366).
+//!
 //! The routes sit in the main router, so on the local listener `auth::protect` (Host, Origin and
 //! the server token) wraps them, and the guest door does not serve them.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::StatusCode;
@@ -39,16 +56,57 @@ use ember_node::proto::{GlobRequest, GrepRequest, PathRequest, ReadRequest};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
+use tokio::sync::Semaphore;
+
 use super::{ComputerError, Computers};
 
 /// Largest request body these routes accept.
 pub const MAX_BODY: usize = 1024 * 1024;
 
+/// Largest `limit` a relayed `glob` or `grep` may ask the node for.
+pub const MAX_SEARCH_LIMIT: usize = 1000;
+
+/// Concurrency and deadline of the relayed operations.
+#[derive(Debug, Clone, Copy)]
+pub struct FsLimits {
+    /// Relayed operations in flight at once, across all computers.
+    pub concurrent: usize,
+    /// Deadline of one operation, waiting for a permit included.
+    pub timeout: Duration,
+}
+
+impl Default for FsLimits {
+    fn default() -> Self {
+        Self { concurrent: 8, timeout: Duration::from_secs(60) }
+    }
+}
+
+#[derive(Clone)]
+struct Relay {
+    computers: Arc<Computers>,
+    permits: Arc<Semaphore>,
+    timeout: Duration,
+}
+
 pub fn router(computers: Arc<Computers>) -> Router {
+    router_with(computers, FsLimits::default())
+}
+
+pub fn router_with(computers: Arc<Computers>, limits: FsLimits) -> Router {
+    let state = Relay {
+        computers,
+        permits: Arc::new(Semaphore::new(limits.concurrent.max(1))),
+        timeout: limits.timeout,
+    };
     Router::new()
         .route("/api/computers/{id}/fs/{op}", post(relay))
         .layer(DefaultBodyLimit::max(MAX_BODY))
-        .with_state(computers)
+        .with_state(state)
+}
+
+/// The `limit` actually sent to the node.
+pub fn clamp_limit(limit: Option<usize>) -> Option<usize> {
+    Some(limit.unwrap_or(MAX_SEARCH_LIMIT).min(MAX_SEARCH_LIMIT))
 }
 
 fn plain(code: StatusCode, msg: String) -> Response {
@@ -86,7 +144,7 @@ fn out<T: serde::Serialize>(r: Result<T, ClientError>) -> Response {
 }
 
 async fn relay(
-    State(c): State<Arc<Computers>>,
+    State(r): State<Relay>,
     Path((id, op)): Path<(String, String)>,
     Json(v): Json<Value>,
 ) -> Response {
@@ -94,11 +152,24 @@ async fn relay(
     if !matches!(op.as_str(), "stat" | "lstat" | "read" | "list" | "readlink" | "glob" | "grep") {
         return plain(StatusCode::NOT_FOUND, format!("no such file operation: {op}"));
     }
-    let node = match c.client(&id) {
+    let node = match r.computers.client(&id) {
         Ok(n) => n,
         Err(e) => return computer_error(e),
     };
-    match op.as_str() {
+    let deadline = tokio::time::Instant::now() + r.timeout;
+    let _permit = match tokio::time::timeout_at(deadline, r.permits.clone().acquire_owned()).await {
+        Ok(Ok(p)) => p,
+        _ => return plain(StatusCode::SERVICE_UNAVAILABLE, "too many file operations in flight".into()),
+    };
+    match tokio::time::timeout_at(deadline, call(&node, &op, v)).await {
+        Ok(resp) => resp,
+        Err(_) => plain(StatusCode::GATEWAY_TIMEOUT, format!("file operation {op} timed out")),
+    }
+}
+
+/// Sends one operation to the node. Dropping this future drops the node request.
+async fn call(node: &ember_node::client::NodeClient, op: &str, v: Value) -> Response {
+    match op {
         "stat" => match body::<PathRequest>(v) {
             Ok(r) => out(node.stat(&r.path).await),
             Err(e) => e,
@@ -120,13 +191,32 @@ async fn relay(
             Err(e) => e,
         },
         "glob" => match body::<GlobRequest>(v) {
-            Ok(r) => out(node.glob(&r).await),
+            Ok(mut r) => {
+                r.limit = clamp_limit(r.limit);
+                out(node.glob(&r).await)
+            }
             Err(e) => e,
         },
         "grep" => match body::<GrepRequest>(v) {
-            Ok(r) => out(node.grep(&r).await),
+            Ok(mut r) => {
+                r.limit = clamp_limit(r.limit);
+                out(node.grep(&r).await)
+            }
             Err(e) => e,
         },
         _ => unreachable!("checked above"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fr_w4_fs_relay_limit_is_clamped() {
+        assert_eq!(clamp_limit(None), Some(MAX_SEARCH_LIMIT));
+        assert_eq!(clamp_limit(Some(5)), Some(5));
+        assert_eq!(clamp_limit(Some(usize::MAX)), Some(MAX_SEARCH_LIMIT));
+        assert_eq!(clamp_limit(Some(0)), Some(0));
     }
 }

@@ -26,6 +26,9 @@ pub enum ClientError {
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
     #[error("protocol: {0}")]
     Protocol(String),
+    /// A fixed Korean sentence for the panel (NFR-L4); the detail is logged, not shown.
+    #[error("{0}")]
+    Refused(&'static str),
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -41,6 +44,53 @@ fn encode_segment(segment: &str) -> String {
         }
     }
     out
+}
+
+/// Whether the relay at `base` may carry a terminal (FR-L31.19). `https` always may, and is
+/// verified against the webpki roots. Plain `http` may only to a loopback host or to a host listed
+/// with an explicit `http://` entry in `EMBER_TOKEN_HOSTS` (`extra_hosts` here), the same rule as
+/// the token (FR-S11), because keystrokes and shell output would otherwise cross a network in
+/// clear. Any other scheme is refused.
+pub fn relay_allowed_with_hosts(base: &str, extra_hosts: &str) -> Result<(), String> {
+    let Ok(url) = reqwest::Url::parse(base) else {
+        return Err(format!("the server address is not a URL: {base}"));
+    };
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if ember_client::token::token_allowed_for_hosts(base, extra_hosts) => Ok(()),
+        "http" => Err(format!(
+            "refusing plain http to {}: use https, or list http://host:port in EMBER_TOKEN_HOSTS",
+            url.host_str().unwrap_or("")
+        )),
+        other => Err(format!("unsupported server scheme {other}: use https or http")),
+    }
+}
+
+/// [`relay_allowed_with_hosts`] with `EMBER_TOKEN_HOSTS` read from the environment.
+pub fn relay_allowed(base: &str) -> Result<(), String> {
+    relay_allowed_with_hosts(base, &std::env::var("EMBER_TOKEN_HOSTS").unwrap_or_default())
+}
+
+/// The fixed Korean sentence the panel shows when [`relay_allowed`] refuses (NFR-L4); the English
+/// reason goes to the log only.
+pub const RELAY_REFUSED: &str =
+    "이 서버 주소로는 터미널을 열 수 없습니다. https 주소를 쓰거나 같은 컴퓨터의 서버에 연결하세요.";
+
+fn check_relay(base: &str) -> Result<(), ClientError> {
+    relay_allowed(base).map_err(|reason| {
+        tracing::warn!("terminal relay refused: {reason}");
+        ClientError::Refused(RELAY_REFUSED)
+    })
+}
+
+/// Installs the ring provider as rustls' process default, once. reqwest and tokio-tungstenite
+/// both build their rustls client config from that default; installing it explicitly keeps the
+/// TLS stack working even if another dependency also enables a second rustls provider.
+fn ensure_tls_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
 }
 
 /// `{base}/api/computers/{computer}/terms`, the create and list endpoint.
@@ -771,7 +821,9 @@ async fn run(
         key: Some(session_key(project, folder)),
         tags: Default::default(),
     };
-    // TODO(#333): TLS. The client speaks plain http and ws only.
+    // FR-L31.19: https is verified (webpki roots); plain http only where FR-S11 allows it.
+    check_relay(base)?;
+    ensure_tls_provider();
     // The shared loader; the token goes only to a server this machine may trust with it.
     let token = ember_client::token::token_allowed_for(base)
         .then(ember_client::token::server_token_from_env)
@@ -809,7 +861,9 @@ async fn stream(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
 ) -> Result<(), ClientError> {
     let live = || shared.upgrade().ok_or_else(|| ClientError::Protocol("terminal closed".into()));
-    // TODO(#333): TLS. Plain ws only; wss is not configured.
+    // FR-L31.19: wss for an https server, verified against the webpki roots.
+    check_relay(base)?;
+    ensure_tls_provider();
     let mut upgrade = attach_url(base, computer, term_id).into_client_request()?;
     if let Some(token) = &token {
         let value = HeaderValue::from_str(&ember_client::token::bearer_header(token))
@@ -1052,6 +1106,54 @@ mod tests {
         assert_eq!(attach_url("http://srv:8080", "c1", "t9"), "ws://srv:8080/api/computers/c1/terms/t9/attach");
         assert_eq!(attach_url("https://srv", "a b", "t"), "wss://srv/api/computers/a%20b/terms/t/attach");
         assert_eq!(session_key("proj", "/work"), "proj:/work");
+    }
+
+    #[test]
+    fn fr_l31_19_attach_scheme_follows_the_server_scheme() {
+        assert_eq!(attach_url("https://srv:8443/", "c", "t"), "wss://srv:8443/api/computers/c/terms/t/attach");
+        assert_eq!(attach_url("http://127.0.0.1:8740", "c", "t"), "ws://127.0.0.1:8740/api/computers/c/terms/t/attach");
+        assert_eq!(terms_url("https://srv:8443", "c"), "https://srv:8443/api/computers/c/terms");
+    }
+
+    #[test]
+    fn fr_l31_19_https_is_always_allowed() {
+        assert!(relay_allowed_with_hosts("https://srv.example:8443", "").is_ok());
+        assert!(relay_allowed_with_hosts("https://10.0.0.5", "").is_ok());
+    }
+
+    #[test]
+    fn fr_l31_19_plain_http_is_allowed_to_loopback_only() {
+        for base in ["http://127.0.0.1:8740", "http://localhost:8740", "http://[::1]:8740", "http://127.1.2.3"] {
+            assert!(relay_allowed_with_hosts(base, "").is_ok(), "{base}");
+        }
+        let err = relay_allowed_with_hosts("http://srv.example:8740", "").unwrap_err();
+        assert!(err.contains("refusing plain http"), "{err}");
+        assert!(relay_allowed_with_hosts("http://192.168.0.2:8740", "").is_err());
+    }
+
+    #[test]
+    fn fr_l31_19_plain_http_to_a_listed_host_needs_an_explicit_http_entry() {
+        // A bare host entry admits that host over https only, as for the token (FR-S11).
+        assert!(relay_allowed_with_hosts("http://srv.example:8740", "srv.example").is_err());
+        assert!(relay_allowed_with_hosts("http://srv.example:8740", "http://srv.example:8740").is_ok());
+        assert!(relay_allowed_with_hosts("http://srv.example:9000", "http://srv.example:8740").is_err());
+    }
+
+    #[test]
+    fn fr_l31_19_other_schemes_and_non_urls_are_refused() {
+        assert!(relay_allowed_with_hosts("ws://127.0.0.1:8740", "").is_err());
+        assert!(relay_allowed_with_hosts("ftp://srv", "").is_err());
+        assert!(relay_allowed_with_hosts("not a url", "").is_err());
+    }
+
+    #[test]
+    fn fr_l31_19_the_refusal_the_panel_shows_is_korean() {
+        let err = check_relay("http://srv.example:8740").unwrap_err();
+        assert_eq!(err.to_string(), RELAY_REFUSED, "the panel text carries no English reason");
+        let mut session = TerminalSession::new();
+        session.fail(err.to_string());
+        assert_eq!(session.state.error_text().as_deref(), Some(format!("터미널 오류: {RELAY_REFUSED}").as_str()));
+        assert!(RELAY_REFUSED.ends_with("하세요."));
     }
 
     #[test]

@@ -570,6 +570,38 @@ async fn fr_w4_relay_substitutes_the_placeholder_in_the_first_window() {
     );
 }
 
+/// A frame that ends with the placeholder's first bytes is not held back waiting for a
+/// continuation that never comes (#776: `still-here` echoed as `still-her` whenever the random
+/// placeholder started with `e`).
+#[tokio::test]
+async fn fr_w4_relay_does_not_hold_a_frame_that_ends_like_the_placeholder() {
+    let dir = tempfile::tempdir().unwrap();
+    let ose = Arc::new(OseManager::with_data_root(None, dir.path().join("ose-data")));
+    let (ose_addr, _) = start_echo_ose().await;
+    let conn = ose.register_launch_for_test("local", dir.path(), ose_addr, REAL_TOKEN);
+    let placeholder = conn.connection_token.clone();
+    let h = start_harness(ose).await;
+
+    let url = format!("ws://{}{}", h.addr, conn.relay.unwrap());
+    let mut req = url.into_client_request().unwrap();
+    req.headers_mut().insert("Authorization", format!("Bearer {}", h.token).parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+
+    for k in [1usize, 2, 63] {
+        let mut frame = b"still-here:".to_vec();
+        frame.extend_from_slice(&placeholder.as_bytes()[..k]);
+        ws.send(Message::Binary(frame.clone().into())).await.unwrap();
+        let mut got = Vec::new();
+        while got.len() < frame.len() {
+            match tokio::time::timeout(Duration::from_secs(2), ws.next()).await {
+                Ok(Some(Ok(Message::Binary(b)))) => got.extend_from_slice(&b),
+                other => panic!("held {k} placeholder bytes: got {got:?} then {other:?}"),
+            }
+        }
+        assert_eq!(got, frame, "a frame ending in {k} placeholder bytes must reach the OSE whole");
+    }
+}
+
 #[tokio::test]
 async fn fr_n3_ide_relay_ends_on_revoke() {
     let net = MemNetwork::new();

@@ -8,3 +8,17 @@ html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font
 /* The top bar is the window's title strip under FullSize: a drag region, with its controls cut out. */
 .ed-top{-webkit-app-region:drag}
 .ed-top button,.ed-top .ed-menu{-webkit-app-region:no-drag}
+/* FR-L31.5 tabs: the mockup draws no preview or pinned tab, so these follow Code-OSS on the mockup's tokens.
+   A preview tab sets its name in italics; a pinned tab keeps its pin button visible where the close button is. */
+.ed-tab.preview>.ellipsis{font-style:italic}
+.ed-tab.pinned .ed-tx{opacity:1}
+/* The tab context menu opens where the pointer is, over a transparent scrim that closes it. */
+.ed-scrim{position:fixed;inset:0;z-index:19;background:transparent}
+.ed-menu.ed-tabmenu{z-index:20;min-width:220px}
+.ed-menu button:disabled{color:var(--muted);cursor:default;background:none}
+/* The unsaved-changes question on a close. */
+.ed-confirm{width:min(440px,100%)}
+.ed-confirm .card-b{display:flex;flex-direction:column;gap:var(--sp2)}
+.ed-confirm p{margin:0}
+.ed-confirm-files{margin:0;padding-left:var(--sp5);font-size:var(--fs-sm)}
+.ed-confirm-acts{display:flex;justify-content:flex-end;gap:var(--sp2);margin-top:var(--sp2)}

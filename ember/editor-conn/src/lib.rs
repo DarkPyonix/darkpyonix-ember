@@ -21,6 +21,7 @@
 //! | [`exthost`]   | ext-host init (Ready/initData/Initialized) + typed minimal subset |
 //! | [`document`]  | editor change events → `$acceptModelChanged`                      |
 //! | [`search`]    | `ExtHostSearch` / `MainThreadSearch` text search (FR-E7)          |
+//! | [`trust`]     | workspace trust: restricted mode extensions, grant (FR-L31.18)   |
 //! | [`uri`]       | `UriComponents` with `$mid` marshalling                           |
 //!
 //! Everything is generic over `AsyncRead + AsyncWrite`, so the same code rides a plain TCP socket,
@@ -44,12 +45,14 @@ pub mod exthost;
 pub mod frame;
 pub mod handshake;
 pub mod ipc;
+pub mod language;
 pub mod management;
 pub mod protocol;
 pub mod remote_fs;
 pub mod rpc;
 pub mod rpc_ids;
 pub mod search;
+pub mod trust;
 pub mod uri;
 
 /// The Code-OSS release tag this crate is pinned to. Must equal `ember/ose/VERSION` (checked by the

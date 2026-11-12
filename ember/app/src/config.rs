@@ -3,7 +3,8 @@
 //! - `EMBER_SERVER_URL`: the main server, default `http://127.0.0.1:8740`.
 //! - Files live under the OS data directory (`dirs::data_dir()`), in `ember/`:
 //!   `client-cache.json` (the client's cold-start snapshot, FR-L1), `prefs.json` (per-device
-//!   choices: last-used combination, IDE target) and `exports/` (FR-L9 exports).
+//!   choices: last-used combination, IDE target), `exports/` (FR-L9 exports) and
+//!   `editor/User/` (the editor's `settings.json` and `keybindings.json`, FR-L31.17).
 //! - `EMBER_DATA_DIR` overrides that directory (tests, portable installs).
 
 use std::path::{Path, PathBuf};
@@ -51,6 +52,12 @@ impl AppConfig {
 
     pub fn prefs_path(&self) -> Option<PathBuf> {
         self.data_dir.as_deref().map(|d| d.join("prefs.json"))
+    }
+
+    /// The folder of the editor's user settings on this machine (FR-L31.17): `settings.json` and
+    /// `keybindings.json`, as Code-OSS keeps them in its `User` folder.
+    pub fn editor_user_dir(&self) -> Option<PathBuf> {
+        self.data_dir.as_deref().map(|d| d.join("editor").join("User"))
     }
 
     pub fn export_dir(&self) -> PathBuf {

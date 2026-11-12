@@ -574,6 +574,10 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
         super::home::content_width(window.width_dp, pad),
         compact,
     );
+    // The form's field widths, worked out here where the window is known: inside the sheet's
+    // own content the window size reads 0 (#493).
+    let form_w_inline = form_field_width(window.width_dp, panel_w, FormLayout::Inline);
+    let form_w_sheet = form_field_width(window.width_dp, panel_w, FormLayout::Sheet);
 
     let on_toggle = {
         let entries_st = entries_state.clone();
@@ -903,6 +907,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                             &computers,
                                             &existing_projects,
                                             FormLayout::Inline,
+                                            form_w_inline,
                                             &form_draft,
                                             move |d| save_cb((d, editing_save.clone())),
                                             move || rl_close(Leave::Cancel),
@@ -999,6 +1004,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
             &computers,
             &existing_projects,
             FormLayout::Sheet,
+            form_w_sheet,
             &form_draft,
             move |d| save_cb((d, editing.clone())),
             move || rl_close(Leave::Cancel),
@@ -1182,14 +1188,17 @@ pub fn seg_lines<S: AsRef<str>>(labels: &[S], avail: f32) -> Vec<Vec<usize>> {
     lines
 }
 
+/// The fields' width in the 390 phone's sheet: the window less the sheet's 20 on each side.
+pub const NARROW_SHEET_FIELD_W: f32 = 390.0 - 2.0 * SP[4];
+
 /// The width the form's fields get: the detail panel less its 1 dp border and 16 padding on
 /// each side inline, or the sheet less its 20 padding on each side.
 pub fn form_field_width(window_w: f32, panel_w: f32, layout: FormLayout) -> f32 {
     match layout {
         FormLayout::Inline => panel_w - 2.0 - 2.0 * 16.0,
-        // An unknown window (0 before the first size event) gives no room, so every segment
-        // takes a line of its own rather than one line running off the sheet.
-        FormLayout::Sheet if window_w <= 0.0 => 0.0,
+        // An unknown window (0 before the first size event) packs against the narrowest sheet,
+        // the 390 phone's, so nothing runs off it and the lines are not one option each.
+        FormLayout::Sheet if window_w <= 0.0 => NARROW_SHEET_FIELD_W,
         FormLayout::Sheet => {
             super::components::sheet_width(window_w, super::components::SHEET_WIDTH_DEFAULT) - 2.0 * SP[4]
         }
@@ -1931,8 +1940,9 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool) {
 /// written once (FR-L25, #511).
 #[derive(Clone)]
 struct FormCtx {
-    /// Inline or sheet: with the window it gives the fields' width (`form_field_width`).
-    layout: FormLayout,
+    /// The fields' width, for wrapping the choice segments (`form_field_width`). The screen
+    /// passes it in: inside the sheet's content the window size reads 0 (#493).
+    field_w: f32,
     draft: MutableState<FormDraft>,
     tried: MutableState<bool>,
     initial: FormDraft,
@@ -1964,6 +1974,7 @@ fn RoutineForm(
     computers: &[(String, String)],
     projects: &[String],
     layout: FormLayout,
+    field_w: f32,
     draft: &MutableState<FormDraft>,
     on_save: impl FnMut(FormDraft) + Clone + 'static,
     on_close: impl FnMut() + Clone + 'static,
@@ -1972,7 +1983,7 @@ fn RoutineForm(
     let draft = draft.clone();
     let tried = remember(|| mutable_state_of(false));
     let ctx = FormCtx {
-        layout,
+        field_w,
         draft,
         tried,
         initial: initial.clone(),
@@ -2051,15 +2062,7 @@ fn RoutineForm(
 /// The fields, in `FORM_FIELDS` order, for both shells.
 fn FormFields(ctx: &FormCtx) {
     let p = ember_theme().palette;
-    // Read here, inside the sheet's own content, so a resize recomposes the fields with the
-    // width they now have; a width worked out by the caller stayed at its first value (#493).
-    let window = current_window_size();
-    let panel_w = detail_panel_width(
-        window.width_dp,
-        super::home::content_width(window.width_dp, SP[6]),
-        false,
-    );
-    let field_w = form_field_width(window.width_dp, panel_w, ctx.layout);
+    let field_w = ctx.field_w;
     let (draft, tried, initial) = (&ctx.draft, &ctx.tried, &ctx.initial);
     let editing = ctx.editing;
     let agents = live_agents();
@@ -2835,7 +2838,18 @@ mod tests {
             let w: f32 = line.iter().map(|&i| seg_width(projects[i])).sum::<f32>() + SP[1] * (line.len() as f32 - 1.0);
             assert!(w <= phone - SP[1], "a 390 line of {w} keeps a gap from the sheet's edge");
         }
-        assert_eq!(form_field_width(0.0, 0.0, FormLayout::Sheet), 0.0, "an unknown window packs one per line");
+        assert_eq!(
+            form_field_width(0.0, 0.0, FormLayout::Sheet),
+            NARROW_SHEET_FIELD_W,
+            "an unknown window packs against the 390 sheet"
+        );
+        assert_eq!(seg_lines(&projects, NARROW_SHEET_FIELD_W), vec![vec![0, 1], vec![2, 3]]);
+        // The screen works the width out before the sheet opens and hands it down.
+        let src = include_str!("routines.rs");
+        let fields = src.split("fn FormFields(").nth(1).unwrap().split("\nfn FormLabel(").next().unwrap();
+        assert!(!fields.contains("current_window_size()"), "the fields never read the window inside the sheet");
+        assert!(src.contains("let form_w_sheet = form_field_width(window.width_dp, panel_w, FormLayout::Sheet);"));
+        assert!(src.contains("            form_w_sheet,\n            &form_draft,"), "the sheet gets the screen's width");
         assert_eq!(seg_lines(&projects, wide).len(), 1, "the wide inline form keeps one line");
         // A segment wider than the room still gets its own line rather than vanishing.
         assert_eq!(seg_lines(&["a-very-long-project-name-indeed"], 100.0), vec![vec![0]]);
@@ -3670,6 +3684,7 @@ mod tests {
                         &computers,
                         &projects,
                         FormLayout::Inline,
+                        form_field_width(1440.0, 742.0, FormLayout::Inline),
                         &draft,
                         |_| {},
                         || {},

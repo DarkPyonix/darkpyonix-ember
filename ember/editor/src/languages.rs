@@ -16,6 +16,16 @@ use serde_json::Value;
 
 /// Language id for files nothing claims.
 pub const PLAINTEXT: &str = "plaintext";
+/// Code-OSS registers `plaintext` itself with this alias (`modesRegistry.ts`).
+const PLAINTEXT_NAME: &str = "Plain Text";
+
+/// A language for the language mode picker (FR-L31.7): the id and the name shown for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageInfo {
+    pub id: String,
+    /// The first `aliases` entry any extension gave the id, else the id.
+    pub name: String,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct LanguageRegistry {
@@ -26,6 +36,8 @@ pub struct LanguageRegistry {
     by_extension: HashMap<String, String>,
     /// (glob over the file name or path, id)
     by_pattern: Vec<(String, String)>,
+    /// id → display name (the first alias contributed for it)
+    names: HashMap<String, String>,
 }
 
 impl LanguageRegistry {
@@ -33,6 +45,7 @@ impl LanguageRegistry {
     pub fn from_extensions(extensions: &[Value]) -> Self {
         let mut reg = Self::default();
         reg.ids.insert(PLAINTEXT.to_owned());
+        reg.names.insert(PLAINTEXT.to_owned(), PLAINTEXT_NAME.to_owned());
         for desc in extensions {
             let Some(langs) = desc.get("contributes").and_then(|c| c.get("languages")).and_then(Value::as_array) else {
                 continue;
@@ -40,6 +53,9 @@ impl LanguageRegistry {
             for lang in langs {
                 let Some(id) = lang.get("id").and_then(Value::as_str) else { continue };
                 reg.ids.insert(id.to_owned());
+                if let Some(alias) = strings(lang.get("aliases")).into_iter().find(|a| !a.trim().is_empty()) {
+                    reg.names.entry(id.to_owned()).or_insert_with(|| alias.to_owned());
+                }
                 for e in strings(lang.get("extensions")) {
                     reg.by_extension.entry(e.to_lowercase()).or_insert_with(|| id.to_owned());
                 }
@@ -57,6 +73,20 @@ impl LanguageRegistry {
     /// Every known language id (the reply to `MainThreadLanguages.$getLanguages`).
     pub fn ids(&self) -> Vec<String> {
         self.ids.iter().cloned().collect()
+    }
+
+    /// The name shown for a language id: its first contributed alias, else the id itself.
+    pub fn display_name(&self, id: &str) -> String {
+        self.names.get(id).cloned().unwrap_or_else(|| id.to_owned())
+    }
+
+    /// Every known language with its name, sorted by name as Code-OSS's picker
+    /// (`getSortedRegisteredLanguageNames`, case ignored), then by id.
+    pub fn languages(&self) -> Vec<LanguageInfo> {
+        let mut list: Vec<LanguageInfo> =
+            self.ids.iter().map(|id| LanguageInfo { id: id.clone(), name: self.display_name(id) }).collect();
+        list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.id.cmp(&b.id)));
+        list
     }
 
     /// The language of a file by its path.
@@ -121,6 +151,25 @@ mod tests {
         assert_eq!(r.language_for("/w/x.d.ts"), "typescriptdecl");
         assert_eq!(r.language_for("/w/x.ts"), "typescript");
         assert_eq!(r.language_for("/w/README"), PLAINTEXT);
+    }
+
+    // FR-L31.7: the picker's names come from the first alias; an id without one shows itself.
+    #[test]
+    fn fr_l31_7_display_names_from_aliases() {
+        let r = LanguageRegistry::from_extensions(&[
+            json!({"contributes": {"languages": [
+                {"id": "json", "aliases": ["JSON", "json"], "extensions": [".json"]},
+                {"id": "jsonc", "aliases": ["JSON with Comments"]},
+                {"id": "zig"}
+            ]}}),
+            json!({"contributes": {"languages": [{"id": "json", "aliases": ["Other name"]}]}}),
+        ]);
+        assert_eq!(r.display_name("json"), "JSON");
+        assert_eq!(r.display_name("zig"), "zig");
+        assert_eq!(r.display_name("plaintext"), "Plain Text");
+        assert_eq!(r.display_name("unknown-id"), "unknown-id");
+        let names: Vec<String> = r.languages().into_iter().map(|l| l.name).collect();
+        assert_eq!(names, ["JSON", "JSON with Comments", "Plain Text", "zig"]);
     }
 
     #[test]

@@ -35,6 +35,10 @@ pub enum HostCommand {
     /// Discard working-tree changes for a file by reading it through the session, reconstructing
     /// the base text from `diff`, and writing it back only if reading succeeds.
     DiscardFile { path: String, diff: crate::ui::vcs::FileDiff },
+    /// The status bar's pickers (FR-L31.7): line ending, encoding, language mode of an open file.
+    SetEol { path: String, eol: ember_editor::Eol },
+    SetEncoding { path: String, encoding: ember_editor::Encoding, mode: ember_editor::EncodingMode },
+    SetLanguage { path: String, language_id: Option<String> },
 }
 
 #[derive(Default)]
@@ -58,6 +62,8 @@ pub struct HostState {
     pub renamed: Vec<(String, String)>,
     /// Extension commands from contributes.commands.
     pub extension_commands: Vec<ember_editor::ContributedCommand>,
+    /// The languages for the language mode picker (FR-L31.7).
+    pub languages: Vec<ember_editor::LanguageInfo>,
     /// The search panel's matches and the last replace's report (FR-E7).
     pub search: crate::ui::editor_search::SearchResults,
     pub updates: Vec<SessionUpdate>,
@@ -114,6 +120,9 @@ impl HostState {
         }
         if let SessionUpdate::Commands { commands } = &update {
             self.extension_commands = commands.clone();
+        }
+        if let SessionUpdate::Languages { languages } = &update {
+            self.languages = languages.clone();
         }
         self.updates.push(update);
     }
@@ -357,6 +366,9 @@ impl EditorHost {
                         Some(HostCommand::Focus(path)) => { let _ = session.focus(session.uri(&path)); }
                         Some(HostCommand::Widget(uri, generation, event)) => { let _ = session.widget_event(uri, generation, event); }
                         Some(HostCommand::Resync(uri)) => { let _ = session.resync(uri); }
+                        Some(HostCommand::SetEol { path, eol }) => { let _ = session.set_eol(session.uri(&path), eol); }
+                        Some(HostCommand::SetEncoding { path, encoding, mode }) => { let _ = session.set_encoding(session.uri(&path), encoding, mode); }
+                        Some(HostCommand::SetLanguage { path, language_id }) => { let _ = session.set_language(session.uri(&path), language_id); }
                         Some(HostCommand::ExecuteCommand(id)) => {
                             if let Err(error) = session.execute_command(id.clone(), Vec::new()) {
                                 shared.lock().unwrap().edit_errors.push(format!("명령 {id}을(를) 실행하지 못했습니다: {error}"));

@@ -68,10 +68,14 @@ pub enum Action {
     ReplaceInFiles,
     /// Reopen the editor closed last (FR-L31.15).
     ReopenClosed,
+    /// View: Zoom In, Zoom Out, Reset Zoom (FR-L31.15).
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
 }
 
 impl Action {
-    pub const ALL: [Action; 23] = [
+    pub const ALL: [Action; 26] = [
         Action::Project,
         Action::Commit,
         Action::Git,
@@ -95,6 +99,9 @@ impl Action {
         Action::FindInFiles,
         Action::ReplaceInFiles,
         Action::ReopenClosed,
+        Action::ZoomIn,
+        Action::ZoomOut,
+        Action::ZoomReset,
     ];
 
     pub fn label(self) -> &'static str {
@@ -122,6 +129,9 @@ impl Action {
             Action::FindInFiles => "파일에서 찾기",
             Action::ReplaceInFiles => "파일에서 바꾸기",
             Action::ReopenClosed => "닫은 편집기 다시 열기",
+            Action::ZoomIn => "확대",
+            Action::ZoomOut => "축소",
+            Action::ZoomReset => "원래 크기",
         }
     }
 }
@@ -249,7 +259,7 @@ impl Chord {
 /// `(action, macOS chord, other chord)`; an empty chord means no default binding.
 type Row = (Action, &'static str, &'static str);
 
-const VSCODE: [Row; 23] = [
+const VSCODE: [Row; 26] = [
     (Action::Project, "\u{21E7}\u{2318}E", "Ctrl+Shift+E"),
     // VS Code has no default for a commit window; the source control view shares Git's chord.
     (Action::Commit, "", ""),
@@ -274,9 +284,12 @@ const VSCODE: [Row; 23] = [
     (Action::FindInFiles, "\u{21E7}\u{2318}F", "Ctrl+Shift+F"),
     (Action::ReplaceInFiles, "\u{21E7}\u{2318}H", "Ctrl+Shift+H"),
     (Action::ReopenClosed, "\u{21E7}\u{2318}T", "Ctrl+Shift+T"),
+    (Action::ZoomIn, "\u{2318}=", "Ctrl+="),
+    (Action::ZoomOut, "\u{2318}-", "Ctrl+-"),
+    (Action::ZoomReset, "\u{2318}0", "Ctrl+0"),
 ];
 
-const JETBRAINS: [Row; 23] = [
+const JETBRAINS: [Row; 26] = [
     (Action::Project, "\u{2318}1", "Alt+1"),
     (Action::Commit, "\u{2318}0", "Alt+0"),
     (Action::Git, "\u{2318}9", "Alt+9"),
@@ -301,6 +314,10 @@ const JETBRAINS: [Row; 23] = [
     (Action::ReplaceInFiles, "\u{21E7}\u{2318}R", "Ctrl+Shift+R"),
     // IntelliJ's Reopen Closed Tab is ⇧⌘T on macOS; elsewhere its Ctrl+Shift+T is the new-terminal row.
     (Action::ReopenClosed, "\u{21E7}\u{2318}T", ""),
+    // ⌘0 is the commit window here, so the IDE zoom takes IntelliJ's own Zoom IDE chords.
+    (Action::ZoomIn, "\u{2303}\u{21E7}\u{2325}=", "Ctrl+Shift+Alt+="),
+    (Action::ZoomOut, "\u{2303}\u{21E7}\u{2325}-", "Ctrl+Shift+Alt+-"),
+    (Action::ZoomReset, "\u{2303}\u{21E7}\u{2325}0", "Ctrl+Shift+Alt+0"),
 ];
 
 impl Keymap {
@@ -328,7 +345,7 @@ impl Keymap {
         }
     }
 
-    fn table(self) -> &'static [Row; 23] {
+    fn table(self) -> &'static [Row; 26] {
         match self {
             Keymap::VsCode => &VSCODE,
             Keymap::JetBrains => &JETBRAINS,

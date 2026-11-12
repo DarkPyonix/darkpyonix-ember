@@ -65,6 +65,18 @@ pub fn toggle_maximized_panel(stripes: &mut Stripes, maximized: bool) -> bool {
     !maximized
 }
 
+/// The zoom level after a zoom action (View: Zoom In, Zoom Out, Reset Zoom), one step of 1.2x
+/// each, kept in the Renderer's range. `None` for any other action.
+pub fn zoom_level_after(action: Action, level: i8) -> Option<i8> {
+    let next = match action {
+        Action::ZoomIn => level.saturating_add(1),
+        Action::ZoomOut => level.saturating_sub(1),
+        Action::ZoomReset => 0,
+        _ => return None,
+    };
+    Some(compose_rust::zoom::clamp_level(next))
+}
+
 /// The editors closed most recently last, for 닫은 편집기 다시 열기
 /// (`workbench.action.reopenClosedEditor`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -132,6 +144,17 @@ mod tests {
             let waits = pending_issue(a).is_some();
             assert!(done != waits || a == Action::Ask, "{a:?}");
         }
+    }
+
+    #[test]
+    fn fr_l31_15_zoom_steps_and_resets_within_the_range() {
+        use compose_rust::zoom::{MAX_ZOOM_LEVEL, MIN_ZOOM_LEVEL};
+        assert_eq!(zoom_level_after(Action::ZoomIn, 0), Some(1));
+        assert_eq!(zoom_level_after(Action::ZoomOut, 0), Some(-1));
+        assert_eq!(zoom_level_after(Action::ZoomReset, 5), Some(0));
+        assert_eq!(zoom_level_after(Action::ZoomIn, MAX_ZOOM_LEVEL), Some(MAX_ZOOM_LEVEL));
+        assert_eq!(zoom_level_after(Action::ZoomOut, MIN_ZOOM_LEVEL), Some(MIN_ZOOM_LEVEL));
+        assert_eq!(zoom_level_after(Action::Save, 3), None);
     }
 
     #[test]

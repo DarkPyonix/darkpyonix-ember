@@ -141,6 +141,8 @@ fn init(target: EditorTarget) {
     let stripes = use_hook(|| Signal::new_in_scope(Stripes::default(), root));
     let menu_open = use_hook(|| Signal::new_in_scope(false, root));
     let keymap = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().keymap, root));
+    // The saved zoom (Code-OSS's window.zoomLevel) applies when the window opens (FR-L31.15).
+    use_hook(|| compose_rust::zoom::set_zoom_level(crate::services::services().ui.prefs.get_untracked().editor_zoom_level));
     let bridge = use_hook(|| Rc::new(RefCell::new(WidgetBridge::new())));
     let uris = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
     let open_errors = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
@@ -334,6 +336,12 @@ pub mod page {
         }
         if let Some(mode) = crate::ui::palette::mode_for(action, *s.keymap.read()) {
             open_palette(s, mode);
+            return;
+        }
+        let saved_zoom = crate::services::services().ui.prefs.get_untracked().editor_zoom_level;
+        if let Some(level) = crate::ui::editor_actions::zoom_level_after(action, saved_zoom) {
+            compose_rust::zoom::set_zoom_level(level);
+            crate::services::services().ui.update_prefs(|p| p.editor_zoom_level = level);
             return;
         }
         if action == Action::MaximizeTool {

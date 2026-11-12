@@ -1128,6 +1128,9 @@ pub fn is_implemented(action: Action) -> bool {
                 | Action::Save
                 | Action::MaximizeTool
                 | Action::ReopenClosed
+                | Action::ZoomIn
+                | Action::ZoomOut
+                | Action::ZoomReset
         )
 }
 
@@ -1469,6 +1472,9 @@ mod tests {
                     | Action::Save
                     | Action::MaximizeTool
                     | Action::ReopenClosed
+                    | Action::ZoomIn
+                    | Action::ZoomOut
+                    | Action::ZoomReset
             ) {
                 continue;
             }

@@ -74,6 +74,11 @@ pub struct Prefs {
     /// restricted mode. Older files have none: every folder asks once.
     #[serde(default)]
     pub workspace_trust: BTreeMap<String, bool>,
+    /// Extension ids disabled in the Ember 에디터, per computer id (FR-L31.14). Kept on the device
+    /// because Code-OSS keeps its disabled list in the workbench's own storage, not on the server.
+    /// Ids are stored in lower case and sorted.
+    #[serde(default)]
+    pub disabled_extensions: BTreeMap<String, Vec<String>>,
 }
 
 fn format_default() -> u32 {
@@ -96,6 +101,7 @@ impl Default for Prefs {
             auto_save: crate::ui::editor_states::AutoSave::default(),
             editor_zoom_level: 0,
             workspace_trust: BTreeMap::new(),
+            disabled_extensions: BTreeMap::new(),
         }
     }
 }
@@ -168,6 +174,29 @@ impl Prefs {
 
     pub fn set_character_style(&mut self, project: &str, style: crate::ui::characters::CharStyle) {
         self.character_styles.insert(project.to_string(), style);
+    }
+
+    /// The extension ids disabled on `computer` (FR-L31.14), in lower case.
+    pub fn disabled_extensions_for(&self, computer: &str) -> Vec<String> {
+        self.disabled_extensions.get(computer).cloned().unwrap_or_default()
+    }
+
+    /// Enables or disables one extension on `computer`. Ids compare without regard to case; a
+    /// computer with nothing disabled keeps no entry.
+    pub fn set_extension_enabled(&mut self, computer: &str, id: &str, enabled: bool) {
+        let key = id.trim().to_lowercase();
+        if key.is_empty() {
+            return;
+        }
+        let list = self.disabled_extensions.entry(computer.to_string()).or_default();
+        list.retain(|d| *d != key);
+        if !enabled {
+            list.push(key);
+            list.sort();
+        }
+        if list.is_empty() {
+            self.disabled_extensions.remove(computer);
+        }
     }
 }
 
@@ -333,6 +362,31 @@ mod tests {
         assert_eq!(p.saved_character_style("new"), Some(CharStyle::Crew));
         assert_eq!(p.saved_character_style("old"), None);
         assert_eq!(p.last_project.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn fr_l31_14_disabled_extensions_round_trip_per_computer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, br#"{"format":1}"#).unwrap();
+        assert!(load(&path).disabled_extensions_for("local").is_empty(), "older files have none");
+        let mut p = Prefs::default();
+        p.set_extension_enabled("local", "RedHat.Java", false);
+        p.set_extension_enabled("local", " golang.go ", false);
+        p.set_extension_enabled("local", "redhat.java", false);
+        p.set_extension_enabled("mini", "a.b", false);
+        p.set_extension_enabled("local", "", false);
+        save(&path, &p).unwrap();
+        let back = load(&path);
+        assert_eq!(back.disabled_extensions_for("local"), ["golang.go", "redhat.java"]);
+        assert_eq!(back.disabled_extensions_for("mini"), ["a.b"]);
+        assert!(back.disabled_extensions_for("other").is_empty());
+        let mut back = back;
+        back.set_extension_enabled("local", "REDHAT.java", true);
+        back.set_extension_enabled("mini", "a.b", true);
+        back.set_extension_enabled("mini", "never.disabled", true);
+        assert_eq!(back.disabled_extensions_for("local"), ["golang.go"]);
+        assert!(!back.disabled_extensions.contains_key("mini"), "an empty list keeps no entry");
     }
 
     #[test]

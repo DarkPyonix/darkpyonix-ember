@@ -72,10 +72,12 @@ pub enum Action {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    /// Show the extensions window (FR-L31.14).
+    Extensions,
 }
 
 impl Action {
-    pub const ALL: [Action; 26] = [
+    pub const ALL: [Action; 27] = [
         Action::Project,
         Action::Commit,
         Action::Git,
@@ -102,6 +104,7 @@ impl Action {
         Action::ZoomIn,
         Action::ZoomOut,
         Action::ZoomReset,
+        Action::Extensions,
     ];
 
     pub fn label(self) -> &'static str {
@@ -132,6 +135,7 @@ impl Action {
             Action::ZoomIn => "확대",
             Action::ZoomOut => "축소",
             Action::ZoomReset => "원래 크기",
+            Action::Extensions => "확장",
         }
     }
 }
@@ -259,7 +263,7 @@ impl Chord {
 /// `(action, macOS chord, other chord)`; an empty chord means no default binding.
 type Row = (Action, &'static str, &'static str);
 
-const VSCODE: [Row; 26] = [
+const VSCODE: [Row; 27] = [
     (Action::Project, "\u{21E7}\u{2318}E", "Ctrl+Shift+E"),
     // VS Code has no default for a commit window; the source control view shares Git's chord.
     (Action::Commit, "", ""),
@@ -287,9 +291,11 @@ const VSCODE: [Row; 26] = [
     (Action::ZoomIn, "\u{2318}=", "Ctrl+="),
     (Action::ZoomOut, "\u{2318}-", "Ctrl+-"),
     (Action::ZoomReset, "\u{2318}0", "Ctrl+0"),
+    // Code-OSS: workbench.view.extensions.
+    (Action::Extensions, "\u{21E7}\u{2318}X", "Ctrl+Shift+X"),
 ];
 
-const JETBRAINS: [Row; 26] = [
+const JETBRAINS: [Row; 27] = [
     (Action::Project, "\u{2318}1", "Alt+1"),
     (Action::Commit, "\u{2318}0", "Alt+0"),
     (Action::Git, "\u{2318}9", "Alt+9"),
@@ -318,6 +324,8 @@ const JETBRAINS: [Row; 26] = [
     (Action::ZoomIn, "\u{2303}\u{21E7}\u{2325}=", "Ctrl+Shift+Alt+="),
     (Action::ZoomOut, "\u{2303}\u{21E7}\u{2325}-", "Ctrl+Shift+Alt+-"),
     (Action::ZoomReset, "\u{2303}\u{21E7}\u{2325}0", "Ctrl+Shift+Alt+0"),
+    // The JetBrains keymap has no default chord for Plugins.
+    (Action::Extensions, "", ""),
 ];
 
 impl Keymap {
@@ -345,7 +353,7 @@ impl Keymap {
         }
     }
 
-    fn table(self) -> &'static [Row; 26] {
+    fn table(self) -> &'static [Row; 27] {
         match self {
             Keymap::VsCode => &VSCODE,
             Keymap::JetBrains => &JETBRAINS,

@@ -17,6 +17,7 @@
 //! | [`inline`] | FR-E4: `$provideInlineCompletions` with debounce + cancellation → ghost text; accept |
 //! | [`registry`] | provider registrations (`$register…`) and extension-host commands |
 //! | [`selector`] | `languages.score` port: document selector matching |
+//! | [`extensions`] | FR-L31.14: the list rows of a scan, and the scan without the disabled ids |
 //! | [`languages`] | file → language id from `contributes.languages`, and the names for the language picker |
 //! | [`text_format`] | FR-L31.7: line ending and encoding detection, decode / encode, the status bar's document format |
 //! | [`textmate`] | FR-E6: the grammars extensions contribute (`contributes.grammars`), read into the raw rule model |
@@ -37,6 +38,7 @@ pub mod codelens;
 pub mod commands;
 pub mod coords;
 pub mod engine;
+pub mod extensions;
 pub mod fallback;
 pub mod folding;
 pub mod diagnostics;
@@ -65,6 +67,7 @@ pub use crate::folding::{compute_indent_folds, merge_folds, parse_provider_folds
 pub use crate::semantic::{decode_semantic_tokens, encode_semantic_tokens_dto, overlay_semantic_runs, role_for_semantic_token};
 pub use crate::commands::{parse_contributed_commands, ContributedCommand};
 pub use crate::fallback::{fallback_for, vscode_fallback_url, ConnectOutcome, Fallback, FallbackTarget};
+pub use crate::extensions::InstalledExtension;
 pub use crate::engine::{CoreOptions, Effect, ExternalChange, Input, SessionCore, SessionUpdate};
 pub use crate::languages::LanguageInfo;
 pub use crate::text_format::{DocumentFormat, Encoding, EncodingMode, Eol};

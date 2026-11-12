@@ -98,6 +98,8 @@ pub struct Shared {
     pub scm: crate::ui::editor_scm::Scm,
     /// Extension notifications: toasts, the center and modal dialogs (FR-L31.16).
     pub notifications: Rc<RefCell<ember_editor::notifications::Notifications>>,
+    /// The 확장 window: search, install, uninstall, enable and disable (FR-L31.14).
+    pub extensions: crate::ui::editor_extensions::Extensions,
 }
 
 // WidgetView accepts a function without props and owns a separate tree. Share signals between
@@ -158,7 +160,14 @@ fn init(target: EditorTarget) {
     let prompt_text = use_hook(|| Signal::new_in_scope(String::new(), root));
     let bottom_max = use_hook(|| Signal::new_in_scope(false, root));
     let position = use_hook(|| Signal::new_in_scope((1, 1), root));
-    let stripes = use_hook(|| Signal::new_in_scope(Stripes::default(), root));
+    let stripes = use_hook(|| {
+        let mut initial = Stripes::default();
+        // Debug capture hook: start with the 확장 window showing (FR-L31.14).
+        if crate::ui::editor_extensions::capture_hook().is_some() {
+            initial.toggle(crate::ui::editor::ToolWindow::Extensions);
+        }
+        Signal::new_in_scope(initial, root)
+    });
     let menu_open = use_hook(|| Signal::new_in_scope(false, root));
     let tab_menu = use_hook(|| Signal::new_in_scope(None::<(String, f64, f64)>, root));
     let close_confirm = use_hook(|| Signal::new_in_scope(None::<crate::ui::editor::CloseRequest>, root));
@@ -200,7 +209,8 @@ fn init(target: EditorTarget) {
         }
         Rc::new(RefCell::new(n))
     });
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
+    let extensions = use_hook(|| crate::ui::editor_extensions::Extensions::new(&target.computer, revision));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { extensions, host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -1235,6 +1245,8 @@ pub mod page {
                             {crate::ui::editor_scm::view::commit_window(&s)}
                         } else if w == ToolWindow::Git {
                             {crate::ui::editor_scm::view::git_window(&s)}
+                        } else if w == ToolWindow::Extensions {
+                            {crate::ui::editor_extensions::view::panel(&s)}
                         } else {
                             {side_note(w, "ed-left")}
                         }
@@ -1470,6 +1482,7 @@ pub mod page {
             ToolWindow::Search => "search",
             ToolWindow::Commit => "commit",
             ToolWindow::Git => "git",
+            ToolWindow::Extensions => "blocks",
             ToolWindow::Agent => "spark",
             ToolWindow::Notifications => "bell",
             ToolWindow::Terminal => "code",

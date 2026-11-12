@@ -22,6 +22,7 @@ pub mod editor_icons;
 pub mod editor_blame;
 pub mod editor_terminals;
 pub mod editor_notifications;
+pub mod editor_extensions;
 pub mod editor_scm;
 pub mod editor_status;
 pub mod editor_scm_repo;

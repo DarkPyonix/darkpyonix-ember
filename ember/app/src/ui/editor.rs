@@ -1388,6 +1388,8 @@ pub enum ToolWindow {
     Search,
     Commit,
     Git,
+    /// Installed extensions, Open VSX search, install, uninstall, enable and disable (FR-L31.14).
+    Extensions,
     Agent,
     Notifications,
     Terminal,
@@ -1397,11 +1399,12 @@ pub enum ToolWindow {
 }
 
 impl ToolWindow {
-    pub const ALL: [ToolWindow; 10] = [
+    pub const ALL: [ToolWindow; 11] = [
         ToolWindow::Project,
         ToolWindow::Search,
         ToolWindow::Commit,
         ToolWindow::Git,
+        ToolWindow::Extensions,
         ToolWindow::Agent,
         ToolWindow::Notifications,
         ToolWindow::Terminal,
@@ -1409,7 +1412,8 @@ impl ToolWindow {
         ToolWindow::Problems,
         ToolWindow::Output,
     ];
-    pub const LEFT: [ToolWindow; 4] = [ToolWindow::Project, ToolWindow::Search, ToolWindow::Commit, ToolWindow::Git];
+    pub const LEFT: [ToolWindow; 5] =
+        [ToolWindow::Project, ToolWindow::Search, ToolWindow::Commit, ToolWindow::Git, ToolWindow::Extensions];
     pub const RIGHT: [ToolWindow; 2] = [ToolWindow::Agent, ToolWindow::Notifications];
     pub const BOTTOM: [ToolWindow; 4] =
         [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems, ToolWindow::Output];
@@ -1420,6 +1424,7 @@ impl ToolWindow {
             ToolWindow::Search => "검색",
             ToolWindow::Commit => "커밋",
             ToolWindow::Git => "Git",
+            ToolWindow::Extensions => "확장",
             ToolWindow::Agent => "에이전트",
             ToolWindow::Notifications => "알림",
             ToolWindow::Terminal => "터미널",
@@ -1431,7 +1436,7 @@ impl ToolWindow {
 
     pub fn side(self) -> Side {
         match self {
-            ToolWindow::Project | ToolWindow::Search | ToolWindow::Commit | ToolWindow::Git => Side::Left,
+            ToolWindow::Project | ToolWindow::Search | ToolWindow::Commit | ToolWindow::Git | ToolWindow::Extensions => Side::Left,
             ToolWindow::Agent | ToolWindow::Notifications => Side::Right,
             ToolWindow::Terminal | ToolWindow::Run | ToolWindow::Problems | ToolWindow::Output => Side::Bottom,
         }
@@ -1444,6 +1449,7 @@ impl ToolWindow {
             ToolWindow::Search => Some(Action::FindInFiles),
             ToolWindow::Commit => Some(Action::Commit),
             ToolWindow::Git => Some(Action::Git),
+            ToolWindow::Extensions => Some(Action::Extensions),
             ToolWindow::Agent => Some(Action::Ask),
             ToolWindow::Notifications => None,
             ToolWindow::Terminal => Some(Action::Terminal),
@@ -1467,6 +1473,7 @@ impl ToolWindow {
             ToolWindow::Search => IconRole::Search,
             ToolWindow::Commit => IconRole::Check,
             ToolWindow::Git => IconRole::History,
+            ToolWindow::Extensions => IconRole::Library,
             ToolWindow::Agent => IconRole::Compose,
             ToolWindow::Notifications => IconRole::Inbox,
             ToolWindow::Terminal => IconRole::Menu,

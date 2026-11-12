@@ -53,6 +53,9 @@ pub enum HostCommand {
     AnswerMessage { id: u64, handle: Option<i64> },
     /// Read the project's `.vscode/tasks.json` for the 실행 window (FR-L31.16).
     LoadTasks,
+    /// Read the extension scan again on the management connection (FR-L31.14): after an install,
+    /// an uninstall, or on the panel's refresh.
+    RescanExtensions,
 }
 
 #[derive(Default)]
@@ -94,6 +97,8 @@ pub struct HostState {
     pub search: crate::ui::editor_search::SearchResults,
     /// The tasks of `.vscode/tasks.json` (FR-L31.16); `None` until the 실행 window asks.
     pub tasks: Option<crate::ui::editor_tasks::TasksLoad>,
+    /// The extensions the OSE has and the ones the extension host runs (FR-L31.14).
+    pub extensions: crate::ui::editor_extensions::ExtensionScan,
     pub updates: Vec<SessionUpdate>,
     /// Workspace trust of the folder: the prompt and the restricted-mode banner (FR-L31.18).
     pub trust: crate::ui::workspace_trust::TrustState,
@@ -287,6 +292,8 @@ impl EditorHost {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let shared = state.clone();
         let self_tx = tx.clone();
+        // Extensions the user disabled on this computer are scanned but not run (FR-L31.14).
+        let disabled_extensions = crate::services::services().ui.prefs.get_untracked().disabled_extensions_for(&target.computer);
         crate::services::services().rt.spawn(async move {
             if target.endpoint.trim().is_empty() {
                 shared.lock().unwrap().error = HostState::missing_endpoint().error;
@@ -304,6 +311,7 @@ impl EditorHost {
                 config.app_language = "ko".into();
                 // The answer given since the window opened holds across a reconnect (FR-L31.18, FR-L31.6).
                 config.workspace_trusted = shared.lock().unwrap().trust.trusted;
+                config.disabled_extensions = disabled_extensions.clone();
                 let (session, mut updates) = match EditorSession::connect_tcp(config).await {
                     Ok(pair) => pair,
                     Err(error) => {
@@ -327,6 +335,11 @@ impl EditorHost {
                         state.reconnected();
                         // A failed listing after a reconnect keeps the tree it had instead of replacing the window.
                         if let Ok(entries) = entries { state.set_dir_listing(&root, Ok::<_, String>(entries)); }
+                    }
+                    // The scan of this connection, on the first one and after a reconnect (FR-L31.14).
+                    state.extensions.connected(session.installed_extensions().to_vec(), session.running_extensions());
+                    if attempt == 1 && crate::ui::editor_extensions::capture_hook().is_some_and(|c| c.adds_samples()) {
+                        state.extensions.add_capture_samples();
                     }
                 }
                 *revision.write() += 1;
@@ -417,6 +430,12 @@ impl EditorHost {
                                     };
                                     finish_edit(&session, &shared, "변경 사항 취소", &parent, result).await;
                                 }
+                            }
+                            Some(HostCommand::RescanExtensions) => {
+                                shared.lock().unwrap().extensions.begin_rescan();
+                                *revision.write() += 1;
+                                let result = session.rescan_extensions().await;
+                                shared.lock().unwrap().extensions.finish_rescan(result);
                             }
                             Some(HostCommand::IndexFiles) => {
                                 // A fresh index replaces the last one and a running one is cancelled; the walk runs

@@ -1333,7 +1333,13 @@ fn RoutineHeader(compact: bool, trailing: impl FnOnce()) {
 /// An accessible invisible button overlay for a painted row or pill.
 /// Gives assistive tech the item's label and provides keyboard focus and click handling.
 fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
+    NamedOverlay(label, true, on_click);
+}
+
+/// The one direct button behind both overlays: invisible text, the whole box to click.
+fn NamedOverlay(label: &str, enabled: bool, on_click: impl FnMut() + 'static) {
     cu::Button(label)
+        .enabled(enabled)
         .variant(ButtonVariant::Text)
         .color(Paint::Literal(Color::argb(0)))
         .modifier(Modifier::new().fill_max_size())
@@ -1346,11 +1352,7 @@ pub const RUN_NOW_BUSY_LABEL: &str = "실행 중";
 /// The invisible overlay of a control that cannot act now: named, focusable by assistive tech as
 /// a disabled button, and never clickable.
 fn DisabledOverlay(label: &str) {
-    cu::Button(label)
-        .enabled(false)
-        .variant(ButtonVariant::Text)
-        .color(Paint::Literal(Color::argb(0)))
-        .modifier(Modifier::new().fill_max_size());
+    NamedOverlay(label, false, || {});
 }
 
 /// The header's 지금 실행. While a run is in progress it is disabled, reads 실행 중 and has a
@@ -3892,7 +3894,16 @@ mod tests {
         svc.reset_demo();
         compose_rust::window::reset_window_size();
 
-        let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreenWith(sample_entries(), true))));
+        // The shown routine keeps only its newest run (session s9), so the detail has exactly one
+        // 세션 열기: with all three (s9, s9, s6) the test took whichever a HashMap gave first and
+        // opened demo-s6 in some runs.
+        let entries = || {
+            let mut all = sample_entries();
+            all[0].runs.truncate(1);
+            assert_eq!(all[0].runs[0].session.as_deref(), Some("s9"));
+            all
+        };
+        let mut host = Host::new(move || Box::new(Recomposer::new(move || RoutinesScreenWith(entries(), true))));
         let mut texts: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
         let mut clickables: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
         let mut scan = |batch: &[Mutation<'_>]| {
@@ -3925,11 +3936,13 @@ mod tests {
         let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
         scan(&decode_batch(bytes).expect("decode"));
 
-        let open_btn = texts
+        let open: Vec<u32> = texts
             .iter()
-            .find(|(id, t)| *t == "세션 열기" && clickables.contains_key(id))
+            .filter(|(id, t)| *t == "세션 열기" && clickables.contains_key(id))
             .map(|(id, _)| *id)
-            .expect("expected clickable '세션 열기' button in detail pane");
+            .collect();
+        assert_eq!(open.len(), 1, "one run, one 세션 열기");
+        let open_btn = open[0];
         let handler_id = clickables[&open_btn];
         host.dispatch(HostEvent {
             node_id: open_btn,

@@ -273,6 +273,7 @@ pub mod page {
     use dioxus_compose::html::prelude::dioxus_elements::{Key, Modifiers};
     use dioxus_compose::html::prelude::dioxus_signals::{ReadableExt, WritableExt};
     use dioxus_compose::html::prelude::*;
+    use std::collections::HashMap;
     use std::sync::Arc;
     use crate::terminal_stream::{self, ChangeCallback, TerminalHandle, TerminalState};
     use super::{DOUBLE_SHIFT, now_ms, send, editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, PendingGoto, Shared};

@@ -358,7 +358,8 @@ async fn fr_c2_enrol_door_serves_exactly_the_route_table() {
     ];
     for m in ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"] {
         for p in paths {
-            let is_route = (m == "POST" && p == "/enrol/redeem") || (m == "GET" && p == "/enrol/status/x");
+            let is_route = (m == "POST" && p == "/enrol/redeem")
+                || ((m == "GET" || m == "DELETE") && p == "/enrol/status/x");
             let (s, h, body) = call(&a, m, p, &[("host", HOST)], None).await;
             if is_route {
                 // Reaches the handler: no content type is 415 for the redeem; an unknown id is the
@@ -385,7 +386,8 @@ async fn fr_c2_enrol_door_serves_exactly_the_route_table() {
             // encoded-slash form included, carries exactly the two door headers whatever the method.
             let allow_value = match p {
                 "/enrol/redeem" => Some("POST"),
-                "/enrol/status/x" => Some("GET,HEAD"),
+                // FR-C2m (#617) adds DELETE; expected order, to be confirmed by the ROUTE_MATRIX line.
+                "/enrol/status/x" => Some("GET,HEAD,DELETE"),
                 _ => None,
             };
             match allow_value {

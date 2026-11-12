@@ -235,6 +235,18 @@ async fn fr_s9_agent_routes_keep_their_runtime_token_auth() {
     assert_eq!(body["code"], "unauthorized");
 }
 
+/// A path that only shares the `/api/a2a` prefix is refused by the server token layer itself
+/// (its body has no `code`, unlike the a2a handlers' own refusal).
+#[tokio::test]
+async fn fr_s9_a2a_prefix_lookalikes_need_the_server_token() {
+    let f = fx();
+    for path in ["/api/a2a", "/api/a2ax", "/api/a2a-admin/targets", "/api/a2a/settings"] {
+        let (st, body) = call(&f.app, Method::GET, path, &[]).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{path}");
+        assert!(body.get("code").is_none(), "{path}: refused by a handler, not the layer: {body}");
+    }
+}
+
 #[tokio::test]
 async fn fr_s9_token_file_is_created_0600_and_reused() {
     let dir = tempfile::tempdir().unwrap();

@@ -119,23 +119,24 @@ cargo build --release --locked
 <span class="c"># {"ok":true}</span></code></pre>
     </figure>
     <div class="warn">
-      <span class="label">The HTTP listener has no login yet</span>
+      <span class="label">The HTTP listener needs the server token</span>
       <p>
-        Anyone who can reach <code>EMBER_LISTEN</code> can use every route, including accounts,
-        devices and the hub registration. Keep it on loopback (the default) or on a network you
-        trust. The authenticated path is the peer-to-peer transport, which admits only devices on
-        the server's allow-list (<a href="computers.html#peer">Computers and the hub</a>). To use
-        the client from another machine today, forward the port over SSH:
-        <code>ssh -N -L 8740:127.0.0.1:8740 you@mini.local</code>.
-        The owner has decided to close this: remote devices keep their device key, and the app and
-        tools on the same computer will send a local token (issue #338). It is in progress, not yet built.
+        <span class="pill works">Works</span> On first start the server writes a random token to
+        <code>&lt;data dir&gt;/server-token</code> (mode 0600) and asks for it on every route as
+        <code>Authorization: Bearer &lt;token&gt;</code>; only <code>GET /api/health</code> answers without it.
+        The app and the client on the same computer read the file, or <code>EMBER_SERVER_TOKEN</code>, and
+        send it only to loopback or a host in <code>EMBER_TOKEN_HOSTS</code>. Every request also passes a
+        <code>Host</code> and <code>Origin</code> check, so a web page you open cannot reach the server
+        cross-site; add extra names with <code>EMBER_ALLOWED_HOSTS</code>.
       </p>
       <p>
-        <span class="pill partial">Partial</span> WebSocket routes (terminal attach, the push channel, the browser view and
-        DevTools relay) refuse a request whose browser <code>Origin</code> is neither the server's own host nor
-        loopback, so a web page you open cannot attach to a shell cross-site. Native clients send no
-        <code>Origin</code> and are unaffected. This is not a login: who may attach beyond the loopback trust is
-        open (FR-P3).
+        The listener speaks plain HTTP, so it stays on loopback. A non-loopback <code>EMBER_LISTEN</code>
+        (<code>0.0.0.0</code>, <code>::</code>, a LAN address) stops the server at start unless
+        <code>EMBER_ALLOW_NON_LOOPBACK_LISTEN=1</code> is set, and then it logs a warning, because the token
+        would cross that network in clear. Remote devices come in through the peer-to-peer transport,
+        which admits only devices on the server's allow-list
+        (<a href="computers.html#peer">Computers and the hub</a>), or over SSH:
+        <code>ssh -N -L 8740:127.0.0.1:8740 you@mini.local</code>.
       </p>
     </div>
 
@@ -166,7 +167,8 @@ cargo build --release --locked --features mount-fuse</code></pre>
         <thead><tr><th scope="col">Variable</th><th scope="col">Default</th><th scope="col">Meaning</th></tr></thead>
         <tbody>
           <tr><td><code>EMBER_DATA_DIR</code></td><td><code>~/.ember</code></td><td>Where the database, keys, accounts and browser profiles live.</td></tr>
-          <tr><td><code>EMBER_LISTEN</code></td><td><code>127.0.0.1:8740</code></td><td>The HTTP listener.</td></tr>
+          <tr><td><code>EMBER_LISTEN</code></td><td><code>127.0.0.1:8740</code></td><td>The HTTP listener. Loopback only unless the next variable is set.</td></tr>
+          <tr><td><code>EMBER_ALLOW_NON_LOOPBACK_LISTEN</code></td><td>unset</td><td><code>1</code> lets <code>EMBER_LISTEN</code> bind a non-loopback address (plain HTTP, a warning at start).</td></tr>
           <tr><td><code>EMBER_IDLE_SECS</code></td><td><code>300</code></td><td>Release an agent process after this long without activity. The next message resumes it.</td></tr>
           <tr><td><code>EMBER_CLAUDE_BIN</code>, <code>EMBER_CODEX_BIN</code>, <code>EMBER_AGY_BIN</code></td><td><code>claude</code>, <code>codex</code>, <code>agy</code> on <code>PATH</code></td><td>Which agent CLI to run.</td></tr>
           <tr><td><code>EMBER_ACP_AGENTS</code></td><td>none</td><td>ACP agents to offer, as JSON, for example <code>["omp"]</code>. See <a href="agents.html">Agents</a>.</td></tr>

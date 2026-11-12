@@ -2215,6 +2215,16 @@ impl Api {
         }
         serde_json::from_slice(&raw.body).map_err(|e| ProjectPatchError::Api(ApiError::Decode(e.to_string())))
     }
+
+    /// `DELETE /projects/{name}` (FR-L26, #384): deletes an empty project. A refusal keeps
+    /// status and `code` (`project_not_empty` 409, `protected_project` 403, `not_found` 404).
+    pub async fn delete_project(&self, name: &str) -> Result<(), ProjectPatchError> {
+        let raw = self.send(Method::DELETE, &format!("/projects/{}", seg(name)), None).await?;
+        if !raw.status.is_success() {
+            return Err(ProjectPatchError::from_answer(raw.status.as_u16(), &raw.body));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2262,6 +2272,21 @@ mod project_patch_tests {
         assert_eq!(serde_json::to_value(&p).unwrap(), json!({"profile_overrides": {"codex": "acc-1"}}));
         let p = ProjectPatch { profile_overrides: Some(Default::default()), ..Default::default() };
         assert_eq!(serde_json::to_value(&p).unwrap(), json!({"profile_overrides": {}}), "an empty map clears all");
+    }
+
+    #[test]
+    fn fr_l26_archive_is_sent_as_a_bool() {
+        let p = ProjectPatch { archived: Some(true), ..Default::default() };
+        assert!(!p.is_empty());
+        assert_eq!(serde_json::to_value(&p).unwrap(), json!({"archived": true}));
+        let p = ProjectPatch { archived: Some(false), ..Default::default() };
+        assert_eq!(serde_json::to_value(&p).unwrap(), json!({"archived": false}));
+    }
+
+    #[test]
+    fn fr_l26_a_delete_refusal_keeps_status_and_code() {
+        let e = ProjectPatchError::from_answer(409, br#"{"error":"busy","code":"project_not_empty","sessions":2}"#);
+        assert_eq!((e.status(), e.code()), (Some(409), Some("project_not_empty")));
     }
 
     #[test]

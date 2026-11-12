@@ -15,10 +15,15 @@
 //! Agents create schedules from a conversation with `ember-a2a schedule add|list|rm`, which
 //! calls the token-authenticated routes in [`api`] scoped to the caller's project.
 //!
+//! An event schedule (`kind: event`, FR-L23) has no planned trigger: [`ci::CiWatcher`] starts it
+//! once per failed GitHub workflow run of its repository ([`Scheduler::fire_event`]), and the run
+//! is recorded like any other.
+//!
 //! Time comes from a [`Clock`], so tests drive the scheduler with a [`ManualClock`] and
 //! [`Scheduler::tick`].
 
 pub mod api;
+pub mod ci;
 pub mod schema;
 pub mod timing;
 
@@ -100,6 +105,23 @@ pub enum ScheduleKind {
         #[serde(deserialize_with = "de_time")]
         at: i64,
     },
+    /// On an event instead of a time (FR-L23): no planned trigger, `next_run_at` stays null.
+    Event {
+        on: EventOn,
+        /// GitHub `owner/name` (a `github.com/owner/name` URL form is accepted and matched the same).
+        repository: String,
+        /// Only runs on this branch; omitted = any branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+    },
+}
+
+/// The events an event schedule can wait for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventOn {
+    /// A GitHub Actions workflow run of the repository concluded `failure`.
+    CiFailed,
 }
 
 fn utc() -> String {
@@ -441,20 +463,25 @@ impl Scheduler {
             .ok_or_else(|| ScheduleError::NotFound(id.to_string()))
     }
 
-    /// Check a kind against the clock: valid, and fires at least once from `now`.
-    fn first_trigger(&self, kind: &ScheduleKind, anchor: i64) -> Result<i64, ScheduleError> {
+    /// Check a kind against the clock: valid, and fires at least once from `now`. An event kind
+    /// has no planned trigger (`None`).
+    fn first_trigger(&self, kind: &ScheduleKind, anchor: i64) -> Result<Option<i64>, ScheduleError> {
         timing::validate(kind).map_err(bad)?;
+        if matches!(kind, ScheduleKind::Event { .. }) {
+            return Ok(None);
+        }
         let now = self.now();
         if let ScheduleKind::Once { at } = kind {
             // A moment in the past (clock skew, typing) still fires right away.
             if *at < now - GRACE_MS {
                 return Err(bad(format!("time {} is in the past", timing::rfc3339(*at))));
             }
-            return Ok((*at).max(now));
+            return Ok(Some((*at).max(now)));
         }
         timing::next_after(kind, anchor, now)
             .map_err(bad)?
             .ok_or_else(|| bad("this schedule would never fire"))
+            .map(Some)
     }
 
     /// Create a schedule (FR-A8). `created_by` is the agent session that asked for it, if any.
@@ -529,7 +556,7 @@ impl Scheduler {
                 new.paused,
                 new.catch_up,
                 now,
-                (!new.paused).then_some(next),
+                next.filter(|_| !new.paused),
                 created_by,
                 now
             ],
@@ -638,7 +665,7 @@ impl Scheduler {
         let (kind, anchor, next) = match &patch.kind {
             Some(kind) => {
                 let next = self.first_trigger(kind, now)?;
-                (kind.clone(), now, (!current.paused).then_some(next))
+                (kind.clone(), now, next.filter(|_| !current.paused))
             }
             None => (current.kind.clone(), current.anchor_at, current.next_run_at),
         };
@@ -704,6 +731,7 @@ impl Scheduler {
             let mut conn = self.conn();
             let tx = conn.transaction()?;
             tx.execute("DELETE FROM schedule_runs WHERE schedule_id = ?1", params![id])?;
+            tx.execute("DELETE FROM schedule_events WHERE schedule_id = ?1", params![id])?;
             tx.execute("DELETE FROM schedules WHERE id = ?1", params![id])?;
             tx.commit()?;
         }
@@ -769,7 +797,34 @@ impl Scheduler {
     /// Run `id` now, outside its schedule (`run-now`). Does not move its next trigger.
     pub async fn run_now(self: &Arc<Self>, id: &str) -> Result<ScheduleRun, ScheduleError> {
         let s = self.get(id)?;
-        Ok(self.execute(&s, self.now()).await?)
+        Ok(self.execute(&s, self.now(), None).await?)
+    }
+
+    /// Start event schedule `s` for event `event_id` (for CI, `ci:<owner/name>:<run id>`), once:
+    /// the pair is stored before the run, so a second call, or a call after a restart, returns
+    /// `None` and sends nothing. `at` is when the event happened (the run's `scheduled_at`);
+    /// `context` is added to the prompt.
+    pub async fn fire_event(
+        self: &Arc<Self>,
+        s: &Schedule,
+        event_id: &str,
+        at: i64,
+        context: &str,
+    ) -> anyhow::Result<Option<ScheduleRun>> {
+        let inserted = self.conn().execute(
+            "INSERT OR IGNORE INTO schedule_events (schedule_id, event_id, seen_at) VALUES (?1, ?2, ?3)",
+            params![s.id, event_id, self.now()],
+        )?;
+        if inserted == 0 {
+            return Ok(None);
+        }
+        let run = self.execute(s, at, Some(context)).await?;
+        self.conn().execute(
+            "UPDATE schedule_events SET run_id = ?3 WHERE schedule_id = ?1 AND event_id = ?2",
+            params![s.id, event_id, run.id],
+        )?;
+        self.conn().execute("UPDATE schedules SET last_run_at = ?2 WHERE id = ?1", params![s.id, at])?;
+        Ok(Some(run))
     }
 
     /// Fire everything due. Returns the runs recorded (missed ones included), oldest first.
@@ -796,7 +851,7 @@ impl Scheduler {
                 Err(e) => tracing::error!(schedule = %s.id, "scheduling failed: {e:#}"),
             }
         }
-        let runs = futures::future::join_all(to_run.iter().map(|(s, at)| self.execute(s, *at))).await;
+        let runs = futures::future::join_all(to_run.iter().map(|(s, at)| self.execute(s, *at, None))).await;
         for r in runs {
             match r {
                 Ok(run) => recorded.push(run),
@@ -870,11 +925,11 @@ impl Scheduler {
 
     /// One run of `s` for the trigger at `scheduled_at`: record it, send the prompt, and follow
     /// the turn in the background.
-    async fn execute(self: &Arc<Self>, s: &Schedule, scheduled_at: i64) -> anyhow::Result<ScheduleRun> {
+    async fn execute(self: &Arc<Self>, s: &Schedule, scheduled_at: i64, context: Option<&str>) -> anyhow::Result<ScheduleRun> {
         let run = self.insert_run(&s.id, scheduled_at, RunStatus::Running, Some(self.now()), None)?;
         // Subscribe before sending so the turn's end cannot be missed.
         let rx = self.sessions.subscribe();
-        match self.send(s, &run.id).await {
+        match self.send(s, &run.id, context).await {
             Ok((session_id, before)) => {
                 self.conn().execute(
                     "UPDATE schedule_runs SET session_id = ?2 WHERE id = ?1",
@@ -895,18 +950,25 @@ impl Scheduler {
     }
 
     /// The text sent for a run.
-    fn render(&self, s: &Schedule, run_id: &str) -> String {
-        format!(
-            "{HEADER_TAG} Scheduled task {} (run {run_id}). This message was sent by a schedule, not \
-             typed by the user just now.\n\n{}",
-            s.id, s.prompt
-        )
+    fn render(&self, s: &Schedule, run_id: &str, context: Option<&str>) -> String {
+        match context {
+            None => format!(
+                "{HEADER_TAG} Scheduled task {} (run {run_id}). This message was sent by a schedule, not \
+                 typed by the user just now.\n\n{}",
+                s.id, s.prompt
+            ),
+            Some(ctx) => format!(
+                "{HEADER_TAG} Event routine {} (run {run_id}). This message was sent by a routine, not \
+                 typed by the user just now. {ctx}\n\n{}",
+                s.id, s.prompt
+            ),
+        }
     }
 
     /// Send the prompt; returns the session and its last event seq before the send.
-    async fn send(&self, s: &Schedule, run_id: &str) -> Result<(String, i64), RunFailure> {
+    async fn send(&self, s: &Schedule, run_id: &str, context: Option<&str>) -> Result<(String, i64), RunFailure> {
         let fail = |e: &dyn std::fmt::Display| RunFailure::Failed(format!("{e:#}"));
-        let text = self.render(s, run_id);
+        let text = self.render(s, run_id, context);
         match &s.target {
             ScheduleTarget::Continue { session_id } => {
                 let rec = self

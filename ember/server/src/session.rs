@@ -442,6 +442,12 @@ impl Sessions {
         self.push.subscribe()
     }
 
+    /// How many push receivers are alive (one per open `/api/push` socket, plus internal
+    /// listeners). Tests use it to see that a closed socket's task ended (#369).
+    pub fn push_receiver_count(&self) -> usize {
+        self.push.receiver_count()
+    }
+
     /// Push something that did not come from a session's event pump (project changes, …).
     pub fn publish(&self, push: Push) {
         let _ = self.push.send(push);

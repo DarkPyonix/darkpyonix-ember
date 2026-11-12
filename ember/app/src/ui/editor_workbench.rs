@@ -2318,6 +2318,34 @@ pub mod page {
     thread_local! {
         /// The editor's terminal session. Started on first show and kept while the panel is hidden.
         static TERMINAL: std::cell::RefCell<Option<TerminalHandle>> = const { std::cell::RefCell::new(None) };
+        /// The terminal panel element, to read its laid-out size (FR-L31.20).
+        static TERM_MOUNT: std::cell::RefCell<Option<std::rc::Rc<dioxus_elements::MountedData>>> = const { std::cell::RefCell::new(None) };
+        static TERM_FIT: std::cell::RefCell<crate::ui::term_fit::PanelFit> = std::cell::RefCell::new(Default::default());
+    }
+
+    /// Fits the PTY to the panel on every render (FR-L31.20, #334): the panel's size from the last
+    /// layout, debounced, to [`TerminalHandle::resize`]. A held-back size asks for one more render.
+    // TODO(dioxus-compose#207): dioxus-compose sends no `onresize` (its `convert_resize_data` is "not sent"), so a size
+    // change is seen on the next render (panel drag, output, the wake below), not by an observer.
+    fn fit_terminal(s: &Shared, handle: &TerminalHandle) {
+        use futures_util::FutureExt;
+        let rect = TERM_MOUNT.with(|m| {
+            let m = m.borrow();
+            let r = m.as_ref()?.get_client_rect().now_or_never()?.ok()?;
+            Some((r.size.width as f32, r.size.height as f32))
+        });
+        let step = TERM_FIT.with(|f| f.borrow_mut().step(rect, std::time::Instant::now()));
+        if let Some((cols, rows)) = step.send {
+            handle.resize(cols, rows);
+        }
+        if let Some(after) = step.wake_after {
+            let revision = s.revision;
+            crate::services::services().rt.spawn(async move {
+                tokio::time::sleep(after).await;
+                let mut revision = revision;
+                *revision.write() += 1;
+            });
+        }
     }
 
     /// The terminal handle, started on first use. `None` when the editor was not given a server
@@ -2381,6 +2409,7 @@ pub mod page {
         let Some(handle) = terminal_handle(s) else {
             return rsx! { div { class: "ed-term", role: "log", "aria-label": "터미널 출력", style: "color:var(--muted);", "터미널은 서버에 연결했을 때만 사용할 수 있습니다. 이 창에는 서버 주소나 컴퓨터가 없습니다." } };
         };
+        fit_terminal(s, &handle);
         let view = panel_view(&handle.snapshot());
         let key_handle = handle.clone();
         let control_handle = handle.clone();
@@ -2394,6 +2423,7 @@ pub mod page {
                 button { class: "ed-ib", title: "새 터미널", "aria-label": "새 터미널", onclick: move |_| notice(crate::ui::editor_actions::not_ready_notice(Action::NewTerminal)), {icon("plus")} }
             }
             div { class: "ed-term", role: "log", "aria-label": "터미널 출력", tabindex: "0", style: "outline:none;",
+                onmounted: move |event| TERM_MOUNT.with(|m| *m.borrow_mut() = Some(event.data())),
                 // TODO(#335): paste and IME. Only key presses are forwarded; pasted and composed text is not.
                 onkeydown: move |event| {
                     let m = event.modifiers();

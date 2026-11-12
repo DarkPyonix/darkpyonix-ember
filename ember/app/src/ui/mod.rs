@@ -39,6 +39,7 @@ pub mod routines;
 pub mod safe_area;
 pub mod session;
 pub mod shell;
+pub mod term_fit;
 pub mod term_pane;
 pub mod theme;
 pub mod usage;

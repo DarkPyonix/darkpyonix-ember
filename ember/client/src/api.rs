@@ -1432,6 +1432,16 @@ impl Api {
         Self::decode(self.send(Method::PATCH, &format!("/sessions/{}", seg(id)), Some(body)).await?)
     }
 
+    // ---- device scope (FR-N8, #366) ----------------------------------------------------------
+
+    /// Sets an admitted device's scope (`PATCH /api/devices/{peer_id}`). Owner only: the route
+    /// is on the local listener with the server token, never on the transport. Answers the
+    /// updated device row.
+    pub async fn set_device_scope(&self, peer_id: &str, scope: DeviceScope) -> ApiResult<DeviceRecord> {
+        let body = serde_json::json!({ "scope": scope });
+        Self::decode(self.send(Method::PATCH, &format!("/devices/{}", seg(peer_id)), Some(body)).await?)
+    }
+
     /// Full-text search across every session's messages, best match first.
     pub async fn search(&self, query: &str, limit: Option<usize>) -> ApiResult<Vec<SearchHit>> {
         let mut q = vec![("q", query.to_string())];
@@ -2846,5 +2856,43 @@ mod enrol_tests {
         assert!(matches!(EnrolCallError::from(st(409, "door_off")), EnrolCallError::DoorOff));
         assert!(matches!(EnrolCallError::from(st(409, "door_url_unknown")), EnrolCallError::DoorUrlUnknown));
         assert_eq!(EnrolCallError::from(st(400, "bad")).status(), Some(400));
+    }
+}
+
+// ---- device scope (FR-N8, #366) --------------------------------------------------------------
+
+/// What an admitted device may call over the transport (server `devices::Scope`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceScope {
+    #[default]
+    Full,
+    ReadOnly,
+    ChatOnly,
+}
+
+/// One row of `GET /api/devices` (server `devices::Device`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRecord {
+    pub peer_id: String,
+    pub name: String,
+    pub created_at: i64,
+    pub source: String,
+    /// Absent on a server older than #366, which means `full`.
+    #[serde(default)]
+    pub scope: DeviceScope,
+}
+
+#[cfg(test)]
+mod device_scope_tests {
+    use super::*;
+
+    #[test]
+    fn scope_wire_names_match_the_server() {
+        assert_eq!(serde_json::to_value(DeviceScope::ReadOnly).unwrap(), "read_only");
+        assert_eq!(serde_json::to_value(DeviceScope::ChatOnly).unwrap(), "chat_only");
+        let d: DeviceRecord =
+            serde_json::from_str(r#"{"peer_id":"p","name":"n","created_at":1,"source":"local"}"#).unwrap();
+        assert_eq!(d.scope, DeviceScope::Full);
     }
 }

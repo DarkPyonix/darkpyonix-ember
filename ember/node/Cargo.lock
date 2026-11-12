@@ -587,6 +587,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "ember-hub",
+ "ember-transfer",
  "ember-transport",
  "futures",
  "globset",
@@ -615,6 +616,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ember-transfer"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ember-transport",
+ "getrandom 0.3.4",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "ember-transport"
 version = "0.1.0"
 dependencies = [
@@ -629,6 +645,7 @@ dependencies = [
  "letify-link",
  "reqwest",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tracing",

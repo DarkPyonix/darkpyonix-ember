@@ -10,7 +10,8 @@
 //! `GET`/`PATCH`/`DELETE /devices/{endpoint_id}`, `POST /devices/{endpoint_id}/readmit`,
 //! `GET /devices/{endpoint_id}/addresses`, `PUT`/`GET /pkarr/{key}` (the pkarr relay
 //! protocol, with signature check; resolving with a `dpr_` resolve token in `?token=`, never a
-//! device token). Every `401` carries `code` `device_removed` or `invalid_credentials`. Not
+//! device token), `GET /pkarr/watch` (the batched long-poll of core FR-H2 #132, advertised in
+//! `/config` as `pkarr_watch`; [`FakeHub::set_pkarr_watch`] turns it off). Every `401` carries `code` `device_removed` or `invalid_credentials`. Not
 //! served: GitHub sign-in, the relay, shares, names.
 //!
 //! Deviations, for tests only: a held long-poll wakes on the change itself (the hub checks about
@@ -49,6 +50,8 @@ const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 const MAX_DNS_PACKET: usize = 1000;
 /// `?wait=` must be an integer from 0 to this (FR-H9).
 const MAX_WAIT_SECS: u64 = 25;
+/// `/config` `pkarr_watch.max_keys` (core FR-H8).
+pub const PKARR_WATCH_MAX_KEYS: usize = 32;
 /// How long a re-admission stays open (FR-H11).
 const READMIT_SECS: i64 = 900;
 
@@ -107,6 +110,11 @@ struct Inner {
     device_list_requests: u64,
     /// Woken on every version bump (held `?wait=` requests).
     changed: Arc<Notify>,
+    /// Whether `GET /pkarr/watch` is served and advertised.
+    pkarr_watch: bool,
+    pkarr_watch_requests: u64,
+    /// Woken on every accepted `PUT /pkarr` (held watches).
+    records_changed: Arc<Notify>,
 }
 
 impl Inner {
@@ -232,6 +240,9 @@ impl FakeHub {
             version: 1,
             device_list_requests: 0,
             changed: Arc::new(Notify::new()),
+            pkarr_watch: true,
+            pkarr_watch_requests: 0,
+            records_changed: Arc::new(Notify::new()),
         }));
         let app = router(state.clone());
         let task = tokio::spawn(async move {
@@ -282,6 +293,16 @@ impl FakeHub {
     /// Test knob, not the contract: `false` answers `?wait=` at once (a hub that ignores it).
     pub fn set_honour_wait(&self, on: bool) {
         self.state.lock().unwrap().honour_wait = on;
+    }
+
+    /// Whether `GET /pkarr/watch` is served and `/config` advertises `pkarr_watch` (default on).
+    pub fn set_pkarr_watch(&self, on: bool) {
+        self.state.lock().unwrap().pkarr_watch = on;
+    }
+
+    /// `GET /pkarr/watch` requests served so far.
+    pub fn pkarr_watch_requests(&self) -> u64 {
+        self.state.lock().unwrap().pkarr_watch_requests
     }
 
     /// `GET /devices` requests served so far.
@@ -397,6 +418,7 @@ fn router(state: Shared) -> Router {
         .route("/devices/{id}", get(get_device).patch(update_device).delete(remove_device))
         .route("/devices/{id}/readmit", post(readmit_device))
         .route("/devices/{id}/addresses", get(device_addresses))
+        .route("/pkarr/watch", get(pkarr_watch))
         .route("/pkarr/{key}", put(pkarr_put).get(pkarr_get))
         // Like the real hub (core NFR-V1): no versioned paths; `/v1/*` and anything else is 404.
         .fallback(|| async { err(StatusCode::NOT_FOUND, "not found") })
@@ -530,16 +552,16 @@ async fn hub_config(State(st): State<Shared>) -> HResult {
     if !s.config_enabled {
         return Err(err(StatusCode::NOT_FOUND, "not found"));
     }
-    Ok((
-        [("cache-control", "public, max-age=300")],
-        Json(json!({
-            "hub_version": "fake",
-            "relay_urls": s.config_relays,
-            "pkarr_url": format!("{}/pkarr", s.base_url),
-            "link_url": format!("{}/link", s.base_url),
-        })),
-    )
-        .into_response())
+    let mut body = json!({
+        "hub_version": "fake",
+        "relay_urls": s.config_relays,
+        "pkarr_url": format!("{}/pkarr", s.base_url),
+        "link_url": format!("{}/link", s.base_url),
+    });
+    if s.pkarr_watch {
+        body["pkarr_watch"] = json!({ "max_keys": PKARR_WATCH_MAX_KEYS, "max_wait": MAX_WAIT_SECS });
+    }
+    Ok(([("cache-control", "public, max-age=300")], Json(body)).into_response())
 }
 
 async fn create_link(State(st): State<Shared>, body: Bytes) -> HResult {
@@ -906,6 +928,7 @@ async fn pkarr_put(State(st): State<Shared>, Path(key): Path<String>, body: Byte
         return Err(err(StatusCode::CONFLICT, "not newer than the stored packet"));
     }
     s.records.insert(peer, Record { timestamp_us, payload: body.to_vec() });
+    s.records_changed.notify_waiters();
     let now = now_secs();
     // `last_seen` alone does not change the list's version (FR-H9).
     if let Some(d) = s.devices.iter_mut().find(|d| d.device.endpoint_id == peer && !d.removed) {
@@ -938,6 +961,79 @@ async fn pkarr_get(State(st): State<Shared>, headers: HeaderMap, Path(key): Path
     s.live_device(&peer).ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     let rec = s.records.get(&peer).ok_or_else(|| err(StatusCode::NOT_FOUND, "nothing published"))?;
     Ok(([("content-type", "application/octet-stream")], rec.payload.clone()).into_response())
+}
+
+#[derive(Deserialize)]
+struct WatchQuery {
+    keys: Option<String>,
+    since: Option<String>,
+    wait: Option<String>,
+}
+
+/// `GET /pkarr/watch?keys=..&since=..&wait=..` (core FR-H2 #132): the device token or a
+/// session in the header; `200` with the records newer than `since`, `204` when none changed
+/// within `wait`, `404` with the keys that are not live devices.
+async fn pkarr_watch(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<WatchQuery>) -> HResult {
+    let bad = |m: &str| err(StatusCode::BAD_REQUEST, m);
+    let names: Vec<&str> = q.keys.as_deref().unwrap_or("").split(',').filter(|k| !k.is_empty()).collect();
+    let since: Vec<&str> = q.since.as_deref().unwrap_or("").split(',').filter(|k| !k.is_empty()).collect();
+    if names.is_empty() || names.len() > PKARR_WATCH_MAX_KEYS || names.len() != since.len() {
+        return Err(bad("keys and since must list 1 to 32 keys and as many timestamps"));
+    }
+    let mut keys: Vec<(String, PeerId, u64)> = Vec::new();
+    for (name, ts) in names.iter().zip(&since) {
+        let key = z32::decode_key(name).and_then(|k| PeerId::from_bytes(k).ok()).ok_or_else(|| bad("malformed key"))?;
+        let ts = ts.parse::<u64>().map_err(|_| bad("malformed since"))?;
+        if keys.iter().any(|(_, k, _)| *k == key) {
+            return Err(bad("duplicate key"));
+        }
+        keys.push((name.to_string(), key, ts));
+    }
+    let wait = match q.wait.as_deref() {
+        None => 0,
+        Some(w) => w.parse::<u64>().ok().filter(|w| *w <= MAX_WAIT_SECS).ok_or_else(|| bad("wait out of range"))?,
+    };
+    let changed = {
+        let mut s = st.lock().unwrap();
+        if !s.pkarr_watch {
+            return Err(err(StatusCode::NOT_FOUND, "not found"));
+        }
+        s.pkarr_watch_requests += 1;
+        principal(&s, &headers)?;
+        let unknown: Vec<&String> = keys.iter().filter(|(_, k, _)| s.live_device(k).is_none()).map(|(n, _, _)| n).collect();
+        if !unknown.is_empty() {
+            return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "not_found", "keys": unknown }))).into_response());
+        }
+        s.records_changed.clone()
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(wait);
+    loop {
+        let notified = changed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        {
+            let s = st.lock().unwrap();
+            principal(&s, &headers)?;
+            let records: Vec<Value> = keys
+                .iter()
+                .filter_map(|(name, k, since)| {
+                    let r = s.records.get(k).filter(|r| r.timestamp_us > *since)?;
+                    Some(json!({
+                        "key": name,
+                        "timestamp": r.timestamp_us,
+                        "packet": base64::engine::general_purpose::STANDARD.encode(&r.payload),
+                    }))
+                })
+                .collect();
+            if !records.is_empty() {
+                return Ok(Json(json!({ "records": records })).into_response());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(StatusCode::NO_CONTENT.into_response());
+            }
+        }
+        let _ = tokio::time::timeout_at(deadline, notified).await;
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

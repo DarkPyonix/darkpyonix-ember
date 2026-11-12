@@ -9,6 +9,16 @@
 //! `grep-regex`) in-process rather than shelling out to `rg`: `rg` is not installed on a stock
 //! macOS or Raspberry Pi OS, a spawned process per search costs more than the search on small
 //! trees, and the libraries give the same ignore rules and regex engine with typed results.
+//!
+//! **Open, then check (#468).** Content operations (read, pwrite, setattr, grep, and on Unix the
+//! atomic write) open the file first and check the opened handle with
+//! [`PathPolicy::check_opened`], so a symlink swapped into the path between the policy check and
+//! the open cannot make them read or write outside the roots. On Unix the final component is
+//! opened with `O_NOFOLLOW`, and the atomic write creates, hashes and renames inside a directory
+//! handle (`openat`, `renameat`) that was itself checked. Namespace operations (mkdir, remove,
+//! rename, symlink, stat, lstat, readlink, list) still act on paths: a swap of a parent directory
+//! between their check and their system call can redirect them. That residual is recorded in
+//! SPEC (FR-X1, #468).
 
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -55,7 +65,11 @@ fn kind_of(ft: fs::FileType) -> FileKind {
 }
 
 pub fn sha256_file(path: &Path) -> io::Result<String> {
-    let mut f = File::open(path)?;
+    sha256_reader(&mut File::open(path)?)
+}
+
+/// SHA-256 of everything `f` yields from its current position.
+pub fn sha256_reader(f: &mut impl Read) -> io::Result<String> {
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
@@ -184,6 +198,101 @@ fn io_err(raw: i32, context: String) -> FsError {
     FsError::Io(io::Error::from_raw_os_error(raw))
 }
 
+/// Resolve `path` (which must exist), open it with `opts` (on Unix also `O_NOFOLLOW` and
+/// `extra_flags`) and check the opened handle (#468). Returns the handle and its canonical path.
+fn open_checked(
+    policy: &PathPolicy,
+    path: &Path,
+    opts: &mut fs::OpenOptions,
+    #[allow(unused_variables)] extra_flags: i32,
+) -> Result<(File, PathBuf), FsError> {
+    let p = policy.resolve_existing(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | extra_flags);
+    }
+    let f = opts.open(&p)?;
+    let p = policy.check_opened(&f, &p)?;
+    Ok((f, p))
+}
+
+/// Directory-relative system calls for the race-free atomic write (#468). Every name is opened
+/// with `O_NOFOLLOW`, so a symlink swapped in at the name is refused, not followed.
+#[cfg(unix)]
+mod at {
+    use std::ffi::{CString, OsStr};
+    use std::fs::File;
+    use std::io;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    fn cstr(b: &[u8]) -> io::Result<CString> {
+        CString::new(b).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))
+    }
+
+    /// Open a directory without following a final symlink.
+    pub fn open_dir(path: &Path) -> io::Result<File> {
+        let c = cstr(path.as_os_str().as_bytes())?;
+        // SAFETY: `c` is a valid NUL-terminated path; the flags take no extra argument.
+        let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is a fresh descriptor this function owns.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    /// `openat(dir, name, flags | O_NOFOLLOW | O_CLOEXEC, mode)`.
+    pub fn openat(dir: &File, name: &OsStr, flags: libc::c_int, mode: libc::mode_t) -> io::Result<File> {
+        let c = cstr(name.as_bytes())?;
+        // SAFETY: `dir` is an open descriptor, `c` a valid NUL-terminated name, `mode` is read
+        // only with O_CREAT and is passed as the promoted unsigned int openat(2) expects.
+        let fd = unsafe {
+            libc::openat(dir.as_raw_fd(), c.as_ptr(), flags | libc::O_NOFOLLOW | libc::O_CLOEXEC, mode as libc::c_uint)
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is a fresh descriptor this function owns.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    /// `fstatat(dir, name, AT_SYMLINK_NOFOLLOW)`: the entry's `st_mode`.
+    pub fn lstat_mode(dir: &File, name: &OsStr) -> io::Result<u32> {
+        let c = cstr(name.as_bytes())?;
+        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: `st` is writable storage for one `stat`, filled on success.
+        let rc = unsafe { libc::fstatat(dir.as_raw_fd(), c.as_ptr(), st.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: fstatat succeeded, so `st` is initialised.
+        Ok(unsafe { st.assume_init() }.st_mode as u32)
+    }
+
+    pub fn renameat(dir: &File, from: &OsStr, to: &OsStr) -> io::Result<()> {
+        let (f, t) = (cstr(from.as_bytes())?, cstr(to.as_bytes())?);
+        // SAFETY: both names are valid NUL-terminated strings relative to the open `dir`.
+        let rc = unsafe { libc::renameat(dir.as_raw_fd(), f.as_ptr(), dir.as_raw_fd(), t.as_ptr()) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub fn unlinkat(dir: &File, name: &OsStr) -> io::Result<()> {
+        let c = cstr(name.as_bytes())?;
+        // SAFETY: `c` is a valid NUL-terminated name relative to the open `dir`.
+        let rc = unsafe { libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), 0) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
 pub fn stat(policy: &PathPolicy, path: &Path) -> Result<Stat, FsError> {
     let p = policy.resolve_existing(path)?;
     let m = fs::metadata(&p)?;
@@ -285,6 +394,9 @@ fn timespec(t: Option<SetTime>) -> libc::timespec {
 }
 
 /// Apply size, mode and times (see [`SetAttrRequest`]). Callers serialise this with writes.
+///
+/// The size is set through a checked handle. On Unix the mode and times are too (`fchmod`,
+/// `futimens`); a file this user cannot open for reading (mode `0o000`) falls back to the path.
 pub fn setattr(policy: &PathPolicy, req: &SetAttrRequest) -> Result<Stat, FsError> {
     let p = policy.resolve_existing(&req.path)?;
     if let Some(size) = req.size {
@@ -292,16 +404,52 @@ pub fn setattr(policy: &PathPolicy, req: &SetAttrRequest) -> Result<Stat, FsErro
         if m.is_dir() {
             return Err(io_err(libc::EISDIR, format!("{} is a directory", p.display())));
         }
-        fs::OpenOptions::new().write(true).open(&p)?.set_len(size)?;
+        let (f, _) = open_checked(policy, &p, fs::OpenOptions::new().write(true), 0)?;
+        f.set_len(size)?;
     }
+    let times = req.atime.is_some() || req.mtime.is_some();
+    if req.mode.is_some() || times {
+        #[cfg(unix)]
+        match open_checked(policy, &p, fs::OpenOptions::new().read(true), libc::O_NONBLOCK) {
+            Ok((f, _)) => setattr_fd(&f, req)?,
+            Err(FsError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied => setattr_path(&p, req)?,
+            Err(e) => return Err(e),
+        }
+        #[cfg(not(unix))]
+        setattr_path(&p, req)?;
+    }
+    let p = policy.resolve_existing(&p)?;
+    let m = fs::metadata(&p)?;
+    Ok(stat_of(p, &m))
+}
+
+#[cfg(unix)]
+fn setattr_fd(f: &File, req: &SetAttrRequest) -> Result<(), FsError> {
+    use std::os::fd::AsRawFd;
+    if let Some(mode) = req.mode {
+        f.set_permissions(fs::Permissions::from_mode(mode & 0o7777))?;
+    }
+    if req.atime.is_some() || req.mtime.is_some() {
+        let times = [timespec(req.atime), timespec(req.mtime)];
+        // SAFETY: `f` is an open descriptor and `times` has the two entries futimens(2) reads.
+        let rc = unsafe { libc::futimens(f.as_raw_fd(), times.as_ptr()) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+    }
+    Ok(())
+}
+
+/// Mode and times by path (Windows, and a Unix file that cannot be opened for reading).
+fn setattr_path(p: &Path, req: &SetAttrRequest) -> Result<(), FsError> {
     if let Some(mode) = req.mode {
         #[cfg(unix)]
-        fs::set_permissions(&p, fs::Permissions::from_mode(mode & 0o7777))?;
+        fs::set_permissions(p, fs::Permissions::from_mode(mode & 0o7777))?;
         #[cfg(not(unix))]
         {
-            let mut perms = fs::metadata(&p)?.permissions();
+            let mut perms = fs::metadata(p)?.permissions();
             perms.set_readonly(mode & 0o200 == 0);
-            fs::set_permissions(&p, perms)?;
+            fs::set_permissions(p, perms)?;
         }
     }
     #[cfg(unix)]
@@ -330,17 +478,15 @@ pub fn setattr(policy: &PathPolicy, req: &SetAttrRequest) -> Result<Stat, FsErro
         if let Some(m) = req.mtime {
             times = times.set_modified(to_sys(m));
         }
-        fs::OpenOptions::new().write(true).open(&p)?.set_times(times)?;
+        fs::OpenOptions::new().write(true).open(p)?.set_times(times)?;
     }
-    let m = fs::metadata(&p)?;
-    Ok(stat_of(p, &m))
+    Ok(())
 }
 
 /// Positional in-place write into an existing regular file (see [`PwriteRequest`]).
 pub fn pwrite(policy: &PathPolicy, req: &PwriteRequest) -> Result<Stat, FsError> {
-    let p = policy.resolve_existing(&req.path)?;
     #[allow(unused_mut)]
-    let mut f = fs::OpenOptions::new().write(true).open(&p)?;
+    let (mut f, p) = open_checked(policy, &req.path, fs::OpenOptions::new().write(true), 0)?;
     let m = f.metadata()?;
     if !m.is_file() {
         return Err(io_err(libc::EINVAL, format!("{} is not a regular file", p.display())));
@@ -360,8 +506,7 @@ pub fn pwrite(policy: &PathPolicy, req: &PwriteRequest) -> Result<Stat, FsError>
 }
 
 pub fn read(policy: &PathPolicy, req: &ReadRequest) -> Result<ReadResponse, FsError> {
-    let p = policy.resolve_existing(&req.path)?;
-    let mut f = File::open(&p)?;
+    let (mut f, p) = open_checked(policy, &req.path, fs::OpenOptions::new().read(true), 0)?;
     let m = f.metadata()?;
     if m.is_dir() {
         return Err(FsError::BadRequest(format!("{} is a directory", p.display())));
@@ -373,7 +518,13 @@ pub fn read(policy: &PathPolicy, req: &ReadRequest) -> Result<ReadResponse, FsEr
         f.seek(SeekFrom::Start(req.offset))?;
         (&mut f).take(len).read_to_end(&mut data)?;
     }
-    let sha256 = if req.hash { Some(sha256_file(&p)?) } else { None };
+    // Hash the opened file, not the path again (#468).
+    let sha256 = if req.hash {
+        f.seek(SeekFrom::Start(0))?;
+        Some(sha256_reader(&mut f)?)
+    } else {
+        None
+    };
     Ok(ReadResponse {
         eof: req.offset + data.len() as u64 >= size,
         path: p,
@@ -390,6 +541,76 @@ pub fn read(policy: &PathPolicy, req: &ReadRequest) -> Result<ReadResponse, FsEr
 /// existing file's permission bits are kept. The precondition is checked immediately before the
 /// rename; callers serialise writes (the API holds one write lock) so the check-then-rename is
 /// atomic against other writes through this daemon, though not against other processes.
+///
+/// On Unix the target directory is opened (`O_NOFOLLOW`) and checked once, and the existing
+/// file's mode, the hash precondition, the temporary file and the rename all go through that
+/// handle (#468), so a symlink swapped into the path cannot move the write outside the roots.
+#[cfg(unix)]
+pub fn write(policy: &PathPolicy, req: &WriteRequest) -> Result<WriteResponse, FsError> {
+    let p = policy.resolve_for_write(&req.path)?;
+    let dir = p.parent().ok_or_else(|| FsError::BadRequest("no parent directory".into()))?;
+    let name = p.file_name().ok_or_else(|| FsError::BadRequest("no file name".into()))?.to_os_string();
+    if req.create_parents {
+        fs::create_dir_all(dir)?;
+    }
+    let d = at::open_dir(dir)?;
+    policy.check_opened(&d, dir)?;
+
+    let existing_mode = match at::lstat_mode(&d, &name) {
+        Ok(mode) => match mode & libc::S_IFMT as u32 {
+            m if m == libc::S_IFDIR as u32 => {
+                return Err(FsError::BadRequest(format!("{} is a directory", p.display())))
+            }
+            m if m == libc::S_IFLNK as u32 => {
+                return Err(io_err(libc::ELOOP, format!("{} became a symbolic link", p.display())))
+            }
+            _ => Some(mode & 0o7777),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+
+    let tmp = std::ffi::OsString::from(format!(
+        ".{}.ember-{}.tmp",
+        name.to_string_lossy(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = (|| -> Result<(), FsError> {
+        let mut f = at::openat(&d, &tmp, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o666)?;
+        f.write_all(&req.data)?;
+        if let Some(mode) = existing_mode {
+            f.set_permissions(fs::Permissions::from_mode(mode))?;
+        }
+        f.sync_all()?;
+        drop(f);
+
+        if let Some(expected) = &req.expect {
+            let actual = match existing_mode {
+                Some(_) => Some(sha256_reader(&mut at::openat(&d, &name, libc::O_RDONLY | libc::O_NONBLOCK, 0)?)?),
+                None => None,
+            };
+            let ok = match expected {
+                Expect::Absent => actual.is_none(),
+                Expect::Sha256(h) => actual.as_deref() == Some(h.to_ascii_lowercase().as_str()),
+            };
+            if !ok {
+                return Err(FsError::Precondition { expected: expected.clone(), actual });
+            }
+        }
+        at::renameat(&d, &tmp, &name)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = at::unlinkat(&d, &tmp);
+    }
+    result?;
+    // Persist the rename itself.
+    let _ = d.sync_all();
+    Ok(WriteResponse { size: req.data.len() as u64, sha256: sha256_bytes(&req.data), path: p })
+}
+
+/// The path-based atomic write (Windows); see the Unix variant for the checked one.
+#[cfg(not(unix))]
 pub fn write(policy: &PathPolicy, req: &WriteRequest) -> Result<WriteResponse, FsError> {
     let p = policy.resolve_for_write(&req.path)?;
     let dir = p.parent().ok_or_else(|| FsError::BadRequest("no parent directory".into()))?;
@@ -455,6 +676,10 @@ pub fn list(policy: &PathPolicy, path: &Path) -> Result<ListResponse, FsError> {
     let mut entries = Vec::new();
     for e in fs::read_dir(&p)? {
         let e = e?;
+        // A denied entry is not listed, so the listing does not reveal the exclusion (#534).
+        if policy.is_denied(&p.join(e.file_name())) {
+            continue;
+        }
         let Ok(m) = e.metadata() else { continue };
         entries.push(DirEntry {
             name: e.file_name().to_string_lossy().into_owned(),
@@ -473,6 +698,14 @@ pub fn list(policy: &PathPolicy, path: &Path) -> Result<ListResponse, FsError> {
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(ListResponse { path: p, entries })
+}
+
+/// `O_NONBLOCK` on Unix (so opening a FIFO does not hang), nothing elsewhere.
+fn nonblock() -> i32 {
+    #[cfg(unix)]
+    return libc::O_NONBLOCK;
+    #[cfg(not(unix))]
+    0
 }
 
 fn matcher(pattern: &str) -> Result<GlobMatcher, FsError> {
@@ -552,10 +785,18 @@ pub fn grep(policy: &PathPolicy, req: &GrepRequest) -> Result<GrepResponse, FsEr
                 continue;
             }
         }
+        // Open, then check the handle (#468): a swapped symlink cannot make grep read outside.
+        let file = match open_checked(policy, &path, fs::OpenOptions::new().read(true), nonblock()) {
+            Ok((f, _)) => f,
+            Err(e) => {
+                tracing::debug!(path = %path.display(), "grep skipped: {e}");
+                continue;
+            }
+        };
         let mut hit_limit = false;
-        let res = searcher.search_path(
+        let res = searcher.search_file(
             &re,
-            &path,
+            &file,
             Lossy(|line, text| {
                 if matches.len() >= limit {
                     hit_limit = true;

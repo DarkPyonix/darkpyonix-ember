@@ -175,6 +175,27 @@ pub(crate) struct Completed {
     pub stored: Vec<StoredFile>,
 }
 
+/// Which receiver a transfer goes to (`FR-F14`, #773).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum TransferTarget {
+    /// The server's own computer (`/api/transfers`).
+    #[default]
+    Server,
+    /// A registered computer, by its registry id; the server relays to its node
+    /// (`/api/computers/{id}/transfers`). Only computers on the encrypted transport receive.
+    Computer(String),
+}
+
+impl TransferTarget {
+    /// The API path every transfer call of this target starts with (below `/api`).
+    pub fn prefix(&self) -> String {
+        match self {
+            TransferTarget::Server => "/transfers".into(),
+            TransferTarget::Computer(id) => format!("/computers/{}/transfers", crate::api::seg(id)),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------------------------
@@ -206,6 +227,10 @@ pub enum TransferError {
     Unauthorized,
     /// The server has no transfer API (an older server).
     Unsupported,
+    /// The computer is reached over plain HTTP, so the server does not send files to it (`FR-F14`).
+    InsecureTarget,
+    /// The receiving computer has not enough free space (`FR-F16`); nothing moved.
+    NoSpace,
     /// Anything else the server refused, with its status code.
     Server(u16),
 }
@@ -232,6 +257,10 @@ impl TransferError {
             }
             TransferError::Unauthorized => "서버가 이 앱의 인증을 거부했습니다.".into(),
             TransferError::Unsupported => "이 서버는 파일 전송을 지원하지 않습니다.".into(),
+            TransferError::InsecureTarget => {
+                "이 컴퓨터는 암호화되지 않은 연결로 등록되어 있어서 파일을 보낼 수 없습니다.".into()
+            }
+            TransferError::NoSpace => "받는 컴퓨터의 저장 공간이 부족해서 보낼 수 없습니다.".into(),
             TransferError::Server(status) => format!("전송에 실패했습니다. (서버 응답 {status})"),
         }
     }
@@ -247,6 +276,10 @@ impl TransferError {
             ApiError::Transport(_) | ApiError::Peer(_) | ApiError::Push(_) => TransferError::Connection,
             ApiError::Unauthorized(_) => TransferError::Unauthorized,
             ApiError::Status { status: 413, .. } => TransferError::TooLarge,
+            ApiError::Status { status: 507, .. } => TransferError::NoSpace,
+            ApiError::Status { status: 403, message, .. } if message.contains("InsecureTarget") => {
+                TransferError::InsecureTarget
+            }
             ApiError::Status { status: 403, message, .. } if message.contains("ReceiveOff") => TransferError::ReceiveOff,
             ApiError::Status { status: 403, message, .. } if message.contains("NotRegistered") => {
                 TransferError::NotRegistered
@@ -363,11 +396,22 @@ pub async fn offer(
     peer_id: Option<&str>,
     files: &[LocalFile],
 ) -> Result<OfferCreated, TransferError> {
+    offer_to(api, &TransferTarget::Server, from, peer_id, files).await
+}
+
+/// [`offer`] to `target` (`FR-F14`).
+pub async fn offer_to(
+    api: &Api,
+    target: &TransferTarget,
+    from: &str,
+    peer_id: Option<&str>,
+    files: &[LocalFile],
+) -> Result<OfferCreated, TransferError> {
     if files.is_empty() {
         return Err(TransferError::NoFiles);
     }
     let declared: Vec<DeclaredFile> = files.iter().map(|f| f.declared.clone()).collect();
-    api.offer_transfer(from, peer_id, &declared).await.map_err(|e| TransferError::from_api(&e))
+    api.offer_transfer_at(target, from, peer_id, &declared).await.map_err(|e| TransferError::from_api(&e))
 }
 
 /// How [`upload`] paces itself.
@@ -448,6 +492,7 @@ enum Next {
 
 struct Uploader<'a> {
     api: &'a Api,
+    target: &'a TransferTarget,
     id: &'a str,
     opts: &'a UploadOptions,
     failures: u32,
@@ -479,7 +524,7 @@ impl Uploader<'_> {
             _ => return Err(TransferError::from_api(&e)),
         }
         let snapshot = loop {
-            match self.api.transfers().await {
+            match self.api.transfers_at(self.target).await {
                 Ok(s) => break s,
                 Err(e) if is_connection(&e) => self.pause_for_retry(TransferError::Connection).await?,
                 Err(e) => return Err(TransferError::from_api(&e)),
@@ -498,7 +543,7 @@ impl Uploader<'_> {
                 }
                 TransferStatus::Failed => {
                     self.pause_for_retry(TransferError::Server(409)).await?;
-                    if let Err(e) = self.api.resume_transfer(self.id).await {
+                    if let Err(e) = self.api.transfer_control_at(self.target, self.id, "resume").await {
                         if !is_connection(&e) && e.status() != Some(409) {
                             return Err(TransferError::from_api(&e));
                         }
@@ -521,7 +566,7 @@ impl Uploader<'_> {
     async fn wait_for_answer(&mut self) -> Result<Option<UploadEnd>, TransferError> {
         let deadline = tokio::time::Instant::now() + self.opts.answer_timeout;
         loop {
-            match self.api.transfers().await {
+            match self.api.transfers_at(self.target).await {
                 Ok(snapshot) => match locate(&snapshot, self.id) {
                     Whereabouts::Pending => {}
                     Whereabouts::Active(_) => return Ok(None),
@@ -532,7 +577,7 @@ impl Uploader<'_> {
             }
             if tokio::time::Instant::now() >= deadline {
                 // Withdraw the offer so the receiver's prompt goes away too.
-                let _ = self.api.cancel_transfer(self.id).await;
+                let _ = self.api.cancel_transfer_at(self.target, self.id).await;
                 return Err(TransferError::Expired);
             }
             tokio::time::sleep(self.opts.poll).await;
@@ -552,7 +597,7 @@ impl Uploader<'_> {
             tokio::fs::File::open(&file.path).await.map_err(|_| TransferError::Read(name.clone()))?;
         let mut buf = vec![0u8; self.opts.chunk_bytes.max(1)];
         loop {
-            let mut offset = match self.api.transfer_resume_offset(self.id, index).await {
+            let mut offset = match self.api.transfer_resume_offset_at(self.target, self.id, index).await {
                 Ok(o) => o,
                 Err(e) => match self.recover(e).await? {
                     Next::Reoffset => continue,
@@ -585,7 +630,7 @@ impl Uploader<'_> {
                 }
                 let chunk = &buf[..filled];
                 let digest = sha256_hex(chunk);
-                match self.api.transfer_chunk(self.id, index, offset, chunk, Some(&digest)).await {
+                match self.api.transfer_chunk_at(self.target, self.id, index, offset, chunk, Some(&digest)).await {
                     Ok(item) => {
                         offset += filled as u64;
                         self.failures = 0;
@@ -605,12 +650,12 @@ impl Uploader<'_> {
 
     async fn complete(&mut self) -> Result<UploadEnd, TransferError> {
         loop {
-            match self.api.complete_transfer(self.id).await {
+            match self.api.complete_transfer_at(self.target, self.id).await {
                 Ok(stored) => return Ok(UploadEnd::Done(stored)),
                 Err(e) if is_connection(&e) => self.pause_for_retry(TransferError::Connection).await?,
                 Err(e) if e.status() == Some(404) => {
                     // Not active any more: an earlier answer was lost, or it was cancelled.
-                    let snapshot = self.api.transfers().await.map_err(|e| TransferError::from_api(&e))?;
+                    let snapshot = self.api.transfers_at(self.target).await.map_err(|e| TransferError::from_api(&e))?;
                     return match locate(&snapshot, self.id) {
                         Whereabouts::Ended(result) => end_of(result),
                         _ => Err(TransferError::Server(404)),
@@ -634,7 +679,19 @@ pub async fn upload(
     opts: &UploadOptions,
     progress: &mut (dyn FnMut(u64) + Send),
 ) -> Result<UploadEnd, TransferError> {
-    let mut up = Uploader { api, id, opts, failures: 0 };
+    upload_to(api, &TransferTarget::Server, id, files, opts, progress).await
+}
+
+/// [`upload`] to `target` (`FR-F14`): the same stream, under the target's path.
+pub async fn upload_to(
+    api: &Api,
+    target: &TransferTarget,
+    id: &str,
+    files: &[LocalFile],
+    opts: &UploadOptions,
+    progress: &mut (dyn FnMut(u64) + Send),
+) -> Result<UploadEnd, TransferError> {
+    let mut up = Uploader { api, target, id, opts, failures: 0 };
     if let Some(end) = up.wait_for_answer().await? {
         return Ok(end);
     }
@@ -708,6 +765,8 @@ mod tests {
             TransferError::Connection,
             TransferError::Unauthorized,
             TransferError::Unsupported,
+            TransferError::InsecureTarget,
+            TransferError::NoSpace,
             TransferError::Server(500),
         ]
     }
@@ -739,11 +798,23 @@ mod tests {
         );
         assert_eq!(TransferError::from_api(&status(400, "SHA-256 mismatch for \"a\": expected 00, got ff")), TransferError::HashMismatch);
         assert_eq!(TransferError::from_api(&status(404, "")), TransferError::Unsupported);
+        assert_eq!(TransferError::from_api(&status(507, "NoSpace: 5 bytes")), TransferError::NoSpace);
+        assert_eq!(
+            TransferError::from_api(&status(403, "InsecureTarget: computer lan is reached over plain HTTP")),
+            TransferError::InsecureTarget
+        );
         assert_eq!(TransferError::from_api(&status(500, "boom")), TransferError::Server(500));
         assert_eq!(TransferError::from_api(&ApiError::Peer("gone".into())), TransferError::Connection);
         assert_eq!(TransferError::from_api(&ApiError::Unauthorized("no".into())), TransferError::Unauthorized);
         // The server's text never reaches the user.
         assert!(!TransferError::from_api(&status(500, "boom")).text_ko().contains("boom"));
+    }
+
+    #[test]
+    fn fr_f14_targets_name_their_paths() {
+        assert_eq!(TransferTarget::default().prefix(), "/transfers");
+        assert_eq!(TransferTarget::Computer("c-1".into()).prefix(), "/computers/c-1/transfers");
+        assert_eq!(TransferTarget::Computer("a/b".into()).prefix(), "/computers/a%2Fb/transfers");
     }
 
     #[test]

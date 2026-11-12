@@ -599,7 +599,7 @@ impl ServerHub {
         let config = self.discover().await;
         self.publish_app().await;
         if let Some(t) = self.transport.get() {
-            t.enable_hub(config.directory(reg.directory_token()))
+            t.enable_hub(config.directory_with_watch(reg.directory_token(), reg.active_token()))
                 .map_err(|e| anyhow::anyhow!("enabling the hub directory: {e}"))?;
             if let Err(e) = t.set_relays(config.relay_config()).await {
                 tracing::warn!("could not switch to the hub's relay: {e}");

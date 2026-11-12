@@ -517,8 +517,16 @@ pub mod page {
             }
         };
         let hint_text = placeholder(mode, keymap);
-        let shown: Vec<_> = ranked.iter().take(50).cloned().collect();
+        // A picker lists every row (a language list is longer than 50) and shows the window of rows that
+        // holds the highlighted one, so the current language or encoding is in view when it opens (FR-L31.7).
+        let picker = crate::ui::editor_status::is_picker(mode);
+        let shown: Vec<_> = ranked.iter().take(if picker { usize::MAX } else { 50 }).cloned().collect();
         let chosen = (*sel.read()).min(shown.len().saturating_sub(1));
+        let (win_start, win_end) = if picker {
+            crate::ui::editor_status::list_window(chosen, shown.len(), crate::ui::editor_status::PICKER_VISIBLE_ROWS)
+        } else {
+            (0, shown.len())
+        };
         // A command the editor cannot do yet is listed but does nothing: Enter on it leaves the sheet open.
         let enter_payload = shown
             .get(chosen)
@@ -534,7 +542,12 @@ pub mod page {
                     {icon("search")}
                     input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
                         "aria-label": "{crate::ui::palette::search_label(mode)}", placeholder: "{hint_text}", value: "{raw_text}", autofocus: true,
-                        oninput: move |event| { query.set(event.value()); sel.set(0); },
+                        oninput: move |event| {
+                            // Only a changed query moves the highlight back to the top, so an input event that
+                            // repeats the text (focus, mount) keeps a picker on its current row.
+                            let value = event.value();
+                            if value != *query.read() { query.set(value); sel.set(0); }
+                        },
                         onkeydown: move |event| {
                             match event.key() {
                                 Key::Escape => { event.stop_propagation(); open.set(false); }
@@ -560,7 +573,13 @@ pub mod page {
                 }
                 div { style: "max-height:320px; overflow:auto;", role: "listbox",
                     if shown.is_empty() { div { style: "padding:var(--sp3); color:var(--muted);", "{crate::ui::palette::empty_text(mode, index_running)}" } }
-                    for (row, r) in shown.iter().enumerate() {
+                    if win_start > 0 {
+                        div { class: "ed-tn", role: "option", "aria-label": "위 항목 더 보기", style: "--d:0; height:34px; color:var(--muted);",
+                            onclick: move |_| sel.set(win_start - 1),
+                            "{crate::ui::editor_status::more_above_text(win_start)}"
+                        }
+                    }
+                    for (row, r) in shown.iter().enumerate().skip(win_start).take(win_end - win_start) {
                         {
                             let item = &items[r.index];
                             let segments = highlight_segments(&item.title, &r.matched);

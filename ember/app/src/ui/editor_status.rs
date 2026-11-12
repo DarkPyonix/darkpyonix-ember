@@ -81,7 +81,7 @@ pub fn picker_items(mode: Mode, format: Option<&DocumentFormat>, languages: &[La
             let current = format.map(|f| f.language_id.as_str());
             let mut items = vec![item(Payload::SetLanguage(None), AUTO_DETECT, String::new())];
             items.extend(languages.iter().map(|l| {
-                let hint = if current == Some(l.id.as_str()) { format!("({}) - 구성된 언어", l.id) } else { format!("({})", l.id) };
+                let hint = current_hint(current == Some(l.id.as_str()), format!("({})", l.id));
                 item(Payload::SetLanguage(Some(l.id.clone())), &l.name, hint)
             }));
             items
@@ -96,6 +96,28 @@ fn current_hint(current: bool, rest: String) -> String {
         (true, false) => format!("{rest} - 현재"),
         (false, _) => rest,
     }
+}
+
+/// How many picker rows the palette's list shows at once (320 px of 34 px rows).
+pub const PICKER_VISIBLE_ROWS: usize = 9;
+
+/// The rows `[start, end)` of a picker list of `len` rows that are drawn so the highlighted row
+/// `selected` is in view: the first page while it is on it, else the page that ends with it. The
+/// toolkit has no scroll-into-view, so the list is windowed instead (Code-OSS reveals the active
+/// item the same way when a quick pick opens).
+pub fn list_window(selected: usize, len: usize, visible: usize) -> (usize, usize) {
+    let visible = visible.max(1);
+    if len <= visible {
+        return (0, len);
+    }
+    let selected = selected.min(len - 1);
+    let start = if selected < visible { 0 } else { selected + 1 - visible };
+    (start, (start + visible).min(len))
+}
+
+/// The row above a windowed picker list that leads back up.
+pub fn more_above_text(hidden: usize) -> String {
+    format!("위에 {hidden}개 더 있습니다")
 }
 
 /// The row highlighted when a picker opens: the current EOL, encoding or language (Code-OSS

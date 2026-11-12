@@ -2,7 +2,7 @@
 //! their pickers. Pure parts only, no renderer.
 
 use ember_app::ui::editor_status::{
-    encoding_text, initial_selection, is_picker, picker_items, reopen_failure_text, reopen_needs_confirmation, status_texts,
+    encoding_text, initial_selection, list_window, more_above_text, PICKER_VISIBLE_ROWS, is_picker, picker_items, reopen_failure_text, reopen_needs_confirmation, status_texts,
     StatusTexts, AUTO_DETECT, CANCEL, DISCARD_AND_REOPEN, REOPEN_WITH_ENCODING, SAVE_WITH_ENCODING, UNKNOWN,
 };
 use ember_app::ui::palette::{lists_files, placeholder, rank, search_label, Mode, Payload};
@@ -94,7 +94,7 @@ fn fr_l31_7_language_picker_lists_auto_detect_then_names_with_ids() {
     assert_eq!(items[0].payload, Payload::SetLanguage(None));
     assert_eq!(items[1].payload, Payload::SetLanguage(Some("json".into())));
     assert_eq!(items[1].hint, "(json)");
-    assert_eq!(items[2].hint, "(markdown) - 구성된 언어");
+    assert_eq!(items[2].hint, "(markdown) - 현재");
     assert_eq!(initial_selection(Mode::Language, Some(&f), &langs()), 2);
     // Typing filters by name, like every palette list.
     let ranked = rank("mark", &items);
@@ -123,4 +123,48 @@ fn fr_l31_7_reopen_failure_says_why_in_korean() {
     assert_eq!(t, "a.txt을(를) UTF-16 LE(으)로 다시 열지 못했습니다: 파일 내용이 이 인코딩에 맞지 않습니다");
     let t = reopen_failure_text("a.txt", None, "EntryNotFound (FileSystemError)");
     assert!(t.starts_with("a.txt을(를) 다시 열지 못했습니다: 파일이 없습니다"), "{t}");
+}
+
+// The picker opens on the current language even far down a long list: it is selected, tagged 현재 and
+// inside the drawn window of rows.
+#[test]
+fn fr_l31_7_language_picker_opens_on_the_current_language_in_view() {
+    let mut languages: Vec<LanguageInfo> =
+        (0..80).map(|i| LanguageInfo { id: format!("lang{i:02}"), name: format!("Lang {i:02}") }).collect();
+    languages.push(LanguageInfo { id: "json".into(), name: "JSON".into() });
+    languages.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    let f = fmt(Eol::Lf, Encoding::Utf8, "json", "JSON");
+    let items = picker_items(Mode::Language, Some(&f), &languages);
+    let sel = initial_selection(Mode::Language, Some(&f), &languages);
+    assert_eq!(items[sel].title, "JSON");
+    assert_eq!(items[sel].hint, "(json) - 현재");
+    assert_eq!(items.iter().filter(|i| i.hint.ends_with("현재")).count(), 1);
+    assert!(sel >= PICKER_VISIBLE_ROWS, "the case needs a row below the first page");
+    let (start, end) = list_window(sel, items.len(), PICKER_VISIBLE_ROWS);
+    assert!(start <= sel && sel < end, "{start}..{end} must hold {sel}");
+    assert_eq!(end - start, PICKER_VISIBLE_ROWS);
+    // Rows near the top stay on the first page; a short list is drawn whole.
+    assert_eq!(list_window(0, items.len(), PICKER_VISIBLE_ROWS), (0, PICKER_VISIBLE_ROWS));
+    assert_eq!(list_window(PICKER_VISIBLE_ROWS - 1, items.len(), PICKER_VISIBLE_ROWS), (0, PICKER_VISIBLE_ROWS));
+    assert_eq!(list_window(PICKER_VISIBLE_ROWS, items.len(), PICKER_VISIBLE_ROWS), (1, PICKER_VISIBLE_ROWS + 1));
+    assert_eq!(list_window(items.len() - 1, items.len(), PICKER_VISIBLE_ROWS), (items.len() - PICKER_VISIBLE_ROWS, items.len()));
+    assert_eq!(list_window(3, 4, PICKER_VISIBLE_ROWS), (0, 4));
+    assert_eq!(more_above_text(5), "위에 5개 더 있습니다");
+}
+
+// The encoding picker also opens on, and tags, the current encoding, in both steps' lists.
+#[test]
+fn fr_l31_7_encoding_picker_opens_on_the_current_encoding() {
+    for (encoding, row) in [(Encoding::Utf8, 0), (Encoding::Utf8Bom, 1), (Encoding::Utf16Le, 2), (Encoding::Utf16Be, 3)] {
+        let f = fmt(Eol::Lf, encoding, "json", "JSON");
+        for mode in [EncodingMode::Reopen, EncodingMode::Save] {
+            let items = picker_items(Mode::Encoding(mode), Some(&f), &[]);
+            let sel = initial_selection(Mode::Encoding(mode), Some(&f), &[]);
+            assert_eq!(sel, row);
+            assert!(items[sel].hint.ends_with("- 현재"), "{:?}", items[sel].hint);
+            assert_eq!(items.iter().filter(|i| i.hint.ends_with("현재")).count(), 1);
+            let (start, end) = list_window(sel, items.len(), PICKER_VISIBLE_ROWS);
+            assert!(start <= sel && sel < end);
+        }
+    }
 }

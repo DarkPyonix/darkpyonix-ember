@@ -263,8 +263,8 @@ fn editor_pane() -> Element {
         key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
         text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), folds: crate::ui::editor::folds(&doc.folds), tab_width: Some(doc.tab_width),
         gutter_decorations,
-        on_change: move |e: compose_rust::code::CodeChange| { keep_edited_tab(&change_s, &change_uri.path); change_s.editor_versions.borrow_mut().insert(generation, e.version); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); },
-        on_save: move |e: compose_rust::code::SaveRequest| { let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
+        on_change: move |e: compose_rust::code::CodeChange| { keep_edited_tab(&change_s, &change_uri.path); change_s.editor_versions.borrow_mut().insert(generation, e.version); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); crate::ui::editor_states::view::edited(&change_s, &change_uri.path); },
+        on_save: move |e: compose_rust::code::SaveRequest| { if !crate::ui::editor_states::view::manual_save_allowed(&save_s, &save_uri.path) { return; } let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
         on_decoration_click: move |id| { let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id); send(&click_s, event); },
         on_fold_change: move |e: compose_rust::code::FoldChange| { let event = fold_s.bridge.borrow_mut().on_fold_changed(&fold_uri, e.start_line, e.collapsed); send(&fold_s, event); let mut rev = fold_s.revision; *rev.write() += 1; },
@@ -393,6 +393,7 @@ pub mod page {
         let current = s.tabs.read().current_path().map(str::to_owned);
         let uri = current.and_then(|p| s.uris.borrow().get(&p).cloned());
         match uri {
+            Some(uri) if !crate::ui::editor_states::view::manual_save_allowed(s, &uri.path) => {}
             Some(uri) => send(s, s.bridge.borrow().on_save_requested(&uri, 0)),
             None => notice("저장할 파일이 열려 있지 않습니다"),
         }
@@ -1007,6 +1008,9 @@ pub mod page {
             // A save changes the work tree: the changes list and the open diff follow it.
             s.scm.refresh();
         }
+        // Reconnect, auto-save and compare follow the updates (FR-L31.6).
+        let now_current = s.tabs.read().current_path().map(str::to_owned);
+        crate::ui::editor_states::view::after_updates(&s, now_current.as_deref());
         let tabs = s.tabs;
         let current = tabs.read().current_path().map(str::to_owned);
         let paths: Vec<String> = tabs.read().paths().into_iter().map(str::to_owned).collect();
@@ -1028,6 +1032,7 @@ pub mod page {
         let branch = s.scm.branch_line().unwrap_or(project_branch);
         let conflict_shown = s.scm.conflict_visible();
         let diff_shown = s.scm.diff_visible(current.as_deref());
+        let compare_shown = crate::ui::editor_states::view::compare_visible(current.as_deref());
         let key_s = s.clone();
         let has_left = sel.selected(Side::Left).is_some();
         let has_bottom = sel.selected(Side::Bottom).is_some();
@@ -1119,10 +1124,12 @@ pub mod page {
                         if let Some(path) = current.as_deref() {
                             {breadcrumbs(path, &s.folder)}
                         }
-                        if *s.find.open.read() && active.is_some() && !diff_shown && !conflict_shown { {find_bar(&s)} }
+                        {crate::ui::editor_states::view::banners(&s, current.as_deref())}
+                        if *s.find.open.read() && active.is_some() && !diff_shown && !conflict_shown && !compare_shown { {find_bar(&s)} }
                         div { style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
                             if conflict_shown { {crate::ui::editor_scm::view::conflict_pane(&s)} }
                             else if diff_shown { {crate::ui::editor_scm::view::diff_pane(&s)} }
+                            else if compare_shown { {crate::ui::editor_states::view::compare_pane(&s)} }
                             else if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
                             else if let Some(error) = current.as_ref().and_then(|p| open_error.clone().map(|e| (p.clone(), e))) {
                                 div { class: "ed-empty", role: "alert",
@@ -1284,6 +1291,7 @@ pub mod page {
                 },
                     span { class: "spacer", "에디터 닫기" }
                 }
+                {crate::ui::editor_states::view::menu_items(s)}
                 div { class: "ed-msep" }
                 div { class: "ed-mlab", "단축키 체계" }
                 for k in Keymap::ALL {
@@ -1985,11 +1993,14 @@ pub mod page {
                         let mut key_recent_files = s.recent_files;
                         let selected = current == Some(path.as_str());
                         let label = base_name(&path).to_string();
+                        let deleted = s.uris.borrow().get(&path).and_then(|u| s.bridge.borrow().document(u).map(|d| crate::ui::editor_states::is_deleted(d.external_change))).unwrap_or(false);
+                        let shown_label = crate::ui::editor_states::tab_label(&label, deleted);
+                        let label_style = crate::ui::editor_states::tab_label_style(deleted);
                         let is_mod = modified.contains(&path);
                         let pinned = model.is_pinned(&path);
                         let preview = model.is_preview(&path);
                         let class = crate::ui::editor::tab_class_with(selected, is_mod, pinned, preview);
-                        let tab_label = crate::ui::editor::tab_aria_label(&label, dirty[i]);
+                        let tab_label = crate::ui::editor::tab_aria_label(&shown_label, dirty[i]);
                         let close_label = if pinned { format!("고정 해제: {label}") } else { format!("닫기: {label}") };
                         let scm = s.scm.clone();
                         let key_scm = s.scm.clone();
@@ -2029,7 +2040,7 @@ pub mod page {
                                 }
                             },
                             {icon_px(if selected { "file-w" } else { "file" }, 14)}
-                            span { class: "ellipsis", "{label}" }
+                            span { class: "ellipsis", style: "{label_style}", "{shown_label}" }
                             if dirty[i] { span { class: "ed-dirty" } }
                             // A pinned tab shows the pin where the close button is; a click on it unpins, as in Code-OSS.
                             button {

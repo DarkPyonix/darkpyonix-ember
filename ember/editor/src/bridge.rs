@@ -35,6 +35,8 @@ pub struct DocumentWidgetState {
     /// `EditCode` commands queued for the widget.
     pub pending_edits: Vec<WidgetCommand>,
     pub external_change: Option<ExternalChange>,
+    /// Why the last save of this document failed, until a save succeeds (FR-L31.6).
+    pub save_error: Option<String>,
     /// The coloured runs of the syntax and the document version they were written against.
     pub syntax: SyntaxRuns,
     /// Line ending, encoding and language for the status bar (FR-L31.7); `None` until the session
@@ -188,6 +190,7 @@ impl WidgetBridge {
                         hover: None,
                         pending_edits: Vec::new(),
                         external_change: None,
+                        save_error: None,
                         syntax: SyntaxRuns::default(),
                         format: None,
                         folds,
@@ -266,16 +269,26 @@ impl WidgetBridge {
             SessionUpdate::Dirty { uri, dirty } => {
                 if let Some(doc) = self.docs.get_mut(&uri.key()) {
                     doc.dirty = dirty;
+                    if !dirty {
+                        // Nothing is left to save (saved, or reverted to the disk version).
+                        doc.save_error = None;
+                    }
                 }
                 BridgeAction::None
             }
             SessionUpdate::Saved { uri } => {
                 if let Some(doc) = self.docs.get_mut(&uri.key()) {
                     doc.external_change = None;
+                    doc.save_error = None;
                 }
                 BridgeAction::None
             }
-            SessionUpdate::SaveFailed { uri, error } => BridgeAction::SaveFailed { uri, error },
+            SessionUpdate::SaveFailed { uri, error } => {
+                if let Some(doc) = self.docs.get_mut(&uri.key()) {
+                    doc.save_error = Some(error.clone());
+                }
+                BridgeAction::SaveFailed { uri, error }
+            }
             SessionUpdate::CommandFailed { id, error } => BridgeAction::CommandFailed { id, error },
             SessionUpdate::ExternalChange { uri, change } => {
                 if let Some(doc) = self.docs.get_mut(&uri.key()) {
@@ -338,6 +351,13 @@ impl WidgetBridge {
     pub fn active_document(&self) -> Option<&DocumentWidgetState> {
         let key = self.active.as_ref()?;
         self.docs.get(key)
+    }
+
+    /// Hide the failed save of a document (the bar's 닫기); the next failure shows again (FR-L31.6).
+    pub fn dismiss_save_error(&mut self, uri: &UriComponents) {
+        if let Some(doc) = self.docs.get_mut(&uri.key()) {
+            doc.save_error = None;
+        }
     }
 
     pub fn set_active(&mut self, uri: &UriComponents) {

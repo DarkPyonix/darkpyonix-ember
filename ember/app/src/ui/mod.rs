@@ -21,6 +21,7 @@ pub mod editor_icons;
 pub mod editor_scm;
 pub mod editor_status;
 pub mod editor_scm_repo;
+pub mod editor_states;
 pub mod editor_workbench;
 pub mod find;
 pub mod palette;

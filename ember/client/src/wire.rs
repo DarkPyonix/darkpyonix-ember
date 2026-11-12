@@ -634,6 +634,22 @@ pub enum ScheduleKind {
     Interval { seconds: u64 },
     /// Once, at `at` (Unix ms).
     Once { at: i64 },
+    /// On an event (FR-L23): `on: ci_failed` fires once per failed GitHub workflow run of
+    /// `repository` (`owner/name`), on `branch` when given. No `next_run_at`.
+    Event {
+        on: EventOn,
+        repository: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+    },
+}
+
+/// What an event schedule waits for (server `EventOn`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventOn {
+    /// A GitHub Actions workflow run concluded `failure`.
+    CiFailed,
 }
 
 /// What each run does (server `ScheduleTarget`).
@@ -756,6 +772,14 @@ pub struct SchedulePatch {
 mod question_wire_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn fr_l23_event_schedule_kind_round_trips() {
+        let k = ScheduleKind::Event { on: EventOn::CiFailed, repository: "o/r".into(), branch: None };
+        let v = serde_json::to_value(&k).unwrap();
+        assert_eq!(v, json!({"type": "event", "on": "ci_failed", "repository": "o/r"}));
+        assert_eq!(serde_json::from_value::<ScheduleKind>(v).unwrap(), k);
+    }
 
     #[test]
     fn fr_t11_question_unknown_fields_and_old_rows_decode() {

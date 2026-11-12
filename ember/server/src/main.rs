@@ -432,6 +432,12 @@ async fn main() -> anyhow::Result<()> {
         scheduler.set_computer_placer(Arc::new(place));
     }
     let _scheduler_task = scheduler.start();
+    // CI event routines (FR-L23): a failed workflow run of a project's repository starts them.
+    let ci_watcher = ember_server::schedules::ci::CiWatcher::new(
+        scheduler.clone(),
+        Arc::new(ember_server::schedules::ci::NodeCiSource::new(sessions.clone(), computers.clone())),
+    );
+    let _ci_task = ci_watcher.start(ember_server::schedules::ci::CiWatcher::interval_from_env());
     // "Open IDE" takes its computers from the registry and the session's current computer
     // (FR-L7, FR-W4); EMBER_IDE_COMPUTERS stays as an override merged onto them.
     let ide = Arc::new(ember_server::api::ide::IdeConfig::from_env()?);

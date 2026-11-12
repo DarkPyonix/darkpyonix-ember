@@ -114,7 +114,7 @@ fn now_ms() -> u64 {
 thread_local! { static ICON_DARK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 thread_local! { static MODIFIER_CLICK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 thread_local! { static SHARED: RefCell<Option<Shared>> = const { RefCell::new(None) }; }
-fn shared() -> Shared { SHARED.with(|s| s.borrow().as_ref().expect("workbench initialized").clone()) }
+pub(crate) fn shared() -> Shared { SHARED.with(|s| s.borrow().as_ref().expect("workbench initialized").clone()) }
 
 /// Sets up the shared state for the page. Called first by the root page.
 fn init(target: EditorTarget) {
@@ -187,13 +187,16 @@ pub(crate) fn join_path(dir: &str, name: &str) -> String {
 fn unsaved_open_paths(s: &Shared) -> Vec<String> {
     let bridge = s.bridge.borrow();
     let uris = s.uris.borrow();
-    s.tabs
-        .read()
-        .paths()
-        .into_iter()
-        .filter(|p| uris.get(*p).and_then(|u| bridge.document(u)).is_some_and(|d| d.dirty))
-        .map(str::to_owned)
-        .collect()
+    let mut paths: Vec<String> = s.tabs.read().paths().into_iter().map(str::to_owned).collect();
+    // A file edited in a diff without a tab of its own counts too (FR-L31.10).
+    if let Some(rel) = s.scm.working_diff_path() {
+        let abs = join_path(&s.folder, &rel);
+        if !paths.contains(&abs) {
+            paths.push(abs);
+        }
+    }
+    paths.retain(|p| uris.get(p).and_then(|u| bridge.document(u)).is_some_and(|d| d.dirty));
+    paths
 }
 
 /// An edit makes a preview tab permanent, as in Code-OSS (FR-L31.5). The tab signal is written only when the
@@ -434,6 +437,9 @@ pub mod page {
     /// request carries no version.
     fn save_current(s: &Shared) {
         let current = s.tabs.read().current_path().map(str::to_owned);
+        // The working tree of a diff being edited is saved instead, while it covers the editor area (FR-L31.10).
+        let editing = s.scm.editable_diff_path(current.as_deref()).map(|rel| join_path(&s.folder, &rel));
+        let current = crate::ui::editor_scm::save_target(current.as_deref(), editing);
         let uri = current.and_then(|p| s.uris.borrow().get(&p).cloned());
         match uri {
             Some(uri) if !crate::ui::editor_states::view::manual_save_allowed(s, &uri.path) => {}
@@ -1100,6 +1106,8 @@ pub mod page {
         // Reconnect, auto-save and compare follow the updates (FR-L31.6).
         let now_current = s.tabs.read().current_path().map(str::to_owned);
         crate::ui::editor_states::view::after_updates(&s, now_current.as_deref());
+        // The document of an open working-tree diff stays open in the session (FR-L31.10).
+        crate::ui::editor_scm::view::sync_diff_document(&s);
         let tabs = s.tabs;
         let current = tabs.read().current_path().map(str::to_owned);
         let paths: Vec<String> = tabs.read().paths().into_iter().map(str::to_owned).collect();

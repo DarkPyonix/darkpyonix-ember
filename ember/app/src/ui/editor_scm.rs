@@ -163,6 +163,189 @@ pub fn side_by_side_rows(hunk: &Hunk) -> Vec<(Option<(u32, LineKind, String)>, O
     rows
 }
 
+/// How one working-tree line of the editable diff stands against the base (FR-L31.10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowKind {
+    /// The same text as the base line beside it.
+    Same,
+    /// Changed: the base line beside it is the text it replaced.
+    Changed,
+    /// Added: no base line beside it.
+    Added,
+}
+
+/// One row of the editable diff: one working-tree line, with the base line shown beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkingRow {
+    pub kind: RowKind,
+    /// The base line beside it (1-based number, text); `None` for an added line.
+    pub base: Option<(u32, String)>,
+    /// Base lines removed just above this line (1-based number, text).
+    pub deleted_above: Vec<(u32, String)>,
+}
+
+/// The base laid out against the working tree, one row per working-tree line, so the read-only base
+/// side lines up with the editor beside it line by line.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkingAlignment {
+    pub rows: Vec<WorkingRow>,
+    /// Base lines removed after the last working-tree line.
+    pub deleted_at_end: Vec<(u32, String)>,
+}
+
+impl WorkingAlignment {
+    /// Working-tree lines that are new or changed, as Code-OSS counts "+".
+    pub fn added(&self) -> usize {
+        self.rows.iter().filter(|r| r.kind != RowKind::Same).count()
+    }
+
+    /// Base lines that are gone or changed, as Code-OSS counts "-".
+    pub fn removed(&self) -> usize {
+        self.rows.iter().map(|r| r.deleted_above.len() + usize::from(r.kind == RowKind::Changed)).sum::<usize>()
+            + self.deleted_at_end.len()
+    }
+}
+
+fn text_lines(text: &str) -> Vec<String> {
+    let norm = text.replace("\r\n", "\n").replace('\r', "\n");
+    if norm.is_empty() {
+        Vec::new()
+    } else {
+        norm.split('\n').map(str::to_owned).collect()
+    }
+}
+
+/// Lays the base out against the working text (FR-L31.10). The edit script is the one
+/// [`crate::ui::editor::compute_line_diffs`] walks for the gutter (common prefix and suffix, then the
+/// longest common subsequence of the middle with the same tie-break, paired by position above
+/// [`crate::ui::editor::MAX_DIFF_MATRIX_CELLS`]), so the rows and the gutter marks agree. In a block of
+/// changes the first removed lines pair with the first added ones as changed rows; the rest of the
+/// added lines are added rows, and the rest of the removed lines sit above the next row.
+pub fn align_working_rows(base: &str, working: &str) -> WorkingAlignment {
+    #[derive(Clone, Copy)]
+    enum Edit {
+        Equal(usize, usize),
+        Delete(usize),
+        Insert(usize),
+    }
+    let old = text_lines(base);
+    let new = text_lines(working);
+    let mut prefix = 0;
+    while prefix < old.len() && prefix < new.len() && old[prefix] == new[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < old.len() - prefix && suffix < new.len() - prefix && old[old.len() - 1 - suffix] == new[new.len() - 1 - suffix] {
+        suffix += 1;
+    }
+    let (m, n) = (old.len() - prefix - suffix, new.len() - prefix - suffix);
+    let mut edits: Vec<Edit> = (0..prefix).map(|i| Edit::Equal(i, i)).collect();
+    if m.saturating_mul(n) > crate::ui::editor::MAX_DIFF_MATRIX_CELLS || m == 0 || n == 0 {
+        edits.extend((0..m).map(|i| Edit::Delete(prefix + i)));
+        edits.extend((0..n).map(|j| Edit::Insert(prefix + j)));
+    } else {
+        let (om, nm) = (&old[prefix..prefix + m], &new[prefix..prefix + n]);
+        let mut dp = vec![vec![0u32; n + 1]; m + 1];
+        for i in 0..m {
+            for j in 0..n {
+                dp[i + 1][j + 1] = if om[i] == nm[j] { dp[i][j] + 1 } else { dp[i + 1][j].max(dp[i][j + 1]) };
+            }
+        }
+        let mut mid = Vec::new();
+        let (mut i, mut j) = (m, n);
+        while i > 0 || j > 0 {
+            if i > 0 && j > 0 && om[i - 1] == nm[j - 1] {
+                mid.push(Edit::Equal(prefix + i - 1, prefix + j - 1));
+                i -= 1;
+                j -= 1;
+            } else if j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
+                mid.push(Edit::Insert(prefix + j - 1));
+                j -= 1;
+            } else {
+                mid.push(Edit::Delete(prefix + i - 1));
+                i -= 1;
+            }
+        }
+        mid.reverse();
+        edits.extend(mid);
+    }
+    edits.extend((0..suffix).map(|k| Edit::Equal(old.len() - suffix + k, new.len() - suffix + k)));
+
+    let numbered = |i: usize| (i as u32 + 1, old[i].clone());
+    let mut out = WorkingAlignment::default();
+    let mut pending: Vec<(u32, String)> = Vec::new();
+    let mut k = 0;
+    while k < edits.len() {
+        if let Edit::Equal(i, _) = edits[k] {
+            out.rows.push(WorkingRow { kind: RowKind::Same, base: Some(numbered(i)), deleted_above: std::mem::take(&mut pending) });
+            k += 1;
+            continue;
+        }
+        let (mut dels, mut ins) = (Vec::new(), 0usize);
+        while k < edits.len() {
+            match edits[k] {
+                Edit::Delete(i) => dels.push(i),
+                Edit::Insert(_) => ins += 1,
+                Edit::Equal(..) => break,
+            }
+            k += 1;
+        }
+        for idx in 0..ins {
+            let (kind, base) = match dels.get(idx) {
+                Some(&i) => (RowKind::Changed, Some(numbered(i))),
+                None => (RowKind::Added, None),
+            };
+            out.rows.push(WorkingRow { kind, base, deleted_above: std::mem::take(&mut pending) });
+        }
+        pending.extend(dels.iter().skip(ins).map(|&i| numbered(i)));
+    }
+    out.deleted_at_end = pending;
+    out
+}
+
+/// What the editable side of a diff shows for the text it holds now: the rows of the base side and
+/// the gutter marks, both recomputed from the reconstructed base on every change (FR-L31.10).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiffEditorModel {
+    pub alignment: WorkingAlignment,
+    pub markers: Vec<crate::ui::editor::DiffLineMarker>,
+}
+
+pub fn diff_editor_model(base: &str, working: &str) -> DiffEditorModel {
+    DiffEditorModel { alignment: align_working_rows(base, working), markers: crate::ui::editor::compute_line_diffs(base, working) }
+}
+
+/// What becomes of a document the diff opened, once the diff no longer shows it (FR-L31.10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffDocRelease {
+    /// A tab holds it: it stays as it is.
+    Keep,
+    /// Nothing holds it and it has no unsaved edits: the session closes it.
+    Close,
+    /// It has unsaved edits: a tab opens for it (the current tab stays), so they are not lost.
+    OpenTab,
+}
+
+pub fn release_diff_document(has_tab: bool, dirty: bool) -> DiffDocRelease {
+    match (has_tab, dirty) {
+        (true, _) => DiffDocRelease::Keep,
+        (false, true) => DiffDocRelease::OpenTab,
+        (false, false) => DiffDocRelease::Close,
+    }
+}
+
+/// Whether the diff must ask the session to open `wanted`: not when a tab or the diff already has
+/// it open, nor when the diff asked once already (a failed open is not retried every frame).
+pub fn diff_document_needs_open(wanted: &str, requested: Option<&str>, already_open: bool) -> bool {
+    !already_open && requested != Some(wanted)
+}
+
+/// The file Cmd/Ctrl+S saves: the working tree of a diff being edited while it covers the editor area,
+/// else the current tab's.
+pub fn save_target(current_tab: Option<&str>, editable_diff: Option<String>) -> Option<String> {
+    editable_diff.or_else(|| current_tab.map(str::to_owned))
+}
+
 /// Build a full patch representing all changes in diff to discard.
 pub fn discard_patch(diff: &FileDiff) -> Option<String> {
     crate::ui::vcs::build_patch(diff, &crate::ui::vcs::FileStaging::all(diff))
@@ -524,12 +707,40 @@ pub struct DiffState {
     pub view: DiffView,
     pub staging: FileStaging,
     pub side_by_side: bool,
+    /// The base text rebuilt from the diff and the working text it was read against, for the
+    /// editable side (FR-L31.10); `None` until the document is open.
+    pub base: Option<String>,
+    /// Whether `base` was rebuilt from the latest diff answer.
+    base_fresh: bool,
     seq: u64,
 }
 
 impl DiffState {
     pub fn visible(&self, current_tab: Option<&str>) -> bool {
         self.over.as_deref() == current_tab
+    }
+
+    /// Whether this diff is of the working tree, whose side is the file's own document (FR-L31.10).
+    /// The staged side is the index and stays read-only, as in Code-OSS.
+    pub fn of_working_tree(&self) -> bool {
+        !self.staged
+    }
+
+    /// Whether the working-tree side shows as an editor: side by side, once a diff has been read.
+    pub fn editable(&self) -> bool {
+        self.of_working_tree() && self.side_by_side && matches!(self.view, DiffView::Ready(_))
+    }
+
+    /// The base for the editable side, given the document's text now and whether it has unsaved
+    /// edits. The base is rebuilt from a new diff answer only while the document is clean, because
+    /// the answer describes the file on disk; until then the last base stays.
+    pub fn base_for(&mut self, doc_text: &str, dirty: bool) -> Option<String> {
+        let DiffView::Ready(fd) = &self.view else { return self.base.clone() };
+        if self.base.is_none() || (!self.base_fresh && !dirty) {
+            self.base = Some(reconstruct_base_text(doc_text, fd));
+            self.base_fresh = true;
+        }
+        self.base.clone()
     }
 
     /// "이름 (스테이지됨)" or "이름 (작업 트리)", as Code-OSS titles a diff "(Index)" or "(Working Tree)".
@@ -559,6 +770,8 @@ pub struct ScmState {
     pub armed_discard: Option<(String, u64)>,
     pub conflict: Option<(String, ConflictLoad, ConflictStep)>,
     pub side_by_side: bool,
+    /// The first and last line the editable diff's editor shows, which the base side follows.
+    pub diff_lines: (u32, u32),
     seq: u64,
     diff_seq: u64,
 }
@@ -579,6 +792,7 @@ impl ScmState {
             armed_discard: None,
             conflict: None,
             side_by_side: false,
+            diff_lines: (0, 0),
             seq: 0,
             diff_seq: 0,
         }
@@ -605,15 +819,27 @@ impl ScmState {
     }
 
     /// Opens the diff of `path` over the current tab; the answer carries the returned number.
+    /// Reading the same diff again (after a save) keeps what it shows until the answer, so the
+    /// editable side stays open meanwhile.
     pub fn begin_diff(&mut self, path: &str, staged: bool, over: Option<String>) -> u64 {
         self.diff_seq += 1;
+        let again = self.diff.take().filter(|d| d.path == path && d.staged == staged);
+        if again.is_none() {
+            self.diff_lines = (0, 0);
+        }
+        let (view, staging, base) = match again {
+            Some(d) => (d.view, d.staging, d.base),
+            None => (DiffView::Loading, FileStaging::none(), None),
+        };
         self.diff = Some(DiffState {
             path: path.to_string(),
             staged,
             over,
-            view: DiffView::Loading,
-            staging: FileStaging::none(),
+            view,
+            staging,
             side_by_side: self.side_by_side,
+            base,
+            base_fresh: false,
             seq: self.diff_seq,
         });
         self.diff_seq
@@ -627,6 +853,7 @@ impl ScmState {
                     d.staging = FileStaging::none();
                 }
                 d.view = view;
+                d.base_fresh = false;
                 true
             }
             _ => false,
@@ -697,6 +924,31 @@ impl Scm {
     /// Whether the diff covers the editor area for this current tab.
     pub fn diff_visible(&self, current_tab: Option<&str>) -> bool {
         self.with(|s| s.diff.as_ref().is_some_and(|d| d.visible(current_tab)))
+    }
+
+    /// The repository path of the diff whose working-tree side is being edited, while it covers the
+    /// editor area for this current tab (FR-L31.10).
+    pub fn editable_diff_path(&self, current_tab: Option<&str>) -> Option<String> {
+        self.with(|s| s.diff.as_ref().filter(|d| d.visible(current_tab) && d.editable()).map(|d| d.path.clone()))
+    }
+
+    /// The repository path of an open working-tree diff, whose document the diff keeps open in the
+    /// session in either view, so switching views keeps unsaved edits (FR-L31.10).
+    pub fn working_diff_path(&self) -> Option<String> {
+        self.with(|s| s.diff.as_ref().filter(|d| d.of_working_tree()).map(|d| d.path.clone()))
+    }
+
+    /// The base of the editable diff for the document's text now (see [`DiffState::base_for`]).
+    pub fn diff_base(&self, doc_text: &str, dirty: bool) -> Option<String> {
+        self.with(|s| s.diff.as_mut().filter(|d| d.editable()).and_then(|d| d.base_for(doc_text, dirty)))
+    }
+
+    /// The editable diff's editor shows lines `first` to `last`: the base side follows.
+    pub fn set_diff_lines(&self, first: u32, last: u32) {
+        let changed = self.with(|s| std::mem::replace(&mut s.diff_lines, (first, last)) != (first, last));
+        if changed {
+            Self::redraw(self.revision);
+        }
     }
 
     pub fn close_diff(&self) {
@@ -1234,8 +1486,129 @@ pub mod view {
         s.open_errors.borrow_mut().remove(&path);
         let mut tabs = s.tabs;
         tabs.write().open(&path);
-        s.host.send(HostCommand::Open(path.clone()));
+        // A document the diff already opened is not opened again: a second open would clear its
+        // unsaved mark (FR-L31.10).
+        if !s.uris.borrow().contains_key(&path) {
+            s.host.send(HostCommand::Open(path.clone()));
+        }
         s.host.send(HostCommand::Focus(path));
+    }
+
+    thread_local! {
+        /// The working-tree document this window's diff asked the session to open (FR-L31.10).
+        static DIFF_DOC: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Keeps the document of an open working-tree diff open in the session, and lets it go when the
+    /// diff closes or moves to another file: closed when nothing else holds it, kept when a tab does,
+    /// and given a tab (the current tab stays) when it has unsaved edits (FR-L31.10). Called once a
+    /// frame by the page, after the session's updates are applied.
+    pub fn sync_diff_document(s: &Shared) {
+        let wanted = s.scm.working_diff_path().map(|rel| join_path(&s.folder, &rel));
+        let requested = DIFF_DOC.with(|d| d.borrow().clone());
+        if let Some(owned) = requested.as_deref().filter(|p| wanted.as_deref() != Some(*p)) {
+            let has_tab = s.tabs.read().paths().contains(&owned);
+            let uri = s.uris.borrow().get(owned).cloned();
+            let dirty = uri.as_ref().and_then(|u| s.bridge.borrow().document(u).map(|d| d.dirty)).unwrap_or(false);
+            match super::release_diff_document(has_tab, dirty) {
+                super::DiffDocRelease::Keep => {}
+                super::DiffDocRelease::Close => {
+                    if uri.is_some() {
+                        s.host.send(HostCommand::Close(owned.to_string()));
+                    }
+                }
+                super::DiffDocRelease::OpenTab => {
+                    let mut tabs = s.tabs;
+                    let current = tabs.read().current_path().map(str::to_owned);
+                    tabs.write().open(owned);
+                    if let Some(current) = current {
+                        tabs.write().activate(&current);
+                    }
+                }
+            }
+            DIFF_DOC.with(|d| *d.borrow_mut() = None);
+        }
+        let requested = DIFF_DOC.with(|d| d.borrow().clone());
+        if let Some(wanted) = wanted {
+            let already_open = s.uris.borrow().contains_key(&wanted) || s.tabs.read().paths().contains(&wanted.as_str());
+            if super::diff_document_needs_open(&wanted, requested.as_deref(), already_open) {
+                s.open_errors.borrow_mut().remove(&wanted);
+                s.host.send(HostCommand::Open(wanted.clone()));
+                DIFF_DOC.with(|d| *d.borrow_mut() = Some(wanted));
+            }
+        }
+    }
+
+    /// The hover text of a base row with lines removed above it: how many, then each line.
+    pub fn deleted_lines_title(lines: &[(u32, String)]) -> String {
+        if lines.is_empty() {
+            return String::new();
+        }
+        let mut out = format!("삭제된 줄 {}개", lines.len());
+        for (no, text) in lines.iter().take(20) {
+            out.push_str(&format!("\n{no}: {text}"));
+        }
+        if lines.len() > 20 {
+            out.push_str(&format!("\n외 {}줄", lines.len() - 20));
+        }
+        out
+    }
+
+    /// Rows of the base side drawn from the editor's first visible line, enough to fill the pane.
+    // TODO(compose-rust#544): the base side follows the editor's first visible line and draws 20 px
+    // rows on the assumption that this is the editor's line height; follow the editor's pixel scroll
+    // offset and line height once the toolkit reports them.
+    const BASE_ROWS_SHOWN: usize = 400;
+
+    /// The editable diff (FR-L31.10): the base read-only on the left, one row per working-tree line
+    /// so it lines up with the editor, and the file's document in an editor on the right.
+    fn editable_body(s: &Shared, abs: &str, model: Option<super::DiffEditorModel>, first_line: u32) -> Element {
+        let Some(model) = model else {
+            let text = match s.open_errors.borrow().get(abs) {
+                Some(error) => format!("파일을 열 수 없습니다: {error}"),
+                None => "파일을 여는 중입니다.".to_string(),
+            };
+            return rsx! { div { class: "ed-empty", role: "status", p { "{text}" } } };
+        };
+        let rows = model.alignment.rows;
+        let start = (first_line as usize).min(rows.len());
+        let end = (start + BASE_ROWS_SHOWN).min(rows.len());
+        let at_end = end == rows.len();
+        let tail_title = deleted_lines_title(&model.alignment.deleted_at_end);
+        let shown: Vec<(usize, super::WorkingRow)> = rows.into_iter().enumerate().skip(start).take(end - start).collect();
+        rsx! {
+            div { style: "flex:1; min-height:0; min-width:0; display:flex;",
+                div { style: "flex:1; min-width:0; overflow:hidden; font-family:var(--mono); font-size:var(--fs-sm); border-right:1px solid var(--line);", role: "region", "aria-label": "기준 (읽기 전용)",
+                    for (ri, row) in shown {
+                        {
+                            let (bg, sign) = match row.kind {
+                                super::RowKind::Same => ("", " "),
+                                super::RowKind::Changed => ("background:var(--c-red-soft);", "-"),
+                                super::RowKind::Added => ("background:var(--surface-2);", " "),
+                            };
+                            let (no, text) = row.base.map(|(n, t)| (n.to_string(), t)).unwrap_or_default();
+                            // TODO(compose-rust#543): removed lines are a red rule and a hover list here,
+                            // because the editor cannot hold blank rows opposite them; give them rows
+                            // of their own once the toolkit has view zones.
+                            let mark = if row.deleted_above.is_empty() { "" } else { "box-shadow:inset 0 2px 0 var(--c-red);" };
+                            let title = deleted_lines_title(&row.deleted_above);
+                            rsx! {
+                                div { key: "base-{ri}", title: "{title}", style: "display:flex; white-space:pre; height:20px; line-height:20px; {bg} {mark}",
+                                    span { style: "width:40px; flex:none; text-align:right; padding-right:6px; color:var(--muted);", "{no}" }
+                                    span { style: "width:14px; flex:none; text-align:center;", "{sign}" }
+                                    span { style: "flex:1; overflow:hidden; text-overflow:ellipsis;", "{text}" }
+                                }
+                            }
+                        }
+                    }
+                    // TODO(compose-rust#543): the lines removed at the end, as a rule until view zones.
+                    if at_end && !tail_title.is_empty() {
+                        div { title: "{tail_title}", style: "height:4px; box-shadow:inset 0 2px 0 var(--c-red);" }
+                    }
+                }
+                WidgetView { app: super::diff_editor_view::diff_editor, style: "flex:1; min-width:0; height:100%;" }
+            }
+        }
     }
 
     /// Shows the Git window (from the branch in the top bar or the status bar).
@@ -1529,12 +1902,25 @@ pub mod view {
     /// The diff of one file in the editor area: a header with 파일 열기 and 닫기, then the hunks
     /// with old and new line numbers.
     pub fn diff_pane(s: &Shared) -> Element {
-        let Some(d) = s.scm.snapshot().diff else { return rsx! {} };
+        let snapshot = s.scm.snapshot();
+        let first_line = snapshot.diff_lines.0;
+        let Some(d) = snapshot.diff else { return rsx! {} };
         let title = d.title();
         let (open_s, close_s, side_s, stage_sel_s) = (s.clone(), s.clone(), s.clone(), s.clone());
         let open_path = d.path.clone();
-        let summary = match &d.view {
-            DiffView::Ready(fd) => format!("+{} \u{2212}{}", fd.added(), fd.removed()),
+        // The editable side: the file's document, as the session holds it now (FR-L31.10).
+        let abs = join_path(&s.folder, &d.path);
+        let doc = if d.editable() {
+            let uri = s.uris.borrow().get(&abs).cloned();
+            uri.and_then(|u| s.bridge.borrow().document(&u).cloned())
+        } else {
+            None
+        };
+        let dirty = doc.as_ref().is_some_and(|doc| doc.dirty);
+        let model = doc.as_ref().and_then(|doc| s.scm.diff_base(&doc.text, doc.dirty).map(|base| super::diff_editor_model(&base, &doc.text)));
+        let summary = match (&model, &d.view) {
+            (Some(m), _) => format!("+{} \u{2212}{}", m.alignment.added(), m.alignment.removed()),
+            (None, DiffView::Ready(fd)) => format!("+{} \u{2212}{}", fd.added(), fd.removed()),
             _ => String::new(),
         };
         let (staged_cnt, _) = match &d.view {
@@ -1548,6 +1934,7 @@ pub mod view {
                 div { class: "ed-tsub",
                     {icon_px("file", 14)}
                     b { "{title}" }
+                    if dirty { span { class: "ed-dirty", title: "저장하지 않은 변경 사항이 있습니다", "aria-label": "저장 안 됨" } }
                     span { class: "ed-sbi", "{summary}" }
                     div { class: "spacer" }
                     button { class: "ed-pj", style: "border:1px solid var(--line);", onclick: move |_| side_s.scm.toggle_side_by_side(),
@@ -1560,7 +1947,9 @@ pub mod view {
                     button { class: "ed-pj", style: "border:1px solid var(--line);", onclick: move |_| open_file(&open_s, &open_path), "파일 열기" }
                     button { class: "ed-ib", title: "차이 닫기", "aria-label": "차이 닫기", onclick: move |_| close_s.scm.close_diff(), {icon("close")} }
                 }
-                if let Some(text) = d.view.note() {
+                if d.editable() {
+                    {editable_body(s, &abs, model, first_line)}
+                } else if let Some(text) = d.view.note() {
                     div { class: "ed-empty", role: "status", p { "{text}" } }
                 } else if let DiffView::Ready(fd) = &d.view {
                     div { style: "flex:1; min-height:0; overflow:auto; font-family:var(--mono); font-size:var(--fs-sm); padding:var(--sp2) 0;",
@@ -1744,6 +2133,102 @@ pub mod view {
                 }
             }
         }
+    }
+}
+
+/// The working-tree side of an editable diff (FR-L31.10): the file's own document in a `CodeEditor`,
+/// bound through the same widget bridge as its tab, so an edit shows in both, the tab's unsaved mark
+/// follows it and Cmd/Ctrl+S saves it. The gutter marks are recomputed against the diff's base on
+/// every change. It is its own tree (a `WidgetView`), like the tab's editor pane.
+pub mod diff_editor_view {
+    use dioxus_compose::prelude::*;
+    use ember_editor::widget::HoverPhase as EditorHoverPhase;
+    use ember_editor::{WidgetPos, WidgetRange};
+
+    use crate::editor_host::HostCommand;
+    use crate::ui::editor_workbench::{join_path, shared, Shared};
+
+    fn pos(p: compose_rust::code::Position) -> WidgetPos {
+        WidgetPos::new(p.line, p.column)
+    }
+
+    fn send(s: &Shared, event: Option<(ember_editor_conn::uri::UriComponents, u64, ember_editor::WidgetEvent)>) {
+        if let Some((uri, generation, event)) = event {
+            s.host.send(HostCommand::Widget(uri, generation, event));
+        }
+    }
+
+    pub fn diff_editor() -> Element {
+        let s = shared();
+        let (box_w, box_h) = dioxus_compose::use_widget_box();
+        let handle = dioxus_compose::use_code_editor();
+        if box_w <= 0.0 || box_h <= 0.0 {
+            return rsx! {};
+        }
+        let _ = *s.revision.read();
+        let Some(rel) = s.scm.working_diff_path() else { return rsx! {} };
+        let abs = join_path(&s.folder, &rel);
+        let uri = s.uris.borrow().get(&abs).cloned();
+        let Some(uri) = uri else { return rsx! {} };
+        let doc = s.bridge.borrow().document(&uri).cloned();
+        let Some(doc) = doc else { return rsx! {} };
+        let generation = doc.generation;
+        // The tab and the diff share the document, so they share its widget version too.
+        let version = {
+            let mut map = s.editor_versions.borrow_mut();
+            let current = map.entry(generation).or_insert(doc.version);
+            *current = (*current).max(doc.version);
+            *current
+        };
+        // TODO(compose-rust#542): the change shows as gutter bars only; tint the added and changed
+        // lines once the toolkit has whole-line background decorations.
+        let gutter_decorations = match s.scm.diff_base(&doc.text, doc.dirty) {
+            Some(base) => crate::ui::editor::diff_gutter_decorations(version, &super::diff_editor_model(&base, &doc.text).markers),
+            None => compose_rust::code::GutterDecorations::default(),
+        };
+        let change_s = s.clone();
+        let change_uri = uri.clone();
+        let save_s = s.clone();
+        let save_uri = uri.clone();
+        let hover_s = s.clone();
+        let hover_uri = uri.clone();
+        let click_s = s.clone();
+        let click_uri = uri.clone();
+        let selection_s = s.clone();
+        let selection_uri = uri;
+        let range_s = s.clone();
+        rsx! { CodeEditor {
+            key: "diff-{generation}", width: Some(box_w), height: Some(box_h), handle,
+            text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), tab_width: Some(doc.tab_width),
+            gutter_decorations,
+            on_change: move |e: compose_rust::code::CodeChange| {
+                change_s.editor_versions.borrow_mut().insert(generation, e.version);
+                let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text);
+                send(&change_s, event);
+            },
+            on_save: move |e: compose_rust::code::SaveRequest| {
+                let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version);
+                send(&save_s, event);
+                save_s.scm.refresh();
+            },
+            on_hover: move |e: compose_rust::code::CodeHover| {
+                let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave };
+                let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase);
+                send(&hover_s, event);
+            },
+            on_decoration_click: move |id| {
+                let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id);
+                send(&click_s, event);
+            },
+            on_selection_change: move |e: compose_rust::code::SelectionChange| {
+                let mut position = selection_s.position;
+                position.set((e.active.line as usize + 1, e.active.column as usize + 1));
+                let event = selection_s.bridge.borrow().on_selection_changed(&selection_uri, e.version, pos(e.anchor), pos(e.active));
+                send(&selection_s, event);
+            },
+            // TODO(compose-rust#544): lines only; the base side cannot follow a partial-line scroll.
+            on_visible_range_change: move |e: compose_rust::code::VisibleRange| range_s.scm.set_diff_lines(e.first_line, e.last_line),
+        } }
     }
 }
 
@@ -2071,5 +2556,187 @@ mod tests {
         let pick_all = f.pick_all(ConflictChoice::Theirs);
         assert!(pick_all.is_resolved());
         assert_eq!(pick_all.resolved_content(), Some("header\ntheirs line\nfooter\n".into()));
+    }
+
+    fn base_row(kind: RowKind, base: Option<(u32, &str)>, deleted_above: &[(u32, &str)]) -> WorkingRow {
+        WorkingRow {
+            kind,
+            base: base.map(|(n, t)| (n, t.to_string())),
+            deleted_above: deleted_above.iter().map(|(n, t)| (*n, t.to_string())).collect(),
+        }
+    }
+
+    #[test]
+    fn fr_l31_10_the_base_side_lines_up_with_the_working_tree_line_by_line() {
+        // A changed line sits beside the line it replaced.
+        let a = align_working_rows("a\nb\nc", "a\nB\nc");
+        assert_eq!(
+            a.rows,
+            vec![
+                base_row(RowKind::Same, Some((1, "a")), &[]),
+                base_row(RowKind::Changed, Some((2, "b")), &[]),
+                base_row(RowKind::Same, Some((3, "c")), &[]),
+            ]
+        );
+        assert_eq!((a.added(), a.removed()), (1, 1));
+        // An added line has an empty base row beside it.
+        let a = align_working_rows("a\nc", "a\nb\nc");
+        assert_eq!(a.rows[1], base_row(RowKind::Added, None, &[]));
+        assert_eq!(a.rows[2], base_row(RowKind::Same, Some((2, "c")), &[]));
+        assert_eq!((a.added(), a.removed()), (1, 0));
+        // Removed lines sit above the next line, or at the end.
+        let a = align_working_rows("a\nb\nc", "a\nc");
+        assert_eq!(a.rows, vec![base_row(RowKind::Same, Some((1, "a")), &[]), base_row(RowKind::Same, Some((3, "c")), &[(2, "b")])]);
+        let a = align_working_rows("a\nb", "a");
+        assert_eq!(a.rows.len(), 1);
+        assert_eq!(a.deleted_at_end, vec![(2, "b".to_string())]);
+        // Two lines replaced by one: the first pairs with it, the second sits above the next line.
+        let a = align_working_rows("a\nb\nc\nd", "a\nX\nd");
+        assert_eq!(
+            a.rows,
+            vec![
+                base_row(RowKind::Same, Some((1, "a")), &[]),
+                base_row(RowKind::Changed, Some((2, "b")), &[]),
+                base_row(RowKind::Same, Some((4, "d")), &[(3, "c")]),
+            ]
+        );
+        assert_eq!((a.added(), a.removed()), (1, 2));
+        // One row per working-tree line, always, so the rows follow the editor's lines.
+        for (base, working) in [("", "x\ny"), ("x\ny", ""), ("p\nq\nr", "r\nq\np"), ("a\r\nb", "a\nb")] {
+            assert_eq!(align_working_rows(base, working).rows.len(), text_lines(working).len(), "{base:?} {working:?}");
+        }
+        // The rows and the gutter marks come from the same edit script.
+        let m = diff_editor_model("a\nb\nc\nd", "a\nX\nd");
+        use crate::ui::editor::{DiffLineKind, DiffLineMarker};
+        assert_eq!(m.markers, vec![DiffLineMarker { line: 1, kind: DiffLineKind::Modified }]);
+    }
+
+    #[test]
+    fn fr_l31_10_deleted_lines_are_named_on_the_row_below() {
+        assert_eq!(view::deleted_lines_title(&[]), "");
+        assert_eq!(view::deleted_lines_title(&[(3, "c".into()), (4, "d".into())]), "삭제된 줄 2개\n3: c\n4: d");
+    }
+
+    const PATCH_ONE_TWO: &str = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,3 @@\n one\n-two\n+2\n three\n";
+
+    fn open_working_diff(st: &mut ScmState) {
+        st.side_by_side = true;
+        let seq = st.begin_diff("a.rs", false, Some("/w/a.rs".into()));
+        assert!(st.finish_diff(seq, diff_from(Ok(PATCH_ONE_TWO.into()))));
+    }
+
+    #[test]
+    fn fr_l31_10_only_the_working_tree_side_by_side_is_editable() {
+        let mut st = ScmState::new(true);
+        st.side_by_side = true;
+        let seq = st.begin_diff("a.rs", false, None);
+        assert!(!st.diff.as_ref().unwrap().editable(), "not before the diff is read");
+        st.finish_diff(seq, diff_from(Ok(PATCH_ONE_TWO.into())));
+        assert!(st.diff.as_ref().unwrap().editable());
+        st.diff.as_mut().unwrap().side_by_side = false;
+        assert!(!st.diff.as_ref().unwrap().editable(), "the unified view stays read-only");
+        let seq = st.begin_diff("a.rs", true, None);
+        st.finish_diff(seq, diff_from(Ok(PATCH_ONE_TWO.into())));
+        assert!(!st.diff.as_ref().unwrap().editable(), "the staged side is the index and stays read-only");
+        assert!(!st.diff.as_ref().unwrap().of_working_tree());
+    }
+
+    #[test]
+    fn fr_l31_10_reading_the_same_diff_again_keeps_it_editable() {
+        let mut st = ScmState::new(true);
+        open_working_diff(&mut st);
+        st.diff_lines = (12, 40);
+        st.begin_diff("a.rs", false, Some("/w/a.rs".into()));
+        assert!(st.diff.as_ref().unwrap().editable());
+        assert_eq!(st.diff_lines, (12, 40));
+        st.begin_diff("b.rs", false, Some("/w/a.rs".into()));
+        assert_eq!(st.diff.as_ref().unwrap().view, DiffView::Loading);
+        assert_eq!(st.diff_lines, (0, 0));
+    }
+
+    #[test]
+    fn fr_l31_10_an_edit_recomputes_the_diff_against_the_same_base() {
+        use ember_editor::{SessionUpdate, WidgetBridge, WidgetPos, WidgetRange};
+        use ember_editor_conn::uri::UriComponents;
+        let uri = UriComponents::file("/w/a.rs");
+        let mut bridge = WidgetBridge::new();
+        bridge.apply(SessionUpdate::Opened { uri: uri.clone(), generation: 7, text: "one\n2\nthree".into(), language_id: "rust".into(), tab_width: 4 });
+        let mut st = ScmState::new(true);
+        open_working_diff(&mut st);
+        let d = st.diff.as_mut().unwrap();
+        let doc = bridge.document(&uri).unwrap().clone();
+        let base = d.base_for(&doc.text, doc.dirty).unwrap();
+        assert_eq!(base, "one\ntwo\nthree");
+        let before = diff_editor_model(&base, &doc.text);
+        assert_eq!(before.alignment.rows[1].kind, RowKind::Changed);
+        assert_eq!((before.alignment.added(), before.alignment.removed()), (1, 1));
+
+        // Typing a new line at the end of the file.
+        bridge.on_code_changed(&uri, 1, WidgetRange::new(WidgetPos::new(2, 5), WidgetPos::new(2, 5)), "\nfour".into());
+        bridge.apply(SessionUpdate::Dirty { uri: uri.clone(), dirty: true });
+        let doc = bridge.document(&uri).unwrap().clone();
+        assert_eq!(doc.text, "one\n2\nthree\nfour");
+        let base = d.base_for(&doc.text, doc.dirty).unwrap();
+        assert_eq!(base, "one\ntwo\nthree", "the base is not rebuilt from the edited text");
+        let after = diff_editor_model(&base, &doc.text);
+        assert_eq!(after.alignment.rows.len(), 4);
+        assert_eq!(after.alignment.rows[3], base_row(RowKind::Added, None, &[]));
+        assert_eq!((after.alignment.added(), after.alignment.removed()), (2, 1));
+        use crate::ui::editor::{DiffLineKind, DiffLineMarker};
+        assert_eq!(
+            after.markers,
+            vec![DiffLineMarker { line: 1, kind: DiffLineKind::Modified }, DiffLineMarker { line: 3, kind: DiffLineKind::Added }]
+        );
+
+        // A new diff answer while the edits are unsaved keeps the base; once saved it is rebuilt.
+        let seq = st.begin_diff("a.rs", false, Some("/w/a.rs".into()));
+        let saved_patch = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,4 @@\n one\n-two\n+2\n three\n+four\n";
+        st.finish_diff(seq, diff_from(Ok(saved_patch.into())));
+        let d = st.diff.as_mut().unwrap();
+        assert_eq!(d.base_for("one\n2\nthree\nfour\nfive", true).unwrap(), "one\ntwo\nthree");
+        assert_eq!(d.base_for("one\n2\nthree\nfour", false).unwrap(), "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn fr_l31_10_the_tab_and_the_diff_edit_one_document() {
+        use ember_editor::{SessionUpdate, WidgetBridge, WidgetPos, WidgetRange};
+        use ember_editor_conn::uri::UriComponents;
+        let uri = UriComponents::file("/w/a.rs");
+        let mut bridge = WidgetBridge::new();
+        bridge.apply(SessionUpdate::Opened { uri: uri.clone(), generation: 3, text: "one\n2\nthree".into(), language_id: "rust".into(), tab_width: 4 });
+        // The diff's editor writes through the bridge entry the tab's editor reads.
+        let event = bridge.on_code_changed(&uri, 1, WidgetRange::new(WidgetPos::new(0, 0), WidgetPos::new(0, 0)), "// ".into());
+        assert!(matches!(event, Some((ref u, 3, _)) if *u == uri));
+        bridge.apply(SessionUpdate::Dirty { uri: uri.clone(), dirty: true });
+        let tab = bridge.active_document().unwrap();
+        assert_eq!(tab.text, "// one\n2\nthree");
+        assert!(tab.dirty, "the tab shows the unsaved mark of an edit made in the diff");
+        assert_eq!(bridge.document(&uri).unwrap(), tab);
+    }
+
+    #[test]
+    fn fr_l31_10_the_diff_opens_its_document_once_and_lets_it_go() {
+        assert!(diff_document_needs_open("/w/a.rs", None, false));
+        assert!(!diff_document_needs_open("/w/a.rs", None, true), "a tab already has it open");
+        assert!(!diff_document_needs_open("/w/a.rs", Some("/w/a.rs"), false), "asked once already");
+        assert!(diff_document_needs_open("/w/b.rs", Some("/w/a.rs"), false));
+        assert_eq!(release_diff_document(true, true), DiffDocRelease::Keep);
+        assert_eq!(release_diff_document(true, false), DiffDocRelease::Keep);
+        assert_eq!(release_diff_document(false, true), DiffDocRelease::OpenTab);
+        assert_eq!(release_diff_document(false, false), DiffDocRelease::Close);
+    }
+
+    #[test]
+    fn fr_l31_10_save_from_the_diff_saves_the_working_tree_document() {
+        use ember_editor::{SessionUpdate, WidgetBridge, WidgetEvent};
+        use ember_editor_conn::uri::UriComponents;
+        assert_eq!(save_target(Some("/w/b.rs"), Some("/w/a.rs".into())), Some("/w/a.rs".into()));
+        assert_eq!(save_target(Some("/w/b.rs"), None), Some("/w/b.rs".into()));
+        assert_eq!(save_target(None, None), None);
+        let uri = UriComponents::file("/w/a.rs");
+        let mut bridge = WidgetBridge::new();
+        bridge.apply(SessionUpdate::Opened { uri: uri.clone(), generation: 5, text: "x".into(), language_id: "rust".into(), tab_width: 4 });
+        let (u, generation, event) = bridge.on_save_requested(&uri, 4).unwrap();
+        assert_eq!((u, generation, event), (uri, 5, WidgetEvent::CodeSaveRequested { version: 4 }));
     }
 }

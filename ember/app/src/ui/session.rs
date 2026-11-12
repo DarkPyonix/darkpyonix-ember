@@ -370,7 +370,7 @@ pub fn view_from_saved(saved: Option<&str>) -> SessionView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneLayout {
     pub per_row: usize,
-    /// One pane at a time with previous and next buttons (the swipe of the design).
+    /// One pane per screen width in a sideways-scrolling strip (the swipe of the design).
     pub paged: bool,
 }
 
@@ -411,6 +411,17 @@ pub fn page_step(current: usize, count: usize, forward: bool) -> usize {
     } else {
         cur.saturating_sub(1)
     }
+}
+
+/// Width of one pane in the swipe strip that replaces the one-pane-at-a-time layout
+/// (mockup `session.css` at 560 px: `.mv` scrolls sideways with `padding` and `gap` of
+/// `--sp2`, each `.pane` is `calc(100% - 8px)`, so the next pane peeks in). `window_dp` is
+/// the width the strip's column gets; an unreported width (0 dp in the first frame) is
+/// treated as 390 dp, the phone width of the design.
+pub fn swipe_pane_width(window_dp: f32) -> f32 {
+    let w = if window_dp > 0.0 { window_dp } else { 390.0 };
+    // 8 dp column padding on each side, then the 8 dp peek.
+    (w - 2.0 * 8.0 - 8.0).max(120.0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1364,6 +1375,13 @@ pub fn session_count_rows(members: &[Member]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l18_swipe_pane_width_leaves_the_next_pane_peeking() {
+        assert_eq!(super::swipe_pane_width(390.0), 366.0);
+        assert_eq!(super::swipe_pane_width(0.0), 366.0);
+        assert_eq!(super::swipe_pane_width(100.0), 120.0);
+    }
+
     use super::*;
     use crate::ide::IdeKind;
     use crate::ui::project::{Member, ProjectBox};

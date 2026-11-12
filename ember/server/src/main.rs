@@ -249,9 +249,17 @@ async fn main() -> anyhow::Result<()> {
         sessions.add_end_hook(egress.end_hook());
     }
 
-    let addr: SocketAddr = std::env::var("EMBER_LISTEN")
-        .unwrap_or_else(|_| "127.0.0.1:8740".into())
-        .parse()?;
+    // FR-S10 listen guard: a non-loopback EMBER_LISTEN needs EMBER_ALLOW_NON_LOOPBACK_LISTEN=1.
+    let addr: SocketAddr = ember_server::auth::parse_listen(std::env::var("EMBER_LISTEN").ok().as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let allow = std::env::var(ember_server::auth::ALLOW_NON_LOOPBACK_LISTEN).ok();
+    if ember_server::auth::check_listen(addr, allow.as_deref()).map_err(|e| anyhow::anyhow!(e))?
+        == ember_server::auth::ListenCheck::NonLoopbackAllowed
+    {
+        tracing::warn!(
+            "EMBER_LISTEN={addr} is reachable from that network over plain HTTP; the server token travels in clear. Prefer the transport (EMBER_TRANSPORT=1) for remote devices."
+        );
+    }
     // The guest door (FR-T14): off unless EMBER_GUEST_LISTEN is set. A bad value is a startup error.
     let guest_door = ember_server::guest_door::GuestDoor::from_env(addr)?;
     // The enrol door (FR-C2e): off unless EMBER_ENROL_LISTEN is set. A bad value, or an address

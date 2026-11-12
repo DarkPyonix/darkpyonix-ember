@@ -24,6 +24,8 @@ fn path(name: &str) -> &'static str {
         "up" => r#"<path d="M12 19V5M5.5 11.5 12 5l6.5 6.5"/>"#,
         "down" => r#"<path d="M12 5v14M18.5 12.5 12 19l-6.5-6.5"/>"#,
         "close" => r#"<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/>"#,
+        // A push pin, for a pinned tab (FR-L31.5); the mockup draws none, so it follows the outline set.
+        "pin" => r#"<path stroke-linecap="round" stroke-linejoin="round" d="M15 3.75 20.25 9l-2.25.75-3.75 3.75.75 3.75-1.5 1.5-3-3L5.25 20.25M10.5 15.75l-3-3 1.5-1.5 3.75.75L16.5 8.25l.75-2.25"/>"#,
         "file" => r#"<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Zm0 0v5h5"/>"#,
         "commit" => r#"<circle cx="12" cy="12" r="3.25"/><path d="M3 12h5.75M15.25 12H21"/>"#,
         "dot" => r#"<circle cx="12" cy="12" r="5"/><path stroke-linecap="round" d="M12 3v3M12 18v3M3 12h3M18 12h3"/>"#,

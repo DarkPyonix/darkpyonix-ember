@@ -66,6 +66,10 @@ pub struct Shared {
     pub position: Signal<(usize, usize)>,
     pub stripes: Signal<Stripes>,
     pub menu_open: Signal<bool>,
+    /// The tab whose context menu is open, and where (client x, y) (FR-L31.5).
+    pub tab_menu: Signal<Option<(String, f64, f64)>>,
+    /// The unsaved-changes question on a close, while it is open (FR-L31.5).
+    pub close_confirm: Signal<Option<crate::ui::editor::CloseRequest>>,
     pub keymap: Signal<Keymap>,
     pub folder: String,
     pub server_url: String,
@@ -90,6 +94,8 @@ pub struct Shared {
 // WidgetView accepts a function without props and owns a separate tree. Share signals between
 // the trees until WidgetView supports props and flex stretch sizing (dioxus-compose #160).
 thread_local! { static DOUBLE_SHIFT: RefCell<super::editor::DoubleShift> = RefCell::new(super::editor::DoubleShift::default()); }
+// TODO(compose-rust#417): tells a double-click from two `onclick`s while the renderer sends no pointer events.
+thread_local! { static DOUBLE_CLICK: RefCell<super::editor::DoubleClick> = RefCell::new(super::editor::DoubleClick::default()); }
 
 /// Milliseconds on a clock that only moves forward, for telling two Shift presses apart.
 fn now_ms() -> u64 {
@@ -140,6 +146,8 @@ fn init(target: EditorTarget) {
     let position = use_hook(|| Signal::new_in_scope((1, 1), root));
     let stripes = use_hook(|| Signal::new_in_scope(Stripes::default(), root));
     let menu_open = use_hook(|| Signal::new_in_scope(false, root));
+    let tab_menu = use_hook(|| Signal::new_in_scope(None::<(String, f64, f64)>, root));
+    let close_confirm = use_hook(|| Signal::new_in_scope(None::<crate::ui::editor::CloseRequest>, root));
     let keymap = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().keymap, root));
     let bridge = use_hook(|| Rc::new(RefCell::new(WidgetBridge::new())));
     let uris = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
@@ -154,7 +162,7 @@ fn init(target: EditorTarget) {
     let workbench_logs = use_hook(|| Signal::new_in_scope(Vec::<String>::new(), root));
     // The branch in the bars comes from the first status read, so it starts with the window.
     let scm = use_hook(|| { let scm = crate::ui::editor_scm::Scm::new(&target.project, revision); scm.refresh(); scm });
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -172,6 +180,16 @@ fn unsaved_open_paths(s: &Shared) -> Vec<String> {
         .filter(|p| uris.get(*p).and_then(|u| bridge.document(u)).is_some_and(|d| d.dirty))
         .map(str::to_owned)
         .collect()
+}
+
+/// An edit makes a preview tab permanent, as in Code-OSS (FR-L31.5). The tab signal is written only when the
+/// tab is a preview, so typing does not redraw the strip on every key.
+fn keep_edited_tab(s: &Shared, path: &str) {
+    let preview = s.tabs.read().is_preview(path);
+    if preview {
+        let mut tabs = s.tabs;
+        tabs.write().keep_open(path);
+    }
 }
 
 fn pos(p: compose_rust::code::Position) -> WidgetPos { WidgetPos::new(p.line, p.column) }
@@ -245,7 +263,7 @@ fn editor_pane() -> Element {
         key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
         text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), folds: crate::ui::editor::folds(&doc.folds), tab_width: Some(doc.tab_width),
         gutter_decorations,
-        on_change: move |e: compose_rust::code::CodeChange| { change_s.editor_versions.borrow_mut().insert(generation, e.version); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); },
+        on_change: move |e: compose_rust::code::CodeChange| { keep_edited_tab(&change_s, &change_uri.path); change_s.editor_versions.borrow_mut().insert(generation, e.version); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); },
         on_save: move |e: compose_rust::code::SaveRequest| { let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
         on_decoration_click: move |id| { let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id); send(&click_s, event); },
@@ -255,13 +273,14 @@ fn editor_pane() -> Element {
 }
 
 pub mod page {
-    use dioxus_compose::html::prelude::dioxus_elements::point_interaction::ModifiersInteraction;
+    use dioxus_compose::html::prelude::dioxus_elements::point_interaction::{InteractionLocation, ModifiersInteraction};
     use dioxus_compose::html::prelude::dioxus_elements::{Key, Modifiers};
     use dioxus_compose::html::prelude::dioxus_signals::{ReadableExt, WritableExt};
     use dioxus_compose::html::prelude::*;
+    use std::collections::HashMap;
     use std::sync::Arc;
     use crate::terminal_stream::{self, ChangeCallback, TerminalHandle, TerminalState};
-    use super::{DOUBLE_SHIFT, now_ms, send, editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, PendingGoto, Shared};
+    use super::{DOUBLE_CLICK, DOUBLE_SHIFT, now_ms, send, editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, PendingGoto, Shared};
     use crate::ui::editor::{
         action_for_key, agent_status_text, apply_action, tooltip_text, Side, Stripes, ToolWindow,
     };
@@ -336,6 +355,16 @@ pub mod page {
             open_palette(s, mode);
             return;
         }
+        if action == Action::Close {
+            // Bound first: the read guard must be gone before `sync_dirty` writes the tabs.
+            let current = s.tabs.read().current_path().map(str::to_owned);
+            if let Some(path) = current {
+                sync_dirty(s);
+                let request = s.tabs.read().close_request(&path);
+                request_close(s, request);
+                return;
+            }
+        }
         let mut tabs = s.tabs;
         let mut stripes = s.stripes;
         let closing = if action == Action::Close { tabs.read().current_path().map(str::to_owned) } else { None };
@@ -367,6 +396,117 @@ pub mod page {
             Some(uri) => send(s, s.bridge.borrow().on_save_requested(&uri, 0)),
             None => notice("저장할 파일이 열려 있지 않습니다"),
         }
+    }
+
+    /// Copies the unsaved marks of the open documents into the tab model, so a close request knows which
+    /// tabs are dirty (the session reports them to the bridge).
+    pub(crate) fn sync_dirty(s: &Shared) {
+        let flags: Vec<(String, bool)> = {
+            let bridge = s.bridge.borrow();
+            let uris = s.uris.borrow();
+            s.tabs
+                .read()
+                .paths()
+                .into_iter()
+                .map(|p| (p.to_owned(), uris.get(p).and_then(|u| bridge.document(u)).is_some_and(|d| d.dirty)))
+                .collect()
+        };
+        let stale = { let tabs = s.tabs.read(); flags.iter().any(|(p, d)| tabs.is_dirty(p) != *d) };
+        if stale {
+            let mut tabs = s.tabs;
+            let mut t = tabs.write();
+            for (p, d) in flags {
+                t.set_dirty(&p, d);
+            }
+        }
+    }
+
+    /// Closes the tabs of `request` at once, or asks first when one of them has unsaved edits (FR-L31.5).
+    pub(crate) fn request_close(s: &Shared, request: crate::ui::editor::CloseRequest) {
+        if request.is_empty() {
+            return;
+        }
+        if request.needs_confirm() {
+            let mut confirm = s.close_confirm;
+            confirm.set(Some(request));
+        } else {
+            finish_close(s, &request.paths, request.anchor.as_deref());
+        }
+    }
+
+    /// Closes `paths`, tells the session, and focuses the tab that is current afterwards.
+    fn finish_close(s: &Shared, paths: &[String], anchor: Option<&str>) {
+        if paths.is_empty() {
+            return;
+        }
+        let mut tabs = s.tabs;
+        tabs.write().close_many(paths, anchor);
+        for p in paths {
+            s.host.send(HostCommand::Close(p.clone()));
+        }
+        let next = tabs.read().current_path().map(str::to_owned);
+        if let Some(next) = next {
+            s.host.send(HostCommand::Focus(next));
+        }
+    }
+
+    /// The answer to the unsaved-changes question. 저장 sends the saves and closes the clean tabs now; each
+    /// dirty tab closes when its save succeeds (`save_result`) and stays open and dirty when it fails, as in
+    /// Code-OSS. 저장 안 함 closes them all; 취소 none.
+    fn answer_close(s: &Shared, choice: crate::ui::editor::DirtyChoice) {
+        let mut confirm = s.close_confirm;
+        let Some(request) = confirm.read().clone() else { return };
+        confirm.set(None);
+        // The version each save is asked at: an edit after it keeps the tab open (`save_result`).
+        let versions: HashMap<String, u32> = {
+            let bridge = s.bridge.borrow();
+            let uris = s.uris.borrow();
+            request.dirty.iter().filter_map(|p| uris.get(p).and_then(|u| bridge.document(u)).map(|d| (p.clone(), d.version))).collect()
+        };
+        let now = { let mut tabs = s.tabs; tabs.write().begin_close(&request, choice, |p| versions.get(p).copied()) };
+        if choice == crate::ui::editor::DirtyChoice::Save {
+            for p in &request.dirty {
+                let uri = s.uris.borrow().get(p).cloned();
+                let event = uri.and_then(|uri| s.bridge.borrow().on_save_requested(&uri, 0));
+                match event {
+                    Some(event) => send(s, Some(event)),
+                    // No document to save: the tab stays open, as after a failed save.
+                    None => { let mut tabs = s.tabs; tabs.write().save_finished(p, crate::ui::editor::SaveOutcome { ok: false, version: None, dirty: true }); }
+                }
+            }
+        }
+        finish_close(s, &now, request.anchor.as_deref());
+    }
+
+    /// A save finished: a tab that waited on it to close closes on success when its document is still at
+    /// the saved version and clean, and stays open otherwise. Called after the session's updates of the
+    /// same batch are applied, so the unsaved mark that follows `Saved` is already in the bridge.
+    fn save_result(s: &Shared, path: &str, ok: bool) {
+        let (version, dirty) = {
+            let bridge = s.bridge.borrow();
+            let uris = s.uris.borrow();
+            match uris.get(path).and_then(|u| bridge.document(u)) {
+                Some(d) => (Some(d.version), d.dirty),
+                None => (None, true),
+            }
+        };
+        let outcome = crate::ui::editor::SaveOutcome { ok, version, dirty };
+        let close = { let mut tabs = s.tabs; tabs.write().save_finished(path, outcome) };
+        if close {
+            finish_close(s, &[path.to_string()], None);
+        }
+    }
+
+    /// Opens a file as the preview tab (a single click in the explorer or the search results); the
+    /// preview it replaces is closed in the session.
+    pub(crate) fn open_preview(s: &Shared, path: &str) {
+        let mut tabs = s.tabs;
+        let replaced = tabs.write().open_preview(path);
+        if let Some(old) = replaced {
+            s.host.send(HostCommand::Close(old));
+        }
+        s.open_errors.borrow_mut().remove(path);
+        s.host.send(HostCommand::Open(path.to_string()));
     }
 
     fn record_recent_file(recent: &mut super::Signal<Vec<String>>, path: &str) {
@@ -822,10 +962,12 @@ pub mod page {
             tree_sel.set(None);
         }
         let saved = updates.iter().any(|u| matches!(u, ember_editor::SessionUpdate::Saved { .. }));
+        let mut saved_paths: Vec<String> = Vec::new();
         for update in updates {
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.uris.borrow_mut().insert(uri.path.clone(), uri.clone()); }
             if let ember_editor::SessionUpdate::Closed { uri } = &update { s.uris.borrow_mut().remove(&uri.path); }
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.open_errors.borrow_mut().remove(&uri.path); }
+            if let ember_editor::SessionUpdate::Saved { uri } = &update { saved_paths.push(uri.path.clone()); }
             let action = s.bridge.borrow_mut().apply(update);
             match action {
                 BridgeAction::Resync(uri) => { s.host.send(HostCommand::Resync(uri)); }
@@ -835,6 +977,7 @@ pub mod page {
                 }
                 BridgeAction::SaveFailed { uri, error } => {
                     tracing::warn!(path = %uri.path, %error, "saving a file failed");
+                    save_result(&s, &uri.path, false);
                     notice(format!("{}을(를) 저장하지 못했습니다: {}", crate::ui::editor::display_name(base_name(&uri.path)), crate::ui::editor::file_failure_reason(&error)));
                 }
                 BridgeAction::ExtensionNotice { severity, message, source } => {
@@ -857,6 +1000,9 @@ pub mod page {
                 _ => {}
             }
         }
+        // After the whole batch, so the unsaved mark the session sends with `Saved` is in the bridge. If it
+        // came in a later batch the mark is still the old dirty one and the tab stays open: the safe side.
+        for path in saved_paths { save_result(&s, &path, true); }
         if saved {
             // A save changes the work tree: the changes list and the open diff follow it.
             s.scm.refresh();
@@ -969,6 +1115,7 @@ pub mod page {
                     section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
                         {tab_strip(&s, &paths, &dirty, current.as_deref())}
                         if *s.menu_open.read() { {menu(&s, keymap)} }
+                        if let Some((menu_path, x, y)) = s.tab_menu.read().clone() { {tab_context_menu(&s, &menu_path, x, y)} }
                         if let Some(path) = current.as_deref() {
                             {breadcrumbs(path, &s.folder)}
                         }
@@ -1010,6 +1157,7 @@ pub mod page {
                         {bottom_window(&s, w)}
                     }
                     if *s.palette_open.read() { {palette_sheet(&s, keymap)} }
+                    if let Some(request) = s.close_confirm.read().clone() { {close_confirm_sheet(&s, &request)} }
                     {status_bar(&s, &agent_state, &branch, current.as_deref().filter(|_| active.is_some()), line, col, active.as_ref().map_or(4, |d| d.tab_width))}
                 }
             }
@@ -1074,11 +1222,36 @@ pub mod page {
 
     fn menu(s: &Shared, keymap: Keymap) -> Element {
         let os = Os::current();
-        let close_others_s = s.clone();
-        let mut close_others_menu = s.menu_open;
         let mut close_editor_menu = s.menu_open;
+        // The current tab's items (FR-L31.5) head the menu. TODO(compose-rust#417): they stand in for the
+        // right-click menu, which does not open while the renderer sends no pointer events; keep them here
+        // or drop them when it lands.
+        let current_tab = s.tabs.read().current_path().map(str::to_owned);
+        let tab_items = current_tab.as_deref().map(|p| crate::ui::editor::tab_menu_items(&s.tabs.read(), p)).unwrap_or_default();
+        let tab_label = current_tab.as_deref().map(|p| format!("탭: {}", crate::ui::editor::display_name(base_name(p)))).unwrap_or_default();
         rsx! {
             div { class: "ed-menu", role: "menu", "aria-label": "편집기 메뉴",
+                if let Some(tab_path) = current_tab.clone() {
+                    div { class: "ed-mlab", "{tab_label}" }
+                    for (item, enabled) in tab_items.into_iter() {
+                        {
+                            let s = s.clone();
+                            let path = tab_path.clone();
+                            let mut menu_open = s.menu_open;
+                            let aria_disabled = (!enabled).to_string();
+                            rsx! {
+                                button { role: "menuitem", disabled: !enabled, "aria-disabled": "{aria_disabled}",
+                                    onclick: move |_| {
+                                        menu_open.set(false);
+                                        if enabled { run_tab_menu_item(&s, item, &path); }
+                                    },
+                                    span { class: "spacer", "{item.label()}" }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "ed-msep" }
+                }
                 for a in [Action::FindInFile, Action::Save, Action::Recent, Action::Format, Action::GotoLine] {
                     {
                         let s = s.clone();
@@ -1092,16 +1265,6 @@ pub mod page {
                             }
                         }
                     }
-                }
-                button { role: "menuitem", onclick: move |_| {
-                    close_others_menu.set(false);
-                    let mut tabs = close_others_s.tabs;
-                    let closed = tabs.write().close_others();
-                    for p in closed {
-                        close_others_s.host.send(HostCommand::Close(p));
-                    }
-                },
-                    span { class: "spacer", "다른 탭 모두 닫기" }
                 }
                 {
                     let s = s.clone();
@@ -1555,7 +1718,6 @@ pub mod page {
                             let path = row.path.clone();
                             let host = s.host.clone();
                             let mut recent_files = s.recent_files;
-                            let open_errors = s.open_errors.clone();
                             let is_dir = row.is_dir;
                             let in_multi = tree_multi_sel.read().iter().any(|(p, _)| p == &row.path);
                             let in_cut = tree_clipboard.read().as_ref().is_some_and(|c| c.kind == crate::ui::editor::ClipboardKind::Cut && c.paths.iter().any(|(p, _)| p == &row.path));
@@ -1576,6 +1738,9 @@ pub mod page {
                             let path_for_down = row.path.clone();
                             let rows_for_down = rows.clone();
                             let rows_for_click = rows.clone();
+                            let preview_s = s.clone();
+                            let keep_s = s.clone();
+                            let keep_path = row.path.clone();
                             let drag_path = row.path.clone();
                             let drop_path = row.path.clone();
                             let drop_is_dir = is_dir;
@@ -1660,10 +1825,20 @@ pub mod page {
                                         if was_open { expanded.write().remove(&path); }
                                         else { expanded.write().insert(path.clone()); host.send(HostCommand::List(path.clone())); }
                                     } else {
-                                        open_errors.borrow_mut().remove(&path);
-                                        tabs.write().open(&path);
+                                        // A single click opens the preview tab; a double-click keeps it (FR-L31.5).
+                                        open_preview(&preview_s, &path);
+                                        // TODO(compose-rust#417): two clicks within 500 ms stand in for `ondoubleclick`.
+                                        if DOUBLE_CLICK.with(|d| d.borrow_mut().click(&format!("tree:{path}"), now_ms())) {
+                                            let mut tabs = preview_s.tabs;
+                                            tabs.write().keep_open(&path);
+                                        }
                                         record_recent_file(&mut recent_files, &path);
-                                        host.send(HostCommand::Open(path.clone()));
+                                    }
+                                },
+                                ondoubleclick: move |_| {
+                                    if !is_dir {
+                                        let mut tabs = keep_s.tabs;
+                                        tabs.write().keep_open(&keep_path);
                                     }
                                 },
                                 if is_dir { if row.open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} } } else { span { class: "chev-sp" } }
@@ -1724,11 +1899,13 @@ pub mod page {
         let mut menu_open = s.menu_open;
         let host = s.host.clone();
         let scm = s.scm.clone();
+        let strip_s = s.clone();
         let modified = s.scm.modified_paths(&s.folder);
         let paths_owned: Vec<String> = paths.to_vec();
         let dirty_owned: Vec<bool> = dirty.to_vec();
         let current_owned: Option<String> = current.map(str::to_string);
         let (strip_ti, tab_tis) = crate::ui::editor::tab_strip_roving_tabindex(paths, current);
+        let model = s.tabs.read().clone();
         rsx! {
             div { class: "ed-tabs", role: "tablist", "aria-label": "열린 파일", tabindex: "{strip_ti}",
                 onkeydown: move |event| {
@@ -1740,6 +1917,40 @@ pub mod page {
                         return;
                     }
                     let key_str = key_name(&event.key());
+                    let m = event.modifiers();
+                    // TODO(compose-rust#417): Shift+F10 / ContextMenu opens the ⋯ menu, which holds the current
+                    // tab's items, while the right-click menu cannot open.
+                    if crate::ui::editor::tab_menu_key(
+                        &key_str,
+                        m.contains(Modifiers::CONTROL),
+                        m.contains(Modifiers::SHIFT),
+                        m.contains(Modifiers::ALT),
+                        m.contains(Modifiers::META),
+                    ) {
+                        event.stop_propagation();
+                        event.prevent_default();
+                        if current_owned.is_some() {
+                            let mut tab_menu = strip_s.tab_menu;
+                            tab_menu.set(None);
+                            menu_open.set(true);
+                        }
+                        return;
+                    }
+                    // Move Editor Left / Right (FR-L31.5): the reorder drag cannot do yet.
+                    if let Some(right) = crate::ui::editor::tab_move_key(
+                        &key_str,
+                        m.contains(Modifiers::CONTROL),
+                        m.contains(Modifiers::SHIFT),
+                        m.contains(Modifiers::ALT),
+                        m.contains(Modifiers::META),
+                    ) {
+                        event.stop_propagation();
+                        if let Some(ref current_path) = current_owned {
+                            let mut t = tabs.write();
+                            if right { t.move_right(current_path); } else { t.move_left(current_path); }
+                        }
+                        return;
+                    }
                     let outcome = crate::ui::editor::tab_strip_key_with_dirty(
                         &paths_owned,
                         &dirty_owned,
@@ -1754,15 +1965,11 @@ pub mod page {
                                 tabs.write().activate(&path);
                                 host.send(HostCommand::Focus(path));
                             }
-                            crate::ui::editor::TabKeyOutcome::Close(path) => {
-                                tabs.write().close(&path);
-                                host.send(HostCommand::Close(path));
-                                if let Some(next) = tabs.read().current_path() {
-                                    host.send(HostCommand::Focus(next.to_string()));
-                                }
-                            }
-                            crate::ui::editor::TabKeyOutcome::RefuseDirty(path) => {
-                                notice(crate::ui::editor::dirty_tab_close_notice(&path));
+                            crate::ui::editor::TabKeyOutcome::Close(path) | crate::ui::editor::TabKeyOutcome::RefuseDirty(path) => {
+                                // A dirty tab is not closed at once: the window asks, as Code-OSS does.
+                                sync_dirty(&strip_s);
+                                let request = strip_s.tabs.read().close_request(&path);
+                                request_close(&strip_s, request);
                             }
                         }
                     }
@@ -1772,25 +1979,45 @@ pub mod page {
                         let tab_ti = tab_tis.get(i).copied().unwrap_or("-1");
                         let path = path.clone(); let close_path = path.clone();
                         let close_path_key = path.clone();
-                        let host = s.host.clone(); let key_host = s.host.clone(); let close_host = s.host.clone();
-                        let close_host_key = s.host.clone();
+                        let host = s.host.clone(); let key_host = s.host.clone();
+                        let close_s = s.clone(); let close_key_s = s.clone();
                         let mut recent_files = s.recent_files;
                         let mut key_recent_files = s.recent_files;
                         let selected = current == Some(path.as_str());
                         let label = base_name(&path).to_string();
                         let is_mod = modified.contains(&path);
-                        let class = crate::ui::editor::tab_class(selected, is_mod);
+                        let pinned = model.is_pinned(&path);
+                        let preview = model.is_preview(&path);
+                        let class = crate::ui::editor::tab_class_with(selected, is_mod, pinned, preview);
                         let tab_label = crate::ui::editor::tab_aria_label(&label, dirty[i]);
-                        let close_label = format!("닫기: {label}");
+                        let close_label = if pinned { format!("고정 해제: {label}") } else { format!("닫기: {label}") };
                         let scm = s.scm.clone();
                         let key_scm = s.scm.clone();
                         let tab_path = path.clone();
-                        rsx! { div { class, role: "tab", "aria-selected": "{selected}", "aria-label": "{tab_label}", tabindex: "{tab_ti}",
+                        let keep_path = path.clone();
+                        let menu_path = path.clone();
+                        let mut tab_menu = s.tab_menu;
+                        let mut top_menu = s.menu_open;
+                        rsx! { div { class, role: "tab", "aria-selected": "{selected}", "aria-label": "{tab_label}", tabindex: "{tab_ti}", title: "{path}",
                             onclick: move |_| {
                                 scm.close_diff();
                                 tabs.write().activate(&path);
+                                // TODO(compose-rust#417): two clicks within 500 ms stand in for `ondoubleclick`.
+                                if DOUBLE_CLICK.with(|d| d.borrow_mut().click(&format!("tab:{path}"), now_ms())) {
+                                    tabs.write().keep_open(&path);
+                                }
                                 record_recent_file(&mut recent_files, &path);
                                 host.send(HostCommand::Focus(path.clone()));
+                            },
+                            ondoubleclick: move |_| {
+                                tabs.write().keep_open(&keep_path);
+                            },
+                            oncontextmenu: move |event| {
+                                event.prevent_default();
+                                event.stop_propagation();
+                                let at = event.client_coordinates();
+                                top_menu.set(false);
+                                tab_menu.set(Some((menu_path.clone(), at.x, at.y)));
                             },
                             onkeydown: move |event| {
                                 if matches!(event.key(), Key::Enter) || matches!(event.key(), Key::Character(ref c) if c == " ") {
@@ -1804,6 +2031,7 @@ pub mod page {
                             {icon_px(if selected { "file-w" } else { "file" }, 14)}
                             span { class: "ellipsis", "{label}" }
                             if dirty[i] { span { class: "ed-dirty" } }
+                            // A pinned tab shows the pin where the close button is; a click on it unpins, as in Code-OSS.
                             button {
                                 class: "ed-tx",
                                 tabindex: "-1",
@@ -1811,29 +2039,149 @@ pub mod page {
                                 "aria-label": "{close_label}",
                                 onclick: move |event| {
                                     event.stop_propagation();
-                                    tabs.write().close(&close_path);
-                                    close_host.send(HostCommand::Close(close_path.clone()));
-                                    if let Some(next) = tabs.read().current_path() {
-                                        close_host.send(HostCommand::Focus(next.to_string()));
+                                    if pinned {
+                                        let mut t = close_s.tabs;
+                                        t.write().unpin(&close_path);
+                                        return;
                                     }
+                                    sync_dirty(&close_s);
+                                    let request = close_s.tabs.read().close_request(&close_path);
+                                    request_close(&close_s, request);
                                 },
                                 onkeydown: move |event| {
                                     if matches!(event.key(), Key::Enter) || matches!(event.key(), Key::Character(ref c) if c == " ") {
                                         event.stop_propagation();
-                                        tabs.write().close(&close_path_key);
-                                        close_host_key.send(HostCommand::Close(close_path_key.clone()));
-                                        if let Some(next) = tabs.read().current_path() {
-                                            close_host_key.send(HostCommand::Focus(next.to_string()));
+                                        if pinned {
+                                            let mut t = close_key_s.tabs;
+                                            t.write().unpin(&close_path_key);
+                                            return;
                                         }
+                                        sync_dirty(&close_key_s);
+                                        let request = close_key_s.tabs.read().close_request(&close_path_key);
+                                        request_close(&close_key_s, request);
                                     }
                                 },
-                                {icon_px(if selected { "close-w" } else { "close" }, 12)}
+                                if pinned {
+                                    {icon_px(if selected { "pin-w" } else { "pin" }, 12)}
+                                } else {
+                                    {icon_px(if selected { "close-w" } else { "close" }, 12)}
+                                }
                             }
                         } }
                     }
                 }
                 div { class: "spacer" }
                 button { class: "ed-ib", title: "탭 메뉴", "aria-label": "탭 메뉴", onclick: move |_| { let open = *menu_open.read(); menu_open.set(!open); }, {icon("more")} }
+            }
+        }
+    }
+
+    /// The context menu of a tab (FR-L31.5): Code-OSS's close, pin and keep-open items, and the move items
+    /// that stand in for drag reorder.
+    fn tab_context_menu(s: &Shared, path: &str, x: f64, y: f64) -> Element {
+        use crate::ui::editor::TabMenuItem;
+        let items = crate::ui::editor::tab_menu_items(&s.tabs.read(), path);
+        // Code-OSS's groups: the close items | keep open and pin | (Ember) the move items.
+        let seps: Vec<bool> = items
+            .iter()
+            .enumerate()
+            .map(|(i, (item, _))| match item {
+                TabMenuItem::KeepOpen | TabMenuItem::MoveLeft => true,
+                TabMenuItem::Pin | TabMenuItem::Unpin => i == 0 || items[i - 1].0 != TabMenuItem::KeepOpen,
+                _ => false,
+            })
+            .collect();
+        let mut tab_menu = s.tab_menu;
+        let style = format!("position:fixed; left:{x}px; top:{y}px; right:auto;");
+        rsx! {
+            div { class: "ed-scrim", onclick: move |_| tab_menu.set(None), oncontextmenu: move |event| { event.prevent_default(); tab_menu.set(None); } }
+            div { class: "ed-menu ed-tabmenu", role: "menu", "aria-label": "탭 메뉴", style: "{style}",
+                for (i, (item, enabled)) in items.into_iter().enumerate() {
+                    {
+                        let s = s.clone();
+                        let path = path.to_string();
+                        let mut tab_menu = s.tab_menu;
+                        let sep = seps[i];
+                        let aria_disabled = (!enabled).to_string();
+                        rsx! {
+                            if sep { div { class: "ed-msep" } }
+                            button { role: "menuitem", disabled: !enabled, "aria-disabled": "{aria_disabled}",
+                                onclick: move |_| {
+                                    tab_menu.set(None);
+                                    if enabled { run_tab_menu_item(&s, item, &path); }
+                                },
+                                span { class: "spacer", "{item.label()}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn run_tab_menu_item(s: &Shared, item: crate::ui::editor::TabMenuItem, path: &str) {
+        use crate::ui::editor::TabMenuItem;
+        let mut tabs = s.tabs;
+        match item {
+            TabMenuItem::KeepOpen => tabs.write().keep_open(path),
+            TabMenuItem::Pin => tabs.write().pin(path),
+            TabMenuItem::Unpin => tabs.write().unpin(path),
+            TabMenuItem::MoveLeft => { tabs.write().move_left(path); }
+            TabMenuItem::MoveRight => { tabs.write().move_right(path); }
+            TabMenuItem::Close | TabMenuItem::CloseOthers | TabMenuItem::CloseRight | TabMenuItem::CloseAll => {
+                sync_dirty(s);
+                let request = {
+                    let t = tabs.read();
+                    match item {
+                        TabMenuItem::Close => t.close_request(path),
+                        TabMenuItem::CloseOthers => t.close_others_request(path),
+                        TabMenuItem::CloseRight => t.close_right_request(path),
+                        _ => t.close_all_request(),
+                    }
+                };
+                if request.anchor.is_some() {
+                    s.scm.close_diff();
+                }
+                request_close(s, request);
+            }
+        }
+    }
+
+    /// The unsaved-changes question on a close (FR-L31.5), worded and ordered as Code-OSS's dialog:
+    /// 저장 (모두 저장 for several files), 저장 안 함, 취소. 취소 is the default and Escape answers it.
+    fn close_confirm_sheet(s: &Shared, request: &crate::ui::editor::CloseRequest) -> Element {
+        use crate::ui::editor::DirtyChoice;
+        let title = request.confirm_title();
+        let detail = request.confirm_detail();
+        let save_label = request.save_label();
+        let names = request.dirty_names();
+        let (save_s, dont_s, cancel_s, key_s, scrim_s) = (s.clone(), s.clone(), s.clone(), s.clone(), s.clone());
+        rsx! {
+            div { class: "modal", role: "presentation",
+                onclick: move |_| answer_close(&scrim_s, DirtyChoice::Cancel),
+                onkeydown: move |event| {
+                    if event.key() == Key::Escape {
+                        event.stop_propagation();
+                        answer_close(&key_s, DirtyChoice::Cancel);
+                    }
+                },
+                div { class: "card ed-confirm", role: "alertdialog", "aria-modal": "true", "aria-label": "{title}",
+                    onclick: move |event| event.stop_propagation(),
+                    div { class: "card-b",
+                        b { "{title}" }
+                        if !names.is_empty() {
+                            ul { class: "ed-confirm-files",
+                                for name in names.iter() { li { key: "{name}", "{name}" } }
+                            }
+                        }
+                        p { class: "muted", "{detail}" }
+                        div { class: "ed-confirm-acts",
+                            button { class: "btn primary sm", onclick: move |_| answer_close(&save_s, DirtyChoice::Save), "{save_label}" }
+                            button { class: "btn sm", onclick: move |_| answer_close(&dont_s, DirtyChoice::DontSave), "저장 안 함" }
+                            button { class: "btn sm", autofocus: true, onclick: move |_| answer_close(&cancel_s, DirtyChoice::Cancel), "취소" }
+                        }
+                    }
+                }
             }
         }
     }

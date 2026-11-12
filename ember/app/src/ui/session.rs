@@ -433,6 +433,9 @@ pub const SWIPE_COLUMN_PAD: f32 = 8.0;
 /// Gap between panes in the swipe strip (`SP[1]`, mockup `.mv` gap `--sp2`).
 pub const SWIPE_GAP: f32 = 8.0;
 /// How much of the next pane shows at the right edge.
+/// TODO(compose-rust#547): a stand-in. Once the toolkit has scroll snapping, the strip should
+/// centre each pane as the mockup does (`calc(100% - 8px)`, 4 dp of the neighbours on each
+/// side) and this peek goes away.
 pub const SWIPE_PEEK: f32 = 24.0;
 
 /// Width of one pane in the swipe strip that replaces the one-pane-at-a-time layout

@@ -7,7 +7,7 @@ the file's DarkPyonix kernel, and lets several clients (VS Code, IntelliJ, ash, 
 edit the same notebook together.
 
 Contract (darkpyonix-core, read-only here): `docs/FORMAT.md`, `docs/api/manager.openapi.yaml`
-(1.0.0-draft.3), `docs/SPEC.md` §7–§10a, `docs/PROTOCOL.md` §3.4 and §4.
+(1.0.0-draft.4), `docs/SPEC.md` §7–§10a, `docs/PROTOCOL.md` §3.4 and §4.
 
 ## What it does
 

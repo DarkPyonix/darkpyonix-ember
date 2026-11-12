@@ -1,5 +1,5 @@
 // A tiny in-process stand-in for the DarkPyonix manager + kernel: the endpoints this extension
-// uses (manager.openapi.yaml 1.0.0-draft.3) with document state, locks, presence, runs and SSE.
+// uses (manager.openapi.yaml 1.0.0-draft.4) with document state, locks, presence, runs and SSE.
 // Behaviour follows SPEC FR-S1..S7 closely enough to exercise the client; it is not a reference.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -225,7 +225,7 @@ export class FakeManager {
     if (!auth) return this.error(res, 401, "unauthorized", "token required");
 
     const K = `/api/kernels/${this.kernelId}`;
-    if (p === "/api/manager") return this.send(res, 200, { version: "0.1.0-fake", mode: "ephemeral", pid: process.pid, started_at: new Date().toISOString(), permission: "admin" });
+    if (p === "/api/manager") return this.send(res, 200, { version: "0.1.0-fake", mode: "ephemeral", pid: process.pid, started_at: new Date().toISOString(), capabilities: ["read", "history", "execute", "edit", "manage"] });
     if (p === "/api/kernels" && method === "GET") return this.send(res, 200, { kernels: this.kernelStarted ? [this.kernel()] : [] });
     if (p === "/api/kernels" && method === "POST") {
       if (body?.path !== this.path) return this.error(res, 400, "bad_request", "unknown file");
@@ -256,7 +256,7 @@ export class FakeManager {
     if (rest === "/events" && method === "GET") return this.sse(req, res, url, who);
     if (rest === "/presence" && method === "PUT") {
       const prev = this.presence.get(who.client_id);
-      const pr: Presence = { ...(prev ?? { ...who, permission: "admin", last_seen: "" }), ...body, focused_at: new Date().toISOString(), last_seen: new Date().toISOString() };
+      const pr: Presence = { ...(prev ?? { ...who, capabilities: ["read", "history", "execute", "edit", "manage"], last_seen: "" }), ...body, focused_at: new Date().toISOString(), last_seen: new Date().toISOString() };
       this.presence.set(who.client_id, pr);
       this.emit("presence.update", pr);
       return this.send(res, 200, { presence: [...this.presence.values()] });
@@ -350,7 +350,7 @@ export class FakeManager {
     res.write(": open\n\n");
     this.streams.add(res);
     if (url.searchParams.get("client_id") && !this.presence.has(who.client_id)) {
-      const pr: Presence = { ...who, permission: "admin", last_seen: new Date().toISOString() };
+      const pr: Presence = { ...who, capabilities: ["read", "history", "execute", "edit", "manage"], last_seen: new Date().toISOString() };
       this.presence.set(who.client_id, pr);
       this.emit("presence.update", pr);
     }

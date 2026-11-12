@@ -124,7 +124,7 @@ class OutputsPanel(private val project: Project) : Disposable {
             val st = s.state
             val kernel = st.kernelStatus ?: if (s.isConnected) "attached" else "no kernel"
             val run = st.currentRunId?.let { " · run $it" + (st.currentRunStartedBy?.let { b -> " by ${b.displayName}" } ?: "") } ?: ""
-            header.text = "${s.file.name} · $kernel$run · ${s.statusText}" + (s.permission?.let { " · $it" } ?: "")
+            header.text = "${s.file.name} · $kernel$run · ${s.statusText}" + (s.capabilities?.let { " · $it" } ?: "")
             val others = s.others()
             presence.text = if (others.isEmpty()) "" else "Here: " + others.joinToString(", ") { p ->
                 val cell = p.focusedCellId?.let { id -> s.state.cell(id)?.index }

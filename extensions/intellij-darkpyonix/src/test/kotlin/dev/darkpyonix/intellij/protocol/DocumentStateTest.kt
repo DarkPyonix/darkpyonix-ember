@@ -85,6 +85,24 @@ class DocumentStateTest {
     }
 
     @Test
+    fun `execution events find their cell by cell_id when the index moved (PROTOCOL 3_4, FR-R4)`() {
+        val s = snapshot()
+        // The run read c1 at index 1, but c2 is now at index 1 in our document: cell_id wins.
+        s.apply(11, "run.started", obj("""{"run_id":"r1","mode":"cells","cells":[2],"cell_ids":["c1"],"params":{}}"""))
+        assertEquals("queued", s.cell("c1")!!.status)
+        assertNull(s.cell("c2")!!.status)
+        s.apply(12, "cell.started", obj("""{"run_id":"r1","index":2,"cell_id":"c1","execution_count":4}"""))
+        s.apply(13, "output", obj("""{"run_id":"r1","index":2,"cell_id":"c1","output":{"output_type":"stream","name":"stdout","text":"hi\n"}}"""))
+        s.apply(14, "cell.finished", obj("""{"run_id":"r1","index":2,"cell_id":"c1","status":"ok"}"""))
+        assertEquals("hi\n", s.cell("c1")!!.outputs.single()["text"])
+        assertEquals("ok", s.cell("c1")!!.status)
+        assertTrue(s.cell("c2")!!.outputs.isEmpty())
+        // A null cell_id (the kernel held no document) falls back to the index.
+        s.apply(15, "output", obj("""{"run_id":"r1","index":2,"cell_id":null,"output":{"output_type":"stream","name":"stdout","text":"x\n"}}"""))
+        assertEquals("x\n", s.cell("c2")!!.outputs.single()["text"])
+    }
+
+    @Test
     fun `output clear without wait empties at once`() {
         val s = snapshot()
         s.apply(11, "output.clear", obj("""{"run_id":"r1","index":1,"wait":false}"""))

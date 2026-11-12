@@ -498,3 +498,197 @@ async fn http_api_and_agent_side_schedule_commands() {
     let (st, _, _) = call(&app, "GET", &format!("/api/schedules/{id}"), None, None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn fr_a8_schedule_patch_updates_fields_and_validates_constraints() {
+    use ember_server::schedules::{MAX_SCHEDULES_PER_PROJECT, SchedulePatch};
+
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let agents = Recording::default();
+    let sessions = sessions_on(store, &agents);
+    let clock = ManualClock::new(T0);
+    let sched = Scheduler::new(sessions.clone(), clock.clone());
+    let app = ember_server::schedules::api::router(sched.clone());
+
+    let new_sch = sched
+        .create(
+            NewSchedule {
+                project: "acme".into(),
+                agent: Some("claude-code".into()),
+                account: None,
+                computer: Some("mac-mini".into()),
+                cwd: Some("/w/acme".into()),
+                prompt: "initial prompt".into(),
+                kind: ScheduleKind::Cron {
+                    expr: "0 9 * * *".into(),
+                    tz: "UTC".into(),
+                },
+                target: ScheduleTarget::New {
+                    title: Some("Old title".into()),
+                },
+                catch_up: false,
+                paused: false,
+            },
+            None,
+        )
+        .unwrap();
+
+    // Update project, agent, computer, cwd, target title, prompt, and kind via HTTP PATCH.
+    let (st, v, raw) = call(
+        &app,
+        "PATCH",
+        &format!("/api/schedules/{}", new_sch.id),
+        None,
+        Some(json!({
+            "project": "beta",
+            "agent": "codex",
+            "computer": "linux-box",
+            "cwd": "/w/beta",
+            "target": { "type": "new", "title": "New title" },
+            "prompt": "updated prompt",
+            "kind": { "type": "cron", "expr": "30 8 * * 1", "tz": "UTC" }
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{raw}");
+    assert_eq!(v["project"], "beta");
+    assert_eq!(v["agent"], "codex");
+    assert_eq!(v["computer_id"], "linux-box");
+    assert_eq!(v["cwd"], "/w/beta");
+    assert_eq!(v["target"], json!({ "type": "new", "title": "New title" }));
+    assert_eq!(v["prompt"], "updated prompt");
+
+    // Clearing computer with "" sets computer_id to None (serialized as null).
+    let (st, v, raw) = call(
+        &app,
+        "PATCH",
+        &format!("/api/schedules/{}", new_sch.id),
+        None,
+        Some(json!({ "computer": "" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{raw}");
+    assert!(v["computer_id"].is_null(), "{raw}");
+
+    // Validation on New-target schedules: empty project, unknown agent, empty cwd.
+    let (st, _, _) = call(
+        &app,
+        "PATCH",
+        &format!("/api/schedules/{}", new_sch.id),
+        None,
+        Some(json!({ "project": "   " })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    let (st, _, _) = call(
+        &app,
+        "PATCH",
+        &format!("/api/schedules/{}", new_sch.id),
+        None,
+        Some(json!({ "agent": "nonexistent-agent" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    let (st, _, _) = call(
+        &app,
+        "PATCH",
+        &format!("/api/schedules/{}", new_sch.id),
+        None,
+        Some(json!({ "cwd": "  " })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    // Continue-target schedule constraints:
+    let s1 = new_session(&sessions, "acme", "/w/one");
+    let cont_sch = sched.create(interval_continue("acme", &s1, false), None).unwrap();
+
+    // Reject computer or cwd on a Continue-target schedule.
+    let (st, _, _) = call(
+        &app,
+        "PATCH",
+        &format!("/api/schedules/{}", cont_sch.id),
+        None,
+        Some(json!({ "computer": "mac-mini" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    let (st, _, _) = call(
+        &app,
+        "PATCH",
+        &format!("/api/schedules/{}", cont_sch.id),
+        None,
+        Some(json!({ "cwd": "/w/other" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    // Reject moving a Continue-target schedule to a project that does not own the session,
+    // or changing its agent away from the session's agent, or converting it to New without cwd.
+    let (st, _, _) = call(
+        &app,
+        "PATCH",
+        &format!("/api/schedules/{}", cont_sch.id),
+        None,
+        Some(json!({ "project": "beta" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    let (st, _, _) = call(
+        &app,
+        "PATCH",
+        &format!("/api/schedules/{}", cont_sch.id),
+        None,
+        Some(json!({ "agent": "codex" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    let (st, _, _) = call(
+        &app,
+        "PATCH",
+        &format!("/api/schedules/{}", cont_sch.id),
+        None,
+        Some(json!({ "target": { "type": "new", "title": "Renamed" } })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        sched.get(&cont_sch.id).unwrap().target,
+        ScheduleTarget::Continue { session_id: s1.clone() },
+        "failed target conversion leaves Continue target intact"
+    );
+
+    // Per-project cap enforced when moving a schedule to a full project.
+    for i in 0..MAX_SCHEDULES_PER_PROJECT {
+        sched
+            .create(
+                NewSchedule {
+                    project: "capped".into(),
+                    agent: Some("scripted".into()),
+                    account: None,
+                    computer: None,
+                    cwd: Some("/w/capped".into()),
+                    prompt: format!("job {i}"),
+                    kind: ScheduleKind::Interval { seconds: 3600 },
+                    target: ScheduleTarget::New { title: None },
+                    catch_up: false,
+                    paused: false,
+                },
+                None,
+            )
+            .unwrap();
+    }
+    let err = sched.update(
+        &new_sch.id,
+        SchedulePatch {
+            project: Some("capped".into()),
+            ..Default::default()
+        },
+    );
+    assert!(err.is_err(), "moving a schedule into a project at MAX_SCHEDULES_PER_PROJECT must fail");
+}

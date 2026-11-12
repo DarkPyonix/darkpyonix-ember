@@ -7,7 +7,7 @@
 //! | GET    | `/api/schedules?project=` | → `[Schedule]` |
 //! | POST   | `/api/schedules` | `NewSchedule` → 201 `Schedule` |
 //! | GET    | `/api/schedules/{id}` | → `Schedule` |
-//! | PATCH  | `/api/schedules/{id}` | `{prompt?, kind?, catch_up?}` → `Schedule` |
+//! | PATCH  | `/api/schedules/{id}` | `{project?, agent?, computer?, cwd?, target?, prompt?, kind?, catch_up?}` → `Schedule` |
 //! | DELETE | `/api/schedules/{id}` | → 204 |
 //! | POST   | `/api/schedules/{id}/pause` | → `Schedule` |
 //! | POST   | `/api/schedules/{id}/resume` | → `Schedule` |

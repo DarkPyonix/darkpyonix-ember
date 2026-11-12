@@ -23,11 +23,11 @@ use compose_rust::{Alignment, ButtonVariant, Color, DrawList, IconRole, Paint, S
 use ember_client::api::ApiError;
 
 pub use crate::ui::routines::{
-    apply_server_run_started, begin_demo_run, changed_patch, current_value_line, demo_run_allowed,
+    apply_server_run_started, begin_demo_run, changed_patch, demo_run_allowed,
     demo_session_title, finish_demo_run, has_running_remote_run, patch_is_empty,
     resolve_run_session_id, rollback_optimistic_run, run_is_simulated, run_now_busy, DEMO_RUN_BUSY, DEMO_RUN_DONE,
-    DEMO_RUN_MS, DEMO_RUN_STARTED, DEMO_SESSION_PREFIX, NAME_SERVER_REASON, REMOTE_RUN_POLL_MS,
-    REMOTE_RUN_STARTED, SAMPLE_FLAG, SERVER_CANNOT_CHANGE,
+    DEMO_RUN_MS, DEMO_RUN_STARTED, DEMO_SESSION_PREFIX, REMOTE_RUN_POLL_MS,
+    REMOTE_RUN_STARTED, SAMPLE_FLAG,
     not_saved_sentence, run_row_text, unsaved_fields,
     ago, big_time, civil_from_days, cron_valid, days_from_civil,
     describe_cron, filter_projects, format_next, group_by_project, kind_text, kpis,
@@ -46,7 +46,7 @@ use crate::ui::home::{
 };
 use super::components::{
     pill_colors, pill_metrics, AppButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
-    FieldOptions, Label, PickChip, Pill, PillTone, Select, SheetFooter,
+    FieldOptions, Label, Pill, PillTone, Select, SheetFooter,
 };
 use super::compat::Spinner;
 use super::project::PHONE_MENU_ROOM;
@@ -814,6 +814,10 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
         super::home::content_width(window.width_dp, pad),
         compact,
     );
+    // The form's field widths, worked out here where the window is known: inside the sheet's
+    // own content the window size reads 0 (#493).
+    let form_w_inline = form_field_width(window.width_dp, panel_w, FormLayout::Inline);
+    let form_w_sheet = form_field_width(window.width_dp, panel_w, FormLayout::Sheet);
 
     let on_toggle = {
         let entries_st = entries_state.clone();
@@ -894,10 +898,20 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                         .map(|e| e.routine.clone())
                 });
                 let unsaved = old.as_ref().map(|o| unsaved_fields(&draft, o)).unwrap_or_default();
-                let patch = match &old {
+                let mut patch = match &old {
                     Some(o) => changed_patch(&draft, o),
                     None => schedule_patch(&draft),
                 };
+                if patch.project.is_some() {
+                    let cwd = try_services().and_then(|svc| {
+                        svc.client.read(|s| crate::model::latest_cwd(s, &draft.sel.project))
+                    });
+                    let Some(cwd) = cwd else {
+                        notice::post(NO_CWD_NOTICE);
+                        return;
+                    };
+                    patch.cwd = Some(cwd);
+                }
                 if patch_is_empty(&patch) {
                     // Nothing the server can store changed; do not send an empty PATCH.
                     panel_ref.set(Panel::View);
@@ -913,7 +927,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                     online_st.clone(),
                     async move {
                         services().client.api().update_schedule(&id, &patch).await?;
-                        Ok(not_saved_sentence(&unsaved).map(|n| format!("{n}. 프롬프트와 일정만 저장했습니다")))
+                        Ok(not_saved_sentence(&unsaved).map(|n| format!("{n}. 나머지 변경 사항은 저장했습니다")))
                     },
                 );
                 panel_ref.set(Panel::View);
@@ -1142,6 +1156,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                             &computers,
                                             &existing_projects,
                                             FormLayout::Inline,
+                                            form_w_inline,
                                             &form_draft,
                                             move |d| save_cb((d, editing_save.clone())),
                                             move || rl_close(Leave::Cancel),
@@ -1238,6 +1253,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
             &computers,
             &existing_projects,
             FormLayout::Sheet,
+            form_w_sheet,
             &form_draft,
             move |d| save_cb((d, editing.clone())),
             move || rl_close(Leave::Cancel),
@@ -1396,20 +1412,108 @@ fn RoutineSwitch(routine_name: &str, checked: bool, mut on_change: impl FnMut(bo
         });
 }
 
-/// A filter segment pill button matching the mockup (`.seg button`): 32px height, pill shape,
-/// ink fill when selected, surface with line border when unselected.
-fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
-    let p = ember_theme().palette;
-    let (bg, border, fg) = if selected {
+/// The segment's type step: the mockup's `.seg button` is `--fs-sm` (13) at 500.
+pub const SEG_FS: Fs = Fs::Sm;
+
+/// `(fill, border, text)` of a segment: `ink` with `ink-text` when chosen (`.seg button.on`),
+/// `surface` on a `line` border with `text-2` when not.
+pub fn seg_colors(selected: bool, p: &Palette) -> (Color, Color, Color) {
+    if selected {
         (p.ink, p.ink, p.ink_text)
     } else {
         (p.surface, p.line, p.text_2)
-    };
-    let advance: f32 = text
-        .chars()
-        .map(|c| if c.is_ascii() { 8.0 } else { 13.0 })
-        .sum::<f32>();
-    let width = (advance + 28.0).max(44.0);
+    }
+}
+
+/// A segment's width, erring wide: its label at `SEG_FS` with a Latin character at 0.62 em
+/// (the measure-style `text_px` uses 0.55) and a Hangul syllable at one em, 12 on each side,
+/// the 1 dp border twice and 4 to spare, at least 44.
+pub fn seg_width(text: &str) -> f32 {
+    let em = SEG_FS.size();
+    let advance: f32 = text.chars().map(|c| if c.is_ascii() { 0.62 * em } else { em }).sum();
+    (advance + 2.0 * 12.0 + 2.0 + 4.0).ceil().max(44.0)
+}
+
+/// What a line of segments may fill: the row's width less one gap, so a line that the estimate
+/// gets slightly wrong still does not touch the edge.
+pub fn seg_line_room(avail: f32) -> f32 {
+    (avail - SP[1]).max(0.0)
+}
+
+/// The segments of a choice row packed into lines no wider than `avail`, as the mockup's `.seg`
+/// wraps (`flex-wrap: wrap`, `gap: 8px`), so every option and the chosen one stay in view.
+/// TODO(compose-rust#521): the toolkit has no wrapping row (`FlowRow`), so the packing is by
+/// estimated width; drop this once `FlowRow` lands. Each line
+/// holds indices into `labels`, in order; a segment wider than `avail` gets a line of its own.
+pub fn seg_lines<S: AsRef<str>>(labels: &[S], avail: f32) -> Vec<Vec<usize>> {
+    let avail = seg_line_room(avail);
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    let mut used = 0.0_f32;
+    for (i, l) in labels.iter().enumerate() {
+        let w = seg_width(l.as_ref());
+        match lines.last_mut() {
+            Some(line) if used + SP[1] + w <= avail => {
+                line.push(i);
+                used += SP[1] + w;
+            }
+            _ => {
+                lines.push(vec![i]);
+                used = w;
+            }
+        }
+    }
+    lines
+}
+
+/// The fields' width in the 390 phone's sheet: the window less the sheet's 20 on each side.
+pub const NARROW_SHEET_FIELD_W: f32 = 390.0 - 2.0 * SP[4];
+
+/// The width the form's fields get: the detail panel less its 1 dp border and 16 padding on
+/// each side inline, or the sheet less its 20 padding on each side.
+pub fn form_field_width(window_w: f32, panel_w: f32, layout: FormLayout) -> f32 {
+    match layout {
+        FormLayout::Inline => panel_w - 2.0 - 2.0 * 16.0,
+        // An unknown window (0 before the first size event) packs against the narrowest sheet,
+        // the 390 phone's, so nothing runs off it and the lines are not one option each.
+        FormLayout::Sheet if window_w <= 0.0 => NARROW_SHEET_FIELD_W,
+        FormLayout::Sheet => {
+            super::components::sheet_width(window_w, super::components::SHEET_WIDTH_DEFAULT) - 2.0 * SP[4]
+        }
+    }
+    .max(0.0)
+}
+
+/// Choice segments in wrapped lines (`seg_lines`): `labels[i]` is chosen when `selected(i)`,
+/// and a tap calls `on_pick(i)`.
+fn SegChoices(
+    labels: &[String],
+    avail: f32,
+    selected: impl Fn(usize) -> bool,
+    on_pick: impl Fn(usize) + Clone + 'static,
+) {
+    let lines = seg_lines(labels, avail);
+    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+        for line in &lines {
+            cu::Row().spacing(SP[1]).content(|| {
+                for &i in line {
+                    let pick = on_pick.clone();
+                    FilterSegButton(&labels[i], selected(i), move || pick(i));
+                }
+            });
+        }
+    });
+}
+
+/// A segment pill button matching the mockup (`.seg button`): 32px height, pill shape, 13/500
+/// text, ink fill when selected, surface with line border when unselected. The list's project
+/// filter and the form's one-of choices (프로젝트, 트리거, 컴퓨터) both use it: the shared
+/// `PickChip` is the composer's dropdown chip (`.pickchip`), whose label takes the toolkit's
+/// button type and whose chosen state is `sel` on `surface-2`, too faint to read as chosen
+/// (#493).
+fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let (bg, border, fg) = seg_colors(selected, p);
+    let width = seg_width(text);
     cu::Box()
         .modifier(
             Modifier::new()
@@ -1421,7 +1525,7 @@ fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static)
         )
         .alignment(Alignment::Center)
         .content(move || {
-            Label(text, Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
+            Label(text, SEG_FS, Weight::Medium, Some(paint(fg)), Some(1));
             FocusOverlay(text, on_click);
         });
 }
@@ -2153,11 +2257,13 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool) {
 /// written once (FR-L25, #511).
 #[derive(Clone)]
 struct FormCtx {
+    /// The fields' width, for wrapping the choice segments (`form_field_width`). The screen
+    /// passes it in: inside the sheet's content the window size reads 0 (#493).
+    field_w: f32,
     draft: MutableState<FormDraft>,
     tried: MutableState<bool>,
     initial: FormDraft,
     editing: bool,
-    server: bool,
     computers: Vec<(String, String)>,
     projects: Vec<String>,
 }
@@ -2181,10 +2287,11 @@ fn form_save_handler(
 fn RoutineForm(
     initial: FormDraft,
     editing: Option<String>,
-    server: bool,
+    _server: bool,
     computers: &[(String, String)],
     projects: &[String],
     layout: FormLayout,
+    field_w: f32,
     draft: &MutableState<FormDraft>,
     on_save: impl FnMut(FormDraft) + Clone + 'static,
     on_close: impl FnMut() + Clone + 'static,
@@ -2193,11 +2300,11 @@ fn RoutineForm(
     let draft = draft.clone();
     let tried = remember(|| mutable_state_of(false));
     let ctx = FormCtx {
+        field_w,
         draft,
         tried,
         initial: initial.clone(),
         editing: editing.is_some(),
-        server,
         computers: computers.to_vec(),
         projects: projects.to_vec(),
     };
@@ -2272,7 +2379,8 @@ fn RoutineForm(
 /// The fields, in `FORM_FIELDS` order, for both shells.
 fn FormFields(ctx: &FormCtx) {
     let p = ember_theme().palette;
-    let (draft, tried, initial, server) = (&ctx.draft, &ctx.tried, &ctx.initial, ctx.server);
+    let field_w = ctx.field_w;
+    let (draft, tried, initial) = (&ctx.draft, &ctx.tried, &ctx.initial);
     let editing = ctx.editing;
     let agents = live_agents();
     let d = draft.get();
@@ -2286,7 +2394,7 @@ fn FormFields(ctx: &FormCtx) {
         .copied()
         .filter(|h| harness_block(*h, &agents, &[]).is_none())
         .collect();
-    let models = model_choices(&model_catalog(), &allowed, d.sel.option.harness, server);
+    let models = model_choices(&model_catalog(), &allowed, d.sel.option.harness, false);
     let model_labels: Vec<String> = models.iter().map(|o| o.chip_label()).collect();
     let model_at = models.iter().position(|o| *o == d.sel.option).unwrap_or(0);
     let modes: Vec<crate::ui::home::PermMode> = modes_for(d.sel.option.harness).to_vec();
@@ -2296,33 +2404,21 @@ fn FormFields(ctx: &FormCtx) {
 
     if editing {
         Label(
-            "입력하지 않은 항목은 지금 값을 유지합니다",
+            "바꾸지 않은 항목은 지금 값을 유지합니다",
             Fs::Xs,
             Weight::Regular,
             Some(paint(p.muted)),
             None,
         );
     }
-    // TODO(compose-rust#374): the text field has no initial value, so each text field shows the
-    // stored value on a "현재 값" line above it and stays empty; typing replaces the value,
-    // leaving it empty keeps it. The pickers start on the stored project, harness, model, mode
-    // and computer (the draft is built by `FormDraft::from_routine`).
     for f in FORM_FIELDS {
         match f {
             FormField::Name => {
                 FormLabel("이름");
-                if server {
-                    Label(NAME_SERVER_REASON, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-                } else {
-                    CurrentValue(editing, &initial.name);
-                }
                 let draft_name = draft.clone();
                 EmberField(FieldOptions {
                     fill_max_width: true,
-                    // TODO(server): `SchedulePatch` takes no name, so a server routine's name is
-                    // shown as is and cannot be edited.
-                    text: server.then(|| initial.name.clone()),
-                    enabled: server.then_some(false),
+                    text: Some(d.name.clone()),
                     placeholder: if editing {
                         "바꾸려면 새 이름을 입력하세요".to_string()
                     } else {
@@ -2336,33 +2432,20 @@ fn FormFields(ctx: &FormCtx) {
             }
             FormField::Project => {
                 FormLabel("프로젝트");
-                FrozenReason(server);
-                cu::ScrollRow()
-                    .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
-                    .content(|| {
-                        for name in &project_choices {
-                            let sel_proj = draft.clone();
-                            let n = name.clone();
-                            let selected = d.sel.project == *name;
-                            PickChip(name, None, selected, false, move || {
-                                if server {
-                                    return;
-                                }
-                                sel_proj.update(|d| d.sel.project = n.clone());
-                            });
-                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                        }
-                    });
+                // Wrapped, never scrolled sideways, so the chosen one is always in view (#493).
+                let (sel_proj, names) = (draft.clone(), project_choices.clone());
+                SegChoices(&project_choices, field_w, |i| d.sel.project == project_choices[i], move |i| {
+                    let n = names[i].clone();
+                    sel_proj.update(|d| d.sel.project = n);
+                });
             }
             FormField::Trigger => {
                 FormLabel("트리거");
-                cu::Row().spacing(SP[1]).content(|| {
-                    for t in Trigger::ALL {
-                        let sel_trig = draft.clone();
-                        PickChip(t.label(), None, d.trigger == t, false, move || {
-                            sel_trig.update(|d| *d = d.with_trigger(t));
-                        });
-                    }
+                let labels: Vec<String> = Trigger::ALL.iter().map(|t| t.label().to_string()).collect();
+                let sel_trig = draft.clone();
+                SegChoices(&labels, field_w, |i| d.trigger == Trigger::ALL[i], move |i| {
+                    let t = Trigger::ALL[i];
+                    sel_trig.update(|d| *d = d.with_trigger(t));
                 });
             }
             FormField::ScheduleDescription => {
@@ -2372,7 +2455,6 @@ fn FormFields(ctx: &FormCtx) {
             }
             FormField::Schedule => {
                 FormLabel(if d.trigger == Trigger::Time { "cron" } else { "이벤트" });
-                CurrentValue(editing && initial.trigger == d.trigger, &initial.cron);
                 let sel_cron = draft.clone();
                 let ph = if editing && initial.trigger == d.trigger {
                     "바꾸려면 새 값을 입력하세요".to_string()
@@ -2383,6 +2465,7 @@ fn FormFields(ctx: &FormCtx) {
                 };
                 EmberField(FieldOptions {
                     fill_max_width: true,
+                    text: Some(d.cron.clone()),
                     placeholder: ph,
                     on_value_change: Some(Box::new(move |v| {
                         sel_cron.update(|d| d.cron = v);
@@ -2392,7 +2475,6 @@ fn FormFields(ctx: &FormCtx) {
             }
             FormField::Model => {
                 FormLabel("하네스 · 모델 · 추론 강도");
-                FrozenReason(server);
                 let (pick, choices) = (draft.clone(), models.clone());
                 Select(&model_labels[model_at.min(model_labels.len().saturating_sub(1))], &model_labels, model_at, 320.0, move |i| {
                     if let Some(o) = choices.get(i).copied() {
@@ -2414,38 +2496,26 @@ fn FormFields(ctx: &FormCtx) {
             }
             FormField::Computer => {
                 FormLabel("컴퓨터");
-                FrozenReason(server);
-                cu::ScrollRow()
-                    .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
-                    .content(|| {
-                        let sel_c = draft.clone();
-                        PickChip("이 서버", None, d.sel.computer.is_none(), false, move || {
-                            if !server {
-                                sel_c.update(|d| d.sel.computer = None);
-                            }
-                        });
-                        cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                        for (cid, cname) in &ctx.computers {
-                            let sel_c = draft.clone();
-                            let cid_clone = cid.clone();
-                            let selected = d.sel.computer.as_deref() == Some(cid.as_str());
-                            PickChip(cname, None, selected, false, move || {
-                                if !server {
-                                    sel_c.update(|d| d.sel.computer = Some(cid_clone.clone()));
-                                }
-                            });
-                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                        }
-                    });
+                // "이 서버" first, then the computers; `None` is this server.
+                let ids: Vec<Option<String>> =
+                    std::iter::once(None).chain(ctx.computers.iter().map(|(id, _)| Some(id.clone()))).collect();
+                let labels: Vec<String> = std::iter::once("이 서버".to_string())
+                    .chain(ctx.computers.iter().map(|(_, name)| name.clone()))
+                    .collect();
+                let (sel_c, pick_ids) = (draft.clone(), ids.clone());
+                SegChoices(&labels, field_w, |i| d.sel.computer == ids[i], move |i| {
+                    let c = pick_ids[i].clone();
+                    sel_c.update(|d| d.sel.computer = c);
+                });
             }
             FormField::Prompt => {
                 FormLabel("프롬프트");
-                CurrentValue(editing, &initial.prompt);
                 let sel_p = draft.clone();
                 EmberField(FieldOptions {
                     fill_max_width: true,
                     height: Some(120.0),
                     multiline: true,
+                    text: Some(d.prompt.clone()),
                     placeholder: if editing {
                         "바꾸려면 새 지시를 입력하세요".to_string()
                     } else {
@@ -2463,21 +2533,6 @@ fn FormFields(ctx: &FormCtx) {
         for e in errors {
             Label(e.message(), Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
         }
-    }
-}
-
-/// The reason beside the chips a server routine cannot change (TODO(server)).
-fn FrozenReason(server: bool) {
-    if server {
-        Label(SERVER_CANNOT_CHANGE, Fs::Xs, Weight::Regular, Some(paint(ember_theme().palette.muted)), Some(1));
-    }
-}
-
-/// The stored value of a text field in the edit form, as a muted line above the field (#493).
-fn CurrentValue(show: bool, value: &str) {
-    let line = current_value_line(value);
-    if show && !line.is_empty() {
-        Label(&line, Fs::Xs, Weight::Regular, Some(paint(ember_theme().palette.text_2)), Some(4));
     }
 }
 
@@ -2508,6 +2563,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::ClaudeCode),
                     computer: Some("mac-mini".into()),
                 },
+                continue_session: None,
             },
             runs: vec![
                 Run {
@@ -2542,6 +2598,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::Codex),
                     computer: Some("mac-mini".into()),
                 },
+                continue_session: None,
             },
             runs: vec![
                 Run {
@@ -2571,6 +2628,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::ClaudeCode),
                     computer: Some("ws-linux-01".into()),
                 },
+                continue_session: None,
             },
             runs: vec![Run {
                 at: now - 5 * 1440,
@@ -2593,6 +2651,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::Codex),
                     computer: Some("win-desktop".into()),
                 },
+                continue_session: None,
             },
             runs: vec![
                 Run {
@@ -2622,6 +2681,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::ClaudeCode),
                     computer: Some("ws-linux-01".into()),
                 },
+                continue_session: None,
             },
             runs: vec![
                 Run {
@@ -2651,6 +2711,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::Gemini),
                     computer: Some("win-desktop".into()),
                 },
+                continue_session: None,
             },
             runs: vec![Run {
                 at: now - 3 * 1440,
@@ -2673,6 +2734,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::ClaudeCode),
                     computer: Some("mac-mini".into()),
                 },
+                continue_session: None,
             },
             runs: vec![Run {
                 at: now - 1440,
@@ -2714,6 +2776,7 @@ mod tests {
                 project: project.into(),
                 ..Selection::initial()
             },
+            continue_session: None,
         }
     }
 
@@ -3044,6 +3107,69 @@ mod tests {
         assert!(!screen.contains("pan.set(Panel::Edit"));
         assert!(!screen.contains("panel_new.set"));
         assert_eq!(ROUTINE_DISCARD_QUESTION, "변경 사항을 버릴까요?");
+    }
+
+    /// The form's one-of choices are the mockup's `.seg` buttons: 13/500 text, and the chosen
+    /// one in `ink`, not the composer's dropdown chip with its faint `sel` fill (#493).
+    #[test]
+    fn fr_l25_form_choices_are_segments_with_an_ink_chosen_state() {
+        assert_eq!((SEG_FS, SEG_FS.size()), (Fs::Sm, 13.0));
+        for p in [&LIGHT, &DARK] {
+            assert_eq!(seg_colors(true, p), (p.ink, p.ink, p.ink_text));
+            assert_eq!(seg_colors(false, p), (p.surface, p.line, p.text_2));
+        }
+        let src = include_str!("routines.rs");
+        let form = src.split("fn FormFields(").nth(1).unwrap().split("\nfn FormLabel(").next().unwrap();
+        for field in ["FormField::Project", "FormField::Trigger", "FormField::Computer"] {
+            let arm = form.split(field).nth(1).unwrap().split("FormField::").next().unwrap();
+            assert!(arm.contains("SegChoices("), "{field} uses the wrapped segments");
+            assert!(!arm.contains("ScrollRow("), "{field} never scrolls sideways");
+            assert!(!arm.contains("PickChip("), "{field} does not use the dropdown chip");
+        }
+    }
+
+    /// At 390 the 프로젝트 segments wrap onto more lines instead of scrolling, so every option
+    /// and the chosen one are in view; no line is wider than the sheet's fields (#493).
+    #[test]
+    fn fr_l25_form_segments_wrap_to_the_field_width() {
+        let projects = ["기본 프로젝트", "demo-project", "second-project", "ember"];
+        let phone = form_field_width(390.0, 0.0, FormLayout::Sheet);
+        assert_eq!(phone, 350.0);
+        let (content, _) = content_at(1440.0);
+        let wide = form_field_width(1440.0, detail_panel_width(1440.0, content, false), FormLayout::Inline);
+        for avail in [phone, wide] {
+            let lines = seg_lines(&projects, avail);
+            let flat: Vec<usize> = lines.iter().flatten().copied().collect();
+            assert_eq!(flat, vec![0, 1, 2, 3], "every option once, in order, at {avail}");
+            for line in &lines {
+                let w: f32 = line.iter().map(|&i| seg_width(projects[i])).sum::<f32>()
+                    + SP[1] * (line.len() as f32 - 1.0);
+                assert!(w <= avail, "a line of {w} fits {avail}");
+            }
+        }
+        assert!(seg_lines(&projects, phone).len() >= 2, "the phone wraps");
+        // The 390 sheet: 기본 프로젝트 and demo-project share a line; second-project and the
+        // chosen ember go below, so ember is in view (r3 capture of #720 had all on one line).
+        assert_eq!(seg_lines(&projects, phone), vec![vec![0, 1], vec![2, 3]]);
+        for line in seg_lines(&projects, phone) {
+            let w: f32 = line.iter().map(|&i| seg_width(projects[i])).sum::<f32>() + SP[1] * (line.len() as f32 - 1.0);
+            assert!(w <= phone - SP[1], "a 390 line of {w} keeps a gap from the sheet's edge");
+        }
+        assert_eq!(
+            form_field_width(0.0, 0.0, FormLayout::Sheet),
+            NARROW_SHEET_FIELD_W,
+            "an unknown window packs against the 390 sheet"
+        );
+        assert_eq!(seg_lines(&projects, NARROW_SHEET_FIELD_W), vec![vec![0, 1], vec![2, 3]]);
+        // The screen works the width out before the sheet opens and hands it down.
+        let src = include_str!("routines.rs");
+        let fields = src.split("fn FormFields(").nth(1).unwrap().split("\nfn FormLabel(").next().unwrap();
+        assert!(!fields.contains("current_window_size()"), "the fields never read the window inside the sheet");
+        assert!(src.contains("let form_w_sheet = form_field_width(window.width_dp, panel_w, FormLayout::Sheet);"));
+        assert!(src.contains("            form_w_sheet,\n            &form_draft,"), "the sheet gets the screen's width");
+        assert_eq!(seg_lines(&projects, wide).len(), 1, "the wide inline form keeps one line");
+        // A segment wider than the room still gets its own line rather than vanishing.
+        assert_eq!(seg_lines(&["a-very-long-project-name-indeed"], 100.0), vec![vec![0]]);
     }
 
     #[test]
@@ -3811,6 +3937,7 @@ mod tests {
                 prompt: "로컬 프롬프트".into(),
                 enabled: true,
                 sel: Selection::initial(),
+                continue_session: None,
             });
         });
         assert!(with_store(|s| s.entries().iter().any(|e| e.routine.id == "test-rt-local")));
@@ -3826,6 +3953,7 @@ mod tests {
                 prompt: "로컬 프롬프트 2".into(),
                 enabled: true,
                 sel: Selection::initial(),
+                continue_session: None,
             });
         });
         assert!(with_store(|s| s.entries().iter().any(|e| e.routine.id == "test-rt-local-2")));
@@ -3884,6 +4012,94 @@ mod tests {
                 );
             }
         }
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l25_host_edit_form_prefills_fields_and_allows_editing() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let entries = sample_entries();
+        let target = &entries[0].routine;
+        let initial = FormDraft::from_routine(target);
+        let draft = mutable_state_of(initial.clone());
+        let computers = vec![("mac-mini".to_string(), "Mac mini".to_string())];
+        let projects = vec!["ember".to_string(), "core".to_string()];
+
+        let mut host = Host::new({
+            let initial = initial.clone();
+            let draft = draft.clone();
+            move || {
+                let initial = initial.clone();
+                let draft = draft.clone();
+                let computers = computers.clone();
+                let projects = projects.clone();
+                Box::new(Recomposer::new(move || {
+                    RoutineForm(
+                        initial.clone(),
+                        Some("rt1".to_string()),
+                        true,
+                        &computers,
+                        &projects,
+                        FormLayout::Inline,
+                        form_field_width(1440.0, 742.0, FormLayout::Inline),
+                        &draft,
+                        |_| {},
+                        || {},
+                    );
+                }))
+            }
+        });
+
+        let mutations = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let text_fields: Vec<u32> = mutations
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create {
+                    node_id,
+                    widget: WidgetKind::TextField,
+                } => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text_fields.len(), 3, "expected Name, Schedule, and Prompt TextFields");
+
+        let field_texts: Vec<&str> = mutations
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::Text,
+                    value: PropertyValue::String(s),
+                } if text_fields.contains(node_id) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            field_texts.contains(&target.name.as_str()),
+            "expected Name TextField pre-filled with '{}', got {field_texts:?}",
+            target.name
+        );
+        assert!(
+            field_texts.contains(&target.cron.as_str()),
+            "expected Schedule TextField pre-filled with '{}', got {field_texts:?}",
+            target.cron
+        );
+        assert!(
+            field_texts.contains(&target.prompt.as_str()),
+            "expected Prompt TextField pre-filled with '{}', got {field_texts:?}",
+            target.prompt
+        );
+
+        let any_disabled = mutations.iter().any(|m| match m {
+            Mutation::SetProp {
+                node_id,
+                property: PropertyKind::Enabled,
+                value: PropertyValue::Bool(false),
+            } if text_fields.contains(node_id) => true,
+            _ => false,
+        });
+        assert!(!any_disabled, "none of the edit form text fields should be disabled");
         compose_rust::window::reset_window_size();
     }
 

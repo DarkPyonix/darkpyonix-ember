@@ -1,7 +1,7 @@
-// HTTP client for the DarkPyonix Kernel Manager API (manager.openapi.yaml 1.0.0-draft.3).
+// HTTP client for the DarkPyonix Kernel Manager API (manager.openapi.yaml 1.0.0-draft.4).
 import { EventStream, type EventStreamOptions } from "./sse";
 import type {
-  ApiErrorBody, Document, DocumentCell, Kernel, KernelEvent, Lock, Presence, RunAccepted, RunRequest, Cursor,
+  ApiErrorBody, Capability, Document, DocumentCell, Kernel, KernelEvent, Lock, Presence, RunAccepted, RunRequest, Cursor,
 } from "./types";
 
 export interface ClientIdentity {
@@ -84,7 +84,7 @@ export class ManagerClient {
   health(): Promise<{ status: string; version: string }> {
     return this.request("GET", "/health", undefined, 3000);
   }
-  manager(): Promise<{ version: string; mode: string; pid: number; permission: string }> {
+  manager(): Promise<{ version: string; mode: "ephemeral" | "dedicated"; pid: number; started_at: string; idle_timeout?: number | null; capabilities: Capability[] }> {
     return this.request("GET", `${API}/manager`);
   }
   async listKernels(): Promise<Kernel[]> {

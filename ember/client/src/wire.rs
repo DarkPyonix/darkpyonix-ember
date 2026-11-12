@@ -729,6 +729,17 @@ pub struct NewSchedule {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct SchedulePatch {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// For `new` sessions: `Some("")` clears `computer_id` to `None` (this server).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub computer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<ScheduleTarget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<ScheduleKind>,

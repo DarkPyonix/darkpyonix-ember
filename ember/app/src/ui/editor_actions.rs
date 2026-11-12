@@ -16,7 +16,7 @@ pub const NOT_READY: &str = "준비 중입니다";
 pub const MAX_CLOSED_EDITORS: usize = 20;
 
 /// The open issue an action waits for, when the window cannot do it yet. `None` for an action
-/// the window does, and for one with no issue yet.
+/// the window does.
 pub fn pending_issue(action: Action) -> Option<u32> {
     match action {
         // Code-OSS runs these through the debug service (Run Without Debugging, Stop).
@@ -25,6 +25,8 @@ pub fn pending_issue(action: Action) -> Option<u32> {
         Action::Format => Some(442),
         // A second terminal needs the terminal list (FR-P6).
         Action::NewTerminal => Some(337),
+        // The agent window on the right stripe.
+        Action::Ask => Some(766),
         _ => None,
     }
 }
@@ -38,10 +40,11 @@ pub fn not_ready_notice(action: Action) -> String {
 }
 
 /// The notice of a tool window with no panel yet (the right stripe). The notification centre
-/// belongs with the extension notifications (#448); the agent window has no issue yet.
+/// belongs with the extension notifications (#448); the agent window is #766.
 pub fn tool_window_notice(w: ToolWindow) -> String {
     match w {
         ToolWindow::Notifications => format!("{}: {NOT_READY} (#448)", w.label()),
+        ToolWindow::Agent => format!("{}: {NOT_READY} (#766)", w.label()),
         _ => format!("{}: {NOT_READY}", w.label()),
     }
 }
@@ -128,8 +131,9 @@ mod tests {
         assert_eq!(not_ready_notice(Action::NewTerminal), "새 터미널: 준비 중입니다 (#337)");
         assert_eq!(not_ready_hint(Action::Format), "준비 중 (#442)");
         assert!(tool_window_notice(ToolWindow::Notifications).ends_with("(#448)"));
-        assert!(!tool_window_notice(ToolWindow::Agent).contains('#'));
-        assert_eq!(not_ready_hint(Action::Ask), "준비 중");
+        assert!(tool_window_notice(ToolWindow::Agent).ends_with("(#766)"));
+        assert_eq!(not_ready_hint(Action::Ask), "준비 중 (#766)");
+        assert_eq!(not_ready_notice(Action::Ask), "에이전트에게 묻기: 준비 중입니다 (#766)");
         for a in Action::ALL {
             assert!(!not_ready_notice(a).contains('\u{2014}'));
         }
@@ -137,12 +141,11 @@ mod tests {
 
     #[test]
     fn fr_l31_15_every_action_is_built_or_waits_for_an_issue() {
-        // An action is done, or it waits for an issue, except the right-side agent window, which
-        // has no issue yet.
+        // An action is done, or it waits for an issue.
         for a in Action::ALL {
             let done = super::super::editor::is_implemented(a);
             let waits = pending_issue(a).is_some();
-            assert!(done != waits || a == Action::Ask, "{a:?}");
+            assert!(done != waits, "{a:?}");
         }
     }
 

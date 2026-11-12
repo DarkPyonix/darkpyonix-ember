@@ -32,7 +32,7 @@ The owner's rule [user, 2026-11-06, `INTENT.md` D38]: the Ember editor does what
 | Notifications, progress, extension quick picks | MainThreadMessageService, Progress, QuickOpen | 부분 (MainThreadMessageService $showMessage decoded and surfaced to notices/logs; Progress, QuickOpen auto-dismissed) | EH-REG | #448 |
 | Status bar, language mode, encoding, EOL | Status bar items | 부분 (cursor position live, LF and UTF-8 constants) | Native plus document data | #453 |
 | Breadcrumbs | Path and symbols | 부분 (path only) | Document symbols need the language providers | #453, #442 |
-| Workspace trust | Trust service and restricted mode | 없음 (always trusted) | EH-REG `$requestWorkspaceTrust` plus a native dialog | #450 |
+| Workspace trust | Trust service and restricted mode | 부분 (`FR-L31.18`: startup prompt, per-folder memory per device, restricted mode withholding extensions without untrusted support, banner, `$requestWorkspaceTrust` prompt, grant via `$deltaExtensions` and `$onDidGrantWorkspaceTrust`; no trust editor, no 제한 모드 status bar item, no revoke without reopening) | EH-REG plus a native dialog | #450 |
 | Save, auto-save, hot exit | Backup service, auto-save setting | 부분 (save 있음; failure not shown; no auto-save or hot exit) | Native; write through `remoteFilesystem` | #451 |
 | File watching, external change | Server file watcher | 부분 (session reloads clean buffers; the window shows nothing) | EXISTS: watch and fileChange | #451 |
 | Webviews, custom editors, notebooks, markdown preview | Origin-isolated iframes from the webview host | 없음 | WEBVIEW only (E5 allows one in the IDE window); decision first | #452 |

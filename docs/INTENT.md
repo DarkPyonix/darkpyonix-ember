@@ -949,4 +949,14 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 
 **Status.** Specified (`FR-W4a` to `FR-W4c`, Draft; issue #457). Local server OSE and its relay are in #458/#459/#461; node OSE routes and server-to-node relay follow this spec.
 
+### D43: Workspace trust in the Ember 에디터 guards extensions, not the computer
 
+**Decision.** [provisional, 2026-11-13, #450; basis: D38 "기능은 oss랑 동일하고 디자인은 목업"; owner confirmation pending] The Ember 에디터 window has Code-OSS's workspace trust (`FR-L31.18`): on the first open of a folder it asks whether the user trusts the authors of its files, remembers the answer per device for that computer and folder (a trusted folder covers the folders below it), and runs an untrusted folder in restricted mode with a banner.
+
+What trust protects, in Ember as in Code-OSS: code in the folder is not run by the editor on its own. Extensions that have not declared `capabilities.untrustedWorkspaces` support (and those that depend on them) are not started, the extension host reports `workspace.isTrusted` as false, and run, debug and tasks are refused.
+
+What trust does not protect. Under D37 agents and terminals run with the full authority of the server user on that computer whether or not the folder is trusted. An agent session or a terminal on an untrusted folder can still run its scripts, its git hooks and its build. Trust is not a sandbox and not a per-device scope (#366); the prompt says so in one sentence.
+
+**Why.** Opening a cloned repository in an editor should not run its code by surprise; extensions such as language servers and task runners read settings and binaries from the folder, and Code-OSS guards exactly that path. Saying what is outside the guard keeps users from reading 제한 모드 as a safe place to run an agent.
+
+**Rejected.** Always trusted (the state before #450): it runs a hostile folder's extension-driven code with no question. Applying trust to agents and terminals: that would change D37 and the agent model, and the agents' own harnesses have their own permission prompts. Keeping the answer on the server: trust is a judgement of the person at this device, as Code-OSS keeps it in its local storage.

@@ -56,7 +56,9 @@ adb shell am start -n dev.darkpyonix.ember/dev.dioxus.main.MainActivity \
 
 The script is `dx build --platform android --target aarch64-linux-android` with
 `COMPOSE_RUST_ANDROID_KOTLIN_DIR` set to the generated project's Kotlin source root, so that
-compose-rust writes no Activity over Ember's own.
+compose-rust writes no Activity over Ember's own, and with the Gradle daemon off
+(`GRADLE_OPTS=-Dorg.gradle.daemon=false`: dx generates the Gradle project, so there is no
+`gradle.properties` of Ember's to put it in).
 
 | Piece | What |
 |---|---|

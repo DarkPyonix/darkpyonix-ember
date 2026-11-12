@@ -36,6 +36,10 @@ project="$PWD/target/dx/ember-app/$profile/android/app"
 # through `android_main_activity` in Dioxus.toml), and the generated one would replace it.
 export COMPOSE_RUST_ANDROID_KOTLIN_DIR="$project/app/src/main/kotlin"
 
+# dx runs the Gradle build itself and has no flag for it, so the daemon is switched off through
+# the environment: a daemon left behind holds its heap on a shared machine.
+export GRADLE_OPTS="${GRADLE_OPTS:-} -Dorg.gradle.daemon=false"
+
 dx build --platform android --target aarch64-linux-android ${args[@]+"${args[@]}"}
 
 find "$project/app/build/outputs/apk" -name '*.apk' -print

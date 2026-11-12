@@ -370,7 +370,7 @@ pub fn view_from_saved(saved: Option<&str>) -> SessionView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneLayout {
     pub per_row: usize,
-    /// One pane at a time with previous and next buttons (the swipe of the design).
+    /// One pane per screen width in a sideways-scrolling strip (the swipe of the design).
     pub paged: bool,
 }
 
@@ -411,6 +411,42 @@ pub fn page_step(current: usize, count: usize, forward: bool) -> usize {
     } else {
         cur.saturating_sub(1)
     }
+}
+
+/// The multi view's layout for a window width (mockup `session.css`): two panes per row
+/// from 700 dp, panes stacked one per row above 560 dp (`.mv` is a column there), and the
+/// sideways strip only at 560 dp and below. An unreported width falls back to the size class.
+pub fn multi_pane_layout(window_dp: f32, class: WindowSizeClass) -> PaneLayout {
+    if window_dp >= 700.0 {
+        PaneLayout { per_row: 2, paged: false }
+    } else if window_dp > 560.0 {
+        PaneLayout { per_row: 1, paged: false }
+    } else if window_dp > 0.0 {
+        PaneLayout { per_row: 1, paged: true }
+    } else {
+        pane_layout(class)
+    }
+}
+
+/// Padding on each side of the multi view's column (`SpaceRole::Sm`).
+pub const SWIPE_COLUMN_PAD: f32 = 8.0;
+/// Gap between panes in the swipe strip (`SP[1]`, mockup `.mv` gap `--sp2`).
+pub const SWIPE_GAP: f32 = 8.0;
+/// How much of the next pane shows at the right edge.
+/// TODO(compose-rust#547): a stand-in. Once the toolkit has scroll snapping, the strip should
+/// centre each pane as the mockup does (`calc(100% - 8px)`, 4 dp of the neighbours on each
+/// side) and this peek goes away.
+pub const SWIPE_PEEK: f32 = 24.0;
+
+/// Width of one pane in the swipe strip that replaces the one-pane-at-a-time layout
+/// (mockup `session.css` at 560 px: `.mv` scrolls sideways with padding and gap of
+/// `--sp2`). The mockup's `calc(100% - 8px)` equals the gap, so with the pane at the left
+/// edge nothing of the next one shows; the pane is narrowed by the gap plus a visible peek
+/// so the next pane always shows. An unreported width (0 dp in the first frame) is treated
+/// as 390 dp, the phone width of the design.
+pub fn swipe_pane_width(window_dp: f32) -> f32 {
+    let w = if window_dp > 0.0 { window_dp } else { 390.0 };
+    (w - 2.0 * SWIPE_COLUMN_PAD - SWIPE_GAP - SWIPE_PEEK).max(120.0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1364,6 +1400,30 @@ pub fn session_count_rows(members: &[Member]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l18_multi_layout_stacks_at_600_and_strips_only_at_phone_width() {
+        let c = WindowSizeClass::Compact;
+        assert_eq!(super::multi_pane_layout(600.0, c), PaneLayout { per_row: 1, paged: false });
+        assert_eq!(super::multi_pane_layout(561.0, c), PaneLayout { per_row: 1, paged: false });
+        assert_eq!(super::multi_pane_layout(560.0, c), PaneLayout { per_row: 1, paged: true });
+        assert_eq!(super::multi_pane_layout(390.0, c), PaneLayout { per_row: 1, paged: true });
+        assert_eq!(super::multi_pane_layout(1024.0, c), PaneLayout { per_row: 2, paged: false });
+    }
+
+    #[test]
+    fn fr_l18_swipe_pane_width_leaves_the_next_pane_peeking() {
+        for w in [0.0_f32, 360.0, 390.0, 560.0] {
+            let window = if w > 0.0 { w } else { 390.0 };
+            let column = window - 2.0 * super::SWIPE_COLUMN_PAD;
+            let pane = super::swipe_pane_width(w);
+            let peek = column - pane - super::SWIPE_GAP;
+            assert!(peek > 0.0, "no visible peek at {w}");
+            assert_eq!(peek, super::SWIPE_PEEK);
+        }
+        assert_eq!(super::swipe_pane_width(390.0), 342.0);
+        assert_eq!(super::swipe_pane_width(100.0), 120.0);
+    }
+
     use super::*;
     use crate::ide::IdeKind;
     use crate::ui::project::{Member, ProjectBox};

@@ -469,6 +469,27 @@ impl EditorSession {
         self.send(Command::Input(Input::Replace { id, request }))
     }
 
+    /// Change the line ending of an open document (FR-L31.6); answered with
+    /// [`SessionUpdate::Format`] and [`SessionUpdate::Dirty`].
+    pub fn set_eol(&self, uri: UriComponents, eol: crate::text_format::Eol) -> Result<(), Error> {
+        self.send(Command::Input(Input::SetEol { uri, eol }))
+    }
+
+    /// Reopen or save an open document in `encoding` (FR-L31.6).
+    pub fn set_encoding(
+        &self,
+        uri: UriComponents,
+        encoding: crate::text_format::Encoding,
+        mode: crate::text_format::EncodingMode,
+    ) -> Result<(), Error> {
+        self.send(Command::Input(Input::SetEncoding { uri, encoding, mode }))
+    }
+
+    /// Put an open document under `language_id`, or the one its path gives with `None` (FR-L31.6).
+    pub fn set_language(&self, uri: UriComponents, language_id: Option<String>) -> Result<(), Error> {
+        self.send(Command::Input(Input::SetLanguage { uri, language_id }))
+    }
+
     /// After [`SessionUpdate::Desync`]: re-send the session's text as a new generation.
     pub fn resync(&self, uri: UriComponents) -> Result<(), Error> {
         self.send(Command::Resync(uri))
@@ -552,6 +573,7 @@ impl Driver {
         if !self.commands.is_empty() {
             let _ = self.updates.send(SessionUpdate::Commands { commands: self.commands.clone() });
         }
+        let _ = self.updates.send(SessionUpdate::Languages { languages: self.core.language_list() });
         let mut changes = Some(changes);
         let mut lifecycle = Some(ipc_lifecycle);
         loop {

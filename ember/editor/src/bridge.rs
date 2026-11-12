@@ -36,6 +36,9 @@ pub struct DocumentWidgetState {
     pub external_change: Option<ExternalChange>,
     /// The coloured runs of the syntax and the document version they were written against.
     pub syntax: SyntaxRuns,
+    /// Line ending, encoding and language for the status bar (FR-L31.6); `None` until the session
+    /// reports it.
+    pub format: Option<crate::text_format::DocumentFormat>,
 }
 
 /// The coloured runs the session last reported for a document.
@@ -67,6 +70,8 @@ pub enum BridgeAction {
     },
     /// Running an extension command failed.
     CommandFailed { id: String, error: String },
+    /// Reopening a document with an encoding failed (FR-L31.6).
+    FormatFailed { uri: UriComponents, error: String },
 }
 
 impl BridgeAction {
@@ -178,6 +183,7 @@ impl WidgetBridge {
                         pending_edits: Vec::new(),
                         external_change: None,
                         syntax: SyntaxRuns::default(),
+                        format: None,
                     },
                 );
                 self.active = Some(key);
@@ -292,7 +298,14 @@ impl WidgetBridge {
                 });
                 BridgeAction::ExtensionNotice { severity, message, source }
             }
-            SessionUpdate::Commands { .. } => BridgeAction::None,
+            SessionUpdate::Commands { .. } | SessionUpdate::Languages { .. } => BridgeAction::None,
+            SessionUpdate::Format { uri, format } => {
+                if let Some(doc) = self.docs.get_mut(&uri.key()) {
+                    doc.format = Some(format);
+                }
+                BridgeAction::None
+            }
+            SessionUpdate::FormatFailed { uri, error } => BridgeAction::FormatFailed { uri, error },
             // Search and replace results are the search panel's, not a document's (FR-E7).
             SessionUpdate::SearchHits { .. } | SessionUpdate::SearchDone { .. } | SessionUpdate::ReplaceDone { .. } => BridgeAction::None,
         }

@@ -13,9 +13,9 @@
 //! `onDidCloseTextDocument` + `onDidOpenTextDocument` for content they never saw being typed.
 //!
 //! **Text form.** The widget gets the text joined with `\n`; the mirror keeps the file's own EOL
-//! (`\n` or `\r\n`, normalized like Monaco) for the extension host and for saving. A UTF-8 BOM is
-//! stripped on open and written back on save. Files that are not UTF-8 are refused (no encoding
-//! guessing yet).
+//! (`\n` or `\r\n`, normalized like Monaco) for the extension host and for saving. The file
+//! encoding ([`Encoding`]: UTF-8, UTF-8 with BOM, UTF-16 LE or BE, detected by the BOM) is kept per
+//! document and used on save; files in no supported encoding are refused (no guessing, FR-L31.6).
 
 use ember_editor_conn::document::{DocumentMirror, EditReason, EditorChange, TextEdit};
 use ember_editor_conn::exthost::{
@@ -24,6 +24,7 @@ use ember_editor_conn::exthost::{
 use ember_editor_conn::uri::UriComponents;
 
 use crate::coords::{end_of_insert, WidgetPos, WidgetRange};
+use crate::text_format::{decode_as, encode_as, Encoding, Eol};
 
 const BOM: &str = "\u{feff}";
 
@@ -31,6 +32,9 @@ const BOM: &str = "\u{feff}";
 pub enum DocError {
     #[error("file is not UTF-8")]
     NotUtf8,
+    /// The bytes are not valid in the encoding chosen for them (FR-L31.6).
+    #[error("file is not valid {0}")]
+    BadEncoding(&'static str),
     /// A `CodeChanged` whose version is not the next one: an event was lost or duplicated.
     #[error("widget version {got}, expected {expected}")]
     VersionGap { expected: u32, got: u32 },
@@ -59,7 +63,7 @@ pub struct OpenDocument {
     generation: u64,
     widget_version: u32,
     ext_base: u64,
-    bom: bool,
+    encoding: Encoding,
     /// The file content as last read or written, in mirror form (`mirror.text()`), to tell our own
     /// save echoing back through the watcher from a real external change.
     disk_text: String,
@@ -87,7 +91,9 @@ impl OpenDocument {
         tab_size: u32,
         insert_spaces: bool,
     ) -> (Self, Vec<Call>) {
-        let mirror = DocumentMirror::new(uri.clone(), text, language_id).with_version(ext_version);
+        let encoding = if bom { Encoding::Utf8Bom } else { Encoding::Utf8 };
+        let mut mirror = DocumentMirror::new(uri.clone(), text, language_id).with_version(ext_version);
+        mirror.encoding = encoding.id().to_owned();
         let doc = Self {
             uri,
             language_id: language_id.to_owned(),
@@ -97,7 +103,7 @@ impl OpenDocument {
             generation,
             widget_version: 0,
             ext_base: ext_version,
-            bom,
+            encoding,
             cursor: None,
             tab_size,
             insert_spaces,
@@ -178,14 +184,58 @@ impl OpenDocument {
     pub fn widget_text(&self) -> String {
         self.mirror.lines().join("\n")
     }
-    /// The bytes to write on save: file EOL, BOM if the file had one.
+    /// The bytes to write on save: file EOL, in the document's encoding (BOM included where it has one).
     pub fn save_bytes(&self) -> Vec<u8> {
-        let mut s = String::new();
-        if self.bom {
-            s.push_str(BOM);
+        encode_as(&self.mirror.text(), self.encoding)
+    }
+
+    /// The document's line ending (FR-L31.6).
+    pub fn eol(&self) -> Eol {
+        Eol::from_sequence(self.mirror.eol())
+    }
+
+    /// The document's file encoding (FR-L31.6).
+    pub fn encoding(&self) -> Encoding {
+        self.encoding
+    }
+
+    /// Change the line ending of the whole document (Code-OSS `model.pushEOL`): one extension-host
+    /// version later, no content change, `isEolChange`, and the document dirty. The widget keeps its
+    /// `\n` text and version (it never sees the file's EOL), so `ext_base` moves instead. `None` when
+    /// the document already has this EOL.
+    pub fn set_eol(&mut self, eol: Eol) -> Option<Call> {
+        if self.eol() == eol {
+            return None;
         }
-        s.push_str(&self.mirror.text());
-        s.into_bytes()
+        let ev = self.mirror.set_eol(eol.as_str());
+        self.ext_base += 1;
+        Some(exthost::accept_model_changed(&self.uri, &ev, self.mirror.is_dirty()))
+    }
+
+    /// Use `encoding` from now on (save writes in it); returns `$acceptEncodingChanged`, or `None`
+    /// when it is the current one.
+    pub fn set_encoding(&mut self, encoding: Encoding) -> Option<Call> {
+        if self.encoding == encoding {
+            return None;
+        }
+        self.encoding = encoding;
+        self.mirror.encoding = encoding.id().to_owned();
+        Some(exthost::accept_encoding_changed(&self.uri, encoding.id()))
+    }
+
+    /// Put the document under another language id (Code-OSS `model.setLanguage`): the extension host
+    /// is told with `$acceptModelLanguageChanged` (`onDidChangeTextDocumentLanguage` style
+    /// close + open for extensions), after `onLanguage:<id>` activation. Empty when unchanged.
+    pub fn set_language(&mut self, language_id: &str) -> Vec<Call> {
+        if self.language_id == language_id {
+            return Vec::new();
+        }
+        self.language_id = language_id.to_owned();
+        self.mirror.language_id = language_id.to_owned();
+        vec![
+            exthost::activate_by_event(&format!("onLanguage:{language_id}")),
+            exthost::accept_model_language_changed(&self.uri, language_id),
+        ]
     }
 
     /// Apply one `CodeChanged` and return the `$acceptModelChanged` call. Updates the cursor
@@ -209,14 +259,15 @@ impl OpenDocument {
     /// Replace the whole content (file changed on disk): bump the generation, restart the widget
     /// at version 0, and re-announce the document to the extension host one version later.
     /// Returns the calls: remove (document + editor), then add (document + editor + active).
-    pub fn reset(&mut self, text: &str, bom: bool, generation: u64) -> Vec<Call> {
+    pub fn reset(&mut self, text: &str, encoding: Encoding, generation: u64) -> Vec<Call> {
         let next = self.ext_version() + 1;
         let mut calls = vec![self.remove_call()];
         self.mirror = DocumentMirror::new(self.uri.clone(), text, &self.language_id).with_version(next);
+        self.mirror.encoding = encoding.id().to_owned();
         self.ext_base = next;
         self.widget_version = 0;
         self.generation = generation;
-        self.bom = bom;
+        self.encoding = encoding;
         self.disk_text = self.mirror.text();
         self.cursor = None;
         calls.extend(self.add_calls());
@@ -238,7 +289,7 @@ impl OpenDocument {
     /// completed. Returns the calls: always `$acceptModelSaved` (fires `onDidSaveTextDocument`),
     /// and `$acceptDirtyStateChanged(true)` when the user typed while the write was in flight.
     pub fn saved(&mut self, saved_ext_version: u64, bytes: &[u8]) -> Vec<Call> {
-        if let Ok((text, _)) = decode(bytes) {
+        if let Ok(text) = decode_as(bytes, self.encoding) {
             self.disk_text = DocumentMirror::new(self.uri.clone(), &text, &self.language_id).text();
         }
         let mut calls = vec![exthost::accept_model_saved(&self.uri)];
@@ -327,7 +378,7 @@ mod tests {
         d.apply_widget_change(2, WidgetRange::empty(p(0, 2)), "c").unwrap();
         assert_eq!(d.ext_version(), 3);
 
-        let calls = d.reset("fresh\r\ncontent", false, 2);
+        let calls = d.reset("fresh\r\ncontent", Encoding::Utf8, 2);
         assert_eq!(d.generation(), 2);
         assert_eq!(d.widget_version(), 0);
         assert_eq!(d.ext_version(), 4);
@@ -353,6 +404,68 @@ mod tests {
         assert_eq!(decode(b"\xff\xfe").unwrap_err(), DocError::NotUtf8);
         let (d, _) = OpenDocument::open(UriComponents::remote("h", "/w/a"), "hi", true, "plaintext", "e", 1, 1, 4, true);
         assert_eq!(d.save_bytes(), b"\xef\xbb\xbfhi".to_vec());
+    }
+
+    // FR-L31.6: the EOL change goes to the extension host as a model change one version later, keeps
+    // the widget's versions, makes the document dirty, and is what save writes.
+    #[test]
+    fn fr_l31_6_eol_change_is_an_edit_through_the_mirror() {
+        let (mut d, _) = open("a\nb");
+        assert_eq!(d.eol(), Eol::Lf);
+        assert!(d.set_eol(Eol::Lf).is_none(), "no change, no call");
+        let c = d.set_eol(Eol::Crlf).unwrap();
+        assert_eq!((c.proxy, c.method), ("ExtHostDocuments", "$acceptModelChanged"));
+        let ev = json_arg(&c, 1);
+        assert_eq!(ev["isEolChange"], true);
+        assert_eq!(ev["eol"], "\r\n");
+        assert_eq!(ev["versionId"], 2);
+        assert_eq!(ev["changes"], json!([]));
+        assert_eq!(c.args[2], Arg::Json(true.into()), "dirty");
+        assert!(d.is_dirty());
+        assert_eq!(d.eol(), Eol::Crlf);
+        assert_eq!(d.widget_version(), 0);
+        assert_eq!(d.ext_version(), 2);
+        assert_eq!(d.widget_text(), "a\nb");
+        assert_eq!(d.save_bytes(), b"a\r\nb".to_vec());
+        // The widget's next edit continues past the EOL change.
+        let c = d.apply_widget_change(1, WidgetRange::empty(p(0, 1)), "x").unwrap();
+        assert_eq!(json_arg(&c, 1)["versionId"], 3);
+        assert_eq!(d.save_bytes(), b"ax\r\nb".to_vec());
+    }
+
+    #[test]
+    fn fr_l31_6_encoding_is_kept_and_used_on_save() {
+        let (mut d, calls) = open("hi");
+        assert_eq!(json_arg(&calls[1], 0)["addedDocuments"][0]["encoding"], "utf8");
+        assert_eq!(d.encoding(), Encoding::Utf8);
+        assert!(d.set_encoding(Encoding::Utf8).is_none());
+        let c = d.set_encoding(Encoding::Utf16Be).unwrap();
+        assert_eq!((c.proxy, c.method), ("ExtHostDocuments", "$acceptEncodingChanged"));
+        assert_eq!(c.args[1], Arg::Json("utf16be".into()));
+        assert_eq!(d.save_bytes(), b"\xfe\xff\x00h\x00i".to_vec());
+        // The save of UTF-16 bytes is recognized as the disk content.
+        let v = d.ext_version();
+        let bytes = d.save_bytes();
+        d.saved(v, &bytes);
+        assert!(d.matches_disk("hi"));
+        // A reset keeps what it is given.
+        let calls = d.reset("x", Encoding::Utf16Le, 2);
+        assert_eq!(json_arg(&calls[2], 0)["addedDocuments"][0]["encoding"], "utf16le");
+        assert_eq!(d.save_bytes(), b"\xff\xfex\x00".to_vec());
+    }
+
+    #[test]
+    fn fr_l31_6_language_change_tells_the_extension_host() {
+        let (mut d, _) = open("{}");
+        assert!(d.set_language("json").is_empty());
+        let calls = d.set_language("jsonc");
+        assert_eq!(calls[0].args[0], Arg::Json("onLanguage:jsonc".into()));
+        assert_eq!((calls[1].proxy, calls[1].method), ("ExtHostDocuments", "$acceptModelLanguageChanged"));
+        assert_eq!(calls[1].args[1], Arg::Json("jsonc".into()));
+        assert_eq!(d.language_id, "jsonc");
+        // A reset re-announces it under the new id.
+        let calls = d.reset("{}", Encoding::Utf8, 2);
+        assert_eq!(json_arg(&calls[2], 0)["addedDocuments"][0]["languageId"], "jsonc");
     }
 
     #[test]

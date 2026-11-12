@@ -518,8 +518,16 @@ pub fn accept_dirty_state_changed(uri: &UriComponents, is_dirty: bool) -> Call {
     Call::new(proxy::EXT_HOST_DOCUMENTS, "$acceptDirtyStateChanged", vec![j(uri), Arg::Json(is_dirty.into())])
 }
 
+/// `$acceptModelLanguageChanged(strURL, newLanguageId)` (extHost.protocol.ts L2400): the extension
+/// host treats it as remove + add of the document under the new language id.
 pub fn accept_model_language_changed(uri: &UriComponents, language_id: &str) -> Call {
     Call::new(proxy::EXT_HOST_DOCUMENTS, "$acceptModelLanguageChanged", vec![j(uri), Arg::Json(language_id.into())])
+}
+
+/// `$acceptEncodingChanged(strURL, encoding)` (extHost.protocol.ts L2403), `encoding` a Code-OSS
+/// encoding id such as `utf16le`.
+pub fn accept_encoding_changed(uri: &UriComponents, encoding: &str) -> Call {
+    Call::new(proxy::EXT_HOST_DOCUMENTS, "$acceptEncodingChanged", vec![j(uri), Arg::Json(encoding.into())])
 }
 
 /// `$provideHover(handle, resource, position, context | undefined, token)` → `HoverWithId | undefined`
@@ -788,6 +796,20 @@ mod tests {
             args: args.as_array().unwrap().iter().cloned().map(Arg::Json).collect(),
             cancellable: false,
         }
+    }
+
+    // FR-L31.6: the language and encoding changes are the ExtHostDocuments calls of the pinned commit.
+    #[test]
+    fn fr_l31_6_language_and_encoding_change_calls() {
+        let uri = UriComponents::remote("h", "/w/a.txt");
+        let c = accept_model_language_changed(&uri, "markdown");
+        assert_eq!((c.proxy, c.method), ("ExtHostDocuments", "$acceptModelLanguageChanged"));
+        assert_eq!(c.args[0].as_json().unwrap()["path"], "/w/a.txt");
+        assert_eq!(c.args[1], Arg::Json(json!("markdown")));
+        let c = accept_encoding_changed(&uri, "utf16le");
+        assert_eq!((c.proxy, c.method), ("ExtHostDocuments", "$acceptEncodingChanged"));
+        assert_eq!(c.args[1], Arg::Json(json!("utf16le")));
+        assert!(crate::rpc_ids::id_of(c.proxy).is_some());
     }
 
     #[test]

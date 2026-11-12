@@ -29,7 +29,8 @@ use crate::highlight::{Action as HighlightAction, HighlightJob, HighlightOutput,
 use crate::hover::{HoverPopup, HoverState};
 use crate::ids::{DecorationIds, IdSpace};
 use crate::inline::{self, EndReason, Ghost, InlineDoc, ReplyOutcome, TypeThrough};
-use crate::languages::LanguageRegistry;
+use crate::languages::{LanguageInfo, LanguageRegistry};
+use crate::text_format::{decode_as, decode_detect, decode_reload, DocumentFormat, Encoding, EncodingMode, Eol};
 use crate::registry::{KindTag, Registry, RegistryChange};
 use crate::replies::session_reply;
 use crate::search::{FileHits, ReplaceReport, ReplaceRequest, SearchEnd, SearchRequest, Target};
@@ -109,6 +110,13 @@ pub enum Input {
     CancelSearch { id: u64 },
     /// Replace the chosen matches (FR-E7); answered with [`SessionUpdate::ReplaceDone`].
     Replace { id: u64, request: ReplaceRequest },
+    /// Change the line ending of an open document (FR-L31.6); it becomes dirty.
+    SetEol { uri: UriComponents, eol: Eol },
+    /// Reopen an open document in `encoding` (its unsaved edits are discarded) or save it in
+    /// `encoding` (FR-L31.6).
+    SetEncoding { uri: UriComponents, encoding: Encoding, mode: EncodingMode },
+    /// Put an open document under a language id; `None` detects it from the path again (FR-L31.6).
+    SetLanguage { uri: UriComponents, language_id: Option<String> },
     /// Nothing happened; run due timers.
     Tick,
 }
@@ -183,6 +191,13 @@ pub enum SessionUpdate {
     SearchDone { id: u64, end: SearchEnd },
     /// Replace `id` finished.
     ReplaceDone { id: u64, report: ReplaceReport },
+    /// The line ending, encoding and language of an open document (FR-L31.6): after it opens, is
+    /// reloaded, or any of the three changes.
+    Format { uri: UriComponents, format: DocumentFormat },
+    /// Reopening with an encoding failed; the document is unchanged (FR-L31.6).
+    FormatFailed { uri: UriComponents, error: String },
+    /// Every language the extensions contribute, for the language mode picker (FR-L31.6).
+    Languages { languages: Vec<LanguageInfo> },
 }
 
 #[derive(Debug, Clone)]
@@ -248,6 +263,8 @@ pub struct SessionCore {
     ids: DecorationIds,
     pending: HashMap<Token, Pending>,
     saves: HashMap<Token, (String, u64, Vec<u8>)>,
+    /// Documents being read again in a chosen encoding (FR-L31.6): key → encoding.
+    reopen: HashMap<String, Encoding>,
     /// Handle of the extension host's text search provider for the workspace's scheme (FR-E7).
     search_provider: Option<i64>,
     search_session: i64,
@@ -299,6 +316,7 @@ impl SessionCore {
             ids: DecorationIds::new(),
             pending: HashMap::new(),
             saves: HashMap::new(),
+            reopen: HashMap::new(),
             search_provider: None,
             search_session: 0,
             search: None,
@@ -339,6 +357,9 @@ impl SessionCore {
             Input::Search { id, request, folder } => self.on_search(id, request, folder),
             Input::CancelSearch { id } => self.on_cancel_search(id),
             Input::Replace { id, request } => self.on_replace(id, request),
+            Input::SetEol { uri, eol } => self.on_set_eol(&uri, eol),
+            Input::SetEncoding { uri, encoding, mode } => self.on_set_encoding(&uri, encoding, mode),
+            Input::SetLanguage { uri, language_id } => self.on_set_language(&uri, language_id),
             Input::Tick => {}
         }
         self.run_timers();
@@ -360,6 +381,11 @@ impl SessionCore {
         let a = self.inline.values().filter_map(|s| s.debounce.deadline());
         let b = self.codelens_due.values().filter_map(|d| d.deadline());
         a.chain(b).min()
+    }
+
+    /// Every known language with its display name (FR-L31.6).
+    pub fn language_list(&self) -> Vec<LanguageInfo> {
+        self.languages.languages()
     }
 
     /// The text the session holds for a document, as the widget should have it.
@@ -469,6 +495,7 @@ impl SessionCore {
                 tab_width: self.opts.tab_width,
             };
             self.ui(u);
+            self.emit_format(&key);
             self.touched.insert(key);
             return;
         }
@@ -479,7 +506,7 @@ impl SessionCore {
 
     fn finish_open(&mut self, uri: UriComponents, bytes: Vec<u8>) {
         let key = uri.key();
-        let (text, bom) = match decode(&bytes) {
+        let (text, encoding) = match decode_detect(&bytes) {
             Ok(t) => t,
             Err(e) => {
                 self.ui(SessionUpdate::OpenFailed { uri, error: e.to_string() });
@@ -498,10 +525,10 @@ impl SessionCore {
         self.next_generation += 1;
         self.next_editor += 1;
         let editor_id = format!("ember-editor-{}", self.next_editor);
-        let (doc, calls) = OpenDocument::open(
+        let (mut doc, mut calls) = OpenDocument::open(
             uri.clone(),
             &text,
-            bom,
+            encoding == Encoding::Utf8Bom,
             &language,
             &editor_id,
             ext_version,
@@ -509,6 +536,7 @@ impl SessionCore {
             self.opts.tab_width,
             self.opts.insert_spaces,
         );
+        calls.extend(doc.set_encoding(encoding));
         for c in calls {
             self.rpc(c);
         }
@@ -520,6 +548,7 @@ impl SessionCore {
             tab_width: self.opts.tab_width,
         });
         self.docs.insert(key.clone(), doc);
+        self.emit_format(&key);
         self.highlight_open(&key);
         self.active = Some(key.clone());
         self.out.push(Effect::Watch { uri });
@@ -725,6 +754,113 @@ impl SessionCore {
                 self.ui(SessionUpdate::HoverHidden { uri });
             }
         }
+    }
+
+    // ---- line ending, encoding, language (FR-L31.6) --------------------------------------------
+
+    fn emit_format(&mut self, key: &str) {
+        let Some(doc) = self.docs.get(key) else { return };
+        let format = DocumentFormat {
+            eol: doc.eol(),
+            encoding: doc.encoding(),
+            language_id: doc.language_id.clone(),
+            language_name: self.languages.display_name(&doc.language_id),
+        };
+        let uri = doc.uri.clone();
+        self.ui(SessionUpdate::Format { uri, format });
+    }
+
+    /// Code-OSS `ChangeEOLAction`: `pushEOL` on the model, which the extension host gets as a
+    /// content change with `isEolChange`; the document is dirty after it.
+    fn on_set_eol(&mut self, uri: &UriComponents, eol: Eol) {
+        let key = uri.key();
+        let Some(doc) = self.docs.get_mut(&key) else { return };
+        let was_dirty = doc.is_dirty();
+        let Some(call) = doc.set_eol(eol) else { return };
+        let uri = doc.uri.clone();
+        self.rpc(call);
+        if !was_dirty {
+            self.ui(SessionUpdate::Dirty { uri, dirty: true });
+            self.send_tab_model();
+        }
+        self.emit_format(&key);
+    }
+
+    /// Code-OSS `TextFileEditorModel.setEncoding`: `Save` takes the encoding and saves; `Reopen` reads
+    /// the file again decoded in it (a no-op when it is the current one). The window asks before a
+    /// reopen discards unsaved edits, as Code-OSS does.
+    fn on_set_encoding(&mut self, uri: &UriComponents, encoding: Encoding, mode: EncodingMode) {
+        let key = uri.key();
+        let Some(doc) = self.docs.get_mut(&key) else { return };
+        match mode {
+            EncodingMode::Save => {
+                if let Some(call) = doc.set_encoding(encoding) {
+                    self.rpc(call);
+                }
+                self.emit_format(&key);
+                self.on_save(&key);
+            }
+            EncodingMode::Reopen => {
+                if doc.encoding() == encoding {
+                    return;
+                }
+                let uri = doc.uri.clone();
+                self.reopen.insert(key, encoding);
+                self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::ForceReload });
+            }
+        }
+    }
+
+    /// Code-OSS `ChangeLanguageAction` / `model.setLanguage`: the extension host is told with
+    /// `$acceptModelLanguageChanged`; colours and lenses follow the new language.
+    fn on_set_language(&mut self, uri: &UriComponents, language_id: Option<String>) {
+        let key = uri.key();
+        let Some(path) = self.docs.get(&key).map(|d| d.uri.path.clone()) else { return };
+        let id = language_id.unwrap_or_else(|| self.languages.language_for(&path));
+        let Some(doc) = self.docs.get_mut(&key) else { return };
+        let calls = doc.set_language(&id);
+        if calls.is_empty() {
+            return;
+        }
+        let (uri, generation, version) = (doc.uri.clone(), doc.generation(), doc.widget_version());
+        for c in calls {
+            self.rpc(c);
+        }
+        if let Some(job) = self.highlights.close(&key) {
+            self.out.push(Effect::Highlight(job));
+        }
+        self.ui(SessionUpdate::Syntax { uri, generation, version, window: (0, 0), runs: Vec::new() });
+        self.highlight_open(&key);
+        for (handle, cache_id) in self.lenses.close(&key) {
+            self.rpc(exthost::release_code_lenses(handle, cache_id));
+        }
+        self.schedule_codelens(&key, Duration::ZERO);
+        self.send_tab_model();
+        self.touched.insert(key.clone());
+        self.emit_format(&key);
+    }
+
+    /// `MainThreadLanguages.$changeLanguage(resource, languageId)` (`languages.setTextDocumentLanguage`):
+    /// refused for an id no extension contributes, as Code-OSS does.
+    fn on_change_language_request(&mut self, r: &IncomingRequest) {
+        let uri: Option<UriComponents> = r.args.first().and_then(Arg::as_json).and_then(|v| serde_json::from_value(v.clone()).ok());
+        let id = r.args.get(1).and_then(Arg::as_json).and_then(Value::as_str).map(str::to_owned);
+        let (Some(uri), Some(id)) = (uri, id) else {
+            self.respond(r.req, Err(Some(js_error("Error", "bad arguments"))));
+            return;
+        };
+        if !self.language_ids.iter().any(|l| *l == id) {
+            self.respond(r.req, Err(Some(js_error("Error", &format!("Unknown language id: {id}")))));
+            return;
+        }
+        let key = uri.key();
+        if self.docs.contains_key(&key) {
+            self.on_set_language(&uri, Some(id));
+        } else if let Some((u, _)) = self.exthost_only.get(&key).cloned() {
+            self.rpc(exthost::activate_by_event(&format!("onLanguage:{id}")));
+            self.rpc(exthost::accept_model_language_changed(&u, &id));
+        }
+        self.respond(r.req, Ok(Reply::Empty));
     }
 
     // ---- save ---------------------------------------------------------------------------------
@@ -1120,6 +1256,9 @@ impl SessionCore {
             Ok(MainThreadCall::Other { proxy: Some("MainThreadDocuments"), method }) if method == "$tryOpenDocument" => {
                 self.on_try_open_document(&r);
             }
+            Ok(MainThreadCall::Other { proxy: Some("MainThreadLanguages"), method }) if method == "$changeLanguage" => {
+                self.on_change_language_request(&r);
+            }
             Ok(MainThreadCall::Other { proxy, method }) => {
                 let reply = session_reply(proxy, &method, self.reply_seq, &self.language_ids);
                 self.respond(r.req, Ok(reply));
@@ -1197,7 +1336,7 @@ impl SessionCore {
             self.respond(req, Ok(Reply::Json(serde_json::to_value(&uri).unwrap_or(Value::Null))));
             return;
         }
-        let text = match result.and_then(|b| decode(&b).map_err(|e| e.to_string())) {
+        let text = match result.and_then(|b| decode_detect(&b).map_err(|e| e.to_string())) {
             Ok((t, _)) => t,
             Err(e) => {
                 self.respond(req, Err(Some(js_error("Error", &format!("cannot open {}: {e}", uri.path)))));
@@ -1270,7 +1409,7 @@ impl SessionCore {
                 let key = uri.key();
                 let Ok(bytes) = result else { return };
                 let Some(doc) = self.docs.get(&key) else { return };
-                let (text, bom) = match decode(&bytes) {
+                let (text, encoding) = match decode_reload(&bytes, doc.encoding()) {
                     Ok(t) => t,
                     Err(_) => return,
                 };
@@ -1282,16 +1421,36 @@ impl SessionCore {
                     self.ui(SessionUpdate::ExternalChange { uri, change: ExternalChange::ChangedWhileDirty });
                     return;
                 }
-                self.reset_doc(&key, &text, Some(bom));
+                self.reset_doc(&key, &text, Some(encoding));
             }
             ReadPurpose::ForceReload => {
                 let key = uri.key();
-                let Ok(bytes) = result else { return };
-                if !self.docs.contains_key(&key) {
-                    return;
-                }
-                let Ok((text, bom)) = decode(&bytes) else { return };
-                self.reset_doc(&key, &text, Some(bom));
+                // Reopen with an encoding (FR-L31.6) decodes exactly as chosen; a failure leaves the document as it was.
+                let reopen = self.reopen.remove(&key);
+                let bytes = match result {
+                    Ok(b) => b,
+                    Err(error) => {
+                        if reopen.is_some() {
+                            self.ui(SessionUpdate::FormatFailed { uri, error });
+                        }
+                        return;
+                    }
+                };
+                let Some(current) = self.docs.get(&key).map(OpenDocument::encoding) else { return };
+                let decoded = match reopen {
+                    Some(enc) => decode_as(&bytes, enc).map(|t| (t, enc)),
+                    None => decode_reload(&bytes, current),
+                };
+                let (text, encoding) = match decoded {
+                    Ok(t) => t,
+                    Err(e) => {
+                        if reopen.is_some() {
+                            self.ui(SessionUpdate::FormatFailed { uri, error: e.to_string() });
+                        }
+                        return;
+                    }
+                };
+                self.reset_doc(&key, &text, Some(encoding));
                 self.ui(SessionUpdate::Dirty { uri, dirty: false });
             }
             ReadPurpose::ExtHostOpen { req } => self.finish_exthost_open(uri, req, result),
@@ -1609,14 +1768,14 @@ impl SessionCore {
         }
     }
 
-    /// Replace a document's content wholesale (reload from disk, resync). `bom: None` keeps the
-    /// current BOM setting.
-    fn reset_doc(&mut self, key: &str, text: &str, bom: Option<bool>) {
+    /// Replace a document's content wholesale (reload from disk, resync). `encoding: None` keeps the
+    /// current encoding.
+    fn reset_doc(&mut self, key: &str, text: &str, encoding: Option<Encoding>) {
         self.next_generation += 1;
         let generation = self.next_generation;
         let Some(doc) = self.docs.get_mut(key) else { return };
-        let bom = bom.unwrap_or_else(|| doc.save_bytes().starts_with("\u{feff}".as_bytes()));
-        let calls = doc.reset(text, bom, generation);
+        let encoding = encoding.unwrap_or_else(|| doc.encoding());
+        let calls = doc.reset(text, encoding, generation);
         let (uri, widget_text) = (doc.uri.clone(), doc.widget_text());
         for c in calls {
             self.rpc(c);
@@ -1636,6 +1795,7 @@ impl SessionCore {
         }
         self.ids.forget_document(key);
         self.ui(SessionUpdate::Command { uri, command: WidgetCommand::SetText { generation, text: widget_text } });
+        self.emit_format(key);
         self.highlight_open(key);
         self.send_tab_model();
         self.schedule_codelens(key, Duration::ZERO);

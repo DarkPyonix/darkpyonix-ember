@@ -1429,7 +1429,7 @@ pub mod page {
         let tab_items = current_tab.as_deref().map(|p| crate::ui::editor::tab_menu_items(&s.tabs.read(), p)).unwrap_or_default();
         let tab_label = current_tab.as_deref().map(|p| format!("탭: {}", crate::ui::editor::display_name(base_name(p)))).unwrap_or_default();
         rsx! {
-            div { class: "ed-menu", role: "menu", "aria-label": "편집기 메뉴",
+            div { class: "ed-menu ed-mainmenu", role: "menu", "aria-label": "편집기 메뉴",
                 if let Some(tab_path) = current_tab.clone() {
                     div { class: "ed-mlab", "{tab_label}" }
                     for (item, enabled) in tab_items.into_iter() {

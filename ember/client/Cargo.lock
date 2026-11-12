@@ -614,6 +614,7 @@ name = "ember-client"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "ember-server",
  "ember-transport",
  "futures-util",
@@ -624,6 +625,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

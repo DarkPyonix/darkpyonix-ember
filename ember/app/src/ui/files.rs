@@ -4,10 +4,11 @@
 //! The decisions are plain types and functions in the first half of this file, unit-tested
 //! without a renderer. The components in the second half only hand them to dioxus-compose.
 //!
-//! The transfer feature has no server or node API yet (FR-F is Draft), so the screen is built
-//! against [`TransferService`]. The only implementation is [`NoTransferService`]: it holds no
-//! device and no transfer, so the screen shows the user's real computers (from the computers API)
-//! as devices and [`UNAVAILABLE`] for sending, receiving and history. Nothing is invented.
+//! The screen is built against [`TransferService`]. The real one is
+//! `ui::files_service::ServerTransferService` (FR-L27.8), on the server's `/api/transfers*`.
+//! [`NoTransferService`] stands in before the app's services exist: it holds no device and no
+//! transfer, so the screen shows the user's real computers (from the computers API) as devices
+//! and [`UNAVAILABLE`] for sending, receiving and history. Nothing is invented.
 //!
 //! #166 workarounds (revert when upstream lands):
 //! - No drag and drop (dioxus-compose and compose-rust are frozen): a send sheet picks the
@@ -567,8 +568,8 @@ pub fn answer_offer(
 // The service (FR-L27.1)
 // ---------------------------------------------------------------------------------------------
 
-/// What the screen needs from the transfer feature. Implemented by the real transfer client when
-/// FR-F lands; until then only [`NoTransferService`].
+/// What the screen needs from the transfer feature: the server's transfer API
+/// (`ui::files_service`), the demo data, or [`NoTransferService`].
 pub trait TransferService: Send + Sync {
     /// Whether transfers can happen at all.
     fn ready(&self) -> bool;
@@ -584,6 +585,14 @@ pub trait TransferService: Send + Sync {
     fn control(&self, transfer_id: &str, action: TransferAction);
     /// Offer `files` (paths) to a device.
     fn send(&self, device_id: &str, files: Vec<String>) -> Result<(), String>;
+    /// Whether transfers are encrypted end to end. The screen shows the claim only when true.
+    fn encrypted(&self) -> bool {
+        true
+    }
+    /// The folder received files go to (`FR-F8`), when the service knows it.
+    fn inbox(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The service until FR-F is built: nothing is ready and nothing is held.
@@ -890,10 +899,13 @@ pub fn demo_transfer_service() -> &'static DemoTransferService {
     DEMO_SERVICE.get_or_init(DemoTransferService::new)
 }
 
-/// TODO(FR-F): return the real service once the transfer client exists.
+/// The demo service in demo mode, else the server's transfer API (`FR-L27.8`); nothing before
+/// the app's services exist.
 pub fn transfer_service() -> &'static dyn TransferService {
     if is_demo() {
         demo_transfer_service()
+    } else if let Some(svc) = crate::ui::files_service::server_service() {
+        svc
     } else {
         &NO_SERVICE
     }

@@ -78,3 +78,10 @@ ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
 pub const PROFILE_OVERRIDES_MIGRATION: &str = "
 ALTER TABLE projects ADD COLUMN profile_overrides TEXT;
 ";
+
+/// Migration 29: per-member character overrides on a project (FR-L22, FR-L26, #489).
+/// `character_overrides` is a nullable TEXT holding a JSON object that maps a member name to a
+/// [`crate::projects::CharacterOverride`]; `NULL` means none. Existing rows get `NULL`.
+pub const CHARACTER_OVERRIDES_MIGRATION: &str = "
+ALTER TABLE projects ADD COLUMN character_overrides TEXT;
+";

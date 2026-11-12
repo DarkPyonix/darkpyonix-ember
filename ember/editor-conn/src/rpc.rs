@@ -98,9 +98,24 @@ pub enum Reply {
 impl Reply {
     pub fn into_json(self) -> Value {
         match self {
-            Self::Empty | Self::Buffer(_) => Value::Null,
+            Self::Empty => Value::Null,
+            Self::Buffer(b) => serde_json::json!({ "$vsbuffer": b }),
             Self::Json(v) | Self::JsonWithBuffers { value: v, .. } => v,
         }
+    }
+
+    /// Extract the bytes of a `Reply::Buffer` encoded by [`Reply::into_json`].
+    pub fn buffer_from_json(v: &Value) -> Option<Vec<u8>> {
+        let arr = v.get("$vsbuffer")?.as_array()?;
+        let mut out = Vec::with_capacity(arr.len());
+        for item in arr {
+            let b = item.as_u64()?;
+            if b > 255 {
+                return None;
+            }
+            out.push(b as u8);
+        }
+        Some(out)
     }
 }
 

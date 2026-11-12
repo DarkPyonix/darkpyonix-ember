@@ -264,7 +264,7 @@ States: `waiting`, `awaiting_confirmation`, `joined`, `denied`, `expired` (`FR-C
 | Malicious or confused node with a valid code | Owner confirm, owner-chosen name, deny, removable at once | The owner misjudges; the card puts details in front of the owner |
 | Plain http | TLS in front is the owner's duty; warnings on both sides; `--allow-http` for public addresses | Code, poll secret and token cross the LAN in clear; sealed delivery is Later (D7) |
 | Rogue server URL | Command copied from the app; node shows the URL and asks; TLS | The node cannot verify the server; a rogue controller can run commands within the node's roots. Fingerprint pinning is Later (D8) |
-| Door open by mistake | Default OFF, startup error without ALLOW_REMOTE, global failure cap, no admin route on the door | Cleartext, and a bounded DoS; with `EMBER_ENROL_AUTO_CLOSE=1` the door is bound only while an enrolment needs it (D12, `FR-C2l`, written, not compiled) |
+| Door open by mistake | Default OFF, startup error without ALLOW_REMOTE, global failure cap, no admin route on the door | Cleartext, and a bounded DoS; by default the door is bound only while an enrolment needs it (D12, `FR-C2l`, written, not compiled; `EMBER_ENROL_AUTO_CLOSE=0` opts out) |
 | Replay, oracle | One atomic statement, one generic refusal, poll 404 for unknown id and wrong secret, constant-time compare, token wiped on delivery | None found |
 
 ### Build order
@@ -278,7 +278,7 @@ States: `waiting`, `awaiting_confirmation`, `joined`, `denied`, `expired` (`FR-C
 
 ### Later
 
-- **D12, door auto-close.** Built as the opt-in `EMBER_ENROL_AUTO_CLOSE=1` (`FR-C2l`, #539, written, not compiled): `DoorGate` in `src/enrol_door.rs` binds at mint and unbinds when `Enrol::has_live_enrolment` is false. It stays opt-in until the owner decides the default. [provisional, 2026-11-13]
+- **D12, door auto-close.** Built and on by default (`FR-C2l`, #539, written, not compiled): `DoorGate` in `src/enrol_door.rs` binds at mint and unbinds when `Enrol::has_live_enrolment` is false. `EMBER_ENROL_AUTO_CLOSE=0` keeps the door open from startup. [provisional] (leader, 2026-11-13)
 - **D7, sealed delivery.** The node sends an ephemeral X25519 key in `node_public_info`; the server seals the credential with an AEAD to it. Removes the passive-sniffer case; an active MITM still needs TLS.
 - **D8, server fingerprint pinning.** `--server-fingerprint` in the command, checked against the server's reply; the server now exposes its peer id in the `joined` answer (C3b, merged), and `ember-node enrol` checks the pin; requirements for the node step, in full: R1 pin first: the command the mint prints carries `--server-fingerprint <full 64 hex peer id>`, and the node compares the delivered id with it BEFORE writing anything; a mismatch aborts, writes nothing and prints both fingerprints. R2 no pin means no automatic trust: the node prints the delivered id's fingerprint and asks whether it matches the server's console or app; non-interactive use needs `--server-fingerprint` or an explicit `--trust-unverified-server` (its help text and a warning say that it widens the node's reach to an unverified server), and by default the id is NOT added to `allowed-peers` (the token-only HTTP path still works as before). R3 verify, then write: `enrol.json` (0600, tmp and rename) and `allowed-peers` together or neither; the id is shape-checked (64 lowercase hex) first and only that one id is added. R4 the node prints what it will allow: commands from this server's fingerprint over the transport and from the token holder over HTTP. `ember-node enrol` enforces R1 to R4 (`tests/fr_c2_enrol_node.rs`).
 
@@ -290,7 +290,7 @@ A checklist for the owner's two-machine run. Machine S runs `ember-server`, mach
 
 1. Start the server with the door on a LAN address and the transport on (the transport is what gives the node a pin to check):
    `EMBER_ENROL_LISTEN=<S-lan-ip>:8742 EMBER_ENROL_LISTEN_ALLOW_REMOTE=1 EMBER_ENROL_PUBLIC_URL=http://<S-lan-ip>:8742 EMBER_TRANSPORT=1 ember-server`
-   The server logs a warning that the door speaks plain HTTP. It prints `ember server peer id: <64 hex>`; note it. The owner API stays on `127.0.0.1:8740`.
+   The server logs a warning that the door speaks plain HTTP. The door is closed until step 2 mints a code, and closes again when no enrolment needs it (`FR-C2l`; `EMBER_ENROL_AUTO_CLOSE=0` keeps it open). It prints `ember server peer id: <64 hex>`; note it. The owner API stays on `127.0.0.1:8740`.
 2. Mint a code. The token is in `<data dir>/server-token`:
    `curl -s -X POST http://127.0.0.1:8740/api/computers/enrol-codes -H "Authorization: Bearer $(cat <data dir>/server-token)" -H 'content-type: application/json' -d '{"name":"laptop"}'`
    The answer has `id`, `code`, `command`, `server`, `door`, `server_peer_id` and `server_fingerprint`. Expect `command` to start `ember-node enrol dpe_`, to name `http://<S-lan-ip>:8742` (not port 8740) and to end `--server-fingerprint <the 64 hex id>`.

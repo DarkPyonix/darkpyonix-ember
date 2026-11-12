@@ -1,4 +1,4 @@
-//! FR-C2l (#539): with `EMBER_ENROL_AUTO_CLOSE=1` the enrol door is closed while no enrolment
+//! FR-C2l (#539): by default (`EMBER_ENROL_AUTO_CLOSE` unset or `1`; `0` opts out) the enrol door is closed while no enrolment
 //! needs it, the owner's mint opens it (and says so in its answer), and it closes again when the
 //! last code is used and delivered, denied, cancelled or expired.
 
@@ -79,11 +79,11 @@ async fn connects(addr: SocketAddr) -> bool {
 }
 
 #[test]
-fn fr_c2l_auto_close_is_opt_in_and_only_for_1() {
-    assert!(!door(None).auto_close);
-    assert!(!door(Some("0")).auto_close);
-    assert!(!door(Some("yes")).auto_close);
+fn fr_c2l_auto_close_is_the_default_and_0_opts_out() {
+    assert!(door(None).auto_close);
     assert!(door(Some("1")).auto_close);
+    assert!(!door(Some("0")).auto_close);
+    assert!(!door(Some(" 0 ")).auto_close);
 }
 
 #[tokio::test]
@@ -157,7 +157,9 @@ async fn fr_c2l_the_watch_closes_the_door_after_a_deny_nudge() {
 }
 
 #[tokio::test]
-async fn fr_c2l_without_a_gate_the_mint_says_door_on() {
+async fn fr_c2l_with_auto_close_0_the_mint_says_door_on() {
+    // `EMBER_ENROL_AUTO_CLOSE=0`: main.rs builds no gate and serves the door from startup.
+    assert!(!door(Some("0")).auto_close);
     let store = Arc::new(Store::open_in_memory().unwrap());
     let comps = Computers::new(Registry::new(store.clone()), computers::default_connector());
     let owner = enrol::router(

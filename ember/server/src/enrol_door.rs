@@ -22,7 +22,7 @@
 //! | `EMBER_ENROL_TRUSTED_PROXIES` | comma list of IPs. `X-Forwarded-For` is read only when the TCP peer is in this list. Its own variable: the guest door's has no effect here. |
 //! | `EMBER_ENROL_ALLOWED_HOSTS` | comma list of host names accepted in `Host`. |
 //! | `EMBER_ENROL_PUBLIC_URL` | `http(s)://host[:port]` the node is told to use; its host is accepted in `Host`. |
-//! | `EMBER_ENROL_AUTO_CLOSE` | `1` keeps the door closed until a code is minted and closes it when no enrolment needs it (#539, [`DoorGate`]). Any other value, or unset, keeps the door open from startup. |
+//! | `EMBER_ENROL_AUTO_CLOSE` | Default on: the door stays closed until a code is minted and closes when no enrolment needs it (#539, [`DoorGate`]). `0` opts out: the door is open from startup. |
 //!
 //! The door is built only from the shared pieces in [`crate::door`], never from the guest door's
 //! constants: its limits are [`DoorLimits::with_strict_path`] with the numbers below and an
@@ -45,7 +45,7 @@ use axum::Router;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::computers::enrol::{Delivery, Enrol, NodeInfo, Refused};
+use crate::computers::enrol::{Delivery, Enrol, NodeCancel, NodeInfo, Refused};
 use crate::door::config::{DoorEnv, Spec};
 use crate::door::harden::{not_found, stack, Guard};
 use crate::door::limits::{client_ip, too_many};
@@ -118,7 +118,7 @@ pub struct EnrolDoor {
     hosts: Arc<HashSet<String>>,
     /// Peers whose `X-Forwarded-For` is believed (`EMBER_ENROL_TRUSTED_PROXIES`).
     trusted_proxies: Arc<Vec<IpAddr>>,
-    /// `EMBER_ENROL_AUTO_CLOSE=1`: the door is bound only while an enrolment needs it (#539).
+    /// The door is bound only while an enrolment needs it (#539); the default, `EMBER_ENROL_AUTO_CLOSE=0` turns it off.
     pub auto_close: bool,
 }
 
@@ -155,7 +155,7 @@ impl EnrolDoor {
             public_url: env.public_url,
             hosts: Arc::new(env.hosts),
             trusted_proxies: Arc::new(env.trusted),
-            auto_close: get(ENROL_AUTO_CLOSE_VAR).is_some_and(|v| v.trim() == "1"),
+            auto_close: get(ENROL_AUTO_CLOSE_VAR).is_none_or(|v| v.trim() != "0"),
         }))
     }
 
@@ -183,7 +183,7 @@ impl EnrolDoor {
         });
         Router::new()
             .route(ENROL_REDEEM_PATH, post(redeem))
-            .route("/enrol/status/{enrol_id}", get(poll))
+            .route("/enrol/status/{enrol_id}", get(poll).delete(node_cancel))
             .method_not_allowed_fallback(not_found)
             .with_state(state)
     }
@@ -290,7 +290,7 @@ impl EnrolDoor {
 
 // ---- the auto-closing door (#539) --------------------------------------------------------------
 
-/// The enrol door bound only while an enrolment needs it (`EMBER_ENROL_AUTO_CLOSE=1`, SPEC
+/// The enrol door bound only while an enrolment needs it (the default; `EMBER_ENROL_AUTO_CLOSE=0` opts out, SPEC
 /// FR-C2l). The owner's mint calls [`DoorGate::open`] before it answers; [`DoorGate::watch`]
 /// closes the door when [`Enrol::has_live_enrolment`] is false (the last code used and its
 /// credential fetched, denied, cancelled or expired). Open and close take one lock, and the
@@ -708,6 +708,45 @@ async fn poll(State(st): State<Arc<Routes>>, id: Result<Path<String>, PathReject
                 (StatusCode::OK, axum::Json(json!({ "status": "joined", "credential": credential }))).into_response();
             res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
             res
+        }
+    }
+}
+
+/// `DELETE /enrol/status/{enrol_id}` (FR-C2m, #617): the node cancels its own enrolment while
+/// it waits for the owner. Same Bearer poll secret, same order as the poll: verify first (no side
+/// effect), then the per-enrolment poll limit, then the change. A wrong secret or an unknown id is
+/// the poll's 404. `200 {"status":"cancelled"}`, or `409 {"status":<state>}` when the owner has
+/// already answered (nothing changes then).
+async fn node_cancel(State(st): State<Arc<Routes>>, id: Result<Path<String>, PathRejection>, headers: HeaderMap) -> Response {
+    let Ok(Path(id)) = id else { return poll_not_found() };
+    if id.chars().count() > ENROL_MAX_ID_CHARS {
+        return poll_not_found();
+    }
+    let secret = bearer(&headers).unwrap_or("");
+    match st.enrol.verify_poll(&id, secret, crate::store::now_ms()) {
+        Ok(true) => {}
+        Ok(false) => return poll_not_found(),
+        Err(_) => {
+            tracing::warn!(enrol = %log_id(&id), "enrol cancel failed");
+            return poll_not_found();
+        }
+    }
+    if let Err(wait) = st.polls.check_at(&id, Instant::now()) {
+        return too_many(wait);
+    }
+    match st.enrol.cancel_by_node(&id, secret, crate::store::now_ms()) {
+        Ok(NodeCancel::Cancelled) => {
+            tracing::info!(enrol = %log_id(&id), "enrol cancelled by the node");
+            (StatusCode::OK, axum::Json(json!({ "status": "cancelled" }))).into_response()
+        }
+        Ok(NodeCancel::TooLate(s)) => {
+            // `confirmed`: the owner said yes; the node's next poll fetches the credential.
+            (StatusCode::CONFLICT, axum::Json(json!({ "status": s.as_str() }))).into_response()
+        }
+        Ok(NodeCancel::Unknown) => poll_not_found(),
+        Err(_) => {
+            tracing::warn!(enrol = %log_id(&id), "enrol cancel failed");
+            poll_not_found()
         }
     }
 }

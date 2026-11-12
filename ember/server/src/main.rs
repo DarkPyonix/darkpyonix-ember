@@ -384,7 +384,7 @@ async fn main() -> anyhow::Result<()> {
             // it is released at once and bound again by the first mint.
             let l = if d.auto_close {
                 drop(l);
-                tracing::info!("enrol door on {} stays closed until a code is minted (EMBER_ENROL_AUTO_CLOSE=1)", d.listen);
+                tracing::info!("enrol door on {} stays closed until a code is minted (EMBER_ENROL_AUTO_CLOSE=0 keeps it open)", d.listen);
                 None
             } else {
                 Some(l)

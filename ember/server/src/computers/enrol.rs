@@ -517,6 +517,18 @@ pub struct StatusDetail {
     pub registered_by: Option<&'static str>,
 }
 
+/// What the node gets when it cancels its own enrolment with its poll secret (FR-C2m, #617).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeCancel {
+    /// A wrong secret or an unknown id: the same answer as a poll's [`Delivery::Unknown`].
+    Unknown,
+    /// The enrolment was awaiting confirmation and now reads `expired`; the owner cannot confirm it.
+    Cancelled,
+    /// The enrolment is past the owner's answer (`confirmed`, `joined`, `denied`, `expired`);
+    /// nothing changed.
+    TooLate(State),
+}
+
 /// What the node gets when it asks for its credential (FR-C2d). Every wrong secret and every
 /// unknown enrol id is [`Delivery::Unknown`].
 #[derive(Debug)]
@@ -572,7 +584,7 @@ pub enum EnrolError {
     /// The door is on but the server has no address to print for it.
     #[error("Set EMBER_ENROL_PUBLIC_URL to the address the other machine uses")]
     DoorUrlUnknown,
-    /// The door opens at mint (`EMBER_ENROL_AUTO_CLOSE=1`, #539) and its socket could not be
+    /// The door opens at mint (auto-close, the default, #539) and its socket could not be
     /// bound. The code just minted is cancelled, so no unusable code is shown.
     #[error("The enrol door could not be opened; no code was made")]
     DoorUnavailable,
@@ -1341,6 +1353,29 @@ impl Enrol {
         } else {
             Err(EnrolError::WrongState { id: enrol_id.into(), state: "changed" })
         }
+    }
+
+    /// The node gives up while it waits for the owner (FR-C2m, #617). The secret check is the
+    /// poll's ([`Enrol::row_for_secret`]), so a wrong secret and an unknown id are the same
+    /// [`NodeCancel::Unknown`]. Only `awaiting_confirmation` moves, to `expired` (a legal move;
+    /// no new state, so the owner's app needs no change), and only before the owner answered.
+    pub fn cancel_by_node(&self, enrol_id: &str, poll_secret: &str, now_ms: i64) -> Result<NodeCancel, EnrolError> {
+        let g = self.gate();
+        self.settle(&g, now_ms)?;
+        let Some(row) = self.row_for_secret(enrol_id, poll_secret)? else {
+            return Ok(NodeCancel::Unknown);
+        };
+        Ok(match row.state {
+            State::Waiting => NodeCancel::Unknown,
+            State::AwaitingConfirmation => {
+                if self.transition(enrol_id, State::AwaitingConfirmation, State::Expired, now_ms, None, None)? {
+                    NodeCancel::Cancelled
+                } else {
+                    NodeCancel::TooLate(State::Expired)
+                }
+            }
+            other => NodeCancel::TooLate(other),
+        })
     }
 
     /// The row of `enrol_id` when `poll_secret` is its poll secret: the secret is hashed and

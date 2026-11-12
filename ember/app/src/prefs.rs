@@ -65,6 +65,10 @@ pub struct Prefs {
     /// as off, Code-OSS's default.
     #[serde(default)]
     pub auto_save: crate::ui::editor_states::AutoSave,
+    /// The editor window's zoom level, Code-OSS's `window.zoomLevel` (FR-L31.15). Older files
+    /// have none, which reads as 0 (the system's size).
+    #[serde(default)]
+    pub editor_zoom_level: i8,
 }
 
 fn format_default() -> u32 {
@@ -85,6 +89,7 @@ impl Default for Prefs {
             character_overrides: BTreeMap::new(),
             keymap: crate::ui::keymap::Keymap::default(),
             auto_save: crate::ui::editor_states::AutoSave::default(),
+            editor_zoom_level: 0,
         }
     }
 }
@@ -215,6 +220,20 @@ mod tests {
         assert_eq!(load(&path), p);
         std::fs::write(&path, b"{nope").unwrap();
         assert_eq!(load(&path), Prefs::default());
+    }
+
+    #[test]
+    fn fr_l31_15_editor_zoom_level_persists_and_defaults_to_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, br#"{"format":1}"#).unwrap();
+        assert_eq!(load(&path).editor_zoom_level, 0);
+        let p = Prefs {
+            editor_zoom_level: -2,
+            ..Prefs::default()
+        };
+        save(&path, &p).unwrap();
+        assert_eq!(load(&path).editor_zoom_level, -2);
     }
 
     #[test]

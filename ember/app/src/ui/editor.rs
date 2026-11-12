@@ -154,6 +154,8 @@ pub struct EditorTabs {
     /// save succeeds and stays open and dirty when it fails, as in Code-OSS. Each holds the document
     /// version the save was asked for, so an edit typed while the save was in flight keeps the tab.
     closing: Vec<(String, Option<u32>)>,
+    /// The tabs closed, for 닫은 편집기 다시 열기 (FR-L31.15).
+    closed: super::editor_actions::ClosedEditors,
 }
 
 /// What closing one or more tabs needs (FR-L31.5): the tabs to close, the ones among them with unsaved
@@ -377,6 +379,7 @@ impl EditorTabs {
     /// one before it; closing another one keeps the current tab.
     pub fn close(&mut self, path: &str) {
         let Some(i) = self.index(path) else { return };
+        self.closed.push_at(path, i);
         self.tabs.remove(i);
         self.closing.retain(|(p, _)| p != path);
         self.current = match self.current {
@@ -509,6 +512,25 @@ impl EditorTabs {
         let closed = self.close_others_request(&cur).paths;
         self.close_many(&closed, Some(&cur));
         closed
+    }
+
+    /// 닫은 편집기 다시 열기 (`workbench.action.reopenClosedEditor`): open the tab closed last
+    /// that is not open again, and return its path.
+    pub fn reopen_closed(&mut self) -> Option<String> {
+        let open: Vec<String> = self.tabs.iter().map(|t| t.path.clone()).collect();
+        let (path, index) = self.closed.pop_at(|p| open.iter().any(|o| o == p))?;
+        // Code-OSS puts a reopened editor back at the index it had, or last when fewer tabs are left.
+        // It comes back unpinned, so never inside the pinned group (FR-L31.5).
+        let pinned = self.tabs.iter().filter(|t| t.pinned).count();
+        let at = index.clamp(pinned, self.tabs.len());
+        self.tabs.insert(at, Tab { path: path.clone(), dirty: false, pinned: false, preview: false });
+        self.current = Some(at);
+        Some(path)
+    }
+
+    /// A path was deleted: its tabs are not reopened.
+    pub fn forget_closed_below(&mut self, path: &str) {
+        self.closed.forget_below(path);
     }
 }
 
@@ -1510,7 +1532,23 @@ impl Stripes {
 pub fn is_implemented(action: Action) -> bool {
     // The right tool windows (agent, notifications) have no panel in the window yet: toggling one shows nothing.
     ToolWindow::from_action(action).is_some_and(|w| w.side() != Side::Right)
-        || matches!(action, Action::Close | Action::HideTool | Action::FindInFile | Action::ReplaceInFiles | Action::Recent | Action::GotoLine)
+        || matches!(
+            action,
+            Action::Close
+                | Action::HideTool
+                | Action::FindInFile
+                | Action::ReplaceInFiles
+                | Action::Recent
+                | Action::GotoLine
+                | Action::Save
+                | Action::MaximizeTool
+                | Action::ReopenClosed
+                | Action::Palette
+                | Action::Find
+                | Action::ZoomIn
+                | Action::ZoomOut
+                | Action::ZoomReset
+        )
 }
 
 /// Do what a keymap action does. Returns false for an action the editor cannot do yet (the
@@ -1847,7 +1885,22 @@ mod tests {
         for action in Action::ALL {
             // The palette, find, find-in-file, replace-in-files, recent files and goto-line open sheets and bars in the window:
             // they are not tab or tool window changes, so `apply_action` does not do them.
-            if matches!(action, Action::Palette | Action::Find | Action::FindInFile | Action::ReplaceInFiles | Action::Recent | Action::GotoLine) {
+            // Save, maximize and reopen act on the window's session, panel size and close history (FR-L31.15).
+            if matches!(
+                action,
+                Action::Palette
+                    | Action::Find
+                    | Action::FindInFile
+                    | Action::ReplaceInFiles
+                    | Action::Recent
+                    | Action::GotoLine
+                    | Action::Save
+                    | Action::MaximizeTool
+                    | Action::ReopenClosed
+                    | Action::ZoomIn
+                    | Action::ZoomOut
+                    | Action::ZoomReset
+            ) {
                 continue;
             }
             let mut tabs = EditorTabs::default();
@@ -1855,6 +1908,24 @@ mod tests {
             let mut stripes = Stripes::default();
             assert_eq!(apply_action(action, &mut tabs, &mut stripes), is_implemented(action), "{action:?}");
         }
+    }
+
+    #[test]
+    fn fr_l31_15_reopen_closed_editor_reopens_the_tab_closed_last() {
+        let mut tabs = EditorTabs::default();
+        for p in ["/w/a", "/w/b", "/w/c"] {
+            tabs.open(p);
+        }
+        tabs.close("/w/b");
+        assert_eq!(tabs.reopen_closed().as_deref(), Some("/w/b"));
+        assert_eq!(tabs.current_path(), Some("/w/b"));
+        assert_eq!(tabs.paths(), vec!["/w/a", "/w/b", "/w/c"], "a reopened tab goes back to its old place");
+        tabs.activate("/w/a");
+        assert_eq!(tabs.close_others(), vec!["/w/b".to_string(), "/w/c".to_string()]);
+        assert_eq!(tabs.reopen_closed().as_deref(), Some("/w/c"));
+        tabs.forget_closed_below("/w/b");
+        assert_eq!(tabs.reopen_closed(), None);
+        assert_eq!(tabs.paths(), vec!["/w/a", "/w/c"]);
     }
 
     #[test]

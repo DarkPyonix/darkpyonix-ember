@@ -9,6 +9,24 @@ import dev.darkpyonix.intellij.json.long
 import dev.darkpyonix.intellij.json.obj
 import dev.darkpyonix.intellij.json.str
 
+/**
+ * A token's capability set from `GET /api/manager` (`capabilities`, SPEC FR-A3, INTENT D18).
+ * Capabilities are a set, not grades: running needs `execute`, editing needs `edit`.
+ */
+data class Capabilities(val names: Set<String>) {
+    val canRun: Boolean get() = "execute" in names
+    val canEdit: Boolean get() = "edit" in names
+
+    fun without(name: String) = Capabilities(names - name)
+
+    override fun toString(): String = names.sorted().joinToString(",")
+
+    companion object {
+        fun fromManagerInfo(info: Map<String, Any?>): Capabilities =
+            Capabilities(info.list("capabilities")?.mapNotNull { it as? String }?.toSet() ?: emptySet())
+    }
+}
+
 /** `Lock` of manager.openapi.yaml (SPEC FR-S3). */
 data class CellLock(
     val cellId: String,

@@ -570,6 +570,46 @@ impl OseManager {
         })
     }
 
+    /// Removes the `*.token` files a killed server left behind (#521): every regular file named
+    /// `<hex>.token` in `<data root>/<computer id>/tokens/`. Call it once at startup, before any OSE
+    /// start: a SIGKILL skips the [`TokenFile`] drop, so the dead token stays on disk until the
+    /// same folder starts again. Symlinks and directories are left alone, a missing root is not an
+    /// error, and an OSE of ANOTHER server sharing the same data root loses its file too (it read
+    /// the file at its start, see FR-W4). Returns how many files were removed.
+    pub fn sweep_stale_tokens(&self) -> usize {
+        let Ok(root) = self.data_root() else { return 0 };
+        let Ok(computers) = std::fs::read_dir(root) else { return 0 };
+        let mut removed = 0;
+        for computer in computers.flatten() {
+            let name = computer.file_name();
+            if !valid_computer_id(&name.to_string_lossy()) {
+                continue;
+            }
+            let tokens = computer.path().join("tokens");
+            match std::fs::symlink_metadata(&tokens) {
+                Ok(md) if md.is_dir() => {}
+                _ => continue,
+            }
+            let Ok(files) = std::fs::read_dir(&tokens) else { continue };
+            for file in files.flatten() {
+                let path = file.path();
+                let is_token = path.extension().is_some_and(|e| e == "token")
+                    && path.file_stem().is_some_and(|s| {
+                        let s = s.to_string_lossy();
+                        !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit())
+                    });
+                let regular = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file());
+                if is_token && regular && std::fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+        if removed > 0 {
+            tracing::info!(removed, "removed stale OSE token files left by an earlier server");
+        }
+        removed
+    }
+
     pub fn data_root(&self) -> Result<&Path, String> {
         self.data_root.as_deref().map_err(|e| e.clone())
     }

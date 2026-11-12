@@ -4079,9 +4079,20 @@ mod tests {
             let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
             seen.scan(&decode_batch(bytes).expect("decode"));
             if class == WindowSizeClass::Compact {
-                // The phone shows the list first; open the selected routine's detail.
-                svc.ui.detail_open.set(true);
-                seen.scan(&decode_batch(host.render_frame(16_000_000).expect("render")).expect("decode"));
+                // The phone shows the list first and the detail only for a chosen routine (no
+                // routine is chosen by default there), so open the first one as a user would:
+                // its row is a button named by the routine.
+                let name = sample_entries()[0].routine.name.clone();
+                let row = seen
+                    .texts
+                    .iter()
+                    .find(|(id, t)| **t == name && seen.clickables.contains_key(id))
+                    .map(|(id, _)| *id)
+                    .unwrap_or_else(|| panic!("a clickable row named {name}"));
+                let (bytes, _) = host
+                    .dispatch(HostEvent { node_id: row, handler_id: seen.clickables[&row], payload: EventPayload::Clicked })
+                    .expect("dispatch click on the routine row");
+                seen.scan(&decode_batch(bytes).expect("decode"));
             }
 
             let run_btn = seen.texts

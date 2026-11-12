@@ -50,5 +50,11 @@ intellijPlatformTesting {
 tasks {
     test {
         useJUnit()
+        // Shows why a test failed in the CI log, and whether the real-manager test was skipped.
+        testLogging {
+            events("failed", "skipped")
+            exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+            showStandardStreams = false
+        }
     }
 }

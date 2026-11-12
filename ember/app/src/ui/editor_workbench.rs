@@ -297,6 +297,7 @@ pub mod page {
     use std::collections::HashMap;
     use std::sync::Arc;
     use crate::terminal_stream::{self, ChangeCallback, TerminalHandle, TerminalState};
+    use crate::ui::editor_terminals as terms;
     use super::{DOUBLE_CLICK, DOUBLE_SHIFT, now_ms, send, editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, PendingGoto, Shared};
     use crate::ui::editor::{
         action_for_key, agent_status_text, apply_action, tooltip_text, Side, Stripes, ToolWindow,
@@ -2316,8 +2317,6 @@ pub mod page {
     }
 
     thread_local! {
-        /// The editor's terminal session. Started on first show and kept while the panel is hidden.
-        static TERMINAL: std::cell::RefCell<Option<TerminalHandle>> = const { std::cell::RefCell::new(None) };
         /// The terminal panel element, to read its laid-out size (FR-L31.20).
         static TERM_MOUNT: std::cell::RefCell<Option<std::rc::Rc<dioxus_elements::MountedData>>> = const { std::cell::RefCell::new(None) };
         static TERM_FIT: std::cell::RefCell<crate::ui::term_fit::PanelFit> = std::cell::RefCell::new(Default::default());
@@ -2350,24 +2349,20 @@ pub mod page {
         }
     }
 
-    /// The terminal handle, started on first use. `None` when the editor was not given a server
-    /// URL and a computer to attach to.
+    /// The active terminal tab's attachment (FR-P6, FR-L31.23). The panel lists the folder's
+    /// terminals on first show and reattaches to those the node kept. `None` when the editor was not
+    /// given a server URL and a computer, or the list is not there yet.
     fn terminal_handle(s: &Shared) -> Option<TerminalHandle> {
         if !can_attach(&s.server_url, &s.computer) {
             return None;
         }
-        TERMINAL.with(|t| {
-            let mut slot = t.borrow_mut();
-            if slot.is_none() {
-                let revision = s.revision;
-                let on_change: ChangeCallback = Arc::new(move || {
-                    let mut revision = revision;
-                    *revision.write() += 1;
-                });
-                *slot = Some(terminal_stream::start(&s.server_url, &s.computer, &s.folder, &s.project, Some(on_change)));
-            }
-            slot.clone()
-        })
+        let revision = s.revision;
+        let on_change: ChangeCallback = Arc::new(move || {
+            let mut revision = revision;
+            *revision.write() += 1;
+        });
+        crate::ui::editor_terminals::ensure(&s.server_url, &s.computer, &s.folder, &s.project, on_change);
+        crate::ui::editor_terminals::active_handle()
     }
 
     /// What the terminal panel shows for one state.
@@ -2407,9 +2402,90 @@ pub mod page {
         !state.controlled_by_other()
     }
 
+    /// The terminal tab strip (FR-L31.23): one tab per terminal of the folder with switch, rename
+    /// (double-click) and kill (trash), and + for a new one, as in Code-OSS's terminal tabs.
+    fn terminal_strip(s: &Shared) -> Element {
+        let revision = s.revision;
+        let bump = move || {
+            let mut revision = revision;
+            *revision.write() += 1;
+        };
+        let view = terms::view();
+        let (tabs, active, renaming, error) = match view {
+            Some(v) => (v.tabs, v.active, v.renaming, v.error),
+            None => (Vec::new(), None, None, None),
+        };
+        rsx! {
+            div { class: "ed-tsub", role: "tablist", "aria-label": "터미널",
+                for (id, label) in tabs {
+                    if renaming.as_ref().is_some_and(|(r, _)| *r == id) {
+                        input { key: "{id}", class: "ed-tren", "aria-label": "터미널 이름", value: renaming.as_ref().map(|(_, t)| t.clone()).unwrap_or_default(),
+                            oninput: move |event| { terms::rename_text(event.value()); bump(); },
+                            onkeydown: move |event| {
+                                match event.key() {
+                                    Key::Enter => { terms::end_rename(true); bump(); }
+                                    Key::Escape => { terms::end_rename(false); bump(); }
+                                    _ => {}
+                                }
+                            },
+                        }
+                    } else {
+                        {
+                            let on = active.as_deref() == Some(id.as_str());
+                            let (sel, ren, del, f2, pen) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
+                            rsx! {
+                                button { key: "{id}", class: if on { "on" } else { "" }, role: "tab", "aria-selected": if on { "true" } else { "false" }, title: "{label}",
+                                    onclick: move |_| { terms::select(&sel); bump(); },
+                                    // TODO(compose-rust#417): the renderer sends no pointer events yet, so a real
+                                    // double-click never arrives; F2 and the pencil button rename today.
+                                    ondoubleclick: move |_| { terms::begin_rename(&ren); bump(); },
+                                    onkeydown: move |event| {
+                                        let m = event.modifiers();
+                                        let name = key_name(&event.key());
+                                        if crate::terminal_list::tab_key_action(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META)).is_some() {
+                                            event.stop_propagation();
+                                            event.prevent_default();
+                                            terms::begin_rename(&f2);
+                                            bump();
+                                        }
+                                    },
+                                    {icon_px("code", 14)} "{label}"
+                                    if on {
+                                        span { class: "ed-ib", role: "button", title: "이름 바꾸기", "aria-label": "이름 바꾸기: {label}", tabindex: "-1",
+                                            onclick: move |event| { event.stop_propagation(); terms::begin_rename(&pen); bump(); },
+                                            {icon_px("edit", 12)}
+                                        }
+                                    }
+                                    span { class: "ed-ib", role: "button", title: "터미널 종료", "aria-label": "터미널 종료: {label}", tabindex: "-1",
+                                        onclick: move |event| { event.stop_propagation(); terms::kill(&del); bump(); },
+                                        {icon_px("trash", 12)}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                button { class: "ed-ib", title: "새 터미널", "aria-label": "새 터미널", onclick: move |_| { terms::new_terminal(); bump(); }, {icon("plus")} }
+            }
+            if let Some(error) = error {
+                div { class: "tl", style: "padding:0 var(--sp3); color:var(--c-red);", "{error}" }
+            }
+        }
+    }
+
     fn terminal_body(s: &Shared) -> Element {
-        let Some(handle) = terminal_handle(s) else {
+        if !can_attach(&s.server_url, &s.computer) {
             return rsx! { div { class: "ed-term", role: "log", "aria-label": "터미널 출력", style: "color:var(--muted);", "터미널은 서버에 연결했을 때만 사용할 수 있습니다. 이 창에는 서버 주소나 컴퓨터가 없습니다." } };
+        }
+        let handle = terminal_handle(s);
+        let strip = terminal_strip(s);
+        let Some(handle) = handle else {
+            let text = match terms::view().map(|v| v.load) {
+                Some(terms::Load::Failed(e)) => format!("터미널 목록을 불러오지 못했습니다: {e}"),
+                Some(terms::Load::Ready) => "열린 터미널이 없습니다. +를 눌러 새 터미널을 엽니다.".to_string(),
+                _ => "터미널 목록을 불러오는 중입니다.".to_string(),
+            };
+            return rsx! { {strip} div { class: "ed-term", role: "log", "aria-label": "터미널 출력", style: "color:var(--muted);", "{text}" } };
         };
         fit_terminal(s, &handle);
         let view = panel_view(&handle.snapshot());
@@ -2419,12 +2495,8 @@ pub mod page {
         let offer_control = offers_take_control(&handle.snapshot());
         let offer_reconnect = handle.snapshot().needs_reconnect();
         let revision = s.revision;
-        let computer = if s.computer.is_empty() { "로컬".to_string() } else { s.computer.clone() };
         rsx! {
-            div { class: "ed-tsub",
-                button { class: "on", "aria-pressed": "true", {icon_px("code", 14)} "{computer}" }
-                button { class: "ed-ib", title: "새 터미널", "aria-label": "새 터미널", onclick: move |_| notice(crate::ui::editor_actions::not_ready_notice(Action::NewTerminal)), {icon("plus")} }
-            }
+            {strip}
             div { class: "ed-term", role: "log", "aria-label": "터미널 출력", tabindex: "0", style: "outline:none;",
                 onmounted: move |event| TERM_MOUNT.with(|m| *m.borrow_mut() = Some(event.data())),
                 // FR-L31.21: paste chord and IME composition (`crate::terminal_input`).
@@ -2485,7 +2557,7 @@ pub mod page {
                     div { style: "display:flex; margin-top:var(--sp2);",
                         button { class: "ed-pj", style: "border:1px solid var(--line);",
                             onclick: move |_| {
-                                TERMINAL.with(|t| *t.borrow_mut() = None);
+                                terms::reattach_active();
                                 let mut revision = revision;
                                 *revision.write() += 1;
                             }, "다시 연결" }

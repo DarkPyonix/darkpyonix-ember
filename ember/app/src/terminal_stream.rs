@@ -182,6 +182,13 @@ pub struct TermInfo {
     pub state: String,
     #[serde(default)]
     pub last_activity_ms: u64,
+    /// The idempotency key it was created with (`"<project>:<folder>"` and its `#n` siblings).
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub cwd: std::path::PathBuf,
+    #[serde(default)]
+    pub created_ms: u64,
 }
 
 /// One attached client.
@@ -887,6 +894,51 @@ pub fn start(
         }
     });
     TerminalHandle { shared }
+}
+
+/// Attach the editor to the existing terminal `term_id` (FR-P6: a terminal that survived the window,
+/// listed by [`crate::terminal_list`]). Dropping the last clone detaches; the terminal keeps running.
+pub fn attach_existing(base_url: &str, computer_id: &str, term_id: &str, on_change: Option<ChangeCallback>) -> TerminalHandle {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let shared = Arc::new(Shared {
+        session: Mutex::new(TerminalSession::new()),
+        revision: AtomicU64::new(0),
+        size: Mutex::new((80, 24)),
+        tx,
+        on_change,
+        pick: Mutex::new(None),
+    });
+    shared.update(|s| s.connecting());
+    let task_shared = Arc::downgrade(&shared);
+    let (base, computer, term) = (base_url.to_owned(), computer_id.to_owned(), term_id.to_owned());
+    crate::services::services().rt.spawn(async move {
+        let hello = TermHello {
+            device: device_name(),
+            kind: Some("ember-editor".into()),
+            pid: Some(std::process::id()),
+            size: Some(PtySize { rows: 24, cols: 80 }),
+            active: true,
+            read_only: false,
+            snapshot: true,
+        };
+        let token = server_token(&base);
+        if let Err(e) = stream(&task_shared, &base, &computer, &term, hello, token, rx).await {
+            if let Some(shared) = task_shared.upgrade() {
+                shared.update(|s| s.fail(e.to_string()));
+            }
+        }
+        if let Some(shared) = task_shared.upgrade() {
+            shared.update(|s| s.disconnected());
+        }
+    });
+    TerminalHandle { shared }
+}
+
+/// The server token, only for a server this machine may trust with it.
+pub(crate) fn server_token(base: &str) -> Option<String> {
+    ember_client::token::token_allowed_for(base)
+        .then(ember_client::token::server_token_from_env)
+        .flatten()
 }
 
 async fn run(

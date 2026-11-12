@@ -20,6 +20,7 @@ pub mod editor_actions;
 pub mod enrol_flow;
 pub mod editor_icons;
 pub mod editor_blame;
+pub mod editor_terminals;
 pub mod editor_scm;
 pub mod editor_status;
 pub mod editor_scm_repo;

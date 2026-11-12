@@ -640,6 +640,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "ember-hub",
+ "ember-transfer",
  "ember-transport",
  "futures",
  "globset",

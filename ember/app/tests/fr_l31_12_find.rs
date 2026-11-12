@@ -119,3 +119,19 @@ fn fr_l31_12_find_in_selection_keeps_only_matches_inside_the_scope() {
     let edits = replacement_edits(text, "a", opts, &find_matches(text, "a", opts), None, "b");
     assert_eq!(apply(text, &edits), "a b\nb a\na a");
 }
+
+#[test]
+fn fr_l31_12_find_option_chords_follow_code_oss() {
+    use ember_app::ui::editor::chord_from_key;
+    use ember_app::ui::keymap::{FindOption, Os};
+    assert_eq!(FindOption::Regex.hint(Os::Mac), FindOption::Regex.chord(Os::Mac).unwrap().display(Os::Mac));
+    let mac = |k: &str| FindOption::for_chord(&chord_from_key(k, false, false, true, true), Os::Mac);
+    let other = |k: &str| FindOption::for_chord(&chord_from_key(k, false, false, true, false), Os::Other);
+    for (k, o) in [("r", FindOption::Regex), ("l", FindOption::InSelection), ("p", FindOption::PreserveCase)] {
+        assert_eq!(mac(k), Some(o));
+        assert_eq!(other(k), Some(o));
+    }
+    // Alt alone on macOS and Cmd+Alt elsewhere toggle nothing.
+    assert_eq!(FindOption::for_chord(&chord_from_key("r", false, false, true, false), Os::Mac), None);
+    assert_eq!(FindOption::for_chord(&chord_from_key("r", false, false, true, true), Os::Other), None);
+}

@@ -349,6 +349,45 @@ impl Keymap {
     }
 }
 
+/// An option of the find bar (FR-L31.12). Code-OSS binds these only while the find widget or the editor
+/// has focus, so they live beside the window table rather than in it (JetBrains' ⌥⌘L, 코드 서식, would
+/// otherwise collide with 선택 영역에서 찾기); they are the same in both keymaps, as Code-OSS's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindOption {
+    Regex,
+    InSelection,
+    PreserveCase,
+}
+
+impl FindOption {
+    pub const ALL: [FindOption; 3] = [FindOption::Regex, FindOption::InSelection, FindOption::PreserveCase];
+
+    fn text(self, os: Os) -> &'static str {
+        match (self, os) {
+            (FindOption::Regex, Os::Mac) => "\u{2325}\u{2318}R",
+            (FindOption::InSelection, Os::Mac) => "\u{2325}\u{2318}L",
+            (FindOption::PreserveCase, Os::Mac) => "\u{2325}\u{2318}P",
+            (FindOption::Regex, Os::Other) => "Alt+R",
+            (FindOption::InSelection, Os::Other) => "Alt+L",
+            (FindOption::PreserveCase, Os::Other) => "Alt+P",
+        }
+    }
+
+    pub fn chord(self, os: Os) -> Option<Chord> {
+        Chord::parse(os, self.text(os))
+    }
+
+    /// The chord as the OS writes it, for the button's tooltip.
+    pub fn hint(self, os: Os) -> String {
+        self.chord(os).map(|c| c.display(os)).unwrap_or_default()
+    }
+
+    /// The option a chord pressed in the find bar toggles.
+    pub fn for_chord(chord: &Chord, os: Os) -> Option<FindOption> {
+        FindOption::ALL.into_iter().find(|o| o.chord(os).as_ref() == Some(chord))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

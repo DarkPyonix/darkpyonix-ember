@@ -636,6 +636,39 @@ pub mod page {
         current.set(None);
     }
 
+    /// Turns a find option (FR-L31.12) on or off. Turning 선택 영역에서 찾기 on takes the selection of that
+    /// moment as the scope, as Code-OSS does.
+    fn toggle_find_option(s: &Shared, option: crate::ui::keymap::FindOption) {
+        use crate::ui::keymap::FindOption;
+        let mut current = s.find.current;
+        match option {
+            FindOption::Regex => { let mut r = s.find.regex; let on = *r.read(); r.set(!on); }
+            FindOption::PreserveCase => { let mut p = s.find.preserve_case; let on = *p.read(); p.set(!on); }
+            FindOption::InSelection => {
+                let mut in_sel = s.find.in_selection;
+                let on = *in_sel.read();
+                if !on {
+                    let (anchor, active) = *s.find.selection.read();
+                    let text = s.bridge.borrow().active_document().map(|d| d.text.clone()).unwrap_or_default();
+                    let mut scope = s.find.scope;
+                    scope.set(crate::ui::find::Scope::from_selection(anchor, active, &text));
+                }
+                in_sel.set(!on);
+            }
+        }
+        current.set(None);
+    }
+
+    /// The find option a key pressed in a find bar field toggles, by the physical key so that macOS's
+    /// Option letters (⌥R gives `®`) still match.
+    fn find_option_for_event(event: &KeyboardEvent) -> Option<crate::ui::keymap::FindOption> {
+        let m = event.modifiers();
+        let code = format!("{:?}", event.code());
+        let key = code.strip_prefix("Key").filter(|k| k.len() == 1).map(str::to_string).unwrap_or_else(|| key_name(&event.key()));
+        let chord = crate::ui::editor::chord_from_key(&key, m.contains(Modifiers::CONTROL), m.contains(Modifiers::SHIFT), m.contains(Modifiers::ALT), m.contains(Modifiers::META));
+        crate::ui::keymap::FindOption::for_chord(&chord, crate::ui::keymap::Os::current())
+    }
+
     /// The find bar over the editor: a field with the case and whole-word options, the counter and the
     /// previous and next buttons, a replacement field with replace and replace all, and close. Enter goes
     /// to the next match, Shift+Enter to the previous, Escape closes.
@@ -658,9 +691,11 @@ pub mod page {
         let has_doc = s.bridge.borrow().active_document().is_some();
         let has_matches = has_doc && (!matches.is_empty() || truncated);
         let (case_on, word_on) = (*case_sensitive.read(), *whole_word.read());
-        let (mut regex, mut preserve, mut in_sel, mut scope) = (s.find.regex, s.find.preserve_case, s.find.in_selection, s.find.scope);
-        let (regex_on, preserve_on, sel_on) = (*regex.read(), *preserve.read(), *in_sel.read());
-        let sel_s = s.clone();
+        let (regex_on, preserve_on, sel_on) = (*s.find.regex.read(), *s.find.preserve_case.read(), *s.find.in_selection.read());
+        let (regex_s, sel_s, preserve_s, opt_q, opt_r) = (s.clone(), s.clone(), s.clone(), s.clone(), s.clone());
+        let os = crate::ui::keymap::Os::current();
+        use crate::ui::keymap::FindOption;
+        let (regex_t, sel_t, preserve_t) = (format!("정규식 사용 ({})", FindOption::Regex.hint(os)), format!("선택 영역에서 찾기 ({})", FindOption::InSelection.hint(os)), format!("대소문자 보존 ({})", FindOption::PreserveCase.hint(os)));
         let on = |flag: bool| if flag { "ed-pj on" } else { "ed-pj" };
         rsx! {
             div { class: "ed-tsub", role: "search", "aria-label": "문서에서 찾기", style: "flex-wrap:wrap;",
@@ -675,24 +710,16 @@ pub mod page {
                             match event.key() {
                                 Key::Enter => { event.stop_propagation(); find_go(&key_s, !event.modifiers().contains(Modifiers::SHIFT)); }
                                 Key::Escape => { event.stop_propagation(); open.set(false); }
-                                _ => {}
+                                _ => if let Some(option) = find_option_for_event(&event) { event.stop_propagation(); event.prevent_default(); toggle_find_option(&opt_q, option); }
                             }
                         },
                     }
                 }
                 button { class: on(case_on), title: "대소문자 구분", "aria-label": "대소문자 구분", "aria-pressed": "{case_on}", style: "border:1px solid var(--line);", onclick: move |_| { case_sensitive.set(!case_on); current.set(None); }, "Aa" }
                 button { class: on(word_on), title: "단어 단위", "aria-label": "단어 단위", "aria-pressed": "{word_on}", style: "border:1px solid var(--line);", onclick: move |_| { whole_word.set(!word_on); current.set(None); }, "단어" }
-                button { class: on(regex_on), title: "정규식 사용", "aria-label": "정규식 사용", "aria-pressed": "{regex_on}", style: "border:1px solid var(--line);", onclick: move |_| { regex.set(!regex_on); current.set(None); }, ".*" }
-                button { class: on(sel_on), title: "선택 영역에서 찾기", "aria-label": "선택 영역에서 찾기", "aria-pressed": "{sel_on}", style: "border:1px solid var(--line);",
-                    onclick: move |_| {
-                        if !sel_on {
-                            // As in Code-OSS the scope is the selection at the moment the option is turned on.
-                            let (anchor, active) = *sel_s.find.selection.read();
-                            let text = sel_s.bridge.borrow().active_document().map(|d| d.text.clone()).unwrap_or_default();
-                            scope.set(crate::ui::find::Scope::from_selection(anchor, active, &text));
-                        }
-                        in_sel.set(!sel_on); current.set(None);
-                    }, "선택" }
+                button { class: on(regex_on), title: "{regex_t}", "aria-label": "정규식 사용", "aria-pressed": "{regex_on}", style: "border:1px solid var(--line);", onclick: move |_| toggle_find_option(&regex_s, FindOption::Regex), ".*" }
+                button { class: on(sel_on), title: "{sel_t}", "aria-label": "선택 영역에서 찾기", "aria-pressed": "{sel_on}", style: "border:1px solid var(--line);",
+                    onclick: move |_| toggle_find_option(&sel_s, FindOption::InSelection), "선택" }
                 span { class: "ed-sbi", role: "status", "{counter}" }
                 button { class: "ed-ib", title: "이전 결과", "aria-label": "이전 결과", disabled: !has_matches, onclick: move |_| find_go(&prev_s, false), {icon("up")} }
                 button { class: "ed-ib", title: "다음 결과", "aria-label": "다음 결과", disabled: !has_matches, onclick: move |_| find_go(&next_s, true), {icon("down")} }
@@ -704,12 +731,12 @@ pub mod page {
                             match event.key() {
                                 Key::Enter => { event.stop_propagation(); find_replace_one(&enter_s); }
                                 Key::Escape => { event.stop_propagation(); open.set(false); }
-                                _ => {}
+                                _ => if let Some(option) = find_option_for_event(&event) { event.stop_propagation(); event.prevent_default(); toggle_find_option(&opt_r, option); }
                             }
                         },
                     }
                 }
-                button { class: on(preserve_on), title: "대소문자 보존", "aria-label": "대소문자 보존", "aria-pressed": "{preserve_on}", style: "border:1px solid var(--line);", onclick: move |_| preserve.set(!preserve_on), "AB" }
+                button { class: on(preserve_on), title: "{preserve_t}", "aria-label": "대소문자 보존", "aria-pressed": "{preserve_on}", style: "border:1px solid var(--line);", onclick: move |_| toggle_find_option(&preserve_s, FindOption::PreserveCase), "AB" }
                 button { class: "ed-pj", style: "border:1px solid var(--line);", disabled: !has_matches, onclick: move |_| find_replace_one(&one_s), "바꾸기" }
                 button { class: "ed-pj", style: "border:1px solid var(--line);", disabled: !has_matches, onclick: move |_| find_replace_all(&all_s), "모두 바꾸기" }
                 div { class: "spacer" }

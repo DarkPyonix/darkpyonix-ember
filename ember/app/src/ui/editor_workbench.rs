@@ -474,8 +474,8 @@ pub mod page {
             {
                 open_picker(s, Mode::ConfirmReopen(encoding));
             }
-            Payload::SetEncoding { mode, encoding } => s.host.send(HostCommand::SetEncoding { path, encoding, mode }),
-            Payload::SetLanguage(language_id) => s.host.send(HostCommand::SetLanguage { path, language_id }),
+            Payload::SetEncoding { mode, encoding } => { s.host.send(HostCommand::SetEncoding { path, encoding, mode }); }
+            Payload::SetLanguage(language_id) => { s.host.send(HostCommand::SetLanguage { path, language_id }); }
             _ => {}
         }
     }

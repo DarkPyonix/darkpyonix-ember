@@ -572,6 +572,10 @@ pub enum EnrolError {
     /// The door is on but the server has no address to print for it.
     #[error("Set EMBER_ENROL_PUBLIC_URL to the address the other machine uses")]
     DoorUrlUnknown,
+    /// The door opens at mint (`EMBER_ENROL_AUTO_CLOSE=1`, #539) and its socket could not be
+    /// bound. The code just minted is cancelled, so no unusable code is shown.
+    #[error("The enrol door could not be opened; no code was made")]
+    DoorUnavailable,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -794,15 +798,38 @@ fn check_name(name: &str) -> Result<String, EnrolError> {
     Ok(name.to_string())
 }
 
-/// The server URL that goes into the command: http(s), no whitespace, quotes or shell characters.
+/// The server URL that goes into the command: `http(s)://host[:port][/path]`, nothing else.
+/// Allowed: ASCII letters, digits, `.`, `-`, `_`, `:` and `/`, and one pair of brackets only as an
+/// IPv6 literal host (`[` right after `://`, hex digits and `:` inside). `%`, `~`, `[` and `]`
+/// elsewhere are refused (#526): the command is pasted into a shell, and zsh globs on `[ ]`,
+/// expands a leading `~`, and `%` starts a percent escape or a zone id the node does not need.
 fn check_base_url(url: &str) -> Result<String, EnrolError> {
+    let bad = || EnrolError::BadRequest("the server URL for the enrol command is not a plain http(s) URL".into());
     let url = url.trim().trim_end_matches('/');
-    let ok_scheme = url.starts_with("http://") || url.starts_with("https://");
-    let ok_chars = url
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '/' | '.' | '-' | '_' | '[' | ']' | '%' | '~'));
-    if !ok_scheme || !ok_chars || url.len() > 300 {
-        return Err(EnrolError::BadRequest("the server URL for the enrol command is not a plain http(s) URL".into()));
+    let rest = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")).ok_or_else(bad)?;
+    if rest.is_empty() || url.len() > 300 {
+        return Err(bad());
+    }
+    let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, ':' | '/' | '.' | '-' | '_');
+    let after_host = match rest.strip_prefix('[') {
+        Some(v6) => {
+            let close = v6.find(']').ok_or_else(bad)?;
+            let inside = &v6[..close];
+            if inside.is_empty() || !inside.chars().all(|c| c.is_ascii_hexdigit() || c == ':') {
+                return Err(bad());
+            }
+            let after = &v6[close + 1..];
+            if !(after.is_empty() || after.starts_with(':') || after.starts_with('/')) {
+                return Err(bad());
+            }
+            after
+        }
+        // A host name must come first: `http:///x` and `http://:80` have none.
+        None if rest.starts_with('/') || rest.starts_with(':') => return Err(bad()),
+        None => rest,
+    };
+    if !after_host.chars().all(plain) {
+        return Err(bad());
     }
     Ok(url.to_string())
 }
@@ -896,6 +923,22 @@ impl Enrol {
     pub fn sweep(&self, now_ms: i64) -> Result<(), EnrolError> {
         let g = self.gate();
         self.settle(&g, now_ms)
+    }
+
+    /// Whether any enrolment still needs the enrol door at `now_ms` (#539): a code not redeemed
+    /// yet (`waiting`), a redeem the owner has not answered (`awaiting_confirmation`), or a
+    /// confirm whose credential the node has not fetched (`confirmed`). Settles first, so an
+    /// expired one does not count. The auto-closing door ([`crate::enrol_door::DoorGate`]) closes
+    /// when this is false.
+    pub fn has_live_enrolment(&self, now_ms: i64) -> Result<bool, EnrolError> {
+        let g = self.gate();
+        self.settle(&g, now_ms)?;
+        let n: i64 = self.store.conn().query_row(
+            "SELECT COUNT(*) FROM enrol_codes WHERE state IN ('waiting', 'awaiting_confirmation', 'confirmed')",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
     }
 
     fn gate(&self) -> MutexGuard<'_, ()> {
@@ -1398,6 +1441,8 @@ struct AppState {
     enrol: Arc<Enrol>,
     door: DoorUrl,
     registrar: Arc<dyn Registrar>,
+    /// The auto-closing door (#539), `None` when the door is always open or off.
+    gate: Option<Arc<crate::enrol_door::DoorGate>>,
 }
 
 /// `POST /api/computers/enrol-codes`, `GET` and `DELETE /api/computers/enrol-codes/{id}`, and
@@ -1405,6 +1450,18 @@ struct AppState {
 /// enrol door's URL for the printed command (the door port, not the owner API address; `Off` and
 /// `Unknown` make the mint answer 409); `registrar` registers a confirmed computer. There is no redeem route. Merge it only into the token-protected local router.
 pub fn router(enrol: Arc<Enrol>, door: DoorUrl, registrar: Arc<dyn Registrar>) -> Router {
+    router_with_gate(enrol, door, registrar, None)
+}
+
+/// As [`router`], with the auto-closing door (#539): the mint opens `gate` before it answers, the
+/// answer says `door: "open"`, and a cancel or deny nudges the gate so it closes at once when no
+/// enrolment needs it any more.
+pub fn router_with_gate(
+    enrol: Arc<Enrol>,
+    door: DoorUrl,
+    registrar: Arc<dyn Registrar>,
+    gate: Option<Arc<crate::enrol_door::DoorGate>>,
+) -> Router {
     // The registry is needed to remove the computer of an enrolment that expires undelivered.
     // The first sweep covers a `confirmed` row left by a restart.
     enrol.set_registrar(registrar.clone());
@@ -1416,7 +1473,7 @@ pub fn router(enrol: Arc<Enrol>, door: DoorUrl, registrar: Arc<dyn Registrar>) -
         .route("/api/computers/enrol-codes/{id}", get(status).delete(cancel))
         .route("/api/computers/enrol-codes/{id}/confirm", post(confirm))
         .route("/api/computers/enrol-codes/{id}/deny", post(deny))
-        .with_state(AppState { enrol, door, registrar })
+        .with_state(AppState { enrol, door, registrar, gate })
 }
 
 struct ApiError(EnrolError);
@@ -1436,6 +1493,7 @@ impl IntoResponse for ApiError {
             EnrolError::FingerprintRequired => (StatusCode::CONFLICT, Some("fingerprint_required")),
             EnrolError::DoorOff => (StatusCode::CONFLICT, Some("door_off")),
             EnrolError::DoorUrlUnknown => (StatusCode::CONFLICT, Some("door_url_unknown")),
+            EnrolError::DoorUnavailable => (StatusCode::SERVICE_UNAVAILABLE, Some("door_unavailable")),
             EnrolError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),
         };
         // An internal error does not echo database text.
@@ -1473,7 +1531,19 @@ async fn mint(AxumState(s): AxumState<AppState>, Json(b): Json<MintBody>) -> Res
         DoorUrl::Url(u) => check_base_url(u)?,
     };
     let m = s.enrol.mint(&b.name, crate::store::now_ms(), b.ttl_secs.map(Duration::from_secs), &door_url)?;
-    tracing::info!(enrol = %m.id, "enrol code minted");
+    // An auto-closing door opens now, before the code is shown. A bind failure cancels the code.
+    let door_state = match &s.gate {
+        None => "on",
+        Some(g) => match g.open().await {
+            Ok(()) => "open",
+            Err(e) => {
+                tracing::warn!(enrol = %m.id, "the enrol door could not be opened: {e}");
+                let _ = s.enrol.cancel(&m.id);
+                return Err(EnrolError::DoorUnavailable.into());
+            }
+        },
+    };
+    tracing::info!(enrol = %m.id, door = door_state, "enrol code minted");
     let mut warning = format!("The code is shown once. Check that {door_url} is reachable from the other machine.");
     if door_url.starts_with("http://") {
         warning.push_str(
@@ -1487,7 +1557,7 @@ async fn mint(AxumState(s): AxumState<AppState>, Json(b): Json<MintBody>) -> Res
         "expires_ms": m.expires_ms,
         "command": m.command,
         "warning": warning,
-        "door": "on",
+        "door": door_state,
         "server": door_url,
     });
     // Both keys are absent, never null, when the transport is off.
@@ -1510,6 +1580,9 @@ async fn status(AxumState(s): AxumState<AppState>, Path(id): Path<String>) -> Re
 
 async fn cancel(AxumState(s): AxumState<AppState>, Path(id): Path<String>) -> Result<impl IntoResponse, ApiError> {
     s.enrol.cancel(&id)?;
+    if let Some(g) = &s.gate {
+        g.nudge();
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1537,6 +1610,9 @@ async fn confirm(
 
 async fn deny(AxumState(s): AxumState<AppState>, Path(id): Path<String>) -> Result<impl IntoResponse, ApiError> {
     s.enrol.deny(&id, crate::store::now_ms())?;
+    if let Some(g) = &s.gate {
+        g.nudge();
+    }
     tracing::info!(enrol = %id, "enrol denied");
     Ok(Json(json!({ "status": "denied" })))
 }
@@ -1932,6 +2008,34 @@ mod tests {
         }
         let m = e.mint(" ok ", T0, None, "https://ember.example/").unwrap();
         assert!(m.command.ends_with("--server https://ember.example"));
+    }
+
+    /// #526 item 5: no character in the printed command that zsh or bash would expand.
+    #[test]
+    fn fr_c1_base_url_refuses_glob_tilde_and_percent() {
+        let (_, e) = svc();
+        for bad in [
+            "http://x[1]",
+            "http://host/a[b]",
+            "http://[::1]x",
+            "http://[zz::1]:9300",
+            "http://[]:9300",
+            "http://[fe80::1%25en0]:9300",
+            "http://host/~user",
+            "http://host/%2e",
+            "http://ho%73t",
+            "http://:9300",
+            "http:///path",
+            "http://",
+            "http://x*",
+            "http://x?y",
+        ] {
+            assert!(matches!(e.mint("ok", T0, None, bad), Err(EnrolError::BadRequest(_))), "{bad:?}");
+        }
+        for good in ["http://[::1]:9300", "http://[fd00::12]", "https://enrol.example.com:443/ember", "http://10.0.0.5:9300"] {
+            let m = e.mint("ok", T0, None, good).unwrap_or_else(|err| panic!("{good:?}: {err}"));
+            assert!(m.command.contains(&format!("--server {good}")), "{good:?}");
+        }
     }
 
     #[test]

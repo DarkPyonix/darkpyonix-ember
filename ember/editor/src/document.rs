@@ -274,6 +274,27 @@ impl OpenDocument {
         calls
     }
 
+    /// Replace the buffer with `text` (widget form, `\n` line breaks) that need not be on disk: a buffer
+    /// kept across a reconnect (FR-L31.6). Like [`OpenDocument::reset`], but the disk text, the BOM and
+    /// the file's line ending stay, and the document is dirty unless `text` equals the disk text.
+    pub fn restore(&mut self, text: &str, generation: u64) -> Vec<Call> {
+        let eol = self.mirror.eol().to_owned();
+        let file_text = text.replace("\r\n", "\n").replace('\n', &eol);
+        let next = self.ext_version() + 1;
+        let mut calls = vec![self.remove_call()];
+        let mut mirror = DocumentMirror::new(self.uri.clone(), &file_text, &self.language_id).with_version(next);
+        if mirror.text() != self.disk_text {
+            mirror.mark_dirty();
+        }
+        self.mirror = mirror;
+        self.ext_base = next;
+        self.widget_version = 0;
+        self.generation = generation;
+        self.cursor = None;
+        calls.extend(self.add_calls());
+        calls
+    }
+
     /// Does `text` (decoded file content) equal what Ember last read or wrote? Used to ignore
     /// watcher events caused by our own save.
     pub fn matches_disk(&self, text: &str) -> bool {

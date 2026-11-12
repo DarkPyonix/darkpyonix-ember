@@ -12,6 +12,7 @@ fn opts() -> FindOptions {
         case_sensitive: false,
         whole_word: false,
         regex: false,
+        ..FindOptions::default()
     }
 }
 
@@ -37,11 +38,11 @@ fn fr_l31_find_ignores_case_unless_asked_not_to() {
     let text = "Foo foo FOO";
     assert_eq!(find_matches(text, "foo", opts()).len(), 3);
     assert_eq!(
-        find_matches(text, "foo", FindOptions { case_sensitive: true, whole_word: false, regex: false }),
+        find_matches(text, "foo", FindOptions { case_sensitive: true, whole_word: false, regex: false, ..FindOptions::default() }),
         vec![m(0, 4, 7)]
     );
     assert_eq!(
-        find_matches(text, "FOO", FindOptions { case_sensitive: true, whole_word: false, regex: false }),
+        find_matches(text, "FOO", FindOptions { case_sensitive: true, whole_word: false, regex: false, ..FindOptions::default() }),
         vec![m(0, 8, 11)]
     );
 }
@@ -49,7 +50,7 @@ fn fr_l31_find_ignores_case_unless_asked_not_to() {
 #[test]
 fn fr_l31_whole_word_skips_matches_inside_longer_words() {
     let text = "cat concat cat_x cat.";
-    let whole = FindOptions { case_sensitive: false, whole_word: true, regex: false };
+    let whole = FindOptions { case_sensitive: false, whole_word: true, regex: false, ..FindOptions::default() };
     assert_eq!(find_matches(text, "cat", whole), vec![m(0, 0, 3), m(0, 17, 20)]);
     assert_eq!(find_matches(text, "cat", opts()).len(), 4);
 }
@@ -140,7 +141,7 @@ fn fr_l31_cached_matches_follow_the_text_query_and_options() {
     assert_eq!(cached_matches("a b a a", "a", o).0.len(), 3, "a changed text is searched again");
     assert_eq!(cached_matches("a b a a", "b", o).0.len(), 1, "a changed query is searched again");
     assert_eq!(
-        cached_matches("A a", "a", FindOptions { case_sensitive: true, whole_word: false, regex: false }).0.len(),
+        cached_matches("A a", "a", FindOptions { case_sensitive: true, whole_word: false, regex: false, ..FindOptions::default() }).0.len(),
         1,
         "changed options too"
     );
@@ -179,7 +180,7 @@ fn fr_l31_cached_doc_matches_skips_text_read_and_recompute_when_version_unchange
     assert_eq!(reads.get(), 3, "query change re-evaluates");
 
     // 5. Options changed: re-evaluates.
-    let o_case = FindOptions { case_sensitive: true, whole_word: false, regex: false };
+    let o_case = FindOptions { case_sensitive: true, whole_word: false, regex: false, ..FindOptions::default() };
     let (m5, _) = cached_doc_matches("file:///a.rs", 1, 1, "bar", o_case, get_text);
     assert_eq!(m5.len(), 1);
     assert_eq!(reads.get(), 4, "options change re-evaluates");

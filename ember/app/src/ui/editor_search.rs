@@ -498,11 +498,9 @@ pub mod view {
         REVEAL_SEEN.with(|c| c.set(false));
     }
 
+    /// A result opens in the preview tab, as Code-OSS's search view does (FR-L31.5).
     fn open_hit(s: &Shared, path: &str, m: Match) {
-        let mut tabs = s.tabs;
-        tabs.write().open(path);
-        s.open_errors.borrow_mut().remove(path);
-        s.host.send(HostCommand::Open(path.to_string()));
+        crate::ui::editor_workbench::page::open_preview(s, path);
         s.host.send(HostCommand::Focus(path.to_string()));
         schedule_reveal(path, m);
     }

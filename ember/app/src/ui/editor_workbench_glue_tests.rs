@@ -119,15 +119,42 @@ impl Page {
         node.attrs()?.iter().find(|a| &*a.name.local == name).map(|a| a.value.clone())
     }
 
-    /// The first element whose attribute `name` is `value`.
+    /// The nodes in the page. The writer keeps every rsx template as a detached subtree that it
+    /// clones for each use, with the template's static attributes (`"aria-label": "새 파일"`), so a
+    /// node counts only when its parents lead to the document's root element.
+    fn connected(&self) -> Vec<NodeId> {
+        let doc = self.dom.document();
+        let root = doc.root_element().id;
+        let ids: Vec<NodeId> = doc.tree().iter().map(|(id, _)| id).collect();
+        ids.into_iter()
+            .filter(|&id| {
+                let mut at = Some(id);
+                while let Some(node) = at {
+                    if node == root {
+                        return true;
+                    }
+                    at = doc.get_node(node).and_then(|n| n.parent);
+                }
+                false
+            })
+            .collect()
+    }
+
+    /// The one element in the page that `matches`; panics when more than one does, so a test
+    /// never acts on whichever came first.
+    fn find_where(&self, what: &str, matches: impl Fn(NodeId) -> bool) -> Option<NodeId> {
+        let found: Vec<NodeId> = self.connected().into_iter().filter(|&id| matches(id)).collect();
+        assert!(found.len() <= 1, "{} elements match {what}: {found:?}", found.len());
+        found.first().copied()
+    }
+
+    /// The one element whose attribute `name` is `value`.
     fn find(&self, name: &str, value: &str) -> Option<NodeId> {
-        let ids: Vec<NodeId> = self.dom.document().tree().iter().map(|(id, _)| id).collect();
-        ids.into_iter().find(|&id| self.attr(id, name).as_deref() == Some(value))
+        self.find_where(&format!("{name}={value:?}"), |id| self.attr(id, name).as_deref() == Some(value))
     }
 
     fn has_attr(&self, name: &str) -> bool {
-        let ids: Vec<NodeId> = self.dom.document().tree().iter().map(|(id, _)| id).collect();
-        ids.into_iter().any(|id| self.attr(id, name).is_some())
+        self.connected().into_iter().any(|id| self.attr(id, name).is_some())
     }
 
     fn text(&self) -> String {
@@ -141,10 +168,10 @@ impl Page {
     }
 
     fn click_row(&mut self) {
-        let ids: Vec<NodeId> = self.dom.document().tree().iter().map(|(id, _)| id).collect();
-        let row = ids
-            .into_iter()
-            .find(|&id| self.attr(id, "role").as_deref() == Some("treeitem") && self.attr(id, "aria-label").as_deref() == Some("a.rs"))
+        let row = self
+            .find_where("the a.rs tree row", |id| {
+                self.attr(id, "role").as_deref() == Some("treeitem") && self.attr(id, "aria-label").as_deref() == Some("a.rs")
+            })
             .expect("the a.rs row in the project tree");
         self.dom.click_node(row);
         self.dom.render();

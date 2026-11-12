@@ -1,12 +1,17 @@
 //! The hub's pkarr directory as the rendezvous of the letify-link backend (SPEC `FR-N2`).
 //!
+//! Polling is adaptive (#783): a watched peer is read at the fast interval while a dial or a
+//! signal exchange with it is in flight and for a short window after it, and otherwise at an
+//! interval that doubles up to the idle interval. The hub runs on a request quota, so an idle
+//! pair must cost little.
+//!
 //! One pkarr packet per peer key carries two kinds of TXT records:
 //!
 //! - `_letify.<key>`: the signed letify-link address record (`record::to_pkarr_txt`), so a peer
 //!   that knows our key finds our dialable addresses and the transports we accept.
 //! - `m<recipient>.<key>`: our mailbox for one recipient, a short queue of messages. The packet
 //!   is signed by our key, so the recipient authenticates the sender. The recipient reads the
-//!   mailboxes of the peers it watches every poll interval. Messages are therefore delayed by up
+//!   mailboxes of the peers it watches on the adaptive schedule below. Messages are delayed by up
 //!   to one interval, which letify-link's rendezvous allows ("may be delayed by seconds").
 //!
 //! A pkarr packet holds about 1000 bytes of DNS, so the mailbox is a few hundred bytes: enough
@@ -256,6 +261,44 @@ struct State {
     watched: HashSet<PeerId>,
     /// Per sender: the packet timestamp and message sequence already delivered.
     seen: HashMap<PeerId, (u64, u32)>,
+    /// Per watched peer: when it is next read and how fast.
+    cadence: HashMap<PeerId, Cadence>,
+}
+
+/// How often watched mailboxes are read (SPEC `FR-N2`, #783).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PollPlan {
+    /// The interval while an exchange with the peer is in flight.
+    pub fast: Duration,
+    /// The longest interval of an idle peer.
+    pub idle: Duration,
+    /// How long a peer stays fast after its last exchange.
+    pub window: Duration,
+}
+
+impl PollPlan {
+    /// The plan of a [`crate::LetifyConfig`]. `idle` is at least `fast`.
+    pub(super) fn new(fast: Duration, idle: Duration, window: Duration) -> Self {
+        let fast = fast.max(Duration::from_millis(1));
+        Self { fast, idle: idle.max(fast), window }
+    }
+}
+
+/// The polling state of one watched peer.
+#[derive(Clone, Copy, Debug)]
+struct Cadence {
+    /// When the peer is read next.
+    due: tokio::time::Instant,
+    /// The interval since the last idle read; doubles up to [`PollPlan::idle`].
+    step: Duration,
+    /// The peer is fast until this instant.
+    hot_until: tokio::time::Instant,
+}
+
+impl Cadence {
+    fn idle_start(now: tokio::time::Instant, plan: &PollPlan) -> Self {
+        Self { due: now + plan.fast, step: plan.fast, hot_until: now }
+    }
 }
 
 /// Publishes our record and mailboxes to a [`PkarrStore`], reads the mailboxes of watched peers
@@ -272,6 +315,9 @@ pub(super) struct PkarrNode {
     start_secs: u32,
     publish_ok: AtomicBool,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    plan: PollPlan,
+    /// Wakes the poller when a peer turns fast.
+    kicked: Arc<Notify>,
 }
 
 impl fmt::Debug for PkarrNode {
@@ -314,7 +360,7 @@ impl PkarrNode {
         key: SecretKey,
         store: Arc<dyn PkarrStore>,
         record: RecordFn,
-        poll_interval: Duration,
+        plan: PollPlan,
     ) -> Arc<Self> {
         let (inbox_tx, rx) = mpsc::unbounded_channel();
         let node = Arc::new(Self {
@@ -329,10 +375,12 @@ impl PkarrNode {
             start_secs: unix_secs(),
             publish_ok: AtomicBool::new(false),
             tasks: Mutex::new(Vec::new()),
+            plan,
+            kicked: Arc::new(Notify::new()),
         });
         // The tasks hold weak references so dropping the node stops them.
         let publisher = tokio::spawn(publish_loop(Arc::downgrade(&node)));
-        let poller = tokio::spawn(poll_loop(Arc::downgrade(&node), poll_interval));
+        let poller = tokio::spawn(poll_loop(Arc::downgrade(&node)));
         node.tasks.lock().unwrap().extend([publisher, poller]);
         node.dirty.notify_one();
         node
@@ -354,12 +402,62 @@ impl PkarrNode {
     }
 
     pub(super) fn watch_peers(&self, peers: &[PeerId]) {
-        let mut st = self.state.lock().unwrap();
-        for p in peers {
-            if *p != self.me {
-                st.watched.insert(*p);
+        let now = tokio::time::Instant::now();
+        let mut added = false;
+        {
+            let mut st = self.state.lock().unwrap();
+            for p in peers {
+                if *p != self.me && st.watched.insert(*p) {
+                    st.cadence.entry(*p).or_insert_with(|| Cadence::idle_start(now, &self.plan));
+                    added = true;
+                }
             }
         }
+        if added {
+            // The poller recomputes its wake time so the new peer is read on schedule.
+            self.kicked.notify_one();
+        }
+    }
+
+    /// An exchange with `peer` is in flight (a dial, a sent or received signal): read its
+    /// mailbox now and at the fast interval until the fast window after this call ends.
+    pub(super) fn kick(&self, peer: PeerId) {
+        if peer == self.me {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        {
+            let mut st = self.state.lock().unwrap();
+            st.watched.insert(peer);
+            let c = st.cadence.entry(peer).or_insert_with(|| Cadence::idle_start(now, &self.plan));
+            c.hot_until = now + self.plan.window;
+            c.step = self.plan.fast;
+            c.due = c.due.min(now);
+        }
+        self.kicked.notify_one();
+    }
+
+    /// The watched peers due at `now`, with their next reads scheduled, and the next due time.
+    fn take_due(&self, now: tokio::time::Instant) -> (Vec<PeerId>, Option<tokio::time::Instant>) {
+        let plan = self.plan;
+        let mut st = self.state.lock().unwrap();
+        let State { watched, cadence, .. } = &mut *st;
+        let mut due = Vec::new();
+        let mut next: Option<tokio::time::Instant> = None;
+        for p in watched.iter() {
+            let c = cadence.entry(*p).or_insert_with(|| Cadence::idle_start(now, &plan));
+            if c.due <= now {
+                due.push(*p);
+                if now < c.hot_until {
+                    c.step = plan.fast;
+                } else {
+                    c.step = (c.step * 2).min(plan.idle);
+                }
+                c.due = now + c.step;
+            }
+            next = Some(next.map_or(c.due, |n| n.min(c.due)));
+        }
+        (due, next)
     }
 
     /// The DNS packet to publish now. When it is over the pkarr size, the oldest queued
@@ -478,6 +576,9 @@ impl PkarrNode {
             }
         }
         self.state.lock().unwrap().seen.insert(from, (ts, top));
+        if !fresh.is_empty() {
+            self.kick(from);
+        }
         for msg in fresh {
             let _ = self.inbox_tx.send((from, msg));
         }
@@ -514,11 +615,21 @@ async fn publish_loop(weak: std::sync::Weak<PkarrNode>) {
     }
 }
 
-async fn poll_loop(weak: std::sync::Weak<PkarrNode>, every: Duration) {
-    loop {
-        tokio::time::sleep(every).await;
+async fn poll_loop(weak: std::sync::Weak<PkarrNode>) {
+    let mut wake = {
         let Some(node) = weak.upgrade() else { return };
-        let peers: Vec<PeerId> = node.state.lock().unwrap().watched.iter().copied().collect();
+        tokio::time::Instant::now() + node.plan.fast
+    };
+    loop {
+        let Some((kicked, idle)) = weak.upgrade().map(|n| (n.kicked.clone(), n.plan.idle)) else { return };
+        // A kick ends the wait at once. No strong reference is held while waiting, and the
+        // wait is capped by the idle interval so a peer watched later is picked up.
+        let cap = tokio::time::Instant::now() + idle;
+        let _ = tokio::time::timeout_at(wake.min(cap), kicked.notified()).await;
+        let Some(node) = weak.upgrade() else { return };
+        let now = tokio::time::Instant::now();
+        let (peers, next) = node.take_due(now);
+        wake = next.unwrap_or(now + node.plan.idle).max(now + Duration::from_millis(1));
         for p in peers {
             if let Err(e) = node.poll_peer(p).await {
                 tracing::debug!(peer = %p.fmt_short(), error = %e, "reading a pkarr mailbox failed");
@@ -535,7 +646,6 @@ impl SignalChannel for PkarrNode {
         }
         {
             let mut st = self.state.lock().unwrap();
-            st.watched.insert(to);
             st.seq = (st.seq + 1).max(unix_secs());
             let seq = st.seq;
             let queue = st.outbox.entry(to).or_default();
@@ -544,6 +654,7 @@ impl SignalChannel for PkarrNode {
                 queue.pop_front();
             }
         }
+        self.kick(to);
         self.dirty.notify_one();
         Ok(())
     }
@@ -565,6 +676,105 @@ impl SignalChannel for PkarrNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A plan that is always fast (the tests that check delivery, not cadence).
+    fn fast(ms: u64) -> PollPlan {
+        let d = Duration::from_millis(ms);
+        PollPlan::new(d, d, Duration::ZERO)
+    }
+
+    /// Counts `GET`s per key on top of a [`crate::MemoryPkarrStore`].
+    #[derive(Clone, Default)]
+    struct CountingStore {
+        inner: crate::MemoryPkarrStore,
+        gets: Arc<Mutex<HashMap<PeerId, usize>>>,
+    }
+
+    impl CountingStore {
+        fn gets(&self, key: &PeerId) -> usize {
+            self.gets.lock().unwrap().get(key).copied().unwrap_or(0)
+        }
+    }
+
+    #[async_trait]
+    impl PkarrStore for CountingStore {
+        async fn put(&self, key: PeerId, payload: Vec<u8>) -> Result<()> {
+            self.inner.put(key, payload).await
+        }
+        async fn get(&self, key: PeerId) -> Result<Option<Vec<u8>>> {
+            *self.gets.lock().unwrap().entry(key).or_default() += 1;
+            self.inner.get(key).await
+        }
+    }
+
+    /// The default plan: 1.5 s fast, 25 s idle, 30 s window.
+    fn default_plan() -> PollPlan {
+        let c = crate::LetifyConfig::default();
+        PollPlan::new(c.poll_interval, c.idle_poll_interval, c.fast_window)
+    }
+
+    fn watcher(store: &CountingStore) -> Arc<PkarrNode> {
+        PkarrNode::start(SecretKey::generate(), Arc::new(store.clone()), Arc::new(Vec::<String>::new), default_plan())
+    }
+
+    async fn gets_during(store: &CountingStore, peer: &PeerId, span: Duration) -> usize {
+        let before = store.gets(peer);
+        tokio::time::sleep(span).await;
+        store.gets(peer) - before
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fr_n2_an_idle_pair_is_read_about_once_per_idle_interval() {
+        let store = CountingStore::default();
+        let node = watcher(&store);
+        let peer = SecretKey::generate().peer_id();
+        node.watch_peers(&[peer]);
+        // The backoff 1.5, 3, 6, 12, 24 s ends at the 25 s idle interval within a minute.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let hour = gets_during(&store, &peer, Duration::from_secs(3600)).await;
+        assert!((143..=145).contains(&hour), "an idle pair made {hour} reads in an hour (expected 144)");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fr_n2_a_dial_reads_the_peer_at_the_fast_interval_at_once() {
+        let store = CountingStore::default();
+        let node = watcher(&store);
+        let peer = SecretKey::generate().peer_id();
+        node.watch_peers(&[peer]);
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        let before = store.gets(&peer);
+        node.kick(peer);
+        // The first read follows the kick without waiting for the idle interval.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(store.gets(&peer), before + 1, "a kick reads the mailbox at once");
+        let window = gets_during(&store, &peer, Duration::from_secs(29)).await;
+        assert!((18..=21).contains(&window), "{window} reads in a 29 s fast window (expected about 19)");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fr_n2_a_sent_signal_turns_the_peer_fast() {
+        let store = CountingStore::default();
+        let node = watcher(&store);
+        let peer = SecretKey::generate().peer_id();
+        node.watch_peers(&[peer]);
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        node.send(peer, b"offer".to_vec()).await.unwrap();
+        let window = gets_during(&store, &peer, Duration::from_secs(15)).await;
+        assert!(window >= 9, "{window} reads in 15 s after a sent signal (expected about 10)");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fr_n2_the_peer_returns_to_idle_after_the_fast_window() {
+        let store = CountingStore::default();
+        let node = watcher(&store);
+        let peer = SecretKey::generate().peer_id();
+        node.watch_peers(&[peer]);
+        node.kick(peer);
+        // The window (30 s) and the backoff ramp (about 47 s) are over after two minutes.
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        let later = gets_during(&store, &peer, Duration::from_secs(600)).await;
+        assert!((23..=25).contains(&later), "{later} reads in 10 idle minutes (expected 24)");
+    }
 
     #[test]
     fn z32_matches_the_hub_key_length_and_alphabet() {
@@ -590,8 +800,8 @@ mod tests {
         let store = MemoryPkarrStore::new();
         let (ka, kb) = (SecretKey::generate(), SecretKey::generate());
         let none: RecordFn = Arc::new(|| Vec::<String>::new());
-        let a = PkarrNode::start(ka.clone(), Arc::new(store.clone()), none.clone(), Duration::from_millis(50));
-        let b = PkarrNode::start(kb.clone(), Arc::new(store.clone()), none, Duration::from_millis(50));
+        let a = PkarrNode::start(ka.clone(), Arc::new(store.clone()), none.clone(), fast(50));
+        let b = PkarrNode::start(kb.clone(), Arc::new(store.clone()), none, fast(50));
         a.watch_peers(&[kb.peer_id()]);
         b.send(ka.peer_id(), b"hello".to_vec()).await.unwrap();
         let (from, msg) = tokio::time::timeout(Duration::from_secs(5), a.recv()).await.unwrap().unwrap();
@@ -615,8 +825,8 @@ mod tests {
         rec.transports = vec![record::DEFAULT_TRANSPORT.to_string()];
         let txt = rec.encode_txt(&identity);
         let rec_joined = txt.concat();
-        let _b = PkarrNode::start(kb.clone(), Arc::new(store.clone()), Arc::new(move || txt.clone()), Duration::from_secs(60));
-        let a = PkarrNode::start(ka, Arc::new(store.clone()), Arc::new(|| Vec::<String>::new()), Duration::from_secs(60));
+        let _b = PkarrNode::start(kb.clone(), Arc::new(store.clone()), Arc::new(move || txt.clone()), fast(60_000));
+        let a = PkarrNode::start(ka, Arc::new(store.clone()), Arc::new(|| Vec::<String>::new()), fast(60_000));
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let found = loop {
             if let Some(found) = a.lookup(kb.peer_id()).await.unwrap() {

@@ -13,6 +13,11 @@
 //! requests and keeps the poll secret of each redeem answer (that is how the "lost answer" test
 //! takes the credential before the node's poll). No tracing capture here (one capture test per
 //! binary, issue #549).
+//!
+//! Sealed delivery (`FR-C2d`, #540) and the server proof (`FR-C2j`, #541) are written, not
+//! compiled: the door seals the token to the node's one-time key, the middleware keeps every
+//! answer body so a test can show the token never crossed in clear, and the stub door seals and
+//! signs with the key the node sent in its redeem.
 
 use std::collections::{HashMap, VecDeque};
 use std::os::unix::fs::PermissionsExt;
@@ -28,6 +33,7 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use ember_node::enrol::{read_enrolment, ENROL_FILE};
 use ember_node::enrol_cli::{run, EnrolIo, Options};
+use ember_node::enrol_seal::{seal, sign_proof, NodeKey};
 use ember_server::computers::enrol::{Delivery, Enrol, EnrolStatus, NodeInfo, RegisterError, Registrar};
 use ember_server::enrol_door::{EnrolDoor, ENROL_LISTEN_VAR};
 use ember_server::store::{now_ms, Store};
@@ -71,7 +77,11 @@ impl Registrar for Fake {
 #[derive(Default)]
 struct Cap {
     redeems: AtomicUsize,
+    /// `GET /enrol/status/{id}` requests: the node's polls (its cancel is a `DELETE`).
+    polls: AtomicUsize,
     secrets: Mutex<Vec<String>>,
+    /// Every answer body the door sent, as text: what a sniffer on the path reads.
+    answers: Mutex<Vec<String>>,
 }
 
 async fn capture(State(cap): State<Arc<Cap>>, req: Request, next: Next) -> Response {
@@ -79,15 +89,18 @@ async fn capture(State(cap): State<Arc<Cap>>, req: Request, next: Next) -> Respo
     if is_redeem {
         cap.redeems.fetch_add(1, Ordering::SeqCst);
     }
-    let res = next.run(req).await;
-    if !is_redeem || res.status() != StatusCode::OK {
-        return res;
+    if req.method() == axum::http::Method::GET && req.uri().path().starts_with("/enrol/status/") {
+        cap.polls.fetch_add(1, Ordering::SeqCst);
     }
+    let res = next.run(req).await;
     let (parts, body) = res.into_parts();
     let bytes = axum::body::to_bytes(body, 64 * 1024).await.unwrap_or_default();
-    if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
-        if let Some(s) = v["poll_secret"].as_str() {
-            cap.secrets.lock().unwrap().push(s.to_string());
+    cap.answers.lock().unwrap().push(String::from_utf8_lossy(&bytes).into_owned());
+    if is_redeem && parts.status == StatusCode::OK {
+        if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
+            if let Some(s) = v["poll_secret"].as_str() {
+                cap.secrets.lock().unwrap().push(s.to_string());
+            }
         }
     }
     Response::from_parts(parts, Body::from(bytes))
@@ -101,20 +114,33 @@ struct Harness {
     _stop: tokio::sync::oneshot::Sender<()>,
 }
 
+/// The identity keys made by [`peer_id`], so `start(Some(id))` can give the door the key of `id`.
+static KEYS: Mutex<Vec<ember_transport::SecretKey>> = Mutex::new(Vec::new());
+
+/// A fresh server identity: its public id. The key is kept in [`KEYS`].
 fn peer_id() -> String {
-    ember_transport::SecretKey::generate().peer_id().to_string()
+    let key = ember_transport::SecretKey::generate();
+    let id = key.peer_id().to_string();
+    KEYS.lock().unwrap().push(key);
+    id
+}
+
+fn key_of(id: &str) -> ember_transport::SecretKey {
+    KEYS.lock().unwrap().iter().find(|k| k.peer_id().to_string() == id).cloned().expect("an id made by peer_id()")
 }
 
 fn fp(id: &str) -> String {
     ember_transport::fingerprint_hex(id).unwrap()
 }
 
-/// A door on 127.0.0.1:0 over a fresh `Enrol`. `server_id` is the transport id the door delivers.
+/// A door on 127.0.0.1:0 over a fresh `Enrol`. `server_id` is the identity the door proves at
+/// the redeem and delivers as its transport id (an id from [`peer_id`]); `None` is a server
+/// with no identity key.
 async fn start(server_id: Option<String>) -> Harness {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let store = Arc::new(Store::open_in_memory().unwrap());
-    let enrol = Enrol::with_server_peer_id(store, server_id.clone());
+    let enrol = Enrol::with_server_key(store, server_id.as_deref().map(key_of), true);
     let vars: HashMap<String, String> = [(ENROL_LISTEN_VAR.to_string(), format!("127.0.0.1:{port}"))].into_iter().collect();
     let door = EnrolDoor::from_lookup(|k| vars.get(k).cloned(), "127.0.0.1:1".parse().unwrap(), None)
         .unwrap()
@@ -271,44 +297,101 @@ async fn fr_c2_node_enrol_short_pin_trusts_with_a_notice() {
     assert!(!said.contains(&h.fake.token_of("build-box")));
 }
 
+/// FR-C2j (#541): a wrong `--server-fingerprint` stops the run at the redeem answer. The node
+/// never polls, so it never receives a credential, and it cancels the pending enrolment so the
+/// owner has nothing left to confirm.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fr_c2_node_enrol_pin_mismatch_writes_nothing_and_names_the_computer() {
+async fn fr_c2j_node_enrol_a_wrong_fingerprint_aborts_before_any_credential() {
     let sid = peer_id();
     let wrong = peer_id();
+    let h = start(Some(sid.clone())).await;
+    let (code, id) = h.mint("build-box");
+    let dir = tempfile::tempdir().unwrap();
+    let mut o = h.opts(&code, dir.path());
+    o.pin = Some(wrong.clone());
+    let mut io = Script::new(false, &[]);
+    let err = format!("{:#}", run(o, &mut io).await.unwrap_err());
+    nothing_written(dir.path());
+    let said = io.text();
+    assert!(err.contains("does not match the pin") && err.contains("nothing was written"), "{err}");
+    assert!(said.contains(&fp(&sid)) && said.contains(&fp(&wrong)), "both fingerprints are shown: {said}");
+    assert!(said.contains("asked the server for no credential"), "{said}");
+    assert_eq!(h.cap.redeems.load(Ordering::SeqCst), 1);
+    assert_eq!(h.cap.polls.load(Ordering::SeqCst), 0, "the node never asked for the credential");
+    // Nothing was registered, and the node's cancel left the owner nothing to confirm.
+    assert_eq!(h.fake.count(), 0);
+    assert!(said.contains("cancelled this enrolment"), "{said}");
+    assert!(matches!(h.enrol.status(&id, now_ms()), Ok(EnrolStatus::Expired)));
+    assert!(h.enrol.confirm(&id, None, None, now_ms(), &*h.fake).is_err());
+    assert_eq!(h.fake.count(), 0);
+    for secret in h.cap.secrets.lock().unwrap().iter() {
+        assert!(!said.contains(secret) && !err.contains(secret), "the poll secret is in no output");
+    }
+    assert!(!said.contains(&code) && !err.contains(&code), "the code is in no output");
+}
+
+/// The same with the 16-hex short form of a wrong id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2j_node_enrol_a_wrong_short_fingerprint_aborts_before_any_credential() {
+    let sid = peer_id();
+    let wrong = peer_id();
+    let h = start(Some(sid.clone())).await;
+    let (code, _id) = h.mint("build-box");
+    let dir = tempfile::tempdir().unwrap();
+    let mut o = h.opts(&code, dir.path());
+    o.pin = Some(fp(&wrong));
+    let mut io = Script::new(false, &[]);
+    let err = format!("{:#}", run(o, &mut io).await.unwrap_err());
+    assert!(err.contains("does not match the pin"), "{err}");
+    assert_eq!(h.cap.polls.load(Ordering::SeqCst), 0);
+    nothing_written(dir.path());
+    assert_eq!(h.fake.count(), 0);
+}
+
+/// A pin against a server that proves no identity cannot be satisfied: the run stops at the
+/// redeem answer as well.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2_node_enrol_pin_without_a_server_id_aborts() {
+    let h = start(None).await;
+    let (code, _id) = h.mint("build-box");
+    let dir = tempfile::tempdir().unwrap();
+    let mut o = h.opts(&code, dir.path());
+    o.pin = Some(peer_id());
+    let mut io = Script::new(false, &[]);
+    let err = format!("{:#}", run(o, &mut io).await.unwrap_err());
+    assert!(err.contains("proved no identity") && err.contains("nothing was written"), "{err}");
+    nothing_written(dir.path());
+    assert!(io.text().contains("asked the server for no credential"), "{}", io.text());
+    assert_eq!(h.cap.polls.load(Ordering::SeqCst), 0);
+    assert_eq!(h.fake.count(), 0);
+}
+
+/// FR-C2d (#540): through the real door, the token is in `enrol.json` and in no answer the door
+/// sent. The poll secret is on the wire (the redeem answer), the token is not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2d_node_enrol_the_token_never_crosses_the_door_in_clear() {
+    let sid = peer_id();
     let h = start(Some(sid.clone())).await;
     let (code, id) = h.mint("build-box");
     let confirm = h.confirm_soon(&id);
     let dir = tempfile::tempdir().unwrap();
     let mut o = h.opts(&code, dir.path());
-    o.pin = Some(wrong.clone());
+    o.pin = Some(sid.clone());
     let mut io = Script::new(false, &[]);
-    let err = run(o, &mut io).await.unwrap_err();
+    let out = run(o, &mut io).await.unwrap();
     confirm.await.unwrap();
-    let err = format!("{err:#}");
-    nothing_written(dir.path());
-    let said = io.text();
-    assert!(said.contains(&fp(&sid)) && said.contains(&fp(&wrong)), "both fingerprints are shown: {said}");
-    assert!(said.contains("build-box") && said.contains("computer-1"), "{said}");
-    assert!(said.contains("remove it in Ember"), "{said}");
+    assert!(out.server_verified, "the pinned server proved its identity");
     let token = h.fake.token_of("build-box");
-    assert!(!said.contains(&token) && !err.contains(&token));
-    assert!(err.contains("does not match") && err.contains("nothing was written"), "{err}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fr_c2_node_enrol_pin_without_a_server_id_aborts() {
-    let h = start(None).await;
-    let (code, id) = h.mint("build-box");
-    let confirm = h.confirm_soon(&id);
-    let dir = tempfile::tempdir().unwrap();
-    let mut o = h.opts(&code, dir.path());
-    o.pin = Some(peer_id());
-    let mut io = Script::new(false, &[]);
-    let err = run(o, &mut io).await.unwrap_err();
-    confirm.await.unwrap();
-    assert!(format!("{err:#}").contains("nothing was written"));
-    nothing_written(dir.path());
-    assert!(io.text().contains("remove it in Ember"));
+    assert_eq!(read_enrolment(dir.path()).unwrap().expect("enrol.json").node_token, token);
+    let answers = h.cap.answers.lock().unwrap().clone();
+    let wire = answers.join("\n");
+    assert!(wire.contains("\"joined\"") && wire.contains("sealed_token"), "the delivery was captured: {wire}");
+    assert!(!wire.contains(&token) && !wire.contains("dpn_") && !wire.contains("node_token"), "{wire}");
+    let secret = h.cap.secrets.lock().unwrap()[0].clone();
+    assert!(wire.contains(&secret), "the sniffer does hold the poll secret");
+    // With that secret the sniffer gets nothing more: the delivery was single-use.
+    assert!(matches!(h.enrol.take_delivery(&id, &secret, now_ms()).unwrap(), Delivery::Delivered));
+    assert!(io.text().contains("proved the pinned identity"), "{}", io.text());
 }
 
 // ---- a write that fails after the delivery --------------------------------------------------
@@ -649,6 +732,13 @@ async fn fr_c2_node_preflight_refuses_a_symlinked_allowed_peers_before_the_redee
 #[derive(Clone)]
 enum Payload {
     Text(String),
+    /// A redeem answer with an identity: `claim` is the id the stub says it is, `signer` the key
+    /// it signs with (the same key for an honest server, another for a rogue one). The proof is
+    /// made for the enrol key the node sent in this redeem.
+    Signed { claim: String, signer: ember_transport::SecretKey },
+    /// A `joined` answer whose token is sealed to the enrol key the node sent, optionally with a
+    /// transport id in the credential.
+    Joined(Option<String>),
     /// A body of this many bytes with a Content-Length.
     Big(usize),
     /// A chunked body that never ends.
@@ -672,6 +762,13 @@ impl Reply {
     }
     fn endless() -> Reply {
         Reply { status: 200, payload: Payload::Endless, delay_ms: 0, location: None }
+    }
+    fn signed(claim: &str, signer: &ember_transport::SecretKey) -> Reply {
+        let payload = Payload::Signed { claim: claim.to_string(), signer: signer.clone() };
+        Reply { status: 200, payload, delay_ms: 0, location: None }
+    }
+    fn joined(server_peer_id: Option<&str>) -> Reply {
+        Reply { status: 200, payload: Payload::Joined(server_peer_id.map(String::from)), delay_ms: 0, location: None }
     }
     fn redirect(to: &str) -> Reply {
         Reply { status: 302, payload: Payload::Text(String::new()), delay_ms: 0, location: Some(to.to_string()) }
@@ -706,6 +803,33 @@ impl Route {
 struct Stub {
     redeem: Route,
     status: Route,
+    /// The `enrol_key` of the last redeem request.
+    key: Mutex<Option<String>>,
+}
+
+impl Stub {
+    /// Turns the payloads that depend on the node's enrol key into text.
+    fn fill(&self, mut r: Reply) -> Reply {
+        let key = self.key.lock().unwrap().clone();
+        let text = match &r.payload {
+            Payload::Signed { claim, signer } => {
+                let key = key.expect("the redeem carried an enrol_key");
+                let proof = sign_proof(signer, STUB_ENROL_ID, &key).expect("a proof");
+                Some(format!(
+                    r#"{{"enrol_id":"{STUB_ENROL_ID}","poll_secret":"poll-secret-1","expires_ms":4102444800000,"server_peer_id":"{claim}","server_proof":"{proof}"}}"#
+                ))
+            }
+            Payload::Joined(peer) => {
+                let key = key.expect("the redeem carried an enrol_key");
+                Some(joined_for(&key, peer.as_deref()))
+            }
+            _ => None,
+        };
+        if let Some(t) = text {
+            r.payload = Payload::Text(t);
+        }
+        r
+    }
 }
 
 async fn reply_of(r: Reply) -> Response {
@@ -718,6 +842,7 @@ async fn reply_of(r: Reply) -> Response {
     }
     let body = match r.payload {
         Payload::Text(t) => Body::from(t),
+        Payload::Signed { .. } | Payload::Joined(_) => panic!("Stub::fill runs before reply_of"),
         Payload::Big(n) => Body::from(vec![b' '; n]),
         Payload::Endless => {
             use futures::StreamExt;
@@ -734,15 +859,26 @@ async fn reply_of(r: Reply) -> Response {
 
 /// A stub door on a loopback port: (its base URL, its counters).
 async fn stub(redeem: Vec<Reply>, status: Vec<Reply>) -> (String, Arc<Stub>) {
-    let st = Arc::new(Stub { redeem: Route::with(redeem), status: Route::with(status) });
+    let st = Arc::new(Stub { redeem: Route::with(redeem), status: Route::with(status), key: Mutex::new(None) });
     let app = axum::Router::new()
         .route(
             "/enrol/redeem",
-            axum::routing::post(|State(st): State<Arc<Stub>>| async move { reply_of(st.redeem.next()).await }),
+            axum::routing::post(|State(st): State<Arc<Stub>>, body: axum::body::Bytes| async move {
+                if let Ok(v) = serde_json::from_slice::<Value>(&body) {
+                    if let Some(k) = v["node_public_info"]["enrol_key"].as_str() {
+                        *st.key.lock().unwrap() = Some(k.to_string());
+                    }
+                }
+                let r = st.fill(st.redeem.next());
+                reply_of(r).await
+            }),
         )
         .route(
             "/enrol/status/{id}",
-            axum::routing::get(|State(st): State<Arc<Stub>>| async move { reply_of(st.status.next()).await }),
+            axum::routing::get(|State(st): State<Arc<Stub>>| async move {
+                let r = st.fill(st.status.next());
+                reply_of(r).await
+            }),
         )
         .with_state(st.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -753,13 +889,17 @@ async fn stub(redeem: Vec<Reply>, status: Vec<Reply>) -> (String, Arc<Stub>) {
     (base, st)
 }
 
+const STUB_ENROL_ID: &str = "enrol-1";
+/// A redeem answer with no identity (a server without an identity key).
 const REDEEM_OK: &str = r#"{"enrol_id":"enrol-1","poll_secret":"poll-secret-1","expires_ms":4102444800000}"#;
 const STUB_TOKEN: &str = "tok_stub-token.1";
 
-fn joined(server_peer_id: Option<&str>) -> String {
+/// The `joined` answer for a node whose enrol key is `node_key_hex`: the token sealed to it.
+fn joined_for(node_key_hex: &str, server_peer_id: Option<&str>) -> String {
+    let sealed = serde_json::to_string(&seal(STUB_ENROL_ID, node_key_hex, STUB_TOKEN).expect("sealed")).unwrap();
     let peer = server_peer_id.map(|p| format!(r#","server_peer_id":"{p}""#)).unwrap_or_default();
     format!(
-        r#"{{"status":"joined","credential":{{"node_token":"{STUB_TOKEN}","name":"stub-box","computer_id":"computer-1"{peer}}}}}"#
+        r#"{{"status":"joined","credential":{{"sealed_token":{sealed},"name":"stub-box","computer_id":"computer-1"{peer}}}}}"#
     )
 }
 
@@ -774,7 +914,7 @@ fn stub_opts(base: &str, dir: &Path) -> Options {
 /// N7: a redirect is not followed, so the code never reaches another host.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fr_c2_node_stub_a_redirect_from_the_redeem_is_not_followed() {
-    let (second, second_st) = stub(vec![Reply::json(200, REDEEM_OK)], vec![Reply::json(200, &joined(None))]).await;
+    let (second, second_st) = stub(vec![Reply::json(200, REDEEM_OK)], vec![Reply::joined(None)]).await;
     let (first, first_st) = stub(vec![Reply::redirect(&format!("{second}/enrol/redeem"))], vec![]).await;
     let dir = tempfile::tempdir().unwrap();
     let mut io = Script::new(false, &[]);
@@ -821,7 +961,7 @@ async fn fr_c2_node_stub_an_oversized_poll_answer_is_refused() {
 async fn fr_c2_node_stub_429_answers_back_the_polling_off() {
     let (base, st) = stub(
         vec![Reply::json(200, REDEEM_OK)],
-        vec![Reply::json(429, "{}"), Reply::json(429, "{}"), Reply::json(200, &joined(None))],
+        vec![Reply::json(429, "{}"), Reply::json(429, "{}"), Reply::joined(None)],
     )
     .await;
     let dir = tempfile::tempdir().unwrap();
@@ -838,20 +978,145 @@ async fn fr_c2_node_stub_429_answers_back_the_polling_off() {
     assert!(!io.text().contains(STUB_TOKEN));
 }
 
-/// A delivered server id that is not 64 lowercase hex aborts with nothing written.
+/// A transport id in the credential that the server did not prove at the redeem aborts with
+/// nothing written, whether it is malformed or a well-formed id of somebody else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fr_c2_node_stub_a_malformed_delivered_server_id_aborts() {
-    let bad = "zz".repeat(32);
-    let (base, _st) = stub(vec![Reply::json(200, REDEEM_OK)], vec![Reply::json(200, &joined(Some(&bad)))]).await;
+async fn fr_c2_node_stub_an_unproven_delivered_server_id_aborts() {
+    for bad in ["zz".repeat(32), peer_id()] {
+        let (base, _st) = stub(vec![Reply::json(200, REDEEM_OK)], vec![Reply::joined(Some(&bad))]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut io = Script::new(false, &[]);
+        let err = format!("{:#}", run(stub_opts(&base, dir.path()), &mut io).await.unwrap_err());
+        let said = io.text();
+        assert!(err.contains("not the identity it proved") && err.contains("nothing was written"), "{err}");
+        assert!(said.contains("(not proven)"), "{said}");
+        nothing_written(dir.path());
+        assert!(!said.contains(STUB_TOKEN) && !err.contains(STUB_TOKEN), "the token is in no output");
+        assert!(!said.contains(&bad), "the unproven id is not echoed");
+    }
+}
+
+// ---- FR-C2j (#541): the server proof, against a stub that can lie ----
+
+/// A rogue server at the URL knows the real server's public id and claims it, but signs with
+/// its own key. The node holds the pin, the proof does not verify, and the run stops before
+/// any poll: the rogue server never gets to hand over a credential.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2j_node_stub_a_rogue_server_that_claims_the_pinned_id_cannot_prove_it() {
+    let real = ember_transport::SecretKey::generate();
+    let real_id = real.peer_id().to_string();
+    let rogue = ember_transport::SecretKey::generate();
+    let (base, st) = stub(vec![Reply::signed(&real_id, &rogue)], vec![Reply::joined(Some(&real_id))]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut o = stub_opts(&base, dir.path());
+    o.pin = Some(real_id.clone());
+    let mut io = Script::new(false, &[]);
+    let err = format!("{:#}", run(o, &mut io).await.unwrap_err());
+    let said = io.text();
+    assert!(err.contains("proof of its identity is not valid") && err.contains("nothing was written"), "{err}");
+    assert_eq!(st.redeem.hits(), 1);
+    assert_eq!(st.status.hits(), 0, "no poll: the node asked for no credential");
+    assert!(said.contains("asked the server for no credential"), "{said}");
+    nothing_written(dir.path());
+    assert!(!said.contains(STUB_TOKEN) && !err.contains(STUB_TOKEN));
+}
+
+/// The rogue server proves its OWN identity honestly. The pin names another server, so the run
+/// stops before any poll, with both fingerprints shown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2j_node_stub_a_server_with_another_identity_is_refused_by_the_pin() {
+    let real_id = peer_id();
+    let rogue = ember_transport::SecretKey::generate();
+    let rogue_id = rogue.peer_id().to_string();
+    let (base, st) = stub(vec![Reply::signed(&rogue_id, &rogue)], vec![Reply::joined(Some(&rogue_id))]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut o = stub_opts(&base, dir.path());
+    o.pin = Some(real_id.clone());
+    let mut io = Script::new(false, &[]);
+    let err = format!("{:#}", run(o, &mut io).await.unwrap_err());
+    let said = io.text();
+    assert!(err.contains("does not match the pin") && err.contains("nothing was written"), "{err}");
+    assert!(said.contains(&fp(&real_id)) && said.contains(&fp(&rogue_id)), "{said}");
+    assert_eq!(st.status.hits(), 0, "no poll: the node asked for no credential");
+    nothing_written(dir.path());
+}
+
+/// Without a pin a bad proof still stops the run: a server that claims an identity must prove it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2j_node_stub_a_bad_proof_aborts_even_without_a_pin() {
+    let real_id = peer_id();
+    let rogue = ember_transport::SecretKey::generate();
+    let half = format!(r#"{{"enrol_id":"enrol-1","poll_secret":"poll-secret-1","server_peer_id":"{real_id}"}}"#);
+    for redeem in [Reply::signed(&real_id, &rogue), Reply::json(200, &half)] {
+        let (base, st) = stub(vec![redeem], vec![Reply::joined(None)]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut io = Script::new(false, &[]);
+        let err = format!("{:#}", run(stub_opts(&base, dir.path()), &mut io).await.unwrap_err());
+        assert!(err.contains("proof of its identity is not valid"), "{err}");
+        assert_eq!(st.status.hits(), 0);
+        nothing_written(dir.path());
+    }
+}
+
+/// The honest case against the stub: the pinned server proves its identity, the node polls,
+/// opens the sealed token, and adds the proven transport id to `allowed-peers`. With no
+/// transport id in the credential the server is verified and nothing is added.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2j_node_stub_a_proven_pinned_server_is_verified() {
+    let server = ember_transport::SecretKey::generate();
+    let sid = server.peer_id().to_string();
+    for with_transport in [true, false] {
+        let delivered = if with_transport { Some(sid.as_str()) } else { None };
+        let (base, st) = stub(vec![Reply::signed(&sid, &server)], vec![Reply::joined(delivered)]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut o = stub_opts(&base, dir.path());
+        o.pin = Some(sid.clone());
+        let mut io = Script::new(false, &[]);
+        let out = run(o, &mut io).await.unwrap();
+        assert!(out.server_verified, "{}", io.text());
+        assert_eq!((out.server_trusted, out.peer_added), (with_transport, with_transport));
+        assert_eq!(st.status.hits(), 1);
+        let e = read_enrolment(dir.path()).unwrap().expect("enrol.json");
+        assert_eq!(e.node_token, STUB_TOKEN);
+        assert_eq!(e.server_peer_id.as_deref(), delivered);
+        assert_eq!(peers_path(dir.path()).exists(), with_transport);
+        assert!(!io.text().contains(STUB_TOKEN));
+    }
+}
+
+// ---- FR-C2d (#540): the sealed credential, against a stub that can lie ----
+
+/// A server that sends the token in clear (a server from before sealed delivery, or one that
+/// ignores the node's key) is refused: the answer does not parse, nothing is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2d_node_stub_a_credential_in_clear_is_refused() {
+    let clear = format!(
+        r#"{{"status":"joined","credential":{{"node_token":"{STUB_TOKEN}","name":"stub-box","computer_id":"computer-1"}}}}"#
+    );
+    let (base, _st) = stub(vec![Reply::json(200, REDEEM_OK)], vec![Reply::json(200, &clear)]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut io = Script::new(false, &[]);
+    let err = format!("{:#}", run(stub_opts(&base, dir.path()), &mut io).await.unwrap_err());
+    assert!(err.contains("the server's answer is not valid"), "{err}");
+    nothing_written(dir.path());
+    assert!(!io.text().contains(STUB_TOKEN) && !err.contains(STUB_TOKEN));
+}
+
+/// A credential sealed to another key (not the one this run sent) does not open: nothing is
+/// written and the node says which computer to remove.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2d_node_stub_a_credential_sealed_to_another_key_is_refused() {
+    let other = NodeKey::generate();
+    let (base, _st) =
+        stub(vec![Reply::json(200, REDEEM_OK)], vec![Reply::json(200, &joined_for(&other.public_hex(), None))]).await;
     let dir = tempfile::tempdir().unwrap();
     let mut io = Script::new(false, &[]);
     let err = format!("{:#}", run(stub_opts(&base, dir.path()), &mut io).await.unwrap_err());
     let said = io.text();
-    assert!(err.contains("malformed") && err.contains("nothing was written"), "{err}");
-    assert!(said.contains("malformed"), "{said}");
+    assert!(err.contains("cannot be opened") && err.contains("nothing was written"), "{err}");
+    assert!(said.contains("stub-box") && said.contains("remove it in Ember"), "{said}");
     nothing_written(dir.path());
-    assert!(!said.contains(STUB_TOKEN) && !err.contains(STUB_TOKEN), "the token is in no output");
-    assert!(!said.contains(&bad), "the malformed id is not echoed");
+    assert!(!said.contains(STUB_TOKEN) && !err.contains(STUB_TOKEN));
 }
 
 // ---- end-to-end transport-only (behind NAT) enrolment & revocation (FR-C2, #625) -------------
@@ -890,7 +1155,9 @@ async fn fr_c2_enrolled_node_authenticates_and_is_listed_online() {
     use ember_transport::{Dialer, PeerGate, SecretKey};
 
     let net = MemNetwork::new();
-    let server_t = net.transport();
+    // The server's identity key is its transport key (FR-C2j): the enrol service signs with it.
+    let server_key = SecretKey::generate();
+    let server_t = net.transport_with_key(server_key.clone());
     let server_id = server_t.peer_id().to_string();
     let dialer = Dialer::new(server_t.clone());
 
@@ -903,7 +1170,7 @@ async fn fr_c2_enrolled_node_authenticates_and_is_listed_online() {
         Some(dialer),
     );
     let registrar = Arc::new(ComputersRegistrar::new(computers.clone()).with_server_peer_id(Some(server_id.clone())));
-    let enrol = Enrol::with_server_peer_id(store.clone(), Some(server_id.clone()));
+    let enrol = Enrol::with_server_key(store.clone(), Some(server_key), true);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1032,7 +1299,9 @@ async fn fr_c2_a_revoked_computer_needs_a_new_code() {
     use ember_transport::{Dialer, PeerAddr, PeerGate, SecretKey};
 
     let net = MemNetwork::new();
-    let server_t = net.transport();
+    // The server's identity key is its transport key (FR-C2j): the enrol service signs with it.
+    let server_key = SecretKey::generate();
+    let server_t = net.transport_with_key(server_key.clone());
     let server_id = server_t.peer_id().to_string();
     let dialer = Dialer::new(server_t.clone());
 
@@ -1045,7 +1314,7 @@ async fn fr_c2_a_revoked_computer_needs_a_new_code() {
         Some(dialer.clone()),
     );
     let registrar = Arc::new(ComputersRegistrar::new(computers.clone()).with_server_peer_id(Some(server_id.clone())));
-    let enrol = Enrol::with_server_peer_id(store.clone(), Some(server_id.clone()));
+    let enrol = Enrol::with_server_key(store.clone(), Some(server_key), true);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();

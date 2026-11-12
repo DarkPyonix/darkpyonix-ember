@@ -133,7 +133,12 @@ async fn fr_c2_the_secrets_are_in_no_log_of_a_full_enrolment_through_the_door() 
     let code = minted["code"].as_str().unwrap_or_default().to_string();
 
     // 2. Redeem on the door, and a refused redeem with a wrong code (its warn line must not carry the code either).
-    let info = json!({ "hostname": "ibrew-laptop", "os": "macos", "arch": "aarch64", "node_version": "0.1.0" });
+    // FR-C2d: the node's one-time enrol key; the credential comes back sealed to it.
+    let node_key = ember_node::enrol_seal::NodeKey::generate();
+    let info = json!({
+        "hostname": "ibrew-laptop", "os": "macos", "arch": "aarch64", "node_version": "0.1.0",
+        "enrol_key": node_key.public_hex()
+    });
     let body = json!({ "code": code, "node_public_info": info }).to_string();
     let (redeem_st, redeemed) = on_door(&d.app(enrol.clone()), "POST", "/enrol/redeem", &json_h(), Some(body)).await;
     let secret = redeemed["poll_secret"].as_str().unwrap_or_default().to_string();
@@ -194,7 +199,10 @@ async fn fr_c2_the_secrets_are_in_no_log_of_a_full_enrolment_through_the_door() 
     assert_eq!((evil_st, evil_wrong_st), (StatusCode::NOT_FOUND, StatusCode::NOT_FOUND));
     assert_eq!(confirm_st, StatusCode::OK);
     assert_eq!((joined_st, &joined["status"]), (StatusCode::OK, &json!("joined")));
-    assert_eq!(joined["credential"]["node_token"], token.as_str());
+    assert!(joined["credential"].get("node_token").is_none(), "no cleartext token in the answer");
+    let sealed: ember_node::enrol_seal::Sealed =
+        serde_json::from_value(joined["credential"]["sealed_token"].clone()).expect("a sealed token");
+    assert_eq!(node_key.open(&id, &sealed).expect("the node opens it").as_str(), token.as_str());
     assert_eq!((delivered_st, &delivered["status"]), (StatusCode::OK, &json!("delivered")));
     assert!(delivered.get("credential").is_none());
 

@@ -29,6 +29,7 @@ pub mod config;
 pub mod egress;
 pub mod enrol;
 pub mod enrol_cli;
+pub mod enrol_seal;
 pub mod envinfo;
 pub mod exec;
 pub mod exec_server;

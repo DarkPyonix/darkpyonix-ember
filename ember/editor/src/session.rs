@@ -215,6 +215,18 @@ impl EditorSession {
 
         // 3. extension host
         let ws_uri = UriComponents::remote(&authority, &config.workspace_path);
+        // FR-L31.24: watch the workspace folder recursively, as Code-OSS's workbench does, before
+        // any file is opened. The OSE serves it with its recursive watcher, whose events cover
+        // every file below the folder, so `Effect::Watch` asks for nothing more there. A request
+        // for one file is served with `fs.watch()`, which the OSE refuses on macOS for every path
+        // below `/Volumes/` (#789). A failure is not fatal: files are then watched one by one.
+        let workspace_watch = match fs.watch(&ws_uri, &crate::watch::workspace_watch_options()).await {
+            Ok(_) => Some(config.workspace_path.clone()),
+            Err(e) => {
+                tracing::warn!("ember-editor: cannot watch the workspace folder {}: {e}", ws_uri.path);
+                None
+            }
+        };
         let workspace = WorkspaceData {
             id: format!("ember-{}", uuid::Uuid::new_v4().simple()),
             name: config.workspace_name.clone(),
@@ -256,6 +268,7 @@ impl EditorSession {
             updates: updates_tx,
             reqs: HashMap::new(),
             watches: Arc::new(Mutex::new(HashMap::new())),
+            workspace_watch,
             commands,
         };
         let task = tokio::spawn(driver.run(rx, rpc_events, changes, ipc_lifecycle));
@@ -522,6 +535,8 @@ struct Driver {
     reqs: HashMap<Token, u32>,
     /// uri key → watch request id.
     watches: Arc<Mutex<HashMap<String, String>>>,
+    /// The workspace folder, when its recursive watch was accepted (FR-L31.24).
+    workspace_watch: Option<String>,
     commands: Vec<crate::commands::ContributedCommand>,
 }
 
@@ -724,6 +739,10 @@ impl Driver {
                     });
                 }
                 Effect::Watch { uri } => {
+                    // FR-L31.24: the workspace folder's recursive watch already reports this file.
+                    if self.workspace_watch.as_deref().is_some_and(|ws| crate::watch::covered_by_workspace_watch(ws, &uri.path)) {
+                        continue;
+                    }
                     let (fs, watches) = (Arc::clone(&self.fs), Arc::clone(&self.watches));
                     tokio::spawn(async move {
                         match fs.watch(&uri, &WatchOptions::default()).await {

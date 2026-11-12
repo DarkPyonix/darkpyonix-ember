@@ -290,7 +290,7 @@ async fn network_or_auth_errors_do_not_fall_back() {
 
 /// Drive the fake management connection (`remoteextensionsenvironment`, `remoteExtensionsScanner`,
 /// `remoteFilesystem`).
-async fn run_fake_management(mut server: DuplexStream, disk: Arc<Mutex<Vec<u8>>>) {
+async fn run_fake_management(mut server: DuplexStream, disk: Arc<Mutex<Vec<u8>>>, watches: Arc<Mutex<Vec<Value>>>) {
     let (mut dec, ct) = accept_upgraded_handshake(&mut server).await;
     assert_eq!(ct["desiredConnectionType"], 1);
 
@@ -408,7 +408,16 @@ async fn run_fake_management(mut server: DuplexStream, disk: Arc<Mutex<Vec<u8>>>
                 }
                 IpcValue::Undefined
             }
-            ("remoteFilesystem", "watch") | ("remoteFilesystem", "unwatch") => IpcValue::Undefined,
+            ("remoteFilesystem", "watch") => {
+                // [sessionId, req, resource, opts]: keep the resource path and the options.
+                if let IpcValue::Array(args) = &body {
+                    let path = args.get(2).map(|r| r.to_json()["path"].clone()).unwrap_or(Value::Null);
+                    let opts = args.get(3).map(IpcValue::to_json).unwrap_or(Value::Null);
+                    watches.lock().unwrap().push(json!({ "path": path, "opts": opts }));
+                }
+                IpcValue::Undefined
+            }
+            ("remoteFilesystem", "unwatch") => IpcValue::Undefined,
             other => panic!("unexpected IPC call: {other:?}"),
         };
 
@@ -565,6 +574,8 @@ async fn wait_for<T>(
 async fn pinned_commit_connects_lists_workspace_opens_edits_shows_diagnostics_and_saves() {
     let disk = Arc::new(Mutex::new(INITIAL_JSON.as_bytes().to_vec()));
     let disk_for_srv = Arc::clone(&disk);
+    let watches: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let watches_for_srv = Arc::clone(&watches);
     let (rpc_log_tx, mut rpc_log_rx) = mpsc::unbounded_channel();
     let dials = Arc::new(AtomicUsize::new(0));
     let dials_for_cb = Arc::clone(&dials);
@@ -575,6 +586,7 @@ async fn pinned_commit_connects_lists_workspace_opens_edits_shows_diagnostics_an
     let outcome = EditorSession::connect_or_fallback(config, move || {
         let step = dials_for_cb.fetch_add(1, Ordering::SeqCst);
         let disk = Arc::clone(&disk_for_srv);
+        let watches = Arc::clone(&watches_for_srv);
         let rpc_log_tx = rpc_log_tx.clone();
         async move {
             let (client, mut server) = tokio::io::duplex(128 * 1024);
@@ -588,7 +600,7 @@ async fn pinned_commit_connects_lists_workspace_opens_edits_shows_diagnostics_an
                     });
                 }
                 1 => {
-                    tokio::spawn(run_fake_management(server, disk));
+                    tokio::spawn(run_fake_management(server, disk, watches));
                 }
                 2 => {
                     tokio::spawn(run_fake_exthost(server, rpc_log_tx));
@@ -605,6 +617,17 @@ async fn pinned_commit_connects_lists_workspace_opens_edits_shows_diagnostics_an
         panic!("expected Connected, got {outcome:?}");
     };
     assert_eq!(dials.load(Ordering::SeqCst), 3);
+
+    // FR-L31.24 (#789): before any file is opened, the session has asked for one recursive watch
+    // on the workspace folder with Code-OSS's default excludes.
+    {
+        let seen = watches.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "one watch at connect: {seen:?}");
+        assert_eq!(seen[0]["path"], "/workspace/project");
+        assert_eq!(seen[0]["opts"]["recursive"], true);
+        assert_eq!(seen[0]["opts"]["excludes"][0], ".git/objects/**");
+        assert!(seen[0]["opts"].get("correlationId").is_none());
+    }
 
     // 1. Browse the project workspace via RemoteFs (`workspace_uri`, `read_dir`, `stat`).
     let ws_uri = session.workspace_uri();
@@ -687,6 +710,10 @@ async fn pinned_commit_connects_lists_workspace_opens_edits_shows_diagnostics_an
         }
     }
     assert!(saw_saved, "extension host did not receive ExtHostDocuments.$acceptModelSaved");
+
+    // FR-L31.24: the opened file is below the workspace folder, so it got no watch of its own
+    // (the OSE would serve one with `fs.watch()`, refused below `/Volumes/` on macOS).
+    assert_eq!(watches.lock().unwrap().len(), 1, "no per-file watch below the workspace folder");
 
     session.shutdown().await;
 }

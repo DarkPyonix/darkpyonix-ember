@@ -149,10 +149,22 @@ async fn main() -> anyhow::Result<()> {
         )),
         None => None,
     };
-    // The peer-to-peer transport (FR-N1), opt-in. `server_peer_id` stays None when it is off.
-    let mut server_peer_id: Option<String> = None;
-    let net = if server_transport::enabled_from_env() {
+    // The server's identity for the enrol flow (FR-C2j, #541): its transport key, loaded (and
+    // created on first use) whether or not the transport is on, so the minted command always
+    // pins the server and the redeem answer always proves it. A key that cannot be loaded with
+    // the transport off is not fatal: enrol then runs without a pin, as before.
+    let transport_on = server_transport::enabled_from_env();
+    let mut server_key: Option<ember_transport::SecretKey> = None;
+    if !transport_on {
+        match server_transport::load_key(&data_dir) {
+            Ok(k) => server_key = Some(k),
+            Err(e) => tracing::warn!("no server identity key, enrol commands carry no --server-fingerprint: {e}"),
+        }
+    }
+    // The peer-to-peer transport (FR-N1), opt-in.
+    let net = if transport_on {
         let key = server_transport::load_key(&data_dir)?;
+        server_key = Some(key.clone());
         let registered = hub.as_ref().is_some_and(|h| h.is_registered());
         // The resolve token (`dpr_`) goes in the directory resolver's URL; a registration from
         // before the hub issued them gets one now.
@@ -187,7 +199,6 @@ async fn main() -> anyhow::Result<()> {
         t.wait_online(std::time::Duration::from_secs(5)).await;
         // Printed (not only logged): the peer id goes into each node's allowed peers.
         println!("ember server peer id: {}", t.peer_id());
-        server_peer_id = Some(t.peer_id().to_string());
         println!("ember server peer addr: {}", serde_json::to_string(&t.local_addr())?);
         Some(ServerTransport::new(t))
     } else {
@@ -202,7 +213,7 @@ async fn main() -> anyhow::Result<()> {
     let store_for_guest = store.clone();
     // One `Enrol` for the whole process: the owner's routes (mint, confirm, deny) and the enrol door
     // (redeem, poll, from step C3a) share its failure windows and its pending-token map, which live per instance.
-    let enrol = computers::enrol::Enrol::with_server_peer_id(store.clone(), server_peer_id);
+    let enrol = computers::enrol::Enrol::with_server_key(store.clone(), server_key, transport_on);
     let sessions = Sessions::new(store, adapters);
     // Per-harness memory limits stored by the settings API (FR-L20, FR-S8).
     sessions.load_settings();
@@ -392,8 +403,8 @@ async fn main() -> anyhow::Result<()> {
             if d.is_remote() {
                 tracing::warn!(
                     "enrol door on {} is reachable from that network (EMBER_ENROL_LISTEN_ALLOW_REMOTE=1); it \
-                     speaks plain HTTP, so an enrol code and the credential cross the network in clear; put \
-                     TLS in front of it",
+                     speaks plain HTTP, so an enrol code and the poll secret cross the network in clear \
+                     (the credential itself is sealed to the node); put TLS in front of it",
                     d.listen
                 );
             } else {

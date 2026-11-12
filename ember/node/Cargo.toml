@@ -11,6 +11,8 @@ alacritty_terminal = { version = "0.26", default-features = false }
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
+# The enrol seal's cipher (SPEC FR-C2d, #540); the same crate and version the server already uses.
+chacha20poly1305 = "0.10"
 # The peer-to-peer transport (SPEC FR-N1, FR-N5): serve the API and dial nodes by peer id.
 ember-transport = { path = "../transport" }
 # The darkpyonix.dev hub: registering this computer to the user's account (SPEC FR-N2).
@@ -20,6 +22,8 @@ globset = "0.4"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 hex = "0.4"
+# The enrol seal's key derivation, HKDF-SHA256 (SPEC FR-C2d, #540).
+hkdf = "0.12"
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
@@ -39,6 +43,9 @@ tokio-tungstenite = "0.29"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+# The enrol seal's key agreement (SPEC FR-C2d, #540). Version 2 sits on curve25519-dalek 4, which the transport's dependencies already bring into the lock file. `static_secrets`: a key made from bytes this crate drew itself.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+zeroize = "1"
 
 [features]
 # The letify transport backend (EMBER_TRANSPORT_BACKEND=letify; SPEC FR-N5). Already on through ember-transport's default features (INTENT D36).

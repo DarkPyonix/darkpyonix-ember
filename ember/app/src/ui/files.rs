@@ -372,20 +372,12 @@ pub struct Transfer {
     pub state: TransferState,
 }
 
-/// The line under a transfer's name: what is happening to it, by direction and state. A paused
-/// or failed transfer never reads as moving.
-pub fn row_subtitle(direction: Direction, state: TransferState) -> &'static str {
-    match (state, direction) {
-        (TransferState::Sending, Direction::Send) => "보내는 중",
-        (TransferState::Sending, Direction::Receive) => "받는 중",
-        (TransferState::Queued, Direction::Send) => "보내기 대기 중",
-        (TransferState::Queued, Direction::Receive) => "받기 대기 중",
-        (TransferState::Paused, _) => "일시 정지됨",
-        (TransferState::Failed, Direction::Send) => "보내기 실패",
-        (TransferState::Failed, Direction::Receive) => "받기 실패",
-        (TransferState::Done, Direction::Send) => "보냄",
-        (TransferState::Done, Direction::Receive) => "받음",
-        (TransferState::Cancelled, _) => "취소됨",
+/// The line under a transfer's name, as the mockup has it (`flTransfer`'s `dirTxt`): the
+/// direction only, in every state. The state is the meta line's ([`progress_line`]).
+pub fn row_subtitle(direction: Direction, _state: TransferState) -> &'static str {
+    match direction {
+        Direction::Send => "보내는 중",
+        Direction::Receive => "받는 중",
     }
 }
 
@@ -501,7 +493,8 @@ pub fn progress_line(t: &Transfer) -> String {
             }
             s
         }
-        TransferState::Paused => format!("{p}% · 일시 정지됨"),
+        // The mockup's paused meta: "일시 정지 · 1.7 MB 남음".
+        TransferState::Paused => format!("일시 정지 · {} 남음", format_bytes(t.total.saturating_sub(t.done))),
         TransferState::Done => "완료되었습니다".to_string(),
         TransferState::Failed => format!("{p}% · 연결이 끊겼습니다"),
         TransferState::Cancelled => "취소되었습니다".to_string(),
@@ -1467,19 +1460,17 @@ mod tests {
 
     // FR-L27.2
     #[test]
-    fn fr_l27_3_a_paused_or_failed_row_never_reads_as_moving() {
+    fn fr_l27_3_the_subtitle_is_the_direction_and_the_meta_line_is_the_state() {
         use Direction::{Receive, Send};
-        assert_eq!(row_subtitle(Receive, TransferState::Sending), "받는 중");
-        assert_eq!(row_subtitle(Send, TransferState::Sending), "보내는 중");
-        for d in [Send, Receive] {
-            assert_eq!(row_subtitle(d, TransferState::Paused), "일시 정지됨");
-            for s in [TransferState::Queued, TransferState::Paused, TransferState::Failed, TransferState::Cancelled] {
-                let text = row_subtitle(d, s);
-                assert!(text != "받는 중" && text != "보내는 중", "{d:?} {s:?}: {text}");
-            }
+        // Mockup `flTransfer`: the subtitle never changes with the state.
+        for s in [TransferState::Queued, TransferState::Sending, TransferState::Paused, TransferState::Failed] {
+            assert_eq!(row_subtitle(Receive, s), "받는 중");
+            assert_eq!(row_subtitle(Send, s), "보내는 중");
         }
-        assert_eq!(row_subtitle(Receive, TransferState::Failed), "받기 실패");
-        assert_eq!(row_subtitle(Send, TransferState::Queued), "보내기 대기 중");
+        // The pause is said in the meta line, with what is left.
+        let paused = tr(TransferState::Paused, 3 * 1024 * 1024, 1024 * 1024, None);
+        assert_eq!(progress_line(&paused), "일시 정지 · 2.0 MB 남음");
+        assert!(progress_line(&tr(TransferState::Failed, 100, 30, None)).contains("연결이 끊겼습니다"));
     }
 
     #[test]
@@ -1680,7 +1671,7 @@ mod tests {
         assert_eq!(progress_line(&t), "50% · 10 MB/초 · 5초 남음");
         assert_eq!(
             progress_line(&tr(TransferState::Paused, 100, 45, Some(1))),
-            "45% · 일시 정지됨"
+            "일시 정지 · 55 B 남음"
         );
         assert_eq!(
             progress_line(&tr(TransferState::Queued, 100, 0, None)),

@@ -432,6 +432,53 @@ pub mod page {
             crate::ui::palette::Payload::ExtensionCommand(id) => {
                 s.host.send(HostCommand::ExecuteCommand(id));
             }
+            payload @ (crate::ui::palette::Payload::SetEol(_)
+            | crate::ui::palette::Payload::EncodingAction(_)
+            | crate::ui::palette::Payload::SetEncoding { .. }
+            | crate::ui::palette::Payload::SetLanguage(_)
+            | crate::ui::palette::Payload::Cancel) => choose_format_item(s, payload),
+        }
+    }
+
+    /// The active document's path and its status bar state (format, dirty), for the pickers (FR-L31.7).
+    fn active_format(s: &Shared) -> Option<(String, Option<ember_editor::DocumentFormat>, bool)> {
+        let path = s.tabs.read().current_path().map(str::to_owned)?;
+        let uri = s.uris.borrow().get(&path).cloned()?;
+        let bridge = s.bridge.borrow();
+        let doc = bridge.document(&uri)?;
+        Some((path, doc.format.clone(), doc.dirty))
+    }
+
+    /// Open one of the status bar's pickers in the palette sheet, on the current item (FR-L31.7).
+    fn open_picker(s: &Shared, mode: crate::ui::palette::Mode) {
+        if active_format(s).is_none() {
+            notice("열린 파일이 없습니다");
+            return;
+        }
+        let (mut open, mut query, mut sel, mut palette_mode) = (s.palette_open, s.palette_query, s.palette_sel, s.palette_mode);
+        palette_mode.set(mode);
+        query.set(String::new());
+        // Follow the current entry until the person moves: the rows may still grow (FR-L31.7).
+        sel.set(crate::ui::editor_status::FOLLOW_CURRENT);
+        open.set(true);
+    }
+
+    /// What a picker row does: the next picker, or the change sent to the session (FR-L31.7).
+    fn choose_format_item(s: &Shared, payload: crate::ui::palette::Payload) {
+        use crate::ui::palette::{Mode, Payload};
+        let Some((path, format, dirty)) = active_format(s) else { return };
+        match payload {
+            Payload::SetEol(eol) => { s.host.send(HostCommand::SetEol { path, eol }); }
+            Payload::EncodingAction(mode) => open_picker(s, Mode::Encoding(mode)),
+            Payload::SetEncoding { mode: ember_editor::EncodingMode::Reopen, encoding }
+                if *s.palette_mode.read() != Mode::ConfirmReopen(encoding)
+                    && crate::ui::editor_status::reopen_needs_confirmation(dirty, format.as_ref(), encoding) =>
+            {
+                open_picker(s, Mode::ConfirmReopen(encoding));
+            }
+            Payload::SetEncoding { mode, encoding } => { s.host.send(HostCommand::SetEncoding { path, encoding, mode }); }
+            Payload::SetLanguage(language_id) => { s.host.send(HostCommand::SetLanguage { path, language_id }); }
+            _ => {}
         }
     }
 
@@ -459,13 +506,35 @@ pub mod page {
             (items, ranked, None)
         } else {
             let (file_q, suffix) = parse_path_line_suffix(&effective_query);
-            let items = items_for_workbench(mode, keymap, Os::current(), &s.folder, &files, &ext_commands, &recent);
-            let ranked = rank(file_q, &items);
-            (items, ranked, suffix)
+            if crate::ui::editor_status::is_picker(mode) {
+                let format = active_format(s).and_then(|(_, f, _)| f);
+                let languages = s.host.state.lock().unwrap().languages.clone();
+                let items = crate::ui::editor_status::picker_items(mode, format.as_ref(), &languages);
+                let ranked = rank(&effective_query, &items);
+                (items, ranked, None)
+            } else {
+                let items = items_for_workbench(mode, keymap, Os::current(), &s.folder, &files, &ext_commands, &recent);
+                let ranked = rank(file_q, &items);
+                (items, ranked, suffix)
+            }
         };
         let hint_text = placeholder(mode, keymap);
-        let shown: Vec<_> = ranked.iter().take(50).cloned().collect();
-        let chosen = (*sel.read()).min(shown.len().saturating_sub(1));
+        // A picker lists every row (a language list is longer than 50) and shows the window of rows that
+        // holds the highlighted one, so the current language or encoding is in view when it opens (FR-L31.7).
+        let picker = crate::ui::editor_status::is_picker(mode);
+        let shown: Vec<_> = ranked.iter().take(if picker { usize::MAX } else { 50 }).cloned().collect();
+        let chosen = if picker {
+            let format = active_format(s).and_then(|(_, f, _)| f);
+            let languages = s.host.state.lock().unwrap().languages.clone();
+            crate::ui::editor_status::resolve_selection(*sel.read(), mode, format.as_ref(), &languages, shown.len())
+        } else {
+            (*sel.read()).min(shown.len().saturating_sub(1))
+        };
+        let (win_start, _) = if picker {
+            crate::ui::editor_status::list_window(chosen, shown.len(), crate::ui::editor_status::PICKER_VISIBLE_ROWS)
+        } else {
+            (0, shown.len())
+        };
         // A command the editor cannot do yet is listed but does nothing: Enter on it leaves the sheet open.
         let enter_payload = shown
             .get(chosen)
@@ -481,7 +550,12 @@ pub mod page {
                     {icon("search")}
                     input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
                         "aria-label": "{crate::ui::palette::search_label(mode)}", placeholder: "{hint_text}", value: "{raw_text}", autofocus: true,
-                        oninput: move |event| { query.set(event.value()); sel.set(0); },
+                        oninput: move |event| {
+                            // Only a changed query moves the highlight back to the top, so an input event that
+                            // repeats the text (focus, mount) keeps a picker on its current row.
+                            let value = event.value();
+                            if value != *query.read() { query.set(value); sel.set(0); }
+                        },
                         onkeydown: move |event| {
                             match event.key() {
                                 Key::Escape => { event.stop_propagation(); open.set(false); }
@@ -499,15 +573,21 @@ pub mod page {
                         },
                     }
                 }
-                if mode != crate::ui::palette::Mode::Commands && mode != crate::ui::palette::Mode::GotoLine && index_running && !shown.is_empty() {
+                if crate::ui::palette::lists_files(mode) && index_running && !shown.is_empty() {
                     div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일을 더 찾는 중입니다…" }
                 }
-                if mode != crate::ui::palette::Mode::Commands && mode != crate::ui::palette::Mode::GotoLine && index_capped {
+                if crate::ui::palette::lists_files(mode) && index_capped {
                     div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일이 많아 일부만 표시합니다." }
                 }
                 div { style: "max-height:320px; overflow:auto;", role: "listbox",
                     if shown.is_empty() { div { style: "padding:var(--sp3); color:var(--muted);", "{crate::ui::palette::empty_text(mode, index_running)}" } }
-                    for (row, r) in shown.iter().enumerate() {
+                    if win_start > 0 {
+                        div { class: "ed-tn", role: "option", "aria-label": "위 항목 더 보기", style: "--d:0; height:34px; color:var(--muted);",
+                            onclick: move |_| sel.set(win_start - 1),
+                            "{crate::ui::editor_status::more_above_text(win_start)}"
+                        }
+                    }
+                    for (row, r) in shown.iter().enumerate().skip(win_start) {
                         {
                             let item = &items[r.index];
                             let segments = highlight_segments(&item.title, &r.matched);
@@ -769,6 +849,10 @@ pub mod page {
                 }
                 BridgeAction::RunCommand(command) => {
                     notice(format!("지원하지 않는 명령입니다: {}", command.id));
+                }
+                BridgeAction::FormatFailed { uri, error } => {
+                    tracing::warn!(path = %uri.path, %error, "reopening a file with an encoding failed");
+                    notice(crate::ui::editor_status::reopen_failure_text(&crate::ui::editor::display_name(base_name(&uri.path)), None, &error));
                 }
                 _ => {}
             }
@@ -2112,6 +2196,11 @@ pub mod page {
         let tab_w = crate::ui::editor::tab_width_text(tab_width);
         let branch = branch.to_string();
         let has_file = current.is_some();
+        // EOL, encoding and language of the active document (FR-L31.7).
+        let format = active_format(s).and_then(|(_, f, _)| f);
+        let crate::ui::editor_status::StatusTexts { eol: eol_t, encoding: enc_t, language: lang_t } =
+            crate::ui::editor_status::status_texts(format.as_ref());
+        let (eol_s, enc_s, lang_s) = (s.clone(), s.clone(), s.clone());
         let goto_s = s.clone();
         let git_s = s.clone();
         rsx! {
@@ -2121,9 +2210,13 @@ pub mod page {
                 span { class: "ed-sbi", span { class: "{dot}" } "{agent}" }
                 if has_file {
                     button { class: "ed-sbi", title: "줄/열로 이동", "aria-label": "줄/열로 이동", onclick: move |_| run_action(&goto_s, Action::GotoLine), "{position}" }
-                    span { class: "ed-sbi hide-md", "LF" }
-                    span { class: "ed-sbi hide-md", "UTF-8" }
+                    button { class: "ed-sbi hide-md", title: "줄 끝 시퀀스 선택", "aria-label": "줄 끝 시퀀스 선택: {eol_t}",
+                        onclick: move |_| open_picker(&eol_s, crate::ui::palette::Mode::Eol), "{eol_t}" }
+                    button { class: "ed-sbi hide-md", title: "인코딩 선택", "aria-label": "인코딩 선택: {enc_t}",
+                        onclick: move |_| open_picker(&enc_s, crate::ui::palette::Mode::EncodingAction), "{enc_t}" }
                     span { class: "ed-sbi hide-md", "{tab_w}" }
+                    button { class: "ed-sbi hide-md", title: "언어 모드 선택", "aria-label": "언어 모드 선택: {lang_t}",
+                        onclick: move |_| open_picker(&lang_s, crate::ui::palette::Mode::Language), "{lang_t}" }
                 }
                 button { class: "ed-sbi", title: "Git 브랜치", "aria-label": "Git 브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon("git")} "{branch}" }
             }

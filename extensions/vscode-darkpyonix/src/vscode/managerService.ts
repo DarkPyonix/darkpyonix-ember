@@ -4,7 +4,7 @@ import { realpathSync } from "node:fs";
 import { hostname } from "node:os";
 import * as vscode from "vscode";
 import { ManagerClient, type ClientIdentity } from "../manager/client";
-import { darkpyonixHome, mapPath, resolveManager, type ManagerEndpoint } from "../manager/discovery";
+import { checkHealth, darkpyonixHome, mapPath, resolveManager, type ManagerEndpoint } from "../manager/discovery";
 
 const CLIENT_ID_KEY = "darkpyonix.clientId";
 export const TOKEN_SECRET = "darkpyonix.manager.token";
@@ -48,6 +48,14 @@ export class ManagerService {
   }
 
   async client(): Promise<ManagerClient> {
+    if (this.endpoint) {
+      // A manager we spawned ends after its idle_timeout (FR-M3); spawn a new one then.
+      const ep = await this.endpoint.catch(() => null);
+      if (ep?.source === "spawned" && !(await checkHealth(ep.url))) {
+        this.log.info(`manager ${ep.url} is gone; spawning a new one`);
+        this.endpoint = null;
+      }
+    }
     if (!this.endpoint) {
       this.endpoint = this.resolve();
       this.endpoint.catch(() => { this.endpoint = null; });
@@ -59,11 +67,11 @@ export class ManagerService {
   private async resolve(): Promise<ManagerEndpoint> {
     const cfg = this.cfg();
     const configuredHome = cfg.get<string>("home") || "";
-    const remoteUrl = cfg.get<string>("manager.url") || undefined;
-    const remoteToken = remoteUrl ? (await this.ctx.secrets.get(TOKEN_SECRET)) || cfg.get<string>("manager.token") || undefined : undefined;
+    const url = cfg.get<string>("manager.url") || undefined;
+    const token = url ? (await this.ctx.secrets.get(TOKEN_SECRET)) || cfg.get<string>("manager.token") || undefined : undefined;
     const ep = await resolveManager({
-      remoteUrl,
-      remoteToken,
+      url,
+      token,
       home: darkpyonixHome(configuredHome),
       passHome: !!configuredHome,
       cliPath: cfg.get<string>("cliPath") || "darkpyonix",

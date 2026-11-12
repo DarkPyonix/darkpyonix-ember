@@ -90,6 +90,8 @@ export function activate(ctx: vscode.ExtensionContext): DarkPyonixApi {
   async function connect(nb: vscode.NotebookDocument, autoStart: boolean): Promise<Entry> {
     const e = entryFor(nb);
     if (e.conn) {
+      // Not attached yet: the manager may have idled out since the notebook opened (FR-M3).
+      if (autoStart && !e.conn.session) e.conn.client = await service.client();
       if (autoStart) await e.conn.ensureAttached();
       return e;
     }

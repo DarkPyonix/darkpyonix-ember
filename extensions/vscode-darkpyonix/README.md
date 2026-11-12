@@ -17,7 +17,7 @@ Contract (darkpyonix-core, read-only here): `docs/FORMAT.md`, `docs/api/manager.
 | Byte-exact save: untouched cells, CRLF, BOM, missing final newline, headers with trailing spaces all survive | FR-F1 | `src/format/` |
 | `[markdown]` cells show the `darkpyonix.markdown("""…""")` body as a Markdown cell; the call (and `silent=`) is kept on save | FORMAT §3.2 | `src/format/cells.ts` |
 | Other types (`argparse`, `binding`, `shell`, `parallel`, `concurrent`, `*interop`, unknown) are code cells with a type badge; the preamble is shown as the first cell when it is not empty | FORMAT §3 | `src/vscode/status.ts` |
-| Finds a live manager in `<DARKPYONIX_HOME or ~/.darkpyonix>/managers/*.json` (pid alive + `GET /health`), else spawns `darkpyonix manager --ephemeral` and waits for its registry file; or uses a dedicated manager URL + token | FR-C1, FR-M3, FR-M4 | `src/manager/discovery.ts` |
+| Finds a manager like the CLI: `darkpyonix.manager.url` + token, else `DARKPYONIX_MANAGER_URL` + `DARKPYONIX_TOKEN` (only one of the pair is an error), else spawns `darkpyonix manager --ephemeral` and reads `{url, token, pid}` from its first stdout line. No registry file; the spawned manager's stderr goes to `<home>/manager.log`, it is left running when VS Code quits and ends after its idle timeout, and a new one is spawned if it has ended | FR-C1, FR-M3, FR-M4 | `src/manager/discovery.ts` |
 | Controller **DarkPyonix**: start/attach (`POST /kernels`), run cells by `cell_ids`, stop = interrupt, restart (soft/hard), graceful shutdown. Never `force=true` | FR-M2, FR-X1, FR-X4, FR-K7, FR-K8 | `src/connection.ts`, `src/extension.ts` |
 | Live outputs from SSE `output` events (stream, display_data, execute_result, error), `output.clear` | PROTOCOL §3.4 | `src/run/` |
 | Latest outputs on open, with an "outputs from previous source" badge on stale cells | FR-R4 | `src/connection.ts` |
@@ -30,7 +30,7 @@ Contract (darkpyonix-core, read-only here): `docs/FORMAT.md`, `docs/api/manager.
 |---|---|---|
 | `darkpyonix.cliPath` | `darkpyonix` | CLI used to spawn an ephemeral manager |
 | `darkpyonix.managerArgs` | `["manager", "--ephemeral"]` | its arguments |
-| `darkpyonix.home` | (empty) | runtime home; empty = `$DARKPYONIX_HOME` or `~/.darkpyonix` |
+| `darkpyonix.home` | (empty) | runtime home (where `manager.log` goes, passed to a spawned manager); empty = `$DARKPYONIX_HOME` or `~/.darkpyonix` |
 | `darkpyonix.manager.url` / `darkpyonix.manager.token` | (empty) | dedicated manager; **Connect** stores the token in the OS secret store instead |
 | `darkpyonix.manager.pathMap` | `{}` | local path prefix → path on the dedicated manager's machine |
 | `darkpyonix.autoStartKernel` | `false` | start the kernel (and join collaboration) on open; a kernel that is already running is always attached |

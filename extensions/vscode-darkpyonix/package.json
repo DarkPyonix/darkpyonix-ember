@@ -149,7 +149,7 @@
         "darkpyonix.cliPath": {
           "type": "string",
           "default": "darkpyonix",
-          "description": "Path to the darkpyonix CLI, used to spawn an ephemeral manager when none is running (SPEC FR-C1)."
+          "description": "Path to the darkpyonix CLI, used to spawn an ephemeral manager when no manager URL and token are given (settings or DARKPYONIX_MANAGER_URL + DARKPYONIX_TOKEN; SPEC FR-C1)."
         },
         "darkpyonix.managerArgs": {
           "type": "array",
@@ -170,7 +170,7 @@
         "darkpyonix.manager.url": {
           "type": "string",
           "default": "",
-          "description": "URL of a dedicated manager (e.g. https://main.example.darkpyonix.dev). Empty: use a local ephemeral manager."
+          "description": "URL of a dedicated manager (e.g. https://main.example.darkpyonix.dev). Empty: DARKPYONIX_MANAGER_URL + DARKPYONIX_TOKEN when set, else spawn an ephemeral manager."
         },
         "darkpyonix.manager.token": {
           "type": "string",

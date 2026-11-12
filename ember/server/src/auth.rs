@@ -155,6 +155,49 @@ pub fn agent_cdp_path_ok(path: &str) -> bool {
     }
 }
 
+/// The variable that lets the owner listener (`EMBER_LISTEN`) bind a non-loopback address
+/// (FR-S10, INTENT D37). Without it such a bind is a startup error, because the listener speaks
+/// plain HTTP and the bearer token would cross the network in clear.
+pub const ALLOW_NON_LOOPBACK_LISTEN: &str = "EMBER_ALLOW_NON_LOOPBACK_LISTEN";
+
+/// What the listen guard decided for `EMBER_LISTEN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListenCheck {
+    /// A loopback address: no warning.
+    Loopback,
+    /// A non-loopback address the owner allowed with `EMBER_ALLOW_NON_LOOPBACK_LISTEN=1`:
+    /// the server starts and logs a warning.
+    NonLoopbackAllowed,
+}
+
+/// Parses `EMBER_LISTEN` (`None` gives the default `127.0.0.1:8740`). `localhost:<port>` is
+/// read as `127.0.0.1:<port>`, so the guard never needs DNS.
+pub fn parse_listen(value: Option<&str>) -> Result<SocketAddr, String> {
+    let v = value.map(str::trim).filter(|v| !v.is_empty()).unwrap_or("127.0.0.1:8740");
+    if let Some(port) = v.strip_prefix("localhost:") {
+        let port: u16 = port.parse().map_err(|_| format!("EMBER_LISTEN: bad port in {v:?}"))?;
+        return Ok(SocketAddr::from(([127, 0, 0, 1], port)));
+    }
+    v.parse().map_err(|_| format!("EMBER_LISTEN: {v:?} is not ip:port"))
+}
+
+/// The listen guard (FR-S10). A loopback address passes. Any other address (`0.0.0.0`, `::`, a
+/// LAN address, an IPv4-mapped IPv6 address) is refused unless `allow` is exactly `"1"`. Remote
+/// devices are meant to come in through the transport door, which checks the device key.
+pub fn check_listen(addr: SocketAddr, allow: Option<&str>) -> Result<ListenCheck, String> {
+    if addr.ip().is_loopback() {
+        return Ok(ListenCheck::Loopback);
+    }
+    if allow.map(str::trim) == Some("1") {
+        return Ok(ListenCheck::NonLoopbackAllowed);
+    }
+    Err(format!(
+        "EMBER_LISTEN={addr} is not a loopback address. The owner listener speaks plain HTTP and the \
+         server token would cross the network in clear; remote devices come in through the transport \
+         (EMBER_TRANSPORT=1). Set {ALLOW_NON_LOOPBACK_LISTEN}=1 to bind it anyway."
+    ))
+}
+
 /// What the middleware checks against.
 pub struct ServerAuth {
     /// The token in force. Replaced by a rotation (#369); the old one is refused from then on.
@@ -312,7 +355,8 @@ fn agent_channel_post_path(path: &str) -> bool {
 }
 
 /// True for the routes that check a session's runtime token themselves, and `GET /auth/callback`.
-fn token_exempt(method: &axum::http::Method, path: &str) -> bool {
+/// Public so a test can walk every exempt family (FR-S9).
+pub fn token_exempt(method: &axum::http::Method, path: &str) -> bool {
     if method == axum::http::Method::GET
         && (path == "/api/health" || path == crate::chatgpt::oauth::CALLBACK_PATH)
     {

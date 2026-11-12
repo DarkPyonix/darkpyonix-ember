@@ -67,8 +67,8 @@ stdin:
 With `-` stdin is a pipe, not a terminal: there is no \"Continue?\" prompt (pass --yes) and no
 fingerprint question. Without --server-fingerprint (or --trust-unverified-server) the server's
 transport id is then not added to allowed-peers; only the token over HTTP is set up.
-Ctrl-C while waiting for the owner stops the command; the code is already redeemed by then, so
-cancel the pending computer in Ember or let it expire. After the credential arrives, Ctrl-C is
+Ctrl-C while waiting for the owner stops the command and asks the server to cancel the pending
+computer (best effort, a few seconds); if that fails, cancel it in Ember or let it expire. After the credential arrives, Ctrl-C is
 ignored until the files are written: answer the fingerprint question with n, Enter or Ctrl-D.";
 
 /// The exact text printed for every http server (design 4.2).
@@ -94,6 +94,12 @@ const TIMEOUT_TEXT: &str = "timed out waiting for the owner";
 const FINGERPRINT_PROMPT: &str =
     "Does this match the fingerprint your Ember server prints at start and shows in the app? (n, Enter or Ctrl-D declines) [y/N] ";
 const INTERRUPTED_TEXT: &str = "interrupted; nothing was written on this node. The code may already have been redeemed: ask the owner to cancel the pending computer in Ember, or let it expire.";
+/// Ctrl-C while waiting, and the server cancelled the enrolment (FR-C2m, #617).
+const CANCELLED_TEXT: &str = "interrupted; nothing was written on this node, and the server cancelled this enrolment: the owner can no longer confirm it.";
+/// Ctrl-C while waiting, and the cancel did not go through (no answer in time, or the owner had already answered).
+const CANCEL_FAILED_TEXT: &str = "interrupted; nothing was written on this node. The server could not cancel this enrolment: ask the owner to deny the pending computer in Ember, or let it expire.";
+/// How long the best-effort cancel on Ctrl-C may take.
+const CANCEL_TIMEOUT: Duration = Duration::from_secs(3);
 const UNVERIFIED_WARNING: &str = "Warning: this adds an unverified server to this node's allowed peers; the transport crosses NAT, so a rogue server could reach this node from anywhere.";
 
 // ---- options and arguments ----------------------------------------------------------------
@@ -645,6 +651,49 @@ async fn poll_once(client: &reqwest::Client, url: &str, secret: &str) -> anyhow:
     Ok(Polled::Answer(answer))
 }
 
+/// Best effort: `DELETE` the enrolment with the poll secret (FR-C2m, #617). True only when the
+/// server answered `200 {"status":"cancelled"}` within [`CANCEL_TIMEOUT`].
+/// The door shares the poll's one-per-2-seconds limit, so a cancel right after a poll is 429:
+/// it is retried once after `Retry-After` (at most 2 s), all inside the one timeout.
+async fn cancel_once(client: &reqwest::Client, url: &str, secret: &str) -> bool {
+    tokio::time::timeout(CANCEL_TIMEOUT, async {
+        for attempt in 0..2 {
+            let Ok(resp) = client.delete(url).bearer_auth(secret).send().await else { return false };
+            match resp.status().as_u16() {
+                200 => {}
+                429 if attempt == 0 => {
+                    let wait = resp
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.trim().parse::<u64>().ok())
+                        .unwrap_or(2)
+                        .min(2);
+                    tokio::time::sleep(Duration::from_secs(wait)).await;
+                    continue;
+                }
+                _ => return false,
+            }
+            return match read_capped(resp).await {
+                Ok(b) => serde_json::from_slice::<serde_json::Value>(&b).is_ok_and(|v| v["status"] == "cancelled"),
+                Err(_) => false,
+            };
+        }
+        false
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// The message after Ctrl-C in the poll loop.
+fn interrupted_while_waiting(cancelled: bool) -> &'static str {
+    if cancelled {
+        CANCELLED_TEXT
+    } else {
+        CANCEL_FAILED_TEXT
+    }
+}
+
 // ---- the command ----------------------------------------------------------------------------
 
 /// What an enrol that finished left behind.
@@ -830,8 +879,8 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
     // token; the cost is that the fingerprint question after the delivery is declined with n,
     // Enter or Ctrl-D (FINGERPRINT_PROMPT says so), not Ctrl-C. `unix::signal` registers now
     // (`ctrl_c()` would register on its first poll and a signal between two polls would be lost).
-    // Not covered by a test: it needs a signal sent to the test process. The server cannot cancel
-    // the pending enrolment (no such route, issue #617).
+    // Not covered by a test: it needs a signal sent to the test process. In the poll loop a
+    // signal first asks the server to cancel the enrolment (`cancel_once`, FR-C2m, #617).
     let mut signals = Signals::register()?;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -889,7 +938,10 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
                 }
                 poll_once(&client, &poll_url, &redeemed.poll_secret).await
             } => r?,
-            _ = signals.recv() => bail!("{INTERRUPTED_TEXT}"),
+            _ = signals.recv() => {
+                let cancelled = cancel_once(&client, &poll_url, &redeemed.poll_secret).await;
+                bail!("{}", interrupted_while_waiting(cancelled))
+            }
         };
         match polled {
             Polled::Answer(a) => {
@@ -1518,8 +1570,58 @@ mod tests {
         assert!(!USAGE.contains("--forget"));
     }
 
-    // Ctrl-C in the poll loop (INTERRUPTED_TEXT) is not unit tested: it needs a SIGINT sent to the
-    // test process, which would also reach the other tests of the binary.
+    // Ctrl-C in the poll loop is not unit tested end to end: it needs a SIGINT sent to the test
+    // process, which would also reach the other tests of the binary. Its two parts are below.
+
+    #[test]
+    fn fr_c2_node_cli_the_interrupt_message_says_whether_the_server_cancelled() {
+        assert!(interrupted_while_waiting(true).contains("the server cancelled this enrolment"));
+        assert!(interrupted_while_waiting(false).contains("could not cancel"));
+        assert!(interrupted_while_waiting(false).contains("deny the pending computer"));
+    }
+
+    async fn stub(status: u16, body: &'static str, delay: Duration) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use axum::routing::delete;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        let app = axum::Router::new().route(
+            "/enrol/status/{id}",
+            delete(move |h: axum::http::HeaderMap| {
+                let s2 = s2.clone();
+                async move {
+                    let auth = h.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                    s2.lock().unwrap().push(auth);
+                    tokio::time::sleep(delay).await;
+                    (axum::http::StatusCode::from_u16(status).unwrap(), body)
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        (format!("http://{addr}/enrol/status/e1"), seen)
+    }
+
+    #[tokio::test]
+    async fn fr_c2_node_cli_cancel_sends_the_poll_secret_and_reads_cancelled() {
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let (url, seen) = stub(200, r#"{"status":"cancelled"}"#, Duration::ZERO).await;
+        assert!(cancel_once(&client, &url, "dps_secret").await);
+        assert_eq!(seen.lock().unwrap().as_slice(), ["Bearer dps_secret"]);
+        let (url, _) = stub(409, r#"{"status":"confirmed"}"#, Duration::ZERO).await;
+        assert!(!cancel_once(&client, &url, "dps_secret").await);
+        let (url, _) = stub(404, r#"{"error":"not found","code":"not_found"}"#, Duration::ZERO).await;
+        assert!(!cancel_once(&client, &url, "dps_secret").await);
+    }
+
+    #[tokio::test]
+    async fn fr_c2_node_cli_cancel_gives_up_after_the_short_timeout() {
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let (url, _) = stub(200, r#"{"status":"cancelled"}"#, Duration::from_secs(30)).await;
+        let t = std::time::Instant::now();
+        assert!(!cancel_once(&client, &url, "dps_secret").await);
+        assert!(t.elapsed() < CANCEL_TIMEOUT + Duration::from_secs(2));
+    }
 
     #[test]
     fn fr_c2_node_cli_said_errors_are_recognised_by_cli() {

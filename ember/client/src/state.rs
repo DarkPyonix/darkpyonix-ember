@@ -388,6 +388,13 @@ impl State {
                     ch.computers |= self.derive_computer_projects();
                 }
             }
+            Input::Push(Push::ProjectDeleted { name }) => {
+                if self.project_records.remove(&name).is_some() {
+                    ch.projects = true;
+                    ch.persist = true;
+                    ch.computers |= self.derive_computer_projects();
+                }
+            }
             Input::ProjectRenamed { old, new } => {
                 if old != new {
                     for rec in self.sessions.values_mut().filter(|r| r.project == old) {
@@ -859,6 +866,13 @@ mod tests {
         assert_eq!(s.computers()[1].projects, vec!["alpha".to_string(), "empty".to_string()]);
         // Repeating it changes nothing.
         assert!(s.apply(Input::Push(Push::ProjectUpdated { project: proj("empty", &["local", "studio"]) })).is_empty());
+
+        // FR-L26: a pushed delete removes the record; a second one changes nothing.
+        let mut d = s.clone();
+        let ch = d.apply(Input::Push(Push::ProjectDeleted { name: "empty".into() }));
+        assert!(ch.projects && ch.persist);
+        assert_eq!(d.projects().iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["alpha"]);
+        assert!(d.apply(Input::Push(Push::ProjectDeleted { name: "empty".into() })).is_empty());
 
         // Fresh computer lists keep the derived assignment.
         s.apply(Input::ComputersLoaded(vec![pc("local", &[]), pc("studio", &[]), pc("new", &[])]));

@@ -17,6 +17,7 @@ pub mod egress_proxy;
 pub mod enrol_door;
 pub mod events;
 pub mod fork;
+pub mod fs_kind;
 pub mod guest_door;
 pub mod history;
 pub mod mcp;

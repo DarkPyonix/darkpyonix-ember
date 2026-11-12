@@ -147,10 +147,10 @@ async fn fr_l26_profile_override_is_validated() {
 }
 
 #[tokio::test]
-async fn fr_l26_leader_and_archive_stay_not_yet() {
+async fn fr_l26_leader_stays_not_yet() {
     let f = fixture();
     make_project(&f, "p");
-    for body in [json!({ "leader_session": null }), json!({ "archived": true })] {
+    for body in [json!({ "leader_session": null })] {
         let (st, resp) = patch(&f, "p", body.clone()).await;
         assert_eq!((st, resp["code"].as_str()), (StatusCode::BAD_REQUEST, Some("not_yet")), "{body}");
     }

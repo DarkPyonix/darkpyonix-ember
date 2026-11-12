@@ -56,6 +56,10 @@ pub enum HostCommand {
     /// Read the extension scan again on the management connection (FR-L31.14): after an install,
     /// an uninstall, or on the panel's refresh.
     RescanExtensions,
+    /// Write one setting into the user's or the workspace's settings.json; `None` removes the key (FR-L31.17).
+    WriteSetting { scope: ember_editor::SettingsScope, key: String, value: Option<serde_json::Value> },
+    /// Open a settings file as a document, making it first when it is not there (FR-L31.17).
+    OpenSettingsFile(crate::ui::editor_settings::SettingsFile),
 }
 
 #[derive(Default)]
@@ -99,6 +103,8 @@ pub struct HostState {
     pub tasks: Option<crate::ui::editor_tasks::TasksLoad>,
     /// The extensions the OSE has and the ones the extension host runs (FR-L31.14).
     pub extensions: crate::ui::editor_extensions::ExtensionScan,
+    /// The settings of every scope, the list the settings view shows and the user's key bindings (FR-L31.17).
+    pub settings: crate::ui::editor_settings::SettingsState,
     pub updates: Vec<SessionUpdate>,
     /// Workspace trust of the folder: the prompt and the restricted-mode banner (FR-L31.18).
     pub trust: crate::ui::workspace_trust::TrustState,
@@ -312,6 +318,13 @@ impl EditorHost {
                 // The answer given since the window opened holds across a reconnect (FR-L31.18, FR-L31.6).
                 config.workspace_trusted = shared.lock().unwrap().trust.trusted;
                 config.disabled_extensions = disabled_extensions.clone();
+                // Settings (FR-L31.17): the user's files are on this machine, the workspace's and the
+                // server's own are read by the session while it connects.
+                let user_files = crate::ui::editor_settings::UserFiles::in_dir(crate::services::services().config.editor_user_dir());
+                let (user_layer, user_error) = crate::ui::editor_settings::read_user_layer(&user_files);
+                config.user_settings = user_layer;
+                config.user_files = user_files.paths();
+                config.server_settings = true;
                 let (session, mut updates) = match EditorSession::connect_tcp(config).await {
                     Ok(pair) => pair,
                     Err(error) => {
@@ -336,6 +349,8 @@ impl EditorHost {
                         // A failed listing after a reconnect keeps the tree it had instead of replacing the window.
                         if let Ok(entries) = entries { state.set_dir_listing(&root, Ok::<_, String>(entries)); }
                     }
+                    // The scopes this session read, on the first connection and after a reconnect (FR-L31.17).
+                    state.settings = crate::ui::editor_settings::start_state(&session, &user_files, user_error);
                     // The scan of this connection, on the first one and after a reconnect (FR-L31.14).
                     state.extensions.connected(session.installed_extensions().to_vec(), session.running_extensions());
                     if attempt == 1 && crate::ui::editor_extensions::capture_hook().is_some_and(|c| c.adds_samples()) {
@@ -478,20 +493,38 @@ impl EditorHost {
                                 shared.lock().unwrap().tasks = Some(crate::ui::editor_tasks::TasksLoad::from_read(read.map_err(|e| e.to_string())));
                                 *revision.write() += 1;
                             }
-                            Some(HostCommand::Open(path)) => { let _ = session.open(session.uri(&path)); }
-                            Some(HostCommand::Close(path)) => { let _ = session.close(session.uri(&path)); }
-                            Some(HostCommand::Focus(path)) => { let _ = session.focus(session.uri(&path)); }
+                            // The settings view is a tab but not a document: the session never hears of it.
+                            Some(HostCommand::Open(path) | HostCommand::Close(path) | HostCommand::Focus(path)) if crate::ui::editor_settings::is_settings_tab(&path) => {}
+                            Some(HostCommand::Open(path)) => { let _ = session.open(session.document_uri(&path)); }
+                            Some(HostCommand::Close(path)) => { let _ = session.close(session.document_uri(&path)); }
+                            Some(HostCommand::Focus(path)) => { let _ = session.focus(session.document_uri(&path)); }
+                            Some(HostCommand::WriteSetting { scope, key, value }) => {
+                                crate::ui::editor_settings::write_setting(&session, &shared, &user_files, scope, &key, value).await;
+                            }
+                            Some(HostCommand::OpenSettingsFile(file)) => {
+                                let path = crate::ui::editor_settings::file_tab_path(&shared.lock().unwrap().settings, file);
+                                match crate::ui::editor_settings::ensure_file(&session, &user_files, file).await {
+                                    Ok(()) => {
+                                        if let Some(path) = path {
+                                            let uri = session.document_uri(&path);
+                                            let _ = session.open(uri.clone());
+                                            let _ = session.focus(uri);
+                                        }
+                                    }
+                                    Err(error) => shared.lock().unwrap().edit_errors.push(format!("설정 파일을 열지 못했습니다: {error}")),
+                                }
+                            }
                             Some(HostCommand::Widget(uri, generation, event)) => { let _ = session.widget_event(uri, generation, event); }
                             Some(HostCommand::Resync(uri)) => { let _ = session.resync(uri); }
                             Some(HostCommand::DecideTrust(trusted)) => {
                                 shared.lock().unwrap().trust.answer(trusted);
                                 let _ = session.decide_workspace_trust(trusted);
                             }
-                            Some(HostCommand::SetEol { path, eol }) => { let _ = session.set_eol(session.uri(&path), eol); }
-                            Some(HostCommand::SetEncoding { path, encoding, mode }) => { let _ = session.set_encoding(session.uri(&path), encoding, mode); }
-                            Some(HostCommand::SetLanguage { path, language_id }) => { let _ = session.set_language(session.uri(&path), language_id); }
-                            Some(HostCommand::Restore { path, text }) => { let _ = session.restore(session.uri(&path), text); }
-                            Some(HostCommand::Reload(path)) => { let _ = session.reload(session.uri(&path)); }
+                            Some(HostCommand::SetEol { path, eol }) => { let _ = session.set_eol(session.document_uri(&path), eol); }
+                            Some(HostCommand::SetEncoding { path, encoding, mode }) => { let _ = session.set_encoding(session.document_uri(&path), encoding, mode); }
+                            Some(HostCommand::SetLanguage { path, language_id }) => { let _ = session.set_language(session.document_uri(&path), language_id); }
+                            Some(HostCommand::Restore { path, text }) => { let _ = session.restore(session.document_uri(&path), text); }
+                            Some(HostCommand::Reload(path)) => { let _ = session.reload(session.document_uri(&path)); }
                             Some(HostCommand::CompareWithDisk(path)) => {
                                 let result = session.read_file_text(&path).await.map_err(|e| e.to_string());
                                 shared.lock().unwrap().compare = Some((path, result));
@@ -509,11 +542,16 @@ impl EditorHost {
                             Some(update) => {
                                 let is_lost = matches!(update, SessionUpdate::ConnectionLost { .. });
                                 // After a replace the search runs again so the list shows what is left.
-                                let refresh = {
+                                let (refresh, saved_settings) = {
                                     let mut state = shared.lock().unwrap();
+                                    let saved_settings = crate::ui::editor_settings::saved_settings_file(&state.settings, &update);
                                     state.apply_update(update);
-                                    state.search.take_refresh()
+                                    (state.search.take_refresh(), saved_settings)
                                 };
+                                // A saved settings file takes effect at once (FR-L31.17).
+                                if let Some(file) = saved_settings {
+                                    crate::ui::editor_settings::reload_after_save(&session, &shared, &user_files, file).await;
+                                }
                                 if let Some((id, request)) = refresh {
                                     latest_search = id;
                                     let _ = session.search(id, request);

@@ -74,10 +74,16 @@ pub enum Action {
     ZoomReset,
     /// Show the extensions window (FR-L31.14).
     Extensions,
+    /// The settings view (FR-L31.17).
+    Settings,
+    /// The user's settings.json as a document (FR-L31.17).
+    SettingsJson,
+    /// The user's keybindings.json as a document (FR-L31.17).
+    KeybindingsJson,
 }
 
 impl Action {
-    pub const ALL: [Action; 27] = [
+    pub const ALL: [Action; 30] = [
         Action::Project,
         Action::Commit,
         Action::Git,
@@ -105,6 +111,9 @@ impl Action {
         Action::ZoomOut,
         Action::ZoomReset,
         Action::Extensions,
+        Action::Settings,
+        Action::SettingsJson,
+        Action::KeybindingsJson,
     ];
 
     pub fn label(self) -> &'static str {
@@ -136,6 +145,9 @@ impl Action {
             Action::ZoomOut => "축소",
             Action::ZoomReset => "원래 크기",
             Action::Extensions => "확장",
+            Action::Settings => "설정",
+            Action::SettingsJson => "사용자 설정 열기 (JSON)",
+            Action::KeybindingsJson => "키보드 단축키 열기 (JSON)",
         }
     }
 }
@@ -263,7 +275,7 @@ impl Chord {
 /// `(action, macOS chord, other chord)`; an empty chord means no default binding.
 type Row = (Action, &'static str, &'static str);
 
-const VSCODE: [Row; 27] = [
+const VSCODE: [Row; 30] = [
     (Action::Project, "\u{21E7}\u{2318}E", "Ctrl+Shift+E"),
     // VS Code has no default for a commit window; the source control view shares Git's chord.
     (Action::Commit, "", ""),
@@ -293,9 +305,13 @@ const VSCODE: [Row; 27] = [
     (Action::ZoomReset, "\u{2318}0", "Ctrl+0"),
     // Code-OSS: workbench.view.extensions.
     (Action::Extensions, "\u{21E7}\u{2318}X", "Ctrl+Shift+X"),
+    (Action::Settings, "\u{2318},", "Ctrl+,"),
+    // Code-OSS binds neither JSON file by default (the keyboard shortcuts editor is a two-stroke chord).
+    (Action::SettingsJson, "", ""),
+    (Action::KeybindingsJson, "", ""),
 ];
 
-const JETBRAINS: [Row; 27] = [
+const JETBRAINS: [Row; 30] = [
     (Action::Project, "\u{2318}1", "Alt+1"),
     (Action::Commit, "\u{2318}0", "Alt+0"),
     (Action::Git, "\u{2318}9", "Alt+9"),
@@ -326,6 +342,9 @@ const JETBRAINS: [Row; 27] = [
     (Action::ZoomReset, "\u{2303}\u{21E7}\u{2325}0", "Ctrl+Shift+Alt+0"),
     // The JetBrains keymap has no default chord for Plugins.
     (Action::Extensions, "", ""),
+    (Action::Settings, "\u{2318},", "Ctrl+Alt+S"),
+    (Action::SettingsJson, "", ""),
+    (Action::KeybindingsJson, "", ""),
 ];
 
 impl Keymap {
@@ -353,7 +372,7 @@ impl Keymap {
         }
     }
 
-    fn table(self) -> &'static [Row; 27] {
+    fn table(self) -> &'static [Row; 30] {
         match self {
             Keymap::VsCode => &VSCODE,
             Keymap::JetBrains => &JETBRAINS,

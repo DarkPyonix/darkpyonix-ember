@@ -34,6 +34,7 @@ pub mod files;
 pub mod fonts;
 pub mod editor_search;
 pub mod editor_tasks;
+pub mod editor_settings;
 pub mod home;
 pub mod keymap;
 pub mod monitor;

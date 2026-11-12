@@ -374,48 +374,139 @@ pub fn bootstrap_calls(workspace: Option<&WorkspaceData>, trusted: bool, configu
     ]
 }
 
+/// One language override block of a settings file: `"[rust]": { "editor.tabSize": 2 }`, or
+/// `"[javascript][typescript]"` with two identifiers.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConfigOverride {
+    pub identifiers: Vec<String>,
+    /// Dotted keys and their values inside the block.
+    pub values: Vec<(String, Value)>,
+}
+
+/// The settings of one scope (defaults, user, remote or workspace) as dotted keys, plus its
+/// language override blocks. It becomes one `IConfigurationModel` (configuration.ts L209-220).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConfigModel {
+    pub values: Vec<(String, Value)>,
+    pub overrides: Vec<ConfigOverride>,
+}
+
+impl ConfigModel {
+    /// A model of plain keys with no override blocks.
+    pub fn from_values(values: Vec<(String, Value)>) -> Self {
+        Self { values, overrides: Vec::new() }
+    }
+
+    /// The key Code-OSS writes an override block under: `[rust]`, `[javascript][typescript]`.
+    pub fn override_key(identifiers: &[String]) -> String {
+        identifiers.iter().map(|i| format!("[{i}]")).collect()
+    }
+
+    /// `IConfigurationModel`: `contents` nests dotted keys (as `toValuesTree` does), `keys` lists
+    /// them flat, and every override block appears three times as upstream's parser leaves it: its
+    /// own key in `keys`, its raw object in `contents`, and a nested entry in `overrides`
+    /// (`configurationModels.ts` `ConfigurationModelParser.doParseRaw` and `toOverrides`).
+    pub fn to_json(&self) -> Value {
+        let mut contents = nested_contents(&self.values);
+        let mut keys: Vec<String> = self.values.iter().map(|(k, _)| k.clone()).collect();
+        let mut overrides = Vec::new();
+        for o in &self.overrides {
+            let key = Self::override_key(&o.identifiers);
+            let raw: Map<String, Value> = o.values.iter().cloned().collect();
+            contents.insert(key.clone(), Value::Object(raw));
+            keys.push(key);
+            let inner_keys: Vec<&str> = o.values.iter().map(|(k, _)| k.as_str()).collect();
+            overrides.push(json!({
+                "identifiers": o.identifiers,
+                "keys": inner_keys,
+                "contents": nested_contents(&o.values),
+            }));
+        }
+        json!({ "contents": contents, "keys": keys, "overrides": overrides })
+    }
+}
+
+fn insert_path(obj: &mut Map<String, Value>, parts: &[&str], v: Value) {
+    match parts {
+        [] => {}
+        [last] => {
+            obj.insert((*last).to_owned(), v);
+        }
+        [head, rest @ ..] => {
+            let child = obj.entry((*head).to_owned()).or_insert_with(|| Value::Object(Map::new()));
+            if !child.is_object() {
+                *child = Value::Object(Map::new());
+            }
+            if let Some(m) = child.as_object_mut() {
+                insert_path(m, rest, v);
+            }
+        }
+    }
+}
+
+/// Dotted keys as the nested object `ConfigurationModel.contents` holds.
+fn nested_contents(entries: &[(String, Value)]) -> Map<String, Value> {
+    let mut contents = Map::new();
+    for (k, v) in entries {
+        let parts: Vec<&str> = k.split('.').collect();
+        insert_path(&mut contents, &parts, v.clone());
+    }
+    contents
+}
+
 /// `IConfigurationInitData` (extHost.protocol.ts L116) from defaults + user settings. Values are
 /// nested objects keyed by dotted paths split on `.` (as `ConfigurationModel.contents`).
 pub fn configuration_init_data(defaults: &[(String, Value, Option<u8>)], user: &[(String, Value)]) -> Value {
-    fn insert_path(obj: &mut Map<String, Value>, parts: &[&str], v: Value) {
-        match parts {
-            [] => {}
-            [last] => {
-                obj.insert((*last).to_owned(), v);
-            }
-            [head, rest @ ..] => {
-                let child = obj.entry((*head).to_owned()).or_insert_with(|| Value::Object(Map::new()));
-                if !child.is_object() {
-                    *child = Value::Object(Map::new());
-                }
-                if let Some(m) = child.as_object_mut() {
-                    insert_path(m, rest, v);
-                }
-            }
-        }
-    }
-    fn model(entries: &[(String, Value)]) -> Value {
-        let mut contents = Map::new();
-        for (k, v) in entries {
-            let parts: Vec<&str> = k.split('.').collect();
-            insert_path(&mut contents, &parts, v.clone());
-        }
-        let keys: Vec<&str> = entries.iter().map(|(k, _)| k.as_str()).collect();
-        json!({ "contents": contents, "keys": keys, "overrides": [] })
-    }
-    let empty = model(&[]);
     let default_entries: Vec<(String, Value)> = defaults.iter().map(|(k, v, _)| (k.clone(), v.clone())).collect();
-    let scopes: Vec<Value> = defaults.iter().map(|(k, _, s)| json!([k, s])).collect();
+    let scopes: Vec<(String, Option<u8>)> = defaults.iter().map(|(k, _, s)| (k.clone(), *s)).collect();
+    configuration_data(
+        &ConfigModel::from_values(default_entries),
+        &scopes,
+        &ConfigModel::from_values(user.to_vec()),
+        &ConfigModel::default(),
+        &ConfigModel::default(),
+    )
+}
+
+/// `IConfigurationInitData` with every scope Ember fills (FR-L31.17): `defaults` (contributed and
+/// Ember's own), `userLocal` (the client's settings.json), `userRemote` (the server's Machine
+/// settings.json) and `workspace` (`.vscode/settings.json`). `policy`, `application` and `folders`
+/// stay empty: Ember has no policy file, no application-scoped profile and one workspace folder,
+/// whose settings are the workspace model. The extension host merges them itself in upstream's
+/// order (`Configuration.parse`, configurationModels.ts L1163).
+pub fn configuration_data(
+    defaults: &ConfigModel,
+    scopes: &[(String, Option<u8>)],
+    user_local: &ConfigModel,
+    user_remote: &ConfigModel,
+    workspace: &ConfigModel,
+) -> Value {
+    let empty = ConfigModel::default().to_json();
+    let scopes: Vec<Value> = scopes.iter().map(|(k, s)| json!([k, s])).collect();
     json!({
-        "defaults": model(&default_entries),
+        "defaults": defaults.to_json(),
         "policy": empty,
         "application": empty,
-        "userLocal": model(user),
-        "userRemote": empty,
-        "workspace": empty,
+        "userLocal": user_local.to_json(),
+        "userRemote": user_remote.to_json(),
+        "workspace": workspace.to_json(),
         "folders": [],
         "configurationScopes": scopes,
     })
+}
+
+/// `ExtHostConfigurationShape.$acceptConfigurationChanged(data, change)` (extHost.protocol.ts
+/// L2379). `data` is the whole new `IConfigurationInitData`; `change` is `IConfigurationChange`
+/// (configuration.ts L63-66): the plain keys that changed, and per language identifier the keys
+/// that changed inside its override blocks. The extension host replaces its configuration with
+/// `data` and fires `onDidChangeConfiguration` from `change` (extHostConfiguration.ts L160-165).
+pub fn accept_configuration_changed(data: &Value, keys: &[String], overrides: &[(String, Vec<String>)]) -> Call {
+    let overrides: Vec<Value> = overrides.iter().map(|(id, keys)| json!([id, keys])).collect();
+    Call::new(
+        proxy::EXT_HOST_CONFIGURATION,
+        "$acceptConfigurationChanged",
+        vec![Arg::Json(data.clone()), Arg::Json(json!({ "keys": keys, "overrides": overrides }))],
+    )
 }
 
 /// Collect `(key, default, scope)` from extensions' `contributes.configuration`.
@@ -974,6 +1065,60 @@ mod tests {
             m,
             json!({"pub.ext": ["onStartupFinished", "onUri:pub.ext", "onCommand:ext.run", "onLanguage:foo", "onView:ext.view"]})
         );
+    }
+
+    #[test]
+    fn fr_l31_17_configuration_payload_carries_every_scope_and_override() {
+        let defaults = ConfigModel::from_values(vec![("editor.tabSize".into(), json!(4))]);
+        let user = ConfigModel {
+            values: vec![("editor.tabSize".into(), json!(2)), ("files.autoSave".into(), json!("afterDelay"))],
+            overrides: vec![ConfigOverride {
+                identifiers: vec!["rust".into(), "toml".into()],
+                values: vec![("editor.tabSize".into(), json!(8))],
+            }],
+        };
+        let remote = ConfigModel::from_values(vec![("terminal.integrated.shell".into(), json!("/bin/zsh"))]);
+        let workspace = ConfigModel::from_values(vec![("editor.insertSpaces".into(), json!(false))]);
+        let data = configuration_data(&defaults, &[("editor.tabSize".into(), Some(6))], &user, &remote, &workspace);
+        assert_eq!(data["defaults"]["contents"]["editor"]["tabSize"], 4);
+        assert_eq!(data["userLocal"]["contents"]["editor"]["tabSize"], 2);
+        assert_eq!(data["userLocal"]["contents"]["files"]["autoSave"], "afterDelay");
+        // An override block is listed under its own key, kept raw in contents and nested in overrides.
+        assert_eq!(data["userLocal"]["keys"], json!(["editor.tabSize", "files.autoSave", "[rust][toml]"]));
+        assert_eq!(data["userLocal"]["contents"]["[rust][toml]"], json!({ "editor.tabSize": 8 }));
+        assert_eq!(
+            data["userLocal"]["overrides"],
+            json!([{ "identifiers": ["rust", "toml"], "keys": ["editor.tabSize"], "contents": { "editor": { "tabSize": 8 } } }])
+        );
+        assert_eq!(data["userRemote"]["contents"]["terminal"]["integrated"]["shell"], "/bin/zsh");
+        assert_eq!(data["workspace"]["contents"]["editor"]["insertSpaces"], false);
+        assert_eq!(data["workspace"]["overrides"], json!([]));
+        assert_eq!(data["policy"]["keys"], json!([]));
+        assert_eq!(data["application"]["keys"], json!([]));
+        assert_eq!(data["folders"], json!([]));
+        assert_eq!(data["configurationScopes"], json!([["editor.tabSize", 6]]));
+    }
+
+    #[test]
+    fn fr_l31_17_configuration_change_call_shape() {
+        let data = configuration_data(
+            &ConfigModel::default(),
+            &[],
+            &ConfigModel::from_values(vec![("editor.tabSize".into(), json!(2))]),
+            &ConfigModel::default(),
+            &ConfigModel::default(),
+        );
+        let call = accept_configuration_changed(&data, &["editor.tabSize".into()], &[("rust".into(), vec!["editor.tabSize".into()])]);
+        assert_eq!(call.proxy, proxy::EXT_HOST_CONFIGURATION);
+        assert_eq!(call.method, "$acceptConfigurationChanged");
+        assert_eq!(call.args.len(), 2);
+        match (&call.args[0], &call.args[1]) {
+            (Arg::Json(sent), Arg::Json(change)) => {
+                assert_eq!(sent, &data);
+                assert_eq!(change, &json!({ "keys": ["editor.tabSize"], "overrides": [["rust", ["editor.tabSize"]]] }));
+            }
+            _ => panic!("both arguments are JSON"),
+        }
     }
 
     #[test]

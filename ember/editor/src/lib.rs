@@ -27,6 +27,7 @@
 //! | [`bridge`] | [`WidgetBridge`]: `SessionUpdate` → per-document widget state and encoded `Decorations` bytes |
 //! | [`fallback`] | connect-time version check outcome: when to offer "Open in VS Code" instead |
 //! | [`replies`] | answers for the extension host's other requests |
+//! | [`settings`] | FR-L31.17: JSONC, settings scopes and their merge, the settings Ember honours, editing one key, `keybindings.json` |
 //! | [`search`] | FR-E7: search across files through the extension host, unsaved buffers, replace with re-check |
 //! | [`trust`] | FR-L31.18: workspace trust answers, waiting requests, the grant |
 //!
@@ -60,6 +61,7 @@ pub mod text_format;
 pub mod trust;
 pub mod notifications;
 pub mod session;
+pub mod settings;
 pub mod widget;
 
 pub use crate::bridge::{apply_text_change, BridgeAction, DocumentWidgetState, SyntaxRuns, WidgetBridge};
@@ -72,7 +74,8 @@ pub use crate::engine::{CoreOptions, Effect, ExternalChange, Input, SessionCore,
 pub use crate::languages::LanguageInfo;
 pub use crate::text_format::{DocumentFormat, Encoding, EncodingMode, Eol};
 pub use crate::coords::{WidgetPos, WidgetRange};
-pub use crate::session::{DirLister, EditorSession, SessionConfig};
+pub use crate::session::{DirLister, EditorSession, ServerSettingsFile, SessionConfig};
+pub use crate::settings::{EditorSettings, SettingsLayer, SettingsScope, SettingsScopes};
 pub use crate::output::{ExtensionMessage, MessageAction, MessageSeverity, OutputChannel, MAX_OUTPUT_CHANNEL_BYTES};
 pub use crate::widget::{
     Decoration, DecorationId, DecorationKind, HoverPhase, Severity, WidgetCommand, WidgetEvent,

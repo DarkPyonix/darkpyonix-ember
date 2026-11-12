@@ -1555,6 +1555,9 @@ pub fn is_implemented(action: Action) -> bool {
                 | Action::ZoomIn
                 | Action::ZoomOut
                 | Action::ZoomReset
+                | Action::Settings
+                | Action::SettingsJson
+                | Action::KeybindingsJson
         )
 }
 
@@ -1893,6 +1896,7 @@ mod tests {
             // The palette, find, find-in-file, replace-in-files, recent files and goto-line open sheets and bars in the window:
             // they are not tab or tool window changes, so `apply_action` does not do them.
             // Save, maximize and reopen act on the window's session, panel size and close history (FR-L31.15).
+            // The settings view and the two settings files open a tab through the window (FR-L31.17).
             if matches!(
                 action,
                 Action::Palette
@@ -1907,6 +1911,9 @@ mod tests {
                     | Action::ZoomIn
                     | Action::ZoomOut
                     | Action::ZoomReset
+                    | Action::Settings
+                    | Action::SettingsJson
+                    | Action::KeybindingsJson
             ) {
                 continue;
             }

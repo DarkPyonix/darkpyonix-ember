@@ -134,6 +134,10 @@ pub const MAX_RELAYS_PER_SERVER: usize = 64;
 const FLAG_DATA_DIR: &str = "--server-data-dir";
 const FLAG_EXTENSIONS_DIR: &str = "--extensions-dir";
 const FLAG_INSTALL: &str = "--install-extension";
+/// `--uninstall-extension <publisher.name>` (SPEC FR-L31.14, #446). The flag is in Code-OSS
+/// 1.139.1 `src/vs/server/node/serverEnvironmentService.ts` (`'uninstall-extension'`), handled by
+/// `ExtensionManagementCLI.uninstallExtensions`. UNVERIFIED against a real `dpx-ose-server` run.
+const FLAG_UNINSTALL: &str = "--uninstall-extension";
 /// `--file-watcher-polling <ms>` (upstream `serverEnvironmentService.ts`): the OSE's recursive
 /// watcher polls at this interval instead of waiting for native file events
 /// (`remoteFileSystemProviderServer.ts` `getRecursiveWatcherOptions`).
@@ -325,42 +329,56 @@ fn secure_token_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::{Error, ErrorKind};
+        use std::os::fd::FromRawFd;
+        use std::os::unix::ffi::OsStrExt;
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        match std::fs::symlink_metadata(path) {
-            Ok(md) => {
-                if md.file_type().is_symlink() {
-                    return Err(Error::new(ErrorKind::PermissionDenied, format!("{} is a symlink", path.display())));
-                }
-                if !md.is_dir() {
-                    return Err(Error::new(ErrorKind::InvalidInput, format!("{} is not a directory", path.display())));
-                }
-                // SAFETY: geteuid takes no arguments and cannot fail.
-                if md.uid() != unsafe { libc::geteuid() } {
-                    return Err(Error::new(
-                        ErrorKind::PermissionDenied,
-                        format!("{} is not owned by the current user", path.display()),
-                    ));
-                }
-                let mode = md.permissions().mode() & 0o777;
-                if mode & 0o022 != 0 {
-                    return Err(Error::new(
-                        ErrorKind::PermissionDenied,
-                        format!("token directory {} is writable by others; fix the permissions", path.display()),
-                    ));
-                }
-                if mode & 0o077 != 0 {
-                    tracing::warn!(
-                        path = %path.display(),
-                        mode = format!("{mode:o}"),
-                        "token directory is readable by group or others; tightening it to 0700"
-                    );
-                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-                }
-                Ok(())
-            }
-            Err(e) if e.kind() == ErrorKind::NotFound => make_private_dir(path),
-            Err(e) => Err(e),
+        // Open the directory itself, never through a symlink at its place, and check and chmod
+        // the opened handle (fstat, fchmod), so a symlink swapped in after the check cannot
+        // redirect the chmod (#534). ACLs are not inspected.
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains NUL"))?;
+        // SAFETY: `c` is a valid NUL-terminated path; the flags take no extra argument.
+        let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd < 0 {
+            let e = Error::last_os_error();
+            return match e.raw_os_error() {
+                Some(libc::ENOENT) => make_private_dir(path),
+                Some(libc::ELOOP) => Err(Error::new(ErrorKind::PermissionDenied, format!("{} is a symlink", path.display()))),
+                Some(libc::ENOTDIR) => match std::fs::symlink_metadata(path) {
+                    Ok(md) if md.file_type().is_symlink() => {
+                        Err(Error::new(ErrorKind::PermissionDenied, format!("{} is a symlink", path.display())))
+                    }
+                    _ => Err(Error::new(ErrorKind::InvalidInput, format!("{} is not a directory", path.display()))),
+                },
+                _ => Err(e),
+            };
         }
+        // SAFETY: `fd` is a fresh descriptor owned here.
+        let dir = unsafe { std::fs::File::from_raw_fd(fd) };
+        let md = dir.metadata()?;
+        // SAFETY: geteuid takes no arguments and cannot fail.
+        if md.uid() != unsafe { libc::geteuid() } {
+            return Err(Error::new(
+                ErrorKind::PermissionDenied,
+                format!("{} is not owned by the current user", path.display()),
+            ));
+        }
+        let mode = md.permissions().mode() & 0o777;
+        if mode & 0o022 != 0 {
+            return Err(Error::new(
+                ErrorKind::PermissionDenied,
+                format!("token directory {} is writable by others; fix the permissions", path.display()),
+            ));
+        }
+        if mode & 0o077 != 0 {
+            tracing::warn!(
+                path = %path.display(),
+                mode = format!("{mode:o}"),
+                "token directory is readable by group or others; tightening it to 0700"
+            );
+            dir.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
     }
     #[cfg(not(unix))]
     {
@@ -735,6 +753,30 @@ impl OseManager {
             return Err(InstallError::Bad(format!("invalid computer id: {computer_id:?}")));
         }
         let spec = extension_spec(id, version).map_err(InstallError::Bad)?;
+        self.run_extension_command(computer_id, FLAG_INSTALL, &spec, "install")
+    }
+
+    /// Runs `<binary> --uninstall-extension <id>` against the computer's data dir, with the rules
+    /// of [`OseManager::install_extension`] (SPEC FR-L31.14): the same id pattern (no version), no
+    /// shell, one extension command per computer at a time, the timeout and the cleared
+    /// environment. Blocking: call from `spawn_blocking`.
+    pub fn uninstall_extension(&self, computer_id: &str, id: &str) -> Result<String, InstallError> {
+        if !valid_computer_id(computer_id) {
+            return Err(InstallError::Bad(format!("invalid computer id: {computer_id:?}")));
+        }
+        let spec = extension_spec(id, None).map_err(InstallError::Bad)?;
+        self.run_extension_command(computer_id, FLAG_UNINSTALL, &spec, "uninstall")
+    }
+
+    /// One extension management run of the OSE binary: `<binary> <flag> <spec> <dir args>`. The
+    /// caller has validated `computer_id` and `spec`; `what` names the run in error messages.
+    fn run_extension_command(
+        &self,
+        computer_id: &str,
+        flag: &str,
+        spec: &str,
+        what: &str,
+    ) -> Result<String, InstallError> {
         let binary = self.binary.as_ref().filter(|p| p.is_file()).ok_or(InstallError::NotInstalled)?;
         {
             let mut busy = self.installing.lock().unwrap_or_else(|e| e.into_inner());
@@ -746,8 +788,8 @@ impl OseManager {
         let dir = self.computer_data_dir(computer_id).map_err(InstallError::Io)?;
         let mut command = ose_command(binary);
         command
-            .arg(FLAG_INSTALL)
-            .arg(&spec)
+            .arg(flag)
+            .arg(spec)
             .args(Self::dir_args(&dir))
             .arg("--accept-server-license-terms")
             .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -764,14 +806,14 @@ impl OseManager {
                     return if status.success() {
                         Ok(output)
                     } else {
-                        Err(InstallError::Failed { message: format!("install failed: {status}"), output })
+                        Err(InstallError::Failed { message: format!("{what} failed: {status}"), output })
                     };
                 }
                 Ok(None) if Instant::now() >= deadline => {
                     kill_tree(&mut child);
                     let output = collect(&parts, false);
                     return Err(InstallError::Failed {
-                        message: format!("install timed out after {}s", self.install_timeout.as_secs_f32()),
+                        message: format!("{what} timed out after {}s", self.install_timeout.as_secs_f32()),
                         output,
                     });
                 }

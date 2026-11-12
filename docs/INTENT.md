@@ -607,6 +607,10 @@ Rejected: messages as the only channel between sessions.
 
 **Architecture** *[provisional, session pZ proposal, needs supervisor confirmation]*. `FR-F6` allows file network code only inside the transport crate, and the transfer endpoints are devices (the app on a desktop or phone), not servers or computers. So the transfer service is a device-side library crate `ember/transfer` (a directory under `ember/`, no new repository root entry). It owns the offer, accept, decline and expire state machine, name cleaning, size limits, receive modes and the resume ledger, and talks to peers only through `ember-transport` streams. It is tested over the in-memory fake transport. The app's `TransferService` trait (`ember/app/src/ui/files.rs`) is implemented by it. The Ember server is not in the path and gets no `/api/transfers` route. Rejected: server-hosted transfer tables, because they put offer metadata, names and sizes on the server and contradict `FR-F6`.
 
+**Update of 2026-11-13: the server relays to a computer** *[provisional] (leader, 2026-11-13)*, issue #773. The architecture above no longer holds as written: #725 gave the server its own receiver (`/api/transfers`), and a send to a computer other than the server goes through the server too. The server forwards each chunk from the sender to the computer's `ember-node` over the node connection it already holds for that computer (the D42 boundary: one authenticated door, revocation at the server). A chunk is held in the server's memory only while it is forwarded and is never written on the server's disk. The node receives with the shared `ember-transfer` store (per-chunk and final SHA-256, `0644`, never overwriting) under `<state_dir>/received` by default, keeps a resume ledger that survives a node restart, and checks free space before it accepts. Only computers reached over the encrypted transport are targets: a computer registered by plain HTTP is refused, because the bytes would cross the network in clear. An offer is accepted on its own only when the owner account starts it to one of the owner's own enrolled computers; any other offer waits for an answer on the node, and answering for a node from another device is later work. Phones (`FR-F7`) are out of scope here. `FR-F6` is reworded to match, and `FR-F13` to `FR-F16` specify the parts.
+
+Rejected: the node receiving directly from the sending device (option B in `.scratch/p1S/773-options.md`), because the node admits only its servers (D39, D42) and the stream protocol cannot yet carry a real chunk; a spool on the server, because the file would then exist on a third machine; plain HTTP node targets; letting the server alone decide auto-accept for every offer, because a non-owner offer must still be answered.
+
 **Status.** Specified only (`FR-F1`–`FR-F10`, Draft; issues #152, #487). Not built. First unit: the `ember/transfer` state machine over the fake transport. The Files menu mock is separate UI work.
 
 ### D25: One client design on every OS, after the owner's reference images; Liquid Glass on iOS only
@@ -954,6 +958,16 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 
 **Status.** Specified (`FR-W4a` to `FR-W4c`, Draft; issue #457). Local server OSE and its relay are in #458/#459/#461; node OSE routes and server-to-node relay follow this spec.
 
+### D43: Hot exit in the Ember 에디터 window waits for a close hook and a backup store
+
+**Decision.** [provisional, #451, #744] The Ember 에디터 window does not implement Code-OSS hot exit (`files.hotExit`: unsaved buffers kept when the window closes and restored when it opens) in #451. #451 implements the other save states of `FR-L31.6` and the building block hot exit needs: a buffer the window holds can be put back into a session dirty (`EditorSession::restore`), which the reconnect uses today. Hot exit follows in #744.
+
+**Rejected** *[provisional]*. (1) Implementing it in #451 with a backup written only by the 에디터 닫기 menu item: the OS window close and the process exit path of `FR-L31.1` do not pass through the window's buffers, so most closes would still lose the edits while the feature looked present. (2) Writing a backup on every edit: a write per keystroke to the device's disk for a feature that is only read after a close, and still no clean-up point without the close hook. (3) Keeping backups on the server: the buffers are the device's unsaved work, and Code-OSS keeps them on the machine of the window too.
+
+**Why.** Code-OSS's backup service writes on close and restores on open; Ember needs the same two points. The window has the restore point now (`HostCommand::Restore`) but no close hook that runs before the process exits for every way the window closes, and no per-device backup store beside the prefs. Shipping half of it would be a function that does not do what Code-OSS does (D38).
+
+**Status.** Deferred; #744 has the completion criteria.
+
 ### D44: Webviews, custom editors and notebook outputs in the Ember 에디터: native for the common cases, VS Code for the rest
 
 **Decision.** [provisional, #452, needs the owner's confirmation] The Ember 에디터 window hosts no webview, keeping D9a. Markdown preview, image files and notebook outputs that are text, stream, error or image mimes are drawn natively. Every other extension webview panel, webview view, custom editor and notebook output (HTML, JavaScript, widgets) shows a placeholder in its own panel, with the extension's name and `VS Code에서 열기`, which opens the project in the VS Code target (`ember/editor/src/fallback.rs`). FR-E5 ("Extension webview panels still work, contained to their panel") is met through that fallback, not inside the window (`FR-E8`).
@@ -971,3 +985,50 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 **Rejected** *[provisional]*. Leaving stderr raw and only restricting the mode (a log the owner pastes into an issue would carry a key fragment). Capping log lines at 300 characters like events (a debugging log loses the part that explains the error). Deleting the log with the shim (the log is needed after a crash). A Windows ACL for the token file (the server's OSE start runs on unix first; documented as default ACL).
 
 **Why.** A SIGKILL skips every drop handler, so only a startup sweep bounds the life of a dead token. The redaction is a heuristic, so the mode stays private as well. Seven days covers a debugging session after a weekend and keeps the directory from growing without bound.
+
+### D46: Workspace trust in the Ember 에디터 guards extensions, not the computer
+
+**Decision.** [provisional, 2026-11-13, #450; basis: D38 "기능은 oss랑 동일하고 디자인은 목업"; owner confirmation pending] The Ember 에디터 window has Code-OSS's workspace trust (`FR-L31.18`): on the first open of a folder it asks whether the user trusts the authors of its files, remembers the answer per device for that computer and folder (a trusted folder covers the folders below it), and runs an untrusted folder in restricted mode with a banner.
+
+What trust protects, in Ember as in Code-OSS: code in the folder is not run by the editor on its own. Extensions that have not declared `capabilities.untrustedWorkspaces` support (and those that depend on them) are not started, the extension host reports `workspace.isTrusted` as false, and run, debug and tasks are refused.
+
+What trust does not protect. Under D37 agents and terminals run with the full authority of the server user on that computer whether or not the folder is trusted. An agent session or a terminal on an untrusted folder can still run its scripts, its git hooks and its build. Trust is not a sandbox and not a per-device scope (#366); the prompt says so in one sentence.
+
+**Why.** Opening a cloned repository in an editor should not run its code by surprise; extensions such as language servers and task runners read settings and binaries from the folder, and Code-OSS guards exactly that path. Saying what is outside the guard keeps users from reading 제한 모드 as a safe place to run an agent.
+
+**Rejected.** Always trusted (the state before #450): it runs a hostile folder's extension-driven code with no question. Applying trust to agents and terminals: that would change D37 and the agent model, and the agents' own harnesses have their own permission prompts. Keeping the answer on the server: trust is a judgement of the person at this device, as Code-OSS keeps it in its local storage.
+
+### D47: Editor settings follow Code-OSS's scopes: user on the client, workspace in the folder, remote on the OSE server
+
+**Decision.** [provisional, #449; basis: D38 "기능은 oss랑 동일하고 디자인은 목업"] The Ember 에디터 window keeps settings where Code-OSS keeps them when it is connected to a remote, and merges them in Code-OSS's order.
+
+- [provisional] **User settings are on the client machine**: `<Ember data folder>/editor/User/settings.json`, with `keybindings.json` beside it (`AppConfig::editor_user_dir`). They are per device, like `prefs.json`, and apply to every project the device opens.
+- [provisional] **Workspace settings are in the project folder on the server**: `<folder>/.vscode/settings.json`, read and written through the OSE file channel. They travel with the repository, so VS Code and the VS Code Web fallback read the same file.
+- [provisional] **Remote settings are on the OSE server**: `<server data dir>/data/Machine/settings.json`, the path the server reports as `settingsPath` in its environment. Ember reads this scope and does not edit it yet.
+- [provisional] **Order.** Default (every extension's `contributes.configuration` plus the settings Ember registers itself), then user, then remote, then workspace. A language block (`"[rust]": {}`) of any scope wins over every plain key, and object values such as `files.exclude` merge key by key. This is `Configuration.getConsolidatedConfigurationModel` of Code-OSS.
+- [provisional] **The extension host** gets all four scopes in `$initializeConfiguration` (`defaults`, `userLocal`, `userRemote`, `workspace`; `policy`, `application` and `folders` stay empty) and gets `$acceptConfigurationChanged` with the whole new data and the changed keys whenever a scope changes. Ember does not merge for it: the extension host merges the models itself, as it does under Code-OSS.
+- [provisional] **The files are ordinary documents.** `settings.json` and `keybindings.json` open in a tab and are edited and saved like any file; a save applies them at once. The user's two files open under the `vscode-userdata:` scheme and are read and written on the client. The session reads and writes exactly those two local files and refuses every other `vscode-userdata:` URI, because an extension on the server can ask the session to open any URI.
+- [provisional] **The settings view** (⌘, / Ctrl+, in the VS Code keymap, ⌘, / Ctrl+Alt+S in the JetBrains keymap) is a tab of the editor area that lists the registered settings with search, and writes one key into the chosen scope's `settings.json` without touching its comments or layout. A file that does not parse is never rewritten.
+- [provisional] **What Ember itself honours**: `editor.tabSize` and `editor.insertSpaces` (per language, for documents opened afterwards), and `files.exclude` in the explorer, with Code-OSS's defaults (`**/.git`, `**/.svn`, `**/.hg`, `**/.DS_Store`, `**/Thumbs.db`). `editor.wordWrap`, `editor.formatOnSave`, `files.autoSave` and `files.autoSaveDelay` are registered and resolved (`EditorSettings`), and each is acted on when its feature is: auto save with #451, format on save with the formatting provider of #442, word wrap with the code widget's wrap property.
+- [provisional] **`keybindings.json`** is read on top of the chosen keymap (`FR-L30`): an entry binds a key to an Ember action by its Code-OSS command id or to an extension command, and `-command` removes a default. Entries with a `when` clause and two-stroke keys are not applied yet.
+
+**Rejected** *[provisional]*.
+1. Keeping user settings on the main server so every device shares them. Code-OSS keeps them on the client and shares them only through Settings Sync, which is a separate feature; a device-independent store would also make the server a party to editor preferences it has no use for. Sharing can be added later as sync without moving the file.
+2. Keeping user settings inside `prefs.json`. The file has to be a JSONC document the person can open and edit with comments, and extensions document their settings as `settings.json` keys.
+3. Writing user settings into the OSE server's data folder (the remote scope). That scope is per server, so the same person would have different settings on every computer of a project, and a second user of the server would share them.
+4. Merging the scopes in Ember and sending the extension host one flat model. The extension host answers `inspect()` and scope-aware reads (`workspace.getConfiguration(section, resource)`) from the separate models; a flat model would report every value as a user value.
+5. A settings sheet in the app's base style instead of a tab. Code-OSS opens settings in the editor area, and D38 takes the function from Code-OSS.
+
+**Why.** The owner's rule is that the editor does what Code-OSS does. Settings that live where VS Code expects them make a project's `.vscode/settings.json` work in Ember unchanged, and extensions read the scopes they were written against.
+
+**Status.** Built (`FR-L31.17`, Draft; issue #449): `ember/editor/src/settings.rs`, `ember/app/src/ui/editor_settings.rs`. Not built: editing the remote scope, multi-root folder settings, profiles, Settings Sync, policy, `when` clauses and two-stroke keys in `keybindings.json`, noticing a `.vscode/settings.json` changed by someone else while it is not open.
+
+### D48: Node file operations open first and check the handle; the write relay waits for the namespace operations
+
+**Decision.** [provisional, #468, 2026-11-13] The node's content file operations (read, pwrite, setattr, grep, and on Unix the atomic write) open first and check the opened handle against the path policy (resolve again, and on Unix compare device and inode), with `O_NOFOLLOW` on the final component and, for the atomic write, a checked directory handle (`openat`, `renameat`). Namespace operations (mkdir, remove, rename, symlink, stat, lstat, readlink, list, glob) keep acting on paths for now. The server write relay may relay only the covered content operations until those move to directory handles too.
+
+**Rejected** *[provisional]*. Accepting the race under D37 without code (an admitted device has full authority, but the local node and denied paths narrow the API on purpose, and a narrowing that a symlink swap defeats is not one). Resolving every component with `openat` from the root on every call (correct, but a rewrite of every operation; it is the next step for the namespace operations). Linux-only `openat2(RESOLVE_BENEATH)` (not on macOS or Windows).
+
+**Why.** The check-then-open gap is reachable remotely through the server relay (#463). Checking the handle closes it for every operation that reads or writes content, with no change to the API.
+
+**Status.** Built (#803) (`ember/node/tests/fs_toctou.rs`). SPEC `FR-X1` (open, then check, #468).

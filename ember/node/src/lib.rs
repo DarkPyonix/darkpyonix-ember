@@ -19,6 +19,7 @@
 //! Known limits: jobs live in the daemon's memory and do not survive a daemon restart (terminal
 //! sessions do, best effort, through their PTY keepers; see [`term`]); the path
 //! policy confines the file API and working directories, not what a command does.
+//! - [`transfers`]: receiving files the owner sends through the server (SPEC `FR-F13`).
 //! - [`egress`]: the SOCKS5 exit for the remote browser (FR-R1), served as `/egress` (one
 //!   WebSocket per proxied TCP connection) and optionally as a plain SOCKS5 listener.
 
@@ -42,4 +43,5 @@ pub mod policy;
 pub mod ports;
 pub mod proto;
 pub mod term;
+pub mod transfers;
 pub mod transport;

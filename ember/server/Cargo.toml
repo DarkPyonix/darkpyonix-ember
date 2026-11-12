@@ -25,6 +25,7 @@ chrono-tz = "0.10"
 # Cron expressions for schedules (FR-A8; MIT): five fields, L/W/#, evaluated in any chrono zone.
 croner = "2"
 futures = "0.3"
+getrandom = "0.3"
 libc = "0.2"
 # Sign in with ChatGPT (FR-U4): OAuth token endpoint and the Responses API over HTTPS.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

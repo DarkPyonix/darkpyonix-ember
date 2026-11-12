@@ -10,6 +10,7 @@
 //! (`local`|`remote`), `EMBER_EXEC_FORWARD_ENV` (comma-separated names), `EMBER_MOUNT_CTL`
 //! (project mount control socket, notified after each remote command).
 
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
 use ember_server::computers::shim::{self, Plan, ShimEnv};
@@ -28,10 +29,24 @@ fn main() {
     match shim::plan(&inv, &env, &cwd) {
         Plan::Local { command } => {
             // Exactly what the shell would have run without the prefix.
-            let sh = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-            let err = std::process::Command::new(&sh).arg("-c").arg(&command).exec();
-            eprintln!("ember-exec: could not run {sh}: {err}");
-            std::process::exit(127);
+            #[cfg(unix)]
+            {
+                let sh = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+                let err = std::process::Command::new(&sh).arg("-c").arg(&command).exec();
+                eprintln!("ember-exec: could not run {sh}: {err}");
+                std::process::exit(127);
+            }
+            #[cfg(not(unix))]
+            {
+                let sh = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
+                match std::process::Command::new(&sh).arg("/C").arg(&command).status() {
+                    Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+                    Err(err) => {
+                        eprintln!("ember-exec: could not run {sh}: {err}");
+                        std::process::exit(127);
+                    }
+                }
+            }
         }
         Plan::Remote { request, cwd_file } => {
             let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {

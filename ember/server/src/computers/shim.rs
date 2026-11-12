@@ -323,7 +323,8 @@ pub async fn run_remote(env: &ShimEnv, request: ExecRequest, cwd_file: Option<Pa
     // Signals → the remote process group.
     let signal_task = {
         let tx = tx.clone();
-        tokio::spawn(async move {
+        #[cfg(unix)]
+        let task = tokio::spawn(async move {
             use tokio::signal::unix::{signal, SignalKind};
             let (Ok(mut int), Ok(mut term), Ok(mut hup)) = (
                 signal(SignalKind::interrupt()),
@@ -340,7 +341,14 @@ pub async fn run_remote(env: &ShimEnv, request: ExecRequest, cwd_file: Option<Pa
                 };
                 let _ = tx.lock().await.send(ExecInput::Kill { signal: Some(sig) }).await;
             }
-        })
+        });
+        #[cfg(not(unix))]
+        let task = tokio::spawn(async move {
+            while tokio::signal::ctrl_c().await.is_ok() {
+                let _ = tx.lock().await.send(ExecInput::Kill { signal: Some(ember_node::exec::SIGINT) }).await;
+            }
+        });
+        task
     };
 
     let mut stdout = tokio::io::stdout();

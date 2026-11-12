@@ -287,15 +287,33 @@ pub(crate) fn version_token(tok: &str) -> Option<String> {
 /// Resolve a command the way the OS would: a path with a separator is taken as it is when it is
 /// a file; a bare name is searched in `PATH`. `None` when nothing executable is found.
 pub fn resolve_executable(bin: &std::path::Path) -> Option<std::path::PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
     let ok = |p: &std::path::Path| {
+        use std::os::unix::fs::PermissionsExt;
         p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
     };
+    #[cfg(not(unix))]
+    let ok = |p: &std::path::Path| p.metadata().map(|m| m.is_file()).unwrap_or(false);
     if bin.components().count() > 1 || bin.is_absolute() {
         return ok(bin).then(|| bin.to_path_buf());
     }
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(bin)).find(|c| ok(c))
+    for d in std::env::split_paths(&path) {
+        let c = d.join(bin);
+        if ok(&c) {
+            return Some(c);
+        }
+        #[cfg(windows)]
+        if let Some(name) = bin.to_str() {
+            for ext in [".exe", ".cmd", ".bat"] {
+                let with_ext = d.join(format!("{name}{ext}"));
+                if ok(&with_ext) {
+                    return Some(with_ext);
+                }
+            }
+        }
+    }
+    None
 }
 
 #[async_trait]

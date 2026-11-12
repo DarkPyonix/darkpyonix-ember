@@ -139,7 +139,9 @@ async fn serve() -> anyhow::Result<()> {
             "ember node serving over the transport"
         );
         // The hub registration: noticing removal, and (opt-in) admitting the account's servers.
+        #[allow(unused_variables, unused_mut)]
         let mut watch = Some(hub::spawn_watch(&dir, t.clone(), gate.clone(), allowed.clone(), allow_servers, hub::WATCH_PERIOD));
+        #[cfg(unix)]
         {
             // SIGHUP re-reads the allow-list; peers no longer listed are disconnected (FR-N3).
             // It also picks up a registration made since start (`ember-node hub register`).
@@ -190,6 +192,7 @@ async fn serve() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 async fn shutdown_signal() {
     use tokio::signal::unix::{signal, SignalKind};
     let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
@@ -197,4 +200,9 @@ async fn shutdown_signal() {
         _ = tokio::signal::ctrl_c() => {}
         _ = term.recv() => {}
     }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }

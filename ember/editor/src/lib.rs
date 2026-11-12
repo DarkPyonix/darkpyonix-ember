@@ -15,6 +15,7 @@
 //! | [`codelens`] | FR-E3: `$provideCodeLenses` / `$resolveCodeLens` → line-above inlays; click → command |
 //! | [`hover`] | FR-E3: `CodeHovered` → `$provideHover` → Markdown popup model |
 //! | [`inline`] | FR-E4: `$provideInlineCompletions` with debounce + cancellation → ghost text; accept |
+//! | [`language`] | FR-L31.13: completion list, definition, references, rename, code actions, formatting, signature help, document symbols |
 //! | [`registry`] | provider registrations (`$register…`) and extension-host commands |
 //! | [`selector`] | `languages.score` port: document selector matching |
 //! | [`extensions`] | FR-L31.14: the list rows of a scan, and the scan without the disabled ids |
@@ -50,6 +51,7 @@ pub mod highlight;
 pub mod hover;
 pub mod ids;
 pub mod inline;
+pub mod language;
 pub mod languages;
 pub mod registry;
 pub mod replies;
@@ -74,6 +76,7 @@ pub use crate::engine::{CoreOptions, Effect, ExternalChange, Input, SessionCore,
 pub use crate::languages::LanguageInfo;
 pub use crate::text_format::{DocumentFormat, Encoding, EncodingMode, Eol};
 pub use crate::coords::{WidgetPos, WidgetRange};
+pub use crate::language::{LanguageRequest, LanguageUpdate};
 pub use crate::session::{DirLister, EditorSession, ServerSettingsFile, SessionConfig};
 pub use crate::settings::{EditorSettings, SettingsLayer, SettingsScope, SettingsScopes};
 pub use crate::output::{ExtensionMessage, MessageAction, MessageSeverity, OutputChannel, MAX_OUTPUT_CHANNEL_BYTES};

@@ -1558,6 +1558,7 @@ pub fn is_implemented(action: Action) -> bool {
                 | Action::Settings
                 | Action::SettingsJson
                 | Action::KeybindingsJson
+                | Action::Format
         )
 }
 
@@ -1897,6 +1898,7 @@ mod tests {
             // they are not tab or tool window changes, so `apply_action` does not do them.
             // Save, maximize and reopen act on the window's session, panel size and close history (FR-L31.15).
             // The settings view and the two settings files open a tab through the window (FR-L31.17).
+            // Format document goes to the language features (FR-L31.13), not to a tab or a tool window.
             if matches!(
                 action,
                 Action::Palette
@@ -1914,6 +1916,7 @@ mod tests {
                     | Action::Settings
                     | Action::SettingsJson
                     | Action::KeybindingsJson
+                    | Action::Format
             ) {
                 continue;
             }

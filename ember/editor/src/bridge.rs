@@ -327,6 +327,8 @@ impl WidgetBridge {
             SessionUpdate::FormatFailed { uri, error } => BridgeAction::FormatFailed { uri, error },
             // Search and replace results are the search panel's, not a document's (FR-E7).
             SessionUpdate::SearchHits { .. } | SessionUpdate::SearchDone { .. } | SessionUpdate::ReplaceDone { .. } => BridgeAction::None,
+            // Language feature answers are the window's lists and boxes, not a document's props (FR-L31.13).
+            SessionUpdate::Language(_) => BridgeAction::None,
         }
     }
 

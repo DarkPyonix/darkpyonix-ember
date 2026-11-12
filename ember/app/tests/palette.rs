@@ -92,10 +92,10 @@ fn fr_l31_the_palette_starts_with_the_editors_actions_and_not_itself() {
 fn fr_l31_commands_the_editor_cannot_do_yet_are_marked_and_listed_after_the_working_ones() {
     let list = action_items(Keymap::VsCode, Os::Mac);
     let enabled = |a: Action| list.iter().find(|i| i.payload == Payload::Action(a)).unwrap().enabled;
-    assert!(enabled(Action::Terminal) && enabled(Action::Close) && enabled(Action::HideTool) && enabled(Action::Recent) && enabled(Action::GotoLine));
+    assert!(enabled(Action::Terminal) && enabled(Action::Close) && enabled(Action::HideTool) && enabled(Action::Recent) && enabled(Action::GotoLine) && enabled(Action::Format));
     // FR-L31.15: save, maximize and reopen closed editor work in the window.
     assert!(enabled(Action::Save) && enabled(Action::MaximizeTool) && enabled(Action::ReopenClosed) && enabled(Action::FindInFiles));
-    for a in [Action::RunConfig, Action::Stop, Action::Format, Action::Ask, Action::NewTerminal] {
+    for a in [Action::RunConfig, Action::Stop, Action::Ask, Action::NewTerminal] {
         assert!(!enabled(a), "{a:?} is not implemented");
     }
     let ranked = rank("", &list);

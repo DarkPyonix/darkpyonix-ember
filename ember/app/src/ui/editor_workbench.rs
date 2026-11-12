@@ -1396,6 +1396,7 @@ pub mod page {
         let root_name = base_name(&root).to_string();
         let selected: Option<(String, bool)> = tree_sel.read().clone();
         let tree_rows_owned = rows.clone();
+        let unsaved_for_key = unsaved.clone();
         let tree_root = root.clone();
         let tree_host = s.host.clone();
         let tree_open_errors = s.open_errors.clone();
@@ -1660,6 +1661,15 @@ pub mod page {
                                     tabs.write().open(&p);
                                     tree_host.send(HostCommand::Open(p.clone()));
                                     tree_host.send(HostCommand::Focus(p));
+                                }
+                                crate::ui::editor::TreeKeyOutcome::Rename(p) => {
+                                    let blocked: Vec<String> = unsaved_for_key.iter().filter(|u| crate::ui::editor::is_at_or_below(u, &p)).cloned().collect();
+                                    if !blocked.is_empty() {
+                                        notice(format!("저장하지 않은 변경이 있어 이름을 바꿀 수 없습니다. 먼저 저장하세요: {}", blocked.iter().map(|u| base_name(u).to_string()).collect::<Vec<_>>().join(", ")));
+                                    } else {
+                                        prompt_text.set(base_name(&p).to_string());
+                                        prompt.set(Some(TreePrompt::Rename { path: p }));
+                                    }
                                 }
                             }
                         }

@@ -1768,6 +1768,8 @@ pub mod page {
     thread_local! {
         /// The editor's terminal session. Started on first show and kept while the panel is hidden.
         static TERMINAL: std::cell::RefCell<Option<TerminalHandle>> = const { std::cell::RefCell::new(None) };
+        /// IME composition state of the terminal panel (FR-L31.21): only committed text is sent.
+        static TERMINAL_IME: std::cell::RefCell<crate::terminal_input::ImeInput> = std::cell::RefCell::new(crate::terminal_input::ImeInput::default());
     }
 
     /// The terminal handle, started on first use. `None` when the editor was not given a server
@@ -1833,6 +1835,7 @@ pub mod page {
         };
         let view = panel_view(&handle.snapshot());
         let key_handle = handle.clone();
+        let ime_handle = handle.clone();
         let control_handle = handle.clone();
         let offer_control = offers_take_control(&handle.snapshot());
         let offer_reconnect = handle.snapshot().needs_reconnect();
@@ -1844,16 +1847,38 @@ pub mod page {
                 button { class: "ed-ib", title: "새 터미널", "aria-label": "새 터미널", onclick: move |_| notice(format!("새 터미널: {SOON}")), {icon("plus")} }
             }
             div { class: "ed-term", role: "log", "aria-label": "터미널 출력", tabindex: "0", style: "outline:none;",
-                // TODO(#335): paste and IME. Only key presses are forwarded; pasted and composed text is not.
+                // FR-L31.21: paste chord and IME composition (`crate::terminal_input`).
                 onkeydown: move |event| {
                     let m = event.modifiers();
                     let name = key_name(&event.key());
+                    if TERMINAL_IME.with(|ime| ime.borrow().drops_key(&name, event.is_composing())) {
+                        return;
+                    }
+                    if crate::terminal_input::is_paste_chord(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META)) {
+                        event.stop_propagation();
+                        event.prevent_default();
+                        // TODO(compose-rust: no clipboard read API yet, gap reported for #335): read the
+                        // clipboard, ask with `needs_multiline_warning` and send `paste_bytes(text,
+                        // state.bracketed_paste)`. Until then the chord only says why nothing is pasted.
+                        notice(crate::terminal_input::PASTE_UNAVAILABLE);
+                        return;
+                    }
                     let bytes = terminal_input(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META));
                     let Some(bytes) = bytes else { return };
                     event.stop_propagation();
                     event.prevent_default();
                     if sends_input(&key_handle.snapshot()) {
                         key_handle.send_input(&bytes);
+                    }
+                },
+                // TODO(compose-rust: the live renderer does not route IME composition wire events,
+                // gap reported for #335): these handlers run in `HtmlDom` tests but not yet on screen.
+                oncompositionstart: move |_| TERMINAL_IME.with(|ime| ime.borrow_mut().start()),
+                oncompositionupdate: move |event| TERMINAL_IME.with(|ime| ime.borrow_mut().update(&event.data().data())),
+                oncompositionend: move |event| {
+                    let bytes = TERMINAL_IME.with(|ime| ime.borrow_mut().end(&event.data().data()));
+                    if !bytes.is_empty() && sends_input(&ime_handle.snapshot()) {
+                        ime_handle.send_input(&bytes);
                     }
                 },
                 if let Some(banner) = view.banner {

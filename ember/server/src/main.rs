@@ -76,8 +76,18 @@ use ember_server::store::Store;
 ///   only the guest routes and `/join`, never the owner API. `EMBER_GUEST_LISTEN_ALLOW_REMOTE=1`
 ///   is required for a non-loopback address; `EMBER_GUEST_ALLOWED_HOSTS` and
 ///   `EMBER_GUEST_PUBLIC_URL` name the hosts guests use. See `guest_door`.
+/// `ember-server __keep-pty …` is the local node's PTY keeper (FR-P6): dispatched before any
+/// runtime or logging starts, as in `ember-node`, so a keeper holds one fd and little memory.
+fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some(ember_node::term::pty::KEEPER_SUBCOMMAND) {
+        std::process::exit(ember_node::term::pty::keeper_main(&args[2..]));
+    }
+    serve_main()
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn serve_main() -> anyhow::Result<()> {
     let started = std::time::SystemTime::now();
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -229,6 +239,14 @@ async fn main() -> anyhow::Result<()> {
         shim,
         dialer.clone(),
     );
+    // The local computer's terminals outlive this process (FR-P6): records and PTY keepers in
+    // `<data dir>/local-node`; a restart re-adopts them. EMBER_NODE_KEEP_PTY=0 turns it off.
+    computers.set_local_node_options(computers::local_node::LocalNodeOptions::from_env(&data_dir));
+    match computers.resume_local_node() {
+        Ok(true) => tracing::info!("local node resumed the terminals of the previous run"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("local node could not resume terminals: {e}"),
+    }
     // Claude Code's file tools on other computers (EMBER_MOUNT=off|nfs|fuse|auto).
     // Opened like every other node client, so computers registered by peer mount too.
     if let Some(mounts) = computers::mount::ProjectMounts::from_env(computers.node_fs()) {

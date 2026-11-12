@@ -697,6 +697,7 @@ pub struct Computers {
     /// This machine's in-process node, started on first use of the local computer's terminals
     /// (FR-W4, #455). Dropping it closes the loopback port.
     local_node: Mutex<Option<local_node::LocalNode>>,
+    local_node_options: Mutex<local_node::LocalNodeOptions>,
 }
 
 /// Probes in a row that must agree before a fallback or return happens (FR-X3).
@@ -764,6 +765,7 @@ impl Computers {
             watch_secs: std::sync::atomic::AtomicU64::new(fallback_env().1),
             flap: Mutex::new(HashMap::new()),
             local_node: Mutex::new(None),
+            local_node_options: Mutex::new(local_node::LocalNodeOptions::default()),
         })
     }
 
@@ -782,6 +784,10 @@ impl Computers {
     pub async fn shutdown(&self) {
         if let Some(m) = self.mounts() {
             m.shutdown().await;
+        }
+        // Save the local terminals' screens for the next server's local node (FR-P6).
+        if let Some(n) = self.local_node.lock().unwrap().as_ref() {
+            n.shutdown();
         }
     }
 
@@ -833,9 +839,28 @@ impl Computers {
     pub fn local_node_client(&self) -> Result<NodeClient, ComputerError> {
         let mut slot = self.local_node.lock().unwrap();
         if slot.is_none() {
-            *slot = Some(local_node::LocalNode::start()?);
+            let opts = self.local_node_options.lock().unwrap().clone();
+            *slot = Some(local_node::LocalNode::start_with(&opts)?);
         }
         Ok(slot.as_ref().expect("just set").client()?)
+    }
+
+    /// Set where the local node keeps terminal records and which binary keeps PTYs (FR-P6).
+    /// Takes effect when the local node starts; call it before the first terminal request.
+    /// Default: none, so terminals end with the server (tests).
+    pub fn set_local_node_options(&self, opts: local_node::LocalNodeOptions) {
+        *self.local_node_options.lock().unwrap() = opts;
+    }
+
+    /// Start the local node now when its state dir holds records of a previous run, so the
+    /// re-adopted programs are read again without waiting for a client (FR-P6). Returns whether
+    /// it started.
+    pub fn resume_local_node(&self) -> Result<bool, ComputerError> {
+        if !self.local_node_options.lock().unwrap().has_records() {
+            return Ok(false);
+        }
+        self.local_node_client()?;
+        Ok(true)
     }
 
     /// Where the local node listens, or `None` while it has not been started (a test accessor).

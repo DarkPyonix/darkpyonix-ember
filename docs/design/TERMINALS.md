@@ -5,6 +5,38 @@ Status: **partial.** ember node's persistent sessions and the VS Code companion 
 Ember editor's terminal panel is not built and the acceptance runs are not verified (#26). Requirements:
 `docs/SPEC.md` §P, FR-P1–FR-P6, NFR-P1.
 
+## 0. Gap table (#26, 2026-11-13)
+
+Each acceptance criterion of SPEC §P against the code. "Built" means written with a test; nothing
+here is verified on two machines or on a real systemd or launchd.
+
+| Criterion | Status | Evidence |
+|---|---|---|
+| FR-P1 a process outlives every window | Built (node) | session independent of clients: `ember/node/src/term/mod.rs` (`Terms`), test `session_outlives_every_client` (`ember/node/tests/terms.rs:167`) |
+| FR-P1 the same in the Ember editor | Open (UI) | the editor terminal panel is not built (#333 to #337 own it) |
+| FR-P2 scrollback of at least 10,000 lines | Built | `SCROLLBACK_LINES = 10_000` (`ember/node/src/term/screen.rs:39`), unit tests in `screen.rs` |
+| FR-P2 screen, TUI and cursor carry over | Built, with gaps | snapshot `Screen::snapshot` (`screen.rs:205`): alternate screen, modes, cursor, title; gaps listed in `screen.rs:22` (scroll region, origin mode, saved cursor, charsets, tab stops, OSC 8); test `create_attach_detach_and_reattach_with_snapshot` (`terms.rs:118`) |
+| FR-P3 several devices attach at once | Built | any number of clients per session (`session.rs`); relay `/api/computers/{id}/terms/{tid}/attach` (`ember/server/src/computers/terms.rs:54`); 100 ms on a LAN not measured |
+| FR-P4 all clients type, in arrival order | Built | test `two_clients_type_and_both_see_everything_in_order` (`terms.rs:188`) |
+| FR-P4 take and release control, refusal | Built | `TermInput::TakeControl` / `ReleaseControl` and `POST /terms/{id}/control`; relay `terms.rs:52`; test `take_and_release_control` (`terms.rs:219`); typed client `Api::computer_term_control` (`ember/client/src/api.rs`, this change) |
+| FR-P4 size follows the controller | Built | test `size_follows_controller_else_most_recently_active_client` (`terms.rs:274`) |
+| FR-P5 tasks and debuggees | Built (VS Code), not run against a real VS Code | `ember-term`, companion (§3); Ember editor run actions not built |
+| FR-P6 listed per computer and project, with the origin | Built | `GET /terms?project=&origin=&running=` (`mod.rs:262`), relay `terms.rs:49`; typed client `Api::computer_terms` returns `TermSummary` with `origin` (this change; before it `ember/client` had no terminal call) |
+| FR-P6 kill from the list | Built | relay `terms.rs:53`, typed `Api::computer_term_kill` / `computer_term_remove` (this change) |
+| FR-P6 survive an ember server restart, remote node | Built by design | the server keeps no terminal state (§2), the node process is separate |
+| FR-P6 survive an ember server restart, local computer | **Was a gap, built here** | the in-process local node (`ember/server/src/computers/local_node.rs`) had no state dir and no keeper, so its terminals were children of the server and ended with it. Now `LocalNodeOptions` gives it `<data dir>/local-node` and the server binary as keeper (`ember-server __keep-pty`, `ember/server/src/main.rs`); `Computers::shutdown` saves the screens; at start `resume_local_node` re-adopts the records. Test `ember/server/tests/fr_p6_local_terms_survive_restart.rs` |
+| FR-P6 survive an ember node restart (best effort) | Built | keeper + re-adoption (`mod.rs:133`), test `a_new_node_readopts_running_sessions_and_reports_lost_ones` (`terms.rs:405`); real systemd/launchd not verified |
+| NFR-P1 attach in 500 ms, 2 MB per idle session | Built on loopback | `ember/node/tests/term_nfr.rs`; LAN not measured |
+
+What the VS Code Web part still needs (outside this backend change): the companion and
+`ember-term` exist (§3) but have not run against a real `code serve-web`; the companion reaches
+the node through the proxy's `/__terms` with the node token from `~/.ember/node/local.json`, so
+on a server whose only node is the in-process local node it has no endpoint file to read. Either
+the proxy relays to `/api/computers/local/terms` with the server token, or the local node writes
+a `local.json` under its own state dir for the proxy (open, [provisional], #26). The setup
+command that writes `terminal.integrated.automationProfile` needs an `ember-term` on the PATH of
+the VS Code server, which the OSE build does not install yet.
+
 Terminals, tasks and other processes started from an IDE window must keep running when every
 window is closed, and must reappear (same scrollback, same screen, same running TUI) on any
 device. To get that, **ember node owns the process**. The IDE windows (VS Code Web and the Ember
@@ -48,6 +80,11 @@ someone kills it. Attaching and detaching never start or stop it.
 
 - **ember server restart, client restart, window close, VS Code server restart:** nothing happens
   to the session; ember server and the IDEs are only clients.
+- **ember server restart, local computer:** the server's in-process local node keeps records in
+  `<data dir>/local-node` (`EMBER_LOCAL_NODE_STATE_DIR` overrides) and starts each keeper as
+  `ember-server __keep-pty`, so a restarted server re-adopts the sessions like a restarted node
+  (below). A graceful stop saves the screens; after a crash the screens start empty.
+  `EMBER_NODE_KEEP_PTY=0` turns it off. [provisional] (#26)
 - **ember node restart:** the process survives **only through its PTY keeper.** When a session
   starts, node launches `ember-node __keep-pty --socket <state>/terms/<id12>.sock --pid <pid> --fd
   <n>` in its **own process session** (`setsid`), holding a duplicate of the PTY master. When
@@ -73,10 +110,11 @@ someone kills it. Attaching and detaching never start or stop it.
     missing. Whether a real systemd or launchd keeps the keepers alive is not yet verified.
   - Disable with `EMBER_NODE_KEEP_PTY=0` (sessions then end with the daemon). Without a state dir
     there are no keepers and no records.
-  - **The server's local node** (`ember/server/src/computers/local_node.rs`, FR-W4, #474) has no
-    state dir, so it starts no keepers and writes no records. Its terminals are children of the
-    server process and end with it: the PTY master closes and the shell gets SIGHUP. A restarted
-    server starts a new, empty local node and does not re-attach; nothing is orphaned. It runs at
+  - **The server's local node** (`ember/server/src/computers/local_node.rs`, FR-W4, #474) gets a
+    state dir (`<data dir>/local-node`) and keepers like a standalone node (FR-P6, #26), so a
+    restarted server re-adopts its terminals. With `EMBER_NODE_KEEP_PTY=0` it has no state dir,
+    starts no keepers and writes no records; its terminals are then children of the server process
+    and end with it (the PTY master closes and the shell gets SIGHUP). It runs at
     most 64 terminals at once (`MAX_LOCAL_TERMS`; one more create answers 409). [provisional]
   - Why a minimal keeper rather than a tmux/dtach-style holder that also owns the model: the
     keeper is ~100 lines with a two-command protocol (`F`: send the fd, `Q`: quit), costs a few

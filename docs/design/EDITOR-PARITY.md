@@ -30,12 +30,12 @@ The owner's rule [user, 2026-11-06, `INTENT.md` D38]: the Ember editor does what
 | Keybindings, keymap | Keybinding service and editor | 부분 (VS Code and JetBrains tables, 19 actions, 팔레트/빠른열기/최근파일/줄로이동/문서찾기/저장/닫기/도구창 연동) | Native (FR-L30) | #447, #449 |
 | Problems panel, Output panel | Marker service list; output channels | 부분 (`FR-L31`, `ember/app/src/ui/editor_workbench.rs`: 문제 패널 클릭 시 해당 줄/열로 커서 이동, 200개 상한 및 더 보기 버튼; 출력 패널에 `MainThreadOutputService` 채널 선택기, 64 KiB 채널 상한, 500줄 워크벤치 로그 상한 및 지우기 버튼 있음; 파일 기반 출력 채널 `$register/update`는 미지원) | EH-REG for output channels; diagnostics data EXISTS | #448 |
 | Notifications, progress, extension quick picks | MainThreadMessageService, Progress, QuickOpen | 부분 (MainThreadMessageService $showMessage decoded and surfaced to notices/logs; Progress, QuickOpen auto-dismissed) | EH-REG | #448 |
-| Status bar, language mode, encoding, EOL | Status bar items | 부분 (cursor position live, LF and UTF-8 constants) | Native plus document data | #453 |
-| Breadcrumbs | Path and symbols | 부분 (path only) | Document symbols need the language providers | #453, #442 |
+| Status bar, language mode, encoding, EOL | Status bar items | 있음 in code (`FR-L31.7`, `ember/app/src/ui/editor_status.rs`, `ember/editor/src/text_format.rs`): 줄 끝(LF/CRLF, 첫 줄바꿈 기준 감지, 바꾸면 `$acceptModelChanged` `isEolChange`로 확장 호스트에 반영되고 수정됨 표시), 인코딩(BOM 기준 UTF-8, UTF-8 with BOM, UTF-16 LE/BE 감지, 인코딩으로 다시 열기/저장, 저장하지 않은 변경이 있으면 버릴지 확인), 언어 모드(`contributes.languages` 별칭 이름, 자동 감지와 언어 목록, `$acceptModelLanguageChanged`, 확장의 `$changeLanguage`)가 있음. 화면과 실제 OSE에서는 확인하지 않았고, 줄 끝 변경 되돌리기, 내용으로 인코딩 추측, 파일 연결 구성은 없음 | Native plus document data: `ExtHostDocuments.$acceptModelChanged`, `$acceptEncodingChanged`, `$acceptModelLanguageChanged` | #453 |
+| Breadcrumbs | Path and symbols | 부분 (path only; symbols wait for document symbols, out of scope for #453 per `FR-L31.7`) | Document symbols need the language providers | #442 |
 | Workspace trust | Trust service and restricted mode | 없음 (always trusted) | EH-REG `$requestWorkspaceTrust` plus a native dialog | #450 |
 | Save, auto-save, hot exit | Backup service, auto-save setting | 부분 (save 있음; failure not shown; no auto-save or hot exit) | Native; write through `remoteFilesystem` | #451 |
 | File watching, external change | Server file watcher | 부분 (session reloads clean buffers; the window shows nothing) | EXISTS: watch and fileChange | #451 |
-| Webviews, custom editors, notebooks, markdown preview | Origin-isolated iframes from the webview host | 없음 | WEBVIEW only (E5 allows one in the IDE window); decision first | #452 |
+| Webviews, custom editors, notebooks, markdown preview | Origin-isolated iframes from the webview host | 없음 | Proposed (D44, FR-E8, owner confirmation pending): native markdown preview, image viewer and text/image notebook outputs; everything else a `VS Code에서 열기` placeholder in its panel. See "Webviews, custom editors and notebook outputs" below | #452 |
 | Remote development (SSH, WSL, containers) | Closed Microsoft remote extensions | 부분 (different model: the OSE server on the node is the remote agent) | Handshake and version pin (`PINNED_COMMIT`), fallback `Open in VS Code` | - |
 | Accessibility | ARIA in the DOM, a11y help, audio cues | 없음 | Native roles and focus order | #302 |
 | Layout, window resize | - | 부분 | dioxus-compose page | #301, #320 |
@@ -91,6 +91,40 @@ Client work that needs no server or node change: multi-root, a tasks runner over
 ### Unknowns to resolve before relying on this
 
 Whether `dpx-ose-server` answers `GET /version` and static files without the token; whether a registered node's computer id ever equals an `EMBER_IDE_COMPUTERS` name; whether the project mount exists when the editor opens a folder (it is made only for agent session starts); which OSE IPC channels exist for search, extension management and user-data sync at the pinned commit (the connection layer uses exactly three); how two OSE processes behave when they share the default server data dir; the FR-W5b ide-gateway (mobile) is design only and a possible carrier for task 5.
+
+## Webviews, custom editors and notebook outputs (scope decision, #452)
+
+Status: proposal. The decision is `INTENT.md` D44 [provisional], the requirement `SPEC.md` FR-E8 [provisional]; both wait for the owner. Nothing below is built.
+
+### What Code-OSS does
+
+- An extension webview (`MainThreadWebviews`, `MainThreadWebviewPanels`, `MainThreadWebviewViews`, actor ids 44 to 46 in `ember/editor-conn/src/rpc_ids.rs`) is extension-supplied HTML and JavaScript. The workbench loads it in an iframe on its own origin (`<uuid>.vscode-cdn.net` or the OSE's `webviewEndpoint`), with a service worker serving `asWebviewUri` resources, and passes messages with `$postMessage`. The content is the extension's program, so it needs a browser engine to run at all.
+- A custom editor (`MainThreadCustomEditors`, id 47) is a webview that owns a document. The built-in image preview (`media-preview`) is one.
+- The markdown preview of `markdown-language-features` is a webview too; the HTML it shows is rendered by the extension from the document text.
+- A notebook (`MainThreadNotebook`, id 62 and the others) draws its cells in the workbench, but every output goes into one webview (the back layer), where notebook renderers (including the default `vscode-darkpyonix` renderer, `FR-W6`) run as JavaScript. Outputs are mime bundles: `text/plain`, `application/vnd.code.notebook.stdout`, `.stderr`, `.error`, `image/png`, `image/jpeg`, `image/svg+xml`, `text/markdown`, `text/html`, `application/javascript`, widget mimes.
+
+### The constraint
+
+AGENTS.md rule 5 and `INTENT.md` E1 forbid a webview in the launcher and conversation UI; the Ember 에디터 window is a separate case. E5 allows a webview in the IDE window only in the smallest region that needs it, but D9a says Ember's own editor has "no webview and no JavaScript engine", and the client has no platform webview host yet (`FR-B1` to `FR-B4`, #30). So any option that runs extension HTML inside the Ember 에디터 window contradicts D9a as it stands and needs the owner either way.
+
+### Options
+
+| Option | What the user gets | Cost | Conflicts |
+| ------ | ------------------ | ---- | --------- |
+| A. Host a platform webview region inside the Ember 에디터 window (WKWebView, WebView2, WebKitGTK, Android WebView) and speak the webview protocol to it | Every webview, custom editor and notebook renderer works, contained to its panel (FR-E5 as written) | Highest. A webview host per OS (#30 is not started), a webview origin and service worker for resources (the ide-gateway of `FR-W5b` is design only), compositing a native view inside a dioxus-compose layout (focus, IME, z-order over islands and menus; no dioxus-compose support known), theme variables, `$postMessage` bridging, a security review of extension HTML in the native process. A JS engine enters the editor window. | D9a ("no webview"), and the spirit of E1; the CI check `check-no-webview.sh` must learn the editor-window exception |
+| B. Open the panel in VS Code Web: a placeholder in the panel with `VS Code에서 열기`, which opens the same folder in the VS Code target (`ember/editor/src/fallback.rs`, `vscode_fallback_url`) | The feature works, in a separate VS Code Web window with its own webview (the IDE window exception of E1) | Low. A placeholder view per panel kind and the existing fallback URL. Opening the *same* panel or custom editor there (rather than the folder) needs a deep link; Code-OSS web takes `?folder=` and a `payload` of open-file entries, unverified at OSE 1.139 | None. The user leaves the Ember 에디터 for that panel; a second OSE window shares the computer's data dir (EDITOR-PARITY "Unknowns") |
+| C. Draw the common cases natively with no extension HTML: markdown preview from the document text (`dioxus-compose-markdown`, already used for hover), images (png, jpeg, gif, webp, svg where the toolkit draws it) in an image view, notebook outputs that are text, stream, error (traceback text with ANSI colours) and image mimes | The everyday uses work inside the window, in the mockup's design | Medium. Per kind: a native view, the notebook model (`MainThreadNotebook*`, cells as editors) for notebooks, which is a larger item of its own. Not pixel-equal to Code-OSS (markdown preview CSS, extension markdown-it plugins do not apply) | None, but it is a re-implementation of what an extension does, so behaviour can drift from the extension's |
+| D. Leave all of it out (the row stays 없음) | Nothing; the user must choose VS Code from Open IDE | None | D38 (function parity) |
+
+### Proposal
+
+C plus B: draw markdown preview, image files and text/image notebook outputs natively; every other webview panel, webview view, custom editor and notebook output (`text/html`, JavaScript, widgets, unknown renderer mimes) shows a placeholder in its own panel that names the extension and offers `VS Code에서 열기`. No webview in the Ember 에디터 window, so D9a stands. A stays possible later, behind its own decision, once a platform webview host exists (#30). Order: image viewer, markdown preview, the placeholder, then notebook outputs with the notebook model.
+
+### Unknowns
+
+- Whether the OSE's VS Code Web accepts an open-file `payload` (or another deep link) to reopen a specific editor; without it B opens only the folder.
+- Whether the extension host needs the workbench to answer `$createWebviewPanel` and `resolveCustomEditor` for an extension to stay healthy when nothing is shown, so a placeholder must still acknowledge the calls.
+- Which notebook output mimes the default renderer (`vscode-darkpyonix`) emits for the darkpyonix kernels.
 
 ## Notes
 

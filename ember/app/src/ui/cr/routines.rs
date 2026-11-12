@@ -23,9 +23,11 @@ use compose_rust::{Alignment, ButtonVariant, Color, DrawList, IconRole, Paint, S
 use ember_client::api::ApiError;
 
 pub use crate::ui::routines::{
-    begin_demo_run, changed_patch, current_value_line, demo_run_allowed, demo_session_title,
-    finish_demo_run, patch_is_empty, run_is_simulated, DEMO_RUN_DONE, DEMO_RUN_MS,
-    DEMO_RUN_STARTED, SAMPLE_FLAG, DEMO_SESSION_PREFIX, NAME_SERVER_REASON, SERVER_CANNOT_CHANGE,
+    apply_server_run_started, begin_demo_run, changed_patch, current_value_line, demo_run_allowed,
+    demo_session_title, finish_demo_run, has_running_remote_run, patch_is_empty,
+    resolve_run_session_id, rollback_optimistic_run, run_is_simulated, run_now_busy, DEMO_RUN_BUSY, DEMO_RUN_DONE,
+    DEMO_RUN_MS, DEMO_RUN_STARTED, DEMO_SESSION_PREFIX, NAME_SERVER_REASON, REMOTE_RUN_POLL_MS,
+    REMOTE_RUN_STARTED, SAMPLE_FLAG, SERVER_CANNOT_CHANGE,
     not_saved_sentence, run_row_text, unsaved_fields,
     ago, big_time, civil_from_days, cron_valid, days_from_civil,
     describe_cron, filter_projects, format_next, group_by_project, kind_text, kpis,
@@ -46,6 +48,7 @@ use super::components::{
     pill_colors, pill_metrics, AppButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
     FieldOptions, Label, PickChip, Pill, PillTone, Select, SheetFooter,
 };
+use super::compat::Spinner;
 use super::project::PHONE_MENU_ROOM;
 use super::shell::NavIcon;
 use super::theme::*;
@@ -83,10 +86,14 @@ pub fn should_use_sample_entries(route_env: Option<&str>, demo_active: bool) -> 
 }
 
 fn sample_mode() -> bool {
-    should_use_sample_entries(
-        std::env::var("EMBER_CR_ROUTE").ok().as_deref(),
-        crate::demo::active_from_env() || try_services().is_some_and(|s| s.demo.is_some()),
-    )
+    let has_server = std::env::var("EMBER_SERVER_URL")
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty());
+    !has_server
+        && should_use_sample_entries(
+            std::env::var("EMBER_CR_ROUTE").ok().as_deref(),
+            crate::demo::active_from_env() || try_services().is_some_and(|s| s.demo.is_some()),
+        )
 }
 
 /// Whether the demo is on. The simulated run needs this, not just the sample route (#494).
@@ -126,7 +133,12 @@ fn demo_run(id: &str, entries_st: &MutableState<Vec<Entry>>, tick: &MutableState
                 title: Some(demo_session_title(&r.name)),
                 account: None,
             };
-            services().create_session(&body).await.ok().map(|rec| rec.id)
+            let svc = services();
+            let sid = svc.create_session(&body).await.ok().map(|rec| rec.id);
+            if let (Some(id), Some(demo)) = (&sid, &svc.demo) {
+                demo.send_message(&svc.client, id, &r.prompt);
+            }
+            sid
         },
         move |session| {
             let mut list = entries_st.get();
@@ -163,7 +175,8 @@ fn capture_demo_run(entries: &mut [Entry], selected: Option<&str>) {
     if !matches!(mode.as_str(), "1" | "running" | "done") {
         return;
     }
-    let Some(id) = selected else { return };
+    let fallback = entries.first().map(|e| e.routine.id.clone());
+    let Some(id) = selected.map(str::to_string).or(fallback) else { return };
     let Some(e) = entries.iter_mut().find(|e| e.routine.id == id) else { return };
     if !demo_run_allowed(true, sample_entries().iter().any(|s| s.routine.id == id)) {
         return;
@@ -171,6 +184,14 @@ fn capture_demo_run(entries: &mut [Entry], selected: Option<&str>) {
     if begin_demo_run(e, now_local()).is_ok() && mode == "done" {
         finish_demo_run(e, Some(format!("{DEMO_SESSION_PREFIX}capture")));
     }
+}
+
+/// Sync `entries_st` and `online_st` from [`Remote`] and [`LocalStore`].
+pub fn sync_from_remote(entries_st: &MutableState<Vec<Entry>>, online_st: &MutableState<bool>) {
+    let (on, mut remote_entries) = with_remote(|r| (r.online, r.entries.clone()));
+    remote_entries.extend(with_store(|s| s.entries()));
+    online_st.set(on);
+    entries_st.set(remote_entries);
 }
 
 /// What the server last answered: `online` is false until a load succeeds.
@@ -201,7 +222,11 @@ pub fn is_remote(id: &str) -> bool {
 
 /// The server's schedules with their recent runs.
 pub async fn load_remote() -> Result<Vec<Entry>, ApiError> {
-    let api = services().client.api();
+    load_remote_from(services().client.api()).await
+}
+
+/// Loads all schedules and their recent runs from `api` (FR-L25, #494).
+pub async fn load_remote_from(api: &ember_client::api::Api) -> Result<Vec<Entry>, ApiError> {
     let mut out = Vec::new();
     for s in api.schedules(None).await? {
         let runs = api.schedule_runs(&s.id, Some(RUNS_SHOWN)).await?;
@@ -243,8 +268,12 @@ fn refresh(tick: MutableState<u32>) {
     );
 }
 
-fn remote_action<F>(tick: MutableState<u32>, work: F)
-where
+fn remote_action<F>(
+    tick: MutableState<u32>,
+    entries_st: MutableState<Vec<Entry>>,
+    online_st: MutableState<bool>,
+    work: F,
+) where
     F: Future<Output = Result<Option<String>, ApiError>> + Send + 'static,
 {
     if try_services().is_none() {
@@ -257,11 +286,122 @@ where
         },
         move |(done, list)| {
             apply_load(list);
+            sync_from_remote(&entries_st, &online_st);
             match done {
                 Ok(Some(text)) => notice::post(text),
                 Ok(None) => {}
                 Err(e) => notice::post(format!("서버가 요청을 처리하지 못했습니다: {e}")),
             }
+            tick.update(|v| *v += 1);
+        },
+    );
+}
+
+/// Inserts the optimistic `RunStatus::Running` placeholder into `entries_st` and `REMOTE` for
+/// `id` before calling `POST /api/schedules/{id}/run` (FR-L25, #494).
+pub fn begin_remote_run_now(
+    id: &str,
+    now: Minutes,
+    entries_st: &MutableState<Vec<Entry>>,
+) -> Result<(), &'static str> {
+    let mut list = entries_st.get();
+    let Some(e) = list.iter_mut().find(|e| e.routine.id == id) else {
+        return Err("루틴을 찾을 수 없습니다");
+    };
+    begin_demo_run(e, now)?;
+    entries_st.set(list);
+    with_remote(|r| {
+        if let Some(re) = r.entries.iter_mut().find(|e| e.routine.id == id) {
+            let _ = begin_demo_run(re, now);
+        }
+    });
+    Ok(())
+}
+
+/// Applies the result of `POST /api/schedules/{id}/run` (`run_res`) and the refreshed
+/// schedule list (`list`) to `REMOTE`, `entries_st` and `online_st`, rolling back any
+/// optimistic placeholder on error and returning the user-facing notice text (FR-L25, #494).
+pub fn finish_remote_run_now(
+    id: &str,
+    run_res: Result<ember_client::wire::ScheduleRun, ApiError>,
+    list: Result<Vec<Entry>, ApiError>,
+    entries_st: &MutableState<Vec<Entry>>,
+    online_st: &MutableState<bool>,
+) -> String {
+    apply_load(list);
+    match run_res {
+        Ok(run) => {
+            let msg = with_remote(|r| {
+                r.entries
+                    .iter_mut()
+                    .find(|e| e.routine.id == id)
+                    .map(|e| apply_server_run_started(e, &run))
+                    .unwrap_or_else(|| match &run.error {
+                        Some(err) => format!("실행하지 못했습니다: {err}"),
+                        None => REMOTE_RUN_STARTED.to_string(),
+                    })
+            });
+            sync_from_remote(entries_st, online_st);
+            msg
+        }
+        Err(e) => {
+            with_remote(|r| {
+                if let Some(re) = r.entries.iter_mut().find(|e| e.routine.id == id) {
+                    rollback_optimistic_run(re);
+                }
+            });
+            sync_from_remote(entries_st, online_st);
+            let mut cur = entries_st.get();
+            if let Some(le) = cur.iter_mut().find(|e| e.routine.id == id) {
+                if rollback_optimistic_run(le) {
+                    entries_st.set(cur);
+                }
+            }
+            format!("서버가 요청을 처리하지 못했습니다: {e}")
+        }
+    }
+}
+
+/// Start a remote schedule run (`POST /api/schedules/{id}/run`), immediately marking the
+/// routine as `"실행 중"` (`RunStatus::Running`), refreshing the client's session list when a
+/// session is created, and syncing the updated run list from the server (FR-L25, #494).
+fn remote_run_now(
+    id: &str,
+    entries_st: &MutableState<Vec<Entry>>,
+    online_st: &MutableState<bool>,
+    tick: &MutableState<u32>,
+) {
+    if try_services().is_none() {
+        notice::post(RUN_NOTICE);
+        return;
+    }
+    if let Err(msg) = begin_remote_run_now(id, now_local(), entries_st) {
+        notice::post(msg);
+        return;
+    }
+    tick.update(|v| *v += 1);
+    let id = id.to_string();
+    let entries_st = entries_st.clone();
+    let online_st = online_st.clone();
+    let tick = tick.clone();
+    run_shared(
+        async move {
+            let svc = services();
+            let api = svc.client.api();
+            let run_res = api.run_schedule(&id).await;
+            if let Ok(run) = &run_res {
+                if run.session_id.is_some() {
+                    if let Ok(sessions) = api.sessions(None).await {
+                        svc.client.apply(ember_client::Input::SessionsLoaded(sessions));
+                    }
+                }
+            }
+            let list = load_remote().await;
+            (id, run_res, list)
+        },
+        move |(id, run_res, list)| {
+            let msg = finish_remote_run_now(&id, run_res, list, &entries_st, &online_st);
+            notice::post(msg);
             tick.update(|v| *v += 1);
         },
     );
@@ -403,6 +543,68 @@ pub fn detail_prompt_width(panel_w: f32, compact: bool) -> f32 {
     (panel_w - 2.0 * pad - INSET_CHROME).max(0.0)
 }
 
+/// The detail header's height: the mockup's `.rt-dh` (`min-height: 56px`), for every layout
+/// but the stacked one.
+pub const DETAIL_HEADER_H: f32 = 56.0;
+/// The ring beside the big time.
+pub const DETAIL_RING: f32 = 76.0;
+/// One run row: the inset's 12 dp above and below a row as tall as the 32 dp 세션 열기 button.
+pub const RUN_TILE_H: f32 = PAD_ROW_V * 2.0 + H_CTL;
+
+/// The detail body's padding: 14 on a wide panel, 12 on a phone.
+pub fn detail_body_pad(compact: bool) -> f32 {
+    if compact {
+        12.0
+    } else {
+        14.0
+    }
+}
+
+/// The gap between the detail body's sections.
+pub const DETAIL_GAP: f32 = SP[3];
+
+/// The big time's type step: 40 on a wide panel, 28 on a phone (mockup `.rt-hero-when .when`,
+/// `--fs-4xl`, and `--fs-2xl` at 560 px and below).
+pub fn detail_when_fs(compact: bool) -> Fs {
+    if compact {
+        Fs::Xl2
+    } else {
+        Fs::Xl4
+    }
+}
+
+/// One key-value tile: the inset's padding, the label, the value, and `sub_lines` of the muted
+/// line under it. The inset already pads 12 16 (`.inset`), so the tile adds none of its own.
+fn kv_tile_h(sub_lines: u32) -> f32 {
+    let sub = if sub_lines > 0 { SP[0] + sub_lines as f32 * Fs::Xs.line_height() } else { 0.0 };
+    PAD_ROW_V * 2.0 + Fs::Xs.line_height() + SP[0] + Fs::Sm.line_height() + sub
+}
+
+/// How far below the top of the detail card the first 실행 기록 row ends, from the same
+/// constants the drawing uses (FR-L25, #494). `prompt_lines` is how many lines the prompt
+/// takes, `computer_sub_lines` how many the 컴퓨터 tile's note takes (2 on a phone). A time
+/// routine's big time is one line; an event's may take two and is not covered here.
+pub fn detail_first_run_bottom(panel_w: f32, compact: bool, prompt_lines: u32, computer_sub_lines: u32) -> f32 {
+    let header = match detail_header_layout(panel_w, compact) {
+        DetailHeader::Stacked => 2.0 * SP[3] + Fs::Lg.line_height() * 2.0 + SP[2] + H_CTL,
+        _ => DETAIL_HEADER_H,
+    };
+    let when_col = detail_when_fs(compact).line_height()
+        + SP[0]
+        + Fs::Sm.line_height()
+        + SP[0]
+        + Fs::Xs.line_height();
+    let when = when_col.max(DETAIL_RING);
+    let tiles = if detail_tile_columns(panel_w) >= 3 {
+        kv_tile_h(1).max(kv_tile_h(computer_sub_lines))
+    } else {
+        kv_tile_h(1) + SP[2] + kv_tile_h(computer_sub_lines).max(kv_tile_h(0))
+    };
+    let prompt = PAD_ROW_V * 2.0 + Fs::Xs.line_height() + SP[0] + prompt_lines as f32 * Fs::Sm.line_height();
+    let history = Fs::Md.line_height() + SP[1] + RUN_TILE_H;
+    header + 1.0 + detail_body_pad(compact) + when + DETAIL_GAP + tiles + DETAIL_GAP + prompt + DETAIL_GAP + history
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Panel {
     #[default]
@@ -538,8 +740,46 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
     let online_state = remember_with_key(launch_tick, move || mutable_state_of(online));
 
     let _ = tick.get();
+    if !sample_mode() {
+        let (remote_online, mut remote_entries) = with_remote(|r| (r.online, r.entries.clone()));
+        if remote_online || !remote_entries.is_empty() {
+            remote_entries.extend(with_store(|s| s.entries()));
+            if online_state.get_untracked() != remote_online {
+                online_state.set(remote_online);
+            }
+            if entries_state.get_untracked() != remote_entries {
+                entries_state.set(remote_entries);
+            }
+        }
+    }
     let cur_entries = entries_state.get();
     let cur_online = online_state.get();
+    let any_running = has_running_remote_run(sample_mode(), cur_online, &cur_entries);
+    if any_running {
+        let tick_poll = tick.clone();
+        let entries_poll = entries_state.clone();
+        let online_poll = online_state.clone();
+        launched_effect((any_running, tick.get()), move || async move {
+            if try_services().is_none() {
+                return;
+            }
+            run_shared(
+                async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(REMOTE_RUN_POLL_MS)).await;
+                    let list = load_remote().await;
+                    if let Ok(sessions) = services().client.api().sessions(None).await {
+                        services().client.apply(ember_client::Input::SessionsLoaded(sessions));
+                    }
+                    list
+                },
+                move |list| {
+                    apply_load(list);
+                    sync_from_remote(&entries_poll, &online_poll);
+                    tick_poll.update(|v| *v += 1);
+                },
+            );
+        });
+    }
     let device_only = with_store(|s| !s.entries().is_empty());
     let now = now_local();
     let (computers, existing_projects) = live_choices();
@@ -577,18 +817,24 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
 
     let on_toggle = {
         let entries_st = entries_state.clone();
+        let online_st = online_state.clone();
         let tick_ref = tick.clone();
         move |id: String, on: bool| {
             if is_remote(&id) {
-                remote_action(tick_ref.clone(), async move {
-                    let api = services().client.api();
-                    if on {
-                        api.resume_schedule(&id).await?;
-                    } else {
-                        api.pause_schedule(&id).await?;
-                    }
-                    Ok(None)
-                });
+                remote_action(
+                    tick_ref.clone(),
+                    entries_st.clone(),
+                    online_st.clone(),
+                    async move {
+                        let api = services().client.api();
+                        if on {
+                            api.resume_schedule(&id).await?;
+                        } else {
+                            api.pause_schedule(&id).await?;
+                        }
+                        Ok(None)
+                    },
+                );
             } else {
                 if with_store(|s| s.set_enabled(&id, on)).is_err() {
                     if let Some(e) = entries_st.get().iter().find(|e| e.routine.id == id) {
@@ -610,12 +856,10 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
     let on_run_now = {
         let tick_ref = tick.clone();
         let entries_st = entries_state.clone();
+        let online_st = online_state.clone();
         move |id: String| {
             if is_remote(&id) {
-                remote_action(tick_ref.clone(), async move {
-                    let run = services().client.api().run_schedule(&id).await?;
-                    Ok(run.error.map(|e| format!("실행하지 못했습니다: {e}")))
-                });
+                remote_run_now(&id, &entries_st, &online_st, &tick_ref);
                 return;
             }
             let sample = sample_entries().iter().any(|e| e.routine.id == id);
@@ -650,7 +894,6 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                         .map(|e| e.routine.clone())
                 });
                 let unsaved = old.as_ref().map(|o| unsaved_fields(&draft, o)).unwrap_or_default();
-                let frozen = !unsaved.is_empty();
                 let patch = match &old {
                     Some(o) => changed_patch(&draft, o),
                     None => schedule_patch(&draft),
@@ -664,10 +907,15 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                     );
                     return;
                 }
-                remote_action(tick_ref.clone(), async move {
-                    services().client.api().update_schedule(&id, &patch).await?;
-                    Ok(not_saved_sentence(&unsaved).map(|n| format!("{n}. 프롬프트와 일정만 저장했습니다")))
-                });
+                remote_action(
+                    tick_ref.clone(),
+                    entries_st.clone(),
+                    online_st.clone(),
+                    async move {
+                        services().client.api().update_schedule(&id, &patch).await?;
+                        Ok(not_saved_sentence(&unsaved).map(|n| format!("{n}. 프롬프트와 일정만 저장했습니다")))
+                    },
+                );
                 panel_ref.set(Panel::View);
                 return;
             }
@@ -1085,11 +1333,39 @@ fn RoutineHeader(compact: bool, trailing: impl FnOnce()) {
 /// An accessible invisible button overlay for a painted row or pill.
 /// Gives assistive tech the item's label and provides keyboard focus and click handling.
 fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
+    NamedOverlay(label, true, on_click);
+}
+
+/// The one direct button behind both overlays: invisible text, the whole box to click.
+fn NamedOverlay(label: &str, enabled: bool, on_click: impl FnMut() + 'static) {
     cu::Button(label)
+        .enabled(enabled)
         .variant(ButtonVariant::Text)
         .color(Paint::Literal(Color::argb(0)))
         .modifier(Modifier::new().fill_max_size())
         .on_click(on_click);
+}
+
+/// What 지금 실행 reads while its routine has a run in progress.
+pub const RUN_NOW_BUSY_LABEL: &str = "실행 중";
+
+/// The invisible overlay of a control that cannot act now: named, focusable by assistive tech as
+/// a disabled button, and never clickable.
+fn DisabledOverlay(label: &str) {
+    NamedOverlay(label, false, || {});
+}
+
+/// The header's 지금 실행. While a run is in progress it is disabled, reads 실행 중 and has a
+/// spinner beside it, as a CI "run" button does while its job runs (FR-L25, #494).
+fn RunNowButton(busy: bool, on_click: impl FnMut() + 'static) {
+    if busy {
+        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+            Spinner(12.0);
+            AppButton(RUN_NOW_BUSY_LABEL, None, ButtonKind::Primary, true, false, false, || {});
+        });
+    } else {
+        AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, on_click);
+    }
 }
 
 // TODO(compose-rust#426): the toolkit Switch cannot take the ink 36x20 style or an accessible name;
@@ -1561,6 +1837,9 @@ fn DetailPane(
     let mode_label = r.sel.mode.label().to_string();
     let prompt_text = r.prompt.clone();
     let computer = computer_chip_text(r.sel.computer.as_deref(), computers);
+    // A run in progress (the optimistic row or a server run still Running) disables 지금 실행,
+    // so a second click cannot start a second run (FR-L25, #494).
+    let busy = run_now_busy(entry);
 
     let layout = detail_header_layout(panel_w, compact);
     let tile_cols = detail_tile_columns(panel_w);
@@ -1593,6 +1872,11 @@ fn DetailPane(
         );
     }
     let ring_cmd = l.build();
+    let sched_text = if routine_trigger == Trigger::Time && cron_valid(&routine_cron) {
+        format!("{routine_line} · {routine_cron}")
+    } else {
+        routine_line
+    };
 
     let on_toggle = std::sync::Arc::new(on_toggle);
     let on_edit = std::sync::Arc::new(on_edit);
@@ -1622,7 +1906,7 @@ fn DetailPane(
                 cu::Row()
                     .alignment(Alignment::CenterStart)
                     .spacing(SP[1])
-                    .modifier(Modifier::new().fill_max_width().height(56.0).padding(12.0))
+                    .modifier(Modifier::new().fill_max_width().height(DETAIL_HEADER_H).padding(PAD_ROW_V))
                     .content(move || {
                         cu::Box()
                             .modifier(Modifier::new().size(32.0, 32.0))
@@ -1652,18 +1936,26 @@ fn DetailPane(
                                 NavIcon(ICON_EDIT_SVG, p.text_2.to_argb(), 16.0);
                                 FocusOverlay("편집", move || edit_fn(edit_id_c.clone()));
                             });
+                        // Busy: the muted fill of a disabled primary button (`button_style_for`)
+                        // with a spinner in place of the play glyph.
+                        let run_fill = if busy { p.muted } else { p.ink };
                         cu::Box()
                             .modifier(
                                 Modifier::new()
                                     .size(32.0, 32.0)
-                                    .background(paint(p.ink))
-                                    .border(1.0, paint(p.ink))
+                                    .background(paint(run_fill))
+                                    .border(1.0, paint(run_fill))
                                     .corner_radius(CORNER_SM),
                             )
                             .alignment(Alignment::Center)
                             .content(move || {
-                                NavIcon(ICON_PLAY_SVG, p.ink_text.to_argb(), 16.0);
-                                FocusOverlay("지금 실행", move || run_fn(run_id_c.clone()));
+                                if busy {
+                                    Spinner(14.0);
+                                    DisabledOverlay(RUN_NOW_BUSY_LABEL);
+                                } else {
+                                    NavIcon(ICON_PLAY_SVG, p.ink_text.to_argb(), 16.0);
+                                    FocusOverlay("지금 실행", move || run_fn(run_id_c.clone()));
+                                }
                             });
                     });
             } else if layout == DetailHeader::Stacked {
@@ -1687,18 +1979,21 @@ fn DetailPane(
                             RoutineSwitch(&routine_name, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
                             cu::Spacer().modifier(Modifier::new().weight(1.0));
                             AppButton("편집", None, ButtonKind::Default, true, true, false, move || edit_fn(edit_id.clone()));
-                            AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, move || run_fn(run_id.clone()));
+                            RunNowButton(busy, move || run_fn(run_id.clone()));
                         });
                     });
             } else {
                 let toggle_fn = on_toggle;
                 let edit_fn = on_edit;
                 let run_fn = on_run;
+                // 56 high as the mockup's `.rt-dh`: 12 above and below the 32 dp buttons, and
+                // 4 more on each side for the card's 16.
                 cu::Row()
                     .alignment(Alignment::CenterStart)
                     .spacing(SP[2])
-                    .modifier(Modifier::new().fill_max_width().height(64.0).padding(16.0))
+                    .modifier(Modifier::new().fill_max_width().height(DETAIL_HEADER_H).padding(PAD_ROW_V))
                     .content(move || {
+                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
                         // The title takes what the actions leave and ellipsizes, so the actions
                         // never leave the panel.
                         cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
@@ -1707,30 +2002,30 @@ fn DetailPane(
                         TriggerPill(routine_trigger, true);
                         RoutineSwitch(&routine_name_w, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
                         AppButton("편집", None, ButtonKind::Default, true, true, false, move || edit_fn(edit_id.clone()));
-                        AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, move || run_fn(run_id.clone()));
+                        RunNowButton(busy, move || run_fn(run_id.clone()));
+                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
                     });
             }
             cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
 
             cu::Column()
-                .spacing(SP[4])
-                .modifier(Modifier::new().fill_max_width().padding(if compact { 12.0 } else { 16.0 }))
+                .spacing(DETAIL_GAP)
+                .modifier(Modifier::new().fill_max_width().padding(detail_body_pad(compact)))
                 .content(move || {
                     // Schedule & Ring
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(move || {
                         cu::Column().modifier(Modifier::new().weight(1.0)).spacing(SP[0]).content(move || {
-                            Label(&when_big, if routine_trigger == Trigger::Event { Fs::Xl2 } else { Fs::Xl4 }, Weight::Semibold, None, Some(when_big_max_lines(routine_trigger)));
-                            Label(&routine_line, Fs::Sm, Weight::Medium, None, Some(1));
-                            if routine_trigger == Trigger::Time && cron_valid(&routine_cron) {
-                                Label(&routine_cron, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                            }
+                            Label(&when_big, if routine_trigger == Trigger::Event { Fs::Xl2 } else { detail_when_fs(compact) }, Weight::Semibold, None, Some(when_big_max_lines(routine_trigger)));
+                            // The cron sits on the schedule's line, as the mockup's `.rt-sched`
+                            // ("매일 오전 9시 · 0 9 * * *"), not on a line of its own.
+                            Label(&sched_text, Fs::Sm, Weight::Medium, None, Some(1));
                             Label(&next, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                         });
                         cu::Box()
-                            .modifier(Modifier::new().size(76.0, 76.0))
+                            .modifier(Modifier::new().size(DETAIL_RING, DETAIL_RING))
                             .alignment(Alignment::Center)
                             .content(move || {
-                                cu::Canvas(ring_cmd).modifier(Modifier::new().size(76.0, 76.0));
+                                cu::Canvas(ring_cmd).modifier(Modifier::new().size(DETAIL_RING, DETAIL_RING));
                                 Label(
                                     &rate.map(|v| format!("{v}%")).unwrap_or_else(|| "-".to_string()),
                                     Fs::Md,
@@ -1741,13 +2036,26 @@ fn DetailPane(
                             });
                     });
 
-                    // Inset cards: 3 cards in one row on wide
+                    // Inset cards: 3 cards in one row on wide, 2x2 grid on narrow so the run
+                    // history below stays visible above the fold on 390 dp phone screens.
                     if tile_cols < 3 {
                         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                            KeyValue("프로젝트", &project_name, "");
-                            KeyValue("에이전트", &harness_label, &model_title);
-                            KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다");
-                            KeyValue("권한 모드", &mode_label, "");
+                            cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                                    KeyValue("프로젝트", &project_name, "");
+                                });
+                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                                    KeyValue("에이전트", &harness_label, &model_title);
+                                });
+                            });
+                            cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                                    KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다");
+                                });
+                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                                    KeyValue("권한 모드", &mode_label, "");
+                                });
+                            });
                         });
                     } else {
                         cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
@@ -1762,19 +2070,24 @@ fn DetailPane(
                             });
                         });
                     }
+                    // The inset pads 12 16 itself (`.inset`); no second padding inside it.
                     InsetPanel(true, move || {
-                        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(move || {
+                        cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(move || {
                             Label("프롬프트", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                             Label(&prompt_text, Fs::Sm, Weight::Regular, None, None);
                         });
                     });
-                    Label("실행 기록", Fs::Lg, Weight::Semibold, None, Some(1));
-                    if entry.runs.is_empty() {
-                        Label("아직 실행하지 않았습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    }
-                    for run in &entry.runs {
-                        RunTile(run, now, run_is_simulated(run, demo));
-                    }
+                    // The heading sits 8 above its rows (mockup `.runtiles { margin-top: 8px }`),
+                    // at the body's 14 semibold (`<b>`).
+                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(move || {
+                        Label("실행 기록", Fs::Md, Weight::Semibold, None, Some(1));
+                        if entry.runs.is_empty() {
+                            Label("아직 실행하지 않았습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        }
+                        for run in &entry.runs {
+                            RunTile(run, now, run_is_simulated(run, demo));
+                        }
+                    });
                 });
         });
     });
@@ -1785,10 +2098,11 @@ fn KeyValue(title: &str, value: &str, sub: &str) {
     let t = title.to_string();
     let v = value.to_string();
     let s = sub.to_string();
+    // The inset pads 12 16 itself (`.inset`); a second padding inside doubled it (#494).
     InsetPanel(true, move || {
         cu::Column()
             .spacing(SP[0])
-            .modifier(Modifier::new().fill_max_width().padding(SP[2]))
+            .modifier(Modifier::new().fill_max_width())
             .content(move || {
                 Label(&t, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 // Two lines, then an ellipsis: the tile is at least a third of the panel.
@@ -1806,11 +2120,12 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool) {
     let session = run.session.clone();
     let row = run_row_text(run, now, simulated);
     let (status_lbl, ago_lbl) = (row.status, row.ago);
+    // `RUN_TILE_H` high: the inset's own 12 above and below a row the button's height.
     InsetPanel(true, move || {
         cu::Row()
             .alignment(Alignment::CenterStart)
             .spacing(SP[2])
-            .modifier(Modifier::new().fill_max_width().padding(SP[2]))
+            .modifier(Modifier::new().fill_max_width().height(H_CTL))
             .content(move || {
                 Pill(status_lbl, tone, true);
                 if simulated {
@@ -1821,7 +2136,8 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool) {
                 if let Some(id) = session {
                     AppButton("세션 열기", None, ButtonKind::Default, true, true, false, move || {
                         if let Some(svc) = try_services() {
-                            svc.ui.open_conversation(&id);
+                            let target = resolve_run_session_id(&id, demo_active());
+                            svc.ui.open_conversation(&target);
                         }
                     });
                 }
@@ -2799,6 +3115,47 @@ mod tests {
         }
     }
 
+    /// The first 실행 기록 row shows without scrolling at 1440x900 and 390x844 (FR-L25, #494).
+    /// The detail card's top is measured on the r3 captures of PR #721 (`running-1440-*.png`:
+    /// 386; `done-390-*.png`: 84), since the dashboard above it is laid out by the toolkit. The
+    /// prompt is given one line more than the sample prompt takes at each width, so the check
+    /// errs on the safe side.
+    #[test]
+    fn fr_l25_first_run_row_is_visible_without_scrolling_at_1440_and_390() {
+        // (window w, window h, card top, prompt lines, 컴퓨터 note lines, room kept at the bottom)
+        let cases = [
+            (1440.0, 900.0, 386.0, 2, 1, SP[6]),
+            (390.0, 844.0, 84.0, 3, 2, compact_bottom_clearance()),
+        ];
+        for (w, h, top, prompt_lines, sub_lines, room) in cases {
+            let (content, compact) = content_at(w);
+            let pw = detail_panel_width(w, content, compact);
+            let bottom = top + detail_first_run_bottom(pw, compact, prompt_lines, sub_lines);
+            assert!(
+                bottom <= h - room,
+                "first run row ends at {bottom} dp at {w}x{h}, past {} dp",
+                h - room
+            );
+        }
+        // The pieces the sum is made of are the mockup's.
+        assert_eq!(DETAIL_HEADER_H, 56.0, "`.rt-dh` min-height");
+        assert_eq!(RUN_TILE_H, 56.0, "12 + 32 + 12");
+        assert_eq!(detail_when_fs(false), Fs::Xl4);
+        assert_eq!(detail_when_fs(true), Fs::Xl2, "28 px at 560 px and below");
+    }
+
+    #[test]
+    fn fr_l25_detail_tiles_and_run_rows_are_padded_once() {
+        let src = include_str!("routines.rs");
+        let kv = src.split("fn KeyValue(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        let tile = src.split("fn RunTile(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        for (name, body) in [("KeyValue", kv), ("RunTile", tile)] {
+            assert!(body.contains("InsetPanel(true"), "{name} sits in an inset");
+            assert!(!body.contains(".padding("), "{name} adds no padding inside the inset's own");
+        }
+        assert!(tile.contains(".height(H_CTL)"), "a run row is as tall as its button");
+    }
+
     #[test]
     fn fr_l25_detail_prompt_has_paragraph_width_at_every_size() {
         for w in [1440.0, 1024.0, 768.0, 390.0] {
@@ -3528,5 +3885,411 @@ mod tests {
             }
         }
         compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l25_host_open_session_button_resolves_demo_session_and_opens_conversation() {
+        let _guard = crate::services::test_guard();
+        let svc = crate::services::test_services();
+        svc.reset_demo();
+        compose_rust::window::reset_window_size();
+
+        // The shown routine keeps only its newest run (session s9), so the detail has exactly one
+        // 세션 열기: with all three (s9, s9, s6) the test took whichever a HashMap gave first and
+        // opened demo-s6 in some runs.
+        let entries = || {
+            let mut all = sample_entries();
+            all[0].runs.truncate(1);
+            assert_eq!(all[0].runs[0].session.as_deref(), Some("s9"));
+            all
+        };
+        let mut host = Host::new(move || Box::new(Recomposer::new(move || RoutinesScreenWith(entries(), true))));
+        let mut texts: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut clickables: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        let mut scan = |batch: &[Mutation<'_>]| {
+            for m in batch {
+                match m {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        texts.insert(*node_id, s.to_string());
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                        clickables.insert(*node_id, *h as u64);
+                    }
+                    _ => {}
+                }
+            }
+        };
+        scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+        let resize = HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: 1440.0,
+                height_dp: 900.0,
+                class: WindowSizeClass::Expanded,
+                height_class: WindowHeightClass::Medium,
+                safe_area_top: 0.0,
+                safe_area_leading: 0.0,
+                safe_area_trailing: 0.0,
+            },
+        };
+        let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
+        scan(&decode_batch(bytes).expect("decode"));
+
+        let open: Vec<u32> = texts
+            .iter()
+            .filter(|(id, t)| *t == "세션 열기" && clickables.contains_key(id))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(open.len(), 1, "one run, one 세션 열기");
+        let open_btn = open[0];
+        let handler_id = clickables[&open_btn];
+        host.dispatch(HostEvent {
+            node_id: open_btn,
+            handler_id,
+            payload: EventPayload::Clicked,
+        })
+        .expect("dispatch click on 세션 열기");
+
+        assert_eq!(
+            svc.ui.route.get(),
+            crate::ui::Route::Conversation("demo-s9".to_string()),
+            "clicking '세션 열기' on sample run 's9' in demo mode should open conversation 'demo-s9'"
+        );
+        let is_open = svc.client.read(|st| {
+            st.session("demo-s9")
+                .is_some_and(|v| v.open && st.transcript("demo-s9").is_some())
+        });
+        assert!(is_open, "opening 'demo-s9' must mark it open and load its demo transcript");
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l25_host_run_now_click_starts_running_state_and_posts_notice() {
+        let _guard = crate::services::test_guard();
+        let svc = crate::services::test_services();
+        svc.reset_demo();
+        compose_rust::window::reset_window_size();
+
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreenWith(sample_entries(), true))));
+        let mut texts: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut clickables: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        let mut scan = |batch: &[Mutation<'_>]| {
+            for m in batch {
+                match m {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        texts.insert(*node_id, s.to_string());
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                        clickables.insert(*node_id, *h as u64);
+                    }
+                    _ => {}
+                }
+            }
+        };
+        scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+        let resize = HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: 1440.0,
+                height_dp: 900.0,
+                class: WindowSizeClass::Expanded,
+                height_class: WindowHeightClass::Medium,
+                safe_area_top: 0.0,
+                safe_area_leading: 0.0,
+                safe_area_trailing: 0.0,
+            },
+        };
+        let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
+        scan(&decode_batch(bytes).expect("decode"));
+
+        let run_btn = texts
+            .iter()
+            .find(|(id, t)| *t == "지금 실행" && clickables.contains_key(id))
+            .map(|(id, _)| *id)
+            .expect("expected clickable '지금 실행' button in detail header");
+        let handler_id = clickables[&run_btn];
+        let (after_click, _) = host
+            .dispatch(HostEvent {
+                node_id: run_btn,
+                handler_id,
+                payload: EventPayload::Clicked,
+            })
+            .expect("dispatch click on 지금 실행");
+        let after_mutations = decode_batch(after_click).expect("decode after click");
+        let after_text: String = after_mutations.iter().map(|m| format!("{m:?}")).collect();
+        assert!(
+            after_text.contains("실행 중") && after_text.contains(SAMPLE_FLAG),
+            "clicking '지금 실행' must immediately render '실행 중' and '{SAMPLE_FLAG}' in the detail run history"
+        );
+        assert_eq!(
+            svc.ui.notice.get().map(|(_, s)| s).as_deref(),
+            Some(DEMO_RUN_STARTED),
+            "clicking '지금 실행' must post DEMO_RUN_STARTED notice"
+        );
+        compose_rust::window::reset_window_size();
+    }
+
+    /// What a test has seen of the tree so far: text, click handler and enabled flag per node.
+    #[derive(Default)]
+    struct Seen {
+        texts: std::collections::HashMap<u32, String>,
+        clickables: std::collections::HashMap<u32, u64>,
+        enabled: std::collections::HashMap<u32, bool>,
+    }
+
+    impl Seen {
+        fn scan(&mut self, batch: &[Mutation<'_>]) {
+            for m in batch {
+                match m {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        self.texts.insert(*node_id, s.to_string());
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                        self.clickables.insert(*node_id, *h as u64);
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::Enabled, value: PropertyValue::Bool(b) } => {
+                        self.enabled.insert(*node_id, *b);
+                    }
+                    Mutation::Remove { node_id } => {
+                        self.texts.remove(node_id);
+                        self.clickables.remove(node_id);
+                        self.enabled.remove(node_id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// While the run it started is in progress, 지금 실행 is disabled and reads 실행 중, at the
+    /// wide header and the phone's icon header alike (FR-L25, #494).
+    #[test]
+    fn fr_l25_run_now_is_disabled_while_its_run_is_in_progress() {
+        for (w, h, class) in [(1440.0, 900.0, WindowSizeClass::Expanded), (390.0, 844.0, WindowSizeClass::Compact)] {
+            let _guard = crate::services::test_guard();
+            let svc = crate::services::test_services();
+            svc.reset_demo();
+            compose_rust::window::reset_window_size();
+
+            let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreenWith(sample_entries(), true))));
+            let mut seen = Seen::default();
+            seen.scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+            let resize = HostEvent {
+                node_id: 0,
+                handler_id: 0,
+                payload: EventPayload::WindowSizeChanged {
+                    width_dp: w,
+                    height_dp: h,
+                    class,
+                    height_class: WindowHeightClass::Medium,
+                    safe_area_top: 0.0,
+                    safe_area_leading: 0.0,
+                    safe_area_trailing: 0.0,
+                },
+            };
+            let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
+            seen.scan(&decode_batch(bytes).expect("decode"));
+            if class == WindowSizeClass::Compact {
+                // The phone shows the list first and the detail only for a chosen routine (no
+                // routine is chosen by default there), so open the first one as a user would:
+                // its row is a button named by the routine.
+                let name = sample_entries()[0].routine.name.clone();
+                let row = seen
+                    .texts
+                    .iter()
+                    .find(|(id, t)| **t == name && seen.clickables.contains_key(id))
+                    .map(|(id, _)| *id)
+                    .unwrap_or_else(|| panic!("a clickable row named {name}"));
+                let (bytes, _) = host
+                    .dispatch(HostEvent { node_id: row, handler_id: seen.clickables[&row], payload: EventPayload::Clicked })
+                    .expect("dispatch click on the routine row");
+                seen.scan(&decode_batch(bytes).expect("decode"));
+            }
+
+            let run_btn = seen.texts
+                .iter()
+                .find(|(id, t)| *t == "지금 실행" && seen.clickables.contains_key(id))
+                .map(|(id, _)| *id)
+                .unwrap_or_else(|| panic!("a clickable 지금 실행 at {w}"));
+            assert_ne!(seen.enabled.get(&run_btn), Some(&false), "지금 실행 starts enabled at {w}");
+            let (bytes, _) = host
+                .dispatch(HostEvent { node_id: run_btn, handler_id: seen.clickables[&run_btn], payload: EventPayload::Clicked })
+                .expect("dispatch click on 지금 실행");
+            seen.scan(&decode_batch(bytes).expect("decode"));
+
+            let live_run_now: Vec<u32> = seen.texts
+                .iter()
+                .filter(|(id, t)| *t == "지금 실행" && seen.enabled.get(id) != Some(&false))
+                .map(|(id, _)| *id)
+                .collect();
+            assert!(live_run_now.is_empty(), "no enabled 지금 실행 while the run is in progress at {w}");
+            assert!(
+                seen.texts.iter().any(|(id, t)| t == RUN_NOW_BUSY_LABEL && seen.enabled.get(id) == Some(&false)),
+                "a disabled {RUN_NOW_BUSY_LABEL} button stands in for it at {w}"
+            );
+            compose_rust::window::reset_window_size();
+        }
+    }
+
+    #[test]
+    fn fr_l25_remote_run_now_live_progress_and_error_rollback() {
+        let _guard = crate::services::test_guard();
+        let svc = crate::services::test_services();
+        with_store(|s| *s = LocalStore::default());
+        with_remote(|r| *r = Remote::default());
+
+        let state = std::sync::Arc::new(std::sync::Mutex::new((
+            None::<ember_client::wire::RunStatus>,
+            false,
+        )));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let addr = listener.local_addr().expect("local addr");
+        let state_srv = std::sync::Arc::clone(&state);
+
+        svc.rt.spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let state_req = std::sync::Arc::clone(&state_srv);
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or("");
+                    let (run_st, fail_run) = *state_req.lock().unwrap();
+                    let status_str = match run_st {
+                        Some(ember_client::wire::RunStatus::Completed) => "completed",
+                        Some(ember_client::wire::RunStatus::Running) | None => "running",
+                        _ => "failed",
+                    };
+                    let (code, body) = if first_line.starts_with("POST /api/schedules/sch-live/run") {
+                        if fail_run {
+                            ("500 Internal Server Error", r#"{"error":"runner down"}"#.to_string())
+                        } else {
+                            (
+                                "200 OK",
+                                format!(
+                                    r#"{{"id":"run-1","schedule_id":"sch-live","scheduled_at":1700000000000,"started_at":1700000000000,"ended_at":null,"status":"{status_str}","session_id":"ses-live-1","error":null}}"#
+                                ),
+                            )
+                        }
+                    } else if first_line.starts_with("GET /api/schedules/sch-live/runs") {
+                        let runs_json = match (fail_run, run_st) {
+                            (true, _) | (_, None) => "[]".to_string(),
+                            (false, Some(_)) => format!(
+                                r#"[{{"id":"run-1","schedule_id":"sch-live","scheduled_at":1700000000000,"started_at":1700000000000,"ended_at":1700000005000,"status":"{status_str}","session_id":"ses-live-1","error":null}}]"#
+                            ),
+                        };
+                        ("200 OK", runs_json)
+                    } else if first_line.starts_with("GET /api/schedules") {
+                        (
+                            "200 OK",
+                            r#"[{"id":"sch-live","project":"ember","agent":"claude-code","computer_id":null,"cwd":"/tmp","prompt":"CI 요약\n자세히","kind":{"type":"cron","expr":"0 9 * * *","tz":"UTC"},"target":{"type":"new","title":"CI 요약"},"catch_up":false,"paused":false,"next_run_at":1700003600000,"last_run_at":null,"created_at":1700000000000}]"#
+                                .to_string(),
+                        )
+                    } else {
+                        ("404 Not Found", r#"{"error":"not found"}"#.to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {code}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let api = ember_client::api::Api::new(&format!("http://{addr}")).expect("api");
+
+        // 1. Initial load from server populates REMOTE and entries_st with 0 runs.
+        let initial_list = svc.rt.block_on(load_remote_from(&api)).expect("initial load");
+        assert_eq!(initial_list.len(), 1);
+        assert_eq!(initial_list[0].routine.id, "sch-live");
+        assert!(initial_list[0].runs.is_empty());
+
+        let entries_st = mutable_state_of(Vec::<Entry>::new());
+        let online_st = mutable_state_of(false);
+        apply_load(Ok(initial_list));
+        sync_from_remote(&entries_st, &online_st);
+        assert!(online_st.get());
+        assert_eq!(entries_st.get().len(), 1);
+        assert!(!has_running_remote_run(false, online_st.get(), &entries_st.get()));
+
+        // 2. Error path first: if POST /api/schedules/{id}/run fails, the optimistic Running
+        // placeholder is rolled back even if load_remote also fails.
+        state.lock().unwrap().1 = true;
+        begin_remote_run_now("sch-live", 100, &entries_st).expect("begin optimistic run");
+        assert!(has_running_remote_run(false, online_st.get(), &entries_st.get()));
+        let err_res = svc.rt.block_on(api.run_schedule("sch-live"));
+        assert!(err_res.is_err());
+        let err_list = svc.rt.block_on(load_remote_from(&api));
+        let err_msg = finish_remote_run_now("sch-live", err_res, err_list, &entries_st, &online_st);
+        assert!(
+            err_msg.starts_with("서버가 요청을 처리하지 못했습니다:"),
+            "unexpected error notice: {err_msg}"
+        );
+        assert!(
+            entries_st.get()[0].runs.is_empty(),
+            "optimistic Running placeholder must be rolled back when run_schedule fails"
+        );
+        assert!(!has_running_remote_run(false, online_st.get(), &entries_st.get()));
+
+        // Also verify rollback when load_remote itself fails with a status error.
+        begin_remote_run_now("sch-live", 101, &entries_st).expect("begin optimistic run 2");
+        let err_res2 = svc.rt.block_on(api.run_schedule("sch-live"));
+        let err_load = Err(ember_client::api::ApiError::Status {
+            status: 500,
+            message: "db locked".into(),
+            code: None,
+        });
+        let _ = finish_remote_run_now("sch-live", err_res2, err_load, &entries_st, &online_st);
+        assert!(
+            entries_st.get()[0].runs.is_empty(),
+            "optimistic placeholder must be rolled back even when load_remote fails"
+        );
+
+        // 3. Live progress path: Running -> polling -> Completed (완료).
+        *state.lock().unwrap() = (Some(ember_client::wire::RunStatus::Running), false);
+        begin_remote_run_now("sch-live", 102, &entries_st).expect("begin live run");
+        assert_eq!(entries_st.get()[0].runs.len(), 1);
+        assert_eq!(entries_st.get()[0].runs[0].status, RunStatus::Running);
+        assert_eq!(entries_st.get()[0].runs[0].session, None);
+
+        let ok_res = svc.rt.block_on(api.run_schedule("sch-live"));
+        let list_running = svc.rt.block_on(load_remote_from(&api));
+        let ok_msg = finish_remote_run_now("sch-live", ok_res, list_running, &entries_st, &online_st);
+        assert_eq!(ok_msg, REMOTE_RUN_STARTED);
+        assert_eq!(entries_st.get()[0].runs.len(), 1);
+        assert_eq!(entries_st.get()[0].runs[0].status, RunStatus::Running);
+        assert_eq!(
+            entries_st.get()[0].runs[0].session.as_deref(),
+            Some("ses-live-1")
+        );
+        assert!(
+            has_running_remote_run(false, online_st.get(), &entries_st.get()),
+            "while server run is Running, has_running_remote_run must stay true to keep polling"
+        );
+
+        // Server transitions run-1 to Completed; next poll syncs Done ("완료") and stops polling.
+        state.lock().unwrap().0 = Some(ember_client::wire::RunStatus::Completed);
+        let polled = svc.rt.block_on(load_remote_from(&api));
+        apply_load(polled);
+        sync_from_remote(&entries_st, &online_st);
+        assert_eq!(entries_st.get()[0].runs.len(), 1);
+        assert_eq!(entries_st.get()[0].runs[0].status, RunStatus::Done);
+        assert_eq!(entries_st.get()[0].runs[0].status.label(), "완료");
+        assert_eq!(
+            entries_st.get()[0].runs[0].session.as_deref(),
+            Some("ses-live-1")
+        );
+        assert!(
+            !has_running_remote_run(false, online_st.get(), &entries_st.get()),
+            "once server run is Completed, polling stops"
+        );
+
+        with_remote(|r| *r = Remote::default());
     }
 }

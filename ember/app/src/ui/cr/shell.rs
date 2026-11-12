@@ -838,7 +838,11 @@ pub fn launch_parts(pref: ThemePref) -> (compose_rust::LaunchBuilder, fn()) {
             shell
         }
         Some("conversation") => {
-            ui.open_conversation("demo-s1");
+            let sid = std::env::var("EMBER_CR_SESSION")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| "demo-s1".to_string());
+            ui.open_conversation(&sid);
             shell
         }
         _ => shell,

@@ -411,7 +411,7 @@ fn fr_e6_plist_parses_all_value_types_and_xml_constructs() {
     <key>int_neg</key>
     <integer>-17</integer>
     <key>real_pos</key>
-    <real>3.1415</real>
+    <real>2.5</real>
     <key>real_neg</key>
     <real>-0.5</real>
     <key>bool_true_self</key>
@@ -462,7 +462,7 @@ fn fr_e6_plist_parses_all_value_types_and_xml_constructs() {
     assert_eq!(obj.get("string_open_close").and_then(Value::as_str), Some(""));
     assert_eq!(obj.get("int_pos").and_then(Value::as_i64), Some(42));
     assert_eq!(obj.get("int_neg").and_then(Value::as_i64), Some(-17));
-    assert_eq!(obj.get("real_pos").and_then(Value::as_f64), Some(3.1415));
+    assert_eq!(obj.get("real_pos").and_then(Value::as_f64), Some(2.5));
     assert_eq!(obj.get("real_neg").and_then(Value::as_f64), Some(-0.5));
     assert_eq!(obj.get("bool_true_self"), Some(&Value::Bool(true)));
     assert_eq!(obj.get("bool_true_open"), Some(&Value::Bool(true)));

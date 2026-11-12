@@ -21,6 +21,16 @@ pub enum Payload {
     GotoLine { line: usize, column: Option<usize> },
     /// An extension command, by its id.
     ExtensionCommand(String),
+    /// Change the active document's line ending (FR-L31.7).
+    SetEol(ember_editor::Eol),
+    /// Go on to the encoding list for reopening or saving (FR-L31.7).
+    EncodingAction(ember_editor::EncodingMode),
+    /// Reopen or save the active document in an encoding (FR-L31.7).
+    SetEncoding { mode: ember_editor::EncodingMode, encoding: ember_editor::Encoding },
+    /// Put the active document under a language id; `None` is 자동 감지 (FR-L31.7).
+    SetLanguage(Option<String>),
+    /// Close the picker and do nothing.
+    Cancel,
 }
 
 /// One line of the palette.
@@ -208,7 +218,8 @@ pub fn move_selection(selected: usize, len: usize, down: bool) -> usize {
     }
 }
 
-/// What the palette lists: commands, files, both, go-to-line, or recent files.
+/// What the palette lists: commands, files, both, go-to-line, or recent files; or one of the status
+/// bar's pickers (FR-L31.7, rows from `editor_status`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Commands,
@@ -216,6 +227,21 @@ pub enum Mode {
     Everything,
     GotoLine,
     Recent,
+    /// LF or CRLF.
+    Eol,
+    /// 인코딩으로 다시 열기 or 인코딩으로 저장.
+    EncodingAction,
+    /// The encodings, for reopening or saving.
+    Encoding(ember_editor::EncodingMode),
+    /// Discard unsaved edits to reopen in this encoding?
+    ConfirmReopen(ember_editor::Encoding),
+    /// The language modes.
+    Language,
+}
+
+/// Does the mode list the file index (so the index notes apply)?
+pub fn lists_files(mode: Mode) -> bool {
+    matches!(mode, Mode::Files | Mode::Everything | Mode::Recent)
 }
 
 /// The mode an action opens the palette in. `Find` follows the keymap's own meaning of it.
@@ -237,6 +263,12 @@ pub fn placeholder(mode: Mode, keymap: Keymap) -> &'static str {
         Mode::Files | Mode::Everything => keymap.find_label(),
         Mode::GotoLine => "이동할 줄 번호 입력",
         Mode::Recent => "최근 파일",
+        Mode::Eol => "줄 끝 시퀀스 선택",
+        Mode::EncodingAction => "작업 선택",
+        Mode::Encoding(ember_editor::EncodingMode::Reopen) => "다시 열 때 사용할 파일 인코딩 선택",
+        Mode::Encoding(ember_editor::EncodingMode::Save) => "저장할 때 사용할 파일 인코딩 선택",
+        Mode::ConfirmReopen(_) => "저장하지 않은 변경 사항을 버리고 다른 인코딩으로 다시 여시겠습니까?",
+        Mode::Language => "언어 모드 선택",
     }
 }
 
@@ -340,7 +372,8 @@ pub fn items_for_workbench(
             items.extend(prioritize_recent_files(folder, files, recent_paths));
             items
         }
-        Mode::GotoLine => Vec::new(),
+        // The status bar's pickers get their rows from `editor_status::picker_items`.
+        Mode::GotoLine | Mode::Eol | Mode::EncodingAction | Mode::Encoding(_) | Mode::ConfirmReopen(_) | Mode::Language => Vec::new(),
     }
 }
 
@@ -472,6 +505,10 @@ pub fn search_label(mode: Mode) -> &'static str {
         Mode::Everything => "파일과 명령 검색",
         Mode::GotoLine => "줄 번호 검색",
         Mode::Recent => "최근 파일 검색",
+        Mode::Eol => "줄 끝 시퀀스 검색",
+        Mode::EncodingAction => "인코딩 작업 검색",
+        Mode::Encoding(_) | Mode::ConfirmReopen(_) => "인코딩 검색",
+        Mode::Language => "언어 모드 검색",
     }
 }
 

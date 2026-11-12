@@ -84,15 +84,22 @@ pub fn zoom_level_after(action: Action, level: i8) -> Option<i8> {
 /// (`workbench.action.reopenClosedEditor`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClosedEditors {
-    paths: Vec<String>,
+    /// The path and the tab index it had when it closed.
+    paths: Vec<(String, usize)>,
 }
 
 impl ClosedEditors {
     /// Remember a closed editor. Closing the same file again moves it to the top; the oldest
     /// drops off past [`MAX_CLOSED_EDITORS`].
     pub fn push(&mut self, path: &str) {
-        self.paths.retain(|p| p != path);
-        self.paths.push(path.to_string());
+        self.push_at(path, usize::MAX);
+    }
+
+    /// Remember a closed editor with the tab index it had, so it reopens in its old place as in
+    /// Code-OSS.
+    pub fn push_at(&mut self, path: &str, index: usize) {
+        self.paths.retain(|(p, _)| p != path);
+        self.paths.push((path.to_string(), index));
         if self.paths.len() > MAX_CLOSED_EDITORS {
             self.paths.remove(0);
         }
@@ -101,9 +108,14 @@ impl ClosedEditors {
     /// The editor to reopen, skipping the ones `is_open` says are open again (Code-OSS does not
     /// reopen an editor that is already open).
     pub fn pop(&mut self, is_open: impl Fn(&str) -> bool) -> Option<String> {
-        while let Some(p) = self.paths.pop() {
+        self.pop_at(is_open).map(|(p, _)| p)
+    }
+
+    /// [`ClosedEditors::pop`] with the tab index the editor had.
+    pub fn pop_at(&mut self, is_open: impl Fn(&str) -> bool) -> Option<(String, usize)> {
+        while let Some((p, i)) = self.paths.pop() {
             if !is_open(&p) {
-                return Some(p);
+                return Some((p, i));
             }
         }
         None
@@ -111,7 +123,7 @@ impl ClosedEditors {
 
     /// Forget the editors at or below a path that was deleted, so they are not reopened.
     pub fn forget_below(&mut self, path: &str) {
-        self.paths.retain(|p| !super::editor::is_at_or_below(p, path));
+        self.paths.retain(|(p, _)| !super::editor::is_at_or_below(p, path));
     }
 
     pub fn is_empty(&self) -> bool {

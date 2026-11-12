@@ -166,7 +166,7 @@ impl EditorTabs {
     /// one before it; closing another one keeps the current tab.
     pub fn close(&mut self, path: &str) {
         let Some(i) = self.index(path) else { return };
-        self.closed.push(path);
+        self.closed.push_at(path, i);
         self.tabs.remove(i);
         self.current = match self.current {
             _ if self.tabs.is_empty() => None,
@@ -217,15 +217,16 @@ impl EditorTabs {
     pub fn close_others(&mut self) -> Vec<String> {
         let Some(cur) = self.current else { return Vec::new() };
         let keep = self.tabs[cur].clone();
-        let closed: Vec<String> = self
+        let closed: Vec<(usize, String)> = self
             .tabs
             .iter()
             .enumerate()
-            .filter_map(|(i, (p, _))| (i != cur).then(|| p.clone()))
+            .filter_map(|(i, (p, _))| (i != cur).then(|| (i, p.clone())))
             .collect();
-        for p in &closed {
-            self.closed.push(p);
+        for (i, p) in &closed {
+            self.closed.push_at(p, *i);
         }
+        let closed: Vec<String> = closed.into_iter().map(|(_, p)| p).collect();
         self.tabs = vec![keep];
         self.current = Some(0);
         closed
@@ -235,8 +236,11 @@ impl EditorTabs {
     /// that is not open again, and return its path.
     pub fn reopen_closed(&mut self) -> Option<String> {
         let open: Vec<String> = self.tabs.iter().map(|(p, _)| p.clone()).collect();
-        let path = self.closed.pop(|p| open.iter().any(|o| o == p))?;
-        self.open(&path);
+        let (path, index) = self.closed.pop_at(|p| open.iter().any(|o| o == p))?;
+        // Code-OSS puts a reopened editor back at the index it had, or last when fewer tabs are left.
+        let at = index.min(self.tabs.len());
+        self.tabs.insert(at, (path.clone(), false));
+        self.current = Some(at);
         Some(path)
     }
 
@@ -1134,6 +1138,8 @@ pub fn is_implemented(action: Action) -> bool {
                 | Action::Save
                 | Action::MaximizeTool
                 | Action::ReopenClosed
+                | Action::Palette
+                | Action::Find
                 | Action::ZoomIn
                 | Action::ZoomOut
                 | Action::ZoomReset
@@ -1508,6 +1514,7 @@ mod tests {
         tabs.close("/w/b");
         assert_eq!(tabs.reopen_closed().as_deref(), Some("/w/b"));
         assert_eq!(tabs.current_path(), Some("/w/b"));
+        assert_eq!(tabs.paths(), vec!["/w/a", "/w/b", "/w/c"], "a reopened tab goes back to its old place");
         tabs.activate("/w/a");
         assert_eq!(tabs.close_others(), vec!["/w/b".to_string(), "/w/c".to_string()]);
         assert_eq!(tabs.reopen_closed().as_deref(), Some("/w/c"));

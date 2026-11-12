@@ -12,6 +12,7 @@ import com.intellij.openapi.vfs.VirtualFile
 import dev.darkpyonix.intellij.format.NotebookFormat
 import dev.darkpyonix.intellij.manager.ManagerClient
 import dev.darkpyonix.intellij.manager.ManagerDiscovery
+import dev.darkpyonix.intellij.manager.SpawnedManager
 import dev.darkpyonix.intellij.settings.DarkPyonixSettings
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
@@ -43,6 +44,12 @@ class NotebookService(val project: Project) : Disposable {
         fun getInstance(project: Project): NotebookService = project.getService(NotebookService::class.java)
 
         const val NOTIFICATION_GROUP = "DarkPyonix"
+
+        private val spawnLock = Any()
+
+        /** The ephemeral manager this IDE process started; it ends on its own idle timeout. */
+        @Volatile
+        private var spawned: SpawnedManager? = null
     }
 
     fun session(file: VirtualFile?): NotebookSession? = file?.let { sessions[it.path] }
@@ -73,8 +80,10 @@ class NotebookService(val project: Project) : Disposable {
     }
 
     /**
-     * The manager to talk to: the configured dedicated manager, else a registered live one
-     * (FR-C1). With [spawn], starts an ephemeral manager when none is registered. Blocking.
+     * The manager to talk to (SPEC FR-C1, like the CLI): the settings URL + token, else
+     * `DARKPYONIX_MANAGER_URL` + `DARKPYONIX_TOKEN`, else the ephemeral manager this IDE spawned
+     * (spawned on first use when [spawn]; one per IDE process, shared by every project).
+     * Blocking.
      */
     fun managerClient(spawn: Boolean): ManagerClient? {
         val settings = DarkPyonixSettings.getInstance()
@@ -82,16 +91,29 @@ class NotebookService(val project: Project) : Disposable {
         synchronized(managerLock) {
             manager?.let { if (it.health()) return it }
             manager = null
-            val url = settings.state.managerUrl?.trim().orEmpty()
-            if (url.isNotEmpty()) {
-                val c = ManagerClient(url, settings.state.managerToken.orEmpty(), identity)
-                if (c.health()) manager = c
-                return manager ?: throw IOException("The dedicated manager at $url does not answer /health.")
-            }
             val discovery = ManagerDiscovery()
-            manager = discovery.findLive(identity)
-            if (manager == null && spawn) manager = discovery.spawnEphemeral(settings.spawnCommand(), identity)
-            return manager
+            val given = discovery.configured(settings.state.managerUrl, settings.state.managerToken)
+            if (given != null) {
+                val c = ManagerClient(given.url, given.token, identity)
+                if (!c.health()) throw IOException("The manager at ${given.url} does not answer /health.")
+                manager = c
+                return c
+            }
+            synchronized(spawnLock) {
+                spawned?.let {
+                    val c = ManagerClient(it.announcement.url, it.announcement.token, identity)
+                    if (it.process.isAlive && c.health()) {
+                        manager = c
+                        return c
+                    }
+                }
+                spawned = null
+                if (!spawn) return null
+                val s = discovery.spawnEphemeral(settings.spawnCommand(), identity)
+                spawned = s
+                manager = s.client
+                return s.client
+            }
         }
     }
 

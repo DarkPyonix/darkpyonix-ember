@@ -201,7 +201,9 @@ class NotebookSession(
     }
 
     private fun connect(startKernel: Boolean): Boolean {
-        val c = service.managerClient(spawn = startKernel) ?: run {
+        // Without registry files, attaching on open also needs a manager: spawn one (FR-C1).
+        // It only looks for the file's kernel; starting a kernel still waits for a run.
+        val c = service.managerClient(spawn = true) ?: run {
             setStatus("No DarkPyonix manager running")
             return false
         }

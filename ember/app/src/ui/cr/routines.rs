@@ -4018,6 +4018,38 @@ mod tests {
         compose_rust::window::reset_window_size();
     }
 
+    /// What a test has seen of the tree so far: text, click handler and enabled flag per node.
+    #[derive(Default)]
+    struct Seen {
+        texts: std::collections::HashMap<u32, String>,
+        clickables: std::collections::HashMap<u32, u64>,
+        enabled: std::collections::HashMap<u32, bool>,
+    }
+
+    impl Seen {
+        fn scan(&mut self, batch: &[Mutation<'_>]) {
+            for m in batch {
+                match m {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        self.texts.insert(*node_id, s.to_string());
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                        self.clickables.insert(*node_id, *h as u64);
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::Enabled, value: PropertyValue::Bool(b) } => {
+                        self.enabled.insert(*node_id, *b);
+                    }
+                    Mutation::Remove { node_id } => {
+                        self.texts.remove(node_id);
+                        self.clickables.remove(node_id);
+                        self.enabled.remove(node_id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     /// While the run it started is in progress, 지금 실행 is disabled and reads 실행 중, at the
     /// wide header and the phone's icon header alike (FR-L25, #494).
     #[test]
@@ -4029,31 +4061,8 @@ mod tests {
             compose_rust::window::reset_window_size();
 
             let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreenWith(sample_entries(), true))));
-            let mut texts: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
-            let mut clickables: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
-            let mut enabled: std::collections::HashMap<u32, bool> = std::collections::HashMap::new();
-            let mut scan = |batch: &[Mutation<'_>]| {
-                for m in batch {
-                    match m {
-                        Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
-                            texts.insert(*node_id, s.to_string());
-                        }
-                        Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
-                            clickables.insert(*node_id, *h as u64);
-                        }
-                        Mutation::SetProp { node_id, property: PropertyKind::Enabled, value: PropertyValue::Bool(b) } => {
-                            enabled.insert(*node_id, *b);
-                        }
-                        Mutation::Remove { node_id } => {
-                            texts.remove(node_id);
-                            clickables.remove(node_id);
-                            enabled.remove(node_id);
-                        }
-                        _ => {}
-                    }
-                }
-            };
-            scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+            let mut seen = Seen::default();
+            seen.scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
             let resize = HostEvent {
                 node_id: 0,
                 handler_id: 0,
@@ -4068,32 +4077,32 @@ mod tests {
                 },
             };
             let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
-            scan(&decode_batch(bytes).expect("decode"));
+            seen.scan(&decode_batch(bytes).expect("decode"));
             if class == WindowSizeClass::Compact {
                 // The phone shows the list first; open the selected routine's detail.
                 svc.ui.detail_open.set(true);
-                scan(&decode_batch(host.render_frame(16_000_000).expect("render")).expect("decode"));
+                seen.scan(&decode_batch(host.render_frame(16_000_000).expect("render")).expect("decode"));
             }
 
-            let run_btn = texts
+            let run_btn = seen.texts
                 .iter()
-                .find(|(id, t)| *t == "지금 실행" && clickables.contains_key(id))
+                .find(|(id, t)| *t == "지금 실행" && seen.clickables.contains_key(id))
                 .map(|(id, _)| *id)
                 .unwrap_or_else(|| panic!("a clickable 지금 실행 at {w}"));
-            assert_ne!(enabled.get(&run_btn), Some(&false), "지금 실행 starts enabled at {w}");
+            assert_ne!(seen.enabled.get(&run_btn), Some(&false), "지금 실행 starts enabled at {w}");
             let (bytes, _) = host
-                .dispatch(HostEvent { node_id: run_btn, handler_id: clickables[&run_btn], payload: EventPayload::Clicked })
+                .dispatch(HostEvent { node_id: run_btn, handler_id: seen.clickables[&run_btn], payload: EventPayload::Clicked })
                 .expect("dispatch click on 지금 실행");
-            scan(&decode_batch(bytes).expect("decode"));
+            seen.scan(&decode_batch(bytes).expect("decode"));
 
-            let live_run_now: Vec<u32> = texts
+            let live_run_now: Vec<u32> = seen.texts
                 .iter()
-                .filter(|(id, t)| *t == "지금 실행" && enabled.get(id) != Some(&false))
+                .filter(|(id, t)| *t == "지금 실행" && seen.enabled.get(id) != Some(&false))
                 .map(|(id, _)| *id)
                 .collect();
             assert!(live_run_now.is_empty(), "no enabled 지금 실행 while the run is in progress at {w}");
             assert!(
-                texts.iter().any(|(id, t)| t == RUN_NOW_BUSY_LABEL && enabled.get(id) == Some(&false)),
+                seen.texts.iter().any(|(id, t)| t == RUN_NOW_BUSY_LABEL && seen.enabled.get(id) == Some(&false)),
                 "a disabled {RUN_NOW_BUSY_LABEL} button stands in for it at {w}"
             );
             compose_rust::window::reset_window_size();

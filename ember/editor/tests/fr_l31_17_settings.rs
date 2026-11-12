@@ -538,3 +538,12 @@ fn fr_l31_17_user_files_get_the_user_data_scheme() {
     // A file on the server is not a local file.
     assert_eq!(user_data_path(&UriComponents::remote("h", "/etc/passwd")), None);
 }
+
+#[test]
+fn fr_l31_17_server_settings_file_that_does_not_parse_reports_why() {
+    // #790: a broken .vscode/settings.json read at connect gave an empty scope and no reason.
+    let (_, error) = ember_editor::session::server_layer_from_bytes(b"{ \"editor.tabSize\": 2 }");
+    assert!(error.is_none(), "a file that parses has no error");
+    let (_, error) = ember_editor::session::server_layer_from_bytes(b"{ \"editor.tabSize\": ");
+    assert!(error.is_some(), "a parse error must come back");
+}

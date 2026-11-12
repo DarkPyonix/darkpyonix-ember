@@ -413,6 +413,21 @@ pub fn page_step(current: usize, count: usize, forward: bool) -> usize {
     }
 }
 
+/// The multi view's layout for a window width (mockup `session.css`): two panes per row
+/// from 700 dp, panes stacked one per row above 560 dp (`.mv` is a column there), and the
+/// sideways strip only at 560 dp and below. An unreported width falls back to the size class.
+pub fn multi_pane_layout(window_dp: f32, class: WindowSizeClass) -> PaneLayout {
+    if window_dp >= 700.0 {
+        PaneLayout { per_row: 2, paged: false }
+    } else if window_dp > 560.0 {
+        PaneLayout { per_row: 1, paged: false }
+    } else if window_dp > 0.0 {
+        PaneLayout { per_row: 1, paged: true }
+    } else {
+        pane_layout(class)
+    }
+}
+
 /// Width of one pane in the swipe strip that replaces the one-pane-at-a-time layout
 /// (mockup `session.css` at 560 px: `.mv` scrolls sideways with `padding` and `gap` of
 /// `--sp2`, each `.pane` is `calc(100% - 8px)`, so the next pane peeks in). `window_dp` is
@@ -1375,6 +1390,16 @@ pub fn session_count_rows(members: &[Member]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l18_multi_layout_stacks_at_600_and_strips_only_at_phone_width() {
+        let c = WindowSizeClass::Compact;
+        assert_eq!(super::multi_pane_layout(600.0, c), PaneLayout { per_row: 1, paged: false });
+        assert_eq!(super::multi_pane_layout(561.0, c), PaneLayout { per_row: 1, paged: false });
+        assert_eq!(super::multi_pane_layout(560.0, c), PaneLayout { per_row: 1, paged: true });
+        assert_eq!(super::multi_pane_layout(390.0, c), PaneLayout { per_row: 1, paged: true });
+        assert_eq!(super::multi_pane_layout(1024.0, c), PaneLayout { per_row: 2, paged: false });
+    }
+
     #[test]
     fn fr_l18_swipe_pane_width_leaves_the_next_pane_peeking() {
         assert_eq!(super::swipe_pane_width(390.0), 366.0);

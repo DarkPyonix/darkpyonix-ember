@@ -35,7 +35,7 @@ pub use crate::ui::session::{
     PaneToggle, ProjectPanes, SIDE_LIST_W, SOON, Section, SessionView, SideListMode, UI_STRINGS,
     add_pane, can_move, close_pane, current_mode, environment_rows, ide_choices, kanban,
     kanban_column, lease_plan, mode_chip_label, mode_chip_warns, mode_rows, model_chip_label,
-    move_pane, pane_layout, pane_rows, swipe_pane_width, reorder_pane, resolve_project, side_list_mode,
+    move_pane, multi_pane_layout, pane_rows, swipe_pane_width, reorder_pane, resolve_project, side_list_mode,
     side_sections, single_target, toolbar_fold_level, toolbar_width, view_chips_below,
     view_from_saved, visible_panes,
 };
@@ -1608,14 +1608,7 @@ pub fn MultiView(
     let ui = shared_ui().clone();
     let window = current_window_size();
     let p = ember_theme().palette;
-    let layout = if window.width_dp >= 700.0 {
-        PaneLayout {
-            per_row: 2,
-            paged: false,
-        }
-    } else {
-        pane_layout(window.class)
-    };
+    let layout = multi_pane_layout(window.width_dp, window.class);
     let proj_owned = project.to_string();
     let members_vec = members.to_vec();
 
@@ -1845,7 +1838,7 @@ pub fn MultiView(
                     } else if layout.paged {
                         // Sideways strip, one pane per screen width with the next one peeking
                         // in (mockup `.mv` at 560 px), instead of a previous / next pager.
-                        // TODO(compose-rust): no scroll snapping, so a swipe can stop between
+                        // TODO(compose-rust#547): no scroll snapping, so a swipe can stop between
                         // two panes (mockup `scroll-snap-type:x mandatory`).
                         let pane_w = swipe_pane_width(window.width_dp);
                         cu::ScrollRow()
@@ -4954,6 +4947,8 @@ mod tests {
         let paged = paged.split("let rows_idx = pane_rows(").next().unwrap();
         assert!(paged.contains("cu::ScrollRow()"));
         assert!(paged.contains(".width(pane_w)"));
+        assert!(paged.contains("TODO(compose-rust#547)"));
+        assert!(mv.contains("multi_pane_layout(window.width_dp, window.class)"));
         assert!(!paged.contains("\"이전\""));
         assert!(!paged.contains("\"다음\""));
     }

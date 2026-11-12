@@ -143,9 +143,28 @@ pub enum TermOrigin {
     IdeEmber,
 }
 
+/// What a new terminal runs (the node's `Program`): `None` in the request is the login shell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TermProgram {
+    /// Run this argv directly (no shell).
+    Argv(Vec<String>),
+    /// Run through `/bin/sh -c` on the node.
+    Shell(String),
+}
+
+/// A terminal to start for a task (FR-L31.16): always a new session (no key).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TermLaunch {
+    pub program: TermProgram,
+    pub cwd: String,
+    pub env: std::collections::BTreeMap<String, String>,
+    pub title: String,
+}
+
 #[derive(Serialize)]
 pub struct TermCreateRequest {
-    pub program: Option<()>,
+    pub program: Option<TermProgram>,
     pub cwd: std::path::PathBuf,
     pub env: std::collections::BTreeMap<String, String>,
     pub env_clear: bool,
@@ -836,6 +855,30 @@ pub fn start(
     project: &str,
     on_change: Option<ChangeCallback>,
 ) -> TerminalHandle {
+    start_with(base_url, computer_id, folder, project, None, on_change)
+}
+
+/// Start a new terminal on `computer_id` that runs `launch` (a task of the 실행 window,
+/// FR-L31.16) and attach to it. The session is the project's (listings filter on `project`).
+pub fn start_task(
+    base_url: &str,
+    computer_id: &str,
+    project: &str,
+    launch: TermLaunch,
+    on_change: Option<ChangeCallback>,
+) -> TerminalHandle {
+    let folder = launch.cwd.clone();
+    start_with(base_url, computer_id, &folder, project, Some(launch), on_change)
+}
+
+fn start_with(
+    base_url: &str,
+    computer_id: &str,
+    folder: &str,
+    project: &str,
+    launch: Option<TermLaunch>,
+    on_change: Option<ChangeCallback>,
+) -> TerminalHandle {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let shared = Arc::new(Shared {
         session: Mutex::new(TerminalSession::new()),
@@ -855,7 +898,7 @@ pub fn start(
         let mut rx = rx;
         let mut policy = Reconnect::default();
         loop {
-            let end = match run(&task_shared, &base, &computer, &folder, &project, &mut rx, &mut policy).await {
+            let end = match run(&task_shared, &base, &computer, &folder, &project, launch.clone(), &mut rx, &mut policy).await {
                 Ok(end) => end,
                 Err(e) => {
                     // The raw text goes to the log; the panel shows a fixed sentence.
@@ -866,6 +909,12 @@ pub fn start(
                 }
             };
             let Some(shared) = task_shared.upgrade() else { return };
+            // A task terminal has no key (FR-L31.16): attaching again would start the task a second
+            // time, so its stream is not retried (FR-L31.22 covers the keyed panel shell).
+            if launch.is_some() {
+                shared.update(|s| s.disconnected());
+                return;
+            }
             match policy.on_end(end) {
                 Next::Stop => {
                     shared.update(|s| s.disconnected());
@@ -947,6 +996,7 @@ async fn run(
     computer: &str,
     folder: &str,
     project: &str,
+    launch: Option<TermLaunch>,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
     policy: &mut crate::terminal_reconnect::Reconnect,
 ) -> Result<crate::terminal_reconnect::StreamEnd, ClientError> {
@@ -957,18 +1007,7 @@ async fn run(
         size
     };
     let size = PtySize { rows, cols };
-    let request = TermCreateRequest {
-        program: None,
-        cwd: folder.into(),
-        env: Default::default(),
-        env_clear: false,
-        size: Some(size),
-        origin: TermOrigin::IdeEmber,
-        project: Some(project.to_owned()),
-        title: None,
-        key: Some(session_key(project, folder)),
-        tags: Default::default(),
-    };
+    let request = task_request(folder, project, size, launch);
     // FR-L31.19: https is verified (webpki roots); plain http only where FR-S11 allows it.
     check_relay(base)?;
     ensure_tls_provider();
@@ -998,6 +1037,31 @@ async fn run(
     // Same key, so a reattach after a drop re-adopts the PTY the node kept (FR-P6); the hello
     // asks for a snapshot, which redraws the screen.
     stream(shared, base, computer, &created.term.id, hello, token, rx, Some(policy)).await
+}
+
+/// The create request: the panel's shell under the `"<project>:<folder>"` key, or a task's
+/// program in a new session with the task's title and no key (FR-L31.16).
+pub fn task_request(folder: &str, project: &str, size: PtySize, launch: Option<TermLaunch>) -> TermCreateRequest {
+    let base = TermCreateRequest {
+        program: None,
+        cwd: folder.into(),
+        env: Default::default(),
+        env_clear: false,
+        size: Some(size),
+        origin: TermOrigin::IdeEmber,
+        project: Some(project.to_owned()),
+        title: None,
+        key: Some(session_key(project, folder)),
+        tags: Default::default(),
+    };
+    match launch {
+        None => base,
+        Some(l) => {
+            let mut tags = std::collections::BTreeMap::new();
+            tags.insert("ember.task".to_string(), l.title.clone());
+            TermCreateRequest { program: Some(l.program), cwd: l.cwd.into(), env: l.env, title: Some(l.title), key: None, tags, ..base }
+        }
+    }
 }
 
 /// Attaches to terminal `term_id` with `hello` as the first frame and runs until it ends.
@@ -1141,6 +1205,28 @@ mod tests {
         assert_eq!(hello["snapshot"], true);
         assert_eq!(hello["kind"], "ember-app");
         assert!(hello["size"].is_null());
+    }
+
+    #[test]
+    fn fr_l31_16_a_task_terminal_is_a_new_session_running_the_program() {
+        let size = PtySize { rows: 24, cols: 80 };
+        let panel = serde_json::to_value(task_request("/w", "/w", size, None)).unwrap();
+        assert_eq!(panel["program"], serde_json::Value::Null);
+        assert_eq!(panel["key"], "/w:/w");
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("A".to_string(), "1".to_string());
+        let launch = TermLaunch { program: TermProgram::Shell("cargo build".into()), cwd: "/w/sub".into(), env, title: "build".into() };
+        let json = serde_json::to_value(task_request("/w/sub", "/w", size, Some(launch))).unwrap();
+        // The node's `Program` is snake_case and externally tagged.
+        assert_eq!(json["program"], serde_json::json!({"shell": "cargo build"}));
+        assert_eq!(json["cwd"], "/w/sub");
+        assert_eq!(json["env"]["A"], "1");
+        assert_eq!(json["title"], "build");
+        assert_eq!(json["key"], serde_json::Value::Null, "every run is a new terminal");
+        assert_eq!(json["project"], "/w");
+        assert_eq!(json["origin"], "ide-ember");
+        let argv = serde_json::to_value(TermProgram::Argv(vec!["node".into(), "a.js".into()])).unwrap();
+        assert_eq!(argv, serde_json::json!({"argv": ["node", "a.js"]}));
     }
 
     #[test]

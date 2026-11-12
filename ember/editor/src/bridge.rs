@@ -68,11 +68,7 @@ pub enum BridgeAction {
     /// Saving a document failed.
     SaveFailed { uri: UriComponents, error: String },
     /// An extension notification surfaced to the workbench.
-    ExtensionNotice {
-        severity: crate::output::MessageSeverity,
-        message: String,
-        source: Option<String>,
-    },
+    ExtensionNotice(crate::output::ExtensionMessage),
     /// Running an extension command failed.
     CommandFailed { id: String, error: String },
     /// Reopening a document with an encoding failed (FR-L31.7).
@@ -129,7 +125,6 @@ pub struct WidgetBridge {
     problems: Vec<crate::diagnostics::Problem>,
     output_channels: Vec<crate::output::OutputChannel>,
     active_output_channel: Option<String>,
-    extension_messages: Vec<crate::output::ExtensionMessage>,
 }
 
 impl WidgetBridge {
@@ -160,11 +155,6 @@ impl WidgetBridge {
         if let Some(ch) = self.output_channels.iter_mut().find(|c| c.id == id) {
             ch.clear();
         }
-    }
-
-    /// Recent extension messages reported by the session.
-    pub fn extension_messages(&self) -> &[crate::output::ExtensionMessage] {
-        &self.extension_messages
     }
 
     /// Apply one [`SessionUpdate`] and return any [`BridgeAction`] the UI layer must handle.
@@ -323,14 +313,8 @@ impl WidgetBridge {
                 }
                 BridgeAction::None
             }
-            SessionUpdate::ExtensionMessage { severity, message, source } => {
-                self.extension_messages.push(crate::output::ExtensionMessage {
-                    severity,
-                    message: message.clone(),
-                    source: source.clone(),
-                });
-                BridgeAction::ExtensionNotice { severity, message, source }
-            }
+            // The workbench keeps the toasts and the center (`notifications::Notifications`).
+            SessionUpdate::ExtensionMessage(message) => BridgeAction::ExtensionNotice(message),
             SessionUpdate::Commands { .. } | SessionUpdate::Languages { .. } => BridgeAction::None,
             // The window's trust prompt handles it (FR-L31.18).
             SessionUpdate::WorkspaceTrustRequested => BridgeAction::None,

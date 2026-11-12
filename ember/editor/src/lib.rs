@@ -56,6 +56,7 @@ pub mod semantic;
 pub mod textmate;
 pub mod text_format;
 pub mod trust;
+pub mod notifications;
 pub mod session;
 pub mod widget;
 
@@ -69,7 +70,7 @@ pub use crate::languages::LanguageInfo;
 pub use crate::text_format::{DocumentFormat, Encoding, EncodingMode, Eol};
 pub use crate::coords::{WidgetPos, WidgetRange};
 pub use crate::session::{DirLister, EditorSession, SessionConfig};
-pub use crate::output::{ExtensionMessage, MessageSeverity, OutputChannel, MAX_OUTPUT_CHANNEL_BYTES};
+pub use crate::output::{ExtensionMessage, MessageAction, MessageSeverity, OutputChannel, MAX_OUTPUT_CHANNEL_BYTES};
 pub use crate::widget::{
     Decoration, DecorationId, DecorationKind, HoverPhase, Severity, WidgetCommand, WidgetEvent,
     DECORATION_RECORD_LEN,

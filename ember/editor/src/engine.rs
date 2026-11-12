@@ -125,6 +125,9 @@ pub enum Input {
     SetLanguage { uri: UriComponents, language_id: Option<String> },
     /// The user's answer to the workspace trust prompt (FR-L31.18): `true` grants trust.
     DecideWorkspaceTrust { trusted: bool },
+    /// The user closed extension message `id`: with the chosen button's handle, or `None` for
+    /// `undefined` (FR-L31.16).
+    AnswerMessage { id: u64, handle: Option<i64> },
     /// Nothing happened; run due timers.
     Tick,
 }
@@ -194,8 +197,9 @@ pub enum SessionUpdate {
     Problems { problems: Vec<crate::diagnostics::Problem> },
     /// Output channels changed (channels list, or an append/clear).
     OutputChannels { channels: Vec<crate::output::OutputChannel>, active_id: Option<String> },
-    /// An extension surfaced a notification message ($showMessage).
-    ExtensionMessage { severity: crate::output::MessageSeverity, message: String, source: Option<String> },
+    /// An extension surfaced a notification message ($showMessage). The call stays open until
+    /// [`Input::AnswerMessage`] names its id (FR-L31.16).
+    ExtensionMessage(crate::output::ExtensionMessage),
     /// Commands contributed by extensions or registered at runtime.
     Commands { commands: Vec<crate::commands::ContributedCommand> },
     /// More matches of search `id` (FR-E7), in arrival order.
@@ -304,6 +308,9 @@ pub struct SessionCore {
     trust: crate::trust::WorkspaceTrust,
     output_seq: u64,
     output_channels: Vec<crate::output::OutputChannel>,
+    /// Open `$showMessage` calls by Ember message id (FR-L31.16).
+    pending_messages: HashMap<u64, u32>,
+    next_message_id: u64,
     touched: BTreeSet<String>,
     out: Vec<Effect>,
     now: Instant,
@@ -364,6 +371,8 @@ impl SessionCore {
             trust: crate::trust::WorkspaceTrust::default(),
             output_seq: 0,
             output_channels: Vec::new(),
+            pending_messages: HashMap::new(),
+            next_message_id: 0,
             touched: BTreeSet::new(),
             out: Vec::new(),
             now,
@@ -397,6 +406,12 @@ impl SessionCore {
             Input::SetEncoding { uri, encoding, mode } => self.on_set_encoding(&uri, encoding, mode),
             Input::SetLanguage { uri, language_id } => self.on_set_language(&uri, language_id),
             Input::DecideWorkspaceTrust { trusted } => self.on_decide_trust(trusted),
+            Input::AnswerMessage { id, handle } => {
+                if let Some(req) = self.pending_messages.remove(&id) {
+                    let reply = match handle { Some(h) => Reply::Json(Value::from(h)), None => Reply::Empty };
+                    self.respond(req, Ok(reply));
+                }
+            }
             Input::Tick => {}
         }
         self.run_timers();
@@ -1517,14 +1532,15 @@ impl SessionCore {
                 });
                 self.respond(r.req, Ok(Reply::Empty));
             }
-            Ok(MainThreadCall::ShowMessage { severity, message, options, .. }) => {
-                let source = options.get("source").and_then(|v| v.as_str()).map(str::to_owned);
-                self.ui(SessionUpdate::ExtensionMessage {
-                    severity: crate::output::MessageSeverity::from_u8(severity),
-                    message,
-                    source,
-                });
-                self.respond(r.req, Ok(Reply::Empty));
+            Ok(MainThreadCall::ShowMessage { severity, message, options, commands }) => {
+                // Code-OSS answers when the notification closes: the chosen button's handle, or
+                // `undefined`. The call stays open until the UI says (FR-L31.16).
+                self.next_message_id += 1;
+                let id = self.next_message_id;
+                self.pending_messages.insert(id, r.req);
+                self.ui(SessionUpdate::ExtensionMessage(crate::output::ExtensionMessage::from_show_message(
+                    id, severity, message, &options, &commands,
+                )));
             }
             Ok(MainThreadCall::RegisterTextSearchProvider { handle, scheme }) => {
                 // The remote scheme wins over `file` should both ever be registered.

@@ -469,6 +469,7 @@ dependencies = [
  "letify-link",
  "reqwest",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",

@@ -876,11 +876,12 @@ impl TransportBackend for LetifyBackend {
         if let Some(p) = self.inner.pkarr() {
             // Already running: only the token and the direct-address choice can change.
             p.store().set_token(hub.token);
+            p.store().set_watch(hub.watch);
             self.inner.publish_direct.store(hub.publish_direct, Ordering::Relaxed);
             p.republish();
             return Ok(());
         }
-        let store: Arc<dyn PkarrStore> = Arc::new(HttpPkarrStore::new(hub.pkarr_url, hub.token)?);
+        let store: Arc<dyn PkarrStore> = Arc::new(HttpPkarrStore::new(hub.pkarr_url, hub.token)?.with_watch(hub.watch));
         self.inner.start_pkarr(store, hub.publish_direct);
         Ok(())
     }

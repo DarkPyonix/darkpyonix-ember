@@ -167,7 +167,13 @@ async fn main() -> anyhow::Result<()> {
             Some(h) => Some(h.config()),
             None => hub_config,
         };
-        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), registered, token)).await?;
+        // The device token, for the hub's batched pkarr watch (header only, never a URL).
+        let device_token = match &hub {
+            Some(h) if registered => h.registration().ok().flatten().and_then(|r| r.active_token()),
+            _ => None,
+        };
+        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), registered, token, device_token))
+            .await?;
         if let Some(h) = &hub {
             h.attach_transport(t.clone());
             let _watch = h.spawn_watch(ember_server::hub::WATCH_PERIOD);

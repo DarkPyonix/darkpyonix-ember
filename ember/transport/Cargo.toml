@@ -13,7 +13,7 @@ iroh = ["dep:iroh", "dep:url"]
 # letify-link backend (SPEC FR-N5, INTENT D36): a Noise session over TCP paths, the main server as
 # relay. The default backend (INTENT D36); EMBER_TRANSPORT_BACKEND=iroh selects the legacy one. The only other place, besides
 # the iroh backend, where a transport library may be referenced.
-letify = ["dep:letify-link", "dep:reqwest"]
+letify = ["dep:letify-link", "dep:reqwest", "dep:serde_json"]
 # Serve / dial HTTP (axum, hyper) over transport streams.
 http = ["dep:axum", "dep:hyper", "dep:hyper-util"]
 # The NFR-N1 measurement binary.

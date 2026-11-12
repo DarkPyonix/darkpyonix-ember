@@ -69,7 +69,10 @@ async fn register_stores_a_private_registration_and_configures_the_transport() {
     // With the hub's /config, its advertised relay is used (an IP-address hub derives none).
     fake.set_config_relays(vec!["https://relay.example.net".into()]);
     let cfg = hub::discovered_transport_config(dir.path(), key.clone()).await.unwrap();
-    assert_eq!(cfg.hub.unwrap().pkarr_url, format!("{}/pkarr", fake.url()));
+    let directory = cfg.hub.clone().unwrap();
+    assert_eq!(directory.pkarr_url, format!("{}/pkarr", fake.url()));
+    // The advertised batched pkarr watch is used with the device token (FR-N2, #783).
+    assert!(directory.watch.is_some_and(|w| w.max_keys == 32), "the hub's pkarr_watch is used");
     if std::env::var_os(ember_transport::RELAY_URL_ENV).is_none() && std::env::var_os(ember_hub::HUB_RELAY_URL_ENV).is_none() {
         assert_eq!(cfg.relay, ember_transport::RelayConfig::Custom(vec!["https://relay.example.net".into()]));
     }
@@ -78,7 +81,9 @@ async fn register_stores_a_private_registration_and_configures_the_transport() {
     let cfg = hub::discovered_transport_config(dir.path(), key.clone()).await.unwrap();
     let plain = hub::transport_config(dir.path(), key.clone()).unwrap();
     assert_eq!(cfg.relay, plain.relay);
-    assert_eq!(cfg.hub.unwrap().pkarr_url, plain.hub.unwrap().pkarr_url);
+    let directory = cfg.hub.unwrap();
+    assert_eq!(directory.pkarr_url, plain.hub.unwrap().pkarr_url);
+    assert_eq!(directory.watch, None, "without /config, mailboxes are polled");
 }
 
 #[tokio::test]

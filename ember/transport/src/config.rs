@@ -262,11 +262,43 @@ pub struct HubDirectory {
     /// devices of the same account, so this is on by default; turn it off to keep IP addresses
     /// away from the hub (peers then always start relayed and upgrade by hole punching).
     pub publish_direct: bool,
+    /// The hub's batched long-poll watch (`GET /pkarr/watch`), when its `/config` advertises
+    /// `pkarr_watch` and this device has a device token. `None`: watched mailboxes are polled
+    /// adaptively (SPEC `FR-N2`, #783).
+    pub watch: Option<PkarrWatch>,
+}
+
+/// The hub's `GET /pkarr/watch` (core FR-H2, #132): one long-poll request for many keys.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PkarrWatch {
+    /// Keys per request (`/config` `pkarr_watch.max_keys`).
+    pub max_keys: usize,
+    /// The longest `wait` (`/config` `pkarr_watch.max_wait`).
+    pub max_wait: Duration,
+    /// This device's token (`dpd_...`), sent as `Authorization: Bearer`. The watch does not
+    /// accept the resolve token.
+    pub device_token: String,
+}
+
+impl std::fmt::Debug for PkarrWatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PkarrWatch")
+            .field("max_keys", &self.max_keys)
+            .field("max_wait", &self.max_wait)
+            .field("device_token", &"<redacted>")
+            .finish()
+    }
 }
 
 impl HubDirectory {
     pub fn new(pkarr_url: impl Into<String>) -> Self {
-        Self { pkarr_url: pkarr_url.into(), token: None, publish_direct: true }
+        Self { pkarr_url: pkarr_url.into(), token: None, publish_direct: true, watch: None }
+    }
+
+    /// Uses the hub's batched long-poll watch for watched mailboxes.
+    pub fn watch(mut self, watch: Option<PkarrWatch>) -> Self {
+        self.watch = watch;
+        self
     }
 
     pub fn token(mut self, token: Option<String>) -> Self {
@@ -286,6 +318,7 @@ impl std::fmt::Debug for HubDirectory {
             .field("pkarr_url", &self.pkarr_url)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
             .field("publish_direct", &self.publish_direct)
+            .field("watch", &self.watch)
             .finish()
     }
 }

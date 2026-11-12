@@ -30,7 +30,9 @@ use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 
 use crate::signal::{pkarr_signable, verify_pkarr_payload};
-use crate::{PeerId, PkarrStore, Result, SecretKey, SignalChannel, TransportError};
+use crate::{
+    PeerId, PkarrStore, PkarrWatch, Result, SecretKey, SignalChannel, TransportError, WatchLimits, WatchOutcome,
+};
 
 /// Largest DNS packet we publish.
 const MAX_DNS: usize = 1000;
@@ -40,6 +42,13 @@ const MAILBOX_BYTES: usize = 200;
 const MESSAGE_TTL_S: u32 = 120;
 /// The record is re-signed and published at least this often (its max age is 10 minutes).
 const REPUBLISH: Duration = Duration::from_secs(120);
+/// Least time between two watch requests, so a hub that answers at once cannot make the
+/// watcher spin (the hub allows about 6 a minute per token).
+const WATCH_MIN_GAP: Duration = Duration::from_secs(1);
+/// After a failed watch, mailboxes are polled adaptively for this long, doubling per failure
+/// up to [`WATCH_FALLBACK_MAX`], before the watch is tried again.
+const WATCH_FALLBACK_MIN: Duration = Duration::from_secs(30);
+const WATCH_FALLBACK_MAX: Duration = Duration::from_secs(600);
 /// DNS name of the address record.
 const RECORD_LABEL: &str = "_letify";
 
@@ -179,7 +188,61 @@ fn first_label(name: &str) -> &str {
 pub struct HttpPkarrStore {
     base: String,
     token: Mutex<Option<String>>,
+    /// The hub's `GET /pkarr/watch`, when advertised (core FR-H2, #132).
+    watch: Mutex<Option<PkarrWatch>>,
     client: reqwest::Client,
+}
+
+/// Decodes standard base64 with padding (the `packet` of `GET /pkarr/watch`).
+fn base64_std(s: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        } as u32)
+    }
+    let b = s.trim().as_bytes();
+    if b.len() % 4 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(b.len() / 4 * 3);
+    for (i, chunk) in b.chunks(4).enumerate() {
+        let last = i == b.len() / 4 - 1;
+        let pad = chunk.iter().rev().take_while(|&&c| c == b'=').count();
+        if pad > 2 || (pad > 0 && !last) {
+            return None;
+        }
+        let mut n = 0u32;
+        for &c in &chunk[..4 - pad] {
+            n = (n << 6) | val(c)?;
+        }
+        n <<= 6 * pad as u32;
+        let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        out.extend_from_slice(&bytes[..3 - pad]);
+    }
+    Some(out)
+}
+
+#[derive(serde::Deserialize)]
+struct WatchBody {
+    #[serde(default)]
+    records: Vec<WatchRecord>,
+}
+
+#[derive(serde::Deserialize)]
+struct WatchRecord {
+    key: String,
+    packet: String,
+}
+
+#[derive(serde::Deserialize)]
+struct NotFoundBody {
+    #[serde(default)]
+    keys: Vec<String>,
 }
 
 impl HttpPkarrStore {
@@ -191,7 +254,18 @@ impl HttpPkarrStore {
             .build()
             .map_err(|e| TransportError::Config(format!("http client: {e}")))?;
         let base: String = base.into();
-        Ok(Self { base: base.trim_end_matches('/').to_string(), token: Mutex::new(token), client })
+        Ok(Self {
+            base: base.trim_end_matches('/').to_string(),
+            token: Mutex::new(token),
+            watch: Mutex::new(None),
+            client,
+        })
+    }
+
+    /// Uses the hub's batched long-poll watch (`GET /pkarr/watch`).
+    pub fn with_watch(self, watch: Option<PkarrWatch>) -> Self {
+        *self.watch.lock().unwrap() = watch;
+        self
     }
 
     fn url(&self, key: &PeerId) -> String {
@@ -244,6 +318,63 @@ impl PkarrStore for HttpPkarrStore {
     fn set_token(&self, token: Option<String>) {
         *self.token.lock().unwrap() = token;
     }
+
+    fn watch_limits(&self) -> Option<WatchLimits> {
+        self.watch
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|w| WatchLimits { max_keys: w.max_keys.max(1), max_wait: w.max_wait })
+    }
+
+    fn set_watch(&self, watch: Option<PkarrWatch>) {
+        *self.watch.lock().unwrap() = watch;
+    }
+
+    /// `GET /pkarr/watch?keys=..&since=..&wait=..` with the device token (core FR-H2).
+    async fn watch(&self, keys: &[(PeerId, u64)], wait: Duration) -> Result<WatchOutcome> {
+        let Some(w) = self.watch.lock().unwrap().clone() else {
+            return Err(TransportError::Stream("the hub advertises no pkarr watch".into()));
+        };
+        let wait = wait.min(w.max_wait);
+        let names: Vec<(String, PeerId)> = keys.iter().map(|(k, _)| (z32(k.as_bytes()), *k)).collect();
+        let joined_keys = names.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(",");
+        let joined_since = keys.iter().map(|(_, ts)| ts.to_string()).collect::<Vec<_>>().join(",");
+        let resp = self
+            .client
+            .get(format!("{}/watch", self.base))
+            .query(&[("keys", joined_keys), ("since", joined_since), ("wait", wait.as_secs().to_string())])
+            .bearer_auth(&w.device_token)
+            // The hub holds the request for up to `wait`; the client's 10 s default is too short.
+            .timeout(wait + Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| TransportError::Stream(format!("pkarr watch: {e}")))?;
+        let status = resp.status();
+        let lookup = |name: &str| names.iter().find(|(n, _)| n == name).map(|(_, k)| *k);
+        match status.as_u16() {
+            204 => Ok(WatchOutcome::Unchanged),
+            200 => {
+                let bytes = resp.bytes().await.map_err(|e| TransportError::Stream(format!("pkarr watch: {e}")))?;
+                let body: WatchBody = serde_json::from_slice(&bytes)
+                    .map_err(|e| TransportError::Stream(format!("pkarr watch: bad body: {e}")))?;
+                let mut out = Vec::new();
+                for r in body.records {
+                    // A key we did not ask for, or a packet that does not decode, is skipped;
+                    // the packet signature is checked by the caller.
+                    let (Some(key), Some(packet)) = (lookup(&r.key), base64_std(&r.packet)) else { continue };
+                    out.push((key, packet));
+                }
+                Ok(WatchOutcome::Changed(out))
+            }
+            404 => {
+                let bytes = resp.bytes().await.unwrap_or_default();
+                let body: NotFoundBody = serde_json::from_slice(&bytes).unwrap_or(NotFoundBody { keys: Vec::new() });
+                Ok(WatchOutcome::NotFound(body.keys.iter().filter_map(|n| lookup(n)).collect()))
+            }
+            _ => Err(TransportError::Stream(format!("pkarr watch refused: {status}"))),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -263,6 +394,8 @@ struct State {
     seen: HashMap<PeerId, (u64, u32)>,
     /// Per watched peer: when it is next read and how fast.
     cadence: HashMap<PeerId, Cadence>,
+    /// Bumped when the watched set grows, so a running hub watch is restarted with it.
+    watch_gen: u64,
 }
 
 /// How often watched mailboxes are read (SPEC `FR-N2`, #783).
@@ -318,6 +451,8 @@ pub(super) struct PkarrNode {
     plan: PollPlan,
     /// Wakes the poller when a peer turns fast.
     kicked: Arc<Notify>,
+    /// Restarts the hub watch when the watched set changes.
+    rewatch: Arc<Notify>,
 }
 
 impl fmt::Debug for PkarrNode {
@@ -377,6 +512,7 @@ impl PkarrNode {
             tasks: Mutex::new(Vec::new()),
             plan,
             kicked: Arc::new(Notify::new()),
+            rewatch: Arc::new(Notify::new()),
         });
         // The tasks hold weak references so dropping the node stops them.
         let publisher = tokio::spawn(publish_loop(Arc::downgrade(&node)));
@@ -412,10 +548,15 @@ impl PkarrNode {
                     added = true;
                 }
             }
+            if added {
+                st.watch_gen += 1;
+            }
         }
         if added {
-            // The poller recomputes its wake time so the new peer is read on schedule.
+            // The poller recomputes its wake time so the new peer is read on schedule, or
+            // restarts the hub watch with it.
             self.kicked.notify_one();
+            self.rewatch.notify_one();
         }
     }
 
@@ -428,13 +569,26 @@ impl PkarrNode {
         let now = tokio::time::Instant::now();
         {
             let mut st = self.state.lock().unwrap();
-            st.watched.insert(peer);
+            if st.watched.insert(peer) {
+                st.watch_gen += 1;
+                self.rewatch.notify_one();
+            }
             let c = st.cadence.entry(peer).or_insert_with(|| Cadence::idle_start(now, &self.plan));
             c.hot_until = now + self.plan.window;
             c.step = self.plan.fast;
             c.due = c.due.min(now);
         }
         self.kicked.notify_one();
+    }
+
+    /// The watched peers with the timestamp of the last packet read from each (`0`: none), for
+    /// the hub watch, and the generation of the watched set.
+    fn watch_keys(&self) -> (Vec<(PeerId, u64)>, u64) {
+        let st = self.state.lock().unwrap();
+        let mut keys: Vec<(PeerId, u64)> =
+            st.watched.iter().map(|p| (*p, st.seen.get(p).map_or(0, |(ts, _)| *ts))).collect();
+        keys.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        (keys, st.watch_gen)
     }
 
     /// The watched peers due at `now`, with their next reads scheduled, and the next due time.
@@ -546,7 +700,13 @@ impl PkarrNode {
         let Some(payload) = self.store.get(from).await? else {
             return Ok(());
         };
-        let (ts, dns) = verify_pkarr_payload(&from, &payload)?;
+        self.take_packet(from, &payload)
+    }
+
+    /// Verifies a packet of `from` (from `GET /pkarr/{key}` or the hub watch) and queues the
+    /// messages of its mailbox for us not seen before.
+    fn take_packet(&self, from: PeerId, payload: &[u8]) -> Result<()> {
+        let (ts, dns) = verify_pkarr_payload(&from, payload)?;
         let (seen_ts, seen_seq) = {
             let st = self.state.lock().unwrap();
             st.seen.get(&from).copied().unwrap_or((0, self.start_secs.saturating_sub(30)))
@@ -615,16 +775,121 @@ async fn publish_loop(weak: std::sync::Weak<PkarrNode>) {
     }
 }
 
+/// What the poller does next.
+enum WatchStep {
+    /// Back to the top of the loop (the watch ran, or the watched set changed).
+    Again,
+    /// The store has no watch, or it failed: poll adaptively once.
+    Poll,
+}
+
+/// The watch state that lives across loop turns.
+struct WatchState {
+    /// Until then, mailboxes are polled (a watch failed).
+    fallback_until: Option<tokio::time::Instant>,
+    fallback_step: Duration,
+    /// Keys the hub answered `404` for, until the watched set changes.
+    not_found: HashSet<PeerId>,
+    not_found_gen: u64,
+}
+
+/// One turn of the hub watch (SPEC `FR-N2`, core FR-H2 #132): one long-poll request per
+/// `max_keys` watched peers instead of a `GET` per peer. A changed packet is delivered when the
+/// first request returns; then all are restarted (the old ones are dropped, which the hub allows:
+/// a new watch runs beside the old). A change of the watched set restarts the watch too.
+async fn watch_turn(weak: &std::sync::Weak<PkarrNode>, ws: &mut WatchState) -> Option<WatchStep> {
+    let node = weak.upgrade()?;
+    let Some(limits) = node.store.watch_limits() else { return Some(WatchStep::Poll) };
+    let now = tokio::time::Instant::now();
+    if ws.fallback_until.is_some_and(|t| now < t) {
+        return Some(WatchStep::Poll);
+    }
+    let store = node.store.clone();
+    let rewatch = node.rewatch.clone();
+    // Registered before the set is read, so a change in between is not missed.
+    let changed = rewatch.notified();
+    tokio::pin!(changed);
+    changed.as_mut().enable();
+    let (keys, gen) = node.watch_keys();
+    // No strong reference is held while the hub holds the request.
+    drop(node);
+    if gen != ws.not_found_gen {
+        ws.not_found.clear();
+        ws.not_found_gen = gen;
+    }
+    let keys: Vec<(PeerId, u64)> = keys.into_iter().filter(|(k, _)| !ws.not_found.contains(k)).collect();
+    if keys.is_empty() {
+        let _ = tokio::time::timeout(limits.max_wait, changed).await;
+        return Some(WatchStep::Again);
+    }
+    let wait = limits.max_wait;
+    let calls: Vec<_> = keys
+        .chunks(limits.max_keys.max(1))
+        .map(|chunk| {
+            let store = store.clone();
+            let chunk = chunk.to_vec();
+            Box::pin(async move { store.watch(&chunk, wait).await })
+        })
+        .collect();
+    let answer = tokio::select! {
+        _ = &mut changed => return Some(WatchStep::Again),
+        (answer, _, _) = futures::future::select_all(calls) => answer,
+    };
+    let fail = |ws: &mut WatchState, why: String| {
+        tracing::debug!(error = %why, "the hub pkarr watch failed; polling mailboxes for a while");
+        ws.fallback_until = Some(tokio::time::Instant::now() + ws.fallback_step);
+        ws.fallback_step = (ws.fallback_step * 2).min(WATCH_FALLBACK_MAX);
+    };
+    match answer {
+        Ok(WatchOutcome::Changed(records)) => {
+            ws.fallback_step = WATCH_FALLBACK_MIN;
+            let node = weak.upgrade()?;
+            for (peer, packet) in records {
+                if let Err(e) = node.take_packet(peer, &packet) {
+                    tracing::debug!(peer = %peer.fmt_short(), error = %e, "a watched pkarr packet was refused");
+                }
+            }
+        }
+        Ok(WatchOutcome::Unchanged) => ws.fallback_step = WATCH_FALLBACK_MIN,
+        Ok(WatchOutcome::NotFound(gone)) if !gone.is_empty() => ws.not_found.extend(gone),
+        Ok(WatchOutcome::NotFound(_)) => {
+            fail(ws, "404 without keys".into());
+            return Some(WatchStep::Poll);
+        }
+        Err(e) => {
+            fail(ws, e.to_string());
+            return Some(WatchStep::Poll);
+        }
+    }
+    tokio::time::sleep_until(now + WATCH_MIN_GAP).await;
+    Some(WatchStep::Again)
+}
+
 async fn poll_loop(weak: std::sync::Weak<PkarrNode>) {
     let mut wake = {
         let Some(node) = weak.upgrade() else { return };
         tokio::time::Instant::now() + node.plan.fast
     };
+    let mut ws = WatchState {
+        fallback_until: None,
+        fallback_step: WATCH_FALLBACK_MIN,
+        not_found: HashSet::new(),
+        not_found_gen: 0,
+    };
     loop {
+        match watch_turn(&weak, &mut ws).await {
+            None => return,
+            Some(WatchStep::Again) => continue,
+            Some(WatchStep::Poll) => {}
+        }
         let Some((kicked, idle)) = weak.upgrade().map(|n| (n.kicked.clone(), n.plan.idle)) else { return };
         // A kick ends the wait at once. No strong reference is held while waiting, and the
-        // wait is capped by the idle interval so a peer watched later is picked up.
-        let cap = tokio::time::Instant::now() + idle;
+        // wait is capped by the idle interval so a peer watched later is picked up (and, after
+        // a failed hub watch, so the watch is tried again on time).
+        let mut cap = tokio::time::Instant::now() + idle;
+        if let Some(t) = ws.fallback_until {
+            cap = cap.min(t.max(tokio::time::Instant::now()));
+        }
         let _ = tokio::time::timeout_at(wake.min(cap), kicked.notified()).await;
         let Some(node) = weak.upgrade() else { return };
         let now = tokio::time::Instant::now();
@@ -774,6 +1039,201 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(120)).await;
         let later = gets_during(&store, &peer, Duration::from_secs(600)).await;
         assert!((23..=25).contains(&later), "{later} reads in 10 idle minutes (expected 24)");
+    }
+
+    /// A store with the hub's batched long-poll watch (core FR-H2): `watch` returns the packets
+    /// newer than `since`, or waits up to `wait` for one to be published. Counts calls.
+    #[derive(Clone)]
+    struct LongPollStore {
+        inner: crate::MemoryPkarrStore,
+        limits: Option<WatchLimits>,
+        published: Arc<Notify>,
+        /// The keys of each watch call, in order.
+        calls: Arc<Mutex<Vec<Vec<PeerId>>>>,
+        gets: Arc<Mutex<usize>>,
+        /// Keys answered with `404` (not live devices of the account).
+        unknown: Arc<Mutex<HashSet<PeerId>>>,
+        /// Every watch fails (a hub error such as `429`).
+        failing: Arc<AtomicBool>,
+    }
+
+    impl fmt::Debug for LongPollStore {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("LongPollStore")
+        }
+    }
+
+    impl LongPollStore {
+        fn new(max_keys: Option<usize>) -> Self {
+            Self {
+                inner: crate::MemoryPkarrStore::new(),
+                limits: max_keys.map(|max_keys| WatchLimits { max_keys, max_wait: Duration::from_secs(25) }),
+                published: Arc::new(Notify::new()),
+                calls: Arc::default(),
+                gets: Arc::default(),
+                unknown: Arc::default(),
+                failing: Arc::default(),
+            }
+        }
+        fn calls(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+        fn last_call(&self) -> Vec<PeerId> {
+            self.calls.lock().unwrap().last().cloned().unwrap_or_default()
+        }
+        fn gets(&self) -> usize {
+            *self.gets.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl PkarrStore for LongPollStore {
+        async fn put(&self, key: PeerId, payload: Vec<u8>) -> Result<()> {
+            self.inner.put(key, payload).await?;
+            self.published.notify_waiters();
+            Ok(())
+        }
+        async fn get(&self, key: PeerId) -> Result<Option<Vec<u8>>> {
+            *self.gets.lock().unwrap() += 1;
+            self.inner.get(key).await
+        }
+        fn watch_limits(&self) -> Option<WatchLimits> {
+            self.limits
+        }
+        async fn watch(&self, keys: &[(PeerId, u64)], wait: Duration) -> Result<WatchOutcome> {
+            let limits = self.limits.expect("watch called on a store without one");
+            assert!(keys.len() <= limits.max_keys, "{} keys in one watch (max {})", keys.len(), limits.max_keys);
+            self.calls.lock().unwrap().push(keys.iter().map(|(k, _)| *k).collect());
+            if self.failing.load(Ordering::Relaxed) {
+                return Err(TransportError::Stream("pkarr watch refused: 429".into()));
+            }
+            let gone: Vec<PeerId> = {
+                let unknown = self.unknown.lock().unwrap();
+                keys.iter().map(|(k, _)| *k).filter(|k| unknown.contains(k)).collect()
+            };
+            if !gone.is_empty() {
+                return Ok(WatchOutcome::NotFound(gone));
+            }
+            let deadline = tokio::time::Instant::now() + wait;
+            loop {
+                let notified = self.published.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let mut changed = Vec::new();
+                for (k, since) in keys {
+                    if let Some(p) = self.inner.get(*k).await? {
+                        let ts = u64::from_be_bytes(p[64..72].try_into().unwrap());
+                        if ts > *since {
+                            changed.push((*k, p));
+                        }
+                    }
+                }
+                if !changed.is_empty() {
+                    return Ok(WatchOutcome::Changed(changed));
+                }
+                if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                    return Ok(WatchOutcome::Unchanged);
+                }
+            }
+        }
+    }
+
+    fn start_on(store: &LongPollStore, key: SecretKey) -> Arc<PkarrNode> {
+        PkarrNode::start(key, Arc::new(store.clone()), Arc::new(Vec::<String>::new), default_plan())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fr_n2_one_watch_per_wait_covers_every_watched_peer() {
+        // max_keys 2 and five peers: three requests per round, one round per 25 s wait.
+        let store = LongPollStore::new(Some(2));
+        let node = start_on(&store, SecretKey::generate());
+        let peers: Vec<PeerId> = (0..5).map(|_| SecretKey::generate().peer_id()).collect();
+        node.watch_peers(&peers);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let before = store.calls();
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        let rounds = (store.calls() - before) as f64 / 3.0;
+        // A round ends when its first request returns; all three end at the same 25 s.
+        assert!((22.0..=26.0).contains(&rounds), "{rounds} watch rounds in 10 minutes (expected 24)");
+        assert_eq!(store.gets(), 0, "no per-peer GET while the hub watch works");
+        let mut seen: Vec<PeerId> = store.calls.lock().unwrap().iter().rev().take(3).flatten().copied().collect();
+        seen.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        let mut want = peers.clone();
+        want.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        assert_eq!(seen, want, "one round covers every watched peer once");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fr_n2_a_changed_record_is_delivered_at_once_through_the_watch() {
+        let store = LongPollStore::new(Some(32));
+        let (ka, kb) = (SecretKey::generate(), SecretKey::generate());
+        let a = start_on(&store, ka.clone());
+        let b = start_on(&store, kb.clone());
+        a.watch_peers(&[kb.peer_id()]);
+        // Let the watch settle into its long wait.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let sent = tokio::time::Instant::now();
+        b.send(ka.peer_id(), b"offer".to_vec()).await.unwrap();
+        let (from, msg) = tokio::time::timeout(Duration::from_secs(25), a.recv()).await.unwrap().unwrap();
+        assert_eq!((from, msg.as_slice()), (kb.peer_id(), &b"offer"[..]));
+        let took = sent.elapsed();
+        assert!(took < Duration::from_secs(1), "delivered after {took:?}, not within the watch's wait");
+        assert_eq!(store.gets(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fr_n2_keys_the_hub_does_not_know_are_dropped_from_the_watch() {
+        let store = LongPollStore::new(Some(32));
+        let (ka, kb) = (SecretKey::generate(), SecretKey::generate());
+        let stranger = SecretKey::generate().peer_id();
+        store.unknown.lock().unwrap().insert(stranger);
+        let a = start_on(&store, ka.clone());
+        let b = start_on(&store, kb.clone());
+        a.watch_peers(&[kb.peer_id(), stranger]);
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(store.last_call(), vec![kb.peer_id()], "the rest is watched without the 404 key");
+        let calls = store.calls();
+        assert!(calls <= 6, "{calls} watch calls in a minute: the 404 key must not be retried each turn");
+        b.send(ka.peer_id(), b"still".to_vec()).await.unwrap();
+        let (from, _) = tokio::time::timeout(Duration::from_secs(2), a.recv()).await.unwrap().unwrap();
+        assert_eq!(from, kb.peer_id());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fr_n2_without_an_advertised_watch_mailboxes_are_polled() {
+        let store = LongPollStore::new(None);
+        let node = start_on(&store, SecretKey::generate());
+        node.watch_peers(&[SecretKey::generate().peer_id()]);
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(store.calls(), 0);
+        assert!(store.gets() > 0, "the adaptive GET polling runs");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fr_n2_a_failing_watch_falls_back_to_polling_and_retries() {
+        let store = LongPollStore::new(Some(32));
+        store.failing.store(true, Ordering::Relaxed);
+        let node = start_on(&store, SecretKey::generate());
+        node.watch_peers(&[SecretKey::generate().peer_id()]);
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        assert_eq!(store.calls(), 1, "a failed watch is not retried at once");
+        assert!(store.gets() > 0, "mailboxes are polled while the watch is down");
+        store.failing.store(false, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(store.calls() >= 2, "the watch is tried again after the fallback");
+        let gets = store.gets();
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(store.gets(), gets, "the watch took over again");
+    }
+
+    #[test]
+    fn base64_std_decodes_padded_input() {
+        assert_eq!(base64_std("aGVsbG8="), Some(b"hello".to_vec()));
+        assert_eq!(base64_std("aGk="), Some(b"hi".to_vec()));
+        assert_eq!(base64_std("YWJj"), Some(b"abc".to_vec()));
+        assert_eq!(base64_std("+/8="), Some(vec![0xfb, 0xff]));
+        assert_eq!(base64_std("aGk"), None);
+        assert_eq!(base64_std("a=Gk"), None);
     }
 
     #[test]

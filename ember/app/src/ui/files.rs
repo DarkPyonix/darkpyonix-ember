@@ -4,10 +4,11 @@
 //! The decisions are plain types and functions in the first half of this file, unit-tested
 //! without a renderer. The components in the second half only hand them to dioxus-compose.
 //!
-//! The transfer feature has no server or node API yet (FR-F is Draft), so the screen is built
-//! against [`TransferService`]. The only implementation is [`NoTransferService`]: it holds no
-//! device and no transfer, so the screen shows the user's real computers (from the computers API)
-//! as devices and [`UNAVAILABLE`] for sending, receiving and history. Nothing is invented.
+//! The screen is built against [`TransferService`]. The real one is
+//! `ui::files_service::ServerTransferService` (FR-L27.8), on the server's `/api/transfers*`.
+//! [`NoTransferService`] stands in before the app's services exist: it holds no device and no
+//! transfer, so the screen shows the user's real computers (from the computers API) as devices
+//! and [`UNAVAILABLE`] for sending, receiving and history. Nothing is invented.
 //!
 //! #166 workarounds (revert when upstream lands):
 //! - No drag and drop (dioxus-compose and compose-rust are frozen): a send sheet picks the
@@ -152,13 +153,30 @@ pub fn path_label(path: Option<PathKind>, latency_ms: Option<u32>) -> Option<Str
     })
 }
 
+/// The id and the English name the server gives its own computer
+/// (`ember_server::computers::LOCAL`, `LOCAL_NAME`).
+pub const SERVER_COMPUTER_ID: &str = "local";
+const SERVER_COMPUTER_NAME_EN: &str = "this server";
+/// The server computer's name on screen (NFR-L4: Korean), as the other screens say it.
+pub const SERVER_COMPUTER_NAME: &str = "이 서버";
+
+/// A computer's name as shown: the server's own computer in Korean, any other as registered.
+/// A server computer the user renamed keeps its name.
+pub fn computer_display_name(id: &str, name: &str) -> String {
+    if id == SERVER_COMPUTER_ID && (name.trim().is_empty() || name == SERVER_COMPUTER_NAME_EN) {
+        SERVER_COMPUTER_NAME.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 /// The user's registered computers as devices (the only devices the client knows today).
 pub fn devices_from_computers(computers: &[Computer]) -> Vec<Device> {
     computers
         .iter()
         .map(|c| Device {
             id: c.id.clone(),
-            name: c.name.clone(),
+            name: computer_display_name(&c.id, &c.name),
             kind: DeviceKind::Computer,
             presence: match c.reachability {
                 Reachability::Online => Presence::Online,
@@ -354,6 +372,24 @@ pub struct Transfer {
     pub state: TransferState,
 }
 
+/// The line under a transfer's name, as the mockup has it (`flTransfer`'s `dirTxt`): the
+/// direction only, in every state. The state is the meta line's ([`progress_line`]).
+pub fn row_subtitle(direction: Direction, _state: TransferState) -> &'static str {
+    match direction {
+        Direction::Send => "보내는 중",
+        Direction::Receive => "받는 중",
+    }
+}
+
+/// The label before the other device's name in a history row (the mockup's `.fl-h`): where a
+/// sent file went, or where a received file came from.
+pub fn history_peer_label(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Send => "받는 곳",
+        Direction::Receive => "보낸 곳",
+    }
+}
+
 /// Apply an action to a transfer. `Err` leaves it unchanged.
 pub fn apply(t: &mut Transfer, action: TransferAction) -> Result<(), IllegalTransition> {
     match next_state(t.state, action) {
@@ -457,7 +493,8 @@ pub fn progress_line(t: &Transfer) -> String {
             }
             s
         }
-        TransferState::Paused => format!("{p}% · 일시 정지됨"),
+        // The mockup's paused meta: "일시 정지 · 1.7 MB 남음".
+        TransferState::Paused => format!("일시 정지 · {} 남음", format_bytes(t.total.saturating_sub(t.done))),
         TransferState::Done => "완료되었습니다".to_string(),
         TransferState::Failed => format!("{p}% · 연결이 끊겼습니다"),
         TransferState::Cancelled => "취소되었습니다".to_string(),
@@ -567,8 +604,8 @@ pub fn answer_offer(
 // The service (FR-L27.1)
 // ---------------------------------------------------------------------------------------------
 
-/// What the screen needs from the transfer feature. Implemented by the real transfer client when
-/// FR-F lands; until then only [`NoTransferService`].
+/// What the screen needs from the transfer feature: the server's transfer API
+/// (`ui::files_service`), the demo data, or [`NoTransferService`].
 pub trait TransferService: Send + Sync {
     /// Whether transfers can happen at all.
     fn ready(&self) -> bool;
@@ -584,6 +621,19 @@ pub trait TransferService: Send + Sync {
     fn control(&self, transfer_id: &str, action: TransferAction);
     /// Offer `files` (paths) to a device.
     fn send(&self, device_id: &str, files: Vec<String>) -> Result<(), String>;
+    /// Whether a send can start now. [`TransferService::ready`] says the lists are known; a
+    /// service that lost its server keeps its lists and answers `false` here.
+    fn can_send(&self) -> bool {
+        self.ready()
+    }
+    /// Whether transfers are encrypted end to end. The screen shows the claim only when true.
+    fn encrypted(&self) -> bool {
+        true
+    }
+    /// The folder received files go to (`FR-F8`), when the service knows it.
+    fn inbox(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The service until FR-F is built: nothing is ready and nothing is held.
@@ -890,10 +940,13 @@ pub fn demo_transfer_service() -> &'static DemoTransferService {
     DEMO_SERVICE.get_or_init(DemoTransferService::new)
 }
 
-/// TODO(FR-F): return the real service once the transfer client exists.
+/// The demo service in demo mode, else the server's transfer API (`FR-L27.8`); nothing before
+/// the app's services exist.
 pub fn transfer_service() -> &'static dyn TransferService {
     if is_demo() {
         demo_transfer_service()
+    } else if let Some(svc) = crate::ui::files_service::server_service() {
+        svc
     } else {
         &NO_SERVICE
     }
@@ -1407,6 +1460,84 @@ mod tests {
 
     // FR-L27.2
     #[test]
+    fn fr_l27_3_the_subtitle_is_the_direction_and_the_meta_line_is_the_state() {
+        use Direction::{Receive, Send};
+        // Mockup `flTransfer`: the subtitle never changes with the state.
+        for s in [TransferState::Queued, TransferState::Sending, TransferState::Paused, TransferState::Failed] {
+            assert_eq!(row_subtitle(Receive, s), "받는 중");
+            assert_eq!(row_subtitle(Send, s), "보내는 중");
+        }
+        // The pause is said in the meta line, with what is left.
+        let paused = tr(TransferState::Paused, 3 * 1024 * 1024, 1024 * 1024, None);
+        assert_eq!(progress_line(&paused), "일시 정지 · 2.0 MB 남음");
+        assert!(progress_line(&tr(TransferState::Failed, 100, 30, None)).contains("연결이 끊겼습니다"));
+    }
+
+    #[test]
+    fn fr_l27_6_a_history_row_names_the_other_side_by_direction() {
+        // A received file names where it came from; a sent one where it went (mockup `.fl-h`).
+        assert_eq!(history_peer_label(Direction::Receive), "보낸 곳");
+        assert_eq!(history_peer_label(Direction::Send), "받는 곳");
+    }
+
+    #[test]
+    fn nfr_l4_the_server_computer_is_named_in_korean() {
+        assert_eq!(computer_display_name("local", "this server"), "이 서버");
+        assert_eq!(computer_display_name("local", ""), "이 서버");
+        assert_eq!(computer_display_name("local", "mac-mini"), "mac-mini", "a renamed server keeps its name");
+        assert_eq!(computer_display_name("c1", "this server"), "this server", "only the server's own computer");
+        let devices = devices_from_computers(&[computer("local", "this server", Reachability::Online)]);
+        assert_eq!(devices[0].name, "이 서버");
+        assert_eq!(devices[0].id, "local");
+    }
+
+    #[test]
+    fn fr_l27_8_a_service_that_cannot_send_keeps_its_lists() {
+        struct Lost;
+        impl TransferService for Lost {
+            fn ready(&self) -> bool {
+                true
+            }
+            fn can_send(&self) -> bool {
+                false
+            }
+            fn devices(&self) -> Option<Vec<Device>> {
+                None
+            }
+            fn transfers(&self) -> Vec<Transfer> {
+                vec![tr(TransferState::Paused, 10, 4, None)]
+            }
+            fn received(&self) -> Vec<ReceivedFile> {
+                Vec::new()
+            }
+            fn history(&self) -> Vec<HistoryEntry> {
+                Vec::new()
+            }
+            fn pending_offers(&self) -> Vec<Offer> {
+                Vec::new()
+            }
+            fn answer(&self, _: &str, _: Answer) {}
+            fn control(&self, _: &str, _: TransferAction) {}
+            fn send(&self, _: &str, _: Vec<String>) -> Result<(), String> {
+                Err(UNAVAILABLE.to_string())
+            }
+        }
+        let m = build_model(&[], &Lost);
+        assert!(m.ready, "the lists are known");
+        assert_eq!(m.transfers.len(), 1);
+        // Empty sections keep their own text, not "준비 중입니다".
+        assert_eq!(empty_text(Section::Received, m.ready), EMPTY_RECEIVED);
+        assert_eq!(empty_text(Section::History, m.ready), EMPTY_HISTORY);
+        // Sending is what is blocked.
+        let draft = SendDraft { target: Some(SendTarget::Device("local".into())), files: vec!["a".into()] };
+        assert_eq!(send_blocker(&draft, true, m.ready && Lost.can_send()), Some(UNAVAILABLE));
+        assert_eq!(send_blocker(&draft, true, m.ready), None);
+        // The default: a service that is ready can send.
+        assert!(DemoTransferService::new().can_send());
+        assert!(!NoTransferService.can_send());
+    }
+
+    #[test]
     fn devices_group_online_first_then_by_name() {
         let out = order_devices(vec![
             dev("1", "zeta", Presence::Offline),
@@ -1540,7 +1671,7 @@ mod tests {
         assert_eq!(progress_line(&t), "50% · 10 MB/초 · 5초 남음");
         assert_eq!(
             progress_line(&tr(TransferState::Paused, 100, 45, Some(1))),
-            "45% · 일시 정지됨"
+            "일시 정지 · 55 B 남음"
         );
         assert_eq!(
             progress_line(&tr(TransferState::Queued, 100, 0, None)),

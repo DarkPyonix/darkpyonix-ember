@@ -476,8 +476,10 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
         if let Some(offer) = offers.first() {
             OfferCard(offer, &live_pending, &live_model.devices, &st, w);
         }
-        SendSheet(&st, &live_model.devices, &members, ready, w);
-        ShareSheet(&share_open, &live_model.devices, &members, ready);
+        // The lists stay when the server is lost; only sending is blocked (FR-L27.8).
+        let can_send = ready && transfer_service().can_send();
+        SendSheet(&st, &live_model.devices, &members, can_send, w);
+        ShareSheet(&share_open, &live_model.devices, &members, can_send);
     });
 }
 
@@ -865,7 +867,7 @@ fn DeviceTile(d: &Device, info: Option<&DeviceInfo>, on_send: impl FnMut(String)
 pub fn agent_host(project: &str) -> String {
     services().client.read(|s| {
         let id = s.project_computers(project).first().cloned()?;
-        s.computers().iter().find(|c| c.id == id).map(|c| c.name.clone())
+        s.computers().iter().find(|c| c.id == id).map(|c| crate::ui::files::computer_display_name(&c.id, &c.name))
     })
     .unwrap_or_else(|| format!("컴퓨터 정보는 {UNAVAILABLE}"))
 }
@@ -923,6 +925,11 @@ fn AgentTile(m: &CrewMember, ui: &SharedUi, text_w: f32, on_send: impl FnMut(Str
 /// Where received files land. TODO(FR-F8): the real inbox comes from the transfer settings.
 pub const DEFAULT_INBOX: &str = "~/Downloads/Ember";
 
+/// The receiver's real folder when the service knows it (`FR-F8`), else the mockup's.
+fn inbox_label() -> String {
+    transfer_service().inbox().unwrap_or_else(|| DEFAULT_INBOX.to_string())
+}
+
 /// The incoming offer (FR-F3) as the mockup's floating card (`.fl-offer`): the sender's icon and
 /// name, the files, where they will be saved, the encryption note, and equal 거절 and 받기.
 fn OfferCard(offer: &Offer, pending: &[Offer], devices: &[Device], st: &State, w: f32) {
@@ -952,15 +959,15 @@ fn OfferCard(offer: &Offer, pending: &[Offer], devices: &[Device], st: &State, w
                         }
                         Label(&fit_label(&offer.files.join(", "), card_w - 150.0, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                     });
-                    Label(&format!("저장 위치 {DEFAULT_INBOX}"), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    cu::Row().spacing(4.0).alignment(Alignment::CenterStart).content(|| {
+                    Label(&format!("저장 위치 {}", inbox_label()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    if transfer_service().encrypted() { cu::Row().spacing(4.0).alignment(Alignment::CenterStart).content(|| {
                         NavIcon(ICON_LOCK, p.muted.to_argb(), 12.0);
                         let text = match route {
                             Some(r) => format!("종단 간 암호화 \u{b7} {r}"),
                             None => "종단 간 암호화".to_string(),
                         };
                         Label(&text, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    });
+                    }); }
                     cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                         for (text, kind, answer) in [("거절", ButtonKind::Default, Answer::Decline), ("받기", ButtonKind::Primary, Answer::Accept)] {
                             let (id, pending, answered) = (offer.id.clone(), pending.to_vec(), st.answered.clone());
@@ -1061,10 +1068,7 @@ pub fn route_line(path: Option<PathKind>) -> String {
 fn TransferRow(t: &Transfer, devices: &[Device], st: &State) {
     let p = ember_theme().palette;
     let svc = transfer_service();
-    let dir = match t.direction {
-        Direction::Send => "보내는 중",
-        Direction::Receive => "받는 중",
-    };
+    let dir = crate::ui::files::row_subtitle(t.direction, t.state);
     let path = devices.iter().find(|d| d.name == t.device).and_then(|d| d.path);
     let fill = match t.state {
         TransferState::Sending | TransferState::Done => p.blue.strong,
@@ -1111,10 +1115,13 @@ fn TransferRow(t: &Transfer, devices: &[Device], st: &State) {
                 }
             }
         });
-        cu::Row().spacing(4.0).alignment(Alignment::CenterStart).content(|| {
-            NavIcon(ICON_LOCK, p.muted.to_argb(), 12.0);
-            Label(&route_line(path), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
-        });
+        // The claim is shown only where it is true (#487): plain HTTP is not end to end.
+        if svc.encrypted() {
+            cu::Row().spacing(4.0).alignment(Alignment::CenterStart).content(|| {
+                NavIcon(ICON_LOCK, p.muted.to_argb(), 12.0);
+                Label(&route_line(path), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+            });
+        }
     });
 }
 
@@ -1124,8 +1131,7 @@ fn ReceivedCard(model: &FilesModel, extras: &Extras, ready: bool, w: f32) {
     EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             super::home::CardHead(ICON_DOWN, "받은 파일", || {
-                // TODO(FR-F8): the real inbox from the transfer settings.
-                Label(DEFAULT_INBOX, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+                Label(&inbox_label(), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
             });
             if model.received.is_empty() {
                 Label(empty_text(crate::ui::files::Section::Received, ready), Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
@@ -1166,7 +1172,7 @@ fn ReceivedTile(f: &ReceivedFile, at: Option<&str>) {
         if let Some(at) = at {
             Label(at, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
         }
-        Label(DEFAULT_INBOX, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+        Label(&inbox_label(), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
             // TODO(FR-F8): opening and revealing a received file need the transfer client.
             AppButton("열기", None, ButtonKind::Default, true, true, false, || notice::post(UNAVAILABLE));
@@ -1251,10 +1257,7 @@ fn HistoryRow(h: &HistoryEntry) {
         (HistoryResult::Declined, _) | (HistoryResult::Cancelled, _) => (h.result.label(), PillTone::Orange),
         (HistoryResult::Failed, _) => (h.result.label(), PillTone::Red),
     };
-    let who = match h.direction {
-        Direction::Send => "받는 곳",
-        Direction::Receive => "보낸 곳",
-    };
+    let who = crate::ui::files::history_peer_label(h.direction);
     let time = split_when(&h.when).1;
     cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
         FileChip(if h.direction == Direction::Send { ICON_UP } else { ICON_DOWN }, tone);
@@ -1431,8 +1434,10 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
         });
         // The footer: the encryption note at the left, the send button at the right.
         cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
-            NavIcon(ICON_LOCK, p.muted.to_argb(), 12.0);
-            Label("종단 간 암호화", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            if transfer_service().encrypted() {
+                NavIcon(ICON_LOCK, p.muted.to_argb(), 12.0);
+                Label("종단 간 암호화", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            }
             cu::Spacer().modifier(Modifier::new().weight(1.0));
             let (files, s) = (d.files.clone(), st.sheet.clone());
             let target = target_device.clone();

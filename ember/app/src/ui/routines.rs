@@ -942,6 +942,10 @@ pub fn kind_text(kind: &ScheduleKind) -> String {
             s => format!("{s}초마다"),
         },
         ScheduleKind::Once { .. } => "한 번만 실행".to_string(),
+        ScheduleKind::Event { repository, branch, .. } => match branch {
+            Some(b) => format!("CI 실패 시 · {repository} ({b})"),
+            None => format!("CI 실패 시 · {repository}"),
+        },
     }
 }
 

@@ -29,6 +29,7 @@
 //! | [`fallback`] | connect-time version check outcome: when to offer "Open in VS Code" instead |
 //! | [`replies`] | answers for the extension host's other requests |
 //! | [`settings`] | FR-L31.17: JSONC, settings scopes and their merge, the settings Ember honours, editing one key, `keybindings.json` |
+//! | [`watch`] | FR-L31.24: the recursive watch on the workspace folder, with Code-OSS's default excludes |
 //! | [`search`] | FR-E7: search across files through the extension host, unsaved buffers, replace with re-check |
 //! | [`trust`] | FR-L31.18: workspace trust answers, waiting requests, the grant |
 //!
@@ -64,6 +65,7 @@ pub mod trust;
 pub mod notifications;
 pub mod session;
 pub mod settings;
+pub mod watch;
 pub mod widget;
 
 pub use crate::bridge::{apply_text_change, BridgeAction, DocumentWidgetState, SyntaxRuns, WidgetBridge};

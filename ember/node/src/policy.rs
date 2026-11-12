@@ -96,6 +96,11 @@ impl PathPolicy {
             return Err(PolicyError::NotAbsolute(path.to_path_buf()));
         }
         let c = std::fs::canonicalize(path).map_err(|e| PolicyError::Io(path.to_path_buf(), e))?;
+        // realpath(3) on macOS drops a trailing slash after a file; POSIX says ENOTDIR.
+        if path.as_os_str().as_encoded_bytes().ends_with(b"/") && !c.is_dir() {
+            let e = std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a directory");
+            return Err(PolicyError::Io(path.to_path_buf(), e));
+        }
         self.check(c, path)
     }
 

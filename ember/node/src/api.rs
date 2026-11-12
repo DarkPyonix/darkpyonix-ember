@@ -286,6 +286,10 @@ impl From<PolicyError> for ApiError {
             PolicyError::Io(_, io) if io.kind() == std::io::ErrorKind::NotFound => {
                 ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, e.to_string())
             }
+            // A NUL byte or similar malformed path is the caller's error, not the node's.
+            PolicyError::Io(_, io) if io.kind() == std::io::ErrorKind::InvalidInput => {
+                ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, e.to_string())
+            }
             PolicyError::Io(..) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, e.to_string()),
         }
     }

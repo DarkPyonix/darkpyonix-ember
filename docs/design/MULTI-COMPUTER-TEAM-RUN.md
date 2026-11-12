@@ -104,7 +104,8 @@ curl -sS -X POST -H @"$HDR" "$BASE/api/accounts/$CX_ACCT/check" | jq '.status'
 ### Step 3: Enrol the second computer (`[OWNER ACTION REQUIRED]`)
 
  ensure `ember-server` is started with `EMBER_ENROL_LISTEN` set (and `EMBER_TRANSPORT=1` if joining
-by peer). Mint a one-time code on the main server:
+by peer). The door stays closed until a code is minted and closes when no enrolment needs it; set
+`EMBER_ENROL_AUTO_CLOSE=0` to keep it open from startup (`FR-C2l`). Mint a one-time code on the main server:
 
 ```sh
 curl -sS -X POST -H @"$HDR" "$BASE/api/computers/enrol-codes" | jq .

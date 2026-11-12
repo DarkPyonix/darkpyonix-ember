@@ -120,3 +120,17 @@ async fn errors_carry_the_server_status_and_delete_removes() {
     api.delete_schedule(&s.id).await.unwrap();
     assert!(api.schedules(None).await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn fr_l23_event_routine_round_trips() {
+    use ember_client::wire::EventOn;
+    let api = start().await;
+    let mut new = daily("acme", "fix the build");
+    new.kind = ScheduleKind::Event { on: EventOn::CiFailed, repository: "o/r".into(), branch: Some("main".into()) };
+    let s = api.create_schedule(&new).await.unwrap();
+    assert_eq!(s.kind, new.kind);
+    assert_eq!(s.next_run_at, None, "an event routine has no planned trigger");
+    let resumed = api.resume_schedule(&api.pause_schedule(&s.id).await.unwrap().id).await.unwrap();
+    assert_eq!(resumed.next_run_at, None);
+    assert_eq!(api.schedules(Some("acme")).await.unwrap()[0].kind, new.kind);
+}

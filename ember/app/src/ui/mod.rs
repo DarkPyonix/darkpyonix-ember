@@ -31,6 +31,7 @@ pub mod editor_workbench;
 pub mod find;
 pub mod palette;
 pub mod files;
+pub mod files_service;
 pub mod fonts;
 pub mod editor_language;
 pub mod editor_search;

@@ -228,6 +228,98 @@ async fn live_session_json_diagnostics_save_and_reload() {
     drop(server);
 }
 
+/// Every log the server wrote below `root`: its stdout and stderr, and the files of its data dir.
+fn server_logs(root: &Path) -> String {
+    fn walk(dir: &Path, out: &mut String) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "log") {
+                out.push_str(&std::fs::read_to_string(&p).unwrap_or_default());
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(root, &mut out);
+    out
+}
+
+/// FR-L31.24 (#789): an external change reaches the session when the workspace is on an external
+/// volume. `EMBER_LIVE_WS_ROOT` names a directory to create the workspace in; on macOS point it
+/// below `/Volumes/<disk>` (unset: the temp dir, where the test only repeats the reload check).
+/// The server must not log that it refuses to watch a workspace path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a real OSE server: EMBER_OSE_SERVER=<unpacked build>/bin/dpx-ose-server"]
+async fn live_fr_l31_24_external_change_under_ws_root() {
+    let Some(bin) = std::env::var_os("EMBER_OSE_SERVER").map(PathBuf::from) else {
+        eprintln!("[live-session] EMBER_OSE_SERVER not set; skipping");
+        return;
+    };
+    let base = std::env::var_os("EMBER_LIVE_WS_ROOT").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let root = base.join(format!("ember-watch-{}", uuid_short()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    println!("[live-session] workspace root {}", root.display());
+    let ws = root.join("ws");
+    std::fs::create_dir_all(ws.join("sub")).unwrap();
+    let doc_path = ws.join("sub").join("data.json");
+    std::fs::write(&doc_path, DOC_TEXT).unwrap();
+
+    let mut server = Server::start(&bin, &root);
+    let addr = format!("127.0.0.1:{}", server.port);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while tokio::net::TcpStream::connect(&addr).await.is_err() {
+        assert!(Instant::now() < deadline, "server not listening on {addr}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let config = SessionConfig::new(addr.clone(), ws.to_str().unwrap());
+    let (session, mut rx) = tokio::time::timeout(Duration::from_secs(120), EditorSession::connect_tcp(config))
+        .await
+        .expect("connect timed out")
+        .unwrap_or_else(|e| panic!("connect: {e}"));
+    let uri = session.uri(doc_path.to_str().unwrap());
+    session.open(uri.clone()).unwrap();
+    let generation = wait_for("Opened", 30, &mut rx, |u| match u {
+        SessionUpdate::Opened { generation, .. } => Some(*generation),
+        SessionUpdate::OpenFailed { error, .. } => panic!("open failed: {error}"),
+        _ => None,
+    })
+    .await;
+
+    let reloaded = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            std::fs::write(&doc_path, DOC_TEXT_EXTERNAL).unwrap();
+            let until = tokio::time::Instant::now() + Duration::from_secs(3);
+            while let Ok(u) = tokio::time::timeout_at(until, rx.recv()).await {
+                match u {
+                    Some(SessionUpdate::Command { command: WidgetCommand::SetText { generation, text }, .. }) => {
+                        return (generation, text);
+                    }
+                    Some(SessionUpdate::ConnectionLost { reason }) => panic!("connection lost: {reason}"),
+                    Some(_) => {}
+                    None => panic!("session ended while waiting for the reload"),
+                }
+            }
+        }
+    })
+    .await;
+
+    session.close(uri).unwrap();
+    session.shutdown().await;
+    server.stop();
+    let logs = server_logs(&root);
+    // The server's own data dir is below `root` here, and the OSE watches it with `fs.watch()` by
+    // itself; only the workspace is the session's business.
+    let ws_str = ws.to_str().unwrap();
+    let refused: Vec<&str> =
+        logs.lines().filter(|l| l.contains("possibly being a network share") && l.contains(ws_str)).collect();
+    assert!(refused.is_empty(), "the OSE refused to watch a workspace path: {refused:#?}");
+    let (gen2, text) = reloaded.expect("no reload after the external change");
+    assert_ne!(gen2, generation);
+    assert_eq!(text, DOC_TEXT_EXTERNAL);
+}
+
 fn uuid_short() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..8].to_owned()
 }

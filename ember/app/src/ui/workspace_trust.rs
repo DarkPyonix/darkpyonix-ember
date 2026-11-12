@@ -7,7 +7,7 @@
 //! keyed by the computer and the folder, and a trusted folder also trusts the folders below it (the
 //! longest remembered folder that contains the opened one decides, as `doGetUriTrustInfo` does).
 //!
-//! What trust protects and what it does not is `docs/INTENT.md` D45: it keeps extensions that have
+//! What trust protects and what it does not is `docs/INTENT.md` D46: it keeps extensions that have
 //! not declared untrusted-workspace support from running code from the folder, and blocks tasks
 //! and debugging. It does not limit agents or terminals, which run with the full authority of the
 //! computer (D37) whatever the answer.

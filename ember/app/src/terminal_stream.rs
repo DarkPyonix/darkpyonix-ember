@@ -447,6 +447,9 @@ pub struct TerminalState {
     pub cursor: (usize, usize),
     /// PTY size as (cols, rows), once known.
     pub size: (u16, u16),
+    /// True while the program enabled bracketed paste (`ESC[?2004h`), so a paste is wrapped
+    /// in `ESC[200~` and `ESC[201~` (FR-L31.21).
+    pub bracketed_paste: bool,
     /// This client's id on the session, once attached.
     pub client: Option<u64>,
     /// The client that holds control, if any.
@@ -561,6 +564,7 @@ impl TerminalSession {
         self.state.cursor = self.screen.cursor();
         let (cols, rows) = self.screen.size();
         self.state.size = (cols, rows);
+        self.state.bracketed_paste = self.screen.bracketed_paste();
     }
 
     pub fn connecting(&mut self) {

@@ -1142,11 +1142,19 @@ pub fn seg_colors(selected: bool, p: &Palette) -> (Color, Color, Color) {
     }
 }
 
-/// A segment's width: its label at 13 px (8 a Latin character, 13 a Hangul syllable), 12 on
-/// each side and the 1 dp border twice, at least 44.
+/// A segment's width, erring wide: its label at `SEG_FS` with a Latin character at 0.62 em
+/// (the measure-style `text_px` uses 0.55) and a Hangul syllable at one em, 12 on each side,
+/// the 1 dp border twice and 4 to spare, at least 44.
 pub fn seg_width(text: &str) -> f32 {
-    let advance: f32 = text.chars().map(|c| if c.is_ascii() { 8.0 } else { 13.0 }).sum();
-    (advance + 28.0).max(44.0)
+    let em = SEG_FS.size();
+    let advance: f32 = text.chars().map(|c| if c.is_ascii() { 0.62 * em } else { em }).sum();
+    (advance + 2.0 * 12.0 + 2.0 + 4.0).ceil().max(44.0)
+}
+
+/// What a line of segments may fill: the row's width less one gap, so a line that the estimate
+/// gets slightly wrong still does not touch the edge.
+pub fn seg_line_room(avail: f32) -> f32 {
+    (avail - SP[1]).max(0.0)
 }
 
 /// The segments of a choice row packed into lines no wider than `avail`, as the mockup's `.seg`
@@ -1155,6 +1163,7 @@ pub fn seg_width(text: &str) -> f32 {
 /// estimated width; drop this once `FlowRow` lands. Each line
 /// holds indices into `labels`, in order; a segment wider than `avail` gets a line of its own.
 pub fn seg_lines<S: AsRef<str>>(labels: &[S], avail: f32) -> Vec<Vec<usize>> {
+    let avail = seg_line_room(avail);
     let mut lines: Vec<Vec<usize>> = Vec::new();
     let mut used = 0.0_f32;
     for (i, l) in labels.iter().enumerate() {
@@ -1178,6 +1187,9 @@ pub fn seg_lines<S: AsRef<str>>(labels: &[S], avail: f32) -> Vec<Vec<usize>> {
 pub fn form_field_width(window_w: f32, panel_w: f32, layout: FormLayout) -> f32 {
     match layout {
         FormLayout::Inline => panel_w - 2.0 - 2.0 * 16.0,
+        // An unknown window (0 before the first size event) gives no room, so every segment
+        // takes a line of its own rather than one line running off the sheet.
+        FormLayout::Sheet if window_w <= 0.0 => 0.0,
         FormLayout::Sheet => {
             super::components::sheet_width(window_w, super::components::SHEET_WIDTH_DEFAULT) - 2.0 * SP[4]
         }
@@ -1919,8 +1931,8 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool) {
 /// written once (FR-L25, #511).
 #[derive(Clone)]
 struct FormCtx {
-    /// The fields' width, for wrapping the choice segments (`form_field_width`).
-    field_w: f32,
+    /// Inline or sheet: with the window it gives the fields' width (`form_field_width`).
+    layout: FormLayout,
     draft: MutableState<FormDraft>,
     tried: MutableState<bool>,
     initial: FormDraft,
@@ -1959,14 +1971,8 @@ fn RoutineForm(
     let p = ember_theme().palette;
     let draft = draft.clone();
     let tried = remember(|| mutable_state_of(false));
-    let window = current_window_size();
-    let panel_w = detail_panel_width(
-        window.width_dp,
-        super::home::content_width(window.width_dp, SP[6]),
-        false,
-    );
     let ctx = FormCtx {
-        field_w: form_field_width(window.width_dp, panel_w, layout),
+        layout,
         draft,
         tried,
         initial: initial.clone(),
@@ -2045,6 +2051,15 @@ fn RoutineForm(
 /// The fields, in `FORM_FIELDS` order, for both shells.
 fn FormFields(ctx: &FormCtx) {
     let p = ember_theme().palette;
+    // Read here, inside the sheet's own content, so a resize recomposes the fields with the
+    // width they now have; a width worked out by the caller stayed at its first value (#493).
+    let window = current_window_size();
+    let panel_w = detail_panel_width(
+        window.width_dp,
+        super::home::content_width(window.width_dp, SP[6]),
+        false,
+    );
+    let field_w = form_field_width(window.width_dp, panel_w, ctx.layout);
     let (draft, tried, initial) = (&ctx.draft, &ctx.tried, &ctx.initial);
     let editing = ctx.editing;
     let agents = live_agents();
@@ -2099,7 +2114,7 @@ fn FormFields(ctx: &FormCtx) {
                 FormLabel("프로젝트");
                 // Wrapped, never scrolled sideways, so the chosen one is always in view (#493).
                 let (sel_proj, names) = (draft.clone(), project_choices.clone());
-                SegChoices(&project_choices, ctx.field_w, |i| d.sel.project == project_choices[i], move |i| {
+                SegChoices(&project_choices, field_w, |i| d.sel.project == project_choices[i], move |i| {
                     let n = names[i].clone();
                     sel_proj.update(|d| d.sel.project = n);
                 });
@@ -2108,7 +2123,7 @@ fn FormFields(ctx: &FormCtx) {
                 FormLabel("트리거");
                 let labels: Vec<String> = Trigger::ALL.iter().map(|t| t.label().to_string()).collect();
                 let sel_trig = draft.clone();
-                SegChoices(&labels, ctx.field_w, |i| d.trigger == Trigger::ALL[i], move |i| {
+                SegChoices(&labels, field_w, |i| d.trigger == Trigger::ALL[i], move |i| {
                     let t = Trigger::ALL[i];
                     sel_trig.update(|d| *d = d.with_trigger(t));
                 });
@@ -2168,7 +2183,7 @@ fn FormFields(ctx: &FormCtx) {
                     .chain(ctx.computers.iter().map(|(_, name)| name.clone()))
                     .collect();
                 let (sel_c, pick_ids) = (draft.clone(), ids.clone());
-                SegChoices(&labels, ctx.field_w, |i| d.sel.computer == ids[i], move |i| {
+                SegChoices(&labels, field_w, |i| d.sel.computer == ids[i], move |i| {
                     let c = pick_ids[i].clone();
                     sel_c.update(|d| d.sel.computer = c);
                 });
@@ -2813,6 +2828,14 @@ mod tests {
             }
         }
         assert!(seg_lines(&projects, phone).len() >= 2, "the phone wraps");
+        // The 390 sheet: 기본 프로젝트 and demo-project share a line; second-project and the
+        // chosen ember go below, so ember is in view (r3 capture of #720 had all on one line).
+        assert_eq!(seg_lines(&projects, phone), vec![vec![0, 1], vec![2, 3]]);
+        for line in seg_lines(&projects, phone) {
+            let w: f32 = line.iter().map(|&i| seg_width(projects[i])).sum::<f32>() + SP[1] * (line.len() as f32 - 1.0);
+            assert!(w <= phone - SP[1], "a 390 line of {w} keeps a gap from the sheet's edge");
+        }
+        assert_eq!(form_field_width(0.0, 0.0, FormLayout::Sheet), 0.0, "an unknown window packs one per line");
         assert_eq!(seg_lines(&projects, wide).len(), 1, "the wide inline form keeps one line");
         // A segment wider than the room still gets its own line rather than vanishing.
         assert_eq!(seg_lines(&["a-very-long-project-name-indeed"], 100.0), vec![vec![0]]);

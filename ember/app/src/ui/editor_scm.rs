@@ -1510,6 +1510,9 @@ pub mod view {
     }
 
     /// Rows of the base side drawn from the editor's first visible line, enough to fill the pane.
+    // TODO(compose-rust#544): the base side follows the editor's first visible line and draws 20 px
+    // rows on the assumption that this is the editor's line height; follow the editor's pixel scroll
+    // offset and line height once the toolkit reports them.
     const BASE_ROWS_SHOWN: usize = 400;
 
     /// The editable diff (FR-L31.10): the base read-only on the left, one row per working-tree line
@@ -1539,6 +1542,9 @@ pub mod view {
                                 super::RowKind::Added => ("background:var(--surface-2);", " "),
                             };
                             let (no, text) = row.base.map(|(n, t)| (n.to_string(), t)).unwrap_or_default();
+                            // TODO(compose-rust#543): removed lines are a red rule and a hover list here,
+                            // because the editor cannot hold blank rows opposite them; give them rows
+                            // of their own once the toolkit has view zones.
                             let mark = if row.deleted_above.is_empty() { "" } else { "box-shadow:inset 0 2px 0 var(--c-red);" };
                             let title = deleted_lines_title(&row.deleted_above);
                             rsx! {
@@ -1550,6 +1556,7 @@ pub mod view {
                             }
                         }
                     }
+                    // TODO(compose-rust#543): the lines removed at the end, as a rule until view zones.
                     if at_end && !tail_title.is_empty() {
                         div { title: "{tail_title}", style: "height:4px; box-shadow:inset 0 2px 0 var(--c-red);" }
                     }
@@ -2128,6 +2135,8 @@ pub mod diff_editor_view {
             *current = (*current).max(doc.version);
             *current
         };
+        // TODO(compose-rust#542): the change shows as gutter bars only; tint the added and changed
+        // lines once the toolkit has whole-line background decorations.
         let gutter_decorations = match s.scm.diff_base(&doc.text, doc.dirty) {
             Some(base) => crate::ui::editor::diff_gutter_decorations(version, &super::diff_editor_model(&base, &doc.text).markers),
             None => compose_rust::code::GutterDecorations::default(),
@@ -2172,6 +2181,7 @@ pub mod diff_editor_view {
                 let event = selection_s.bridge.borrow().on_selection_changed(&selection_uri, e.version, pos(e.anchor), pos(e.active));
                 send(&selection_s, event);
             },
+            // TODO(compose-rust#544): lines only; the base side cannot follow a partial-line scroll.
             on_visible_range_change: move |e: compose_rust::code::VisibleRange| range_s.scm.set_diff_lines(e.first_line, e.last_line),
         } }
     }

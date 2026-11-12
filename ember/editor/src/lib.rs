@@ -15,6 +15,7 @@
 //! | [`codelens`] | FR-E3: `$provideCodeLenses` / `$resolveCodeLens` → line-above inlays; click → command |
 //! | [`hover`] | FR-E3: `CodeHovered` → `$provideHover` → Markdown popup model |
 //! | [`inline`] | FR-E4: `$provideInlineCompletions` with debounce + cancellation → ghost text; accept |
+//! | [`language`] | FR-L31.13: completion list, definition, references, rename, code actions, formatting, signature help, document symbols |
 //! | [`registry`] | provider registrations (`$register…`) and extension-host commands |
 //! | [`selector`] | `languages.score` port: document selector matching |
 //! | [`languages`] | file → language id from `contributes.languages` |
@@ -45,6 +46,7 @@ pub mod highlight;
 pub mod hover;
 pub mod ids;
 pub mod inline;
+pub mod language;
 pub mod languages;
 pub mod registry;
 pub mod replies;
@@ -62,6 +64,7 @@ pub use crate::commands::{parse_contributed_commands, ContributedCommand};
 pub use crate::fallback::{fallback_for, vscode_fallback_url, ConnectOutcome, Fallback, FallbackTarget};
 pub use crate::engine::{CoreOptions, Effect, ExternalChange, Input, SessionCore, SessionUpdate};
 pub use crate::coords::{WidgetPos, WidgetRange};
+pub use crate::language::{LanguageRequest, LanguageUpdate};
 pub use crate::session::{DirLister, EditorSession, SessionConfig};
 pub use crate::output::{ExtensionMessage, MessageSeverity, OutputChannel, MAX_OUTPUT_CHANNEL_BYTES};
 pub use crate::widget::{

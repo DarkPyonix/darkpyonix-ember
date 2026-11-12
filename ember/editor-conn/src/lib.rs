@@ -44,6 +44,7 @@ pub mod exthost;
 pub mod frame;
 pub mod handshake;
 pub mod ipc;
+pub mod language;
 pub mod management;
 pub mod protocol;
 pub mod remote_fs;

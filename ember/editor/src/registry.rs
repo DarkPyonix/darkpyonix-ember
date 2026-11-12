@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ember_editor_conn::exthost::{DocumentFilter, MainThreadCall, SemanticTokensLegend};
+use ember_editor_conn::language::LanguageFeature;
 use ember_editor_conn::uri::UriComponents;
 use serde_json::Value;
 
@@ -57,6 +58,9 @@ pub enum ProviderKind {
     InlineCompletions(InlineMeta),
     FoldingRange { event_handle: Option<i64> },
     DocumentSemanticTokens { legend: SemanticTokensLegend, event_handle: Option<i64> },
+    /// Completion, definition, references, rename, code actions, formatting, signature help or
+    /// document symbols (FR-L31.13), with what its registration said.
+    Language(LanguageFeature),
 }
 
 /// Which kind of provider a query is for.
@@ -67,6 +71,15 @@ pub enum KindTag {
     InlineCompletions,
     FoldingRange,
     DocumentSemanticTokens,
+    Completion,
+    Definition,
+    Reference,
+    CodeAction,
+    DocumentFormatting,
+    RangeFormatting,
+    Rename,
+    SignatureHelp,
+    DocumentSymbol,
 }
 
 impl ProviderKind {
@@ -77,6 +90,17 @@ impl ProviderKind {
             Self::InlineCompletions(_) => KindTag::InlineCompletions,
             Self::FoldingRange { .. } => KindTag::FoldingRange,
             Self::DocumentSemanticTokens { .. } => KindTag::DocumentSemanticTokens,
+            Self::Language(feature) => match feature {
+                LanguageFeature::Completion { .. } => KindTag::Completion,
+                LanguageFeature::Definition => KindTag::Definition,
+                LanguageFeature::Reference => KindTag::Reference,
+                LanguageFeature::CodeAction { .. } => KindTag::CodeAction,
+                LanguageFeature::DocumentFormatting { .. } => KindTag::DocumentFormatting,
+                LanguageFeature::RangeFormatting { .. } => KindTag::RangeFormatting,
+                LanguageFeature::Rename { .. } => KindTag::Rename,
+                LanguageFeature::SignatureHelp { .. } => KindTag::SignatureHelp,
+                LanguageFeature::DocumentSymbol { .. } => KindTag::DocumentSymbol,
+            },
         }
     }
 
@@ -85,7 +109,7 @@ impl ProviderKind {
             Self::CodeLens { event_handle }
             | Self::FoldingRange { event_handle }
             | Self::DocumentSemanticTokens { event_handle, .. } => *event_handle,
-            Self::Hover | Self::InlineCompletions(_) => None,
+            Self::Hover | Self::InlineCompletions(_) | Self::Language(_) => None,
         }
     }
 }
@@ -158,6 +182,9 @@ impl Registry {
             }
             MainThreadCall::RegisterInlineCompletionsSupport { handle, selector, raw, .. } => {
                 self.insert(*handle, selector.clone(), ProviderKind::InlineCompletions(InlineMeta::from_raw(raw)))
+            }
+            MainThreadCall::RegisterLanguageFeature { handle, selector, feature } => {
+                self.insert(*handle, selector.clone(), ProviderKind::Language(feature.clone()))
             }
             MainThreadCall::EmitCodeLensEvent { event_handle } => match self.event_handles.get(event_handle) {
                 Some(&handle) => RegistryChange::CodeLensChanged { handle },
@@ -251,6 +278,26 @@ mod tests {
         assert_eq!(order, vec![3, 2, 1]);
         assert_eq!(r.matching(KindTag::CodeLens, &u, "json").len(), 1);
         assert!(r.matching(KindTag::InlineCompletions, &u, "json").is_empty());
+    }
+
+    #[test]
+    fn fr_l31_13_language_features_register_match_and_unregister() {
+        let mut r = Registry::new();
+        let u = UriComponents::remote("h", "/w/a.rs");
+        let feature = LanguageFeature::Completion { trigger_characters: vec![".".into()], supports_resolve: true };
+        assert_eq!(
+            r.apply(&MainThreadCall::RegisterLanguageFeature { handle: 9, selector: sel(json!([{"language": "rust"}])), feature: feature.clone() }),
+            RegistryChange::Registered { handle: 9, kind: KindTag::Completion }
+        );
+        r.apply(&MainThreadCall::RegisterLanguageFeature { handle: 10, selector: sel(json!([{"language": "rust"}])), feature: LanguageFeature::Definition });
+        let found = r.matching(KindTag::Completion, &u, "rust");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind, ProviderKind::Language(feature));
+        assert_eq!(r.matching(KindTag::Definition, &u, "rust").len(), 1);
+        assert!(r.matching(KindTag::Completion, &u, "json").is_empty());
+        assert!(r.matching(KindTag::Rename, &u, "rust").is_empty());
+        assert_eq!(r.apply(&MainThreadCall::Unregister { handle: 9 }), RegistryChange::Unregistered { handle: 9, kind: KindTag::Completion });
+        assert!(r.matching(KindTag::Completion, &u, "rust").is_empty());
     }
 
     #[test]

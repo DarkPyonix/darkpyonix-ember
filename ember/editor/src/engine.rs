@@ -37,6 +37,8 @@ use crate::search::{FileHits, ReplaceReport, ReplaceRequest, SearchEnd, SearchRe
 use crate::semantic::{decode_semantic_tokens, overlay_semantic_runs, DocSemanticTokens};
 use crate::widget::{Decoration, DecorationKind, WidgetCommand, WidgetEvent};
 
+mod language;
+
 /// How many versions behind the document an answer of the highlighter may be and still be shown.
 const MAX_SPAN_VERSION_LAG: u32 = 500;
 
@@ -82,6 +84,8 @@ pub enum ReadPurpose {
     Grammar { scope: String },
     /// A file that is not open, read for replace `id` (FR-E7).
     Replace { id: u64 },
+    /// A file that is not open, read for workspace edit `id` (FR-L31.13).
+    WorkspaceEdit { id: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -111,6 +115,8 @@ pub enum Input {
     CancelSearch { id: u64 },
     /// Replace the chosen matches (FR-E7); answered with [`SessionUpdate::ReplaceDone`].
     Replace { id: u64, request: ReplaceRequest },
+    /// A language feature the window asks for (FR-L31.13); answered with [`SessionUpdate::Language`].
+    Language(crate::language::LanguageRequest),
     /// Nothing happened; run due timers.
     Tick,
 }
@@ -187,6 +193,8 @@ pub enum SessionUpdate {
     SearchDone { id: u64, end: SearchEnd },
     /// Replace `id` finished.
     ReplaceDone { id: u64, report: ReplaceReport },
+    /// The answer to a language feature request (FR-L31.13).
+    Language(crate::language::LanguageUpdate),
 }
 
 #[derive(Debug, Clone)]
@@ -202,6 +210,8 @@ enum Pending {
     Command { id: String },
     /// `$provideTextSearchResults` of search `id`.
     Search { id: u64 },
+    /// A call of the language features (FR-L31.13).
+    Language(language::PendingLang),
 }
 
 /// The running search: the window's id, the provider session, its call, and the open documents whose
@@ -267,6 +277,7 @@ pub struct SessionCore {
     search: Option<ActiveSearch>,
     replaces: HashMap<u64, ReplaceJob>,
     replace_writes: HashMap<Token, ReplaceWrite>,
+    lang: language::LangState,
     next_token: Token,
     next_generation: u64,
     next_editor: u64,
@@ -324,6 +335,7 @@ impl SessionCore {
             search: None,
             replaces: HashMap::new(),
             replace_writes: HashMap::new(),
+            lang: language::LangState::default(),
             next_token: 0,
             next_generation: 0,
             next_editor: 0,
@@ -359,6 +371,7 @@ impl SessionCore {
             Input::Search { id, request, folder } => self.on_search(id, request, folder),
             Input::CancelSearch { id } => self.on_cancel_search(id),
             Input::Replace { id, request } => self.on_replace(id, request),
+            Input::Language(request) => self.on_language(request),
             Input::Tick => {}
         }
         self.run_timers();
@@ -608,6 +621,7 @@ impl SessionCore {
 
     fn on_close(&mut self, uri: &UriComponents) {
         let key = uri.key();
+        self.language_close(&key);
         let Some(doc) = self.docs.remove(&key) else { return };
         self.rpc(doc.remove_call());
         if let Some(job) = self.highlights.close(&key) {
@@ -851,6 +865,9 @@ impl SessionCore {
     fn on_file_written(&mut self, uri: &UriComponents, token: Token, result: Result<(), String>) {
         if let Some(write) = self.replace_writes.remove(&token) {
             self.on_replace_written(uri, write, result);
+            return;
+        }
+        if self.on_workspace_edit_written(uri, token, &result) {
             return;
         }
         let Some((key, ext_version, bytes)) = self.saves.remove(&token) else { return };
@@ -1342,6 +1359,9 @@ impl SessionCore {
             Ok(MainThreadCall::Other { proxy: Some("MainThreadDocuments"), method }) if method == "$tryOpenDocument" => {
                 self.on_try_open_document(&r);
             }
+            Ok(MainThreadCall::Other { proxy: Some("MainThreadBulkEdits"), method }) if method == "$tryApplyWorkspaceEdit" => {
+                self.on_try_apply_workspace_edit(&r);
+            }
             Ok(MainThreadCall::Other { proxy, method }) => {
                 let reply = session_reply(proxy, &method, self.reply_seq, &self.language_ids);
                 self.respond(r.req, Ok(reply));
@@ -1503,6 +1523,7 @@ impl SessionCore {
                 }
             }
             Pending::Search { id } => self.on_search_reply(id, result),
+            Pending::Language(pending) => self.on_language_reply(token, pending, result),
         }
     }
 
@@ -1548,6 +1569,7 @@ impl SessionCore {
             ReadPurpose::ExtHostOpen { req } => self.finish_exthost_open(uri, req, result),
             ReadPurpose::Grammar { scope } => self.on_grammar_read(&scope, &uri, result),
             ReadPurpose::Replace { id } => self.on_replace_read(id, uri, result),
+            ReadPurpose::WorkspaceEdit { id } => self.on_workspace_edit_read(id, uri, result),
         }
     }
 

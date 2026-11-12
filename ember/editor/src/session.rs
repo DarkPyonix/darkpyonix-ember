@@ -469,6 +469,11 @@ impl EditorSession {
         self.send(Command::Input(Input::Replace { id, request }))
     }
 
+    /// Ask for a language feature (FR-L31.13); answered with [`SessionUpdate::Language`].
+    pub fn language(&self, request: crate::language::LanguageRequest) -> Result<(), Error> {
+        self.send(Command::Input(Input::Language(request)))
+    }
+
     /// After [`SessionUpdate::Desync`]: re-send the session's text as a new generation.
     pub fn resync(&self, uri: UriComponents) -> Result<(), Error> {
         self.send(Command::Resync(uri))

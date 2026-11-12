@@ -343,10 +343,10 @@ pub struct Call {
 }
 
 impl Call {
-    fn new(proxy: &'static str, method: &'static str, args: Vec<Arg>) -> Self {
+    pub(crate) fn new(proxy: &'static str, method: &'static str, args: Vec<Arg>) -> Self {
         Self { proxy, method, args, cancellable: false }
     }
-    fn cancellable(mut self) -> Self {
+    pub(crate) fn cancellable(mut self) -> Self {
         self.cancellable = true;
         self
     }
@@ -356,7 +356,7 @@ impl Call {
     }
 }
 
-fn j<T: Serialize>(v: &T) -> Arg {
+pub(crate) fn j<T: Serialize>(v: &T) -> Arg {
     Arg::Json(serde_json::to_value(v).unwrap_or(Value::Null))
 }
 
@@ -682,6 +682,9 @@ pub enum MainThreadCall {
     /// head is decoded, the rest kept raw.
     RegisterInlineCompletionsSupport { handle: i64, selector: Vec<DocumentFilter>, extension_id: String, raw: Vec<Value> },
     EmitInlineCompletionsChange { handle: i64 },
+    /// A registration of [`crate::language`]: completion, definition, references, rename, code actions,
+    /// formatting, signature help or document symbols (FR-L31.13).
+    RegisterLanguageFeature { handle: i64, selector: Vec<DocumentFilter>, feature: crate::language::LanguageFeature },
     Unregister { handle: i64 },
     RegisterCommand { id: String },
     UnregisterCommand { id: String },
@@ -704,11 +707,11 @@ pub enum MainThreadCall {
     Other { proxy: Option<&'static str>, method: String },
 }
 
-fn arg_json(args: &[Arg], i: usize) -> Value {
+pub(crate) fn arg_json(args: &[Arg], i: usize) -> Value {
     args.get(i).and_then(Arg::as_json).cloned().unwrap_or(Value::Null)
 }
 
-fn arg_i64(args: &[Arg], i: usize) -> Result<i64> {
+pub(crate) fn arg_i64(args: &[Arg], i: usize) -> Result<i64> {
     arg_json(args, i).as_i64().ok_or_else(|| Error::Malformed(format!("arg {i} is not an integer")))
 }
 
@@ -770,6 +773,12 @@ impl MainThreadCall {
             }
             (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$emitInlineCompletionsChange") => {
                 Self::EmitInlineCompletionsChange { handle: arg_i64(a, 0)? }
+            }
+            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), m) if crate::language::is_registration(m) => {
+                match crate::language::parse_registration(m, a)? {
+                    Some((handle, selector, feature)) => Self::RegisterLanguageFeature { handle, selector, feature },
+                    None => Self::Other { proxy: r.proxy, method: r.method.clone() },
+                }
             }
             (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$unregister") => Self::Unregister { handle: arg_i64(a, 0)? },
             (Some(proxy::MAIN_THREAD_COMMANDS), "$registerCommand") => Self::RegisterCommand { id: arg_str(a, 0)? },

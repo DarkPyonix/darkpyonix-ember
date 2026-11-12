@@ -4027,21 +4027,24 @@ fn TeamRowView(
                             }
                         }
 
+                        // The card's buttons are the mockup's `.btn.sm` (32 px, 13 px text). They are
+                        // painted pills, as the stash buttons are: `AppButton` cannot set the text
+                        // size (compose-rust#500), so its label came out at the toolkit's 16 px.
                         if r.conflict {
                             let on_cf = on_conflict.clone();
-                            AppButton("충돌 해결", None, ButtonKind::Destructive, true, true, false, move || on_cf());
+                            StashPill("충돌 해결", "충돌 해결", ButtonKind::Destructive, true, move || on_cf());
                         }
 
                         cu::Spacer().modifier(Modifier::new().weight(1.0));
 
                         let on_br = on_branch.clone();
-                        AppButton("브랜치 보기", None, ButtonKind::Default, true, true, false, move || on_br());
+                        StashPill("브랜치 보기", "브랜치 보기", ButtonKind::Default, true, move || on_br());
 
                         if let Some(m) = &r.member {
                             if !m.session_id.is_empty() {
                                 let sid = m.session_id.clone();
                                 let on_sess = on_session.clone();
-                                AppButton("세션", None, ButtonKind::Default, true, true, false, move || on_sess(&sid));
+                                StashPill("세션", "세션", ButtonKind::Default, true, move || on_sess(&sid));
                             }
                         }
                     });
@@ -6547,6 +6550,44 @@ mod tests {
     }
 
     #[test]
+    fn fr_l19_team_card_buttons_draw_their_text_at_the_small_step() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let count = mutable_state_of(None::<usize>);
+        let PrLoad::Ready(sample_pr_list) = sample_prs() else { panic!() };
+        let prs = mutable_state_of(Some(sample_pr_list));
+        let sec = mutable_state_of(Section::Team);
+        let mut host = Host::new(move || {
+            let cnt = count.clone();
+            let p = prs.clone();
+            let s = sec.clone();
+            Box::new(Recomposer::new(move || {
+                TeamPane(None, cnt.clone(), p.clone(), None, PaneLayout::Two, Some(s.clone()), None);
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let mut text_of: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut size_of: std::collections::HashMap<u32, f32> = std::collections::HashMap::new();
+        for m in &batch {
+            match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                    text_of.insert(*node_id, s.to_string());
+                }
+                Mutation::SetProp { node_id, property: PropertyKind::FontSize, value: PropertyValue::Float(f) } => {
+                    size_of.insert(*node_id, *f);
+                }
+                _ => {}
+            }
+        }
+        // The mockup's `.btn.sm`: the visible label of each card button is 13 px, not the toolkit's 16 px.
+        for want in ["브랜치 보기", "세션"] {
+            let sized: Vec<f32> = text_of.iter().filter(|(_, t)| *t == want).filter_map(|(id, _)| size_of.get(id).copied()).collect();
+            assert!(!sized.is_empty(), "no sized text for {want}");
+            assert!(sized.iter().all(|f| (*f - VCS_CONTROL_FS.size()).abs() < 0.01), "{want} is drawn at {sized:?}");
+        }
+    }
+
+    #[test]
     fn fr_l19_team_row_view_renders_all_pr_states() {
         let _guard = crate::services::test_guard();
         compose_rust::window::reset_window_size();
@@ -6775,7 +6816,8 @@ mod tests {
             }
         }
 
-        let br_button = button_texts.iter().find(|(_, text)| *text == "브랜치 보기").map(|(id, _)| *id);
+        // The painted pill carries the text twice (its label and the button over it); the button is the clickable one.
+        let br_button = button_texts.iter().find(|(id, text)| *text == "브랜치 보기" && clickables.contains_key(id)).map(|(id, _)| *id);
         assert!(br_button.is_some(), "expected '브랜치 보기' button");
 
         if let Some(node_id) = br_button {

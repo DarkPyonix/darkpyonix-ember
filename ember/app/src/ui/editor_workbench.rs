@@ -15,6 +15,13 @@ pub struct FindState {
     pub replacement: Signal<String>,
     pub case_sensitive: Signal<bool>,
     pub whole_word: Signal<bool>,
+    /// 정규식, 대소문자 보존 and 선택 영역에서 찾기 (FR-L31.12).
+    pub regex: Signal<bool>,
+    pub preserve_case: Signal<bool>,
+    pub scope: Signal<Option<crate::ui::find::Scope>>,
+    pub in_selection: Signal<bool>,
+    /// The editor's last selection, anchor and active end, each (line, UTF-16 column).
+    pub selection: Signal<((u32, u32), (u32, u32))>,
     pub current: Signal<Option<usize>>,
     pub cmd: Signal<Option<FindCmd>>,
     pub next_id: Signal<u64>,
@@ -125,6 +132,11 @@ fn init(target: EditorTarget) {
         replacement: Signal::new_in_scope(String::new(), root),
         case_sensitive: Signal::new_in_scope(false, root),
         whole_word: Signal::new_in_scope(false, root),
+        regex: Signal::new_in_scope(false, root),
+        preserve_case: Signal::new_in_scope(false, root),
+        scope: Signal::new_in_scope(None, root),
+        in_selection: Signal::new_in_scope(false, root),
+        selection: Signal::new_in_scope(((0, 0), (0, 0)), root),
         current: Signal::new_in_scope(None, root),
         cmd: Signal::new_in_scope(None, root),
         next_id: Signal::new_in_scope(1, root),
@@ -250,7 +262,7 @@ fn editor_pane() -> Element {
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
         on_decoration_click: move |id| { let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id); send(&click_s, event); },
         on_fold_change: move |e: compose_rust::code::FoldChange| { let event = fold_s.bridge.borrow_mut().on_fold_changed(&fold_uri, e.start_line, e.collapsed); send(&fold_s, event); let mut rev = fold_s.revision; *rev.write() += 1; },
-        on_selection_change: move |e: compose_rust::code::SelectionChange| { let mut position = selection_s.position; position.set((e.active.line as usize + 1, e.active.column as usize + 1)); let event = selection_s.bridge.borrow().on_selection_changed(&selection_uri, e.version, pos(e.anchor), pos(e.active)); send(&selection_s, event); },
+        on_selection_change: move |e: compose_rust::code::SelectionChange| { let mut position = selection_s.position; position.set((e.active.line as usize + 1, e.active.column as usize + 1)); let mut find_sel = selection_s.find.selection; find_sel.set(((e.anchor.line, e.anchor.column), (e.active.line, e.active.column))); let event = selection_s.bridge.borrow().on_selection_changed(&selection_uri, e.version, pos(e.anchor), pos(e.active)); send(&selection_s, event); },
     } }
 }
 
@@ -540,7 +552,9 @@ pub mod page {
         crate::ui::find::FindOptions {
             case_sensitive: *s.find.case_sensitive.read(),
             whole_word: *s.find.whole_word.read(),
-            regex: false,
+            regex: *s.find.regex.read(),
+            preserve_case: *s.find.preserve_case.read(),
+            scope: if *s.find.in_selection.read() { *s.find.scope.read() } else { None },
         }
     }
 
@@ -592,24 +606,24 @@ pub mod page {
 
     /// Replaces the match the reader is on (the first one when none is chosen yet).
     fn find_replace_one(s: &Shared) {
-        let (matches, _) = {
+        let (matches, text) = {
             let bridge = s.bridge.borrow();
             let Some(doc) = bridge.active_document() else { return; };
-            crate::ui::find::cached_doc_matches(&doc.uri.key(), doc.generation, doc.version, &s.find.query.read(), find_options(s), || &doc.text)
+            (crate::ui::find::cached_doc_matches(&doc.uri.key(), doc.generation, doc.version, &s.find.query.read(), find_options(s), || &doc.text).0, doc.text.clone())
         };
         let mut current = s.find.current;
         let index = current.read().filter(|i| *i < matches.len()).or(if matches.is_empty() { None } else { Some(0) });
         let Some(index) = index else { return };
         let replacement = s.find.replacement.read().clone();
-        find_send(s, None, crate::ui::find::replace_edits(&matches, Some(index), &replacement));
+        find_send(s, None, crate::ui::find::replacement_edits(&text, &s.find.query.read(), find_options(s), &matches, Some(index), &replacement));
         current.set(None);
     }
 
     fn find_replace_all(s: &Shared) {
-        let (matches, truncated) = {
+        let ((matches, truncated), text) = {
             let bridge = s.bridge.borrow();
             let Some(doc) = bridge.active_document() else { return; };
-            crate::ui::find::cached_doc_matches(&doc.uri.key(), doc.generation, doc.version, &s.find.query.read(), find_options(s), || &doc.text)
+            (crate::ui::find::cached_doc_matches(&doc.uri.key(), doc.generation, doc.version, &s.find.query.read(), find_options(s), || &doc.text), doc.text.clone())
         };
         if matches.is_empty() { return; }
         if truncated {
@@ -618,7 +632,7 @@ pub mod page {
         }
         let replacement = s.find.replacement.read().clone();
         let mut current = s.find.current;
-        find_send(s, None, crate::ui::find::replace_edits(&matches, None, &replacement));
+        find_send(s, None, crate::ui::find::replacement_edits(&text, &s.find.query.read(), find_options(s), &matches, None, &replacement));
         current.set(None);
     }
 
@@ -638,11 +652,15 @@ pub mod page {
                 (Vec::new(), false)
             }
         };
-        let counter = if truncated { format!("{}개 이상", crate::ui::find::MAX_MATCHES) } else { crate::ui::find::count_text(current.read().filter(|i| *i < matches.len()), matches.len(), &q) };
+        let regex_bad = crate::ui::find::regex_error(&q, find_options(s)).is_some();
+        let counter = if regex_bad { "잘못된 정규식".to_string() } else if truncated { format!("{}개 이상", crate::ui::find::MAX_MATCHES) } else { crate::ui::find::count_text(current.read().filter(|i| *i < matches.len()), matches.len(), &q) };
         let (prev_s, next_s, one_s, all_s, key_s, enter_s) = (s.clone(), s.clone(), s.clone(), s.clone(), s.clone(), s.clone());
         let has_doc = s.bridge.borrow().active_document().is_some();
         let has_matches = has_doc && (!matches.is_empty() || truncated);
         let (case_on, word_on) = (*case_sensitive.read(), *whole_word.read());
+        let (mut regex, mut preserve, mut in_sel, mut scope) = (s.find.regex, s.find.preserve_case, s.find.in_selection, s.find.scope);
+        let (regex_on, preserve_on, sel_on) = (*regex.read(), *preserve.read(), *in_sel.read());
+        let sel_s = s.clone();
         let on = |flag: bool| if flag { "ed-pj on" } else { "ed-pj" };
         rsx! {
             div { class: "ed-tsub", role: "search", "aria-label": "문서에서 찾기", style: "flex-wrap:wrap;",
@@ -664,6 +682,17 @@ pub mod page {
                 }
                 button { class: on(case_on), title: "대소문자 구분", "aria-label": "대소문자 구분", "aria-pressed": "{case_on}", style: "border:1px solid var(--line);", onclick: move |_| { case_sensitive.set(!case_on); current.set(None); }, "Aa" }
                 button { class: on(word_on), title: "단어 단위", "aria-label": "단어 단위", "aria-pressed": "{word_on}", style: "border:1px solid var(--line);", onclick: move |_| { whole_word.set(!word_on); current.set(None); }, "단어" }
+                button { class: on(regex_on), title: "정규식 사용", "aria-label": "정규식 사용", "aria-pressed": "{regex_on}", style: "border:1px solid var(--line);", onclick: move |_| { regex.set(!regex_on); current.set(None); }, ".*" }
+                button { class: on(sel_on), title: "선택 영역에서 찾기", "aria-label": "선택 영역에서 찾기", "aria-pressed": "{sel_on}", style: "border:1px solid var(--line);",
+                    onclick: move |_| {
+                        if !sel_on {
+                            // As in Code-OSS the scope is the selection at the moment the option is turned on.
+                            let (anchor, active) = *sel_s.find.selection.read();
+                            let text = sel_s.bridge.borrow().active_document().map(|d| d.text.clone()).unwrap_or_default();
+                            scope.set(crate::ui::find::Scope::from_selection(anchor, active, &text));
+                        }
+                        in_sel.set(!sel_on); current.set(None);
+                    }, "선택" }
                 span { class: "ed-sbi", role: "status", "{counter}" }
                 button { class: "ed-ib", title: "이전 결과", "aria-label": "이전 결과", disabled: !has_matches, onclick: move |_| find_go(&prev_s, false), {icon("up")} }
                 button { class: "ed-ib", title: "다음 결과", "aria-label": "다음 결과", disabled: !has_matches, onclick: move |_| find_go(&next_s, true), {icon("down")} }
@@ -680,6 +709,7 @@ pub mod page {
                         },
                     }
                 }
+                button { class: on(preserve_on), title: "대소문자 보존", "aria-label": "대소문자 보존", "aria-pressed": "{preserve_on}", style: "border:1px solid var(--line);", onclick: move |_| preserve.set(!preserve_on), "AB" }
                 button { class: "ed-pj", style: "border:1px solid var(--line);", disabled: !has_matches, onclick: move |_| find_replace_one(&one_s), "바꾸기" }
                 button { class: "ed-pj", style: "border:1px solid var(--line);", disabled: !has_matches, onclick: move |_| find_replace_all(&all_s), "모두 바꾸기" }
                 div { class: "spacer" }

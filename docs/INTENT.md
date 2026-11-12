@@ -949,7 +949,7 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 
 **Status.** Specified (`FR-W4a` to `FR-W4c`, Draft; issue #457). Local server OSE and its relay are in #458/#459/#461; node OSE routes and server-to-node relay follow this spec.
 
-### D43: Workspace trust in the Ember 에디터 guards extensions, not the computer
+### D45: Workspace trust in the Ember 에디터 guards extensions, not the computer
 
 **Decision.** [provisional, 2026-11-13, #450; basis: D38 "기능은 oss랑 동일하고 디자인은 목업"; owner confirmation pending] The Ember 에디터 window has Code-OSS's workspace trust (`FR-L31.18`): on the first open of a folder it asks whether the user trusts the authors of its files, remembers the answer per device for that computer and folder (a trusted folder covers the folders below it), and runs an untrusted folder in restricted mode with a banner.
 

@@ -66,10 +66,16 @@ pub enum Action {
     FindInFiles,
     /// Search across the project's files with the replace field shown (FR-E7).
     ReplaceInFiles,
+    /// The settings view (FR-L31.17).
+    Settings,
+    /// The user's settings.json as a document (FR-L31.17).
+    SettingsJson,
+    /// The user's keybindings.json as a document (FR-L31.17).
+    KeybindingsJson,
 }
 
 impl Action {
-    pub const ALL: [Action; 22] = [
+    pub const ALL: [Action; 25] = [
         Action::Project,
         Action::Commit,
         Action::Git,
@@ -92,6 +98,9 @@ impl Action {
         Action::FindInFile,
         Action::FindInFiles,
         Action::ReplaceInFiles,
+        Action::Settings,
+        Action::SettingsJson,
+        Action::KeybindingsJson,
     ];
 
     pub fn label(self) -> &'static str {
@@ -118,6 +127,9 @@ impl Action {
             Action::FindInFile => "문서에서 찾기",
             Action::FindInFiles => "파일에서 찾기",
             Action::ReplaceInFiles => "파일에서 바꾸기",
+            Action::Settings => "설정",
+            Action::SettingsJson => "사용자 설정 열기 (JSON)",
+            Action::KeybindingsJson => "키보드 단축키 열기 (JSON)",
         }
     }
 }
@@ -245,7 +257,7 @@ impl Chord {
 /// `(action, macOS chord, other chord)`; an empty chord means no default binding.
 type Row = (Action, &'static str, &'static str);
 
-const VSCODE: [Row; 22] = [
+const VSCODE: [Row; 25] = [
     (Action::Project, "\u{21E7}\u{2318}E", "Ctrl+Shift+E"),
     // VS Code has no default for a commit window; the source control view shares Git's chord.
     (Action::Commit, "", ""),
@@ -269,9 +281,13 @@ const VSCODE: [Row; 22] = [
     (Action::FindInFile, "\u{2318}F", "Ctrl+F"),
     (Action::FindInFiles, "\u{21E7}\u{2318}F", "Ctrl+Shift+F"),
     (Action::ReplaceInFiles, "\u{21E7}\u{2318}H", "Ctrl+Shift+H"),
+    (Action::Settings, "\u{2318},", "Ctrl+,"),
+    // Code-OSS binds neither JSON file by default (the keyboard shortcuts editor is a two-stroke chord).
+    (Action::SettingsJson, "", ""),
+    (Action::KeybindingsJson, "", ""),
 ];
 
-const JETBRAINS: [Row; 22] = [
+const JETBRAINS: [Row; 25] = [
     (Action::Project, "\u{2318}1", "Alt+1"),
     (Action::Commit, "\u{2318}0", "Alt+0"),
     (Action::Git, "\u{2318}9", "Alt+9"),
@@ -294,6 +310,9 @@ const JETBRAINS: [Row; 22] = [
     (Action::FindInFile, "\u{2318}F", "Ctrl+F"),
     (Action::FindInFiles, "\u{21E7}\u{2318}F", "Ctrl+Shift+F"),
     (Action::ReplaceInFiles, "\u{21E7}\u{2318}R", "Ctrl+Shift+R"),
+    (Action::Settings, "\u{2318},", "Ctrl+Alt+S"),
+    (Action::SettingsJson, "", ""),
+    (Action::KeybindingsJson, "", ""),
 ];
 
 impl Keymap {
@@ -321,7 +340,7 @@ impl Keymap {
         }
     }
 
-    fn table(self) -> &'static [Row; 22] {
+    fn table(self) -> &'static [Row; 25] {
         match self {
             Keymap::VsCode => &VSCODE,
             Keymap::JetBrains => &JETBRAINS,

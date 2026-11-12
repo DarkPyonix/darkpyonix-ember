@@ -332,6 +332,13 @@ pub mod page {
             save_current(s);
             return;
         }
+        // Settings (FR-L31.17): the view is a tab, the two files open as documents.
+        match action {
+            Action::Settings => return crate::ui::editor_settings::view::open(s),
+            Action::SettingsJson => return crate::ui::editor_settings::view::open_file(s, crate::ui::editor_settings::SettingsFile::User),
+            Action::KeybindingsJson => return crate::ui::editor_settings::view::open_file(s, crate::ui::editor_settings::SettingsFile::Keybindings),
+            _ => {}
+        }
         if let Some(mode) = crate::ui::palette::mode_for(action, *s.keymap.read()) {
             open_palette(s, mode);
             return;
@@ -790,6 +797,8 @@ pub mod page {
         drop(uris);
         drop(bridge);
         crate::ui::editor_search::view::apply_pending_reveal(&s);
+        crate::ui::editor_settings::view::apply_capture_hook(&s);
+        let settings_shown = current.as_deref().is_some_and(crate::ui::editor_settings::is_settings_tab);
         let (line, col) = *s.position.read();
         let sel = *s.stripes.read();
         let keymap = *s.keymap.read();
@@ -849,7 +858,7 @@ pub mod page {
                             run_action(&key_s, action);
                         }
                     }
-                    if let Some(action) = action_for_key(
+                    let default_action = action_for_key(
                         keymap,
                         Os::current(),
                         &key_name(&event.key()),
@@ -857,8 +866,28 @@ pub mod page {
                         m.contains(Modifiers::SHIFT),
                         m.contains(Modifiers::ALT),
                         m.contains(Modifiers::META),
-                    ) {
-                        run_action(&key_s, action);
+                    );
+                    // The user's keybindings.json is read on top of the keymap (FR-L31.17).
+                    let user_rules = key_s.host.state.lock().unwrap().settings.keybindings.clone();
+                    let resolution = if user_rules.is_empty() {
+                        crate::ui::editor_settings::KeyResolution::Default
+                    } else {
+                        let chord = crate::ui::editor::chord_from_key(
+                            &key_name(&event.key()),
+                            m.contains(Modifiers::CONTROL),
+                            m.contains(Modifiers::SHIFT),
+                            m.contains(Modifiers::ALT),
+                            m.contains(Modifiers::META),
+                        );
+                        crate::ui::editor_settings::resolve_key(&user_rules, &chord, default_action)
+                    };
+                    match resolution {
+                        crate::ui::editor_settings::KeyResolution::Default => {
+                            if let Some(action) = default_action { run_action(&key_s, action); }
+                        }
+                        crate::ui::editor_settings::KeyResolution::Unbound => {}
+                        crate::ui::editor_settings::KeyResolution::Action(action) => run_action(&key_s, action),
+                        crate::ui::editor_settings::KeyResolution::Command(id) => { key_s.host.send(HostCommand::ExecuteCommand(id)); }
                     }
                 },
                 if let Some(error) = error {
@@ -885,13 +914,14 @@ pub mod page {
                     section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
                         {tab_strip(&s, &paths, &dirty, current.as_deref())}
                         if *s.menu_open.read() { {menu(&s, keymap)} }
-                        if let Some(path) = current.as_deref() {
+                        if let Some(path) = current.as_deref().filter(|_| !settings_shown) {
                             {breadcrumbs(path, &s.folder)}
                         }
                         if *s.find.open.read() && active.is_some() && !diff_shown && !conflict_shown { {find_bar(&s)} }
                         div { style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
                             if conflict_shown { {crate::ui::editor_scm::view::conflict_pane(&s)} }
                             else if diff_shown { {crate::ui::editor_scm::view::diff_pane(&s)} }
+                            else if settings_shown { {crate::ui::editor_settings::view::pane(&s)} }
                             else if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
                             else if let Some(error) = current.as_ref().and_then(|p| open_error.clone().map(|e| (p.clone(), e))) {
                                 div { class: "ed-empty", role: "alert",
@@ -995,7 +1025,7 @@ pub mod page {
         let mut close_editor_menu = s.menu_open;
         rsx! {
             div { class: "ed-menu", role: "menu", "aria-label": "편집기 메뉴",
-                for a in [Action::FindInFile, Action::Save, Action::Recent, Action::Format, Action::GotoLine] {
+                for a in [Action::FindInFile, Action::Save, Action::Recent, Action::Format, Action::GotoLine, Action::Settings] {
                     {
                         let s = s.clone();
                         let label = a.label();
@@ -1136,7 +1166,12 @@ pub mod page {
         let root = s.folder.clone();
         let rows = {
             let state = s.host.state.lock().unwrap();
-            crate::ui::editor::tree_rows(&root, &state.listings, &expanded.read())
+            // `files.exclude` hides rows here, so everything below works on what is shown (FR-L31.17).
+            crate::ui::editor_settings::visible_tree_rows(
+                crate::ui::editor::tree_rows(&root, &state.listings, &expanded.read()),
+                &root,
+                &state.settings.exclude_matcher(),
+            )
         };
         let root_name = base_name(&root).to_string();
         let selected: Option<(String, bool)> = tree_sel.read().clone();

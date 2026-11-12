@@ -236,6 +236,8 @@ struct ReplaceWrite {
 
 pub struct SessionCore {
     opts: CoreOptions,
+    /// The window's settings (FR-L31.17); `None` until the session has read them.
+    settings: Option<crate::settings::SettingsScopes>,
     languages: LanguageRegistry,
     language_ids: Vec<String>,
     docs: HashMap<String, OpenDocument>,
@@ -295,6 +297,7 @@ impl SessionCore {
         let language_ids = languages.ids();
         Self {
             opts,
+            settings: None,
             languages,
             language_ids,
             docs: HashMap::new(),
@@ -334,6 +337,24 @@ impl SessionCore {
             touched: BTreeSet::new(),
             out: Vec::new(),
             now,
+        }
+    }
+
+    /// Take the window's settings (FR-L31.17). `editor.tabSize` and `editor.insertSpaces` apply to
+    /// documents opened from now on; an open document keeps what it was opened with.
+    pub fn set_settings(&mut self, scopes: crate::settings::SettingsScopes) {
+        self.settings = Some(scopes);
+    }
+
+    /// Tab size and insert-spaces for a document of `language`: the settings when the session has
+    /// them, the start-up options otherwise.
+    fn indent_for(&self, language: &str) -> (u32, bool) {
+        match &self.settings {
+            Some(scopes) => {
+                let resolved = crate::settings::EditorSettings::resolve(scopes, Some(language));
+                (resolved.tab_size, resolved.insert_spaces)
+            }
+            None => (self.opts.tab_width, self.opts.insert_spaces),
         }
     }
 
@@ -461,7 +482,7 @@ impl SessionCore {
     fn emit_folds(&mut self, key: &str) {
         let Some(doc) = self.docs.get(key) else { return };
         let (uri, generation, version) = (doc.uri.clone(), doc.generation(), doc.widget_version());
-        let tab_width = self.opts.tab_width;
+        let tab_width = self.indent_for(&doc.language_id).0;
         let folds = self
             .folds
             .entry(key.to_owned())
@@ -536,7 +557,7 @@ impl SessionCore {
                 generation: d.generation(),
                 text: d.widget_text(),
                 language_id: d.language_id.clone(),
-                tab_width: self.opts.tab_width,
+                tab_width: self.indent_for(&d.language_id).0,
             };
             self.ui(u);
             self.emit_folds(&key);
@@ -572,6 +593,7 @@ impl SessionCore {
         self.next_generation += 1;
         self.next_editor += 1;
         let editor_id = format!("ember-editor-{}", self.next_editor);
+        let (tab_width, insert_spaces) = self.indent_for(&language);
         let (doc, calls) = OpenDocument::open(
             uri.clone(),
             &text,
@@ -580,8 +602,8 @@ impl SessionCore {
             &editor_id,
             ext_version,
             self.next_generation,
-            self.opts.tab_width,
-            self.opts.insert_spaces,
+            tab_width,
+            insert_spaces,
         );
         for c in calls {
             self.rpc(c);
@@ -591,7 +613,7 @@ impl SessionCore {
             generation: doc.generation(),
             text: doc.widget_text(),
             language_id: language,
-            tab_width: self.opts.tab_width,
+            tab_width,
         });
         self.docs.insert(key.clone(), doc);
         self.folds.insert(key.clone(), DocFolds::default());

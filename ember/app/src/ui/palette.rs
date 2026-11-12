@@ -21,13 +21,13 @@ pub enum Payload {
     GotoLine { line: usize, column: Option<usize> },
     /// An extension command, by its id.
     ExtensionCommand(String),
-    /// Change the active document's line ending (FR-L31.6).
+    /// Change the active document's line ending (FR-L31.7).
     SetEol(ember_editor::Eol),
-    /// Go on to the encoding list for reopening or saving (FR-L31.6).
+    /// Go on to the encoding list for reopening or saving (FR-L31.7).
     EncodingAction(ember_editor::EncodingMode),
-    /// Reopen or save the active document in an encoding (FR-L31.6).
+    /// Reopen or save the active document in an encoding (FR-L31.7).
     SetEncoding { mode: ember_editor::EncodingMode, encoding: ember_editor::Encoding },
-    /// Put the active document under a language id; `None` is 자동 감지 (FR-L31.6).
+    /// Put the active document under a language id; `None` is 자동 감지 (FR-L31.7).
     SetLanguage(Option<String>),
     /// Close the picker and do nothing.
     Cancel,
@@ -219,7 +219,7 @@ pub fn move_selection(selected: usize, len: usize, down: bool) -> usize {
 }
 
 /// What the palette lists: commands, files, both, go-to-line, or recent files; or one of the status
-/// bar's pickers (FR-L31.6, rows from `editor_status`).
+/// bar's pickers (FR-L31.7, rows from `editor_status`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Commands,

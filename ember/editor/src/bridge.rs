@@ -36,7 +36,7 @@ pub struct DocumentWidgetState {
     pub external_change: Option<ExternalChange>,
     /// The coloured runs of the syntax and the document version they were written against.
     pub syntax: SyntaxRuns,
-    /// Line ending, encoding and language for the status bar (FR-L31.6); `None` until the session
+    /// Line ending, encoding and language for the status bar (FR-L31.7); `None` until the session
     /// reports it.
     pub format: Option<crate::text_format::DocumentFormat>,
 }
@@ -70,7 +70,7 @@ pub enum BridgeAction {
     },
     /// Running an extension command failed.
     CommandFailed { id: String, error: String },
-    /// Reopening a document with an encoding failed (FR-L31.6).
+    /// Reopening a document with an encoding failed (FR-L31.7).
     FormatFailed { uri: UriComponents, error: String },
 }
 

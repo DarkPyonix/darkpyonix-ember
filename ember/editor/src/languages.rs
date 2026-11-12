@@ -19,7 +19,7 @@ pub const PLAINTEXT: &str = "plaintext";
 /// Code-OSS registers `plaintext` itself with this alias (`modesRegistry.ts`).
 const PLAINTEXT_NAME: &str = "Plain Text";
 
-/// A language for the language mode picker (FR-L31.6): the id and the name shown for it.
+/// A language for the language mode picker (FR-L31.7): the id and the name shown for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanguageInfo {
     pub id: String,
@@ -153,9 +153,9 @@ mod tests {
         assert_eq!(r.language_for("/w/README"), PLAINTEXT);
     }
 
-    // FR-L31.6: the picker's names come from the first alias; an id without one shows itself.
+    // FR-L31.7: the picker's names come from the first alias; an id without one shows itself.
     #[test]
-    fn fr_l31_6_display_names_from_aliases() {
+    fn fr_l31_7_display_names_from_aliases() {
         let r = LanguageRegistry::from_extensions(&[
             json!({"contributes": {"languages": [
                 {"id": "json", "aliases": ["JSON", "json"], "extensions": [".json"]},

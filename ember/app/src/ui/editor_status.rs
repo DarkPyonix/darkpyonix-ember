@@ -1,4 +1,4 @@
-//! The status bar's document items and their pickers in the Ember 에디터 window (FR-L31.6, #453):
+//! The status bar's document items and their pickers in the Ember 에디터 window (FR-L31.7, #453):
 //! line ending, encoding and language mode, as Code-OSS's `editorStatus.ts` (`ChangeEOLAction`,
 //! `ChangeEncodingAction`, `ChangeLanguageAction`). Pure; the window draws the items in the status
 //! bar and the pickers in the palette sheet (`editor_workbench`).

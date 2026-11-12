@@ -18,7 +18,7 @@
 //! | [`registry`] | provider registrations (`$register…`) and extension-host commands |
 //! | [`selector`] | `languages.score` port: document selector matching |
 //! | [`languages`] | file → language id from `contributes.languages`, and the names for the language picker |
-//! | [`text_format`] | FR-L31.6: line ending and encoding detection, decode / encode, the status bar's document format |
+//! | [`text_format`] | FR-L31.7: line ending and encoding detection, decode / encode, the status bar's document format |
 //! | [`textmate`] | FR-E6: the grammars extensions contribute (`contributes.grammars`), read into the raw rule model |
 //! | [`ids`] | stable, non-zero, session-unique decoration ids |
 //! | [`coords`] | widget (0-based) ↔ extension host (1-based) positions, UTF-16 helpers, ranges through edits |

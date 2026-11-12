@@ -469,13 +469,13 @@ impl EditorSession {
         self.send(Command::Input(Input::Replace { id, request }))
     }
 
-    /// Change the line ending of an open document (FR-L31.6); answered with
+    /// Change the line ending of an open document (FR-L31.7); answered with
     /// [`SessionUpdate::Format`] and [`SessionUpdate::Dirty`].
     pub fn set_eol(&self, uri: UriComponents, eol: crate::text_format::Eol) -> Result<(), Error> {
         self.send(Command::Input(Input::SetEol { uri, eol }))
     }
 
-    /// Reopen or save an open document in `encoding` (FR-L31.6).
+    /// Reopen or save an open document in `encoding` (FR-L31.7).
     pub fn set_encoding(
         &self,
         uri: UriComponents,
@@ -485,7 +485,7 @@ impl EditorSession {
         self.send(Command::Input(Input::SetEncoding { uri, encoding, mode }))
     }
 
-    /// Put an open document under `language_id`, or the one its path gives with `None` (FR-L31.6).
+    /// Put an open document under `language_id`, or the one its path gives with `None` (FR-L31.7).
     pub fn set_language(&self, uri: UriComponents, language_id: Option<String>) -> Result<(), Error> {
         self.send(Command::Input(Input::SetLanguage { uri, language_id }))
     }

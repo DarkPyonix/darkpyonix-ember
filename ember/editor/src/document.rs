@@ -15,7 +15,7 @@
 //! **Text form.** The widget gets the text joined with `\n`; the mirror keeps the file's own EOL
 //! (`\n` or `\r\n`, normalized like Monaco) for the extension host and for saving. The file
 //! encoding ([`Encoding`]: UTF-8, UTF-8 with BOM, UTF-16 LE or BE, detected by the BOM) is kept per
-//! document and used on save; files in no supported encoding are refused (no guessing, FR-L31.6).
+//! document and used on save; files in no supported encoding are refused (no guessing, FR-L31.7).
 
 use ember_editor_conn::document::{DocumentMirror, EditReason, EditorChange, TextEdit};
 use ember_editor_conn::exthost::{
@@ -32,7 +32,7 @@ const BOM: &str = "\u{feff}";
 pub enum DocError {
     #[error("file is not UTF-8")]
     NotUtf8,
-    /// The bytes are not valid in the encoding chosen for them (FR-L31.6).
+    /// The bytes are not valid in the encoding chosen for them (FR-L31.7).
     #[error("file is not valid {0}")]
     BadEncoding(&'static str),
     /// A `CodeChanged` whose version is not the next one: an event was lost or duplicated.
@@ -189,12 +189,12 @@ impl OpenDocument {
         encode_as(&self.mirror.text(), self.encoding)
     }
 
-    /// The document's line ending (FR-L31.6).
+    /// The document's line ending (FR-L31.7).
     pub fn eol(&self) -> Eol {
         Eol::from_sequence(self.mirror.eol())
     }
 
-    /// The document's file encoding (FR-L31.6).
+    /// The document's file encoding (FR-L31.7).
     pub fn encoding(&self) -> Encoding {
         self.encoding
     }
@@ -406,10 +406,10 @@ mod tests {
         assert_eq!(d.save_bytes(), b"\xef\xbb\xbfhi".to_vec());
     }
 
-    // FR-L31.6: the EOL change goes to the extension host as a model change one version later, keeps
+    // FR-L31.7: the EOL change goes to the extension host as a model change one version later, keeps
     // the widget's versions, makes the document dirty, and is what save writes.
     #[test]
-    fn fr_l31_6_eol_change_is_an_edit_through_the_mirror() {
+    fn fr_l31_7_eol_change_is_an_edit_through_the_mirror() {
         let (mut d, _) = open("a\nb");
         assert_eq!(d.eol(), Eol::Lf);
         assert!(d.set_eol(Eol::Lf).is_none(), "no change, no call");
@@ -434,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l31_6_encoding_is_kept_and_used_on_save() {
+    fn fr_l31_7_encoding_is_kept_and_used_on_save() {
         let (mut d, calls) = open("hi");
         assert_eq!(json_arg(&calls[1], 0)["addedDocuments"][0]["encoding"], "utf8");
         assert_eq!(d.encoding(), Encoding::Utf8);
@@ -455,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l31_6_language_change_tells_the_extension_host() {
+    fn fr_l31_7_language_change_tells_the_extension_host() {
         let (mut d, _) = open("{}");
         assert!(d.set_language("json").is_empty());
         let calls = d.set_language("jsonc");

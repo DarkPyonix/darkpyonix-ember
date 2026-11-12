@@ -1,4 +1,4 @@
-//! FR-L31.6 (#453): the status bar's EOL, encoding and language items of the Ember 에디터 window and
+//! FR-L31.7 (#453): the status bar's EOL, encoding and language items of the Ember 에디터 window and
 //! their pickers. Pure parts only, no renderer.
 
 use ember_app::ui::editor_status::{
@@ -22,7 +22,7 @@ fn langs() -> Vec<LanguageInfo> {
 }
 
 #[test]
-fn fr_l31_6_status_bar_texts_follow_the_document() {
+fn fr_l31_7_status_bar_texts_follow_the_document() {
     let f = fmt(Eol::Crlf, Encoding::Utf16Le, "json", "JSON");
     assert_eq!(
         status_texts(Some(&f)),
@@ -41,7 +41,7 @@ fn fr_l31_6_status_bar_texts_follow_the_document() {
 }
 
 #[test]
-fn fr_l31_6_eol_picker_offers_lf_and_crlf_on_the_current_one() {
+fn fr_l31_7_eol_picker_offers_lf_and_crlf_on_the_current_one() {
     let f = fmt(Eol::Crlf, Encoding::Utf8, "json", "JSON");
     let items = picker_items(Mode::Eol, Some(&f), &[]);
     let titles: Vec<&str> = items.iter().map(|i| i.title.as_str()).collect();
@@ -53,7 +53,7 @@ fn fr_l31_6_eol_picker_offers_lf_and_crlf_on_the_current_one() {
 }
 
 #[test]
-fn fr_l31_6_encoding_picker_has_two_steps_and_the_four_encodings() {
+fn fr_l31_7_encoding_picker_has_two_steps_and_the_four_encodings() {
     let f = fmt(Eol::Lf, Encoding::Utf8Bom, "json", "JSON");
     let actions = picker_items(Mode::EncodingAction, Some(&f), &[]);
     assert_eq!(actions.iter().map(|i| i.title.as_str()).collect::<Vec<_>>(), [REOPEN_WITH_ENCODING, SAVE_WITH_ENCODING]);
@@ -73,7 +73,7 @@ fn fr_l31_6_encoding_picker_has_two_steps_and_the_four_encodings() {
 }
 
 #[test]
-fn fr_l31_6_reopen_over_unsaved_edits_asks_first_with_cancel_as_default() {
+fn fr_l31_7_reopen_over_unsaved_edits_asks_first_with_cancel_as_default() {
     let f = fmt(Eol::Lf, Encoding::Utf8, "json", "JSON");
     assert!(reopen_needs_confirmation(true, Some(&f), Encoding::Utf16Le));
     assert!(!reopen_needs_confirmation(false, Some(&f), Encoding::Utf16Le), "clean: nothing to lose");
@@ -87,7 +87,7 @@ fn fr_l31_6_reopen_over_unsaved_edits_asks_first_with_cancel_as_default() {
 }
 
 #[test]
-fn fr_l31_6_language_picker_lists_auto_detect_then_names_with_ids() {
+fn fr_l31_7_language_picker_lists_auto_detect_then_names_with_ids() {
     let f = fmt(Eol::Lf, Encoding::Utf8, "markdown", "Markdown");
     let items = picker_items(Mode::Language, Some(&f), &langs());
     assert_eq!(items.iter().map(|i| i.title.as_str()).collect::<Vec<_>>(), [AUTO_DETECT, "JSON", "Markdown", "Plain Text"]);
@@ -102,7 +102,7 @@ fn fr_l31_6_language_picker_lists_auto_detect_then_names_with_ids() {
 }
 
 #[test]
-fn fr_l31_6_pickers_are_palette_modes_without_the_file_index() {
+fn fr_l31_7_pickers_are_palette_modes_without_the_file_index() {
     for mode in [Mode::Eol, Mode::EncodingAction, Mode::Encoding(EncodingMode::Save), Mode::ConfirmReopen(Encoding::Utf8), Mode::Language] {
         assert!(is_picker(mode));
         assert!(!lists_files(mode));
@@ -118,7 +118,7 @@ fn fr_l31_6_pickers_are_palette_modes_without_the_file_index() {
 }
 
 #[test]
-fn fr_l31_6_reopen_failure_says_why_in_korean() {
+fn fr_l31_7_reopen_failure_says_why_in_korean() {
     let t = reopen_failure_text("a.txt", Some(Encoding::Utf16Le), "file is not valid UTF-16 LE");
     assert_eq!(t, "a.txt을(를) UTF-16 LE(으)로 다시 열지 못했습니다: 파일 내용이 이 인코딩에 맞지 않습니다");
     let t = reopen_failure_text("a.txt", None, "EntryNotFound (FileSystemError)");

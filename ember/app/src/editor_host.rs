@@ -35,7 +35,7 @@ pub enum HostCommand {
     /// Discard working-tree changes for a file by reading it through the session, reconstructing
     /// the base text from `diff`, and writing it back only if reading succeeds.
     DiscardFile { path: String, diff: crate::ui::vcs::FileDiff },
-    /// The status bar's pickers (FR-L31.6): line ending, encoding, language mode of an open file.
+    /// The status bar's pickers (FR-L31.7): line ending, encoding, language mode of an open file.
     SetEol { path: String, eol: ember_editor::Eol },
     SetEncoding { path: String, encoding: ember_editor::Encoding, mode: ember_editor::EncodingMode },
     SetLanguage { path: String, language_id: Option<String> },
@@ -62,7 +62,7 @@ pub struct HostState {
     pub renamed: Vec<(String, String)>,
     /// Extension commands from contributes.commands.
     pub extension_commands: Vec<ember_editor::ContributedCommand>,
-    /// The languages for the language mode picker (FR-L31.6).
+    /// The languages for the language mode picker (FR-L31.7).
     pub languages: Vec<ember_editor::LanguageInfo>,
     /// The search panel's matches and the last replace's report (FR-E7).
     pub search: crate::ui::editor_search::SearchResults,

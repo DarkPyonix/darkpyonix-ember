@@ -798,9 +798,9 @@ mod tests {
         }
     }
 
-    // FR-L31.6: the language and encoding changes are the ExtHostDocuments calls of the pinned commit.
+    // FR-L31.7: the language and encoding changes are the ExtHostDocuments calls of the pinned commit.
     #[test]
-    fn fr_l31_6_language_and_encoding_change_calls() {
+    fn fr_l31_7_language_and_encoding_change_calls() {
         let uri = UriComponents::remote("h", "/w/a.txt");
         let c = accept_model_language_changed(&uri, "markdown");
         assert_eq!((c.proxy, c.method), ("ExtHostDocuments", "$acceptModelLanguageChanged"));

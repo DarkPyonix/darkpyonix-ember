@@ -1,4 +1,4 @@
-//! FR-L31.6 (#453): line ending, encoding and language mode of an open document through the pure
+//! FR-L31.7 (#453): line ending, encoding and language mode of an open document through the pure
 //! session core. No server: the test feeds back what a server would answer.
 
 use std::time::Instant;
@@ -69,7 +69,7 @@ fn save(c: &mut SessionCore, t0: Instant, u: &UriComponents, generation: u64) ->
 }
 
 #[test]
-fn fr_l31_6_open_reports_eol_encoding_and_language_name() {
+fn fr_l31_7_open_reports_eol_encoding_and_language_name() {
     let t0 = Instant::now();
     let mut c = core(t0);
     let (fx, _) = open(&mut c, t0, "/w/a.json", b"{\r\n}\n");
@@ -83,7 +83,7 @@ fn fr_l31_6_open_reports_eol_encoding_and_language_name() {
 }
 
 #[test]
-fn fr_l31_6_utf16_files_open_and_tell_the_extension_host_their_encoding() {
+fn fr_l31_7_utf16_files_open_and_tell_the_extension_host_their_encoding() {
     let t0 = Instant::now();
     let mut c = core(t0);
     let (fx, g) = open(&mut c, t0, "/w/u.json", b"\xff\xfe{\x00}\x00");
@@ -99,7 +99,7 @@ fn fr_l31_6_utf16_files_open_and_tell_the_extension_host_their_encoding() {
 }
 
 #[test]
-fn fr_l31_6_changing_the_eol_is_an_edit_that_makes_the_document_dirty() {
+fn fr_l31_7_changing_the_eol_is_an_edit_that_makes_the_document_dirty() {
     let t0 = Instant::now();
     let mut c = core(t0);
     let u = uri("/w/a.json");
@@ -131,7 +131,7 @@ fn fr_l31_6_changing_the_eol_is_an_edit_that_makes_the_document_dirty() {
 }
 
 #[test]
-fn fr_l31_6_save_with_encoding_writes_in_it() {
+fn fr_l31_7_save_with_encoding_writes_in_it() {
     let t0 = Instant::now();
     let mut c = core(t0);
     let u = uri("/w/a.json");
@@ -144,7 +144,7 @@ fn fr_l31_6_save_with_encoding_writes_in_it() {
 }
 
 #[test]
-fn fr_l31_6_reopen_with_encoding_reads_the_file_again_in_it() {
+fn fr_l31_7_reopen_with_encoding_reads_the_file_again_in_it() {
     let t0 = Instant::now();
     let mut c = core(t0);
     let u = uri("/w/a.json");
@@ -169,7 +169,7 @@ fn fr_l31_6_reopen_with_encoding_reads_the_file_again_in_it() {
 }
 
 #[test]
-fn fr_l31_6_language_mode_change_reannounces_the_language() {
+fn fr_l31_7_language_mode_change_reannounces_the_language() {
     let t0 = Instant::now();
     let mut c = core(t0);
     let u = uri("/w/notes.json");
@@ -190,7 +190,7 @@ fn fr_l31_6_language_mode_change_reannounces_the_language() {
 }
 
 #[test]
-fn fr_l31_6_extensions_set_the_language_with_change_language() {
+fn fr_l31_7_extensions_set_the_language_with_change_language() {
     let t0 = Instant::now();
     let mut c = core(t0);
     let u = uri("/w/a.json");

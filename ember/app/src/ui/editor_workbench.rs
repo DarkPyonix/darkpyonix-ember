@@ -438,7 +438,7 @@ pub mod page {
         }
     }
 
-    /// The active document's path and its status bar state (format, dirty), for the pickers (FR-L31.6).
+    /// The active document's path and its status bar state (format, dirty), for the pickers (FR-L31.7).
     fn active_format(s: &Shared) -> Option<(String, Option<ember_editor::DocumentFormat>, bool)> {
         let path = s.tabs.read().current_path().map(str::to_owned)?;
         let uri = s.uris.borrow().get(&path).cloned()?;
@@ -447,7 +447,7 @@ pub mod page {
         Some((path, doc.format.clone(), doc.dirty))
     }
 
-    /// Open one of the status bar's pickers in the palette sheet, on the current item (FR-L31.6).
+    /// Open one of the status bar's pickers in the palette sheet, on the current item (FR-L31.7).
     fn open_picker(s: &Shared, mode: crate::ui::palette::Mode) {
         let Some((_, format, _)) = active_format(s) else {
             notice("열린 파일이 없습니다");
@@ -461,7 +461,7 @@ pub mod page {
         open.set(true);
     }
 
-    /// What a picker row does: the next picker, or the change sent to the session (FR-L31.6).
+    /// What a picker row does: the next picker, or the change sent to the session (FR-L31.7).
     fn choose_format_item(s: &Shared, payload: crate::ui::palette::Payload) {
         use crate::ui::palette::{Mode, Payload};
         let Some((path, format, dirty)) = active_format(s) else { return };
@@ -2169,7 +2169,7 @@ pub mod page {
         let tab_w = crate::ui::editor::tab_width_text(tab_width);
         let branch = branch.to_string();
         let has_file = current.is_some();
-        // EOL, encoding and language of the active document (FR-L31.6).
+        // EOL, encoding and language of the active document (FR-L31.7).
         let format = active_format(s).and_then(|(_, f, _)| f);
         let crate::ui::editor_status::StatusTexts { eol: eol_t, encoding: enc_t, language: lang_t } =
             crate::ui::editor_status::status_texts(format.as_ref());

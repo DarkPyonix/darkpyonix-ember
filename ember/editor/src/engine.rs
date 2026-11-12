@@ -110,12 +110,12 @@ pub enum Input {
     CancelSearch { id: u64 },
     /// Replace the chosen matches (FR-E7); answered with [`SessionUpdate::ReplaceDone`].
     Replace { id: u64, request: ReplaceRequest },
-    /// Change the line ending of an open document (FR-L31.6); it becomes dirty.
+    /// Change the line ending of an open document (FR-L31.7); it becomes dirty.
     SetEol { uri: UriComponents, eol: Eol },
     /// Reopen an open document in `encoding` (its unsaved edits are discarded) or save it in
-    /// `encoding` (FR-L31.6).
+    /// `encoding` (FR-L31.7).
     SetEncoding { uri: UriComponents, encoding: Encoding, mode: EncodingMode },
-    /// Put an open document under a language id; `None` detects it from the path again (FR-L31.6).
+    /// Put an open document under a language id; `None` detects it from the path again (FR-L31.7).
     SetLanguage { uri: UriComponents, language_id: Option<String> },
     /// Nothing happened; run due timers.
     Tick,
@@ -191,12 +191,12 @@ pub enum SessionUpdate {
     SearchDone { id: u64, end: SearchEnd },
     /// Replace `id` finished.
     ReplaceDone { id: u64, report: ReplaceReport },
-    /// The line ending, encoding and language of an open document (FR-L31.6): after it opens, is
+    /// The line ending, encoding and language of an open document (FR-L31.7): after it opens, is
     /// reloaded, or any of the three changes.
     Format { uri: UriComponents, format: DocumentFormat },
-    /// Reopening with an encoding failed; the document is unchanged (FR-L31.6).
+    /// Reopening with an encoding failed; the document is unchanged (FR-L31.7).
     FormatFailed { uri: UriComponents, error: String },
-    /// Every language the extensions contribute, for the language mode picker (FR-L31.6).
+    /// Every language the extensions contribute, for the language mode picker (FR-L31.7).
     Languages { languages: Vec<LanguageInfo> },
 }
 
@@ -263,7 +263,7 @@ pub struct SessionCore {
     ids: DecorationIds,
     pending: HashMap<Token, Pending>,
     saves: HashMap<Token, (String, u64, Vec<u8>)>,
-    /// Documents being read again in a chosen encoding (FR-L31.6): key → encoding.
+    /// Documents being read again in a chosen encoding (FR-L31.7): key → encoding.
     reopen: HashMap<String, Encoding>,
     /// Handle of the extension host's text search provider for the workspace's scheme (FR-E7).
     search_provider: Option<i64>,
@@ -383,7 +383,7 @@ impl SessionCore {
         a.chain(b).min()
     }
 
-    /// Every known language with its display name (FR-L31.6).
+    /// Every known language with its display name (FR-L31.7).
     pub fn language_list(&self) -> Vec<LanguageInfo> {
         self.languages.languages()
     }
@@ -756,7 +756,7 @@ impl SessionCore {
         }
     }
 
-    // ---- line ending, encoding, language (FR-L31.6) --------------------------------------------
+    // ---- line ending, encoding, language (FR-L31.7) --------------------------------------------
 
     fn emit_format(&mut self, key: &str) {
         let Some(doc) = self.docs.get(key) else { return };
@@ -1425,7 +1425,7 @@ impl SessionCore {
             }
             ReadPurpose::ForceReload => {
                 let key = uri.key();
-                // Reopen with an encoding (FR-L31.6) decodes exactly as chosen; a failure leaves the document as it was.
+                // Reopen with an encoding (FR-L31.7) decodes exactly as chosen; a failure leaves the document as it was.
                 let reopen = self.reopen.remove(&key);
                 let bytes = match result {
                     Ok(b) => b,

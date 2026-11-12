@@ -582,9 +582,9 @@ mod tests {
         assert_eq!(d.text(), "z");
     }
 
-    // FR-L31.6: changing the EOL is a content event with no changes, one version later, dirty.
+    // FR-L31.7: changing the EOL is a content event with no changes, one version later, dirty.
     #[test]
-    fn fr_l31_6_set_eol_is_an_eol_change_and_makes_the_document_dirty() {
+    fn fr_l31_7_set_eol_is_an_eol_change_and_makes_the_document_dirty() {
         let mut d = doc("a\nb").with_version(3);
         assert!(!d.is_dirty());
         let ev = d.set_eol("\r\n");

@@ -1,4 +1,4 @@
-//! The format of one document as the status bar shows it (FR-L31.6, #453): line endings, file
+//! The format of one document as the status bar shows it (FR-L31.7, #453): line endings, file
 //! encoding and language mode, and the pure conversions behind the pickers.
 //!
 //! **EOL.** As Monaco: the first line break decides (`\r\n` makes the document CRLF, anything else
@@ -197,7 +197,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fr_l31_6_eol_is_the_first_line_break() {
+    fn fr_l31_7_eol_is_the_first_line_break() {
         assert_eq!(detect_eol("a\nb"), Eol::Lf);
         assert_eq!(detect_eol("a\r\nb"), Eol::Crlf);
         assert_eq!(detect_eol("a\r\nb\nc"), Eol::Crlf, "mixed counts as the first");
@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l31_6_encoding_is_detected_by_bom_then_utf8() {
+    fn fr_l31_7_encoding_is_detected_by_bom_then_utf8() {
         assert_eq!(detect_encoding(b"plain"), Some(Encoding::Utf8));
         assert_eq!(detect_encoding("한글".as_bytes()), Some(Encoding::Utf8));
         assert_eq!(detect_encoding(b"\xef\xbb\xbfhi"), Some(Encoding::Utf8Bom));
@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l31_6_encoding_labels_and_ids_follow_code_oss() {
+    fn fr_l31_7_encoding_labels_and_ids_follow_code_oss() {
         let labels: Vec<_> = Encoding::ALL.iter().map(|e| e.label()).collect();
         assert_eq!(labels, ["UTF-8", "UTF-8 with BOM", "UTF-16 LE", "UTF-16 BE"]);
         let ids: Vec<_> = Encoding::ALL.iter().map(|e| e.id()).collect();
@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l31_6_decode_and_encode_round_trip() {
+    fn fr_l31_7_decode_and_encode_round_trip() {
         for e in Encoding::ALL {
             let bytes = encode_as("a😀\r\n한", e);
             assert_eq!(decode_as(&bytes, e).unwrap(), "a😀\r\n한", "{e:?}");
@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l31_6_bytes_that_do_not_fit_the_encoding_are_refused() {
+    fn fr_l31_7_bytes_that_do_not_fit_the_encoding_are_refused() {
         assert_eq!(decode_as(b"\xff\xfeh\x00", Encoding::Utf8), Err(DocError::NotUtf8));
         assert!(matches!(decode_as(b"abc", Encoding::Utf16Le), Err(DocError::BadEncoding(_))), "odd length");
         // A lone high surrogate.
@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l31_6_reload_keeps_the_encoding_unless_the_bom_says_otherwise() {
+    fn fr_l31_7_reload_keeps_the_encoding_unless_the_bom_says_otherwise() {
         assert_eq!(decode_reload(b"h\x00i\x00", Encoding::Utf16Le).unwrap(), ("hi".into(), Encoding::Utf16Le));
         assert_eq!(decode_reload(b"hi", Encoding::Utf8Bom).unwrap(), ("hi".into(), Encoding::Utf8));
         assert_eq!(decode_reload(b"\xef\xbb\xbfhi", Encoding::Utf8).unwrap(), ("hi".into(), Encoding::Utf8Bom));

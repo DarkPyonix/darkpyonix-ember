@@ -22,6 +22,7 @@ pub mod prefs;
 pub mod server;
 pub mod services;
 pub mod terminal_input;
+pub mod terminal_reconnect;
 pub mod terminal_stream;
 pub mod ui;
 

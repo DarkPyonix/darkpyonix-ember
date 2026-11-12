@@ -60,6 +60,11 @@ struct ChannelMessageBody {
 }
 
 #[derive(Deserialize)]
+struct ProjectDeletedBody {
+    name: String,
+}
+
+#[derive(Deserialize)]
 struct LaggedBody {
     #[serde(default)]
     missed: u64,
@@ -91,6 +96,10 @@ pub fn decode(text: &str) -> Result<Push, DecodeError> {
         "project_updated" => {
             let b: ProjectBody = serde_json::from_value(value).map_err(malformed)?;
             Ok(Push::ProjectUpdated { project: b.project })
+        }
+        "project_deleted" => {
+            let b: ProjectDeletedBody = serde_json::from_value(value).map_err(malformed)?;
+            Ok(Push::ProjectDeleted { name: b.name })
         }
         "team_updated" => {
             let b: TeamBody = serde_json::from_value(value).map_err(malformed)?;
@@ -191,6 +200,11 @@ mod tests {
             Push::ProjectUpdated {
                 project: Project { name: "p".into(), created_at: 1, computers: vec!["local".into()], ..Default::default() }
             }
+        );
+        assert_eq!(
+            decode(r#"{"type":"project_deleted","name":"p"}"#).unwrap(),
+            Push::ProjectDeleted { name: "p".into() },
+            "FR-L26: a delete carries only the name"
         );
         // An older server's record (no metadata fields) still decodes.
         let p = decode(

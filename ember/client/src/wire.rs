@@ -306,6 +306,9 @@ pub struct ProjectPatch {
     /// all; FR-L22, #489).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub character_overrides: Option<std::collections::BTreeMap<String, Option<CharacterOverride>>>,
+    /// Archive (`Some(true)`) or restore (`Some(false)`) the project (FR-L26, #384). Never `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
 }
 
 impl ProjectPatch {
@@ -470,6 +473,8 @@ pub enum Push {
     SessionUpdated { session: SessionRecord },
     /// A project was created or its computer assignment changed (FR-L4).
     ProjectUpdated { project: Project },
+    /// A project was deleted (FR-L26, #384): only its name.
+    ProjectDeleted { name: String },
     /// A team's members or tasks changed (FR-T7): the whole team.
     TeamUpdated { team: TeamView },
     /// A session's approve-everything mode was switched (FR-A5).

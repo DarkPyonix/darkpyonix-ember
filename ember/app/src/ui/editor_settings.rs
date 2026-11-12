@@ -1,4 +1,4 @@
-//! Settings of the Ember 에디터 window (SPEC FR-L31.17, `docs/INTENT.md` D43).
+//! Settings of the Ember 에디터 window (SPEC FR-L31.17, `docs/INTENT.md` D46).
 //!
 //! The pure part of the settings lives in `ember_editor::settings`. This module is what the window
 //! adds: where the user's files are on this machine, the state the host keeps, writing one setting

@@ -1,4 +1,4 @@
-//! Settings of the Ember 에디터 window (SPEC FR-L31.17, `docs/INTENT.md` D43).
+//! Settings of the Ember 에디터 window (SPEC FR-L31.17, `docs/INTENT.md` D46).
 //!
 //! Code-OSS keeps settings in JSON files with comments (JSONC) and merges them by scope. This
 //! module is the pure part of that: reading JSONC, the scopes and their merge, the settings Ember

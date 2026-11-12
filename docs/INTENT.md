@@ -949,7 +949,7 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 
 **Status.** Specified (`FR-W4a` to `FR-W4c`, Draft; issue #457). Local server OSE and its relay are in #458/#459/#461; node OSE routes and server-to-node relay follow this spec.
 
-### D43: Editor settings follow Code-OSS's scopes: user on the client, workspace in the folder, remote on the OSE server
+### D46: Editor settings follow Code-OSS's scopes: user on the client, workspace in the folder, remote on the OSE server
 
 **Decision.** [provisional, #449; basis: D38 "기능은 oss랑 동일하고 디자인은 목업"] The Ember 에디터 window keeps settings where Code-OSS keeps them when it is connected to a remote, and merges them in Code-OSS's order.
 

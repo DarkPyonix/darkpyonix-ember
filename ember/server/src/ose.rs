@@ -134,6 +134,10 @@ pub const MAX_RELAYS_PER_SERVER: usize = 64;
 const FLAG_DATA_DIR: &str = "--server-data-dir";
 const FLAG_EXTENSIONS_DIR: &str = "--extensions-dir";
 const FLAG_INSTALL: &str = "--install-extension";
+/// `--uninstall-extension <publisher.name>` (SPEC FR-L31.14, #446). The flag is in Code-OSS
+/// 1.139.1 `src/vs/server/node/serverEnvironmentService.ts` (`'uninstall-extension'`), handled by
+/// `ExtensionManagementCLI.uninstallExtensions`. UNVERIFIED against a real `dpx-ose-server` run.
+const FLAG_UNINSTALL: &str = "--uninstall-extension";
 /// UNVERIFIED: `--list-extensions` is not documented or used anywhere in this repository, so no
 /// list route exists. Kept as the one place the flag would be named.
 #[allow(dead_code)]
@@ -610,6 +614,30 @@ impl OseManager {
             return Err(InstallError::Bad(format!("invalid computer id: {computer_id:?}")));
         }
         let spec = extension_spec(id, version).map_err(InstallError::Bad)?;
+        self.run_extension_command(computer_id, FLAG_INSTALL, &spec, "install")
+    }
+
+    /// Runs `<binary> --uninstall-extension <id>` against the computer's data dir, with the rules
+    /// of [`OseManager::install_extension`] (SPEC FR-L31.14): the same id pattern (no version), no
+    /// shell, one extension command per computer at a time, the timeout and the cleared
+    /// environment. Blocking: call from `spawn_blocking`.
+    pub fn uninstall_extension(&self, computer_id: &str, id: &str) -> Result<String, InstallError> {
+        if !valid_computer_id(computer_id) {
+            return Err(InstallError::Bad(format!("invalid computer id: {computer_id:?}")));
+        }
+        let spec = extension_spec(id, None).map_err(InstallError::Bad)?;
+        self.run_extension_command(computer_id, FLAG_UNINSTALL, &spec, "uninstall")
+    }
+
+    /// One extension management run of the OSE binary: `<binary> <flag> <spec> <dir args>`. The
+    /// caller has validated `computer_id` and `spec`; `what` names the run in error messages.
+    fn run_extension_command(
+        &self,
+        computer_id: &str,
+        flag: &str,
+        spec: &str,
+        what: &str,
+    ) -> Result<String, InstallError> {
         let binary = self.binary.as_ref().filter(|p| p.is_file()).ok_or(InstallError::NotInstalled)?;
         {
             let mut busy = self.installing.lock().unwrap_or_else(|e| e.into_inner());
@@ -621,8 +649,8 @@ impl OseManager {
         let dir = self.computer_data_dir(computer_id).map_err(InstallError::Io)?;
         let mut command = ose_command(binary);
         command
-            .arg(FLAG_INSTALL)
-            .arg(&spec)
+            .arg(flag)
+            .arg(spec)
             .args(Self::dir_args(&dir))
             .arg("--accept-server-license-terms")
             .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -639,14 +667,14 @@ impl OseManager {
                     return if status.success() {
                         Ok(output)
                     } else {
-                        Err(InstallError::Failed { message: format!("install failed: {status}"), output })
+                        Err(InstallError::Failed { message: format!("{what} failed: {status}"), output })
                     };
                 }
                 Ok(None) if Instant::now() >= deadline => {
                     kill_tree(&mut child);
                     let output = collect(&parts, false);
                     return Err(InstallError::Failed {
-                        message: format!("install timed out after {}s", self.install_timeout.as_secs_f32()),
+                        message: format!("{what} timed out after {}s", self.install_timeout.as_secs_f32()),
                         output,
                     });
                 }

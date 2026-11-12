@@ -17,6 +17,7 @@
 //! | [`inline`] | FR-E4: `$provideInlineCompletions` with debounce + cancellation → ghost text; accept |
 //! | [`registry`] | provider registrations (`$register…`) and extension-host commands |
 //! | [`selector`] | `languages.score` port: document selector matching |
+//! | [`extensions`] | FR-L31.14: the list rows of a scan, and the scan without the disabled ids |
 //! | [`languages`] | file → language id from `contributes.languages` |
 //! | [`textmate`] | FR-E6: the grammars extensions contribute (`contributes.grammars`), read into the raw rule model |
 //! | [`ids`] | stable, non-zero, session-unique decoration ids |
@@ -35,6 +36,7 @@ pub mod codelens;
 pub mod commands;
 pub mod coords;
 pub mod engine;
+pub mod extensions;
 pub mod fallback;
 pub mod diagnostics;
 pub mod paths;
@@ -56,6 +58,7 @@ pub mod widget;
 pub use crate::bridge::{apply_text_change, BridgeAction, DocumentWidgetState, SyntaxRuns, WidgetBridge};
 pub use crate::commands::{parse_contributed_commands, ContributedCommand};
 pub use crate::fallback::{fallback_for, vscode_fallback_url, ConnectOutcome, Fallback, FallbackTarget};
+pub use crate::extensions::InstalledExtension;
 pub use crate::engine::{CoreOptions, Effect, ExternalChange, Input, SessionCore, SessionUpdate};
 pub use crate::coords::{WidgetPos, WidgetRange};
 pub use crate::session::{DirLister, EditorSession, SessionConfig};

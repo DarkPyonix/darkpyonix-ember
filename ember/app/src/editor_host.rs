@@ -35,6 +35,9 @@ pub enum HostCommand {
     /// Discard working-tree changes for a file by reading it through the session, reconstructing
     /// the base text from `diff`, and writing it back only if reading succeeds.
     DiscardFile { path: String, diff: crate::ui::vcs::FileDiff },
+    /// Read the extension scan again on the management connection (FR-L31.14): after an install,
+    /// an uninstall, or on the panel's refresh.
+    RescanExtensions,
 }
 
 #[derive(Default)]
@@ -60,6 +63,8 @@ pub struct HostState {
     pub extension_commands: Vec<ember_editor::ContributedCommand>,
     /// The search panel's matches and the last replace's report (FR-E7).
     pub search: crate::ui::editor_search::SearchResults,
+    /// The extensions the OSE has and the ones the extension host runs (FR-L31.14).
+    pub extensions: crate::ui::editor_extensions::ExtensionScan,
     pub updates: Vec<SessionUpdate>,
 }
 
@@ -207,6 +212,8 @@ impl EditorHost {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let shared = state.clone();
         let self_tx = tx.clone();
+        // Extensions the user disabled on this computer are scanned but not run (FR-L31.14).
+        let disabled_extensions = crate::services::services().ui.prefs.get_untracked().disabled_extensions_for(&target.computer);
         crate::services::services().rt.spawn(async move {
             if target.endpoint.trim().is_empty() {
                 shared.lock().unwrap().error = HostState::missing_endpoint().error;
@@ -217,6 +224,7 @@ impl EditorHost {
             let mut config = SessionConfig::new(target.endpoint, target.folder);
             config.connection_token = (!target.token.is_empty()).then_some(target.token);
             config.app_language = "ko".into();
+            config.disabled_extensions = disabled_extensions;
             let (session, mut updates) = match EditorSession::connect_tcp(config).await {
                 Ok(pair) => pair,
                 Err(error) => {
@@ -230,6 +238,10 @@ impl EditorHost {
                 let mut state = shared.lock().unwrap();
                 state.connected = true;
                 state.set_dir_listing(&root, entries);
+                state.extensions.connected(session.installed_extensions().to_vec(), session.running_extensions());
+                if crate::ui::editor_extensions::capture_hook().is_some_and(|c| c.adds_samples()) {
+                    state.extensions.add_capture_samples();
+                }
             }
             *revision.write() += 1;
             let mut index_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -318,6 +330,12 @@ impl EditorHost {
                                 };
                                 finish_edit(&session, &shared, "변경 사항 취소", &parent, result).await;
                             }
+                        }
+                        Some(HostCommand::RescanExtensions) => {
+                            shared.lock().unwrap().extensions.begin_rescan();
+                            *revision.write() += 1;
+                            let result = session.rescan_extensions().await;
+                            shared.lock().unwrap().extensions.finish_rescan(result);
                         }
                         Some(HostCommand::IndexFiles) => {
                             // A fresh index replaces the last one and a running one is cancelled; the walk runs

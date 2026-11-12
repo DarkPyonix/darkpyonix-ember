@@ -66,6 +66,10 @@ pub struct SessionConfig {
     /// Optional VS Code Web target URL (or base URL) used when the server version is unsupported
     /// or unknown and the session falls back to the VS Code target.
     pub vscode_url: Option<String>,
+    /// Extension ids the user disabled (FR-L31.14). They are scanned and listed, but left out of
+    /// what the extension host is given, as the Code-OSS workbench does. Compared without regard
+    /// to case.
+    pub disabled_extensions: Vec<String>,
 }
 
 impl SessionConfig {
@@ -83,6 +87,7 @@ impl SessionConfig {
             user_settings: Vec::new(),
             core: CoreOptions::default(),
             vscode_url: None,
+            disabled_extensions: Vec::new(),
         }
     }
 
@@ -119,6 +124,13 @@ pub struct EditorSession {
     authority: String,
     workspace_path: String,
     fs: Arc<RemoteFs>,
+    /// The management IPC, kept for reading the extension scan again (FR-L31.14).
+    ipc: IpcClient,
+    app_language: String,
+    /// Every extension the connect-time scan found, disabled ones included.
+    installed: Vec<crate::extensions::InstalledExtension>,
+    /// The extensions the extension host was started with (the scan without the disabled ids).
+    running: Vec<crate::extensions::InstalledExtension>,
     task: Option<JoinHandle<()>>,
 }
 
@@ -209,7 +221,13 @@ impl EditorSession {
         .to_ipc()?;
         let (ipc, ipc_lifecycle) = IpcClient::start(mconn, ctx);
         let env = management::get_environment_data(&ipc, &authority, None).await?;
-        let extensions = management::scan_extensions(&ipc, &config.app_language).await?;
+        let scanned = management::scan_extensions(&ipc, &config.app_language).await?;
+        let installed = crate::extensions::parse_installed(&scanned);
+        // A disabled extension is listed but not run: the extension host, the commands, the
+        // languages and the grammars below only see the enabled ones (FR-L31.14).
+        let extensions = crate::extensions::enabled_only(&scanned, &config.disabled_extensions);
+        drop(scanned);
+        let running = crate::extensions::parse_installed(&extensions);
         let fs = Arc::new(RemoteFs::new(ipc.clone()));
         let changes = fs.subscribe_changes().await?;
 
@@ -252,7 +270,7 @@ impl EditorSession {
             highlight: None,
             peer: peer.clone(),
             fs: Arc::clone(&fs),
-            ipc,
+            ipc: ipc.clone(),
             updates: updates_tx,
             reqs: HashMap::new(),
             watches: Arc::new(Mutex::new(HashMap::new())),
@@ -271,7 +289,26 @@ impl EditorSession {
             call.start(&peer)?.wait().await?;
         }
 
-        Ok((Self { tx, authority, workspace_path, fs, task: Some(task) }, updates_rx))
+        let app_language = config.app_language.clone();
+        Ok((Self { tx, authority, workspace_path, fs, ipc, app_language, installed, running, task: Some(task) }, updates_rx))
+    }
+
+    /// Every extension the connect-time scan found, disabled ones included (FR-L31.14).
+    pub fn installed_extensions(&self) -> &[crate::extensions::InstalledExtension] {
+        &self.installed
+    }
+
+    /// The extensions the extension host was started with: what is running until it restarts.
+    pub fn running_extensions(&self) -> &[crate::extensions::InstalledExtension] {
+        &self.running
+    }
+
+    /// Reads the scan again on the management connection (`remoteExtensionsScanner.scanExtensions`),
+    /// for the list after an install or an uninstall. The extension host is not told: what it runs
+    /// stays [`EditorSession::running_extensions`] until it starts again.
+    pub async fn rescan_extensions(&self) -> Result<Vec<crate::extensions::InstalledExtension>, Error> {
+        let scanned = management::scan_extensions(&self.ipc, &self.app_language).await.map_err(Error::Conn)?;
+        Ok(crate::extensions::parse_installed(&scanned))
     }
 
     /// The remote authority URIs of this session use.

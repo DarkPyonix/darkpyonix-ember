@@ -66,10 +66,12 @@ pub enum Action {
     FindInFiles,
     /// Search across the project's files with the replace field shown (FR-E7).
     ReplaceInFiles,
+    /// Show the extensions window (FR-L31.14).
+    Extensions,
 }
 
 impl Action {
-    pub const ALL: [Action; 22] = [
+    pub const ALL: [Action; 23] = [
         Action::Project,
         Action::Commit,
         Action::Git,
@@ -92,6 +94,7 @@ impl Action {
         Action::FindInFile,
         Action::FindInFiles,
         Action::ReplaceInFiles,
+        Action::Extensions,
     ];
 
     pub fn label(self) -> &'static str {
@@ -118,6 +121,7 @@ impl Action {
             Action::FindInFile => "문서에서 찾기",
             Action::FindInFiles => "파일에서 찾기",
             Action::ReplaceInFiles => "파일에서 바꾸기",
+            Action::Extensions => "확장",
         }
     }
 }
@@ -245,7 +249,7 @@ impl Chord {
 /// `(action, macOS chord, other chord)`; an empty chord means no default binding.
 type Row = (Action, &'static str, &'static str);
 
-const VSCODE: [Row; 22] = [
+const VSCODE: [Row; 23] = [
     (Action::Project, "\u{21E7}\u{2318}E", "Ctrl+Shift+E"),
     // VS Code has no default for a commit window; the source control view shares Git's chord.
     (Action::Commit, "", ""),
@@ -269,9 +273,11 @@ const VSCODE: [Row; 22] = [
     (Action::FindInFile, "\u{2318}F", "Ctrl+F"),
     (Action::FindInFiles, "\u{21E7}\u{2318}F", "Ctrl+Shift+F"),
     (Action::ReplaceInFiles, "\u{21E7}\u{2318}H", "Ctrl+Shift+H"),
+    // Code-OSS: workbench.view.extensions.
+    (Action::Extensions, "\u{21E7}\u{2318}X", "Ctrl+Shift+X"),
 ];
 
-const JETBRAINS: [Row; 22] = [
+const JETBRAINS: [Row; 23] = [
     (Action::Project, "\u{2318}1", "Alt+1"),
     (Action::Commit, "\u{2318}0", "Alt+0"),
     (Action::Git, "\u{2318}9", "Alt+9"),
@@ -294,6 +300,8 @@ const JETBRAINS: [Row; 22] = [
     (Action::FindInFile, "\u{2318}F", "Ctrl+F"),
     (Action::FindInFiles, "\u{21E7}\u{2318}F", "Ctrl+Shift+F"),
     (Action::ReplaceInFiles, "\u{21E7}\u{2318}R", "Ctrl+Shift+R"),
+    // The JetBrains keymap has no default chord for Plugins.
+    (Action::Extensions, "", ""),
 ];
 
 impl Keymap {
@@ -321,7 +329,7 @@ impl Keymap {
         }
     }
 
-    fn table(self) -> &'static [Row; 22] {
+    fn table(self) -> &'static [Row; 23] {
         match self {
             Keymap::VsCode => &VSCODE,
             Keymap::JetBrains => &JETBRAINS,

@@ -26,6 +26,8 @@ fn path(name: &str) -> &'static str {
         "close" => r#"<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/>"#,
         "file" => r#"<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Zm0 0v5h5"/>"#,
         "commit" => r#"<circle cx="12" cy="12" r="3.25"/><path d="M3 12h5.75M15.25 12H21"/>"#,
+        // Four blocks, one set apart: the extensions window (the mockup's icons.js has none).
+        "blocks" => r#"<path stroke-linejoin="round" d="M3.75 3.75h6.5v6.5h-6.5zM3.75 13.75h6.5v6.5h-6.5zM13.75 13.75h6.5v6.5h-6.5zM14.5 3h6.5v6.5h-6.5z"/>"#,
         "dot" => r#"<circle cx="12" cy="12" r="5"/><path stroke-linecap="round" d="M12 3v3M12 18v3M3 12h3M18 12h3"/>"#,
         _ => "",
     }

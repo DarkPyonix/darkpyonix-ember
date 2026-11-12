@@ -930,6 +930,23 @@ mod keyboard_navigation {
     }
 
     #[test]
+    fn fr_l31_4_tree_f2_renames_selected_row_but_not_root() {
+        let rows = sample_tree();
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/lib.rs", false)), "/p", "F2"),
+            Some(TreeKeyOutcome::Rename("/p/src/lib.rs".to_string()))
+        );
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "F2"),
+            Some(TreeKeyOutcome::Rename("/p/src".to_string()))
+        );
+        assert_eq!(tree_key_action(&rows, None, "/p", "F2"), None);
+        let mut with_root = rows.clone();
+        with_root.insert(0, TreeRow { path: "/p".to_string(), name: "p".to_string(), depth: 0, is_dir: true, open: true });
+        assert_eq!(tree_key_action(&with_root, Some(("/p", true)), "/p", "F2"), None);
+    }
+
+    #[test]
     fn fr_l31_tree_arrow_right_expands_or_descends() {
         let rows = sample_tree();
 

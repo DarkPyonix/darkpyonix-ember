@@ -751,6 +751,8 @@ pub enum TreeKeyOutcome {
     Collapse(String),
     /// Open a file in the editor.
     OpenFile(String),
+    /// Start renaming the row (`F2`, as Code-OSS's `renameFile` keybinding).
+    Rename(String),
 }
 
 /// Whether the explorer tree container should handle key events (`Escape`, `Cmd/Ctrl+C/X/V`,
@@ -763,6 +765,7 @@ pub fn tree_handles_key(prompt: Option<&TreePrompt>) -> bool {
 }
 
 /// Handles WAI-ARIA treeview keyboard navigation (`ArrowDown`, `ArrowUp`, `ArrowRight`, `ArrowLeft`, `Home`, `End`, `Enter`, `" "`)
+/// and `F2` (rename the selected row, never the root folder)
 /// over `rows`, given `selected` (`Option<(&str, bool)>`) and `root`.
 pub fn tree_key_action(
     rows: &[TreeRow],
@@ -828,6 +831,11 @@ pub fn tree_key_action(
             } else {
                 None
             }
+        }
+        "F2" => {
+            let i = current_idx?;
+            let row = &rows[i];
+            (row.path != root).then(|| TreeKeyOutcome::Rename(row.path.clone()))
         }
         "Enter" | " " | "Space" => {
             let i = current_idx?;

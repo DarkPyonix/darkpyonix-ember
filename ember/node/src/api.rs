@@ -27,6 +27,7 @@
 //! | POST | `/git/prs` | [`git_prs::GitPrsRequest`] → [`git_prs::GitPrsResponse`] (FR-G8, through `gh pr list`; 409 when gh is missing, not logged in or the repository has no GitHub remote) |
 //! | POST | `/git/pr`, `/git/pr/review`, `/git/pr/merge`, `/git/pr/create` | [`git_prs::GitPrRef`], [`git_prs::GitPrReviewRequest`], [`git_prs::GitPrMergeRequest`], [`git_prs::GitPrCreateRequest`] (FR-G10 to FR-G12, through `gh`; changing calls need `confirm: true`, merge answers 409 with the gate reason when closed) |
 //! | POST | `/git/status` | [`GitRepoRequest`] → [`GitStatus`] (404 `not_a_repo`; 409 for a bare repository or dubious ownership) |
+//! | POST | `/git/toplevel` | [`GitRepoRequest`] → [`GitToplevel`] (FR-L31.9: the work tree root and the directory's path below it; `diff`, `stage`, `unstage` and `apply` run at that root) |
 //! | POST | `/git/diff` | [`GitDiffRequest`] → [`GitDiff`] (`include_untracked` adds all untracked files; 413 `too_large` past 8 MiB of git output) |
 //! | POST | `/git/stage`, `/git/unstage` | [`GitPathsRequest`] → 204 |
 //! | POST | `/git/apply` | [`GitApplyRequest`] → 204 (patch to the index; 409 if it does not apply) |
@@ -188,6 +189,7 @@ pub fn router(node: Node) -> Router {
         // End FR-G5.
 
         .route("/git/status", post(git_status))
+        .route("/git/toplevel", post(git_toplevel))
         .route("/git/diff", post(git_diff))
         .route("/git/stage", post(git_stage))
         .route("/git/unstage", post(git_unstage))
@@ -458,6 +460,10 @@ async fn git_pr_create_handler(State(n): State<Node>, Json(r): Json<git_prs::Git
 
 async fn git_status(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<GitStatus> {
     Ok(Json(git::status(&n.0.policy, &r).await?))
+}
+
+async fn git_toplevel(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<GitToplevel> {
+    Ok(Json(git::toplevel(&n.0.policy, &r).await?))
 }
 
 async fn git_diff(State(n): State<Node>, Json(r): Json<GitDiffRequest>) -> ApiResult<GitDiff> {

@@ -11,6 +11,7 @@ use dioxus_compose::html::prelude::dioxus_signals::WritableExt;
 use ember_client::api::{ApiError, GitCommitted, GitDiff, GitFile, GitStatus};
 use serde_json::{json, Value};
 
+use crate::ui::editor_scm_repo::{self as repo, Toplevel};
 use crate::ui::vcs::{
     commit_body, commit_done_text, failure_text, git_call, parse_unified, CommitRequest, ConflictChoice,
     ConflictFile, ConflictLoad, ConflictSegment, ConflictStep, DeleteTap, FileDiff, FileStaging, Hunk,
@@ -293,6 +294,12 @@ pub fn letter_color(letter: char) -> &'static str {
 /// [`ScmLoad::Ready`]: without a real `git/status` answer no file is highlighted.Deleted-only files
 /// (`D` with no surviving path) are excluded because they do not appear in the explorer or tabs.
 pub fn modified_paths_set(root: &str, load: &ScmLoad) -> std::collections::HashSet<String> {
+    modified_paths_in(root, "", load)
+}
+
+/// [`modified_paths_set`] for a folder `prefix` below the repository root (FR-L31.9): each
+/// repository path becomes the path the editor uses for it ([`repo::editor_path`]).
+pub fn modified_paths_in(root: &str, prefix: &str, load: &ScmLoad) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     let ScmLoad::Ready(status) = load else { return out };
     for f in &status.files {
@@ -305,7 +312,7 @@ pub fn modified_paths_set(root: &str, load: &ScmLoad) -> std::collections::HashS
             || !matches!(f.index, '.' | '!' | ' ')
             || !matches!(f.worktree, '.' | '!' | ' ');
         if changed {
-            out.insert(super::editor_workbench::join_path(root, &f.path));
+            out.insert(repo::editor_path(root, prefix, &f.path));
         }
     }
     out
@@ -542,8 +549,11 @@ pub struct ScmState {
     pub busy: bool,
     pub message: String,
     pub diff: Option<DiffState>,
+    /// Diffs for the gutter, by repository path.
     pub gutter_diffs: BTreeMap<String, FileDiff>,
     pub gutter_seq: u64,
+    /// The `git/toplevel` answer once one came (FR-L31.9); until then the folder is the root.
+    pub toplevel: Option<Toplevel>,
     pub amend: bool,
     pub new_branch: String,
     pub armed_discard: Option<(String, u64)>,
@@ -563,6 +573,7 @@ impl ScmState {
             diff: None,
             gutter_diffs: BTreeMap::new(),
             gutter_seq: 0,
+            toplevel: None,
             amend: false,
             new_branch: String::new(),
             armed_discard: None,
@@ -663,7 +674,21 @@ impl Scm {
     /// The absolute paths below `root` that `git/status` reported as modified, added or conflicted.
     /// Empty when no status has been read yet.
     pub fn modified_paths(&self, root: &str) -> std::collections::HashSet<String> {
-        self.with(|s| modified_paths_set(root, &s.load))
+        self.with(|s| {
+            let prefix = s.toplevel.as_ref().map(|t| repo::folder_prefix(root, t)).unwrap_or_default();
+            modified_paths_in(root, &prefix, &s.load)
+        })
+    }
+
+    /// The folder's path below the repository root (FR-L31.9); empty until `git/toplevel`
+    /// answered, and when the folder is the root.
+    pub fn prefix(&self, folder: &str) -> String {
+        self.with(|s| s.toplevel.as_ref().map(|t| repo::folder_prefix(folder, t)).unwrap_or_default())
+    }
+
+    /// The path the editor uses for a repository path of `git/status` (FR-L31.9).
+    pub fn editor_path(&self, folder: &str, repo_path: &str) -> String {
+        repo::editor_path(folder, &self.prefix(folder), repo_path)
     }
 
     /// Whether the diff covers the editor area for this current tab.
@@ -691,19 +716,33 @@ impl Scm {
         }
         self.with(|s| s.gutter_diffs.clear());
         let seq = self.with(ScmState::begin_load);
+        // The repository root is asked once (FR-L31.9); a failed answer is asked again next time.
+        let need_top = self.with(|s| s.toplevel.is_none());
         let (state, revision, project) = (self.state.clone(), self.revision, self.project.clone());
-        crate::services::run_shared(async move { git_call::<GitStatus>(&project, "status", json!({})).await }, move |result| {
-            let taken = state.lock().unwrap_or_else(|e| e.into_inner()).finish_load(seq, load_from(result));
-            if taken {
-                Self::redraw(revision);
-            }
-        });
+        crate::services::run_shared(
+            async move {
+                let top = if need_top { git_call::<Toplevel>(&project, "toplevel", json!({})).await.ok() } else { None };
+                (top, git_call::<GitStatus>(&project, "status", json!({})).await)
+            },
+            move |(top, result)| {
+                let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(t) = top {
+                    s.toplevel = Some(t);
+                }
+                let taken = s.finish_load(seq, load_from(result));
+                drop(s);
+                if taken {
+                    Self::redraw(revision);
+                }
+            },
+        );
         let open = self.with(|s| s.diff.as_ref().map(|d| (d.path.clone(), d.staged, d.over.clone())));
         if let Some((path, staged, over)) = open {
             self.load_diff(&path, staged, over);
         }
     }
 
+    /// Reads the diff of `rel_path` (a repository path) for the gutter, once per status.
     pub fn ensure_gutter_diff(&self, rel_path: &str) {
         let (needed, staged) = self.with(|s| {
             if s.gutter_diffs.contains_key(rel_path) {
@@ -743,11 +782,11 @@ impl Scm {
     }
 
     pub fn gutter_decorations(&self, folder: &str, abs_path: &str, current_text: &str, version: u32) -> compose_rust::code::GutterDecorations {
-        let folder = folder.trim_end_matches('/');
-        let rel_path = match abs_path.strip_prefix(folder) {
-            Some(r) => r.trim_start_matches('/'),
-            None => abs_path,
+        // The status names files by repository path, wherever the folder is in it (FR-L31.9).
+        let Some(rel_path) = repo::gutter_key(folder, &self.prefix(folder), abs_path) else {
+            return compose_rust::code::GutterDecorations::default();
         };
+        let rel_path = rel_path.as_str();
         let snapshot = self.snapshot();
         let ScmLoad::Ready(status) = &snapshot.load else {
             return compose_rust::code::GutterDecorations::default();
@@ -1174,7 +1213,7 @@ pub mod view {
     use crate::editor_host::HostCommand;
     use crate::ui::editor::{base_name, Side, ToolWindow};
     use crate::ui::editor_workbench::page::{icon, icon_px};
-    use crate::ui::editor_workbench::{join_path, Shared};
+    use crate::ui::editor_workbench::Shared;
     use crate::ui::vcs::{ConflictChoice, ConflictLoad, ConflictStep, LineKind, RemoteAction};
 
     /// The folder part of a repository path, for the muted text after the name.
@@ -1182,9 +1221,10 @@ pub mod view {
         path.rfind('/').map(|i| &path[..i]).unwrap_or("")
     }
 
-    /// Opens the file of a repository path in a tab (the project folder is taken as the repository root).
+    /// Opens the file of a repository path in a tab: below the folder as the explorer opens it,
+    /// outside it by its absolute path (FR-L31.9).
     fn open_file(s: &Shared, rel: &str) {
-        let path = join_path(&s.folder, rel);
+        let path = s.scm.editor_path(&s.folder, rel);
         s.scm.close_diff();
         s.open_errors.borrow_mut().remove(&path);
         let mut tabs = s.tabs;
@@ -1382,7 +1422,7 @@ pub mod view {
                         title: "{discard_title}: {name}", "aria-label": "{discard_title}: {name}", disabled: busy,
                         onclick: move |event| {
                             event.stop_propagation();
-                            let abs = join_path(&discard_s.folder, &discard_path);
+                            let abs = discard_s.scm.editor_path(&discard_s.folder, &discard_path);
                             discard_s.scm.discard_file(&discard_path, &abs, &discard_s.host);
                         }, {icon_px("close", 13)} }
                 }

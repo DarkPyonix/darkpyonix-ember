@@ -320,6 +320,16 @@ pub struct DocumentFilter {
     pub notebook_type: Option<String>,
 }
 
+/// `SemanticTokensLegend` (`languages.ts`, sent with `$registerDocumentSemanticTokensProvider`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticTokensLegend {
+    #[serde(default)]
+    pub token_types: Vec<String>,
+    #[serde(default)]
+    pub token_modifiers: Vec<String>,
+}
+
 // ---- Ember → extension host -----------------------------------------------------------------
 
 /// One outgoing call: target proxy, method, positional args, whether a cancellation token is
@@ -559,6 +569,37 @@ pub fn release_code_lenses(handle: i64, cache_id: i64) -> Call {
     Call::new(proxy::EXT_HOST_LANGUAGE_FEATURES, "$releaseCodeLenses", vec![Arg::Json(handle.into()), Arg::Json(cache_id.into())])
 }
 
+/// `$provideFoldingRanges(handle, resource, context, token)` → `IFoldingRangeDto[] | undefined`
+/// (extHost.protocol.ts, `Eb.from` converts 0-based provider lines to 1-based `{ start, end, kind? }`).
+pub fn provide_folding_ranges(handle: i64, uri: &UriComponents) -> Call {
+    Call::new(
+        proxy::EXT_HOST_LANGUAGE_FEATURES,
+        "$provideFoldingRanges",
+        vec![Arg::Json(handle.into()), j(uri), Arg::Json(json!({}))],
+    )
+    .cancellable()
+}
+
+/// `$provideDocumentSemanticTokens(handle, resource, previousResultId, token)` → `VSBuffer | null`
+/// (`Reply::Buffer`, little-endian u32 words: `id`, `kind` (`1` = full), `data_len`, then 5-tuples).
+pub fn provide_document_semantic_tokens(handle: i64, uri: &UriComponents, previous_result_id: i64) -> Call {
+    Call::new(
+        proxy::EXT_HOST_LANGUAGE_FEATURES,
+        "$provideDocumentSemanticTokens",
+        vec![Arg::Json(handle.into()), j(uri), Arg::Json(previous_result_id.into())],
+    )
+    .cancellable()
+}
+
+/// `$releaseDocumentSemanticTokens(handle, semanticColoringResultId)` to free the previous result in the extension host.
+pub fn release_document_semantic_tokens(handle: i64, result_id: i64) -> Call {
+    Call::new(
+        proxy::EXT_HOST_LANGUAGE_FEATURES,
+        "$releaseDocumentSemanticTokens",
+        vec![Arg::Json(handle.into()), Arg::Json(result_id.into())],
+    )
+}
+
 /// `InlineCompletionContext` (languages.ts L767-795).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -637,6 +678,14 @@ pub enum MainThreadCall {
     RegisterHoverProvider { handle: i64, selector: Vec<DocumentFilter> },
     RegisterCodeLensSupport { handle: i64, selector: Vec<DocumentFilter>, event_handle: Option<i64> },
     EmitCodeLensEvent { event_handle: i64 },
+    /// `MainThreadLanguageFeatures.$registerFoldingRangeProvider(handle, selector, extensionId, eventHandle)` (FR-E6).
+    RegisterFoldingRangeProvider { handle: i64, selector: Vec<DocumentFilter>, event_handle: Option<i64> },
+    /// `MainThreadLanguageFeatures.$emitFoldingRangeEvent(eventHandle, ranges?)` (FR-E6).
+    EmitFoldingRangeEvent { event_handle: i64 },
+    /// `MainThreadLanguageFeatures.$registerDocumentSemanticTokensProvider(handle, selector, legend, eventHandle)` (FR-E6).
+    RegisterDocumentSemanticTokensProvider { handle: i64, selector: Vec<DocumentFilter>, legend: SemanticTokensLegend, event_handle: Option<i64> },
+    /// `MainThreadLanguageFeatures.$emitDocumentSemanticTokensEvent(eventHandle)` (FR-E6).
+    EmitDocumentSemanticTokensEvent { event_handle: i64 },
     /// 17 positional args at the pinned commit (extHost.protocol.ts L558-576); only the stable
     /// head is decoded, the rest kept raw.
     RegisterInlineCompletionsSupport { handle: i64, selector: Vec<DocumentFilter>, extension_id: String, raw: Vec<Value> },
@@ -699,6 +748,25 @@ impl MainThreadCall {
             },
             (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$emitCodeLensEvent") => {
                 Self::EmitCodeLensEvent { event_handle: arg_i64(a, 0)? }
+            }
+            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$registerFoldingRangeProvider") => Self::RegisterFoldingRangeProvider {
+                handle: arg_i64(a, 0)?,
+                selector: serde_json::from_value(arg_json(a, 1))?,
+                event_handle: arg_json(a, 3).as_i64(),
+            },
+            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$emitFoldingRangeEvent") => {
+                Self::EmitFoldingRangeEvent { event_handle: arg_i64(a, 0)? }
+            }
+            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$registerDocumentSemanticTokensProvider") => {
+                Self::RegisterDocumentSemanticTokensProvider {
+                    handle: arg_i64(a, 0)?,
+                    selector: serde_json::from_value(arg_json(a, 1))?,
+                    legend: serde_json::from_value(arg_json(a, 2))?,
+                    event_handle: arg_json(a, 3).as_i64(),
+                }
+            }
+            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$emitDocumentSemanticTokensEvent") => {
+                Self::EmitDocumentSemanticTokensEvent { event_handle: arg_i64(a, 0)? }
             }
             (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$registerInlineCompletionsSupport") => {
                 Self::RegisterInlineCompletionsSupport {
@@ -999,5 +1067,56 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn fr_e6_parses_folding_and_semantic_tokens_registrations() {
+        let rf = req(
+            proxy::MAIN_THREAD_LANGUAGE_FEATURES,
+            "$registerFoldingRangeProvider",
+            json!([11, [{"language": "rust"}], {"value": "rust-lang.rust-analyzer"}, 12]),
+        );
+        assert_eq!(
+            MainThreadCall::parse(&rf).unwrap(),
+            MainThreadCall::RegisterFoldingRangeProvider {
+                handle: 11,
+                selector: vec![DocumentFilter {
+                    language: Some("rust".into()),
+                    scheme: None,
+                    pattern: None,
+                    exclusive: None,
+                    notebook_type: None,
+                }],
+                event_handle: Some(12),
+            }
+        );
+        let ef = req(proxy::MAIN_THREAD_LANGUAGE_FEATURES, "$emitFoldingRangeEvent", json!([12]));
+        assert_eq!(MainThreadCall::parse(&ef).unwrap(), MainThreadCall::EmitFoldingRangeEvent { event_handle: 12 });
+
+        let rs = req(
+            proxy::MAIN_THREAD_LANGUAGE_FEATURES,
+            "$registerDocumentSemanticTokensProvider",
+            json!([21, [{"language": "rust"}], {"tokenTypes": ["namespace", "type", "function"], "tokenModifiers": ["declaration"]}, 22]),
+        );
+        assert_eq!(
+            MainThreadCall::parse(&rs).unwrap(),
+            MainThreadCall::RegisterDocumentSemanticTokensProvider {
+                handle: 21,
+                selector: vec![DocumentFilter {
+                    language: Some("rust".into()),
+                    scheme: None,
+                    pattern: None,
+                    exclusive: None,
+                    notebook_type: None,
+                }],
+                legend: SemanticTokensLegend {
+                    token_types: vec!["namespace".into(), "type".into(), "function".into()],
+                    token_modifiers: vec!["declaration".into()],
+                },
+                event_handle: Some(22),
+            }
+        );
+        let es = req(proxy::MAIN_THREAD_LANGUAGE_FEATURES, "$emitDocumentSemanticTokensEvent", json!([22]));
+        assert_eq!(MainThreadCall::parse(&es).unwrap(), MainThreadCall::EmitDocumentSemanticTokensEvent { event_handle: 22 });
     }
 }

@@ -29,6 +29,34 @@ pub const NAME_MAX_CHARS: usize = 64;
 /// The team character styles (FR-L22), as the client stores them (`CharStyle`, lowercase).
 pub const CHARACTER_STYLES: [&str; 6] = ["mongle", "malang", "crew", "pocket", "cream", "keyring"];
 
+/// The character harnesses (FR-L22), as the client's character editor stores them.
+pub const CHARACTER_HARNESSES: [&str; 3] = ["claude", "codex", "gemini"];
+
+/// The character roles (FR-L22), as the client's character editor stores them.
+pub const CHARACTER_ROLES: [&str; 6] = ["리더", "구현", "리뷰어", "테스터", "디자인", "문서"];
+
+/// The character poses (FR-L22), as the client's character editor stores them.
+pub const CHARACTER_STATES: [&str; 5] = ["run", "wait", "fail", "done", "idle"];
+
+/// Number of fixed silhouettes (FR-L22, `SILHOUETTES.len()`).
+pub const CHARACTER_SILHOUETTE_COUNT: usize = 8;
+
+/// A saved character override for one member name in a project (FR-L22, #489).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub silhouette: Option<usize>,
+}
+
 /// The permission modes a new member may default to (`docs/DESIGN.md` 4.4).
 pub const PERMISSION_MODES: [&str; 4] = ["ask", "edits", "plan", "bypass"];
 
@@ -63,6 +91,9 @@ pub struct Project {
     /// Per harness, the account new members of this project use instead of the router's choice
     /// (FR-L20). An account that has been deleted since reads as `null`.
     pub profile_overrides: BTreeMap<String, Option<String>>,
+    /// Per-member character overrides saved from the team character editor (FR-L22, #489).
+    #[serde(default)]
+    pub character_overrides: BTreeMap<String, CharacterOverride>,
 }
 
 /// `PATCH /api/projects/{name}`. Every field is optional; `Some(None)` clears a nullable field.
@@ -83,6 +114,10 @@ pub struct ProjectPatch {
     /// for the field itself (send `{}` to clear).
     #[serde(default, deserialize_with = "nullable")]
     pub profile_overrides: Option<Option<BTreeMap<String, Option<serde_json::Value>>>>,
+    /// Member name to character override or `null` (FR-L22, #489). The map replaces the stored
+    /// one; `null` is refused for the field itself (send `{}` to clear).
+    #[serde(default, deserialize_with = "nullable")]
+    pub character_overrides: Option<Option<BTreeMap<String, Option<CharacterOverride>>>>,
 }
 
 /// Tell an absent field (`None`) from an explicit `null` (`Some(None)`).
@@ -125,7 +160,7 @@ const RENAMED_TABLES: &[&str] =
     &["project_computers", "channels", "sessions", "schedules", "teams", "browser_egress"];
 
 const PROJECT_COLUMNS: &str =
-    "name, created_at, repository, default_branch, member_defaults, character_style, archived, profile_overrides";
+    "name, created_at, repository, default_branch, member_defaults, character_style, archived, profile_overrides, character_overrides";
 
 fn project_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     let defaults: String = r.get(4)?;
@@ -142,6 +177,10 @@ fn project_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
             .get::<_, Option<String>>(7)?
             .and_then(|j| serde_json::from_str(&j).ok())
             .map(|m: BTreeMap<String, String>| m.into_iter().map(|(h, a)| (h, Some(a))).collect())
+            .unwrap_or_default(),
+        character_overrides: r
+            .get::<_, Option<String>>(8)?
+            .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default(),
     })
 }
@@ -275,6 +314,87 @@ fn check_style(v: Option<&str>) -> Result<Option<String>, ProjectError> {
     }
 }
 
+/// Validate a whole `character_overrides` map and return what is stored (member name to
+/// `CharacterOverride`, without `null` or all-empty entries).
+fn check_character_overrides(
+    v: Option<&BTreeMap<String, Option<CharacterOverride>>>,
+) -> Result<BTreeMap<String, CharacterOverride>, ProjectError> {
+    let Some(map) = v else {
+        return Err(bad("character_overrides must be an object (send {} to clear)"));
+    };
+    let mut out = BTreeMap::new();
+    for (member, entry) in map {
+        let key = member.trim();
+        if key.is_empty() || key.chars().count() > NAME_MAX_CHARS || key.chars().any(char::is_control) {
+            return Err(bad(format!("character_overrides: {member:?} is not a valid member name")));
+        }
+        let Some(entry) = entry else { continue };
+        let harness = match entry.harness.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            None => None,
+            Some(h) if CHARACTER_HARNESSES.contains(&h) => Some(h.to_string()),
+            Some(h) => {
+                return Err(bad(format!(
+                    "character_overrides.{key}.harness {h:?} must be one of {}",
+                    CHARACTER_HARNESSES.join(", ")
+                )))
+            }
+        };
+        let role = match entry.role.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            None => None,
+            Some(r) if CHARACTER_ROLES.contains(&r) => Some(r.to_string()),
+            Some(r) => {
+                return Err(bad(format!(
+                    "character_overrides.{key}.role {r:?} must be one of {}",
+                    CHARACTER_ROLES.join(", ")
+                )))
+            }
+        };
+        let style = match entry.style.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            None => None,
+            Some(s) if CHARACTER_STYLES.contains(&s) => Some(s.to_string()),
+            Some(s) => {
+                return Err(bad(format!(
+                    "character_overrides.{key}.style {s:?} must be one of {}",
+                    CHARACTER_STYLES.join(", ")
+                )))
+            }
+        };
+        let state = match entry.state.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            None => None,
+            Some(st) if CHARACTER_STATES.contains(&st) => Some(st.to_string()),
+            Some(st) => {
+                return Err(bad(format!(
+                    "character_overrides.{key}.state {st:?} must be one of {}",
+                    CHARACTER_STATES.join(", ")
+                )))
+            }
+        };
+        let silhouette = match entry.silhouette {
+            None => None,
+            Some(pin) if pin < CHARACTER_SILHOUETTE_COUNT => {
+                if let Some(s) = style.as_deref() {
+                    if !matches!(s, "malang" | "keyring") {
+                        return Err(bad(format!(
+                            "character_overrides.{key}.silhouette is only supported for malang or keyring"
+                        )));
+                    }
+                }
+                Some(pin)
+            }
+            Some(pin) => {
+                return Err(bad(format!(
+                    "character_overrides.{key}.silhouette {pin} must be in 0..{CHARACTER_SILHOUETTE_COUNT}"
+                )))
+            }
+        };
+        let cleaned = CharacterOverride { harness, role, style, state, silhouette };
+        if cleaned != CharacterOverride::default() {
+            out.insert(key.to_string(), cleaned);
+        }
+    }
+    Ok(out)
+}
+
 pub fn validate_name(name: &str) -> Result<(), ProjectError> {
     if name.trim().is_empty() {
         return Err(ProjectError::BadRequest("project name must not be empty".into()));
@@ -343,6 +463,11 @@ impl Store {
         let branch = patch.default_branch.as_ref().map(|v| check_branch(v.as_deref())).transpose()?;
         let defaults = patch.member_defaults.as_ref().map(|v| check_defaults(v.as_ref())).transpose()?;
         let style = patch.character_style.as_ref().map(|v| check_style(v.as_deref())).transpose()?;
+        let char_overrides = patch
+            .character_overrides
+            .as_ref()
+            .map(|v| check_character_overrides(v.as_ref()))
+            .transpose()?;
 
         let final_name = {
             let mut conn = self.conn();
@@ -354,6 +479,10 @@ impl Store {
             if let Some(v) = &overrides {
                 let json = if v.is_empty() { None } else { Some(serde_json::to_string(v).map_err(anyhow::Error::from)?) };
                 tx.execute("UPDATE projects SET profile_overrides = ?1 WHERE name = ?2", params![json, name])?;
+            }
+            if let Some(v) = &char_overrides {
+                let json = if v.is_empty() { None } else { Some(serde_json::to_string(v).map_err(anyhow::Error::from)?) };
+                tx.execute("UPDATE projects SET character_overrides = ?1 WHERE name = ?2", params![json, name])?;
             }
             if let Some(v) = &repository {
                 tx.execute("UPDATE projects SET repository = ?1 WHERE name = ?2", params![v, name])?;
@@ -379,9 +508,9 @@ impl Store {
                 // first, the dependants move, then the old row goes.
                 tx.execute(
                     "INSERT INTO projects (name, created_at, repository, default_branch, member_defaults,
-                                           character_style, archived, profile_overrides)
+                                           character_style, archived, profile_overrides, character_overrides)
                      SELECT ?1, created_at, repository, default_branch, member_defaults, character_style, archived,
-                            profile_overrides
+                            profile_overrides, character_overrides
                      FROM projects WHERE name = ?2",
                     params![new, name],
                 )?;

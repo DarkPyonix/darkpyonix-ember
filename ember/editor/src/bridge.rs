@@ -10,6 +10,7 @@ use ember_editor_conn::uri::UriComponents;
 use crate::codelens::CommandDto;
 use crate::coords::{utf16_to_byte, WidgetPos, WidgetRange};
 use crate::engine::{ExternalChange, SessionUpdate};
+use crate::folding::{compute_indent_folds, merge_folds, FoldRegion};
 use crate::hover::HoverPopup;
 use crate::widget::{Decoration, HoverPhase, WidgetCommand, WidgetEvent};
 
@@ -39,6 +40,8 @@ pub struct DocumentWidgetState {
     /// Line ending, encoding and language for the status bar (FR-L31.7); `None` until the session
     /// reports it.
     pub format: Option<crate::text_format::DocumentFormat>,
+    /// The foldable regions of the document (FR-E6).
+    pub folds: Vec<FoldRegion>,
 }
 
 /// The coloured runs the session last reported for a document.
@@ -167,6 +170,9 @@ impl WidgetBridge {
         match update {
             SessionUpdate::Opened { uri, generation, text, language_id, tab_width } => {
                 let key = uri.key();
+                let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+                let indent = compute_indent_folds(&lines, tab_width);
+                let folds = merge_folds(0, lines.len(), &[], &indent, &std::collections::HashSet::new());
                 self.docs.insert(
                     key.clone(),
                     DocumentWidgetState {
@@ -184,6 +190,7 @@ impl WidgetBridge {
                         external_change: None,
                         syntax: SyntaxRuns::default(),
                         format: None,
+                        folds,
                     },
                 );
                 self.active = Some(key);
@@ -194,6 +201,9 @@ impl WidgetBridge {
                 if let Some(doc) = self.docs.get_mut(&uri.key()) {
                     match command {
                         WidgetCommand::SetText { generation, text } => {
+                            let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+                            let indent = compute_indent_folds(&lines, doc.tab_width);
+                            let folds = merge_folds(0, lines.len(), &[], &indent, &std::collections::HashSet::new());
                             doc.generation = generation;
                             doc.version = 0;
                             doc.text = text;
@@ -203,6 +213,7 @@ impl WidgetBridge {
                             doc.pending_edits.clear();
                             doc.external_change = None;
                             doc.syntax = SyntaxRuns::default();
+                            doc.folds = folds;
                         }
                          edit @ WidgetCommand::EditCode { .. } => {
                             doc.pending_edits.push(edit);
@@ -225,6 +236,15 @@ impl WidgetBridge {
                     if doc.generation == generation {
                         doc.version = doc.version.max(version);
                         doc.syntax = SyntaxRuns { version, runs };
+                    }
+                }
+                BridgeAction::None
+            }
+            SessionUpdate::Folds { uri, generation, version, folds } => {
+                if let Some(doc) = self.docs.get_mut(&uri.key()) {
+                    if doc.generation == generation {
+                        doc.version = doc.version.max(version);
+                        doc.folds = folds;
                     }
                 }
                 BridgeAction::None
@@ -409,6 +429,25 @@ impl WidgetBridge {
             doc.uri.clone(),
             doc.generation,
             WidgetEvent::VisibleRangeChanged { version, first_line, last_line },
+        ))
+    }
+
+    pub fn on_fold_changed(
+        &mut self,
+        uri: &UriComponents,
+        start_line: u32,
+        collapsed: bool,
+    ) -> Option<(UriComponents, u64, WidgetEvent)> {
+        let doc = self.docs.get_mut(&uri.key())?;
+        for f in &mut doc.folds {
+            if f.start_line == start_line {
+                f.collapsed = collapsed;
+            }
+        }
+        Some((
+            doc.uri.clone(),
+            doc.generation,
+            WidgetEvent::FoldChanged { start_line, collapsed },
         ))
     }
 }

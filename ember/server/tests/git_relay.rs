@@ -123,7 +123,7 @@ fn fr_g4_the_contract_ops_are_all_routed() {
     let mut ops = computers_ops();
     ops.sort();
     let mut want =
-        vec!["status", "diff", "stage", "unstage", "apply", "commit", "checkout", "branch", "fetch", "pull", "push", "conflicts", "log", "branches", "prs", "pr", "pr/review", "pr/merge", "pr/create", "commit/show", "revert", "cherry-pick", "merge", "merge/abort", "merge/commit", "stash/list", "stash/push", "stash/apply", "stash/pop", "stash/drop", "conflict", "resolve"];
+        vec!["status", "diff", "stage", "unstage", "apply", "commit", "checkout", "branch", "fetch", "pull", "push", "conflicts", "log", "branches", "prs", "pr", "pr/review", "pr/merge", "pr/create", "commit/show", "revert", "cherry-pick", "merge", "merge/abort", "merge/commit", "stash/list", "stash/push", "stash/apply", "stash/pop", "stash/drop", "conflict", "resolve", "blame"];
     want.sort();
     assert_eq!(ops, want);
 }

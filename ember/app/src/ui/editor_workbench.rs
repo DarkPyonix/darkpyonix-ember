@@ -1857,7 +1857,7 @@ pub mod page {
                     if crate::terminal_input::is_paste_chord(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META)) {
                         event.stop_propagation();
                         event.prevent_default();
-                        // TODO(compose-rust: no clipboard read API yet, gap reported for #335): read the
+                        // TODO(compose-rust#546): no clipboard read API yet. Then read the
                         // clipboard, ask with `needs_multiline_warning` and send `paste_bytes(text,
                         // state.bracketed_paste)`. Until then the chord only says why nothing is pasted.
                         notice(crate::terminal_input::PASTE_UNAVAILABLE);
@@ -1871,8 +1871,8 @@ pub mod page {
                         key_handle.send_input(&bytes);
                     }
                 },
-                // TODO(compose-rust: the live renderer does not route IME composition wire events,
-                // gap reported for #335): these handlers run in `HtmlDom` tests but not yet on screen.
+                // TODO(dioxus-compose#205): the live renderer does not route paste and IME composition
+                // events yet; these handlers run in `HtmlDom` tests but not yet on screen.
                 oncompositionstart: move |_| TERMINAL_IME.with(|ime| ime.borrow_mut().start()),
                 oncompositionupdate: move |event| TERMINAL_IME.with(|ime| ime.borrow_mut().update(&event.data().data())),
                 oncompositionend: move |event| {

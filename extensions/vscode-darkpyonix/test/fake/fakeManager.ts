@@ -370,13 +370,13 @@ export class FakeManager {
     const started_by = who;
     const go = () => {
       const indexes = ids.map((id) => this.byId(id)!.index);
-      this.emit("run.started", { run_id: runId, mode: "cells", cells: indexes, params: {}, started_by });
+      this.emit("run.started", { run_id: runId, mode: "cells", cells: indexes, cell_ids: ids, params: {}, started_by });
       let n = 0;
       for (const id of ids) {
         const c = this.byId(id)!;
-        this.emit("cell.started", { run_id: runId, index: c.index, execution_count: ++n, started_by });
-        for (const o of this.runOutput(c)) this.emit("output", { run_id: runId, index: c.index, output: o });
-        this.emit("cell.finished", { run_id: runId, index: c.index, status: "ok", duration: 0.01, started_by });
+        this.emit("cell.started", { run_id: runId, index: c.index, cell_id: c.cell_id, execution_count: ++n, started_by });
+        for (const o of this.runOutput(c)) this.emit("output", { run_id: runId, index: c.index, cell_id: c.cell_id, output: o });
+        this.emit("cell.finished", { run_id: runId, index: c.index, cell_id: c.cell_id, status: "ok", duration: 0.01, started_by });
       }
       this.emit("run.finished", { run_id: runId, status: "ok", duration: 0.02, started_by });
     };

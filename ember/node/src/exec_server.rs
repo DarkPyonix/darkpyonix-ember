@@ -55,10 +55,20 @@ pub fn codex_args() -> [&'static str; 3] {
 /// `ember-node exec-server`: become `codex exec-server` on this process's stdio. Returns only on
 /// failure.
 pub fn run_stdio() -> anyhow::Error {
-    use std::os::unix::process::CommandExt;
     let bin = codex_bin();
-    let err = std::process::Command::new(&bin).args(codex_args()).exec();
-    anyhow::anyhow!("could not run {} {}: {err}", bin.display(), codex_args().join(" "))
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(&bin).args(codex_args()).exec();
+        anyhow::anyhow!("could not run {} {}: {err}", bin.display(), codex_args().join(" "))
+    }
+    #[cfg(not(unix))]
+    {
+        match std::process::Command::new(&bin).args(codex_args()).status() {
+            Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+            Err(err) => anyhow::anyhow!("could not run {} {}: {err}", bin.display(), codex_args().join(" ")),
+        }
+    }
 }
 
 /// Route handler for `GET /exec-server`.

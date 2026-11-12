@@ -69,7 +69,9 @@ impl NodeConfig {
         let roots: Vec<PathBuf> = match std::env::var_os("EMBER_NODE_ROOTS") {
             Some(v) if !v.is_empty() => std::env::split_paths(&v).filter(|p| !p.as_os_str().is_empty()).collect(),
             _ => vec![PathBuf::from(
-                std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("neither EMBER_NODE_ROOTS nor HOME is set"))?,
+                std::env::var_os("HOME")
+                    .or_else(|| std::env::var_os("USERPROFILE"))
+                    .ok_or_else(|| anyhow::anyhow!("neither EMBER_NODE_ROOTS nor HOME is set"))?,
             )],
         };
         let pty_keeper = match std::env::var("EMBER_NODE_KEEP_PTY").as_deref() {
@@ -124,7 +126,9 @@ pub fn parse_deny(value: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
 pub fn default_state_dir() -> Option<PathBuf> {
     match std::env::var_os("EMBER_NODE_STATE_DIR") {
         Some(v) if !v.is_empty() => Some(PathBuf::from(v)),
-        _ => std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".ember").join("node")),
+        _ => std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(|h| PathBuf::from(h).join(".ember").join("node")),
     }
 }
 
@@ -162,11 +166,17 @@ impl LocalEndpoint {
 
     pub fn write(&self, state_dir: &Path) -> std::io::Result<()> {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         std::fs::create_dir_all(state_dir)?;
         let path = state_dir.join(LOCAL_ENDPOINT_FILE);
         let tmp = state_dir.join(format!("{LOCAL_ENDPOINT_FILE}.tmp"));
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
         f.write_all(&serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?)?;
         drop(f);
         std::fs::rename(tmp, path)
@@ -292,8 +302,11 @@ mod tests {
         assert_eq!(ep.url, "http://127.0.0.1:8741");
         ep.write(d.path()).unwrap();
         assert_eq!(LocalEndpoint::read(d.path()).unwrap(), ep);
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(d.path().join(LOCAL_ENDPOINT_FILE)).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(d.path().join(LOCAL_ENDPOINT_FILE)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 }

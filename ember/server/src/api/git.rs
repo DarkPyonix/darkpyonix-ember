@@ -3,6 +3,7 @@
 //! | Op | Body (without `repo`) |
 //! | -- | --------------------- |
 //! | `status`, `conflicts` | `{}` |
+//! | `toplevel` | `{}` (FR-L31.9: the work tree root and the session directory's path below it) |
 //! | `diff` | `{path?, staged, include_untracked?}` |
 //! | `stage`, `unstage` | `{paths}` |
 //! | `apply` | `{patch, reverse}` |
@@ -48,7 +49,7 @@ use crate::session::Sessions;
 
 /// Every operation the node serves under `/git/`.
 pub const OPS: &[&str] =
-    &["status", "diff", "stage", "unstage", "apply", "commit", "checkout", "branch", "fetch", "pull", "push", "conflicts", "log", "branches", "prs", "pr", "pr/review", "pr/merge", "pr/create", "commit/show", "revert", "cherry-pick", "merge", "merge/abort", "merge/commit", "stash/list", "stash/push", "stash/apply", "stash/pop", "stash/drop", "conflict", "resolve"];
+    &["status", "toplevel", "diff", "stage", "unstage", "apply", "commit", "checkout", "branch", "fetch", "pull", "push", "conflicts", "log", "branches", "prs", "pr", "pr/review", "pr/merge", "pr/create", "commit/show", "revert", "cherry-pick", "merge", "merge/abort", "merge/commit", "stash/list", "stash/push", "stash/apply", "stash/pop", "stash/drop", "conflict", "resolve"];
 
 #[derive(Clone)]
 struct GitState {

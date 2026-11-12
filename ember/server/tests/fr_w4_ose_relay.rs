@@ -530,7 +530,7 @@ async fn fr_w4_relay_substitutes_the_placeholder_in_the_first_window() {
     first_part.extend_from_slice(prefix);
     first_part.extend_from_slice(placeholder.as_bytes());
     first_part.extend_from_slice(mid);
-    // 2. Split the second occurrence (`signedData`) across two binary frames (25 bytes + 39 bytes)!
+    // 2. A placeholder split across two messages is NOT replaced: messages pass whole (#776).
     first_part.extend_from_slice(&placeholder.as_bytes()[..25]);
     ws.send(Message::Binary(first_part.clone().into())).await.unwrap();
 
@@ -555,7 +555,7 @@ async fn fr_w4_relay_substitutes_the_placeholder_in_the_first_window() {
     expected.extend_from_slice(prefix);
     expected.extend_from_slice(REAL_TOKEN.as_bytes());
     expected.extend_from_slice(mid);
-    expected.extend_from_slice(REAL_TOKEN.as_bytes());
+    expected.extend_from_slice(placeholder.as_bytes());
     expected.extend_from_slice(suffix);
     expected.extend_from_slice(wrong_tok);
     expected.extend_from_slice(&vec![b'x'; pad_len]);
@@ -565,9 +565,53 @@ async fn fr_w4_relay_substitutes_the_placeholder_in_the_first_window() {
     assert_eq!(received.len(), expected.len());
     assert_eq!(received, expected);
     assert!(
-        !std::str::from_utf8(&received[..RELAY_SUBSTITUTION_WINDOW]).unwrap().contains(&placeholder),
-        "placeholder must never reach the OSE inside the substitution window"
+        !std::str::from_utf8(&received[..prefix.len() + 64]).unwrap().contains(&placeholder),
+        "a placeholder whole inside one message in the window must not reach the OSE"
     );
+}
+
+/// Message boundaries are preserved exactly: N client messages in, N identical messages out,
+/// including messages that end with a prefix of the placeholder (#776: one held tail turned
+/// `still-here` into `still-her` + `e` whenever the random placeholder started with `e`).
+#[tokio::test]
+async fn fr_w4_relay_preserves_client_message_boundaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let ose = Arc::new(OseManager::with_data_root(None, dir.path().join("ose-data")));
+    let (ose_addr, _) = start_echo_ose().await;
+    let conn = ose.register_launch_for_test("local", dir.path(), ose_addr, REAL_TOKEN);
+    let placeholder = conn.connection_token.clone();
+    let h = start_harness(ose).await;
+
+    let url = format!("ws://{}{}", h.addr, conn.relay.unwrap());
+    let mut req = url.into_client_request().unwrap();
+    req.headers_mut().insert("Authorization", format!("Bearer {}", h.token).parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+
+    let p = placeholder.as_bytes();
+    let mut messages: Vec<Vec<u8>> = vec![b"still-here".to_vec(), b"x".to_vec()];
+    for k in [1usize, 2, 32, 63] {
+        let mut m = b"tail:".to_vec();
+        m.extend_from_slice(&p[..k]);
+        messages.push(m);
+        // The rest of a split placeholder, alone in the next message.
+        messages.push(p[k..].to_vec());
+    }
+    // Every byte of the placeholder as the last byte of a message.
+    for b in p {
+        messages.push(vec![b'm', *b]);
+    }
+
+    // One at a time, so the echo OSE's TCP reads cannot coalesce two messages.
+    for (n, m) in messages.iter().enumerate() {
+        ws.send(Message::Binary(m.clone().into())).await.unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+        match got {
+            Ok(Some(Ok(Message::Binary(b)))) => assert_eq!(b.to_vec(), *m, "message {n} came back changed or split"),
+            other => panic!("message {n} {m:?}: got {other:?}"),
+        }
+    }
+    // Nothing extra arrives after the last echo.
+    assert!(tokio::time::timeout(Duration::from_millis(300), ws.next()).await.is_err(), "an extra message arrived");
 }
 
 #[tokio::test]

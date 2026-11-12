@@ -23,9 +23,11 @@ use compose_rust::{Alignment, ButtonVariant, Color, DrawList, IconRole, Paint, S
 use ember_client::api::ApiError;
 
 pub use crate::ui::routines::{
-    begin_demo_run, changed_patch, current_value_line, demo_run_allowed, demo_session_title,
-    finish_demo_run, patch_is_empty, run_is_simulated, DEMO_RUN_DONE, DEMO_RUN_MS,
-    DEMO_RUN_STARTED, SAMPLE_FLAG, DEMO_SESSION_PREFIX, NAME_SERVER_REASON, SERVER_CANNOT_CHANGE,
+    apply_server_run_started, begin_demo_run, changed_patch, demo_run_allowed,
+    demo_session_title, finish_demo_run, has_running_remote_run, patch_is_empty,
+    resolve_run_session_id, rollback_optimistic_run, run_is_simulated, run_now_busy, DEMO_RUN_BUSY, DEMO_RUN_DONE,
+    DEMO_RUN_MS, DEMO_RUN_STARTED, DEMO_SESSION_PREFIX, REMOTE_RUN_POLL_MS,
+    REMOTE_RUN_STARTED, SAMPLE_FLAG,
     not_saved_sentence, run_row_text, unsaved_fields,
     ago, big_time, civil_from_days, cron_valid, days_from_civil,
     describe_cron, filter_projects, format_next, group_by_project, kind_text, kpis,
@@ -44,8 +46,9 @@ use crate::ui::home::{
 };
 use super::components::{
     pill_colors, pill_metrics, AppButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
-    FieldOptions, Label, PickChip, Pill, PillTone, Select, SheetFooter,
+    FieldOptions, Label, Pill, PillTone, Select, SheetFooter,
 };
+use super::compat::Spinner;
 use super::project::PHONE_MENU_ROOM;
 use super::shell::NavIcon;
 use super::theme::*;
@@ -83,10 +86,14 @@ pub fn should_use_sample_entries(route_env: Option<&str>, demo_active: bool) -> 
 }
 
 fn sample_mode() -> bool {
-    should_use_sample_entries(
-        std::env::var("EMBER_CR_ROUTE").ok().as_deref(),
-        crate::demo::active_from_env() || try_services().is_some_and(|s| s.demo.is_some()),
-    )
+    let has_server = std::env::var("EMBER_SERVER_URL")
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty());
+    !has_server
+        && should_use_sample_entries(
+            std::env::var("EMBER_CR_ROUTE").ok().as_deref(),
+            crate::demo::active_from_env() || try_services().is_some_and(|s| s.demo.is_some()),
+        )
 }
 
 /// Whether the demo is on. The simulated run needs this, not just the sample route (#494).
@@ -126,7 +133,12 @@ fn demo_run(id: &str, entries_st: &MutableState<Vec<Entry>>, tick: &MutableState
                 title: Some(demo_session_title(&r.name)),
                 account: None,
             };
-            services().create_session(&body).await.ok().map(|rec| rec.id)
+            let svc = services();
+            let sid = svc.create_session(&body).await.ok().map(|rec| rec.id);
+            if let (Some(id), Some(demo)) = (&sid, &svc.demo) {
+                demo.send_message(&svc.client, id, &r.prompt);
+            }
+            sid
         },
         move |session| {
             let mut list = entries_st.get();
@@ -163,7 +175,8 @@ fn capture_demo_run(entries: &mut [Entry], selected: Option<&str>) {
     if !matches!(mode.as_str(), "1" | "running" | "done") {
         return;
     }
-    let Some(id) = selected else { return };
+    let fallback = entries.first().map(|e| e.routine.id.clone());
+    let Some(id) = selected.map(str::to_string).or(fallback) else { return };
     let Some(e) = entries.iter_mut().find(|e| e.routine.id == id) else { return };
     if !demo_run_allowed(true, sample_entries().iter().any(|s| s.routine.id == id)) {
         return;
@@ -171,6 +184,14 @@ fn capture_demo_run(entries: &mut [Entry], selected: Option<&str>) {
     if begin_demo_run(e, now_local()).is_ok() && mode == "done" {
         finish_demo_run(e, Some(format!("{DEMO_SESSION_PREFIX}capture")));
     }
+}
+
+/// Sync `entries_st` and `online_st` from [`Remote`] and [`LocalStore`].
+pub fn sync_from_remote(entries_st: &MutableState<Vec<Entry>>, online_st: &MutableState<bool>) {
+    let (on, mut remote_entries) = with_remote(|r| (r.online, r.entries.clone()));
+    remote_entries.extend(with_store(|s| s.entries()));
+    online_st.set(on);
+    entries_st.set(remote_entries);
 }
 
 /// What the server last answered: `online` is false until a load succeeds.
@@ -201,7 +222,11 @@ pub fn is_remote(id: &str) -> bool {
 
 /// The server's schedules with their recent runs.
 pub async fn load_remote() -> Result<Vec<Entry>, ApiError> {
-    let api = services().client.api();
+    load_remote_from(services().client.api()).await
+}
+
+/// Loads all schedules and their recent runs from `api` (FR-L25, #494).
+pub async fn load_remote_from(api: &ember_client::api::Api) -> Result<Vec<Entry>, ApiError> {
     let mut out = Vec::new();
     for s in api.schedules(None).await? {
         let runs = api.schedule_runs(&s.id, Some(RUNS_SHOWN)).await?;
@@ -243,8 +268,12 @@ fn refresh(tick: MutableState<u32>) {
     );
 }
 
-fn remote_action<F>(tick: MutableState<u32>, work: F)
-where
+fn remote_action<F>(
+    tick: MutableState<u32>,
+    entries_st: MutableState<Vec<Entry>>,
+    online_st: MutableState<bool>,
+    work: F,
+) where
     F: Future<Output = Result<Option<String>, ApiError>> + Send + 'static,
 {
     if try_services().is_none() {
@@ -257,11 +286,122 @@ where
         },
         move |(done, list)| {
             apply_load(list);
+            sync_from_remote(&entries_st, &online_st);
             match done {
                 Ok(Some(text)) => notice::post(text),
                 Ok(None) => {}
                 Err(e) => notice::post(format!("서버가 요청을 처리하지 못했습니다: {e}")),
             }
+            tick.update(|v| *v += 1);
+        },
+    );
+}
+
+/// Inserts the optimistic `RunStatus::Running` placeholder into `entries_st` and `REMOTE` for
+/// `id` before calling `POST /api/schedules/{id}/run` (FR-L25, #494).
+pub fn begin_remote_run_now(
+    id: &str,
+    now: Minutes,
+    entries_st: &MutableState<Vec<Entry>>,
+) -> Result<(), &'static str> {
+    let mut list = entries_st.get();
+    let Some(e) = list.iter_mut().find(|e| e.routine.id == id) else {
+        return Err("루틴을 찾을 수 없습니다");
+    };
+    begin_demo_run(e, now)?;
+    entries_st.set(list);
+    with_remote(|r| {
+        if let Some(re) = r.entries.iter_mut().find(|e| e.routine.id == id) {
+            let _ = begin_demo_run(re, now);
+        }
+    });
+    Ok(())
+}
+
+/// Applies the result of `POST /api/schedules/{id}/run` (`run_res`) and the refreshed
+/// schedule list (`list`) to `REMOTE`, `entries_st` and `online_st`, rolling back any
+/// optimistic placeholder on error and returning the user-facing notice text (FR-L25, #494).
+pub fn finish_remote_run_now(
+    id: &str,
+    run_res: Result<ember_client::wire::ScheduleRun, ApiError>,
+    list: Result<Vec<Entry>, ApiError>,
+    entries_st: &MutableState<Vec<Entry>>,
+    online_st: &MutableState<bool>,
+) -> String {
+    apply_load(list);
+    match run_res {
+        Ok(run) => {
+            let msg = with_remote(|r| {
+                r.entries
+                    .iter_mut()
+                    .find(|e| e.routine.id == id)
+                    .map(|e| apply_server_run_started(e, &run))
+                    .unwrap_or_else(|| match &run.error {
+                        Some(err) => format!("실행하지 못했습니다: {err}"),
+                        None => REMOTE_RUN_STARTED.to_string(),
+                    })
+            });
+            sync_from_remote(entries_st, online_st);
+            msg
+        }
+        Err(e) => {
+            with_remote(|r| {
+                if let Some(re) = r.entries.iter_mut().find(|e| e.routine.id == id) {
+                    rollback_optimistic_run(re);
+                }
+            });
+            sync_from_remote(entries_st, online_st);
+            let mut cur = entries_st.get();
+            if let Some(le) = cur.iter_mut().find(|e| e.routine.id == id) {
+                if rollback_optimistic_run(le) {
+                    entries_st.set(cur);
+                }
+            }
+            format!("서버가 요청을 처리하지 못했습니다: {e}")
+        }
+    }
+}
+
+/// Start a remote schedule run (`POST /api/schedules/{id}/run`), immediately marking the
+/// routine as `"실행 중"` (`RunStatus::Running`), refreshing the client's session list when a
+/// session is created, and syncing the updated run list from the server (FR-L25, #494).
+fn remote_run_now(
+    id: &str,
+    entries_st: &MutableState<Vec<Entry>>,
+    online_st: &MutableState<bool>,
+    tick: &MutableState<u32>,
+) {
+    if try_services().is_none() {
+        notice::post(RUN_NOTICE);
+        return;
+    }
+    if let Err(msg) = begin_remote_run_now(id, now_local(), entries_st) {
+        notice::post(msg);
+        return;
+    }
+    tick.update(|v| *v += 1);
+    let id = id.to_string();
+    let entries_st = entries_st.clone();
+    let online_st = online_st.clone();
+    let tick = tick.clone();
+    run_shared(
+        async move {
+            let svc = services();
+            let api = svc.client.api();
+            let run_res = api.run_schedule(&id).await;
+            if let Ok(run) = &run_res {
+                if run.session_id.is_some() {
+                    if let Ok(sessions) = api.sessions(None).await {
+                        svc.client.apply(ember_client::Input::SessionsLoaded(sessions));
+                    }
+                }
+            }
+            let list = load_remote().await;
+            (id, run_res, list)
+        },
+        move |(id, run_res, list)| {
+            let msg = finish_remote_run_now(&id, run_res, list, &entries_st, &online_st);
+            notice::post(msg);
             tick.update(|v| *v += 1);
         },
     );
@@ -403,6 +543,68 @@ pub fn detail_prompt_width(panel_w: f32, compact: bool) -> f32 {
     (panel_w - 2.0 * pad - INSET_CHROME).max(0.0)
 }
 
+/// The detail header's height: the mockup's `.rt-dh` (`min-height: 56px`), for every layout
+/// but the stacked one.
+pub const DETAIL_HEADER_H: f32 = 56.0;
+/// The ring beside the big time.
+pub const DETAIL_RING: f32 = 76.0;
+/// One run row: the inset's 12 dp above and below a row as tall as the 32 dp 세션 열기 button.
+pub const RUN_TILE_H: f32 = PAD_ROW_V * 2.0 + H_CTL;
+
+/// The detail body's padding: 14 on a wide panel, 12 on a phone.
+pub fn detail_body_pad(compact: bool) -> f32 {
+    if compact {
+        12.0
+    } else {
+        14.0
+    }
+}
+
+/// The gap between the detail body's sections.
+pub const DETAIL_GAP: f32 = SP[3];
+
+/// The big time's type step: 40 on a wide panel, 28 on a phone (mockup `.rt-hero-when .when`,
+/// `--fs-4xl`, and `--fs-2xl` at 560 px and below).
+pub fn detail_when_fs(compact: bool) -> Fs {
+    if compact {
+        Fs::Xl2
+    } else {
+        Fs::Xl4
+    }
+}
+
+/// One key-value tile: the inset's padding, the label, the value, and `sub_lines` of the muted
+/// line under it. The inset already pads 12 16 (`.inset`), so the tile adds none of its own.
+fn kv_tile_h(sub_lines: u32) -> f32 {
+    let sub = if sub_lines > 0 { SP[0] + sub_lines as f32 * Fs::Xs.line_height() } else { 0.0 };
+    PAD_ROW_V * 2.0 + Fs::Xs.line_height() + SP[0] + Fs::Sm.line_height() + sub
+}
+
+/// How far below the top of the detail card the first 실행 기록 row ends, from the same
+/// constants the drawing uses (FR-L25, #494). `prompt_lines` is how many lines the prompt
+/// takes, `computer_sub_lines` how many the 컴퓨터 tile's note takes (2 on a phone). A time
+/// routine's big time is one line; an event's may take two and is not covered here.
+pub fn detail_first_run_bottom(panel_w: f32, compact: bool, prompt_lines: u32, computer_sub_lines: u32) -> f32 {
+    let header = match detail_header_layout(panel_w, compact) {
+        DetailHeader::Stacked => 2.0 * SP[3] + Fs::Lg.line_height() * 2.0 + SP[2] + H_CTL,
+        _ => DETAIL_HEADER_H,
+    };
+    let when_col = detail_when_fs(compact).line_height()
+        + SP[0]
+        + Fs::Sm.line_height()
+        + SP[0]
+        + Fs::Xs.line_height();
+    let when = when_col.max(DETAIL_RING);
+    let tiles = if detail_tile_columns(panel_w) >= 3 {
+        kv_tile_h(1).max(kv_tile_h(computer_sub_lines))
+    } else {
+        kv_tile_h(1) + SP[2] + kv_tile_h(computer_sub_lines).max(kv_tile_h(0))
+    };
+    let prompt = PAD_ROW_V * 2.0 + Fs::Xs.line_height() + SP[0] + prompt_lines as f32 * Fs::Sm.line_height();
+    let history = Fs::Md.line_height() + SP[1] + RUN_TILE_H;
+    header + 1.0 + detail_body_pad(compact) + when + DETAIL_GAP + tiles + DETAIL_GAP + prompt + DETAIL_GAP + history
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Panel {
     #[default]
@@ -538,8 +740,46 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
     let online_state = remember_with_key(launch_tick, move || mutable_state_of(online));
 
     let _ = tick.get();
+    if !sample_mode() {
+        let (remote_online, mut remote_entries) = with_remote(|r| (r.online, r.entries.clone()));
+        if remote_online || !remote_entries.is_empty() {
+            remote_entries.extend(with_store(|s| s.entries()));
+            if online_state.get_untracked() != remote_online {
+                online_state.set(remote_online);
+            }
+            if entries_state.get_untracked() != remote_entries {
+                entries_state.set(remote_entries);
+            }
+        }
+    }
     let cur_entries = entries_state.get();
     let cur_online = online_state.get();
+    let any_running = has_running_remote_run(sample_mode(), cur_online, &cur_entries);
+    if any_running {
+        let tick_poll = tick.clone();
+        let entries_poll = entries_state.clone();
+        let online_poll = online_state.clone();
+        launched_effect((any_running, tick.get()), move || async move {
+            if try_services().is_none() {
+                return;
+            }
+            run_shared(
+                async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(REMOTE_RUN_POLL_MS)).await;
+                    let list = load_remote().await;
+                    if let Ok(sessions) = services().client.api().sessions(None).await {
+                        services().client.apply(ember_client::Input::SessionsLoaded(sessions));
+                    }
+                    list
+                },
+                move |list| {
+                    apply_load(list);
+                    sync_from_remote(&entries_poll, &online_poll);
+                    tick_poll.update(|v| *v += 1);
+                },
+            );
+        });
+    }
     let device_only = with_store(|s| !s.entries().is_empty());
     let now = now_local();
     let (computers, existing_projects) = live_choices();
@@ -574,21 +814,31 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
         super::home::content_width(window.width_dp, pad),
         compact,
     );
+    // The form's field widths, worked out here where the window is known: inside the sheet's
+    // own content the window size reads 0 (#493).
+    let form_w_inline = form_field_width(window.width_dp, panel_w, FormLayout::Inline);
+    let form_w_sheet = form_field_width(window.width_dp, panel_w, FormLayout::Sheet);
 
     let on_toggle = {
         let entries_st = entries_state.clone();
+        let online_st = online_state.clone();
         let tick_ref = tick.clone();
         move |id: String, on: bool| {
             if is_remote(&id) {
-                remote_action(tick_ref.clone(), async move {
-                    let api = services().client.api();
-                    if on {
-                        api.resume_schedule(&id).await?;
-                    } else {
-                        api.pause_schedule(&id).await?;
-                    }
-                    Ok(None)
-                });
+                remote_action(
+                    tick_ref.clone(),
+                    entries_st.clone(),
+                    online_st.clone(),
+                    async move {
+                        let api = services().client.api();
+                        if on {
+                            api.resume_schedule(&id).await?;
+                        } else {
+                            api.pause_schedule(&id).await?;
+                        }
+                        Ok(None)
+                    },
+                );
             } else {
                 if with_store(|s| s.set_enabled(&id, on)).is_err() {
                     if let Some(e) = entries_st.get().iter().find(|e| e.routine.id == id) {
@@ -610,12 +860,10 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
     let on_run_now = {
         let tick_ref = tick.clone();
         let entries_st = entries_state.clone();
+        let online_st = online_state.clone();
         move |id: String| {
             if is_remote(&id) {
-                remote_action(tick_ref.clone(), async move {
-                    let run = services().client.api().run_schedule(&id).await?;
-                    Ok(run.error.map(|e| format!("실행하지 못했습니다: {e}")))
-                });
+                remote_run_now(&id, &entries_st, &online_st, &tick_ref);
                 return;
             }
             let sample = sample_entries().iter().any(|e| e.routine.id == id);
@@ -650,11 +898,20 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                         .map(|e| e.routine.clone())
                 });
                 let unsaved = old.as_ref().map(|o| unsaved_fields(&draft, o)).unwrap_or_default();
-                let frozen = !unsaved.is_empty();
-                let patch = match &old {
+                let mut patch = match &old {
                     Some(o) => changed_patch(&draft, o),
                     None => schedule_patch(&draft),
                 };
+                if patch.project.is_some() {
+                    let cwd = try_services().and_then(|svc| {
+                        svc.client.read(|s| crate::model::latest_cwd(s, &draft.sel.project))
+                    });
+                    let Some(cwd) = cwd else {
+                        notice::post(NO_CWD_NOTICE);
+                        return;
+                    };
+                    patch.cwd = Some(cwd);
+                }
                 if patch_is_empty(&patch) {
                     // Nothing the server can store changed; do not send an empty PATCH.
                     panel_ref.set(Panel::View);
@@ -664,10 +921,15 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                     );
                     return;
                 }
-                remote_action(tick_ref.clone(), async move {
-                    services().client.api().update_schedule(&id, &patch).await?;
-                    Ok(not_saved_sentence(&unsaved).map(|n| format!("{n}. 프롬프트와 일정만 저장했습니다")))
-                });
+                remote_action(
+                    tick_ref.clone(),
+                    entries_st.clone(),
+                    online_st.clone(),
+                    async move {
+                        services().client.api().update_schedule(&id, &patch).await?;
+                        Ok(not_saved_sentence(&unsaved).map(|n| format!("{n}. 나머지 변경 사항은 저장했습니다")))
+                    },
+                );
                 panel_ref.set(Panel::View);
                 return;
             }
@@ -894,6 +1156,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                             &computers,
                                             &existing_projects,
                                             FormLayout::Inline,
+                                            form_w_inline,
                                             &form_draft,
                                             move |d| save_cb((d, editing_save.clone())),
                                             move || rl_close(Leave::Cancel),
@@ -990,6 +1253,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
             &computers,
             &existing_projects,
             FormLayout::Sheet,
+            form_w_sheet,
             &form_draft,
             move |d| save_cb((d, editing.clone())),
             move || rl_close(Leave::Cancel),
@@ -1085,11 +1349,39 @@ fn RoutineHeader(compact: bool, trailing: impl FnOnce()) {
 /// An accessible invisible button overlay for a painted row or pill.
 /// Gives assistive tech the item's label and provides keyboard focus and click handling.
 fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
+    NamedOverlay(label, true, on_click);
+}
+
+/// The one direct button behind both overlays: invisible text, the whole box to click.
+fn NamedOverlay(label: &str, enabled: bool, on_click: impl FnMut() + 'static) {
     cu::Button(label)
+        .enabled(enabled)
         .variant(ButtonVariant::Text)
         .color(Paint::Literal(Color::argb(0)))
         .modifier(Modifier::new().fill_max_size())
         .on_click(on_click);
+}
+
+/// What 지금 실행 reads while its routine has a run in progress.
+pub const RUN_NOW_BUSY_LABEL: &str = "실행 중";
+
+/// The invisible overlay of a control that cannot act now: named, focusable by assistive tech as
+/// a disabled button, and never clickable.
+fn DisabledOverlay(label: &str) {
+    NamedOverlay(label, false, || {});
+}
+
+/// The header's 지금 실행. While a run is in progress it is disabled, reads 실행 중 and has a
+/// spinner beside it, as a CI "run" button does while its job runs (FR-L25, #494).
+fn RunNowButton(busy: bool, on_click: impl FnMut() + 'static) {
+    if busy {
+        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+            Spinner(12.0);
+            AppButton(RUN_NOW_BUSY_LABEL, None, ButtonKind::Primary, true, false, false, || {});
+        });
+    } else {
+        AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, on_click);
+    }
 }
 
 // TODO(compose-rust#426): the toolkit Switch cannot take the ink 36x20 style or an accessible name;
@@ -1120,20 +1412,108 @@ fn RoutineSwitch(routine_name: &str, checked: bool, mut on_change: impl FnMut(bo
         });
 }
 
-/// A filter segment pill button matching the mockup (`.seg button`): 32px height, pill shape,
-/// ink fill when selected, surface with line border when unselected.
-fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
-    let p = ember_theme().palette;
-    let (bg, border, fg) = if selected {
+/// The segment's type step: the mockup's `.seg button` is `--fs-sm` (13) at 500.
+pub const SEG_FS: Fs = Fs::Sm;
+
+/// `(fill, border, text)` of a segment: `ink` with `ink-text` when chosen (`.seg button.on`),
+/// `surface` on a `line` border with `text-2` when not.
+pub fn seg_colors(selected: bool, p: &Palette) -> (Color, Color, Color) {
+    if selected {
         (p.ink, p.ink, p.ink_text)
     } else {
         (p.surface, p.line, p.text_2)
-    };
-    let advance: f32 = text
-        .chars()
-        .map(|c| if c.is_ascii() { 8.0 } else { 13.0 })
-        .sum::<f32>();
-    let width = (advance + 28.0).max(44.0);
+    }
+}
+
+/// A segment's width, erring wide: its label at `SEG_FS` with a Latin character at 0.62 em
+/// (the measure-style `text_px` uses 0.55) and a Hangul syllable at one em, 12 on each side,
+/// the 1 dp border twice and 4 to spare, at least 44.
+pub fn seg_width(text: &str) -> f32 {
+    let em = SEG_FS.size();
+    let advance: f32 = text.chars().map(|c| if c.is_ascii() { 0.62 * em } else { em }).sum();
+    (advance + 2.0 * 12.0 + 2.0 + 4.0).ceil().max(44.0)
+}
+
+/// What a line of segments may fill: the row's width less one gap, so a line that the estimate
+/// gets slightly wrong still does not touch the edge.
+pub fn seg_line_room(avail: f32) -> f32 {
+    (avail - SP[1]).max(0.0)
+}
+
+/// The segments of a choice row packed into lines no wider than `avail`, as the mockup's `.seg`
+/// wraps (`flex-wrap: wrap`, `gap: 8px`), so every option and the chosen one stay in view.
+/// TODO(compose-rust#521): the toolkit has no wrapping row (`FlowRow`), so the packing is by
+/// estimated width; drop this once `FlowRow` lands. Each line
+/// holds indices into `labels`, in order; a segment wider than `avail` gets a line of its own.
+pub fn seg_lines<S: AsRef<str>>(labels: &[S], avail: f32) -> Vec<Vec<usize>> {
+    let avail = seg_line_room(avail);
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    let mut used = 0.0_f32;
+    for (i, l) in labels.iter().enumerate() {
+        let w = seg_width(l.as_ref());
+        match lines.last_mut() {
+            Some(line) if used + SP[1] + w <= avail => {
+                line.push(i);
+                used += SP[1] + w;
+            }
+            _ => {
+                lines.push(vec![i]);
+                used = w;
+            }
+        }
+    }
+    lines
+}
+
+/// The fields' width in the 390 phone's sheet: the window less the sheet's 20 on each side.
+pub const NARROW_SHEET_FIELD_W: f32 = 390.0 - 2.0 * SP[4];
+
+/// The width the form's fields get: the detail panel less its 1 dp border and 16 padding on
+/// each side inline, or the sheet less its 20 padding on each side.
+pub fn form_field_width(window_w: f32, panel_w: f32, layout: FormLayout) -> f32 {
+    match layout {
+        FormLayout::Inline => panel_w - 2.0 - 2.0 * 16.0,
+        // An unknown window (0 before the first size event) packs against the narrowest sheet,
+        // the 390 phone's, so nothing runs off it and the lines are not one option each.
+        FormLayout::Sheet if window_w <= 0.0 => NARROW_SHEET_FIELD_W,
+        FormLayout::Sheet => {
+            super::components::sheet_width(window_w, super::components::SHEET_WIDTH_DEFAULT) - 2.0 * SP[4]
+        }
+    }
+    .max(0.0)
+}
+
+/// Choice segments in wrapped lines (`seg_lines`): `labels[i]` is chosen when `selected(i)`,
+/// and a tap calls `on_pick(i)`.
+fn SegChoices(
+    labels: &[String],
+    avail: f32,
+    selected: impl Fn(usize) -> bool,
+    on_pick: impl Fn(usize) + Clone + 'static,
+) {
+    let lines = seg_lines(labels, avail);
+    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+        for line in &lines {
+            cu::Row().spacing(SP[1]).content(|| {
+                for &i in line {
+                    let pick = on_pick.clone();
+                    FilterSegButton(&labels[i], selected(i), move || pick(i));
+                }
+            });
+        }
+    });
+}
+
+/// A segment pill button matching the mockup (`.seg button`): 32px height, pill shape, 13/500
+/// text, ink fill when selected, surface with line border when unselected. The list's project
+/// filter and the form's one-of choices (프로젝트, 트리거, 컴퓨터) both use it: the shared
+/// `PickChip` is the composer's dropdown chip (`.pickchip`), whose label takes the toolkit's
+/// button type and whose chosen state is `sel` on `surface-2`, too faint to read as chosen
+/// (#493).
+fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let (bg, border, fg) = seg_colors(selected, p);
+    let width = seg_width(text);
     cu::Box()
         .modifier(
             Modifier::new()
@@ -1145,7 +1525,7 @@ fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static)
         )
         .alignment(Alignment::Center)
         .content(move || {
-            Label(text, Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
+            Label(text, SEG_FS, Weight::Medium, Some(paint(fg)), Some(1));
             FocusOverlay(text, on_click);
         });
 }
@@ -1561,6 +1941,9 @@ fn DetailPane(
     let mode_label = r.sel.mode.label().to_string();
     let prompt_text = r.prompt.clone();
     let computer = computer_chip_text(r.sel.computer.as_deref(), computers);
+    // A run in progress (the optimistic row or a server run still Running) disables 지금 실행,
+    // so a second click cannot start a second run (FR-L25, #494).
+    let busy = run_now_busy(entry);
 
     let layout = detail_header_layout(panel_w, compact);
     let tile_cols = detail_tile_columns(panel_w);
@@ -1593,6 +1976,11 @@ fn DetailPane(
         );
     }
     let ring_cmd = l.build();
+    let sched_text = if routine_trigger == Trigger::Time && cron_valid(&routine_cron) {
+        format!("{routine_line} · {routine_cron}")
+    } else {
+        routine_line
+    };
 
     let on_toggle = std::sync::Arc::new(on_toggle);
     let on_edit = std::sync::Arc::new(on_edit);
@@ -1622,7 +2010,7 @@ fn DetailPane(
                 cu::Row()
                     .alignment(Alignment::CenterStart)
                     .spacing(SP[1])
-                    .modifier(Modifier::new().fill_max_width().height(56.0).padding(12.0))
+                    .modifier(Modifier::new().fill_max_width().height(DETAIL_HEADER_H).padding(PAD_ROW_V))
                     .content(move || {
                         cu::Box()
                             .modifier(Modifier::new().size(32.0, 32.0))
@@ -1652,18 +2040,26 @@ fn DetailPane(
                                 NavIcon(ICON_EDIT_SVG, p.text_2.to_argb(), 16.0);
                                 FocusOverlay("편집", move || edit_fn(edit_id_c.clone()));
                             });
+                        // Busy: the muted fill of a disabled primary button (`button_style_for`)
+                        // with a spinner in place of the play glyph.
+                        let run_fill = if busy { p.muted } else { p.ink };
                         cu::Box()
                             .modifier(
                                 Modifier::new()
                                     .size(32.0, 32.0)
-                                    .background(paint(p.ink))
-                                    .border(1.0, paint(p.ink))
+                                    .background(paint(run_fill))
+                                    .border(1.0, paint(run_fill))
                                     .corner_radius(CORNER_SM),
                             )
                             .alignment(Alignment::Center)
                             .content(move || {
-                                NavIcon(ICON_PLAY_SVG, p.ink_text.to_argb(), 16.0);
-                                FocusOverlay("지금 실행", move || run_fn(run_id_c.clone()));
+                                if busy {
+                                    Spinner(14.0);
+                                    DisabledOverlay(RUN_NOW_BUSY_LABEL);
+                                } else {
+                                    NavIcon(ICON_PLAY_SVG, p.ink_text.to_argb(), 16.0);
+                                    FocusOverlay("지금 실행", move || run_fn(run_id_c.clone()));
+                                }
                             });
                     });
             } else if layout == DetailHeader::Stacked {
@@ -1687,18 +2083,21 @@ fn DetailPane(
                             RoutineSwitch(&routine_name, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
                             cu::Spacer().modifier(Modifier::new().weight(1.0));
                             AppButton("편집", None, ButtonKind::Default, true, true, false, move || edit_fn(edit_id.clone()));
-                            AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, move || run_fn(run_id.clone()));
+                            RunNowButton(busy, move || run_fn(run_id.clone()));
                         });
                     });
             } else {
                 let toggle_fn = on_toggle;
                 let edit_fn = on_edit;
                 let run_fn = on_run;
+                // 56 high as the mockup's `.rt-dh`: 12 above and below the 32 dp buttons, and
+                // 4 more on each side for the card's 16.
                 cu::Row()
                     .alignment(Alignment::CenterStart)
                     .spacing(SP[2])
-                    .modifier(Modifier::new().fill_max_width().height(64.0).padding(16.0))
+                    .modifier(Modifier::new().fill_max_width().height(DETAIL_HEADER_H).padding(PAD_ROW_V))
                     .content(move || {
+                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
                         // The title takes what the actions leave and ellipsizes, so the actions
                         // never leave the panel.
                         cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
@@ -1707,30 +2106,30 @@ fn DetailPane(
                         TriggerPill(routine_trigger, true);
                         RoutineSwitch(&routine_name_w, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
                         AppButton("편집", None, ButtonKind::Default, true, true, false, move || edit_fn(edit_id.clone()));
-                        AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, move || run_fn(run_id.clone()));
+                        RunNowButton(busy, move || run_fn(run_id.clone()));
+                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
                     });
             }
             cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
 
             cu::Column()
-                .spacing(SP[4])
-                .modifier(Modifier::new().fill_max_width().padding(if compact { 12.0 } else { 16.0 }))
+                .spacing(DETAIL_GAP)
+                .modifier(Modifier::new().fill_max_width().padding(detail_body_pad(compact)))
                 .content(move || {
                     // Schedule & Ring
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(move || {
                         cu::Column().modifier(Modifier::new().weight(1.0)).spacing(SP[0]).content(move || {
-                            Label(&when_big, if routine_trigger == Trigger::Event { Fs::Xl2 } else { Fs::Xl4 }, Weight::Semibold, None, Some(when_big_max_lines(routine_trigger)));
-                            Label(&routine_line, Fs::Sm, Weight::Medium, None, Some(1));
-                            if routine_trigger == Trigger::Time && cron_valid(&routine_cron) {
-                                Label(&routine_cron, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                            }
+                            Label(&when_big, if routine_trigger == Trigger::Event { Fs::Xl2 } else { detail_when_fs(compact) }, Weight::Semibold, None, Some(when_big_max_lines(routine_trigger)));
+                            // The cron sits on the schedule's line, as the mockup's `.rt-sched`
+                            // ("매일 오전 9시 · 0 9 * * *"), not on a line of its own.
+                            Label(&sched_text, Fs::Sm, Weight::Medium, None, Some(1));
                             Label(&next, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                         });
                         cu::Box()
-                            .modifier(Modifier::new().size(76.0, 76.0))
+                            .modifier(Modifier::new().size(DETAIL_RING, DETAIL_RING))
                             .alignment(Alignment::Center)
                             .content(move || {
-                                cu::Canvas(ring_cmd).modifier(Modifier::new().size(76.0, 76.0));
+                                cu::Canvas(ring_cmd).modifier(Modifier::new().size(DETAIL_RING, DETAIL_RING));
                                 Label(
                                     &rate.map(|v| format!("{v}%")).unwrap_or_else(|| "-".to_string()),
                                     Fs::Md,
@@ -1741,13 +2140,26 @@ fn DetailPane(
                             });
                     });
 
-                    // Inset cards: 3 cards in one row on wide
+                    // Inset cards: 3 cards in one row on wide, 2x2 grid on narrow so the run
+                    // history below stays visible above the fold on 390 dp phone screens.
                     if tile_cols < 3 {
                         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                            KeyValue("프로젝트", &project_name, "");
-                            KeyValue("에이전트", &harness_label, &model_title);
-                            KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다");
-                            KeyValue("권한 모드", &mode_label, "");
+                            cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                                    KeyValue("프로젝트", &project_name, "");
+                                });
+                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                                    KeyValue("에이전트", &harness_label, &model_title);
+                                });
+                            });
+                            cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                                    KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다");
+                                });
+                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                                    KeyValue("권한 모드", &mode_label, "");
+                                });
+                            });
                         });
                     } else {
                         cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
@@ -1762,19 +2174,24 @@ fn DetailPane(
                             });
                         });
                     }
+                    // The inset pads 12 16 itself (`.inset`); no second padding inside it.
                     InsetPanel(true, move || {
-                        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(move || {
+                        cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(move || {
                             Label("프롬프트", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                             Label(&prompt_text, Fs::Sm, Weight::Regular, None, None);
                         });
                     });
-                    Label("실행 기록", Fs::Lg, Weight::Semibold, None, Some(1));
-                    if entry.runs.is_empty() {
-                        Label("아직 실행하지 않았습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    }
-                    for run in &entry.runs {
-                        RunTile(run, now, run_is_simulated(run, demo));
-                    }
+                    // The heading sits 8 above its rows (mockup `.runtiles { margin-top: 8px }`),
+                    // at the body's 14 semibold (`<b>`).
+                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(move || {
+                        Label("실행 기록", Fs::Md, Weight::Semibold, None, Some(1));
+                        if entry.runs.is_empty() {
+                            Label("아직 실행하지 않았습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        }
+                        for run in &entry.runs {
+                            RunTile(run, now, run_is_simulated(run, demo));
+                        }
+                    });
                 });
         });
     });
@@ -1785,10 +2202,11 @@ fn KeyValue(title: &str, value: &str, sub: &str) {
     let t = title.to_string();
     let v = value.to_string();
     let s = sub.to_string();
+    // The inset pads 12 16 itself (`.inset`); a second padding inside doubled it (#494).
     InsetPanel(true, move || {
         cu::Column()
             .spacing(SP[0])
-            .modifier(Modifier::new().fill_max_width().padding(SP[2]))
+            .modifier(Modifier::new().fill_max_width())
             .content(move || {
                 Label(&t, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 // Two lines, then an ellipsis: the tile is at least a third of the panel.
@@ -1806,11 +2224,12 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool) {
     let session = run.session.clone();
     let row = run_row_text(run, now, simulated);
     let (status_lbl, ago_lbl) = (row.status, row.ago);
+    // `RUN_TILE_H` high: the inset's own 12 above and below a row the button's height.
     InsetPanel(true, move || {
         cu::Row()
             .alignment(Alignment::CenterStart)
             .spacing(SP[2])
-            .modifier(Modifier::new().fill_max_width().padding(SP[2]))
+            .modifier(Modifier::new().fill_max_width().height(H_CTL))
             .content(move || {
                 Pill(status_lbl, tone, true);
                 if simulated {
@@ -1821,7 +2240,8 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool) {
                 if let Some(id) = session {
                     AppButton("세션 열기", None, ButtonKind::Default, true, true, false, move || {
                         if let Some(svc) = try_services() {
-                            svc.ui.open_conversation(&id);
+                            let target = resolve_run_session_id(&id, demo_active());
+                            svc.ui.open_conversation(&target);
                         }
                     });
                 }
@@ -1837,11 +2257,13 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool) {
 /// written once (FR-L25, #511).
 #[derive(Clone)]
 struct FormCtx {
+    /// The fields' width, for wrapping the choice segments (`form_field_width`). The screen
+    /// passes it in: inside the sheet's content the window size reads 0 (#493).
+    field_w: f32,
     draft: MutableState<FormDraft>,
     tried: MutableState<bool>,
     initial: FormDraft,
     editing: bool,
-    server: bool,
     computers: Vec<(String, String)>,
     projects: Vec<String>,
 }
@@ -1865,10 +2287,11 @@ fn form_save_handler(
 fn RoutineForm(
     initial: FormDraft,
     editing: Option<String>,
-    server: bool,
+    _server: bool,
     computers: &[(String, String)],
     projects: &[String],
     layout: FormLayout,
+    field_w: f32,
     draft: &MutableState<FormDraft>,
     on_save: impl FnMut(FormDraft) + Clone + 'static,
     on_close: impl FnMut() + Clone + 'static,
@@ -1877,11 +2300,11 @@ fn RoutineForm(
     let draft = draft.clone();
     let tried = remember(|| mutable_state_of(false));
     let ctx = FormCtx {
+        field_w,
         draft,
         tried,
         initial: initial.clone(),
         editing: editing.is_some(),
-        server,
         computers: computers.to_vec(),
         projects: projects.to_vec(),
     };
@@ -1956,7 +2379,8 @@ fn RoutineForm(
 /// The fields, in `FORM_FIELDS` order, for both shells.
 fn FormFields(ctx: &FormCtx) {
     let p = ember_theme().palette;
-    let (draft, tried, initial, server) = (&ctx.draft, &ctx.tried, &ctx.initial, ctx.server);
+    let field_w = ctx.field_w;
+    let (draft, tried, initial) = (&ctx.draft, &ctx.tried, &ctx.initial);
     let editing = ctx.editing;
     let agents = live_agents();
     let d = draft.get();
@@ -1970,7 +2394,7 @@ fn FormFields(ctx: &FormCtx) {
         .copied()
         .filter(|h| harness_block(*h, &agents, &[]).is_none())
         .collect();
-    let models = model_choices(&model_catalog(), &allowed, d.sel.option.harness, server);
+    let models = model_choices(&model_catalog(), &allowed, d.sel.option.harness, false);
     let model_labels: Vec<String> = models.iter().map(|o| o.chip_label()).collect();
     let model_at = models.iter().position(|o| *o == d.sel.option).unwrap_or(0);
     let modes: Vec<crate::ui::home::PermMode> = modes_for(d.sel.option.harness).to_vec();
@@ -1980,33 +2404,21 @@ fn FormFields(ctx: &FormCtx) {
 
     if editing {
         Label(
-            "입력하지 않은 항목은 지금 값을 유지합니다",
+            "바꾸지 않은 항목은 지금 값을 유지합니다",
             Fs::Xs,
             Weight::Regular,
             Some(paint(p.muted)),
             None,
         );
     }
-    // TODO(compose-rust#374): the text field has no initial value, so each text field shows the
-    // stored value on a "현재 값" line above it and stays empty; typing replaces the value,
-    // leaving it empty keeps it. The pickers start on the stored project, harness, model, mode
-    // and computer (the draft is built by `FormDraft::from_routine`).
     for f in FORM_FIELDS {
         match f {
             FormField::Name => {
                 FormLabel("이름");
-                if server {
-                    Label(NAME_SERVER_REASON, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-                } else {
-                    CurrentValue(editing, &initial.name);
-                }
                 let draft_name = draft.clone();
                 EmberField(FieldOptions {
                     fill_max_width: true,
-                    // TODO(server): `SchedulePatch` takes no name, so a server routine's name is
-                    // shown as is and cannot be edited.
-                    text: server.then(|| initial.name.clone()),
-                    enabled: server.then_some(false),
+                    text: Some(d.name.clone()),
                     placeholder: if editing {
                         "바꾸려면 새 이름을 입력하세요".to_string()
                     } else {
@@ -2020,33 +2432,20 @@ fn FormFields(ctx: &FormCtx) {
             }
             FormField::Project => {
                 FormLabel("프로젝트");
-                FrozenReason(server);
-                cu::ScrollRow()
-                    .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
-                    .content(|| {
-                        for name in &project_choices {
-                            let sel_proj = draft.clone();
-                            let n = name.clone();
-                            let selected = d.sel.project == *name;
-                            PickChip(name, None, selected, false, move || {
-                                if server {
-                                    return;
-                                }
-                                sel_proj.update(|d| d.sel.project = n.clone());
-                            });
-                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                        }
-                    });
+                // Wrapped, never scrolled sideways, so the chosen one is always in view (#493).
+                let (sel_proj, names) = (draft.clone(), project_choices.clone());
+                SegChoices(&project_choices, field_w, |i| d.sel.project == project_choices[i], move |i| {
+                    let n = names[i].clone();
+                    sel_proj.update(|d| d.sel.project = n);
+                });
             }
             FormField::Trigger => {
                 FormLabel("트리거");
-                cu::Row().spacing(SP[1]).content(|| {
-                    for t in Trigger::ALL {
-                        let sel_trig = draft.clone();
-                        PickChip(t.label(), None, d.trigger == t, false, move || {
-                            sel_trig.update(|d| *d = d.with_trigger(t));
-                        });
-                    }
+                let labels: Vec<String> = Trigger::ALL.iter().map(|t| t.label().to_string()).collect();
+                let sel_trig = draft.clone();
+                SegChoices(&labels, field_w, |i| d.trigger == Trigger::ALL[i], move |i| {
+                    let t = Trigger::ALL[i];
+                    sel_trig.update(|d| *d = d.with_trigger(t));
                 });
             }
             FormField::ScheduleDescription => {
@@ -2056,7 +2455,6 @@ fn FormFields(ctx: &FormCtx) {
             }
             FormField::Schedule => {
                 FormLabel(if d.trigger == Trigger::Time { "cron" } else { "이벤트" });
-                CurrentValue(editing && initial.trigger == d.trigger, &initial.cron);
                 let sel_cron = draft.clone();
                 let ph = if editing && initial.trigger == d.trigger {
                     "바꾸려면 새 값을 입력하세요".to_string()
@@ -2067,6 +2465,7 @@ fn FormFields(ctx: &FormCtx) {
                 };
                 EmberField(FieldOptions {
                     fill_max_width: true,
+                    text: Some(d.cron.clone()),
                     placeholder: ph,
                     on_value_change: Some(Box::new(move |v| {
                         sel_cron.update(|d| d.cron = v);
@@ -2076,7 +2475,6 @@ fn FormFields(ctx: &FormCtx) {
             }
             FormField::Model => {
                 FormLabel("하네스 · 모델 · 추론 강도");
-                FrozenReason(server);
                 let (pick, choices) = (draft.clone(), models.clone());
                 Select(&model_labels[model_at.min(model_labels.len().saturating_sub(1))], &model_labels, model_at, 320.0, move |i| {
                     if let Some(o) = choices.get(i).copied() {
@@ -2098,38 +2496,26 @@ fn FormFields(ctx: &FormCtx) {
             }
             FormField::Computer => {
                 FormLabel("컴퓨터");
-                FrozenReason(server);
-                cu::ScrollRow()
-                    .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
-                    .content(|| {
-                        let sel_c = draft.clone();
-                        PickChip("이 서버", None, d.sel.computer.is_none(), false, move || {
-                            if !server {
-                                sel_c.update(|d| d.sel.computer = None);
-                            }
-                        });
-                        cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                        for (cid, cname) in &ctx.computers {
-                            let sel_c = draft.clone();
-                            let cid_clone = cid.clone();
-                            let selected = d.sel.computer.as_deref() == Some(cid.as_str());
-                            PickChip(cname, None, selected, false, move || {
-                                if !server {
-                                    sel_c.update(|d| d.sel.computer = Some(cid_clone.clone()));
-                                }
-                            });
-                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                        }
-                    });
+                // "이 서버" first, then the computers; `None` is this server.
+                let ids: Vec<Option<String>> =
+                    std::iter::once(None).chain(ctx.computers.iter().map(|(id, _)| Some(id.clone()))).collect();
+                let labels: Vec<String> = std::iter::once("이 서버".to_string())
+                    .chain(ctx.computers.iter().map(|(_, name)| name.clone()))
+                    .collect();
+                let (sel_c, pick_ids) = (draft.clone(), ids.clone());
+                SegChoices(&labels, field_w, |i| d.sel.computer == ids[i], move |i| {
+                    let c = pick_ids[i].clone();
+                    sel_c.update(|d| d.sel.computer = c);
+                });
             }
             FormField::Prompt => {
                 FormLabel("프롬프트");
-                CurrentValue(editing, &initial.prompt);
                 let sel_p = draft.clone();
                 EmberField(FieldOptions {
                     fill_max_width: true,
                     height: Some(120.0),
                     multiline: true,
+                    text: Some(d.prompt.clone()),
                     placeholder: if editing {
                         "바꾸려면 새 지시를 입력하세요".to_string()
                     } else {
@@ -2147,21 +2533,6 @@ fn FormFields(ctx: &FormCtx) {
         for e in errors {
             Label(e.message(), Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
         }
-    }
-}
-
-/// The reason beside the chips a server routine cannot change (TODO(server)).
-fn FrozenReason(server: bool) {
-    if server {
-        Label(SERVER_CANNOT_CHANGE, Fs::Xs, Weight::Regular, Some(paint(ember_theme().palette.muted)), Some(1));
-    }
-}
-
-/// The stored value of a text field in the edit form, as a muted line above the field (#493).
-fn CurrentValue(show: bool, value: &str) {
-    let line = current_value_line(value);
-    if show && !line.is_empty() {
-        Label(&line, Fs::Xs, Weight::Regular, Some(paint(ember_theme().palette.text_2)), Some(4));
     }
 }
 
@@ -2192,6 +2563,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::ClaudeCode),
                     computer: Some("mac-mini".into()),
                 },
+                continue_session: None,
             },
             runs: vec![
                 Run {
@@ -2226,6 +2598,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::Codex),
                     computer: Some("mac-mini".into()),
                 },
+                continue_session: None,
             },
             runs: vec![
                 Run {
@@ -2255,6 +2628,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::ClaudeCode),
                     computer: Some("ws-linux-01".into()),
                 },
+                continue_session: None,
             },
             runs: vec![Run {
                 at: now - 5 * 1440,
@@ -2277,6 +2651,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::Codex),
                     computer: Some("win-desktop".into()),
                 },
+                continue_session: None,
             },
             runs: vec![
                 Run {
@@ -2306,6 +2681,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::ClaudeCode),
                     computer: Some("ws-linux-01".into()),
                 },
+                continue_session: None,
             },
             runs: vec![
                 Run {
@@ -2335,6 +2711,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::Gemini),
                     computer: Some("win-desktop".into()),
                 },
+                continue_session: None,
             },
             runs: vec![Run {
                 at: now - 3 * 1440,
@@ -2357,6 +2734,7 @@ pub fn sample_entries() -> Vec<Entry> {
                     mode: default_mode(Harness::ClaudeCode),
                     computer: Some("mac-mini".into()),
                 },
+                continue_session: None,
             },
             runs: vec![Run {
                 at: now - 1440,
@@ -2398,6 +2776,7 @@ mod tests {
                 project: project.into(),
                 ..Selection::initial()
             },
+            continue_session: None,
         }
     }
 
@@ -2730,6 +3109,69 @@ mod tests {
         assert_eq!(ROUTINE_DISCARD_QUESTION, "변경 사항을 버릴까요?");
     }
 
+    /// The form's one-of choices are the mockup's `.seg` buttons: 13/500 text, and the chosen
+    /// one in `ink`, not the composer's dropdown chip with its faint `sel` fill (#493).
+    #[test]
+    fn fr_l25_form_choices_are_segments_with_an_ink_chosen_state() {
+        assert_eq!((SEG_FS, SEG_FS.size()), (Fs::Sm, 13.0));
+        for p in [&LIGHT, &DARK] {
+            assert_eq!(seg_colors(true, p), (p.ink, p.ink, p.ink_text));
+            assert_eq!(seg_colors(false, p), (p.surface, p.line, p.text_2));
+        }
+        let src = include_str!("routines.rs");
+        let form = src.split("fn FormFields(").nth(1).unwrap().split("\nfn FormLabel(").next().unwrap();
+        for field in ["FormField::Project", "FormField::Trigger", "FormField::Computer"] {
+            let arm = form.split(field).nth(1).unwrap().split("FormField::").next().unwrap();
+            assert!(arm.contains("SegChoices("), "{field} uses the wrapped segments");
+            assert!(!arm.contains("ScrollRow("), "{field} never scrolls sideways");
+            assert!(!arm.contains("PickChip("), "{field} does not use the dropdown chip");
+        }
+    }
+
+    /// At 390 the 프로젝트 segments wrap onto more lines instead of scrolling, so every option
+    /// and the chosen one are in view; no line is wider than the sheet's fields (#493).
+    #[test]
+    fn fr_l25_form_segments_wrap_to_the_field_width() {
+        let projects = ["기본 프로젝트", "demo-project", "second-project", "ember"];
+        let phone = form_field_width(390.0, 0.0, FormLayout::Sheet);
+        assert_eq!(phone, 350.0);
+        let (content, _) = content_at(1440.0);
+        let wide = form_field_width(1440.0, detail_panel_width(1440.0, content, false), FormLayout::Inline);
+        for avail in [phone, wide] {
+            let lines = seg_lines(&projects, avail);
+            let flat: Vec<usize> = lines.iter().flatten().copied().collect();
+            assert_eq!(flat, vec![0, 1, 2, 3], "every option once, in order, at {avail}");
+            for line in &lines {
+                let w: f32 = line.iter().map(|&i| seg_width(projects[i])).sum::<f32>()
+                    + SP[1] * (line.len() as f32 - 1.0);
+                assert!(w <= avail, "a line of {w} fits {avail}");
+            }
+        }
+        assert!(seg_lines(&projects, phone).len() >= 2, "the phone wraps");
+        // The 390 sheet: 기본 프로젝트 and demo-project share a line; second-project and the
+        // chosen ember go below, so ember is in view (r3 capture of #720 had all on one line).
+        assert_eq!(seg_lines(&projects, phone), vec![vec![0, 1], vec![2, 3]]);
+        for line in seg_lines(&projects, phone) {
+            let w: f32 = line.iter().map(|&i| seg_width(projects[i])).sum::<f32>() + SP[1] * (line.len() as f32 - 1.0);
+            assert!(w <= phone - SP[1], "a 390 line of {w} keeps a gap from the sheet's edge");
+        }
+        assert_eq!(
+            form_field_width(0.0, 0.0, FormLayout::Sheet),
+            NARROW_SHEET_FIELD_W,
+            "an unknown window packs against the 390 sheet"
+        );
+        assert_eq!(seg_lines(&projects, NARROW_SHEET_FIELD_W), vec![vec![0, 1], vec![2, 3]]);
+        // The screen works the width out before the sheet opens and hands it down.
+        let src = include_str!("routines.rs");
+        let fields = src.split("fn FormFields(").nth(1).unwrap().split("\nfn FormLabel(").next().unwrap();
+        assert!(!fields.contains("current_window_size()"), "the fields never read the window inside the sheet");
+        assert!(src.contains("let form_w_sheet = form_field_width(window.width_dp, panel_w, FormLayout::Sheet);"));
+        assert!(src.contains("            form_w_sheet,\n            &form_draft,"), "the sheet gets the screen's width");
+        assert_eq!(seg_lines(&projects, wide).len(), 1, "the wide inline form keeps one line");
+        // A segment wider than the room still gets its own line rather than vanishing.
+        assert_eq!(seg_lines(&["a-very-long-project-name-indeed"], 100.0), vec![vec![0]]);
+    }
+
     #[test]
     fn fr_l25_form_fields_follow_the_mockup_order_with_one_model_picker() {
         assert_eq!(
@@ -2797,6 +3239,47 @@ mod tests {
             assert_eq!(detail_header_layout(pw, compact), header, "header at {w}");
             assert_eq!(detail_tile_columns(pw), cols, "tiles at {w}");
         }
+    }
+
+    /// The first 실행 기록 row shows without scrolling at 1440x900 and 390x844 (FR-L25, #494).
+    /// The detail card's top is measured on the r3 captures of PR #721 (`running-1440-*.png`:
+    /// 386; `done-390-*.png`: 84), since the dashboard above it is laid out by the toolkit. The
+    /// prompt is given one line more than the sample prompt takes at each width, so the check
+    /// errs on the safe side.
+    #[test]
+    fn fr_l25_first_run_row_is_visible_without_scrolling_at_1440_and_390() {
+        // (window w, window h, card top, prompt lines, 컴퓨터 note lines, room kept at the bottom)
+        let cases = [
+            (1440.0, 900.0, 386.0, 2, 1, SP[6]),
+            (390.0, 844.0, 84.0, 3, 2, compact_bottom_clearance()),
+        ];
+        for (w, h, top, prompt_lines, sub_lines, room) in cases {
+            let (content, compact) = content_at(w);
+            let pw = detail_panel_width(w, content, compact);
+            let bottom = top + detail_first_run_bottom(pw, compact, prompt_lines, sub_lines);
+            assert!(
+                bottom <= h - room,
+                "first run row ends at {bottom} dp at {w}x{h}, past {} dp",
+                h - room
+            );
+        }
+        // The pieces the sum is made of are the mockup's.
+        assert_eq!(DETAIL_HEADER_H, 56.0, "`.rt-dh` min-height");
+        assert_eq!(RUN_TILE_H, 56.0, "12 + 32 + 12");
+        assert_eq!(detail_when_fs(false), Fs::Xl4);
+        assert_eq!(detail_when_fs(true), Fs::Xl2, "28 px at 560 px and below");
+    }
+
+    #[test]
+    fn fr_l25_detail_tiles_and_run_rows_are_padded_once() {
+        let src = include_str!("routines.rs");
+        let kv = src.split("fn KeyValue(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        let tile = src.split("fn RunTile(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        for (name, body) in [("KeyValue", kv), ("RunTile", tile)] {
+            assert!(body.contains("InsetPanel(true"), "{name} sits in an inset");
+            assert!(!body.contains(".padding("), "{name} adds no padding inside the inset's own");
+        }
+        assert!(tile.contains(".height(H_CTL)"), "a run row is as tall as its button");
     }
 
     #[test]
@@ -3454,6 +3937,7 @@ mod tests {
                 prompt: "로컬 프롬프트".into(),
                 enabled: true,
                 sel: Selection::initial(),
+                continue_session: None,
             });
         });
         assert!(with_store(|s| s.entries().iter().any(|e| e.routine.id == "test-rt-local")));
@@ -3469,6 +3953,7 @@ mod tests {
                 prompt: "로컬 프롬프트 2".into(),
                 enabled: true,
                 sel: Selection::initial(),
+                continue_session: None,
             });
         });
         assert!(with_store(|s| s.entries().iter().any(|e| e.routine.id == "test-rt-local-2")));
@@ -3528,5 +4013,499 @@ mod tests {
             }
         }
         compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l25_host_edit_form_prefills_fields_and_allows_editing() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let entries = sample_entries();
+        let target = &entries[0].routine;
+        let initial = FormDraft::from_routine(target);
+        let draft = mutable_state_of(initial.clone());
+        let computers = vec![("mac-mini".to_string(), "Mac mini".to_string())];
+        let projects = vec!["ember".to_string(), "core".to_string()];
+
+        let mut host = Host::new({
+            let initial = initial.clone();
+            let draft = draft.clone();
+            move || {
+                let initial = initial.clone();
+                let draft = draft.clone();
+                let computers = computers.clone();
+                let projects = projects.clone();
+                Box::new(Recomposer::new(move || {
+                    RoutineForm(
+                        initial.clone(),
+                        Some("rt1".to_string()),
+                        true,
+                        &computers,
+                        &projects,
+                        FormLayout::Inline,
+                        form_field_width(1440.0, 742.0, FormLayout::Inline),
+                        &draft,
+                        |_| {},
+                        || {},
+                    );
+                }))
+            }
+        });
+
+        let mutations = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let text_fields: Vec<u32> = mutations
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create {
+                    node_id,
+                    widget: WidgetKind::TextField,
+                } => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text_fields.len(), 3, "expected Name, Schedule, and Prompt TextFields");
+
+        let field_texts: Vec<&str> = mutations
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::Text,
+                    value: PropertyValue::String(s),
+                } if text_fields.contains(node_id) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            field_texts.contains(&target.name.as_str()),
+            "expected Name TextField pre-filled with '{}', got {field_texts:?}",
+            target.name
+        );
+        assert!(
+            field_texts.contains(&target.cron.as_str()),
+            "expected Schedule TextField pre-filled with '{}', got {field_texts:?}",
+            target.cron
+        );
+        assert!(
+            field_texts.contains(&target.prompt.as_str()),
+            "expected Prompt TextField pre-filled with '{}', got {field_texts:?}",
+            target.prompt
+        );
+
+        let any_disabled = mutations.iter().any(|m| match m {
+            Mutation::SetProp {
+                node_id,
+                property: PropertyKind::Enabled,
+                value: PropertyValue::Bool(false),
+            } if text_fields.contains(node_id) => true,
+            _ => false,
+        });
+        assert!(!any_disabled, "none of the edit form text fields should be disabled");
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l25_host_open_session_button_resolves_demo_session_and_opens_conversation() {
+        let _guard = crate::services::test_guard();
+        let svc = crate::services::test_services();
+        svc.reset_demo();
+        compose_rust::window::reset_window_size();
+
+        // The shown routine keeps only its newest run (session s9), so the detail has exactly one
+        // 세션 열기: with all three (s9, s9, s6) the test took whichever a HashMap gave first and
+        // opened demo-s6 in some runs.
+        let entries = || {
+            let mut all = sample_entries();
+            all[0].runs.truncate(1);
+            assert_eq!(all[0].runs[0].session.as_deref(), Some("s9"));
+            all
+        };
+        let mut host = Host::new(move || Box::new(Recomposer::new(move || RoutinesScreenWith(entries(), true))));
+        let mut texts: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut clickables: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        let mut scan = |batch: &[Mutation<'_>]| {
+            for m in batch {
+                match m {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        texts.insert(*node_id, s.to_string());
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                        clickables.insert(*node_id, *h as u64);
+                    }
+                    _ => {}
+                }
+            }
+        };
+        scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+        let resize = HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: 1440.0,
+                height_dp: 900.0,
+                class: WindowSizeClass::Expanded,
+                height_class: WindowHeightClass::Medium,
+                safe_area_top: 0.0,
+                safe_area_leading: 0.0,
+                safe_area_trailing: 0.0,
+            },
+        };
+        let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
+        scan(&decode_batch(bytes).expect("decode"));
+
+        let open: Vec<u32> = texts
+            .iter()
+            .filter(|(id, t)| *t == "세션 열기" && clickables.contains_key(id))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(open.len(), 1, "one run, one 세션 열기");
+        let open_btn = open[0];
+        let handler_id = clickables[&open_btn];
+        host.dispatch(HostEvent {
+            node_id: open_btn,
+            handler_id,
+            payload: EventPayload::Clicked,
+        })
+        .expect("dispatch click on 세션 열기");
+
+        assert_eq!(
+            svc.ui.route.get(),
+            crate::ui::Route::Conversation("demo-s9".to_string()),
+            "clicking '세션 열기' on sample run 's9' in demo mode should open conversation 'demo-s9'"
+        );
+        let is_open = svc.client.read(|st| {
+            st.session("demo-s9")
+                .is_some_and(|v| v.open && st.transcript("demo-s9").is_some())
+        });
+        assert!(is_open, "opening 'demo-s9' must mark it open and load its demo transcript");
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l25_host_run_now_click_starts_running_state_and_posts_notice() {
+        let _guard = crate::services::test_guard();
+        let svc = crate::services::test_services();
+        svc.reset_demo();
+        compose_rust::window::reset_window_size();
+
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreenWith(sample_entries(), true))));
+        let mut texts: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut clickables: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        let mut scan = |batch: &[Mutation<'_>]| {
+            for m in batch {
+                match m {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        texts.insert(*node_id, s.to_string());
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                        clickables.insert(*node_id, *h as u64);
+                    }
+                    _ => {}
+                }
+            }
+        };
+        scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+        let resize = HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: 1440.0,
+                height_dp: 900.0,
+                class: WindowSizeClass::Expanded,
+                height_class: WindowHeightClass::Medium,
+                safe_area_top: 0.0,
+                safe_area_leading: 0.0,
+                safe_area_trailing: 0.0,
+            },
+        };
+        let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
+        scan(&decode_batch(bytes).expect("decode"));
+
+        let run_btn = texts
+            .iter()
+            .find(|(id, t)| *t == "지금 실행" && clickables.contains_key(id))
+            .map(|(id, _)| *id)
+            .expect("expected clickable '지금 실행' button in detail header");
+        let handler_id = clickables[&run_btn];
+        let (after_click, _) = host
+            .dispatch(HostEvent {
+                node_id: run_btn,
+                handler_id,
+                payload: EventPayload::Clicked,
+            })
+            .expect("dispatch click on 지금 실행");
+        let after_mutations = decode_batch(after_click).expect("decode after click");
+        let after_text: String = after_mutations.iter().map(|m| format!("{m:?}")).collect();
+        assert!(
+            after_text.contains("실행 중") && after_text.contains(SAMPLE_FLAG),
+            "clicking '지금 실행' must immediately render '실행 중' and '{SAMPLE_FLAG}' in the detail run history"
+        );
+        assert_eq!(
+            svc.ui.notice.get().map(|(_, s)| s).as_deref(),
+            Some(DEMO_RUN_STARTED),
+            "clicking '지금 실행' must post DEMO_RUN_STARTED notice"
+        );
+        compose_rust::window::reset_window_size();
+    }
+
+    /// What a test has seen of the tree so far: text, click handler and enabled flag per node.
+    #[derive(Default)]
+    struct Seen {
+        texts: std::collections::HashMap<u32, String>,
+        clickables: std::collections::HashMap<u32, u64>,
+        enabled: std::collections::HashMap<u32, bool>,
+    }
+
+    impl Seen {
+        fn scan(&mut self, batch: &[Mutation<'_>]) {
+            for m in batch {
+                match m {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        self.texts.insert(*node_id, s.to_string());
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                        self.clickables.insert(*node_id, *h as u64);
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::Enabled, value: PropertyValue::Bool(b) } => {
+                        self.enabled.insert(*node_id, *b);
+                    }
+                    Mutation::Remove { node_id } => {
+                        self.texts.remove(node_id);
+                        self.clickables.remove(node_id);
+                        self.enabled.remove(node_id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// While the run it started is in progress, 지금 실행 is disabled and reads 실행 중, at the
+    /// wide header and the phone's icon header alike (FR-L25, #494).
+    #[test]
+    fn fr_l25_run_now_is_disabled_while_its_run_is_in_progress() {
+        for (w, h, class) in [(1440.0, 900.0, WindowSizeClass::Expanded), (390.0, 844.0, WindowSizeClass::Compact)] {
+            let _guard = crate::services::test_guard();
+            let svc = crate::services::test_services();
+            svc.reset_demo();
+            compose_rust::window::reset_window_size();
+
+            let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreenWith(sample_entries(), true))));
+            let mut seen = Seen::default();
+            seen.scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+            let resize = HostEvent {
+                node_id: 0,
+                handler_id: 0,
+                payload: EventPayload::WindowSizeChanged {
+                    width_dp: w,
+                    height_dp: h,
+                    class,
+                    height_class: WindowHeightClass::Medium,
+                    safe_area_top: 0.0,
+                    safe_area_leading: 0.0,
+                    safe_area_trailing: 0.0,
+                },
+            };
+            let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
+            seen.scan(&decode_batch(bytes).expect("decode"));
+            if class == WindowSizeClass::Compact {
+                // The phone shows the list first and the detail only for a chosen routine (no
+                // routine is chosen by default there), so open the first one as a user would:
+                // its row is a button named by the routine.
+                let name = sample_entries()[0].routine.name.clone();
+                let row = seen
+                    .texts
+                    .iter()
+                    .find(|(id, t)| **t == name && seen.clickables.contains_key(id))
+                    .map(|(id, _)| *id)
+                    .unwrap_or_else(|| panic!("a clickable row named {name}"));
+                let (bytes, _) = host
+                    .dispatch(HostEvent { node_id: row, handler_id: seen.clickables[&row], payload: EventPayload::Clicked })
+                    .expect("dispatch click on the routine row");
+                seen.scan(&decode_batch(bytes).expect("decode"));
+            }
+
+            let run_btn = seen.texts
+                .iter()
+                .find(|(id, t)| *t == "지금 실행" && seen.clickables.contains_key(id))
+                .map(|(id, _)| *id)
+                .unwrap_or_else(|| panic!("a clickable 지금 실행 at {w}"));
+            assert_ne!(seen.enabled.get(&run_btn), Some(&false), "지금 실행 starts enabled at {w}");
+            let (bytes, _) = host
+                .dispatch(HostEvent { node_id: run_btn, handler_id: seen.clickables[&run_btn], payload: EventPayload::Clicked })
+                .expect("dispatch click on 지금 실행");
+            seen.scan(&decode_batch(bytes).expect("decode"));
+
+            let live_run_now: Vec<u32> = seen.texts
+                .iter()
+                .filter(|(id, t)| *t == "지금 실행" && seen.enabled.get(id) != Some(&false))
+                .map(|(id, _)| *id)
+                .collect();
+            assert!(live_run_now.is_empty(), "no enabled 지금 실행 while the run is in progress at {w}");
+            assert!(
+                seen.texts.iter().any(|(id, t)| t == RUN_NOW_BUSY_LABEL && seen.enabled.get(id) == Some(&false)),
+                "a disabled {RUN_NOW_BUSY_LABEL} button stands in for it at {w}"
+            );
+            compose_rust::window::reset_window_size();
+        }
+    }
+
+    #[test]
+    fn fr_l25_remote_run_now_live_progress_and_error_rollback() {
+        let _guard = crate::services::test_guard();
+        let svc = crate::services::test_services();
+        with_store(|s| *s = LocalStore::default());
+        with_remote(|r| *r = Remote::default());
+
+        let state = std::sync::Arc::new(std::sync::Mutex::new((
+            None::<ember_client::wire::RunStatus>,
+            false,
+        )));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let addr = listener.local_addr().expect("local addr");
+        let state_srv = std::sync::Arc::clone(&state);
+
+        svc.rt.spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let state_req = std::sync::Arc::clone(&state_srv);
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or("");
+                    let (run_st, fail_run) = *state_req.lock().unwrap();
+                    let status_str = match run_st {
+                        Some(ember_client::wire::RunStatus::Completed) => "completed",
+                        Some(ember_client::wire::RunStatus::Running) | None => "running",
+                        _ => "failed",
+                    };
+                    let (code, body) = if first_line.starts_with("POST /api/schedules/sch-live/run") {
+                        if fail_run {
+                            ("500 Internal Server Error", r#"{"error":"runner down"}"#.to_string())
+                        } else {
+                            (
+                                "200 OK",
+                                format!(
+                                    r#"{{"id":"run-1","schedule_id":"sch-live","scheduled_at":1700000000000,"started_at":1700000000000,"ended_at":null,"status":"{status_str}","session_id":"ses-live-1","error":null}}"#
+                                ),
+                            )
+                        }
+                    } else if first_line.starts_with("GET /api/schedules/sch-live/runs") {
+                        let runs_json = match (fail_run, run_st) {
+                            (true, _) | (_, None) => "[]".to_string(),
+                            (false, Some(_)) => format!(
+                                r#"[{{"id":"run-1","schedule_id":"sch-live","scheduled_at":1700000000000,"started_at":1700000000000,"ended_at":1700000005000,"status":"{status_str}","session_id":"ses-live-1","error":null}}]"#
+                            ),
+                        };
+                        ("200 OK", runs_json)
+                    } else if first_line.starts_with("GET /api/schedules") {
+                        (
+                            "200 OK",
+                            r#"[{"id":"sch-live","project":"ember","agent":"claude-code","computer_id":null,"cwd":"/tmp","prompt":"CI 요약\n자세히","kind":{"type":"cron","expr":"0 9 * * *","tz":"UTC"},"target":{"type":"new","title":"CI 요약"},"catch_up":false,"paused":false,"next_run_at":1700003600000,"last_run_at":null,"created_at":1700000000000}]"#
+                                .to_string(),
+                        )
+                    } else {
+                        ("404 Not Found", r#"{"error":"not found"}"#.to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {code}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let api = ember_client::api::Api::new(&format!("http://{addr}")).expect("api");
+
+        // 1. Initial load from server populates REMOTE and entries_st with 0 runs.
+        let initial_list = svc.rt.block_on(load_remote_from(&api)).expect("initial load");
+        assert_eq!(initial_list.len(), 1);
+        assert_eq!(initial_list[0].routine.id, "sch-live");
+        assert!(initial_list[0].runs.is_empty());
+
+        let entries_st = mutable_state_of(Vec::<Entry>::new());
+        let online_st = mutable_state_of(false);
+        apply_load(Ok(initial_list));
+        sync_from_remote(&entries_st, &online_st);
+        assert!(online_st.get());
+        assert_eq!(entries_st.get().len(), 1);
+        assert!(!has_running_remote_run(false, online_st.get(), &entries_st.get()));
+
+        // 2. Error path first: if POST /api/schedules/{id}/run fails, the optimistic Running
+        // placeholder is rolled back even if load_remote also fails.
+        state.lock().unwrap().1 = true;
+        begin_remote_run_now("sch-live", 100, &entries_st).expect("begin optimistic run");
+        assert!(has_running_remote_run(false, online_st.get(), &entries_st.get()));
+        let err_res = svc.rt.block_on(api.run_schedule("sch-live"));
+        assert!(err_res.is_err());
+        let err_list = svc.rt.block_on(load_remote_from(&api));
+        let err_msg = finish_remote_run_now("sch-live", err_res, err_list, &entries_st, &online_st);
+        assert!(
+            err_msg.starts_with("서버가 요청을 처리하지 못했습니다:"),
+            "unexpected error notice: {err_msg}"
+        );
+        assert!(
+            entries_st.get()[0].runs.is_empty(),
+            "optimistic Running placeholder must be rolled back when run_schedule fails"
+        );
+        assert!(!has_running_remote_run(false, online_st.get(), &entries_st.get()));
+
+        // Also verify rollback when load_remote itself fails with a status error.
+        begin_remote_run_now("sch-live", 101, &entries_st).expect("begin optimistic run 2");
+        let err_res2 = svc.rt.block_on(api.run_schedule("sch-live"));
+        let err_load = Err(ember_client::api::ApiError::Status {
+            status: 500,
+            message: "db locked".into(),
+            code: None,
+        });
+        let _ = finish_remote_run_now("sch-live", err_res2, err_load, &entries_st, &online_st);
+        assert!(
+            entries_st.get()[0].runs.is_empty(),
+            "optimistic placeholder must be rolled back even when load_remote fails"
+        );
+
+        // 3. Live progress path: Running -> polling -> Completed (완료).
+        *state.lock().unwrap() = (Some(ember_client::wire::RunStatus::Running), false);
+        begin_remote_run_now("sch-live", 102, &entries_st).expect("begin live run");
+        assert_eq!(entries_st.get()[0].runs.len(), 1);
+        assert_eq!(entries_st.get()[0].runs[0].status, RunStatus::Running);
+        assert_eq!(entries_st.get()[0].runs[0].session, None);
+
+        let ok_res = svc.rt.block_on(api.run_schedule("sch-live"));
+        let list_running = svc.rt.block_on(load_remote_from(&api));
+        let ok_msg = finish_remote_run_now("sch-live", ok_res, list_running, &entries_st, &online_st);
+        assert_eq!(ok_msg, REMOTE_RUN_STARTED);
+        assert_eq!(entries_st.get()[0].runs.len(), 1);
+        assert_eq!(entries_st.get()[0].runs[0].status, RunStatus::Running);
+        assert_eq!(
+            entries_st.get()[0].runs[0].session.as_deref(),
+            Some("ses-live-1")
+        );
+        assert!(
+            has_running_remote_run(false, online_st.get(), &entries_st.get()),
+            "while server run is Running, has_running_remote_run must stay true to keep polling"
+        );
+
+        // Server transitions run-1 to Completed; next poll syncs Done ("완료") and stops polling.
+        state.lock().unwrap().0 = Some(ember_client::wire::RunStatus::Completed);
+        let polled = svc.rt.block_on(load_remote_from(&api));
+        apply_load(polled);
+        sync_from_remote(&entries_st, &online_st);
+        assert_eq!(entries_st.get()[0].runs.len(), 1);
+        assert_eq!(entries_st.get()[0].runs[0].status, RunStatus::Done);
+        assert_eq!(entries_st.get()[0].runs[0].status.label(), "완료");
+        assert_eq!(
+            entries_st.get()[0].runs[0].session.as_deref(),
+            Some("ses-live-1")
+        );
+        assert!(
+            !has_running_remote_run(false, online_st.get(), &entries_st.get()),
+            "once server run is Completed, polling stops"
+        );
+
+        with_remote(|r| *r = Remote::default());
     }
 }

@@ -317,6 +317,8 @@ pub struct Routine {
     pub enabled: bool,
     /// Project, model and effort, mode and computer, the same choices as the Home composer.
     pub sel: Selection,
+    /// Session id when this routine continues an existing session (`ScheduleTarget::Continue`).
+    pub continue_session: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -715,6 +717,7 @@ impl FormDraft {
             prompt: self.prompt.trim().into(),
             enabled,
             sel: self.sel.clone(),
+            continue_session: None,
         }
     }
 }
@@ -963,12 +966,22 @@ pub fn run_from_server(r: &ScheduleRun) -> Run {
 }
 
 /// A server schedule as a routine. Model and mode are the harness defaults, since the server
-/// stores neither.
+/// stores neither; the routine's name comes from `ScheduleTarget::New { title }` when present and
+/// non-empty, falling back to [`name_from_prompt`].
 pub fn schedule_to_routine(s: &Schedule) -> Routine {
     let harness = Harness::from_kind(&s.agent).unwrap_or(Harness::ClaudeCode);
+    let (name, continue_session) = match &s.target {
+        ScheduleTarget::New { title: Some(t) } if !t.trim().is_empty() => {
+            (t.trim().to_string(), None)
+        }
+        ScheduleTarget::New { .. } => (name_from_prompt(&s.prompt), None),
+        ScheduleTarget::Continue { session_id } => {
+            (name_from_prompt(&s.prompt), Some(session_id.clone()))
+        }
+    };
     Routine {
         id: s.id.clone(),
-        name: name_from_prompt(&s.prompt),
+        name,
         trigger: Trigger::Time,
         cron: kind_text(&s.kind),
         prompt: s.prompt.clone(),
@@ -979,6 +992,7 @@ pub fn schedule_to_routine(s: &Schedule) -> Routine {
             mode: default_mode(harness),
             computer: s.computer_id.clone().filter(|c| c != "local"),
         },
+        continue_session,
     }
 }
 
@@ -1013,9 +1027,16 @@ pub fn new_schedule(d: &FormDraft, cwd: &str) -> NewSchedule {
     }
 }
 
-/// The edit body: the prompt and the cron expression are all the server lets change.
+/// The edit body when no previous routine is cached: sends all draft fields that the server stores.
 pub fn schedule_patch(d: &FormDraft) -> SchedulePatch {
     SchedulePatch {
+        project: Some(d.sel.project.clone()),
+        agent: Some(d.sel.option.harness.kind().to_string()),
+        computer: Some(d.sel.computer.clone().unwrap_or_default()),
+        cwd: None,
+        target: Some(ScheduleTarget::New {
+            title: Some(d.name.trim().to_string()),
+        }),
         prompt: Some(d.prompt.trim().to_string()),
         kind: Some(ScheduleKind::Cron {
             expr: d.cron.trim().to_string(),
@@ -1025,7 +1046,7 @@ pub fn schedule_patch(d: &FormDraft) -> SchedulePatch {
     }
 }
 
-/// Whether the draft changes something the server cannot patch.
+/// Whether the draft changes a field beyond prompt and schedule.
 pub fn changes_frozen_fields(d: &FormDraft, old: &Routine) -> bool {
     d.sel.project != old.sel.project
         || d.sel.option.harness != old.sel.option.harness
@@ -1041,17 +1062,27 @@ pub const LOCAL_NOTE: &str =
 pub const RUN_NOTICE: &str = "서버에 연결되지 않아 지금 실행할 수 없습니다";
 pub const NO_CWD_NOTICE: &str =
     "이 프로젝트의 작업 폴더를 알 수 없습니다. 프로젝트에서 세션을 한 번 시작하셔야 합니다";
-pub const FROZEN_NOTICE: &str =
-    "프로젝트, 에이전트, 컴퓨터는 만든 뒤에 바꿀 수 없어 프롬프트와 일정만 저장했습니다";
 
-/// The `PATCH` body for an edit: only what differs from the stored routine (FR-L25, #493). The
-/// server patches the prompt and the schedule only, so a changed project, agent or computer is
-/// not part of it (see [`changes_frozen_fields`]). An empty patch means nothing to send.
+/// The `PATCH` body for an edit: only what differs from the stored routine (FR-L25, #493).
+/// Includes `project`, `agent`, `computer` (empty string when cleared to `None`), `target` (`title`),
+/// `prompt`, and `kind`. A `ScheduleTarget::Continue` routine keeps its target on the server and
+/// does not send `ScheduleTarget::New`. An empty patch means nothing to send.
 pub fn changed_patch(d: &FormDraft, old: &Routine) -> SchedulePatch {
+    let name = d.name.trim();
     let prompt = d.prompt.trim();
     let cron = d.cron.trim();
     let schedule_changed = d.trigger != old.trigger || cron != old.cron.trim();
+    let cont = old.continue_session.is_some();
     SchedulePatch {
+        project: (!cont && d.sel.project != old.sel.project).then(|| d.sel.project.clone()),
+        agent: (!cont && d.sel.option.harness != old.sel.option.harness)
+            .then(|| d.sel.option.harness.kind().to_string()),
+        computer: (!cont && d.sel.computer != old.sel.computer)
+            .then(|| d.sel.computer.clone().unwrap_or_default()),
+        cwd: None,
+        target: (!cont && name != old.name.trim()).then(|| ScheduleTarget::New {
+            title: Some(name.to_string()),
+        }),
         prompt: (prompt != old.prompt.trim()).then(|| prompt.to_string()),
         kind: schedule_changed.then(|| ScheduleKind::Cron {
             expr: cron.to_string(),
@@ -1061,27 +1092,31 @@ pub fn changed_patch(d: &FormDraft, old: &Routine) -> SchedulePatch {
     }
 }
 
-/// Why a server routine's name, project, agent and computer cannot be edited (TODO(server): the
-/// `SchedulePatch` takes only the prompt, the schedule kind and catch-up).
-pub const SERVER_CANNOT_CHANGE: &str = "서버가 아직 바꿀 수 없습니다";
-pub const NAME_SERVER_REASON: &str = "이름은 서버가 아직 바꿀 수 없습니다";
-
 /// The fields of a draft that differ from `old` and that the server cannot store, in form order.
+/// `Schedule` stores the harness (`agent`), not a per-schedule model or permission mode; a
+/// `Continue`-target routine also keeps its session's title, project, harness and computer.
 pub fn unsaved_fields(d: &FormDraft, old: &Routine) -> Vec<&'static str> {
-    let mut v = Vec::new();
-    if d.name.trim() != old.name.trim() {
-        v.push("이름");
+    let mut out = Vec::new();
+    let cont = old.continue_session.is_some();
+    if cont && d.name.trim() != old.name.trim() {
+        out.push("이름");
     }
-    if d.sel.project != old.sel.project {
-        v.push("프로젝트");
+    if cont && d.sel.project != old.sel.project {
+        out.push("프로젝트");
     }
-    if d.sel.option.harness != old.sel.option.harness {
-        v.push("하네스");
+    if cont && d.sel.option.harness != old.sel.option.harness {
+        out.push("하네스");
     }
-    if d.sel.computer != old.sel.computer {
-        v.push("컴퓨터");
+    if d.sel.option != default_option(d.sel.option.harness) {
+        out.push("모델");
     }
-    v
+    if d.sel.mode != default_mode(d.sel.option.harness) {
+        out.push("권한 모드");
+    }
+    if cont && d.sel.computer != old.sel.computer {
+        out.push("컴퓨터");
+    }
+    out
 }
 
 /// The sentence for an edit whose patch holds nothing the server takes: it names what was not
@@ -1113,18 +1148,14 @@ pub fn run_row_text(r: &Run, now: Minutes, simulated: bool) -> RunRowText {
 
 /// Whether a patch carries no change.
 pub fn patch_is_empty(p: &SchedulePatch) -> bool {
-    p.prompt.is_none() && p.kind.is_none() && p.catch_up.is_none()
-}
-
-/// The line above an edit field that shows the stored value, because the toolkit's text field
-/// has no initial value (compose-rust#374). Empty for an empty value.
-pub fn current_value_line(value: &str) -> String {
-    let v = value.trim();
-    if v.is_empty() {
-        String::new()
-    } else {
-        format!("현재 값: {v}")
-    }
+    p.project.is_none()
+        && p.agent.is_none()
+        && p.computer.is_none()
+        && p.cwd.is_none()
+        && p.target.is_none()
+        && p.prompt.is_none()
+        && p.kind.is_none()
+        && p.catch_up.is_none()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1133,13 +1164,64 @@ pub fn current_value_line(value: &str) -> String {
 
 /// How long the simulated run shows "실행 중" before it finishes.
 pub const DEMO_RUN_MS: u64 = 2500;
+/// How often the Routines screen polls the server while a schedule run is `Running` (FR-L25, #494).
+pub const REMOTE_RUN_POLL_MS: u64 = 1000;
 /// The id prefix the demo gives a session it creates; a run linked to one is a simulation.
 pub const DEMO_SESSION_PREFIX: &str = "demo-new-";
 pub const DEMO_RUN_STARTED: &str = "예시 실행을 시작했습니다. 데모에서 시뮬레이션하는 실행입니다";
 pub const DEMO_RUN_DONE: &str = "예시 실행이 끝났습니다. 예시 세션이 목록에 추가되었습니다";
 pub const DEMO_RUN_BUSY: &str = "이 루틴은 이미 실행 중입니다";
+pub const REMOTE_RUN_STARTED: &str = "루틴을 지금 실행했습니다";
 /// The flag shown beside a simulated run.
 pub const SAMPLE_FLAG: &str = "예시";
+
+/// Maps a demo routine's session id (`s1`..`s9` or `demo-s1`..`demo-s9` or `demo-new-*`) to the
+/// client session id in demo mode (`demo-s1`..`demo-s9`), or leaves real server session ids as-is.
+pub fn resolve_run_session_id(id: &str, demo_active: bool) -> String {
+    if demo_active
+        && id.starts_with('s')
+        && id.len() > 1
+        && id[1..].chars().all(|c| c.is_ascii_digit())
+    {
+        format!("demo-{id}")
+    } else {
+        id.to_string()
+    }
+}
+
+/// Applies the server's `POST /api/schedules/{id}/run` response (`ScheduleRun`) to `entry`:
+/// replaces the optimistic `Running` placeholder (if any) or inserts the server run at the top
+/// of the history, and returns the user-facing notice string.
+pub fn apply_server_run_started(e: &mut Entry, run: &ScheduleRun) -> String {
+    let mapped = run_from_server(run);
+    if let Some(slot) = e.runs.iter_mut().find(|r| r.status == RunStatus::Running && r.session.is_none()) {
+        *slot = mapped;
+    } else if let Some(slot) = e.runs.iter_mut().find(|r| r.session.is_some() && r.session == mapped.session) {
+        *slot = mapped;
+    } else {
+        e.runs.insert(0, mapped);
+    }
+    match &run.error {
+        Some(err) => format!("실행하지 못했습니다: {err}"),
+        None => REMOTE_RUN_STARTED.to_string(),
+    }
+}
+
+/// Whether `entries` has any run still in `RunStatus::Running` that should be polled on the server.
+pub fn has_running_remote_run(sample_mode: bool, online: bool, entries: &[Entry]) -> bool {
+    !sample_mode
+        && online
+        && entries
+            .iter()
+            .any(|e| e.runs.iter().any(|r| r.status == RunStatus::Running))
+}
+
+/// Whether 지금 실행 is busy for this routine: a run is in progress, either the optimistic
+/// placeholder that `begin_demo_run` put first or a server run still `Running` (the runs
+/// `has_running_remote_run` polls for). The button is disabled while this holds (FR-L25, #494).
+pub fn run_now_busy(e: &Entry) -> bool {
+    e.runs.iter().any(|r| r.status == RunStatus::Running)
+}
 
 /// Whether the simulated run is allowed: only in demo mode, never with a server.
 pub fn demo_run_allowed(demo_active: bool, sample_entry: bool) -> bool {
@@ -1174,6 +1256,21 @@ pub fn finish_demo_run(e: &mut Entry, session: Option<String>) -> bool {
     }
 }
 
+/// Removes an optimistic `RunStatus::Running` placeholder (`session: None`) from `e` when a
+/// server `run_schedule` request fails before creating a run.
+pub fn rollback_optimistic_run(e: &mut Entry) -> bool {
+    if let Some(pos) = e
+        .runs
+        .iter()
+        .position(|r| r.status == RunStatus::Running && r.session.is_none())
+    {
+        e.runs.remove(pos);
+        true
+    } else {
+        false
+    }
+}
+
 /// The title of the sample session a simulated run creates.
 pub fn demo_session_title(routine_name: &str) -> String {
     format!("{} ({SAMPLE_FLAG})", routine_name.trim())
@@ -1200,6 +1297,7 @@ mod tests {
                 project: project.into(),
                 ..Selection::initial()
             },
+            continue_session: None,
         }
     }
 
@@ -1865,7 +1963,6 @@ mod tests {
             LOCAL_NOTE.into(),
             RUN_NOTICE.into(),
             NO_CWD_NOTICE.into(),
-            FROZEN_NOTICE.into(),
         ];
         strings.extend(Trigger::ALL.iter().map(|t| t.label().to_string()));
         for e in [
@@ -1903,6 +2000,7 @@ mod tests {
         let p = changed_patch(&d, &old);
         assert_eq!(p.prompt.as_deref(), Some("새 지시"));
         assert!(p.kind.is_none());
+        assert!(p.project.is_none() && p.agent.is_none() && p.computer.is_none() && p.target.is_none());
         d.prompt = old.prompt.clone();
         d.cron = "30 8 * * 1".into();
         let p = changed_patch(&d, &old);
@@ -1911,23 +2009,67 @@ mod tests {
     }
 
     #[test]
-    fn fr_l25_edit_name_is_not_silently_dropped() {
-        let old = routine("r1", "CI 요약", "ember", "0 9 * * *");
+    fn fr_l25_edit_patch_carries_name_project_harness_and_computer() {
+        let mut old = routine("r1", "CI 요약", "ember", "0 9 * * *");
+        old.sel.computer = Some("c1".into());
         let mut d = FormDraft::from_routine(&old);
         d.name = "새 이름".into();
-        assert!(patch_is_empty(&changed_patch(&d, &old)), "the server takes no name");
-        assert_eq!(unsaved_fields(&d, &old), vec!["이름"]);
-        assert!(NAME_SERVER_REASON.contains("이름은 서버가 아직 바꿀 수 없습니다"));
+        d.sel.project = "core".into();
+        d.sel = d.sel.with_harness(Harness::Codex);
+        d.sel.computer = None;
+        let p = changed_patch(&d, &old);
+        assert!(!patch_is_empty(&p));
+        assert_eq!(
+            p.target,
+            Some(ScheduleTarget::New {
+                title: Some("새 이름".into())
+            })
+        );
+        assert_eq!(p.project.as_deref(), Some("core"));
+        assert_eq!(p.agent.as_deref(), Some("codex"));
+        assert_eq!(p.computer.as_deref(), Some(""), "clearing computer sends empty string");
+        assert!(unsaved_fields(&d, &old).is_empty(), "server stores all four fields");
+
+        // Non-default model or mode on a server routine is reported in unsaved_fields.
+        let mut custom = FormDraft::from_routine(&old);
+        if let Some(other_opt) = crate::ui::home::model_catalog()
+            .iter()
+            .copied()
+            .find(|o| o.harness == old.sel.option.harness && *o != default_option(old.sel.option.harness))
+        {
+            custom.sel = custom.sel.with_option(other_opt);
+        }
+        custom.sel = custom.sel.with_mode(PermMode::Plan);
+        let unsaved = unsaved_fields(&custom, &old);
+        assert_eq!(unsaved, vec!["모델", "권한 모드"]);
+
+        // Continue-target routine preserves its Continue target and reports unsupported edits.
+        let mut cont_sched = schedule(cron_kind("0 9 * * *"), false);
+        cont_sched.target = ScheduleTarget::Continue {
+            session_id: "sess_1".into(),
+        };
+        let cont_old = schedule_to_routine(&cont_sched);
+        assert_eq!(cont_old.continue_session.as_deref(), Some("sess_1"));
+        let mut cont_draft = FormDraft::from_routine(&cont_old);
+        cont_draft.name = "바꾼 이름".into();
+        cont_draft.prompt = "바꾼 프롬프트".into();
+        let cont_patch = changed_patch(&cont_draft, &cont_old);
+        assert!(cont_patch.target.is_none(), "Continue target must not become New");
+        assert_eq!(cont_patch.prompt.as_deref(), Some("바꾼 프롬프트"));
+        assert_eq!(unsaved_fields(&cont_draft, &cont_old), vec!["이름"]);
+
+        // Round-trip: schedule_to_routine reads title from ScheduleTarget::New { title }.
+        let mut s = schedule(cron_kind("0 9 * * *"), false);
+        s.target = ScheduleTarget::New {
+            title: Some("새 이름".into()),
+        };
+        assert_eq!(schedule_to_routine(&s).name, "새 이름");
     }
 
     #[test]
     fn fr_l25_not_saved_sentence_names_the_fields() {
-        let old = routine("r1", "a", "ember", "0 9 * * *");
-        let mut d = FormDraft::from_routine(&old);
-        assert_eq!(not_saved_sentence(&unsaved_fields(&d, &old)), None);
-        d.name = "b".into();
-        d.sel.project = "core".into();
-        let s = not_saved_sentence(&unsaved_fields(&d, &old)).unwrap();
+        assert_eq!(not_saved_sentence(&[]), None);
+        let s = not_saved_sentence(&["이름", "프로젝트"]).unwrap();
         assert!(s.starts_with("이름, 프로젝트"), "{s}");
         assert!(s.ends_with("저장하지 않았습니다"));
         assert!(!s.contains("바뀐 내용이 없습니다"));
@@ -1959,8 +2101,6 @@ mod tests {
         assert_eq!(d.cron, "0 9 * * *");
         assert_eq!(d.prompt, old.prompt);
         assert_eq!(d.sel, old.sel, "project, harness, model, mode and computer");
-        assert_eq!(current_value_line(" CI 요약 "), "현재 값: CI 요약");
-        assert_eq!(current_value_line("  "), "");
         // Project, agent and computer can change and travel with the draft.
         let mut d2 = d.clone();
         d2.sel.project = "core".into();
@@ -2009,10 +2149,63 @@ mod tests {
     #[test]
     fn fr_l25_demo_run_session_is_flagged_as_a_sample() {
         assert_eq!(demo_session_title(" 아침 요약 "), "아침 요약 (예시)");
-        for s in [DEMO_RUN_STARTED, DEMO_RUN_DONE, DEMO_RUN_BUSY] {
+        for s in [DEMO_RUN_STARTED, DEMO_RUN_DONE, DEMO_RUN_BUSY, REMOTE_RUN_STARTED] {
             assert!(!s.contains('\u{2014}'));
+            assert!(s.ends_with("니다"), "{s}");
         }
         assert!(DEMO_RUN_STARTED.contains("시뮬레이션"));
+    }
+
+    #[test]
+    fn fr_l25_resolve_run_session_id_maps_demo_ids_only_in_demo_mode() {
+        assert_eq!(resolve_run_session_id("s9", true), "demo-s9");
+        assert_eq!(resolve_run_session_id("s4", true), "demo-s4");
+        assert_eq!(resolve_run_session_id("demo-s9", true), "demo-s9");
+        assert_eq!(resolve_run_session_id("demo-new-1", true), "demo-new-1");
+        assert_eq!(resolve_run_session_id("s9", false), "s9");
+        assert_eq!(resolve_run_session_id("ses_1234", true), "ses_1234");
+    }
+
+    #[test]
+    fn fr_l25_apply_server_run_started_replaces_optimistic_placeholder_and_tracks_running() {
+        let mut e = entry(routine("sch1", "a", "ember", "0 9 * * *"), vec![run(10, RunStatus::Done)]);
+        assert!(!has_running_remote_run(false, true, std::slice::from_ref(&e)));
+        begin_demo_run(&mut e, 100).unwrap();
+        assert!(has_running_remote_run(false, true, std::slice::from_ref(&e)));
+        assert!(!has_running_remote_run(true, true, std::slice::from_ref(&e)));
+        assert!(!has_running_remote_run(false, false, std::slice::from_ref(&e)));
+
+        let srv_running = server_run(wire::RunStatus::Running);
+        let msg = apply_server_run_started(&mut e, &srv_running);
+        assert_eq!(msg, REMOTE_RUN_STARTED);
+        assert_eq!(e.runs.len(), 2, "optimistic placeholder is replaced, not duplicated");
+        assert_eq!(e.runs[0].status, RunStatus::Running);
+        assert_eq!(e.runs[0].session.as_deref(), Some("s9"));
+
+        let mut srv_failed = server_run(wire::RunStatus::Failed);
+        srv_failed.error = Some("cwd missing".into());
+        let fail_msg = apply_server_run_started(&mut e, &srv_failed);
+        assert_eq!(fail_msg, "실행하지 못했습니다: cwd missing");
+        assert_eq!(e.runs[0].status, RunStatus::Failed);
+        assert!(!has_running_remote_run(false, true, std::slice::from_ref(&e)));
+    }
+
+    #[test]
+    fn fr_l25_run_now_is_busy_from_the_optimistic_row_until_the_server_run_ends() {
+        let mut e = entry(routine("sch1", "a", "ember", "0 9 * * *"), vec![run(10, RunStatus::Done)]);
+        assert!(!run_now_busy(&e), "finished history leaves 지금 실행 enabled");
+        begin_demo_run(&mut e, 100).unwrap();
+        assert!(run_now_busy(&e), "the optimistic row disables 지금 실행 before the server answers");
+        apply_server_run_started(&mut e, &server_run(wire::RunStatus::Running));
+        assert!(run_now_busy(&e), "a server run still Running keeps it disabled");
+        assert!(has_running_remote_run(false, true, std::slice::from_ref(&e)));
+        apply_server_run_started(&mut e, &server_run(wire::RunStatus::Completed));
+        assert!(!run_now_busy(&e), "the run ended, so 지금 실행 is enabled again");
+
+        let mut rolled = entry(routine("sch2", "b", "ember", "0 9 * * *"), vec![]);
+        begin_demo_run(&mut rolled, 1).unwrap();
+        assert!(rollback_optimistic_run(&mut rolled));
+        assert!(!run_now_busy(&rolled), "a failed call rolls back and enables it again");
     }
 
     #[test]

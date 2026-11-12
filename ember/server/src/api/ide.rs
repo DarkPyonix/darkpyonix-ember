@@ -491,19 +491,21 @@ fn build(
         })
 }
 
-/// Rolling C2 placeholder-to-real-token substitution for the first `window` bytes of the
+/// C2 placeholder-to-real-token substitution for the first `window` bytes of the
 /// client-to-OSE byte stream (`FR-W4`, `#458`, `#461`).
 ///
-/// While inside the window, the last `placeholder.len() - 1` bytes that cannot yet be proven not
-/// to start a match are held in `pending`, so a 64-byte placeholder split across two WebSocket
-/// binary frames is still replaced in place. Once `seen` reaches `window`, buffered bytes are
-/// flushed and all later bytes pass through untouched.
+/// Substitution works within one client WebSocket message: every placeholder that starts inside
+/// the window and lies whole in the message is replaced. Each client message goes to the OSE as
+/// exactly one write, never split, held or merged with another (#776). A placeholder split across
+/// two messages is not replaced; Code-OSS and `ember-editor-conn` write each protocol message
+/// (header and body, including the `auth` control message) as one WebSocket message, so the token
+/// never straddles messages. Placeholder and real token have the same length, so byte offsets
+/// do not shift.
 struct TokenSubstituter {
     placeholder: Vec<u8>,
     real_token: Vec<u8>,
     window: usize,
     seen: usize,
-    pending: Vec<u8>,
 }
 
 impl TokenSubstituter {
@@ -513,7 +515,6 @@ impl TokenSubstituter {
             real_token: real_token.as_bytes().to_vec(),
             window,
             seen: 0,
-            pending: Vec::new(),
         }
     }
 
@@ -523,72 +524,25 @@ impl TokenSubstituter {
             && self.placeholder != self.real_token
     }
 
-    fn feed(&mut self, chunk: &[u8]) -> Vec<u8> {
-        if !self.enabled() || chunk.is_empty() {
-            return chunk.to_vec();
+    /// One client message in, the same message (same length) out.
+    fn feed(&mut self, msg: &[u8]) -> Vec<u8> {
+        let start = self.seen;
+        self.seen = self.seen.saturating_add(msg.len());
+        if !self.enabled() || start >= self.window {
+            return msg.to_vec();
         }
-        if self.seen >= self.window {
-            let mut out = std::mem::take(&mut self.pending);
-            out.extend_from_slice(chunk);
-            return out;
-        }
-        let remaining = self.window - self.seen;
-        let in_win = chunk.len().min(remaining);
-        self.seen += in_win;
-        self.pending.extend_from_slice(&chunk[..in_win]);
-        let tail = &chunk[in_win..];
-
+        let in_win = (self.window - start).min(msg.len());
         let pat_len = self.placeholder.len();
-        let mut out = Vec::with_capacity(self.pending.len() + tail.len());
+        let mut out = msg.to_vec();
         let mut i = 0;
-        let flush_all = self.seen >= self.window;
-        // Keep only the longest suffix of `pending[i..]` that is a prefix of `placeholder`.
-        let mut keep = 0;
-        if !flush_all {
-            let max_k = (pat_len - 1).min(self.pending.len());
-            for k in (1..=max_k).rev() {
-                if self.pending[self.pending.len() - k..] == self.placeholder[..k] {
-                    keep = k;
-                    break;
-                }
-            }
-        }
-        let stop = self.pending.len().saturating_sub(keep);
-        while i < stop {
-            if i + pat_len <= self.pending.len() && self.pending[i..i + pat_len] == self.placeholder[..] {
-                out.extend_from_slice(&self.real_token);
+        while i < in_win && i + pat_len <= msg.len() {
+            if msg[i..i + pat_len] == self.placeholder[..] {
+                out[i..i + pat_len].copy_from_slice(&self.real_token);
                 i += pat_len;
             } else {
-                out.push(self.pending[i]);
                 i += 1;
             }
         }
-        if flush_all || i >= self.pending.len() {
-            self.pending.clear();
-        } else {
-            self.pending.drain(..i);
-        }
-        out.extend_from_slice(tail);
-        out
-    }
-
-    fn flush(&mut self) -> Vec<u8> {
-        if !self.enabled() || self.pending.is_empty() {
-            return std::mem::take(&mut self.pending);
-        }
-        let pat_len = self.placeholder.len();
-        let mut out = Vec::with_capacity(self.pending.len());
-        let mut i = 0;
-        while i < self.pending.len() {
-            if i + pat_len <= self.pending.len() && self.pending[i..i + pat_len] == self.placeholder[..] {
-                out.extend_from_slice(&self.real_token);
-                i += pat_len;
-            } else {
-                out.push(self.pending[i]);
-                i += 1;
-            }
-        }
-        self.pending.clear();
         out
     }
 }
@@ -696,10 +650,6 @@ async fn pump_ose_relay(socket: WebSocket, target: RelayTarget) {
                 Ok(Message::Pong(_)) => {}
                 Ok(Message::Close(_)) | Err(_) => break,
             }
-        }
-        let rest = sub.flush();
-        if !rest.is_empty() {
-            let _ = tcp_write.write_all(&rest).await;
         }
         let _ = tcp_write.shutdown().await;
     };

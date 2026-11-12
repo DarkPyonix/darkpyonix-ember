@@ -68,13 +68,26 @@ async fn pause_resume_and_update() {
     assert!(resumed.next_run_at.is_some());
 
     let patch = SchedulePatch {
+        project: Some("beta".into()),
+        computer: Some("mac-mini".into()),
+        target: Some(ScheduleTarget::New { title: Some("Morning summary".into()) }),
         prompt: Some("new prompt".into()),
         kind: Some(ScheduleKind::Cron { expr: "30 8 * * 1".into(), tz: "UTC".into() }),
         ..SchedulePatch::default()
     };
     let updated = api.update_schedule(&s.id, &patch).await.unwrap();
+    assert_eq!(updated.project, "beta");
+    assert_eq!(updated.computer_id.as_deref(), Some("mac-mini"));
+    assert_eq!(updated.target, ScheduleTarget::New { title: Some("Morning summary".into()) });
     assert_eq!(updated.prompt, "new prompt");
     assert_eq!(updated.kind, ScheduleKind::Cron { expr: "30 8 * * 1".into(), tz: "UTC".into() });
+
+    // Empty computer clears computer_id back to None.
+    let cleared = api
+        .update_schedule(&s.id, &SchedulePatch { computer: Some(String::new()), ..SchedulePatch::default() })
+        .await
+        .unwrap();
+    assert_eq!(cleared.computer_id, None);
 }
 
 #[tokio::test]

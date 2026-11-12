@@ -1142,6 +1142,69 @@ pub fn seg_colors(selected: bool, p: &Palette) -> (Color, Color, Color) {
     }
 }
 
+/// A segment's width: its label at 13 px (8 a Latin character, 13 a Hangul syllable), 12 on
+/// each side and the 1 dp border twice, at least 44.
+pub fn seg_width(text: &str) -> f32 {
+    let advance: f32 = text.chars().map(|c| if c.is_ascii() { 8.0 } else { 13.0 }).sum();
+    (advance + 28.0).max(44.0)
+}
+
+/// The segments of a choice row packed into lines no wider than `avail`, as the mockup's `.seg`
+/// wraps (`flex-wrap: wrap`, `gap: 8px`), so every option and the chosen one stay in view.
+/// The toolkit has no wrapping row (`FlowRow`), so the packing is by measured width. Each line
+/// holds indices into `labels`, in order; a segment wider than `avail` gets a line of its own.
+pub fn seg_lines<S: AsRef<str>>(labels: &[S], avail: f32) -> Vec<Vec<usize>> {
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    let mut used = 0.0_f32;
+    for (i, l) in labels.iter().enumerate() {
+        let w = seg_width(l.as_ref());
+        match lines.last_mut() {
+            Some(line) if used + SP[1] + w <= avail => {
+                line.push(i);
+                used += SP[1] + w;
+            }
+            _ => {
+                lines.push(vec![i]);
+                used = w;
+            }
+        }
+    }
+    lines
+}
+
+/// The width the form's fields get: the detail panel less its 1 dp border and 16 padding on
+/// each side inline, or the sheet less its 20 padding on each side.
+pub fn form_field_width(window_w: f32, panel_w: f32, layout: FormLayout) -> f32 {
+    match layout {
+        FormLayout::Inline => panel_w - 2.0 - 2.0 * 16.0,
+        FormLayout::Sheet => {
+            super::components::sheet_width(window_w, super::components::SHEET_WIDTH_DEFAULT) - 2.0 * SP[4]
+        }
+    }
+    .max(0.0)
+}
+
+/// Choice segments in wrapped lines (`seg_lines`): `labels[i]` is chosen when `selected(i)`,
+/// and a tap calls `on_pick(i)`.
+fn SegChoices(
+    labels: &[String],
+    avail: f32,
+    selected: impl Fn(usize) -> bool,
+    on_pick: impl Fn(usize) + Clone + 'static,
+) {
+    let lines = seg_lines(labels, avail);
+    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+        for line in &lines {
+            cu::Row().spacing(SP[1]).content(|| {
+                for &i in line {
+                    let pick = on_pick.clone();
+                    FilterSegButton(&labels[i], selected(i), move || pick(i));
+                }
+            });
+        }
+    });
+}
+
 /// A segment pill button matching the mockup (`.seg button`): 32px height, pill shape, 13/500
 /// text, ink fill when selected, surface with line border when unselected. The list's project
 /// filter and the form's one-of choices (프로젝트, 트리거, 컴퓨터) both use it: the shared
@@ -1151,11 +1214,7 @@ pub fn seg_colors(selected: bool, p: &Palette) -> (Color, Color, Color) {
 fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (bg, border, fg) = seg_colors(selected, p);
-    let advance: f32 = text
-        .chars()
-        .map(|c| if c.is_ascii() { 8.0 } else { 13.0 })
-        .sum::<f32>();
-    let width = (advance + 28.0).max(44.0);
+    let width = seg_width(text);
     cu::Box()
         .modifier(
             Modifier::new()
@@ -1859,6 +1918,8 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool) {
 /// written once (FR-L25, #511).
 #[derive(Clone)]
 struct FormCtx {
+    /// The fields' width, for wrapping the choice segments (`form_field_width`).
+    field_w: f32,
     draft: MutableState<FormDraft>,
     tried: MutableState<bool>,
     initial: FormDraft,
@@ -1897,7 +1958,14 @@ fn RoutineForm(
     let p = ember_theme().palette;
     let draft = draft.clone();
     let tried = remember(|| mutable_state_of(false));
+    let window = current_window_size();
+    let panel_w = detail_panel_width(
+        window.width_dp,
+        super::home::content_width(window.width_dp, SP[6]),
+        false,
+    );
     let ctx = FormCtx {
+        field_w: form_field_width(window.width_dp, panel_w, layout),
         draft,
         tried,
         initial: initial.clone(),
@@ -2028,29 +2096,20 @@ fn FormFields(ctx: &FormCtx) {
             }
             FormField::Project => {
                 FormLabel("프로젝트");
-                cu::ScrollRow()
-                    .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
-                    .content(|| {
-                        for name in &project_choices {
-                            let sel_proj = draft.clone();
-                            let n = name.clone();
-                            let selected = d.sel.project == *name;
-                            FilterSegButton(name, selected, move || {
-                                sel_proj.update(|d| d.sel.project = n.clone());
-                            });
-                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                        }
-                    });
+                // Wrapped, never scrolled sideways, so the chosen one is always in view (#493).
+                let (sel_proj, names) = (draft.clone(), project_choices.clone());
+                SegChoices(&project_choices, ctx.field_w, |i| d.sel.project == project_choices[i], move |i| {
+                    let n = names[i].clone();
+                    sel_proj.update(|d| d.sel.project = n);
+                });
             }
             FormField::Trigger => {
                 FormLabel("트리거");
-                cu::Row().spacing(SP[1]).content(|| {
-                    for t in Trigger::ALL {
-                        let sel_trig = draft.clone();
-                        FilterSegButton(t.label(), d.trigger == t, move || {
-                            sel_trig.update(|d| *d = d.with_trigger(t));
-                        });
-                    }
+                let labels: Vec<String> = Trigger::ALL.iter().map(|t| t.label().to_string()).collect();
+                let sel_trig = draft.clone();
+                SegChoices(&labels, ctx.field_w, |i| d.trigger == Trigger::ALL[i], move |i| {
+                    let t = Trigger::ALL[i];
+                    sel_trig.update(|d| *d = d.with_trigger(t));
                 });
             }
             FormField::ScheduleDescription => {
@@ -2101,24 +2160,17 @@ fn FormFields(ctx: &FormCtx) {
             }
             FormField::Computer => {
                 FormLabel("컴퓨터");
-                cu::ScrollRow()
-                    .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
-                    .content(|| {
-                        let sel_c = draft.clone();
-                        FilterSegButton("이 서버", d.sel.computer.is_none(), move || {
-                            sel_c.update(|d| d.sel.computer = None);
-                        });
-                        cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                        for (cid, cname) in &ctx.computers {
-                            let sel_c = draft.clone();
-                            let cid_clone = cid.clone();
-                            let selected = d.sel.computer.as_deref() == Some(cid.as_str());
-                            FilterSegButton(cname, selected, move || {
-                                sel_c.update(|d| d.sel.computer = Some(cid_clone.clone()));
-                            });
-                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                        }
-                    });
+                // "이 서버" first, then the computers; `None` is this server.
+                let ids: Vec<Option<String>> =
+                    std::iter::once(None).chain(ctx.computers.iter().map(|(id, _)| Some(id.clone()))).collect();
+                let labels: Vec<String> = std::iter::once("이 서버".to_string())
+                    .chain(ctx.computers.iter().map(|(_, name)| name.clone()))
+                    .collect();
+                let (sel_c, pick_ids) = (draft.clone(), ids.clone());
+                SegChoices(&labels, ctx.field_w, |i| d.sel.computer == ids[i], move |i| {
+                    let c = pick_ids[i].clone();
+                    sel_c.update(|d| d.sel.computer = c);
+                });
             }
             FormField::Prompt => {
                 FormLabel("프롬프트");
@@ -2734,9 +2786,35 @@ mod tests {
         let form = src.split("fn FormFields(").nth(1).unwrap().split("\nfn FormLabel(").next().unwrap();
         for field in ["FormField::Project", "FormField::Trigger", "FormField::Computer"] {
             let arm = form.split(field).nth(1).unwrap().split("FormField::").next().unwrap();
-            assert!(arm.contains("FilterSegButton("), "{field} uses the segment");
+            assert!(arm.contains("SegChoices("), "{field} uses the wrapped segments");
+            assert!(!arm.contains("ScrollRow("), "{field} never scrolls sideways");
             assert!(!arm.contains("PickChip("), "{field} does not use the dropdown chip");
         }
+    }
+
+    /// At 390 the 프로젝트 segments wrap onto more lines instead of scrolling, so every option
+    /// and the chosen one are in view; no line is wider than the sheet's fields (#493).
+    #[test]
+    fn fr_l25_form_segments_wrap_to_the_field_width() {
+        let projects = ["기본 프로젝트", "demo-project", "second-project", "ember"];
+        let phone = form_field_width(390.0, 0.0, FormLayout::Sheet);
+        assert_eq!(phone, 350.0);
+        let (content, _) = content_at(1440.0);
+        let wide = form_field_width(1440.0, detail_panel_width(1440.0, content, false), FormLayout::Inline);
+        for avail in [phone, wide] {
+            let lines = seg_lines(&projects, avail);
+            let flat: Vec<usize> = lines.iter().flatten().copied().collect();
+            assert_eq!(flat, vec![0, 1, 2, 3], "every option once, in order, at {avail}");
+            for line in &lines {
+                let w: f32 = line.iter().map(|&i| seg_width(projects[i])).sum::<f32>()
+                    + SP[1] * (line.len() as f32 - 1.0);
+                assert!(w <= avail, "a line of {w} fits {avail}");
+            }
+        }
+        assert!(seg_lines(&projects, phone).len() >= 2, "the phone wraps");
+        assert_eq!(seg_lines(&projects, wide).len(), 1, "the wide inline form keeps one line");
+        // A segment wider than the room still gets its own line rather than vanishing.
+        assert_eq!(seg_lines(&["a-very-long-project-name-indeed"], 100.0), vec![vec![0]]);
     }
 
     #[test]

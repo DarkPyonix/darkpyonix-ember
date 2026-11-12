@@ -8,6 +8,7 @@
 //!   launcher status (incl. finished-unread), transcripts, computers, connection state.
 //! - [`token`]: the server token every HTTP and WebSocket call carries (FR-S11).
 //! - [`cache`]: the cold-start snapshot file.
+//! - [`transfers`]: file transfer wire types and the chunked, resumable upload (FR-F5).
 //! - [`client`]: the sync engine tying them together.
 //!
 //! A UI holds a [`Client`], reads with [`Client::read`], and redraws on
@@ -21,6 +22,7 @@ pub mod push;
 pub mod state;
 pub mod token;
 pub mod transcript;
+pub mod transfers;
 pub mod wire;
 
 pub use client::{Client, ClientConfig};

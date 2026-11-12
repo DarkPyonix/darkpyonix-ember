@@ -120,7 +120,7 @@ pub struct ProjectPatch {
     pub character_overrides: Option<Option<BTreeMap<String, Option<CharacterOverride>>>>,
     /// Archive (`true`) or restore (`false`) the project (FR-L26, #384 PR 4). Only a bool;
     /// `null` is refused.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "not_null")]
     pub archived: Option<bool>,
 }
 
@@ -131,6 +131,15 @@ where
     T: Deserialize<'de>,
 {
     Ok(Some(Option::<T>::deserialize(d)?))
+}
+
+/// A present field that must not be `null` (absent stays `None`).
+fn not_null<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(d).map(Some)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -553,13 +562,30 @@ impl Store {
         let count = |table: &str| -> rusqlite::Result<i64> {
             tx.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE project = ?1"), params![name], |r| r.get(0))
         };
+        // The default channel is made on demand for every project (FR-T10), so an untouched one
+        // (no messages, agents or invites) is not a record and goes with the project.
+        let count_channels = || -> rusqlite::Result<i64> {
+            tx.query_row(
+                "SELECT COUNT(*) FROM channels c WHERE c.project = ?1 AND (c.is_default = 0
+                   OR EXISTS (SELECT 1 FROM channel_messages m WHERE m.channel_id = c.id)
+                   OR EXISTS (SELECT 1 FROM channel_agents a WHERE a.channel_id = c.id)
+                   OR EXISTS (SELECT 1 FROM channel_invites i WHERE i.channel_id = c.id))",
+                params![name],
+                |r| r.get(0),
+            )
+        };
         let (sessions, channels, schedules, teams) =
-            (count("sessions")?, count("channels")?, count("schedules")?, count("teams")?);
+            (count("sessions")?, count_channels()?, count("schedules")?, count("teams")?);
         if sessions + channels + schedules + teams > 0 {
             return Err(ProjectError::NotEmpty { name: name.into(), sessions, channels, schedules, teams });
         }
         tx.execute("DELETE FROM project_computers WHERE project = ?1", params![name])?;
         tx.execute("DELETE FROM browser_egress WHERE project = ?1", params![name])?;
+        tx.execute(
+            "DELETE FROM channel_reads WHERE channel_id IN (SELECT id FROM channels WHERE project = ?1)",
+            params![name],
+        )?;
+        tx.execute("DELETE FROM channels WHERE project = ?1", params![name])?;
         tx.execute("DELETE FROM projects WHERE name = ?1", params![name])?;
         tx.commit()?;
         Ok(())

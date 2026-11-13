@@ -46,7 +46,14 @@ impl Scope {
     }
 
     /// Whether this scope allows `method` on `path` (the request path, no query).
+    ///
+    /// An owner route (`FR-S12`, #784) needs `full`: on the transport the device key is the
+    /// owner credential, and a narrow scope is the non-owner one. The check is here and not only
+    /// in the allow-lists, so a family opened to a narrow scope later cannot open an owner route.
     pub fn allows(self, method: &Method, path: &str) -> bool {
+        if self != Scope::Full && crate::owner::owner_route(method, path) {
+            return false;
+        }
         match self {
             Scope::Full => true,
             Scope::ReadOnly => read_only_allows(method, path),
@@ -95,6 +102,7 @@ fn never_narrow(segs: &[&str]) -> bool {
 const READ_FAMILIES: &[&str] = &[
     "health", "sessions", "projects", "accounts", "agents", "providers", "usage", "search", "channels",
     "schedules", "a2a", "computers", "transfers", "hub", "mcp", "browsers", "teams", "push", "guest-door",
+    "whoami",
 ];
 
 fn read_only_allows(method: &Method, path: &str) -> bool {
@@ -113,7 +121,7 @@ fn chat_only_allows(method: &Method, path: &str) -> bool {
     let get = method == Method::GET || method == Method::HEAD;
     let post = method == Method::POST;
     match segs.as_slice() {
-        ["health"] | ["push"] => get,
+        ["health"] | ["push"] | ["whoami"] => get,
         ["sessions"] => get,
         ["sessions", _] => get,
         ["sessions", _, "events" | "usage"] => get,
@@ -152,7 +160,30 @@ async fn check(State(devices): State<Arc<Devices>>, req: Request, next: Next) ->
         tracing::info!(peer = %peer.fmt_short(), scope = scope.as_str(), method = %req.method(), path = req.uri().path(), "scope denied");
         return denied(scope);
     }
+    let mut req = req;
+    req.extensions_mut().insert(Caller { peer, scope });
     next.run(req).await
+}
+
+/// The transport caller as [`enforce`] saw it, for `GET /api/whoami`.
+#[derive(Debug, Clone, Copy)]
+pub struct Caller {
+    pub peer: PeerId,
+    pub scope: Scope,
+}
+
+/// `GET /api/whoami` (FR-N8): which door the call came through, the caller's peer id over the
+/// transport, and its scope. The local listener (behind the server token) is `local` and `full`.
+/// A transport router served without [`enforce`] gives every admitted device `full`.
+pub async fn whoami(req: Request) -> Json<serde_json::Value> {
+    let ext = req.extensions();
+    if let Some(c) = ext.get::<Caller>() {
+        return Json(json!({ "door": "transport", "peer_id": c.peer.to_string(), "scope": c.scope.as_str() }));
+    }
+    if let Some(ConnectInfo(peer)) = ext.get::<ConnectInfo<PeerId>>() {
+        return Json(json!({ "door": "transport", "peer_id": peer.to_string(), "scope": Scope::Full.as_str() }));
+    }
+    Json(json!({ "door": "local", "scope": Scope::Full.as_str() }))
 }
 
 /// Wraps `app` (the router the transport serves) with the scope check.
@@ -184,6 +215,24 @@ mod tests {
         assert!(!r.allows(&Method::GET, "/api/devices"));
         assert!(!r.allows(&Method::GET, "/api/sessions/../devices"));
         assert!(!r.allows(&Method::GET, "/auth/callback"));
+    }
+
+    /// FR-S12: `read_only` may read the `computers` family, but an enrol code's status is an
+    /// owner route.
+    #[test]
+    fn fr_s12_no_narrow_scope_reaches_an_owner_route() {
+        for (m, template, class) in crate::owner::ROUTES {
+            if *class != crate::owner::RouteClass::Owner {
+                continue;
+            }
+            let method = Method::from_bytes(m.as_bytes()).unwrap();
+            let path = template.replace('{', "").replace('}', "");
+            assert!(crate::owner::owner_route(&method, &path), "{m} {path}");
+            assert!(Scope::Full.allows(&method, &path), "{m} {path}");
+            for s in [Scope::ReadOnly, Scope::ChatOnly] {
+                assert!(!s.allows(&method, &path), "{} reaches {m} {path}", s.as_str());
+            }
+        }
     }
 
     #[test]

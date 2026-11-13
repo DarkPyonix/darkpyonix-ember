@@ -20,6 +20,9 @@
 # passed to curl as a header file (`-H @file`) and to jq with `--rawfile`, so they are never on a
 # command line this script runs, and never printed.
 set -euo pipefail
+# Throwaway keys stay in the run directory, never in the login keychain (FR-S13: auto would
+# probe the OS keystore and could raise a prompt).
+export EMBER_KEYSTORE="${EMBER_KEYSTORE:-file}"
 
 D="$(cd "$(dirname "$0")" && pwd)"
 R="$(cd "$D/../../.." && pwd)"
@@ -166,9 +169,12 @@ start_server() {
   port_free "$PORT" "$RUN/server.pid"
   # Isolation: own data dir and TMPDIR (private MCP config files), no hub, no relay roles, no
   # transport, no guest door, no demo data. EMBER_SCRIPTED_AGENT=1 offers the no-model test agent.
+  # Owner presence (FR-S12, #784) is left in its default, warn: this harness answers approvals
+  # with curl and the server token alone and holds no owner key. The server logs each such call.
+  # When enforce becomes the default, this harness needs EMBER_OWNER_PRESENCE=warn or a claim.
   local extra_env=()
   [ -n "${SMOKE_CLAUDE_BIN:-}" ] && extra_env+=("EMBER_CLAUDE_BIN=$SMOKE_CLAUDE_BIN")
-  env -u EMBER_DEMO_DATA -u EMBER_TRANSPORT -u EMBER_GUEST_LISTEN -u EMBER_SERVER_TOKEN \
+  env -u EMBER_DEMO_DATA -u EMBER_TRANSPORT -u EMBER_GUEST_LISTEN -u EMBER_SERVER_TOKEN -u EMBER_OWNER_PRESENCE \
     -u EMBER_ACP_AGENTS -u EMBER_ACP_AGENTS_FILE -u EMBER_HOSTED \
     "${extra_env[@]}" \
     EMBER_DATA_DIR="$SD" EMBER_LISTEN="127.0.0.1:$PORT" EMBER_SCRIPTED_AGENT=1 \

@@ -210,6 +210,9 @@ pub struct AgentCommand {
     /// falls back to `EMBER_SESSION_MEM_LIMIT_MB`, then to no limit. Applies when a shim is
     /// started; a rejoined shim keeps the limit it was started with.
     pub mem_limit_mb: Option<u64>,
+    /// Start the agent under the OS sandbox of [`crate::sandbox::wrap`] (FR-A11). False for a
+    /// harness whose own sandbox is not known to nest under it (Codex).
+    pub os_sandbox: bool,
 }
 
 /// The limit in bytes for a shim: the request's MiB value, else `env_mb` (the text of
@@ -286,10 +289,11 @@ fn safe_id(id: &str) -> bool {
 }
 
 fn spawn_direct(cmd: AgentCommand) -> anyhow::Result<AgentProc> {
-    let mut command = Command::new(&cmd.program);
+    let (program, args) = crate::sandbox::wrap(cmd.os_sandbox, &cmd.env, &cmd.program, &cmd.args);
+    let mut command = Command::new(&program);
     session_shim::apply_env(&mut command, &cmd.env);
     let mut child = command
-        .args(&cmd.args)
+        .args(&args)
         .current_dir(&cmd.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -332,10 +336,12 @@ async fn spawn_shimmed(rt: Arc<ShimRuntime>, session: String, cmd: AgentCommand)
 }
 
 async fn start_shim(rt: &ShimRuntime, session: &str, cmd: &AgentCommand) -> anyhow::Result<ShimClient> {
+    // The shim itself runs unsandboxed (it needs the shim dir); its agent is wrapped (FR-A11).
+    let (program, args) = crate::sandbox::wrap(cmd.os_sandbox, &cmd.env, &cmd.program, &cmd.args);
     let spec = ShimSpec {
         session: session.to_string(),
-        program: cmd.program.clone(),
-        args: cmd.args.clone(),
+        program,
+        args,
         cwd: cmd.cwd.clone(),
         env: cmd.env.clone(),
         mem_limit_bytes: mem_limit_bytes(

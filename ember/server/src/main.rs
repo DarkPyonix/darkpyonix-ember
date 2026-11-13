@@ -27,12 +27,19 @@ use ember_server::store::Store;
 /// - `EMBER_ALLOWED_HOSTS`: extra host names accepted in `Host` (comma-separated, FR-S10); the
 ///   token is in `<data dir>/server-token` (FR-S9); `ember-server rotate-token` replaces it and
 ///   exits, and `POST /api/server-token/rotate` does the same on a running server (#369)
+/// - Owner presence (FR-S12, #784): owner routes also need the in-memory owner key, claimed over
+///   `<data dir>/owner.sock` by the app or by `ember-server owner <verb>` (a terminal only).
+///   The default mode is warn: a call without a key is logged and served, until the app ships
+///   its claim. `EMBER_OWNER_PRESENCE=enforce` refuses it with 403. Windows always warns (#815);
+///   `EMBER_OWNER_CONFIRM=off` grants a claim without the console code (best effort)
 /// - `EMBER_IDLE_SECS`: release an agent process after this long without activity (default 300)
 /// - `EMBER_CLAUDE_BIN`: the Claude Code CLI (default `claude` on `PATH`)
 /// - `EMBER_CODEX_BIN`: the Codex CLI (default `codex` on `PATH`)
 /// - `EMBER_AGY_BIN`: the Antigravity CLI (default `agy` on `PATH`). Its sessions keep a private
-///   configuration folder each under `<data dir>/agy/`. A version other than the tested one runs
+///   configuration folder each under `<data dir>-runtime/agy/` (FR-A11). A version other than the tested one runs
 ///   read-only (INTENT D14); `EMBER_AGY_SANDBOX=1` adds agy's `--sandbox` (off by default)
+/// - `EMBER_AGENT_SANDBOX=off`: start agents without the OS sandbox that hides the data dir
+///   (FR-A11; macOS `sandbox-exec`, Linux `bwrap`, used when found and working)
 /// - `EMBER_SCRIPTED_AGENT=1`: also offer the test agent (development only)
 /// - `EMBER_DEMO_DATA=1`: add a demo ChatGPT plan account with 14 days of usage (screenshots only)
 /// - `EMBER_ACP_AGENTS`: Agent Client Protocol agents to offer, as JSON: a list of preset names
@@ -98,10 +105,17 @@ async fn serve_main() -> anyhow::Result<()> {
     // Private MCP config files left by a crashed run hold env values such as runtime tokens.
     ember_server::agents::claude_code::cleanup_stale_mcp_files(&std::env::temp_dir(), started);
 
+    // Keys in the OS keystore where available (FR-S13, EMBER_KEYSTORE=file|os|auto).
+    ember_node::keystore::install_from_env()?;
+
     let data_dir = std::env::var_os("EMBER_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| {
         PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".ember")
     });
     std::fs::create_dir_all(&data_dir)?;
+    // FR-A11 (#784): agy homes and the OSE data root live in the data dir's sibling runtime dir;
+    // a data dir from before is moved once (idempotent).
+    let runtime = ember_server::runtime_dir::runtime_dir(&data_dir);
+    ember_server::runtime_dir::migrate_logged(&data_dir, &runtime);
     // `ember-server rotate-token` (#369): replace `<data dir>/server-token` and exit. A running
     // server takes the new token on the next request that presents it; the old one gets 401.
     if std::env::args().nth(1).as_deref() == Some("rotate-token") {
@@ -112,7 +126,26 @@ async fn serve_main() -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    // `ember-server owner <verb>` (FR-S12, #784): one owner route from a terminal, with a key
+    // claimed over the running server's owner socket for this call only.
+    if std::env::args().nth(1).as_deref() == Some("owner") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        return ember_server::owner::cli::run(&args, &data_dir).await;
+    }
     let store = Arc::new(Store::open(&data_dir.join("ember.db"))?);
+    // Agents never see the data dir or the OSE data root (FR-A11): OS sandbox where available,
+    // Ember's own file handlers and Claude Code's deny rules otherwise.
+    {
+        let mut denied = vec![std::path::absolute(&data_dir).unwrap_or_else(|_| data_dir.clone())];
+        if let Ok(ose) = ember_server::ose::data_root_from(
+            std::env::var_os("EMBER_OSE_DATA_DIR").map(PathBuf::from),
+            Some(denied[0].clone()),
+            None,
+        ) {
+            denied.push(std::path::absolute(&ose).unwrap_or(ose));
+        }
+        ember_server::sandbox::install(ember_server::sandbox::from_env(denied));
+    }
     // Agents run under per-session shims and outlive this server (FR-S8, EMBER_SESSION_SHIM=off
     // keeps direct children). Stopping the server leaves the shims, and so the agents, running.
     let shim_runtime = match ember_server::agents::proc::find_shim_bin() {
@@ -573,6 +606,11 @@ async fn serve_main() -> anyhow::Result<()> {
             ),
             enrol_gate.clone(),
         ));
+    // FR-S12: the live owner keys, in memory only.
+    let owner = ember_server::owner::Owner::from_env();
+    if owner.presence() == ember_server::owner::Presence::Warn {
+        tracing::warn!("owner presence is in warn mode: owner routes are served with the server token alone and logged (EMBER_OWNER_PRESENCE=enforce refuses them)");
+    }
     // FR-S9, FR-S10: the token and the Origin/Host check on the local listener, every route.
     // The transport above serves `app` unwrapped: its callers passed the device gate (FR-N7).
     let local_app = {
@@ -594,8 +632,31 @@ async fn serve_main() -> anyhow::Result<()> {
         // `POST /api/server-token/rotate` take effect without a restart (#369).
         let auth = ember_server::auth::ServerAuth::with_token_file(&data_dir, addr, hosts)?;
         let local_app = local_app.merge(ember_server::auth::rotate_router(auth.clone()));
-        ember_server::auth::protect(local_app, auth)
+        // FR-S12: owner routes also need the owner key. The transport door has the device scope.
+        ember_server::auth::protect_with_owner(local_app, auth, owner.clone())
     };
+    // FR-S12: the claim socket. Without it no key can be claimed: in enforce mode the owner
+    // routes of the local listener then stay closed; the rest of the server works.
+    #[cfg(unix)]
+    let _owner_door = {
+        // The shim folder is scanned on every claim, shims left by an earlier server included.
+        let cfg = ember_server::owner::door::DoorConfig::for_server(Some(data_dir.join("shims")));
+        if cfg.confirm == ember_server::owner::Confirm::Off {
+            tracing::warn!("EMBER_OWNER_CONFIRM=off: owner claims are not confirmed by the console code");
+        }
+        match ember_server::owner::door::OwnerDoor::bind(&data_dir, owner.clone(), cfg) {
+            Ok(door) => {
+                tracing::info!("owner socket: {}", door.path().display());
+                Some(door)
+            }
+            Err(e) => {
+                tracing::error!("owner socket could not be bound, no owner key can be claimed (in enforce mode owner routes stay closed): {e}");
+                None
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    tracing::warn!("no owner socket on this platform yet (#815): owner presence stays in warn mode (FR-S12)");
     if let Some(rt) = &shim_runtime {
         let rejoined = sessions.rejoin_shims(rt).await;
         if !rejoined.is_empty() {

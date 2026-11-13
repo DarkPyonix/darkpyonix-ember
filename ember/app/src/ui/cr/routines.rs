@@ -1391,7 +1391,7 @@ fn RunNowButton(busy: bool, on_click: impl FnMut() + 'static) {
 /// The toolkit `Switch` takes the size, the colours and the accessible name since compose-rust
 /// v0.0.7 (#426, #372). It announces its own on or off state, so its name is
 /// "<routine> 루틴", passed with `accessible_name` because a routine name is data (#455).
-fn RoutineSwitch(routine_name: &str, checked: bool, mut on_change: impl FnMut(bool) + 'static) {
+fn RoutineSwitch(routine_name: &str, checked: bool, on_change: impl FnMut(bool) + 'static) {
     let p = ember_theme().palette;
     let track_color = if checked { p.ink } else { p.track };
     cu::Switch(checked)
@@ -1399,7 +1399,7 @@ fn RoutineSwitch(routine_name: &str, checked: bool, mut on_change: impl FnMut(bo
         .track_color(paint(track_color))
         .thumb_color(paint(p.surface))
         .accessible_name(routine_switch_name(routine_name))
-        .on_change(move |v| on_change(v));
+        .on_change(on_change);
 }
 
 /// The accessible name of a routine's switch.

@@ -510,15 +510,15 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
 /// accessible name since compose-rust v0.0.7 (#426, #372); the switch announces its own on or
 /// off state, so its name is `label` alone. The mockup's 1 px `line` ring on an enabled, off
 /// switch has no builder and is not drawn.
-fn MockSwitch(label: &str, checked: bool, enabled: bool, mut on_change: impl FnMut(bool) + 'static) {
+fn MockSwitch(label: &str, checked: bool, enabled: bool, on_change: impl FnMut(bool) + 'static) {
     let p = ember_theme().palette;
     cu::Switch(checked)
         .enabled(enabled)
         .size(36.0, 20.0)
-        .track_color(paint(switch_track(checked, enabled, &p)))
+        .track_color(paint(switch_track(checked, enabled, p)))
         .thumb_color(paint(p.surface))
         .accessible_name(label)
-        .on_change(move |v| on_change(v));
+        .on_change(on_change);
 }
 
 /// The track colour of [`MockSwitch`]: `line` when disabled, `ink` when on, `surface-2` when off.

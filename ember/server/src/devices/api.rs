@@ -5,6 +5,7 @@
 //! | ------ | ---- | --------------- |
 //! | GET    | `/api/devices` | → `[Device]` |
 //! | POST   | `/api/devices` | `{peer_id, name}` → 201 `Device` |
+//! | PATCH  | `/api/devices/{peer_id}` | `{scope}` → `Device` (FR-N8, #366); 404 if unknown, 400 for an unknown scope |
 //! | DELETE | `/api/devices/{peer_id}` | → `{closed}` (connections closed); 404 if unknown |
 
 use std::sync::Arc;
@@ -18,12 +19,12 @@ use ember_transport::PeerId;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{DeviceError, Devices};
+use super::{DeviceError, Devices, Scope};
 
 pub fn router(devices: Arc<Devices>) -> Router {
     Router::new()
         .route("/api/devices", get(list).post(add))
-        .route("/api/devices/{peer}", delete(remove))
+        .route("/api/devices/{peer}", delete(remove).patch(patch))
         .with_state(devices)
 }
 
@@ -69,4 +70,23 @@ async fn remove(State(d): State<Arc<Devices>>, Path(peer): Path<String>) -> Resu
     let peer = parse_peer(&peer)?;
     let closed = d.remove(&peer)?;
     Ok(Json(json!({ "closed": closed })))
+}
+
+#[derive(Deserialize)]
+struct PatchBody {
+    scope: String,
+}
+
+/// Sets a device's scope (FR-N8). Reachable only on the local listener with the server token.
+async fn patch(
+    State(d): State<Arc<Devices>>,
+    Path(peer): Path<String>,
+    Json(b): Json<PatchBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let peer = parse_peer(&peer)?;
+    let scope = b
+        .scope
+        .parse::<Scope>()
+        .map_err(|_| ApiError(DeviceError::BadRequest(format!("unknown scope {:?}", b.scope))))?;
+    Ok(Json(d.set_scope(&peer, scope)?))
 }

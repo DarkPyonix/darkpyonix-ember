@@ -139,3 +139,20 @@ pub fn serve(
     gate.attach(transport);
     Ok(async move { axum::serve(HttpListener::with_gate(listener, gate), app).await })
 }
+
+/// Like [`serve`], with each call checked against the calling device's scope (SPEC `FR-N8`,
+/// #366): `app` is wrapped by [`crate::devices::scope::enforce`] and served with the caller's
+/// [`ember_transport::PeerId`] as connect info, and `devices.gate()` admits the peers. This is
+/// what `main.rs` serves; [`serve`] stays for tests and tools that need no scope.
+pub fn serve_scoped(
+    transport: &Transport,
+    app: axum::Router,
+    devices: std::sync::Arc<crate::devices::Devices>,
+) -> io::Result<impl Future<Output = io::Result<()>> + Send + 'static> {
+    let listener = transport.listen(SERVER_SERVICE).map_err(io::Error::other)?;
+    let gate = devices.gate().clone();
+    gate.attach(transport);
+    let app = crate::devices::scope::enforce(app, devices)
+        .into_make_service_with_connect_info::<ember_transport::PeerId>();
+    Ok(async move { axum::serve(HttpListener::with_gate(listener, gate), app).await })
+}

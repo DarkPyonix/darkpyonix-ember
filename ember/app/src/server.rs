@@ -116,6 +116,10 @@ pub struct ComputerStatus {
     pub url: String,
     #[serde(default)]
     pub local: bool,
+    /// The node's transport peer id (hex); `None` for a computer registered by plain HTTP and
+    /// for the server's own computer.
+    #[serde(default)]
+    pub peer: Option<String>,
     /// `None` when not probed.
     #[serde(default)]
     pub reachable: Option<bool>,

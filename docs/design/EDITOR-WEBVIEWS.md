@@ -34,6 +34,18 @@ The API Ember sees is the same on every OS (D25); only the host crate differs.
 - **Theme.** Code-OSS's `--vscode-*` CSS variables are generated from Ember's light and dark tokens (DESIGN.md), so extension pages match the window.
 - **CI check.** `check-no-webview.sh` (NFR-L2) keeps forbidding webviews in the launcher and conversation UI and allows exactly the editor window's webview host module.
 
+## Ember side: what is built (#823)
+
+Built without the host node, behind a trait, and tested with a fake host (`fr_e8_*`):
+
+- **Decoding** (`ember/editor-conn/src/webview.rs`): every call of `MainThreadWebviews`, `MainThreadWebviewPanels`, `MainThreadWebviewViews` and `MainThreadCustomEditors` at the pinned commit (the panel's dispose is `$disposeWebview`), and the calls back: `$onMessage`, `$onMissingCsp`, `$onDidChangeWebviewPanelViewStates`, `$onDidDisposeWebviewPanel`, `$deserializeWebviewPanel`, `$resolveWebviewView`, `$onDidChangeWebviewViewVisibility`, `$disposeWebviewView`, `$createCustomDocument`, `$resolveCustomEditor`, `$disposeCustomDocument`. A message stays a JSON string plus side buffers, as on the wire.
+- **Model** (`ember/editor/src/webview/mod.rs`): one record per handle (kind, title, HTML, content and panel options, state, visible, active, position, ready); messages queue until the page is ready and keep their order; view states go out for every panel at once; a view's state survives close and resolve; a failed resolve shows Code-OSS's error page in Korean; `command:` links run only when `enableCommandUris` allows them. `SessionCore` routes the four actors to it (`Input::Webview`, `SessionUpdate::Webview`).
+- **Resources** (`webview/resource.rs`): the `asWebviewUri` form decoded, `.` and `..` resolved, and a file served only strictly under `localResourceRoots`; the bytes come from the remote filesystem channel. The URL form and the page origin are the host's (`WebviewHost::resource_base`, `WebviewHost::origin`): a custom scheme (`vscode-resource://`, `vscode-webview://<uuid>`) on macOS and Linux, where WKWebView and WebKitGTK cannot intercept `https://`, and `https://` on Windows and Android. The extension host always writes Code-OSS's form, so the driver rewrites the page's HTML, its CSP source and messages into the host's form and turns request URLs back before the session checks them.
+- **Theme** (`webview/theme.rs`, `webview/shim.rs`): the `--vscode-*` variables from Ember's light and dark tokens, covering every variable the webview's default stylesheet reads; the init script with `acquireVsCodeApi()` and the saved state.
+- **Host** (`webview/host.rs`): the `WebviewHost` trait the node implements (with find, find next/previous/stop and their match counts, developer tools, and the app chords the page did not handle; the channel global's name is `shim::IPC_GLOBAL`, `__emberWebviewHost`), the `WebviewDriver` that applies updates and drops hidden pages without `retainContextWhenHidden`, the `WebviewPanes` placeholders ("웹뷰를 표시하는 중입니다"), and `FakeHost`.
+
+Not built yet: the host node and drawing the panes in the window (compose-rust p1A), the window's custom editor "Open With" and webview view places, notebook renderer messages, custom document edits and dirty state, and the `check-no-webview.sh` exception for the host module.
+
 ## Open
 
 - The compose-rust node and its crate (amending compose-rust INTENT C1 through an opt-in crate waits for the owner's OK).

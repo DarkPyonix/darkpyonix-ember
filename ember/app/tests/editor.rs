@@ -1772,3 +1772,75 @@ mod fr_l31_tabs {
         assert!(!tab_menu_key("Enter", false, true, false, false));
     }
 }
+
+// Design review 2026-11-13 (A6, A7, A11, A12, A13, A14) and the owner placement rule of the same day
+// (rules 4 and 5): the editor chrome as the mockup draws it.
+mod design_chrome {
+    use ember_app::ui::editor::{ToolWindow, FIND_PILL_LABEL};
+
+    fn compact_css() -> String {
+        let css = ember_app::ui::editor_workbench::page::config().stylesheets.join("\n");
+        css.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    const PAGE: &str = include_str!("../src/ui/editor_workbench.rs");
+
+    #[test]
+    fn design_a13_stripes_are_exactly_the_mockups() {
+        assert_eq!(ToolWindow::LEFT_STRIPE, [ToolWindow::Project, ToolWindow::Commit, ToolWindow::Git]);
+        assert_eq!(ToolWindow::BOTTOM_STRIPE, [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems]);
+        // 검색 and 출력 keep their windows: search on the left, output as a bottom tab.
+        assert_eq!(ToolWindow::Search.side(), ember_app::ui::editor::Side::Left);
+        assert!(ToolWindow::BOTTOM.contains(&ToolWindow::Output));
+        assert!(PAGE.contains("&ToolWindow::LEFT_STRIPE") && PAGE.contains("&ToolWindow::BOTTOM_STRIPE"));
+    }
+
+    #[test]
+    fn design_a13_the_line_above_the_bottom_group_is_drawn_as_an_element() {
+        let css = compact_css();
+        assert!(css.contains(".ed-stripe-sep{flex:none;align-self:center;width:28px;height:1px;background:var(--line)}"));
+        assert!(PAGE.contains("div { class: \"ed-stripe-sep\", role: \"separator\" }"));
+    }
+
+    #[test]
+    fn design_a7_bottom_tab_labels_are_centred() {
+        assert!(compact_css().contains(".ed-btabsbutton{display:inline-flex;align-items:center;justify-content:center;flex:none}"));
+    }
+
+    #[test]
+    fn design_a11_status_bar_is_sbh_high_on_one_centre_line() {
+        let css = compact_css();
+        assert!(css.contains(".ed-status{height:var(--sbh);align-self:end;box-sizing:border-box}"));
+        assert!(css.contains(".ed-sbi.crumbs-s{align-self:center}"));
+    }
+
+    #[test]
+    fn design_a12_find_pill_is_300_wide_with_an_8px_gap_and_the_mockup_label() {
+        assert_eq!(FIND_PILL_LABEL, "파일, 동작, 기호 찾기");
+        let css = compact_css();
+        assert!(css.contains("@media(min-width:1101px){.ed-top.ed-find{flex:none;width:300px}}"));
+        assert!(css.contains(".ed-find>span.hide-md{margin-left:var(--sp2)}"));
+        assert!(css.contains("@media(max-width:560px){.ed-top.ed-find{display:none}}"));
+        assert!(PAGE.contains("span { class: \"hide-md\", \"{crate::ui::editor::FIND_PILL_LABEL}\" }"));
+    }
+
+    #[test]
+    fn design_a6_palette_overlay_takes_no_grid_row() {
+        assert!(PAGE.contains("style: \"position:fixed; grid-row:1; grid-column:1; left:0; top:0; right:0; bottom:0; z-index:39;\""));
+        assert!(PAGE.contains("style: \"position:fixed; grid-row:1; grid-column:1; z-index:40; top:60px;"));
+        assert!(ember_app::ui::editor_menu::menu_style().contains("grid-row:1; grid-column:1;"));
+    }
+
+    #[test]
+    fn design_a14_top_bar_actions_follow_the_mockup_order_without_a_menu_button() {
+        let top = &PAGE[PAGE.find("fn top_bar(").unwrap()..PAGE.find("fn menu(s: &Shared").unwrap()];
+        let at = |label: &str| top.find(&format!("title: \"{label}\"")).unwrap_or_else(|| panic!("{label} missing"));
+        let runcfg = at("실행 구성");
+        let run = at("실행");
+        let stop = at("중지");
+        let ask = at("에이전트에게 묻기");
+        let theme = at("{theme_title}");
+        assert!(runcfg < run && run < stop && stop < ask && ask < theme, "order is not run config, run, stop, ask, theme");
+        assert!(!top.contains("icon(\"more\")"), "the top bar still has a ⋯ button");
+    }
+}

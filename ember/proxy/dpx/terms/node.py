@@ -1,6 +1,8 @@
 """Pure helpers for the `/__terms` relay: no FastAPI, no network (unit-tested on their own).
 
 - `discover()` finds the ember node daemon on this computer (endpoint file or overrides).
+- `discover_server()` is the fallback when no daemon runs: ember server's built-in node,
+  reached through the server's `/api/computers/local/terms*` relay with the server token.
 - `sanitize_create()` / `sanitize_query()` / `sanitize_control()` decide what a browser may
   send. Everything else (allowed roots, argv parsing) is enforced by ember node itself.
 """
@@ -13,6 +15,10 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 LOCAL_ENDPOINT_FILE = "local.json"
+
+# ember server relays the terminal routes of its built-in (in-process) node under this prefix,
+# with the same bodies, events and attach protocol as the node's own `/terms` routes.
+SERVER_LOCAL_PREFIX = "/api/computers/local"
 
 # What started a session (FR-P6). A browser may only claim an IDE origin: `agent` sessions are
 # started by ember server's tool calls and `user` ones by hand (ember-term), never by a page.
@@ -29,12 +35,23 @@ _ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 class NodeEndpoint:
     url: str
     token: str
+    # "" for an ember node daemon, SERVER_LOCAL_PREFIX for ember server's relay.
+    prefix: str = ""
+
+    @property
+    def via_server(self) -> bool:
+        return bool(self.prefix)
+
+    def health_path(self) -> str:
+        """What `/__terms/_status` probes: the node's `/health`, or the relay's list (the
+        server has no per-computer health route; a 200 list means the built-in node answers)."""
+        return "/terms" if self.via_server else "/health"
 
     def http(self, path: str) -> str:
-        return self.url.rstrip("/") + path
+        return self.url.rstrip("/") + self.prefix + path
 
     def ws(self, path: str) -> str:
-        base = self.url.rstrip("/")
+        base = self.url.rstrip("/") + self.prefix
         if base.startswith("https://"):
             base = "wss://" + base[len("https://"):]
         elif base.startswith("http://"):
@@ -61,6 +78,23 @@ def discover(url: str, token: str, state_dir: Path) -> NodeEndpoint | None:
     if not isinstance(found_url, str) or not isinstance(found_token, str) or not found_url or not found_token:
         return None
     return NodeEndpoint(found_url, found_token)
+
+
+def discover_server(url: str, token: str, token_file: Path | None) -> NodeEndpoint | None:
+    """ember server's built-in node through the server relay: `url` with `token`, else the
+    first line of `token_file` (re-read on every call, so a rotated token is followed). None
+    without a URL or a usable token."""
+    if not url:
+        return None
+    found = token
+    if not found and token_file is not None:
+        try:
+            found = Path(token_file).read_text().strip()
+        except OSError:
+            return None
+    if not found:
+        return None
+    return NodeEndpoint(url, found, SERVER_LOCAL_PREFIX)
 
 
 def valid_id(term_id: str) -> bool:

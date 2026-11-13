@@ -12,6 +12,11 @@
 | POST   | `/__terms/{id}/kill`          | `POST /terms/{id}/kill`          |
 | WS     | `/__terms/{id}/attach`        | `WS /terms/{id}/attach` (frames passed through unchanged) |
 
+Where the terminals live (re-read on every request): the ember node daemon of this computer
+(`DPX_EMBER_NODE_URL` + `DPX_EMBER_NODE_TOKEN`, else its `local.json`); when there is none,
+ember server's built-in node through `/api/computers/local/terms*` with the server token
+(`DPX_EMBER_SERVER_URL`, `DPX_EMBER_SERVER_TOKEN` or the server's token file). [provisional, #26]
+
 HTTP routes are behind the session gate of `main.py`'s middleware (they are not public). The
 WebSocket route is not seen by that HTTP middleware, so it checks the session cookie and the
 `Origin` itself. Closing the browser's socket only detaches; the session lives on in the node.
@@ -41,8 +46,10 @@ CLIENT = httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0))
 
 
 def endpoint() -> node.NodeEndpoint | None:
-    # Re-read every time: the node writes a new local.json when it restarts (maybe on a new port).
-    return node.discover(config.EMBER_NODE_URL, config.EMBER_NODE_TOKEN, config.EMBER_NODE_STATE_DIR)
+    # Re-read every time: the node writes a new local.json when it restarts (maybe on a new port),
+    # and the server token file follows `ember-server rotate-token`.
+    return node.discover(config.EMBER_NODE_URL, config.EMBER_NODE_TOKEN, config.EMBER_NODE_STATE_DIR) or \
+        node.discover_server(config.EMBER_SERVER_URL, config.EMBER_SERVER_TOKEN, config.EMBER_SERVER_TOKEN_FILE)
 
 
 def _error(status: int, message: str) -> JSONResponse:
@@ -76,10 +83,10 @@ async def _json_body(request: Request):
 async def terms_status():
     ep = endpoint()
     if ep is None:
-        return {"available": False, "reason": "ember node endpoint not found"}
+        return {"available": False, "reason": "neither an ember node nor ember server's token was found"}
     try:
-        r = await CLIENT.get(ep.http("/health"))
-        return {"available": r.status_code == 200}
+        r = await CLIENT.get(ep.http(ep.health_path()), headers=ep.headers())
+        return {"available": r.status_code == 200, "via": "server" if ep.via_server else "node"}
     except httpx.RequestError as exc:
         return {"available": False, "reason": str(exc)}
 

@@ -2712,12 +2712,27 @@ pub mod page {
             let mut revision = revision;
             *revision.write() += 1;
         };
-        let view = terms::view();
+        strip_of(terms::view(), bump)
+    }
+
+    /// The strip for one [`terms::StripView`]. The + sits outside the scrolling tab list, after it,
+    /// so it stays visible in every state as in Code-OSS (#799); inside the scrolling list the
+    /// renderer drew it only while a rename field was open.
+    /// A terminal tab's width in px from its label (`.ed-tsub>button`: 12 px text, 12 px padding each
+    /// side, 1 px border, 14 px icon, 18 px buttons with -6 px end margin, 6 px gaps), at most 240.
+    pub(super) fn tab_width(label: &str, on: bool) -> u32 {
+        let text: u32 = label.chars().map(|c| if c.is_ascii() { 7 } else { 12 }).sum();
+        let buttons = if on { 2 * (6 + 18) } else { 6 + 18 } - 6;
+        (2 + 24 + 14 + 6 + text + buttons).min(240)
+    }
+
+    pub(super) fn strip_of(view: Option<terms::StripView>, bump: impl Fn() + Copy + 'static) -> Element {
         let (tabs, active, renaming, error) = match view {
             Some(v) => (v.tabs, v.active, v.renaming, v.error),
             None => (Vec::new(), None, None, None),
         };
         rsx! {
+            div { class: "ed-tstrip",
             div { class: "ed-tsub", role: "tablist", "aria-label": "터미널",
                 for (id, label) in tabs {
                     if renaming.as_ref().is_some_and(|(r, _)| *r == id) {
@@ -2737,6 +2752,9 @@ pub mod page {
                             let (sel, ren, del, f2, pen) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
                             rsx! {
                                 button { key: "{id}", class: if on { "on" } else { "" }, role: "tab", "aria-selected": if on { "true" } else { "false" }, title: "{label}",
+                                    // TODO(dioxus-compose#227): no max-content width, so an inactive tab
+                                    // collapsed to its padding in the scrolling list; its width is set here.
+                                    style: "flex:none; width:{tab_width(&label, on)}px;",
                                     onclick: move |_| { terms::select(&sel); bump(); },
                                     // TODO(compose-rust#417): the renderer sends no pointer events yet, so a real
                                     // double-click never arrives; F2 and the pencil button rename today.
@@ -2767,7 +2785,8 @@ pub mod page {
                         }
                     }
                 }
-                button { class: "ed-ib", title: "새 터미널", "aria-label": "새 터미널", onclick: move |_| { terms::new_terminal(); bump(); }, {icon("plus")} }
+            }
+                button { class: "ed-ib ed-tnew", title: "새 터미널", "aria-label": "새 터미널", onclick: move |_| { terms::new_terminal(); bump(); }, {icon("plus")} }
             }
             if let Some(error) = error {
                 div { class: "tl", style: "padding:0 var(--sp3); color:var(--c-red);", "{error}" }
@@ -3141,6 +3160,10 @@ pub mod page {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "editor_terminal_strip_tests.rs"]
+mod terminal_strip_tests;
 
 #[cfg(test)]
 #[path = "editor_workbench_glue_tests.rs"]

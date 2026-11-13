@@ -430,23 +430,20 @@ pub fn multi_pane_layout(window_dp: f32, class: WindowSizeClass) -> PaneLayout {
 
 /// Padding on each side of the multi view's column (`SpaceRole::Sm`).
 pub const SWIPE_COLUMN_PAD: f32 = 8.0;
-/// Gap between panes in the swipe strip (`SP[1]`, mockup `.mv` gap `--sp2`).
+/// Gap between panes in the swipe strip (`SP[1]`, mockup `.mv` gap `--sp2`). Each pane slot
+/// carries half of it on either side, so two panes are a gap apart and a snapped pane sits half a
+/// gap in from both edges of the strip.
 pub const SWIPE_GAP: f32 = 8.0;
-/// How much of the next pane shows at the right edge.
-/// TODO(compose-rust#547): a stand-in. Once the toolkit has scroll snapping, the strip should
-/// centre each pane as the mockup does (`calc(100% - 8px)`, 4 dp of the neighbours on each
-/// side) and this peek goes away.
-pub const SWIPE_PEEK: f32 = 24.0;
 
-/// Width of one pane in the swipe strip that replaces the one-pane-at-a-time layout
-/// (mockup `session.css` at 560 px: `.mv` scrolls sideways with padding and gap of
-/// `--sp2`). The mockup's `calc(100% - 8px)` equals the gap, so with the pane at the left
-/// edge nothing of the next one shows; the pane is narrowed by the gap plus a visible peek
-/// so the next pane always shows. An unreported width (0 dp in the first frame) is treated
-/// as 390 dp, the phone width of the design.
+/// Width of one pane slot in the swipe strip that replaces the one-pane-at-a-time layout
+/// (mockup `session.css` at 560 px: `.mv` scrolls sideways with `scroll-snap-type:x mandatory`).
+/// A slot is as wide as the strip, so the strip snaps (`Snap::ItemStart`, compose-rust#547) to one
+/// whole pane per screen and a swipe never stops between two panes. The pane inside is the slot
+/// less `SWIPE_GAP`, the mockup's `calc(100% - 8px)`. An unreported width (0 dp in the first
+/// frame) is treated as 390 dp, the phone width of the design.
 pub fn swipe_pane_width(window_dp: f32) -> f32 {
     let w = if window_dp > 0.0 { window_dp } else { 390.0 };
-    (w - 2.0 * SWIPE_COLUMN_PAD - SWIPE_GAP - SWIPE_PEEK).max(120.0)
+    (w - 2.0 * SWIPE_COLUMN_PAD).max(120.0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1411,17 +1408,17 @@ mod tests {
     }
 
     #[test]
-    fn fr_l18_swipe_pane_width_leaves_the_next_pane_peeking() {
+    fn fr_l18_swipe_pane_slot_is_the_whole_strip_width() {
+        // compose-rust#547: the strip snaps to each slot's start, so a slot as wide as the strip
+        // shows exactly one pane and nothing of the next one peeks in.
         for w in [0.0_f32, 360.0, 390.0, 560.0] {
             let window = if w > 0.0 { w } else { 390.0 };
             let column = window - 2.0 * super::SWIPE_COLUMN_PAD;
-            let pane = super::swipe_pane_width(w);
-            let peek = column - pane - super::SWIPE_GAP;
-            assert!(peek > 0.0, "no visible peek at {w}");
-            assert_eq!(peek, super::SWIPE_PEEK);
+            assert_eq!(super::swipe_pane_width(w), column, "slot at {w}");
         }
-        assert_eq!(super::swipe_pane_width(390.0), 342.0);
+        assert_eq!(super::swipe_pane_width(390.0), 374.0);
         assert_eq!(super::swipe_pane_width(100.0), 120.0);
+        assert!(!include_str!("session.rs").contains(concat!("SWIPE_", "PEEK")));
     }
 
     use super::*;

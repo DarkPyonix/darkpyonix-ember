@@ -22,7 +22,7 @@ use compose_rust::runtime::{
     on_dispose, remember, remember_with_key,
 };
 use compose_rust::ui::{self as cu, Modifier};
-use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, SpaceRole, TypeRole};
+use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, Snap, SpaceRole, TypeRole};
 
 use ember_client::LauncherStatus;
 
@@ -1841,39 +1841,41 @@ pub fn MultiView(
                                     });
                             });
                     } else if layout.paged {
-                        // Sideways strip, one pane per screen width with the next one peeking
-                        // in (mockup `.mv` at 560 px), instead of a previous / next pager.
-                        // TODO(compose-rust#547): no scroll snapping, so a swipe can stop between
-                        // two panes (mockup `scroll-snap-type:x mandatory`).
+                        // Sideways strip, one pane per screen width (mockup `.mv` at 560 px,
+                        // `scroll-snap-type:x mandatory`), instead of a previous / next pager.
+                        // Each slot is a direct child of the ScrollRow and as wide as the strip,
+                        // so `Snap::ItemStart` (compose-rust#547) brings a swipe to rest on one
+                        // whole pane. Half a gap on each side of a slot keeps panes a gap apart.
                         let pane_w = swipe_pane_width(window.width_dp);
                         cu::ScrollRow()
+                            .snap(Snap::ItemStart)
                             .modifier(Modifier::new().fill_max_width().weight(1.0))
                             .content(|| {
-                                cu::Row()
-                                    .spacing(SWIPE_GAP)
-                                    .modifier(Modifier::new().fill_max_height())
-                                    .content(|| {
-                                        for sid in &vis {
-                                            if let Some(m) =
-                                                members_vec.iter().find(|m| &m.session_id == sid)
-                                            {
-                                                let m = m.clone();
-                                                let pr = proj_owned.clone();
-                                                let all_s = all.clone();
-                                                let vis_s = vis.clone();
-                                                let enl = on_enlarge.clone();
+                                for sid in &vis {
+                                    if let Some(m) = members_vec.iter().find(|m| &m.session_id == sid)
+                                    {
+                                        let m = m.clone();
+                                        let pr = proj_owned.clone();
+                                        let all_s = all.clone();
+                                        let vis_s = vis.clone();
+                                        let enl = on_enlarge.clone();
+                                        cu::Row()
+                                            .modifier(Modifier::new().width(pane_w).fill_max_height())
+                                            .content(move || {
+                                                cu::Spacer()
+                                                    .modifier(Modifier::new().width(SWIPE_GAP / 2.0));
                                                 cu::Box()
                                                     .modifier(
-                                                        Modifier::new()
-                                                            .width(pane_w)
-                                                            .fill_max_height(),
+                                                        Modifier::new().weight(1.0).fill_max_height(),
                                                     )
                                                     .content(move || {
                                                         Pane(&pr, &m, &all_s, &vis_s, enl.clone());
                                                     });
-                                            }
-                                        }
-                                    });
+                                                cu::Spacer()
+                                                    .modifier(Modifier::new().width(SWIPE_GAP / 2.0));
+                                            });
+                                    }
+                                }
                             });
                     } else {
                         let rows_idx = pane_rows(n, layout.per_row);
@@ -4954,7 +4956,10 @@ mod tests {
         let paged = paged.split("let rows_idx = pane_rows(").next().unwrap();
         assert!(paged.contains("cu::ScrollRow()"));
         assert!(paged.contains(".width(pane_w)"));
-        assert!(paged.contains("TODO(compose-rust#547)"));
+        // compose-rust#547: the strip snaps to whole panes, so no peek stand-in is left.
+        assert!(paged.contains(".snap(Snap::ItemStart)"));
+        assert!(!paged.contains("TODO(compose-rust#547)"));
+        assert!(!paged.contains(".spacing(SWIPE_GAP)"));
         assert!(mv.contains("multi_pane_layout(window.width_dp, window.class)"));
         assert!(!paged.contains("\"이전\""));
         assert!(!paged.contains("\"다음\""));

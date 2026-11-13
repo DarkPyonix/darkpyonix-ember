@@ -44,8 +44,38 @@ pub struct SecretBox {
 }
 
 impl SecretBox {
-    /// Load `path`, creating it with a fresh random key (mode `0600`) if it does not exist.
+    /// The key for `path` (`secret.key`): from the OS keystore when one is installed (moving an
+    /// existing file into it, FR-S13), otherwise the file, created if missing.
     pub fn open_or_create(path: &Path) -> anyhow::Result<SecretBox> {
+        Self::open_or_create_with(ember_node::keystore::installed().as_deref(), path)
+    }
+
+    /// [`SecretBox::open_or_create`] against an explicit store (tests).
+    pub fn open_or_create_with(
+        store: Option<&dyn ember_node::keystore::KeyStore>,
+        path: &Path,
+    ) -> anyhow::Result<SecretBox> {
+        use ember_node::keystore::{resolve, Resolved};
+        let read_file = |p: &Path| -> anyhow::Result<Vec<u8>> {
+            check_private(p)?;
+            let bytes = std::fs::read(p)?;
+            anyhow::ensure!(bytes.len() == KEY_LEN, "{} is corrupt: expected {KEY_LEN} bytes", p.display());
+            Ok(bytes)
+        };
+        let generate = || XChaCha20Poly1305::generate_key(&mut OsRng).to_vec();
+        match resolve(store, path, read_file, generate)? {
+            Resolved::Keystore(bytes) => {
+                let bytes = Zeroizing::new(bytes);
+                let cipher = XChaCha20Poly1305::new_from_slice(&bytes)
+                    .map_err(|_| anyhow::anyhow!("keystore entry for {} is not {KEY_LEN} bytes", path.display()))?;
+                Ok(SecretBox { cipher })
+            }
+            Resolved::File => Self::open_or_create_file(path),
+        }
+    }
+
+    /// Load the file `path`, creating it with a fresh random key (mode `0600`) if it does not exist.
+    pub fn open_or_create_file(path: &Path) -> anyhow::Result<SecretBox> {
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -265,6 +295,33 @@ pub fn provider_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_s13_secret_key_migrates_and_still_opens_old_ciphertext() {
+        use ember_node::keystore::{migrated_marker, MemoryKeyStore};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.key");
+        let file_box = SecretBox::open_or_create_with(None, &path).unwrap();
+        let (nonce, ct) = file_box.seal(b"hello", b"aad");
+        let store = MemoryKeyStore::default();
+        let ks_box = SecretBox::open_or_create_with(Some(&store), &path).unwrap();
+        assert!(!path.exists(), "file removed after a verified read-back");
+        assert!(migrated_marker(&path).is_file());
+        assert_eq!(&ks_box.open(&nonce, &ct, b"aad").unwrap()[..], b"hello");
+    }
+
+    #[test]
+    fn fr_s13_secret_key_write_failure_keeps_the_file() {
+        use ember_node::keystore::MemoryKeyStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.key");
+        let a = SecretBox::open_or_create_with(None, &path).unwrap();
+        let (nonce, ct) = a.seal(b"x", b"aad");
+        let store = MemoryKeyStore { fail_set: true, ..Default::default() };
+        let b = SecretBox::open_or_create_with(Some(&store), &path).unwrap();
+        assert!(path.is_file());
+        assert_eq!(&b.open(&nonce, &ct, b"aad").unwrap()[..], b"x");
+    }
 
     #[test]
     fn round_trip_and_ciphertext_is_bound_to_its_row() {

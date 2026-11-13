@@ -33,8 +33,8 @@ use ember_node::config::NodeConfig;
 
 /// The paths the local node refuses: the server data dir (`EMBER_DATA_DIR`, else `<home>/.ember`,
 /// where `ember.db`, `secret.key`, the server token and `accounts/` live) and the OSE data root
-/// (`EMBER_OSE_DATA_DIR`, else `<data dir>/ose-data`, holding connection token files), when it is
-/// a different path. Kept pure so tests need no environment.
+/// (`EMBER_OSE_DATA_DIR`, else `<data dir>-runtime/ose-data`, holding connection token files), when
+/// it is not inside the data dir. Kept pure so tests need no environment.
 ///
 /// This narrows the `/fs` API only. It is not a sandbox: terminals and agents run as the server
 /// user and can read these folders by shell (D37 full authority is unchanged).

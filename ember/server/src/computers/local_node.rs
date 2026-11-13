@@ -7,9 +7,9 @@
 //!
 //! Security: the listener is loopback only. Its Bearer token is 32 bytes from the OS random source
 //! (`getrandom`, 256 bits, 64 hex characters), held in memory and never logged. With a state dir
-it is also written to `<state dir>/local.json` (mode 0600, the node's own endpoint file format),
-so `ember-term` in an OSE terminal finds this node (#26, [provisional]); that folder is inside the
-server data dir, which the node itself refuses ([`denied_paths`]). The client
+//! it is also written to `<state dir>/local.json` (mode 0600, the node's own endpoint file format),
+//! so `ember-term` in an OSE terminal finds this node (#26, [provisional]); that folder is inside the
+//! server data dir, which the node itself refuses ([`denied_paths`]). The client
 //! ignores proxy variables ([`NodeClient::new_local`]), so the token never goes to a proxy named
 //! in the server's environment. Another OS user on the machine can
 //! connect to the port but cannot authenticate. The node serves file and terminal operations as

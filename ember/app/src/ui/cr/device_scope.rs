@@ -30,6 +30,15 @@ struct Pending {
     scope: DeviceScope,
 }
 
+/// Asks whoami once (cached in `Services`) and stores the answer; `None` on the local door's
+/// demo or a failed call means no self row.
+fn load_who(who: MutableState<Option<ember_client::api::Whoami>>) {
+    if try_services().is_none() {
+        return;
+    }
+    run_shared(async move { crate::services::services().whoami().await }, move |w| who.set(w));
+}
+
 fn load(state: MutableState<ListState>) {
     if try_services().is_none() {
         state.set(ListState::Ready(demo_devices()));
@@ -64,8 +73,15 @@ pub fn DeviceScopeSection() {
     let state = remember(|| mutable_state_of(ListState::Loading));
     let error = remember(|| mutable_state_of(None::<String>));
     let pending = remember(|| mutable_state_of(None::<Pending>));
-    // TODO(whoami): the self row is decided here, from `Services::self_peer_id` (`Api::whoami`).
-    let self_peer = try_services().and_then(|s| s.self_peer_id());
+    let who = remember(|| mutable_state_of(None::<ember_client::api::Whoami>));
+    // The self row comes from whoami (FR-N8a): local door none, transport door its peer id.
+    let self_row = self_peer(who.get().as_ref());
+    let own_line = own_scope_line(who.get().as_ref());
+    let w = who.clone();
+    launched_effect(("who",), move || {
+        let w = w.clone();
+        async move { load_who(w) }
+    });
 
     let st = state.clone();
     launched_effect((), move || {
@@ -73,6 +89,9 @@ pub fn DeviceScopeSection() {
         async move { load(st) }
     });
 
+    if let Some(line) = &own_line {
+        Label(line, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
+    }
     InsetPanel(true, || {
         cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| match state.get() {
             ListState::Loading => Label("기기를 불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1)),
@@ -81,7 +100,7 @@ pub fn DeviceScopeSection() {
                 Label(NO_DEVICES, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1))
             }
             ListState::Ready(list) => {
-                for row in scope_rows(&list, self_peer.as_deref()) {
+                for row in scope_rows(&list, self_row.as_deref()) {
                     cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                         cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                             cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
@@ -95,8 +114,9 @@ pub fn DeviceScopeSection() {
                         for chip in &row.chips {
                             let (st, er, pe) = (state.clone(), error.clone(), pending.clone());
                             let (peer, from, to) = (row.peer_id.clone(), row.scope, chip.scope);
+                            let me = self_row.clone();
                             FilterChip(chip.label, chip.selected, move || {
-                                match pick_action(&peer, self_peer_of(), from, to) {
+                                match pick_action(&peer, me.as_deref(), from, to) {
                                     PickAction::Nothing => {}
                                     PickAction::Set => set(st.clone(), er.clone(), peer.clone(), to),
                                     PickAction::Confirm => pe.set(Some(Pending { peer_id: peer.clone(), scope: to })),
@@ -125,10 +145,4 @@ pub fn DeviceScopeSection() {
     if let Some(t) = error.get() {
         Label(&t, Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), Some(2));
     }
-}
-
-fn self_peer_of() -> Option<&'static str> {
-    use std::sync::OnceLock;
-    static SELF: OnceLock<Option<String>> = OnceLock::new();
-    SELF.get_or_init(|| try_services().and_then(|s| s.self_peer_id())).as_deref()
 }

@@ -5,7 +5,7 @@
 
 use std::sync::Mutex;
 
-use ember_client::api::{ApiError, DeviceRecord, DeviceScope};
+use ember_client::api::{ApiError, DeviceRecord, DeviceScope, Whoami};
 
 /// The fixed sentence for a call the server refused with 403 `scope_denied`.
 pub const SCOPE_DENIED: &str = "이 기기에는 이 작업을 할 권한이 없습니다. 기기 권한은 서버에서 바꿀 수 있습니다.";
@@ -19,6 +19,33 @@ pub const NO_DEVICES: &str = "서버에 등록된 기기가 없습니다";
 
 /// Shown when the scope could not be changed for another reason.
 pub const SET_FAILED: &str = "기기 권한을 바꾸지 못했습니다. 연결을 확인하고 다시 시도합니다";
+
+/// The peer id of the row that is the device the app runs on. The local door is the server's
+/// own machine and never in the device list; the transport door names its peer; an unknown
+/// answer (the call failed) has no self row.
+pub fn self_peer(who: Option<&Whoami>) -> Option<String> {
+    let w = who?;
+    if w.door != "transport" {
+        return None;
+    }
+    w.peer_id.clone().filter(|p| !p.trim().is_empty())
+}
+
+/// "이 기기 권한: ..." for the transport door only; the local door is always full.
+pub fn own_scope_line(who: Option<&Whoami>) -> Option<String> {
+    let w = who.filter(|w| w.door == "transport")?;
+    let label = match w.scope.as_str() {
+        "full" => scope_label(DeviceScope::Full),
+        "read_only" => scope_label(DeviceScope::ReadOnly),
+        "chat_only" => scope_label(DeviceScope::ChatOnly),
+        _ => return None,
+    };
+    Some(format!("이 기기 권한: {label}"))
+}
+
+pub fn demo_whoami() -> Whoami {
+    Whoami { door: "local".into(), peer_id: None, scope: "full".into() }
+}
 
 /// The picker order, widest first.
 pub const PICKER: [DeviceScope; 3] = [DeviceScope::Full, DeviceScope::ReadOnly, DeviceScope::ChatOnly];
@@ -154,7 +181,7 @@ pub fn set_error_text(e: &ApiError) -> &'static str {
 
 static DEMO: Mutex<Option<Vec<DeviceRecord>>> = Mutex::new(None);
 
-/// The demo's peer id for its laptop row (not the app's own device: see `Services::self_peer_id`).
+/// The demo's peer id for its laptop row (not the app's own device: see `Services::whoami`).
 pub const DEMO_SELF_PEER: &str = "12D3KooWDemoThisLaptop";
 
 fn demo_seed() -> Vec<DeviceRecord> {
@@ -222,6 +249,23 @@ mod tests {
         assert_eq!(pick_action("me", None, Full, ChatOnly), PickAction::Set);
         assert_eq!(pick_action("me", Some(" "), Full, ChatOnly), PickAction::Set);
         assert_eq!(pick_action("me", Some("me"), Full, Full), PickAction::Nothing);
+    }
+
+    fn who(door: &str, peer: Option<&str>, scope: &str) -> Whoami {
+        Whoami { door: door.into(), peer_id: peer.map(str::to_string), scope: scope.into() }
+    }
+
+    #[test]
+    fn fr_n8_app_self_row_comes_from_whoami() {
+        assert_eq!(self_peer(Some(&who("local", None, "full"))), None, "local door: no self row");
+        assert_eq!(self_peer(Some(&who("local", Some("p"), "full"))), None);
+        assert_eq!(self_peer(Some(&who("transport", Some("p1"), "read_only"))).as_deref(), Some("p1"));
+        assert_eq!(self_peer(Some(&who("transport", None, "full"))), None);
+        assert_eq!(self_peer(None), None, "error: unknown, no self row");
+        assert_eq!(self_peer(Some(&demo_whoami())), None, "demo is the local door");
+        assert_eq!(own_scope_line(Some(&who("transport", Some("p1"), "chat_only"))).as_deref(), Some("이 기기 권한: 채팅만"));
+        assert_eq!(own_scope_line(Some(&who("local", None, "full"))), None);
+        assert_eq!(own_scope_line(None), None);
     }
 
     #[test]

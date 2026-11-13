@@ -145,12 +145,25 @@ impl Services {
         self.client.api().set_device_scope(peer_id, scope).await
     }
 
-    /// The peer id of the device the app runs on. Always `None` today: the app uses only the
-    /// server's local listener, which is the server's own machine and never in the device list.
-    // TODO(whoami): call ember_client `Api::whoami() -> Whoami { door, peer_id: Option<String>,
-    // scope }` (`GET /api/whoami`) and answer its `peer_id` on the transport door.
-    pub fn self_peer_id(&self) -> Option<String> {
-        None
+    /// What the server says this app is (`Api::whoami`, FR-N8a), asked once and cached. The
+    /// demo is the local door. `None` when the call failed: no self row then.
+    pub async fn whoami(&self) -> Option<ember_client::api::Whoami> {
+        static CACHE: tokio::sync::OnceCell<Option<ember_client::api::Whoami>> = tokio::sync::OnceCell::const_new();
+        CACHE
+            .get_or_init(|| async {
+                if self.demo.is_some() {
+                    return Some(crate::ui::device_scope::demo_whoami());
+                }
+                match self.client.api().whoami().await {
+                    Ok(w) => Some(w),
+                    Err(e) => {
+                        tracing::warn!("whoami failed: {e}");
+                        None
+                    }
+                }
+            })
+            .await
+            .clone()
     }
 }
 

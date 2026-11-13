@@ -139,6 +139,66 @@ cargo build --release --locked
         <code>ssh -N -L 8740:127.0.0.1:8740 you@mini.local</code>.
       </p>
     </div>
+    <div class="warn" id="owner-presence">
+      <span class="label">Owner routes need owner presence</span>
+      <p>
+        <span class="pill partial">Partial</span> The token file stops other users and web pages, not
+        your own processes. An agent runs as you and can read <code>server-token</code>. So the routes
+        that grant authority, admit someone or change a secret need a second credential, the owner key.
+        On a server started with <code>EMBER_OWNER_PRESENCE=enforce</code>, they answer
+        <code>403</code> with <code>{"code": "owner_required"}</code> to the token alone. The default
+        is <code>warn</code> for now: the call is logged and served, because the app cannot claim a
+        key yet. Enforce becomes the default once it can.
+        These routes are: answering a tool approval and approve-all; the device list; adding, removing
+        and checking accounts and providers, and ChatGPT sign-in; adding and removing computers, and
+        enrol codes; rotating the token; hub registration; MCP servers; the per-agent, A2A and browser
+        egress settings; channel invites, guests and allowances. Reading, sessions, messages,
+        terminals and answering an agent's question need the token only.
+      </p>
+      <p>
+        The owner key exists only in the memory of the Ember app or of one
+        <code>ember-server owner</code> command. It is claimed over
+        <code>&lt;data dir&gt;/owner.sock</code> and is void when that app or command exits, or when the
+        server restarts. The first claim prints a code on the server's console
+        (<code>ember owner code: XXXX-XXXX</code>); type it where the claim was made. A later claim can
+        be approved in an app that already holds a key. The server side and the command are in place;
+        the app's screen for the claim is not built yet
+        (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/784">#784</a>). Until it is,
+        use the command from a terminal on the server's computer:
+      </p>
+      <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+        <figcaption>shell, on the main server</figcaption>
+<pre><code>ember-server owner enrol-code laptop            <span class="c"># a code for a new computer</span>
+ember-server owner devices list
+ember-server owner approve &lt;session&gt; &lt;approval&gt; allow
+ember-server owner call POST /api/accounts <span class="s">'{"agent": "claude-code", "label": "work"}'</span></code></pre>
+      </figure>
+      <p>
+        The command needs a real terminal and is refused inside Ember's own terminal panel or an
+        agent, because those run in process trees the server started. Where this guide shows
+        <code>curl</code> on one of the routes above, use <code>ember-server owner call</code> with the
+        same method, path and body. <code>EMBER_OWNER_CONFIRM=off</code> grants a claim without the
+        console code; it lowers the protection and is meant for test rigs. A remote device with
+        scope <code>full</code> counts as the owner for approvals over the transport; the device list
+        itself is managed only on the server's computer. A server on Windows has no owner socket
+        yet (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/815">#815</a>), so it
+        always runs in <code>warn</code> and its owner routes stay open to the token.
+      </p>
+      <p>
+        <strong>What this does not stop.</strong> In the default <code>warn</code> mode nothing is
+        refused: a process that reads <code>server-token</code> can still call these routes, and the
+        server only logs it. Set <code>EMBER_OWNER_PRESENCE=enforce</code> to close them. Even
+        then, a process that runs arbitrary code as you and is
+        not sandboxed can still read or change Ember's database and keys in the data folder
+        directly, attach to the app, or imitate it by leaving the agent's process tree and asking
+        for a key. The console code stops the last one only while that process cannot read the
+        server's console output, so do not send the server's output to a file agents can read.
+        Starting agents with the data folder hidden (a sandbox per harness) and moving the keys to
+        the OS keystore are not built yet
+        (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/784">#784</a>). For an agent
+        you do not trust, use a harness with its own sandbox or a separate computer.
+      </p>
+    </div>
 
     <h3 id="mount-build">Building with the project mount</h3>
     <p>

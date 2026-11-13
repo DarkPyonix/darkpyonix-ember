@@ -86,3 +86,14 @@ fn fr_l31_23_plus_never_scrolls_with_the_tabs() {
         "tabs keep their natural width (label, pencil, trash) instead of shrinking to an icon"
     );
 }
+
+/// #799: an inactive tab keeps its label's width (it collapsed to its padding before), the active
+/// one adds the pencil, and a long name stops at 240 px.
+#[test]
+fn fr_l31_23_tab_width_fits_the_label() {
+    let w = super::page::tab_width;
+    assert_eq!(w("zsh", false), 2 + 24 + 14 + 6 + 21 + 18);
+    assert_eq!(w("zsh", true), w("zsh", false) + 24);
+    assert!(w("빌드", false) > w("ab", false));
+    assert_eq!(w(&"x".repeat(80), true), 240);
+}

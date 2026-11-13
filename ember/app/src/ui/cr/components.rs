@@ -232,19 +232,53 @@ pub fn Select(
     popup_width: f32,
     on_choose: impl FnMut(usize) + Clone + 'static,
 ) {
+    select_field(None, shown, options, chosen, popup_width, on_choose);
+}
+
+/// A [`Select`] named for assistive technology by the label beside it (`FieldRow`'s text), so a
+/// screen reader says which field it is and not only the chosen option. The trigger is a dropdown
+/// list to the platform (`Role::DropdownList`, which compose-rust#473 hands to the platform in
+/// v0.0.9). `name` is `&'static str` for the reason [`NamedClickable`] gives.
+pub fn NamedSelect(
+    name: &'static str,
+    shown: &str,
+    options: &[String],
+    chosen: usize,
+    popup_width: f32,
+    on_choose: impl FnMut(usize) + Clone + 'static,
+) {
+    select_field(Some(name), shown, options, chosen, popup_width, on_choose);
+}
+
+fn select_field(
+    name: Option<&'static str>,
+    shown: &str,
+    options: &[String],
+    chosen: usize,
+    popup_width: f32,
+    on_choose: impl FnMut(usize) + Clone + 'static,
+) {
     use compose_rust::runtime::{mutable_state_of, remember};
     let p = ember_theme().palette;
     let open = remember(|| mutable_state_of(false));
     let toggle = open.clone();
+    let trigger = Modifier::new()
+        .fill_max_width()
+        .height(H_BTN)
+        .background(paint(p.surface))
+        .border(1.0, paint(p.line))
+        .corner_radius(CORNER_SM)
+        .role(Role::DropdownList)
+        .expanded(open.get())
+        .click_action(true);
+    let trigger = match name {
+        Some(n) => trigger.label(n),
+        None => trigger,
+    };
     // One node, so the popup's `Dialog` is not a separate child that a parent's spacing counts.
     cu::Box().modifier(Modifier::new().fill_max_width()).content(|| {
     Clickable(
-        Modifier::new()
-            .fill_max_width()
-            .height(H_BTN)
-            .background(paint(p.surface))
-            .border(1.0, paint(p.line))
-            .corner_radius(CORNER_SM),
+        trigger,
         Alignment::CenterStart,
         move || toggle.set(!toggle.get_untracked()),
         || {
@@ -642,6 +676,50 @@ pub fn AppButton(
         b = b.icon(i);
     }
     drop(b);
+}
+
+/// A pill button that is one choice of several: the chosen one is `Primary`, the others
+/// `Default`. To assistive technology a `Toggle` says it is pressed (`Modifier::selected`, the
+/// mockup's `aria-pressed`) and a `Radio` is a radio button that is checked or not; compose-rust
+/// v0.0.9 hands both to the platform (#473).
+pub fn ChoiceButton(
+    text: &str,
+    choice: Choice,
+    chosen: bool,
+    small: bool,
+    enabled: bool,
+    on_click: impl FnMut() + 'static,
+) {
+    let theme = ember_theme();
+    let kind = if chosen { ButtonKind::Primary } else { ButtonKind::Default };
+    let s = button_style_for(kind, small, enabled, theme.palette);
+    let state = match choice {
+        Choice::Toggle => Modifier::new().selected(chosen),
+        Choice::Radio => Modifier::new().role(Role::RadioButton).checked(chosen),
+    };
+    drop(
+        cu::Button(text)
+            .enabled(enabled)
+            .variant(ButtonVariant::Text)
+            .color(paint(s.text))
+            .modifier(
+                state
+                    .height(s.height)
+                    .background(paint(s.fill))
+                    .border(1.0, paint(s.border))
+                    .shape_role(ShapeRole::Full),
+            )
+            .on_click(on_click),
+    );
+}
+
+/// How a [`ChoiceButton`] tells assistive technology that it is the chosen one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Choice {
+    /// A pressed toggle (`aria-pressed`), such as the character style switch.
+    Toggle,
+    /// A checked radio button (`role=radio`), such as the fan mode control.
+    Radio,
 }
 
 /// A 40 px (or 32 px) circle with a 1 px border and a glyph.
@@ -1338,6 +1416,30 @@ mod tests {
         assert_eq!(sheet_presentation(559.0, false), SheetPresentation::Bottom);
         assert_eq!(sheet_presentation(560.0, false), SheetPresentation::Dialog);
         assert_eq!(sheet_max_height(390.0, 1000.0, false), 850.0);
+    }
+
+    #[test]
+    fn fr_l10_choices_and_selects_carry_their_state_for_assistive_technology() {
+        // compose-rust#473 (v0.0.9): the platform hears declared roles and states, so the style
+        // switch says which style is pressed, the fan modes are radios and a select is named.
+        let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        let choice = production.split("pub fn ChoiceButton(").nth(1).unwrap();
+        assert!(choice.contains("Choice::Toggle => Modifier::new().selected(chosen)"));
+        assert!(choice.contains("Choice::Radio => Modifier::new().role(Role::RadioButton).checked(chosen)"));
+        let select = production.split("fn select_field(").nth(1).unwrap();
+        assert!(select.contains(".role(Role::DropdownList)"));
+        assert!(select.contains(".expanded(open.get())"));
+        assert!(select.contains("Some(n) => trigger.label(n)"));
+        let chars = include_str!("characters_screen.rs");
+        assert!(chars.contains("ChoiceButton(s.label(), Choice::Toggle, s == style"));
+        for name in ["하네스", "역할", "스타일", "실루엣 고정"] {
+            assert!(chars.contains(&format!("NamedSelect(\"{name}\", &labels[at]")), "{name}");
+        }
+        let monitor = include_str!("monitor.rs");
+        assert!(monitor.contains("ChoiceButton(mode.label(), Choice::Radio, mode == FanMode::Auto"));
+        for src in [chars, monitor] {
+            assert!(!src.contains(concat!("TODO(compose-rust#", "473)")));
+        }
     }
 
     #[test]

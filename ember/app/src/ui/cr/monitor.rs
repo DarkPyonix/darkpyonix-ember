@@ -27,7 +27,7 @@ use crate::ui::monitor::{
 };
 use super::characters::{Character, CharState};
 use super::components::{
-    AppButton, ButtonKind, EmberCard, EmberSheetSized, Label, Pill, PillTone, SHEET_WIDTH_MONITOR,
+    Choice, ChoiceButton, EmberCard, EmberSheetSized, Label, Pill, PillTone, SHEET_WIDTH_MONITOR,
     WrapLabel,
 };
 use super::theme::*;
@@ -335,7 +335,9 @@ fn StatusCard(c: &ComputerChip, feed: &MonitorFeed, online: bool, height: Option
 
 /// The fan card: the speed stays 준비 중입니다 and the mode control (자동, 냉각, 최대) is shown
 /// disabled with the reason, because the node neither reports fans nor sets a mode
-/// (FR-X7, TODO(#389)). TODO(compose-rust#473): no radio role or checked state on the buttons.
+/// (FR-X7, TODO(#389)). The mode buttons are radio buttons to assistive technology, with 자동
+/// checked (`Choice::Radio`, compose-rust#473, v0.0.9). `Row::radio_group` (#545) moves focus
+/// between toolkit `RadioButton`s only, so the row does not claim it for pill buttons.
 fn FanCard(height: Option<f32>) {
     let p = ember_theme().palette;
     MonCard(metric_icon(Metric::Fans), Metric::Fans.title(), None, height, || {
@@ -346,8 +348,7 @@ fn FanCard(height: Option<f32>) {
         });
         cu::Row().space_role(SpaceRole::Xs).modifier(Modifier::new().fill_max_width()).content(|| {
             for mode in FanMode::ALL {
-                let kind = if mode == FanMode::Auto { ButtonKind::Primary } else { ButtonKind::Default };
-                AppButton(mode.label(), None, kind, true, FAN_MODE_AVAILABLE, false, || {});
+                ChoiceButton(mode.label(), Choice::Radio, mode == FanMode::Auto, true, FAN_MODE_AVAILABLE, || {});
             }
         });
         Label(FAN_MODE_REASON, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));

@@ -291,8 +291,9 @@ A checklist for the owner's two-machine run. Machine S runs `ember-server`, mach
 1. Start the server with the door on a LAN address and the transport on (the transport is what gives the node a pin to check):
    `EMBER_ENROL_LISTEN=<S-lan-ip>:8742 EMBER_ENROL_LISTEN_ALLOW_REMOTE=1 EMBER_ENROL_PUBLIC_URL=http://<S-lan-ip>:8742 EMBER_TRANSPORT=1 ember-server`
    The server logs a warning that the door speaks plain HTTP. The door is closed until step 2 mints a code, and closes again when no enrolment needs it (`FR-C2l`; `EMBER_ENROL_AUTO_CLOSE=0` keeps it open). It prints `ember server peer id: <64 hex>`; note it. The owner API stays on `127.0.0.1:8740`.
-2. Mint a code. The token is in `<data dir>/server-token`:
-   `curl -s -X POST http://127.0.0.1:8740/api/computers/enrol-codes -H "Authorization: Bearer $(cat <data dir>/server-token)" -H 'content-type: application/json' -d '{"name":"laptop"}'`
+2. Mint a code. Minting is an owner route (`FR-S12`, #784): the server token alone gets 403 `owner_required`. From a terminal on S, outside Ember's own terminal panel:
+   `ember-server owner enrol-code laptop`
+   The command claims an owner key over `<data dir>/owner.sock`; type the code the server prints on its console (`ember owner code: XXXX-XXXX`).
    The answer has `id`, `code`, `command`, `server`, `door`, `server_peer_id` and `server_fingerprint`. Expect `command` to start `ember-node enrol dpe_`, to name `http://<S-lan-ip>:8742` (not port 8740) and to end `--server-fingerprint <the 64 hex id>`.
 
 **On N**
@@ -301,7 +302,7 @@ A checklist for the owner's two-machine run. Machine S runs `ember-server`, mach
 
 **On S again**
 
-4. See the pending request: `curl -s http://127.0.0.1:8740/api/computers/enrol-codes/<id> -H "Authorization: Bearer ..."` shows `status: awaiting_confirmation`, `node_info`, `observed_addr` and `fingerprint`. Compare `fingerprint` with the one N printed. Confirm: `curl -s -X POST .../enrol-codes/<id>/confirm -H "Authorization: Bearer ..." -H 'content-type: application/json' -d '{}'`.
+4. See the pending request: `ember-server owner call GET /api/computers/enrol-codes/<id>` shows `status: awaiting_confirmation`, `node_info`, `observed_addr` and `fingerprint`. Compare `fingerprint` with the one N printed. Confirm: `ember-server owner call POST /api/computers/enrol-codes/<id>/confirm '{}'`. Both are owner routes (`FR-S12`).
 
 **On N again**
 

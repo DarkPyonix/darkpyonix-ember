@@ -1967,6 +1967,9 @@ pub mod page {
                         }
                         // TODO(v0.0.7 pin, compose-rust#417): Shift+F10 stands in for right-click until it
                         // reaches the app; remove the stand-in once right-click opens the menu.
+                        // TODO(compose-rust#100): the v0.0.6 renderer sends only Enter as a key event, so
+                        // in a real run this branch is not reached yet (#832); the "+" menu's 선택한 항목
+                        // section is the stand-in that works on the pin.
                         {
                             let m = event.modifiers();
                             if crate::ui::editor::tab_menu_key(&key_name(&event.key()), m.contains(Modifiers::CONTROL), m.contains(Modifiers::SHIFT), m.contains(Modifiers::ALT), m.contains(Modifiers::META)) {

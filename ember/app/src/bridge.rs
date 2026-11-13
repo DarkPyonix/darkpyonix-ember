@@ -466,6 +466,7 @@ async fn refresh_slow(s: &'static Services, live: Option<Live>, first: bool) {
     // known (FR-L3), then probe and update in place.
     if first {
         if let Ok(list) = s.server.computers(false).await {
+            crate::ui::files_service::note_computers(&list);
             let merged = s.client.read(|st| merge_computers(st.computers(), &list));
             s.client.apply(Input::ComputersLoaded(merged));
         }
@@ -530,6 +531,7 @@ async fn refresh_slow(s: &'static Services, live: Option<Live>, first: bool) {
     // Probing asks every node and can take a while; last.
     match s.server.computers(true).await {
         Ok(list) => {
+            crate::ui::files_service::note_computers(&list);
             let merged = s.client.read(|st| merge_computers(st.computers(), &list));
             s.client.apply(Input::ComputersLoaded(merged));
         }

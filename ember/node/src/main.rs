@@ -50,6 +50,8 @@ fn main() -> anyhow::Result<()> {
     if args.get(1).map(String::as_str) == Some("exec-server") {
         return Err(ember_node::exec_server::run_stdio());
     }
+    // Keys in the OS keystore where available (FR-S13, EMBER_KEYSTORE=file|os|auto).
+    ember_node::keystore::install_from_env()?;
     if args.get(1).map(String::as_str) == Some("hub") {
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()

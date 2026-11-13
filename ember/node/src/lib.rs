@@ -38,6 +38,7 @@ pub mod git;
 pub mod git_conflict;
 pub mod hub;
 pub mod jobs;
+pub mod keystore;
 pub mod metrics;
 pub mod policy;
 pub mod ports;

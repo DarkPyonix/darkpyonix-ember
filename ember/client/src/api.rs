@@ -155,6 +155,19 @@ pub(crate) fn fork_body(turn_seq: Option<i64>) -> serde_json::Value {
 }
 
 impl ApiError {
+    /// True for 403 `owner_required` (`FR-S12`, #784): the route needs owner presence and this
+    /// client sent no live owner key. Show "owner presence lost" and claim again; do not retry
+    /// in a loop, because the same call is refused until a claim is granted.
+    pub fn is_owner_required(&self) -> bool {
+        matches!(self, ApiError::Status { status: 403, code: Some(c), .. } if c == "owner_required")
+    }
+
+    /// True for 403 `scope_denied` (`FR-N8`, #366): over the transport, this device's scope
+    /// does not allow the route. Retrying does not help; the owner changes the scope.
+    pub fn is_scope_denied(&self) -> bool {
+        matches!(self, ApiError::Status { status: 403, code: Some(c), .. } if c == "scope_denied")
+    }
+
     /// The server's JSON `code` (`invalid_hours`, `not_found`, ...), when the error body had one.
     pub fn code(&self) -> Option<&str> {
         match self {
@@ -696,6 +709,10 @@ pub struct Api {
     /// Where the token came from. Unless it was given ([`Api::with_token`]), a 401 re-reads it
     /// once and retries, so a rotated `server-token` is picked up (#369).
     source: TokenSource,
+    /// The owner key as the `X-Ember-Owner` value (`FR-S12`, #784), sent on owner routes on the
+    /// plain HTTP reach only. In memory only, marked sensitive, shared by clones. It has no
+    /// environment or file source: it comes from a live claim ([`crate::owner::OwnerLink`]).
+    owner: Arc<std::sync::RwLock<Option<header::HeaderValue>>>,
 }
 
 /// Where an [`Api`] re-reads its server token after a 401 (#369).
@@ -762,6 +779,7 @@ impl Api {
             base,
             auth: Arc::new(std::sync::RwLock::new(auth)),
             source: TokenSource::Fixed,
+            owner: Arc::default(),
         })
     }
 
@@ -769,7 +787,7 @@ impl Api {
     /// this device's identity).
     pub fn over_transport(dialer: Dialer, addr: impl Into<PeerAddr>) -> Api {
         let addr = addr.into();
-        Api { base: format!("peer:{}", addr.peer), reach: Reach::Peer { dialer, addr }, auth: Arc::default(), source: TokenSource::Fixed }
+        Api { base: format!("peer:{}", addr.peer), reach: Reach::Peer { dialer, addr }, auth: Arc::default(), source: TokenSource::Fixed, owner: Arc::default() }
     }
 
     /// The base URL, or `peer:<id>` over the transport.
@@ -818,10 +836,14 @@ impl Api {
         match &self.reach {
             Reach::Http(http) => {
                 let url = format!("{}/api{path}", self.base);
-                let raw = Self::send_http(http, method.clone(), &url, json.as_ref(), self.auth_headers()).await?;
+                // The owner key goes on owner routes only (FR-S12). A 403 `owner_required` is
+                // not retried: the same key would be refused again.
+                let owner = self.owner_header(&method, path);
+                let raw =
+                    Self::send_http(http, method.clone(), &url, json.as_ref(), self.auth_headers(), owner.clone()).await?;
                 // A rotated server token (#369): re-read it once and retry when it changed.
                 if raw.status == StatusCode::UNAUTHORIZED && self.reload_token() {
-                    return Self::send_http(http, method, &url, json.as_ref(), self.auth_headers()).await;
+                    return Self::send_http(http, method, &url, json.as_ref(), self.auth_headers(), owner).await;
                 }
                 Ok(raw)
             }
@@ -855,10 +877,14 @@ impl Api {
         url: &str,
         json: Option<&serde_json::Value>,
         auth: Option<header::HeaderMap>,
+        owner: Option<header::HeaderValue>,
     ) -> ApiResult<Raw> {
         let mut req = http.request(method, url);
         if let Some(headers) = auth {
             req = req.headers(headers);
+        }
+        if let Some(key) = owner {
+            req = req.header(crate::owner::OWNER_HEADER, key);
         }
         if let Some(body) = json {
             req = req.json(body);
@@ -870,6 +896,40 @@ impl Api {
 
     fn auth_headers(&self) -> Option<header::HeaderMap> {
         self.auth.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Sets or clears the owner key (`FR-S12`, #784), for this `Api` and its clones. Set it when
+    /// a claim is granted ([`crate::owner::OwnerMessage::Granted`]) and clear it when the claim
+    /// link closes. The key is sent as `X-Ember-Owner` on owner routes
+    /// ([`crate::owner::owner_route`]) and only where the server token is sent: a loopback or
+    /// listed host over plain HTTP, never over the transport. False when the key cannot be a
+    /// header value, or this `Api` has nowhere to send it; nothing is stored then.
+    pub fn set_owner_key(&self, key: Option<&crate::owner::OwnerKey>) -> bool {
+        let value = match key {
+            None => None,
+            Some(k) => {
+                if !matches!(self.reach, Reach::Http(_)) || !crate::token::token_allowed_for(&self.base) {
+                    return false;
+                }
+                let Ok(mut v) = header::HeaderValue::from_str(k.expose()) else { return false };
+                v.set_sensitive(true);
+                Some(v)
+            }
+        };
+        *self.owner.write().unwrap_or_else(|e| e.into_inner()) = value;
+        true
+    }
+
+    /// Whether an owner key is set. It may be void already: the server decides.
+    pub fn has_owner_key(&self) -> bool {
+        self.owner.read().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+
+    /// The owner header for `method` on `path` (below `/api`, a query string allowed): the key
+    /// when one is set and the route is an owner route.
+    fn owner_header(&self, method: &Method, path: &str) -> Option<header::HeaderValue> {
+        let key = self.owner.read().unwrap_or_else(|e| e.into_inner()).clone()?;
+        crate::owner::owner_route(method, &format!("/api{path}")).then_some(key)
     }
 
     /// Re-reads the server token from the environment or the token file (FR-S11) when this `Api`
@@ -982,6 +1042,11 @@ impl Api {
 
     pub async fn health(&self) -> ApiResult<Health> {
         self.get("/health").await
+    }
+
+    /// `GET /api/whoami` (FR-N8): the door this client came through and its scope.
+    pub async fn whoami(&self) -> ApiResult<Whoami> {
+        self.get("/whoami").await
     }
 
     pub async fn agents(&self) -> ApiResult<Vec<DetectedAgent>> {
@@ -1431,6 +1496,16 @@ impl Api {
     pub async fn patch_session(&self, id: &str, patch: &SessionPatch) -> ApiResult<SessionRecord> {
         let body = serde_json::to_value(patch).expect("SessionPatch serialises");
         Self::decode(self.send(Method::PATCH, &format!("/sessions/{}", seg(id)), Some(body)).await?)
+    }
+
+    // ---- device scope (FR-N8, #366) ----------------------------------------------------------
+
+    /// Sets an admitted device's scope (`PATCH /api/devices/{peer_id}`). Owner only: the route
+    /// is on the local listener with the server token, never on the transport. Answers the
+    /// updated device row.
+    pub async fn set_device_scope(&self, peer_id: &str, scope: DeviceScope) -> ApiResult<DeviceRecord> {
+        let body = serde_json::json!({ "scope": scope });
+        Self::decode(self.send(Method::PATCH, &format!("/devices/{}", seg(peer_id)), Some(body)).await?)
     }
 
     /// Full-text search across every session's messages, best match first.
@@ -2086,6 +2161,32 @@ mod metrics_tests {
         assert!(s.memory.is_none() && s.disks.is_empty() && s.processes.is_empty());
         let s: MetricsSample = serde_json::from_value(json!({})).unwrap();
         assert_eq!(s, MetricsSample::default());
+    }
+}
+
+/// Answer of `GET /api/whoami` (FR-N8). `door` is `local` or `transport`; `peer_id` is set only
+/// over the transport; `scope` is `full`, `read_only` or `chat_only`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Whoami {
+    pub door: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<String>,
+    pub scope: String,
+}
+
+#[cfg(test)]
+mod whoami_tests {
+    use super::Whoami;
+
+    #[test]
+    fn whoami_decodes_both_doors() {
+        let local: Whoami = serde_json::from_str(r#"{"door":"local","scope":"full"}"#).unwrap();
+        assert_eq!(local, Whoami { door: "local".into(), peer_id: None, scope: "full".into() });
+        let remote: Whoami =
+            serde_json::from_str(r#"{"door":"transport","peer_id":"abc","scope":"chat_only"}"#).unwrap();
+        assert_eq!(remote.peer_id.as_deref(), Some("abc"));
+        assert_eq!(remote.scope, "chat_only");
+        assert_eq!(serde_json::to_string(&local).unwrap(), r#"{"door":"local","scope":"full"}"#);
     }
 }
 
@@ -3048,5 +3149,43 @@ mod enrol_tests {
         assert!(matches!(EnrolCallError::from(st(409, "door_off")), EnrolCallError::DoorOff));
         assert!(matches!(EnrolCallError::from(st(409, "door_url_unknown")), EnrolCallError::DoorUrlUnknown));
         assert_eq!(EnrolCallError::from(st(400, "bad")).status(), Some(400));
+    }
+}
+
+// ---- device scope (FR-N8, #366) --------------------------------------------------------------
+
+/// What an admitted device may call over the transport (server `devices::Scope`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceScope {
+    #[default]
+    Full,
+    ReadOnly,
+    ChatOnly,
+}
+
+/// One row of `GET /api/devices` (server `devices::Device`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRecord {
+    pub peer_id: String,
+    pub name: String,
+    pub created_at: i64,
+    pub source: String,
+    /// Absent on a server older than #366, which means `full`.
+    #[serde(default)]
+    pub scope: DeviceScope,
+}
+
+#[cfg(test)]
+mod device_scope_tests {
+    use super::*;
+
+    #[test]
+    fn scope_wire_names_match_the_server() {
+        assert_eq!(serde_json::to_value(DeviceScope::ReadOnly).unwrap(), "read_only");
+        assert_eq!(serde_json::to_value(DeviceScope::ChatOnly).unwrap(), "chat_only");
+        let d: DeviceRecord =
+            serde_json::from_str(r#"{"peer_id":"p","name":"n","created_at":1,"source":"local"}"#).unwrap();
+        assert_eq!(d.scope, DeviceScope::Full);
     }
 }

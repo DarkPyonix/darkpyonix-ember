@@ -402,7 +402,7 @@ pub async fn cli(args: &[String]) -> anyhow::Result<()> {
                 }
             }
             let hub = HubConfig::from_env().ok_or_else(|| anyhow::anyhow!("the hub is off ({}=off)", ember_hub::HUB_URL_ENV))?;
-            let key = SecretKey::load_or_generate(dir.join(crate::transport::KEY_FILE))?;
+            let key = crate::keystore::load_transport_key(&dir.join(crate::transport::KEY_FILE))?;
             let name = name.unwrap_or_else(default_name);
             let reg = register(&dir, &key, &hub, &name, None, |p| {
                 println!("To add this computer to your darkpyonix.dev account, open");

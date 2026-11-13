@@ -8,6 +8,7 @@
 //!   devices on its allow-list (`FR-N3`). Each request runs on a fresh stream of one cached
 //!   connection; the push socket ([`Api::open_push`]) gets its own stream.
 
+use crate::transfers::TransferTarget;
 use std::fmt;
 use std::sync::Arc;
 
@@ -1432,6 +1433,16 @@ impl Api {
         Self::decode(self.send(Method::PATCH, &format!("/sessions/{}", seg(id)), Some(body)).await?)
     }
 
+    // ---- device scope (FR-N8, #366) ----------------------------------------------------------
+
+    /// Sets an admitted device's scope (`PATCH /api/devices/{peer_id}`). Owner only: the route
+    /// is on the local listener with the server token, never on the transport. Answers the
+    /// updated device row.
+    pub async fn set_device_scope(&self, peer_id: &str, scope: DeviceScope) -> ApiResult<DeviceRecord> {
+        let body = serde_json::json!({ "scope": scope });
+        Self::decode(self.send(Method::PATCH, &format!("/devices/{}", seg(peer_id)), Some(body)).await?)
+    }
+
     /// Full-text search across every session's messages, best match first.
     pub async fn search(&self, query: &str, limit: Option<usize>) -> ApiResult<Vec<SearchHit>> {
         let mut q = vec![("q", query.to_string())];
@@ -1517,13 +1528,18 @@ fn authority_addr(authority: &str) -> (String, u16) {
     }
 }
 
-// ---- file transfer (FR-F3, FR-F4, FR-F5, FR-F8, #487) ---------------------------------------
+// ---- file transfer (FR-F3, FR-F4, FR-F5, FR-F8, #487; FR-F14, #773) -------------------------
 
 impl Api {
     /// Everything the receiving computer holds: devices, transfers, offers, received files,
     /// history and settings.
     pub async fn transfers(&self) -> ApiResult<crate::transfers::TransfersSnapshot> {
-        self.get("/transfers").await
+        self.transfers_at(&TransferTarget::Server).await
+    }
+
+    /// [`Api::transfers`] of `target`.
+    pub async fn transfers_at(&self, target: &TransferTarget) -> ApiResult<crate::transfers::TransfersSnapshot> {
+        self.get(&target.prefix()).await
     }
 
     /// Offers files as device `from`. With `peer_id` the receiver requires a registered device.
@@ -1533,8 +1549,19 @@ impl Api {
         peer_id: Option<&str>,
         files: &[crate::transfers::DeclaredFile],
     ) -> ApiResult<crate::transfers::OfferCreated> {
+        self.offer_transfer_at(&TransferTarget::Server, from, peer_id, files).await
+    }
+
+    /// [`Api::offer_transfer`] to `target`.
+    pub async fn offer_transfer_at(
+        &self,
+        target: &TransferTarget,
+        from: &str,
+        peer_id: Option<&str>,
+        files: &[crate::transfers::DeclaredFile],
+    ) -> ApiResult<crate::transfers::OfferCreated> {
         let body = json!({ "from": from, "peer_id": peer_id, "files": files });
-        Self::decode(self.post("/transfers/offers", body).await?)
+        Self::decode(self.post(&format!("{}/offers", target.prefix()), body).await?)
     }
 
     pub async fn accept_transfer_offer(&self, id: &str) -> ApiResult<crate::transfers::TransferItem> {
@@ -1555,6 +1582,19 @@ impl Api {
         data: &[u8],
         sha256: Option<&str>,
     ) -> ApiResult<crate::transfers::TransferItem> {
+        self.transfer_chunk_at(&TransferTarget::Server, id, file, offset, data, sha256).await
+    }
+
+    /// [`Api::transfer_chunk`] to `target`.
+    pub async fn transfer_chunk_at(
+        &self,
+        target: &TransferTarget,
+        id: &str,
+        file: usize,
+        offset: u64,
+        data: &[u8],
+        sha256: Option<&str>,
+    ) -> ApiResult<crate::transfers::TransferItem> {
         use base64::Engine;
         let body = json!({
             "file": file,
@@ -1562,34 +1602,67 @@ impl Api {
             "data_base64": base64::engine::general_purpose::STANDARD.encode(data),
             "sha256": sha256,
         });
-        Self::decode(self.post(&format!("/transfers/{}/chunks", seg(id)), body).await?)
+        Self::decode(self.post(&format!("{}/{}/chunks", target.prefix(), seg(id)), body).await?)
     }
 
     /// The receiver's verified byte offset of file `file` (`FR-F5`): where to continue.
     pub async fn transfer_resume_offset(&self, id: &str, file: usize) -> ApiResult<u64> {
+        self.transfer_resume_offset_at(&TransferTarget::Server, id, file).await
+    }
+
+    /// [`Api::transfer_resume_offset`] at `target`.
+    pub async fn transfer_resume_offset_at(&self, target: &TransferTarget, id: &str, file: usize) -> ApiResult<u64> {
         let r: crate::transfers::ResumeOffset =
-            self.get(&format!("/transfers/{}/resume-offset/{file}", seg(id))).await?;
+            self.get(&format!("{}/{}/resume-offset/{file}", target.prefix(), seg(id))).await?;
         Ok(r.offset)
     }
 
     /// Asks the receiver to verify and store the files of transfer `id`.
     pub async fn complete_transfer(&self, id: &str) -> ApiResult<Vec<crate::transfers::StoredFile>> {
+        self.complete_transfer_at(&TransferTarget::Server, id).await
+    }
+
+    /// [`Api::complete_transfer`] at `target`.
+    pub async fn complete_transfer_at(
+        &self,
+        target: &TransferTarget,
+        id: &str,
+    ) -> ApiResult<Vec<crate::transfers::StoredFile>> {
         let r: crate::transfers::Completed =
-            Self::decode(self.post(&format!("/transfers/{}/complete", seg(id)), json!({})).await?)?;
+            Self::decode(self.post(&format!("{}/{}/complete", target.prefix(), seg(id)), json!({})).await?)?;
         Ok(r.stored)
     }
 
     pub async fn pause_transfer(&self, id: &str) -> ApiResult<crate::transfers::TransferItem> {
-        Self::decode(self.post(&format!("/transfers/{}/pause", seg(id)), json!({})).await?)
+        self.transfer_control_at(&TransferTarget::Server, id, "pause").await
     }
 
     pub async fn resume_transfer(&self, id: &str) -> ApiResult<crate::transfers::TransferItem> {
-        Self::decode(self.post(&format!("/transfers/{}/resume", seg(id)), json!({})).await?)
+        self.transfer_control_at(&TransferTarget::Server, id, "resume").await
+    }
+
+    /// Pauses (`op` `"pause"`) or resumes (`"resume"`) transfer `id` at `target`.
+    pub async fn transfer_control_at(
+        &self,
+        target: &TransferTarget,
+        id: &str,
+        op: &str,
+    ) -> ApiResult<crate::transfers::TransferItem> {
+        Self::decode(self.post(&format!("{}/{}/{}", target.prefix(), seg(id), seg(op)), json!({})).await?)
     }
 
     /// Cancels an offer or a transfer; the receiver removes the partial files (`FR-F4`).
     pub async fn cancel_transfer(&self, id: &str) -> ApiResult<crate::transfers::HistoryRecord> {
-        Self::decode(self.post(&format!("/transfers/{}/cancel", seg(id)), json!({})).await?)
+        self.cancel_transfer_at(&TransferTarget::Server, id).await
+    }
+
+    /// [`Api::cancel_transfer`] at `target`.
+    pub async fn cancel_transfer_at(
+        &self,
+        target: &TransferTarget,
+        id: &str,
+    ) -> ApiResult<crate::transfers::HistoryRecord> {
+        Self::decode(self.post(&format!("{}/{}/cancel", target.prefix(), seg(id)), json!({})).await?)
     }
 
     pub async fn transfer_history(&self) -> ApiResult<Vec<crate::transfers::HistoryRecord>> {
@@ -1690,6 +1763,145 @@ impl Api {
 
 fn ports_path(computer_id: &str) -> String {
     format!("/computers/{}/ports", seg(computer_id))
+}
+
+/// One client attached to a persistent terminal (FR-P3).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct TermClientInfo {
+    pub client: u64,
+    #[serde(default)]
+    pub device: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+/// A persistent terminal on a computer, as `GET /api/computers/{id}/terms` lists it (FR-P6).
+/// Only the fields a session list needs; unknown fields are ignored so a newer node still decodes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct TermSummary {
+    pub id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// What started it: `ide-vscode`, `ide-ember`, `agent` or `user`.
+    #[serde(default)]
+    pub origin: String,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// `running`, `exited` or `lost`.
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub signal: Option<i32>,
+    #[serde(default)]
+    pub created_ms: i64,
+    #[serde(default)]
+    pub last_activity_ms: i64,
+    #[serde(default)]
+    pub clients: Vec<TermClientInfo>,
+    /// The client in control (FR-P4), if any.
+    #[serde(default)]
+    pub controller: Option<TermClientInfo>,
+    #[serde(default)]
+    pub survives_node_restart: bool,
+    #[serde(default)]
+    pub adopted: bool,
+}
+
+/// Filters for [`Api::computer_terms`]; `None` leaves a filter out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TermFilter {
+    pub project: Option<String>,
+    pub origin: Option<String>,
+    pub running: Option<bool>,
+}
+
+impl Api {
+    /// Persistent terminals on a computer (`local` for this server's machine), oldest first (FR-P6).
+    pub async fn computer_terms(&self, computer_id: &str, filter: &TermFilter) -> ApiResult<Vec<TermSummary>> {
+        self.get(&terms_path(computer_id, filter)).await
+    }
+
+    /// Kill a terminal: SIGHUP, then SIGKILL after 3 s, or `signal` (FR-P6).
+    pub async fn computer_term_kill(&self, computer_id: &str, term_id: &str, signal: Option<i32>) -> ApiResult<()> {
+        let body = match signal {
+            Some(s) => json!({ "signal": s }),
+            None => json!({}),
+        };
+        Self::check(self.post(&format!("{}/kill", term_path(computer_id, term_id)), body).await?)?;
+        Ok(())
+    }
+
+    /// Take (`take: true`) or release control for an attached client id (FR-P4).
+    pub async fn computer_term_control(&self, computer_id: &str, term_id: &str, client: u64, take: bool) -> ApiResult<()> {
+        let body = json!({ "client": client, "take": take });
+        Self::check(self.post(&format!("{}/control", term_path(computer_id, term_id)), body).await?)?;
+        Ok(())
+    }
+
+    /// Remove a finished terminal's record (409 while it runs).
+    pub async fn computer_term_remove(&self, computer_id: &str, term_id: &str) -> ApiResult<()> {
+        Self::check(self.send(Method::DELETE, &term_path(computer_id, term_id), None).await?)?;
+        Ok(())
+    }
+}
+
+fn term_path(computer_id: &str, term_id: &str) -> String {
+    format!("/computers/{}/terms/{}", seg(computer_id), seg(term_id))
+}
+
+fn terms_path(computer_id: &str, f: &TermFilter) -> String {
+    let mut q = Vec::new();
+    if let Some(p) = &f.project {
+        q.push(format!("project={}", seg(p)));
+    }
+    if let Some(o) = &f.origin {
+        q.push(format!("origin={}", seg(o)));
+    }
+    if let Some(r) = f.running {
+        q.push(format!("running={r}"));
+    }
+    let base = format!("/computers/{}/terms", seg(computer_id));
+    if q.is_empty() { base } else { format!("{base}?{}", q.join("&")) }
+}
+
+#[cfg(test)]
+mod terms_tests {
+    use super::*;
+
+    #[test]
+    fn fr_p6_terms_paths_escape_ids_and_carry_filters() {
+        assert_eq!(terms_path("local", &TermFilter::default()), "/computers/local/terms");
+        let f = TermFilter { project: Some("/a b".into()), origin: Some("agent".into()), running: Some(true) };
+        assert_eq!(terms_path("c 1", &f), "/computers/c%201/terms?project=%2Fa%20b&origin=agent&running=true");
+        assert_eq!(term_path("local", "ab/c"), "/computers/local/terms/ab%2Fc");
+    }
+
+    #[test]
+    fn fr_p6_a_term_list_entry_decodes_with_origin_and_controller() {
+        let t: TermSummary = serde_json::from_value(json!({
+            "id": "3f2a", "key": null, "title": "zsh", "origin": "ide-vscode", "project": "/p",
+            "argv": ["/bin/zsh", "-l"], "cwd": "/p", "pid": 4242, "state": "running",
+            "exit_code": null, "signal": null, "size": {"rows": 40, "cols": 120},
+            "created_ms": 1, "finished_ms": null, "last_activity_ms": 2, "tags": {},
+            "clients": [{"client": 7, "device": "Mac", "kind": "vscode-companion", "pid": null,
+                         "read_only": false, "size": null, "attached_ms": 0}],
+            "controller": {"client": 7, "device": "Mac", "kind": null, "read_only": false},
+            "survives_node_restart": true, "adopted": true, "has_screen": true, "future": 1
+        }))
+        .unwrap();
+        assert_eq!(t.origin, "ide-vscode");
+        assert_eq!(t.state, "running");
+        assert_eq!(t.controller.as_ref().map(|c| c.client), Some(7));
+        assert!(t.adopted && t.survives_node_restart);
+    }
 }
 
 #[cfg(test)]
@@ -2846,5 +3058,43 @@ mod enrol_tests {
         assert!(matches!(EnrolCallError::from(st(409, "door_off")), EnrolCallError::DoorOff));
         assert!(matches!(EnrolCallError::from(st(409, "door_url_unknown")), EnrolCallError::DoorUrlUnknown));
         assert_eq!(EnrolCallError::from(st(400, "bad")).status(), Some(400));
+    }
+}
+
+// ---- device scope (FR-N8, #366) --------------------------------------------------------------
+
+/// What an admitted device may call over the transport (server `devices::Scope`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceScope {
+    #[default]
+    Full,
+    ReadOnly,
+    ChatOnly,
+}
+
+/// One row of `GET /api/devices` (server `devices::Device`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRecord {
+    pub peer_id: String,
+    pub name: String,
+    pub created_at: i64,
+    pub source: String,
+    /// Absent on a server older than #366, which means `full`.
+    #[serde(default)]
+    pub scope: DeviceScope,
+}
+
+#[cfg(test)]
+mod device_scope_tests {
+    use super::*;
+
+    #[test]
+    fn scope_wire_names_match_the_server() {
+        assert_eq!(serde_json::to_value(DeviceScope::ReadOnly).unwrap(), "read_only");
+        assert_eq!(serde_json::to_value(DeviceScope::ChatOnly).unwrap(), "chat_only");
+        let d: DeviceRecord =
+            serde_json::from_str(r#"{"peer_id":"p","name":"n","created_at":1,"source":"local"}"#).unwrap();
+        assert_eq!(d.scope, DeviceScope::Full);
     }
 }

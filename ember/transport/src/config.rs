@@ -114,8 +114,15 @@ pub struct LetifyConfig {
     pub resume_window: Duration,
     /// Use letify-link's phone profile (smaller windows, slower keepalive).
     pub mobile: bool,
-    /// How often the pkarr mailbox of each watched peer is read.
+    /// How often the pkarr mailbox of a watched peer is read while a dial or a signal exchange
+    /// with it is in flight, and for [`LetifyConfig::fast_window`] after (SPEC `FR-N2`, #783).
     pub poll_interval: Duration,
+    /// The longest interval between reads of an idle peer's mailbox. An idle peer's interval
+    /// doubles from `poll_interval` up to this. It bounds the delay of an inbound relayed dial
+    /// from an idle peer until the hub offers a long poll (#783 step 2).
+    pub idle_poll_interval: Duration,
+    /// How long a peer stays at `poll_interval` after its last dial or signal.
+    pub fast_window: Duration,
     /// How long one dial of one candidate path may take before it is retried. A relayed dial
     /// includes the rendezvous round trip.
     pub dial_timeout: Duration,
@@ -136,6 +143,10 @@ impl Default for LetifyConfig {
             resume_window: Duration::from_secs(300),
             mobile: false,
             poll_interval: Duration::from_millis(1500),
+            // 25 s: 3,456 reads a day per idle pair, the same cost as one long poll of the
+            // planned 25 s wait, and still under the hub's 30 s request limit (FR-N2).
+            idle_poll_interval: Duration::from_secs(25),
+            fast_window: Duration::from_secs(30),
             dial_timeout: Duration::from_secs(8),
             connect_timeout: Duration::from_secs(20),
         }
@@ -144,8 +155,9 @@ impl Default for LetifyConfig {
 
 impl LetifyConfig {
     /// Reads `EMBER_LETIFY_RELAY_LISTEN`, `EMBER_LETIFY_QAD_LISTEN`, `EMBER_LETIFY_OBSERVER`
-    /// and `EMBER_LETIFY_ADVERTISE` (comma separated `ip:port`). Unusable values are logged and
-    /// ignored.
+    /// and `EMBER_LETIFY_ADVERTISE` (comma separated `ip:port`), and the polling intervals
+    /// `EMBER_LETIFY_POLL_MS`, `EMBER_LETIFY_IDLE_POLL_MS` and `EMBER_LETIFY_FAST_WINDOW_MS`
+    /// (milliseconds). Unusable values are logged and ignored.
     pub fn from_env() -> Self {
         fn var(name: &str) -> Option<String> {
             std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
@@ -164,6 +176,19 @@ impl LetifyConfig {
             if cfg.observer.is_none() {
                 tracing::warn!(value = %v, "EMBER_LETIFY_OBSERVER is not host:port[#peer id]");
             }
+        }
+        fn millis(name: &str) -> Option<Duration> {
+            let v = var(name)?;
+            v.parse::<u64>().map(Duration::from_millis).map_err(|e| tracing::warn!(value = %v, "{name}: {e}")).ok()
+        }
+        if let Some(d) = millis("EMBER_LETIFY_POLL_MS") {
+            cfg.poll_interval = d;
+        }
+        if let Some(d) = millis("EMBER_LETIFY_IDLE_POLL_MS") {
+            cfg.idle_poll_interval = d;
+        }
+        if let Some(d) = millis("EMBER_LETIFY_FAST_WINDOW_MS") {
+            cfg.fast_window = d;
         }
         if let Some(v) = var("EMBER_LETIFY_ADVERTISE") {
             cfg.advertise = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
@@ -237,11 +262,43 @@ pub struct HubDirectory {
     /// devices of the same account, so this is on by default; turn it off to keep IP addresses
     /// away from the hub (peers then always start relayed and upgrade by hole punching).
     pub publish_direct: bool,
+    /// The hub's batched long-poll watch (`GET /pkarr/watch`), when its `/config` advertises
+    /// `pkarr_watch` and this device has a device token. `None`: watched mailboxes are polled
+    /// adaptively (SPEC `FR-N2`, #783).
+    pub watch: Option<PkarrWatch>,
+}
+
+/// The hub's `GET /pkarr/watch` (core FR-H2, #132): one long-poll request for many keys.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PkarrWatch {
+    /// Keys per request (`/config` `pkarr_watch.max_keys`).
+    pub max_keys: usize,
+    /// The longest `wait` (`/config` `pkarr_watch.max_wait`).
+    pub max_wait: Duration,
+    /// This device's token (`dpd_...`), sent as `Authorization: Bearer`. The watch does not
+    /// accept the resolve token.
+    pub device_token: String,
+}
+
+impl std::fmt::Debug for PkarrWatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PkarrWatch")
+            .field("max_keys", &self.max_keys)
+            .field("max_wait", &self.max_wait)
+            .field("device_token", &"<redacted>")
+            .finish()
+    }
 }
 
 impl HubDirectory {
     pub fn new(pkarr_url: impl Into<String>) -> Self {
-        Self { pkarr_url: pkarr_url.into(), token: None, publish_direct: true }
+        Self { pkarr_url: pkarr_url.into(), token: None, publish_direct: true, watch: None }
+    }
+
+    /// Uses the hub's batched long-poll watch for watched mailboxes.
+    pub fn watch(mut self, watch: Option<PkarrWatch>) -> Self {
+        self.watch = watch;
+        self
     }
 
     pub fn token(mut self, token: Option<String>) -> Self {
@@ -261,6 +318,7 @@ impl std::fmt::Debug for HubDirectory {
             .field("pkarr_url", &self.pkarr_url)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
             .field("publish_direct", &self.publish_direct)
+            .field("watch", &self.watch)
             .finish()
     }
 }

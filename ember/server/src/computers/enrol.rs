@@ -36,7 +36,9 @@
 //! an unknown enrol id, so a wrong secret and an unknown id answer alike ([`Delivery::Unknown`]).
 //!
 //! The node token (`dpn_`, 366 bits) is minted by the server at confirm, never before, and the
-//! node never chooses it. The registry keeps it in clear (it presents it as a bearer, like every
+//! node never chooses it. It never crosses the network in clear (FR-C2d, #540): the door seals
+//! it to the one-time key the node sent at redeem ([`NodeInfo::enrol_key`],
+//! `ember_node::enrol_seal`), and a redeem without such a key is refused. The registry keeps it in clear (it presents it as a bearer, like every
 //! computer). The pending copy for delivery is kept in MEMORY only (`Enrol::pending`), never in
 //! SQLite: it is handed to the node once by [`Enrol::take_delivery`] and wiped. A server restart
 //! between the confirm and the delivery loses it; the next look at the enrolment reads `expired`,
@@ -297,10 +299,17 @@ pub struct NodeInfo {
     /// The node's transport peer id, 64 hex characters.
     #[serde(default)]
     pub peer_id: Option<String>,
+    /// The node's one-time X25519 public key for this enrol run, 64 lowercase hex characters
+    /// (FR-C2d, #540). The node token is sealed to it. `Option` only so that a row stored before
+    /// the field existed still parses: [`NodeInfo::validated`] refuses a node without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrol_key: Option<String>,
 }
 
 impl NodeInfo {
-    /// A node that reports only a host name (tests, and nodes with nothing else to say).
+    /// A node that reports only a host name, with a throwaway enrol key: the private half is
+    /// dropped here, so what is sealed to it can never be opened. For tests that do not read
+    /// the credential; a caller that does sets its own key with [`NodeInfo::with_enrol_key`].
     pub fn minimal(hostname: &str) -> NodeInfo {
         NodeInfo {
             hostname: hostname.into(),
@@ -309,11 +318,18 @@ impl NodeInfo {
             node_version: String::new(),
             url: None,
             peer_id: None,
+            enrol_key: Some(ember_node::enrol_seal::NodeKey::generate().public_hex()),
         }
     }
 
+    /// The same information with `key` (64 lowercase hex) as the enrol key.
+    pub fn with_enrol_key(mut self, key: &str) -> NodeInfo {
+        self.enrol_key = Some(key.to_string());
+        self
+    }
+
     /// The cleaned copy, or `None` when any field breaks its cap or carries a control, format
-    /// or line-separator character. The check does not depend on any code or enrolment.
+    /// or line-separator character, or when the enrol key is missing or unusable. The check does not depend on any code or enrolment.
     pub fn validated(&self) -> Option<NodeInfo> {
         fn text(s: &str, min: usize, max: usize) -> Option<String> {
             let t = s.trim();
@@ -340,6 +356,9 @@ impl NodeInfo {
             Some(p) if p.len() == 64 && p.chars().all(|c| c.is_ascii_hexdigit()) => Some(p.clone()),
             Some(_) => return None,
         };
+        // FR-C2d: no enrol key, no redeem. A key of the wrong shape or a weak point (one the
+        // token could not be sealed to) is refused here, before the code is spent.
+        let enrol_key = self.enrol_key.as_ref().filter(|k| ember_node::enrol_seal::key_ok(k))?.clone();
         let out = NodeInfo {
             hostname: text(&self.hostname, 1, MAX_INFO_CHARS)?,
             os: text(&self.os, 0, MAX_INFO_CHARS)?,
@@ -347,6 +366,7 @@ impl NodeInfo {
             node_version: text(&self.node_version, 0, MAX_INFO_CHARS)?,
             url,
             peer_id,
+            enrol_key: Some(enrol_key),
         };
         (serde_json::to_string(&out).ok()?.len() <= MAX_INFO_BYTES).then_some(out)
     }
@@ -380,6 +400,12 @@ pub struct Redeemed {
     pub poll_secret: Secret,
     /// The confirm deadline (Unix ms): the redeem time plus [`CONFIRM_WINDOW_MS`].
     pub expires_ms: i64,
+    /// The server's identity (its public Ed25519 peer id, 64 lowercase hex), `None` when the
+    /// service holds no identity key (FR-C2j, #541).
+    pub server_peer_id: Option<String>,
+    /// The identity's signature over this enrol id and the node's enrol key
+    /// (`ember_node::enrol_seal::sign_proof`, 128 hex). Present exactly when `server_peer_id` is.
+    pub server_proof: Option<String>,
 }
 
 /// Why a redeem was refused. [`Refused::Generic`] covers unknown, used, expired, cancelled and
@@ -537,7 +563,9 @@ pub enum Delivery {
     Pending,
     /// The credential, handed over once and wiped from the server's memory.
     /// `server_peer_id` is the server's own public transport id, `None` when the transport is off.
-    Joined { token: Secret, name: String, computer_id: String, server_peer_id: Option<String> },
+    /// `enrol_key` is the node's one-time public key from the redeem: the door seals the token
+    /// to it and never sends the token in clear (FR-C2d, #540).
+    Joined { token: Secret, name: String, computer_id: String, server_peer_id: Option<String>, enrol_key: String },
     /// The credential was already delivered.
     Delivered,
     Denied,
@@ -882,8 +910,14 @@ pub struct Enrol {
     /// Serializes every state change after the redeem (confirm, deny, delivery, expiry), so
     /// exactly one of two racing calls wins and no registration is made for the loser.
     gate: Mutex<()>,
-    /// The server's own transport peer id (public, 64 lowercase hex), set once at construction by
-    /// [`Enrol::with_server_peer_id`] and `None` when the transport is off. Never per request.
+    /// The server's identity key (its Ed25519 transport key), set once at construction by
+    /// [`Enrol::with_server_key`]. It signs the proof in each redeem answer (FR-C2j, #541) and
+    /// its public id is the pin in the minted command. `None`: no identity, no pin, no proof.
+    server_key: Option<ember_transport::SecretKey>,
+    /// The public id of `server_key` (64 lowercase hex). Never per request.
+    server_identity: Option<String>,
+    /// The id the `joined` delivery carries for the node's `allowed-peers`: `server_identity`
+    /// when the transport is on, `None` when it is off (the node has nobody to allow then).
     server_peer_id: Option<String>,
 }
 
@@ -902,24 +936,41 @@ impl Enrol {
             registrar: Mutex::new(None),
             orphans: Mutex::new(Vec::new()),
             gate: Mutex::new(()),
+            server_key: None,
+            server_identity: None,
             server_peer_id: None,
         })
     }
 
-    /// Like [`Enrol::new`] (default limits), with the server's transport peer id for the `joined` delivery
-    /// (FR-C2). The id is kept only when it is exactly 64 lowercase hex chars (the shape
-    /// [`ember_transport::fingerprint_hex`] accepts); a malformed value is dropped to `None`, never
-    /// stored. `None` is the transport being off.
-    pub fn with_server_peer_id(store: Arc<Store>, server_peer_id: Option<String>) -> Arc<Enrol> {
-        let server_peer_id = server_peer_id.filter(|id| ember_transport::fingerprint_hex(id).is_some());
+    /// Like [`Enrol::new`] (default limits), with the server's identity key (FR-C2j, #541): the
+    /// Ed25519 key of its transport (`<data dir>/transport.key`). With a key, the minted command
+    /// pins its public id (`--server-fingerprint`) and every redeem answer carries the id and a
+    /// signature the node checks before it polls. `transport_on` says whether the server serves
+    /// the transport: only then does the `joined` delivery carry the id for the node's
+    /// `allowed-peers` (FR-C2d). The id is derived from the key, never taken from a caller, so it
+    /// cannot be malformed and cannot name a key the server does not hold.
+    pub fn with_server_key(
+        store: Arc<Store>,
+        server_key: Option<ember_transport::SecretKey>,
+        transport_on: bool,
+    ) -> Arc<Enrol> {
+        let identity = server_key.as_ref().map(|k| k.peer_id().to_string());
         let mut e = Self::new(store);
-        Arc::get_mut(&mut e).expect("a fresh Arc has one owner").server_peer_id = server_peer_id;
+        let inner = Arc::get_mut(&mut e).expect("a fresh Arc has one owner");
+        inner.server_peer_id = identity.clone().filter(|_| transport_on);
+        inner.server_identity = identity;
+        inner.server_key = server_key;
         e
     }
 
-    /// The server's transport peer id (64 lowercase hex), `None` when the transport is off. The
-    /// mint pins it in the command (`--server-fingerprint`).
+    /// The server's identity (64 lowercase hex), `None` when the service holds no key. The mint
+    /// pins it in the command (`--server-fingerprint`) and the redeem answer proves it.
     pub fn server_peer_id(&self) -> Option<&str> {
+        self.server_identity.as_deref()
+    }
+
+    /// The id the `joined` delivery carries: the identity when the transport is on, else `None`.
+    pub fn transport_peer_id(&self) -> Option<&str> {
         self.server_peer_id.as_deref()
     }
 
@@ -960,7 +1011,7 @@ impl Enrol {
     /// Mint a code for a computer to be called `name`. `ttl` defaults to 10 minutes and is
     /// clamped to 10 minutes; zero is refused. `base_url` is the URL of the enrol DOOR as the other
     /// machine reaches it (not the owner API address); the caller passes it. When the service
-    /// holds the server's peer id, the command ends in `--server-fingerprint <full 64 hex id>`
+    /// holds the server's identity key, the command ends in `--server-fingerprint <full 64 hex id>`
     /// (the pin the node checks; the short form is for human screens only). Expired rows older
     /// than [`SWEEP_GRACE_MS`] are deleted.
     pub fn mint(&self, name: &str, now_ms: i64, ttl: Option<Duration>, base_url: &str) -> Result<Minted, EnrolError> {
@@ -983,7 +1034,7 @@ impl Enrol {
             )?;
         }
         let mut command = format!("ember-node enrol {code} --server {base}");
-        if let Some(id) = &self.server_peer_id {
+        if let Some(id) = &self.server_identity {
             command.push_str(" --server-fingerprint ");
             command.push_str(id);
         }
@@ -995,7 +1046,9 @@ impl Enrol {
     /// failure limiters, then the node information (independent of the code), then one SQL
     /// statement that moves the code from `waiting` to `awaiting_confirmation` only if it is
     /// unused and unexpired, so of two concurrent redeems one wins. No credential exists after
-    /// it: the answer is the enrol id, the poll secret (once) and the confirm deadline.
+    /// it: the answer is the enrol id, the poll secret (once), the confirm deadline and, when
+    /// the service holds an identity key, the server's id with its signature over the enrol id
+    /// and the node's enrol key (FR-C2j, #541).
     pub fn redeem(&self, code: &str, info: &NodeInfo, now_ms: i64, source_key: &str) -> Result<Redeemed, Refused> {
         if self.rate_limited(source_key, now_ms) {
             return Err(Refused::RateLimited);
@@ -1022,7 +1075,17 @@ impl Enrol {
             |r| r.get::<_, String>(0),
         );
         match won {
-            Ok(enrol_id) => Ok(Redeemed { enrol_id, poll_secret: Secret::new(secret), expires_ms: deadline }),
+            Ok(enrol_id) => {
+                // The proof covers the key this node just sent, so it is of no use for another
+                // redeem. Signing happens only after the code was accepted: nobody gets a
+                // signature from the server without a valid code.
+                let server_proof = match (&self.server_key, &info.enrol_key) {
+                    (Some(key), Some(node_key)) => ember_node::enrol_seal::sign_proof(key, &enrol_id, node_key),
+                    _ => None,
+                };
+                let server_peer_id = self.server_identity.clone().filter(|_| server_proof.is_some());
+                Ok(Redeemed { enrol_id, poll_secret: Secret::new(secret), expires_ms: deadline, server_peer_id, server_proof })
+            }
             // No row, or a database error: the caller sees the same refusal either way.
             Err(_) => {
                 self.record_failure(source_key, now_ms);
@@ -1408,7 +1471,8 @@ impl Enrol {
     /// The node asks for its credential with its poll secret. The presented secret is hashed and
     /// compared in constant effort, and an unknown enrol id does the same work, so every bad
     /// secret and every unknown id is [`Delivery::Unknown`]. The token is returned once and
-    /// wiped; a second call is [`Delivery::Delivered`].
+    /// wiped; a second call is [`Delivery::Delivered`]. The caller (the door) seals the token to
+    /// the returned `enrol_key` before it leaves the process.
     pub fn take_delivery(&self, enrol_id: &str, poll_secret: &str, now_ms: i64) -> Result<Delivery, EnrolError> {
         let g = self.gate();
         self.settle(&g, now_ms)?;
@@ -1423,13 +1487,23 @@ impl Enrol {
             State::Expired => Delivery::Expired,
             State::Confirmed => {
                 let token = self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(enrol_id);
-                match token {
-                    Some(token) if self.transition(enrol_id, State::Confirmed, State::Joined, now_ms, None, None)? => {
+                // The key the node sent at redeem. A row without one (stored before FR-C2d
+                // required it) has nothing to seal to and expires like a lost credential.
+                let enrol_key = row
+                    .node_info
+                    .as_deref()
+                    .and_then(|j| serde_json::from_str::<NodeInfo>(j).ok())
+                    .and_then(|i| i.enrol_key);
+                match (token, enrol_key) {
+                    (Some(token), Some(enrol_key))
+                        if self.transition(enrol_id, State::Confirmed, State::Joined, now_ms, None, None)? =>
+                    {
                         Delivery::Joined {
                             token,
                             name: row.final_name.unwrap_or(row.name),
                             computer_id: row.computer_id.unwrap_or_default(),
                             server_peer_id: self.server_peer_id.clone(),
+                            enrol_key,
                         }
                     }
                     _ => {
@@ -1582,7 +1656,9 @@ async fn mint(AxumState(s): AxumState<AppState>, Json(b): Json<MintBody>) -> Res
     let mut warning = format!("The code is shown once. Check that {door_url} is reachable from the other machine.");
     if door_url.starts_with("http://") {
         warning.push_str(
-            " The enrol door speaks plain HTTP. Anyone on the network path can read the code and the credential. \
+            " The enrol door speaks plain HTTP. Anyone on the network path can read the code. The credential is \
+             sealed to the node, so reading the traffic does not reveal it; someone who can change the traffic is \
+             stopped only by the --server-fingerprint pin in the command. \
              Use it on a trusted network, or put TLS in front of it and set EMBER_ENROL_PUBLIC_URL to the https address.",
         );
     }
@@ -1595,7 +1671,8 @@ async fn mint(AxumState(s): AxumState<AppState>, Json(b): Json<MintBody>) -> Res
         "door": door_state,
         "server": door_url,
     });
-    // Both keys are absent, never null, when the transport is off.
+    // The server's identity, the one the command pins. Both keys are absent, never null, when
+    // the server holds no identity key.
     if let (Some(id), Some(map)) = (s.enrol.server_peer_id(), body.as_object_mut()) {
         map.insert("server_peer_id".into(), json!(id));
         if let Some(short) = ember_transport::fingerprint_hex(id) {
@@ -1746,15 +1823,28 @@ mod tests {
         }
     }
 
-    fn enrol_with(id: Option<&str>) -> Arc<Enrol> {
+    /// The identity key made from `seed`, and its public id (64 lowercase hex).
+    fn server_key(seed: u8) -> (ember_transport::SecretKey, String) {
+        let key = ember_transport::SecretKey::from_bytes([seed; 32]);
+        let id = key.peer_id().to_string();
+        (key, id)
+    }
+
+    fn sid(seed: u8) -> String {
+        server_key(seed).1
+    }
+
+    /// An `Enrol` whose server has the identity key of `seed` and serves the transport; `None`
+    /// is a server with no identity key.
+    fn enrol_with(seed: Option<u8>) -> Arc<Enrol> {
         let store = Arc::new(Store::open_in_memory().unwrap());
-        Enrol::with_server_peer_id(store, id.map(String::from))
+        Enrol::with_server_key(store, seed.map(|s| server_key(s).0), true)
     }
 
     #[test]
     fn fr_c2_joined_carries_the_server_peer_id_when_set() {
-        let id = "ab".repeat(32);
-        let e = enrol_with(Some(&id));
+        let id = sid(0xab);
+        let e = enrol_with(Some(0xab));
         assert_eq!(server_id_of(joined_of(&e, T0)), Some(id));
     }
 
@@ -1766,20 +1856,122 @@ mod tests {
         assert_eq!(server_id_of(joined_of(&e, T0)), None);
     }
 
+    /// The id is derived from the key, so it always has the shape the node accepts, and with the
+    /// transport off the identity stays (pin and proof) while the `joined` delivery carries no id.
     #[test]
-    fn fr_c2_a_malformed_server_peer_id_is_dropped_never_stored() {
-        for bad in ["zz".repeat(32), "a".repeat(63), "a".repeat(65), "AB".repeat(32), String::new(), " ".repeat(64)] {
-            let e = enrol_with(Some(&bad));
-            assert_eq!(e.server_peer_id, None, "{bad:?}");
-            assert_eq!(server_id_of(joined_of(&e, T0)), None, "{bad:?}");
+    fn fr_c2j_the_identity_is_derived_from_the_key_and_the_joined_id_needs_the_transport() {
+        let (key, id) = server_key(0x11);
+        assert!(ember_transport::fingerprint_hex(&id).is_some(), "{id}");
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let off = Enrol::with_server_key(store, Some(key.clone()), false);
+        assert_eq!(off.server_peer_id(), Some(id.as_str()));
+        assert_eq!(off.transport_peer_id(), None);
+        assert_eq!(server_id_of(joined_of(&off, T0)), None);
+        assert!(mint(&off, T0 + 1_000_000).command.ends_with(&format!(" --server-fingerprint {id}")));
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let on = Enrol::with_server_key(store, Some(key), true);
+        assert_eq!(on.transport_peer_id(), Some(id.as_str()));
+        assert_eq!(server_id_of(joined_of(&on, T0)), Some(id));
+        // No key: no identity, whatever the transport flag says.
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let none = Enrol::with_server_key(store, None, true);
+        assert_eq!((none.server_peer_id(), none.transport_peer_id()), (None, None));
+    }
+
+    // ---- FR-C2d (#540): the enrol key; FR-C2j (#541): the server proof ----
+
+    #[test]
+    fn fr_c2d_redeem_refuses_a_node_without_a_usable_enrol_key() {
+        let (_, e) = svc();
+        let m = mint(&e, T0);
+        let mut none = info();
+        none.enrol_key = None;
+        let weak = info().with_enrol_key(&"00".repeat(32));
+        let upper = info().with_enrol_key(&"AB".repeat(32));
+        let short = info().with_enrol_key(&"ab".repeat(31));
+        for bad in [&none, &weak, &upper, &short] {
+            assert_eq!(e.redeem(m.code.expose(), bad, T0 + 1, SRC), Err(Refused::BadNodeInfo), "{bad:?}");
         }
+        // The refusal burned nothing: the code still redeems with a key.
+        assert!(rd(&e, m.code.expose(), T0 + 2, SRC).is_ok());
+    }
+
+    #[test]
+    fn fr_c2d_the_delivery_names_the_key_the_node_sent_and_the_node_opens_the_seal() {
+        let (_, e) = svc();
+        let fake = Fake::default();
+        let node = ember_node::enrol_seal::NodeKey::generate();
+        let m = mint(&e, T0);
+        let r = e.redeem(m.code.expose(), &info().with_enrol_key(&node.public_hex()), T0 + 1, SRC).unwrap();
+        e.confirm(&r.enrol_id, None, None, T0 + 10, &fake).unwrap();
+        match e.take_delivery(&r.enrol_id, r.poll_secret.expose(), T0 + 12).unwrap() {
+            Delivery::Joined { token, enrol_key, .. } => {
+                assert_eq!(enrol_key, node.public_hex());
+                // What the door does with it: the node opens the seal, nobody else does.
+                let sealed = ember_node::enrol_seal::seal(&r.enrol_id, &enrol_key, token.expose()).unwrap();
+                assert_eq!(node.open(&r.enrol_id, &sealed).unwrap().as_str(), token.expose());
+                assert_eq!(token.expose(), fake.token(0));
+                let other = ember_node::enrol_seal::NodeKey::generate();
+                assert!(other.open(&r.enrol_id, &sealed).is_err());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A confirmed row whose stored node information has no enrol key (written before the key
+    /// was required) has nothing to seal to: the delivery expires, the token is never returned.
+    #[test]
+    fn fr_c2d_a_confirmed_row_without_an_enrol_key_expires_and_hands_out_nothing() {
+        let (store, e) = svc();
+        let fake = Fake::default();
+        let (id, secret) = open(&e, T0);
+        e.confirm(&id, None, None, T0 + 10, &fake).unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE enrol_codes SET node_info = ?2 WHERE id = ?1",
+                rusqlite::params![id, r#"{"hostname":"old-node"}"#],
+            )
+            .unwrap();
+        assert!(matches!(e.take_delivery(&id, &secret, T0 + 12).unwrap(), Delivery::Expired));
+        assert!(e.pending.lock().unwrap().is_empty(), "the pending token is wiped");
+        assert_eq!(e.status(&id, T0 + 13).unwrap(), EnrolStatus::Expired);
+    }
+
+    #[test]
+    fn fr_c2j_redeem_answer_proves_the_server_identity_for_this_node_key() {
+        use ember_node::enrol_seal::{verify_proof, NodeKey};
+        let (_, id) = server_key(0x21);
+        let e = enrol_with(Some(0x21));
+        let node = NodeKey::generate().public_hex();
+        let m = mint(&e, T0);
+        let r = e.redeem(m.code.expose(), &info().with_enrol_key(&node), T0 + 1, SRC).unwrap();
+        assert_eq!(r.server_peer_id.as_deref(), Some(id.as_str()));
+        let proof = r.server_proof.expect("a proof");
+        assert!(verify_proof(&id, &r.enrol_id, &node, &proof));
+        // The proof is for this node key and this enrolment only.
+        assert!(!verify_proof(&id, &r.enrol_id, &NodeKey::generate().public_hex(), &proof));
+        assert!(!verify_proof(&id, "another-enrol", &node, &proof));
+        // Another server's id does not verify it: a rogue server cannot borrow it.
+        assert!(!verify_proof(&sid(0x22), &r.enrol_id, &node, &proof));
+    }
+
+    #[test]
+    fn fr_c2j_redeem_answer_has_no_identity_without_a_key_and_a_refusal_signs_nothing() {
+        let (_, e) = svc();
+        let m = mint(&e, T0);
+        let r = rd(&e, m.code.expose(), T0 + 1, SRC).unwrap();
+        assert_eq!((r.server_peer_id, r.server_proof), (None, None));
+        // With a key, a refused redeem returns no signature at all (the type has none to carry).
+        let e = enrol_with(Some(0x23));
+        assert_eq!(rd(&e, "dpe_wrong", T0 + 1, SRC), Err(Refused::Generic));
     }
 
     #[test]
     fn fr_c2_the_server_peer_id_is_not_per_request() {
-        let id = "cd".repeat(32);
-        let e1 = enrol_with(Some(&id));
-        let e2 = enrol_with(Some(&id));
+        let id = sid(0xcd);
+        let e1 = enrol_with(Some(0xcd));
+        let e2 = enrol_with(Some(0xcd));
         let a = server_id_of(joined_of(&e1, T0));
         let b = server_id_of(joined_of(&e2, T0));
         assert_eq!(a, b);
@@ -1893,8 +2085,8 @@ mod tests {
 
     #[test]
     fn fr_c2_command_has_the_full_server_peer_id_as_the_pin() {
-        let id = "ab".repeat(32);
-        let e = enrol_with(Some(&id));
+        let id = sid(0xab);
+        let e = enrol_with(Some(0xab));
         let m = mint(&e, T0);
         let c = m.code.expose();
         assert_eq!(m.command, format!("ember-node enrol {c} --server {BASE} --server-fingerprint {id}"));
@@ -1915,8 +2107,8 @@ mod tests {
 
     #[test]
     fn fr_c2_server_peer_id_accessor_returns_the_stored_id() {
-        let id = "cd".repeat(32);
-        assert_eq!(enrol_with(Some(&id)).server_peer_id(), Some(id.as_str()));
+        let id = sid(0xcd);
+        assert_eq!(enrol_with(Some(0xcd)).server_peer_id(), Some(id.as_str()));
     }
 
     /// The owner router with a given door state, plus the store to count rows.
@@ -1957,9 +2149,9 @@ mod tests {
 
     #[tokio::test]
     async fn fr_c2_mint_answer_names_the_door_and_the_server_id() {
-        let id = "0f".repeat(32);
+        let (key, id) = server_key(0x0f);
         let store = Arc::new(Store::open_in_memory().unwrap());
-        let e = Enrol::with_server_peer_id(store.clone(), Some(id.clone()));
+        let e = Enrol::with_server_key(store.clone(), Some(key), true);
         let door = "http://192.168.0.5:8741";
         let app = owner_app(e, DoorUrl::Url(door.into()));
         let (st, b, text, cc) = post_mint(&app, json!({"name": "laptop"})).await;
@@ -2617,6 +2809,7 @@ mod tests {
             node_version: "0.1.0".into(),
             url: Some("http://10.0.0.7:8741".into()),
             peer_id: Some("ab".repeat(32)),
+            enrol_key: Some(ember_node::enrol_seal::NodeKey::from_bytes([7u8; 32]).public_hex()),
         };
         let r = e.redeem(m.code.expose(), &good, T0 + 2, SRC).unwrap();
         let d = e.status_detail(&r.enrol_id, T0 + 3).unwrap();

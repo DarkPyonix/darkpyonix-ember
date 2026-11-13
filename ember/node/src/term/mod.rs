@@ -63,8 +63,16 @@ impl Shared {
     }
 }
 
+/// [`Terms::create`] refused a new session because [`Terms::set_max_running`] sessions are
+/// already running (#474). The API answers 409 `conflict`.
+#[derive(Debug, thiserror::Error)]
+#[error("terminal limit reached: {0} sessions are running; close one first")]
+pub struct TermLimit(pub usize);
+
 pub struct Terms {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// The most running sessions [`Terms::create`] allows; `usize::MAX` (the default) is no cap.
+    max_running: std::sync::atomic::AtomicUsize,
     shared: Arc<Shared>,
     /// The `ember-node` binary used to start PTY keepers; `None` disables them.
     keeper_exe: Option<PathBuf>,
@@ -100,7 +108,12 @@ impl Terms {
         });
         let keeper_exe = if store.is_some() { keeper_exe } else { None };
         let shared = Arc::new(Shared { store, events });
-        let terms = Arc::new(Terms { sessions: Mutex::new(HashMap::new()), shared, keeper_exe });
+        let terms = Arc::new(Terms {
+            sessions: Mutex::new(HashMap::new()),
+            max_running: std::sync::atomic::AtomicUsize::new(usize::MAX),
+            shared,
+            keeper_exe,
+        });
         terms.load();
         terms.prune();
 
@@ -193,13 +206,24 @@ impl Terms {
         }
     }
 
-    /// Start a session (or return the running one with the same `key`).
+    /// Cap the number of running sessions (#474). A real node has no cap; the server's in-process
+    /// local node sets one, so a client cannot start PTYs without bound.
+    pub fn set_max_running(&self, max: usize) {
+        self.max_running.store(max, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Start a session (or return the running one with the same `key`). Fails with [`TermLimit`]
+    /// when the cap is reached; returning a keyed running session is still allowed then.
     pub fn create(&self, req: &TermCreateRequest, cwd: PathBuf) -> anyhow::Result<TermCreateResponse> {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(key) = &req.key {
             if let Some(s) = sessions.values().find(|s| s.is_running() && s.key().as_deref() == Some(key.as_str())) {
                 return Ok(TermCreateResponse { created: false, term: s.info() });
             }
+        }
+        let max = self.max_running.load(std::sync::atomic::Ordering::SeqCst);
+        if sessions.values().filter(|s| s.is_running()).count() >= max {
+            return Err(TermLimit(max).into());
         }
         let argv = match &req.program {
             Some(p) => crate::exec::argv(p)?,

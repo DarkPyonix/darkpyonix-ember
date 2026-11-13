@@ -235,6 +235,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/api/transfers/{id}/resume-offset/{file}", Token),
     ("GET", "/api/usage", Token),
     ("GET", "/api/usage/summary", Token),
+    ("GET", "/api/whoami", Token),
     ("GET", "/auth/callback", Exempt),
     ("POST", "/enrol/redeem", OtherDoor),
     ("DELETE", "/enrol/status/{enrol_id}", OtherDoor),

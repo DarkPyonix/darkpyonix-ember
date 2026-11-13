@@ -217,7 +217,16 @@ pub fn SettingsContent() {
 
             cu::Separator(Some(paint(p.line)));
 
-            // 5. Connection & local storage info
+            // 5. Per-device scope (FR-N8, #817)
+            SectionBlock(
+                "기기 권한",
+                "서버에 등록된 기기마다 할 수 있는 작업을 정합니다.",
+                super::device_scope::DeviceScopeSection,
+            );
+
+            cu::Separator(Some(paint(p.line)));
+
+            // 6. Connection & local storage info
             SectionBlock("연결 및 저장소", "현재 연결된 메인 서버 주소와 로컬 데이터 폴더입니다.", || {
                 InsetPanel(true, || {
                     cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {

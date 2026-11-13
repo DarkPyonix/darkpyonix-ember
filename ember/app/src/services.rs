@@ -124,6 +124,38 @@ impl Services {
 }
 
 impl Services {
+    /// The admitted devices with their scope (FR-N8, #817): the server, or the demo list.
+    pub async fn devices(&self) -> Result<Vec<ember_client::api::DeviceRecord>, ember_client::api::ApiError> {
+        if self.demo.is_some() {
+            return Ok(crate::ui::device_scope::demo_devices());
+        }
+        self.client.api().devices().await
+    }
+
+    /// Sets a device's scope (FR-N8, #817): on the server, or in the demo list.
+    pub async fn set_device_scope(
+        &self,
+        peer_id: &str,
+        scope: ember_client::api::DeviceScope,
+    ) -> Result<ember_client::api::DeviceRecord, ember_client::api::ApiError> {
+        if self.demo.is_some() {
+            return crate::ui::device_scope::demo_set_scope(peer_id, scope)
+                .ok_or_else(|| ember_client::api::ApiError::Decode(format!("unknown device {peer_id}")));
+        }
+        self.client.api().set_device_scope(peer_id, scope).await
+    }
+
+    /// The peer id of the device the app runs on, if known (`EMBER_DEVICE_PEER_ID`; the demo
+    /// names its own laptop row).
+    pub fn self_peer_id(&self) -> Option<String> {
+        if self.demo.is_some() {
+            return Some(crate::ui::device_scope::DEMO_SELF_PEER.to_string());
+        }
+        std::env::var(crate::ui::device_scope::SELF_PEER_ENV).ok().filter(|v| !v.trim().is_empty())
+    }
+}
+
+impl Services {
     /// Answer an approval: on the server, or in the demo state (#199).
     pub async fn answer(
         &self,

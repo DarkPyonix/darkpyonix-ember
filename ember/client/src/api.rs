@@ -1435,6 +1435,12 @@ impl Api {
 
     // ---- device scope (FR-N8, #366) ----------------------------------------------------------
 
+    /// The admitted devices (`GET /api/devices`), each with its scope (FR-N8, #817). Owner only,
+    /// like [`Api::set_device_scope`].
+    pub async fn devices(&self) -> ApiResult<Vec<DeviceRecord>> {
+        self.get("/devices").await
+    }
+
     /// Sets an admitted device's scope (`PATCH /api/devices/{peer_id}`). Owner only: the route
     /// is on the local listener with the server token, never on the transport. Answers the
     /// updated device row.

@@ -18,7 +18,9 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 /// Posts `text` to be shown as a long message. Safe from any thread.
 pub fn post(text: impl Into<String>) {
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    shared_ui().notice.set(Some((id, text.into())));
+    // A call the device's scope refused reads as one fixed sentence wherever it fails (FR-N8).
+    let text = crate::ui::device_scope::failure_text(&text.into());
+    shared_ui().notice.set(Some((id, text)));
 }
 
 /// Shows what [`post`] queued. Compose it once at the root.

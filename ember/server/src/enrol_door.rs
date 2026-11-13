@@ -9,8 +9,10 @@
 //!
 //! Where each secret may appear: the code only in the redeem request body; the poll secret in
 //! the redeem answer body and then only in the `Authorization: Bearer` header of a poll (never in
-//! a query string or a path, so no access log or proxy log records it); the node token only in
-//! the one poll answer that delivers it. None of them is formatted into a log line or an error.
+//! a query string or a path, so no access log or proxy log records it); the node token only
+//! SEALED (`credential.sealed_token`, FR-C2d, #540) in the one poll answer that delivers it, to
+//! the one-time key the node sent in its redeem, never in clear. The redeem answer also carries
+//! the server's identity and proof when the server holds an identity key (FR-C2j, #541). None of them is formatted into a log line or an error.
 //!
 //! Off by default. With `EMBER_ENROL_LISTEN` unset or empty nothing is bound and no router is
 //! built (`main.rs` asks [`EnrolDoor::from_env`] and builds nothing on `None`).
@@ -617,15 +619,19 @@ async fn redeem(State(st): State<Arc<Routes>>, req: Request) -> Response {
     match st.enrol.redeem(&b.code, &b.node_public_info, crate::store::now_ms(), &source) {
         Ok(r) => {
             tracing::info!(enrol = %log_id(&r.enrol_id), addr = %ip, "enrol code redeemed");
-            let mut res = (
-                StatusCode::OK,
-                axum::Json(json!({
-                    "enrol_id": r.enrol_id,
-                    "poll_secret": r.poll_secret.expose(),
-                    "expires_ms": r.expires_ms,
-                })),
-            )
-                .into_response();
+            let mut body = json!({
+                "enrol_id": r.enrol_id,
+                "poll_secret": r.poll_secret.expose(),
+                "expires_ms": r.expires_ms,
+            });
+            // FR-C2j (#541): the server's identity and its signature over this enrol id and the
+            // node's enrol key. Both keys together or neither (absent, never null), so a node
+            // with a pin can check the server before it polls for any credential.
+            if let (Some(sid), Some(proof), Some(map)) = (&r.server_peer_id, &r.server_proof, body.as_object_mut()) {
+                map.insert("server_peer_id".into(), json!(sid));
+                map.insert("server_proof".into(), json!(proof));
+            }
+            let mut res = (StatusCode::OK, axum::Json(body)).into_response();
             res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
             res
         }
@@ -696,9 +702,21 @@ async fn poll(State(st): State<Arc<Routes>>, id: Result<Path<String>, PathReject
         Delivery::Denied => status("denied"),
         Delivery::Expired => status("expired"),
         Delivery::Unknown => poll_not_found(),
-        Delivery::Joined { token, name, computer_id, server_peer_id } => {
+        Delivery::Joined { token, name, computer_id, server_peer_id, enrol_key } => {
+            // FR-C2d (#540): the token leaves the process sealed to the node's one-time key,
+            // never in clear. The key passed `key_ok` at redeem, so a failure here is not
+            // expected; if it happens the token is not sent at all (the enrolment already reads
+            // `joined`, the owner removes the computer and mints a new code).
+            let sealed = match ember_node::enrol_seal::seal(&id, &enrol_key, token.expose()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(enrol = %log_id(&id), "enrol credential could not be sealed: {e}");
+                    return poll_not_found();
+                }
+            };
+            drop(token);
             tracing::info!(enrol = %log_id(&id), "enrol credential delivered");
-            let mut credential = json!({ "node_token": token.expose(), "name": name, "computer_id": computer_id });
+            let mut credential = json!({ "sealed_token": sealed, "name": name, "computer_id": computer_id });
             // The server's public transport id, only when the transport is on: the key is absent
             // otherwise, never null and never empty (FR-C2). No other answer carries it.
             if let (Some(sid), Some(map)) = (server_peer_id, credential.as_object_mut()) {

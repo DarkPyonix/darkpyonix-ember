@@ -46,7 +46,7 @@ use tokio::sync::{mpsc, watch};
 
 pub use addr::{AddressDirectory, MemoryDirectory, PeerAddr};
 pub use config::{
-    BackendKind, HubDirectory, LetifyConfig, ObserverAddr, RelayConfig, TransportConfig, BACKEND_ENV,
+    BackendKind, HubDirectory, LetifyConfig, ObserverAddr, PkarrWatch, RelayConfig, TransportConfig, BACKEND_ENV,
     RELAY_URL_ENV,
 };
 pub use dialer::Dialer;
@@ -54,7 +54,7 @@ pub use gate::PeerGate;
 pub use key::{fingerprint_hex, PeerId, SecretKey};
 pub use signal::{
     pkarr_signable, verify_pkarr_payload, MemoryPkarrStore, MemorySignal, MemorySignalHub, PkarrStore,
-    SignalChannel, SIGNAL_MAX,
+    SignalChannel, WatchLimits, WatchOutcome, SIGNAL_MAX,
 };
 #[cfg(feature = "letify")]
 pub use letify::{direct_addresses_from_txt, is_record_label, HttpPkarrStore, LETIFY_TRANSPORT_ID};

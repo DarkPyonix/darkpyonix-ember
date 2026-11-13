@@ -76,8 +76,18 @@ use ember_server::store::Store;
 ///   only the guest routes and `/join`, never the owner API. `EMBER_GUEST_LISTEN_ALLOW_REMOTE=1`
 ///   is required for a non-loopback address; `EMBER_GUEST_ALLOWED_HOSTS` and
 ///   `EMBER_GUEST_PUBLIC_URL` name the hosts guests use. See `guest_door`.
+/// `ember-server __keep-pty …` is the local node's PTY keeper (FR-P6): dispatched before any
+/// runtime or logging starts, as in `ember-node`, so a keeper holds one fd and little memory.
+fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some(ember_node::term::pty::KEEPER_SUBCOMMAND) {
+        std::process::exit(ember_node::term::pty::keeper_main(&args[2..]));
+    }
+    serve_main()
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn serve_main() -> anyhow::Result<()> {
     let started = std::time::SystemTime::now();
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -160,10 +170,22 @@ async fn main() -> anyhow::Result<()> {
         )),
         None => None,
     };
-    // The peer-to-peer transport (FR-N1), opt-in. `server_peer_id` stays None when it is off.
-    let mut server_peer_id: Option<String> = None;
-    let net = if server_transport::enabled_from_env() {
+    // The server's identity for the enrol flow (FR-C2j, #541): its transport key, loaded (and
+    // created on first use) whether or not the transport is on, so the minted command always
+    // pins the server and the redeem answer always proves it. A key that cannot be loaded with
+    // the transport off is not fatal: enrol then runs without a pin, as before.
+    let transport_on = server_transport::enabled_from_env();
+    let mut server_key: Option<ember_transport::SecretKey> = None;
+    if !transport_on {
+        match server_transport::load_key(&data_dir) {
+            Ok(k) => server_key = Some(k),
+            Err(e) => tracing::warn!("no server identity key, enrol commands carry no --server-fingerprint: {e}"),
+        }
+    }
+    // The peer-to-peer transport (FR-N1), opt-in.
+    let net = if transport_on {
         let key = server_transport::load_key(&data_dir)?;
+        server_key = Some(key.clone());
         let registered = hub.as_ref().is_some_and(|h| h.is_registered());
         // The resolve token (`dpr_`) goes in the directory resolver's URL; a registration from
         // before the hub issued them gets one now.
@@ -178,7 +200,13 @@ async fn main() -> anyhow::Result<()> {
             Some(h) => Some(h.config()),
             None => hub_config,
         };
-        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), registered, token)).await?;
+        // The device token, for the hub's batched pkarr watch (header only, never a URL).
+        let device_token = match &hub {
+            Some(h) if registered => h.registration().ok().flatten().and_then(|r| r.active_token()),
+            _ => None,
+        };
+        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), registered, token, device_token))
+            .await?;
         if let Some(h) = &hub {
             h.attach_transport(t.clone());
             let _watch = h.spawn_watch(ember_server::hub::WATCH_PERIOD);
@@ -198,7 +226,6 @@ async fn main() -> anyhow::Result<()> {
         t.wait_online(std::time::Duration::from_secs(5)).await;
         // Printed (not only logged): the peer id goes into each node's allowed peers.
         println!("ember server peer id: {}", t.peer_id());
-        server_peer_id = Some(t.peer_id().to_string());
         println!("ember server peer addr: {}", serde_json::to_string(&t.local_addr())?);
         Some(ServerTransport::new(t))
     } else {
@@ -213,7 +240,7 @@ async fn main() -> anyhow::Result<()> {
     let store_for_guest = store.clone();
     // One `Enrol` for the whole process: the owner's routes (mint, confirm, deny) and the enrol door
     // (redeem, poll, from step C3a) share its failure windows and its pending-token map, which live per instance.
-    let enrol = computers::enrol::Enrol::with_server_peer_id(store.clone(), server_peer_id);
+    let enrol = computers::enrol::Enrol::with_server_key(store.clone(), server_key, transport_on);
     let sessions = Sessions::new(store, adapters);
     // Per-harness memory limits stored by the settings API (FR-L20, FR-S8).
     sessions.load_settings();
@@ -229,6 +256,14 @@ async fn main() -> anyhow::Result<()> {
         shim,
         dialer.clone(),
     );
+    // The local computer's terminals outlive this process (FR-P6): records and PTY keepers in
+    // `<data dir>/local-node`; a restart re-adopts them. EMBER_NODE_KEEP_PTY=0 turns it off.
+    computers.set_local_node_options(computers::local_node::LocalNodeOptions::from_env(&data_dir));
+    match computers.resume_local_node() {
+        Ok(true) => tracing::info!("local node resumed the terminals of the previous run"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("local node could not resume terminals: {e}"),
+    }
     // Claude Code's file tools on other computers (EMBER_MOUNT=off|nfs|fuse|auto).
     // Opened like every other node client, so computers registered by peer mount too.
     if let Some(mounts) = computers::mount::ProjectMounts::from_env(computers.node_fs()) {
@@ -411,8 +446,8 @@ async fn main() -> anyhow::Result<()> {
             if d.is_remote() {
                 tracing::warn!(
                     "enrol door on {} is reachable from that network (EMBER_ENROL_LISTEN_ALLOW_REMOTE=1); it \
-                     speaks plain HTTP, so an enrol code and the credential cross the network in clear; put \
-                     TLS in front of it",
+                     speaks plain HTTP, so an enrol code and the poll secret cross the network in clear \
+                     (the credential itself is sealed to the node); put TLS in front of it",
                     d.listen
                 );
             } else {
@@ -485,6 +520,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(computers::terms::router(computers.clone()))
         .merge(computers::metrics::router(computers.clone()))
         .merge(computers::fs::router(computers.clone()))
+        .merge(computers::transfers::router(computers.clone()))
         .merge(computers::ports::router(computers.clone()))
         .merge(ember_server::api::harnesses::router(sessions.clone(), computers.clone()))
         .merge(ember_server::api::git::router(sessions.clone(), computers.clone()))

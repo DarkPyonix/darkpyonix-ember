@@ -72,12 +72,17 @@ pub const ICON_SUN_SVG: &str = include_str!("../../assets/nav/sun.svg");
 pub const ICON_MOON_SVG: &str = include_str!("../../assets/nav/moon.svg");
 pub const ICON_GEAR_SVG: &str = include_str!("../../assets/nav/gear.svg");
 
-/// `svg` at `px` dp with its `currentColor` stroke set to `argb` (alpha dropped).
-pub fn tinted_svg(svg: &str, px: f32, argb: u32) -> String {
-    let size = format!("{}", px.round() as i32);
+/// `svg` with its `currentColor` stroke set to `argb` (alpha dropped), drawn to fill its box.
+/// The root takes width/height 100% (with the icon's viewBox) because SVG root sizes are pixels:
+/// a dp number drew at ~40% of the box on the Flip 4 (compose-rust#677). `_px` is the box size,
+/// set by the caller's modifier.
+pub fn tinted_svg(svg: &str, _px: f32, argb: u32) -> String {
     svg.replace("currentColor", &format!("#{:06x}", argb & 0x00ff_ffff))
-        .replacen("width=\"24\" height=\"24\"", &format!("width=\"{size}\" height=\"{size}\""), 1)
+        .replacen("width=\"24\" height=\"24\"", FILL_BOX, 1)
 }
+
+/// The SVG root size that fills the drawing box on every renderer (compose-rust#677).
+pub const FILL_BOX: &str = "width=\"100%\" height=\"100%\"";
 
 /// The menu to mark active: an open conversation always belongs to 세션.
 pub fn active_menu(route: &Route, chosen: NavMenu) -> NavMenu {
@@ -506,7 +511,7 @@ mod tests {
     fn tinted_svg_sets_colour_and_size() {
         let t = tinted_svg(NavMenu::Home.svg(), 18.0, 0xff1c1b19);
         assert!(t.contains("stroke=\"#1c1b19\""));
-        assert!(t.contains("width=\"18\" height=\"18\""));
+        assert!(t.contains("width=\"100%\" height=\"100%\""), "root fills its box: {t}");
         assert!(!t.contains("currentColor"));
     }
 

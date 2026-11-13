@@ -79,9 +79,9 @@ pub fn Character(
 }
 
 pub fn draw(spec: &CharSpec, size: f32) {
-    // The renderer draws an SVG at its own width and height, so the pixel size goes in.
-    let px = format!("{}", size.round() as i32);
-    let doc = svg(spec).replacen("width=\"100\" height=\"100\"", &format!("width=\"{px}\" height=\"{px}\""), 1);
+    // The root fills the image box (SVG root sizes are pixels, so a dp number drew small on
+    // Android, compose-rust#677); the modifier sets the box.
+    let doc = svg(spec).replacen("width=\"100\" height=\"100\"", crate::ui::shell::FILL_BOX, 1);
     let id = compose_rust::asset(AssetKind::Svg, doc_bytes(doc));
     cu::Image(id).modifier(Modifier::new().size(size, size));
 }

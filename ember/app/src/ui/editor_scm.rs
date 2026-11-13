@@ -1555,9 +1555,10 @@ pub mod view {
     }
 
     /// Rows of the base side drawn from the editor's first visible line, enough to fill the pane.
-    // TODO(compose-rust#544): the base side follows the editor's first visible line and draws 20 px
-    // rows on the assumption that this is the editor's line height; follow the editor's pixel scroll
-    // offset and line height once the toolkit reports them.
+    // v0.0.7: #544 fixed (`CodeMetrics`, `CodeScrolled` and `Batch::set_scroll_offset`);
+    // workaround kept until checked on a display (dioxus-compose's `CodeEditor` has to expose the
+    // `on_code_metrics` and `on_code_scrolled` handlers first). Until then the base side follows the
+    // editor's first visible line and draws 20 px rows on the assumption that this is the line height.
     const BASE_ROWS_SHOWN: usize = 400;
 
     /// The editable diff (FR-L31.10): the base read-only on the left, one row per working-tree line
@@ -2226,7 +2227,8 @@ pub mod diff_editor_view {
                 let event = selection_s.bridge.borrow().on_selection_changed(&selection_uri, e.version, pos(e.anchor), pos(e.active));
                 send(&selection_s, event);
             },
-            // TODO(compose-rust#544): lines only; the base side cannot follow a partial-line scroll.
+            // Lines only: the base side cannot follow a partial-line scroll. v0.0.7: #544 fixed;
+            // workaround kept until checked on a display (dioxus-compose has to forward `CodeScrolled`).
             on_visible_range_change: move |e: compose_rust::code::VisibleRange| range_s.scm.set_diff_lines(e.first_line, e.last_line),
         } }
     }

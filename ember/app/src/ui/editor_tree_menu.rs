@@ -6,9 +6,11 @@
 //! inline icons: cut, copy, paste, rename (F2), delete, closing the file's tab and select all are
 //! in the tree's context menu, in Code-OSS's explorer order.
 //!
-//! TODO(v0.0.7 pin, compose-rust#417): right-click does not reach the app until the pin moves, so
-//! two stand-ins open the same items: the "선택한 항목" section of the header "+" menu and
-//! Shift+F10 (or the context-menu key) on the focused tree. Remove both once right-click works.
+//! v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward
+//! compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
+//! Until right-click reaches the editor window, two stand-ins open the same items: the "선택한
+//! 항목" section of the header "+" menu and Shift+F10 (or the context-menu key) on the focused
+//! tree. Remove both once right-click works there.
 
 use std::cell::Cell;
 
@@ -117,7 +119,8 @@ pub fn plus_entries(st: TreeMenuState) -> Vec<TreeMenuEntry> {
     out
 }
 
-/// TODO(v0.0.7 pin, compose-rust#417): false once right-click opens the context menu.
+/// v0.0.7: #417 fixed; workaround kept until checked on a display (false once right-click opens
+/// the context menu in the dioxus-compose window).
 pub const PLUS_MENU_HOLDS_SELECTION: bool = true;
 /// The heading of the stand-in section of the "+" menu.
 pub const SELECTION_HEADING: &str = "선택한 항목";
@@ -208,7 +211,7 @@ mod tests {
         assert_eq!(&entries[..2], &[Item(NewFile, true), Item(NewFolder, true)]);
         assert_eq!(&entries[2..4], &[Sep, Heading("선택한 항목")]);
         assert!(entries.contains(&Item(Rename, true)) && entries.contains(&Item(Delete, true)) && entries.contains(&Item(CloseTab, true)));
-        const { assert!(PLUS_MENU_HOLDS_SELECTION, "the stand-in goes with the v0.0.7 pin (compose-rust#417), not before") };
+        const { assert!(PLUS_MENU_HOLDS_SELECTION, "the stand-in goes once dioxus-compose forwards right-click (compose-rust#417), not before") };
     }
 
     #[test]

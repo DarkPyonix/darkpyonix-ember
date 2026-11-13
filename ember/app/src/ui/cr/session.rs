@@ -50,7 +50,7 @@ use super::characters::{CharState, Character};
 use super::compat::Spinner;
 use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
-    AppButton, ButtonKind, Clickable, CloseButton, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
+    AppButton, ButtonKind, Clickable, CloseButton, NamedClickable, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
     FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, SearchField, Select, SheetFooter, Txt,
     SEARCH_FIELD_H_COMPACT,
 };
@@ -236,7 +236,9 @@ pub fn StopCircleButton(on_click: impl FnMut() + 'static) {
 /// Circular send button (`.sendround` in mockup: `size` circle, `--ink`, send glyph).
 pub fn SendCircleButton(size: f32, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    Clickable(
+    // Named "보내기" for assistive technology (compose-rust v0.0.7, #429).
+    NamedClickable(
+        super::a11y::SEND,
         Modifier::new()
             .size(size, size)
             .background(paint(p.ink))
@@ -496,8 +498,8 @@ pub fn ide_split_style(p: &Palette) -> IdeSplitStyle {
 
 /// The chevron beside a header's "IDE 열기" that opens the chooser even when a default is set
 /// (FR-L7). `on_ink` draws it inside the dark split button; otherwise as a bordered square.
-/// TODO(compose-rust#460): the accessible name "다른 IDE 선택" cannot be set; `Clickable` gives a
-/// button role (compose-rust#372) but no label. Touch target 26x32, under 44 px: #323.
+/// Its accessible name is "다른 IDE 선택" (compose-rust v0.0.7, #460), and it says whether the
+/// chooser is open. Touch target 26x32, under 44 px: #323.
 pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
     let p = ember_theme().palette;
     let (tint, m) = if on_ink {
@@ -512,8 +514,9 @@ pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
                 .shape_role(ShapeRole::Full),
         )
     };
-    Clickable(
-        m,
+    NamedClickable(
+        super::a11y::OTHER_IDE,
+        m.expanded(open.get()),
         Alignment::Center,
         move || open.set(true),
         move || NavIcon(ICON_CHEVRON_DOWN_SVG, tint, 13.0),
@@ -1098,7 +1101,8 @@ pub fn PaneTranscript(session: &str, agent: &str) {
 /// The Terminal side of a pane: the member's terminal, read-only, in the mockup's `.term` colours
 /// (FR-L18). Outside the demo the client has no stream to attach to for a member, so it says so.
 ///
-/// TODO(compose-rust#5): wrap in `SelectionContainer` so the output can be selected and copied.
+/// v0.0.7: #5 fixed (`SelectionContainer`); workaround kept until checked on a display (the
+/// terminal rows are a styled grid, and a selection over them must be tried before wrapping it).
 /// TODO(compose-rust): scroll to the bottom on new output; the pane opens at the top.
 /// Outside the demo it attaches as a read-only viewer to the project's one running agent terminal on
 /// the session's computer, and detaches when the pane leaves the screen (the terminal keeps running).
@@ -1507,10 +1511,11 @@ pub fn Pane(
                             let tg_seg = toggle.clone();
                             if icon_toggle {
                                 // One icon button (`.ph-mode`): shows the view it opens, so the
-                                // title keeps the remaining width. TODO(compose-rust#460): the
-                                // accessible name `switch_label()` cannot be set on a Clickable.
+                                // title keeps the remaining width. Its accessible name is
+                                // `switch_label()`, a fixed set (compose-rust v0.0.7, #460).
                                 let to = cur_toggle.other();
-                                Clickable(
+                                NamedClickable(
+                                    to.switch_label(),
                                     Modifier::new().size(28.0, 28.0).corner_radius(CORNER_SM),
                                     Alignment::Center,
                                     move || tg_seg.set(to),
@@ -3596,7 +3601,8 @@ fn StatusCardsGrid(width_dp: f32, d: StatusCardsData) {
 
 /// Whether the stat tiles, the timeline card and the kanban card are drawn above the status cards.
 /// `EMBER_CR_SCROLL=cards` hides them for review captures: the toolkit cannot scroll a column from
-/// code (TODO(compose-rust#385)), so the blocks that would have scrolled out are left out and the
+/// code before v0.0.5 (v0.0.7: #385 fixed with `ScrollState::scroll_to`; workaround kept until
+/// checked on a display, because the capture script relies on it), so the blocks that would have scrolled out are left out and the
 /// cards (PR과 CI, 서브 에이전트 스레드, 부하) start at the top at 390 dp.
 fn status_blocks_above_cards(scroll: Option<&str>) -> bool {
     scroll != Some("cards")
@@ -3908,8 +3914,9 @@ fn ToolbarBtn(
             .border(1.0, paint(p.line))
             .shape_role(ShapeRole::Full)
     };
-    // The label is the tooltip (`title` in the mockup). TODO(v0.0.7 pin, compose-rust#417): the
-    // tooltip shows on hover once pointer events reach the app; assistive technology reads it now.
+    // The label is the tooltip (`title` in the mockup). v0.0.7: #417 fixed (pointer events reach
+    // the app); kept as is until checked on a display that the toolkit `Tooltip` shows on hover.
+    // Assistive technology reads it now.
     let tip = lbl.clone();
     cu::Tooltip(tip).content(move || Clickable(m, Alignment::Center, on_click, move || {
         if show_label || chevron {
@@ -4647,12 +4654,14 @@ pub fn SessionScreen(focus: Option<String>) {
                                 .content(|| {
                                     if is_phone {
                                         let dr = drawer.clone();
-                                        Clickable(
+                                        NamedClickable(
+                                            super::a11y::MENU,
                                             Modifier::new()
                                                 .size(32.0, 32.0)
                                                 .background(paint(p.surface))
                                                 .border(1.0, paint(p.line))
-                                                .shape_role(ShapeRole::Full),
+                                                .shape_role(ShapeRole::Full)
+                                                .expanded(drawer.get()),
                                             Alignment::Center,
                                             move || dr.set(true),
                                             || NavIcon(ICON_LIST_SVG, p.text_2.to_argb(), 15.0),
@@ -4804,10 +4813,10 @@ pub fn SessionScreen(focus: Option<String>) {
             // own edge and Dialog centres, so this is an in-tree overlay stacked in the screen's
             // Box. It covers the session content area, not the phone tab bar or title strip
             // (the shell is outside this screen).
-            // TODO(compose-rust#476): no Escape to the drawer (no key delivery or focus request
-            // in the Rust API); the scrim and the close button close it.
-            // TODO(compose-rust#429): no accessible name for the toggle, the scrim and the
-            // drawer yet.
+            // v0.0.7: #476 fixed (containers take `on_key_down`, and `Batch::request_focus`
+            // exists); workaround kept until checked on a display (the drawer has to take focus
+            // when it opens before Escape can reach it); the scrim and the close button close it.
+            // The toggle, the scrim and the drawer are named (compose-rust v0.0.7, #429).
             if crate::ui::session::drawer_open_effective(show_column, drawer.get()) {
                 let dr_s = drawer.clone();
                 let dr_x = drawer.clone();
@@ -4820,7 +4829,8 @@ pub fn SessionScreen(focus: Option<String>) {
                 let theme = ember_theme();
                 let pal = theme.palette;
                 let w = crate::ui::session::drawer_width(window.width_dp);
-                Clickable(
+                NamedClickable(
+                    super::a11y::CLOSE,
                     Modifier::new()
                         .fill_max_width()
                         .fill_max_height()
@@ -4830,7 +4840,13 @@ pub fn SessionScreen(focus: Option<String>) {
                     || {},
                 );
                 cu::Row()
-                    .modifier(with_shadows(Modifier::new(), theme.shadow_sm()).width(w).fill_max_height())
+                    .modifier(
+                        with_shadows(Modifier::new(), theme.shadow_sm())
+                            .width(w)
+                            .fill_max_height()
+                            .role(compose_rust::ui::Role::Navigation)
+                            .label(super::a11y::SESSION_MENU),
+                    )
                     .content(move || {
                         cu::Box()
                             .modifier(Modifier::new().weight(1.0).fill_max_height())
@@ -4954,7 +4970,10 @@ mod tests {
         // open_member closes it.
         let om = src.split("let open_member = {").nth(1).unwrap();
         assert!(om.split("let same = proj == current;").next().unwrap().contains("drawer.set(false);"));
-        assert!(src.contains("TODO(compose-rust#429)"));
+        // compose-rust#429 (v0.0.7): the toggle, the scrim and the drawer are named.
+        assert!(src.contains("super::a11y::MENU,"));
+        assert!(src.contains(".label(super::a11y::SESSION_MENU)"));
+        assert!(!src.contains("TODO(compose-rust#429)"));
     }
 
     #[test]
@@ -4994,7 +5013,7 @@ mod tests {
     use super::*;
     use compose_rust::protocol::{HostEvent, Mutation, PropertyValue, decode_batch};
     use compose_rust::{
-        EventPayload, Host, Recomposer, WindowHeightClass, WindowSizeClass, composable,
+        EventPayload, Host, Recomposer, WindowHeightClass, WindowSizeClass, Composable,
     };
 
     fn texts(batch: &[Mutation<'_>]) -> Vec<String> {
@@ -5014,7 +5033,7 @@ mod tests {
         static CHEVRON_OPEN: RefCell<Option<MutableState<bool>>> = const { RefCell::new(None) };
     }
 
-    #[composable]
+    #[Composable]
     fn host_ide_chevron() {
         let open = remember(|| mutable_state_of(false));
         CHEVRON_OPEN.with(|c| *c.borrow_mut() = Some(open.clone()));
@@ -5074,12 +5093,12 @@ mod tests {
         assert!(open.get_untracked(), "the chevron opened the chooser");
     }
 
-    #[composable]
+    #[Composable]
     fn host_session_multi() {
         SessionScreen(None);
     }
 
-    #[composable]
+    #[Composable]
     fn host_session_single() {
         SessionScreen(Some("demo-s1".to_string()));
     }

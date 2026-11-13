@@ -105,7 +105,7 @@ pub struct Shared {
 // WidgetView accepts a function without props and owns a separate tree. Share signals between
 // the trees until WidgetView supports props and flex stretch sizing (dioxus-compose #160).
 thread_local! { static DOUBLE_SHIFT: RefCell<super::editor::DoubleShift> = RefCell::new(super::editor::DoubleShift::default()); }
-// TODO(compose-rust#417): tells a double-click from two `onclick`s while the renderer sends no pointer events.
+// v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately): tells a double-click from two `onclick`s.
 thread_local! { static DOUBLE_CLICK: RefCell<super::editor::DoubleClick> = RefCell::new(super::editor::DoubleClick::default()); }
 
 /// Milliseconds on a clock that only moves forward, for telling two Shift presses apart.
@@ -1223,7 +1223,9 @@ pub mod page {
         let grid = if maximized { crate::ui::editor::editor_grid_style_maximized() } else { crate::ui::editor::editor_grid_style(has_left, has_bottom) };
         // macOS opens the window FullSize (the page starts at the top and the top bar is the title
         // strip), so the page is the window's height; elsewhere the native chrome stays and the
-        // page keeps its 76px allowance. TODO(#320): the height is fixed at launch (compose-rust#467).
+        // page keeps its 76px allowance. TODO(#320): the height is fixed at launch. v0.0.7: #467
+        // fixed (`with_report_size`); workaround kept until checked on a display (the page has to
+        // follow the reported height in the dioxus-compose window).
         let height = crate::ui::editor::editor_page_height(cfg!(target_os = "macos"));
         let ed_style = format!("width:100vw; height:{height}; {grid}");
         rsx! {
@@ -1437,9 +1439,8 @@ pub mod page {
     fn menu(s: &Shared, keymap: Keymap) -> Element {
         use crate::ui::editor_menu::{self as em, Submenu};
         let os = Os::current();
-        // The current tab's items (FR-L31.5) head the menu. TODO(compose-rust#417): they stand in for the
-        // right-click menu, which does not open while the renderer sends no pointer events; keep them here
-        // or drop them when it lands.
+        // The current tab's items (FR-L31.5) head the menu. They stand in for the right-click menu.
+        // v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
         let current_tab = s.tabs.read().current_path().map(str::to_owned);
         let tab_items = current_tab.as_deref().map(|p| crate::ui::editor::tab_menu_items(&s.tabs.read(), p)).unwrap_or_default();
         let tab_label = current_tab.as_deref().map(|p| format!("탭: {}", crate::ui::editor::display_name(base_name(p)))).unwrap_or_default();
@@ -1965,11 +1966,9 @@ pub mod page {
                         if !crate::ui::editor::tree_handles_key(prompt.read().as_ref()) {
                             return;
                         }
-                        // TODO(v0.0.7 pin, compose-rust#417): Shift+F10 stands in for right-click until it
-                        // reaches the app; remove the stand-in once right-click opens the menu.
-                        // TODO(compose-rust#100): the v0.0.6 renderer sends only Enter as a key event, so
-                        // in a real run this branch is not reached yet (#832); the "+" menu's 선택한 항목
-                        // section is the stand-in that works on the pin.
+                        // Shift+F10 stands in for right-click. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick).
+                        // compose-rust#100: v0.0.6 sent only Enter as a key event (#832); recheck on v0.0.7
+                        // whether Shift+F10 now reaches this branch.
                         {
                             let m = event.modifiers();
                             if crate::ui::editor::tab_menu_key(&key_name(&event.key()), m.contains(Modifiers::CONTROL), m.contains(Modifiers::SHIFT), m.contains(Modifiers::ALT), m.contains(Modifiers::META)) {
@@ -2279,7 +2278,7 @@ pub mod page {
                                     } else {
                                         // A single click opens the preview tab; a double-click keeps it (FR-L31.5).
                                         open_preview(&preview_s, &path);
-                                        // TODO(compose-rust#417): two clicks within 500 ms stand in for `ondoubleclick`.
+                                        // Two clicks within 500 ms stand in for `ondoubleclick`. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
                                         if DOUBLE_CLICK.with(|d| d.borrow_mut().click(&format!("tree:{path}"), now_ms())) {
                                             let mut tabs = preview_s.tabs;
                                             tabs.write().keep_open(&path);
@@ -2352,8 +2351,8 @@ pub mod page {
                     }
                     let key_str = key_name(&event.key());
                     let m = event.modifiers();
-                    // TODO(compose-rust#417): Shift+F10 / ContextMenu opens the ⋯ menu, which holds the current
-                    // tab's items, while the right-click menu cannot open.
+                    // Shift+F10 / ContextMenu opens the ⋯ menu, which holds the current tab's items, while
+                    // the right-click menu cannot open. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
                     if crate::ui::editor::tab_menu_key(
                         &key_str,
                         m.contains(Modifiers::CONTROL),
@@ -2439,7 +2438,7 @@ pub mod page {
                             onclick: move |_| {
                                 scm.close_diff();
                                 tabs.write().activate(&path);
-                                // TODO(compose-rust#417): two clicks within 500 ms stand in for `ondoubleclick`.
+                                // Two clicks within 500 ms stand in for `ondoubleclick`. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
                                 if DOUBLE_CLICK.with(|d| d.borrow_mut().click(&format!("tab:{path}"), now_ms())) {
                                     tabs.write().keep_open(&path);
                                 }
@@ -2773,8 +2772,8 @@ pub mod page {
                                     // collapsed to its padding in the scrolling list; its width is set here.
                                     style: "flex:none; width:{tab_width(&label, on)}px;",
                                     onclick: move |_| { terms::select(&sel); bump(); },
-                                    // TODO(compose-rust#417): the renderer sends no pointer events yet, so a real
-                                    // double-click never arrives; F2 and the pencil button rename today.
+                                    // F2 and the pencil button rename until a real double-click arrives.
+                                    // v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
                                     ondoubleclick: move |_| { terms::begin_rename(&ren); bump(); },
                                     onkeydown: move |event| {
                                         let m = event.modifiers();
@@ -2847,9 +2846,11 @@ pub mod page {
                     if crate::terminal_input::is_paste_chord(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META)) {
                         event.stop_propagation();
                         event.prevent_default();
-                        // TODO(compose-rust#546): no clipboard read API yet. Then read the
-                        // clipboard, ask with `needs_multiline_warning` and send `paste_bytes(text,
-                        // state.bracketed_paste)`. Until then the chord only says why nothing is pasted.
+                        // v0.0.7: #546 fixed (`compose_rust::clipboard::read_text`); workaround kept
+                        // until checked on a display (the read has to answer inside the dioxus-compose
+                        // window). Then read the clipboard, ask with `needs_multiline_warning` and send
+                        // `paste_bytes(text, state.bracketed_paste)`. Until then the chord only says why
+                        // nothing is pasted.
                         notice(crate::terminal_input::PASTE_UNAVAILABLE);
                         return;
                     }

@@ -13,7 +13,7 @@
 //! 저장소가 아닙니다". Sections beyond changes and branches still wait for their endpoints (#168).
 //!
 //! What the pinned toolkit cannot do yet, with the workaround used (`GAPS-WORKLIST.md`):
-//! - no clickable Row or Column: a text Button is the hit target of a row or a diff line (TODO(compose-rust#372): drop once Row/Column on_click is confirmed);
+//! - no clickable Row or Column: a text Button is the hit target of a row or a diff line (v0.0.7: #372 fixed, container `on_click`; workaround kept until checked on a display, with the VCS screen's own migration under #673);
 //! - no sticky column: the line check sits in the row and scrolls with it (TODO(compose-rust#424));
 //! - no SVG graph: the history is a list first (TODO(compose-rust#308): draw the graph on a `Canvas`).
 
@@ -1567,60 +1567,16 @@ pub fn commit_detail_view(d: &GitCommitDetail, now: i64) -> CommitDetailView {
     }
 }
 
-/// Attempt to copy `sha` to the system clipboard on macOS, Linux, or Windows.
-/// Returns true if an OS clipboard command was launched and succeeded.
-/// TODO(compose-rust#471): replace with native toolkit clipboard support once available.
+/// Puts `sha` on the system clipboard through the toolkit (`compose_rust::clipboard::set_text`,
+/// compose-rust v0.0.7, #471), the same call on every system. Returns true when the request is
+/// on its way: an empty SHA, or one over the toolkit's 64 KiB limit, sends nothing. Call it
+/// from an event handler, like the toolkit's other calls.
 pub fn copy_sha_to_clipboard(sha: &str) -> bool {
     let sha = sha.trim();
     if sha.is_empty() {
         return false;
     }
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(mut child) = std::process::Command::new("pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                use std::io::Write;
-                let _ = stdin.write_all(sha.as_bytes());
-            }
-            return child.wait().map(|s| s.success()).unwrap_or(false);
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        for cmd in ["wl-copy", "xclip -selection clipboard", "xsel --clipboard --input"] {
-            let parts: Vec<&str> = cmd.split_whitespace().collect();
-            if let Ok(mut child) = std::process::Command::new(parts[0])
-                .args(&parts[1..])
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-            {
-                if let Some(mut stdin) = child.stdin.take() {
-                    use std::io::Write;
-                    let _ = stdin.write_all(sha.as_bytes());
-                }
-                if child.wait().map(|s| s.success()).unwrap_or(false) {
-                    return true;
-                }
-            }
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(mut child) = std::process::Command::new("clip")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                use std::io::Write;
-                let _ = stdin.write_all(sha.as_bytes());
-            }
-            return child.wait().map(|s| s.success()).unwrap_or(false);
-        }
-    }
-    false
+    compose_rust::clipboard::set_text(sha).is_ok()
 }
 
 /// Read one commit. Runs on the runtime, not the UI thread.
@@ -6343,6 +6299,8 @@ mod commit_detail_tests {
         assert!(v_remote.remote_only);
 
         assert!(!copy_sha_to_clipboard(""));
+        // compose-rust#471 (v0.0.7): a SHA goes to the toolkit clipboard on every system.
+        assert!(copy_sha_to_clipboard("0123abcd"));
     }
 
 }

@@ -48,7 +48,7 @@ pub const AGENT_SEND_UNSUPPORTED: &str = "agent로 보내기는 아직 지원되
 pub const OFFLINE_TAG: &str = "오프라인";
 
 /// TODO(compose-rust#483): flip when the toolkit has a file dialog API,
-/// then fill [`SendDraft::files`] from it. Dropped files stay with compose-rust#166.
+/// then fill [`SendDraft::files`] from it. Dropped files stay with compose-rust#485.
 pub const FILE_PICKER_AVAILABLE: bool = false;
 
 // ---------------------------------------------------------------------------------------------

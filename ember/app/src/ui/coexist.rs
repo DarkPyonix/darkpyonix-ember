@@ -34,7 +34,7 @@ use crate::ui::{initial_menu, Route};
 ///
 /// Every field is a [`MutableState`], so it is `Clone + Send + Sync + 'static` and can be
 /// written from `tokio` worker threads in [`crate::bridge`] or read inside any
-/// `#[composable]` function.
+/// `#[Composable]` function.
 #[derive(Clone)]
 pub struct SharedLive {
     /// Projects, session records/status, computers, connection.

@@ -4784,8 +4784,8 @@ pub fn VcsSheet(project_id: &str, open: bool, on_close: impl FnMut() + Clone + '
 }
 
 /// A review window (`EMBER_CR_ROUTE=vcs`): sample repository view in compose-rust.
-#[compose_rust::runtime::composable]
-pub fn preview() {
+#[compose_rust::runtime::Composable]
+pub fn preview_vcs() {
     let p = ember_theme().palette;
     cu::Box().modifier(Modifier::new().fill_max_size().background(paint(p.bg))).content(|| {
         let reload = remember(|| mutable_state_of(0_u64));
@@ -5233,12 +5233,12 @@ mod tests {
         batch.iter().map(|m| format!("{m:?}")).collect()
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn responsive_pills_sample() {
         SectionPillsAtWidth(Section::Changes, 704.0, |_| {});
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn commit_fields_sample() {
         let summary = remember(|| mutable_state_of(String::new()));
         let body = remember(|| mutable_state_of(String::new()));
@@ -5246,7 +5246,7 @@ mod tests {
         CommitBox("main", 1, &summary, &body, &amend, None);
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn theme_button_sample() {
         let ui = remember(|| crate::ui::coexist::SharedUi::new(crate::prefs::Prefs::default()));
         super::super::project::ThemeButton(&ui);
@@ -5278,12 +5278,12 @@ mod tests {
         assert!(text.contains(SOON));
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn history_sample_wide() {
         HistoryPane(None, PaneLayout::Two, false, "develop".to_string());
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn history_sample_compact() {
         HistoryPane(None, PaneLayout::Tabs, false, "develop".to_string());
     }
@@ -5511,7 +5511,7 @@ mod tests {
         assert!(back_text.contains("로컬 전용"));
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn history_detail_body_sample() {
         let noop: Rc<dyn Fn()> = Rc::new(|| {});
         let ctl = CommitCtl {
@@ -5569,7 +5569,7 @@ mod tests {
         assert_eq!(history_meta(&entries[0]), "a1b2c3d \u{00b7} BREW \u{00b7} 12분 전");
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn prs_sample_wide() {
         let cnt = remember(|| mutable_state_of(None));
         let shared = remember(|| mutable_state_of(Some(Vec::new())));
@@ -5577,7 +5577,7 @@ mod tests {
         PullRequestsPane(None, cnt, shared, selected, PaneLayout::Two, Some("feat/x".to_string()));
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn prs_sample_compact() {
         let cnt = remember(|| mutable_state_of(None));
         let shared = remember(|| mutable_state_of(Some(Vec::new())));
@@ -5846,22 +5846,22 @@ mod tests {
         assert_eq!(section_count_with(Section::PullRequests, None, None, Some(3)), Some(3));
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn stash_sample_wide() {
         StashPane(None, mutable_state_of(None), PaneLayout::Two, false);
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn stash_sample_compact() {
         StashPane(None, mutable_state_of(None), PaneLayout::Tabs, false);
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn conflicts_sample_wide() {
         ConflictsPane(&["a.rs".to_string()], None, PaneLayout::Two);
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn conflicts_sample_compact() {
         ConflictsPane(&["a.rs".to_string()], None, PaneLayout::Tabs);
     }
@@ -5890,7 +5890,7 @@ mod tests {
         }
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn conflict_file_row_sample() {
         ConflictFileRow("docs/SPEC.md", || {});
     }
@@ -5914,7 +5914,7 @@ mod tests {
         assert!(!text.contains("해결 완료"));
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn conflicts_preview_composed() {
         let f = sample_conflict().with_choice(0, ConflictChoice::Ours).with_choice(1, ConflictChoice::Theirs);
         let step = mutable_state_of(ConflictStep::Preview);
@@ -5934,12 +5934,12 @@ mod tests {
         }
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn branches_sample_wide() {
         BranchesPane(None, mutable_state_of(None), PaneLayout::Two);
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn branches_sample_compact() {
         BranchesPane(None, mutable_state_of(None), PaneLayout::Tabs);
     }
@@ -6048,14 +6048,14 @@ mod tests {
     fn fr_l18_vcs_sheet_leaves_the_selected_project_and_wires_dismiss() {
         let src = include_str!("vcs.rs");
         let start = src.find("pub fn VcsSheet(").expect("VcsSheet");
-        let end = start + src[start..].find("pub fn preview()").expect("preview");
+        let end = start + src[start..].find("pub fn preview_vcs()").expect("preview_vcs");
         let body = &src[start..end];
         assert!(!body.contains("set_selected_project"));
     }
 
     static VCS_DISMISSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn host_vcs_sheet_dismiss() {
         VcsSheet("ember", true, || { VCS_DISMISSES.fetch_add(1, std::sync::atomic::Ordering::SeqCst); });
     }
@@ -6074,12 +6074,12 @@ mod tests {
         assert_eq!(VCS_DISMISSES.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn open_vcs_sheet() {
         VcsSheet("ember", true, || {});
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn closed_vcs_sheet() {
         VcsSheet("ember", false, || {});
     }
@@ -6101,7 +6101,7 @@ mod tests {
         assert!(!text_of(closed_vcs_sheet).contains("버전 관리"));
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn sample_screen() {
         VcsScreenWith(Some(sample_snapshot()), sample_projects(), Some("ember".to_string()));
     }
@@ -6874,7 +6874,7 @@ mod tests {
         }
     }
 
-    #[compose_rust::runtime::composable]
+    #[compose_rust::runtime::Composable]
     fn team_compact_probe() {
         let cnt = compose_rust::runtime::remember(|| mutable_state_of(None::<usize>));
         let p = compose_rust::runtime::remember(|| mutable_state_of(Some(Vec::<PrEntry>::new())));

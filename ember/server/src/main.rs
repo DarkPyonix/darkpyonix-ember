@@ -27,6 +27,10 @@ use ember_server::store::Store;
 /// - `EMBER_ALLOWED_HOSTS`: extra host names accepted in `Host` (comma-separated, FR-S10); the
 ///   token is in `<data dir>/server-token` (FR-S9); `ember-server rotate-token` replaces it and
 ///   exits, and `POST /api/server-token/rotate` does the same on a running server (#369)
+/// - Owner presence (FR-S12, #784): owner routes also need the in-memory owner key, claimed over
+///   `<data dir>/owner.sock` by the app or by `ember-server owner <verb>` (a terminal only).
+///   `EMBER_OWNER_PRESENCE=warn` logs instead of refusing (one release, for older apps);
+///   `EMBER_OWNER_CONFIRM=off` grants a claim without the console code (best effort)
 /// - `EMBER_IDLE_SECS`: release an agent process after this long without activity (default 300)
 /// - `EMBER_CLAUDE_BIN`: the Claude Code CLI (default `claude` on `PATH`)
 /// - `EMBER_CODEX_BIN`: the Codex CLI (default `codex` on `PATH`)
@@ -101,6 +105,12 @@ async fn main() -> anyhow::Result<()> {
             ember_server::auth::token_path(&data_dir).display()
         );
         return Ok(());
+    }
+    // `ember-server owner <verb>` (FR-S12, #784): one owner route from a terminal, with a key
+    // claimed over the running server's owner socket for this call only.
+    if std::env::args().nth(1).as_deref() == Some("owner") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        return ember_server::owner::cli::run(&args, &data_dir).await;
     }
     let store = Arc::new(Store::open(&data_dir.join("ember.db"))?);
     // Agents run under per-session shims and outlive this server (FR-S8, EMBER_SESSION_SHIM=off
@@ -537,6 +547,11 @@ async fn main() -> anyhow::Result<()> {
             ),
             enrol_gate.clone(),
         ));
+    // FR-S12: the live owner keys, in memory only.
+    let owner = ember_server::owner::Owner::from_env();
+    if owner.presence() == ember_server::owner::Presence::Warn {
+        tracing::warn!("EMBER_OWNER_PRESENCE=warn: owner routes are served without owner presence");
+    }
     // FR-S9, FR-S10: the token and the Origin/Host check on the local listener, every route.
     // The transport above serves `app` unwrapped: its callers passed the device gate (FR-N7).
     let local_app = {
@@ -558,8 +573,31 @@ async fn main() -> anyhow::Result<()> {
         // `POST /api/server-token/rotate` take effect without a restart (#369).
         let auth = ember_server::auth::ServerAuth::with_token_file(&data_dir, addr, hosts)?;
         let local_app = local_app.merge(ember_server::auth::rotate_router(auth.clone()));
-        ember_server::auth::protect(local_app, auth)
+        // FR-S12: owner routes also need the owner key. The transport door has the device scope.
+        ember_server::auth::protect_with_owner(local_app, auth, owner.clone())
     };
+    // FR-S12: the claim socket. Without it no key can be claimed, so owner routes stay closed on
+    // the local listener; the rest of the server works.
+    #[cfg(unix)]
+    let _owner_door = {
+        // The shim folder is scanned on every claim, shims left by an earlier server included.
+        let cfg = ember_server::owner::door::DoorConfig::for_server(Some(data_dir.join("shims")));
+        if cfg.confirm == ember_server::owner::Confirm::Off {
+            tracing::warn!("EMBER_OWNER_CONFIRM=off: owner claims are not confirmed by the console code");
+        }
+        match ember_server::owner::door::OwnerDoor::bind(&data_dir, owner.clone(), cfg) {
+            Ok(door) => {
+                tracing::info!("owner socket: {}", door.path().display());
+                Some(door)
+            }
+            Err(e) => {
+                tracing::error!("owner socket could not be bound, owner routes stay closed: {e}");
+                None
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    tracing::warn!("no owner socket on this platform: owner routes on the local listener stay closed (FR-S12)");
     if let Some(rt) = &shim_runtime {
         let rejoined = sessions.rejoin_shims(rt).await;
         if !rejoined.is_empty() {

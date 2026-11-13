@@ -1555,10 +1555,12 @@ pub mod view {
     }
 
     /// Rows of the base side drawn from the editor's first visible line, enough to fill the pane.
-    // v0.0.7: #544 fixed (`CodeMetrics`, `CodeScrolled` and `Batch::set_scroll_offset`);
-    // workaround kept until checked on a display (dioxus-compose's `CodeEditor` has to expose the
-    // `on_code_metrics` and `on_code_scrolled` handlers first). Until then the base side follows the
-    // editor's first visible line and draws 20 px rows on the assumption that this is the line height.
+    // v0.0.7: #544 fixed (`CodeMetrics`, `CodeScrolled` and `Batch::set_scroll_offset`), and
+    // dioxus-compose's v0.0.9 move gives `CodeEditor` `on_code_metrics` (`CodeMetrics`),
+    // `on_code_scrolled` (`CodeScroll`) and `CodeEditorHandle::set_scroll_offset`; workaround kept
+    // until Ember pins that dioxus-compose and the pixel sync is checked on a display (#673). Until
+    // then the base side follows the editor's first visible line and draws 20 px rows on the
+    // assumption that this is the line height.
     const BASE_ROWS_SHOWN: usize = 400;
 
     /// The editable diff (FR-L31.10): the base read-only on the left, one row per working-tree line
@@ -2228,7 +2230,8 @@ pub mod diff_editor_view {
                 send(&selection_s, event);
             },
             // Lines only: the base side cannot follow a partial-line scroll. v0.0.7: #544 fixed;
-            // workaround kept until checked on a display (dioxus-compose has to forward `CodeScrolled`).
+            // workaround kept until Ember pins dioxus-compose's v0.0.9 move, which forwards
+            // `CodeScrolled` as `on_code_scrolled`, and it is checked on a display.
             on_visible_range_change: move |e: compose_rust::code::VisibleRange| range_s.scm.set_diff_lines(e.first_line, e.last_line),
         } }
     }

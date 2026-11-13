@@ -12,14 +12,17 @@
 //! So a list opens on its command (Ctrl+Space, F12, Shift+F12, F2, Ctrl/Cmd+.), takes the focus,
 //! and is filtered by typing in its own field.
 //!
-//! The stand-ins and the toolkit issue each waits for:
-//! * TODO(compose-rust#553): sheets and a bottom strip instead of popups at the caret (no caret or
-//!   position rectangle from `CodeEditor`).
+//! The stand-ins and the toolkit issue each waits for. compose-rust v0.0.9 has #553, #554 and #555,
+//! and dioxus-compose's v0.0.9 move forwards them (`CodeEditor` `on_caret_rect`, `on_key_preview`,
+//! `on_code_pointer` with `pointer_kinds`, and `CodeEditorHandle::query_position_rect`). Moving
+//! onto them is a change of its own once Ember pins that dioxus-compose (#673):
+//! * TODO(compose-rust#553): sheets and a bottom strip instead of popups at the caret (`on_caret_rect`
+//!   and `query_position_rect` place them).
 //! * TODO(compose-rust#554): the editor menu carries every command, because a chord pressed while
 //!   the code has the focus may not reach the page, and a list cannot take Up, Down, Enter, Tab and
-//!   Escape from the editor (no key preview; related compose-rust#100).
-//! * TODO(compose-rust#555): no Cmd/Ctrl+click to a definition (no pointer press with modifiers and
-//!   position from `CodeEditor`; also compose-rust#417).
+//!   Escape from the editor (`on_key_preview` takes them; related compose-rust#100).
+//! * TODO(compose-rust#555): no Cmd/Ctrl+click to a definition (`on_code_pointer` gives the press
+//!   with its modifiers and the position under it; also compose-rust#417).
 //! * TODO(compose-rust#556): a snippet is inserted as plain text (no snippet session).
 
 use std::collections::HashMap;

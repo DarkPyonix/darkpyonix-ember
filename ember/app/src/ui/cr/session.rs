@@ -4719,6 +4719,7 @@ pub fn SessionScreen(focus: Option<String>) {
                                         let vo = vcs_open.clone();
                                         ToolbarBtn(ICON_GIT_SVG, "버전 관리", SESSION_HEADER_LABELS, false, move || vo.set(true));
                                         let wm = open_web_menu.clone();
+                                        #[allow(clippy::redundant_closure)]
                                         ToolbarBtn(ICON_GLOBE_SVG, "웹 페이지", SESSION_HEADER_LABELS, false, move || wm());
                                     }
                                     if let Some(t) = target.clone() {

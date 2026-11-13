@@ -208,7 +208,7 @@ mod tests {
         assert_eq!(&entries[..2], &[Item(NewFile, true), Item(NewFolder, true)]);
         assert_eq!(&entries[2..4], &[Sep, Heading("선택한 항목")]);
         assert!(entries.contains(&Item(Rename, true)) && entries.contains(&Item(Delete, true)) && entries.contains(&Item(CloseTab, true)));
-        assert!(PLUS_MENU_HOLDS_SELECTION, "the stand-in goes with the v0.0.7 pin (compose-rust#417), not before");
+        const { assert!(PLUS_MENU_HOLDS_SELECTION, "the stand-in goes with the v0.0.7 pin (compose-rust#417), not before") };
     }
 
     #[test]

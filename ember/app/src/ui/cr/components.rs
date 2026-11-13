@@ -1593,7 +1593,8 @@ mod tests {
             // Existing direct buttons are explicitly counted until their specialized controls
             // move into shared components. Any additional bypass must be reviewed.
             let allowed_buttons = match name {
-                "components.rs" => 3,
+                // AppButton, IconButton, PickChip, and ChoiceButton (FR-L10, compose-rust#473).
+                "components.rs" => 4,
                 "agents.rs" => 2,
                 "files.rs" => 1,
                 "home.rs" => 0,

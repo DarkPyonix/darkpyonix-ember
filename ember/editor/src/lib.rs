@@ -32,6 +32,7 @@
 //! | [`watch`] | FR-L31.24: the recursive watch on the workspace folder, with Code-OSS's default excludes |
 //! | [`search`] | FR-E7: search across files through the extension host, unsaved buffers, replace with re-check |
 //! | [`trust`] | FR-L31.18: workspace trust answers, waiting requests, the grant |
+//! | [`webview`] | FR-E8: extension webviews: one record per handle, message queue, local resources, theme variables, the host trait |
 //!
 //! **Status: written without compiling** (no cargo was run for this change). See
 //! `docs/design/EDITOR-SESSION.md` §7 for the APIs that are uncertain.
@@ -66,6 +67,7 @@ pub mod notifications;
 pub mod session;
 pub mod settings;
 pub mod watch;
+pub mod webview;
 pub mod widget;
 
 pub use crate::bridge::{apply_text_change, BridgeAction, DocumentWidgetState, SyntaxRuns, WidgetBridge};

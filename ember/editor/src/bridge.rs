@@ -73,6 +73,9 @@ pub enum BridgeAction {
     CommandFailed { id: String, error: String },
     /// Reopening a document with an encoding failed (FR-L31.7).
     FormatFailed { uri: UriComponents, error: String },
+    /// An extension webview changed (FR-E8): pass it to the window's `WebviewDriver`. The bridge has
+    /// already updated its placeholder panes ([`WidgetBridge::webview_panes`]).
+    Webview(crate::webview::WebviewUpdate),
 }
 
 impl BridgeAction {
@@ -125,11 +128,18 @@ pub struct WidgetBridge {
     problems: Vec<crate::diagnostics::Problem>,
     output_channels: Vec<crate::output::OutputChannel>,
     active_output_channel: Option<String>,
+    webview_panes: crate::webview::host::WebviewPanes,
 }
 
 impl WidgetBridge {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The extension webviews the window has a place for (FR-E8); each shows a placeholder until
+    /// the webview host node exists.
+    pub fn webview_panes(&self) -> &crate::webview::host::WebviewPanes {
+        &self.webview_panes
     }
 
     /// The problems list as the session last reported it.
@@ -329,6 +339,10 @@ impl WidgetBridge {
             SessionUpdate::SearchHits { .. } | SessionUpdate::SearchDone { .. } | SessionUpdate::ReplaceDone { .. } => BridgeAction::None,
             // Language feature answers are the window's lists and boxes, not a document's props (FR-L31.13).
             SessionUpdate::Language(_) => BridgeAction::None,
+            SessionUpdate::Webview(update) => {
+                self.webview_panes.apply(&update);
+                BridgeAction::Webview(update)
+            }
         }
     }
 

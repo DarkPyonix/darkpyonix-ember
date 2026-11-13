@@ -736,6 +736,12 @@ impl EditorSession {
         self.send(Command::Input(Input::Language(request)))
     }
 
+    /// An event of an extension webview or its host (FR-E8), usually from `WebviewDriver::poll` or
+    /// `WebviewDriver::set_view_state`; answered with [`SessionUpdate::Webview`].
+    pub fn webview(&self, event: crate::webview::WebviewEvent) -> Result<(), Error> {
+        self.send(Command::Input(Input::Webview(event)))
+    }
+
     /// After [`SessionUpdate::Desync`]: re-send the session's text as a new generation.
     pub fn resync(&self, uri: UriComponents) -> Result<(), Error> {
         self.send(Command::Resync(uri))

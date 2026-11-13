@@ -200,6 +200,7 @@ cargo build --release --locked --features mount-fuse</code></pre>
           <tr><td><code>transport.key</code></td><td>서버의 피어 신원. <code>EMBER_TRANSPORT=1</code> 일 때 만들어집니다.</td></tr>
         </tbody>
       </table>
+      <p id="keystore"><strong>OS 키 저장소의 키.</strong> <code>secret.key</code> 와 <code>transport.key</code>(서버와 각 노드의 것)는 응답하는 OS 키 저장소가 있으면 그곳에 둡니다: macOS 키체인, Windows 자격 증명 관리자, Linux Secret Service. 기존 파일이 있는 상태로 처음 시작하면 Ember 가 키를 키 저장소에 복사하고 다시 읽어 확인한 뒤에야 파일을 지우고 <code>&lt;파일&gt;.migrated</code> 를 남깁니다. 키 저장소에 쓰지 못하면 파일을 그대로 둡니다. <code>EMBER_KEYSTORE</code> 로 <code>auto</code>(기본값: 키 저장소가 있으면 그것, 없으면 파일), <code>os</code>(키 저장소가 없으면 시작하지 않음), <code>file</code> 중 하나를 고릅니다. 키 저장소 항목(서비스 <code>dev.darkpyonix.ember</code>)도 <code>ember.db</code> 와 함께 백업하세요. <strong>남는 위험.</strong> 키 저장소가 없으면(화면 없는 Linux 서버에는 Secret Service 가 없습니다) 키는 0600 파일이므로, 같은 사용자로 도는 프로세스와 데이터 폴더 사본을 가진 사람은 누구나 읽을 수 있습니다. 키 저장소가 있어도 잠금이 풀린 세션에서는 같은 사용자의 프로세스가 키를 요청할 수 있습니다. 키 저장소는 데이터 폴더의 사본과 백업을 지키며, 탈취된 사용자 계정을 지키지는 않습니다.</p>
     </div>
 
     <h2 id="node">ember node, 각 컴퓨터에</h2>

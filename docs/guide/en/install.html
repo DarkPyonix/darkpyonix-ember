@@ -200,6 +200,7 @@ cargo build --release --locked --features mount-fuse</code></pre>
           <tr><td><code>transport.key</code></td><td>The server's peer identity, created with <code>EMBER_TRANSPORT=1</code>.</td></tr>
         </tbody>
       </table>
+      <p id="keystore"><strong>Keys in the OS keystore.</strong> <code>secret.key</code> and <code>transport.key</code> (the server's and each node's) go to the OS keystore where one answers: the macOS Keychain, the Windows Credential Manager or a Linux Secret Service. On the first start with an existing file, Ember copies the key into the keystore, reads it back, and only then deletes the file and leaves <code>&lt;file&gt;.migrated</code>; if the keystore write fails, the file stays. <code>EMBER_KEYSTORE</code> picks <code>auto</code> (the default: the keystore if available, else the file), <code>os</code> (refuse to start without one) or <code>file</code>. Back up the keystore entries (service <code>dev.darkpyonix.ember</code>) along with <code>ember.db</code>. <strong>Residual risk.</strong> Without a keystore (a headless Linux server has no Secret Service), the key is a 0600 file, so any process running as the same user, and anyone holding a copy of the data folder, can read it. With a keystore, a process running as the same user can still ask for the key on an unlocked session: the keystore protects copies and backups of the data folder, not a compromised user account.</p>
     </div>
 
     <h2 id="node">ember node, on each computer</h2>

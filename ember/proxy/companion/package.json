@@ -97,7 +97,7 @@
         "ember.terminals.emberTermPath": {
           "type": "string",
           "default": "",
-          "description": "Absolute path of the ember-term binary on the workspace's computer, used by the setup command for tasks (terminal.integrated.automationProfile.*)."
+          "description": "ember-term for tasks, used by the setup command (terminal.integrated.automationProfile.*): an absolute path, or empty for the bare name ember-term looked up on the VS Code server's PATH."
         },
         "ember.debug.persistent": {
           "type": "boolean",

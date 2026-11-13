@@ -6,7 +6,10 @@
 //! never opens one binds nothing). Dropping the value aborts the accept task and closes the port.
 //!
 //! Security: the listener is loopback only. Its Bearer token is 32 bytes from the OS random source
-//! (`getrandom`, 256 bits, 64 hex characters), held in memory, never logged or written. The client
+//! (`getrandom`, 256 bits, 64 hex characters), held in memory and never logged. With a state dir
+//! it is also written to `<state dir>/local.json` (mode 0600, the node's own endpoint file format),
+//! so `ember-term` in an OSE terminal finds this node (#26, [provisional]); that folder is inside the
+//! server data dir, which the node itself refuses ([`denied_paths`]). The client
 //! ignores proxy variables ([`NodeClient::new_local`]), so the token never goes to a proxy named
 //! in the server's environment. Another OS user on the machine can
 //! connect to the port but cannot authenticate. The node serves file and terminal operations as
@@ -29,7 +32,7 @@ use std::net::SocketAddr;
 use anyhow::Context;
 use ember_node::api::{self, Node};
 use ember_node::client::NodeClient;
-use ember_node::config::NodeConfig;
+use ember_node::config::{LocalEndpoint, NodeConfig};
 
 /// The paths the local node refuses: the server data dir (`EMBER_DATA_DIR`, else `<home>/.ember`,
 /// where `ember.db`, `secret.key`, the server token and `accounts/` live) and the OSE data root
@@ -171,6 +174,13 @@ impl LocalNode {
             let _guard = handle.enter();
             tokio::net::TcpListener::from_std(std_listener)?
         };
+        if let Some(dir) = &opts.state_dir {
+            // ember-term (VS Code tasks in an OSE window) finds the node through this file, the
+            // way it finds a standalone daemon (EMBER_NODE_STATE_DIR is set on the OSE child).
+            if let Err(e) = LocalEndpoint::for_addr(addr, &token).write(dir) {
+                tracing::warn!("local node: cannot write {}: {e}", dir.join(ember_node::config::LOCAL_ENDPOINT_FILE).display());
+            }
+        }
         let task = handle.spawn(async move {
             if let Err(e) = api::serve(listener, node).await {
                 tracing::warn!("local node stopped: {e}");

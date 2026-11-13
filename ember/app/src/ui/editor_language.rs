@@ -409,7 +409,7 @@ impl LanguageState {
 
 /// The parameter hint's box (#800), sized in Rust because dioxus-compose's layout does not honour
 /// `width:max-content` (the text got zero width and stacked one glyph per line).
-// TODO(dioxus-compose): no issue yet for `max-content` / `fit-content` widths; reported to the leader.
+// TODO(dioxus-compose#227): `max-content` / `fit-content` widths are not honoured; size in CSS once they are.
 pub mod hint_box {
     /// The advance of one column of the 13 px mono font, and its line height.
     pub const ADVANCE: f32 = 7.8;

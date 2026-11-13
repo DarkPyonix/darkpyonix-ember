@@ -576,14 +576,18 @@ fn FocusOverlayEnabled(label: &str, enabled: bool, on_click: impl FnMut() + 'sta
         .on_click(on_click);
 }
 
-/// A selectable chip matching the mockup's .field.ag-sel: sized to its label, with a 1-line
-/// label and an accessible FocusOverlay. A `Box` in a `Row` is content sized since compose-rust
-/// v0.0.7 (#427), so the chip needs no fixed width to leave its sibling room.
+// TODO(compose-rust#431): the FocusOverlay is a `fill_max_size` Button, and the toolkit has no
+// parent-sized modifier for an overlay, so a chip without a width takes the rest of the row and
+// squeezes the hint beside it to one word per line. compose-rust v0.0.7 (#427) stops the
+// squeeze at a word, not at the overlay: checked on a display 2026-11-13, so the width stays fixed.
+/// A selectable chip matching the mockup's .field.ag-sel: wide enough for the label,
+/// with a 1-line label and an accessible FocusOverlay.
 fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     cu::Box()
         .modifier(
             Modifier::new()
+                .width(200.0)
                 .height(H_CTL)
                 .background(paint(p.surface_2))
                 .shape_role(ShapeRole::Full),
@@ -599,13 +603,20 @@ fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
         });
 }
 
-/// A picker pill matching mockup's .pickchip: full pill shape, icon + label, sized to its
-/// content (a `Box` in a `Row` is content sized since compose-rust v0.0.7, #427).
+// TODO(compose-rust#431): as for `SelectChip`, the `fill_max_size` overlay makes a pill without
+// a width take the rest of the row, so the width is estimated with `text_px` and fixed.
+/// A picker pill matching mockup's .pickchip: full pill shape, icon + label, sized to its content.
 fn ModelPickerPill(text: &str, svg: Option<&'static str>, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
+    let width = 12.0
+        + if svg.is_some() { 16.0 + 8.0 } else { 0.0 }
+        + super::home::text_px(text, Fs::Sm.size())
+        + 12.0
+        + 8.0;
     cu::Box()
         .modifier(
             Modifier::new()
+                .width(width.max(72.0))
                 .height(H_CTL)
                 .background(paint(p.surface_2))
                 .shape_role(ShapeRole::Full),

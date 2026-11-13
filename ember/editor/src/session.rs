@@ -137,30 +137,36 @@ pub enum ServerSettingsFile {
 const SETTINGS_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// One scope from a settings file on the server. A missing file, a file that is not UTF-8 and a
-/// file that does not parse all read as an empty scope: the window still opens, and the settings
-/// view says what is wrong with the file when the person opens it.
-async fn read_server_layer(fs: &RemoteFs, uri: &UriComponents) -> SettingsLayer {
+/// file that does not parse all read as an empty scope, so the window still opens; for the last two
+/// the reason comes back too, so the settings view can show its banner (FR-L31.17, #790).
+async fn read_server_layer(fs: &RemoteFs, uri: &UriComponents) -> (SettingsLayer, Option<String>) {
     let bytes = match tokio::time::timeout(SETTINGS_READ_TIMEOUT, fs.read_file(uri)).await {
         Ok(Ok(bytes)) => bytes,
         Ok(Err(e)) => {
             tracing::debug!("ember-editor: no settings at {}: {e}", uri.path);
-            return SettingsLayer::default();
+            return (SettingsLayer::default(), None);
         }
         Err(_) => {
             tracing::warn!("ember-editor: reading settings at {} timed out", uri.path);
-            return SettingsLayer::default();
+            return (SettingsLayer::default(), None);
         }
     };
-    let Ok((text, _bom)) = crate::document::decode(&bytes) else {
-        tracing::warn!("ember-editor: settings at {} are not UTF-8", uri.path);
-        return SettingsLayer::default();
+    let (layer, error) = server_layer_from_bytes(&bytes);
+    if let Some(e) = &error {
+        tracing::warn!("ember-editor: settings at {} do not parse: {e}", uri.path);
+    }
+    (layer, error)
+}
+
+/// The scope a server settings file's bytes hold, and why it is empty when they are not UTF-8 or do
+/// not parse (`None` for a file that parses).
+pub fn server_layer_from_bytes(bytes: &[u8]) -> (SettingsLayer, Option<String>) {
+    let Ok((text, _bom)) = crate::document::decode(bytes) else {
+        return (SettingsLayer::default(), Some("UTF-8 텍스트가 아닙니다".to_string()));
     };
     match crate::settings::parse_layer(&text) {
-        Ok(layer) => layer,
-        Err(e) => {
-            tracing::warn!("ember-editor: settings at {} do not parse: {e}", uri.path);
-            SettingsLayer::default()
-        }
+        Ok(layer) => (layer, None),
+        Err(e) => (SettingsLayer::default(), Some(e.to_string())),
     }
 }
 
@@ -205,6 +211,9 @@ pub struct EditorSession {
     catalogue: Vec<SettingSchema>,
     /// The server's Machine `settings.json`, when the server names it.
     machine_settings_path: Option<String>,
+    /// Why the server's settings files read as empty at connect, when they did not parse (#790).
+    workspace_settings_error: Option<String>,
+    machine_settings_error: Option<String>,
     user_files: Vec<std::path::PathBuf>,
 }
 
@@ -379,11 +388,12 @@ impl EditorSession {
             user: config.user_settings.clone(),
             ..SettingsScopes::default()
         };
+        let (mut workspace_settings_error, mut machine_settings_error) = (None, None);
         if config.server_settings {
             let workspace_file = format!("{}/{}", workspace_path.trim_end_matches('/'), crate::settings::WORKSPACE_SETTINGS_FILE);
-            settings.workspace = read_server_layer(&fs, &UriComponents::remote(&authority, &workspace_file)).await;
+            (settings.workspace, workspace_settings_error) = read_server_layer(&fs, &UriComponents::remote(&authority, &workspace_file)).await;
             if let Some(path) = &machine_settings_path {
-                settings.remote = read_server_layer(&fs, &UriComponents::remote(&authority, path)).await;
+                (settings.remote, machine_settings_error) = read_server_layer(&fs, &UriComponents::remote(&authority, path)).await;
             }
         }
         let commands = crate::commands::parse_contributed_commands(&extensions);
@@ -414,7 +424,7 @@ impl EditorSession {
         }
 
         let app_language = config.app_language.clone();
-        Ok((Self { tx, authority, workspace_path, fs, ipc, app_language, installed, running, task: Some(task), settings, catalogue, machine_settings_path, user_files: config.user_files.clone() }, updates_rx))
+        Ok((Self { tx, authority, workspace_path, fs, ipc, app_language, installed, running, task: Some(task), settings, catalogue, machine_settings_path, workspace_settings_error, machine_settings_error, user_files: config.user_files.clone() }, updates_rx))
     }
 
     /// Every extension the connect-time scan found, disabled ones included (FR-L31.14).
@@ -453,6 +463,15 @@ impl EditorSession {
                 Some(format!("{}/{}", self.workspace_path.trim_end_matches('/'), crate::settings::WORKSPACE_SETTINGS_FILE))
             }
             ServerSettingsFile::Machine => self.machine_settings_path.clone(),
+        }
+    }
+
+    /// Why a server settings file read at connect gave an empty scope (not UTF-8, does not parse);
+    /// `None` when it parsed or is not there.
+    pub fn server_settings_error(&self, file: ServerSettingsFile) -> Option<&str> {
+        match file {
+            ServerSettingsFile::Workspace => self.workspace_settings_error.as_deref(),
+            ServerSettingsFile::Machine => self.machine_settings_error.as_deref(),
         }
     }
 

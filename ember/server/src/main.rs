@@ -540,7 +540,7 @@ async fn serve_main() -> anyhow::Result<()> {
     // Over the transport: the same API to allowed devices, without device management.
     let transport_task = match &net {
         Some(n) => {
-            let serve = server_transport::serve(&n.transport, app.clone(), devices.gate().clone())?;
+            let serve = server_transport::serve_scoped(&n.transport, app.clone(), devices.clone())?;
             tracing::info!(
                 peer = %n.transport.peer_id(),
                 service = server_transport::SERVER_SERVICE,

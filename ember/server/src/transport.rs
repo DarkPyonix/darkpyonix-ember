@@ -95,15 +95,19 @@ pub fn load_key(data_dir: &Path) -> anyhow::Result<SecretKey> {
 /// hub was named explicitly (`EMBER_HUB_URL`), the hub's relay and address directory, resolving
 /// with `token` (the registration's resolve token, `dpr_`; never the device token: NFR-H2);
 /// otherwise the plain environment configuration (the directory is turned on at runtime once
-/// the server registers, see [`crate::hub`]).
+/// the server registers, see [`crate::hub`]). `device_token` turns on the hub's batched pkarr
+/// watch when its `/config` advertises one (sent in the header only, #783).
 pub fn config_with_hub(
     key: SecretKey,
     hub: Option<&ember_hub::HubConfig>,
     registered: bool,
     token: Option<String>,
+    device_token: Option<String>,
 ) -> TransportConfig {
     let cfg = match hub {
-        Some(h) if registered || ember_hub::HubConfig::explicitly_enabled() => h.transport_config(key, token),
+        Some(h) if registered || ember_hub::HubConfig::explicitly_enabled() => {
+            h.transport_config_with_watch(key, token, device_token)
+        }
         _ => TransportConfig::from_env(key),
     };
     main_server_roles_from_env(cfg)

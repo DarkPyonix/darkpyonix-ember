@@ -96,6 +96,8 @@ fn info() -> NodeInfo {
         node_version: "0.1.0".into(),
         url: Some("http://192.168.0.9:8741".into()),
         peer_id: None,
+        // FR-C2d: a redeem needs an enrol key. These tests never open the credential.
+        enrol_key: Some(ember_node::enrol_seal::NodeKey::generate().public_hex()),
     }
 }
 

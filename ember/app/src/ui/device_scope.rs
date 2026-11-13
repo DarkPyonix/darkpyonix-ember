@@ -20,10 +20,6 @@ pub const NO_DEVICES: &str = "서버에 등록된 기기가 없습니다";
 /// Shown when the scope could not be changed for another reason.
 pub const SET_FAILED: &str = "기기 권한을 바꾸지 못했습니다. 연결을 확인하고 다시 시도합니다";
 
-/// The env var that names the peer id of the device the app runs on (provisional: the app has
-/// no device key of its own yet, so the launcher or the person sets it).
-pub const SELF_PEER_ENV: &str = "EMBER_DEVICE_PEER_ID";
-
 /// The picker order, widest first.
 pub const PICKER: [DeviceScope; 3] = [DeviceScope::Full, DeviceScope::ReadOnly, DeviceScope::ChatOnly];
 
@@ -158,7 +154,7 @@ pub fn set_error_text(e: &ApiError) -> &'static str {
 
 static DEMO: Mutex<Option<Vec<DeviceRecord>>> = Mutex::new(None);
 
-/// The demo's peer id for the device the app runs on.
+/// The demo's peer id for its laptop row (not the app's own device: see `Services::self_peer_id`).
 pub const DEMO_SELF_PEER: &str = "12D3KooWDemoThisLaptop";
 
 fn demo_seed() -> Vec<DeviceRecord> {

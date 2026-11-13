@@ -64,6 +64,7 @@ pub fn DeviceScopeSection() {
     let state = remember(|| mutable_state_of(ListState::Loading));
     let error = remember(|| mutable_state_of(None::<String>));
     let pending = remember(|| mutable_state_of(None::<Pending>));
+    // TODO(whoami): the self row is decided here, from `Services::self_peer_id`.
     let self_peer = try_services().and_then(|s| s.self_peer_id());
 
     let st = state.clone();

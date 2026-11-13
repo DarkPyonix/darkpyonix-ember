@@ -145,13 +145,12 @@ impl Services {
         self.client.api().set_device_scope(peer_id, scope).await
     }
 
-    /// The peer id of the device the app runs on, if known (`EMBER_DEVICE_PEER_ID`; the demo
-    /// names its own laptop row).
+    /// The peer id of the device the app runs on. Always `None` today: the app uses only the
+    /// server's local listener, which is the server's own machine and never in the device list.
+    // TODO(whoami): ask `GET /api/whoami` ({door, peer_id, scope}) and answer its `peer_id` on
+    // the transport door.
     pub fn self_peer_id(&self) -> Option<String> {
-        if self.demo.is_some() {
-            return Some(crate::ui::device_scope::DEMO_SELF_PEER.to_string());
-        }
-        std::env::var(crate::ui::device_scope::SELF_PEER_ENV).ok().filter(|v| !v.trim().is_empty())
+        None
     }
 }
 

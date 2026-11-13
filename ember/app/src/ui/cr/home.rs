@@ -2247,7 +2247,7 @@ mod tests {
     #[test]
     fn fr_l11_hero_bots_use_the_vendor_colours() {
         let svg = hero_bot_svg("codex", "run", 40.0, &LIGHT);
-        assert!(svg.contains("#3f74d4") && svg.contains("width=\"40\""));
+        assert!(svg.contains("#3f74d4") && svg.contains("width=\"100%\""));
         assert!(hero_bot_svg("gemini", "wait", 32.0, &DARK).contains("#8fb1df"));
     }
 

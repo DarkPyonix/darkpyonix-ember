@@ -1304,6 +1304,7 @@ pub mod page {
                         }
                     }
                     section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
+                        onmounted: move |event| crate::ui::editor_language::view::mount_editor_area(event.data()),
                         {crate::ui::workspace_trust::view::banner(&s)}
                         {tab_strip(&s, &paths, &dirty, current.as_deref())}
                         if let Some((menu_path, x, y)) = s.tab_menu.read().clone() { {tab_context_menu(&s, &menu_path, x, y)} }
@@ -1345,6 +1346,7 @@ pub mod page {
                                 }
                             }
                         }
+                        {crate::ui::editor_language::view::hint_in_editor(&s)}
                     }
                     {stripe_column(&s, sel, keymap, Strip::Right)}
                     if let Some(w) = sel.selected(Side::Bottom) {

@@ -787,9 +787,11 @@ pub mod page {
         let count = shown.len();
         let run_s = s.clone();
         rsx! {
-            div { style: "position:fixed; left:0; top:0; right:0; bottom:0; z-index:39;", onclick: move |_| open.set(false) }
+            // `grid-row` and `grid-column` keep both in the top bar's cell: placed automatically they
+            // took an implicit row of the page grid and pushed the page down one gap (design review A6).
+            div { style: "position:fixed; grid-row:1; grid-column:1; left:0; top:0; right:0; bottom:0; z-index:39;", onclick: move |_| open.set(false) }
             div { class: "ed-menu", role: "dialog", "aria-label": "명령 팔레트",
-                style: "position:fixed; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);",
+                style: "position:fixed; grid-row:1; grid-column:1; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);",
                 div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
                     {icon("search")}
                     input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
@@ -1286,6 +1288,9 @@ pub mod page {
                     {top_bar(&s, &branch, keymap)}
                     div { class: "ed-rail",
                         {stripe_column(&s, sel, keymap, Strip::Left)}
+                        // The line above the bottom group (`.ed-stripe-b` border-top): drawn as its own
+                        // element, because the HTML path does not draw a border with side margins (A13).
+                        div { class: "ed-stripe-sep", role: "separator" }
                         {stripe_column(&s, sel, keymap, Strip::Bottom)}
                     }
                     if let (Some(w), false) = (sel.selected(Side::Left), maximized) {
@@ -1376,7 +1381,6 @@ pub mod page {
     }
 
     fn top_bar(s: &Shared, branch: &str, keymap: Keymap) -> Element {
-        let mut menu_open = s.menu_open;
         let mut theme = s.theme;
         let theme_pref = *s.theme.read();
         let theme_title = format!("테마: {}", theme_pref.label());
@@ -1389,7 +1393,6 @@ pub mod page {
         let (runcfg_s, run_s, stop_s) = (s.clone(), s.clone(), s.clone());
         let mut stripes = s.stripes;
         let project_tip = tooltip_text("프로젝트 창", &keymap.hint(Action::Project, Os::current()));
-        let open = *menu_open.read();
         // The traffic lights float over the top bar's left end under FullSize.
         let strip_pad = crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), crate::ui::safe_area::safe_area().leading);
         rsx! {
@@ -1400,21 +1403,22 @@ pub mod page {
                 div { class: "spacer" }
                 button { class: "ed-find", title: "{find}", "aria-label": "{find}", onclick: move |_| run_action(&find_s, Action::Find),
                     {icon("search")}
-                    span { class: "hide-md", "{keymap.find_label()}" }
+                    span { class: "hide-md", "{crate::ui::editor::FIND_PILL_LABEL}" }
                     kbd { class: "ed-sc", "{find_hint}" }
                 }
                 div { class: "ed-runcfg",
                     button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| crate::ui::editor_tasks::view::open(&runcfg_s), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
                     button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| { if let Some(blocked) = crate::ui::workspace_trust::view::blocked(&run_s, crate::ui::workspace_trust::Restricted::Run) { notice(blocked); } else { crate::ui::editor_tasks::view::run_default(&run_s); } }, {icon("play")} }
                     button { class: "ed-ib", title: "중지", "aria-label": "중지", onclick: move |_| crate::ui::editor_tasks::view::stop(&stop_s), {icon("pause")} }
-                    button { class: "ed-ib", title: "{theme_title}", "aria-label": "{theme_title}", onclick: move |_| {
-                        let next = theme_pref.next();
-                        theme.set(next);
-                        crate::services::services().ui.update_prefs(|p| p.theme = next);
-                    }, {icon(if super::ICON_DARK.with(|d| d.get()) { "moon" } else { "sun" })} }
-                    button { class: "ed-ib", title: "에이전트에게 묻기", "aria-label": "에이전트에게 묻기", onclick: move |_| notice(crate::ui::editor_actions::not_ready_notice(Action::Ask)), {icon("spark")} }
-                    button { class: "ed-ib", title: "메뉴", "aria-label": "메뉴", onclick: move |_| { crate::ui::editor_menu::close_submenu(); menu_open.set(!open); }, {icon("more")} }
                 }
+                // The mockup's order (`editor.js:75-76`): run configuration, run, stop, ask agent, theme.
+                // No ⋯ here: the tab strip's ⋯ opens the menu (owner placement rule 2026-11-13, rule 5).
+                button { class: "ed-ib", title: "에이전트에게 묻기", "aria-label": "에이전트에게 묻기", onclick: move |_| notice(crate::ui::editor_actions::not_ready_notice(Action::Ask)), {icon("spark")} }
+                button { class: "ed-ib", title: "{theme_title}", "aria-label": "{theme_title}", onclick: move |_| {
+                    let next = theme_pref.next();
+                    theme.set(next);
+                    crate::services::services().ui.update_prefs(|p| p.theme = next);
+                }, {icon(if super::ICON_DARK.with(|d| d.get()) { "moon" } else { "sun" })} }
             }
         }
     }
@@ -1424,7 +1428,6 @@ pub mod page {
     fn menu(s: &Shared, keymap: Keymap) -> Element {
         use crate::ui::editor_menu::{self as em, Submenu};
         let os = Os::current();
-        let mut close_editor_menu = s.menu_open;
         // The current tab's items (FR-L31.5) head the menu. TODO(compose-rust#417): they stand in for the
         // right-click menu, which does not open while the renderer sends no pointer events; keep them here
         // or drop them when it lands.
@@ -1448,7 +1451,13 @@ pub mod page {
         let submenu = match open {
             None => rsx! {},
             Some(sub) => {
-                let top = em::submenu_top(&rows, sub).unwrap_or(em::TOP);
+                let size = match sub {
+                    Submenu::Tab => tab_items.len(),
+                    Submenu::Code => 1 + crate::ui::editor_language::MENU.len(),
+                    Submenu::AutoSave => crate::ui::editor_states::AutoSave::ALL.len(),
+                    Submenu::Keymap => Keymap::ALL.len(),
+                };
+                let top = em::submenu_top_fitted(&rows, sub, size).unwrap_or(em::TOP);
                 let style = em::submenu_style(top);
                 let body = match sub {
                     Submenu::Tab => {
@@ -1528,43 +1537,57 @@ pub mod page {
             }
         };
         let menu_style = em::menu_style();
+        // The mockup's items, a separator, then Ember's (owner placement rule 2026-11-13, rule 5).
+        let entries = em::entries(current_tab.is_some());
+        let item = |top: em::TopItem| -> Element {
+            use em::TopItem as T;
+            let s = s.clone();
+            let mut menu_open = s.menu_open;
+            let (label, hint): (String, String) = match top {
+                T::Save => (Action::Save.label().to_string(), keymap.hint(Action::Save, os)),
+                T::Recent => (Action::Recent.label().to_string(), keymap.hint(Action::Recent, os)),
+                T::GotoLine => (Action::GotoLine.label().to_string(), keymap.hint(Action::GotoLine, os)),
+                T::CloseOthers => ("다른 탭 모두 닫기".to_string(), String::new()),
+                T::Palette => (keymap.palette_label().to_string(), keymap.hint(Action::Palette, os)),
+                T::FindInFile => (Action::FindInFile.label().to_string(), keymap.hint(Action::FindInFile, os)),
+                T::ReopenClosed => (Action::ReopenClosed.label().to_string(), keymap.hint(Action::ReopenClosed, os)),
+                T::Settings => (Action::Settings.label().to_string(), keymap.hint(Action::Settings, os)),
+                T::CloseEditor => ("에디터 닫기".to_string(), String::new()),
+            };
+            let tab_path = current_tab.clone();
+            rsx! {
+                button { key: "{label}", role: "menuitem", onclick: move |_| {
+                    menu_open.set(false);
+                    match top {
+                        T::Save => run_action(&s, Action::Save),
+                        T::Recent => run_action(&s, Action::Recent),
+                        T::GotoLine => run_action(&s, Action::GotoLine),
+                        T::CloseOthers => if let Some(path) = tab_path.as_deref() { run_tab_menu_item(&s, crate::ui::editor::TabMenuItem::CloseOthers, path); },
+                        T::Palette => run_action(&s, Action::Palette),
+                        T::FindInFile => run_action(&s, Action::FindInFile),
+                        T::ReopenClosed => run_action(&s, Action::ReopenClosed),
+                        T::Settings => run_action(&s, Action::Settings),
+                        T::CloseEditor => crate::services::services().ui.close_editor(),
+                    }
+                },
+                    span { class: "spacer", "{label}" }
+                    if !hint.is_empty() { span { class: "ed-msc", "{hint}" } }
+                }
+            }
+        };
         rsx! {
             div { class: "ed-menu ed-mainmenu", role: "menu", "aria-label": "편집기 메뉴", style: "{menu_style}",
-                if current_tab.is_some() { {group(Submenu::Tab, tab_label.clone())} }
-                for a in [Action::FindInFile, Action::Save, Action::Recent, Action::ReopenClosed, Action::GotoLine, Action::Settings] {
+                for entry in entries.into_iter() {
                     {
-                        let s = s.clone();
-                        let label = a.label();
-                        let hint = keymap.hint(a, os);
-                        let mut menu_open = s.menu_open;
-                        rsx! {
-                            button { key: "{label}", role: "menuitem", onclick: move |_| { menu_open.set(false); run_action(&s, a); },
-                                span { class: "spacer", "{label}" }
-                                if !hint.is_empty() { span { class: "ed-msc", "{hint}" } }
-                            }
+                        match entry {
+                            em::Entry::Item(top) => item(top),
+                            em::Entry::Group(Submenu::Code) => group(Submenu::Code, "코드".to_string()),
+                            em::Entry::Group(Submenu::Keymap) => group(Submenu::Keymap, "단축키 체계".to_string()),
+                            em::Entry::Group(Submenu::AutoSave) => group(Submenu::AutoSave, "자동 저장".to_string()),
+                            em::Entry::Group(Submenu::Tab) => group(Submenu::Tab, tab_label.clone()),
+                            em::Entry::Sep => rsx! { div { class: "ed-msep" } },
                         }
                     }
-                }
-                {group(Submenu::Code, "코드".to_string())}
-                {
-                    let s = s.clone();
-                    let label = keymap.palette_label();
-                    let hint = keymap.hint(Action::Palette, os);
-                    let mut menu_open = s.menu_open;
-                    rsx! {
-                        button { key: "{label}", role: "menuitem", onclick: move |_| { menu_open.set(false); run_action(&s, Action::Palette); },
-                            span { class: "spacer", "{label}" }
-                            if !hint.is_empty() { span { class: "ed-msc", "{hint}" } }
-                        }
-                    }
-                }
-                {group(Submenu::AutoSave, "자동 저장".to_string())}
-                {group(Submenu::Keymap, "단축키 체계".to_string())}
-                button { role: "menuitem", onclick: move |_| {
-                    close_editor_menu.set(false);
-                    crate::services::services().ui.close_editor();
-                },
-                    span { class: "spacer", "에디터 닫기" }
                 }
             }
             {submenu}
@@ -1610,8 +1633,8 @@ pub mod page {
 
     fn stripe_column(s: &Shared, sel: Stripes, keymap: Keymap, strip: Strip) -> Element {
         let (class, windows): (&str, &[ToolWindow]) = match strip {
-            Strip::Left => ("ed-stripe ed-stripe-l", &ToolWindow::LEFT),
-            Strip::Bottom => ("ed-stripe ed-stripe-b", &ToolWindow::BOTTOM),
+            Strip::Left => ("ed-stripe ed-stripe-l", &ToolWindow::LEFT_STRIPE),
+            Strip::Bottom => ("ed-stripe ed-stripe-b", &ToolWindow::BOTTOM_STRIPE),
             Strip::Right => ("ed-stripe ed-stripe-r", &ToolWindow::RIGHT),
         };
         rsx! {

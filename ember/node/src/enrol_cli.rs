@@ -8,6 +8,11 @@
 //! redeem, the Ctrl-C handling in the poll loop, the NotSynced output, the help wording and the
 //! new tests in `ember/server/tests/fr_c2_enrol_node.rs`) is written and not yet compiled.
 //!
+//! Sealed delivery (#540) and the server proof (#541) are written, not compiled: each run makes a
+//! one-time key ([`crate::enrol_seal::NodeKey`]), the credential arrives sealed to it and is
+//! never accepted in clear, and with `--server-fingerprint` the server must prove that identity
+//! in its redeem answer before this node polls for any credential.
+//!
 //! Rules that hold on every path:
 //! - Nothing is written before the trust decision, and an aborted run writes nothing at all.
 //! - The code, the poll secret and the node token are never passed to [`EnrolIo::say`], to
@@ -30,6 +35,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::enrol::{is_peer_hex, lock_state_dir, preflight, validate, write_enrolment, Enrolment, WriteError, ENROL_FILE};
+use crate::enrol_seal::{verify_proof, NodeKey, Sealed};
 
 /// The most of a response body that is read (64 KiB).
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -67,12 +73,15 @@ stdin:
 With `-` stdin is a pipe, not a terminal: there is no \"Continue?\" prompt (pass --yes) and no
 fingerprint question. Without --server-fingerprint (or --trust-unverified-server) the server's
 transport id is then not added to allowed-peers; only the token over HTTP is set up.
+With --server-fingerprint the server must prove that identity (a signature over this run's
+one-time key) before this node asks for any credential; a wrong or missing proof stops the run.
+The credential always arrives sealed to that one-time key, never in clear.
 Ctrl-C while waiting for the owner stops the command and asks the server to cancel the pending
 computer (best effort, a few seconds); if that fails, cancel it in Ember or let it expire. After the credential arrives, Ctrl-C is
 ignored until the files are written: answer the fingerprint question with n, Enter or Ctrl-D.";
 
 /// The exact text printed for every http server (design 4.2).
-pub const PLAIN_HTTP_WARNING: &str = "This server speaks plain HTTP. Anyone on the network path can read the enrol code, the poll secret and the credential this node receives, and whoever reads the poll secret can fetch the credential before this node does. Use a network you trust, or an https address.";
+pub const PLAIN_HTTP_WARNING: &str = "This server speaks plain HTTP. Anyone on the network path can read the enrol code and the poll secret. The credential is sealed to a key that only this run holds, so reading the traffic does not reveal it; whoever reads the poll secret can still fetch the sealed credential first and make this enrolment fail, and someone who can change the traffic is stopped only by --server-fingerprint. Use a network you trust, or an https address.";
 /// The plain-http notice for a server on THIS machine (a loopback address): the traffic does not
 /// leave the machine, so the warning is weaker, but it is still printed (supervisor, 2026-11-06).
 pub const LOOPBACK_HTTP_NOTE: &str = "This server speaks plain HTTP, but its address is on this machine: the enrol code, the poll secret and the credential travel only inside this machine. Use an https address if the server is not on this machine.";
@@ -100,6 +109,9 @@ const CANCELLED_TEXT: &str = "interrupted; nothing was written on this node, and
 const CANCEL_FAILED_TEXT: &str = "interrupted; nothing was written on this node. The server could not cancel this enrolment: ask the owner to deny the pending computer in Ember, or let it expire.";
 /// How long the best-effort cancel on Ctrl-C may take.
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(3);
+/// The server's identity failed the check at the redeem answer (FR-C2j, #541). Printed before
+/// any credential was asked for.
+const IDENTITY_ABORT_TEXT: &str = "This node asked the server for no credential and stored nothing.";
 const UNVERIFIED_WARNING: &str = "Warning: this adds an unverified server to this node's allowed peers; the transport crosses NAT, so a rogue server could reach this node from anywhere.";
 
 // ---- options and arguments ----------------------------------------------------------------
@@ -606,11 +618,46 @@ struct RedeemAnswer {
     poll_secret: String,
     #[serde(default)]
     expires_ms: Option<i64>,
+    /// The server's identity (64 lowercase hex) and its proof (FR-C2j, #541). Both or neither.
+    #[serde(default)]
+    server_peer_id: Option<String>,
+    #[serde(default)]
+    server_proof: Option<String>,
 }
 
+/// What the redeem answer says about the server's identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Identity {
+    /// The server claimed no identity.
+    None,
+    /// The server proved this id: its signature over the enrol id and this run's key verified.
+    Proven(String),
+    /// An id without a proof, a proof without an id, a malformed id, or a signature that does
+    /// not verify.
+    Invalid,
+}
+
+/// Checks the identity part of a redeem answer against this run's enrol key. Pure.
+pub(crate) fn check_identity(
+    server_peer_id: Option<&str>,
+    server_proof: Option<&str>,
+    enrol_id: &str,
+    node_key_hex: &str,
+) -> Identity {
+    match (server_peer_id, server_proof) {
+        (None, None) => Identity::None,
+        (Some(id), Some(proof)) if is_peer_hex(id) && verify_proof(id, enrol_id, node_key_hex, proof) => {
+            Identity::Proven(id.to_string())
+        }
+        _ => Identity::Invalid,
+    }
+}
+
+/// The credential of a `joined` answer. There is no cleartext token field: an answer without
+/// `sealed_token` does not parse and is refused (FR-C2d, #540).
 #[derive(Deserialize)]
 struct Credential {
-    node_token: String,
+    sealed_token: Sealed,
     name: String,
     computer_id: String,
     #[serde(default)]
@@ -707,6 +754,9 @@ pub struct Outcome {
     pub server_trusted: bool,
     /// The trusted id is listed in `allowed-peers` now.
     pub peer_added: bool,
+    /// The server proved the identity given with `--server-fingerprint` before any credential
+    /// was asked for (FR-C2j, #541). False without a pin.
+    pub server_verified: bool,
 }
 
 /// The words for a failed final write (SPEC `FR-C2h`). The server consumed the credential when it
@@ -855,13 +905,18 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
         "arch": std::env::consts::ARCH,
         "node_version": env!("CARGO_PKG_VERSION"),
     });
+    // The one-time key of this run (FR-C2d, #540): the public half goes to the server, the
+    // private half stays in this value, in memory, until the run ends.
+    let node_key = NodeKey::generate();
+    let node_key_hex = node_key.public_hex();
     let mut own_fingerprint: Option<String> = None;
     if let Some(obj) = info.as_object_mut() {
+        obj.insert("enrol_key".into(), json!(node_key_hex));
         if let Some(u) = &node_url {
             obj.insert("url".into(), json!(u));
         }
         if opts.transport {
-            let key = ember_transport::SecretKey::load_or_generate(opts.state_dir.join(crate::transport::KEY_FILE))
+            let key = crate::keystore::load_transport_key(&opts.state_dir.join(crate::transport::KEY_FILE))
                 .map_err(|e| anyhow!("cannot load the transport key: {e}"))?;
             let id = key.peer_id().to_string();
             own_fingerprint = ember_transport::fingerprint_hex(&id);
@@ -913,6 +968,59 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
         "the server's answer to the redeem is not valid"
     );
     let wait = opts.deadline.unwrap_or_else(|| wait_from_expiry(redeemed.expires_ms, wall_ms()));
+    let poll_url = format!("{}/enrol/status/{}", server.base, redeemed.enrol_id);
+
+    // 5b. The server's identity (FR-C2j, #541), checked BEFORE any credential is asked for. A
+    // server that claims an identity must prove it with a signature over this run's key. With a
+    // pin, the proven identity must be the pinned one. On any failure the run stops here: no
+    // poll is sent, nothing is written, and the pending enrolment is cancelled (best effort) so
+    // the owner is not left with a request to confirm for a node that walked away.
+    let identity = check_identity(
+        redeemed.server_peer_id.as_deref(),
+        redeemed.server_proof.as_deref(),
+        &redeemed.enrol_id,
+        &node_key_hex,
+    );
+    let proven: Option<String> = match &identity {
+        Identity::Proven(id) => Some(id.clone()),
+        Identity::None | Identity::Invalid => None,
+    };
+    let early_pin: Option<PinResult> = pin.as_ref().map(|p| check_pin(proven.as_deref(), p));
+    let identity_failure: Option<&str> = if identity == Identity::Invalid {
+        Some("the server's proof of its identity is not valid")
+    } else {
+        match early_pin {
+            Some(PinResult::Mismatch) => Some("the server's identity does not match the pin"),
+            Some(PinResult::NoIdDelivered) => Some("a pin was given but the server proved no identity"),
+            Some(PinResult::Match { .. }) | None => None,
+        }
+    };
+    if let Some(what) = identity_failure {
+        io.say(&format!("Pinned fingerprint: {}", pin.as_ref().map(pin_fingerprint).unwrap_or_else(|| "(none)".into())));
+        io.say(&format!(
+            "Server fingerprint: {}",
+            match &identity {
+                Identity::Proven(id) => ember_transport::fingerprint_hex(id).unwrap_or_default(),
+                Identity::None => "(none)".into(),
+                Identity::Invalid => "(not proven)".into(),
+            }
+        ));
+        io.say(IDENTITY_ABORT_TEXT);
+        let cancelled = cancel_once(&client, &poll_url, &redeemed.poll_secret).await;
+        io.say(if cancelled {
+            "The server cancelled this enrolment: the owner can no longer confirm it."
+        } else {
+            "The enrolment could not be cancelled: if a computer is waiting for confirmation in Ember, deny it."
+        });
+        bail!("{what}; nothing was written");
+    }
+    let server_verified = matches!(early_pin, Some(PinResult::Match { .. }));
+    if let (true, Some(id)) = (server_verified, &proven) {
+        io.say(&format!(
+            "The server proved the pinned identity: {}",
+            ember_transport::fingerprint_hex(id).unwrap_or_default()
+        ));
+    }
 
     // 6. Poll until the owner decides.
     match &own_fingerprint {
@@ -921,7 +1029,6 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
         )),
         None => io.say("Waiting for the owner to confirm this computer in Ember."),
     }
-    let poll_url = format!("{}/enrol/status/{}", server.base, redeemed.enrol_id);
     let started = Instant::now();
     let mut delay = opts.poll_every;
     let mut net_errors = 0u32;
@@ -972,16 +1079,36 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
         }
     };
     // The poll secret has done its job; it was never printed or logged.
+    let enrol_id = redeemed.enrol_id.clone();
     drop(redeemed);
 
-    // 7. Trust decision, before anything is written.
+    // 7. Open the sealed credential, then the trust decision, before anything is written.
     let name = strip_display(&cred.name, MAX_DISPLAY_NAME_CHARS);
     let computer_id = strip_display(&cred.computer_id, MAX_DISPLAY_ID_CHARS);
-    let delivered_shape_ok = cred.server_peer_id.as_deref().map_or(true, is_peer_hex);
+    // Only this run's key opens it (FR-C2d, #540). A credential sealed to another key, for
+    // another enrolment, or changed on the way does not open, and nothing is written.
+    let node_token = match node_key.open(&enrol_id, &cred.sealed_token) {
+        Ok(t) => t,
+        Err(e) => {
+            io.say(&format!(
+                "The server registered this computer as {name} ({computer_id}) but this node cannot open the credential it sent; remove it in Ember."
+            ));
+            bail!("{e}; nothing was written");
+        }
+    };
+    drop(node_key);
+    // The transport id in the credential is the one the node would add to allowed-peers. It
+    // must be the identity the server proved at the redeem (FR-C2j): an id that was not proven,
+    // or another id, is never trusted.
+    let delivered_shape_ok = match (&cred.server_peer_id, &proven) {
+        (None, _) => true,
+        (Some(c), Some(p)) => c == p,
+        (Some(_), None) => false,
+    };
     let delivered: Option<String> = cred.server_peer_id.clone().filter(|_| delivered_shape_ok);
     let enrolment = Enrolment {
         server: server.base.clone(),
-        node_token: cred.node_token,
+        node_token: node_token.to_string(),
         server_peer_id: delivered.clone(),
         name: name.clone(),
         computer_id: computer_id.clone(),
@@ -997,15 +1124,17 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
     if let Some(fp) = &delivered_fp {
         io.say(&format!("The server's transport id: {fp}"));
     }
-    let pin_result: Option<PinResult> = match (&pin, delivered_shape_ok) {
-        (Some(_), false) => Some(PinResult::Mismatch),
-        (Some(p), true) => Some(check_pin(delivered.as_deref(), p)),
-        (None, _) => None,
+    // The pin was already satisfied by the proven identity (step 5b). With no transport id in
+    // the credential there is nothing to add to allowed-peers, pin or no pin.
+    let pin_result: Option<PinResult> = match (&pin, delivered_shape_ok, &delivered) {
+        (Some(_), false, _) => Some(PinResult::Mismatch),
+        (Some(p), true, Some(_)) => Some(check_pin(delivered.as_deref(), p)),
+        (Some(_), true, None) | (None, _, _) => None,
     };
     let mut asked = false;
     let trust = if !delivered_shape_ok {
         Trust::Abort
-    } else if pin.is_none() && delivered.is_none() {
+    } else if delivered.is_none() {
         Trust::NotTrusted
     } else {
         decide_trust(pin_result, interactive, opts.trust_unverified, opts.yes, || {
@@ -1017,7 +1146,7 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
     match trust {
         Trust::Abort => {
             let what = if !delivered_shape_ok {
-                "the server sent a malformed transport id"
+                "the server sent a transport id that is not the identity it proved"
             } else if matches!(pin_result, Some(PinResult::NoIdDelivered)) {
                 "a pin was given but the server has no transport id"
             } else {
@@ -1028,7 +1157,7 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
                 "Delivered fingerprint: {}",
                 match (&delivered_fp, delivered_shape_ok) {
                     (Some(fp), _) => fp.clone(),
-                    (None, false) => "(malformed)".into(),
+                    (None, false) => "(not proven)".into(),
                     (None, true) => "(none)".into(),
                 }
             ));
@@ -1098,7 +1227,7 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
     if let Some(text) = sync_warning {
         return Err(anyhow::Error::new(Said(text)));
     }
-    Ok(Outcome { name, computer_id, server_trusted: trusted, peer_added: report.peer_added })
+    Ok(Outcome { name, computer_id, server_trusted: trusted, peer_added: report.peer_added, server_verified })
 }
 
 // ---- tests ----------------------------------------------------------------------------------
@@ -1628,5 +1757,60 @@ mod tests {
         let e = anyhow::Error::new(Said("x".into()));
         assert!(e.downcast_ref::<Said>().is_some());
         assert_eq!(format!("{e:#}"), "x");
+    }
+
+    // ---- the server proof (FR-C2j, #541) and the sealed credential (FR-C2d, #540) ----
+
+    #[test]
+    fn fr_c2j_node_cli_check_identity_table() {
+        use crate::enrol_seal::sign_proof;
+        let server = ember_transport::SecretKey::generate();
+        let sid = server.peer_id().to_string();
+        let key = NodeKey::generate().public_hex();
+        let proof = sign_proof(&server, "enrol-1", &key).unwrap();
+        assert_eq!(check_identity(None, None, "enrol-1", &key), Identity::None);
+        assert_eq!(check_identity(Some(&sid), Some(&proof), "enrol-1", &key), Identity::Proven(sid.clone()));
+        // A rogue server that claims the real server's id cannot make its signature.
+        let rogue = ember_transport::SecretKey::generate();
+        let forged = sign_proof(&rogue, "enrol-1", &key).unwrap();
+        assert_eq!(check_identity(Some(&sid), Some(&forged), "enrol-1", &key), Identity::Invalid);
+        // A proof recorded for another enrolment or another run's key is of no use.
+        assert_eq!(check_identity(Some(&sid), Some(&proof), "enrol-2", &key), Identity::Invalid);
+        let other_key = NodeKey::generate().public_hex();
+        assert_eq!(check_identity(Some(&sid), Some(&proof), "enrol-1", &other_key), Identity::Invalid);
+        // Half an identity, or a malformed id, is invalid, never "none".
+        assert_eq!(check_identity(Some(&sid), None, "enrol-1", &key), Identity::Invalid);
+        assert_eq!(check_identity(None, Some(&proof), "enrol-1", &key), Identity::Invalid);
+        assert_eq!(check_identity(Some(&sid.to_uppercase()), Some(&proof), "enrol-1", &key), Identity::Invalid);
+        assert_eq!(check_identity(Some("zz"), Some(&proof), "enrol-1", &key), Identity::Invalid);
+    }
+
+    #[test]
+    fn fr_c2j_node_cli_a_pin_is_checked_against_the_proven_identity_only() {
+        let sid = id();
+        let wrong = id();
+        // No proven identity: a pin cannot be satisfied.
+        assert_eq!(check_pin(None, &parse_pin(&sid).unwrap()), PinResult::NoIdDelivered);
+        assert_eq!(check_pin(Some(&sid), &parse_pin(&wrong).unwrap()), PinResult::Mismatch);
+        assert_eq!(check_pin(Some(&sid), &parse_pin(&sid).unwrap()), PinResult::Match { short: false });
+    }
+
+    #[test]
+    fn fr_c2d_node_cli_a_cleartext_credential_does_not_parse() {
+        let clear = r#"{"status":"joined","credential":{"node_token":"dpn_clear","name":"n","computer_id":"c"}}"#;
+        assert!(serde_json::from_str::<PollAnswer>(clear).is_err(), "a token in clear is never accepted");
+        let key = NodeKey::generate();
+        let sealed = crate::enrol_seal::seal("enrol-1", &key.public_hex(), "dpn_sealed").unwrap();
+        let body = json!({ "status": "joined", "credential": { "sealed_token": sealed, "name": "n", "computer_id": "c" } });
+        let a: PollAnswer = serde_json::from_value(body).unwrap();
+        let c = a.credential.expect("credential");
+        assert_eq!(key.open("enrol-1", &c.sealed_token).unwrap().as_str(), "dpn_sealed");
+    }
+
+    #[test]
+    fn fr_c2d_node_cli_the_help_and_the_warning_say_the_credential_is_sealed() {
+        assert!(USAGE.contains("sealed") && USAGE.contains("prove"));
+        assert!(PLAIN_HTTP_WARNING.contains("sealed") && PLAIN_HTTP_WARNING.contains("--server-fingerprint"));
+        assert!(IDENTITY_ABORT_TEXT.contains("no credential") && IDENTITY_ABORT_TEXT.contains("stored nothing"));
     }
 }

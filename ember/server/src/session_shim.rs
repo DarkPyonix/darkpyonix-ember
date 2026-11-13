@@ -78,10 +78,13 @@ pub struct ShimSpec {
 pub const ENV_CLEAR: &str = "EMBER_ENV_CLEAR";
 
 /// Set `env` on `cmd`: honours [`ENV_CLEAR`], otherwise the entries are added on top of the
-/// inherited environment.
+/// inherited environment with every Ember secret removed first (FR-A11,
+/// [`crate::sandbox::scrub_env`]). An entry of `env` itself is set after the scrub and survives.
 pub fn apply_env(cmd: &mut tokio::process::Command, env: &[(String, String)]) {
     if env.iter().any(|(k, _)| k == ENV_CLEAR) {
         cmd.env_clear();
+    } else {
+        crate::sandbox::scrub_env(cmd);
     }
     cmd.envs(env.iter().filter(|(k, _)| k != ENV_CLEAR).map(|(k, v)| (k, v)));
 }

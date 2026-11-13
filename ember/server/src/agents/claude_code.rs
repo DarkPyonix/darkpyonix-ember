@@ -118,6 +118,10 @@ impl ClaudeCodeAdapter {
         .into_iter()
         .map(String::from)
         .collect();
+        // FR-A11: deny its file tools on the agent sandbox's directories (none in tests).
+        if let Some(settings) = crate::sandbox::claude_settings(crate::sandbox::denied_dirs()) {
+            args.push(format!("--settings={settings}"));
+        }
         if let Some(model) = &req.model {
             args.push("--model".into());
             args.push(model.clone());
@@ -370,6 +374,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
             // stream-json has no handshake state, so a running agent can be rejoined (FR-S8).
             reattachable: true,
             mem_limit_mb: req.mem_limit_mb,
+            os_sandbox: true,
         })
         .await?;
         let pid = proc.pid;

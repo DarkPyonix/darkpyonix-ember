@@ -12,10 +12,15 @@
 //! transfer events yet), and each user action is one API call on the app's runtime.
 //!
 //! Limits, stated where the user meets them:
-//! - Only the server computer can be a receiver ([`SEND_OTHER_DEVICE`]). The server does not
-//!   relay a transfer to another computer or device, and a node has no receiver.
-//! - The app accepts its own offer: the person sending through the owner API is the person who
-//!   would answer the prompt on the same screen. Offers from other devices still ask.
+//! - A receiver is the server computer (`/api/transfers`) or an online registered computer
+//!   reached over the transport, through the server's relay to its node
+//!   (`TransferTarget::Computer`, `FR-F14`). Phones and other devices cannot receive yet
+//!   ([`SEND_OTHER_DEVICE`]), nor a computer registered by plain HTTP ([`SEND_PLAIN_HTTP`]),
+//!   because the relay would carry its bytes unencrypted (`FR-F6`).
+//! - The app accepts its own offer to the server computer: the person sending through the owner
+//!   API is the person who would answer the prompt on the same screen. A node accepts an owner's
+//!   offer by itself (`FR-F15`), so the app never accepts for a computer. Offers from other
+//!   devices still ask.
 //! - A history row is shown as sent only for this run of the app; the server records every
 //!   transfer from its own side, as received.
 
@@ -26,8 +31,8 @@ use std::time::{Duration, Instant};
 
 use ember_client::api::Api;
 use ember_client::transfers::{
-    self as wire, LocalFile, RateMeter, TransferError, TransferResult, TransferStatus, TransfersSnapshot,
-    UploadEnd, UploadOptions,
+    self as wire, LocalFile, RateMeter, TransferError, TransferResult, TransferStatus, TransferTarget,
+    TransfersSnapshot, UploadEnd, UploadOptions,
 };
 
 use crate::ui::files::{
@@ -38,14 +43,71 @@ use crate::ui::files::{
 /// The id of the server computer in the computers list (`ember_server::computers::LOCAL`).
 pub const SERVER_DEVICE: &str = crate::ui::files::SERVER_COMPUTER_ID;
 
-/// Why a device other than the server computer cannot receive yet.
-pub const SEND_OTHER_DEVICE: &str = "지금은 서버 컴퓨터로만 파일을 보낼 수 있습니다";
+/// Why a phone or another device that is not a registered computer cannot receive yet.
+pub const SEND_OTHER_DEVICE: &str = "휴대폰이나 다른 기기로는 아직 파일을 보낼 수 없습니다. 컴퓨터를 골라 주세요.";
+/// Why a computer registered by plain HTTP cannot receive (`FR-F14` `InsecureTarget`).
+pub const SEND_PLAIN_HTTP: &str = "이 컴퓨터는 암호화되지 않은 연결로 등록되어 있어서 파일을 보낼 수 없습니다.";
+/// Why a computer that is not online cannot receive.
+pub const SEND_OFFLINE: &str = "이 컴퓨터가 온라인이 아니어서 파일을 보낼 수 없습니다.";
 /// Why nothing can be sent while the server does not answer.
 pub const NOT_CONNECTED: &str = "서버에 연결되어 있지 않아 파일을 보낼 수 없습니다";
 /// The server computer's name when the computers list does not have it.
 pub const SERVER_NAME_FALLBACK: &str = crate::ui::files::SERVER_COMPUTER_NAME;
 
 const ACTION_FAILED: &str = "요청을 서버에 전하지 못했습니다. 연결을 확인하고 다시 시도해 주세요.";
+
+// ---------------------------------------------------------------------------------------------
+// Where a send goes
+// ---------------------------------------------------------------------------------------------
+
+/// What the app knows about a chosen receiver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Receiver {
+    pub id: String,
+    /// It is one of the registered computers (the server's `GET /computers`).
+    pub computer: bool,
+    /// The computer is reached over the transport (it has a peer id), not by a plain HTTP URL.
+    pub peer: bool,
+    pub online: bool,
+}
+
+/// The target a send to `r` goes through, or the reason it cannot go there.
+pub fn target_of(r: &Receiver) -> Result<TransferTarget, &'static str> {
+    if r.id == SERVER_DEVICE {
+        return Ok(TransferTarget::Server);
+    }
+    if !r.computer {
+        return Err(SEND_OTHER_DEVICE);
+    }
+    if !r.peer {
+        return Err(SEND_PLAIN_HTTP);
+    }
+    if !r.online {
+        return Err(SEND_OFFLINE);
+    }
+    Ok(TransferTarget::Computer(r.id.clone()))
+}
+
+/// The registered computers' transport ids, from the last `GET /computers` (`None`: plain HTTP).
+static PEERS: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+
+/// Records which registered computers are reached over the transport. Called with every
+/// computers list the app reads.
+pub fn note_computers(list: &[crate::server::ComputerStatus]) {
+    let map = list.iter().map(|c| (c.id.clone(), c.local || c.peer.as_deref().is_some_and(|p| !p.is_empty()))).collect();
+    *PEERS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()) = map;
+}
+
+fn has_peer(id: &str) -> Option<bool> {
+    PEERS.get()?.lock().unwrap_or_else(|e| e.into_inner()).get(id).copied()
+}
+
+/// Writes why a send to a computer failed to the log; the user sees only the fixed sentence.
+fn log_failure(target: &TransferTarget, e: &TransferError) {
+    if let TransferTarget::Computer(id) = target {
+        tracing::warn!(computer = %id, error = ?e, "a file transfer to a computer failed");
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // The book: everything the service knows, and what each action means
@@ -60,6 +122,8 @@ pub struct Outgoing {
     pub name: String,
     /// The receiver's name.
     pub device: String,
+    /// Where the send goes: the server computer, or a computer through the relay.
+    pub target: TransferTarget,
     pub paths: Vec<PathBuf>,
     /// Sizes and hashes, once read.
     pub prepared: Option<Vec<LocalFile>>,
@@ -81,6 +145,16 @@ pub enum Plan {
     Restart(String),
 }
 
+/// A history row of a relayed send, with the time it ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEntryAt {
+    pub name: String,
+    pub device: String,
+    pub size: u64,
+    pub result: HistoryResult,
+    pub at_ms: i64,
+}
+
 #[derive(Debug, Default)]
 pub struct Book {
     snapshot: Option<TransfersSnapshot>,
@@ -89,6 +163,9 @@ pub struct Book {
     outgoing: Vec<Outgoing>,
     /// Server ids of the sends finished in this run, with the receiver's name.
     sent: Vec<(String, String)>,
+    /// Sends to other computers that ended in this run. The server's history holds only its own
+    /// computer's transfers, so these rows name the receiving computer from here.
+    relayed: Vec<HistoryEntryAt>,
     rates: HashMap<String, RateMeter>,
     seq: u64,
 }
@@ -153,8 +230,10 @@ impl Book {
         self.online && self.ready()
     }
 
+    /// The server computer's transfer `server_id` is one of this device's sends. A node numbers
+    /// its transfers on its own, so only sends to the server computer can match.
     fn owns(&self, server_id: &str) -> bool {
-        self.outgoing.iter().any(|o| o.server_id.as_deref() == Some(server_id))
+        self.outgoing.iter().any(|o| o.target == TransferTarget::Server && o.server_id.as_deref() == Some(server_id))
     }
 
     /// Takes a fresh snapshot. `true` when the screen has something new to draw.
@@ -164,19 +243,39 @@ impl Book {
         for t in &snapshot.transfers {
             self.rates.entry(t.id.clone()).or_default().observe(now_ms, t.done);
         }
-        self.rates.retain(|id, _| snapshot.transfers.iter().any(|t| &t.id == id));
-        for o in &mut self.outgoing {
-            let Some(t) = o.server_id.as_ref().and_then(|id| snapshot.transfers.iter().find(|t| &t.id == id)) else {
-                continue;
-            };
-            // A send that failed here stays failed, whatever the receiver still holds.
-            if matches!(o.state, TransferState::Sending | TransferState::Paused) {
-                o.state = if t.state == TransferStatus::Paused { TransferState::Paused } else { TransferState::Sending };
-                o.done = o.done.max(t.done);
-            }
-        }
+        let relayed: Vec<String> = self
+            .outgoing
+            .iter()
+            .filter(|o| o.target != TransferTarget::Server)
+            .filter_map(|o| o.server_id.as_ref().map(|id| relay_rate_key(&o.target, id)))
+            .collect();
+        self.rates.retain(|id, _| relayed.contains(id) || snapshot.transfers.iter().any(|t| &t.id == id));
+        follow(&mut self.outgoing, &TransferTarget::Server, &snapshot);
         self.snapshot = Some(snapshot);
         changed
+    }
+
+    /// The computers this device is sending to now, whose own transfer lists the poll reads.
+    pub fn relay_targets(&self) -> Vec<TransferTarget> {
+        let mut out: Vec<TransferTarget> = Vec::new();
+        for o in &self.outgoing {
+            if o.target != TransferTarget::Server && o.server_id.is_some() && !out.contains(&o.target) {
+                out.push(o.target.clone());
+            }
+        }
+        out
+    }
+
+    /// Takes a computer's transfer list (`transfers_at`): its rows of this device's sends follow
+    /// the node's state and progress. Nothing else of it is shown.
+    pub fn apply_relay_snapshot(&mut self, target: &TransferTarget, snapshot: &TransfersSnapshot, now_ms: i64) {
+        for o in self.outgoing.iter().filter(|o| &o.target == target) {
+            let Some(id) = &o.server_id else { continue };
+            if let Some(t) = snapshot.transfers.iter().find(|t| &t.id == id) {
+                self.rates.entry(relay_rate_key(target, id)).or_default().observe(now_ms, t.done);
+            }
+        }
+        follow(&mut self.outgoing, target, snapshot);
     }
 
     /// The server did not answer. The last lists stay on screen; sending is blocked.
@@ -200,9 +299,11 @@ impl Book {
                 total: o.total,
                 done: o.done.min(o.total),
                 bytes_per_sec: match o.state {
-                    TransferState::Sending => {
-                        o.server_id.as_ref().and_then(|id| self.rates.get(id)).and_then(|m| m.rate())
-                    }
+                    TransferState::Sending => o
+                        .server_id
+                        .as_ref()
+                        .and_then(|id| self.rates.get(&relay_rate_key(&o.target, id)))
+                        .and_then(|m| m.rate()),
                     _ => None,
                 },
                 state: o.state,
@@ -236,23 +337,29 @@ impl Book {
 
     pub fn history(&self, now_ms: i64) -> Vec<HistoryEntry> {
         let Some(s) = &self.snapshot else { return Vec::new() };
-        s.history
-            .iter()
-            .map(|h| {
-                let mine = self.sent.iter().find(|(id, _)| id == &h.id);
-                HistoryEntry {
-                    name: h.name.clone(),
-                    device: mine.map(|(_, device)| device.clone()).unwrap_or_else(|| h.device.clone()),
-                    direction: match (mine, h.direction) {
-                        (Some(_), _) | (None, wire::TransferDirection::Send) => Direction::Send,
-                        (None, wire::TransferDirection::Receive) => Direction::Receive,
-                    },
-                    size: h.size,
-                    result: result_of(h.result),
-                    when: when_text(now_ms, h.timestamp_ms),
-                }
-            })
-            .collect()
+        let relayed = self.relayed.iter().rev().map(|h| HistoryEntry {
+            name: h.name.clone(),
+            device: h.device.clone(),
+            direction: Direction::Send,
+            size: h.size,
+            result: h.result,
+            when: when_text(now_ms, h.at_ms),
+        });
+        let recorded = s.history.iter().map(|h| {
+            let mine = self.sent.iter().find(|(id, _)| id == &h.id);
+            HistoryEntry {
+                name: h.name.clone(),
+                device: mine.map(|(_, device)| device.clone()).unwrap_or_else(|| h.device.clone()),
+                direction: match (mine, h.direction) {
+                    (Some(_), _) | (None, wire::TransferDirection::Send) => Direction::Send,
+                    (None, wire::TransferDirection::Receive) => Direction::Receive,
+                },
+                size: h.size,
+                result: result_of(h.result),
+                when: when_text(now_ms, h.timestamp_ms),
+            }
+        });
+        relayed.chain(recorded).collect()
     }
 
     /// Offers from other devices waiting for an answer, with the cleaned names only (`FR-F9`).
@@ -270,14 +377,19 @@ impl Book {
         self.snapshot.as_ref().map(|s| s.settings.received_dir.clone()).filter(|d| !d.is_empty())
     }
 
-    /// Queues a send and answers its local id, or says why it cannot be sent.
+    /// Queues a send to the server computer and answers its local id, or says why it cannot be
+    /// sent. Any other id is taken as a device that is not a registered computer.
     pub fn queue_send(&mut self, device_id: &str, device_name: &str, files: &[String]) -> Result<String, String> {
+        let receiver = Receiver { id: device_id.to_string(), computer: device_id == SERVER_DEVICE, peer: true, online: true };
+        self.queue_send_to(&receiver, device_name, files)
+    }
+
+    /// [`Book::queue_send`] with what the app knows about the receiver.
+    pub fn queue_send_to(&mut self, receiver: &Receiver, device_name: &str, files: &[String]) -> Result<String, String> {
         if !self.can_send() {
             return Err(NOT_CONNECTED.to_string());
         }
-        if device_id != SERVER_DEVICE {
-            return Err(SEND_OTHER_DEVICE.to_string());
-        }
+        let target = target_of(receiver).map_err(str::to_string)?;
         if files.is_empty() {
             return Err(TransferError::NoFiles.text_ko());
         }
@@ -289,6 +401,7 @@ impl Book {
             server_id: None,
             name: send_label(&paths),
             device: device_name.to_string(),
+            target,
             paths,
             prepared: None,
             total: 0,
@@ -301,12 +414,18 @@ impl Book {
 
     /// What a user action needs. An action the transfer's state does not allow needs nothing.
     pub fn plan_control(&mut self, id: &str, action: TransferAction) -> Plan {
+        self.plan_control_at(id, action).1
+    }
+
+    /// [`Book::plan_control`] with the target the call goes to.
+    pub fn plan_control_at(&mut self, id: &str, action: TransferAction) -> (TransferTarget, Plan) {
         if let Some(pos) = self.outgoing.iter().position(|o| o.local_id == id) {
             let o = &mut self.outgoing[pos];
+            let target = o.target.clone();
             if next_state(o.state, action).is_none() {
-                return Plan::Nothing;
+                return (target, Plan::Nothing);
             }
-            return match action {
+            let plan = match action {
                 TransferAction::Pause => o.server_id.clone().map(Plan::Pause).unwrap_or(Plan::Nothing),
                 TransferAction::Resume => o.server_id.clone().map(Plan::Resume).unwrap_or(Plan::Nothing),
                 TransferAction::Cancel => {
@@ -323,20 +442,23 @@ impl Book {
                 }
                 _ => Plan::Nothing,
             };
+            return (target, plan);
         }
+        let server = TransferTarget::Server;
         let Some(t) = self.snapshot.as_ref().and_then(|s| s.transfers.iter().find(|t| t.id == id)) else {
-            return Plan::Nothing;
+            return (server, Plan::Nothing);
         };
         if next_state(state_of(t.state), action).is_none() {
-            return Plan::Nothing;
+            return (server, Plan::Nothing);
         }
-        match action {
+        let plan = match action {
             TransferAction::Pause => Plan::Pause(t.id.clone()),
             // The receiver takes chunks again; the sending device continues from its offset.
             TransferAction::Resume | TransferAction::Retry => Plan::Resume(t.id.clone()),
             TransferAction::Cancel => Plan::Cancel(t.id.clone()),
             _ => Plan::Nothing,
-        }
+        };
+        (server, plan)
     }
 
     fn outgoing_mut(&mut self, local_id: &str) -> Option<&mut Outgoing> {
@@ -345,11 +467,33 @@ impl Book {
 
     /// The send ended: done, declined and cancelled leave the list, a failure stays for a retry.
     pub fn finish_send(&mut self, local_id: &str, end: &Result<UploadEnd, TransferError>) {
+        self.finish_send_at(local_id, end, crate::demo::now_ms())
+    }
+
+    /// [`Book::finish_send`] at `now_ms`. A send to another computer that ended becomes a history
+    /// row naming that computer.
+    pub fn finish_send_at(&mut self, local_id: &str, end: &Result<UploadEnd, TransferError>, now_ms: i64) {
         let Some(pos) = self.outgoing.iter().position(|o| o.local_id == local_id) else { return };
+        let ended = match end {
+            Ok(UploadEnd::Done(_)) => Some(HistoryResult::Done),
+            Ok(UploadEnd::Declined) => Some(HistoryResult::Declined),
+            _ => None,
+        };
+        if let (Some(result), o) = (ended, &self.outgoing[pos]) {
+            if o.target != TransferTarget::Server {
+                self.relayed.push(HistoryEntryAt {
+                    name: o.name.clone(),
+                    device: o.device.clone(),
+                    size: o.total,
+                    result,
+                    at_ms: now_ms,
+                });
+            }
+        }
         match end {
             Ok(UploadEnd::Done(_)) => {
                 let o = self.outgoing.remove(pos);
-                if let Some(id) = o.server_id {
+                if let (Some(id), TransferTarget::Server) = (o.server_id, &o.target) {
                     self.sent.push((id, o.device));
                 }
             }
@@ -361,6 +505,28 @@ impl Book {
                 o.state = TransferState::Failed;
                 o.resumable = e.can_resume() && o.server_id.is_some();
             }
+        }
+    }
+}
+
+/// The rate meter's key: a node's transfer ids may repeat the server's.
+fn relay_rate_key(target: &TransferTarget, id: &str) -> String {
+    match target {
+        TransferTarget::Server => id.to_string(),
+        TransferTarget::Computer(c) => format!("{c}/{id}"),
+    }
+}
+
+/// The rows of sends to `target` follow `snapshot`, its receiver's list.
+fn follow(outgoing: &mut [Outgoing], target: &TransferTarget, snapshot: &TransfersSnapshot) {
+    for o in outgoing.iter_mut().filter(|o| &o.target == target) {
+        let Some(t) = o.server_id.as_ref().and_then(|id| snapshot.transfers.iter().find(|t| &t.id == id)) else {
+            continue;
+        };
+        // A send that failed here stays failed, whatever the receiver still holds.
+        if matches!(o.state, TransferState::Sending | TransferState::Paused) {
+            o.state = if t.state == TransferStatus::Paused { TransferState::Paused } else { TransferState::Sending };
+            o.done = o.done.max(t.done);
         }
     }
 }
@@ -404,6 +570,13 @@ fn notify(text: impl Into<String>) {
 }
 
 async fn refresh(book: &Mutex<Book>, api: &Api) -> Result<(), TransferError> {
+    let targets = lock(book).relay_targets();
+    for target in targets {
+        // A computer that does not answer leaves its rows as they are; the upload reports it.
+        if let Ok(snapshot) = api.transfers_at(&target).await {
+            lock(book).apply_relay_snapshot(&target, &snapshot, crate::demo::now_ms());
+        }
+    }
     match api.transfers().await {
         Ok(snapshot) => {
             if lock(book).apply_snapshot(snapshot, crate::demo::now_ms()) {
@@ -445,6 +618,12 @@ async fn poll(book: Arc<Mutex<Book>>, api: Api) {
 /// One send, from reading the files to the end. Run again for a retry.
 async fn run_send(book: Arc<Mutex<Book>>, api: Api, local_id: String, from: String) {
     let end = send_steps(&book, &api, &local_id, &from).await;
+    if let Err(e) = &end {
+        let target = lock(&book).outgoing_mut(&local_id).map(|o| o.target.clone());
+        if let Some(target) = target {
+            log_failure(&target, e);
+        }
+    }
     let name = {
         let mut b = lock(&book);
         let name = b.outgoing_mut(&local_id).map(|o| o.name.clone());
@@ -488,14 +667,15 @@ async fn send_steps(
             files
         }
     };
+    let target = row.target.clone();
     let id = match row.server_id {
         Some(id) if row.resumable => id,
         stale => {
             if let Some(old) = stale {
                 // A transfer that cannot continue: drop what the receiver kept and offer again.
-                let _ = api.cancel_transfer(&old).await;
+                let _ = api.cancel_transfer_at(&target, &old).await;
             }
-            let created = wire::offer(api, from, None, &files).await?;
+            let created = wire::offer_to(api, &target, from, None, &files).await?;
             let recorded = match lock(book).outgoing_mut(local_id) {
                 Some(o) => {
                     o.server_id = Some(created.id.clone());
@@ -505,10 +685,12 @@ async fn send_steps(
             };
             if !recorded {
                 // Cancelled before the offer had an id on record: withdraw it.
-                let _ = api.cancel_transfer(&created.id).await;
+                let _ = api.cancel_transfer_at(&target, &created.id).await;
                 return Ok(UploadEnd::Cancelled);
             }
-            if created.status == "offered" {
+            // Only the server computer's offer is accepted here. A node accepts the owner's
+            // offer itself (`FR-F15`) and accepting for a computer is not relayed (403).
+            if created.status == "offered" && target == TransferTarget::Server {
                 api.accept_transfer_offer(&created.id).await.map_err(|e| TransferError::from_api(&e))?;
             }
             created.id
@@ -531,7 +713,7 @@ async fn send_steps(
             redraw();
         }
     };
-    wire::upload(api, &id, &files, &UploadOptions::default(), &mut progress).await
+    wire::upload_to(api, &target, &id, &files, &UploadOptions::default(), &mut progress).await
 }
 
 impl ServerTransferService {
@@ -546,14 +728,14 @@ impl ServerTransferService {
     }
 
     /// One API call for a user action, then a fresh snapshot.
-    fn call(&self, plan: Plan) {
+    fn call(&self, target: TransferTarget, plan: Plan) {
         let (book, api) = (self.book.clone(), self.api.clone());
         self.spawn(async move {
             let result = match &plan {
                 Plan::Nothing | Plan::Restart(_) => return,
-                Plan::Pause(id) => api.pause_transfer(id).await.map(|_| ()),
-                Plan::Resume(id) => api.resume_transfer(id).await.map(|_| ()),
-                Plan::Cancel(id) => api.cancel_transfer(id).await.map(|_| ()),
+                Plan::Pause(id) => api.transfer_control_at(&target, id, "pause").await.map(|_| ()),
+                Plan::Resume(id) => api.transfer_control_at(&target, id, "resume").await.map(|_| ()),
+                Plan::Cancel(id) => api.cancel_transfer_at(&target, id).await.map(|_| ()),
             };
             // 404 and 409: the transfer already moved on; the fresh snapshot shows where to.
             if let Err(e) = result {
@@ -616,11 +798,11 @@ impl TransferService for ServerTransferService {
     }
 
     fn control(&self, transfer_id: &str, action: TransferAction) {
-        let plan = lock(&self.book).plan_control(transfer_id, action);
+        let (target, plan) = lock(&self.book).plan_control_at(transfer_id, action);
         match plan {
             Plan::Nothing => {}
             Plan::Restart(local_id) => self.start_send(local_id),
-            other => self.call(other),
+            other => self.call(target, other),
         }
     }
 
@@ -629,11 +811,26 @@ impl TransferService for ServerTransferService {
     }
 
     fn send(&self, device_id: &str, files: Vec<String>) -> Result<(), String> {
-        let device_name = crate::services::try_services()
-            .and_then(|s| s.client.read(|st| st.computers().iter().find(|c| c.id == device_id).map(|c| c.name.clone())))
-            .map(|name| crate::ui::files::computer_display_name(device_id, &name))
-            .unwrap_or_else(|| SERVER_NAME_FALLBACK.to_string());
-        let local_id = lock(&self.book).queue_send(device_id, &device_name, &files)?;
+        let computer = crate::services::try_services().and_then(|s| {
+            s.client.read(|st| {
+                st.computers().iter().find(|c| c.id == device_id).map(|c| (c.name.clone(), c.reachability))
+            })
+        });
+        let device_name = computer
+            .as_ref()
+            .map(|(name, _)| crate::ui::files::computer_display_name(device_id, name))
+            .unwrap_or_else(|| {
+                if device_id == SERVER_DEVICE { SERVER_NAME_FALLBACK.to_string() } else { device_id.to_string() }
+            });
+        let receiver = Receiver {
+            id: device_id.to_string(),
+            computer: device_id == SERVER_DEVICE || computer.is_some(),
+            // Before the first computers list is read, a computer counts as plain HTTP: the
+            // server would refuse it anyway (`InsecureTarget`).
+            peer: has_peer(device_id).unwrap_or(false),
+            online: computer.as_ref().is_some_and(|(_, r)| *r == ember_client::state::Reachability::Online),
+        };
+        let local_id = lock(&self.book).queue_send_to(&receiver, &device_name, &files)?;
         self.start_send(local_id);
         Ok(())
     }
@@ -907,7 +1104,10 @@ mod tests {
         let mut all: Vec<String> = ends.iter().filter_map(|e| end_notice("a.txt", e)).collect();
         assert_eq!(all.len(), 4);
         assert_eq!(end_notice("a.txt", &Ok(UploadEnd::Cancelled)), None);
-        all.extend([SEND_OTHER_DEVICE, NOT_CONNECTED, ACTION_FAILED, SERVER_NAME_FALLBACK].map(String::from));
+        all.extend(
+            [SEND_OTHER_DEVICE, SEND_PLAIN_HTTP, SEND_OFFLINE, NOT_CONNECTED, ACTION_FAILED, SERVER_NAME_FALLBACK]
+                .map(String::from),
+        );
         for text in &all {
             assert!(!text.contains('\u{2014}'), "{text}");
             assert!(text.chars().any(|c| ('가'..='힣').contains(&c)), "{text}");
@@ -932,5 +1132,99 @@ mod tests {
             assert!(!time.is_empty(), "{when}");
         }
         assert!(!DAY_RECENT.contains(' ') && !DAY_EARLIER.contains(' '));
+    }
+
+    fn computer(id: &str, peer: bool, online: bool) -> Receiver {
+        Receiver { id: id.into(), computer: true, peer, online }
+    }
+
+    #[test]
+    fn fr_l27_8_a_send_goes_to_the_server_or_to_an_online_computer_with_a_peer() {
+        let server = Receiver { id: SERVER_DEVICE.into(), computer: true, peer: false, online: false };
+        assert_eq!(target_of(&server), Ok(TransferTarget::Server), "the server computer keeps /api/transfers");
+        assert_eq!(target_of(&computer("c2", true, true)), Ok(TransferTarget::Computer("c2".into())));
+
+        let mut b = online_book();
+        let id = b.queue_send_to(&computer("c2", true, true), "lab-pc", &["/tmp/a.txt".into()]).unwrap();
+        assert_eq!(b.outgoing_mut(&id).unwrap().target, TransferTarget::Computer("c2".into()));
+        let t = b.transfers();
+        assert_eq!((t[0].device.as_str(), t[0].direction), ("lab-pc", Direction::Send));
+    }
+
+    #[test]
+    fn fr_l27_8_phones_other_devices_and_plain_http_computers_are_refused() {
+        let phone = Receiver { id: "p1".into(), computer: false, peer: true, online: true };
+        assert_eq!(target_of(&phone), Err(SEND_OTHER_DEVICE));
+        assert_eq!(target_of(&computer("c3", false, true)), Err(SEND_PLAIN_HTTP));
+        assert_eq!(target_of(&computer("c4", true, false)), Err(SEND_OFFLINE));
+
+        let mut b = online_book();
+        for (r, why) in [(phone, SEND_OTHER_DEVICE), (computer("c3", false, true), SEND_PLAIN_HTTP)] {
+            assert_eq!(b.queue_send_to(&r, "x", &["/tmp/a.txt".into()]), Err(why.to_string()));
+        }
+        assert!(b.transfers().is_empty(), "a refused send leaves no row");
+        // The plain HTTP refusal says the same as the server's own InsecureTarget answer.
+        assert_eq!(SEND_PLAIN_HTTP, TransferError::InsecureTarget.text_ko());
+    }
+
+    #[test]
+    fn fr_l27_8_insecure_target_and_no_space_are_fixed_korean_sentences() {
+        assert_eq!(
+            end_notice("a.txt", &Err(TransferError::InsecureTarget)).as_deref(),
+            Some("이 컴퓨터는 암호화되지 않은 연결로 등록되어 있어서 파일을 보낼 수 없습니다.")
+        );
+        assert_eq!(
+            end_notice("a.txt", &Err(TransferError::NoSpace)).as_deref(),
+            Some("받는 컴퓨터의 저장 공간이 부족해서 보낼 수 없습니다.")
+        );
+    }
+
+    /// A send that reached computer `c2`'s node as `tr-3` (the server has its own `tr-3`).
+    fn relayed_book() -> (Book, String) {
+        let mut b = online_book();
+        let id = b.queue_send_to(&computer("c2", true, true), "lab-pc", &["/tmp/a.bin".into()]).unwrap();
+        let o = b.outgoing_mut(&id).unwrap();
+        o.server_id = Some("tr-3".into());
+        o.total = 1000;
+        o.state = TransferState::Sending;
+        (b, id)
+    }
+
+    #[test]
+    fn fr_l27_8_a_computer_send_follows_its_node_and_not_the_server() {
+        let (mut b, id) = relayed_book();
+        assert_eq!(b.relay_targets(), vec![TransferTarget::Computer("c2".into())]);
+        // The server's own tr-3 is another transfer: it stays a receive row and an offer to answer.
+        b.apply_snapshot(snapshot(json!([receiving("tr-3", 900, "paused")]), json!([offer("tr-3")])), NOW);
+        assert_eq!(b.offers().len(), 1);
+        let t = b.transfers();
+        assert_eq!(t.len(), 2);
+        assert_eq!((t[0].id.as_str(), t[0].state, t[0].done), (id.as_str(), TransferState::Sending, 0));
+        // The node's list moves the row.
+        b.apply_relay_snapshot(&TransferTarget::Computer("c2".into()), &snapshot(json!([receiving("tr-3", 100, "sending")]), json!([])), NOW);
+        b.apply_relay_snapshot(&TransferTarget::Computer("c2".into()), &snapshot(json!([receiving("tr-3", 600, "paused")]), json!([])), NOW + 1000);
+        assert_eq!((b.transfers()[0].state, b.transfers()[0].done), (TransferState::Paused, 600));
+        // Actions go to the computer.
+        assert_eq!(b.plan_control_at(&id, TransferAction::Resume), (TransferTarget::Computer("c2".into()), Plan::Resume("tr-3".into())));
+    }
+
+    #[test]
+    fn fr_l27_8_history_names_the_receiving_computer() {
+        let (mut b, id) = relayed_book();
+        b.finish_send_at(&id, &Ok(UploadEnd::Done(Vec::new())), NOW - 60_000);
+        assert!(b.transfers().is_empty());
+        let h = b.history(NOW);
+        assert_eq!(h.len(), 3, "the relayed send, then the server's own two rows");
+        assert_eq!((h[0].name.as_str(), h[0].device.as_str()), ("a.bin", "lab-pc"));
+        assert_eq!((h[0].direction, h[0].result, h[0].size), (Direction::Send, HistoryResult::Done, 1000));
+        assert_eq!(crate::ui::files::history_peer_label(h[0].direction), "받는 곳");
+        // The server's history row with the same id is not taken for it.
+        assert_eq!(h[1].direction, Direction::Receive);
+
+        // A failure stays a row to retry, not a history entry.
+        let (mut b, id) = relayed_book();
+        b.finish_send_at(&id, &Err(TransferError::NoSpace), NOW);
+        assert_eq!(b.history(NOW).len(), 2);
+        assert_eq!(b.transfers()[0].state, TransferState::Failed);
     }
 }

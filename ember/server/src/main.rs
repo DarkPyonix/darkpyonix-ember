@@ -27,12 +27,19 @@ use ember_server::store::Store;
 /// - `EMBER_ALLOWED_HOSTS`: extra host names accepted in `Host` (comma-separated, FR-S10); the
 ///   token is in `<data dir>/server-token` (FR-S9); `ember-server rotate-token` replaces it and
 ///   exits, and `POST /api/server-token/rotate` does the same on a running server (#369)
+/// - Owner presence (FR-S12, #784): owner routes also need the in-memory owner key, claimed over
+///   `<data dir>/owner.sock` by the app or by `ember-server owner <verb>` (a terminal only).
+///   The default mode is warn: a call without a key is logged and served, until the app ships
+///   its claim. `EMBER_OWNER_PRESENCE=enforce` refuses it with 403. Windows always warns (#815);
+///   `EMBER_OWNER_CONFIRM=off` grants a claim without the console code (best effort)
 /// - `EMBER_IDLE_SECS`: release an agent process after this long without activity (default 300)
 /// - `EMBER_CLAUDE_BIN`: the Claude Code CLI (default `claude` on `PATH`)
 /// - `EMBER_CODEX_BIN`: the Codex CLI (default `codex` on `PATH`)
 /// - `EMBER_AGY_BIN`: the Antigravity CLI (default `agy` on `PATH`). Its sessions keep a private
-///   configuration folder each under `<data dir>/agy/`. A version other than the tested one runs
+///   configuration folder each under `<data dir>-runtime/agy/` (FR-A11). A version other than the tested one runs
 ///   read-only (INTENT D14); `EMBER_AGY_SANDBOX=1` adds agy's `--sandbox` (off by default)
+/// - `EMBER_AGENT_SANDBOX=off`: start agents without the OS sandbox that hides the data dir
+///   (FR-A11; macOS `sandbox-exec`, Linux `bwrap`, used when found and working)
 /// - `EMBER_SCRIPTED_AGENT=1`: also offer the test agent (development only)
 /// - `EMBER_DEMO_DATA=1`: add a demo ChatGPT plan account with 14 days of usage (screenshots only)
 /// - `EMBER_ACP_AGENTS`: Agent Client Protocol agents to offer, as JSON: a list of preset names
@@ -76,8 +83,18 @@ use ember_server::store::Store;
 ///   only the guest routes and `/join`, never the owner API. `EMBER_GUEST_LISTEN_ALLOW_REMOTE=1`
 ///   is required for a non-loopback address; `EMBER_GUEST_ALLOWED_HOSTS` and
 ///   `EMBER_GUEST_PUBLIC_URL` name the hosts guests use. See `guest_door`.
+/// `ember-server __keep-pty …` is the local node's PTY keeper (FR-P6): dispatched before any
+/// runtime or logging starts, as in `ember-node`, so a keeper holds one fd and little memory.
+fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some(ember_node::term::pty::KEEPER_SUBCOMMAND) {
+        std::process::exit(ember_node::term::pty::keeper_main(&args[2..]));
+    }
+    serve_main()
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn serve_main() -> anyhow::Result<()> {
     let started = std::time::SystemTime::now();
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -88,10 +105,17 @@ async fn main() -> anyhow::Result<()> {
     // Private MCP config files left by a crashed run hold env values such as runtime tokens.
     ember_server::agents::claude_code::cleanup_stale_mcp_files(&std::env::temp_dir(), started);
 
+    // Keys in the OS keystore where available (FR-S13, EMBER_KEYSTORE=file|os|auto).
+    ember_node::keystore::install_from_env()?;
+
     let data_dir = std::env::var_os("EMBER_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| {
         PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".ember")
     });
     std::fs::create_dir_all(&data_dir)?;
+    // FR-A11 (#784): agy homes and the OSE data root live in the data dir's sibling runtime dir;
+    // a data dir from before is moved once (idempotent).
+    let runtime = ember_server::runtime_dir::runtime_dir(&data_dir);
+    ember_server::runtime_dir::migrate_logged(&data_dir, &runtime);
     // `ember-server rotate-token` (#369): replace `<data dir>/server-token` and exit. A running
     // server takes the new token on the next request that presents it; the old one gets 401.
     if std::env::args().nth(1).as_deref() == Some("rotate-token") {
@@ -102,7 +126,26 @@ async fn main() -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    // `ember-server owner <verb>` (FR-S12, #784): one owner route from a terminal, with a key
+    // claimed over the running server's owner socket for this call only.
+    if std::env::args().nth(1).as_deref() == Some("owner") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        return ember_server::owner::cli::run(&args, &data_dir).await;
+    }
     let store = Arc::new(Store::open(&data_dir.join("ember.db"))?);
+    // Agents never see the data dir or the OSE data root (FR-A11): OS sandbox where available,
+    // Ember's own file handlers and Claude Code's deny rules otherwise.
+    {
+        let mut denied = vec![std::path::absolute(&data_dir).unwrap_or_else(|_| data_dir.clone())];
+        if let Ok(ose) = ember_server::ose::data_root_from(
+            std::env::var_os("EMBER_OSE_DATA_DIR").map(PathBuf::from),
+            Some(denied[0].clone()),
+            None,
+        ) {
+            denied.push(std::path::absolute(&ose).unwrap_or(ose));
+        }
+        ember_server::sandbox::install(ember_server::sandbox::from_env(denied));
+    }
     // Agents run under per-session shims and outlive this server (FR-S8, EMBER_SESSION_SHIM=off
     // keeps direct children). Stopping the server leaves the shims, and so the agents, running.
     let shim_runtime = match ember_server::agents::proc::find_shim_bin() {
@@ -160,10 +203,22 @@ async fn main() -> anyhow::Result<()> {
         )),
         None => None,
     };
-    // The peer-to-peer transport (FR-N1), opt-in. `server_peer_id` stays None when it is off.
-    let mut server_peer_id: Option<String> = None;
-    let net = if server_transport::enabled_from_env() {
+    // The server's identity for the enrol flow (FR-C2j, #541): its transport key, loaded (and
+    // created on first use) whether or not the transport is on, so the minted command always
+    // pins the server and the redeem answer always proves it. A key that cannot be loaded with
+    // the transport off is not fatal: enrol then runs without a pin, as before.
+    let transport_on = server_transport::enabled_from_env();
+    let mut server_key: Option<ember_transport::SecretKey> = None;
+    if !transport_on {
+        match server_transport::load_key(&data_dir) {
+            Ok(k) => server_key = Some(k),
+            Err(e) => tracing::warn!("no server identity key, enrol commands carry no --server-fingerprint: {e}"),
+        }
+    }
+    // The peer-to-peer transport (FR-N1), opt-in.
+    let net = if transport_on {
         let key = server_transport::load_key(&data_dir)?;
+        server_key = Some(key.clone());
         let registered = hub.as_ref().is_some_and(|h| h.is_registered());
         // The resolve token (`dpr_`) goes in the directory resolver's URL; a registration from
         // before the hub issued them gets one now.
@@ -178,7 +233,13 @@ async fn main() -> anyhow::Result<()> {
             Some(h) => Some(h.config()),
             None => hub_config,
         };
-        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), registered, token)).await?;
+        // The device token, for the hub's batched pkarr watch (header only, never a URL).
+        let device_token = match &hub {
+            Some(h) if registered => h.registration().ok().flatten().and_then(|r| r.active_token()),
+            _ => None,
+        };
+        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), registered, token, device_token))
+            .await?;
         if let Some(h) = &hub {
             h.attach_transport(t.clone());
             let _watch = h.spawn_watch(ember_server::hub::WATCH_PERIOD);
@@ -198,7 +259,6 @@ async fn main() -> anyhow::Result<()> {
         t.wait_online(std::time::Duration::from_secs(5)).await;
         // Printed (not only logged): the peer id goes into each node's allowed peers.
         println!("ember server peer id: {}", t.peer_id());
-        server_peer_id = Some(t.peer_id().to_string());
         println!("ember server peer addr: {}", serde_json::to_string(&t.local_addr())?);
         Some(ServerTransport::new(t))
     } else {
@@ -213,7 +273,7 @@ async fn main() -> anyhow::Result<()> {
     let store_for_guest = store.clone();
     // One `Enrol` for the whole process: the owner's routes (mint, confirm, deny) and the enrol door
     // (redeem, poll, from step C3a) share its failure windows and its pending-token map, which live per instance.
-    let enrol = computers::enrol::Enrol::with_server_peer_id(store.clone(), server_peer_id);
+    let enrol = computers::enrol::Enrol::with_server_key(store.clone(), server_key, transport_on);
     let sessions = Sessions::new(store, adapters);
     // Per-harness memory limits stored by the settings API (FR-L20, FR-S8).
     sessions.load_settings();
@@ -229,6 +289,14 @@ async fn main() -> anyhow::Result<()> {
         shim,
         dialer.clone(),
     );
+    // The local computer's terminals outlive this process (FR-P6): records and PTY keepers in
+    // `<data dir>/local-node`; a restart re-adopts them. EMBER_NODE_KEEP_PTY=0 turns it off.
+    computers.set_local_node_options(computers::local_node::LocalNodeOptions::from_env(&data_dir));
+    match computers.resume_local_node() {
+        Ok(true) => tracing::info!("local node resumed the terminals of the previous run"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("local node could not resume terminals: {e}"),
+    }
     // Claude Code's file tools on other computers (EMBER_MOUNT=off|nfs|fuse|auto).
     // Opened like every other node client, so computers registered by peer mount too.
     if let Some(mounts) = computers::mount::ProjectMounts::from_env(computers.node_fs()) {
@@ -411,8 +479,8 @@ async fn main() -> anyhow::Result<()> {
             if d.is_remote() {
                 tracing::warn!(
                     "enrol door on {} is reachable from that network (EMBER_ENROL_LISTEN_ALLOW_REMOTE=1); it \
-                     speaks plain HTTP, so an enrol code and the credential cross the network in clear; put \
-                     TLS in front of it",
+                     speaks plain HTTP, so an enrol code and the poll secret cross the network in clear \
+                     (the credential itself is sealed to the node); put TLS in front of it",
                     d.listen
                 );
             } else {
@@ -485,6 +553,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(computers::terms::router(computers.clone()))
         .merge(computers::metrics::router(computers.clone()))
         .merge(computers::fs::router(computers.clone()))
+        .merge(computers::transfers::router(computers.clone()))
         .merge(computers::ports::router(computers.clone()))
         .merge(ember_server::api::harnesses::router(sessions.clone(), computers.clone()))
         .merge(ember_server::api::git::router(sessions.clone(), computers.clone()))
@@ -504,7 +573,7 @@ async fn main() -> anyhow::Result<()> {
     // Over the transport: the same API to allowed devices, without device management.
     let transport_task = match &net {
         Some(n) => {
-            let serve = server_transport::serve(&n.transport, app.clone(), devices.gate().clone())?;
+            let serve = server_transport::serve_scoped(&n.transport, app.clone(), devices.clone())?;
             tracing::info!(
                 peer = %n.transport.peer_id(),
                 service = server_transport::SERVER_SERVICE,
@@ -537,6 +606,11 @@ async fn main() -> anyhow::Result<()> {
             ),
             enrol_gate.clone(),
         ));
+    // FR-S12: the live owner keys, in memory only.
+    let owner = ember_server::owner::Owner::from_env();
+    if owner.presence() == ember_server::owner::Presence::Warn {
+        tracing::warn!("owner presence is in warn mode: owner routes are served with the server token alone and logged (EMBER_OWNER_PRESENCE=enforce refuses them)");
+    }
     // FR-S9, FR-S10: the token and the Origin/Host check on the local listener, every route.
     // The transport above serves `app` unwrapped: its callers passed the device gate (FR-N7).
     let local_app = {
@@ -558,8 +632,31 @@ async fn main() -> anyhow::Result<()> {
         // `POST /api/server-token/rotate` take effect without a restart (#369).
         let auth = ember_server::auth::ServerAuth::with_token_file(&data_dir, addr, hosts)?;
         let local_app = local_app.merge(ember_server::auth::rotate_router(auth.clone()));
-        ember_server::auth::protect(local_app, auth)
+        // FR-S12: owner routes also need the owner key. The transport door has the device scope.
+        ember_server::auth::protect_with_owner(local_app, auth, owner.clone())
     };
+    // FR-S12: the claim socket. Without it no key can be claimed: in enforce mode the owner
+    // routes of the local listener then stay closed; the rest of the server works.
+    #[cfg(unix)]
+    let _owner_door = {
+        // The shim folder is scanned on every claim, shims left by an earlier server included.
+        let cfg = ember_server::owner::door::DoorConfig::for_server(Some(data_dir.join("shims")));
+        if cfg.confirm == ember_server::owner::Confirm::Off {
+            tracing::warn!("EMBER_OWNER_CONFIRM=off: owner claims are not confirmed by the console code");
+        }
+        match ember_server::owner::door::OwnerDoor::bind(&data_dir, owner.clone(), cfg) {
+            Ok(door) => {
+                tracing::info!("owner socket: {}", door.path().display());
+                Some(door)
+            }
+            Err(e) => {
+                tracing::error!("owner socket could not be bound, no owner key can be claimed (in enforce mode owner routes stay closed): {e}");
+                None
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    tracing::warn!("no owner socket on this platform yet (#815): owner presence stays in warn mode (FR-S12)");
     if let Some(rt) = &shim_runtime {
         let rejoined = sessions.rejoin_shims(rt).await;
         if !rejoined.is_empty() {

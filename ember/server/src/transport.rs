@@ -88,22 +88,26 @@ pub async fn bind(data_dir: &Path) -> anyhow::Result<Transport> {
 /// The server's persistent transport key (`<data dir>/transport.key`, created on first use):
 /// its identity to nodes, clients and the hub.
 pub fn load_key(data_dir: &Path) -> anyhow::Result<SecretKey> {
-    Ok(SecretKey::load_or_generate(data_dir.join(KEY_FILE))?)
+    ember_node::keystore::load_transport_key(&data_dir.join(KEY_FILE))
 }
 
 /// The transport configuration with the hub (FR-N2): when this server is `registered`, or the
 /// hub was named explicitly (`EMBER_HUB_URL`), the hub's relay and address directory, resolving
 /// with `token` (the registration's resolve token, `dpr_`; never the device token: NFR-H2);
 /// otherwise the plain environment configuration (the directory is turned on at runtime once
-/// the server registers, see [`crate::hub`]).
+/// the server registers, see [`crate::hub`]). `device_token` turns on the hub's batched pkarr
+/// watch when its `/config` advertises one (sent in the header only, #783).
 pub fn config_with_hub(
     key: SecretKey,
     hub: Option<&ember_hub::HubConfig>,
     registered: bool,
     token: Option<String>,
+    device_token: Option<String>,
 ) -> TransportConfig {
     let cfg = match hub {
-        Some(h) if registered || ember_hub::HubConfig::explicitly_enabled() => h.transport_config(key, token),
+        Some(h) if registered || ember_hub::HubConfig::explicitly_enabled() => {
+            h.transport_config_with_watch(key, token, device_token)
+        }
         _ => TransportConfig::from_env(key),
     };
     main_server_roles_from_env(cfg)
@@ -133,5 +137,22 @@ pub fn serve(
     // A backend that enforces admission below the gate (the relay role of the main server) is
     // told about every allow and revoke (FR-N2, FR-N3).
     gate.attach(transport);
+    Ok(async move { axum::serve(HttpListener::with_gate(listener, gate), app).await })
+}
+
+/// Like [`serve`], with each call checked against the calling device's scope (SPEC `FR-N8`,
+/// #366): `app` is wrapped by [`crate::devices::scope::enforce`] and served with the caller's
+/// [`ember_transport::PeerId`] as connect info, and `devices.gate()` admits the peers. This is
+/// what `main.rs` serves; [`serve`] stays for tests and tools that need no scope.
+pub fn serve_scoped(
+    transport: &Transport,
+    app: axum::Router,
+    devices: std::sync::Arc<crate::devices::Devices>,
+) -> io::Result<impl Future<Output = io::Result<()>> + Send + 'static> {
+    let listener = transport.listen(SERVER_SERVICE).map_err(io::Error::other)?;
+    let gate = devices.gate().clone();
+    gate.attach(transport);
+    let app = crate::devices::scope::enforce(app, devices)
+        .into_make_service_with_connect_info::<ember_transport::PeerId>();
     Ok(async move { axum::serve(HttpListener::with_gate(listener, gate), app).await })
 }

@@ -120,3 +120,26 @@ async fn fr_x1_policy_denied_symlink_into_the_denied_dir_and_dotdot_are_refused(
     assert_eq!(refusal(c.write_file(&p, "x", None).await, &p), want);
     assert!(!f.denied.join("new").exists());
 }
+
+#[tokio::test]
+async fn fr_x1_policy_denied_entry_is_not_listed_in_its_parent() {
+    let f = start().await;
+    let names: Vec<String> = f.c.list(&f.root).await.unwrap().entries.into_iter().map(|e| e.name).collect();
+    assert!(!names.iter().any(|n| n == ".ember"), "the denied entry is hidden: {names:?}");
+    assert!(names.iter().any(|n| n == ".ember-other"), "{names:?}");
+    assert!(names.iter().any(|n| n == "work"), "{names:?}");
+    // glob hides it too (the same claim: the exclusion is not revealed).
+    let g = f
+        .c
+        .glob(&GlobRequest { root: f.root.clone(), pattern: "**".into(), respect_ignore: false, limit: None })
+        .await
+        .unwrap();
+    assert!(g.paths.iter().all(|p| !p.starts_with(&f.denied)), "{:?}", g.paths);
+}
+
+#[test]
+fn fr_x1_policy_denied_relative_entry_refuses_the_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = Node::new(NodeConfig::new(TOKEN, vec![dir.path().to_path_buf()]).with_denied(vec![PathBuf::from("rel/.ember")]));
+    assert!(r.is_err(), "a relative denied entry must not be dropped silently");
+}

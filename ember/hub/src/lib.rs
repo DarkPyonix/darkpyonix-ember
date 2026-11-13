@@ -46,6 +46,6 @@ pub use registration::{
 };
 pub use types::{
     service_label, AddressRecord, ClaimOutcome, Device, DeviceApp, HubInfo, LinkCodeInfo, LinkInfo, LinkRequest,
-    LinkStatus, Me, PendingLink, Readmission, Role,
+    LinkStatus, Me, PendingLink, PkarrWatchInfo, Readmission, Role,
 };
 pub use watch::{DeviceWatcher, DEFAULT_WAIT};

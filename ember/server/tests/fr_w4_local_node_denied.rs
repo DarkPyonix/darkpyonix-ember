@@ -18,10 +18,13 @@ use ember_server::store::Store;
 #[test]
 fn fr_w4_local_node_denied_paths_follow_the_data_dir_and_the_ose_root() {
     let p = |s: &str| Some(PathBuf::from(s));
-    // Defaults: ~/.ember covers ~/.ember/ose-data.
-    assert_eq!(denied_paths(None, None, p("/h")), vec![PathBuf::from("/h/.ember")]);
-    // EMBER_DATA_DIR replaces ~/.ember; the OSE root under it adds nothing.
-    assert_eq!(denied_paths(p("/d"), None, p("/h")), vec![PathBuf::from("/d")]);
+    // Defaults: ~/.ember, and the OSE root in its sibling runtime dir (FR-A11).
+    assert_eq!(
+        denied_paths(None, None, p("/h")),
+        vec![PathBuf::from("/h/.ember"), PathBuf::from("/h/.ember-runtime/ose-data")]
+    );
+    // EMBER_DATA_DIR replaces ~/.ember, and the runtime dir follows it.
+    assert_eq!(denied_paths(p("/d"), None, p("/h")), vec![PathBuf::from("/d"), PathBuf::from("/d-runtime/ose-data")]);
     // An OSE root elsewhere is denied as well.
     assert_eq!(
         denied_paths(p("/d"), p("/o/ose"), p("/h")),

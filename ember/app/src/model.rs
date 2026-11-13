@@ -878,6 +878,7 @@ mod tests {
             name: "studio".into(),
             url: String::new(),
             local: false,
+            peer: None,
             reachable: r,
             error: None,
         };

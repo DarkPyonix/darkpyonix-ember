@@ -7,7 +7,9 @@
 //!   holding the whole file in memory (`FR-F5`).
 //! - Both the per-file declared size and the offer's running total against [`Limits`] are enforced
 //!   as bytes arrive (`FR-F10`, `#527` item 6).
-//! - An interrupted transfer can resume from the verified byte offset of its partial file (`FR-F5`).
+//! - An interrupted transfer can resume from the verified byte offset of its partial file (`FR-F5`),
+//!   but only when the folder's `offer.json` record names the same offer id, declared sizes and
+//!   hashes; any other partial folder is removed first (`FR-F11`, #773).
 //! - When a file finishes, its SHA-256 digest is checked when expected (`FR-F5`), then it is
 //!   atomically moved to [`resolve_destination`](crate::names::resolve_destination) inside
 //!   `received_dir` with permissions `0644` (stripping execute, setuid, setgid and sticky bits,
@@ -99,6 +101,17 @@ pub struct HistoryRecord {
     pub timestamp_ms: i64,
 }
 
+/// File name of the record inside a partial folder (`FR-F11`).
+const PARTIAL_RECORD: &str = "offer.json";
+
+/// What a partial folder belongs to: the offer id and each file's declared size and hash
+/// (`FR-F11`, #773).
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct PartialRecord {
+    offer_id: String,
+    files: Vec<(u64, Option<String>)>,
+}
+
 struct PartFile {
     components: Vec<String>,
     declared_size: u64,
@@ -144,7 +157,27 @@ impl ReceiveWriter {
             .collect();
         let safe_id = if safe_id.is_empty() { "offer".to_string() } else { safe_id };
         let partial_dir = received_dir.join(".partial").join(&safe_id);
+        // A partial folder is adopted only when its record names this offer id and the same
+        // declared sizes and hashes; anything else is stale and removed (`FR-F11`, #773).
+        let record = PartialRecord {
+            offer_id: offer_id.to_string(),
+            files: declared
+                .iter()
+                .map(|f| (f.size, f.sha256.as_ref().map(|s| s.to_ascii_lowercase())))
+                .collect(),
+        };
+        let record_path = partial_dir.join(PARTIAL_RECORD);
+        let adopt = fs::read(&record_path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<PartialRecord>(&b).ok())
+            .is_some_and(|r| r == record);
+        if !adopt && partial_dir.exists() {
+            fs::remove_dir_all(&partial_dir)?;
+        }
         fs::create_dir_all(&partial_dir)?;
+        if !adopt {
+            fs::write(&record_path, serde_json::to_vec(&record).map_err(std::io::Error::other)?)?;
+        }
 
         let raw_names: Vec<String> = declared.iter().map(|f| f.name.clone()).collect();
         let cleaned_paths = clean_offer_paths(&raw_names);

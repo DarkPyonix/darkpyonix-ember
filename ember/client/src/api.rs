@@ -984,6 +984,11 @@ impl Api {
         self.get("/health").await
     }
 
+    /// `GET /api/whoami` (FR-N8): the door this client came through and its scope.
+    pub async fn whoami(&self) -> ApiResult<Whoami> {
+        self.get("/whoami").await
+    }
+
     pub async fn agents(&self) -> ApiResult<Vec<DetectedAgent>> {
         self.get("/agents").await
     }
@@ -2096,6 +2101,32 @@ mod metrics_tests {
         assert!(s.memory.is_none() && s.disks.is_empty() && s.processes.is_empty());
         let s: MetricsSample = serde_json::from_value(json!({})).unwrap();
         assert_eq!(s, MetricsSample::default());
+    }
+}
+
+/// Answer of `GET /api/whoami` (FR-N8). `door` is `local` or `transport`; `peer_id` is set only
+/// over the transport; `scope` is `full`, `read_only` or `chat_only`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Whoami {
+    pub door: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<String>,
+    pub scope: String,
+}
+
+#[cfg(test)]
+mod whoami_tests {
+    use super::Whoami;
+
+    #[test]
+    fn whoami_decodes_both_doors() {
+        let local: Whoami = serde_json::from_str(r#"{"door":"local","scope":"full"}"#).unwrap();
+        assert_eq!(local, Whoami { door: "local".into(), peer_id: None, scope: "full".into() });
+        let remote: Whoami =
+            serde_json::from_str(r#"{"door":"transport","peer_id":"abc","scope":"chat_only"}"#).unwrap();
+        assert_eq!(remote.peer_id.as_deref(), Some("abc"));
+        assert_eq!(remote.scope, "chat_only");
+        assert_eq!(serde_json::to_string(&local).unwrap(), r#"{"door":"local","scope":"full"}"#);
     }
 }
 

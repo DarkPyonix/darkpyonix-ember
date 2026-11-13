@@ -670,16 +670,67 @@ mod transport_door {
     }
 }
 
-// ---- the claim socket ---------------------------------------------------------------------
+// ---- the claim door -----------------------------------------------------------------------
+//
+// One set of tests for both doors: the unix socket and the Windows named pipe (#815). Only
+// `connect` and the tests about the endpoint itself (its file mode, its access list, the
+// process table) differ per platform. The Windows job of `.github/workflows/test.yml` runs
+// this file.
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod door {
     use super::*;
-    use ember_server::owner::door::{socket_path, DoorConfig, OwnerDoor, Proc, ProcTable};
+    #[cfg(unix)]
+    use ember_server::owner::door::socket_path;
+    use ember_server::owner::door::{DoorConfig, OwnerDoor, Proc, ProcTable};
     use ember_server::owner::Confirm;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-    use tokio::net::UnixStream;
+    use std::pin::Pin;
+    use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+
+    type Reader = Pin<Box<dyn AsyncRead + Send>>;
+    type Writer = Pin<Box<dyn AsyncWrite + Send>>;
+
+    /// A raw connection to the door of `dir`.
+    #[cfg(unix)]
+    async fn connect(dir: &Path) -> (Reader, Writer) {
+        let (r, w) = tokio::net::UnixStream::connect(socket_path(dir)).await.unwrap().into_split();
+        let (r, w): (Reader, Writer) = (Box::pin(r), Box::pin(w));
+        (r, w)
+    }
+
+    /// A raw connection to the door of `dir`. A busy pipe (the server is between instances)
+    /// is tried again.
+    #[cfg(windows)]
+    async fn connect(dir: &Path) -> (Reader, Writer) {
+        let name = ember_server::owner::pipe_name(dir);
+        let mut tries = 0;
+        let pipe = loop {
+            match tokio::net::windows::named_pipe::ClientOptions::new().open(&name) {
+                Ok(p) => break p,
+                // ERROR_PIPE_BUSY
+                Err(e) if e.raw_os_error() == Some(231) && tries < 100 => {
+                    tries += 1;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(e) => panic!("cannot open {name}: {e}"),
+            }
+        };
+        let (r, w) = tokio::io::split(pipe);
+        let (r, w): (Reader, Writer) = (Box::pin(r), Box::pin(w));
+        (r, w)
+    }
+
+    /// True while the door of `dir` exists: the socket file, or the pipe.
+    fn door_exists(dir: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            socket_path(dir).exists()
+        }
+        #[cfg(windows)]
+        {
+            ember_server::owner::door::pipe_exists(&ember_server::owner::pipe_name(dir))
+        }
+    }
 
     type Codes = Arc<Mutex<Vec<String>>>;
 
@@ -707,13 +758,13 @@ mod door {
     }
 
     struct Conn {
-        lines: tokio::io::Lines<BufReader<OwnedReadHalf>>,
-        w: OwnedWriteHalf,
+        lines: tokio::io::Lines<BufReader<Reader>>,
+        w: Writer,
     }
 
     impl Conn {
         async fn open(dir: &Path, name: &str) -> Conn {
-            let (r, w) = UnixStream::connect(socket_path(dir)).await.unwrap().into_split();
+            let (r, w) = connect(dir).await;
             let mut c = Conn { lines: BufReader::new(r).lines(), w };
             c.send(json!({ "op": "claim", "name": name })).await;
             c
@@ -729,7 +780,7 @@ mod door {
         async fn next(&mut self) -> Value {
             let line = tokio::time::timeout(Duration::from_secs(5), self.lines.next_line())
                 .await
-                .expect("no line from the owner socket")
+                .expect("no line from the owner door")
                 .unwrap_or(None);
             line.map(|l| serde_json::from_str(&l).unwrap()).unwrap_or(Value::Null)
         }
@@ -938,6 +989,7 @@ mod door {
     }
 
     /// The real process table shows this test process and its parent.
+    #[cfg(unix)]
     #[test]
     fn fr_s12_ps_table_shows_this_process() {
         let t = ember_server::owner::door::ps_table();
@@ -945,6 +997,23 @@ mod door {
         // SAFETY: getppid has no preconditions and cannot fail.
         assert_eq!(me.ppid, unsafe { libc::getppid() } as u32);
         assert!(!me.exe.is_empty());
+    }
+
+    /// The Windows twin of `fr_s12_ps_table_shows_this_process`: the process snapshot shows this
+    /// test process with its executable, and the server's table is that snapshot.
+    #[cfg(windows)]
+    #[test]
+    fn fr_s12_snapshot_table_shows_this_process() {
+        let t = ember_server::owner::door::snapshot_table();
+        let me = t.get(&std::process::id()).expect("the snapshot does not list this process");
+        assert!(me.exe.to_ascii_lowercase().ends_with(".exe"), "{me:?}");
+        assert_ne!(me.ppid, std::process::id());
+        assert!(ember_server::owner::door::process_table().contains_key(&std::process::id()));
+        // A real walk: this process is outside a tree that does not hold it.
+        assert_eq!(
+            ember_server::owner::door::tree_verdict_exited_parents(std::process::id(), &t, &[]),
+            ember_server::owner::door::TreeVerdict::Outside
+        );
     }
 
     /// The key lives while its connection does: closing the socket voids it.
@@ -969,13 +1038,19 @@ mod door {
         let (cfg, codes) = config(Confirm::Strict, vec![], 1);
         let door = OwnerDoor::bind(f.dir.path(), f.owner.clone(), cfg).unwrap();
         let (mut c, key) = claim_with_code(f.dir.path(), &codes, "ember-app").await;
-        assert!(socket_path(f.dir.path()).exists());
+        assert!(door_exists(f.dir.path()));
         drop(door);
-        assert!(!socket_path(f.dir.path()).exists(), "the socket file is removed at stop");
+        // The socket file goes at once. The pipe goes when its last instance closes: the
+        // listening one and each connection, which end on the stop signal.
+        #[cfg(unix)]
+        assert!(!door_exists(f.dir.path()), "the socket file is removed at stop");
         let got = call_with(&f.app, "GET", "/api/devices", Some(&f.token), Some(&key), None).await;
         assert!(is_owner_required(&got), "{got:?}");
         // The app sees its connection close and claims again.
         assert!(c.next_event().await.is_null());
+        drop(c);
+        let dir = f.dir.path().to_path_buf();
+        until("the door to close", || !door_exists(&dir)).await;
         // A new server on the same folder does not know the old key.
         let (cfg, codes) = config(Confirm::Strict, vec![], 1);
         let _door = OwnerDoor::bind(f.dir.path(), f.owner.clone(), cfg).unwrap();
@@ -1002,6 +1077,7 @@ mod door {
 
     /// The socket is private to the server's user, and a socket file left by a killed server
     /// does not stop the next start; a live one does.
+    #[cfg(unix)]
     #[tokio::test]
     async fn fr_s12_socket_is_0600_and_a_stale_file_is_replaced() {
         use std::os::unix::fs::PermissionsExt;
@@ -1017,6 +1093,61 @@ mod door {
         let second = OwnerDoor::bind(f.dir.path(), f.owner.clone(), cfg);
         assert!(second.is_err(), "a second server on the same folder must not take the socket");
         drop(door);
+    }
+
+    /// The Windows twin of `fr_s12_socket_is_0600_and_a_stale_file_is_replaced`: the pipe's
+    /// access list, as Windows applied it, holds one entry, for this user, and is protected
+    /// (nothing inherited, no Everyone, no anonymous). A second server on the same folder is
+    /// refused; once the first is gone the name is free again (a pipe leaves no stale file).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn fr_s12_pipe_is_private_and_a_second_server_is_refused() {
+        use std::os::windows::io::AsRawHandle;
+        let f = fx();
+        let name = ember_server::owner::pipe_name(f.dir.path());
+        assert!(name.starts_with(r"\\.\pipe\ember-owner-"), "{name}");
+        assert!(!door_exists(f.dir.path()));
+        let (cfg, _) = config(Confirm::Strict, vec![], 1);
+        let door = OwnerDoor::bind(f.dir.path(), f.owner.clone(), cfg).unwrap();
+        assert_eq!(door.name(), name);
+        assert!(door_exists(f.dir.path()));
+
+        let client = tokio::net::windows::named_pipe::ClientOptions::new().open(&name).unwrap();
+        let dacl = ember_server::owner::door::pipe_dacl(client.as_raw_handle()).unwrap();
+        drop(client);
+        let sid = ember_server::owner::door::current_user_sid().unwrap();
+        assert!(dacl.starts_with("D:P"), "the DACL is not protected: {dacl}");
+        assert_eq!(dacl.matches('(').count(), 1, "one access entry only: {dacl}");
+        assert!(dacl.contains("(A;"), "{dacl}");
+        assert!(dacl.ends_with(&format!(";;;{sid})")), "the entry is not this user's: {dacl} (user {sid})");
+        for other in [";WD)", ";AN)", ";BU)", ";AU)", ";NU)"] {
+            assert!(!dacl.contains(other), "{other} in {dacl}");
+        }
+
+        let (cfg, _) = config(Confirm::Strict, vec![], 1);
+        let second = OwnerDoor::bind(f.dir.path(), f.owner.clone(), cfg);
+        let err = second.err().expect("a second server on the same folder must not take the pipe");
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse, "{err}");
+
+        drop(door);
+        let dir = f.dir.path().to_path_buf();
+        until("the pipe to close", || !door_exists(&dir)).await;
+        let (cfg, _) = config(Confirm::Strict, vec![], 1);
+        let _again = OwnerDoor::bind(f.dir.path(), f.owner.clone(), cfg).unwrap();
+    }
+
+    /// A process that created the pipe name first (to answer the app in the server's place)
+    /// stops the bind: the door is created as the first instance or not at all.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn fr_s12_a_taken_pipe_name_stops_the_bind() {
+        let f = fx();
+        let name = ember_server::owner::pipe_name(f.dir.path());
+        let squatter = tokio::net::windows::named_pipe::ServerOptions::new().create(&name).unwrap();
+        let (cfg, _) = config(Confirm::Off, vec![], 1);
+        let err = OwnerDoor::bind(f.dir.path(), f.owner.clone(), cfg).err().expect("the bind must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse, "{err}");
+        drop(squatter);
     }
 
     fn files_under(dir: &Path, out: &mut Vec<std::path::PathBuf>) {

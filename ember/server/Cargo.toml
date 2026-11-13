@@ -59,6 +59,19 @@ http-body-util = "0.1"
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { version = "0.18", optional = true }
 
+# The owner claim pipe on Windows (FR-S12, #815): the pipe's access list, the client's pid and
+# user, and the process snapshot. windows-sys 0.61.2 is already in Cargo.lock (through tokio and
+# others); these features were checked in its registry sources.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
 [features]
 # Mount a Claude Code session's project directory from its computer (src/computers/mount.rs).
 # macOS: `mount-nfs`; Linux: `mount-fuse` (or `mount-nfs`, which needs root to mount there).

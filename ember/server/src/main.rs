@@ -28,9 +28,10 @@ use ember_server::store::Store;
 ///   token is in `<data dir>/server-token` (FR-S9); `ember-server rotate-token` replaces it and
 ///   exits, and `POST /api/server-token/rotate` does the same on a running server (#369)
 /// - Owner presence (FR-S12, #784): owner routes also need the in-memory owner key, claimed over
-///   `<data dir>/owner.sock` by the app or by `ember-server owner <verb>` (a terminal only).
-///   The default mode is warn: a call without a key is logged and served, until the app ships
-///   its claim. `EMBER_OWNER_PRESENCE=enforce` refuses it with 403. Windows always warns (#815);
+///   `<data dir>/owner.sock` (Windows: the named pipe `\\.\pipe\ember-owner-<hash>`, #815) by
+///   the app or by `ember-server owner <verb>` (a terminal only). The default mode is warn: a
+///   call without a key is logged and served, until the app ships its claim.
+///   `EMBER_OWNER_PRESENCE=enforce` refuses it with 403, on Windows too;
 ///   `EMBER_OWNER_CONFIRM=off` grants a claim without the console code (best effort)
 /// - `EMBER_IDLE_SECS`: release an agent process after this long without activity (default 300)
 /// - `EMBER_CLAUDE_BIN`: the Claude Code CLI (default `claude` on `PATH`)
@@ -635,9 +636,10 @@ async fn serve_main() -> anyhow::Result<()> {
         // FR-S12: owner routes also need the owner key. The transport door has the device scope.
         ember_server::auth::protect_with_owner(local_app, auth, owner.clone())
     };
-    // FR-S12: the claim socket. Without it no key can be claimed: in enforce mode the owner
-    // routes of the local listener then stay closed; the rest of the server works.
-    #[cfg(unix)]
+    // FR-S12: the claim socket (unix) or claim pipe (Windows, #815). Without it no key can be
+    // claimed: in enforce mode the owner routes of the local listener then stay closed; the rest
+    // of the server works.
+    #[cfg(any(unix, windows))]
     let _owner_door = {
         // The shim folder is scanned on every claim, shims left by an earlier server included.
         let cfg = ember_server::owner::door::DoorConfig::for_server(Some(data_dir.join("shims")));
@@ -646,17 +648,17 @@ async fn serve_main() -> anyhow::Result<()> {
         }
         match ember_server::owner::door::OwnerDoor::bind(&data_dir, owner.clone(), cfg) {
             Ok(door) => {
-                tracing::info!("owner socket: {}", door.path().display());
+                tracing::info!("owner door: {}", door.path().display());
                 Some(door)
             }
             Err(e) => {
-                tracing::error!("owner socket could not be bound, no owner key can be claimed (in enforce mode owner routes stay closed): {e}");
+                tracing::error!("owner door could not be bound, no owner key can be claimed (in enforce mode owner routes stay closed): {e}");
                 None
             }
         }
     };
-    #[cfg(not(unix))]
-    tracing::warn!("no owner socket on this platform yet (#815): owner presence stays in warn mode (FR-S12)");
+    #[cfg(not(any(unix, windows)))]
+    tracing::warn!("no owner door on this platform: owner presence stays in warn mode (FR-S12)");
     if let Some(rt) = &shim_runtime {
         let rejoined = sessions.rejoin_shims(rt).await;
         if !rejoined.is_empty() {

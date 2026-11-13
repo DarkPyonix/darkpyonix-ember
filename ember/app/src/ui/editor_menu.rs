@@ -169,6 +169,19 @@ pub fn toggle_submenu(sub: Submenu) {
     OPEN.with(|o| o.set(if o.get() == Some(sub) { None } else { Some(sub) }));
 }
 
+/// Whether the ⋯ menu is drawn (#831). A modal (the trust prompt, the unsaved-changes sheet, an
+/// extension's modal message) blocks the workbench as Code-OSS's modal dialogs do, so the menu is
+/// not drawn above its scrim; the renderer does not order fixed layers by z-index alone.
+pub fn menu_shown(menu_open: bool, modal_up: bool) -> bool {
+    menu_open && !modal_up
+}
+
+/// The menu's state after a click on the tab strip's ⋯ (#831): it toggles, and never opens while a
+/// modal is up.
+pub fn toggled(menu_open: bool, modal_up: bool) -> bool {
+    !menu_open && !modal_up
+}
+
 /// Opening or closing the menu starts with no submenu open.
 pub fn close_submenu() {
     OPEN.with(|o| o.set(None));
@@ -252,6 +265,18 @@ mod tests {
         assert!(menu_style().contains("position:fixed;"));
         let page = include_str!("editor_workbench.rs");
         assert!(!page.contains("if *s.menu_open.read() { {menu(&s, keymap)} }\n                        if let Some((menu_path"), "the menu is still drawn inside the clipped editor area");
-        assert!(page.contains("if *s.menu_open.read() { {menu(&s, keymap)} }\n                    if *s.palette_open.read()"), "the menu is not drawn at the page level");
+        assert!(page.contains("if em_shown { {menu(&s, keymap)} }\n                    if *s.palette_open.read()"), "the menu is not drawn at the page level");
+    }
+
+    #[test]
+    fn fr_l31_main_menu_is_blocked_by_a_modal() {
+        assert!(menu_shown(true, false));
+        assert!(!menu_shown(true, true), "the menu is drawn above a modal's scrim");
+        assert!(!toggled(false, true), "the menu opens while a modal is up");
+        assert!(toggled(false, false));
+        assert!(!toggled(true, false));
+        let page = include_str!("editor_workbench.rs");
+        assert!(page.contains("crate::ui::editor_menu::toggled(open, modal_up(&menu_s))"), "the ⋯ button ignores the modal");
+        assert!(page.contains("if em_shown { {menu(&s, keymap)} }"), "the page does not gate the menu on the modal");
     }
 }

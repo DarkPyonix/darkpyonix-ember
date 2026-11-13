@@ -146,6 +146,11 @@ pub mod view {
         s.host.state.lock().unwrap().trust
     }
 
+    /// Whether the trust prompt is up (a modal: it blocks the ⋯ menu, #831).
+    pub fn prompt_up(s: &Shared) -> bool {
+        state(s).prompt
+    }
+
     /// Remembers the answer for this folder on this device, updates the window at once and tells
     /// the session through the host (queued until the session is connected).
     fn answer(s: &Shared, trusted: bool) {

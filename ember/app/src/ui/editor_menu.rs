@@ -189,7 +189,7 @@ mod tests {
             assert!(low <= MIN_WINDOW_H, "the menu reaches {low} px, past a {MIN_WINDOW_H} px window");
         }
         // A menu and its submenu side by side fit the 768 px wide window.
-        assert!(2.0 * WIDTH + 4.0 + 16.0 <= 768.0);
+        const { assert!(2.0 * WIDTH + 4.0 + 16.0 <= 768.0) };
     }
 
     #[test]

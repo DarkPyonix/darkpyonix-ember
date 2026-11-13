@@ -18,6 +18,7 @@ pub mod conversation;
 pub mod editor;
 pub mod editor_actions;
 pub mod enrol_flow;
+pub mod device_scope;
 pub mod editor_icons;
 pub mod editor_blame;
 pub mod editor_terminals;

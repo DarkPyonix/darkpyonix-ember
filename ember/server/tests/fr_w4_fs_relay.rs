@@ -3,8 +3,9 @@
 //!
 //! The node, not the server, enforces the allowed roots. These tests pin what the node does
 //! today for a path outside them, `..` traversal and a symlink pointing out. The write relay
-//! carries `write`, `pwrite` and `setattr` only (INTENT D48); the namespace operations stay
-//! unreachable through the server.
+//! carries `write`, `pwrite` and `setattr` and, since the node checks their parent directory by
+//! handle (#456), the namespace operations `mkdir`, `remove`, `rename` and `symlink` (INTENT
+//! D48).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -199,30 +200,127 @@ async fn fr_w4_fs_relay_dotdot_and_symlinks_out_of_the_root_are_refused_by_the_n
 }
 
 #[tokio::test]
-async fn fr_w4_fs_relay_namespace_operations_are_not_routed() {
+async fn fr_w4_fs_relay_namespace_operations_reach_the_node() {
     within(async {
         let f = fx().await;
-        let target = f.root.join("written.txt");
-        let victim = f.root.join("hello.txt");
-        for (op, body) in [
-            ("remove", json!({ "path": victim, "recursive": false })),
-            ("rename", json!({ "from": victim, "to": target })),
-            ("mkdir", json!({ "path": f.root.join("newdir") })),
-            ("symlink", json!({ "path": target, "target": "/etc/hosts" })),
-            ("nonsense", json!({})),
-        ] {
-            let (st, _) = f.post(op, body).await;
-            assert_eq!(st, 404, "{op} must not reach the node (D48)");
-        }
-        assert!(!target.exists());
+        let hello = f.root.join("hello.txt");
+
+        let (st, v) = f.post("mkdir", json!({ "path": f.root.join("newdir/a/b"), "parents": true })).await;
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(v["kind"], "dir");
+        assert!(f.root.join("newdir/a/b").is_dir());
+        let (st, v) = f.post("mkdir", json!({ "path": f.root.join("newdir") })).await;
+        assert_eq!(st, 409, "an existing directory is the node's EEXIST: {v}");
+        assert_eq!(v["errno"], "EEXIST", "{v}");
+
+        let (st, v) = f.post("symlink", json!({ "path": f.root.join("newdir/l"), "target": "../hello.txt" })).await;
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(v["kind"], "symlink");
+        assert_eq!(std::fs::read_link(f.root.join("newdir/l")).unwrap(), std::path::PathBuf::from("../hello.txt"));
+
+        let moved = f.root.join("newdir/moved.txt");
+        let (st, v) = f.post("rename", json!({ "from": hello, "to": moved })).await;
+        assert_eq!(st, 204, "rename answers the node's 204: {v}");
+        assert_eq!(v, Value::Null, "no body");
+        assert!(!hello.exists());
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "hello needle world\n");
+        // overwrite: false keeps an existing target (the node's EEXIST).
+        std::fs::write(f.root.join("other.txt"), "other").unwrap();
+        let (st, v) = f.post("rename", json!({ "from": moved, "to": f.root.join("other.txt"), "overwrite": false })).await;
+        assert_eq!(st, 409, "{v}");
+        assert_eq!(std::fs::read_to_string(f.root.join("other.txt")).unwrap(), "other");
+
+        let (st, v) = f.post("remove", json!({ "path": f.root.join("newdir"), "recursive": false })).await;
+        assert_eq!(st, 409, "a non-empty directory without recursive: {v}");
+        assert_eq!(v["errno"], "ENOTEMPTY", "{v}");
+        let (st, v) = f.post("remove", json!({ "path": f.root.join("newdir"), "recursive": true })).await;
+        assert_eq!(st, 204, "{v}");
         assert!(!f.root.join("newdir").exists());
-        assert!(victim.exists());
-        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "hello needle world\n");
-        // Only POST is routed.
-        let r = f.c.get(format!("{}/api/computers/{}/fs/read", f.base, f.cid)).send().await.unwrap();
-        assert_eq!(r.status(), 405);
-        let r = f.c.get(format!("{}/api/computers/{}/fs/write", f.base, f.cid)).send().await.unwrap();
-        assert_eq!(r.status(), 405);
+
+        // The node's answer is relayed unchanged: status and body equal a direct call.
+        for (op, body) in [
+            ("remove", json!({ "path": f.root.join("missing"), "recursive": false })),
+            ("remove", json!({ "path": f.root, "recursive": true })),
+            ("mkdir", json!({ "path": f.root.join("no/parent") })),
+            ("rename", json!({ "from": f.root.join("missing"), "to": f.root.join("x") })),
+        ] {
+            let relayed = f.post(op, body.clone()).await;
+            let direct = f.direct(op, body).await;
+            assert_eq!(relayed, direct, "{op}");
+        }
+        assert!(f.root.exists(), "a root is never removed");
+
+        // Anything else is not routed; only POST is.
+        let (st, _) = f.post("nonsense", json!({})).await;
+        assert_eq!(st, 404);
+        for op in ["read", "write", "mkdir", "remove", "rename", "symlink"] {
+            let r = f.c.get(format!("{}/api/computers/{}/fs/{op}", f.base, f.cid)).send().await.unwrap();
+            assert_eq!(r.status(), 405, "{op}");
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn fr_w4_fs_relay_namespace_operations_outside_the_roots_or_denied_are_refused_by_the_node() {
+    within(async {
+        let f = fx().await;
+        let secret = f.outside.join("secret.txt");
+        let hello = f.root.join("hello.txt");
+        for (op, body) in [
+            ("mkdir", json!({ "path": f.outside.join("new") })),
+            ("mkdir", json!({ "path": f.root.join("dir-out/new") })),
+            ("mkdir", json!({ "path": f.root.join("dir-out/new/deep"), "parents": true })),
+            ("mkdir", json!({ "path": f.root.join(".ember") })),
+            ("mkdir", json!({ "path": f.root.join("../outside/new") })),
+            ("remove", json!({ "path": secret, "recursive": false })),
+            ("remove", json!({ "path": f.root.join("dir-out/secret.txt"), "recursive": false })),
+            ("remove", json!({ "path": f.outside, "recursive": true })),
+            ("rename", json!({ "from": hello, "to": f.outside.join("stolen.txt") })),
+            ("rename", json!({ "from": secret, "to": f.root.join("got.txt") })),
+            ("rename", json!({ "from": hello, "to": f.root.join("dir-out/stolen.txt") })),
+            ("rename", json!({ "from": hello, "to": f.root.join(".ember") })),
+            ("symlink", json!({ "path": f.outside.join("planted"), "target": "secret.txt" })),
+            ("symlink", json!({ "path": f.root.join("l1"), "target": "/etc/hosts" })),
+            ("symlink", json!({ "path": f.root.join("l2"), "target": secret })),
+            ("symlink", json!({ "path": f.root.join("l3"), "target": "../outside/secret.txt" })),
+            ("symlink", json!({ "path": f.root.join("l4"), "target": "dir-out/secret.txt" })),
+            ("symlink", json!({ "path": f.root.join("l5"), "target": ".ember/server-token" })),
+        ] {
+            let (st, v) = f.post(op, body.clone()).await;
+            assert_eq!(st, 403, "{op} {body}: {v}");
+            assert_eq!(v["code"], "forbidden_path", "{op}: the node's own body: {v}");
+            assert_eq!(v["errno"], "EACCES", "{op}: {v}");
+        }
+        // Nothing changed on either side.
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "TOP-SECRET needle\n");
+        assert_eq!(std::fs::read_to_string(&hello).unwrap(), "hello needle world\n");
+        let mut outside: Vec<String> = std::fs::read_dir(&f.outside)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        outside.sort();
+        assert_eq!(outside, vec!["secret.txt".to_string()]);
+        for name in ["got.txt", ".ember", "l1", "l2", "l3", "l4", "l5"] {
+            assert!(std::fs::symlink_metadata(f.root.join(name)).is_err(), "{name} was created");
+        }
+        // A link that points out but already exists is removed as a link, never its target.
+        let (st, v) = f.post("remove", json!({ "path": f.root.join("link-out.txt"), "recursive": false })).await;
+        assert_eq!(st, 204, "{v}");
+        assert!(secret.exists());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn fr_w4_fs_relay_namespace_body_is_capped_at_1_mib() {
+    within(async {
+        let f = fx().await;
+        let big = "a".repeat(2 * 1024 * 1024);
+        for op in ["mkdir", "remove", "rename", "symlink"] {
+            let (st, _) = f.post(op, json!({ "path": big, "from": "/x", "to": "/y", "target": "t" })).await;
+            assert_eq!(st, 413, "{op}");
+        }
     })
     .await;
 }
@@ -434,7 +532,10 @@ async fn status(app: &Router, method: &str, path: &str, authz: Option<&str>) -> 
 async fn fr_w4_fs_relay_needs_the_server_token() {
     let dir = tempfile::tempdir().unwrap();
     let (app, token) = protected_app(dir.path());
-    for op in ["stat", "lstat", "read", "list", "readlink", "glob", "grep", "write", "pwrite", "setattr"] {
+    for op in [
+        "stat", "lstat", "read", "list", "readlink", "glob", "grep", "write", "pwrite", "setattr", "mkdir", "remove",
+        "rename", "symlink",
+    ] {
         let path = format!("/api/computers/local/fs/{op}");
         assert_eq!(status(&app, "POST", &path, None).await, 401, "{op}: no token");
         assert_eq!(status(&app, "POST", &path, Some("Bearer dpg_guestcredential")).await, 401, "{op}: guest credential");
@@ -443,11 +544,6 @@ async fn fr_w4_fs_relay_needs_the_server_token() {
         // 400 or 422 from the relay itself, not 401.
         let st = status(&app, "POST", &path, Some(&format!("Bearer {token}"))).await;
         assert!(st == 400 || st == 422, "{op}: {st}");
-    }
-    // The namespace operations stay unrouted behind the token too (D48).
-    for op in ["remove", "rename", "mkdir", "symlink"] {
-        let st = status(&app, "POST", &format!("/api/computers/local/fs/{op}"), Some(&format!("Bearer {token}"))).await;
-        assert_eq!(st, 404, "{op}");
     }
 }
 

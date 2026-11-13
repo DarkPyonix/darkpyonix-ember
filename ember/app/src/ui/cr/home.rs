@@ -125,9 +125,10 @@ const ICON_FOLDER: &str = include_str!("../../../assets/nav/folder.svg");
 const ICON_PC: &str = include_str!("../../../assets/nav/pc.svg");
 // TODO(item 6): the model chip's harness glyph; the terminal stands in.
 const ICON_TERMINAL: &str = include_str!("../../../assets/nav/terminal.svg");
-const ICON_CODE: &str = include_str!("../../../assets/nav/code.svg");
 const ICON_GIT: &str = include_str!("../../../assets/nav/git.svg");
 const ICON_CHART_NAV: &str = include_str!("../../../assets/nav/chart.svg");
+/// Heroicons 2.2.0 `sparkles` (MIT), the mockup's `spark` (`icons.js`).
+const ICON_SPARK: &str = line_icon!("M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z");
 const ICON_WARN: &str = line_icon!("M12 9.5v4M12 16.75h.01M10.3 3.9L2.4 17.6a2 2 0 001.7 3h15.8a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z");
 const ICON_CHECK: &str = line_icon!("M5 12.5l4.5 4.5L19 7.5");
 const ICON_CLOCK: &str = line_icon!("M12 7v5l3 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z");
@@ -1029,6 +1030,12 @@ const GLYPH_CLAUDE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24"
 const GLYPH_CODEX: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path d="M12 2.8 20 7.4v9.2l-8 4.6-8-4.6V7.4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" fill="none"/><path d="M8.5 10l2.5 2-2.5 2M12.5 14.5h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>"#;
 const GLYPH_GEMINI: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path d="M12 2.5c.6 5.2 4.3 8.9 9.5 9.5-5.2.6-8.9 4.3-9.5 9.5-.6-5.2-4.3-8.9-9.5-9.5 5.2-.6 8.9-4.3 9.5-9.5z" fill="currentColor"/></svg>"#;
 
+/// A composer chip's glyph and tint: the model chip takes the harness glyph in the harness colour,
+/// every other chip keeps its icon in `text-2`.
+fn composer_chip_icon(pick: Pick, icon: &'static str, harness: Harness) -> (&'static str, Option<u32>) {
+    if pick == Pick::Model { (harness_glyph(harness), Some(harness_tint(harness))) } else { (icon, None) }
+}
+
 fn harness_glyph(h: Harness) -> &'static str {
     match h {
         Harness::ClaudeCode => GLYPH_CLAUDE,
@@ -1070,7 +1077,7 @@ fn Hero(c: &Composer, ui: &SharedUi, width_dp: f32, height_dp: f32, content_w: f
         });
         // The mockup greets the signed-in user by name.
         let greeting = format!("{}, {}", DEMO_USER.0, GREETING);
-        Label(&greeting, if l.compact { Fs::Xl2 } else { Fs::Xl3 }, Weight::Medium, None, Some(2));
+        Label(&greeting, if l.compact { Fs::Xl2 } else { Fs::Xl3 }, GREETING_WEIGHT, None, Some(2));
         ComposerCard(c, ui, composer_width(content_w), l);
         Suggestions(c, width_dp);
         cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
@@ -1121,6 +1128,7 @@ fn HeroBot(vendor: &str, status: &str, px: f32) {
 fn ComposerChip(
     text: &str,
     icon: &'static str,
+    tint: Option<u32>,
     chevron: bool,
     selected: bool,
     icon_only: bool,
@@ -1131,14 +1139,15 @@ fn ComposerChip(
     let fill = if selected { p.sel } else { p.surface_2 };
     let modifier = Modifier::new().height(H_CTL).background(paint(fill)).shape_role(ShapeRole::Full);
     let modifier = if icon_only { modifier.width(H_CTL) } else if weighted { modifier.weight(1.0) } else { modifier };
+    let icon_color = tint.unwrap_or(p.text_2.to_argb());
     Clickable(modifier, Alignment::Center, on_click, || {
         if icon_only {
-            NavIcon(icon, p.text_2.to_argb(), 16.0);
+            NavIcon(icon, icon_color, 16.0);
             return;
         }
         cu::Row().alignment(Alignment::CenterStart).content(|| {
             cu::Spacer().modifier(Modifier::new().width(SP[2]));
-            NavIcon(icon, p.text_2.to_argb(), 16.0);
+            NavIcon(icon, icon_color, 16.0);
             cu::Spacer().modifier(Modifier::new().width(SP[1]));
             if weighted {
                 cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
@@ -1226,9 +1235,12 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     let mode_text = sel.mode.label().to_string();
     let chip = |text: &str, icon: &'static str, pick: Pick, selected: bool| {
         let open = c.open.clone();
+        // The harness chip shows the harness's own glyph in its colour (`--v-claude` and so on),
+        // at every width (design review B11; it was a generic terminal glyph).
+        let (icon, tint) = composer_chip_icon(pick, icon, sel.option.harness);
         // Wide chips are content-sized, their text cut to the budget; only the compact project
         // chip takes the rest of the row.
-        ComposerChip(text, icon, chip_has_chevron(pick), selected, icon_only && pick != Pick::Project, icon_only && pick == Pick::Project, move || open.set(Some(pick)));
+        ComposerChip(text, icon, tint, chip_has_chevron(pick), selected, icon_only && pick != Pick::Project, icon_only && pick == Pick::Project, move || open.set(Some(pick)));
     };
     let add = || {
         let open = c.attachment_open.clone();
@@ -1374,20 +1386,23 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
 
 /// The glyph of the `i`th suggestion in a line. TODO(item 6): the mockup's spark star needs the
 /// harness glyph asset; `code.svg` stands in until it lands.
+/// The glyph of the `i`th suggestion of [`SUGGESTIONS`], counted over all lines: spark, branch,
+/// chart (`home.js:9`). Design review 2026-11-13 B11: the index restarted on every line, so at 390
+/// the first and the third chip both showed the code glyph.
 fn suggestion_icon(i: usize) -> &'static str {
-    [ICON_CODE, ICON_GIT, ICON_CHART_NAV][i % 3]
+    [ICON_SPARK, ICON_GIT, ICON_CHART_NAV][i % 3]
 }
 
 /// `.sugg`: outlined chips, three a line (two up to 900 px), centred.
 fn Suggestions(c: &Composer, width_dp: f32) {
     let n = suggestion_cols(width_dp);
     cu::Column().alignment(Alignment::Center).spacing(SP[1]).content(|| {
-        for line in SUGGESTIONS.chunks(n) {
+        for (row, line) in SUGGESTIONS.chunks(n).enumerate() {
             cu::Row().spacing(SP[1]).content(|| {
                 for (i, text) in line.iter().enumerate() {
                     let s = c.suggestion.clone();
                     let t = apply_suggestion(&c.typed.get_untracked(), text);
-                    SuggestionChip(text, suggestion_icon(i), move || s.set(Some(t.clone())));
+                    SuggestionChip(text, suggestion_icon(row * n + i), move || s.set(Some(t.clone())));
                 }
             });
         }
@@ -1592,6 +1607,11 @@ fn CiBar(results: &[CiResult]) {
     });
 }
 
+/// The unit or denominator after a KPI number: `.hm-kv small`, half the 28 px number, 500.
+pub const KPI_SMALL: (Fs, Weight) = (Fs::Md, Weight::Medium);
+/// `.hm-kv small{margin-left:2px}`.
+pub const KPI_SMALL_GAP: f32 = 2.0;
+
 /// `.hm-kpis`: label, the number with its unit and note pill; a 1 px rule between the columns.
 fn KpiStrip(k: &[Kpi; 4], counts: &StatusCounts, l: Layout) {
     let cells: Vec<Part> = k
@@ -1616,11 +1636,14 @@ fn KpiCell(kpi: &Kpi, tone: PillTone, rule: bool) {
             Label(kpi.label, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
             if kpi.available {
                 cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
-                    // The unit hugs the number (`small{margin-left:2px}`).
+                    // The unit or the denominator hugs the number (`small{margin-left:2px}`), small
+                    // and muted (design review B9).
+                    let (number, small) = crate::ui::home::kpi_value_parts(kpi);
                     cu::Row().spacing(0.0).alignment(Alignment::CenterStart).content(|| {
-                        Label(&kpi.value, Fs::Xl2, Weight::Regular, None, Some(1));
-                        if !kpi.unit.is_empty() {
-                            Label(kpi.unit, Fs::Md, Weight::Medium, Some(paint(p.muted)), Some(1));
+                        Label(&number, Fs::Xl2, Weight::Regular, None, Some(1));
+                        if !small.is_empty() {
+                            cu::Spacer().modifier(Modifier::new().width(KPI_SMALL_GAP));
+                            Label(&small, KPI_SMALL.0, KPI_SMALL.1, Some(paint(p.muted)), Some(1));
                         }
                     });
                     if let Some(note) = &kpi.note {
@@ -2533,5 +2556,56 @@ mod tests {
         assert_eq!(crate::bridge::github_request_count(), after_mount);
         ui.set_menu(crate::ui::shell::NavMenu::Home);
         assert_eq!(crate::bridge::github_request_count(), after_mount + 1);
+    }
+}
+
+/// Design review 2026-11-13 (B8, B9, B11): the home screen against the mockup.
+#[cfg(test)]
+mod design_review_tests {
+    use super::*;
+
+    /// This file without this module, so a source check never finds its own literal.
+    fn source() -> &'static str {
+        let src = include_str!("home.rs");
+        &src[..src.find("mod design_review_tests {").unwrap()]
+    }
+
+    fn kpi(value: &str, unit: &'static str) -> Kpi {
+        Kpi { label: "x", value: value.to_string(), unit, note: None, available: true }
+    }
+
+    #[test]
+    fn design_b9_kpi_unit_and_denominator_are_the_small_muted_part() {
+        assert_eq!(crate::ui::home::kpi_value_parts(&kpi("4", "명")), ("4".to_string(), "명".to_string()));
+        assert_eq!(crate::ui::home::kpi_value_parts(&kpi("3/5", "")), ("3".to_string(), "/5".to_string()));
+        assert_eq!(crate::ui::home::kpi_value_parts(&kpi("87", "%")), ("87".to_string(), "%".to_string()));
+        assert_eq!(KPI_SMALL, (Fs::Md, Weight::Medium));
+        assert_eq!(KPI_SMALL_GAP, 2.0);
+        let src = source();
+        assert!(src.contains("Label(&small, KPI_SMALL.0, KPI_SMALL.1, Some(paint(p.muted)), Some(1));"));
+    }
+
+    #[test]
+    fn design_b8_greeting_is_32_500() {
+        assert_eq!(GREETING_WEIGHT, Weight::Medium);
+        assert!(source().contains("Label(&greeting, if l.compact { Fs::Xl2 } else { Fs::Xl3 }, GREETING_WEIGHT, None, Some(2));"));
+    }
+
+    #[test]
+    fn design_b11_suggestions_are_spark_branch_chart_on_every_line() {
+        assert_eq!(suggestion_icon(0), ICON_SPARK);
+        assert_eq!(suggestion_icon(1), ICON_GIT);
+        assert_eq!(suggestion_icon(2), ICON_CHART_NAV);
+        assert!(source().contains("suggestion_icon(row * n + i)"), "the index restarts on every line");
+    }
+
+    #[test]
+    fn design_b11_harness_chip_shows_the_harness_glyph_in_its_colour() {
+        for h in [Harness::ClaudeCode, Harness::Codex, Harness::Gemini] {
+            let (glyph, tint) = composer_chip_icon(Pick::Model, ICON_TERMINAL, h);
+            assert_eq!(glyph, harness_glyph(h));
+            assert!(tint.is_some());
+        }
+        assert_eq!(composer_chip_icon(Pick::Project, ICON_FOLDER, Harness::Codex), (ICON_FOLDER, None));
     }
 }

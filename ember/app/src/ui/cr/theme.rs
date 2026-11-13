@@ -254,6 +254,12 @@ impl Fs {
     }
 }
 
+/// A page title (`style.css:66` `.head h1`, 32/400; 28 on a phone): book weight, as the mockup.
+/// Design review 2026-11-13 B8: the titles were drawn Medium or Semibold and read heavier.
+pub const PAGE_TITLE_WEIGHT: Weight = Weight::Regular;
+/// The home greeting (`home.css:233` `.greet`, 32/500, `DESIGN.md` 6.1).
+pub const GREETING_WEIGHT: Weight = Weight::Medium;
+
 /// The three weights. 700 is only for 11px badge numbers and 800 is not used, so neither is
 /// representable here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

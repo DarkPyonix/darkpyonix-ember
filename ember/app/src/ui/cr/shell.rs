@@ -576,7 +576,7 @@ pub fn Placeholder(menu: NavMenu) {
     // A `Box` centers on both axes; a `Column`'s alignment is the horizontal one only.
     cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
         cu::Column().alignment(Alignment::Center).space_role(SpaceRole::Sm).content(|| {
-            Label(menu.label(), Fs::Xl3, Weight::Medium, None, None);
+            Label(menu.label(), Fs::Xl3, PAGE_TITLE_WEIGHT, None, None);
             Label(PLACEHOLDER_TEXT, Fs::Md, Weight::Regular, Some(paint(ember_theme().palette.muted)), None);
         });
     });

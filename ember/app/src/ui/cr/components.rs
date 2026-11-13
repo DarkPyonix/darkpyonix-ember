@@ -7,8 +7,8 @@
 //!
 //! Gaps in the pinned compose-rust, each with its issue:
 //! - #372: container `on_click` is in compose-rust v0.0.5 (FR-55);
-//! - #443: `Text` has no `overflow_wrap`, so a long unbreakable token clips (#208);
-//! - #444: `TextField` has no `word_break`, so the placeholder can break inside a word (#208);
+//! - #443 and #444 are fixed in v0.0.8: `Text::overflow_wrap` lets a long token break
+//!   ([`WrapLabel`]), and `TextField::word_break` keeps the placeholder's words whole (#208);
 
 #![allow(non_snake_case)]
 
@@ -16,7 +16,7 @@ use compose_rust::ui as cu;
 use compose_rust::ui::{Modifier, Role};
 use compose_rust::{
     Alignment, ButtonVariant, Color, ColorRole, FontRef, FontRefs, GenericFamily, IconRole,
-    KeyEvent, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole, WordBreak,
+    KeyEvent, OverflowWrap, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole, WordBreak,
 };
 
 use super::theme::*;
@@ -286,11 +286,32 @@ pub fn SheetFooter(content: impl FnOnce()) {
 // ---------------------------------------------------------------------------------------------
 
 /// Text on the type scale: one of the nine sizes and one of the three weights.
+///
+/// It breaks Korean only at spaces (`WordBreak::KeepAll`) and keeps room for its longest word in
+/// a weighted row (compose-rust#427), so a token wider than its container still clips. Text that
+/// can hold a path, a URL or a long name uses [`WrapLabel`].
 pub fn Label(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines: Option<u32>) {
+    scale_text(text, fs, weight, color, max_lines, false);
+}
+
+/// A [`Label`] whose token too long for its line breaks between its letters, the mockup's
+/// `word-break:keep-all; overflow-wrap:anywhere` (compose-rust#443, v0.0.8). Such a text is as
+/// narrow as its widest letter in a weighted row, so use it where the text should wrap rather
+/// than widen its column.
+pub fn WrapLabel(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines: Option<u32>) {
+    scale_text(text, fs, weight, color, max_lines, true);
+}
+
+fn scale_text(
+    text: &str,
+    fs: Fs,
+    weight: Weight,
+    color: Option<Paint>,
+    max_lines: Option<u32>,
+    wrap_anywhere: bool,
+) {
     let theme = ember_theme();
     let color = color.unwrap_or_else(|| paint(theme.palette.text));
-    // TODO(compose-rust#443): Text has no overflow_wrap builder in v0.0.5, so a single
-    // word wider than its container can still be clipped by the renderer.
     let mut t = cu::Text(text)
         .word_break(WordBreak::KeepAll)
         .font_size(fs.size())
@@ -298,6 +319,9 @@ pub fn Label(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines
         .font_weight(weight.value())
         .letter_spacing(fs.letter_spacing())
         .color(color);
+    if wrap_anywhere {
+        t = t.overflow_wrap(OverflowWrap::Anywhere);
+    }
     if let Some(n) = max_lines {
         t = t.max_lines(n).overflow(TextOverflow::Ellipsis);
     }
@@ -405,10 +429,12 @@ pub fn EmberField(o: FieldOptions) {
         .background(o.background.unwrap_or_else(|| paint(fill)))
         .border(o.border_width.unwrap_or(border_w), o.border_color.unwrap_or_else(|| paint(p.line)))
         .corner_radius(o.corner_radius.unwrap_or(CORNER_SM));
-    // TODO(compose-rust#444): TextField has no word_break or overflow builder; its
-    // multiline placeholder can break Korean words inside a line.
+    // compose-rust#444 (v0.0.8): the placeholder and the typed text break Korean only at spaces,
+    // and a long token such as a path or a URL breaks inside itself rather than clipping.
     let mut f = cu::TextField()
         .modifier(modifier)
+        .word_break(WordBreak::KeepAll)
+        .overflow_wrap(OverflowWrap::Anywhere)
         .placeholder(o.placeholder)
         .multiline(o.multiline)
         .enabled(o.enabled.unwrap_or(true));
@@ -1469,6 +1495,24 @@ mod tests {
         }
         let source = fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/cr/components.rs")).unwrap();
         assert!(source.split("#[cfg(test)]").next().unwrap().matches(".word_break(WordBreak::KeepAll)").count() >= 1);
+    }
+
+    #[test]
+    fn fr_l10_1_fields_keep_words_and_wrap_labels_break_long_tokens() {
+        // compose-rust#443 and #444 (v0.0.8): no workaround markers are left, the field keeps
+        // Korean words whole and breaks a long token, and WrapLabel lets a token break.
+        let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains(concat!("TODO(compose-rust#", "443)")));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "444)")));
+        let field = production.split("pub fn EmberField(").nth(1).unwrap();
+        let field = field.split("\npub fn ").next().unwrap();
+        assert!(field.contains(".word_break(WordBreak::KeepAll)"));
+        assert!(field.contains(".overflow_wrap(OverflowWrap::Anywhere)"));
+        let text = production.split("fn scale_text(").nth(1).unwrap();
+        assert!(text.contains("if wrap_anywhere {\n        t = t.overflow_wrap(OverflowWrap::Anywhere);"));
+        for screen in [include_str!("monitor.rs"), include_str!("routines.rs")] {
+            assert!(!screen.contains(concat!("TODO(compose-rust#", "443)")));
+        }
     }
 
     #[test]

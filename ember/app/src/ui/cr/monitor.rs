@@ -28,6 +28,7 @@ use crate::ui::monitor::{
 use super::characters::{Character, CharState};
 use super::components::{
     AppButton, ButtonKind, EmberCard, EmberSheetSized, Label, Pill, PillTone, SHEET_WIDTH_MONITOR,
+    WrapLabel,
 };
 use super::theme::*;
 use crate::ui::coexist::shared_ui;
@@ -268,9 +269,11 @@ fn MonCard(icon: &'static str, label: &str, badge: Option<(&str, PillTone)>, hei
         cu::Column().spacing(SP[2]).modifier(m).content(|| {
             cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).modifier(Modifier::new().fill_max_width()).content(|| {
                 super::shell::NavIcon(icon, p.muted.to_argb(), 16.0);
-                // TODO(compose-rust#443): no overflow_wrap on Text, so a long label clips with an ellipsis.
-                Label(label, Fs::Sm, Weight::Semibold, Some(paint(p.text_2)), Some(1));
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                // A long label wraps to a second line, breaking a long token inside itself
+                // (compose-rust#443, v0.0.8), instead of clipping with an ellipsis.
+                cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
+                    WrapLabel(label, Fs::Sm, Weight::Semibold, Some(paint(p.text_2)), Some(2));
+                });
                 if let Some((text, tone)) = badge {
                     Pill(text, tone, true);
                 }

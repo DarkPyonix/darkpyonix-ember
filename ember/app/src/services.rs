@@ -147,8 +147,8 @@ impl Services {
 
     /// The peer id of the device the app runs on. Always `None` today: the app uses only the
     /// server's local listener, which is the server's own machine and never in the device list.
-    // TODO(whoami): ask `GET /api/whoami` ({door, peer_id, scope}) and answer its `peer_id` on
-    // the transport door.
+    // TODO(whoami): call ember_client `Api::whoami() -> Whoami { door, peer_id: Option<String>,
+    // scope }` (`GET /api/whoami`) and answer its `peer_id` on the transport door.
     pub fn self_peer_id(&self) -> Option<String> {
         None
     }

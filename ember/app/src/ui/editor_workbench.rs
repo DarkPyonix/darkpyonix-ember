@@ -1825,7 +1825,9 @@ pub mod page {
                         let sources: Vec<String> = clip.paths.into_iter().map(|(p, _)| p).collect();
                         expanded.write().insert(dest_dir.clone());
                         match clip.kind {
-                            crate::ui::editor::ClipboardKind::Copy => run_host.send(HostCommand::CopyPaths { sources, dest_dir }),
+                            crate::ui::editor::ClipboardKind::Copy => {
+                                run_host.send(HostCommand::CopyPaths { sources, dest_dir });
+                            }
                             crate::ui::editor::ClipboardKind::Cut => {
                                 run_host.send(HostCommand::MovePaths { sources, dest_dir });
                                 tree_clipboard.set(None);

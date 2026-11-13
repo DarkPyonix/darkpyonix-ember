@@ -291,7 +291,8 @@ async fn serve_main() -> anyhow::Result<()> {
     );
     // The local computer's terminals outlive this process (FR-P6): records and PTY keepers in
     // `<data dir>/local-node`; a restart re-adopts them. EMBER_NODE_KEEP_PTY=0 turns it off.
-    computers.set_local_node_options(computers::local_node::LocalNodeOptions::from_env(&data_dir));
+    let local_node_options = computers::local_node::LocalNodeOptions::from_env(&data_dir);
+    computers.set_local_node_options(local_node_options.clone());
     match computers.resume_local_node() {
         Ok(true) => tracing::info!("local node resumed the terminals of the previous run"),
         Ok(false) => {}
@@ -520,7 +521,27 @@ async fn serve_main() -> anyhow::Result<()> {
     // "Open IDE" takes its computers from the registry and the session's current computer
     // (FR-L7, FR-W4); EMBER_IDE_COMPUTERS stays as an override merged onto them.
     let ide = Arc::new(ember_server::api::ide::IdeConfig::from_env()?);
-    let ose = Arc::new(ember_server::ose::OseManager::default());
+    // FR-P5 (#26): OSE terminals run tasks through `ember-term`; put it on the OSE child's PATH
+    // and point it at the built-in node's `local.json`. The node starts now so the file names
+    // the running node before a task asks for it. [provisional]
+    let ember_term_dir = ember_server::ose::find_ember_term_dir(
+        std::env::var_os("EMBER_TERM_BIN"),
+        std::env::current_exe().ok(),
+    );
+    if ember_term_dir.is_none() {
+        tracing::warn!("ember-term not found (EMBER_TERM_BIN or next to ember-server); VS Code tasks use it only if it is on PATH");
+    }
+    if ember_term_dir.is_some() && local_node_options.state_dir.is_some() {
+        if let Err(e) = computers.local_node_client() {
+            tracing::warn!("local node did not start for ember-term: {e}");
+        }
+    }
+    let ose = Arc::new(ember_server::ose::OseManager::default().with_terminal_env(
+        ember_server::ose::TerminalEnv {
+            ember_term_dir,
+            local_node_state_dir: local_node_options.state_dir.clone(),
+        },
+    ));
     // A SIGKILL of the previous server skips the token file drop (#521).
     ose.sweep_stale_tokens();
     let transfers = ember_server::transfers::TransferManager::new(

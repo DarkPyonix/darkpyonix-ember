@@ -51,6 +51,38 @@ class DiscoverTest(unittest.TestCase):
         self.assertEqual(ep.headers(), {"authorization": "Bearer s3cret"})
 
 
+class DiscoverServerTest(unittest.TestCase):
+    """#26: with only ember server's built-in node there is no local.json; the proxy relays to
+    the server's /api/computers/local/terms* with the server token."""
+
+    def test_server_fallback_uses_the_relay_prefix_and_token_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            tf = Path(d, "server-token")
+            tf.write_text("srvtok\n")
+            ep = node.discover_server("http://127.0.0.1:8740", "", tf)
+            self.assertEqual(ep, node.NodeEndpoint("http://127.0.0.1:8740", "srvtok", "/api/computers/local"))
+            self.assertTrue(ep.via_server)
+            self.assertEqual(ep.http("/terms"), "http://127.0.0.1:8740/api/computers/local/terms")
+            self.assertEqual(ep.ws("/terms/a/attach"), "ws://127.0.0.1:8740/api/computers/local/terms/a/attach")
+            self.assertEqual(ep.http(ep.health_path()), "http://127.0.0.1:8740/api/computers/local/terms")
+            self.assertEqual(ep.headers(), {"authorization": "Bearer srvtok"})
+            tf.write_text("rotated")
+            self.assertEqual(node.discover_server("http://h:1", "", tf).token, "rotated")
+
+    def test_explicit_token_wins_and_missing_pieces_mean_none(self):
+        self.assertEqual(node.discover_server("http://h:1", "t", None).token, "t")
+        self.assertIsNone(node.discover_server("", "t", None))
+        self.assertIsNone(node.discover_server("http://h:1", "", Path("/nonexistent/server-token")))
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "server-token").write_text("  \n")
+            self.assertIsNone(node.discover_server("http://h:1", "", Path(d, "server-token")))
+
+    def test_node_daemon_keeps_its_plain_paths(self):
+        ep = node.NodeEndpoint("http://127.0.0.1:8741", "t")
+        self.assertFalse(ep.via_server)
+        self.assertEqual(ep.health_path(), "/health")
+
+
 class SanitizeTest(unittest.TestCase):
     def test_create_defaults_and_drops_unknown_keys(self):
         out = node.sanitize_create({"cwd": None, "evil": 1, "size": {"rows": 30, "cols": 100}}, "/home/u")
@@ -158,6 +190,18 @@ class RouterTest(unittest.TestCase):
             ("POST", "/terms/abc/kill", {}),
             ("POST", "/terms/abc/kill", {"signal": 9}),
         ])
+
+    def test_server_relay_paths_carry_the_prefix(self):
+        self.api.endpoint = lambda: node.NodeEndpoint("http://node.test", "srv", node.SERVER_LOCAL_PREFIX)
+        self.client.get("/__terms", params={"project": "/p"})
+        self.client.post("/__terms/abc/kill")
+        status = self.client.get("/__terms/_status").json()
+        self.assertEqual([(c[0], c[1], c[4]) for c in self.calls], [
+            ("GET", "/api/computers/local/terms", "Bearer srv"),
+            ("POST", "/api/computers/local/terms/abc/kill", "Bearer srv"),
+            ("GET", "/api/computers/local/terms", "Bearer srv"),
+        ])
+        self.assertEqual(status, {"available": True, "via": "server"})
 
     def test_node_not_running(self):
         self.api.endpoint = lambda: None

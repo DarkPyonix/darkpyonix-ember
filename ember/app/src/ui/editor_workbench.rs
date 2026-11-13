@@ -1690,6 +1690,9 @@ pub mod page {
         };
         let mut submit_enter = submit.clone();
         let mut submit_ok = submit.clone();
+        // A rename edits the renamed row in place (#797); other prompts sit at the top of the tree.
+        let rename_at = crate::ui::editor::rename_in_place_row(pending.as_ref(), &rows);
+        let mut prompt_inline: Option<Element> = None;
         let prompt_row = match pending.clone() {
             None => rsx! {},
             Some(TreePrompt::Delete { path, is_dir }) => {
@@ -1728,11 +1731,12 @@ pub mod page {
             Some(other) => {
                 let label = match &other { TreePrompt::NewFile { .. } => "새 파일 이름", TreePrompt::NewDir { .. } => "새 폴더 이름", _ => "새 이름" };
                 let enter = other.clone();
-                rsx! {
-                    div { class: "ed-tn", style: "--d:0;",
-                        {icon_px("file", 15)}
+                let field = rsx! {
                         input { style: "flex:1; min-width:0; height:22px; border:1px solid var(--line); border-radius:var(--r-xs); background:var(--surface); color:var(--text); padding:0 6px;",
                             "aria-label": "{label}", placeholder: "{label}", value: "{prompt_text}", autofocus: true,
+                            // In place on a row, a click in the field must not select, open or toggle the row.
+                            onmousedown: move |event| event.stop_propagation(),
+                            onclick: move |event| event.stop_propagation(),
                             oninput: move |event| prompt_text.set(event.value()),
                             onblur: move |_| { if crate::ui::editor::blur_closes_prompt(&prompt_text.read()) { prompt.set(None); } },
                             onkeydown: move |event| {
@@ -1742,6 +1746,16 @@ pub mod page {
                                     _ => {}
                                 }
                             },
+                        }
+                };
+                if rename_at.is_some() {
+                    prompt_inline = Some(field);
+                    rsx! {}
+                } else {
+                    rsx! {
+                        div { class: "ed-tn", style: "--d:0;",
+                            {icon_px("file", 15)}
+                            {field}
                         }
                     }
                 }
@@ -2125,8 +2139,12 @@ pub mod page {
                                 },
                                 if is_dir { if row.open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} } } else { span { class: "chev-sp" } }
                                 if is_dir { {icon_px("folder", 15)} } else { {icon_px("file", 15)} }
-                                span { class: "ellipsis", "{row.name}" }
-                                if chosen {
+                                if rename_at == Some(row_idx) {
+                                    {prompt_inline.take()}
+                                } else {
+                                    span { class: "ellipsis", "{row.name}" }
+                                }
+                                if chosen && rename_at != Some(row_idx) {
                                     div { class: "spacer" }
                                     button { class: "ed-ib", title: "잘라내기: {cut_label}", "aria-label": "잘라내기: {cut_label}", style: "width:22px; height:22px;",
                                         onmousedown: move |event| { event.stop_propagation(); },

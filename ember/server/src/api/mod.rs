@@ -79,6 +79,7 @@ use crate::store::{now_ms, SessionPatch};
 pub fn router(sessions: Arc<Sessions>) -> Router {
     Router::new()
         .route("/api/health", get(|| async { Json(json!({ "ok": true })) }))
+        .route("/api/whoami", get(crate::devices::scope::whoami))
         .route("/api/agents", get(agents))
         // `/api/agents/settings` has three segments, `/api/agents/{agent}/settings` four: no overlap.
         .route("/api/agents/settings", get(get_agent_settings))

@@ -31,8 +31,10 @@ use ember_server::store::Store;
 /// - `EMBER_CLAUDE_BIN`: the Claude Code CLI (default `claude` on `PATH`)
 /// - `EMBER_CODEX_BIN`: the Codex CLI (default `codex` on `PATH`)
 /// - `EMBER_AGY_BIN`: the Antigravity CLI (default `agy` on `PATH`). Its sessions keep a private
-///   configuration folder each under `<data dir>/agy/`. A version other than the tested one runs
+///   configuration folder each under `<data dir>-runtime/agy/` (FR-A11). A version other than the tested one runs
 ///   read-only (INTENT D14); `EMBER_AGY_SANDBOX=1` adds agy's `--sandbox` (off by default)
+/// - `EMBER_AGENT_SANDBOX=off`: start agents without the OS sandbox that hides the data dir
+///   (FR-A11; macOS `sandbox-exec`, Linux `bwrap`, used when found and working)
 /// - `EMBER_SCRIPTED_AGENT=1`: also offer the test agent (development only)
 /// - `EMBER_DEMO_DATA=1`: add a demo ChatGPT plan account with 14 days of usage (screenshots only)
 /// - `EMBER_ACP_AGENTS`: Agent Client Protocol agents to offer, as JSON: a list of preset names
@@ -102,6 +104,10 @@ async fn serve_main() -> anyhow::Result<()> {
         PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".ember")
     });
     std::fs::create_dir_all(&data_dir)?;
+    // FR-A11 (#784): agy homes and the OSE data root live in the data dir's sibling runtime dir;
+    // a data dir from before is moved once (idempotent).
+    let runtime = ember_server::runtime_dir::runtime_dir(&data_dir);
+    ember_server::runtime_dir::migrate_logged(&data_dir, &runtime);
     // `ember-server rotate-token` (#369): replace `<data dir>/server-token` and exit. A running
     // server takes the new token on the next request that presents it; the old one gets 401.
     if std::env::args().nth(1).as_deref() == Some("rotate-token") {
@@ -113,6 +119,19 @@ async fn serve_main() -> anyhow::Result<()> {
         return Ok(());
     }
     let store = Arc::new(Store::open(&data_dir.join("ember.db"))?);
+    // Agents never see the data dir or the OSE data root (FR-A11): OS sandbox where available,
+    // Ember's own file handlers and Claude Code's deny rules otherwise.
+    {
+        let mut denied = vec![std::path::absolute(&data_dir).unwrap_or_else(|_| data_dir.clone())];
+        if let Ok(ose) = ember_server::ose::data_root_from(
+            std::env::var_os("EMBER_OSE_DATA_DIR").map(PathBuf::from),
+            Some(denied[0].clone()),
+            None,
+        ) {
+            denied.push(std::path::absolute(&ose).unwrap_or(ose));
+        }
+        ember_server::sandbox::install(ember_server::sandbox::from_env(denied));
+    }
     // Agents run under per-session shims and outlive this server (FR-S8, EMBER_SESSION_SHIM=off
     // keeps direct children). Stopping the server leaves the shims, and so the agents, running.
     let shim_runtime = match ember_server::agents::proc::find_shim_bin() {

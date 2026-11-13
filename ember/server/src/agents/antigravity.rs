@@ -210,7 +210,8 @@ pub enum Policy {
 
 pub struct AntigravityAdapter {
     bin: PathBuf,
-    /// `<data dir>/agy`: session roots and the conversation → root index.
+    /// `<runtime dir>/agy`: session roots and the conversation → root index (FR-A11: outside
+    /// the data dir, so the agent sandbox can deny all of it).
     home: PathBuf,
     hooks: Arc<HookBroker>,
     /// Pass `--sandbox`.
@@ -229,11 +230,12 @@ impl AntigravityAdapter {
     }
 
     /// The binary from `EMBER_AGY_BIN`, else `agy` on `PATH`; session roots under
-    /// `<data_dir>/agy`; `EMBER_AGY_SANDBOX=1` adds `--sandbox`.
+    /// `<runtime dir>/agy` (the data dir's sibling, [`crate::runtime_dir`]); `EMBER_AGY_SANDBOX=1`
+    /// adds `--sandbox`.
     pub fn from_env(data_dir: &Path, hooks: Arc<HookBroker>) -> Self {
         let adapter = Self::new(
             std::env::var_os("EMBER_AGY_BIN").unwrap_or_else(|| "agy".into()),
-            data_dir.join("agy"),
+            crate::runtime_dir::runtime_dir(data_dir).join("agy"),
             hooks,
         );
         if std::env::var("EMBER_AGY_SANDBOX").as_deref() == Ok("1") {
@@ -728,6 +730,34 @@ fn mentions(v: &Value, roots: &[String]) -> bool {
     }
 }
 
+/// The first of `denied` (the agent sandbox's directories, FR-A11) that a string in `v` names,
+/// as a path prefix or inside a command line. agy's file tools and shell commands both carry
+/// paths as strings, so a mention is enough to deny.
+pub fn data_dir_mentioned(v: &Value, denied: &[PathBuf]) -> Option<PathBuf> {
+    let strs: Vec<String> = denied.iter().map(|d| d.to_string_lossy().trim_end_matches('/').to_string()).collect();
+    if strs.is_empty() {
+        return None;
+    }
+    let hit = |s: &str| {
+        strs.iter().position(|d| {
+            s.match_indices(d.as_str()).any(|(i, _)| {
+                // `/h/.ember` must not match `/h/.ember-runtime` or `/h/.ember2`.
+                let next = s[i + d.len()..].chars().next();
+                next.is_none_or(|c| c == '/' || c.is_whitespace() || "\"'`;:)".contains(c))
+            })
+        })
+    };
+    fn walk(v: &Value, hit: &dyn Fn(&str) -> Option<usize>) -> Option<usize> {
+        match v {
+            Value::String(s) => hit(s),
+            Value::Array(a) => a.iter().find_map(|x| walk(x, hit)),
+            Value::Object(o) => o.values().find_map(|x| walk(x, hit)),
+            _ => None,
+        }
+    }
+    walk(v, &hit).map(|i| denied[i].clone())
+}
+
 /// Pending approvals of one run.
 struct RunApprovals {
     events: mpsc::Sender<AgentEvent>,
@@ -803,6 +833,9 @@ impl RunApprovals {
                  the project's folder instead (use it as the working directory).",
                 self.roots[0]
             ));
+        }
+        if let Some(dir) = data_dir_mentioned(&call.input, crate::sandbox::denied_dirs()) {
+            return deny_reply(&crate::sandbox::denied_message(&dir));
         }
         if READ_ONLY_TOOLS.contains(&call.tool.as_str()) {
             let mut bases: Vec<PathBuf> = payload["workspacePaths"]
@@ -1077,6 +1110,7 @@ impl AgentRun for AgyRun {
             program: self.bin.clone(), args, env: self.req.env.clone(),
             cwd: self.req.cwd.clone(), reattachable: true,
             mem_limit_mb: self.req.mem_limit_mb,
+            os_sandbox: true,
         }).await {
             Ok(proc) => proc,
             Err(e) => {

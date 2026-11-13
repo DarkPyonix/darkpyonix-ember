@@ -259,8 +259,12 @@ async fn fr_w4_fs_relay_write_pwrite_setattr_reach_the_node() {
         assert_eq!(std::fs::metadata(&new).unwrap().permissions().mode() & 0o777, 0o600);
 
         // The answer is the node's, unchanged.
-        let (st, d) = f.direct("stat", json!({ "path": new })).await;
+        // The reads above bump atime, so the comparison leaves atime out.
+        let (st, mut d) = f.direct("stat", json!({ "path": new })).await;
         assert_eq!(st, 200);
+        let mut v = v;
+        v.as_object_mut().unwrap().remove("atime_ms");
+        d.as_object_mut().unwrap().remove("atime_ms");
         assert_eq!(v, d, "setattr answers the node's Stat");
     })
     .await;

@@ -666,14 +666,14 @@ pub mod view {
 
     const FIELD: &str = "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;";
     const BOX: &str = "width:auto; height:30px; cursor:text;";
-    // #798: a row never grows past the panel. The name and meta lines end in an ellipsis, the
+    // #798: a row never grows past the panel (ellipsis drawing: dioxus-compose#184). The name and meta lines end in an ellipsis, the
     // description wraps, the version and the buttons keep their size, so 제거 and 설치 stay visible at any width.
-    const ROW: &str = "display:flex; flex-direction:column; gap:2px; padding:var(--sp2) var(--sp2) var(--sp2) var(--sp3); min-width:0; max-width:100%; overflow:hidden; box-sizing:border-box;";
-    const LINE: &str = "display:flex; align-items:center; gap:var(--sp2); min-width:0; max-width:100%;";
-    const NAME: &str = "font-weight:var(--fw-medium); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; flex:0 1 auto;";
+    const ROW: &str = "display:flex; flex-direction:column; gap:2px; padding:var(--sp2) var(--sp2) var(--sp2) var(--sp3); width:100%; min-width:0; max-width:100%; overflow:hidden; box-sizing:border-box;";
+    const LINE: &str = "display:flex; align-items:center; gap:var(--sp2); width:100%; min-width:0; max-width:100%; overflow:hidden;";
+    const NAME: &str = "font-weight:var(--fw-medium); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; flex:0 1 auto; display:block;";
     const VERSION: &str = "color:var(--muted); font-size:var(--fs-xs); flex:none;";
-    const META: &str = "color:var(--muted); font-size:var(--fs-xs); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; max-width:100%;";
-    const DESCRIPTION: &str = "color:var(--text-2); font-size:var(--fs-xs); white-space:normal; overflow-wrap:anywhere; min-width:0; max-width:100%;";
+    const META: &str = "color:var(--muted); font-size:var(--fs-xs); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; width:100%; min-width:0; max-width:100%;";
+    const DESCRIPTION: &str = "color:var(--text-2); font-size:var(--fs-xs); white-space:normal; overflow-wrap:anywhere; word-break:break-word; display:block; width:100%; min-width:0; max-width:100%;";
     /// The two lists scroll down, never sideways (#798).
     const LIST: &str = "overflow-x:hidden;";
     const ACTION: &str = "border:1px solid var(--line); height:24px; padding:0 var(--sp2); font-size:var(--fs-xs); flex:none;";
@@ -890,6 +890,12 @@ pub mod view {
             }
             assert!(DESCRIPTION.contains("overflow-wrap:anywhere"), "a long description wraps inside the row");
             assert!(ACTION.contains("flex:none") && VERSION.contains("flex:none"), "buttons and the version never shrink away");
+            for style in [ROW, LINE, META, DESCRIPTION] {
+                assert!(style.contains("width:100%"), "bounded by the panel, not by its text: {style}");
+            }
+            for style in [NAME, META, DESCRIPTION] {
+                assert!(style.contains("display:block"), "ellipsis and wrapping need a block box (dioxus-compose#184): {style}");
+            }
             assert!(LIST.contains("overflow-x:hidden"), "the lists never scroll sideways");
         }
     }

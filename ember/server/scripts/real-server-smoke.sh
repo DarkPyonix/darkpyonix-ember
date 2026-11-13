@@ -20,6 +20,9 @@
 # passed to curl as a header file (`-H @file`) and to jq with `--rawfile`, so they are never on a
 # command line this script runs, and never printed.
 set -euo pipefail
+# Throwaway keys stay in the run directory, never in the login keychain (FR-S13: auto would
+# probe the OS keystore and could raise a prompt).
+export EMBER_KEYSTORE="${EMBER_KEYSTORE:-file}"
 
 D="$(cd "$(dirname "$0")" && pwd)"
 R="$(cd "$D/../../.." && pwd)"

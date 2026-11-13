@@ -88,7 +88,7 @@ pub async fn bind(data_dir: &Path) -> anyhow::Result<Transport> {
 /// The server's persistent transport key (`<data dir>/transport.key`, created on first use):
 /// its identity to nodes, clients and the hub.
 pub fn load_key(data_dir: &Path) -> anyhow::Result<SecretKey> {
-    Ok(SecretKey::load_or_generate(data_dir.join(KEY_FILE))?)
+    ember_node::keystore::load_transport_key(&data_dir.join(KEY_FILE))
 }
 
 /// The transport configuration with the hub (FR-N2): when this server is `registered`, or the

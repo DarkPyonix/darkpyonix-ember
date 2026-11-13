@@ -24,6 +24,10 @@ globset = "0.4"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 hex = "0.4"
+# Secret keys in the OS keystore (SPEC FR-S13, #784): Keychain, Windows Credential Manager, Linux
+# Secret Service. `vendored` builds libdbus from source, so Linux CI needs no libdbus-dev and no
+# running Secret Service (the store is probed at runtime and falls back to the file).
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 # The enrol seal's key derivation, HKDF-SHA256 (SPEC FR-C2d, #540).
 hkdf = "0.12"
 http = "1"

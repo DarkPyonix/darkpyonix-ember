@@ -105,6 +105,9 @@ async fn serve_main() -> anyhow::Result<()> {
     // Private MCP config files left by a crashed run hold env values such as runtime tokens.
     ember_server::agents::claude_code::cleanup_stale_mcp_files(&std::env::temp_dir(), started);
 
+    // Keys in the OS keystore where available (FR-S13, EMBER_KEYSTORE=file|os|auto).
+    ember_node::keystore::install_from_env()?;
+
     let data_dir = std::env::var_os("EMBER_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| {
         PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".ember")
     });

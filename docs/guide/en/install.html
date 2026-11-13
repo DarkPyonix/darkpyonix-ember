@@ -145,7 +145,10 @@ cargo build --release --locked
         <span class="pill partial">Partial</span> The token file stops other users and web pages, not
         your own processes. An agent runs as you and can read <code>server-token</code>. So the routes
         that grant authority, admit someone or change a secret need a second credential, the owner key.
-        With the token alone they answer <code>403</code> with <code>{"code": "owner_required"}</code>.
+        On a server started with <code>EMBER_OWNER_PRESENCE=enforce</code>, they answer
+        <code>403</code> with <code>{"code": "owner_required"}</code> to the token alone. The default
+        is <code>warn</code> for now: the call is logged and served, because the app cannot claim a
+        key yet. Enforce becomes the default once it can.
         These routes are: answering a tool approval and approve-all; the device list; adding, removing
         and checking accounts and providers, and ChatGPT sign-in; adding and removing computers, and
         enrol codes; rotating the token; hub registration; MCP servers; the per-agent, A2A and browser
@@ -175,14 +178,17 @@ ember-server owner call POST /api/accounts <span class="s">'{"agent": "claude-co
         agent, because those run in process trees the server started. Where this guide shows
         <code>curl</code> on one of the routes above, use <code>ember-server owner call</code> with the
         same method, path and body. <code>EMBER_OWNER_CONFIRM=off</code> grants a claim without the
-        console code, and <code>EMBER_OWNER_PRESENCE=warn</code> logs these calls and serves them
-        without a key; both lower the protection and are meant for test rigs. A remote device with
+        console code; it lowers the protection and is meant for test rigs. A remote device with
         scope <code>full</code> counts as the owner for approvals over the transport; the device list
         itself is managed only on the server's computer. A server on Windows has no owner socket
-        yet, so its owner routes stay closed on the local listener.
+        yet (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/815">#815</a>), so it
+        always runs in <code>warn</code> and its owner routes stay open to the token.
       </p>
       <p>
-        <strong>What this does not stop.</strong> A process that runs arbitrary code as you and is
+        <strong>What this does not stop.</strong> In the default <code>warn</code> mode nothing is
+        refused: a process that reads <code>server-token</code> can still call these routes, and the
+        server only logs it. Set <code>EMBER_OWNER_PRESENCE=enforce</code> to close them. Even
+        then, a process that runs arbitrary code as you and is
         not sandboxed can still read or change Ember's database and keys in the data folder
         directly, attach to the app, or imitate it by leaving the agent's process tree and asking
         for a key. The console code stops the last one only while that process cannot read the

@@ -90,6 +90,8 @@ fn fx_with(presence: Presence) -> Fx {
     Fx { app, token, owner, dir }
 }
 
+/// Enforce is given explicitly: the default mode is warn, and the mode is never read from the
+/// process environment in these tests.
 fn fx() -> Fx {
     fx_with(Presence::Enforce)
 }
@@ -246,7 +248,62 @@ async fn fr_s12_voiding_a_key_stops_future_authority_only() {
     assert_eq!(got.0, StatusCode::ACCEPTED, "{got:?}");
 }
 
-/// `EMBER_OWNER_PRESENCE=warn` serves an owner route without a key (one release, older apps).
+#[derive(Clone)]
+struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Log lines of this thread go to the returned buffer while the guard lives. The test runtime
+/// is single-threaded, so the server's tasks log through it too.
+fn capture_logs() -> (LogBuf, tracing::subscriber::DefaultGuard) {
+    let logs = LogBuf(Arc::default());
+    let sink = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(move || sink.clone())
+        .finish();
+    (logs, tracing::subscriber::set_default(subscriber))
+}
+
+fn logged(logs: &LogBuf) -> String {
+    String::from_utf8_lossy(&logs.0.lock().unwrap()).into_owned()
+}
+
+/// The default mode is warn (leader, 2026-11-13), until the app ships its claim: with nothing
+/// set, an owner route called with the server token alone is served, and the call is logged.
+/// Enforce is opt-in.
+#[tokio::test]
+async fn fr_s12_the_default_is_warn_and_the_call_is_logged() {
+    assert_eq!(Presence::from_value(None), Presence::Warn);
+    assert_eq!(Presence::from_value(Some("enforce")), Presence::Enforce);
+    let (logs, _guard) = capture_logs();
+    // The mode a server gets with EMBER_OWNER_PRESENCE unset, given here and not read from the
+    // process environment, so no other test can change it.
+    let f = fx_with(Presence::for_platform(None));
+    assert_eq!(f.owner.presence(), Presence::Warn);
+    let got = call_with(&f.app, "GET", "/api/devices", Some(&f.token), None, None).await;
+    assert_eq!(got.0, StatusCode::OK, "{got:?}");
+    assert!(got.1.is_array());
+    let text = logged(&logs);
+    assert!(text.contains("owner route served without owner presence"), "the call is logged: {text}");
+    assert!(text.contains("/api/devices"), "{text}");
+    // Not an owner route: nothing to warn about.
+    let before = logged(&logs).matches("owner route served").count();
+    let got = call_with(&f.app, "GET", "/api/sessions", Some(&f.token), None, None).await;
+    assert_eq!(got.0, StatusCode::OK);
+    assert_eq!(logged(&logs).matches("owner route served").count(), before);
+}
+
+/// Warn mode serves an owner route without a key; the server token is still required.
 #[tokio::test]
 async fn fr_s12_warn_mode_serves_without_a_key() {
     let f = fx_with(Presence::Warn);
@@ -926,19 +983,6 @@ mod door {
         drop(door);
     }
 
-    #[derive(Clone)]
-    struct LogBuf(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for LogBuf {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
     fn files_under(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
         for e in std::fs::read_dir(dir).unwrap().flatten() {
             let p = e.path();
@@ -955,15 +999,7 @@ mod door {
     /// not on the console.
     #[tokio::test]
     async fn fr_s12_owner_key_never_on_disk_or_in_logs() {
-        let logs = LogBuf(Arc::default());
-        let sink = logs.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_ansi(false)
-            .with_writer(move || sink.clone())
-            .finish();
-        // The test runtime is single-threaded, so the door's tasks log through this guard too.
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (logs, _guard) = capture_logs();
 
         let f = fx();
         let (cfg, codes) = config(Confirm::Strict, vec![], 1);
@@ -986,7 +1022,7 @@ mod door {
             let bytes = std::fs::read(&p).unwrap();
             assert!(!String::from_utf8_lossy(&bytes).contains(secret), "{} holds the owner key", p.display());
         }
-        let logged = String::from_utf8_lossy(&logs.0.lock().unwrap()).into_owned();
+        let logged = logged(&logs);
         assert!(logged.contains("owner key claimed"), "the claim is logged: {logged}");
         assert!(logged.contains("owner key voided"), "the void is logged: {logged}");
         assert!(!logged.contains(secret), "a log line holds the owner key");

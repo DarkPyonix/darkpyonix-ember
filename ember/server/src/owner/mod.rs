@@ -10,6 +10,8 @@
 //! - **How it is sent.** Header `X-Ember-Owner: <key>` beside the bearer token, on owner routes.
 //!   Missing or wrong: 403 `{"code": "owner_required"}`. 403 and not 401, so a client does not
 //!   take it for a bad server token and re-read the token file.
+//! - **The mode.** Warn by default for now: a call without a key is logged and served, until
+//!   the app ships its claim. `EMBER_OWNER_PRESENCE=enforce` refuses it ([`Presence`]).
 //! - **How it is claimed.** Over the unix socket `<data dir>/owner.sock` ([`door`]). The key
 //!   lives while that connection stays open.
 //! - **The transport door** has no owner key: there the device key is the credential, and an
@@ -49,8 +51,10 @@ pub const OWNER_HEADER: &str = "x-ember-owner";
 pub const KEY_PREFIX: &str = "eok_";
 /// The claim socket's name in the data folder.
 pub const SOCKET_FILE: &str = "owner.sock";
-/// `EMBER_OWNER_PRESENCE=warn`: an owner route called without a key is logged and served. For
-/// the one release in which older apps have no claim yet. Unset or any other value: enforce.
+/// `EMBER_OWNER_PRESENCE=enforce`: an owner route called without a live key gets 403
+/// `owner_required`. Unset or any other value: warn, which logs the call and serves it. Warn is
+/// the default until the app ships its claim (leader, 2026-11-13); enforce becomes the default
+/// in a later change. Where there is no claim socket (Windows, #815) the mode is always warn.
 pub const PRESENCE_ENV: &str = "EMBER_OWNER_PRESENCE";
 /// `EMBER_OWNER_CONFIRM=off`: a claim that passes the peer checks gets a key with no
 /// confirmation (best effort). Unset or any other value: every claim is confirmed.
@@ -59,18 +63,29 @@ pub const CONFIRM_ENV: &str = "EMBER_OWNER_CONFIRM";
 /// What the owner layer does with an owner route called without a live key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Presence {
-    /// 403 `owner_required` (the default).
+    /// 403 `owner_required` ([`PRESENCE_ENV`]`=enforce`).
     Enforce,
-    /// Log and serve ([`PRESENCE_ENV`]).
+    /// Log and serve (the default for now).
     Warn,
 }
 
 impl Presence {
-    /// `Some("warn")` is [`Presence::Warn`]; everything else enforces.
+    /// `Some("enforce")` is [`Presence::Enforce`]; everything else, unset included, warns.
     pub fn from_value(v: Option<&str>) -> Presence {
         match v.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
-            Some("warn") => Presence::Warn,
-            _ => Presence::Enforce,
+            Some("enforce") => Presence::Enforce,
+            _ => Presence::Warn,
+        }
+    }
+
+    /// The mode a server runs in for `v` (the value of [`PRESENCE_ENV`]). Without a claim
+    /// socket no key can exist, so enforcing would only close the owner routes: such a
+    /// platform (Windows until the named-pipe door, #815) always warns.
+    pub fn for_platform(v: Option<&str>) -> Presence {
+        if cfg!(unix) {
+            Presence::from_value(v)
+        } else {
+            Presence::Warn
         }
     }
 }
@@ -156,9 +171,9 @@ impl Owner {
         Arc::new(Owner { presence, keys: Mutex::new(HashMap::new()), next: AtomicU64::new(1), events })
     }
 
-    /// The mode from [`PRESENCE_ENV`].
+    /// The mode from [`PRESENCE_ENV`], as [`Presence::for_platform`] reads it.
     pub fn from_env() -> Arc<Owner> {
-        Owner::new(Presence::from_value(std::env::var(PRESENCE_ENV).ok().as_deref()))
+        Owner::new(Presence::for_platform(std::env::var(PRESENCE_ENV).ok().as_deref()))
     }
 
     pub fn presence(&self) -> Presence {
@@ -260,7 +275,7 @@ async fn guard(State(owner): State<Arc<Owner>>, mut req: Request<Body>, next: Ne
     }
     match owner.presence {
         Presence::Warn => {
-            tracing::warn!(method = %req.method(), path = req.uri().path(), "owner route served without owner presence (EMBER_OWNER_PRESENCE=warn)");
+            tracing::warn!(method = %req.method(), path = req.uri().path(), "owner route served without owner presence (warn mode; EMBER_OWNER_PRESENCE=enforce refuses it)");
             next.run(req).await
         }
         Presence::Enforce => {
@@ -308,10 +323,15 @@ mod tests {
     }
 
     #[test]
-    fn fr_s12_modes_default_to_strict_and_enforce() {
-        assert_eq!(Presence::from_value(None), Presence::Enforce);
-        assert_eq!(Presence::from_value(Some("off")), Presence::Enforce);
-        assert_eq!(Presence::from_value(Some(" WARN ")), Presence::Warn);
+    fn fr_s12_modes_default_to_strict_confirm_and_warn_presence() {
+        assert_eq!(Presence::from_value(None), Presence::Warn);
+        assert_eq!(Presence::from_value(Some("off")), Presence::Warn);
+        assert_eq!(Presence::from_value(Some("warn")), Presence::Warn);
+        assert_eq!(Presence::from_value(Some(" ENFORCE ")), Presence::Enforce);
+        // A platform without the claim socket never enforces (#815).
+        let enforced = Presence::for_platform(Some("enforce"));
+        assert_eq!(enforced, if cfg!(unix) { Presence::Enforce } else { Presence::Warn });
+        assert_eq!(Presence::for_platform(None), Presence::Warn);
         assert_eq!(Confirm::from_value(None), Confirm::Strict);
         assert_eq!(Confirm::from_value(Some("1")), Confirm::Strict);
         assert_eq!(Confirm::from_value(Some("off")), Confirm::Off);

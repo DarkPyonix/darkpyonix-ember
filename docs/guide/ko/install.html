@@ -144,7 +144,10 @@ cargo build --release --locked
         <span class="pill partial">부분</span> 토큰 파일은 다른 사용자와 웹 페이지를 막을 뿐, 내 계정의
         프로세스는 막지 못합니다. 에이전트는 내 계정으로 실행되므로 <code>server-token</code> 을 읽을 수
         있습니다. 그래서 권한을 주거나, 누군가를 들이거나, 비밀을 바꾸는 경로는 두 번째 자격인 소유자 키를
-        요구합니다. 토큰만 보내면 <code>403</code> 과 <code>{"code": "owner_required"}</code> 로 답합니다.
+        요구합니다. <code>EMBER_OWNER_PRESENCE=enforce</code> 로 시작한 서버는 토큰만 보내면 <code>403</code> 과
+        <code>{"code": "owner_required"}</code> 로 답합니다. 지금 기본값은 <code>warn</code> 입니다. 앱이 아직
+        키를 받을 수 없어서, 호출을 로그에 남기고 처리합니다. 앱이 키를 받을 수 있게 되면 enforce 가 기본값이
+        됩니다.
         해당 경로는 다음과 같습니다: 도구 승인 응답과 모두 승인, 장치 목록, 계정과 프로바이더의 추가, 삭제,
         확인과 ChatGPT 로그인, 컴퓨터 추가와 삭제 및 등록 코드, 토큰 교체, 허브 등록, MCP 서버, 에이전트별
         설정과 A2A 설정, 브라우저 트래픽이 나가는 곳 설정, 채널 초대와 게스트, 허용 설정. 읽기, 세션, 메시지, 터미널,
@@ -170,14 +173,17 @@ ember-server owner call POST /api/accounts <span class="s">'{"agent": "claude-co
         이 명령은 실제 터미널이 필요하며, Ember의 터미널 패널이나 에이전트 안에서는 거부됩니다. 서버가
         시작한 프로세스 트리 안이기 때문입니다. 이 안내서에서 위 경로에 <code>curl</code> 을 쓰는 곳은 같은
         메서드, 경로, 본문으로 <code>ember-server owner call</code> 을 쓰세요.
-        <code>EMBER_OWNER_CONFIRM=off</code> 는 콘솔 코드 없이 키를 내주고,
-        <code>EMBER_OWNER_PRESENCE=warn</code> 은 키 없는 호출을 로그에 남기고 처리합니다. 둘 다 보호를
-        낮추므로 시험 환경용입니다. 범위가 <code>full</code> 인 원격 장치는 전송 경로에서 승인에 대해 소유자로
+        <code>EMBER_OWNER_CONFIRM=off</code> 는 콘솔 코드 없이 키를 내줍니다. 보호를 낮추므로 시험
+        환경용입니다. 범위가 <code>full</code> 인 원격 장치는 전송 경로에서 승인에 대해 소유자로
         취급됩니다. 장치 목록 자체는 서버가 있는 컴퓨터에서만 관리합니다. Windows의 서버에는 아직 소유자
-        소켓이 없어서, 로컬 리스너의 소유자 경로가 닫혀 있습니다.
+        소켓이 없습니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/815">#815</a>). 그래서 항상
+        <code>warn</code> 으로 동작하고, 소유자 경로가 토큰에 열려 있습니다.
       </p>
       <p>
-        <strong>막지 못하는 것.</strong> 내 계정으로 임의 코드를 실행하고 샌드박스에 들어 있지 않은
+        <strong>막지 못하는 것.</strong> 기본값인 <code>warn</code> 에서는 아무것도 거부하지 않습니다.
+        <code>server-token</code> 을 읽은 프로세스는 이 경로를 그대로 호출할 수 있고, 서버는 로그만 남깁니다.
+        닫으려면 <code>EMBER_OWNER_PRESENCE=enforce</code> 를 설정하세요. 그렇게 해도, 내 계정으로 임의 코드를
+        실행하고 샌드박스에 들어 있지 않은
         프로세스는 여전히 데이터 폴더의 Ember 데이터베이스와 키를 직접 읽거나 바꿀 수 있고, 앱에 붙거나,
         에이전트의 프로세스 트리를 벗어나 키를 요청해서 앱을 흉내 낼 수 있습니다. 콘솔 코드는 그 프로세스가
         서버 콘솔 출력을 읽지 못할 때만 마지막 경우를 막습니다. 그러니 서버 출력을 에이전트가 읽을 수 있는

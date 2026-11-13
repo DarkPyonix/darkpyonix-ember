@@ -29,7 +29,8 @@ use ember_server::store::Store;
 ///   exits, and `POST /api/server-token/rotate` does the same on a running server (#369)
 /// - Owner presence (FR-S12, #784): owner routes also need the in-memory owner key, claimed over
 ///   `<data dir>/owner.sock` by the app or by `ember-server owner <verb>` (a terminal only).
-///   `EMBER_OWNER_PRESENCE=warn` logs instead of refusing (one release, for older apps);
+///   The default mode is warn: a call without a key is logged and served, until the app ships
+///   its claim. `EMBER_OWNER_PRESENCE=enforce` refuses it with 403. Windows always warns (#815);
 ///   `EMBER_OWNER_CONFIRM=off` grants a claim without the console code (best effort)
 /// - `EMBER_IDLE_SECS`: release an agent process after this long without activity (default 300)
 /// - `EMBER_CLAUDE_BIN`: the Claude Code CLI (default `claude` on `PATH`)
@@ -550,7 +551,7 @@ async fn main() -> anyhow::Result<()> {
     // FR-S12: the live owner keys, in memory only.
     let owner = ember_server::owner::Owner::from_env();
     if owner.presence() == ember_server::owner::Presence::Warn {
-        tracing::warn!("EMBER_OWNER_PRESENCE=warn: owner routes are served without owner presence");
+        tracing::warn!("owner presence is in warn mode: owner routes are served with the server token alone and logged (EMBER_OWNER_PRESENCE=enforce refuses them)");
     }
     // FR-S9, FR-S10: the token and the Origin/Host check on the local listener, every route.
     // The transport above serves `app` unwrapped: its callers passed the device gate (FR-N7).
@@ -576,8 +577,8 @@ async fn main() -> anyhow::Result<()> {
         // FR-S12: owner routes also need the owner key. The transport door has the device scope.
         ember_server::auth::protect_with_owner(local_app, auth, owner.clone())
     };
-    // FR-S12: the claim socket. Without it no key can be claimed, so owner routes stay closed on
-    // the local listener; the rest of the server works.
+    // FR-S12: the claim socket. Without it no key can be claimed: in enforce mode the owner
+    // routes of the local listener then stay closed; the rest of the server works.
     #[cfg(unix)]
     let _owner_door = {
         // The shim folder is scanned on every claim, shims left by an earlier server included.
@@ -591,13 +592,13 @@ async fn main() -> anyhow::Result<()> {
                 Some(door)
             }
             Err(e) => {
-                tracing::error!("owner socket could not be bound, owner routes stay closed: {e}");
+                tracing::error!("owner socket could not be bound, no owner key can be claimed (in enforce mode owner routes stay closed): {e}");
                 None
             }
         }
     };
     #[cfg(not(unix))]
-    tracing::warn!("no owner socket on this platform: owner routes on the local listener stay closed (FR-S12)");
+    tracing::warn!("no owner socket on this platform yet (#815): owner presence stays in warn mode (FR-S12)");
     if let Some(rt) = &shim_runtime {
         let rejoined = sessions.rejoin_shims(rt).await;
         if !rejoined.is_empty() {

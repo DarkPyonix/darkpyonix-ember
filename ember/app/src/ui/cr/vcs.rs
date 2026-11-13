@@ -4785,7 +4785,7 @@ pub fn VcsSheet(project_id: &str, open: bool, on_close: impl FnMut() + Clone + '
 
 /// A review window (`EMBER_CR_ROUTE=vcs`): sample repository view in compose-rust.
 #[compose_rust::runtime::Composable]
-pub fn preview() {
+pub fn preview_vcs() {
     let p = ember_theme().palette;
     cu::Box().modifier(Modifier::new().fill_max_size().background(paint(p.bg))).content(|| {
         let reload = remember(|| mutable_state_of(0_u64));
@@ -6048,7 +6048,7 @@ mod tests {
     fn fr_l18_vcs_sheet_leaves_the_selected_project_and_wires_dismiss() {
         let src = include_str!("vcs.rs");
         let start = src.find("pub fn VcsSheet(").expect("VcsSheet");
-        let end = start + src[start..].find("pub fn preview()").expect("preview");
+        let end = start + src[start..].find("pub fn preview_vcs()").expect("preview_vcs");
         let body = &src[start..end];
         assert!(!body.contains("set_selected_project"));
     }

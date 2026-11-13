@@ -1286,7 +1286,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
 
 /// A review window (`EMBER_CR_ROUTE=routines`): the routines screen with sample routines.
 #[compose_rust::runtime::Composable]
-pub fn preview() {
+pub fn preview_routines() {
     let p = ember_theme().palette;
     cu::Box()
         .modifier(Modifier::new().fill_max_size().background(paint(p.bg)))
@@ -3106,7 +3106,7 @@ mod tests {
     #[test]
     fn fr_l25_form_routes_all_go_through_request_leave() {
         let src = include_str!("routines.rs");
-        let screen = src.split("pub fn RoutinesScreenWith").nth(1).unwrap().split("pub fn preview").next().unwrap();
+        let screen = src.split("pub fn RoutinesScreenWith").nth(1).unwrap().split("pub fn preview_routines").next().unwrap();
         for route in ["Leave::NewForm", "Leave::OpenRoutine", "Leave::Cancel", "Leave::EditForm"] {
             assert!(screen.contains(route), "{route}");
         }

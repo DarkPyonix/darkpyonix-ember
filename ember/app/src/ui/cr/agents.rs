@@ -412,7 +412,7 @@ pub fn AgentsScreenWith(
 
 /// A review window (`EMBER_CR_ROUTE=agents`).
 #[compose_rust::runtime::Composable]
-pub fn preview() {
+pub fn preview_agents() {
     let p = ember_theme().palette;
     cu::Box()
         .modifier(Modifier::new().fill_max_size().background(paint(p.bg)))

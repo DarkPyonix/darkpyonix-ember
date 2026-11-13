@@ -542,7 +542,7 @@ pub mod view {
     use ember_editor::settings::{search_settings, SettingKind, SettingSchema, SettingsScope};
     use serde_json::Value;
 
-    use super::{file_tab_path, parse_input, row_value, scope_label, value_text, SettingsFile, SETTINGS_PAGE, SETTINGS_TAB};
+    use super::{file_tab_path, parse_input, row_value, scope_error_banners, scope_label, value_text, SettingsFile, SETTINGS_PAGE, SETTINGS_TAB};
     use crate::editor_host::HostCommand;
     use crate::ui::editor_workbench::page::icon_px;
     use crate::ui::editor_workbench::Shared;

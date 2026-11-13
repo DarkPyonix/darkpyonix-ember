@@ -672,7 +672,9 @@ pub mod view {
     const LINE: &str = "display:flex; align-items:center; gap:var(--sp2); width:100%; min-width:0; max-width:100%; overflow:hidden;";
     const NAME: &str = "font-weight:var(--fw-medium); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; flex:0 1 auto; display:block;";
     const VERSION: &str = "color:var(--muted); font-size:var(--fs-xs); flex:none;";
-    const META: &str = "color:var(--muted); font-size:var(--fs-xs); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; width:100%; min-width:0; max-width:100%;";
+    // As in Code-OSS, the buttons sit on the last line beside the publisher, so a long name never
+    // pushes them out of the panel (#798: on the name line 제거 was cut off in the docked panel).
+    const META: &str = "color:var(--muted); font-size:var(--fs-xs); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; flex:1 1 0; width:0; min-width:0;";
     const DESCRIPTION: &str = "color:var(--text-2); font-size:var(--fs-xs); white-space:normal; overflow-wrap:anywhere; word-break:break-word; display:block; width:100%; min-width:0; max-width:100%;";
     /// The two lists scroll down, never sideways (#798).
     const LIST: &str = "overflow-x:hidden;";
@@ -696,7 +698,10 @@ pub mod view {
                 div { style: "{LINE}",
                     span { style: "{name_style}", "{name}" }
                     span { style: "{VERSION}", "{row.ext.version}" }
-                    div { class: "spacer" }
+                }
+                if !row.ext.description.is_empty() { div { style: "{DESCRIPTION}", "{row.ext.description}" } }
+                div { style: "{LINE}",
+                    span { style: "{META}", "{meta}" }
                     if let Some(op) = op {
                         span { role: "status", style: "{VERSION}", "{op.doing()}" }
                     } else {
@@ -708,8 +713,6 @@ pub mod view {
                         }
                     }
                 }
-                if !meta.is_empty() { div { style: "{META}", "{meta}" } }
-                if !row.ext.description.is_empty() { div { style: "{DESCRIPTION}", "{row.ext.description}" } }
             }
         }
     }
@@ -727,7 +730,10 @@ pub mod view {
                 div { style: "{LINE}",
                     span { style: "{NAME}", "{name}" }
                     span { style: "{VERSION}", "{row.ext.version}" }
-                    div { class: "spacer" }
+                }
+                if !row.ext.description.is_empty() { div { style: "{DESCRIPTION}", "{row.ext.description}" } }
+                div { style: "{LINE}",
+                    span { style: "{META}", "{meta}" }
                     if let Some(op) = op {
                         span { role: "status", style: "{VERSION}", "{op.doing()}" }
                     } else if !installed && can_manage {
@@ -735,8 +741,6 @@ pub mod view {
                             onclick: move |_| install_s.run(Op::Install, &install_id, &install_name, &install_host), "설치" }
                     }
                 }
-                if !meta.is_empty() { div { style: "{META}", "{meta}" } }
-                if !row.ext.description.is_empty() { div { style: "{DESCRIPTION}", "{row.ext.description}" } }
             }
         }
     }
@@ -890,9 +894,10 @@ pub mod view {
             }
             assert!(DESCRIPTION.contains("overflow-wrap:anywhere"), "a long description wraps inside the row");
             assert!(ACTION.contains("flex:none") && VERSION.contains("flex:none"), "buttons and the version never shrink away");
-            for style in [ROW, LINE, META, DESCRIPTION] {
+            for style in [ROW, LINE, DESCRIPTION] {
                 assert!(style.contains("width:100%"), "bounded by the panel, not by its text: {style}");
             }
+            assert!(META.contains("flex:1 1 0") && META.contains("width:0"), "the publisher takes only the space the buttons leave");
             for style in [NAME, META, DESCRIPTION] {
                 assert!(style.contains("display:block"), "ellipsis and wrapping need a block box (dioxus-compose#184): {style}");
             }

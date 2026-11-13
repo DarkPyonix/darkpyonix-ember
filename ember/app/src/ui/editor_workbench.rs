@@ -1306,7 +1306,6 @@ pub mod page {
                     section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
                         {crate::ui::workspace_trust::view::banner(&s)}
                         {tab_strip(&s, &paths, &dirty, current.as_deref())}
-                        if *s.menu_open.read() { {menu(&s, keymap)} }
                         if let Some((menu_path, x, y)) = s.tab_menu.read().clone() { {tab_context_menu(&s, &menu_path, x, y)} }
                         if let Some(path) = current.as_deref().filter(|_| !settings_shown) {
                             {breadcrumbs(&s, path)}
@@ -1351,6 +1350,7 @@ pub mod page {
                     if let Some(w) = sel.selected(Side::Bottom) {
                         {bottom_window(&s, w)}
                     }
+                    if *s.menu_open.read() { {menu(&s, keymap)} }
                     if *s.palette_open.read() { {palette_sheet(&s, keymap)} }
                     if let Some(request) = s.close_confirm.read().clone() { {close_confirm_sheet(&s, &request)} }
                     {crate::ui::workspace_trust::view::prompt(&s)}
@@ -1413,13 +1413,16 @@ pub mod page {
                         crate::services::services().ui.update_prefs(|p| p.theme = next);
                     }, {icon(if super::ICON_DARK.with(|d| d.get()) { "moon" } else { "sun" })} }
                     button { class: "ed-ib", title: "에이전트에게 묻기", "aria-label": "에이전트에게 묻기", onclick: move |_| notice(crate::ui::editor_actions::not_ready_notice(Action::Ask)), {icon("spark")} }
-                    button { class: "ed-ib", title: "메뉴", "aria-label": "메뉴", onclick: move |_| menu_open.set(!open), {icon("more")} }
+                    button { class: "ed-ib", title: "메뉴", "aria-label": "메뉴", onclick: move |_| { crate::ui::editor_menu::close_submenu(); menu_open.set(!open); }, {icon("more")} }
                 }
             }
         }
     }
 
+    /// The ⋯ menu (FR-L31, #795): fixed under the top bar at the page level, its groups opened as
+    /// submenus beside it (`editor_menu`), so it fits the window without scrolling.
     fn menu(s: &Shared, keymap: Keymap) -> Element {
+        use crate::ui::editor_menu::{self as em, Submenu};
         let os = Os::current();
         let mut close_editor_menu = s.menu_open;
         // The current tab's items (FR-L31.5) head the menu. TODO(compose-rust#417): they stand in for the
@@ -1428,30 +1431,107 @@ pub mod page {
         let current_tab = s.tabs.read().current_path().map(str::to_owned);
         let tab_items = current_tab.as_deref().map(|p| crate::ui::editor::tab_menu_items(&s.tabs.read(), p)).unwrap_or_default();
         let tab_label = current_tab.as_deref().map(|p| format!("탭: {}", crate::ui::editor::display_name(base_name(p)))).unwrap_or_default();
-        rsx! {
-            div { class: "ed-menu", role: "menu", "aria-label": "편집기 메뉴",
-                if let Some(tab_path) = current_tab.clone() {
-                    div { class: "ed-mlab", "{tab_label}" }
-                    for (item, enabled) in tab_items.into_iter() {
-                        {
-                            let s = s.clone();
-                            let path = tab_path.clone();
-                            let mut menu_open = s.menu_open;
-                            let aria_disabled = (!enabled).to_string();
-                            rsx! {
-                                button { role: "menuitem", disabled: !enabled, "aria-disabled": "{aria_disabled}",
-                                    onclick: move |_| {
-                                        menu_open.set(false);
-                                        if enabled { run_tab_menu_item(&s, item, &path); }
-                                    },
-                                    span { class: "spacer", "{item.label()}" }
+        let rows = em::top_rows(current_tab.is_some());
+        let open = em::open_submenu().filter(|sub| *sub != Submenu::Tab || current_tab.is_some());
+        let group = |sub: Submenu, label: String| {
+            let mut revision = s.revision;
+            let on = open == Some(sub);
+            rsx! {
+                button { key: "{label}", role: "menuitem", "aria-haspopup": "menu", "aria-expanded": "{on}",
+                    style: if on { "background:var(--hover);" } else { "" },
+                    onclick: move |_| { em::toggle_submenu(sub); *revision.write() += 1; },
+                    span { class: "spacer", "{label}" }
+                    {icon_px("chev", 12)}
+                }
+            }
+        };
+        let submenu = match open {
+            None => rsx! {},
+            Some(sub) => {
+                let top = em::submenu_top(&rows, sub).unwrap_or(em::TOP);
+                let style = em::submenu_style(top);
+                let body = match sub {
+                    Submenu::Tab => {
+                        let tab_path = current_tab.clone().unwrap_or_default();
+                        rsx! {
+                            for (item, enabled) in tab_items.into_iter() {
+                                {
+                                    let s = s.clone();
+                                    let path = tab_path.clone();
+                                    let mut menu_open = s.menu_open;
+                                    let aria_disabled = (!enabled).to_string();
+                                    rsx! {
+                                        button { role: "menuitem", disabled: !enabled, "aria-disabled": "{aria_disabled}",
+                                            onclick: move |_| {
+                                                menu_open.set(false);
+                                                if enabled { run_tab_menu_item(&s, item, &path); }
+                                            },
+                                            span { class: "spacer", "{item.label()}" }
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                    div { class: "ed-msep" }
-                }
-                for a in [Action::FindInFile, Action::Save, Action::Recent, Action::ReopenClosed, Action::Format, Action::GotoLine, Action::Settings] {
+                    Submenu::Code => rsx! {
+                        {
+                            let s = s.clone();
+                            let label = Action::Format.label();
+                            let hint = keymap.hint(Action::Format, os);
+                            let mut menu_open = s.menu_open;
+                            rsx! {
+                                button { key: "{label}", role: "menuitem", onclick: move |_| { menu_open.set(false); run_action(&s, Action::Format); },
+                                    span { class: "spacer", "{label}" }
+                                    if !hint.is_empty() { span { class: "ed-msc", "{hint}" } }
+                                }
+                            }
+                        }
+                        // The language features are in the menu too: a key pressed while the code has the focus may not reach the page.
+                        // TODO(compose-rust#554): the chords alone are enough once the editor previews keys.
+                        for (action, label, hint) in crate::ui::editor_language::MENU {
+                            {
+                                let s = s.clone();
+                                let mut menu_open = s.menu_open;
+                                rsx! {
+                                    button { key: "{label}", role: "menuitem", onclick: move |_| { menu_open.set(false); crate::ui::editor_language::view::run(&s, action); },
+                                        span { class: "spacer", "{label}" }
+                                        span { class: "ed-msc", "{hint}" }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    Submenu::AutoSave => crate::ui::editor_states::view::menu_items(s),
+                    Submenu::Keymap => rsx! {
+                        for k in Keymap::ALL {
+                            {
+                                let mut menu_open = s.menu_open;
+                                let mut keymap_sig = s.keymap;
+                                let selected = k == keymap;
+                                let hint = k.hint(Action::Find, os);
+                                rsx! {
+                                    button { key: "{k.label()}", role: "menuitemradio", "aria-checked": "{selected}", onclick: move |_| {
+                                        menu_open.set(false);
+                                        keymap_sig.set(k);
+                                        crate::services::services().ui.update_prefs(|p| p.keymap = k);
+                                    },
+                                        span { class: "ed-mchk", if selected { {icon_px("check", 14)} } }
+                                        span { class: "spacer", "{k.label()}" }
+                                        span { class: "ed-msc", "{hint}" }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                };
+                rsx! { div { class: "ed-menu ed-mainmenu", role: "menu", style: "{style}", {body} } }
+            }
+        };
+        let menu_style = em::menu_style();
+        rsx! {
+            div { class: "ed-menu ed-mainmenu", role: "menu", "aria-label": "편집기 메뉴", style: "{menu_style}",
+                if current_tab.is_some() { {group(Submenu::Tab, tab_label.clone())} }
+                for a in [Action::FindInFile, Action::Save, Action::Recent, Action::ReopenClosed, Action::GotoLine, Action::Settings] {
                     {
                         let s = s.clone();
                         let label = a.label();
@@ -1465,20 +1545,7 @@ pub mod page {
                         }
                     }
                 }
-                // The language features are in the menu too: a key pressed while the code has the focus may not reach the page.
-                // TODO(compose-rust#554): the chords alone are enough once the editor previews keys.
-                for (action, label, hint) in crate::ui::editor_language::MENU {
-                    {
-                        let s = s.clone();
-                        let mut menu_open = s.menu_open;
-                        rsx! {
-                            button { key: "{label}", role: "menuitem", onclick: move |_| { menu_open.set(false); crate::ui::editor_language::view::run(&s, action); },
-                                span { class: "spacer", "{label}" }
-                                span { class: "ed-msc", "{hint}" }
-                            }
-                        }
-                    }
-                }
+                {group(Submenu::Code, "코드".to_string())}
                 {
                     let s = s.clone();
                     let label = keymap.palette_label();
@@ -1491,35 +1558,16 @@ pub mod page {
                         }
                     }
                 }
+                {group(Submenu::AutoSave, "자동 저장".to_string())}
+                {group(Submenu::Keymap, "단축키 체계".to_string())}
                 button { role: "menuitem", onclick: move |_| {
                     close_editor_menu.set(false);
                     crate::services::services().ui.close_editor();
                 },
                     span { class: "spacer", "에디터 닫기" }
                 }
-                {crate::ui::editor_states::view::menu_items(s)}
-                div { class: "ed-msep" }
-                div { class: "ed-mlab", "단축키 체계" }
-                for k in Keymap::ALL {
-                    {
-                        let mut menu_open = s.menu_open;
-                        let mut keymap_sig = s.keymap;
-                        let selected = k == keymap;
-                        let hint = k.hint(Action::Find, os);
-                        rsx! {
-                            button { key: "{k.label()}", role: "menuitemradio", "aria-checked": "{selected}", onclick: move |_| {
-                                menu_open.set(false);
-                                keymap_sig.set(k);
-                                crate::services::services().ui.update_prefs(|p| p.keymap = k);
-                            },
-                                span { class: "ed-mchk", if selected { {icon_px("check", 14)} } }
-                                span { class: "spacer", "{k.label()}" }
-                                span { class: "ed-msc", "{hint}" }
-                            }
-                        }
-                    }
-                }
             }
+            {submenu}
         }
     }
 
@@ -2326,7 +2374,7 @@ pub mod page {
                     }
                 }
                 div { class: "spacer" }
-                button { class: "ed-ib", title: "탭 메뉴", "aria-label": "탭 메뉴", onclick: move |_| { let open = *menu_open.read(); menu_open.set(!open); }, {icon("more")} }
+                button { class: "ed-ib", title: "탭 메뉴", "aria-label": "탭 메뉴", onclick: move |_| { crate::ui::editor_menu::close_submenu(); let open = *menu_open.read(); menu_open.set(!open); }, {icon("more")} }
             }
         }
     }

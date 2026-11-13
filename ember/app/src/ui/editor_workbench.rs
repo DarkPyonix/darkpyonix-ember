@@ -1189,6 +1189,13 @@ pub mod page {
         let (line, col) = *s.position.read();
         let sel = *s.stripes.read();
         let keymap = *s.keymap.read();
+        // A modal blocks the ⋯ menu (#831): it is not drawn, and an open one closes.
+        let modal = modal_up(&s);
+        if modal && *s.menu_open.peek() {
+            let mut menu_open = s.menu_open;
+            menu_open.set(false);
+        }
+        let em_shown = crate::ui::editor_menu::menu_shown(*s.menu_open.read(), modal);
         let (agent_state, project_branch) = project_status(&s.project);
         // The branch git/status returned; the project row's until the first answer.
         let branch = s.scm.branch_line().unwrap_or(project_branch);
@@ -1357,7 +1364,7 @@ pub mod page {
                     if let Some(w) = sel.selected(Side::Bottom) {
                         {bottom_window(&s, w)}
                     }
-                    if *s.menu_open.read() { {menu(&s, keymap)} }
+                    if em_shown { {menu(&s, keymap)} }
                     if *s.palette_open.read() { {palette_sheet(&s, keymap)} }
                     if let Some(request) = s.close_confirm.read().clone() { {close_confirm_sheet(&s, &request)} }
                     {crate::ui::workspace_trust::view::prompt(&s)}
@@ -2311,12 +2318,19 @@ pub mod page {
         }
     }
 
+    /// Whether a modal is up: the trust prompt, the unsaved-changes sheet or an extension's modal
+    /// message (#831). Code-OSS's modal dialogs block the workbench, so the ⋯ menu stays closed.
+    fn modal_up(s: &Shared) -> bool {
+        crate::ui::workspace_trust::view::prompt_up(s) || s.close_confirm.peek().is_some() || s.notifications.borrow().modal().is_some()
+    }
+
     fn tab_strip(s: &Shared, paths: &[String], dirty: &[bool], current: Option<&str>) -> Element {
         let mut tabs = s.tabs;
         let mut menu_open = s.menu_open;
         let host = s.host.clone();
         let scm = s.scm.clone();
         let strip_s = s.clone();
+        let menu_s = s.clone();
         let modified = s.scm.modified_paths(&s.folder);
         let paths_owned: Vec<String> = paths.to_vec();
         let dirty_owned: Vec<bool> = dirty.to_vec();
@@ -2491,7 +2505,7 @@ pub mod page {
                     }
                 }
                 div { class: "spacer" }
-                button { class: "ed-ib", title: "탭 메뉴", "aria-label": "탭 메뉴", onclick: move |_| { crate::ui::editor_menu::close_submenu(); let open = *menu_open.read(); menu_open.set(!open); }, {icon("more")} }
+                button { class: "ed-ib", title: "탭 메뉴", "aria-label": "탭 메뉴", onclick: move |_| { crate::ui::editor_menu::close_submenu(); let open = *menu_open.read(); menu_open.set(crate::ui::editor_menu::toggled(open, modal_up(&menu_s))); }, {icon("more")} }
             }
         }
     }

@@ -26,6 +26,7 @@ pub mod editor_extensions;
 pub mod editor_scm;
 pub mod editor_status;
 pub mod editor_scm_repo;
+pub mod editor_menu;
 pub mod editor_states;
 pub mod editor_workbench;
 pub mod find;

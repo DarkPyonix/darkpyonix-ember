@@ -730,12 +730,10 @@ pub mod view {
         }
     }
 
-    /// The 자동 저장 choice in the ⋯ menu, saved per device like the keymap.
+    /// The 자동 저장 submenu of the ⋯ menu (#795), saved per device like the keymap.
     pub fn menu_items(s: &Shared) -> Element {
         let current = *ui().auto_save.read();
         rsx! {
-            div { class: "ed-msep" }
-            div { class: "ed-mlab", "자동 저장" }
             for mode in AutoSave::ALL {
                 {
                     let mut menu_open = s.menu_open;

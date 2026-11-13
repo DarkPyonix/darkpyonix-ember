@@ -22,5 +22,3 @@ html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font
 .ed-confirm p{margin:0}
 .ed-confirm-files{margin:0;padding-left:var(--sp5);font-size:var(--fs-sm)}
 .ed-confirm-acts{display:flex;justify-content:flex-end;gap:var(--sp2);margin-top:var(--sp2)}
-/* FR-L31, #795: the ⋯ menu holds more items than a 900 px window is tall, so it stops above the window bottom and scrolls, as Code-OSS's menus do. */
-.ed-menu.ed-mainmenu{max-height:calc(100vh - 64px);overflow-y:auto}

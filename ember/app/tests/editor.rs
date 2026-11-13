@@ -517,19 +517,6 @@ mod title_strip {
     }
 
     #[test]
-    fn fr_l31_main_menu_stops_above_the_window_bottom_and_scrolls() {
-        // #795: at 1440x900 the menu ran past the window and its last items could not be reached.
-        let css = ember_app::ui::editor_workbench::page::config().stylesheets.join("\n");
-        let compact: String = css.chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(
-            compact.contains(".ed-menu.ed-mainmenu{max-height:calc(100vh-64px);overflow-y:auto}"),
-            "the editor menu has no max height within the window or does not scroll"
-        );
-        let src = include_str!("../src/ui/editor_workbench.rs");
-        assert!(src.contains(r#"class: "ed-menu ed-mainmenu", role: "menu", "aria-label": "편집기 메뉴""#));
-    }
-
-    #[test]
     fn fr_l31_editor_window_opens_full_size_on_macos() {
         use compose_rust::schema::{Chrome, Window};
         // The chrome the editor window is given is the shell's: FullSize on macOS, untouched elsewhere.

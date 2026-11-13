@@ -666,12 +666,20 @@ pub mod view {
 
     const FIELD: &str = "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;";
     const BOX: &str = "width:auto; height:30px; cursor:text;";
-    const ROW: &str = "display:flex; flex-direction:column; gap:2px; padding:var(--sp2) var(--sp2) var(--sp2) var(--sp3);";
-    const LINE: &str = "display:flex; align-items:center; gap:var(--sp2); min-width:0;";
-    const NAME: &str = "font-weight:var(--fw-medium); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;";
+    // #798: a row never grows past the panel (ellipsis drawing: dioxus-compose#184). The name and meta lines end in an ellipsis, the
+    // description wraps, the version and the buttons keep their size, so 제거 and 설치 stay visible at any width.
+    const ROW: &str = "display:flex; flex-direction:column; gap:2px; padding:var(--sp2) var(--sp2) var(--sp2) var(--sp3); width:100%; min-width:0; max-width:100%; overflow:hidden; box-sizing:border-box;";
+    const LINE: &str = "display:flex; align-items:center; gap:var(--sp2); width:100%; min-width:0; max-width:100%; overflow:hidden;";
+    const NAME: &str = "font-weight:var(--fw-medium); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; flex:0 1 auto; display:block;";
     const VERSION: &str = "color:var(--muted); font-size:var(--fs-xs); flex:none;";
-    const META: &str = "color:var(--muted); font-size:var(--fs-xs); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;";
-    const DESCRIPTION: &str = "color:var(--text-2); font-size:var(--fs-xs); white-space:normal;";
+    const META: &str = "color:var(--muted); font-size:var(--fs-xs); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; width:100%; min-width:0; max-width:100%;";
+    /// The buttons get a line of their own at the row's end, right-aligned, so a long name never
+    /// pushes them out of the panel (#798: on the name line 제거 was cut off in the docked panel;
+    /// beside the publisher, the renderer gave the publisher no width).
+    const ACTIONS: &str = "display:flex; align-items:center; justify-content:flex-end; gap:var(--sp2); width:100%;";
+    const DESCRIPTION: &str = "color:var(--text-2); font-size:var(--fs-xs); white-space:normal; overflow-wrap:anywhere; word-break:break-word; display:block; width:100%; min-width:0; max-width:100%;";
+    /// The two lists scroll down, never sideways (#798).
+    const LIST: &str = "overflow-x:hidden;";
     const ACTION: &str = "border:1px solid var(--line); height:24px; padding:0 var(--sp2); font-size:var(--fs-xs); flex:none;";
     const NOTE: &str = "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs); white-space:normal;";
     const GROUP: &str = "--d:0; font-weight:var(--fw-medium);";
@@ -692,7 +700,10 @@ pub mod view {
                 div { style: "{LINE}",
                     span { style: "{name_style}", "{name}" }
                     span { style: "{VERSION}", "{row.ext.version}" }
-                    div { class: "spacer" }
+                }
+                if !row.ext.description.is_empty() { div { style: "{DESCRIPTION}", "{row.ext.description}" } }
+                if !meta.is_empty() { div { style: "{META}", "{meta}" } }
+                div { style: "{ACTIONS}",
                     if let Some(op) = op {
                         span { role: "status", style: "{VERSION}", "{op.doing()}" }
                     } else {
@@ -704,8 +715,6 @@ pub mod view {
                         }
                     }
                 }
-                if !meta.is_empty() { div { style: "{META}", "{meta}" } }
-                if !row.ext.description.is_empty() { div { style: "{DESCRIPTION}", "{row.ext.description}" } }
             }
         }
     }
@@ -723,7 +732,10 @@ pub mod view {
                 div { style: "{LINE}",
                     span { style: "{NAME}", "{name}" }
                     span { style: "{VERSION}", "{row.ext.version}" }
-                    div { class: "spacer" }
+                }
+                if !row.ext.description.is_empty() { div { style: "{DESCRIPTION}", "{row.ext.description}" } }
+                if !meta.is_empty() { div { style: "{META}", "{meta}" } }
+                div { style: "{ACTIONS}",
                     if let Some(op) = op {
                         span { role: "status", style: "{VERSION}", "{op.doing()}" }
                     } else if !installed && can_manage {
@@ -731,8 +743,6 @@ pub mod view {
                             onclick: move |_| install_s.run(Op::Install, &install_id, &install_name, &install_host), "설치" }
                     }
                 }
-                if !meta.is_empty() { div { style: "{META}", "{meta}" } }
-                if !row.ext.description.is_empty() { div { style: "{DESCRIPTION}", "{row.ext.description}" } }
             }
         }
     }
@@ -812,7 +822,7 @@ pub mod view {
                     div { role: "note", style: "{NOTE}", "{NO_COMPUTER_NOTE}" }
                 }
                 if searching {
-                    div { class: "ed-tree", role: "list", "aria-label": "검색 결과",
+                    div { class: "ed-tree", role: "list", "aria-label": "검색 결과", style: "{LIST}",
                         for row in results {
                             {
                                 let op = st.op_of(&row.ext.id);
@@ -828,7 +838,7 @@ pub mod view {
                         }
                     }
                 } else {
-                    div { class: "ed-tree", role: "list", "aria-label": "설치된 확장",
+                    div { class: "ed-tree", role: "list", "aria-label": "설치된 확장", style: "{LIST}",
                         div { class: "ed-tn", role: "heading", "aria-level": "3", style: "{GROUP}",
                             span { "설치됨" }
                             div { class: "spacer" }
@@ -868,6 +878,31 @@ pub mod view {
                     }
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod fit_tests {
+        use super::*;
+
+        #[test]
+        fn fr_l31_14_rows_fit_the_panel_and_keep_their_buttons() {
+            for style in [ROW, LINE, NAME, META, DESCRIPTION] {
+                assert!(style.contains("min-width:0"), "shrinks with the panel: {style}");
+            }
+            assert!(ROW.contains("max-width:100%") && ROW.contains("overflow:hidden"), "a row is never wider than the panel");
+            for style in [NAME, META] {
+                assert!(style.contains("text-overflow:ellipsis"), "long text ends in an ellipsis: {style}");
+            }
+            assert!(DESCRIPTION.contains("overflow-wrap:anywhere"), "a long description wraps inside the row");
+            assert!(ACTION.contains("flex:none") && VERSION.contains("flex:none"), "buttons and the version never shrink away");
+            for style in [ROW, LINE, META, DESCRIPTION, ACTIONS] {
+                assert!(style.contains("width:100%"), "bounded by the panel, not by its text: {style}");
+            }
+            for style in [NAME, META, DESCRIPTION] {
+                assert!(style.contains("display:block"), "ellipsis and wrapping need a block box (dioxus-compose#184): {style}");
+            }
+            assert!(LIST.contains("overflow-x:hidden"), "the lists never scroll sideways");
         }
     }
 }

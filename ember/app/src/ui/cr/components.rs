@@ -832,12 +832,15 @@ fn sheet_presentation(window_width_dp: f32, monitor: bool) -> SheetPresentation 
     }
 }
 
+/// The tallest a bottom sheet grows, as a share of the window (`.sheet` `max-height:85vh`).
+pub(crate) const SHEET_BOTTOM_MAX_FRACTION: f32 = 0.85;
+
 /// The tallest a sheet may be (`.sheet` in the mockup): 85 percent of the window for a bottom
 /// sheet, the whole window for the full-screen monitor, and the window less 32 dp for a dialog.
 pub(crate) fn sheet_max_height(window_width_dp: f32, window_height_dp: f32, monitor: bool) -> f32 {
     let h = window_height_dp.max(0.0);
     match sheet_presentation(window_width_dp, monitor) {
-        SheetPresentation::Bottom => h * 0.85,
+        SheetPresentation::Bottom => h * SHEET_BOTTOM_MAX_FRACTION,
         SheetPresentation::FullScreen => h,
         SheetPresentation::Dialog => (h - 32.0).max(0.0),
     }
@@ -949,11 +952,11 @@ pub fn EmberSheetSized(
     let window = compose_rust::runtime::current_window_size();
     let presentation = sheet_presentation(window.width_dp, monitor);
     if presentation == SheetPresentation::Bottom {
-        // TODO(compose-rust#445): expose a maximum height constraint so short sheets can wrap
-        // their content instead of occupying the full 85 percent height.
+        // compose-rust#445 (v0.0.9): the sheet is as tall as its content up to 85 percent of the
+        // window, and taller content scrolls inside it, so a short sheet wraps its content.
         cu::Sheet(open)
-            .modifier(modifier.fill_max_width().height(sheet_max_height(window.width_dp, window.height_dp, monitor))
-                .corner_radii([CORNER_XL, CORNER_XL, 0.0, 0.0]))
+            .modifier(modifier.fill_max_width().corner_radii([CORNER_XL, CORNER_XL, 0.0, 0.0]))
+            .max_height_fraction(SHEET_BOTTOM_MAX_FRACTION)
             .on_dismiss(on_dismiss)
             .content(body);
     } else if presentation == SheetPresentation::FullScreen {
@@ -1335,6 +1338,19 @@ mod tests {
         assert_eq!(sheet_presentation(559.0, false), SheetPresentation::Bottom);
         assert_eq!(sheet_presentation(560.0, false), SheetPresentation::Dialog);
         assert_eq!(sheet_max_height(390.0, 1000.0, false), 850.0);
+    }
+
+    #[test]
+    fn fr_l32_bottom_sheet_wraps_its_content_up_to_the_fraction() {
+        // compose-rust#445: the bottom sheet takes a maximum height instead of a fixed one.
+        let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        let sized = production.split("pub fn EmberSheetSized(").nth(1).unwrap();
+        let bottom = sized.split("if presentation == SheetPresentation::Bottom {").nth(1).unwrap();
+        let bottom = bottom.split("} else if presentation == SheetPresentation::FullScreen {").next().unwrap();
+        assert!(bottom.contains(".max_height_fraction(SHEET_BOTTOM_MAX_FRACTION)"));
+        assert!(!bottom.contains(".height("));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "445)")));
+        assert_eq!(SHEET_BOTTOM_MAX_FRACTION, 0.85);
     }
 
     #[test]

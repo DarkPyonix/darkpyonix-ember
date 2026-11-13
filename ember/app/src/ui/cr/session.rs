@@ -21,7 +21,7 @@ use compose_rust::runtime::{
     MutableState, current_window_size, delay, disposable_effect, launched_effect, mutable_state_of,
     on_dispose, remember, remember_with_key,
 };
-use compose_rust::ui::{self as cu, Modifier};
+use compose_rust::ui::{self as cu, Modifier, Side};
 use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, Snap, SpaceRole, TypeRole};
 
 use ember_client::LauncherStatus;
@@ -3377,8 +3377,11 @@ fn EmptyText(text: &str) {
 }
 
 /// `.list-row`: the 36 px git tile, `#num title` over `member · branch`, and the CI pill over
-/// the review state. TODO(compose-rust#464): the row divider is inside the card padding, and the
-/// right column is not right-aligned (no column cross-axis alignment in the pinned toolkit).
+/// the review state. The row divider is a 1 dp line inside the card body's padding, where the
+/// mockup's `.list-row` top border reaches the card edges, and the right column is not
+/// right-aligned. Neither waits on the toolkit any more (one-sided borders arrived with
+/// compose-rust#464, v0.0.9); moving the divider out of the padding means laying the body out
+/// without `StatusCardShell`'s inset, which is left for a display check.
 fn PrRowView(row: PrRow, first: bool) {
     let p = ember_theme().palette;
     // The divider sits between rows with 12 dp above and below, clear of the right column.
@@ -3412,8 +3415,14 @@ fn PrRowView(row: PrRow, first: bool) {
 }
 
 /// `.tnode`: an avatar for a member, a spinner or a status dot for a thread, then name and task.
-/// Children are indented. TODO(compose-rust#464): the 1 px guide line (a left border) needs a
-/// one-sided border or a stretching child; indentation alone for now.
+/// Children are indented 14 dp and sit 12 dp right of a 1 dp guide line, the left border of the
+/// children's column (`.tree ul` `margin-left:14px; padding-left:12px; border-left`), drawn with
+/// `Modifier::border_side` (compose-rust#464, v0.0.9).
+/// `.tree ul` `margin-left`: where the guide line stands from the parent's left edge.
+const TREE_GUIDE_INSET: f32 = 14.0;
+/// `.tree ul` `padding-left`: the gap from the guide line to the children.
+const TREE_CHILD_PAD: f32 = 12.0;
+
 fn TreeNodeView(node: SubNode, project: String) {
     let p = ember_theme().palette;
     cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
@@ -3443,12 +3452,21 @@ fn TreeNodeView(node: SubNode, project: String) {
         });
         if !node.children.is_empty() {
             cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[3] + 2.0));
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    for c in node.children.iter() {
-                        TreeNodeView(c.clone(), project.clone());
-                    }
-                });
+                cu::Spacer().modifier(Modifier::new().width(TREE_GUIDE_INSET));
+                cu::Row()
+                    .modifier(
+                        Modifier::new()
+                            .weight(1.0)
+                            .border_side(Side::Start, 1.0, paint(p.line)),
+                    )
+                    .content(|| {
+                        cu::Spacer().modifier(Modifier::new().width(TREE_CHILD_PAD));
+                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                            for c in node.children.iter() {
+                                TreeNodeView(c.clone(), project.clone());
+                            }
+                        });
+                    });
             });
         }
     });
@@ -4945,6 +4963,19 @@ mod tests {
             assert!(head.contains(icon), "{icon}");
         }
         assert!(!src.contains("more_menu"));
+    }
+
+    #[test]
+    fn fr_l18_subagent_tree_children_hang_from_a_guide_line() {
+        // compose-rust#464: the children's column has a one-sided left border, as `.tree ul`.
+        let src = include_str!("session.rs").split("mod tests {").next().unwrap();
+        let tree = src.split("fn TreeNodeView(").nth(1).unwrap();
+        let tree = tree.split("\nfn ").next().unwrap();
+        assert!(tree.contains(".border_side(Side::Start, 1.0, paint(p.line))"));
+        assert!(tree.contains("Modifier::new().width(TREE_GUIDE_INSET)"));
+        assert!(tree.contains("Modifier::new().width(TREE_CHILD_PAD)"));
+        assert_eq!((super::TREE_GUIDE_INSET, super::TREE_CHILD_PAD), (14.0, 12.0));
+        assert!(!src.contains(concat!("TODO(compose-rust#", "464)")));
     }
 
     #[test]

@@ -1772,3 +1772,129 @@ mod fr_l31_tabs {
         assert!(!tab_menu_key("Enter", false, true, false, false));
     }
 }
+
+// Design review 2026-11-13 (A6, A7, A11, A12, A13, A14) and the owner placement rule of the same day
+// (rules 4 and 5): the editor chrome as the mockup draws it.
+mod design_chrome {
+    use ember_app::ui::editor::{ToolWindow, FIND_PILL_LABEL};
+
+    fn compact_css() -> String {
+        let css = ember_app::ui::editor_workbench::page::config().stylesheets.join("\n");
+        css.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    const PAGE: &str = include_str!("../src/ui/editor_workbench.rs");
+
+    #[test]
+    fn design_a13_stripes_are_exactly_the_mockups() {
+        assert_eq!(ToolWindow::LEFT_STRIPE, [ToolWindow::Project, ToolWindow::Commit, ToolWindow::Git]);
+        assert_eq!(ToolWindow::BOTTOM_STRIPE, [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems]);
+        // 검색 and 출력 keep their windows: search on the left, output as a bottom tab.
+        assert_eq!(ToolWindow::Search.side(), ember_app::ui::editor::Side::Left);
+        assert!(ToolWindow::BOTTOM.contains(&ToolWindow::Output));
+        assert!(PAGE.contains("&ToolWindow::LEFT_STRIPE") && PAGE.contains("&ToolWindow::BOTTOM_STRIPE"));
+    }
+
+    #[test]
+    fn design_a13_the_line_above_the_bottom_group_is_drawn_as_an_element() {
+        let css = compact_css();
+        assert!(css.contains(".ed-stripe-sep{flex:none;align-self:center;width:28px;height:1px;background:var(--line)}"));
+        assert!(PAGE.contains("div { class: \"ed-stripe-sep\", role: \"separator\" }"));
+    }
+
+    #[test]
+    fn design_a7_bottom_tab_labels_are_centred() {
+        assert!(compact_css().contains(".ed-btabsbutton{display:inline-flex;align-items:center;justify-content:center;flex:none}"));
+    }
+
+    #[test]
+    fn design_a11_status_bar_is_sbh_high_on_one_centre_line() {
+        let css = compact_css();
+        assert!(css.contains(".ed-status{height:var(--sbh);align-self:end;box-sizing:border-box}"));
+        assert!(css.contains(".ed-sbi.crumbs-s{align-self:center}"));
+    }
+
+    #[test]
+    fn design_a12_find_pill_is_300_wide_with_an_8px_gap_and_the_mockup_label() {
+        assert_eq!(FIND_PILL_LABEL, "파일, 동작, 기호 찾기");
+        let css = compact_css();
+        assert!(css.contains("@media(min-width:1101px){.ed-top.ed-find{flex:none;width:300px}}"));
+        assert!(css.contains(".ed-find>span.hide-md{margin-left:var(--sp2)}"));
+        assert!(css.contains("@media(max-width:560px){.ed-top.ed-find{display:none}}"));
+        assert!(PAGE.contains("span { class: \"hide-md\", \"{crate::ui::editor::FIND_PILL_LABEL}\" }"));
+    }
+
+    #[test]
+    fn design_a6_palette_overlay_takes_no_grid_row() {
+        assert!(PAGE.contains("style: \"position:fixed; grid-row:1; grid-column:1; left:0; top:0; right:0; bottom:0; z-index:39;\""));
+        assert!(PAGE.contains("style: \"position:fixed; grid-row:1; grid-column:1; z-index:40; top:60px;"));
+        assert!(ember_app::ui::editor_menu::menu_style().contains("grid-row:1; grid-column:1;"));
+    }
+
+    #[test]
+    fn design_a14_top_bar_actions_follow_the_mockup_order_without_a_menu_button() {
+        let top = &PAGE[PAGE.find("fn top_bar(").unwrap()..PAGE.find("fn menu(s: &Shared").unwrap()];
+        let at = |label: &str| top.find(&format!("title: \"{label}\"")).unwrap_or_else(|| panic!("{label} missing"));
+        let runcfg = at("실행 구성");
+        let run = at("실행");
+        let stop = at("중지");
+        let ask = at("에이전트에게 묻기");
+        let theme = at("{theme_title}");
+        assert!(runcfg < run && run < stop && stop < ask && ask < theme, "order is not run config, run, stop, ask, theme");
+        assert!(!top.contains("icon(\"more\")"), "the top bar still has a ⋯ button");
+    }
+}
+
+// Owner placement rule 2026-11-13 (`docs/DESIGN.md` 6.3, rules 1 to 4): features beyond the mockup
+// live in surfaces the mockup already has.
+mod design_placement {
+    use ember_app::ui::editor::ToolWindow;
+
+    const PAGE: &str = include_str!("../src/ui/editor_workbench.rs");
+
+    fn project_tree() -> &'static str {
+        &PAGE[PAGE.find("fn project_tree(").unwrap()..PAGE.find("fn tab_strip(").unwrap()]
+    }
+
+    #[test]
+    fn design_rule1_project_header_is_plus_and_the_mockups_three_actions() {
+        let tree = project_tree();
+        let head = &tree[tree.find("div { class: \"ed-twh\",").unwrap()..tree.find("{tree_menu}").unwrap()];
+        let titles: Vec<&str> = head.match_indices("title: \"").map(|(i, _)| {
+            let rest = &head[i + 8..];
+            &rest[..rest.find('"').unwrap()]
+        }).collect();
+        assert_eq!(titles, ember_app::ui::editor_tree_menu::HEADER_ACTIONS);
+        for gone in ["새 파일", "새 폴더", "모두 선택", "파일 검색"] {
+            assert!(!head.contains(&format!("title: \"{gone}\"")), "{gone} is still in the header");
+        }
+    }
+
+    #[test]
+    fn design_rule2_tree_rows_carry_no_inline_actions_and_open_the_context_menu() {
+        let tree = project_tree();
+        for gone in ["잘라내기: {cut_label}", "이름 변경: {rename_label}", "삭제: {rename_label}"] {
+            assert!(!tree.contains(gone), "a row still has the inline {gone} button");
+        }
+        assert!(tree.contains("oncontextmenu: move |event| {"), "rows do not open the context menu");
+        assert!(tree.contains("TreeMenuAt::Pointer { x: at.x, y: at.y }"));
+        // Stand-in openers until right-click reaches the app (v0.0.7 pin, compose-rust#417).
+        assert!(tree.contains("TreeMenuAt::Keyboard"), "no Shift+F10 opener");
+        assert!(tree.contains("TODO(v0.0.7 pin, compose-rust#417)"));
+    }
+
+    #[test]
+    fn design_rule3_no_search_stripe_and_the_find_pill_opens_search() {
+        assert!(!ToolWindow::LEFT_STRIPE.contains(&ToolWindow::Search));
+        assert_eq!(ToolWindow::Search.action(), Some(ember_app::ui::keymap::Action::FindInFiles));
+        assert!(PAGE.contains("button { class: \"ed-find\", title: \"{find}\", \"aria-label\": \"{find}\", onclick: move |_| run_action(&find_s, Action::Find),"));
+    }
+
+    #[test]
+    fn design_rule4_output_is_a_bottom_tab_next_to_problems_not_a_stripe() {
+        assert!(!ToolWindow::BOTTOM_STRIPE.contains(&ToolWindow::Output));
+        let problems = ToolWindow::BOTTOM.iter().position(|w| *w == ToolWindow::Problems).unwrap();
+        assert_eq!(ToolWindow::BOTTOM.get(problems + 1), Some(&ToolWindow::Output));
+        assert!(PAGE.contains("for b in ToolWindow::BOTTOM {"), "the bottom tabs are not drawn from the bottom windows");
+    }
+}

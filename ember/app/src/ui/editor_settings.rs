@@ -85,6 +85,16 @@ fn write_local(path: &std::path::Path, text: &str) -> Result<(), String> {
     std::fs::write(path, text).map_err(|e| e.to_string())
 }
 
+/// How the banner names the server's own settings file (the remote scope, read only).
+pub const REMOTE_SETTINGS_FILE: &str = "원격 settings.json";
+
+/// The parse-error banners the settings view shows on a scope tab: the file of that scope, then the
+/// server's own file, which applies whichever tab is shown (#790).
+pub fn scope_error_banners(settings: &SettingsState, target: SettingsScope) -> Vec<String> {
+    let own = if target == SettingsScope::Workspace { &settings.workspace_error } else { &settings.user_error };
+    own.iter().chain(settings.remote_error.iter()).cloned().collect()
+}
+
 /// The message for a settings file that does not parse.
 pub fn parse_error_text(file: &str, error: &impl std::fmt::Display) -> String {
     format!("{file}을(를) 읽을 수 없습니다 ({error}). 파일을 고친 뒤 저장하세요.")
@@ -103,6 +113,8 @@ pub struct SettingsState {
     /// Why the user's or the workspace's file is not applied (it does not parse).
     pub user_error: Option<String>,
     pub workspace_error: Option<String>,
+    /// The server's own (Machine) settings.json, read only, when it did not parse at connect (#790).
+    pub remote_error: Option<String>,
     pub keybindings_error: Option<String>,
     /// The user's `keybindings.json`, in file order.
     pub keybindings: Arc<Vec<KeybindingRule>>,
@@ -154,7 +166,10 @@ pub fn start_state(session: &EditorSession, files: &UserFiles, user_error: Optio
         workspace_path: session.server_settings_path(ServerSettingsFile::Workspace),
         keybindings_path: UserFiles::tab_path(&files.keybindings),
         user_error,
-        workspace_error: None,
+        // The server's files were read by the session while it connected; a parse error there shows
+        // the same banner as the user's file does (#790).
+        workspace_error: session.server_settings_error(ServerSettingsFile::Workspace).map(|e| parse_error_text(".vscode/settings.json", &e)),
+        remote_error: session.server_settings_error(ServerSettingsFile::Machine).map(|e| parse_error_text(REMOTE_SETTINGS_FILE, &e)),
         keybindings_error,
         keybindings: Arc::new(keybindings),
         revision: 1,
@@ -527,7 +542,7 @@ pub mod view {
     use ember_editor::settings::{search_settings, SettingKind, SettingSchema, SettingsScope};
     use serde_json::Value;
 
-    use super::{file_tab_path, parse_input, row_value, scope_label, value_text, SettingsFile, SETTINGS_PAGE, SETTINGS_TAB};
+    use super::{file_tab_path, parse_input, row_value, scope_error_banners, scope_label, value_text, SettingsFile, SETTINGS_PAGE, SETTINGS_TAB};
     use crate::editor_host::HostCommand;
     use crate::ui::editor_workbench::page::icon_px;
     use crate::ui::editor_workbench::Shared;
@@ -736,7 +751,7 @@ pub mod view {
         let shown_count = (*limit.read()).min(total);
         let rows: Vec<SettingSchema> = found.into_iter().take(shown_count).cloned().collect();
         let count_text = if q.trim().is_empty() { format!("설정 {total}개") } else { format!("{total}개 찾음") };
-        let file_error = if target == SettingsScope::Workspace { settings.workspace_error.clone() } else { settings.user_error.clone() };
+        let file_errors = scope_error_banners(&settings, target);
         let keybindings_error = settings.keybindings_error.clone();
         let no_user_file = target == SettingsScope::User && settings.user_path.is_none();
         let (json_s, keys_s) = (s.clone(), s.clone());
@@ -775,8 +790,8 @@ pub mod view {
                         "keybindings.json 열기"
                     }
                 }
-                if let Some(text) = file_error {
-                    div { role: "alert", style: "padding:var(--sp2) var(--sp4); background:var(--c-orange-soft); color:var(--text); font-size:var(--fs-xs); white-space:normal; flex:none;", "{text}" }
+                for text in file_errors {
+                    div { key: "{text}", role: "alert", style: "padding:var(--sp2) var(--sp4); background:var(--c-orange-soft); color:var(--text); font-size:var(--fs-xs); white-space:normal; flex:none;", "{text}" }
                 }
                 if let Some(text) = keybindings_error {
                     div { role: "alert", style: "padding:var(--sp2) var(--sp4); background:var(--c-orange-soft); color:var(--text); font-size:var(--fs-xs); white-space:normal; flex:none;", "{text}" }
@@ -836,6 +851,23 @@ pub mod view {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l31_17_parse_error_banner_shows_for_every_scope() {
+        let mut settings = SettingsState::default();
+        assert!(scope_error_banners(&settings, SettingsScope::User).is_empty());
+        settings.workspace_error = Some(parse_error_text(".vscode/settings.json", &"1행"));
+        assert_eq!(scope_error_banners(&settings, SettingsScope::Workspace), vec![settings.workspace_error.clone().unwrap()]);
+        assert!(scope_error_banners(&settings, SettingsScope::User).is_empty(), "the user tab shows only its own file");
+        settings.user_error = Some(parse_error_text("settings.json", &"2행"));
+        settings.remote_error = Some(parse_error_text(REMOTE_SETTINGS_FILE, &"3행"));
+        assert_eq!(
+            scope_error_banners(&settings, SettingsScope::User),
+            vec![settings.user_error.clone().unwrap(), settings.remote_error.clone().unwrap()]
+        );
+        assert_eq!(scope_error_banners(&settings, SettingsScope::Workspace).len(), 2);
+        assert!(settings.remote_error.as_deref().unwrap().starts_with("원격 settings.json을(를) 읽을 수 없습니다"));
+    }
+
     use super::*;
 
     #[test]

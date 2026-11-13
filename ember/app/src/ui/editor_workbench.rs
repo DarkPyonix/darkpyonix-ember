@@ -1304,6 +1304,7 @@ pub mod page {
                         }
                     }
                     section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
+                        onmounted: move |event| crate::ui::editor_language::view::mount_editor_area(event.data()),
                         {crate::ui::workspace_trust::view::banner(&s)}
                         {tab_strip(&s, &paths, &dirty, current.as_deref())}
                         if *s.menu_open.read() { {menu(&s, keymap)} }

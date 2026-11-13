@@ -407,13 +407,55 @@ impl LanguageState {
     }
 }
 
-/// Where the parameter hint sits (#800): absolute inside the editor area (`.ed-main` is positioned
-/// and clips), so it never covers the bottom panel; its width follows the signature (`max-content`)
-/// up to the area's width less the margins, and only a signature wider than that wraps.
-pub const HINT_STYLE: &str = "position:absolute; z-index:15; left:var(--sp3); bottom:var(--sp3); top:auto; right:auto; width:max-content; min-width:0; max-width:calc(100% - 2 * var(--sp3)); box-sizing:border-box; padding:var(--sp2) var(--sp3); display:flex; align-items:center; gap:var(--sp2);";
-/// The signature text: kept on one line while it fits, broken anywhere (not word by word into a
-/// column) when it is wider than the area.
-pub const HINT_CODE_STYLE: &str = "flex:0 1 auto; min-width:0; font-family:var(--mono); font-size:var(--fs-sm); white-space:pre-wrap; overflow-wrap:anywhere; color:var(--muted);";
+/// The parameter hint's box (#800), sized in Rust because dioxus-compose's layout does not honour
+/// `width:max-content` (the text got zero width and stacked one glyph per line).
+// TODO(dioxus-compose): no issue yet for `max-content` / `fit-content` widths; reported to the leader.
+pub mod hint_box {
+    /// The advance of one column of the 13 px mono font, and its line height.
+    pub const ADVANCE: f32 = 7.8;
+    pub const LINE_H: f32 = 20.0;
+    /// Padding 8 x 12, a 1 px border, the gap and the close button.
+    pub const PAD_X: f32 = 12.0;
+    pub const PAD_Y: f32 = 8.0;
+    pub const BORDER: f32 = 1.0;
+    pub const GAP: f32 = 8.0;
+    pub const CLOSE_W: f32 = 28.0;
+    /// "외 N개" beside the signature when there are several.
+    pub const MORE_W: f32 = 52.0;
+    /// The margin to the editor area's edges.
+    pub const MARGIN: f32 = 12.0;
+    /// The editor area's width before its first layout is known.
+    pub const FALLBACK_AREA_W: f32 = 600.0;
+
+    /// Columns the text takes: a wide (CJK, Hangul) character takes two.
+    pub fn columns(text: &str) -> usize {
+        text.chars().map(|c| if (c as u32) >= 0x1100 { 2 } else { 1 }).sum()
+    }
+
+    /// The box's width and height, the text's width, and its line count: the text on one line while
+    /// it fits the area less the margins, else wrapped at that cap.
+    pub fn size(text_columns: usize, more: bool, area_w: f32) -> (f32, f32, f32, usize) {
+        let extra = 2.0 * (PAD_X + BORDER) + GAP + CLOSE_W + if more { GAP + MORE_W } else { 0.0 };
+        let text_w = (text_columns.max(1) as f32 * ADVANCE).ceil();
+        let cap = (area_w - 2.0 * MARGIN).max(extra + 10.0 * ADVANCE);
+        let width = (text_w + extra).min(cap);
+        let text_cap = width - extra;
+        let cols_per_line = ((text_cap / ADVANCE).floor() as usize).max(1);
+        let lines = text_columns.max(1).div_ceil(cols_per_line);
+        let height = lines as f32 * LINE_H + 2.0 * (PAD_Y + BORDER);
+        (width, height, text_cap, lines)
+    }
+
+    /// The box's style: anchored at the editor area's bottom left, above the code, below the drawer.
+    pub fn style(width: f32, height: f32) -> String {
+        format!("position:absolute; z-index:15; left:{MARGIN}px; bottom:{MARGIN}px; width:{width}px; height:{height}px; box-sizing:border-box; padding:{PAD_Y}px {PAD_X}px; display:flex; align-items:center; gap:{GAP}px; background:var(--surface); border:{BORDER}px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow-lg);")
+    }
+
+    /// The text's style: its own width, wrapped anywhere only past it.
+    pub fn text_style(text_w: f32) -> String {
+        format!("flex:none; width:{text_w}px; font-family:var(--mono); font-size:13px; line-height:{LINE_H}px; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--muted);")
+    }
+}
 
 pub mod view {
     //! The sheet, the parameter hint and the breadcrumb symbols. The sheet's field and selection are
@@ -636,21 +678,49 @@ pub mod view {
     /// bottom of the editor area because the widget does not say where the caret is on screen.
     // TODO(compose-rust#553): anchor the hint above the caret.
     fn hint(s: &Shared, help: &ember_editor::language::SignatureHelp) -> Element {
+        use super::hint_box;
         let Some((before, active, after)) = signature_parts(help) else { return rsx! {} };
         let count = help.signatures.len();
         let close_s = s.clone();
+        let cols = hint_box::columns(&before) + hint_box::columns(&active) + hint_box::columns(&after);
+        let (w, h, text_w, _) = hint_box::size(cols, count > 1, editor_area_width());
+        let style = hint_box::style(w, h);
+        let text_style = hint_box::text_style(text_w);
         rsx! {
-            div { class: "ed-menu", role: "status", "aria-label": "매개변수 정보",
-                style: "{super::HINT_STYLE}",
-                code { style: "{super::HINT_CODE_STYLE}",
+            div { role: "status", "aria-label": "매개변수 정보", style: "{style}",
+                code { style: "{text_style}",
                     "{before}"
                     span { style: "font-weight:var(--fw-semibold); color:var(--text);", "{active}" }
                     "{after}"
                 }
-                if count > 1 { span { class: "muted", style: "font-size:var(--fs-xs);", "외 {count - 1}개" } }
-                button { class: "ed-ib", title: "닫기", "aria-label": "매개변수 정보 닫기", onclick: move |_| { dismiss_hint(&close_s); }, {icon("close")} }
+                if count > 1 { span { class: "muted", style: "flex:none; font-size:var(--fs-xs);", "외 {count - 1}개" } }
+                button { class: "ed-ib", style: "flex:none;", title: "닫기", "aria-label": "매개변수 정보 닫기", onclick: move |_| { dismiss_hint(&close_s); }, {icon("close")} }
             }
         }
+    }
+
+    thread_local! {
+        /// The editor area (`.ed-main`), to read its laid-out width for the hint (#800).
+        static EDITOR_AREA: RefCell<Option<std::rc::Rc<dioxus_compose::html::prelude::dioxus_elements::MountedData>>> = const { RefCell::new(None) };
+    }
+
+    /// Keep the editor area's element (its `onmounted`).
+    pub fn mount_editor_area(data: std::rc::Rc<dioxus_compose::html::prelude::dioxus_elements::MountedData>) {
+        EDITOR_AREA.with(|m| *m.borrow_mut() = Some(data));
+    }
+
+    /// The editor area's width from the last layout.
+    // TODO(dioxus-compose#207): no resize event, so a new width is seen on the next render.
+    fn editor_area_width() -> f32 {
+        use futures_util::FutureExt;
+        EDITOR_AREA
+            .with(|m| {
+                let m = m.borrow();
+                let r = m.as_ref()?.get_client_rect().now_or_never()?.ok()?;
+                Some(r.size.width as f32)
+            })
+            .filter(|w| *w > 0.0)
+            .unwrap_or(super::hint_box::FALLBACK_AREA_W)
     }
 
     /// The parameter hint inside the editor area (`.ed-main`, positioned), when no sheet is open: it
@@ -763,19 +833,33 @@ pub mod view {
 mod tests {
     #[test]
     fn fr_l31_13_parameter_hint_sizes_to_its_text_within_the_editor_area() {
-        // #800: the hint was fixed to the window, wrapped word by word and covered the bottom panel.
-        use super::{HINT_CODE_STYLE, HINT_STYLE};
-        assert!(HINT_STYLE.contains("position:absolute;"), "the hint must be placed in the editor area, not the window");
-        assert!(!HINT_STYLE.contains("fixed"));
-        assert!(HINT_STYLE.contains("width:max-content;"), "the hint sizes to its text");
-        assert!(HINT_STYLE.contains("max-width:calc(100% - 2 * var(--sp3));"), "the hint is capped at the editor area's width");
-        assert!(!HINT_STYLE.contains("vw"), "no window-relative width");
-        assert!(HINT_CODE_STYLE.contains("min-width:0;") && HINT_CODE_STYLE.contains("overflow-wrap:anywhere;"));
+        // #800: the hint was fixed to the window, then stacked one glyph per line; its width is now set in px.
+        use super::hint_box::*;
+        let sig = "fn add(a: i32, b: i32) -> i32";
+        let cols = columns(sig);
+        assert_eq!(cols, sig.len());
+        // Fits: one line, as wide as the text plus padding, border, gap and close button.
+        let (w, h, text_w, lines) = size(cols, false, 1000.0);
+        assert_eq!(lines, 1);
+        assert_eq!(text_w, (cols as f32 * ADVANCE).ceil());
+        assert_eq!(w, text_w + 2.0 * (PAD_X + BORDER) + GAP + CLOSE_W);
+        assert_eq!(h, LINE_H + 2.0 * (PAD_Y + BORDER));
+        // Wider than the area: capped at the area less the margins, wrapped onto more lines.
+        let long = cols * 10;
+        let (w, h, _, lines) = size(long, true, 500.0);
+        assert_eq!(w, 500.0 - 2.0 * MARGIN);
+        assert!(lines > 1 && h == lines as f32 * LINE_H + 2.0 * (PAD_Y + BORDER));
+        // Hangul takes two columns.
+        assert_eq!(columns("가a"), 3);
+        let style = style(300.0, 38.0);
+        assert!(style.contains("position:absolute;") && style.contains("width:300px;") && style.contains("bottom:12px;"));
+        assert!(!style.contains("max-content") && !style.contains("fixed") && !style.contains("top:"));
         let page = include_str!("editor_workbench.rs");
         let main = page.find(r#"section { class: "ed-main""#).expect("editor area");
         let hint = page.find("editor_language::view::hint_in_editor(&s)").expect("hint call");
         let right = page.find("stripe_column(&s, sel, keymap, Strip::Right)").expect("right stripe");
         assert!(main < hint && hint < right, "the hint is drawn inside the editor area");
+        assert!(page.contains("editor_language::view::mount_editor_area(event.data())"), "the editor area's width is not measured");
     }
 
     use super::*;

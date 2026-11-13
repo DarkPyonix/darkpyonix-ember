@@ -2,8 +2,9 @@
 //! `/api/computers/{id}/fs/{op}`, against a real `ember_node` and a real server listener.
 //!
 //! The node, not the server, enforces the allowed roots. These tests pin what the node does
-//! today for a path outside them, `..` traversal and a symlink pointing out, and that the write
-//! operations are not reachable through the server.
+//! today for a path outside them, `..` traversal and a symlink pointing out. The write relay
+//! carries `write`, `pwrite` and `setattr` only (INTENT D48); the namespace operations stay
+//! unreachable through the server.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -69,7 +70,9 @@ async fn fx() -> Fx {
     std::os::unix::fs::symlink(outside.join("secret.txt"), root.join("link-out.txt")).unwrap();
     std::os::unix::fs::symlink(&outside, root.join("dir-out")).unwrap();
 
-    let node = Node::new(NodeConfig::new(TOKEN, vec![root.clone()])).unwrap();
+    // `<root>/.ember` is denied, like the local node's data dir (#521). It is not created, so
+    // the read tests see the same tree as before.
+    let node = Node::new(NodeConfig::new(TOKEN, vec![root.clone()]).with_denied(vec![root.join(".ember")])).unwrap();
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let node_url = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(api::serve(l, node));
@@ -196,23 +199,20 @@ async fn fr_w4_fs_relay_dotdot_and_symlinks_out_of_the_root_are_refused_by_the_n
 }
 
 #[tokio::test]
-async fn fr_w4_fs_relay_write_operations_are_not_routed() {
+async fn fr_w4_fs_relay_namespace_operations_are_not_routed() {
     within(async {
         let f = fx().await;
         let target = f.root.join("written.txt");
         let victim = f.root.join("hello.txt");
         for (op, body) in [
-            ("write", json!({ "path": target, "data": "" })),
             ("remove", json!({ "path": victim, "recursive": false })),
             ("rename", json!({ "from": victim, "to": target })),
             ("mkdir", json!({ "path": f.root.join("newdir") })),
             ("symlink", json!({ "path": target, "target": "/etc/hosts" })),
-            ("setattr", json!({ "path": victim, "mode": 0 })),
-            ("pwrite", json!({ "path": victim, "offset": 0, "data": "" })),
             ("nonsense", json!({})),
         ] {
             let (st, _) = f.post(op, body).await;
-            assert_eq!(st, 404, "{op} must not reach the node");
+            assert_eq!(st, 404, "{op} must not reach the node (D48)");
         }
         assert!(!target.exists());
         assert!(!f.root.join("newdir").exists());
@@ -221,6 +221,130 @@ async fn fr_w4_fs_relay_write_operations_are_not_routed() {
         // Only POST is routed.
         let r = f.c.get(format!("{}/api/computers/{}/fs/read", f.base, f.cid)).send().await.unwrap();
         assert_eq!(r.status(), 405);
+        let r = f.c.get(format!("{}/api/computers/{}/fs/write", f.base, f.cid)).send().await.unwrap();
+        assert_eq!(r.status(), 405);
+    })
+    .await;
+}
+
+fn b64(data: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[tokio::test]
+async fn fr_w4_fs_relay_write_pwrite_setattr_reach_the_node() {
+    within(async {
+        let f = fx().await;
+        let new = f.root.join("new/written.txt");
+        let (st, v) = f.post("write", json!({ "path": new, "data": b64(b"first"), "create_parents": true })).await;
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(v["size"], 5);
+        assert_eq!(v["sha256"], sha256_hex(b"first"));
+        assert_eq!(std::fs::read(&new).unwrap(), b"first");
+
+        let (st, v) = f.post("pwrite", json!({ "path": new, "offset": 1, "data": b64(b"IR") })).await;
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(std::fs::read(&new).unwrap(), b"fIRst");
+
+        let (st, v) = f.post("setattr", json!({ "path": new, "size": 2, "mode": 0o600 })).await;
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(std::fs::read(&new).unwrap(), b"fI");
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&new).unwrap().permissions().mode() & 0o777, 0o600);
+
+        // The answer is the node's, unchanged.
+        // The reads above bump atime, so the comparison leaves atime out.
+        let (st, mut d) = f.direct("stat", json!({ "path": new })).await;
+        assert_eq!(st, 200);
+        let mut v = v;
+        v.as_object_mut().unwrap().remove("atime_ms");
+        d.as_object_mut().unwrap().remove("atime_ms");
+        assert_eq!(v, d, "setattr answers the node's Stat");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn fr_w4_fs_relay_writes_outside_the_roots_or_denied_are_refused_by_the_node() {
+    within(async {
+        let f = fx().await;
+        let secret = f.outside.join("secret.txt");
+        let denied = f.root.join(".ember/server-token");
+        for (op, body) in [
+            ("write", json!({ "path": f.outside.join("new.txt"), "data": b64(b"x") })),
+            ("write", json!({ "path": secret, "data": b64(b"x") })),
+            ("write", json!({ "path": f.root.join("link-out.txt"), "data": b64(b"x") })),
+            ("write", json!({ "path": f.root.join("../outside/secret.txt"), "data": b64(b"x") })),
+            ("write", json!({ "path": denied, "data": b64(b"x"), "create_parents": true })),
+            ("pwrite", json!({ "path": secret, "offset": 0, "data": b64(b"x") })),
+            ("pwrite", json!({ "path": f.root.join("link-out.txt"), "offset": 0, "data": b64(b"x") })),
+            ("setattr", json!({ "path": secret, "size": 0 })),
+            ("setattr", json!({ "path": f.root.join("link-out.txt"), "mode": 0o777 })),
+        ] {
+            let (st, v) = f.post(op, body.clone()).await;
+            let (dst, dv) = f.direct(op, body).await;
+            assert!(st.is_client_error(), "{op}: {st} {v}");
+            assert_eq!((st, &v), (dst, &dv), "{op}: the server passes the node's answer unchanged");
+        }
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "TOP-SECRET needle\n");
+        assert!(!f.outside.join("new.txt").exists());
+        assert!(!f.root.join(".ember").exists());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn fr_w4_fs_relay_write_precondition_conflict_is_the_nodes_412() {
+    within(async {
+        let f = fx().await;
+        let hello = f.root.join("hello.txt");
+        let current = sha256_hex(b"hello needle world\n");
+
+        let (st, v) = f
+            .post("write", json!({ "path": hello, "data": b64(b"x"), "expect": { "kind": "sha256", "sha256": "00".repeat(32) } }))
+            .await;
+        assert_eq!(st, 412, "{v}");
+        assert_eq!(v["code"], "precondition_failed", "{v}");
+        assert_eq!(v["actual_sha256"], current, "{v}");
+
+        let (st, v) = f.post("write", json!({ "path": hello, "data": b64(b"x"), "expect": { "kind": "absent" } })).await;
+        assert_eq!(st, 412, "{v}");
+        assert_eq!(v["actual_sha256"], current, "{v}");
+        assert_eq!(std::fs::read_to_string(&hello).unwrap(), "hello needle world\n");
+
+        // The matching hash writes.
+        let (st, v) = f.post("write", json!({ "path": hello, "data": b64(b"x"), "expect": { "kind": "sha256", "sha256": current } })).await;
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(std::fs::read(&hello).unwrap(), b"x");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn fr_w4_fs_relay_write_body_is_capped_at_24_mib() {
+    within(async {
+        let f = fx().await;
+        assert_eq!(computers::fs::MAX_WRITE_BODY, 24 * 1024 * 1024);
+        let target = f.root.join("big.bin");
+        // 2 MiB of data passes (over the read cap of 1 MiB, under the write cap).
+        let (st, v) = f.post("write", json!({ "path": target, "data": b64(&vec![7u8; 2 * 1024 * 1024]) })).await;
+        assert_eq!(st, 200, "{v}");
+        // 20 MiB of data is about 26.7 MiB of base64: 413, the node never sees it.
+        let (st, _) = f.post("write", json!({ "path": f.root.join("huge.bin"), "data": b64(&vec![7u8; 20 * 1024 * 1024]) })).await;
+        assert_eq!(st, 413);
+        assert!(!f.root.join("huge.bin").exists());
+        let (st, _) = f.post("pwrite", json!({ "path": target, "offset": 0, "data": b64(&vec![1u8; 20 * 1024 * 1024]) })).await;
+        assert_eq!(st, 413);
+        assert_eq!(std::fs::read(&target).unwrap()[0], 7);
+        // The read routes keep their 1 MiB cap.
+        let (st, _) = f.post("stat", json!({ "path": "a".repeat(2 * 1024 * 1024) })).await;
+        assert_eq!(st, 413);
     })
     .await;
 }
@@ -310,7 +434,7 @@ async fn status(app: &Router, method: &str, path: &str, authz: Option<&str>) -> 
 async fn fr_w4_fs_relay_needs_the_server_token() {
     let dir = tempfile::tempdir().unwrap();
     let (app, token) = protected_app(dir.path());
-    for op in ["stat", "lstat", "read", "list", "readlink", "glob", "grep"] {
+    for op in ["stat", "lstat", "read", "list", "readlink", "glob", "grep", "write", "pwrite", "setattr"] {
         let path = format!("/api/computers/local/fs/{op}");
         assert_eq!(status(&app, "POST", &path, None).await, 401, "{op}: no token");
         assert_eq!(status(&app, "POST", &path, Some("Bearer dpg_guestcredential")).await, 401, "{op}: guest credential");
@@ -320,9 +444,11 @@ async fn fr_w4_fs_relay_needs_the_server_token() {
         let st = status(&app, "POST", &path, Some(&format!("Bearer {token}"))).await;
         assert!(st == 400 || st == 422, "{op}: {st}");
     }
-    // The write operations stay unrouted behind the token too.
-    let st = status(&app, "POST", "/api/computers/local/fs/write", Some(&format!("Bearer {token}"))).await;
-    assert_eq!(st, 404);
+    // The namespace operations stay unrouted behind the token too (D48).
+    for op in ["remove", "rename", "mkdir", "symlink"] {
+        let st = status(&app, "POST", &format!("/api/computers/local/fs/{op}"), Some(&format!("Bearer {token}"))).await;
+        assert_eq!(st, 404, "{op}");
+    }
 }
 
 // ---- #467: limits, deadline, path edge cases ----

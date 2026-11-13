@@ -329,42 +329,56 @@ fn secure_token_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::{Error, ErrorKind};
+        use std::os::fd::FromRawFd;
+        use std::os::unix::ffi::OsStrExt;
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        match std::fs::symlink_metadata(path) {
-            Ok(md) => {
-                if md.file_type().is_symlink() {
-                    return Err(Error::new(ErrorKind::PermissionDenied, format!("{} is a symlink", path.display())));
-                }
-                if !md.is_dir() {
-                    return Err(Error::new(ErrorKind::InvalidInput, format!("{} is not a directory", path.display())));
-                }
-                // SAFETY: geteuid takes no arguments and cannot fail.
-                if md.uid() != unsafe { libc::geteuid() } {
-                    return Err(Error::new(
-                        ErrorKind::PermissionDenied,
-                        format!("{} is not owned by the current user", path.display()),
-                    ));
-                }
-                let mode = md.permissions().mode() & 0o777;
-                if mode & 0o022 != 0 {
-                    return Err(Error::new(
-                        ErrorKind::PermissionDenied,
-                        format!("token directory {} is writable by others; fix the permissions", path.display()),
-                    ));
-                }
-                if mode & 0o077 != 0 {
-                    tracing::warn!(
-                        path = %path.display(),
-                        mode = format!("{mode:o}"),
-                        "token directory is readable by group or others; tightening it to 0700"
-                    );
-                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-                }
-                Ok(())
-            }
-            Err(e) if e.kind() == ErrorKind::NotFound => make_private_dir(path),
-            Err(e) => Err(e),
+        // Open the directory itself, never through a symlink at its place, and check and chmod
+        // the opened handle (fstat, fchmod), so a symlink swapped in after the check cannot
+        // redirect the chmod (#534). ACLs are not inspected.
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains NUL"))?;
+        // SAFETY: `c` is a valid NUL-terminated path; the flags take no extra argument.
+        let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd < 0 {
+            let e = Error::last_os_error();
+            return match e.raw_os_error() {
+                Some(libc::ENOENT) => make_private_dir(path),
+                Some(libc::ELOOP) => Err(Error::new(ErrorKind::PermissionDenied, format!("{} is a symlink", path.display()))),
+                Some(libc::ENOTDIR) => match std::fs::symlink_metadata(path) {
+                    Ok(md) if md.file_type().is_symlink() => {
+                        Err(Error::new(ErrorKind::PermissionDenied, format!("{} is a symlink", path.display())))
+                    }
+                    _ => Err(Error::new(ErrorKind::InvalidInput, format!("{} is not a directory", path.display()))),
+                },
+                _ => Err(e),
+            };
         }
+        // SAFETY: `fd` is a fresh descriptor owned here.
+        let dir = unsafe { std::fs::File::from_raw_fd(fd) };
+        let md = dir.metadata()?;
+        // SAFETY: geteuid takes no arguments and cannot fail.
+        if md.uid() != unsafe { libc::geteuid() } {
+            return Err(Error::new(
+                ErrorKind::PermissionDenied,
+                format!("{} is not owned by the current user", path.display()),
+            ));
+        }
+        let mode = md.permissions().mode() & 0o777;
+        if mode & 0o022 != 0 {
+            return Err(Error::new(
+                ErrorKind::PermissionDenied,
+                format!("token directory {} is writable by others; fix the permissions", path.display()),
+            ));
+        }
+        if mode & 0o077 != 0 {
+            tracing::warn!(
+                path = %path.display(),
+                mode = format!("{mode:o}"),
+                "token directory is readable by group or others; tightening it to 0700"
+            );
+            dir.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
     }
     #[cfg(not(unix))]
     {

@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -50,6 +51,41 @@ pub trait PkarrStore: Send + Sync + fmt::Debug + 'static {
     async fn get(&self, key: PeerId) -> Result<Option<Vec<u8>>>;
     /// Sets or clears the credential used to fetch (a hub resolve token). No-op by default.
     fn set_token(&self, _token: Option<String>) {}
+    /// The limits of [`PkarrStore::watch`], or `None` when the store has no batched watch (the
+    /// default). Then watched mailboxes are polled with [`PkarrStore::get`].
+    fn watch_limits(&self) -> Option<WatchLimits> {
+        None
+    }
+    /// Sets or clears the batched watch (the hub's `/config` changed, or the device token did).
+    /// No-op by default.
+    fn set_watch(&self, _watch: Option<crate::PkarrWatch>) {}
+    /// Waits up to `wait` until any of `keys` has a packet newer than its timestamp (the
+    /// microseconds of the last packet read, `0` for none), and returns the changed packets.
+    /// One call covers at most [`WatchLimits::max_keys`] keys (the hub's `GET /pkarr/watch`,
+    /// core FR-H2). Unsupported by default.
+    async fn watch(&self, _keys: &[(PeerId, u64)], _wait: Duration) -> Result<WatchOutcome> {
+        Err(TransportError::Stream("this pkarr store has no batched watch".into()))
+    }
+}
+
+/// The limits of a batched pkarr watch (`/config` `pkarr_watch`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WatchLimits {
+    /// Keys per call.
+    pub max_keys: usize,
+    /// The longest wait of one call.
+    pub max_wait: Duration,
+}
+
+/// The answer of one [`PkarrStore::watch`] call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WatchOutcome {
+    /// `200`: the packets (`PUT /pkarr` bodies) of the keys that changed.
+    Changed(Vec<(PeerId, Vec<u8>)>),
+    /// `204`: nothing changed within the wait.
+    Unchanged,
+    /// `404`: these keys are not live devices of the account; watch the rest without them.
+    NotFound(Vec<PeerId>),
 }
 
 /// Checks the signature and timestamp of a pkarr relay payload for `key`. Returns the timestamp

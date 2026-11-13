@@ -244,6 +244,8 @@ dioxus-compose를 구현하고 있는 이유일텐데?"]
   management and extension-host connections, the remote filesystem, and the per-category bridges
   (`docs/design/EDITOR-CONNECTION.md`).
 
+**Amendment** [user, 2026-11-13, D44: "확장 프로그램은 웹뷰 사용하는건데? 몰랐어?"]. The Ember 에디터 window may host platform webviews for extension content only: extension webview panels and webview views, custom editors, and notebook outputs that need HTML, JavaScript or widgets, each contained to its own panel (`FR-E5`, `FR-E8`). The workbench itself stays drawn by dioxus-compose with no JavaScript engine of its own, and the native code editor still replaces Monaco. The launcher and the conversation UI still never allocate a webview (`NFR-L2`, AGENTS.md rule 5).
+
 **Consequence.** M8 (the editor core) is in scope and dated (`PROJECT.md`). The official Node
 Extension Host is still never reimplemented (E4): the editor core speaks Code-OSS's own
 renderer ↔ extension-host protocol to it. That protocol is internal, so each OSE build pins one
@@ -859,6 +861,8 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 
 **Non-loopback owner listener.** [provisional] (leader, 2026-11-13) The owner listener (`EMBER_LISTEN`) speaks plain HTTP, so on a LAN address the bearer token crosses the network in clear. The server therefore refuses to start when `EMBER_LISTEN` is not a loopback address (`0.0.0.0`, `::`, a LAN address, an IPv4-mapped IPv6 address) unless `EMBER_ALLOW_NON_LOOPBACK_LISTEN=1` is set, and logs a startup warning when it is set. Remote devices are meant to come in through the transport door, which checks the device key. This matches the guest door's `EMBER_GUEST_LISTEN_ALLOW_REMOTE`. Rejected: a warning alone (an accidental `0.0.0.0` would expose the token silently in logs nobody reads); removing the option (some owners run behind a TLS proxy or on a trusted host-only network). Tests `fr_s10_non_loopback_listen_*`.
 
+**Keys at rest (FR-S13).** [provisional] (leader, 2026-11-13, #784 answer 6) `secret.key`, `transport.key` and device keys go to the OS keystore where available (Keychain, DPAPI through the Credential Manager, Secret Service), with the 0600 file as the fallback and the residual risk written in the install guide. One cross-platform crate (`keyring`) is used instead of per-OS crates. The default is `auto`, because a headless Linux server has no Secret Service and must still start. Rejected: keystore only (headless servers could not start); keeping files only (a copied data folder carries every key).
+
 **Rejected.** Loopback trust alone, which is today's model and is documented in `docs/guide/en/install.html` as "anyone who can reach `EMBER_LISTEN` can use every route"; a per-process secret; session tokens only. The issue lists the last two as options and gives no reason against them, so none is recorded here.
 
 **Per-device scope (#366, `FR-N8`).** [provisional, 2026-11-13, follow-up of the owner's "범위는 나중에"] Every admitted device carries a scope, set by the owner. The scope is checked on the transport door only, per route family, by a middleware that knows the calling device's peer id. A refused call is answered with 403 and `{"code": "scope_denied"}`. The scopes:
@@ -998,15 +1002,18 @@ Anything a scope does not list is refused, so a route added later is closed to s
 
 **Status.** Deferred; #744 has the completion criteria.
 
-### D44: Webviews, custom editors and notebook outputs in the Ember 에디터: native for the common cases, VS Code for the rest
+### D44: Extension webviews, custom editors and notebook outputs run in a platform webview inside the Ember 에디터 window
 
-**Decision.** [provisional, #452, needs the owner's confirmation] The Ember 에디터 window hosts no webview, keeping D9a. Markdown preview, image files and notebook outputs that are text, stream, error or image mimes are drawn natively. Every other extension webview panel, webview view, custom editor and notebook output (HTML, JavaScript, widgets) shows a placeholder in its own panel, with the extension's name and `VS Code에서 열기`, which opens the project in the VS Code target (`ember/editor/src/fallback.rs`). FR-E5 ("Extension webview panels still work, contained to their panel") is met through that fallback, not inside the window (`FR-E8`).
+**Decision.** [user, 2026-11-13] Extension webview panels and webview views, custom editors, and notebook outputs that need HTML, JavaScript or widgets run in a platform webview inside the Ember 에디터 window, each contained to its own panel (`FR-E5`, `FR-E8`): WKWebView on macOS and iOS, WebView2 on Windows, WebKitGTK on Linux, Android WebView on Android. Each webview has its own secure origin and runs the extension's HTML under its own CSP; Ember bridges the VS Code webview API (`postMessage` both ways, `asWebviewUri` and local resources limited to `localResourceRoots`, state, `retainContextWhenHidden`). The window composes each webview into the editor layout at its panel's rect and z-order. The toolkit node that hosts a platform view is compose-rust's (p1A, `.scratch/leader/native-webview-plan.md`); Ember owns the bridge, the composition and the requirements (`docs/design/EDITOR-WEBVIEWS.md`). D9a is amended for this (extension content only); `NFR-L2` still holds for the launcher and the conversation UI.
 
-**Rejected** *[provisional]*. A platform webview region inside the Ember 에디터 window (E5 allows it, D9a does not; it needs a webview host per OS that does not exist (#30), a secure webview origin, a native view composited into dioxus-compose, and a JS engine in the editor window). Leaving these features out (D38 asks for function parity). The options and their costs are in `docs/design/EDITOR-PARITY.md`, "Webviews, custom editors and notebook outputs".
+**Rejected.**
+1. The #755 proposal (C+B): draw markdown, images and simple notebook outputs natively and send every other webview to "VS Code에서 열기". The owner: "확장 프로그램은 웹뷰 사용하는건데? 몰랐어?" and "VS Code에서 열기 >> 뭐래 확장은 웹뷰 쓰는거야". Extensions are written against the webview API; an editor that cannot run them does not have Code-OSS's function (D38), and a fallback to another IDE is not an answer.
+2. Leaving webviews out (D, also in #755): contradicts D38 and FR-E5.
+3. A webview for the whole workbench (VS Code Web inside the window): that is the VS Code target of D9a, not the Ember editor, and it would bring the JS engine into the workbench itself.
 
-**Why.** Extension webviews are extension programs written for a browser engine; they cannot be drawn without one. The cases users meet daily (reading markdown, looking at an image, a notebook's printed output and plots) need no extension code, so they can follow the mockup's design natively, and the rest still works one click away in VS Code Web, which already is the IDE window exception of E1.
+**Why.** Many extensions show their main UI in a webview (previews, dashboards, custom editors, notebook renderers). Code-OSS hosts them in sandboxed iframes with a per-webview origin; a platform webview per panel gives the same contract natively, while the workbench stays dioxus-compose.
 
-**Status.** Proposed, not built. Waits for the owner; if the owner wants option A, D9a changes first.
+**Status.** Decided by the owner; not built. Toolkit: compose-rust embedded native view (p1A; amending compose-rust INTENT C1 through an opt-in separate crate waits for the owner's OK). Ember: `FR-E8`.
 
 ### D45: Local secret files: swept at startup, redacted logs, a week of retention
 

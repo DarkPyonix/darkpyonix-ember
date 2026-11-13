@@ -71,7 +71,9 @@ impl TransportMode {
             return Self::parse(&raw);
         }
         if let Some(dir) = state_dir {
-            let has_key = dir.join(KEY_FILE).is_file();
+            // A key moved to the OS keystore leaves `transport.key.migrated` (FR-S13).
+            let has_key = dir.join(KEY_FILE).is_file()
+                || crate::keystore::migrated_marker(&dir.join(KEY_FILE)).is_file();
             let has_server_peer = crate::enrol::read_enrolment(dir)
                 .ok()
                 .flatten()
@@ -136,7 +138,7 @@ pub fn allowed_peers(state_dir: Option<&Path>) -> anyhow::Result<Vec<PeerId>> {
 /// the hub's relay and directory when the node is registered ([`crate::hub::discovered_transport_config`]),
 /// otherwise with the relay from `EMBER_RELAY_URL`.
 pub async fn bind(state_dir: &Path) -> anyhow::Result<Transport> {
-    let key = SecretKey::load_or_generate(state_dir.join(KEY_FILE))?;
+    let key = crate::keystore::load_transport_key(&state_dir.join(KEY_FILE))?;
     Ok(Transport::bind(crate::hub::discovered_transport_config(state_dir, key).await?).await?)
 }
 

@@ -50,6 +50,7 @@ fn fake_agent_cmd(session: &str, cwd: &Path, ticks: u32) -> AgentCommand {
         cwd: cwd.to_path_buf(),
         reattachable: true,
         mem_limit_mb: None,
+        os_sandbox: false,
     }
 }
 
@@ -698,6 +699,7 @@ fn memhog_cmd(session: &str, cwd: &Path, limit_mb: Option<u64>) -> AgentCommand 
         cwd: cwd.to_path_buf(),
         reattachable: false,
         mem_limit_mb: limit_mb,
+        os_sandbox: false,
     }
 }
 

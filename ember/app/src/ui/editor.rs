@@ -82,6 +82,16 @@ pub fn row_click_closes_prompt(prompt: &TreePrompt, typed: &str) -> bool {
     }
 }
 
+/// The row whose label the name box replaces: a rename edits the renamed row in place, as Code-OSS's
+/// explorer does (#797). New file and new folder prompts, and a rename of a row that is not shown, get
+/// no row and keep the box at the top of the tree.
+pub fn rename_in_place_row(prompt: Option<&TreePrompt>, rows: &[TreeRow]) -> Option<usize> {
+    match prompt {
+        Some(TreePrompt::Rename { path }) => rows.iter().position(|r| &r.path == path),
+        _ => None,
+    }
+}
+
 /// Whether leaving the new-name field closes its prompt: an empty field has nothing to keep, a typed
 /// name stays so the person can come back to it.
 pub fn blur_closes_prompt(typed: &str) -> bool {
@@ -1871,6 +1881,19 @@ mod tests {
         assert_eq!(display_name(&"x".repeat(200)).chars().count(), 80);
         assert_eq!(display_name("README.md"), "README.md");
     }
+
+    #[test]
+    fn fr_l31_4_rename_box_replaces_the_renamed_rows_label() {
+        let row = |path: &str, depth| TreeRow { path: path.into(), name: base_name_for_test(path), depth, is_dir: false, open: false };
+        let rows = vec![row("/w/src", 0), row("/w/src/a.rs", 1), row("/w/b.md", 0)];
+        assert_eq!(rename_in_place_row(Some(&TreePrompt::Rename { path: "/w/src/a.rs".into() }), &rows), Some(1));
+        assert_eq!(rename_in_place_row(Some(&TreePrompt::Rename { path: "/w/b.md".into() }), &rows), Some(2));
+        assert_eq!(rename_in_place_row(Some(&TreePrompt::Rename { path: "/w/gone".into() }), &rows), None);
+        assert_eq!(rename_in_place_row(Some(&TreePrompt::NewFile { parent: "/w/src".into() }), &rows), None);
+        assert_eq!(rename_in_place_row(None, &rows), None);
+    }
+
+    fn base_name_for_test(path: &str) -> String { path.rsplit('/').next().unwrap_or(path).to_string() }
 
     #[test]
     fn fr_l31_row_click_keeps_a_typed_name_and_closes_an_empty_field() {

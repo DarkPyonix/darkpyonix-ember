@@ -1125,6 +1125,7 @@ fn HeroBot(vendor: &str, status: &str, px: f32) {
 /// 13 px weight 500 label cut with an ellipsis, and the 14 px chevron of a picker. `icon_only`
 /// chips are 32 px circles with the glyph centred.
 /// TODO(compose-rust#372): a pointer-up `Clickable` with no keyboard focus or role.
+#[allow(clippy::too_many_arguments)]
 fn ComposerChip(
     text: &str,
     icon: &'static str,

@@ -632,6 +632,15 @@ radius, smoothing 0.6: "애플의 스퀘어클과 맞지 않는 구현이야"), 
 
 [user, 2026-10-25: "앱 기본 스타일에서 안쪽 코드 작성이랑 도구창이 오히려 jetbrains island라는 최신 디자인 컨셉에 더 맞아. 그래서 그쪽 디자인이 맞고, 다만 지금 좌우 메뉴바의 경우 jetbrains 느낌으로 하는게 맞을거 같아. 흰색 버튼 배경이 보기 싫네."] The editor and terminal use the app's own style: rounded island panels, tabs, tool windows and the code area, matching the JetBrains Islands concept. Only the left and right tool-window stripes take the JetBrains form: 40 px icon-only stripes, with no white background or shadow on the selected button, just a faint selection tint. Breadcrumbs stay under the tabs. [provisional] The owner did not decide this, so it is a leader decision. Every other screen keeps the mockup design unchanged, including the session panels, the status view and version control.
 
+[user, 2026-11-13: "엠버 디자인 추천대로 해"] *Note on placement.* Features beyond the mockup (Code-OSS
+parity, D38) live in surfaces the mockup already has rather than new buttons: the 프로젝트 header keeps
+its three actions plus one "+" menu, tree-row actions move to the context menu, file search to the
+find pill, 출력 becomes a bottom tab, the stripes and the top bar are exactly the mockup's, and the
+top bar's ⋯ items join the tab strip's ⋯ menu under a separator. The rule and its six parts are in
+`DESIGN.md` §6.3 ("Where features beyond the mockup go"). Rejected: one button per feature in the
+chrome (what the 2026-11-13 design review found), and dropping features to keep the mockup's chrome
+(breaks D38).
+
 **Why.** One product that a user moves between machines should look the same on all of them, and a
 per-OS widget set multiplies the work of every screen.
 

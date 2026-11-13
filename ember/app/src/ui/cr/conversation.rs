@@ -2134,7 +2134,7 @@ mod tests {
     use super::*;
     use compose_rust::protocol::{HostEvent, Mutation, PropertyValue, decode_batch};
     use compose_rust::{
-        EventPayload, Host, Recomposer, WindowHeightClass, WindowSizeClass, composable,
+        EventPayload, Host, Recomposer, WindowHeightClass, WindowSizeClass, Composable,
     };
 
     fn texts(batch: &[Mutation<'_>]) -> Vec<String> {
@@ -2170,7 +2170,7 @@ mod tests {
         );
     }
 
-    #[composable]
+    #[Composable]
     fn host_conversation_s1() {
         ConversationView("demo-s1", false);
     }

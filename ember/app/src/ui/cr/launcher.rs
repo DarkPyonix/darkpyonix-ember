@@ -198,7 +198,7 @@ pub fn SessionRowWith(row: &SessionRow, menu_start_open: bool) {
 
 /// A review window: the connection banner and a few session rows, the first with its menu open
 /// (`EMBER_CR_ROUTE=launcher-row`).
-#[compose_rust::runtime::composable]
+#[compose_rust::runtime::Composable]
 pub fn rows_preview() {
     let ui = shared_ui().clone();
     let theme = ember_theme();

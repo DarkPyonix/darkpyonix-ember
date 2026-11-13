@@ -779,7 +779,7 @@ pub fn sample_rooms() -> Vec<Room> {
 
 /// A review window (`EMBER_CR_ROUTE=channels`): the channels screen with sample rooms; the
 /// first room is open on a wide window.
-#[compose_rust::runtime::composable]
+#[compose_rust::runtime::Composable]
 pub fn preview() {
     let p = ember_theme().palette;
     cu::Box().modifier(Modifier::new().fill_max_size().background(paint(p.bg))).content(|| {

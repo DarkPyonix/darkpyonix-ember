@@ -411,7 +411,7 @@ pub fn AgentsScreenWith(
 }
 
 /// A review window (`EMBER_CR_ROUTE=agents`).
-#[compose_rust::runtime::composable]
+#[compose_rust::runtime::Composable]
 pub fn preview() {
     let p = ember_theme().palette;
     cu::Box()

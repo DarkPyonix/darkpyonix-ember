@@ -4994,7 +4994,7 @@ mod tests {
     use super::*;
     use compose_rust::protocol::{HostEvent, Mutation, PropertyValue, decode_batch};
     use compose_rust::{
-        EventPayload, Host, Recomposer, WindowHeightClass, WindowSizeClass, composable,
+        EventPayload, Host, Recomposer, WindowHeightClass, WindowSizeClass, Composable,
     };
 
     fn texts(batch: &[Mutation<'_>]) -> Vec<String> {
@@ -5014,7 +5014,7 @@ mod tests {
         static CHEVRON_OPEN: RefCell<Option<MutableState<bool>>> = const { RefCell::new(None) };
     }
 
-    #[composable]
+    #[Composable]
     fn host_ide_chevron() {
         let open = remember(|| mutable_state_of(false));
         CHEVRON_OPEN.with(|c| *c.borrow_mut() = Some(open.clone()));
@@ -5074,12 +5074,12 @@ mod tests {
         assert!(open.get_untracked(), "the chevron opened the chooser");
     }
 
-    #[composable]
+    #[Composable]
     fn host_session_multi() {
         SessionScreen(None);
     }
 
-    #[composable]
+    #[Composable]
     fn host_session_single() {
         SessionScreen(Some("demo-s1".to_string()));
     }

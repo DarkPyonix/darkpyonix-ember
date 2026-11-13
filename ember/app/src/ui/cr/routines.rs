@@ -1285,7 +1285,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
 }
 
 /// A review window (`EMBER_CR_ROUTE=routines`): the routines screen with sample routines.
-#[compose_rust::runtime::composable]
+#[compose_rust::runtime::Composable]
 pub fn preview() {
     let p = ember_theme().palette;
     cu::Box()

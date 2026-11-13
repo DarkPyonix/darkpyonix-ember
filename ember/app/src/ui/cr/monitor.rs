@@ -509,7 +509,7 @@ fn ProcessRowView(row: &ProcessRow, mut on_open: impl FnMut(String) + 'static) {
 
 /// A review window (`EMBER_CR_ROUTE=monitor`): the monitor sheet of a demo computer, chosen by
 /// `EMBER_CR_COMPUTER` (an index: 0 is the online "이 컴퓨터", 1 the offline "스튜디오 PC").
-#[compose_rust::runtime::composable]
+#[compose_rust::runtime::Composable]
 pub fn preview() {
     let ui = shared_ui().clone();
     let _ = ui.live.launcher.get();

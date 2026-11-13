@@ -7,7 +7,7 @@
 //! so the list, kill and reattach rules are testable without a server.
 
 use crate::terminal_stream::{
-    server_token, session_key, terms_list_url, terms_url, ClientError, PtySize, TermCreateRequest,
+    check_relay, server_token, session_key, terms_list_url, terms_url, ClientError, PtySize, TermCreateRequest,
     TermCreateResponse, TermInfo, TermOrigin,
 };
 
@@ -254,12 +254,14 @@ fn authed(req: reqwest::RequestBuilder, base: &str) -> reqwest::RequestBuilder {
 
 /// The project's running editor terminals on `computer`, through the relay.
 pub async fn list(base: &str, computer: &str, project: &str) -> Result<Vec<TermInfo>, ClientError> {
+    check_relay(base)?;
     let url = terms_list_url(base, computer, project, Some(EDITOR_ORIGIN), true);
     Ok(authed(reqwest::Client::new().get(url), base).send().await?.error_for_status()?.json().await?)
 }
 
 /// Create (or re-adopt by key) an editor terminal.
 pub async fn create(base: &str, computer: &str, folder: &str, project: &str, key: String) -> Result<TermInfo, ClientError> {
+    check_relay(base)?;
     let req = authed(reqwest::Client::new().post(terms_url(base, computer)), base).json(&create_request(folder, project, key));
     let created: TermCreateResponse = req.send().await?.error_for_status()?.json().await?;
     Ok(created.term)
@@ -268,7 +270,41 @@ pub async fn create(base: &str, computer: &str, folder: &str, project: &str, key
 /// Kill a terminal (the trash button), then ask the node to forget it. The node refuses the
 /// removal while the process is still exiting; the running-only list hides it either way.
 pub async fn kill(base: &str, computer: &str, term_id: &str) -> Result<(), ClientError> {
+    check_relay(base)?;
     authed(reqwest::Client::new().post(kill_url(base, computer, term_id)), base).send().await?.error_for_status()?;
     let _ = authed(reqwest::Client::new().delete(remove_url(base, computer, term_id)), base).send().await;
     Ok(())
+}
+
+/// Which tab-strip call failed, for [`panel_error`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TermAction {
+    List,
+    Create,
+    Kill,
+}
+
+/// Shown when the server answers 401 or 403 (a missing, withheld or wrong token).
+pub const AUTH_REFUSED_TEXT: &str = "서버가 터미널 요청을 거절했습니다. 이 컴퓨터에 접근할 권한이나 서버 토큰을 확인하세요.";
+
+/// The fixed Korean sentence a failed list, new or kill shows on the panel (FR-L31.22, NFR-L4).
+/// The transport's English text never reaches the panel: it goes to the log here. A relay refusal
+/// (FR-L31.19) keeps its own sentence, a 401 or 403 says the server refused, anything else names
+/// the action.
+pub fn panel_error(action: TermAction, err: &ClientError) -> String {
+    tracing::warn!("terminal {action:?} failed: {err}");
+    if let ClientError::Refused(text) = err {
+        return (*text).to_owned();
+    }
+    if let ClientError::Http(e) = err {
+        if matches!(e.status().map(|s| s.as_u16()), Some(401 | 403)) {
+            return AUTH_REFUSED_TEXT.to_owned();
+        }
+    }
+    match action {
+        TermAction::List => "터미널 목록을 불러오지 못했습니다. 잠시 뒤 다시 시도하세요.",
+        TermAction::Create => "새 터미널을 만들지 못했습니다. 잠시 뒤 다시 시도하세요.",
+        TermAction::Kill => "터미널을 종료하지 못했습니다. 잠시 뒤 다시 시도하세요.",
+    }
+    .to_owned()
 }

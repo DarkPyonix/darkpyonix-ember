@@ -20,6 +20,14 @@ pub fn overlay_bottom(full_size: bool) -> &'static str {
     if full_size { "calc(var(--sbh) + 12px)" } else { "calc(var(--sbh) + 88px)" }
 }
 
+/// Whether the toasts and the notification center are drawn (#802). While a modal message waits
+/// they are hidden, so nothing sits undimmed above its scrim, as Code-OSS keeps notifications under
+/// a modal dialog; they come back when it closes. The renderer does not order fixed layers by
+/// `z-index` yet, so hiding is the reliable way to keep them under it.
+pub fn overlay_shown(modal_waiting: bool) -> bool {
+    !modal_waiting
+}
+
 /// The accessible name of a notification card.
 pub fn card_label(severity: MessageSeverity, source: Option<&str>) -> String {
     match source {
@@ -166,6 +174,7 @@ pub mod view {
         let center: Option<Vec<ExtensionMessage>> = n.center_open().then(|| n.center().into_iter().map(|e| e.message.clone()).collect());
         let pending_modal = n.modal().cloned();
         drop(n);
+        let (toasts, center) = if super::overlay_shown(pending_modal.is_some()) { (toasts, center) } else { (Vec::new(), None) };
         let clear_s = s.clone();
         let hide_s = s.clone();
         rsx! {
@@ -206,5 +215,11 @@ mod tests {
         assert_eq!(card_label(MessageSeverity::Info, None), "정보 알림");
         assert_eq!(severity_class(MessageSeverity::Warning), "ed-pdot warn");
         assert_eq!(overlay_bottom(true), "calc(var(--sbh) + 12px)");
+    }
+
+    #[test]
+    fn fr_l31_16_toasts_and_center_hide_while_a_modal_waits() {
+        assert!(!overlay_shown(true), "nothing above the modal's scrim");
+        assert!(overlay_shown(false), "toasts come back once the modal closes");
     }
 }

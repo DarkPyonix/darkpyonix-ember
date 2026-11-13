@@ -33,6 +33,7 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
+use ember_node::enrol_seal::{verify_proof, NodeKey, Sealed};
 use ember_server::computers::enrol::{
     Enrol, NodeInfo, RegisterError, Registrar, BAD_NODE_INFO_MESSAGE, CONFIRM_WINDOW_MS, GLOBAL_MAX_FAILURES,
     MAX_FAILURES, RATE_LIMITED_MESSAGE, REFUSED_MESSAGE,
@@ -116,16 +117,14 @@ struct Fx {
 }
 
 fn fx_with(vars: &[(&str, &str)]) -> Fx {
-    fx_with_server_id(vars, None)
+    fx_with_server_key(vars, None, false)
 }
 
-/// A fixture whose `Enrol` knows the server's transport peer id (C3b), as `main.rs` builds it.
-fn fx_with_server_id(vars: &[(&str, &str)], server_peer_id: Option<&str>) -> Fx {
+/// A fixture whose `Enrol` holds the server's identity key (FR-C2j), as `main.rs` builds it.
+/// `transport_on` says whether the `joined` answer carries the id (C3b).
+fn fx_with_server_key(vars: &[(&str, &str)], key: Option<ember_transport::SecretKey>, transport_on: bool) -> Fx {
     let store = Arc::new(Store::open_in_memory().unwrap());
-    let enrol = match server_peer_id {
-        Some(id) => Enrol::with_server_peer_id(store, Some(id.to_string())),
-        None => Enrol::new(store),
-    };
+    let enrol = Enrol::with_server_key(store, key, transport_on);
     let fake = Arc::new(Fake::default());
     let owner = computers::enrol::router(enrol.clone(), ember_server::computers::enrol::DoorUrl::Url(BASE.into()), fake.clone());
     Fx { d: door(vars), enrol, owner, fake }
@@ -184,11 +183,24 @@ fn pairs(h: &HeaderMap) -> Vec<(String, String)> {
     v
 }
 
+/// The node's one-time enrol key in these tests (FR-C2d): fixed, so every helper can rebuild it.
+fn node_key() -> NodeKey {
+    NodeKey::from_bytes([7u8; 32])
+}
+
 fn node_info() -> Value {
     json!({
         "hostname": "ibrew-laptop", "os": "macos", "arch": "aarch64", "node_version": "0.1.0",
-        "url": "http://192.168.0.9:8741"
+        "url": "http://192.168.0.9:8741", "enrol_key": node_key().public_hex()
     })
+}
+
+/// The token of a `joined` answer for `enrol_id`, opened with the node's key. The answer must
+/// carry no token in clear.
+fn opened_token(joined: &Value, enrol_id: &str) -> String {
+    assert!(joined["credential"].get("node_token").is_none(), "no cleartext token: {joined}");
+    let sealed: Sealed = serde_json::from_value(joined["credential"]["sealed_token"].clone()).expect("a sealed token");
+    node_key().open(enrol_id, &sealed).expect("the node opens its credential").to_string()
 }
 
 async fn redeem_raw(app: &Router, peer: &str, ctype: Option<&str>, body: &str) -> Reply {
@@ -285,7 +297,7 @@ async fn fr_c2_redeem_happy_path_returns_a_handle_and_never_a_credential() {
     let b = json_of(&body);
     let mut keys: Vec<&str> = b.as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort();
-    assert_eq!(keys, ["enrol_id", "expires_ms", "poll_secret"], "exactly the handle");
+    assert_eq!(keys, ["enrol_id", "expires_ms", "poll_secret"], "exactly the handle (this fixture has no identity key)");
     assert_eq!(b["enrol_id"], id);
     assert!(b["poll_secret"].as_str().unwrap().starts_with("dps_"));
     let exp = b["expires_ms"].as_i64().unwrap();
@@ -661,11 +673,16 @@ async fn fr_c2_redeem_bad_node_info_is_400_and_does_not_burn_the_code() {
     let app = f.open_app();
     let (id, code) = mint(&f, "bad-info").await;
     let want = json!({ "error": BAD_NODE_INFO_MESSAGE, "code": "bad_request" });
+    let key = node_key().public_hex();
     let bad = [
-        json!({ "hostname": "" }),
-        json!({ "hostname": "bad\nhost" }),
-        json!({ "hostname": "h".repeat(65) }),
-        json!({ "hostname": "h", "url": "javascript:alert(1)" }),
+        json!({ "hostname": "", "enrol_key": key }),
+        json!({ "hostname": "bad\nhost", "enrol_key": key }),
+        json!({ "hostname": "h".repeat(65), "enrol_key": key }),
+        json!({ "hostname": "h", "url": "javascript:alert(1)", "enrol_key": key }),
+        // FR-C2d: no enrol key, a malformed one, or a weak point is refused the same way.
+        json!({ "hostname": "h" }),
+        json!({ "hostname": "h", "enrol_key": "AB".repeat(32) }),
+        json!({ "hostname": "h", "enrol_key": "00".repeat(32) }),
     ];
     // More attempts than the failure budget: bad node info spends nothing.
     for i in 0..(MAX_FAILURES + 5) {
@@ -788,7 +805,13 @@ async fn fr_c2_poll_after_confirm_delivers_the_credential_exactly_once_then_deli
     assert_eq!(h["cache-control"], "no-store");
     let b = json_of(&body);
     assert_eq!(b["status"], "joined");
-    assert_eq!(b["credential"], json!({ "node_token": token, "name": "laptop", "computer_id": "computer-1" }));
+    let mut keys: Vec<&str> = b["credential"].as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(keys, ["computer_id", "name", "sealed_token"], "{b}");
+    assert_eq!((b["credential"]["name"].as_str(), b["credential"]["computer_id"].as_str()), (Some("laptop"), Some("computer-1")));
+    // FR-C2d: the token is sealed; it is nowhere in the answer in clear, and the node opens it.
+    assert!(!text(&body).contains(&token) && !text(&body).contains("dpn_"), "{}", text(&body));
+    assert_eq!(opened_token(&b, &o.id), token);
     assert_eq!(b.as_object().unwrap().len(), 2);
     assert!(token.starts_with("dpn_"));
     // Second and third poll: delivered, no credential, and the token is nowhere in the answer.
@@ -1034,7 +1057,7 @@ async fn fr_c2_a_rate_limited_poll_does_not_consume_the_credential() {
     assert_eq!(st, StatusCode::OK);
     let b = json_of(&body);
     assert_eq!(b["status"], "joined", "{b}");
-    assert_eq!(b["credential"]["node_token"], token.as_str());
+    assert_eq!(opened_token(&b, &o.id), token);
     assert_eq!(f.fake.count(), 1);
 }
 
@@ -1135,7 +1158,7 @@ async fn fr_c2_the_door_and_the_owner_routes_share_one_enrol() {
     assert_eq!(st, StatusCode::OK, "{c}");
     let (st, _, body) = poll(&f.open_app(), &id, Some(&secret)).await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(json_of(&body)["credential"]["node_token"], f.fake.token(0));
+    assert_eq!(opened_token(&json_of(&body), &id), f.fake.token(0));
     // The failure books are shared as well: failures made on the door are the owner instance's.
     let g = fx();
     for _ in 0..MAX_FAILURES {
@@ -1168,13 +1191,18 @@ async fn fr_c2_the_eleventh_redeem_in_a_minute_from_one_address_is_429() {
 
 // ---- C3b: the server peer id in the joined answer ----
 
-/// 64 lowercase hex chars, the shape of a transport peer id.
-const SERVER_ID: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f00112233445566778899aabbccddeeff0";
+/// The server's identity key in these tests, and its public id (64 lowercase hex).
+fn server_key() -> (ember_transport::SecretKey, String) {
+    let key = ember_transport::SecretKey::from_bytes([0x5e; 32]);
+    let id = key.peer_id().to_string();
+    (key, id)
+}
 
 #[tokio::test]
 async fn fr_c2_joined_answer_has_server_peer_id_when_the_transport_is_on() {
-    assert_eq!(SERVER_ID.len(), 64);
-    let f = fx_with_server_id(&[], Some(SERVER_ID));
+    let (key, server_id) = server_key();
+    assert_eq!(server_id.len(), 64);
+    let f = fx_with_server_key(&[], Some(key), true);
     let o = open(&f, "laptop", PEER).await;
     let (st, _) = owner(&f, "POST", &api(&o.id, "/confirm"), Some(json!({}))).await;
     assert_eq!(st, StatusCode::OK);
@@ -1186,11 +1214,11 @@ async fn fr_c2_joined_answer_has_server_peer_id_when_the_transport_is_on() {
     let sid = b["credential"]["server_peer_id"].as_str().expect("the key is present and a string");
     assert_eq!(sid.len(), 64);
     assert!(sid.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)), "{sid}");
-    assert_eq!(sid, SERVER_ID);
-    assert_eq!(
-        b["credential"],
-        json!({ "node_token": token, "name": "laptop", "computer_id": "computer-1", "server_peer_id": SERVER_ID })
-    );
+    assert_eq!(sid, server_id);
+    let mut keys: Vec<&str> = b["credential"].as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(keys, ["computer_id", "name", "sealed_token", "server_peer_id"], "{b}");
+    assert_eq!(opened_token(&b, &o.id), token);
 }
 
 #[tokio::test]
@@ -1206,28 +1234,131 @@ async fn fr_c2_joined_answer_omits_the_key_when_the_transport_is_off() {
     assert!(b["credential"].is_object());
     assert!(b["credential"].get("server_peer_id").is_none(), "absent, not null: {b}");
     assert!(!text(&body).contains("server_peer_id"), "{}", text(&body));
-    // A malformed configured id is dropped by the core, so the key is absent too.
-    let bad = "zz".repeat(32);
-    let f = fx_with_server_id(&[], Some(&bad));
+    // An identity key with the transport off: the redeem answer proves the identity, the joined
+    // answer still carries no id (the node has no transport peer to allow).
+    let (key, server_id) = server_key();
+    let f = fx_with_server_key(&[], Some(key), false);
     let o = open(&f, "laptop", PEER).await;
     let (st, _) = owner(&f, "POST", &api(&o.id, "/confirm"), Some(json!({}))).await;
     assert_eq!(st, StatusCode::OK);
     let (_, _, body) = poll(&f.open_app(), &o.id, Some(&o.secret)).await;
-    assert!(!text(&body).contains("server_peer_id") && !text(&body).contains(&bad), "{}", text(&body));
+    assert!(!text(&body).contains("server_peer_id") && !text(&body).contains(&server_id), "{}", text(&body));
+}
+
+// ---- FR-C2j (#541): the redeem answer proves the server's identity ----
+
+#[tokio::test]
+async fn fr_c2j_redeem_answer_carries_the_server_id_and_a_proof_for_this_node_key() {
+    let (key, server_id) = server_key();
+    for transport_on in [true, false] {
+        let f = fx_with_server_key(&[], Some(key.clone()), transport_on);
+        let (id, code) = mint(&f, "laptop").await;
+        let (st, _, body) = redeem(&f.open_app(), PEER, &code).await;
+        assert_eq!(st, StatusCode::OK, "{}", text(&body));
+        let b = json_of(&body);
+        let mut keys: Vec<&str> = b.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, ["enrol_id", "expires_ms", "poll_secret", "server_peer_id", "server_proof"]);
+        assert_eq!(b["server_peer_id"], server_id.as_str());
+        let proof = b["server_proof"].as_str().unwrap();
+        let node = node_key().public_hex();
+        assert!(verify_proof(&server_id, &id, &node, proof), "the proof verifies for this node key");
+        // Not for another node key (a machine in the middle that swapped the key), not for
+        // another enrolment, and not under another server's id.
+        assert!(!verify_proof(&server_id, &id, &NodeKey::generate().public_hex(), proof));
+        assert!(!verify_proof(&server_id, "another-enrol", &node, proof));
+        let rogue = ember_transport::SecretKey::generate().peer_id().to_string();
+        assert!(!verify_proof(&rogue, &id, &node, proof));
+    }
+}
+
+#[tokio::test]
+async fn fr_c2j_a_refused_redeem_carries_no_identity_and_no_signature() {
+    let (key, server_id) = server_key();
+    let f = fx_with_server_key(&[], Some(key), true);
+    let body = json!({ "code": unknown_code('j'), "node_public_info": node_info() }).to_string();
+    let r = redeem_raw(&f.open_app(), PEER, Some("application/json"), &body).await;
+    assert_eq!(r.0, StatusCode::FORBIDDEN);
+    let t = text(&r.2);
+    assert!(!t.contains("server_proof") && !t.contains("server_peer_id") && !t.contains(&server_id), "{t}");
+}
+
+// ---- FR-C2d (#540): a sniffer with the poll secret cannot read the token ----
+
+/// Everything a passive sniffer on a plain-http path sees: the redeem request and answer (so
+/// the code, the node's public enrol key and the poll secret) and the poll answer that delivers
+/// the credential. None of it contains the token, and with the poll secret the sniffer can only
+/// fetch the same sealed credential, which opens with the node's private key and no other.
+#[tokio::test]
+async fn fr_c2d_a_sniffer_holding_the_poll_secret_cannot_read_the_token_and_the_node_decrypts_it() {
+    let f = fx();
+    let (id, code) = mint(&f, "laptop").await;
+    let request = json!({ "code": code, "node_public_info": node_info() }).to_string();
+    let (st, _, redeem_answer) = redeem_raw(&f.open_app(), PEER, Some("application/json"), &request).await;
+    assert_eq!(st, StatusCode::OK);
+    let secret = json_of(&redeem_answer)["poll_secret"].as_str().unwrap().to_string();
+    let (st, _) = owner(&f, "POST", &api(&id, "/confirm"), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::OK);
+    let token = f.fake.token(0);
+    // The sniffer uses the poll secret it read and takes the delivery before the node does.
+    let (st, _, sniffed) = poll(&f.open_app(), &id, Some(&secret)).await;
+    assert_eq!(st, StatusCode::OK);
+    let wire = format!("{request}\n{}\n{}", text(&redeem_answer), text(&sniffed));
+    assert!(!wire.contains(&token), "the token is nowhere on the wire");
+    assert!(!wire.contains("dpn_") && !wire.contains("node_token"), "{wire}");
+    let b = json_of(&sniffed);
+    assert_eq!(b["status"], "joined");
+    let sealed: Sealed = serde_json::from_value(b["credential"]["sealed_token"].clone()).unwrap();
+    // The token's bytes are not in the sealed text either (hex of the token would be a plain encoding).
+    let token_hex: String = token.bytes().map(|x| format!("{x:02x}")).collect();
+    assert!(!sealed.ct.contains(&token_hex));
+    // What the sniffer holds: the node's PUBLIC key and the sealed credential. Its own keys do
+    // not open it, and neither does a key rebuilt from the public half's bytes.
+    let public_hex = node_key().public_hex();
+    let mut public = [0u8; 32];
+    for (i, byte) in public.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&public_hex[i * 2..i * 2 + 2], 16).unwrap();
+    }
+    for sniffer in [NodeKey::generate(), NodeKey::from_bytes(public), NodeKey::from_bytes([0u8; 32])] {
+        assert!(sniffer.open(&id, &sealed).is_err(), "only the node's private key opens it");
+    }
+    // The node, which holds the private key, reads the token the confirm minted.
+    assert_eq!(node_key().open(&id, &sealed).unwrap().as_str(), token);
+    // The delivery was single-use: nobody gets a second copy.
+    let (_, _, again) = poll(&f.open_app(), &id, Some(&secret)).await;
+    assert_eq!(json_of(&again), json!({ "status": "delivered" }));
+}
+
+/// A node that sends no enrol key (a node from before sealed delivery) is refused at redeem:
+/// there is no cleartext path left to fall back to. [provisional]
+#[tokio::test]
+async fn fr_c2d_a_node_without_an_enrol_key_is_refused_and_the_code_is_not_burnt() {
+    let f = fx();
+    let app = f.open_app();
+    let (id, code) = mint(&f, "old-node").await;
+    let old = json!({ "code": code, "node_public_info": { "hostname": "old-node", "os": "linux" } }).to_string();
+    let r = redeem_raw(&app, PEER, Some("application/json"), &old).await;
+    assert_eq!(r.0, StatusCode::BAD_REQUEST, "{}", text(&r.2));
+    assert_eq!(json_of(&r.2), json!({ "error": BAD_NODE_INFO_MESSAGE, "code": "bad_request" }));
+    let (_, s) = owner(&f, "GET", &api(&id, ""), None).await;
+    assert_eq!(s["status"], "waiting", "the code is still good");
+    let (st, _, body) = redeem(&app, PEER, &code).await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
 }
 
 #[tokio::test]
 async fn fr_c2_the_other_answers_never_carry_the_server_peer_id() {
-    let f = fx_with_server_id(&[], Some(SERVER_ID));
+    let (key, server_id) = server_key();
+    let f = fx_with_server_key(&[], Some(key), true);
     let clean = |what: &str, body: &[u8]| {
         let t = text(body);
-        assert!(!t.contains(SERVER_ID) && !t.contains("server_peer_id"), "{what}: {t}");
+        assert!(!t.contains(&server_id) && !t.contains("server_peer_id"), "{what}: {t}");
     };
-    // Redeem answer.
+    // The redeem answer carries the identity and its proof (FR-C2j); see the test above.
     let (id, code) = mint(&f, "waiting").await;
     let (st, _, body) = redeem(&f.open_app(), PEER, &code).await;
     assert_eq!(st, StatusCode::OK);
-    clean("redeem", &body);
+    assert!(text(&body).contains(&server_id), "the redeem answer names the server");
     let secret = json_of(&body)["poll_secret"].as_str().unwrap().to_string();
     // Waiting.
     let (st, _, body) = poll(&f.open_app(), &id, Some(&secret)).await;
@@ -1238,7 +1369,7 @@ async fn fr_c2_the_other_answers_never_carry_the_server_peer_id() {
     let (st, _) = owner(&f, "POST", &api(&id, "/confirm"), Some(json!({}))).await;
     assert_eq!(st, StatusCode::OK);
     let (_, _, first) = poll(&f.open_app(), &id, Some(&secret)).await;
-    assert!(text(&first).contains(SERVER_ID), "the joined answer is the one that carries it");
+    assert!(text(&first).contains(&server_id), "the joined answer carries it too");
     let (_, _, body) = poll(&f.open_app(), &id, Some(&secret)).await;
     assert_eq!(json_of(&body), json!({ "status": "delivered" }));
     clean("delivered", &body);

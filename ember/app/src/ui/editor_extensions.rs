@@ -673,10 +673,11 @@ pub mod view {
     const NAME: &str = "font-weight:var(--fw-medium); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; flex:0 1 auto; display:block;";
     const VERSION: &str = "color:var(--muted); font-size:var(--fs-xs); flex:none;";
     const META: &str = "color:var(--muted); font-size:var(--fs-xs); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; width:100%; min-width:0; max-width:100%;";
-    /// The buttons get a line of their own at the row's end, right-aligned, so a long name never
-    /// pushes them out of the panel (#798: on the name line 제거 was cut off in the docked panel;
-    /// beside the publisher, the renderer gave the publisher no width).
-    const ACTIONS: &str = "display:flex; align-items:center; justify-content:flex-end; gap:var(--sp2); width:100%;";
+    /// The buttons get a line of their own at the row's end, so a long name never pushes them out
+    /// of the panel (#798: on the name line 제거 was cut off in the docked panel; beside the
+    /// publisher, the renderer gave the publisher no width). A leading `.spacer` right-aligns them,
+    /// as elsewhere in the editor: the renderer honoured justify-content on some rows only (#833).
+    const ACTIONS: &str = "display:flex; align-items:center; gap:var(--sp2); width:100%;";
     const DESCRIPTION: &str = "color:var(--text-2); font-size:var(--fs-xs); white-space:normal; overflow-wrap:anywhere; word-break:break-word; display:block; width:100%; min-width:0; max-width:100%;";
     /// The two lists scroll down, never sideways (#798).
     const LIST: &str = "overflow-x:hidden;";
@@ -704,6 +705,7 @@ pub mod view {
                 if !row.ext.description.is_empty() { div { style: "{DESCRIPTION}", "{row.ext.description}" } }
                 if !meta.is_empty() { div { style: "{META}", "{meta}" } }
                 div { style: "{ACTIONS}",
+                    div { class: "spacer" }
                     if let Some(op) = op {
                         span { role: "status", style: "{VERSION}", "{op.doing()}" }
                     } else {
@@ -735,12 +737,16 @@ pub mod view {
                 }
                 if !row.ext.description.is_empty() { div { style: "{DESCRIPTION}", "{row.ext.description}" } }
                 if !meta.is_empty() { div { style: "{META}", "{meta}" } }
-                div { style: "{ACTIONS}",
-                    if let Some(op) = op {
-                        span { role: "status", style: "{VERSION}", "{op.doing()}" }
-                    } else if !installed && can_manage {
-                        button { class: "ed-pj", style: "{ACTION}", "aria-label": "{install_label}", disabled: any_busy,
-                            onclick: move |_| install_s.run(Op::Install, &install_id, &install_name, &install_host), "설치" }
+                // An installed result with no op running has no buttons, so no empty line (#833).
+                if op.is_some() || (!installed && can_manage) {
+                    div { style: "{ACTIONS}",
+                        div { class: "spacer" }
+                        if let Some(op) = op {
+                            span { role: "status", style: "{VERSION}", "{op.doing()}" }
+                        } else {
+                            button { class: "ed-pj", style: "{ACTION}", "aria-label": "{install_label}", disabled: any_busy,
+                                onclick: move |_| install_s.run(Op::Install, &install_id, &install_name, &install_host), "설치" }
+                        }
                     }
                 }
             }
@@ -903,6 +909,7 @@ pub mod view {
                 assert!(style.contains("display:block"), "ellipsis and wrapping need a block box (dioxus-compose#184): {style}");
             }
             assert!(LIST.contains("overflow-x:hidden"), "the lists never scroll sideways");
+            assert!(!ACTIONS.contains("justify-content"), "a leading .spacer right-aligns the buttons, not justify-content (#833)");
         }
     }
 }

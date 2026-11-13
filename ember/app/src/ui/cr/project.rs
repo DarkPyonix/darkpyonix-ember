@@ -281,7 +281,7 @@ pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32,
     let p = ember_theme().palette;
     let titles = || {
         cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-            Label(title, if compact { Fs::Xl2 } else { Fs::Xl3 }, Weight::Medium, None, Some(1));
+            Label(title, if compact { Fs::Xl2 } else { Fs::Xl3 }, PAGE_TITLE_WEIGHT, None, Some(1));
             if !sub.is_empty() {
                 if gap > 0.0 {
                     cu::Spacer().modifier(Modifier::new().height(gap));
@@ -498,6 +498,13 @@ fn StripArrow(svg: &'static str, enabled: bool, mut on_click: impl FnMut() + 'st
     );
 }
 
+/// `.cchip` (`project.css:176`): 200 by 56 px, design review 2026-11-13 B7.
+pub const COMPUTER_CHIP: (f32, f32) = (200.0, 56.0);
+/// The chip's text width: 200 less the 8 px lead, the 38 px tile, two 10 px gaps and the 14 px end.
+pub const COMPUTER_CHIP_TEXT_W: f32 = 200.0 - 8.0 - 38.0 - 10.0 - 10.0 - 14.0;
+/// The project box's name: `.pbox .pname` `fs-xl` 18/600 (`project.css:174`, `DESIGN.md` 6.2), B7.
+pub const PROJECT_NAME: (Fs, Weight) = (Fs::Xl, Weight::Semibold);
+
 /// `.cchip`: 56 px, an icon tile with a status dot, the name and the status line.
 /// TODO(compose-rust#372): a pointer-up `Clickable`.
 fn ComputerChipView(c: &ComputerChip, on_open: impl FnMut() + 'static) {
@@ -505,7 +512,7 @@ fn ComputerChipView(c: &ComputerChip, on_open: impl FnMut() + 'static) {
     let (_, tone) = reach_pill(c.reachability);
     let dot = super::components::pill_colors(tone.into(), p).0;
     let offline = !matches!(c.reachability, ember_client::state::Reachability::Online);
-    let m = Modifier::new().height(56.0).background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_MD);
+    let m = Modifier::new().size(COMPUTER_CHIP.0, COMPUTER_CHIP.1).background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_MD);
     Clickable(if offline { m.alpha(0.6) } else { m }, Alignment::CenterStart, on_open, || {
         cu::Row().spacing(10.0).alignment(Alignment::CenterStart).content(|| {
             cu::Spacer().modifier(Modifier::new().width(1.0));
@@ -519,8 +526,8 @@ fn ComputerChipView(c: &ComputerChip, on_open: impl FnMut() + 'static) {
                 });
             });
             cu::Column().content(|| {
-                Label(&fit_label(&c.name, 180.0, Fs::Sm.size()), Fs::Sm, Weight::Semibold, None, Some(1));
-                Label(&fit_label(&chip_sub(c), 180.0, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                Label(&fit_label(&c.name, COMPUTER_CHIP_TEXT_W, Fs::Sm.size()), Fs::Sm, Weight::Semibold, None, Some(1));
+                Label(&fit_label(&chip_sub(c), COMPUTER_CHIP_TEXT_W, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             });
             cu::Spacer().modifier(Modifier::new().width(4.0));
         });
@@ -567,7 +574,7 @@ fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
                         // TODO(compose-rust#372): the name opens the full view; a pointer-up `Clickable`.
                         Clickable(Modifier::new().weight(1.0), Alignment::CenterStart, move || full.set(Some(id.clone())), || {
                             cu::Column().content(|| {
-                                Label(&b.name, Fs::Lg, Weight::Semibold, None, Some(1));
+                                Label(&b.name, PROJECT_NAME.0, PROJECT_NAME.1, None, Some(1));
                                 Label(&b.repo_line(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                             });
                         });
@@ -1974,5 +1981,35 @@ mod tests {
         assert_eq!(sheet_scroll_dp(Some("120")), 120.0);
         assert_eq!(sheet_scroll_dp(Some("junk")), 0.0);
         assert_eq!(sheet_scroll_dp(Some("end")), 1450.0);
+    }
+}
+
+/// Design review 2026-11-13 (B7, B8): the project screen against the mockup.
+#[cfg(test)]
+mod design_review_tests {
+    use super::*;
+
+    /// This file without this module, so a source check never finds its own literal.
+    fn source() -> &'static str {
+        let src = include_str!("project.rs");
+        &src[..src.find("mod design_review_tests {").unwrap()]
+    }
+
+    #[test]
+    fn design_b7_computer_chips_are_200_by_56_and_the_name_is_18_600() {
+        assert_eq!(COMPUTER_CHIP, (200.0, 56.0));
+        assert_eq!(COMPUTER_CHIP_TEXT_W, 120.0);
+        assert_eq!(PROJECT_NAME, (Fs::Xl, Weight::Semibold));
+        let src = source();
+        assert!(src.contains("Modifier::new().size(COMPUTER_CHIP.0, COMPUTER_CHIP.1)"));
+        assert!(src.contains("Label(&b.name, PROJECT_NAME.0, PROJECT_NAME.1, None, Some(1));"));
+    }
+
+    #[test]
+    fn design_b8_page_titles_are_32_400() {
+        assert_eq!(PAGE_TITLE_WEIGHT, Weight::Regular);
+        assert!(source().contains("Label(title, if compact { Fs::Xl2 } else { Fs::Xl3 }, PAGE_TITLE_WEIGHT, None, Some(1));"));
+        assert!(include_str!("shell.rs").contains("Label(menu.label(), Fs::Xl3, PAGE_TITLE_WEIGHT, None, None);"));
+        assert!(include_str!("vcs.rs").contains("Label(\"버전 관리\", Fs::Xl3, PAGE_TITLE_WEIGHT, None, None);"));
     }
 }

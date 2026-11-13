@@ -212,6 +212,9 @@ impl AgentAdapter for CodexAdapter {
             // through `thread/resume` instead of rejoined.
             reattachable: false,
             mem_limit_mb: req.mem_limit_mb,
+            // Codex runs its commands under its own Seatbelt / Landlock sandbox; nesting under
+            // Ember's is not measured, so Codex is partial in FR-A11.
+            os_sandbox: false,
         })
         .await
         .with_context(|| format!("starting {} app-server", self.bin.display()))?;

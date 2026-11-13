@@ -3,7 +3,8 @@
 //! Each computer has its own OSE data dir, `<data root>/<computer id>`, passed as
 //! `--server-data-dir` to every OSE started for it and to every extension install, so an
 //! extension is installed once per computer and shared by that computer's folders (SPEC
-//! FR-W4, #459). The data root is `EMBER_OSE_DATA_DIR`, else `<EMBER_DATA_DIR or ~/.ember>/ose-data`.
+//! FR-W4, #459). The data root is `EMBER_OSE_DATA_DIR`, else `<runtime dir>/ose-data`, where the runtime dir is the
+//! data dir's sibling ([`crate::runtime_dir`], FR-A11): `~/.ember-runtime/ose-data` by default.
 //! **Unknown:** how several OSE processes behave on one shared data dir (no lock or race
 //! documentation was found), so nothing here claims it is safe.
 
@@ -255,7 +256,7 @@ pub fn data_root_from(
             })?
             .join(".ember"),
     };
-    Ok(base.join("ose-data"))
+    Ok(crate::runtime_dir::runtime_dir(&base).join("ose-data"))
 }
 
 fn default_data_root() -> Result<PathBuf, String> {

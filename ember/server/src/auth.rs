@@ -26,6 +26,10 @@
 //! `ember.token.<token>`. Never from the query string, which ends up in logs and history. When
 //! the client also offers `ember.v1`, the server answers with that one, so the token is not
 //! echoed back.
+//!
+//! The token is the non-owner credential (SPEC `FR-S12`, #784): the routes that grant authority,
+//! admit a party or change a secret also need owner presence, the in-memory key of
+//! [`crate::owner`]. [`protect_with_owner`] applies both layers, and is what `main.rs` uses.
 
 use std::collections::HashSet;
 use std::io::{Read, Write};
@@ -311,8 +315,19 @@ pub fn protect(router: Router, auth: Arc<ServerAuth>) -> Router {
     router.layer(middleware::from_fn_with_state(auth, guard))
 }
 
+/// The one list of owner routes, for both doors (`FR-S12`).
+pub use crate::owner::owner_route;
+
+/// [`protect`], plus owner presence on the owner routes (`FR-S12`, #784): the Origin and Host
+/// check, then the server token (401), then the owner key on an owner route (403
+/// `owner_required`). The local listener's app is wrapped with this.
+pub fn protect_with_owner(router: Router, auth: Arc<ServerAuth>, owner: Arc<crate::owner::Owner>) -> Router {
+    protect(crate::owner::require(router, owner), auth)
+}
+
 /// `POST /api/server-token/rotate` (#369): rotates the server token. Mount it on the local
-/// listener only, inside [`protect`], so only a caller holding the current token can rotate it.
+/// listener only, inside [`protect_with_owner`]: it is an owner route (`FR-S12`), so the server
+/// token alone does not rotate it.
 /// Answers `{rotated: true, token_file}`; the new token is never in the answer, so a client on
 /// this computer re-reads the file (FR-S11) and a device that only had the old token is locked out.
 pub fn rotate_router(auth: Arc<ServerAuth>) -> Router {

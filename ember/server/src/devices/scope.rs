@@ -46,7 +46,14 @@ impl Scope {
     }
 
     /// Whether this scope allows `method` on `path` (the request path, no query).
+    ///
+    /// An owner route (`FR-S12`, #784) needs `full`: on the transport the device key is the
+    /// owner credential, and a narrow scope is the non-owner one. The check is here and not only
+    /// in the allow-lists, so a family opened to a narrow scope later cannot open an owner route.
     pub fn allows(self, method: &Method, path: &str) -> bool {
+        if self != Scope::Full && crate::owner::owner_route(method, path) {
+            return false;
+        }
         match self {
             Scope::Full => true,
             Scope::ReadOnly => read_only_allows(method, path),
@@ -208,6 +215,24 @@ mod tests {
         assert!(!r.allows(&Method::GET, "/api/devices"));
         assert!(!r.allows(&Method::GET, "/api/sessions/../devices"));
         assert!(!r.allows(&Method::GET, "/auth/callback"));
+    }
+
+    /// FR-S12: `read_only` may read the `computers` family, but an enrol code's status is an
+    /// owner route.
+    #[test]
+    fn fr_s12_no_narrow_scope_reaches_an_owner_route() {
+        for (m, template, class) in crate::owner::ROUTES {
+            if *class != crate::owner::RouteClass::Owner {
+                continue;
+            }
+            let method = Method::from_bytes(m.as_bytes()).unwrap();
+            let path = template.replace('{', "").replace('}', "");
+            assert!(crate::owner::owner_route(&method, &path), "{m} {path}");
+            assert!(Scope::Full.allows(&method, &path), "{m} {path}");
+            for s in [Scope::ReadOnly, Scope::ChatOnly] {
+                assert!(!s.allows(&method, &path), "{} reaches {m} {path}", s.as_str());
+            }
+        }
     }
 
     #[test]

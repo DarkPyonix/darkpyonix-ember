@@ -125,8 +125,10 @@ fn all_sessions() -> Vec<ember_client::wire::SessionRecord> {
 }
 
 /// The round `+` of the list header. `live` is false in demo mode and for review captures: a tap
-/// then says why nothing is created. The overlay button gives it the accessible name and focus
-/// (TODO(compose-rust#425, #429): remove when Button takes content or a semantics modifier exists).
+/// then says why nothing is created. The overlay button gives it the accessible name and focus,
+/// set with `accessible_name` (compose-rust v0.0.7, #429). v0.0.7: #425 fixed
+/// (`Button::content`); workaround kept until checked on a display (the `+` glyph inside a
+/// `Button` content slot must keep the 32 px ring and the demo dimming).
 pub fn NewChannelButton(st: &NewChannelState, live: bool, filter: Option<String>) {
     let p = ember_theme().palette;
     let st = st.clone();
@@ -145,6 +147,7 @@ pub fn NewChannelButton(st: &NewChannelState, live: bool, filter: Option<String>
         .content(|| {
             super::shell::NavIcon(super::shell::ICON_PLUS_SVG, p.text_2.to_argb(), 16.0);
             cu::Button(&label)
+                .accessible_name(&label)
                 .variant(ButtonVariant::Text)
                 .color(compose_rust::Paint::Literal(Color::argb(0)))
                 .modifier(Modifier::new().fill_max_size())
@@ -234,7 +237,8 @@ pub fn NewChannelSheet(st: &NewChannelState, rooms: &[Room], feed: Option<Feed>,
                     Label("이름", Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
                     let _gen = st.generation.get();
                     let d = st.draft.clone();
-                    // TODO(compose-rust#374): the field is uncontrolled.
+                    // v0.0.7: #374 fixed (`TextField::text`); workaround kept until checked on a
+                    // display (a controlled value must not move the caret), so it is uncontrolled.
                     EmberField(FieldOptions {
                         fill_max_width: true,
                         placeholder: "채널 이름".to_string(),

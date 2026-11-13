@@ -1,6 +1,6 @@
 //! compose-rust version of `ui::components` (#220 phase 1): pick chip, pill, card, sheet header,
 //! buttons. Same names and style functions as the Dioxus module; the components are plain
-//! functions that call compose-rust widgets, so a screen composes them inside a `#[composable]`.
+//! functions that call compose-rust widgets, so a screen composes them inside a `#[Composable]`.
 //!
 //! All compose-rust calls live in this file so the API changes coming in compose-rust (#285
 //! `Copy` state handles, #286 `#[Composable]`, #289 and #290 call macros) touch one place.
@@ -13,7 +13,7 @@
 #![allow(non_snake_case)]
 
 use compose_rust::ui as cu;
-use compose_rust::ui::Modifier;
+use compose_rust::ui::{Modifier, Role};
 use compose_rust::{
     Alignment, ButtonVariant, Color, ColorRole, FontRef, FontRefs, GenericFamily, IconRole,
     KeyEvent, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole, WordBreak,
@@ -29,8 +29,9 @@ use super::theme::Palette;
 /// The font stack for prose (`--font`): Inter, then Apple SD Gothic Neo and Noto Sans KR for
 /// Hangul, then the system UI face. The toolkit resolves installed families by name; it has no
 /// way to bundle a font file yet, so Inter applies where it is installed.
-/// TODO(compose-rust#374): `Text` has no `font` property yet, so nothing calls this; wire it
-/// into `Label` and `Txt` (and bundle Inter and Pretendard, #216) when it lands.
+/// v0.0.7: #374 fixed (`Text::font` and `TextField::font` exist); workaround kept until checked on
+/// a display (wiring this stack into `Label` and `Txt` changes every label's face, and Inter and
+/// Pretendard are not bundled yet, #216), so nothing calls this yet.
 #[allow(dead_code)]
 pub fn font_refs(mono: bool) -> FontRefs {
     if mono {
@@ -115,9 +116,10 @@ fn with_height(m: Modifier, height: Option<f32>) -> Modifier {
 ///
 /// This is the container's own `on_click`, which the renderer turns into a button: keyboard
 /// focus, Enter and Space, a button role for screen readers, hover and press state
-/// (compose-rust#372, FR-55). It is not a pointer subscription: the renderer of v0.0.4 accepts
-/// `on_pointer` but never sends the Host a `Pointer` event, so a handler written that way never
-/// runs (the sidebar rows did nothing). Every clickable container in `ui/cr` goes through here.
+/// (compose-rust#372, FR-55). It is not a pointer subscription: a click stays the container's
+/// `on_click` even though the renderer sends `on_pointer` events since v0.0.7 (#417), because
+/// `on_click` is also what Enter, Space and an assistive press run. Every clickable container in
+/// `ui/cr` goes through here; an icon-only one goes through [`NamedClickable`].
 pub fn Clickable(
     modifier: Modifier,
     alignment: Alignment,
@@ -127,15 +129,46 @@ pub fn Clickable(
     cu::Box().modifier(modifier).alignment(alignment).on_click(move || on_click()).content(content);
 }
 
+/// A [`Clickable`] whose child is only an icon or a glyph, named for assistive technology with
+/// `Modifier::label` (compose-rust v0.0.7, #460, #429). `label` is `&'static str` on purpose:
+/// the toolkit keeps every distinct label for the life of the program (at most 4096), so a name
+/// built from data (a routine name, a commit subject) takes a `Button`'s `accessible_name`
+/// instead.
+pub fn NamedClickable(
+    label: &'static str,
+    modifier: Modifier,
+    alignment: Alignment,
+    on_click: impl FnMut() + 'static,
+    content: impl FnOnce(),
+) {
+    Clickable(modifier.label(label).role(Role::Button).click_action(true), alignment, on_click, content);
+}
+
+/// The label of a copy button. The button puts text the screen already holds on the clipboard
+/// with `compose_rust::clipboard::set_text` (compose-rust v0.0.7, #471).
+pub const COPY_LABEL: &str = "복사";
+
+/// What a copy button says after it is pressed: `sent` is whether the toolkit took the text.
+pub fn copy_notice(sent: bool) -> &'static str {
+    if sent { "클립보드에 복사했습니다" } else { "복사하지 못했습니다" }
+}
+
 /// One row of a popup menu: 38 px high, left-aligned `--text`, the chosen row on `--sel`.
 /// The toolkit `Button` as a menu entry centres its label in link colour and stretches the
-/// popup to the window, so rows are Ember's own until `Menu` entries can be styled.
-/// TODO(compose-rust#372): no keyboard focus or role, as for every `Clickable`.
+/// popup to the window, so rows are Ember's own until `Menu` entries can be styled. The row is a
+/// menu item to assistive technology and says which one is chosen (compose-rust v0.0.7, #372,
+/// #429); its visible label is its name.
 pub fn MenuRow(label: &str, width: f32, chosen: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let bg = if chosen { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
     Clickable(
-        Modifier::new().width(width).height(38.0).background(bg).corner_radius(CORNER_SM),
+        Modifier::new()
+            .width(width)
+            .height(38.0)
+            .background(bg)
+            .corner_radius(CORNER_SM)
+            .role(Role::MenuItem)
+            .selected(chosen),
         Alignment::CenterStart,
         on_click,
         || {
@@ -150,7 +183,9 @@ pub fn MenuRow(label: &str, width: f32, chosen: bool, on_click: impl FnMut() + '
 /// A small modal list of options: opaque `--surface`, 1 px `--line`, the `corner-md` radius.
 /// The toolkit `Menu` hangs its popup from the anchor's bottom-start corner and grows upward
 /// over the anchor, with no way to place it below, so option lists are a modal instead.
-/// TODO(compose-rust#383): an anchored popup placed below or beside its anchor.
+/// v0.0.7: #383 fixed (`Select`, `Dropdown::closed`, `MenuItem` and `Popover` open below the
+/// anchor); workaround kept until checked on a display (the toolkit popup must match the
+/// mockup's surface, border and row height before the modal goes).
 pub fn OptionSheet(
     open: bool,
     options: &[String],
@@ -187,7 +222,9 @@ pub fn OptionSheet(
 /// A closed select: a 40 px field showing the chosen option and an arrow, opening an
 /// [`OptionSheet`]. The toolkit `Dropdown` is a wheel on Apple design systems and a flat list
 /// of every option in the tree.
-/// TODO(compose-rust#383): a `Dropdown` presentation that does not depend on the design system.
+/// v0.0.7: #383 fixed (`Select` and `Dropdown::closed(true)` draw a closed field with a
+/// below-anchor popup); workaround kept until checked on a display (the closed field must match
+/// the mockup's 40 px field in both schemes).
 pub fn Select(
     shown: &str,
     options: &[String],
@@ -301,7 +338,8 @@ pub fn Txt(
     };
     let mut t = cu::Text(text).word_break(WordBreak::KeepAll);
     if mono {
-        // The theme's monospace face; the bundled font stack lands with compose-rust#374.
+        // The theme's monospace face. v0.0.7: #374 fixed (`Text::font`); the bundled font stack
+        // waits for the fonts themselves (#216), see `font_refs`.
         t = t.type_role(TypeRole::Mono);
     }
     let mut t = t
@@ -465,7 +503,8 @@ pub fn Pill(text: &str, tone: PillTone, small: bool) {
 }
 
 /// A single-line bar: `pct` (0 to 100) of the track in `fill`. Drawn here rather than with the
-/// toolkit indicator, whose colours are the design system's (compose-rust#377). Hoisted from the
+/// toolkit indicator, whose colours are the design system's (compose-rust#377 made only the
+/// ring's stroke scale; the indicator still takes no colour). Hoisted from the
 /// files screen's `Bar` for the status cards (FR-L18, #349).
 pub fn TrackBar(pct: f32, height: f32, fill: Color) {
     let p = ember_theme().palette;
@@ -588,9 +627,10 @@ pub fn IconButton(icon: IconRole, small: bool, on_click: impl FnMut() + 'static)
         .background(paint(theme.palette.surface))
         .border(1.0, paint(theme.palette.line))
         .shape_role(ShapeRole::Full);
-    // TODO(compose-rust#372): the mockup's 1.5 px line icons (18 px, 16 px small) are SVG
-    // assets that need a clickable container with button semantics; the toolkit glyph is
-    // tinted `--text-2` until then, and the small button shows it small.
+    // v0.0.7: #372 fixed (container `on_click`), and `Button::content` (#425) can hold the
+    // mockup's 1.5 px SVG line icons; workaround kept until checked on a display (moving every
+    // caller to an SVG and a Korean `accessible_name` changes this signature). The toolkit glyph
+    // is tinted `--text-2`, and the small button shows it small.
     cu::Button("")
         .icon(icon)
         .color(paint(theme.palette.text_2))
@@ -650,9 +690,8 @@ pub fn card_colors(selected: bool, p: &Palette) -> (Color, Color) {
     }
 }
 
-/// A card: `surface`, 1 px `line`, the `corner-lg` radius, the card shadow.
-/// TODO(compose-rust#378): corner radii render at about 0.55x the dp value on macOS, so the
-/// card, inset and field corners look tighter than the mockup until that is fixed.
+/// A card: `surface`, 1 px `line`, the `corner-lg` radius, the card shadow (corner radii render
+/// at their dp value since compose-rust#378).
 pub fn EmberCard(
     selected: bool,
     fill_max_width: bool,
@@ -780,10 +819,10 @@ pub(crate) fn sheet_max_height(window_width_dp: f32, window_height_dp: f32, moni
 
 /// The body height used while the window height is unknown (not yet reported).
 ///
-/// TODO(compose-rust#467, compose-rust#479): at 390x844 the implicit window never reports its dp
-/// size (`current_window_size()` reads 0x0 with class Compact, measured on v0.0.6 with the shell
-/// and with a sheet opened by a real press), so every sheet body is this constant. Remove it and
-/// check the 85 percent formula at 390 once the implicit window can opt in to `report_size`.
+/// v0.0.7: #467 and #479 fixed (the window opts in with `with_report_size(true)` in
+/// `shell::window_chrome`, and a 390x844 window sends its first size); workaround kept until
+/// checked on a display (the first composition still reads 0x0 before the first report, measured
+/// 2026-11-06, and the 85 percent formula at 390 needs a real press on each sheet).
 const SHEET_BODY_UNKNOWN_H: f32 = 240.0;
 
 /// The one formula for a sheet body's height: what is left of the sheet's maximum height after
@@ -798,15 +837,15 @@ pub(crate) fn sheet_body_max_height(window_width_dp: f32, window_height_dp: f32,
 }
 
 /// The 32 px round close button of a sheet header, with the mockup's line icon.
-/// TODO(compose-rust#372): a pointer-up subscription; the toolkit's modal calls on_dismiss for Escape and the scrim (not yet checked on a display).
-/// TODO(compose-rust#476, FR-L32, #502): Escape does not close a sheet on a display. The Rust API
-/// of v0.0.6 cannot receive the key: `Key` has only `Enter`, only `TextField` has `on_key_down`,
-/// and there is no request-focus call, so a sheet cannot take focus when it opens. Ember passes
-/// the same close callback (guarded where a guard exists) to the modal's `on_dismiss`, so Escape
-/// closes every sheet as soon as the renderer delivers it.
+/// Its accessible name is "닫기" (compose-rust v0.0.7, #460).
+/// v0.0.7: #476 fixed (containers take `on_key_down`, and `Batch::request_focus` exists);
+/// workaround kept until checked on a display (FR-L32, #502: that Escape reaches the modal's
+/// `on_dismiss`). Ember passes the same close callback (guarded where a guard exists) to the
+/// modal's `on_dismiss`, so Escape closes every sheet once the renderer delivers it.
 pub fn CloseButton(on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    Clickable(
+    NamedClickable(
+        super::a11y::CLOSE,
         Modifier::new()
             .size(H_CTL, H_CTL)
             .background(paint(p.surface))
@@ -843,7 +882,8 @@ pub fn SheetHeader(
 }
 
 /// A responsive modal with the shared header and a scrim (#212).
-/// TODO(compose-rust#294): `corner-xl` squircle corners; plain arcs for now.
+/// v0.0.7: #294 fixed (`Modifier::corner_curve`); workaround kept until checked on a display
+/// (the `corner-xl` squircle must be compared with the mockup in both schemes); plain arcs for now.
 pub fn EmberSheet(
     title: &str,
     open: bool,
@@ -904,12 +944,12 @@ pub fn EmberSheetSized(
 }
 
 /// A filter chip (`.chip`): 32 px, `--ink` when selected, `--surface-2` otherwise, 12 px medium.
-/// TODO(compose-rust#372): a pointer-up `Clickable`.
+/// Its label is its name, and it says whether it is selected (compose-rust v0.0.7, #429).
 pub fn FilterChip(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (bg, ink) = if selected { (p.ink, p.ink_text) } else { (p.surface_2, p.text_2) };
     Clickable(
-        Modifier::new().height(H_CTL).background(paint(bg)).shape_role(ShapeRole::Full),
+        Modifier::new().height(H_CTL).background(paint(bg)).shape_role(ShapeRole::Full).selected(selected),
         Alignment::Center,
         on_click,
         || {
@@ -943,26 +983,34 @@ pub fn search_field_padding(height: f32) -> f32 {
 
 /// The visible gap between the magnifier and the typed text (`.searchbox` gap 8).
 pub const SEARCH_FIELD_GAP: f32 = 8.0;
-/// The leading inset the bare toolkit text field adds before its text. Measured from captures
-/// (a 4 px spacer showed a ~24 px gap), so about 20 px; re-measure if the toolkit changes it.
-pub const SEARCH_FIELD_INSET: f32 = 20.0;
+/// The leading inset the bare toolkit text field adds before its text. The v0.0.6 field has about
+/// 12 px: with the old 20 px assumption the -12 px offset left the magnifier touching the
+/// placeholder (design review 2026-11-13 C4, "Q팀원 검색"). Re-measure if the toolkit changes it.
+pub const SEARCH_FIELD_INSET: f32 = 12.0;
 
-/// The visible icon-to-text gap: no spacer, the field's own inset, and a negative offset that
-/// pulls the field left by `inset - gap`. Assumes [`SEARCH_FIELD_INSET`].
+/// The visible icon-to-text gap: a spacer, the field's own inset and an offset, which together
+/// always come to [`SEARCH_FIELD_GAP`].
 pub fn search_field_gap() -> f32 {
-    search_field_offset() + SEARCH_FIELD_INSET
+    search_field_spacer() + search_field_offset() + SEARCH_FIELD_INSET
 }
 
-/// The negative x offset applied to the bare field so the visible gap is [`SEARCH_FIELD_GAP`].
+/// The spacer between the magnifier and the field, for an inset smaller than the gap.
+pub fn search_field_spacer() -> f32 {
+    (SEARCH_FIELD_GAP - SEARCH_FIELD_INSET).max(0.0)
+}
+
+/// The negative x offset applied to the bare field, for an inset larger than the gap.
 pub fn search_field_offset() -> f32 {
-    -(SEARCH_FIELD_INSET - SEARCH_FIELD_GAP)
+    (SEARCH_FIELD_GAP - SEARCH_FIELD_INSET).min(0.0)
 }
 
 /// A search box: white fill, 1 px border, pill radius, a leading magnifier and a bare field that
 /// takes the rest of the row. Width intent: it fills its column (`fill_max_width`); the mockup's
 /// 280/220 px is for the standalone box, which a caller gets by constraining the parent. The
 /// compact (36 px) field uses the `Label` role (Fs::Sm, 13 px) like the mockup's session field. The field is uncontrolled and keeps its hint `placeholder`.
-/// TODO(compose-rust#376, #374): the field frame and leading icon belong to the toolkit field.
+/// v0.0.7: #376 and #374 fixed (`TextField` takes the node's background, border and shape, and
+/// `text`); workaround kept until checked on a display (the bare field inside Ember's own pill
+/// must be compared with the mockup before the frame moves onto the field).
 pub fn SearchField(placeholder: &str, height: f32, on_change: impl FnMut(String) + 'static) {
     let p = ember_theme().palette;
     let placeholder = placeholder.to_string();
@@ -980,6 +1028,9 @@ pub fn SearchField(placeholder: &str, height: f32, on_change: impl FnMut(String)
         .content(move || {
             cu::Spacer().modifier(Modifier::new().width(search_field_padding(height)));
             super::shell::NavIcon(super::shell::ICON_SEARCH_SVG, p.muted.to_argb(), SEARCH_ICON_SIZE);
+            if search_field_spacer() > 0.0 {
+                cu::Spacer().modifier(Modifier::new().width(search_field_spacer()));
+            }
             // The field takes the row's remaining width by weight, so it never overruns it.
             let cb = on_change.clone();
             let placeholder = placeholder.clone();
@@ -1021,8 +1072,11 @@ mod tests {
 
     #[test]
     fn fr_l10_1_search_field_visible_gap_is_8() {
+        // Design review 2026-11-13 C4: 8 px after the magnifier, with the field's 12 px inset.
         assert_eq!(search_field_gap(), 8.0);
-        assert_eq!(search_field_offset(), -12.0);
+        assert_eq!(SEARCH_FIELD_INSET, 12.0);
+        assert_eq!(search_field_offset(), -4.0);
+        assert_eq!(search_field_spacer(), 0.0);
     }
 
     #[test]
@@ -1304,7 +1358,7 @@ mod tests {
 
     static DISMISSES: AtomicUsize = AtomicUsize::new(0);
 
-    #[composable]
+    #[Composable]
     fn host_sheet() {
         EmberSheet("설정", true, || { DISMISSES.fetch_add(1, Ordering::SeqCst); }, None, || {});
     }
@@ -1366,6 +1420,19 @@ mod tests {
     }
 
     #[test]
+    fn copy_button_says_whether_the_text_was_copied() {
+        // compose-rust#471 (v0.0.7): a copy button writes through the toolkit clipboard.
+        assert_eq!(copy_notice(true), "클립보드에 복사했습니다");
+        assert_eq!(copy_notice(false), "복사하지 못했습니다");
+        assert!(compose_rust::clipboard::set_text("ember").is_ok());
+        for file in [include_str!("channel_owner.rs"), include_str!("add_computer.rs")] {
+            let prod = file.split("#[cfg(test)]").next().unwrap();
+            assert!(prod.contains("compose_rust::clipboard::set_text("));
+            assert!(!prod.contains("TODO(compose-rust#471)"));
+        }
+    }
+
+    #[test]
     fn fr_l10_1_cr_screens_use_safe_label_builders() {
         use std::fs;
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/cr");
@@ -1391,7 +1458,8 @@ mod tests {
                 "routines.rs" => 2,
                 // FocusOverlay and the StashPill accessible-name overlay (FR-G6, #350).
                 "vcs.rs" => 2,
-                // The accessible-name overlay of the channel + button (#499, compose-rust#429).
+                // The accessible-name overlay of the channel + button (#499); it keeps its
+                // visible text and `accessible_name` until #425's content slot is checked.
                 "new_channel.rs" => 1,
                 _ => 0,
             };
@@ -1426,12 +1494,12 @@ mod tests {
     // ---- FR-L10: a navigation row is a control the renderer can click -----------------------
 
     use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
-    use compose_rust::{composable, EventPayload, Host, PropertyKind, Recomposer};
+    use compose_rust::{Composable, EventPayload, Host, PropertyKind, Recomposer};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static CLICKS: AtomicUsize = AtomicUsize::new(0);
 
-    #[composable]
+    #[Composable]
     fn host_clickables() {
         use crate::ui::shell::{NavBadge, NavMenu};
         use crate::ui::cr::shell::{NavRow, RailItem, ToolRow};

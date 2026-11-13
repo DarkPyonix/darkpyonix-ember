@@ -87,6 +87,8 @@ pub enum ReadPurpose {
     Replace { id: u64 },
     /// A file that is not open, read for workspace edit `id` (FR-L31.13).
     WorkspaceEdit { id: u64 },
+    /// A local resource request `request` of webview `handle` (FR-E8).
+    WebviewResource { handle: String, request: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -134,6 +136,8 @@ pub enum Input {
     AnswerMessage { id: u64, handle: Option<i64> },
     /// A language feature the window asks for (FR-L31.13); answered with [`SessionUpdate::Language`].
     Language(crate::language::LanguageRequest),
+    /// An event of an extension webview or its host (FR-E8).
+    Webview(crate::webview::WebviewEvent),
     /// Nothing happened; run due timers.
     Tick,
 }
@@ -223,6 +227,8 @@ pub enum SessionUpdate {
     Languages { languages: Vec<LanguageInfo> },
     /// The answer to a language feature request (FR-L31.13).
     Language(crate::language::LanguageUpdate),
+    /// An extension webview changed (FR-E8): the window applies it to its webview host and panes.
+    Webview(crate::webview::WebviewUpdate),
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +246,8 @@ enum Pending {
     Search { id: u64 },
     /// A call of the language features (FR-L31.13).
     Language(language::PendingLang),
+    /// A call of the webview model (FR-E8).
+    Webview(crate::webview::Pending),
 }
 
 /// The running search: the window's id, the provider session, its call, and the open documents whose
@@ -312,6 +320,8 @@ pub struct SessionCore {
     replaces: HashMap<u64, ReplaceJob>,
     replace_writes: HashMap<Token, ReplaceWrite>,
     lang: language::LangState,
+    /// Extension webviews (FR-E8).
+    webviews: crate::webview::Webviews,
     next_token: Token,
     next_generation: u64,
     next_editor: u64,
@@ -378,6 +388,7 @@ impl SessionCore {
             replaces: HashMap::new(),
             replace_writes: HashMap::new(),
             lang: language::LangState::default(),
+            webviews: crate::webview::Webviews::new(),
             next_token: 0,
             next_generation: 0,
             next_editor: 0,
@@ -446,6 +457,10 @@ impl SessionCore {
                 }
             }
             Input::Language(request) => self.on_language(request),
+            Input::Webview(event) => {
+                let out = self.webviews.on_event(event);
+                self.apply_webview(out);
+            }
             Input::Tick => {}
         }
         self.run_timers();
@@ -1496,6 +1511,19 @@ impl SessionCore {
 
     fn on_exthost_request(&mut self, r: IncomingRequest) {
         self.reply_seq += 1;
+        if ember_editor_conn::webview::WebviewCall::is_webview_proxy(r.proxy) {
+            match ember_editor_conn::webview::WebviewCall::parse(&r) {
+                Ok(Some(call)) => {
+                    let out = self.webviews.on_call(r.req, call);
+                    self.apply_webview(out);
+                    return;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("ember-editor: cannot decode webview call {:?}.{}: {e}", r.proxy, r.method);
+                }
+            }
+        }
         let parsed = MainThreadCall::parse(&r);
         match parsed {
             Ok(MainThreadCall::DiagnosticsChangeMany { owner, entries }) => {
@@ -1774,6 +1802,35 @@ impl SessionCore {
             }
             Pending::Search { id } => self.on_search_reply(id, result),
             Pending::Language(pending) => self.on_language_reply(token, pending, result),
+            Pending::Webview(pending) => {
+                let out = self.webviews.on_reply(pending, result);
+                self.apply_webview(out);
+            }
+        }
+    }
+
+    // ---- extension webviews (FR-E8) -----------------------------------------------------------
+
+    /// The webview model of this session.
+    pub fn webviews(&self) -> &crate::webview::Webviews {
+        &self.webviews
+    }
+
+    fn apply_webview(&mut self, out: Vec<crate::webview::Out>) {
+        use crate::webview::Out;
+        for o in out {
+            match o {
+                Out::Rpc(call) => self.rpc(call),
+                Out::RpcWith(call, pending) => {
+                    self.rpc_with(call, Pending::Webview(pending));
+                }
+                Out::Respond { req, reply } => self.respond(req, Ok(reply)),
+                Out::Ui(update) => self.ui(SessionUpdate::Webview(update)),
+                Out::ReadFile { uri, handle, request } => {
+                    self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::WebviewResource { handle, request } })
+                }
+                Out::Command { id, arguments } => self.run_command(CommandDto { id, title: String::new(), tooltip: None, arguments }),
+            }
         }
     }
 
@@ -1843,6 +1900,10 @@ impl SessionCore {
             ReadPurpose::Grammar { scope } => self.on_grammar_read(&scope, &uri, result),
             ReadPurpose::Replace { id } => self.on_replace_read(id, uri, result),
             ReadPurpose::WorkspaceEdit { id } => self.on_workspace_edit_read(id, uri, result),
+            ReadPurpose::WebviewResource { handle, request } => {
+                let out = self.webviews.on_resource_read(handle, request, &uri, result);
+                self.apply_webview(out);
+            }
         }
     }
 

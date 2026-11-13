@@ -16,7 +16,7 @@ use compose_rust::{Alignment, SpaceRole};
 use ember_client::channels::{CreatedInvite, Guest, GuestDoorState, Invite};
 
 use super::components::{
-    AppButton, ButtonKind, EmberField, EmberSheet, FieldOptions, FilterChip, Label, Pill, PillTone, SheetFooter,
+    AppButton, ButtonKind, copy_notice, EmberField, EmberSheet, FieldOptions, FilterChip, Label, Pill, PillTone, SheetFooter, COPY_LABEL,
 };
 use super::home::text_px;
 use super::notice;
@@ -469,13 +469,15 @@ fn InviteSection(channel: &str, st: &OwnerState) {
         Label("127.0.0.1 같은 내 컴퓨터 주소나 0.0.0.0 주소는 밖에서 닿지 않습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
     }
     if let Some(c) = created.filter(|_| status.can_copy()) {
-        // TODO(compose-rust#471): no clipboard facility in the app or the toolkit, so the link is
-        // shown as text to select and the 복사 button waits.
         // A read-only look: the field starts with the link, enabled so it can be selected and
         // copied with Cmd+C / Ctrl+C. The toolkit has no read_only flag, so typing into it changes
-        // only what is drawn, never the link.
-        // TODO(compose-rust#471): replace with a 복사 button once the clipboard can be written.
+        // only what is drawn, never the link. 복사 puts the link on the clipboard through the
+        // toolkit (compose-rust v0.0.7, #471); the link is never logged.
         EmberField(FieldOptions { fill_max_width: true, text: Some(c.link.clone()), ..Default::default() });
+        let link = c.link.clone();
+        AppButton(COPY_LABEL, None, ButtonKind::Default, true, true, false, move || {
+            notice::post(copy_notice(compose_rust::clipboard::set_text(&link).is_ok()));
+        });
         Label("이 링크는 지금만 보입니다. 닫으면 다시 볼 수 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
     }
     if let Some(n) = st.note.get() {
@@ -560,7 +562,8 @@ fn GuestList(channel: &str, st: &OwnerState) {
     cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
         // Read here so a generation bump redraws the field empty.
         let _gen = st.custom_gen.get();
-        // TODO(compose-rust#374): the field is uncontrolled with no initial value.
+        // v0.0.7: #374 fixed (`TextField::text`); workaround kept until checked on a display (a
+        // controlled value must not move the caret), so the field is uncontrolled.
         let (text, hours) = (st.custom.clone(), st.hours.clone());
         EmberField(FieldOptions {
             weight: Some(1.0),

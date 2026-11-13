@@ -254,12 +254,16 @@ fn fr_l31_leaving_an_empty_new_name_field_closes_it_and_a_typed_name_stays() {
     let mut page = Page::open();
     let field_label = "새 파일 이름";
 
+    // 새 파일 is in the header "+" menu (owner placement rule 2026-11-13, rule 1).
+    crate::ui::editor_tree_menu::close();
+    page.click("aria-label", "추가");
     page.click("aria-label", "새 파일");
     let field = page.find("aria-label", field_label).expect("the new-name field");
     page.dom.blur(field);
     page.dom.render();
     assert!(page.find("aria-label", field_label).is_none(), "an empty field closes on blur");
 
+    page.click("aria-label", "추가");
     page.click("aria-label", "새 파일");
     let field = page.find("aria-label", field_label).expect("the new-name field again");
     page.dom.input(field, "notes.md");
@@ -269,4 +273,50 @@ fn fr_l31_leaving_an_empty_new_name_field_closes_it_and_a_typed_name_stays() {
     page.dom.render();
     assert!(page.find("aria-label", field_label).is_some(), "a typed name stays after blur");
     assert!(page.sent().iter().all(|c| !c.starts_with("create")), "blur creates nothing");
+}
+
+// FR-L31 (#832, #827 rule 2): Shift+F10 or the context-menu key on a focused tree row opens the
+// tree's context menu with the row's items, as in Code-OSS. This pins Ember's side of the key
+// path; on the v0.0.6 pin the renderer sends only Enter (compose-rust#100), so a real run does not
+// reach this handler yet.
+#[test]
+fn fr_l31_shift_f10_and_the_context_menu_key_on_a_tree_row_open_its_context_menu() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    crate::ui::editor_tree_menu::close();
+    page.click_row();
+    let row_of = |page: &Page| {
+        page.find_where("the a.rs tree row", |id| {
+            page.attr(id, "role").as_deref() == Some("treeitem") && page.attr(id, "aria-label").as_deref() == Some("a.rs")
+        })
+        .expect("the a.rs row in the project tree")
+    };
+
+    for (key, code, modifiers) in [
+        (Key::F10, Code::F10, Modifiers::SHIFT),
+        (Key::ContextMenu, Code::ContextMenu, Modifiers::empty()),
+    ] {
+        crate::ui::editor_tree_menu::close();
+        page.redraw();
+        assert!(page.find("aria-label", "프로젝트 메뉴").is_none(), "no menu before {key:?}");
+        let row = row_of(&page);
+        page.dom.key_down(row, key.clone(), code, modifiers);
+        page.dom.render();
+        assert_eq!(
+            crate::ui::editor_tree_menu::open_menu(),
+            Some(crate::ui::editor_tree_menu::TreeMenuAt::Keyboard),
+            "{key:?} opens the keyboard context menu"
+        );
+        assert!(page.find("aria-label", "프로젝트 메뉴").is_some(), "{key:?} shows the menu");
+        let rename = page.find("aria-label", "이름 바꾸기").expect("the row's rename item");
+        assert_eq!(page.attr(rename, "aria-disabled").as_deref(), Some("false"), "the row's items are enabled");
+    }
+
+    // F10 alone is not the menu key.
+    crate::ui::editor_tree_menu::close();
+    page.redraw();
+    let row = row_of(&page);
+    page.dom.key_down(row, Key::F10, Code::F10, Modifiers::empty());
+    page.dom.render();
+    assert_eq!(crate::ui::editor_tree_menu::open_menu(), None);
 }

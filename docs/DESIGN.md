@@ -415,6 +415,20 @@ header switches project.
   by default or the official build), **JetBrains Gateway** (a command to the Gateway installed on
   that computer). The choice is remembered.
 - **Editor look** [user, D25, 2026-10-25] The Ember 에디터 window uses the app's own style: rounded island panels for the code area, tabs and tool windows, matching the JetBrains Islands concept. The left and right tool-window stripes are 40 px, icon only, with no white background or shadow on the selected button, only a faint selection tint. Breadcrumbs sit under the tabs [provisional, a leader decision]. The visual source is `.scratch/design-mockup/editor.html`. The keymap (VS Code or JetBrains, `INTENT.md` D32, `FR-L30`) changes the shortcut hints and keys, not the layout.
+- **Where features beyond the mockup go** [user, 2026-11-13: "엠버 디자인 추천대로 해", the owner
+  approving the leader's placement plan] The editor does what Code-OSS does (D38), and anything the
+  mockup has no place for goes into a surface the mockup already has, so the chrome stays the
+  mockup's. (1) 프로젝트 tool-window header: the mockup's three actions (collapse all, locate the open
+  file, hide) and one "+" button whose menu holds new file and new folder. (2) Tree rows carry no
+  inline icons; delete, rename (F2), close and multi-select moves are in the tree's context menu.
+  (3) No 검색 stripe: file search opens from the top find pill (⌘P, ⇧⌘F). (4) The stripes are the
+  mockup's: left 프로젝트, 커밋, Git; bottom 터미널, 실행, 문제. 출력 is a tab of the bottom tool window
+  next to 문제, not a stripe. (5) The top bar has no ⋯: run configuration, run, stop, ask agent, theme.
+  The tab strip's ⋯ menu lists the mockup's items first and, under a separator, Ember's additions
+  (find in file, reopen closed, settings, auto save, the tab's items, close editor). (6) Session
+  header actions are icon-only buttons with tooltips, as in the mockup. Why: every extra that grew
+  its own button made the chrome drift from the mockup (design review 2026-11-13, A8, A13, A14, A15,
+  B6).
 - **Multi view**: user-defined **tabs**, each holding its own pane layout, saved per project.
   No pane-count picker [user, FEEDBACK v7: "에이전트 수를 고를 수 있도록 하는 기능은 필요 없을거
   같고 탭을 추가해서 여러 pane을 사용자가 배치할 수 있도록 해줘."]. Panes are dragged by their

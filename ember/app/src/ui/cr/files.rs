@@ -426,7 +426,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                         cu::Spacer().modifier(Modifier::new().height(PHONE_MENU_ROW));
                     }
                     HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, w <= 900.0, 6.0, || {
-                        // TODO(compose-rust#460): no label modifier, so the share button has no accessible name "공유 시트 열기".
+                        // The share button is named "공유 시트 열기" (compose-rust v0.0.7, #460).
                         ShareButton(compact, {
                             let o = share_open.clone();
                             move || o.set(true)
@@ -498,7 +498,9 @@ pub fn page_pad(width_dp: f32) -> f32 {
 const PHONE_MENU_ROW: f32 = 19.0;
 
 /// `EMBER_CR_SCROLL=<dp|bottom|agents|tray|transfers|history>` for review captures: the toolkit
-/// cannot scroll a column from code (TODO(compose-rust#385)), so the blocks that would have
+/// could not scroll a column from code before v0.0.5 (v0.0.7: #385 fixed with
+/// `ScrollState::scroll_to`; workaround kept until checked on a display, because the capture
+/// script relies on it), so the blocks that would have
 /// scrolled out, by estimated height, are left out.
 struct Skip(std::cell::Cell<f32>);
 
@@ -812,8 +814,8 @@ pub fn path_name(p: PathKind) -> &'static str {
 
 /// `.fl-dev`: a device card: the kind glyph with its presence dot, the name, the system line, and
 /// the path pill with the latency beside it (or the state and when it was last seen). The whole
-/// tile sends to the device (it opens the send sheet), as in the mockup.
-/// TODO(compose-rust#372): a pointer-up `Clickable`.
+/// tile sends to the device (it opens the send sheet), as in the mockup. The tile is the
+/// container's `on_click` (compose-rust#372); its text names it.
 fn DeviceTile(d: &Device, info: Option<&DeviceInfo>, on_send: impl FnMut(String) + 'static) {
     let p = ember_theme().palette;
     let id = d.id.clone();
@@ -874,8 +876,7 @@ pub fn agent_host(project: &str) -> String {
 
 /// An agent's tile: its character (48 px, as the mockup's `.fl-dev-ic.bot`), name, computer and
 /// task, its status, and actions to open its conversation (`ui.open_conversation`) or send files
-/// to the computer it works on.
-/// TODO(compose-rust#372): a pointer-up `Clickable`.
+/// to the computer it works on. The tile is the container's `on_click` (compose-rust#372).
 fn AgentTile(m: &CrewMember, ui: &SharedUi, text_w: f32, on_send: impl FnMut(String) + 'static) {
     let p = ember_theme().palette;
     let send_id = m.id.clone();
@@ -1016,11 +1017,13 @@ fn FileChip(icon: &'static str, tone: PillTone) {
         .content(|| NavIcon(icon, fg.to_argb(), 16.0));
 }
 
-/// A 32 px round icon button with a line glyph (`.icon-btn.sm`).
-/// TODO(compose-rust#372): a pointer-up `Clickable`; the toolkit has no pause or play glyph.
-fn RoundGlyph(icon: &'static str, on_click: impl FnMut() + 'static) {
+/// A 32 px round icon button with a line glyph (`.icon-btn.sm`), named by `label` for assistive
+/// technology (compose-rust v0.0.7, #372, #460). The toolkit has no pause or play glyph, so the
+/// glyph is Ember's SVG.
+fn RoundGlyph(icon: &'static str, label: &'static str, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    Clickable(
+    super::components::NamedClickable(
+        label,
         Modifier::new().size(H_CTL, H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
         Alignment::Center,
         on_click,
@@ -1029,7 +1032,8 @@ fn RoundGlyph(icon: &'static str, on_click: impl FnMut() + 'static) {
 }
 
 /// A single-line bar: `pct` of the track in `fill` (`.fl-bar`). Drawn here rather than with the
-/// toolkit indicator, whose colours are the design system's (compose-rust#377), so the done part
+/// toolkit indicator, whose colours are the design system's (compose-rust#377 made only the
+/// ring's stroke scale), so the done part
 /// is the token colour and the rest the track in both schemes.
 fn Bar(pct: u32, height: f32, fill: compose_rust::Color) {
     super::components::TrackBar(pct.min(100) as f32, height, fill);
@@ -1109,8 +1113,14 @@ fn TransferRow(t: &Transfer, devices: &[Device], st: &State) {
                     svc.control(&id, action);
                     st_ver.set(st_ver.get_untracked() + 1);
                 };
+                let name = match action {
+                    TransferAction::Pause => "일시 정지",
+                    TransferAction::Resume => "재개",
+                    TransferAction::Retry => "다시 시도",
+                    _ => "시작",
+                };
                 match glyph {
-                    Some(g) => RoundGlyph(g, on_act),
+                    Some(g) => RoundGlyph(g, name, on_act),
                     None => IconButton(IconRole::Close, true, on_act),
                 }
             }
@@ -1176,7 +1186,7 @@ fn ReceivedTile(f: &ReceivedFile, at: Option<&str>) {
         cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
             // TODO(FR-F8): opening and revealing a received file need the transfer client.
             AppButton("열기", None, ButtonKind::Default, true, true, false, || notice::post(UNAVAILABLE));
-            RoundGlyph(ICON_FOLDER, || notice::post(UNAVAILABLE));
+            RoundGlyph(ICON_FOLDER, "폴더에서 보기", || notice::post(UNAVAILABLE));
         });
     });
 }
@@ -1277,15 +1287,20 @@ fn HistoryRow(h: &HistoryEntry) {
 // --- the send sheet ---------------------------------------------------------------------------
 
 /// A receiver chip of the send sheet (`.fl-tg`): an outlined pill with the device glyph or the
-/// agent's character; the selected one takes the `ink` border, an offline one is dimmed.
-/// TODO(compose-rust#372): a pointer-up `Clickable`.
+/// agent's character; the selected one takes the `ink` border, an offline one is dimmed. It is
+/// the container's `on_click` (compose-rust#372) and says whether it is selected (v0.0.7, #429).
 fn TargetChip(label: &str, icon: TargetIcon, selected: bool, disabled: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let fill = if selected { p.sel } else { p.surface };
     let border = if selected { p.ink } else { p.line };
-    let mut m = Modifier::new().height(H_CTL).background(paint(fill)).border(1.0, paint(border)).shape_role(ShapeRole::Full);
+    let mut m = Modifier::new()
+        .height(H_CTL)
+        .background(paint(fill))
+        .border(1.0, paint(border))
+        .shape_role(ShapeRole::Full)
+        .selected(selected);
     if disabled {
-        m = m.alpha(0.5);
+        m = m.alpha(0.5).disabled(true);
     }
     Clickable(m, Alignment::CenterStart, on_click, || {
         cu::Row().alignment(Alignment::CenterStart).content(|| {
@@ -1462,13 +1477,13 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
 // --- the share sheet (FR-L27.7) -----------------------------------------------------------------
 
 /// The header's "공유 시트" button (`.fl-sharebtn`): a 32 px outlined pill with the share glyph
-/// and the label; icon only on a phone (`.lbl{display:none}`).
-/// TODO(compose-rust#372): a pointer-up `Clickable`.
+/// and the label; icon only on a phone (`.lbl{display:none}`). Named "공유 시트 열기" in both
+/// forms (compose-rust v0.0.7, #460).
 fn ShareButton(compact: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let m = Modifier::new().height(H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full);
     let m = if compact { m.width(H_CTL) } else { m };
-    Clickable(m, Alignment::Center, on_click, || {
+    super::components::NamedClickable(super::a11y::SHARE, m, Alignment::Center, on_click, || {
         cu::Row().spacing(SP[1]).alignment(Alignment::Center).content(|| {
             NavIcon(ICON_SHARE, p.text_2.to_argb(), 16.0);
             if !compact {
@@ -1530,7 +1545,7 @@ fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMemb
     let dev_lines = super::project::wrap_lines(&dev_widths, SP[3], inner);
     let ag_widths: Vec<f32> = agents.iter().map(|_| 72.0).collect();
     let ag_lines = super::project::wrap_lines(&ag_widths, SP[3], inner);
-    // TODO(compose-rust#460): the sheet header's close button has no accessible name "닫기" (no label modifier).
+    // The sheet header's close button is named "닫기" (`CloseButton`, compose-rust v0.0.7, #460).
     EmberSheetSized("공유 시트", is_open, SHARE_SHEET_WIDTH, false, close, None, || {
         cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_h).background(paint(p.surface_2))).content(|| {
             cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {

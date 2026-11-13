@@ -1,9 +1,9 @@
 [package]
 name = "ember-app"
 version = "0.1.0"
-# dioxus-compose is edition 2024 / Rust 1.85; this crate follows it.
+# dioxus-compose is edition 2024 / Rust 1.88 (3f8fc4a1); this crate follows it.
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Ember native client: launcher and conversation UI on dioxus-compose, no webview (SPEC §L, E1)"
 license = "Apache-2.0"
 publish = false
@@ -26,8 +26,8 @@ path = "src/main.rs"
 # ("Local dioxus-compose"). The crate's build script fetches the renderer for its version; set
 # DIOXUS_COMPOSE_RENDERER_DIR to use a renderer you built yourself.
 # TODO: 배포되면 버전 의존성으로 바꾼다 (compose-rust and dioxus-compose are not yet published).
-compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", tag = "v0.0.6", default-features = false }
-dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "877ef59d4ac8341ec26e1bf8af577f12e23a4367" }
+compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", tag = "v0.0.7", default-features = false }
+dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "3f8fc4a173ecce0d0621be7a9af5d814c30614f8" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
 ember-client = { path = "../client" }

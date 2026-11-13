@@ -24,6 +24,9 @@ use crate::store::{now_ms, Store};
 
 pub mod api;
 pub mod schema;
+pub mod scope;
+
+pub use scope::Scope;
 
 /// An allowed device.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -33,6 +36,8 @@ pub struct Device {
     pub created_at: i64,
     /// `local` (added by hand) or `hub` (synced from the hub account).
     pub source: String,
+    /// What the device may call over the transport (FR-N8, #366). `full` by default.
+    pub scope: Scope,
 }
 
 /// Where a device row came from.
@@ -87,15 +92,23 @@ impl Devices {
     pub fn list(&self) -> Result<Vec<Device>, DeviceError> {
         let conn = self.store.conn();
         let mut stmt =
-            conn.prepare("SELECT peer_id, name, created_at, source FROM devices ORDER BY created_at, name")?;
+            conn.prepare("SELECT peer_id, name, created_at, source, scope FROM devices ORDER BY created_at, name")?;
         let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (peer, name, created_at, source) = row?;
+            let (peer, name, created_at, source, scope) = row?;
+            // An unknown value (a newer server's scope) is read as the narrowest one.
+            let scope = scope.parse::<Scope>().unwrap_or(Scope::ChatOnly);
             match peer.parse::<PeerId>() {
-                Ok(peer_id) => out.push(Device { peer_id, name, created_at, source }),
+                Ok(peer_id) => out.push(Device { peer_id, name, created_at, source, scope }),
                 Err(e) => tracing::warn!("ignoring device row with invalid peer id {peer:?}: {e}"),
             }
         }
@@ -109,15 +122,50 @@ impl Devices {
         if name.is_empty() {
             return Err(DeviceError::BadRequest("device name must not be empty".into()));
         }
-        let d = Device { peer_id: peer, name: name.to_string(), created_at: now_ms(), source: SOURCE_LOCAL.into() };
+        let mut d = Device {
+            peer_id: peer,
+            name: name.to_string(),
+            created_at: now_ms(),
+            source: SOURCE_LOCAL.into(),
+            scope: Scope::Full,
+        };
         self.store.conn().execute(
             "INSERT INTO devices (peer_id, name, created_at, source) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(peer_id) DO UPDATE SET name = ?2, source = ?4",
             params![peer.to_string(), d.name, d.created_at, SOURCE_LOCAL],
         )?;
+        // Renaming an existing row keeps its scope (FR-N8): re-adding is not a way to widen it.
+        d.scope = self.scope_of(&peer).unwrap_or(Scope::Full);
         self.gate.allow(peer);
         tracing::info!(peer = %peer.fmt_short(), name = %d.name, "device allowed");
         Ok(d)
+    }
+
+    /// The scope of an allowed device, `None` when the peer has no row (FR-N8). The transport
+    /// door calls this on every request, so it is one indexed lookup.
+    pub fn scope_of(&self, peer: &PeerId) -> Option<Scope> {
+        let conn = self.store.conn();
+        let v: Option<String> = conn
+            .query_row("SELECT scope FROM devices WHERE peer_id = ?1", params![peer.to_string()], |r| r.get(0))
+            .ok();
+        v.map(|s| s.parse().unwrap_or(Scope::ChatOnly))
+    }
+
+    /// Sets the scope of an allowed device (FR-N8). Owner only: the [`api`] router that calls
+    /// this is served on the local listener, never on the transport.
+    pub fn set_scope(&self, peer: &PeerId, scope: Scope) -> Result<Device, DeviceError> {
+        let n = self.store.conn().execute(
+            "UPDATE devices SET scope = ?2 WHERE peer_id = ?1",
+            params![peer.to_string(), scope.as_str()],
+        )?;
+        if n == 0 {
+            return Err(DeviceError::NotFound(peer.to_string()));
+        }
+        tracing::info!(peer = %peer.fmt_short(), scope = scope.as_str(), "device scope set");
+        self.list()?
+            .into_iter()
+            .find(|d| d.peer_id == *peer)
+            .ok_or_else(|| DeviceError::NotFound(peer.to_string()))
     }
 
     /// Makes the `hub` rows equal to `listed` (the hub account's devices, without this server):

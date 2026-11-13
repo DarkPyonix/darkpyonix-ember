@@ -179,13 +179,13 @@ fn fr_w4_ose_data_dir_a_computer_id_cannot_escape_the_root() {
 fn fr_w4_ose_data_dir_root_resolution() {
     let p = |s: &str| Some(PathBuf::from(s));
     assert_eq!(data_root_from(p("/o"), p("/d"), p("/h")).unwrap(), PathBuf::from("/o"));
-    assert_eq!(data_root_from(None, p("/d"), p("/h")).unwrap(), PathBuf::from("/d/ose-data"));
-    assert_eq!(data_root_from(None, None, p("/h")).unwrap(), PathBuf::from("/h/.ember/ose-data"));
-    assert_eq!(data_root_from(p(""), p(""), p("/h")).unwrap(), PathBuf::from("/h/.ember/ose-data"));
+    assert_eq!(data_root_from(None, p("/d"), p("/h")).unwrap(), PathBuf::from("/d-runtime/ose-data"));
+    assert_eq!(data_root_from(None, None, p("/h")).unwrap(), PathBuf::from("/h/.ember-runtime/ose-data"));
+    assert_eq!(data_root_from(p(""), p(""), p("/h")).unwrap(), PathBuf::from("/h/.ember-runtime/ose-data"));
     // No override and no HOME: an error, never a relative path.
     assert!(data_root_from(None, None, None).is_err());
     assert!(data_root_from(p(""), p(""), p("")).is_err());
-    assert_eq!(data_root_from(None, p("/d"), None).unwrap(), PathBuf::from("/d/ose-data"));
+    assert_eq!(data_root_from(None, p("/d"), None).unwrap(), PathBuf::from("/d-runtime/ose-data"));
 }
 
 #[test]

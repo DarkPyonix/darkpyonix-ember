@@ -405,3 +405,48 @@ async fn fr_n7_scope_device_cannot_raise_its_own_scope() {
     assert_eq!(patch(Some(token)).await, 200);
     assert_eq!(devices.scope_of(&narrow_peer), Some(Scope::ReadOnly));
 }
+
+// ---- FR-N8: `GET /api/whoami` (#818) -------------------------------------------------------
+
+/// The local listener (behind the server token) answers door `local`, scope `full`, no peer id.
+#[tokio::test]
+async fn fr_n7_whoami_local_is_local_and_full() {
+    let (app, _store) = router();
+    let (addr, token, _dir) = serve_local(app).await;
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/api/whoami"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body, serde_json::json!({ "door": "local", "scope": "full" }));
+}
+
+async fn whoami_for(scope: Scope) {
+    let net = MemNetwork::new();
+    let (server_t, devices) = serve_scoped_server(&net);
+    let (device, peer) = device_with(&net, &devices, scope);
+    let got = device_call(&device, &server_t, "GET", "/api/whoami", None).await;
+    assert_eq!(got.0, StatusCode::OK, "{:?}: {:?}", scope, got.1);
+    assert_eq!(
+        got.1,
+        serde_json::json!({ "door": "transport", "peer_id": peer.to_string(), "scope": scope.as_str() })
+    );
+}
+
+#[tokio::test]
+async fn fr_n7_whoami_transport_full() {
+    whoami_for(Scope::Full).await;
+}
+
+#[tokio::test]
+async fn fr_n7_whoami_transport_read_only() {
+    whoami_for(Scope::ReadOnly).await;
+}
+
+#[tokio::test]
+async fn fr_n7_whoami_transport_chat_only() {
+    whoami_for(Scope::ChatOnly).await;
+}

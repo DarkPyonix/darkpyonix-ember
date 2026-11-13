@@ -195,7 +195,7 @@ async fn fr_s12_non_owner_routes_keep_working_with_the_token() {
     }
     let cwd = f.dir.path().display().to_string();
     let got =
-        call_with(&f.app, "POST", "/api/sessions", Some(&f.token), None, Some(json!({ "agent": "scripted", "cwd": cwd })))
+        call_with(&f.app, "POST", "/api/sessions", Some(&f.token), None, Some(json!({ "project": "acme", "agent": "scripted", "cwd": cwd })))
             .await;
     assert_eq!(got.0, StatusCode::CREATED, "{got:?}");
     let id = got.1["id"].as_str().unwrap().to_string();
@@ -219,7 +219,7 @@ async fn fr_s12_voiding_a_key_stops_future_authority_only() {
     let f = fx();
     let cwd = f.dir.path().display().to_string();
     let got =
-        call_with(&f.app, "POST", "/api/sessions", Some(&f.token), None, Some(json!({ "agent": "scripted", "cwd": cwd })))
+        call_with(&f.app, "POST", "/api/sessions", Some(&f.token), None, Some(json!({ "project": "acme", "agent": "scripted", "cwd": cwd })))
             .await;
     assert_eq!(got.0, StatusCode::CREATED, "{got:?}");
     let id = got.1["id"].as_str().unwrap().to_string();
@@ -261,17 +261,53 @@ impl std::io::Write for LogBuf {
     }
 }
 
+thread_local! {
+    static CAPTURE: std::cell::RefCell<Option<LogBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Writes a line to the capturing buffer of the thread that logs it, if that thread has one.
+struct ThreadSink;
+
+impl std::io::Write for ThreadSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        CAPTURE.with(|c| {
+            if let Some(b) = c.borrow().as_ref() {
+                b.0.lock().unwrap().extend_from_slice(buf);
+            }
+        });
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Stops capturing on this thread when dropped.
+struct CaptureGuard;
+
+impl Drop for CaptureGuard {
+    fn drop(&mut self) {
+        CAPTURE.with(|c| *c.borrow_mut() = None);
+    }
+}
+
 /// Log lines of this thread go to the returned buffer while the guard lives. The test runtime
-/// is single-threaded, so the server's tasks log through it too.
-fn capture_logs() -> (LogBuf, tracing::subscriber::DefaultGuard) {
+/// is single-threaded, so the server's tasks log through it too. One global subscriber routes
+/// each line by thread: a scoped `set_default` per test loses lines when tests in this binary
+/// run in parallel (tracing caches callsite interest and the max level across threads).
+fn capture_logs() -> (LogBuf, CaptureGuard) {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(|| ThreadSink)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).unwrap();
+    });
     let logs = LogBuf(Arc::default());
-    let sink = logs.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_ansi(false)
-        .with_writer(move || sink.clone())
-        .finish();
-    (logs, tracing::subscriber::set_default(subscriber))
+    CAPTURE.with(|c| *c.borrow_mut() = Some(logs.clone()));
+    (logs, CaptureGuard)
 }
 
 fn logged(logs: &LogBuf) -> String {

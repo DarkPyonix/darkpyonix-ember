@@ -916,7 +916,7 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
             obj.insert("url".into(), json!(u));
         }
         if opts.transport {
-            let key = ember_transport::SecretKey::load_or_generate(opts.state_dir.join(crate::transport::KEY_FILE))
+            let key = crate::keystore::load_transport_key(&opts.state_dir.join(crate::transport::KEY_FILE))
                 .map_err(|e| anyhow!("cannot load the transport key: {e}"))?;
             let id = key.peer_id().to_string();
             own_fingerprint = ember_transport::fingerprint_hex(&id);

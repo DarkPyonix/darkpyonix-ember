@@ -14,6 +14,7 @@ use crate::terminal_stream::{self, ChangeCallback, TerminalHandle};
 pub enum Load {
     Loading,
     Ready,
+    /// The fixed Korean sentence from [`terminal_list::panel_error`].
     Failed(String),
 }
 
@@ -92,7 +93,7 @@ pub fn ensure(base: &str, computer: &str, folder: &str, project: &str, on_change
                         r.tabs = tabs;
                         r.load = Load::Ready;
                     }
-                    Err(e) => r.load = Load::Failed(e.to_string()),
+                    Err(e) => r.load = Load::Failed(terminal_list::panel_error(terminal_list::TermAction::List, &e)),
                 }
             }
             on_change();
@@ -174,7 +175,7 @@ pub fn new_terminal() {
                 let mut r = lock(&remote);
                 match result {
                     Ok(info) => r.tabs.push(TermTab::from_info(&info)),
-                    Err(e) => r.error = Some(format!("새 터미널을 만들지 못했습니다: {e}")),
+                    Err(e) => r.error = Some(terminal_list::panel_error(terminal_list::TermAction::Create, &e)),
                 }
             }
             on_change();
@@ -197,7 +198,7 @@ pub fn kill(id: &str) {
         let (remote, on_change) = (panel.remote.clone(), panel.on_change.clone());
         crate::services::services().rt.spawn(async move {
             if let Err(e) = terminal_list::kill(&b, &c, &term).await {
-                lock(&remote).error = Some(format!("터미널을 종료하지 못했습니다: {e}"));
+                lock(&remote).error = Some(terminal_list::panel_error(terminal_list::TermAction::Kill, &e));
             }
             on_change();
         });

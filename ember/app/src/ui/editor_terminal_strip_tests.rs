@@ -79,6 +79,10 @@ fn fr_l31_23_plus_is_shown_in_every_strip_state() {
 #[test]
 fn fr_l31_23_plus_never_scrolls_with_the_tabs() {
     let css = include_str!("../../assets/editor/editor.css");
-    assert!(css.contains(".ed-tstrip>.ed-tnew{flex:none"), "the + keeps its size");
-    assert!(css.contains(".ed-tstrip>.ed-tsub{flex:0 1 auto;min-width:0}"), "the tab list shrinks and scrolls");
+    assert!(css.contains(".ed-tstrip>.ed-tnew{flex:0 0 auto"), "the + keeps its size");
+    assert!(css.contains(".ed-tstrip>.ed-tsub{flex:1 1 auto;min-width:0}"), "the tab list takes the room and scrolls");
+    assert!(
+        css.contains(".ed-tstrip>.ed-tsub>button,.ed-tstrip>.ed-tsub>input{flex:0 0 auto;max-width:240px}"),
+        "tabs keep their natural width (label, pencil, trash) instead of shrinking to an icon"
+    );
 }

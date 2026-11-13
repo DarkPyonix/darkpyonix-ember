@@ -2608,7 +2608,7 @@ pub mod page {
         let strip = terminal_strip(s);
         let Some(handle) = handle else {
             let text = match terms::view().map(|v| v.load) {
-                Some(terms::Load::Failed(e)) => format!("터미널 목록을 불러오지 못했습니다: {e}"),
+                Some(terms::Load::Failed(e)) => e,
                 Some(terms::Load::Ready) => "열린 터미널이 없습니다. +를 눌러 새 터미널을 엽니다.".to_string(),
                 _ => "터미널 목록을 불러오는 중입니다.".to_string(),
             };

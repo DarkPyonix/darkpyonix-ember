@@ -13,6 +13,12 @@
 //!
 //! This confines the file API and command working directories. It is **not** a sandbox for the
 //! commands themselves: a command can touch anything its user can.
+//!
+//! **Check, then open (#468).** Resolving a path and opening it are two steps, so a symlink swapped
+//! into the path between them could make the open land outside the roots. The file operations
+//! therefore open first and check the opened handle with [`PathPolicy::check_opened`]: the path is
+//! resolved again after the open and, on Unix, the opened file's device and inode must equal those
+//! of the resolved path. A handle that does not match is refused like a path outside the roots.
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -33,6 +39,8 @@ pub struct PathPolicy {
     /// Canonical when the entry existed at construction, else its nearest existing ancestor made
     /// canonical plus the missing tail.
     denied: Vec<PathBuf>,
+    /// The denied entries as configured (absolute), resolved again at every check (#534).
+    denied_given: Vec<PathBuf>,
 }
 
 impl PathPolicy {
@@ -47,9 +55,18 @@ impl PathPolicy {
     /// (component-wise: `/h/.ember-other` is not inside `/h/.ember`). A denied entry that exists
     /// is canonicalised at construction, so a symlink into it, `..` into it and the entry reached
     /// through another name are all refused. A denied entry that does not exist yet is kept as its
-    /// absolute path (a relative entry is ignored), with its nearest existing ancestor
-    /// canonicalised and the missing tail appended, so it is matched against canonical candidates
-    /// and against not-yet-existing write targets. Matching is by path, not by inode: a bind mount or hard link is not detected.
+    /// nearest existing ancestor canonicalised with the missing tail appended, so it is matched
+    /// against canonical candidates and against not-yet-existing write targets.
+    ///
+    /// Every entry is also resolved again at each check (#534): an entry created after
+    /// construction, or a symlink planted at its place later, is matched by its canonical form
+    /// from then on. A case variant (`.Ember` for `.ember`) on a case-insensitive volume is caught
+    /// only once the entry exists, because canonicalising an existing path returns its stored
+    /// name; a missing entry is matched by its bytes.
+    ///
+    /// A relative entry is an error (#534): it would be resolved against the working directory
+    /// of whoever reads it, so dropping it would fail open and keeping it would be ambiguous.
+    /// Matching is by path, not by inode: a bind mount or hard link is not detected.
     pub fn with_denied(
         roots: impl IntoIterator<Item = PathBuf>,
         denied: impl IntoIterator<Item = PathBuf>,
@@ -61,17 +78,42 @@ impl PathPolicy {
             out.push(c);
         }
         anyhow::ensure!(!out.is_empty(), "at least one allowed root is required");
-        let denied = denied
-            .into_iter()
-            .filter(|d| d.is_absolute())
-            .map(|d| canonical_or_lexical(&d))
-            .collect();
-        Ok(Self { roots: out, denied })
+        let denied_given: Vec<PathBuf> = denied.into_iter().collect();
+        if let Some(rel) = denied_given.iter().find(|d| !d.is_absolute()) {
+            anyhow::bail!("denied path must be absolute: {}", rel.display());
+        }
+        let denied = denied_given.iter().map(|d| canonical_or_lexical(d)).collect();
+        Ok(Self { roots: out, denied, denied_given })
     }
 
-    /// Whether `canonical` equals or is inside a denied entry (component-wise).
+    /// Whether `canonical` equals or is inside a denied entry (component-wise), as resolved at
+    /// construction or now.
     pub fn is_denied(&self, canonical: &Path) -> bool {
         self.denied.iter().any(|d| canonical.starts_with(d))
+            || self.denied_given.iter().any(|d| canonical.starts_with(canonical_or_lexical(d)))
+    }
+
+    /// Check an already opened handle (#468). `path` is the canonical path the caller opened. It
+    /// is resolved again and checked against the roots; on Unix the opened file must also be the
+    /// file that path names now (same device and inode). Otherwise a symlink was swapped in
+    /// between the check and the open, and the handle is refused like a path outside the roots.
+    ///
+    /// On Windows only the second resolution is done (the standard library has no stable file
+    /// id), so a swap that is undone before that resolution is not detected there.
+    pub fn check_opened(&self, file: &std::fs::File, path: &Path) -> Result<PathBuf, PolicyError> {
+        let again = self.resolve_existing(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let opened = file.metadata().map_err(|e| PolicyError::Io(path.to_path_buf(), e))?;
+            let named = std::fs::metadata(&again).map_err(|e| PolicyError::Io(path.to_path_buf(), e))?;
+            if opened.dev() != named.dev() || opened.ino() != named.ino() {
+                return Err(PolicyError::Outside(path.to_path_buf()));
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = file;
+        Ok(again)
     }
 
     pub fn denied(&self) -> &[PathBuf] {
@@ -272,5 +314,44 @@ mod tests {
         assert!(p.resolve_nofollow(Path::new("relative")).is_err());
         assert!(p.is_root(&root));
         assert!(!p.is_root(&root.join("link")));
+    }
+
+    #[test]
+    fn fr_x1_relative_denied_entries_are_refused_not_dropped() {
+        let t = tempfile::tempdir().unwrap();
+        let e = PathPolicy::with_denied([t.path().to_path_buf()], [PathBuf::from(".ember")]).unwrap_err();
+        assert!(e.to_string().contains("must be absolute"), "{e}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_x1_denied_entries_are_resolved_again_at_check_time() {
+        let t = tempfile::tempdir().unwrap();
+        let base = t.path().canonicalize().unwrap();
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("elsewhere/secret")).unwrap();
+        // Missing at construction.
+        let p = PathPolicy::with_denied([root.clone()], [root.join(".ember")]).unwrap();
+        assert!(p.resolve_existing(&root.join("elsewhere/secret")).is_ok());
+        // A symlink planted later at the denied place: its target is denied from then on.
+        std::os::unix::fs::symlink(root.join("elsewhere"), root.join(".ember")).unwrap();
+        assert!(matches!(p.resolve_existing(&root.join("elsewhere/secret")), Err(PolicyError::Outside(_))));
+        assert!(matches!(p.resolve_existing(&root.join(".ember/secret")), Err(PolicyError::Outside(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_x1_check_opened_refuses_a_handle_that_is_not_the_named_file() {
+        let t = tempfile::tempdir().unwrap();
+        let base = t.path().canonicalize().unwrap();
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a"), b"a").unwrap();
+        std::fs::write(base.join("out"), b"o").unwrap();
+        let p = PathPolicy::new([root.clone()]).unwrap();
+        let inside = std::fs::File::open(root.join("a")).unwrap();
+        assert_eq!(p.check_opened(&inside, &root.join("a")).unwrap(), root.join("a"));
+        let outside = std::fs::File::open(base.join("out")).unwrap();
+        assert!(matches!(p.check_opened(&outside, &root.join("a")), Err(PolicyError::Outside(_))));
     }
 }

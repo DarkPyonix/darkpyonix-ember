@@ -76,7 +76,7 @@ pub fn relay_allowed(base: &str) -> Result<(), String> {
 pub const RELAY_REFUSED: &str =
     "이 서버 주소로는 터미널을 열 수 없습니다. https 주소를 쓰거나 같은 컴퓨터의 서버에 연결하세요.";
 
-fn check_relay(base: &str) -> Result<(), ClientError> {
+pub(crate) fn check_relay(base: &str) -> Result<(), ClientError> {
     relay_allowed(base).map_err(|reason| {
         tracing::warn!("terminal relay refused: {reason}");
         ClientError::Refused(RELAY_REFUSED)

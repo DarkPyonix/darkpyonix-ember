@@ -3882,6 +3882,10 @@ fn ViewSeg(
 }
 
 /// Pill-shaped toolbar action button (`.btn.sm` in `.sesshead`).
+/// Session header actions carry no text label (owner placement rule 2026-11-13, rule 6, design
+/// review B6); the label is the tooltip and the accessible name.
+pub const SESSION_HEADER_LABELS: bool = false;
+
 fn ToolbarBtn(
     icon_svg: &'static str,
     label: &str,
@@ -3904,7 +3908,10 @@ fn ToolbarBtn(
             .border(1.0, paint(p.line))
             .shape_role(ShapeRole::Full)
     };
-    Clickable(m, Alignment::Center, on_click, move || {
+    // The label is the tooltip (`title` in the mockup). TODO(v0.0.7 pin, compose-rust#417): the
+    // tooltip shows on hover once pointer events reach the app; assistive technology reads it now.
+    let tip = lbl.clone();
+    cu::Tooltip(tip).content(move || Clickable(m, Alignment::Center, on_click, move || {
         if show_label || chevron {
             cu::Row()
                 .alignment(Alignment::CenterStart)
@@ -3929,7 +3936,7 @@ fn ToolbarBtn(
         } else {
             NavIcon(icon_svg, p.text_2.to_argb(), 15.0);
         }
-    });
+    }));
 }
 
 /// New member sheet (`#snew` in mockup `session.js` lines 386-395).
@@ -4434,8 +4441,6 @@ pub fn SessionScreen(focus: Option<String>) {
     }
     let chips_below = view_chips_below(window.width_dp);
     let hide_view_lbl = crate::ui::session::view_seg_icon_only(window.width_dp);
-    let show_btn_lbl = window.width_dp >= 1400.0;
-    let show_web_lbl = window.width_dp >= 1400.0;
 
     // Opening the 웹 페이지 list reads the listening ports of the session's computer (FR-P7).
     let open_web_menu = {
@@ -4707,32 +4712,14 @@ pub fn SessionScreen(focus: Option<String>) {
                                         ViewSeg(view_now, hide_view_lbl, false, move |v| sv(v));
                                     }
                                     {
-                                        // Phone keeps the same row of buttons, icon only
-                                        // (mockup `.sesshead` at 560 px hides `.hide-xl` labels).
+                                        // Icon-only 32 px buttons with tooltips at every width, as the
+                                        // mockup's `.sesshead` (owner placement rule 2026-11-13, rule 6).
                                         let nm = new_member_open.clone();
-                                        ToolbarBtn(
-                                            ICON_PLUS_SVG,
-                                            "새 팀원",
-                                            show_btn_lbl && !is_phone,
-                                            false,
-                                            move || nm.set(true),
-                                        );
+                                        ToolbarBtn(ICON_PLUS_SVG, "새 팀원", SESSION_HEADER_LABELS, false, move || nm.set(true));
                                         let vo = vcs_open.clone();
-                                        ToolbarBtn(
-                                            ICON_GIT_SVG,
-                                            "버전 관리",
-                                            show_btn_lbl && !is_phone,
-                                            false,
-                                            move || vo.set(true),
-                                        );
+                                        ToolbarBtn(ICON_GIT_SVG, "버전 관리", SESSION_HEADER_LABELS, false, move || vo.set(true));
                                         let wm = open_web_menu.clone();
-                                        ToolbarBtn(
-                                            ICON_GLOBE_SVG,
-                                            "웹 페이지",
-                                            show_web_lbl && !is_phone,
-                                            !is_phone,
-                                            move || wm(),
-                                        );
+                                        ToolbarBtn(ICON_GLOBE_SVG, "웹 페이지", SESSION_HEADER_LABELS, false, move || wm());
                                     }
                                     if let Some(t) = target.clone() {
                                         IdeMenu(&t);
@@ -4931,7 +4918,10 @@ mod tests {
         let head = src.split("// Top toolbar (.sesshead)").nth(1).unwrap();
         let head = head.split("if chips_below {").next().unwrap();
         assert!(!head.contains("ICON_MORE_H_SVG"));
-        assert!(head.contains("show_btn_lbl && !is_phone"));
+        // Owner placement rule 2026-11-13 (rule 6): icon only at every width.
+        assert!(!super::SESSION_HEADER_LABELS);
+        assert_eq!(head.matches(", SESSION_HEADER_LABELS, false, move ||").count(), 3);
+        assert!(!head.contains("show_btn_lbl"));
         for icon in ["ICON_PLUS_SVG", "ICON_GIT_SVG", "ICON_GLOBE_SVG", "IdeMenu(&t)"] {
             assert!(head.contains(icon), "{icon}");
         }

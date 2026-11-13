@@ -8,8 +8,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use compose_rust::runtime::launched_effect;
-use compose_rust::{Message, MessageDuration};
+use compose_rust::runtime::{current_window_size, launched_effect};
+use compose_rust::{Message, MessageDuration, MessageHorizontal, MessagePlacement, MessageVertical};
 
 use crate::ui::coexist::shared_ui;
 
@@ -23,16 +23,34 @@ pub fn post(text: impl Into<String>) {
     shared_ui().notice.set(Some((id, text)));
 }
 
+/// Where the toast sits: the bottom centre (`.toast` `left:50%`, compose-rust#577, v0.0.9).
+pub const TOAST_PLACEMENT: MessagePlacement =
+    MessagePlacement { vertical: MessageVertical::Bottom, horizontal: MessageHorizontal::Center };
+
+/// How far the toast is above the bottom of the safe area: `.toast` `bottom:90px`, and at 560 dp
+/// and below 12 dp above the floating tab bar (`calc(var(--tabbar-clear) + 12px)`, the 64 dp bar,
+/// its 10 dp gap and 10 dp more). The tab bar is Ember's own, not a toolkit bar, so the toolkit
+/// does not know to keep clear of it and the offset counts it. An unreported width (0) is the
+/// desktop's.
+pub fn toast_offset(window_dp: f32) -> f32 {
+    if window_dp > 0.0 && window_dp <= 560.0 { 64.0 + 10.0 + 10.0 + 12.0 } else { 90.0 }
+}
+
 /// Shows what [`post`] queued. Compose it once at the root.
+///
+/// Its shadow and pill corner are the app theme's overlay tokens (compose-rust#446,
+/// `fonts::APP_OVERLAY`), because a message takes no Modifier.
 pub fn NoticeHost() {
     let latest = shared_ui().notice.get();
     let key = latest.as_ref().map(|(id, _)| *id);
+    let offset = toast_offset(current_window_size().width_dp);
     launched_effect(key, move || async move {
         if let Some((_, text)) = latest {
-            // TODO(compose-rust#446): Message has no Modifier for the mockup toast shadow.
-            // TODO(compose-rust#577): Message has no placement, so the toast shows where the
-            // toolkit puts it (top end) and not at the mockup's bottom centre (`.toast`).
-            Message::new(text).with_duration(MessageDuration::Long).show();
+            Message::new(text)
+                .with_duration(MessageDuration::Long)
+                .with_placement(TOAST_PLACEMENT)
+                .with_offset(offset)
+                .show();
         }
     });
 }
@@ -55,5 +73,21 @@ mod tests {
             shown.extend(batch.iter().map(|m| format!("{m:?}")));
         }
         assert!(shown.contains("Export failed: disk full"), "{shown}");
+    }
+
+    #[test]
+    fn fr_l9_the_toast_sits_at_the_bottom_centre_clear_of_the_tab_bar() {
+        // compose-rust#577: the toast takes the mockup's place instead of the toolkit's top end.
+        assert_eq!(TOAST_PLACEMENT.vertical, MessageVertical::Bottom);
+        assert_eq!(TOAST_PLACEMENT.horizontal, MessageHorizontal::Center);
+        assert_eq!(toast_offset(390.0), 96.0);
+        assert_eq!(toast_offset(560.0), 96.0);
+        assert_eq!(toast_offset(561.0), 90.0);
+        assert_eq!(toast_offset(0.0), 90.0);
+        let production = include_str!("notice.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains(".with_placement(TOAST_PLACEMENT)"));
+        assert!(production.contains(".with_offset(offset)"));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "446)")));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "577)")));
     }
 }

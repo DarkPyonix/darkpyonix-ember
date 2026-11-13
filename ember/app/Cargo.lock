@@ -389,8 +389,8 @@ dependencies = [
 
 [[package]]
 name = "compose-rust"
-version = "0.0.6"
-source = "git+https://github.com/DarkPyonix/compose-rust?tag=v0.0.6#a3494e849b39e0bb1700bda96583899691b45787"
+version = "0.0.7"
+source = "git+https://github.com/DarkPyonix/compose-rust?tag=v0.0.7#ecf74996aa4b3749cc95effeb84faeb641f4d77a"
 dependencies = [
  "compose-rust-macros",
  "jni",
@@ -398,8 +398,8 @@ dependencies = [
 
 [[package]]
 name = "compose-rust-macros"
-version = "0.0.6"
-source = "git+https://github.com/DarkPyonix/compose-rust?tag=v0.0.6#a3494e849b39e0bb1700bda96583899691b45787"
+version = "0.0.7"
+source = "git+https://github.com/DarkPyonix/compose-rust?tag=v0.0.7#ecf74996aa4b3749cc95effeb84faeb641f4d77a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -719,7 +719,7 @@ dependencies = [
 [[package]]
 name = "dioxus-compose"
 version = "0.0.1"
-source = "git+https://github.com/DarkPyonix/dioxus-compose?rev=877ef59d4ac8341ec26e1bf8af577f12e23a4367#877ef59d4ac8341ec26e1bf8af577f12e23a4367"
+source = "git+https://github.com/DarkPyonix/dioxus-compose?rev=ea98a0439fac43ff98864eb106faefb88c686656#ea98a0439fac43ff98864eb106faefb88c686656"
 dependencies = [
  "blitz-dom",
  "blitz-html",
@@ -875,7 +875,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1074,7 +1074,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2067,7 +2067,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2445,7 +2445,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2700,7 +2700,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3378,7 +3378,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4049,7 +4049,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

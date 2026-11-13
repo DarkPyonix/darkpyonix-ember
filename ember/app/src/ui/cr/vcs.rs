@@ -4600,7 +4600,7 @@ fn VcsScreenWithLoad(
             cu::Column().modifier(Modifier::new().weight(1.0)).spacing(4.0).content(|| {
                 // The sheet header carries the title (#495).
                 if !sheet {
-                    Label("버전 관리", Fs::Xl3, Weight::Semibold, None, None);
+                    Label("버전 관리", Fs::Xl3, PAGE_TITLE_WEIGHT, None, None);
                 }
                 if let Some(ref proj) = project {
                     let subtitle = screen_subtitle(proj, snap.as_ref(), sample);

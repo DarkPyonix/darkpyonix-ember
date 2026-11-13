@@ -943,19 +943,25 @@ pub fn search_field_padding(height: f32) -> f32 {
 
 /// The visible gap between the magnifier and the typed text (`.searchbox` gap 8).
 pub const SEARCH_FIELD_GAP: f32 = 8.0;
-/// The leading inset the bare toolkit text field adds before its text. Measured from captures
-/// (a 4 px spacer showed a ~24 px gap), so about 20 px; re-measure if the toolkit changes it.
-pub const SEARCH_FIELD_INSET: f32 = 20.0;
+/// The leading inset the bare toolkit text field adds before its text. The v0.0.6 field has about
+/// 12 px: with the old 20 px assumption the -12 px offset left the magnifier touching the
+/// placeholder (design review 2026-11-13 C4, "Q팀원 검색"). Re-measure if the toolkit changes it.
+pub const SEARCH_FIELD_INSET: f32 = 12.0;
 
-/// The visible icon-to-text gap: no spacer, the field's own inset, and a negative offset that
-/// pulls the field left by `inset - gap`. Assumes [`SEARCH_FIELD_INSET`].
+/// The visible icon-to-text gap: a spacer, the field's own inset and an offset, which together
+/// always come to [`SEARCH_FIELD_GAP`].
 pub fn search_field_gap() -> f32 {
-    search_field_offset() + SEARCH_FIELD_INSET
+    search_field_spacer() + search_field_offset() + SEARCH_FIELD_INSET
 }
 
-/// The negative x offset applied to the bare field so the visible gap is [`SEARCH_FIELD_GAP`].
+/// The spacer between the magnifier and the field, for an inset smaller than the gap.
+pub fn search_field_spacer() -> f32 {
+    (SEARCH_FIELD_GAP - SEARCH_FIELD_INSET).max(0.0)
+}
+
+/// The negative x offset applied to the bare field, for an inset larger than the gap.
 pub fn search_field_offset() -> f32 {
-    -(SEARCH_FIELD_INSET - SEARCH_FIELD_GAP)
+    (SEARCH_FIELD_GAP - SEARCH_FIELD_INSET).min(0.0)
 }
 
 /// A search box: white fill, 1 px border, pill radius, a leading magnifier and a bare field that
@@ -980,6 +986,9 @@ pub fn SearchField(placeholder: &str, height: f32, on_change: impl FnMut(String)
         .content(move || {
             cu::Spacer().modifier(Modifier::new().width(search_field_padding(height)));
             super::shell::NavIcon(super::shell::ICON_SEARCH_SVG, p.muted.to_argb(), SEARCH_ICON_SIZE);
+            if search_field_spacer() > 0.0 {
+                cu::Spacer().modifier(Modifier::new().width(search_field_spacer()));
+            }
             // The field takes the row's remaining width by weight, so it never overruns it.
             let cb = on_change.clone();
             let placeholder = placeholder.clone();
@@ -1021,8 +1030,11 @@ mod tests {
 
     #[test]
     fn fr_l10_1_search_field_visible_gap_is_8() {
+        // Design review 2026-11-13 C4: 8 px after the magnifier, with the field's 12 px inset.
         assert_eq!(search_field_gap(), 8.0);
-        assert_eq!(search_field_offset(), -12.0);
+        assert_eq!(SEARCH_FIELD_INSET, 12.0);
+        assert_eq!(search_field_offset(), -4.0);
+        assert_eq!(search_field_spacer(), 0.0);
     }
 
     #[test]

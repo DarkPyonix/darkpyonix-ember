@@ -1578,15 +1578,16 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
     let busy = totals.iter().any(|t| *t > 0);
 
     let kpis_content = move || {
+        // The two KPI rows sit together at the top of the card (`.rt-topwrap .kpis` row gap
+        // `--sp4`), not spread over the height the chart card beside it gives (design review B5).
         cu::Column()
-            .spacing(SP[2])
+            .spacing(ROUTINE_KPI_ROW_GAP)
             .modifier(Modifier::new().fill_max_width().height(card_h))
             .content(|| {
                 cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
                     RoutineKpiView(&k[0], 0);
                     RoutineKpiView(&k[1], 1);
                 });
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
                 cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
                     RoutineKpiView(&k[2], 2);
                     RoutineKpiView(&k[3], 3);
@@ -1680,6 +1681,13 @@ fn HeroCardContent(
         });
 }
 
+/// A routine KPI number: `.kpi .v` 28/400 (`style.css:110`, `routines.css:64`), design review B5.
+pub const ROUTINE_KPI_WEIGHT: Weight = Weight::Regular;
+/// The gap between the two KPI rows (`.rt-topwrap .kpis` gap `--sp4`).
+pub const ROUTINE_KPI_ROW_GAP: f32 = 16.0;
+/// The detail pane's title: 15/600 (`DESIGN.md` 6.5), design review B5.
+pub const ROUTINE_DETAIL_TITLE: (Fs, Weight) = (Fs::Lg, Weight::Semibold);
+
 // TODO(compose-rust#443): `Text` has no `overflow_wrap`, so a KPI label stays on one line with
 // `max_lines(Some(1))` instead of being allowed to wrap in a narrow column.
 fn RoutineKpiView(kpi: &RoutineKpi, index: usize) {
@@ -1688,7 +1696,7 @@ fn RoutineKpiView(kpi: &RoutineKpi, index: usize) {
         Label(kpi.label, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
         if index < 3 {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                Label(&kpi.value, Fs::Xl2, Weight::Semibold, None, Some(1));
+                Label(&kpi.value, Fs::Xl2, ROUTINE_KPI_WEIGHT, None, Some(1));
                 if let Some(note) = &kpi.note {
                     let tone = match index {
                         1 => PillTone::Blue,
@@ -1699,7 +1707,7 @@ fn RoutineKpiView(kpi: &RoutineKpi, index: usize) {
                 }
             });
         } else {
-            Label(&kpi.value, Fs::Xl2, Weight::Semibold, None, Some(1));
+            Label(&kpi.value, Fs::Xl2, ROUTINE_KPI_WEIGHT, None, Some(1));
             if let Some(note) = &kpi.note {
                 Label(note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             }
@@ -2101,7 +2109,7 @@ fn DetailPane(
                         // The title takes what the actions leave and ellipsizes, so the actions
                         // never leave the panel.
                         cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                            Label(&routine_name, Fs::Xl, Weight::Semibold, None, Some(1));
+                            Label(&routine_name, ROUTINE_DETAIL_TITLE.0, ROUTINE_DETAIL_TITLE.1, None, Some(1));
                         });
                         TriggerPill(routine_trigger, true);
                         RoutineSwitch(&routine_name_w, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
@@ -4507,5 +4515,32 @@ mod tests {
         );
 
         with_remote(|r| *r = Remote::default());
+    }
+}
+
+/// Design review 2026-11-13 B5: the routine dashboard and detail against the mockup.
+#[cfg(test)]
+mod design_review_tests {
+    use super::*;
+
+    /// This file without this module, so a source check never finds its own literal.
+    fn source() -> &'static str {
+        let src = include_str!("routines.rs");
+        &src[..src.find("mod design_review_tests {").unwrap()]
+    }
+
+    #[test]
+    fn design_b5_kpi_numbers_are_28_400_and_the_rows_sit_together() {
+        assert_eq!(ROUTINE_KPI_WEIGHT, Weight::Regular);
+        assert_eq!(ROUTINE_KPI_ROW_GAP, 16.0);
+        let src = source();
+        assert_eq!(src.matches("Label(&kpi.value, Fs::Xl2, ROUTINE_KPI_WEIGHT, None, Some(1));").count(), 2);
+        let dash = &src[src.find("let kpis_content = move || {").unwrap()..src.find("let hero_content = move || {").unwrap()];
+        assert!(!dash.contains("weight(1.0)"), "the KPI rows are still spread over the card");
+    }
+
+    #[test]
+    fn design_b5_detail_title_is_15_600() {
+        assert_eq!(ROUTINE_DETAIL_TITLE, (Fs::Lg, Weight::Semibold));
     }
 }

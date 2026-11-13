@@ -14,7 +14,10 @@ use super::theme::Palette;
 // ---------------------------------------------------------------------------------------------
 
 /// The font stack for prose (`--font`): Inter, then Apple SD Gothic Neo and Noto Sans KR for
-/// Hangul, then the system UI face.
+/// Hangul, then the system UI face. The mono stack names JetBrains Mono by family; the bundled
+/// faces reach text through the theme's `Mono` role (`ui::fonts::mono_font`), and CSS
+/// `font-family:var(--mono)` on the editor page waits for the HTML path to apply it
+/// (TODO(dioxus-compose#196), arrives with the v0.0.7 pin).
 pub fn font_refs(mono: bool) -> FontRefs {
     if mono {
         FontRefs::new([

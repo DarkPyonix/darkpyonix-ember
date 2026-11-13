@@ -2,8 +2,9 @@
 //! project, folder, agent (`GET /agents`), account (`GET /accounts`), computer
 //! (`GET /computers`) and model, defaulting to the last-used combination for the project.
 //!
-//! TODO(compose-rust#374): `TextField` is uncontrolled and has no initial value, so remembered
-//! text (folder, model) is shown as the placeholder and an untouched field means "use it".
+//! v0.0.7: #374 fixed (`TextField::text`); workaround kept until checked on a display (a
+//! controlled value must not move the caret while typing), so remembered text (folder, model) is
+//! shown as the placeholder and an untouched field means "use it".
 
 #![allow(non_snake_case)]
 

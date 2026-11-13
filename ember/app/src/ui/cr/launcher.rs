@@ -166,8 +166,9 @@ pub fn SessionRowWith(row: &SessionRow, menu_start_open: bool) {
         },
     );
 
-    // FR-L9 rename, on the main server. TODO(compose-rust#374): TextField has no initial value
-    // (it is uncontrolled), so the current title is the placeholder; an empty entry keeps it.
+    // FR-L9 rename, on the main server. v0.0.7: #374 fixed (`TextField::text`); workaround kept
+    // until checked on a display (a controlled value must not move the caret while typing), so
+    // the current title is the placeholder; an empty entry keeps it.
     let dismiss = renaming.clone();
     EmberSheet("세션 이름 변경", renaming.get(), move || dismiss.set(false), None, || {
         cu::Column().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {

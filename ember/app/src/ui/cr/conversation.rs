@@ -63,7 +63,9 @@ pub const ICON_SEND_SVG: &str = include_str!("../../../assets/nav/send.svg");
 const POPUP_W: f32 = 280.0;
 
 /// Estimate the rendered height (dp) of a single transcript item so constrained viewports
-/// can anchor to the latest messages at the bottom (workaround for compose-rust#385).
+/// can anchor to the latest messages at the bottom. v0.0.7: #385 fixed (`ScrollState::scroll_to`
+/// and `animate_scroll_to`); workaround kept until checked on a display (scrolling to the end
+/// needs the column's `max_offset` after layout, which must be tried on screen).
 pub fn estimate_item_height(item: &TranscriptItem, open: bool) -> f32 {
     match item {
         TranscriptItem::User { .. } => 48.0,

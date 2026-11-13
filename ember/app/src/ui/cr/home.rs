@@ -55,8 +55,8 @@ const MODEL_RAIL_WIDTH: f32 = 128.0;
 /// Keyboard: each row is a `Clickable`, which the renderer makes a focusable button (Tab, Enter,
 /// Space), named by its title and description. Not built: arrow keys between rows and focus on
 /// the chosen row when the picker opens (TODO(compose-rust#504): only Enter reaches the Host,
-/// compose-rust#100; request focus landed after the pinned v0.0.6), and the selected state for screen readers
-/// (TODO(compose-rust#460): `Modifier.selected` landed after v0.0.6).
+/// compose-rust#100; request focus landed after the pinned v0.0.6). The chosen row says it is
+/// selected to screen readers (`Modifier::selected`, compose-rust v0.0.7, #460).
 fn ModeBody(header: &str, rows: &[ModeRow], width: f32, on_tap: impl FnMut(usize) + Clone + 'static) {
     let p = ember_theme().palette;
     cu::Column().modifier(Modifier::new().width(width)).content(|| {
@@ -72,7 +72,7 @@ fn ModeBody(header: &str, rows: &[ModeRow], width: f32, on_tap: impl FnMut(usize
             let title = if r.danger { p.red.strong } else { p.text };
             let icon = if r.danger { ICON_WARN } else { ICON_SHIELD };
             Clickable(
-                Modifier::new().width(width).background(bg).corner_radius(CORNER_SM).padding(SP[2]),
+                Modifier::new().width(width).background(bg).corner_radius(CORNER_SM).padding(SP[2]).selected(r.chosen),
                 Alignment::CenterStart,
                 move || tap(i),
                 || {
@@ -352,8 +352,9 @@ pub fn Tile(content: impl FnOnce()) {
 
 /// The inner height of the success tile (donut 132 + head 30 + gap 8 + the card's 16 px padding
 /// each side is outside it): tiles beside it take the same, since the toolkit rows do not
-/// stretch their children. TODO(compose-rust#389): equal-height cards in a row; this number is
-/// fragile when the success tile's content changes.
+/// stretch their children. v0.0.7: #389 fixed (`Row::equal_height` with `fill_max_height`
+/// children, as `EmberCardSized` uses); workaround kept until checked on a display (the tiles
+/// here are not `EmberCardSized` yet). This number is fragile when the success tile's content changes.
 const ROW_TILE_H: f32 = 171.0;
 
 fn TileH(height: Option<f32>, content: impl FnOnce()) {
@@ -377,11 +378,12 @@ pub fn CardHead(icon: &'static str, title: &str, trailing: impl FnOnce()) {
     });
 }
 
-/// `.hm-go`: the round 30 px arrow that opens the tile's screen.
-/// TODO(compose-rust#372): a pointer-up `Clickable` with no keyboard focus or role.
+/// `.hm-go`: the round 30 px arrow that opens the tile's screen, named "화면 열기" for
+/// assistive technology (compose-rust v0.0.7, #372, #460).
 fn GoButton(on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    Clickable(
+    super::components::NamedClickable(
+        super::a11y::OPEN_SCREEN,
         Modifier::new().size(30.0, 30.0).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
         Alignment::Center,
         on_click,
@@ -400,13 +402,14 @@ fn DotOrHatch(hatched: bool, hatch: compose_rust::Color, solid: compose_rust::Co
         return;
     }
     // The bars' pattern: same colour for fill and lines, same step (`legend_hatch_style`).
-    // TODO(compose-rust#428, #429): the dots have no accessible label; the Label beside them is the text.
+    // The square is decoration: the Label beside it is the text, so it is hidden from
+    // assistive technology (compose-rust v0.0.7, #429).
     let (step, _alpha) = usage::legend_hatch_style();
     let mut list = DrawList::builder().round_rect(paint(hatch), 0.0, 0.0, 8.0, 8.0, 2.0, 1.0);
     for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(0.0, 0.0, 8.0, 8.0, step) {
         list = list.line(paint(hatch), x1, y1, x2, y2, 1.0);
     }
-    cu::Canvas(list.build()).modifier(Modifier::new().size(8.0, 8.0));
+    cu::Canvas(list.build()).modifier(Modifier::new().size(8.0, 8.0).hidden(true));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -460,7 +463,8 @@ fn initial_suggestion() -> Option<String> {
 }
 
 /// `EMBER_CR_SCROLL=<dp|bottom|status|usage|efficiency|small>` for review captures: the toolkit cannot scroll a column from
-/// code (TODO(compose-rust#385)), so the blocks that would have scrolled out (by their estimated heights) are left out.
+/// code before v0.0.5 (v0.0.7: #385 fixed with `ScrollState::scroll_to`; workaround kept until
+/// checked on a display, because the capture script relies on it), so the blocks that would have scrolled out (by their estimated heights) are left out.
 struct Skip(std::cell::Cell<f32>);
 
 impl Skip {
@@ -966,9 +970,9 @@ impl Composer {
             // `equal_height`: the rail's `surface-2` runs the popover's full height.
             cu::Row().equal_height(true).modifier(surface).content(|| {
                 // `.mp-rail`: `surface-2`, one entry per harness, the open one marked.
-                // TODO(compose-rust#460): icon-only 36 dp entries in a 52 dp rail as in the
-                // mockup once the pinned toolkit has the label modifier; until then each entry
-                // keeps its harness name as text, which is what names it to a screen reader.
+                // v0.0.7: #460 fixed (`Modifier::label`); workaround kept until checked on a
+                // display (the icon-only 36 dp entries in a 52 dp rail of the mockup need a
+                // capture). Until then each entry keeps its harness name as text, which names it.
                 cu::Column()
                     .spacing(SP[0])
                     .modifier(Modifier::new().width(MODEL_RAIL_WIDTH).fill_max_height().background(paint(p.surface_2)).padding(SP[1]))
@@ -1122,8 +1126,8 @@ fn HeroBot(vendor: &str, status: &str, px: f32) {
 
 /// A composer chip (`.pickchip`): a 32 px `surface-2` pill built like `WarnChip`: 16 px glyph,
 /// 13 px weight 500 label cut with an ellipsis, and the 14 px chevron of a picker. `icon_only`
-/// chips are 32 px circles with the glyph centred.
-/// TODO(compose-rust#372): a pointer-up `Clickable` with no keyboard focus or role.
+/// chips are 32 px circles with the glyph centred. The chip is the container's `on_click`
+/// (compose-rust#372) and says whether it is selected (compose-rust v0.0.7, #429).
 #[allow(clippy::too_many_arguments)]
 fn ComposerChip(
     text: &str,
@@ -1137,7 +1141,7 @@ fn ComposerChip(
 ) {
     let p = ember_theme().palette;
     let fill = if selected { p.sel } else { p.surface_2 };
-    let modifier = Modifier::new().height(H_CTL).background(paint(fill)).shape_role(ShapeRole::Full);
+    let modifier = Modifier::new().height(H_CTL).background(paint(fill)).shape_role(ShapeRole::Full).selected(selected);
     let modifier = if icon_only { modifier.width(H_CTL) } else if weighted { modifier.weight(1.0) } else { modifier };
     let icon_color = tint.unwrap_or(p.text_2.to_argb());
     Clickable(modifier, Alignment::Center, on_click, || {
@@ -1249,8 +1253,7 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     let send = || {
         let (c2, ui2) = (c.clone(), ui.clone());
         // `.sendround`: a 36 px `--ink` circle with the paper plane, always ink. Composer::send
-        // guards `can_send`, so an empty input does nothing.
-        // TODO(compose-rust#428, #429): the circle has no accessible name ("보내기").
+        // guards `can_send`, so an empty input does nothing. The circle is named "보내기".
         super::session::SendCircleButton(SEND_BUTTON_DP, move || c2.send(&ui2));
     };
 
@@ -1296,8 +1299,9 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                     PickChip("첨부", None, false, false, move || add.add_attachment());
                 }
                 let (typed, ui2, c2) = (c.typed.clone(), ui.clone(), c.clone());
-                // TODO(compose-rust#374, #376): the field is uncontrolled with no initial value
-                // and carries the toolkit frame, so a suggestion shows as the placeholder.
+                // v0.0.7: #374 and #376 fixed (`TextField::text`, and the field takes the node's
+                // frame); workaround kept until checked on a display (a controlled value must not
+                // move the caret while typing), so a suggestion shows as the placeholder.
                 EmberField(FieldOptions {
                     fill_max_width: true,
                     multiline: true,
@@ -1788,7 +1792,8 @@ fn StatusTile(c: &StatusCounts, ui: &SharedUi, tile_w: f32, compact: bool) {
         // `.hm-blocks`: coloured blocks sized by count, each with the 18 % white stripes. The
         // stripes are a canvas at the block's estimated width (the card's inner width shared by
         // the weights, less 8 dp so an estimate that is a little high stops short rather than
-        // spilling past the block); TODO(compose-rust#388): size-aware drawing so the stripes follow their box.
+        // spilling past the block). v0.0.7: #388 fixed (`Canvas::view_box` and `fractional`);
+        // workaround kept until checked on a display (the stripes must follow the weighted box).
         let bh = if compact { 88.0 } else { 116.0 };
         let weights: Vec<f32> = parts.iter().map(|(_, n, _)| (*n as f32).max(0.6)).collect();
         let sum: f32 = weights.iter().sum();
@@ -2091,7 +2096,7 @@ fn ProjectsTile(tiles: &[ProjectTile], ui: &SharedUi, l: Layout) {
             Box::new(move || {
                 let (u, name) = (ui.clone(), t.name.clone());
                 // `.ptile`: a `surface-2` row, a 40 px ring with the member count, the name and
-                // the counts. TODO(compose-rust#372): a pointer-up `Clickable`.
+                // the counts; the container's `on_click` (compose-rust#372).
                 Clickable(
                     Modifier::new().fill_max_width().background(paint(p.surface_2)).corner_radius(CORNER_MD).padding(10.0),
                     Alignment::CenterStart,

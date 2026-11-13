@@ -463,7 +463,7 @@ fn ProcessTable(rows: &[ProcessRow], cur: SortState, sort: &MutableState<SortSta
 
 /// One row of the process table. A member's agent process (`tr.mine`) has a 3 px blue bar, a
 /// 12 % blue wash and the member name in blue, and opens its session (FR-L21).
-/// TODO(compose-rust#372): the row is a pointer-up `Clickable`.
+/// The row is the container's `on_click` (compose-rust#372), named by its text.
 fn ProcessRowView(row: &ProcessRow, mut on_open: impl FnMut(String) + 'static) {
     let p = ember_theme().palette;
     let session = row.session.clone();

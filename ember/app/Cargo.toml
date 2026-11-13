@@ -1,9 +1,9 @@
 [package]
 name = "ember-app"
 version = "0.1.0"
-# dioxus-compose is edition 2024 / Rust 1.85; this crate follows it.
+# dioxus-compose is edition 2024 / Rust 1.88 (ea98a043); this crate follows it.
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Ember native client: launcher and conversation UI on dioxus-compose, no webview (SPEC §L, E1)"
 license = "Apache-2.0"
 publish = false

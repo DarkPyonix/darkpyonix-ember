@@ -194,7 +194,9 @@ pub enum CaptureStart {
 }
 
 /// The start from `EMBER_CR_SCROLL=<team|editor>` and `EMBER_CR_CHARACTER=<index>`: the toolkit
-/// cannot scroll a column from code (TODO(compose-rust#385)), so the blocks above are left out,
+/// could not scroll a column from code before v0.0.5 (v0.0.7: #385 fixed with
+/// `ScrollState::scroll_to`; workaround kept until checked on a display, because the capture
+/// script relies on it), so the blocks above are left out,
 /// as `EMBER_CR_SCROLL` does on the home and files screens. Picking a member alone starts at the
 /// editor, so its 팀원 설정 저장 and 초기화 buttons are in view.
 pub fn capture_start(scroll: Option<&str>, character: Option<&str>) -> CaptureStart {

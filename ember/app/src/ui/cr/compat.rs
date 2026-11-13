@@ -80,9 +80,9 @@ pub fn Dot(tone: Tone) {
         .content(|| {});
 }
 
-/// An indeterminate circular spinner, 12 px as in the mockup.
-/// TODO(compose-rust#377): the stroke is the design system's (about 3 px), the mockup has 2 px
-/// with a `--c-blue-soft` track.
+/// An indeterminate circular spinner, 12 px as in the mockup. The ring's stroke scales with its
+/// size (compose-rust#377); the mockup's `--c-blue-soft` track has no builder, so the ring has
+/// the design system's track.
 pub fn Spinner(size: f32) {
     cu::IndeterminateProgressIndicator()
         .circular(true)
@@ -131,10 +131,12 @@ pub fn StatusPill(status: LauncherStatus) {
 /// Conversation text.
 ///
 /// TODO(markdown): render with a markdown component (and its stream form for streaming
-/// replies) once compose-rust has one. Plain text until then.
-/// TODO(compose-rust#5): wrap in `SelectionContainer` so text can be selected and copied.
+/// replies) once compose-rust has one. Plain text until then. The text sits in a
+/// `SelectionContainer` so it can be selected and copied (compose-rust#5).
 pub fn MessageText(text: &str, ink: Option<ColorRole>) {
-    Txt(text, TypeRole::Body, ink.map(Paint::Role), None, None, None, None);
+    cu::SelectionContainer().content(|| {
+        Txt(text, TypeRole::Body, ink.map(Paint::Role), None, None, None, None);
+    });
 }
 
 /// Code or tool output in a monospace face.
@@ -233,5 +235,16 @@ mod tests {
             })
         };
         assert!(has(&want) && has("cargo test") && has("hi"), "{batch:?}");
+    }
+
+    #[test]
+    fn message_text_can_be_selected_and_copied() {
+        // compose-rust#5: the conversation text sits in a SelectionContainer.
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| MessageText("hello", None))));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        assert!(
+            batch.iter().any(|m| matches!(m, Mutation::Create { widget: compose_rust::WidgetKind::SelectionContainer, .. })),
+            "{batch:?}"
+        );
     }
 }

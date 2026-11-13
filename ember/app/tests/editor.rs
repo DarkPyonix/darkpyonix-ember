@@ -1878,9 +1878,10 @@ mod design_placement {
         }
         assert!(tree.contains("oncontextmenu: move |event| {"), "rows do not open the context menu");
         assert!(tree.contains("TreeMenuAt::Pointer { x: at.x, y: at.y }"));
-        // Stand-in openers until right-click reaches the app (v0.0.7 pin, compose-rust#417).
+        // Stand-in openers until dioxus-compose forwards right-click (compose-rust#417 is fixed in
+        // v0.0.7; the editor window waits for dioxus-compose).
         assert!(tree.contains("TreeMenuAt::Keyboard"), "no Shift+F10 opener");
-        assert!(tree.contains("TODO(v0.0.7 pin, compose-rust#417)"));
+        assert!(tree.contains("v0.0.7: #417 fixed; workaround kept until checked on a display"));
     }
 
     #[test]

@@ -1786,8 +1786,130 @@ pub mod page {
                 }
             }
         };
-        let search_s = s.clone();
-        let rows_for_sel_all = rows.clone();
+        // The tree's menus (owner placement rule 2026-11-13, rules 1 and 2): the header "+" menu and the
+        // context menu share one item list and one handler.
+        use crate::ui::editor_tree_menu::{self as tm, TreeMenuEntry, TreeMenuItem};
+        let tree_menu_state = tm::TreeMenuState {
+            has_selection: selected.is_some() || !tree_multi_sel.read().is_empty(),
+            has_clipboard: tree_clipboard.read().is_some(),
+            tab_open: selected.as_ref().is_some_and(|(p, d)| !*d && s.tabs.read().paths().contains(&p.as_str())),
+        };
+        let run_host = s.host.clone();
+        let run_root = root.clone();
+        let run_rows = rows.clone();
+        let run_unsaved = unsaved.clone();
+        let run_s = s.clone();
+        let run_selected = selected.clone();
+        let run_tree_item = move |item: TreeMenuItem| {
+            let items = {
+                let sel = tree_multi_sel.read();
+                if sel.is_empty() { run_selected.clone().into_iter().collect::<Vec<_>>() } else { sel.clone() }
+            };
+            let pruned = crate::ui::editor::prune_redundant_selection(&items);
+            match item {
+                TreeMenuItem::NewFile => { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewFile { parent: new_file_parent.clone() })); }
+                TreeMenuItem::NewFolder => { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewDir { parent: new_dir_parent.clone() })); }
+                TreeMenuItem::Cut | TreeMenuItem::Copy => {
+                    if !pruned.is_empty() {
+                        let n = pruned.len();
+                        let cut = item == TreeMenuItem::Cut;
+                        let kind = if cut { crate::ui::editor::ClipboardKind::Cut } else { crate::ui::editor::ClipboardKind::Copy };
+                        tree_clipboard.set(Some(crate::ui::editor::TreeClipboard { kind, paths: pruned }));
+                        notice(if cut { format!("{n}개 항목을 잘라냈습니다") } else { format!("{n}개 항목을 복사했습니다") });
+                    }
+                }
+                TreeMenuItem::Paste => {
+                    let clip = tree_clipboard.read().clone();
+                    if let Some(clip) = clip {
+                        let dest_dir = crate::ui::editor::new_item_parent(run_selected.as_ref().map(|(p, d)| (p.as_str(), *d)), &run_root);
+                        let sources: Vec<String> = clip.paths.into_iter().map(|(p, _)| p).collect();
+                        expanded.write().insert(dest_dir.clone());
+                        match clip.kind {
+                            crate::ui::editor::ClipboardKind::Copy => {
+                                run_host.send(HostCommand::CopyPaths { sources, dest_dir });
+                            }
+                            crate::ui::editor::ClipboardKind::Cut => {
+                                run_host.send(HostCommand::MovePaths { sources, dest_dir });
+                                tree_clipboard.set(None);
+                            }
+                        }
+                    }
+                }
+                TreeMenuItem::Rename => {
+                    if let Some((path, _)) = run_selected.clone() {
+                        let blocked: Vec<String> = run_unsaved.iter().filter(|u| crate::ui::editor::is_at_or_below(u, &path)).cloned().collect();
+                        if !blocked.is_empty() {
+                            notice(format!("저장하지 않은 변경이 있어 이름을 바꿀 수 없습니다. 먼저 저장하세요: {}", blocked.iter().map(|u| base_name(u).to_string()).collect::<Vec<_>>().join(", ")));
+                        } else {
+                            prompt_text.set(base_name(&path).to_string());
+                            prompt.set(Some(TreePrompt::Rename { path }));
+                        }
+                    }
+                }
+                TreeMenuItem::Delete => {
+                    if !pruned.is_empty() {
+                        prompt_at.set(now_ms());
+                        if pruned.len() == 1 {
+                            prompt.set(Some(TreePrompt::Delete { path: pruned[0].0.clone(), is_dir: pruned[0].1 }));
+                        } else {
+                            prompt.set(Some(TreePrompt::DeleteMany { items: pruned }));
+                        }
+                    }
+                }
+                TreeMenuItem::CloseTab => {
+                    if let Some((path, false)) = run_selected.clone() {
+                        run_tab_menu_item(&run_s, crate::ui::editor::TabMenuItem::Close, &path);
+                    }
+                }
+                TreeMenuItem::SelectAll => {
+                    let (all, last) = crate::ui::editor::select_all_tree_rows(&run_rows);
+                    tree_multi_sel.set(all);
+                    tree_sel.set(last);
+                }
+            }
+        };
+        let menu_at = tm::open_menu();
+        let plus_open = menu_at == Some(tm::TreeMenuAt::Plus);
+        let mut tree_revision = s.revision;
+        let mut key_revision = s.revision;
+        let tree_menu = match menu_at {
+            None => rsx! {},
+            Some(at) => {
+                let entries = at.entries(tree_menu_state);
+                let style = at.style();
+                let mac = matches!(Os::current(), Os::Mac);
+                let mut scrim_rev = s.revision;
+                let mut scrim_rev2 = s.revision;
+                rsx! {
+                    div { class: "ed-scrim", style: "z-index:40;",
+                        onclick: move |_| { tm::close(); *scrim_rev.write() += 1; },
+                        oncontextmenu: move |event| { event.prevent_default(); tm::close(); *scrim_rev2.write() += 1; } }
+                    div { class: "ed-menu", role: "menu", "aria-label": "프로젝트 메뉴", style: "{style}",
+                        for (i, entry) in entries.into_iter().enumerate() {
+                            {
+                                match entry {
+                                    TreeMenuEntry::Sep => rsx! { div { key: "sep{i}", class: "ed-msep" } },
+                                    TreeMenuEntry::Heading(h) => rsx! { div { key: "h{i}", class: "ed-mlab", "{h}" } },
+                                    TreeMenuEntry::Item(item, enabled) => {
+                                        let mut run = run_tree_item.clone();
+                                        let hint = item.hint(mac);
+                                        let aria_disabled = (!enabled).to_string();
+                                        let mut rev = s.revision;
+                                        rsx! {
+                                            button { key: "{item.label()}", role: "menuitem", "aria-label": "{item.label()}", disabled: !enabled, "aria-disabled": "{aria_disabled}",
+                                                onclick: move |_| { tm::close(); *rev.write() += 1; if enabled { run(item); } },
+                                                span { class: "spacer", "{item.label()}" }
+                                                if !hint.is_empty() { span { class: "ed-msc", "{hint}" } }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
         let paste_selected = selected.clone();
         let paste_host = s.host.clone();
         let paste_root = root.clone();
@@ -1805,44 +1927,48 @@ pub mod page {
         let reveal_current = current.map(str::to_string);
         let reveal_root = root.clone();
         let reveal_host = s.host.clone();
+        let reveal_disabled = reveal_current.is_none();
         let modified = s.scm.modified_paths(&root);
         rsx! {
             section { class: "ed-tw ed-left", "aria-label": "프로젝트",
-                div { class: "ed-twh", style: "gap:2px;",
+                // The mockup's three actions and one "+" (owner placement rule 2026-11-13, rule 1).
+                div { class: "ed-twh",
                     b { class: "ed-twt", "프로젝트" }
                     div { class: "spacer" }
-                    button { class: "ed-ib", title: "새 파일", "aria-label": "새 파일", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewFile { parent: new_file_parent.clone() })); }, {icon("plus")} }
-                    button { class: "ed-ib", title: "새 폴더", "aria-label": "새 폴더", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewDir { parent: new_dir_parent.clone() })); }, {icon("folder")} }
-                    button { class: "ed-ib", title: "모두 선택", "aria-label": "모두 선택", onclick: move |_| {
-                        let (all, last) = crate::ui::editor::select_all_tree_rows(&rows_for_sel_all);
-                        tree_multi_sel.set(all);
-                        tree_sel.set(last);
-                    }, {icon_px("check", 15)} }
-                    if let Some(ref cur_path) = reveal_current {
-                        {
-                            let cur_path = cur_path.clone();
-                            let reveal_root = reveal_root.clone();
-                            let reveal_host = reveal_host.clone();
-                            rsx! {
-                                button { class: "ed-ib", title: "열린 파일 찾기", "aria-label": "열린 파일 찾기", onclick: move |_| {
-                                    for dir in crate::ui::editor::ancestor_dirs_to_expand(&reveal_root, &cur_path) {
-                                        expanded.write().insert(dir.clone());
-                                        reveal_host.send(HostCommand::List(dir));
-                                    }
-                                    tree_multi_sel.set(vec![(cur_path.clone(), false)]);
-                                    tree_sel.set(Some((cur_path.clone(), false)));
-                                }, {icon_px("dot", 14)} }
-                            }
-                        }
-                    }
+                    button { class: "ed-ib", title: "추가", "aria-label": "추가", "aria-haspopup": "menu", "aria-expanded": "{plus_open}", onclick: move |_| {
+                        crate::ui::editor_tree_menu::toggle_plus();
+                        *tree_revision.write() += 1;
+                    }, {icon("plus")} }
                     button { class: "ed-ib", title: "모두 접기", "aria-label": "모두 접기", onclick: move |_| expanded.write().clear(), {icon_px("chev", 16)} }
-                    button { class: "ed-ib", title: "파일 검색", "aria-label": "파일 검색", onclick: move |_| crate::ui::editor_search::view::open(&search_s, false), {icon("search")} }
+                    button { class: "ed-ib", title: "열린 파일 찾기", "aria-label": "열린 파일 찾기", disabled: reveal_disabled, onclick: move |_| {
+                        if let Some(cur_path) = reveal_current.clone() {
+                            for dir in crate::ui::editor::ancestor_dirs_to_expand(&reveal_root, &cur_path) {
+                                expanded.write().insert(dir.clone());
+                                reveal_host.send(HostCommand::List(dir));
+                            }
+                            tree_multi_sel.set(vec![(cur_path.clone(), false)]);
+                            tree_sel.set(Some((cur_path, false)));
+                        }
+                    }, {icon("search")} }
                     button { class: "ed-ib", title: "숨기기", "aria-label": "숨기기", onclick: move |_| stripes.write().hide(Side::Left), {icon("close")} }
                 }
+                {tree_menu}
                 div { class: "ed-tree", role: "tree", "aria-label": "프로젝트 트리", "aria-multiselectable": "true", tabindex: "{tree_container_ti}",
                     onkeydown: move |event| {
                         if !crate::ui::editor::tree_handles_key(prompt.read().as_ref()) {
                             return;
+                        }
+                        // TODO(v0.0.7 pin, compose-rust#417): Shift+F10 stands in for right-click until it
+                        // reaches the app; remove the stand-in once right-click opens the menu.
+                        {
+                            let m = event.modifiers();
+                            if crate::ui::editor::tab_menu_key(&key_name(&event.key()), m.contains(Modifiers::CONTROL), m.contains(Modifiers::SHIFT), m.contains(Modifiers::ALT), m.contains(Modifiers::META)) {
+                                event.stop_propagation();
+                                event.prevent_default();
+                                crate::ui::editor_tree_menu::open(crate::ui::editor_tree_menu::TreeMenuAt::Keyboard);
+                                *key_revision.write() += 1;
+                                return;
+                            }
                         }
                         if event.key() == Key::Escape {
                             event.stop_propagation();
@@ -2048,13 +2174,8 @@ pub mod page {
                             let class = crate::ui::editor::tree_row_class(active_row, is_mod);
                             let depth = row.depth + 1;
                             let row_style = if in_cut { format!("--d:{depth}; opacity:0.55;") } else { format!("--d:{depth};") };
-                            let rename_path = row.path.clone();
-                            let cut_path = row.path.clone();
-                            let delete_path = row.path.clone();
-                            let rename_name = row.name.clone();
-                            let rename_label = row.name.clone();
-                            let cut_label = row.name.clone();
-                            let unsaved_for_rename = unsaved.clone();
+                            let ctx_path = row.path.clone();
+                            let mut ctx_revision = s.revision;
                             let row_label = crate::ui::editor::tree_item_aria_label(&row.name, is_dir);
                             let path_for_down = row.path.clone();
                             let rows_for_down = rows.clone();
@@ -2162,54 +2283,25 @@ pub mod page {
                                         tabs.write().keep_open(&keep_path);
                                     }
                                 },
+                                // Right-click selects the row (keeping a multi-selection it is part of)
+                                // and opens the tree's context menu (owner placement rule, rule 2).
+                                oncontextmenu: move |event| {
+                                    event.prevent_default();
+                                    event.stop_propagation();
+                                    if !tree_multi_sel.read().iter().any(|(p, _)| p == &ctx_path) {
+                                        tree_multi_sel.set(vec![(ctx_path.clone(), is_dir)]);
+                                    }
+                                    tree_sel.set(Some((ctx_path.clone(), is_dir)));
+                                    let at = event.client_coordinates();
+                                    crate::ui::editor_tree_menu::open(crate::ui::editor_tree_menu::TreeMenuAt::Pointer { x: at.x, y: at.y });
+                                    *ctx_revision.write() += 1;
+                                },
                                 if is_dir { if row.open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} } } else { span { class: "chev-sp" } }
                                 if is_dir { {icon_px("folder", 15)} } else { {icon_px("file", 15)} }
                                 if rename_at == Some(row_idx) {
                                     {prompt_inline.take()}
                                 } else {
                                     span { class: "ellipsis", "{row.name}" }
-                                }
-                                if chosen && rename_at != Some(row_idx) {
-                                    div { class: "spacer" }
-                                    button { class: "ed-ib", title: "잘라내기: {cut_label}", "aria-label": "잘라내기: {cut_label}", style: "width:22px; height:22px;",
-                                        onmousedown: move |event| { event.stop_propagation(); },
-                                        onclick: move |event| {
-                                            event.stop_propagation();
-                                            if let Some(clip) = crate::ui::editor::cut_selection(&tree_multi_sel.read(), &cut_path, is_dir) {
-                                                let n = clip.paths.len();
-                                                tree_clipboard.set(Some(clip));
-                                                notice(format!("{n}개 항목을 잘라냈습니다"));
-                                            }
-                                        }, {icon_px("minus", 13)} }
-                                    button { class: "ed-ib", title: "이름 변경: {rename_label}", "aria-label": "이름 변경: {rename_label}", style: "width:22px; height:22px;",
-                                        onmousedown: move |event| { event.stop_propagation(); },
-                                        onclick: move |event| {
-                                            event.stop_propagation();
-                                            let blocked: Vec<String> = unsaved_for_rename.iter().filter(|p| crate::ui::editor::is_at_or_below(p, &rename_path)).cloned().collect();
-                                            if !blocked.is_empty() {
-                                                notice(format!("저장하지 않은 변경이 있어 이름을 바꿀 수 없습니다. 먼저 저장하세요: {}", blocked.iter().map(|p| base_name(p).to_string()).collect::<Vec<_>>().join(", ")));
-                                                return;
-                                            }
-                                            prompt_text.set(rename_name.clone());
-                                            prompt.set(Some(TreePrompt::Rename { path: rename_path.clone() }));
-                                        }, {icon_px("edit", 13)} }
-                                    button { class: "ed-ib", title: "삭제: {rename_label}", "aria-label": "삭제: {rename_label}", style: "width:22px; height:22px; color:var(--c-red);",
-                                        onmousedown: move |event| { event.stop_propagation(); },
-                                        onclick: move |event| {
-                                            event.stop_propagation();
-                                            prompt_at.set(now_ms());
-                                            let multi = tree_multi_sel.read();
-                                            if multi.iter().any(|(p, _)| p == &delete_path) && multi.len() > 1 {
-                                                let pruned = crate::ui::editor::prune_redundant_selection(&multi);
-                                                if pruned.len() == 1 {
-                                                    prompt.set(Some(TreePrompt::Delete { path: pruned[0].0.clone(), is_dir: pruned[0].1 }));
-                                                } else {
-                                                    prompt.set(Some(TreePrompt::DeleteMany { items: pruned }));
-                                                }
-                                            } else {
-                                                prompt.set(Some(TreePrompt::Delete { path: delete_path.clone(), is_dir }));
-                                            }
-                                        }, {icon_px("close", 13)} }
                                 }
                             } }
                         }

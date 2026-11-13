@@ -254,12 +254,16 @@ fn fr_l31_leaving_an_empty_new_name_field_closes_it_and_a_typed_name_stays() {
     let mut page = Page::open();
     let field_label = "새 파일 이름";
 
+    // 새 파일 is in the header "+" menu (owner placement rule 2026-11-13, rule 1).
+    crate::ui::editor_tree_menu::close();
+    page.click("aria-label", "추가");
     page.click("aria-label", "새 파일");
     let field = page.find("aria-label", field_label).expect("the new-name field");
     page.dom.blur(field);
     page.dom.render();
     assert!(page.find("aria-label", field_label).is_none(), "an empty field closes on blur");
 
+    page.click("aria-label", "추가");
     page.click("aria-label", "새 파일");
     let field = page.find("aria-label", field_label).expect("the new-name field again");
     page.dom.input(field, "notes.md");

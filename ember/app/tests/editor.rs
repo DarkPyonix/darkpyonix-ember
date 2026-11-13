@@ -1844,3 +1844,57 @@ mod design_chrome {
         assert!(!top.contains("icon(\"more\")"), "the top bar still has a ⋯ button");
     }
 }
+
+// Owner placement rule 2026-11-13 (`docs/DESIGN.md` 6.3, rules 1 to 4): features beyond the mockup
+// live in surfaces the mockup already has.
+mod design_placement {
+    use ember_app::ui::editor::ToolWindow;
+
+    const PAGE: &str = include_str!("../src/ui/editor_workbench.rs");
+
+    fn project_tree() -> &'static str {
+        &PAGE[PAGE.find("fn project_tree(").unwrap()..PAGE.find("fn tab_strip(").unwrap()]
+    }
+
+    #[test]
+    fn design_rule1_project_header_is_plus_and_the_mockups_three_actions() {
+        let tree = project_tree();
+        let head = &tree[tree.find("div { class: \"ed-twh\",").unwrap()..tree.find("{tree_menu}").unwrap()];
+        let titles: Vec<&str> = head.match_indices("title: \"").map(|(i, _)| {
+            let rest = &head[i + 8..];
+            &rest[..rest.find('"').unwrap()]
+        }).collect();
+        assert_eq!(titles, ember_app::ui::editor_tree_menu::HEADER_ACTIONS);
+        for gone in ["새 파일", "새 폴더", "모두 선택", "파일 검색"] {
+            assert!(!head.contains(&format!("title: \"{gone}\"")), "{gone} is still in the header");
+        }
+    }
+
+    #[test]
+    fn design_rule2_tree_rows_carry_no_inline_actions_and_open_the_context_menu() {
+        let tree = project_tree();
+        for gone in ["잘라내기: {cut_label}", "이름 변경: {rename_label}", "삭제: {rename_label}"] {
+            assert!(!tree.contains(gone), "a row still has the inline {gone} button");
+        }
+        assert!(tree.contains("oncontextmenu: move |event| {"), "rows do not open the context menu");
+        assert!(tree.contains("TreeMenuAt::Pointer { x: at.x, y: at.y }"));
+        // Stand-in openers until right-click reaches the app (v0.0.7 pin, compose-rust#417).
+        assert!(tree.contains("TreeMenuAt::Keyboard"), "no Shift+F10 opener");
+        assert!(tree.contains("TODO(v0.0.7 pin, compose-rust#417)"));
+    }
+
+    #[test]
+    fn design_rule3_no_search_stripe_and_the_find_pill_opens_search() {
+        assert!(!ToolWindow::LEFT_STRIPE.contains(&ToolWindow::Search));
+        assert_eq!(ToolWindow::Search.action(), Some(ember_app::ui::keymap::Action::FindInFiles));
+        assert!(PAGE.contains("button { class: \"ed-find\", title: \"{find}\", \"aria-label\": \"{find}\", onclick: move |_| run_action(&find_s, Action::Find),"));
+    }
+
+    #[test]
+    fn design_rule4_output_is_a_bottom_tab_next_to_problems_not_a_stripe() {
+        assert!(!ToolWindow::BOTTOM_STRIPE.contains(&ToolWindow::Output));
+        let problems = ToolWindow::BOTTOM.iter().position(|w| *w == ToolWindow::Problems).unwrap();
+        assert_eq!(ToolWindow::BOTTOM.get(problems + 1), Some(&ToolWindow::Output));
+        assert!(PAGE.contains("for b in ToolWindow::BOTTOM {"), "the bottom tabs are not drawn from the bottom windows");
+    }
+}

@@ -6,11 +6,19 @@
 //! inline icons: cut, copy, paste, rename (F2), delete, closing the file's tab and select all are
 //! in the tree's context menu, in Code-OSS's explorer order.
 //!
+<<<<<<< HEAD
 //! v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward
 //! compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
 //! Until right-click reaches the editor window, two stand-ins open the same items: the "선택한
 //! 항목" section of the header "+" menu and Shift+F10 (or the context-menu key) on the focused
 //! tree. Remove both once right-click works there.
+=======
+//! TODO(v0.0.7 pin, compose-rust#417): right-click does not reach the app until the pin moves, so
+//! two stand-ins open the same items: the "선택한 항목" section of the header "+" menu and
+//! Shift+F10 (or the context-menu key) on the focused tree. Remove both once right-click works.
+//! TODO(compose-rust#100): the v0.0.6 renderer sends only Enter as a key event, so Shift+F10 does
+//! not reach the tree in a real run yet (#832); until then the "+" menu is the one that works.
+>>>>>>> origin/develop
 
 use std::cell::Cell;
 

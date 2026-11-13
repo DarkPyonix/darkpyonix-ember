@@ -13,7 +13,7 @@ use std::sync::mpsc;
 
 use ember_editor_conn::webview::{ContentOptions, PanelOptions, WebviewHandle, WebviewMessage};
 
-use super::resource::ResourceResponse;
+use super::resource::{self, ResourceBase, ResourceResponse};
 use super::shim;
 use super::theme::{self, Fonts, ThemeKind};
 use super::{WebviewEvent, WebviewKind, WebviewUpdate};
@@ -22,9 +22,12 @@ use super::{WebviewEvent, WebviewKind, WebviewUpdate};
 #[derive(Debug, Clone, PartialEq)]
 pub struct HostWebview {
     pub handle: WebviewHandle,
-    /// The page's own secure origin (`vscode-webview://<uuid>`).
+    /// The page's own secure origin, as the host gave it ([`WebviewHost::origin`]).
     pub origin: String,
+    /// The HTML with resource URLs and the CSP source already in the host's form.
     pub html: Option<String>,
+    /// The name of the channel global the host injects ([`shim::IPC_GLOBAL`]).
+    pub ipc_global: String,
     /// Runs before the page's scripts ([`shim::init_script`]).
     pub init_script: String,
     /// Also applied before the first paint, so the page never shows the wrong theme.
@@ -51,6 +54,27 @@ pub enum HostEvent {
     /// The page tried to navigate or opened a link; the host never navigates by itself.
     Link { handle: WebviewHandle, uri: String },
     MissingCsp { handle: WebviewHandle },
+    /// Find in page: `count` matches, `active` the 0-based current one (`None` without matches).
+    Find { handle: WebviewHandle, count: u32, active: Option<u32> },
+    /// A key chord the page did not handle (`defaultPrevented` false), for the app's shortcuts, in
+    /// Ember's keymap notation (for example `"Cmd+P"`). Editing keys and text input never come here.
+    Key { handle: WebviewHandle, chord: String },
+}
+
+/// Options of [`WebviewHost::find`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FindOptions {
+    pub match_case: bool,
+    pub whole_word: bool,
+}
+
+/// What the host reports that is for the window, not the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowEvent {
+    /// The find widget's "N/M" counter.
+    Find { handle: WebviewHandle, count: u32, active: Option<u32> },
+    /// Run the app shortcut `chord` (the page left it alone).
+    Key { handle: WebviewHandle, chord: String },
 }
 
 /// Where the host sends its callbacks; it may call it from any thread.
@@ -60,6 +84,11 @@ pub type HostSink = Box<dyn FnMut(HostEvent) + Send>;
 pub trait WebviewHost {
     /// Install the callback sink (once, before any `create`).
     fn set_sink(&mut self, sink: HostSink);
+    /// The secure origin the host gives the page of `handle`, asked once before `create`: a custom
+    /// scheme (`vscode-webview://<uuid>`) on macOS and Linux, `https://<uuid>...` on Windows and Android.
+    fn origin(&mut self, handle: &str) -> String;
+    /// The URL form the host serves local resources in for `handle` (see [`resource`]).
+    fn resource_base(&self, handle: &str) -> ResourceBase;
     fn create(&mut self, webview: HostWebview);
     /// Replace the page's HTML: the page reloads, the webview and its channel stay.
     fn set_html(&mut self, handle: &str, html: &str, init_script: &str);
@@ -73,12 +102,20 @@ pub trait WebviewHost {
     fn focus(&mut self, handle: &str);
     fn dispose(&mut self, handle: &str);
     fn answer_resource(&mut self, handle: &str, request: u64, response: &ResourceResponse);
+    /// Find in page; results come back as [`HostEvent::Find`].
+    fn find(&mut self, handle: &str, query: &str, options: FindOptions);
+    fn find_next(&mut self, handle: &str);
+    fn find_prev(&mut self, handle: &str);
+    fn find_stop(&mut self, handle: &str);
+    /// "Developer: Open Webview Developer Tools" (debug builds at least).
+    fn open_devtools(&mut self, handle: &str);
 }
 
 #[derive(Debug, Clone)]
 struct Page {
     kind: WebviewKind,
     origin: String,
+    base: ResourceBase,
     html: Option<String>,
     state: Option<String>,
     content: ContentOptions,
@@ -96,6 +133,7 @@ pub struct WebviewDriver<H: WebviewHost> {
     fonts: Fonts,
     vars: Vec<(String, String)>,
     pages: HashMap<WebviewHandle, Page>,
+    window_events: Vec<WindowEvent>,
 }
 
 impl<H: WebviewHost> WebviewDriver<H> {
@@ -105,7 +143,7 @@ impl<H: WebviewHost> WebviewDriver<H> {
             let _ = tx.send(e);
         }));
         let vars = theme::css_vars(kind, &fonts);
-        Self { host, events, kind, fonts, vars, pages: HashMap::new() }
+        Self { host, events, kind, fonts, vars, pages: HashMap::new(), window_events: Vec::new() }
     }
 
     pub fn host(&self) -> &H {
@@ -126,8 +164,9 @@ impl<H: WebviewHost> WebviewDriver<H> {
         let webview = HostWebview {
             handle: handle.to_owned(),
             origin: p.origin.clone(),
-            html: p.html.clone(),
-            init_script: shim::init_script(p.state.as_deref(), &self.vars, self.kind),
+            html: p.html.as_deref().map(|h| resource::rewrite_for_host(h, &p.base)),
+            ipc_global: shim::IPC_GLOBAL.to_owned(),
+            init_script: shim::init_script(p.state.as_deref(), &self.vars, self.kind, shim::IPC_GLOBAL),
             css_vars: self.vars.clone(),
             enable_scripts: p.content.enable_scripts,
             enable_forms: p.content.enable_forms,
@@ -141,12 +180,15 @@ impl<H: WebviewHost> WebviewDriver<H> {
     /// Apply one session update; updates for the window only (titles, links, providers) are ignored here.
     pub fn apply(&mut self, update: &WebviewUpdate) {
         match update {
-            WebviewUpdate::Created { handle, kind, origin, content, panel, state, .. } => {
+            WebviewUpdate::Created { handle, kind, content, panel, state, .. } => {
+                let origin = self.host.origin(handle);
+                let base = self.host.resource_base(handle);
                 self.pages.insert(
                     handle.clone(),
                     Page {
                         kind: kind.clone(),
-                        origin: origin.clone(),
+                        origin,
+                        base,
                         html: None,
                         state: state.clone(),
                         content: content.clone(),
@@ -164,8 +206,9 @@ impl<H: WebviewHost> WebviewDriver<H> {
                     p.state = state.clone();
                 }
                 if p.alive {
-                    let script = shim::init_script(p.state.as_deref(), &self.vars, self.kind);
-                    self.host.set_html(handle, html, &script);
+                    let script = shim::init_script(p.state.as_deref(), &self.vars, self.kind, shim::IPC_GLOBAL);
+                    let html = resource::rewrite_for_host(html, &p.base);
+                    self.host.set_html(handle, &html, &script);
                 }
             }
             WebviewUpdate::Options { handle, content } => {
@@ -179,9 +222,10 @@ impl<H: WebviewHost> WebviewDriver<H> {
                 }
             }
             WebviewUpdate::Post { handle, message } => {
-                if self.pages.get(handle).is_some_and(|p| p.alive) {
-                    self.host.post(handle, message);
-                }
+                let Some(p) = self.pages.get(handle).filter(|p| p.alive) else { return };
+                // Extensions also send `asWebviewUri` results in messages.
+                let message = WebviewMessage { json: resource::rewrite_for_host(&message.json, &p.base), buffers: message.buffers.clone() };
+                self.host.post(handle, &message);
             }
             WebviewUpdate::Reveal { handle, preserve_focus, .. } => {
                 if !*preserve_focus && self.pages.get(handle).is_some_and(|p| p.alive) {
@@ -249,11 +293,70 @@ impl<H: WebviewHost> WebviewDriver<H> {
         }
     }
 
-    /// The host's callbacks since the last call, as session events.
+    /// The page's origin, as the host gave it.
+    pub fn origin(&self, handle: &str) -> Option<&str> {
+        self.pages.get(handle).map(|p| p.origin.as_str())
+    }
+
+    /// `webview.asWebviewUri` and `webview.cspSource` as this host serves them.
+    pub fn resource_base(&self, handle: &str) -> Option<&ResourceBase> {
+        self.pages.get(handle).map(|p| &p.base)
+    }
+
+    fn alive(&self, handle: &str) -> bool {
+        self.pages.get(handle).is_some_and(|p| p.alive)
+    }
+
+    /// Find in the page (the find widget over a webview with `enableFindWidget`).
+    pub fn find(&mut self, handle: &str, query: &str, options: FindOptions) {
+        if self.alive(handle) {
+            self.host.find(handle, query, options);
+        }
+    }
+
+    pub fn find_next(&mut self, handle: &str) {
+        if self.alive(handle) {
+            self.host.find_next(handle);
+        }
+    }
+
+    pub fn find_prev(&mut self, handle: &str) {
+        if self.alive(handle) {
+            self.host.find_prev(handle);
+        }
+    }
+
+    pub fn find_stop(&mut self, handle: &str) {
+        if self.alive(handle) {
+            self.host.find_stop(handle);
+        }
+    }
+
+    pub fn open_devtools(&mut self, handle: &str) {
+        if self.alive(handle) {
+            self.host.open_devtools(handle);
+        }
+    }
+
+    /// Find results and app chords the host reported, since the last call (filled by [`Self::poll`]).
+    pub fn take_window_events(&mut self) -> Vec<WindowEvent> {
+        std::mem::take(&mut self.window_events)
+    }
+
+    /// The host's callbacks since the last call, as session events. Find results and key chords go
+    /// to [`Self::take_window_events`]; a resource URL is turned back into Code-OSS's form.
     pub fn poll(&mut self) -> Vec<WebviewEvent> {
         let mut out = Vec::new();
         while let Ok(e) = self.events.try_recv() {
             out.push(match e {
+                HostEvent::Find { handle, count, active } => {
+                    self.window_events.push(WindowEvent::Find { handle, count, active });
+                    continue;
+                }
+                HostEvent::Key { handle, chord } => {
+                    self.window_events.push(WindowEvent::Key { handle, chord });
+                    continue;
+                }
                 HostEvent::Ready { handle } => WebviewEvent::Ready { handle },
                 HostEvent::Message { handle, message } => WebviewEvent::Message { handle, message },
                 HostEvent::State { handle, state } => {
@@ -263,7 +366,11 @@ impl<H: WebviewHost> WebviewDriver<H> {
                     WebviewEvent::State { handle, state }
                 }
                 HostEvent::Focus { handle, focused } => WebviewEvent::Focus { handle, focused },
-                HostEvent::Resource { handle, request, url } => WebviewEvent::ResourceRequested { handle, request, url },
+                HostEvent::Resource { handle, request, url } => {
+                    // A URL not in the host's form stays as it is, and the session refuses it.
+                    let url = self.pages.get(&handle).and_then(|p| p.base.to_canonical(&url)).unwrap_or(url);
+                    WebviewEvent::ResourceRequested { handle, request, url }
+                }
                 HostEvent::Link { handle, uri } => WebviewEvent::LinkClicked { handle, uri },
                 HostEvent::MissingCsp { handle } => WebviewEvent::MissingCsp { handle },
             });
@@ -374,6 +481,11 @@ pub enum HostCall {
     Focus { handle: WebviewHandle },
     Dispose { handle: WebviewHandle },
     AnswerResource { handle: WebviewHandle, request: u64, response: ResourceResponse },
+    Find { handle: WebviewHandle, query: String, options: FindOptions },
+    FindNext { handle: WebviewHandle },
+    FindPrev { handle: WebviewHandle },
+    FindStop { handle: WebviewHandle },
+    OpenDevtools { handle: WebviewHandle },
 }
 
 /// A page of the [`FakeHost`].
@@ -389,14 +501,32 @@ pub struct FakePage {
 }
 
 /// A host with no webview: it records calls and lets a test play the page.
-#[derive(Default)]
 pub struct FakeHost {
     pub calls: Vec<HostCall>,
     pub pages: HashMap<WebviewHandle, FakePage>,
+    /// The resource form it reports (custom scheme like WKWebView, or https like WebView2).
+    pub base: ResourceBase,
     sink: Option<HostSink>,
+    next_origin: u64,
+}
+
+impl Default for FakeHost {
+    fn default() -> Self {
+        Self::custom_scheme()
+    }
 }
 
 impl FakeHost {
+    /// Like the macOS and Linux hosts: `vscode-webview://...` origins, `vscode-resource://` resources.
+    pub fn custom_scheme() -> Self {
+        Self { calls: Vec::new(), pages: HashMap::new(), base: ResourceBase::custom_scheme(), sink: None, next_origin: 0 }
+    }
+
+    /// Like the Windows and Android hosts: `https://` origins and resources.
+    pub fn https() -> Self {
+        Self { base: ResourceBase::code_oss(), ..Self::custom_scheme() }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -416,6 +546,18 @@ impl FakeHost {
 impl WebviewHost for FakeHost {
     fn set_sink(&mut self, sink: HostSink) {
         self.sink = Some(sink);
+    }
+
+    fn origin(&mut self, _handle: &str) -> String {
+        self.next_origin += 1;
+        match self.base {
+            ResourceBase::Scheme { .. } => format!("vscode-webview://fake-{}", self.next_origin),
+            ResourceBase::Https { .. } => format!("https://fake-{}.vscode-webview.net", self.next_origin),
+        }
+    }
+
+    fn resource_base(&self, _handle: &str) -> ResourceBase {
+        self.base.clone()
     }
 
     fn create(&mut self, webview: HostWebview) {
@@ -473,5 +615,25 @@ impl WebviewHost for FakeHost {
 
     fn answer_resource(&mut self, handle: &str, request: u64, response: &ResourceResponse) {
         self.calls.push(HostCall::AnswerResource { handle: handle.to_owned(), request, response: response.clone() });
+    }
+
+    fn find(&mut self, handle: &str, query: &str, options: FindOptions) {
+        self.calls.push(HostCall::Find { handle: handle.to_owned(), query: query.to_owned(), options });
+    }
+
+    fn find_next(&mut self, handle: &str) {
+        self.calls.push(HostCall::FindNext { handle: handle.to_owned() });
+    }
+
+    fn find_prev(&mut self, handle: &str) {
+        self.calls.push(HostCall::FindPrev { handle: handle.to_owned() });
+    }
+
+    fn find_stop(&mut self, handle: &str) {
+        self.calls.push(HostCall::FindStop { handle: handle.to_owned() });
+    }
+
+    fn open_devtools(&mut self, handle: &str) {
+        self.calls.push(HostCall::OpenDevtools { handle: handle.to_owned() });
     }
 }

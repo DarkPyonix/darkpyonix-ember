@@ -5,22 +5,26 @@
 //! `setState`, `getState`; the state a reload starts with is embedded), puts the theme's CSS variables
 //! on `<html>` and the theme class on `<body>`.
 //!
-//! The host node supplies the channel as `globalThis.__emberWebviewHost.post(kind, payload)`
+//! The host node supplies the channel as `globalThis.<ipc global>.post(kind, payload)`, the global
+//! named by [`IPC_GLOBAL`] (the host is configured with it, compose-rust `.ipc_global(...)`), e.g.
+//! `globalThis.__emberWebviewHost.post(kind, payload)`
 //! (`"message"` with the page's value, `"state"` with the JSON text of the new state); how bytes
 //! cross the OS's IPC is the node's business. Messages to the page arrive as ordinary `message`
 //! events on `window`, as in Code-OSS.
 
 use super::theme::ThemeKind;
 
-/// The global the host node defines before this script runs.
-pub const HOST_GLOBAL: &str = "__emberWebviewHost";
+/// The name of the global the host node injects before this script runs; Ember configures the host
+/// with it ([`super::host::HostWebview::ipc_global`]).
+pub const IPC_GLOBAL: &str = "__emberWebviewHost";
 
 fn js_string(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
 }
 
-/// The init script for one page: `state` is the JSON text the page last saved with `setState`.
-pub fn init_script(state: Option<&str>, vars: &[(String, String)], kind: ThemeKind) -> String {
+/// The init script for one page: `state` is the JSON text the page last saved with `setState`, and
+/// `ipc_global` the name of the host's channel global (normally [`IPC_GLOBAL`]).
+pub fn init_script(state: Option<&str>, vars: &[(String, String)], kind: ThemeKind, ipc_global: &str) -> String {
     let state_expr = match state {
         Some(s) => format!("JSON.parse({})", js_string(s)),
         None => "undefined".into(),
@@ -30,10 +34,10 @@ pub fn init_script(state: Option<&str>, vars: &[(String, String)], kind: ThemeKi
         style.push_str(&format!("    root.setProperty({}, {});\n", js_string(k), js_string(v)));
     }
     let class = js_string(kind.body_class());
-    let host_global = HOST_GLOBAL;
+    let host_global = js_string(ipc_global);
     format!(
         r#"(function () {{
-  const host = globalThis.{host_global};
+  const host = globalThis[{host_global}];
   let state = {state_expr};
   let acquired = false;
   globalThis.acquireVsCodeApi = function () {{

@@ -18,6 +18,10 @@
 //! - **View states.** A panel's `active`, `visible` and `position` go to the extension host for every
 //!   panel at once (`$onDidChangeWebviewPanelViewStates`), as `updateWebviewViewStates` does.
 //!
+//! The page's origin and the URL form of its resources are the host's (they differ per OS), so they
+//! are not in the record: the window asks the host ([`host::WebviewHost::origin`],
+//! [`host::WebviewHost::resource_base`]).
+//!
 //! The window draws the webview with a host behind the [`host::WebviewHost`] trait; until the
 //! compose-rust host node exists it shows [`host::WebviewPanes`] placeholders.
 
@@ -69,8 +73,6 @@ pub struct WebviewRecord {
     pub handle: WebviewHandle,
     pub kind: WebviewKind,
     pub extension_id: String,
-    /// `vscode-webview://<uuid>`: unique per webview, so pages cannot read each other.
-    pub origin: String,
     pub title: String,
     pub description: Option<String>,
     pub badge: Option<ViewBadge>,
@@ -127,7 +129,6 @@ pub enum WebviewUpdate {
         handle: WebviewHandle,
         kind: WebviewKind,
         title: String,
-        origin: String,
         content: ContentOptions,
         panel: PanelOptions,
         state: Option<String>,
@@ -282,10 +283,6 @@ impl Webviews {
         format!("ember-webview-{}", self.next_handle)
     }
 
-    fn new_origin() -> String {
-        format!("vscode-webview://{}", uuid::Uuid::new_v4())
-    }
-
     fn take(&mut self) -> Vec<Out> {
         std::mem::take(&mut self.out)
     }
@@ -315,12 +312,10 @@ impl Webviews {
         position: i64,
         reveal: Option<ShowOptions>,
     ) {
-        let origin = Self::new_origin();
         let record = WebviewRecord {
             handle: handle.clone(),
             kind: kind.clone(),
             extension_id,
-            origin: origin.clone(),
             title: title.clone(),
             description: None,
             badge: None,
@@ -341,7 +336,7 @@ impl Webviews {
             self.order.push(handle.clone());
         }
         self.records.insert(handle.clone(), record);
-        self.ui(WebviewUpdate::Created { handle, kind, title, origin, content, panel, state, reveal });
+        self.ui(WebviewUpdate::Created { handle, kind, title, content, panel, state, reveal });
     }
 
     fn remove(&mut self, handle: &str) -> Option<WebviewRecord> {

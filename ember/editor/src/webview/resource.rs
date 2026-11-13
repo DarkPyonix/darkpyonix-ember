@@ -14,6 +14,14 @@
 //! query is ignored, `.` and `..` are resolved first (a `..` above the root is refused), and
 //! backslashes count as slashes for non-`file` schemes. Anything else is [`Decision::Denied`].
 //!
+//! **The URL the page sees depends on the host** ([`ResourceBase`], reported by the host per webview):
+//! WKWebView and WebKitGTK can only intercept custom schemes, so there it is
+//! `vscode-resource://<scheme>+<encoded authority>/<path>`; WebView2 and the Android WebView can
+//! intercept `https://`, so there it stays Code-OSS's form. The extension host always writes Code-OSS's
+//! form (its `asWebviewUri` and `cspSource` are computed in the extension host), so the window
+//! rewrites the page's HTML and messages into the host's form ([`rewrite_for_host`]) and a request
+//! URL back into Code-OSS's form ([`ResourceBase::to_canonical`]) before the session checks it.
+//!
 //! Code-OSS rewrites a `vscode-remote` resource to the server's `/vscode-resource` HTTP endpoint;
 //! Ember reads the same file through the remote filesystem channel instead, so the allowed URI is
 //! the file itself.
@@ -23,7 +31,8 @@ use ember_editor_conn::uri::UriComponents;
 /// `webviewRootResourceAuthority`.
 pub const RESOURCE_AUTHORITY: &str = "vscode-resource.vscode-cdn.net";
 
-/// `webviewGenericCspSource`: what `webview.cspSource` adds to a page's CSP.
+/// `webviewGenericCspSource`: what `webview.cspSource` adds to a page's CSP in Code-OSS's form (the
+/// extension host writes this; the window rewrites it with [`ResourceBase::csp_source`]).
 pub const CSP_SOURCE: &str = "'self' https://*.vscode-cdn.net";
 
 /// What the host answers a resource request with.
@@ -55,21 +64,149 @@ pub enum Decision {
     Denied,
 }
 
-/// `asWebviewUri` for a file URI (`http` and `https` stay as they are).
-pub fn as_webview_uri(resource: &UriComponents) -> String {
-    if resource.scheme == "http" || resource.scheme == "https" {
-        return resource.key();
+/// Where a host serves local resources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceBase {
+    /// `https://<scheme>+<authority>.<domain>/<path>` (WebView2, Android WebView). With
+    /// [`RESOURCE_AUTHORITY`] as the domain it is Code-OSS's own form.
+    Https { domain: String },
+    /// `<scheme>://<scheme>+<authority>/<path>`, a custom scheme (WKWebView, WebKitGTK).
+    Scheme { scheme: String },
+}
+
+/// The custom scheme the macOS and Linux hosts register.
+pub const CUSTOM_SCHEME: &str = "vscode-resource";
+
+impl ResourceBase {
+    /// Code-OSS's form, which the extension host writes.
+    pub fn code_oss() -> Self {
+        Self::Https { domain: RESOURCE_AUTHORITY.to_owned() }
     }
-    let mut out = format!("https://{}+{}.{RESOURCE_AUTHORITY}{}", resource.scheme, encode_authority(&resource.authority), resource.path);
-    if !resource.query.is_empty() {
-        out.push('?');
-        out.push_str(&resource.query);
+
+    /// `vscode-resource://...`.
+    pub fn custom_scheme() -> Self {
+        Self::Scheme { scheme: CUSTOM_SCHEME.to_owned() }
     }
-    if !resource.fragment.is_empty() {
-        out.push('#');
-        out.push_str(&resource.fragment);
+
+    /// The URL up to the path for a resource `scheme` and an already encoded authority.
+    fn prefix(&self, scheme: &str, encoded_authority: &str) -> String {
+        match self {
+            Self::Https { domain } => format!("https://{scheme}+{encoded_authority}.{domain}"),
+            Self::Scheme { scheme: s } => format!("{s}://{scheme}+{encoded_authority}"),
+        }
     }
+
+    /// What the page's CSP allows for resources (Code-OSS `webview.cspSource` is
+    /// `'self' https://*.vscode-cdn.net`).
+    pub fn csp_host(&self) -> String {
+        match self {
+            Self::Https { domain } => format!("https://*.{domain}"),
+            Self::Scheme { scheme } => format!("{scheme}:"),
+        }
+    }
+
+    pub fn csp_source(&self) -> String {
+        format!("'self' {}", self.csp_host())
+    }
+
+    /// `asWebviewUri` in this host's form (`http` and `https` files stay as they are).
+    pub fn as_webview_uri(&self, resource: &UriComponents) -> String {
+        if resource.scheme == "http" || resource.scheme == "https" {
+            return resource.key();
+        }
+        let mut out = format!("{}{}", self.prefix(&resource.scheme, &encode_authority(&resource.authority)), resource.path);
+        if !resource.query.is_empty() {
+            out.push('?');
+            out.push_str(&resource.query);
+        }
+        if !resource.fragment.is_empty() {
+            out.push('#');
+            out.push_str(&resource.fragment);
+        }
+        out
+    }
+
+    /// Split a request URL of this form into the label (`<scheme>+<encoded authority>`) and the
+    /// rest (path, query, fragment), without decoding anything.
+    fn split<'a>(&self, url: &'a str) -> Option<(&'a str, &'a str)> {
+        let rest = match self {
+            Self::Https { .. } => strip_prefix_ci(url, "https://")?,
+            Self::Scheme { scheme } => strip_prefix_ci(url, &format!("{scheme}://"))?,
+        };
+        let (host, tail) = match rest.find(['/', '?', '#']) {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => (rest, ""),
+        };
+        let label = match self {
+            Self::Https { domain } => {
+                let suffix = format!(".{domain}");
+                if host.len() <= suffix.len() || !host[host.len() - suffix.len()..].eq_ignore_ascii_case(&suffix) {
+                    return None;
+                }
+                &host[..host.len() - suffix.len()]
+            }
+            Self::Scheme { .. } => host,
+        };
+        label.contains('+').then_some((label, tail))
+    }
+
+    /// Decode a request URL of this form into the file it names.
+    pub fn parse(&self, url: &str) -> Option<UriComponents> {
+        let (label, tail) = self.split(url)?;
+        let (scheme, encoded) = label.split_once('+')?;
+        if scheme.is_empty() {
+            return None;
+        }
+        let authority = decode_authority(encoded)?;
+        let tail = if tail.starts_with('/') { tail.to_owned() } else { format!("/{tail}") };
+        let end = tail.find(['?', '#']).unwrap_or(tail.len());
+        let path = percent_decode(&tail[..end])?;
+        let query = tail[end..].strip_prefix('?').map(|q| q.split('#').next().unwrap_or("").to_owned()).unwrap_or_default();
+        let mut uri = UriComponents::new(scheme.to_ascii_lowercase(), authority, path);
+        uri.query = query;
+        Some(uri)
+    }
+
+    /// The same request in Code-OSS's form, the rest of the URL kept byte for byte.
+    pub fn to_canonical(&self, url: &str) -> Option<String> {
+        let (label, tail) = self.split(url)?;
+        Some(format!("https://{label}.{RESOURCE_AUTHORITY}{tail}"))
+    }
+}
+
+/// Rewrite Code-OSS's resource URLs and CSP source in `text` (a page's HTML, a message's JSON) into
+/// `base`'s form. The replacements contain no quote or backslash, so JSON stays valid.
+pub fn rewrite_for_host(text: &str, base: &ResourceBase) -> String {
+    if *base == ResourceBase::code_oss() {
+        return text.to_owned();
+    }
+    const CDN_WILDCARD: &str = "*.vscode-cdn.net";
+    let suffix = format!(".{RESOURCE_AUTHORITY}");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("https://") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + "https://".len()..];
+        let label_len = after.bytes().take_while(|b| b.is_ascii_alphanumeric() || *b == b'+' || *b == b'-').count();
+        let label = &after[..label_len];
+        if let (Some((scheme, encoded)), true) = (label.split_once('+'), after[label_len..].starts_with(&suffix)) {
+            out.push_str(&base.prefix(scheme, encoded));
+            rest = &after[label_len + suffix.len()..];
+        } else if after.starts_with(CDN_WILDCARD) {
+            out.push_str(&base.csp_host());
+            rest = &after[CDN_WILDCARD.len()..];
+        } else {
+            out.push_str("https://");
+            rest = after;
+        }
+    }
+    out.push_str(rest);
     out
+}
+
+/// `asWebviewUri` for a file URI in Code-OSS's form (`http` and `https` stay as they are).
+pub fn as_webview_uri(resource: &UriComponents) -> String {
+    ResourceBase::code_oss().as_webview_uri(resource)
 }
 
 /// `encodeAuthority`: `[A-Za-z0-9]` as is, anything else `-` and four lower-case hex digits.
@@ -128,29 +265,9 @@ pub fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// Decode a resource request URL into the file it names. `None` for any other URL.
+/// Decode a request URL in Code-OSS's form into the file it names. `None` for any other URL.
 pub fn parse_resource_url(url: &str) -> Option<UriComponents> {
-    let rest = strip_prefix_ci(url, "https://")?;
-    let (host, tail) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, "/"),
-    };
-    let suffix = format!(".{RESOURCE_AUTHORITY}");
-    if host.len() <= suffix.len() || !host[host.len() - suffix.len()..].eq_ignore_ascii_case(&suffix) {
-        return None;
-    }
-    let label = &host[..host.len() - suffix.len()];
-    let (scheme, encoded) = label.split_once('+')?;
-    if scheme.is_empty() {
-        return None;
-    }
-    let authority = decode_authority(encoded)?;
-    let end = tail.find(['?', '#']).unwrap_or(tail.len());
-    let path = percent_decode(&tail[..end])?;
-    let query = tail[end..].strip_prefix('?').map(|q| q.split('#').next().unwrap_or("").to_owned()).unwrap_or_default();
-    let mut uri = UriComponents::new(scheme.to_ascii_lowercase(), authority, path);
-    uri.query = query;
-    Some(uri)
+    ResourceBase::code_oss().parse(url)
 }
 
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {

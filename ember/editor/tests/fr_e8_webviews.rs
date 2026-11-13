@@ -79,11 +79,10 @@ fn fr_e8_panel_lifecycle_create_title_reveal_dispose() {
     let out = w.on_call(1, create("p-1", false));
     assert_eq!(respond(&out), Some((1, Reply::Empty)));
     match updates(&out)[..] {
-        [WebviewUpdate::Created { handle, kind, title, origin, content, reveal, .. }] => {
+        [WebviewUpdate::Created { handle, kind, title, content, reveal, .. }] => {
             assert_eq!(handle, "p-1");
             assert_eq!(kind, &WebviewKind::Panel { view_type: "catCoding".into() });
             assert_eq!(title, "Cat Coding");
-            assert!(origin.starts_with("vscode-webview://"));
             assert!(content.enable_scripts);
             assert!(reveal.is_some());
         }
@@ -100,9 +99,7 @@ fn fr_e8_panel_lifecycle_create_title_reveal_dispose() {
     let out = w.on_call(4, WebviewCall::Reveal { handle: "p-1".into(), show: ShowOptions { view_column: Some(1), preserve_focus: true } });
     assert!(matches!(updates(&out)[..], [WebviewUpdate::Reveal { preserve_focus: true, view_column: Some(1), .. }]));
 
-    // Two panels have two origins.
     w.on_call(5, create("p-2", false));
-    assert_ne!(w.get("p-1").unwrap().origin, w.get("p-2").unwrap().origin);
 
     let out = w.on_call(6, WebviewCall::DisposePanel { handle: "p-1".into() });
     assert!(w.get("p-1").is_none());
@@ -277,7 +274,7 @@ fn fr_e8_state_round_trips_through_reload_restore_and_views() {
     let out = w.on_call(2, WebviewCall::SetHtml { handle: "p-1".into(), html: "<p>".into() });
     assert!(matches!(updates(&out)[..], [WebviewUpdate::Html { state: Some(s), .. }] if s == r#"{"count":3}"#));
     // The init script hands the same state to `getState()`.
-    let script = shim::init_script(Some(r#"{"count":3}"#), &[], ThemeKind::Light);
+    let script = shim::init_script(Some(r#"{"count":3}"#), &[], ThemeKind::Light, shim::IPC_GLOBAL);
     assert!(script.contains(r#"JSON.parse("{\"count\":3}")"#), "{script}");
     assert!(script.contains("acquireVsCodeApi") && script.contains("getState") && script.contains("setState"));
 
@@ -404,7 +401,7 @@ fn fr_e8_theme_vars_cover_the_webview_default_stylesheet() {
     assert_eq!(get(&dark, "--vscode-textLink-foreground"), "#6b95e0");
     assert_eq!(get(&light, "--vscode-font-size"), "13px");
     assert_eq!(ThemeKind::Dark.body_class(), "vscode-dark");
-    let script = shim::init_script(None, &light, ThemeKind::Light);
+    let script = shim::init_script(None, &light, ThemeKind::Light, shim::IPC_GLOBAL);
     assert!(script.contains(r##"root.setProperty("--vscode-editor-background", "#ffffff");"##));
     assert!(script.contains("let state = undefined;"));
     assert!(script.contains(r#""vscode-light""#));
@@ -433,7 +430,9 @@ fn fr_e8_fake_host_flow_from_create_to_dispose() {
     match &d.host().calls[..] {
         [HostCall::Create(c)] => {
             assert_eq!(c.handle, "p-1");
-            assert!(c.origin.starts_with("vscode-webview://"));
+            assert!(c.origin.starts_with("vscode-webview://"), "the origin is the host's");
+            assert_eq!(c.ipc_global, "__emberWebviewHost");
+            assert!(c.init_script.contains(r#"globalThis["__emberWebviewHost"]"#));
             assert!(c.enable_scripts);
             assert!(c.init_script.contains("acquireVsCodeApi"));
             assert!(c.css_vars.iter().any(|(k, _)| k == "--vscode-editor-background"));
@@ -481,7 +480,7 @@ fn fr_e8_fake_host_flow_from_create_to_dispose() {
     d.host_mut().emit(HostEvent::Resource {
         handle: "p-1".into(),
         request: 1,
-        url: "https://vscode-remote+h.vscode-resource.vscode-cdn.net/secret".into(),
+        url: "vscode-resource://vscode-remote+h/secret".into(),
     });
     for e in d.poll() {
         run(w.on_event(e), &mut d, &mut panes);
@@ -558,4 +557,124 @@ fn fr_e8_session_core_routes_webview_calls_and_the_bridge_keeps_panes() {
     let fx = core.handle(t0, Input::FileRead { uri, purpose, result: Ok(vec![0x89, b'P']) });
     assert!(fx.iter().any(|e| matches!(e,
         Effect::Ui(SessionUpdate::Webview(WebviewUpdate::Resource { request: 4, response: ResourceResponse::Ok { mime, .. }, .. })) if mime == "image/png")));
+}
+
+#[test]
+fn fr_e8_resource_base_comes_from_the_host_in_both_forms() {
+    let file = UriComponents::remote("127.0.0.1:9", "/x/cat/media/cat.gif");
+    let scheme = resource::ResourceBase::custom_scheme();
+    let https = resource::ResourceBase::code_oss();
+    assert_eq!(scheme.as_webview_uri(&file), "vscode-resource://vscode-remote+127-002e0-002e0-002e1-003a9/x/cat/media/cat.gif");
+    assert_eq!(https.as_webview_uri(&file), resource::as_webview_uri(&file));
+    assert_eq!(scheme.csp_source(), "'self' vscode-resource:");
+    assert_eq!(https.csp_source(), "'self' https://*.vscode-resource.vscode-cdn.net");
+    for base in [&scheme, &https] {
+        let url = base.as_webview_uri(&file);
+        assert_eq!(base.parse(&url), Some(file.clone()));
+        // Back to Code-OSS's form, the path kept byte for byte, so the session's rule applies unchanged.
+        let canonical = base.to_canonical(&format!("{url}?v=1")).unwrap();
+        assert_eq!(canonical, format!("{}?v=1", resource::as_webview_uri(&file)));
+        assert_eq!(resource::parse_resource_url(&canonical).unwrap().path, "/x/cat/media/cat.gif");
+    }
+    assert_eq!(scheme.parse("https://vscode-remote+h.vscode-resource.vscode-cdn.net/a"), None);
+    assert_eq!(https.parse("vscode-resource://vscode-remote+h/a"), None);
+    assert_eq!(scheme.to_canonical("vscode-resource://nolabel/a"), None);
+
+    // The extension host writes Code-OSS's form; the page gets the host's.
+    let html = r#"<meta http-equiv="Content-Security-Policy" content="img-src 'self' https://*.vscode-cdn.net; script-src 'nonce-1'"><img src="https://vscode-remote+h.vscode-resource.vscode-cdn.net/x/cat/media/cat.gif"><a href="https://example.com/">x</a>"#;
+    let out = resource::rewrite_for_host(html, &scheme);
+    assert!(out.contains("img-src 'self' vscode-resource:;"), "{out}");
+    assert!(out.contains(r#"src="vscode-resource://vscode-remote+h/x/cat/media/cat.gif""#), "{out}");
+    assert!(out.contains(r#"href="https://example.com/""#));
+    assert_eq!(resource::rewrite_for_host(html, &https), html);
+}
+
+#[test]
+fn fr_e8_driver_uses_the_hosts_origin_and_resource_form() {
+    for (host, prefix) in [(FakeHost::custom_scheme(), "vscode-webview://"), (FakeHost::https(), "https://")] {
+        let https = matches!(host.base, resource::ResourceBase::Https { .. });
+        let mut w = Webviews::new();
+        let mut d = WebviewDriver::new(host, ThemeKind::Light, Fonts::default());
+        for o in w.on_call(1, create("p-1", false)).into_iter().chain(w.on_call(2, create("p-2", false))) {
+            if let Out::Ui(u) = o {
+                d.apply(&u);
+            }
+        }
+        let (o1, o2) = (d.origin("p-1").unwrap().to_owned(), d.origin("p-2").unwrap().to_owned());
+        assert!(o1.starts_with(prefix) && o2.starts_with(prefix));
+        assert_ne!(o1, o2, "one origin per webview");
+
+        let src = "https://vscode-remote+h.vscode-resource.vscode-cdn.net/x/cat/media/cat.gif";
+        let html = format!(r#"<img src="{src}">"#);
+        for o in w.on_call(3, WebviewCall::SetHtml { handle: "p-1".into(), html }) {
+            if let Out::Ui(u) = o {
+                d.apply(&u);
+            }
+        }
+        let page_html = d.host().page("p-1").unwrap().html.clone().unwrap();
+        let expected = if https { src.to_owned() } else { "vscode-resource://vscode-remote+h/x/cat/media/cat.gif".to_owned() };
+        assert!(page_html.contains(&expected), "{page_html}");
+
+        // The page requests what it was given; the session sees Code-OSS's form and allows it.
+        d.host_mut().emit(HostEvent::Resource { handle: "p-1".into(), request: 1, url: expected.clone() });
+        let events = d.poll();
+        assert!(matches!(&events[..], [WebviewEvent::ResourceRequested { url, .. }] if url == src));
+        let out = w.on_event(events.into_iter().next().unwrap());
+        assert!(matches!(&out[..], [Out::ReadFile { uri, .. }] if uri.path == "/x/cat/media/cat.gif"));
+
+        // Messages carry the host's form too.
+        w.on_event(WebviewEvent::Ready { handle: "p-1".into() });
+        let json = format!(r#"{{"src":"{src}"}}"#);
+        for o in w.on_call(4, WebviewCall::PostMessage { handle: "p-1".into(), message: msg(&json) }) {
+            if let Out::Ui(u) = o {
+                d.apply(&u);
+            }
+        }
+        let got = &d.host().page("p-1").unwrap().received[0].json;
+        assert!(got.contains(&expected), "{got}");
+        assert!(serde_json::from_str::<Value>(got).is_ok());
+    }
+}
+
+#[test]
+fn fr_e8_find_devtools_and_app_chords_go_through_the_host() {
+    use ember_editor::webview::host::{FindOptions, WindowEvent};
+    let mut w = Webviews::new();
+    let mut d = WebviewDriver::new(FakeHost::new(), ThemeKind::Light, Fonts::default());
+    for o in w.on_call(1, create("p-1", false)) {
+        if let Out::Ui(u) = o {
+            d.apply(&u);
+        }
+    }
+    let opts = FindOptions { match_case: true, whole_word: false };
+    d.find("p-1", "cat", opts);
+    d.find_next("p-1");
+    d.find_prev("p-1");
+    d.find_stop("p-1");
+    d.open_devtools("p-1");
+    d.find("gone", "cat", opts);
+    let calls: Vec<&HostCall> = d.host().calls.iter().skip(1).collect();
+    assert_eq!(
+        calls,
+        vec![
+            &HostCall::Find { handle: "p-1".into(), query: "cat".into(), options: opts },
+            &HostCall::FindNext { handle: "p-1".into() },
+            &HostCall::FindPrev { handle: "p-1".into() },
+            &HostCall::FindStop { handle: "p-1".into() },
+            &HostCall::OpenDevtools { handle: "p-1".into() },
+        ]
+    );
+    d.host_mut().emit(HostEvent::Find { handle: "p-1".into(), count: 4, active: Some(1) });
+    d.host_mut().emit(HostEvent::Key { handle: "p-1".into(), chord: "Cmd+P".into() });
+    d.host_mut().emit(HostEvent::Ready { handle: "p-1".into() });
+    // Only the ready event is the session's.
+    assert_eq!(d.poll(), vec![WebviewEvent::Ready { handle: "p-1".into() }]);
+    assert_eq!(
+        d.take_window_events(),
+        vec![
+            WindowEvent::Find { handle: "p-1".into(), count: 4, active: Some(1) },
+            WindowEvent::Key { handle: "p-1".into(), chord: "Cmd+P".into() },
+        ]
+    );
+    assert!(d.take_window_events().is_empty());
 }

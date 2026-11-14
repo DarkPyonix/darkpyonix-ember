@@ -140,6 +140,16 @@ impl EmberTheme {
         }
     }
 
+    /// The opacity of the press tint as the toolkit takes it (`Modifier::press_feedback`):
+    /// 0.07 in light and 0.10 in dark (`style.css` `.ripple-clip.in{opacity:.07}` and its dark
+    /// rule `opacity:.1`). The toolkit lays the tint in the pressed element's ink.
+    pub fn press_alpha(&self) -> f32 {
+        match self.scheme {
+            Scheme::Light => 0.07,
+            Scheme::Dark => 0.10,
+        }
+    }
+
     /// `--shadow`: cards and the composer.
     pub fn shadow_sm(&self) -> Vec<Shadow> {
         match self.scheme {
@@ -565,6 +575,9 @@ mod tests {
             EmberTheme::new(Scheme::Dark).press_tint().to_argb(),
             0x1a_000000
         );
+        // FR-L34.1: the opacity sent to the toolkit, `.ripple-clip.in` light and dark.
+        assert_eq!(EmberTheme::new(Scheme::Light).press_alpha(), 0.07);
+        assert_eq!(EmberTheme::new(Scheme::Dark).press_alpha(), 0.10);
     }
 
     #[test]

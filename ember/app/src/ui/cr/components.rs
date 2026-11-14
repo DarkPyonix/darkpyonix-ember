@@ -112,6 +112,18 @@ fn with_height(m: Modifier, height: Option<f32>) -> Modifier {
     }
 }
 
+/// The press feedback every pressable sends (FR-L34.1, #250): the mockup's calm press, a scale
+/// to 0.975 and a tint at 0.07 in light and 0.10 in dark (`core.js` `pressStart`, `style.css`
+/// `.ripple-clip`). The toolkit's own defaults are the same numbers today
+/// (`ModifierChain.kt` `PRESS_SCALE`, `PRESS_TINT_LIGHT`, `PRESS_TINT_DARK`); Ember sends them
+/// so the values are the mockup's whatever the toolkit's defaults become, and so the dark tint
+/// follows Ember's scheme. The renderer draws the tint and the keyboard focus ring in the shape
+/// the same node carries (`pressedShape`), so a pressable puts its `corner_radius`,
+/// `corner_radii` or `shape_role` on the node that takes the click (FR-L34.2, #251).
+pub fn pressable(modifier: Modifier) -> Modifier {
+    modifier.press_feedback(PRESS_SCALE, ember_theme().press_alpha())
+}
+
 /// A container that reacts to a click.
 ///
 /// This is the container's own `on_click`, which the renderer turns into a button: keyboard
@@ -126,7 +138,7 @@ pub fn Clickable(
     mut on_click: impl FnMut() + 'static,
     content: impl FnOnce(),
 ) {
-    cu::Box().modifier(modifier).alignment(alignment).on_click(move || on_click()).content(content);
+    cu::Box().modifier(pressable(modifier)).alignment(alignment).on_click(move || on_click()).content(content);
 }
 
 /// A [`Clickable`] whose child is only an icon or a glyph, named for assistive technology with
@@ -1368,14 +1380,14 @@ pub fn AppButton(
         // label style (about 17/600). compose-rust v0.0.7 sends both only when they are set.
         .font_size(s.fs.size())
         .font_weight(s.weight.value())
-        .modifier(
+        .modifier(pressable(
             Modifier::new()
                 .fill_max_width_if(fill_max_width)
                 .height(s.height)
                 .background(paint(s.fill))
                 .border(1.0, paint(s.border))
                 .shape_role(ShapeRole::Full),
-        )
+        ))
         .on_click(on_click);
     if let Some(i) = icon {
         b = b.icon(i);
@@ -1491,7 +1503,7 @@ pub fn IconButton(icon: IconRole, small: bool, on_click: impl FnMut() + 'static)
         .icon(icon)
         .color(paint(theme.palette.text_2))
         .variant(ButtonVariant::Text)
-        .modifier(ring)
+        .modifier(pressable(ring))
         .on_click(on_click);
 }
 
@@ -1544,12 +1556,12 @@ pub fn PickChip(
     let mut b = cu::Button(text)
         .variant(ButtonVariant::Text)
         .color(paint(theme.palette.text_2))
-        .modifier(
+        .modifier(pressable(
             Modifier::new()
                 .height(height)
                 .background(paint(fill))
                 .shape_role(ShapeRole::Full),
-        )
+        ))
         .on_click(on_click);
     if let Some(i) = icon {
         b = b.icon(i);
@@ -2659,6 +2671,61 @@ mod tests {
         assert!(flow.mods.iter().any(|m| m == "FillMaxWidth"), "{:?}", flow.mods);
         let pills = nodes.iter().filter(|n| n.parent == Some(flow.id)).count();
         assert_eq!(pills, 4, "each choice is a child of the wrapping row");
+    }
+
+    /// The node that takes the click, as the renderer finds it: the one with `OnClick`.
+    fn clicked(nodes: &[EmittedNode]) -> &EmittedNode {
+        nodes.iter().find(|n| n.props.iter().any(|p| p.starts_with("OnClick="))).expect("a node with OnClick")
+    }
+
+    /// Every shared pressable, composed alone: containers through `Clickable` and the three
+    /// toolkit `Button`s.
+    fn shared_pressables() -> Vec<(&'static str, fn())> {
+        let cases: [(&'static str, fn()); 11] = [
+            ("Clickable", || Clickable(Modifier::new().size(40.0, 40.0), Alignment::Center, || {}, || {})),
+            ("NamedClickable", || {
+                NamedClickable(crate::ui::cr::a11y::CLOSE, Modifier::new().size(40.0, 40.0), Alignment::Center, || {}, || {})
+            }),
+            ("MenuRow", || MenuRow("항목", 200.0, false, || {})),
+            ("ChoiceButton", || ChoiceButton("선택", Choice::Toggle, true, false, true, || {})),
+            ("FilterChip", || FilterChip("전체", false, || {})),
+            ("BackButton", || BackButton(|| {})),
+            ("CloseButton", || CloseButton(|| {})),
+            ("AppButton", || AppButton("저장", None, ButtonKind::Default, false, true, false, || {})),
+            ("AppButton primary small", || AppButton("저장", None, ButtonKind::Primary, true, true, false, || {})),
+            ("IconButton", || IconButton(IconRole::Close, false, || {})),
+            ("PickChip", || PickChip("프로젝트", Some(IconRole::Close), false, false, || {})),
+        ];
+        cases.to_vec()
+    }
+
+    #[test]
+    fn fr_l34_1_every_shared_pressable_sends_the_mockup_press() {
+        // #250. `core.js` pressStart: scale 0.975; `style.css` `.ripple-clip.in`: opacity .07,
+        // .1 in dark. Sent on the node that takes the click, which is the one the renderer
+        // scales and tints (`ModifierChain.kt` reads the node's last `PressFeedback`).
+        let _guard = crate::services::test_guard();
+        let alpha = ember_theme().press_alpha();
+        assert!(alpha == 0.07 || alpha == 0.10, "{alpha}");
+        let want = format!("{:?}", compose_rust::schema::Modifier::PressFeedback { scale: 0.975, tint_alpha: alpha });
+        for (name, content) in shared_pressables() {
+            let nodes = emitted_nodes(content);
+            let node = clicked(&nodes);
+            assert!(node.mods.contains(&want), "{name}: {:?}", node.mods);
+            assert_eq!(node.mods.iter().filter(|m| m.starts_with("PressFeedback")).count(), 1, "{name}: sent once");
+        }
+        // No screen sets its own press values: the helper is the one place.
+        for (file, src) in [
+            ("session.rs", include_str!("session.rs")),
+            ("home.rs", include_str!("home.rs")),
+            ("project.rs", include_str!("project.rs")),
+            ("vcs.rs", include_str!("vcs.rs")),
+            ("shell.rs", include_str!("shell.rs")),
+            ("channels.rs", include_str!("channels.rs")),
+            ("files.rs", include_str!("files.rs")),
+        ] {
+            assert!(!src.contains(".press_feedback("), "{file} sets press values of its own");
+        }
     }
 
     #[test]

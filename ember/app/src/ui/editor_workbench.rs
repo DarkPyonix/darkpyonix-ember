@@ -3045,7 +3045,8 @@ pub mod page {
 
     fn terminal_body(s: &Shared) -> Element {
         if !can_attach(&s.server_url, &s.computer) {
-            return rsx! { div { class: "ed-term", role: "log", "aria-label": "터미널 출력", style: "color:var(--muted);", "터미널은 서버에 연결했을 때만 사용할 수 있습니다. 이 창에는 서버 주소나 컴퓨터가 없습니다." } };
+            // FR-L31.34: a notice is prose in the UI face (`.ed-note`); only terminal output is mono.
+            return rsx! { div { class: "ed-note", role: "log", "aria-label": "터미널 출력", "터미널은 서버에 연결했을 때만 사용할 수 있습니다. 이 창에는 서버 주소나 컴퓨터가 없습니다." } };
         }
         let handle = terminal_handle(s);
         let strip = terminal_strip(s);
@@ -3055,7 +3056,7 @@ pub mod page {
                 Some(terms::Load::Ready) => "열린 터미널이 없습니다. +를 눌러 새 터미널을 엽니다.".to_string(),
                 _ => "터미널 목록을 불러오는 중입니다.".to_string(),
             };
-            return rsx! { {strip} div { class: "ed-term", role: "log", "aria-label": "터미널 출력", style: "color:var(--muted);", "{text}" } };
+            return rsx! { {strip} div { class: "ed-note", role: "log", "aria-label": "터미널 출력", "{text}" } };
         };
         fit_terminal(s, &handle);
         let view = panel_view(&handle.snapshot());
@@ -3143,7 +3144,7 @@ pub mod page {
         use ember_editor::widget::Severity;
         let mut tabs = s.tabs;
         if rows.is_empty() {
-            return rsx! { div { class: "ed-term", style: "color:var(--muted);", "문제가 없습니다." } };
+            return rsx! { div { class: "ed-note", role: "status", "문제가 없습니다." } };
         }
         let limit = *s.problems_limit.read();
         let (visible_rows, overflow) = crate::ui::editor::paginate_problems(&rows, limit);
@@ -3285,10 +3286,13 @@ pub mod page {
                     "지우기"
                 }
             }
-            div { class: "ed-term", role: "log", "aria-label": "출력 로그", style: "flex:1; overflow-y:auto; padding:var(--sp2); font-family:var(--font-mono); white-space:pre-wrap; outline:none;",
-                if text.trim().is_empty() {
-                    div { style: "color:var(--muted);", "출력이 없습니다." }
-                } else {
+            // FR-L31.34: the empty note is prose (`.ed-note`); a channel's text is a log in the mono
+            // face of `.ed-term` (the old inline `var(--font-mono)` named no token, so the log fell
+            // back to the UI face).
+            if text.trim().is_empty() {
+                div { class: "ed-note", role: "log", "aria-label": "출력 로그", "출력이 없습니다." }
+            } else {
+                div { class: "ed-term", role: "log", "aria-label": "출력 로그", style: "white-space:pre-wrap; outline:none;",
                     for (i, line) in text.lines().enumerate() {
                         div { key: "{i}", class: "tl", "{line}" }
                     }
@@ -3348,7 +3352,7 @@ pub mod page {
                 } else if w == ToolWindow::Run {
                     {crate::ui::editor_tasks::view::body(s)}
                 } else {
-                    div { class: "ed-term", style: "color:var(--muted);", "{body}" }
+                    div { class: "ed-note", role: "status", "{body}" }
                 }
             }
         }

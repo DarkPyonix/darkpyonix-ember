@@ -818,6 +818,53 @@ fn fr_l31_33_the_commit_button_is_40_high_and_names_the_branch() {
     assert!(near(b[0].0, b[1].0) && near(b[0].2, b[1].2), "as wide as the message box: {b:?}");
 }
 
+impl Page {
+    /// Clicks the bottom tool window's tab whose label starts with `label`.
+    fn show_bottom_tab(&mut self, label: &str) {
+        let tab = self
+            .find_where(&format!("the bottom tab {label}"), |id| {
+                self.attr(id, "role").as_deref() == Some("tab")
+                    && self.dom.document().get_node(id).is_some_and(|n| n.text_content().starts_with(label))
+                    && self.parent(id).is_some_and(|p| self.has_class(p, "ed-btabs"))
+            })
+            .unwrap_or_else(|| panic!("the bottom tab {label}"));
+        self.dom.click_node(tab);
+        self.dom.render();
+    }
+
+    /// The text of the one notice (`.ed-note`) in the bottom tool window.
+    fn bottom_note(&self) -> String {
+        let note = self
+            .find_where("the bottom window's notice", |id| self.has_class(id, "ed-note"))
+            .expect("a notice in the bottom window");
+        assert!(!self.has_class(note, "ed-term"), "a notice is not terminal text");
+        self.dom.document().get_node(note).map(|n| n.text_content()).unwrap_or_default()
+    }
+}
+
+// FR-L31.34 (#895, design review E9): the notices of the bottom tool window are prose in the UI
+// face (`.ed-note`), all four the same; the mono terminal body is for output only.
+#[test]
+fn fr_l31_34_tool_window_notices_are_prose_not_terminal_text() {
+    let css = include_str!("../../assets/editor/page.css");
+    assert!(css.contains(".ed-note{flex:1;overflow:auto;min-height:0;padding:var(--sp3) var(--sp4);font:var(--fw-regular) var(--fs-sm)/var(--lh-sm) var(--font);color:var(--muted)}"));
+    assert!(include_str!("../../assets/editor/editor.css").contains(".ed-term{flex:1;overflow:auto;padding:var(--sp3) var(--sp4);font:var(--code-fs)/var(--code-lh) var(--mono);"));
+    for (file, source) in [("editor_workbench.rs", include_str!("editor_workbench.rs")), ("editor_tasks.rs", include_str!("editor_tasks.rs"))] {
+        assert!(!source.contains(r#"class: "ed-term", style: "color:var(--muted);""#), "{file}: a muted note in the terminal class");
+        assert!(!source.contains(r#"class: "ed-term", style: "flex:1; color:var(--muted);""#), "{file}: a muted note in the terminal class");
+        assert!(!source.contains("font-family:var(--font-mono)"), "{file}: a font token that does not exist");
+    }
+
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    // No server address in this window: the terminal says so.
+    assert!(page.bottom_note().starts_with("터미널은 서버에 연결했을 때만"));
+    page.show_bottom_tab("문제");
+    assert_eq!(page.bottom_note(), "문제가 없습니다.");
+    page.show_bottom_tab("출력");
+    assert_eq!(page.bottom_note(), "출력이 없습니다.");
+}
+
 #[compose_rust::runtime::Composable]
 fn toolkit_probe() {
     compose_rust::ui::Text("probe".to_string());

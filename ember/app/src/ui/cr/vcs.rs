@@ -1588,10 +1588,10 @@ pub fn ChangesPane(
     tab: Option<PaneTab>,
     on_tab: impl FnMut(PaneTab) + Clone + 'static,
 ) {
-    ChangesPaneWithActions(snap, layout, tab, on_tab, None, diff_pane_width(current_window_size().width_dp, layout));
+    ChangesPaneWithActions(snap, layout, tab, on_tab, None, diff_pane_width(current_window_size().width_dp, layout), 320.0);
 }
 
-fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<PaneTab>, on_tab: impl FnMut(PaneTab) + Clone + 'static, actions: Option<Actions>, diff_width: f32) {
+fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<PaneTab>, on_tab: impl FnMut(PaneTab) + Clone + 'static, actions: Option<Actions>, diff_width: f32, files_w: f32) {
     let p = ember_theme().palette;
     let diffs = snap.changes.clone();
     let staging_key = (actions.as_ref().map(|a| (a.project.clone(), a.reload.get())), snap.branch.clone(), snap.staged.clone(), diffs.clone());
@@ -1634,7 +1634,7 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
                 .spacing(GAP_CARD)
                 .content(move || {
                     // The tree and commit card share a scroll, leaving more room for file rows (#654).
-                    cu::ScrollColumn().modifier(Modifier::new().width(320.0).fill_max_height()).content(move || {
+                    cu::ScrollColumn().modifier(Modifier::new().width(files_w).fill_max_height()).content(move || {
                         cu::Column().modifier(Modifier::new().fill_max_width()).spacing(GAP_CARD).content(move || {
                             VcsCard(move || {
                                 cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
@@ -1725,6 +1725,7 @@ fn SectionContent(
     selected_pr: MutableState<Option<u64>>,
     sec_state: Option<MutableState<Section>>,
     diff_width: f32,
+    files_w: f32,
 ) {
     match (snap, sec) {
         (Some(s), Section::Changes) => {
@@ -1736,6 +1737,7 @@ fn SectionContent(
                 move |t| tab_state.set(t),
                 actions,
                 diff_width,
+                files_w,
             );
         }
         (Some(s), Section::Conflicts) => ConflictsPane(&s.conflicts, actions, layout),
@@ -4670,7 +4672,7 @@ pub fn VcsScreen() {
     let current = pick_project(selected.as_deref(), &boxes);
     if is_sample_route {
         let reload = remember(|| mutable_state_of(0_u64));
-        VcsScreenWithLoad(Load::Ready(sample_snapshot()), boxes, current, reload, true, false);
+        VcsScreenWithLoad(Load::Ready(sample_snapshot()), boxes, current, reload, true, None);
         return;
     }
     let load = remember_with_key(current.clone(), || mutable_state_of(Load::Loading));
@@ -4685,7 +4687,7 @@ pub fn VcsScreen() {
         }
     });
     let state = load.get();
-    VcsScreenWithLoad(state, boxes, current, reload, false, false);
+    VcsScreenWithLoad(state, boxes, current, reload, false, None);
 }
 
 /// VCS screen with explicit snapshot and projects.
@@ -4696,7 +4698,7 @@ pub fn VcsScreenWith(
 ) {
     let state = snap.map(Load::Ready).unwrap_or_else(|| Load::Unavailable(String::new()));
     let reload = remember(|| mutable_state_of(0_u64));
-    VcsScreenWithLoad(state, boxes, current_id, reload, false, false);
+    VcsScreenWithLoad(state, boxes, current_id, reload, false, None);
 }
 
 fn VcsScreenWithLoad(
@@ -4705,20 +4707,26 @@ fn VcsScreenWithLoad(
     current_id: Option<String>,
     reload: MutableState<u64>,
     sample: bool,
-    sheet: bool,
+    sheet_ctl: Option<VcsSheetCtl>,
 ) {
     let snap = load.snapshot().cloned();
     let p = ember_theme().palette;
     let window = current_window_size();
     let class = window.class;
-    // The sheet scrolls as one page at every width, so it never takes the two-pane layout (#495).
-    let layout = if sheet { vcs_sheet_layout(class) } else { pane_layout(class) };
-    let wide = !sheet && section_nav(class) == SectionNav::List;
+    let sheet = sheet_ctl.is_some();
+    // In the sheet the layout follows the sheet's own width, as the mockup's mounted screen
+    // follows its container (FR-L18.1, #889): the icon rail and two panes while the padded body
+    // is wider than 760, pills over one column below that, the tabs on a phone.
+    let frame = sheet_ctl.as_ref().map(|c| vcs_sheet_frame(c.sheet_w, c.window_w));
+    let layout = frame.map_or_else(|| pane_layout(class), |f| f.layout);
+    let wide = frame.map_or_else(|| section_nav(class) == SectionNav::List, |f| f.rail);
     let compact = class == WindowSizeClass::Compact;
-    let pad = vcs_page_pad(compact);
-    let content_width = ((if sheet { vcs_sheet_width(window.width_dp) } else { window.width_dp }) - 2.0 * pad).max(0.0);
-    let section_width = (content_width - if wide { 200.0 + SP[3] } else { 0.0 }).max(0.0);
-    let diff_width = (section_width - if layout == PaneLayout::Two { 320.0 + GAP_CARD } else { 0.0 }).max(0.0);
+    let pad = frame.map_or_else(|| vcs_page_pad(compact), |f| f.pad);
+    let files_w = frame.map_or(320.0, |f| f.files_w);
+    let content_width = (sheet_ctl.as_ref().map_or(window.width_dp, |c| c.sheet_w) - 2.0 * pad).max(0.0);
+    let nav_w = if sheet { VCS_SHEET_RAIL_W + SP[3] } else { 200.0 + SP[3] };
+    let section_width = (content_width - if wide { nav_w } else { 0.0 }).max(0.0);
+    let diff_width = (section_width - if layout == PaneLayout::Two { files_w + GAP_CARD } else { 0.0 }).max(0.0);
 
     // `EMBER_CR_VCS_SECTION=<key>` opens a section directly, for captures without clicks.
     let section = remember(|| mutable_state_of(std::env::var("EMBER_CR_VCS_SECTION").map(|k| route_section(&k)).unwrap_or(Section::Changes)));
@@ -4746,6 +4754,9 @@ fn VcsScreenWithLoad(
     let active_tab = effective_tab(sec, tab.get());
 
     let body = || {
+        // The sheet's header carries the title and the summary line (FR-L18.1), so the sheet
+        // draws neither again.
+        if !sheet {
         cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).content(|| {
             cu::Column().modifier(Modifier::new().weight(1.0)).spacing(4.0).content(|| {
                 // The sheet header carries the title (#495).
@@ -4766,6 +4777,7 @@ fn VcsScreenWithLoad(
                 }
             }
         });
+        }
 
         if let Some(project) = project {
                     let sel_proj = selected_proj.clone();
@@ -4807,11 +4819,15 @@ fn VcsScreenWithLoad(
                         cu::Row().modifier(Modifier::new().fill_max_width().weight(1.0)).spacing(SP[3]).content(|| {
                             let sec_state = section.clone();
                             let sec_for_list = sec_state.clone();
-                            cu::ScrollColumn().modifier(Modifier::new().width(200.0).fill_max_height()).content(|| {
-                                SectionListWithSample(sec, snap.as_ref(), sample, stash_count.get(), pr_count.get(), branch_count.get(), team_count.get(), move |s| sec_for_list.set(s));
-                            });
+                            if sheet {
+                                SectionRail(sec, snap.as_ref(), sample, stash_count.get(), pr_count.get(), branch_count.get(), team_count.get(), move |s| sec_for_list.set(s));
+                            } else {
+                                cu::ScrollColumn().modifier(Modifier::new().width(200.0).fill_max_height()).content(|| {
+                                    SectionListWithSample(sec, snap.as_ref(), sample, stash_count.get(), pr_count.get(), branch_count.get(), team_count.get(), move |s| sec_for_list.set(s));
+                                });
+                            }
                             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
-                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone(), selected_pr.clone(), Some(sec_state.clone()), diff_width);
+                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone(), selected_pr.clone(), Some(sec_state.clone()), diff_width, files_w);
                             });
                         });
                     } else {
@@ -4823,7 +4839,7 @@ fn VcsScreenWithLoad(
                                 let tab_state = tab.clone();
                                 PaneTabs(sec, active_tab, move |t| tab_state.set(t));
                             }
-                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone(), selected_pr.clone(), Some(sec_state.clone()), diff_width);
+                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone(), selected_pr.clone(), Some(sec_state.clone()), diff_width, files_w);
                         });
                     }
                 } else {
@@ -4831,15 +4847,33 @@ fn VcsScreenWithLoad(
                     Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
                 }
     };
-    if wide {
-        // Wide: a bounded page, so the section list and the panes can fill its height.
-        cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height().padding(pad)).spacing(SP[3]).content(body);
-    } else {
-        cu::Box().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-                cu::Column().modifier(Modifier::new().fill_max_width().padding(pad)).spacing(SP[3]).content(body);
+    let page = || {
+        // In the sheet the body sits under the header on `bg` (`.svcs-box{background:var(--bg)}`)
+        // and takes the height the header leaves.
+        let outer = if sheet { Modifier::new().fill_max_width().weight(1.0).background(paint(p.bg)) } else { Modifier::new().fill_max_width().fill_max_height() };
+        if wide {
+            // Wide: a bounded page, so the section list and the panes can fill its height.
+            cu::Column().modifier(outer.padding(pad)).spacing(SP[3]).content(body);
+        } else {
+            cu::Box().modifier(outer).content(|| {
+                cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+                    cu::Column().modifier(Modifier::new().fill_max_width().padding(pad)).spacing(SP[3]).content(body);
+                });
             });
-        });
+        }
+    };
+    match sheet_ctl {
+        Some(ctl) => {
+            let project_name = boxes.iter().find(|b| Some(&b.id) == current.as_ref()).map(|b| b.name.clone()).unwrap_or_default();
+            let prs = if sample { Some(sample_pr_count()) } else { pr_count.get() };
+            let subtitle = vcs_sheet_subtitle(snap.as_ref(), prs);
+            let phone = ctl.window_w <= VCS_SHEET_PHONE_DP;
+            cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+                VcsSheetHeader(&vcs_sheet_title(&project_name), &subtitle, phone, current.clone(), ctl.on_close.clone());
+                page();
+            });
+        }
+        None => page(),
     }
 }
 
@@ -4848,13 +4882,165 @@ pub fn vcs_page_pad(compact: bool) -> f32 {
     if compact { SP[3] } else { 32.0 }
 }
 
-/// The pane layout inside the 버전 관리 sheet (FR-L18, #495): the sheet body scrolls as a page, so
-/// the pinned two-pane layout is never used. Compact windows keep the tabs.
-pub fn vcs_sheet_layout(class: WindowSizeClass) -> PaneLayout {
-    match class {
-        WindowSizeClass::Compact => PaneLayout::Tabs,
-        _ => PaneLayout::Stacked,
+/// What the 버전 관리 sheet hands the screen it mounts (FR-L18.1, #889): the window and sheet
+/// widths it lays out against and its close callback.
+#[derive(Clone)]
+struct VcsSheetCtl {
+    window_w: f32,
+    sheet_w: f32,
+    on_close: std::rc::Rc<std::cell::RefCell<dyn FnMut()>>,
+}
+
+/// The icon rail of the mounted screen (`.vcs-compact .vcs-body{grid-template-columns:56px ...}`)
+/// and its entries (`.vcs-compact .vcs-navi{width:48px;height:44px}`).
+pub const VCS_SHEET_RAIL_W: f32 = 56.0;
+pub const VCS_SHEET_RAIL_ITEM: (f32, f32) = (48.0, 44.0);
+
+/// How the sheet lays out the screen at a sheet width (FR-L18.1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VcsSheetFrame {
+    /// `.vcs-mounted{padding:16px}`, 12 at 560 and below.
+    pub pad: f32,
+    /// The icon rail and the panes side by side, while the padded body is wider than 760
+    /// (`@container (max-width:760px)` stacks them).
+    pub rail: bool,
+    pub layout: PaneLayout,
+    /// The tree column beside the diff (`.vcs-compact .vcs-chg{grid-template-columns:260px ...}`).
+    pub files_w: f32,
+}
+
+pub fn vcs_sheet_frame(sheet_w: f32, window_w: f32) -> VcsSheetFrame {
+    let phone = window_w <= VCS_SHEET_PHONE_DP;
+    let pad = if phone { SP[2] } else { SP[3] };
+    let rail = sheet_w - 2.0 * pad > 760.0;
+    let layout = if phone {
+        PaneLayout::Tabs
+    } else if rail {
+        PaneLayout::Two
+    } else {
+        PaneLayout::Stacked
+    };
+    VcsSheetFrame { pad, rail, layout, files_w: 260.0 }
+}
+
+/// The sheet header's title (`.vcs-mhead b`).
+pub fn vcs_sheet_title(project_name: &str) -> String {
+    format!("버전 관리 \u{b7} {project_name}")
+}
+
+/// The line under the title: branch, changed files and open pull requests (`.vcs-mhead .small`).
+/// A PR count not read yet is left out rather than shown as 0; without a snapshot it is empty.
+pub fn vcs_sheet_subtitle(snap: Option<&RepoSnapshot>, open_prs: Option<usize>) -> String {
+    let Some(s) = snap else { return String::new() };
+    let mut line = format!("{} \u{b7} 변경 {}", s.branch, s.changes.len());
+    if let Some(n) = open_prs {
+        line.push_str(&format!(" \u{b7} PR {n}"));
     }
+    line
+}
+
+/// The sheet's header (`.vcs-mhead`): 60 high, 20 at the sides (16 on a phone), the 32 `ink`
+/// tile with the git glyph, the title over the summary line, 전체 화면 (not on a phone) and the
+/// close button, then a line.
+fn VcsSheetHeader(title: &str, subtitle: &str, phone: bool, project: Option<String>, on_close: std::rc::Rc<std::cell::RefCell<dyn FnMut()>>) {
+    let p = ember_theme().palette;
+    let side = if phone { SP[3] } else { SP[4] };
+    cu::Row()
+        .alignment(Alignment::CenterStart)
+        .modifier(Modifier::new().fill_max_width().height(SHEET_HEADER_H).background(paint(p.surface)))
+        .content(|| {
+            cu::Spacer().modifier(Modifier::new().width(side));
+            cu::Box()
+                .alignment(Alignment::Center)
+                .modifier(Modifier::new().size(32.0, 32.0).background(paint(p.ink)).corner_radius(CORNER_SM))
+                .content(|| NavIcon(ICON_GIT_SVG, p.ink_text.to_argb(), 18.0));
+            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
+                Label(title, Fs::Xl, Weight::Semibold, None, Some(1));
+                if !subtitle.is_empty() {
+                    Label(subtitle, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                }
+            });
+            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            if !phone {
+                let close = on_close.clone();
+                let project = project.clone();
+                AppButton("전체 화면", None, ButtonKind::Default, true, true, false, move || {
+                    if let (Some(s), Some(id)) = (crate::services::try_services(), project.as_deref()) {
+                        open_for_project_cr(&s.ui, id);
+                    }
+                    (&mut *close.borrow_mut())();
+                });
+                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            }
+            let close = on_close.clone();
+            super::components::CloseButton(move || (&mut *close.borrow_mut())());
+            cu::Spacer().modifier(Modifier::new().width(side));
+        });
+    cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+}
+
+/// The section rail of the mounted screen (`.vcs-compact .vcs-navi`): 48 x 44 icon entries in a
+/// 56 column, the open one on `surface` with a `line` outline and the small shadow, a count at
+/// the top right (white on orange for conflicts). Each entry is named by its section.
+fn SectionRail(
+    active: Section, snap: Option<&RepoSnapshot>, is_sample: bool, stash_count: Option<usize>, pr_count: Option<usize>, branch_count: Option<usize>, team_count: Option<usize>,
+    on_pick: impl FnMut(Section) + Clone + 'static,
+) {
+    let p = ember_theme().palette;
+    let (item_w, item_h) = VCS_SHEET_RAIL_ITEM;
+    cu::Column().alignment(Alignment::TopCenter).spacing(2.0).modifier(Modifier::new().width(VCS_SHEET_RAIL_W)).content(|| {
+        for sec in Section::ALL {
+            let on = sec == active;
+            let count = shown_section_count(sec, snap, is_sample, stash_count, pr_count, branch_count, team_count);
+            let mut m = Modifier::new()
+                .size(item_w, item_h)
+                .background(if on { paint(p.surface) } else { Paint::Literal(Color::argb(0)) })
+                .corner_radius(CORNER_MD);
+            if on {
+                m = with_shadows(m.border(1.0, paint(p.line)), ember_theme().shadow_sm());
+            }
+            let mut pick = on_pick.clone();
+            cu::Box().alignment(Alignment::TopEnd).modifier(m).content(move || {
+                cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_size()).content(|| {
+                    NavIcon(section_svg(sec), (if on { p.text } else { p.text_2 }).to_argb(), 18.0);
+                });
+                if let Some(n) = count.filter(|n| *n > 0) {
+                    let alert = sec == Section::Conflicts;
+                    let (fill, ink) = if alert { (p.orange.strong, Color::argb(0xffff_ffff)) } else { (p.surface_2, p.muted) };
+                    cu::Row()
+                        .alignment(Alignment::CenterStart)
+                        .modifier(Modifier::new().height(16.0).background(paint(fill)).shape_role(ShapeRole::Full))
+                        .content(|| {
+                            cu::Spacer().modifier(Modifier::new().width(5.0));
+                            Label(&n.to_string(), Fs::Xs2, Weight::Medium, Some(paint(ink)), Some(1));
+                            cu::Spacer().modifier(Modifier::new().width(5.0));
+                        });
+                }
+                FocusOverlay(sec.label(), move || pick(sec));
+            });
+        }
+    });
+}
+
+/// A section's count as the list and the rail show it: what the server reported, else the
+/// sample's own numbers on the review screen.
+fn shown_section_count(
+    sec: Section, snap: Option<&RepoSnapshot>, is_sample: bool, stash_count: Option<usize>, pr_count: Option<usize>, branch_count: Option<usize>, team_count: Option<usize>,
+) -> Option<usize> {
+    section_count_with_team(sec, snap, stash_count, pr_count, branch_count, team_count).or_else(|| {
+        if is_sample {
+            match sec {
+                Section::PullRequests => Some(sample_pr_count()),
+                Section::Stash => Some(2),
+                Section::Conflicts => Some(SAMPLE_CONFLICT_COUNT),
+                Section::Team => Some(sample_team_len()),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    })
 }
 
 /// Below this window width the sheet is full screen (`.svcs-box` at 560 px, session.css).
@@ -4931,9 +5117,15 @@ pub fn VcsSheet(project_id: &str, open: bool, on_close: impl FnMut() + Clone + '
     let state = if sample { Load::Ready(sample_snapshot()) } else { load.get() };
     let boxes = if sample { sample_projects() } else { boxes };
     let current = if sample { Some("ember".to_string()) } else { current };
-    EmberSheetSized("버전 관리", true, sheet_w, true, on_close, None, || {
-        cu::Box().modifier(Modifier::new().fill_max_width().height(body_height)).content(|| {
-            VcsScreenWithLoad(state, boxes, current, reload, sample, true);
+    let ctl = VcsSheetCtl {
+        window_w: win_w,
+        sheet_w,
+        on_close: std::rc::Rc::new(std::cell::RefCell::new(on_close.clone())),
+    };
+    // No shared title: the mounted screen draws the mockup's header (`.vcs-mhead`, FR-L18.1).
+    EmberSheetSized("", true, sheet_w, true, on_close, None, || {
+        cu::Box().modifier(Modifier::new().fill_max_width().height(body_height + VCS_SHEET_CHROME_H)).content(|| {
+            VcsScreenWithLoad(state, boxes, current, reload, sample, Some(ctl));
         });
     });
 }
@@ -4944,7 +5136,7 @@ pub fn preview_vcs() {
     let p = ember_theme().palette;
     cu::Box().modifier(Modifier::new().fill_max_size().background(paint(p.bg))).content(|| {
         let reload = remember(|| mutable_state_of(0_u64));
-        VcsScreenWithLoad(Load::Ready(sample_snapshot()), sample_projects(), Some("ember".into()), reload, true, false);
+        VcsScreenWithLoad(Load::Ready(sample_snapshot()), sample_projects(), Some("ember".into()), reload, true, None);
     });
 }
 

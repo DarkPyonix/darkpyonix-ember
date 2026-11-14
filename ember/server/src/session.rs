@@ -1100,7 +1100,10 @@ impl Sessions {
             std::env::var("EMBER_SHIM_DRAIN_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600),
         );
         let lines = crate::agents::proc::drain_surviving_lines(rt, id, max, |l| adapter.drain_turn_end(l)).await?;
-        for event in adapter.translate_drained(&lines) {
+        // The adapter sees what is stored, so a tool call announced before the server died is
+        // not stored a second time (#310).
+        let stored: Vec<AgentEvent> = self.store.events_after(id, 0)?.into_iter().map(|e| e.event).collect();
+        for event in adapter.translate_drained_after(&lines, &stored) {
             self.record(id, &event)?;
         }
         // A turn that did not finish cannot continue: end it, so the session is not stuck running.

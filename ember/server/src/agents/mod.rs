@@ -359,6 +359,13 @@ pub trait AgentAdapter: Send + Sync {
         Vec::new()
     }
 
+    /// [`AgentAdapter::translate_drained`] with the events already stored for the session
+    /// (oldest first), so an adapter can leave out what the store already holds (FR-S8, #310).
+    /// Default: the stored events are not looked at.
+    fn translate_drained_after(&self, lines: &[String], _stored: &[AgentEvent]) -> Vec<AgentEvent> {
+        self.translate_drained(lines)
+    }
+
     /// Start (or resume) the agent. Events are sent on `events` until the process exits.
     async fn start(
         &self,

@@ -98,36 +98,6 @@ fn current_hint(current: bool, rest: String) -> String {
     }
 }
 
-/// How many picker rows the palette's list shows at once (320 px of 34 px rows).
-pub const PICKER_VISIBLE_ROWS: usize = 9;
-
-/// The rows of a picker list of `len` rows drawn in view so the highlighted row `selected` can be
-/// read: `(start, end)`, rows `start..end` fit under the sheet's `visible` row budget. When rows above
-/// are hidden (`start > 0`) the "위에 N개 더 있습니다" row takes one row of that budget, and the
-/// highlighted row keeps one row of context below it unless it is the last one (Code-OSS reveals a
-/// quick pick's active item the same way). The rows after `end` are still drawn and scroll into view.
-/// The toolkit has no scroll-into-view (TODO(dioxus-compose#200)), so the list is windowed instead.
-pub fn list_window(selected: usize, len: usize, visible: usize) -> (usize, usize) {
-    let visible = visible.max(3);
-    if len <= visible {
-        return (0, len);
-    }
-    let selected = selected.min(len - 1);
-    // The first page holds the row and the one below it: no row above is hidden.
-    if selected + 2 <= visible {
-        return (0, visible);
-    }
-    // One row goes to "위에 N개"; the selection sits on the second to last of the rest.
-    let rows = visible - 1;
-    let start = (selected + 2 - rows).min(len - rows);
-    (start, start + rows)
-}
-
-/// The row count the "위에 N개 더 있습니다" row takes from the budget for a window starting at `start`.
-pub fn overflow_rows(start: usize) -> usize {
-    usize::from(start > 0)
-}
-
 /// The value of the palette's highlight when a picker opens: follow the current entry until the
 /// person moves the highlight or types, so a list that grows after the sheet opened (the languages
 /// arrive with the session) still opens on the current entry.
@@ -138,11 +108,6 @@ pub const FOLLOW_CURRENT: usize = usize::MAX;
 pub fn resolve_selection(stored: usize, mode: Mode, format: Option<&DocumentFormat>, languages: &[LanguageInfo], len: usize) -> usize {
     let row = if stored == FOLLOW_CURRENT { initial_selection(mode, format, languages) } else { stored };
     row.min(len.saturating_sub(1))
-}
-
-/// The row above a windowed picker list that leads back up.
-pub fn more_above_text(hidden: usize) -> String {
-    format!("위에 {hidden}개 더 있습니다")
 }
 
 /// The row highlighted when a picker opens: the current EOL, encoding or language (Code-OSS

@@ -850,8 +850,8 @@ pub mod page {
             }
         };
         let hint_text = placeholder(mode, keymap);
-        // A picker lists every row (a language list is longer than 50) and shows the window of rows that
-        // holds the highlighted one, so the current language or encoding is in view when it opens (FR-L31.7).
+        // A picker lists every row (a language list is longer than 50) and scrolls the highlighted one into
+        // view, so the current language or encoding is in view when it opens (FR-L31.7, #838).
         let picker = crate::ui::editor_status::is_picker(mode);
         let shown: Vec<_> = ranked.iter().take(if picker { usize::MAX } else { 50 }).cloned().collect();
         let chosen = if picker {
@@ -860,11 +860,6 @@ pub mod page {
             crate::ui::editor_status::resolve_selection(*sel.read(), mode, format.as_ref(), &languages, shown.len())
         } else {
             (*sel.read()).min(shown.len().saturating_sub(1))
-        };
-        let (win_start, _) = if picker {
-            crate::ui::editor_status::list_window(chosen, shown.len(), crate::ui::editor_status::PICKER_VISIBLE_ROWS)
-        } else {
-            (0, shown.len())
         };
         // A command the editor cannot do yet is listed but does nothing: Enter on it leaves the sheet open.
         let enter_payload = shown
@@ -893,8 +888,8 @@ pub mod page {
                         onkeydown: move |event| {
                             match event.key() {
                                 Key::Escape => { event.stop_propagation(); close_palette(&key_s); }
-                                Key::ArrowDown => { event.stop_propagation(); sel.set(move_selection(chosen, count, true)); }
-                                Key::ArrowUp => { event.stop_propagation(); sel.set(move_selection(chosen, count, false)); }
+                                Key::ArrowDown => { event.stop_propagation(); let next = move_selection(chosen, count, true); sel.set(next); reveal_palette_row(next); }
+                                Key::ArrowUp => { event.stop_propagation(); let next = move_selection(chosen, count, false); sel.set(next); reveal_palette_row(next); }
                                 Key::Enter => {
                                     event.stop_propagation();
                                     if let Some(payload) = enter_payload.clone() {
@@ -915,13 +910,7 @@ pub mod page {
                 }
                 div { style: "max-height:320px; overflow:auto;", role: "listbox",
                     if shown.is_empty() { div { style: "padding:var(--sp3); color:var(--muted);", "{crate::ui::palette::empty_text(mode, index_running)}" } }
-                    if win_start > 0 {
-                        div { class: "ed-tn", role: "option", "aria-label": "위 항목 더 보기", style: "--d:0; height:34px; color:var(--muted);",
-                            onclick: move |_| sel.set(win_start - 1),
-                            "{crate::ui::editor_status::more_above_text(win_start)}"
-                        }
-                    }
-                    for (row, r) in shown.iter().enumerate().skip(win_start) {
+                    for (row, r) in shown.iter().enumerate() {
                         {
                             let item = &items[r.index];
                             let segments = highlight_segments(&item.title, &r.matched);
@@ -932,6 +921,12 @@ pub mod page {
                             let class = if row == chosen { "ed-tn sel" } else { "ed-tn" };
                             let row_style = if enabled { "--d:0; height:34px;" } else { "--d:0; height:34px; color:var(--muted);" };
                             rsx! { div { key: "{row}", class, role: "option", "aria-selected": "{row == chosen}", "aria-disabled": "{!enabled}", style: "{row_style}",
+                                // The row highlighted when it first draws (the current entry of a picker) is
+                                // brought into view; an arrow key brings the next one (`reveal_palette_row`).
+                                onmounted: move |event| {
+                                    PALETTE_ROWS.with(|rows| rows.borrow_mut().insert(row, event.data()));
+                                    if row == chosen { reveal_palette_row(row); }
+                                },
                                 onclick: move |_| {
                                     if !enabled { return; }
                                     close_palette(&click_s);
@@ -948,6 +943,22 @@ pub mod page {
                 }
             }
         }
+    }
+
+    thread_local! {
+        /// The palette's rows by index, to bring the highlighted one into view (FR-L31.7, #838).
+        static PALETTE_ROWS: std::cell::RefCell<std::collections::HashMap<usize, std::rc::Rc<dioxus_elements::MountedData>>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+
+    /// Scrolls the palette's list the least distance that shows row `row` (`scrollIntoView`
+    /// `nearest`, as Code-OSS's quick pick reveals its active item; dioxus-compose#200).
+    fn reveal_palette_row(row: usize) {
+        use futures_util::FutureExt;
+        PALETTE_ROWS.with(|rows| {
+            if let Some(mounted) = rows.borrow().get(&row) {
+                let _ = mounted.scroll_to(dioxus_elements::ScrollBehavior::Instant).now_or_never();
+            }
+        });
     }
 
     fn find_options(s: &Shared) -> crate::ui::find::FindOptions {

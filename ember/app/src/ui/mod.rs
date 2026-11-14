@@ -11,6 +11,7 @@ pub mod cr;
 pub mod compat;
 pub mod add_computer;
 pub mod agents;
+pub mod back;
 pub mod channel_owner;
 pub mod channels;
 pub mod components;

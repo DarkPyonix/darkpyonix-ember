@@ -1317,6 +1317,133 @@ pub fn demo_session_title(routine_name: &str) -> String {
     format!("{} ({SAMPLE_FLAG})", routine_name.trim())
 }
 
+// ---------------------------------------------------------------------------------------------
+// The project page's 루틴 tile (FR-L26, #327)
+// ---------------------------------------------------------------------------------------------
+
+/// The state of an event routine the server holds: it has no next run, it waits for its event.
+pub const EVENT_WAITING: &str = "이벤트 대기";
+/// Rows the project page's 루틴 tile lists; the rest is counted.
+pub const TILE_MAX_ROWS: usize = 3;
+pub const TILE_LOADING: &str = "루틴을 불러오는 중입니다";
+pub const TILE_FAILED: &str = "루틴을 불러오지 못했습니다";
+pub const TILE_EMPTY: &str = "이 프로젝트에는 루틴이 없습니다";
+
+/// What the project page knows of its project's routines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TileLoad {
+    /// Asked, not answered yet.
+    Loading,
+    /// The list call failed.
+    Failed,
+    /// The server's schedules of the project, each with its newest run.
+    Loaded(Vec<Entry>),
+}
+
+/// One routine of the tile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TileRow {
+    pub id: String,
+    pub name: String,
+    /// "다음 실행 오늘 09:00", [`EVENT_WAITING`], or that it is off.
+    pub when: String,
+    /// "완료 · 3시간 전" or "실행 기록 없음".
+    pub last: String,
+}
+
+/// The project page's 루틴 tile as text. Loading, a failed call and an empty project each have a
+/// sentence in `summary` and no rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRoutineTile {
+    pub summary: String,
+    pub rows: Vec<TileRow>,
+    /// "외 2개" when more than [`TILE_MAX_ROWS`] routines exist.
+    pub more: Option<String>,
+}
+
+impl ProjectRoutineTile {
+    /// The tile's lines, top to bottom: the summary, one line per row, then the rest count.
+    pub fn lines(&self) -> Vec<String> {
+        let mut out = vec![self.summary.clone()];
+        out.extend(self.rows.iter().map(|r| format!("{} · {} · {}", r.name, r.when, r.last)));
+        out.extend(self.more.clone());
+        out
+    }
+}
+
+/// When a routine runs next, as its state: off, waiting for its event, or the next run.
+pub fn routine_state_text(e: &Entry, now: Minutes) -> String {
+    let r = &e.routine;
+    if !r.enabled {
+        return "꺼져 있습니다".to_string();
+    }
+    match r.trigger {
+        Trigger::Event => EVENT_WAITING.to_string(),
+        Trigger::Time => match e.next_at.or_else(|| next_run(&r.cron, now)) {
+            Some(t) => format!("다음 실행 {}", format_next(t, now)),
+            None => "다음 실행 없음".to_string(),
+        },
+    }
+}
+
+fn same_project(a: &str, b: &str) -> bool {
+    use crate::ui::project::is_default_project;
+    a == b || (is_default_project(a) && is_default_project(b))
+}
+
+/// The tile for `project`: how many routines it has, how many are on and how many last ended
+/// in failure, then the first [`TILE_MAX_ROWS`] with next run and last result.
+pub fn project_routine_tile(load: &TileLoad, project: &str, now: Minutes) -> ProjectRoutineTile {
+    let sentence = |text: &str| ProjectRoutineTile { summary: text.to_string(), rows: Vec::new(), more: None };
+    let entries: Vec<&Entry> = match load {
+        TileLoad::Loading => return sentence(TILE_LOADING),
+        TileLoad::Failed => return sentence(TILE_FAILED),
+        TileLoad::Loaded(all) => all.iter().filter(|e| same_project(&e.routine.sel.project, project)).collect(),
+    };
+    if entries.is_empty() {
+        return sentence(TILE_EMPTY);
+    }
+    let on = entries.iter().filter(|e| e.routine.enabled).count();
+    let failed = entries
+        .iter()
+        .filter(|e| e.runs.first().is_some_and(|r| r.status == RunStatus::Failed))
+        .count();
+    let mut summary = format!("루틴 {}개 · 켜짐 {on}개", entries.len());
+    if failed > 0 {
+        summary.push_str(&format!(" · 최근 실패 {failed}개"));
+    }
+    let rows = entries
+        .iter()
+        .take(TILE_MAX_ROWS)
+        .map(|e| TileRow {
+            id: e.routine.id.clone(),
+            name: e.routine.name.clone(),
+            when: routine_state_text(e, now),
+            last: last_run_text(&e.runs, now),
+        })
+        .collect();
+    let rest = entries.len().saturating_sub(TILE_MAX_ROWS);
+    ProjectRoutineTile { summary, rows, more: (rest > 0).then(|| format!("외 {rest}개")) }
+}
+
+/// One project's schedules, each with its newest run, for the tile. A failed list is
+/// [`TileLoad::Failed`]; a failed run list leaves that routine without a last result.
+pub async fn load_project_tile(api: &ember_client::api::Api, project: &str) -> TileLoad {
+    let list = match api.schedules(Some(project)).await {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!("loading the project's routines failed: {e}");
+            return TileLoad::Failed;
+        }
+    };
+    let mut out = Vec::with_capacity(list.len());
+    for s in &list {
+        let runs = api.schedule_runs(&s.id, Some(1)).await.unwrap_or_default();
+        out.push(schedule_to_entry(s, &runs));
+    }
+    TileLoad::Loaded(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

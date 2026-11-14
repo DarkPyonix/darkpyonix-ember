@@ -363,11 +363,22 @@ pub fn project_boxes(state: &State) -> Vec<ProjectBox> {
     project_boxes_with_archived(state, false)
 }
 
+/// Appended to the name of an archived project where archived items are shown (FR-L26, #327).
+pub const ARCHIVED_MARK: &str = "(보관됨)";
+
+/// Whether the server holds `name` as archived (FR-L26). An unknown project is not archived.
+pub fn project_archived(state: &State, name: &str) -> bool {
+    state.project(name).is_some_and(|p| p.archived)
+}
+
 /// All projects as boxes, including archived sessions when `show_archived` is true (FR-L9).
+/// An archived project (FR-L26, #327) is listed only then, with [`ARCHIVED_MARK`] after its
+/// name: the server keeps listing it and the client hides it.
 pub fn project_boxes_with_archived(state: &State, show_archived: bool) -> Vec<ProjectBox> {
     let mut out: Vec<(i64, ProjectBox)> = state
         .projects()
         .into_iter()
+        .filter(|p| show_archived || !project_archived(state, &p.name))
         .map(|p| {
             let mut seen = false;
             let mut members: Vec<Member> = p
@@ -384,7 +395,11 @@ pub fn project_boxes_with_archived(state: &State, show_archived: bool) -> Vec<Pr
                 .max_by_key(|s| status_rank(*s));
             let b = ProjectBox {
                 id: p.name.clone(),
-                name: display_name(&p.name),
+                name: if project_archived(state, &p.name) {
+                    format!("{} {ARCHIVED_MARK}", display_name(&p.name))
+                } else {
+                    display_name(&p.name)
+                },
                 running: count(LauncherStatus::Running),
                 waiting: count(LauncherStatus::WaitingForApproval),
                 computers: state.project_computers(&p.name).to_vec(),
@@ -474,9 +489,10 @@ pub enum SettingsPart {
 }
 
 /// Whether the main server can save a part today: computer assignment (FR-L4) and, through
-/// `PATCH /api/projects/{name}`, name, repository and branch, new member defaults and character
-/// style (FR-L26). The rest is shown disabled with an explanation.
-/// TODO(#384): leader, archive and delete (server answers 400 `not_yet`).
+/// `PATCH /api/projects/{name}`, name, repository and branch, new member defaults, character
+/// style and the archived flag, and `DELETE /api/projects/{name}` (FR-L26, #327). The rest is
+/// shown disabled with an explanation.
+/// TODO(#384): the leader (server answers 400 `not_yet`, owner decision open).
 pub fn part_supported(part: SettingsPart) -> bool {
     matches!(
         part,
@@ -486,6 +502,8 @@ pub fn part_supported(part: SettingsPart) -> bool {
             | SettingsPart::CharacterStyle
             | SettingsPart::MemberDefaults
             | SettingsPart::ProfileOverride
+            | SettingsPart::Archive
+            | SettingsPart::Delete
     )
 }
 
@@ -525,19 +543,111 @@ pub struct DangerRow {
     pub button: &'static str,
 }
 
-/// The danger zone's rows as the mockup: 프로젝트 보관 then 프로젝트 삭제, each with what it does.
-/// The delete note counts the members the client knows; routines are left out because the
-/// client has no per-project routine list (the mockup counts them too).
+/// The danger zone's rows as the mockup: 프로젝트 보관 then 프로젝트 삭제, each with what it does,
+/// for a project that is not archived and whose delete button is not armed.
 pub fn danger_rows(project_id: &str, members: usize) -> [DangerRow; 2] {
-    let delete_note = if is_default_project(project_id) {
-        "기본 프로젝트는 지울 수 없습니다.".to_string()
+    danger_rows_for(project_id, members, false, false)
+}
+
+/// The danger zone's rows (FR-L26, #327). An archived project offers 보관 해제. The delete note
+/// follows the server, which deletes only an empty project and refuses any other (#384): it
+/// counts the members the client knows and never promises a cascade. While the delete button is
+/// armed (`delete_armed`) it reads 정말 삭제합니다 and the note says what the second tap does.
+pub fn danger_rows_for(project_id: &str, members: usize, archived: bool, delete_armed: bool) -> [DangerRow; 2] {
+    let default_project = is_default_project(project_id);
+    let archive = if archived {
+        DangerRow {
+            part: SettingsPart::Archive,
+            title: "프로젝트 보관 해제",
+            note: "보관된 프로젝트입니다. 해제하면 목록에 다시 나타납니다.".to_string(),
+            button: "보관 해제",
+        }
     } else {
-        format!("팀원 {members}명의 대화가 함께 지워집니다.")
+        DangerRow { part: SettingsPart::Archive, title: "프로젝트 보관", note: "세션과 기록은 남고 목록에서 숨겨집니다.".to_string(), button: "보관" }
     };
-    [
-        DangerRow { part: SettingsPart::Archive, title: "프로젝트 보관", note: "세션과 기록은 남고 목록에서 숨겨집니다.".to_string(), button: "보관" },
-        DangerRow { part: SettingsPart::Delete, title: "프로젝트 삭제", note: delete_note, button: "삭제" },
-    ]
+    let armed = delete_armed && !default_project;
+    let delete_note = if default_project {
+        "기본 프로젝트는 지울 수 없습니다.".to_string()
+    } else if armed {
+        "한 번 더 누르면 프로젝트를 지웁니다. 되돌릴 수 없습니다.".to_string()
+    } else if members > 0 {
+        format!("팀원 {members}명의 세션이 남아 있습니다. 비어 있는 프로젝트만 지울 수 있습니다.")
+    } else {
+        "비어 있는 프로젝트만 지울 수 있습니다. 지우면 되돌릴 수 없습니다.".to_string()
+    };
+    let delete = DangerRow {
+        part: SettingsPart::Delete,
+        title: "프로젝트 삭제",
+        note: delete_note,
+        button: if armed { "정말 삭제합니다" } else { "삭제" },
+    };
+    [archive, delete]
+}
+
+/// The line under the danger zone's title.
+pub fn danger_hint(project_id: &str) -> &'static str {
+    if is_default_project(project_id) {
+        "되돌리기 어려운 작업입니다. 기본 프로젝트는 보관하거나 지울 수 없습니다"
+    } else {
+        "되돌리기 어려운 작업입니다. 삭제는 한 번 더 눌러 확인합니다"
+    }
+}
+
+/// The patch of the 보관 or 보관 해제 button: the flag flipped and nothing else, so unsaved form
+/// changes are not sent with it.
+pub fn archive_patch(archived_now: bool) -> ProjectPatch {
+    ProjectPatch { archived: Some(!archived_now), ..Default::default() }
+}
+
+/// What a tap on 프로젝트 삭제 does (FR-L26, #327). Deleting cannot be undone, so it asks twice
+/// with the rule of the other destructive buttons (`ui::vcs::delete_tap`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteStep {
+    /// The first tap, or a tap after the question ran out: arm and show 정말 삭제합니다.
+    Arm,
+    /// Too soon after arming for the question to have been read (a double click): nothing.
+    Wait,
+    /// The second tap: delete.
+    Delete,
+}
+
+/// `armed_at` is the time (ms) of the tap that armed the button, `None` when it is not armed.
+pub fn delete_step(armed_at: Option<i64>, now: i64) -> DeleteStep {
+    use crate::ui::vcs::{delete_tap, DeleteTap};
+    match delete_tap(armed_at.map(|at| (0, at)), 0, now) {
+        DeleteTap::Arm | DeleteTap::Expired => DeleteStep::Arm,
+        DeleteTap::Wait => DeleteStep::Wait,
+        DeleteTap::Confirm => DeleteStep::Delete,
+    }
+}
+
+/// Whether the delete button shows its question at `now`.
+pub fn delete_armed(armed_at: Option<i64>, now: i64) -> bool {
+    crate::ui::vcs::armed_label_visible(armed_at.map(|at| (0, at)), 0, now)
+}
+
+/// The sentence a failed delete shows. Never the server's raw text.
+pub fn delete_error_message(status: Option<u16>, code: Option<&str>) -> &'static str {
+    match (status, code) {
+        (Some(409), Some("project_not_empty")) => {
+            "프로젝트에 세션, 채널, 루틴 또는 팀이 남아 있어 지울 수 없습니다. 먼저 옮기거나 지운 뒤 다시 시도해 주세요"
+        }
+        (Some(403), Some("protected_project")) => "기본 프로젝트는 지울 수 없습니다",
+        (Some(404), _) => "프로젝트를 찾지 못했습니다",
+        (Some(400), Some("not_yet")) | (Some(405), _) => "이 서버는 프로젝트 삭제를 아직 지원하지 않습니다. 서버를 업데이트해 주세요",
+        _ => "프로젝트를 지우지 못했습니다. 잠시 뒤에 다시 시도해 주세요",
+    }
+}
+
+/// True for a 403 `owner_required` (FR-S12): the failure goes to the notice, which opens the
+/// owner sheet, instead of a sentence in the settings sheet.
+pub fn is_owner_refusal(status: Option<u16>, code: Option<&str>) -> bool {
+    status == Some(403) && code == Some("owner_required")
+}
+
+/// The open project view after `removed` was deleted: closed when it showed that project.
+pub fn full_after_removal(full: Option<&str>, removed: &str) -> Option<String> {
+    full.filter(|f| *f != removed).map(str::to_string)
 }
 
 /// Columns of the leader choice (`.ps-leads`): 3, 2 at 900 dp and below, 1 at 560 and below.
@@ -790,8 +900,11 @@ pub fn patch_error_message(status: Option<u16>, code: Option<&str>, patch: &Proj
         && patch.default_branch.is_none()
         && patch.member_defaults.is_none()
         && patch.character_style.is_none();
+    let archive = patch.archived.is_some();
     match (status, code) {
         (Some(409), Some("name_taken")) => "이미 있는 이름입니다",
+        (Some(403), Some("protected_project")) if archive => "기본 프로젝트는 보관할 수 없습니다",
+        (Some(400), Some("not_yet")) if archive => "이 서버는 프로젝트 보관을 아직 지원하지 않습니다. 서버를 업데이트해 주세요",
         (Some(403), Some("protected_project")) => "기본 프로젝트의 이름은 바꿀 수 없습니다",
         (Some(400), Some("invalid_field")) if !account_only => "입력한 값을 서버가 받아들이지 않았습니다. 내용을 확인하십시오.",
         (Some(400), Some("invalid_field")) => "선택한 계정을 쓸 수 없습니다. 다시 고르십시오.",

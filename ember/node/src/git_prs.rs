@@ -300,7 +300,7 @@ async fn run_gh(policy: &PathPolicy, repo: &str, args: Vec<OsString>) -> Result<
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let out = exec_cmd(cmd, "gh", None, Some(Deadline::Network(network_timeout()))).await?;
+    let out = exec_cmd(cmd, "gh", None, Some(Deadline::Network(network_timeout())), None).await?;
     if out.truncated {
         return Err(super::too_large());
     }

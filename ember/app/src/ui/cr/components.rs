@@ -1533,16 +1533,22 @@ pub fn EmberCardSized(
 
 /// The inset panel one level below a card: `surface-2`, `corner-md`.
 pub fn InsetPanel(fill_max_width: bool, content: impl FnOnce()) {
+    InsetPanelSized(fill_max_width, false, content);
+}
+
+/// [`InsetPanel`] that can also fill the height its parent gives it, with its content centred
+/// in that height (`.ag-acc{align-items:center}`): a tile in an `equal_height` row is as tall as
+/// the tallest tile of the row, as a CSS grid stretches its cells (FR-L20a, #886).
+pub fn InsetPanelSized(fill_max_width: bool, fill_max_height: bool, content: impl FnOnce()) {
     let theme = ember_theme();
+    let mut m = Modifier::new().fill_max_width_if(fill_max_width);
+    if fill_max_height {
+        m = m.fill_max_height();
+    }
     // TODO(compose-rust): the mockup's 12/16 padding is asymmetric; 12 on all sides for now.
-    cu::Box()
-        .modifier(
-            Modifier::new()
-                .fill_max_width_if(fill_max_width)
-                .background(paint(theme.palette.surface_2))
-                .corner_radius(CORNER_MD)
-                .padding(PAD_ROW_V),
-        )
+    let panel = cu::Box().modifier(m.background(paint(theme.palette.surface_2)).corner_radius(CORNER_MD).padding(PAD_ROW_V));
+    let panel = if fill_max_height { panel.alignment(Alignment::CenterStart) } else { panel };
+    panel
         .content(|| {
             // 4 dp more on each side makes the mockup's 12 16 (`.inset`).
             // The Row and the Column take the panel's width (a Column with no weight shrinks to

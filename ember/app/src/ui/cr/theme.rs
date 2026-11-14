@@ -619,6 +619,10 @@ mod tests {
         // compose-rust#97: System follows the reported appearance; no stand-in marker is left.
         let src = include_str!("theme.rs");
         assert!(!src[..src.find("#[cfg(test)]").unwrap()].contains(concat!("TODO(compose-rust#", "97)")));
+        // The toolkit's own widgets follow the system with it, not a light stand-in.
+        assert_eq!(ThemePref::System.color_scheme(), compose_rust::ColorScheme::FollowSystem);
+        let shell = include_str!("shell.rs");
+        assert!(shell.contains("let scheme = pref.color_scheme();"), "the shell launches with the preference's scheme");
     }
 
     /// The tokens are the mockup's `--shadow` and `--shadow-lg`, light and dark.

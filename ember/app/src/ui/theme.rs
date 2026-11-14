@@ -61,8 +61,9 @@ impl ThemePref {
     /// What the toolkit's own widgets are told (the renderer resolves System itself).
     pub fn color_scheme(self) -> ColorScheme {
         match self {
-            // The app palette draws light for System (see system_scheme), so the toolkit agrees.
-            ThemePref::System => ColorScheme::Light,
+            // The app palette follows the reported appearance for System (`system_scheme`,
+            // compose-rust#97), so the toolkit follows the system too.
+            ThemePref::System => ColorScheme::FollowSystem,
             ThemePref::Light => ColorScheme::Light,
             ThemePref::Dark => ColorScheme::Dark,
         }

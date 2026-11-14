@@ -29,7 +29,7 @@ pub use crate::ui::routines::{
     resolve_run_session_id, rollback_optimistic_run, run_is_simulated, run_now_busy, DEMO_RUN_BUSY, DEMO_RUN_DONE,
     DEMO_RUN_MS, DEMO_RUN_STARTED, DEMO_SESSION_PREFIX, REMOTE_RUN_POLL_MS,
     REMOTE_RUN_STARTED, SAMPLE_FLAG,
-    not_saved_sentence, run_row_text, unsaved_fields,
+    not_saved_sentence, run_row_text, run_tile_sub, unsaved_fields,
     ago, big_time, civil_from_days, cron_valid, days_from_civil,
     describe_cron, filter_projects, format_next, group_by_project, kind_text, kpis,
     last_run_text, minutes_at, ms_to_minutes, name_from_prompt, new_schedule, next_run,
@@ -2397,6 +2397,23 @@ pub fn run_char_state(s: RunStatus) -> CharState {
     }
 }
 
+/// The member a run's session belongs to, named as the project screen names it (team name,
+/// else `<project>-<harness>`), when the client knows the session (`mname` in the mockup).
+pub fn run_member_name(session: &str) -> Option<String> {
+    let svc = try_services()?;
+    let id = resolve_run_session_id(session, demo_active());
+    svc.client.read(|s| {
+        let v = s.session(&id)?;
+        let team = s.team_for_session(&id);
+        Some(crate::ui::project::member_name(
+            team.and_then(|t| t.member(&id)).map(|m| m.name.as_str()),
+            &v.record.project,
+            &v.record.agent,
+            &v.record.title,
+        ))
+    })
+}
+
 /// One `.runtile` (R3, #848): the harness's character, the run's time over the session line,
 /// and the status pill, on `surface-2`. The whole tile opens the run's session (세션 열기).
 fn RunTile(run: &Run, now: Minutes, simulated: bool, agent: &'static str, project: &str) {
@@ -2404,6 +2421,7 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool, agent: &'static str, projec
     let tone = status_tone(run.status);
     let session = run.session.clone();
     let row = run_row_text(run, now, simulated);
+    let sub = run_tile_sub(run, run.session.as_deref().and_then(run_member_name).as_deref());
     let state = run_char_state(run.status);
     let name = Harness::from_kind(agent).map(|h| h.label()).unwrap_or(agent);
     let project = project.to_string();
@@ -2425,7 +2443,7 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool, agent: &'static str, projec
                     Character(agent, false, RUN_TILE_AVATAR, name, &project, state, None);
                     cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                         Label(&row.when, Fs::Xs, Weight::Semibold, None, Some(1));
-                        Label(row.sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        Label(&sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                     });
                     Pill(row.status, tone, true);
                     if let Some(flag) = row.flag {
@@ -4915,6 +4933,30 @@ mod design_review_tests {
         let fail_only = children(&nodes, bars[2]);
         assert_eq!(fail_only.len(), 1);
         assert!(fail_only[0].mods.contains(&orange));
+    }
+
+    fn sample_run_tile() {
+        let run = Run { at: 0, status: RunStatus::Done, session: Some("s9".into()) };
+        RunTile(&run, 0, false, "claude-code", "ember");
+    }
+
+    /// Review r3 (#848): the run tile's second line names the session's member, as the
+    /// mockup's `mname(session)`, not "세션" on every run.
+    #[test]
+    fn design_r3_run_tile_names_the_member() {
+        let _guard = crate::services::test_guard();
+        let svc = crate::services::test_services();
+        svc.reset_demo();
+        let want = run_member_name("s9").expect("the demo knows demo-s9");
+        assert_ne!(want, crate::ui::routines::RUN_TILE_SESSION);
+        let nodes = nodes_of(sample_run_tile);
+        let text = |t: &str| format!("Text=String({t:?})");
+        assert!(nodes.iter().any(|n| n.props.contains(&text(&want))), "the tile shows {want}");
+        assert!(
+            !nodes.iter().any(|n| n.props.contains(&text(crate::ui::routines::RUN_TILE_SESSION))),
+            "no bare 세션 line when the member is known"
+        );
+        assert_eq!(run_member_name("no-such-session"), None);
     }
 
     /// R2: 편집 has a pencil and 지금 실행 a play glyph, 13/500, in every header layout.

@@ -1188,10 +1188,20 @@ pub struct RunRowText {
     pub opens_session: bool,
 }
 
-/// The run tile's second line when the run has a session, and when it has none. The mockup
-/// names the member; a run carries only its session id, so the line says what the tile opens.
+/// The run tile's second line when the run's session is not known to the client, and when the
+/// run has none. A known session names its member (`run_tile_sub`).
 pub const RUN_TILE_SESSION: &str = "세션";
 pub const RUN_TILE_NO_SESSION: &str = "세션 없음";
+
+/// The run tile's second line (`.runtile` `mname(session)`): the member whose session the run
+/// is, when the client knows that session, else what the tile opens (#848, review r3).
+pub fn run_tile_sub(r: &Run, member: Option<&str>) -> String {
+    match (&r.session, member.map(str::trim).filter(|m| !m.is_empty())) {
+        (None, _) => RUN_TILE_NO_SESSION.to_string(),
+        (Some(_), Some(m)) => m.to_string(),
+        (Some(_), None) => RUN_TILE_SESSION.to_string(),
+    }
+}
 
 pub fn run_row_text(r: &Run, now: Minutes, simulated: bool) -> RunRowText {
     RunRowText {
@@ -2340,5 +2350,15 @@ mod tests {
         assert_eq!(weekday_bar_parts(40.0, 0, 0), (0.0, 0.0, 0.0));
         let (f, g, o) = weekday_bar_parts(1.0, 1, 1);
         assert!(f >= 0.0 && o >= 0.0 && f + g + o <= 1.0 + f32::EPSILON, "a tiny bar never overflows");
+    }
+
+    #[test]
+    fn fr_l25_run_tile_names_the_member_when_the_session_is_known() {
+        let with = Run { at: 0, status: RunStatus::Done, session: Some("s1".into()) };
+        assert_eq!(run_tile_sub(&with, Some("ember-구현")), "ember-구현");
+        assert_eq!(run_tile_sub(&with, Some("  ")), RUN_TILE_SESSION, "a blank name falls back");
+        assert_eq!(run_tile_sub(&with, None), RUN_TILE_SESSION);
+        let without = Run { session: None, ..with };
+        assert_eq!(run_tile_sub(&without, Some("ember-구현")), RUN_TILE_NO_SESSION);
     }
 }

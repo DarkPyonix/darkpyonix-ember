@@ -359,8 +359,15 @@ pub trait AgentAdapter: Send + Sync {
         Vec::new()
     }
 
-    /// [`AgentAdapter::translate_drained`] with the events already stored for the session
-    /// (oldest first), so an adapter can leave out what the store already holds (FR-S8, #310).
+    /// Whether [`AgentAdapter::translate_drained_after`] compares the drained lines with what
+    /// the store holds (FR-S8, #310). Default: no, and then the store is not read for the drain.
+    fn drain_reads_stored(&self) -> bool {
+        false
+    }
+
+    /// [`AgentAdapter::translate_drained`] with the tool calls and tool results already stored
+    /// for the turn in flight (oldest first; empty unless [`AgentAdapter::drain_reads_stored`]),
+    /// so an adapter can leave out what the store already holds (FR-S8, #310).
     /// Default: the stored events are not looked at.
     fn translate_drained_after(&self, lines: &[String], _stored: &[AgentEvent]) -> Vec<AgentEvent> {
         self.translate_drained(lines)

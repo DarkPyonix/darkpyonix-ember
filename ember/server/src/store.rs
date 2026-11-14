@@ -501,10 +501,44 @@ impl Store {
     /// After a restart, sessions that were mid-turn can no longer be: mark them idle so the next
     /// message resumes them natively.
     pub fn reset_live_statuses(&self) -> anyhow::Result<usize> {
-        Ok(self.conn.lock().unwrap().execute(
-            "UPDATE sessions SET status = 'idle' WHERE status IN ('running', 'waiting_for_approval')",
-            [],
-        )?)
+        self.reset_live_statuses_except(&[])
+    }
+
+    /// [`Store::reset_live_statuses`] for every mid-turn session but `keep` (FR-S8): the sessions
+    /// whose agent outlived the previous server and was rejoined are still mid-turn.
+    pub fn reset_live_statuses_except(&self, keep: &[String]) -> anyhow::Result<usize> {
+        let marks = vec!["?"; keep.len()].join(", ");
+        let sql = format!(
+            "UPDATE sessions SET status = 'idle'
+             WHERE status IN ('running', 'waiting_for_approval') AND id NOT IN ({marks})"
+        );
+        Ok(self.conn.lock().unwrap().execute(&sql, rusqlite::params_from_iter(keep.iter()))?)
+    }
+
+    /// The tool calls and tool results stored for the turn in flight (the events after the
+    /// session's last `turn_ended`), oldest first (FR-S8, #310). The drain of a surviving agent
+    /// needs nothing else, so the rest of the session is not read: the kind is filtered in SQL,
+    /// the search for the last turn end walks back from the newest event, and the rows are
+    /// parsed after the connection lock is released.
+    pub fn open_turn_tool_events(&self, session_id: &str) -> anyhow::Result<Vec<AgentEvent>> {
+        let rows: Vec<String> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT event FROM events
+                 WHERE session_id = ?1
+                   AND seq > COALESCE(
+                       (SELECT seq FROM events
+                        WHERE session_id = ?1 AND json_extract(event, '$.kind') = 'turn_ended'
+                        ORDER BY seq DESC LIMIT 1),
+                       0)
+                   AND json_extract(event, '$.kind') IN ('tool_call', 'tool_result')
+                 ORDER BY seq",
+            )?;
+            let rows = stmt.query_map(params![session_id], |r| r.get::<_, String>(0))?;
+            let rows: Vec<String> = rows.collect::<Result<_, _>>()?;
+            rows
+        };
+        rows.iter().map(|json| Ok(serde_json::from_str(json)?)).collect()
     }
 }
 
@@ -822,5 +856,74 @@ mod tests {
         store.append(&s.id, &AgentEvent::UserMessage { text: "hi".into() }).unwrap();
         assert_eq!(store.reset_live_statuses().unwrap(), 1);
         assert_eq!(store.session(&s.id).unwrap().unwrap().status, SessionStatus::Idle);
+    }
+
+    /// FR-S8: the sessions kept (rejoined agents) stay mid-turn, every other mid-turn session
+    /// becomes idle, and a session that is not mid-turn is not touched.
+    #[test]
+    fn fr_s8_reset_live_statuses_except_keeps_the_given_sessions() {
+        let store = Store::open_in_memory().unwrap();
+        let new = |title: &str| store.create_session("p", AgentKind::Scripted, "/tmp", None, title).unwrap().id;
+        let (kept, waiting, dead, done) = (new("kept"), new("waiting"), new("dead"), new("done"));
+        for id in [&kept, &waiting, &dead, &done] {
+            store.append(id, &AgentEvent::UserMessage { text: "hi".into() }).unwrap();
+        }
+        store
+            .append(
+                &waiting,
+                &AgentEvent::ApprovalRequested {
+                    approval_id: "a1".into(),
+                    tool: "Bash".into(),
+                    input: serde_json::json!({}),
+                    needs_person: false,
+                },
+            )
+            .unwrap();
+        store.append(&done, &AgentEvent::TurnEnded { outcome: crate::events::TurnOutcome::Completed }).unwrap();
+        assert_eq!(store.reset_live_statuses_except(&[kept.clone()]).unwrap(), 2);
+        let status = |id: &str| store.session(id).unwrap().unwrap().status;
+        assert_eq!(status(&kept), SessionStatus::Running);
+        assert_eq!(status(&waiting), SessionStatus::Idle);
+        assert_eq!(status(&dead), SessionStatus::Idle);
+        assert_eq!(status(&done), SessionStatus::Finished);
+        // Nothing kept: the rest goes too.
+        assert_eq!(store.reset_live_statuses_except(&[]).unwrap(), 1);
+        assert_eq!(status(&kept), SessionStatus::Idle);
+    }
+
+    /// FR-S8 (#310): only the tool calls and results after the last turn end are read.
+    #[test]
+    fn fr_s8_open_turn_tool_events_are_the_tool_events_after_the_last_turn_end() {
+        let store = Store::open_in_memory().unwrap();
+        let id = store.create_session("p", AgentKind::Scripted, "/tmp", None, "t").unwrap().id;
+        let call = |call_id: &str| AgentEvent::ToolCall {
+            call_id: call_id.into(),
+            name: "read".into(),
+            input: serde_json::json!({ "path": call_id }),
+        };
+        let result = |call_id: &str| AgentEvent::ToolResult {
+            call_id: call_id.into(),
+            output: "ok".into(),
+            is_error: false,
+        };
+        // No event at all, then a turn with no turn end yet.
+        assert!(store.open_turn_tool_events(&id).unwrap().is_empty());
+        store.append(&id, &AgentEvent::UserMessage { text: "one".into() }).unwrap();
+        store.append(&id, &call("old")).unwrap();
+        assert_eq!(store.open_turn_tool_events(&id).unwrap(), vec![call("old")]);
+        store.append(&id, &result("old")).unwrap();
+        store.append(&id, &AgentEvent::TurnEnded { outcome: crate::events::TurnOutcome::Completed }).unwrap();
+        assert!(store.open_turn_tool_events(&id).unwrap().is_empty(), "a finished turn has no open calls");
+        // The turn in flight: its calls and results, without the messages around them.
+        store.append(&id, &AgentEvent::UserMessage { text: "two".into() }).unwrap();
+        store.append(&id, &call("t1")).unwrap();
+        store.append(&id, &AgentEvent::AssistantMessage { text: "working".into() }).unwrap();
+        store.append(&id, &result("t1")).unwrap();
+        store.append(&id, &call("t2")).unwrap();
+        assert_eq!(store.open_turn_tool_events(&id).unwrap(), vec![call("t1"), result("t1"), call("t2")]);
+        // Another session's events are not mixed in.
+        let other = store.create_session("p", AgentKind::Scripted, "/tmp", None, "o").unwrap().id;
+        store.append(&other, &call("x")).unwrap();
+        assert_eq!(store.open_turn_tool_events(&id).unwrap().len(), 3);
     }
 }

@@ -169,10 +169,8 @@ async fn serve_main() -> anyhow::Result<()> {
     };
     // Demo only (#193): off unless EMBER_DEMO_DATA=1.
     ember_server::chatgpt::demo::seed(&store, std::env::var(ember_server::chatgpt::demo::ENV).ok().as_deref())?;
-    let reset = store.reset_live_statuses()?;
-    if reset > 0 {
-        tracing::info!("{reset} session(s) were mid-turn at shutdown; marked idle for resume");
-    }
+    // The statuses of sessions that were mid-turn are settled further down, by
+    // `Sessions::recover_after_restart`, once the session manager and its hooks exist (FR-S8).
     // Repair the per-channel JSONL files against the store before any router serves (FR-T16).
     // It only logs: a problem here never stops the start. It uses its own JsonlLog and shares no lock
     // with the routers' instances, so it must stay synchronous and ahead of every router.
@@ -503,8 +501,17 @@ async fn serve_main() -> anyhow::Result<()> {
         }
         None => None,
     };
+    // FR-S8 startup order: first rejoin or drain the sessions whose agent outlived the previous
+    // server, only then mark idle the mid-turn sessions with no surviving agent. It runs here
+    // because a rejoin needs every start hook above (accounts, members, computers, egress,
+    // browser, MCP, A2A), and nothing may read a session status before it: the A2A flush, the
+    // scheduler, the CI watcher, the transport and the local listener all start below. Until
+    // then a session still reads as running although its agent is gone. The start waits for a
+    // drain (EMBER_SHIM_DRAIN_SECS at most); the listeners are bound, so callers queue.
+    a2a.install_hooks();
+    sessions.recover_after_restart(shim_runtime.as_ref()).await?;
     // After binding, so agents woken by queued messages can reach the API.
-    a2a.install();
+    a2a.start();
     // Scheduled tasks (FR-A8): the first tick reports triggers missed while the server was down.
     let scheduler = Scheduler::new(sessions.clone(), Arc::new(SystemClock));
     {
@@ -691,12 +698,6 @@ async fn serve_main() -> anyhow::Result<()> {
     };
     #[cfg(not(any(unix, windows)))]
     tracing::warn!("no owner door on this platform: owner presence stays in warn mode (FR-S12)");
-    if let Some(rt) = &shim_runtime {
-        let rejoined = sessions.rejoin_shims(rt).await;
-        if !rejoined.is_empty() {
-            tracing::info!("rejoined {} running session(s) from the previous server", rejoined.len());
-        }
-    }
     // The guest door stops with the owner server. Its failure never stops the owner server.
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let guest_task = match (guest_listener, guest_app) {

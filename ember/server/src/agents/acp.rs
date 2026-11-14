@@ -443,6 +443,10 @@ impl AgentAdapter for AcpAdapter {
         translate_drained_lines(lines)
     }
 
+    fn drain_reads_stored(&self) -> bool {
+        true
+    }
+
     /// The tool calls already stored for the turn in flight are not stored again (#310).
     fn translate_drained_after(&self, lines: &[String], stored: &[AgentEvent]) -> Vec<AgentEvent> {
         translate_drained_lines_after(lines, stored)

@@ -557,7 +557,8 @@ fn RemoteMainButton(
     enabled: bool,
     on_click: impl FnMut() + 'static,
 ) {
-    // TODO(compose-rust#328): keep button labels visible when the available width is narrow.
+    // The label is a one-line `Label` in a fixed 100 dp pill, so it is not measured narrow
+    // (compose-rust#328, fixed in v0.0.7, was about toolkit Button and Chip labels).
     let p = ember_theme().palette;
     let (action_icon, action_text, action_count) = match action {
         RemoteAction::Pull(n) => (ICON_ARROW_DOWN_SVG, "Pull", Some(n)),
@@ -4952,7 +4953,7 @@ mod tests {
         // named, and a filter chip is a named, selectable container without an overlay button.
         let src = include_str!("vcs.rs");
         let production = &src[..src.find("#[cfg(test)]").expect("tests")];
-        for marker in [concat!("TODO(compose-rust#", "471)"), concat!("TODO(compose-rust#", "460, #429)"), concat!("TODO(compose-rust#", "500)")] {
+        for marker in [concat!("TODO(compose-rust#", "471)"), concat!("TODO(compose-rust#", "460, #429)"), concat!("TODO(compose-rust#", "500)"), concat!("TODO(compose-rust#", "328)")] {
             assert!(!production.contains(marker), "{marker}");
         }
         let chip = &production[production.find("fn VcsChip(").expect("chip")..];

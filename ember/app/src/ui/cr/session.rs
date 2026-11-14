@@ -1057,7 +1057,7 @@ pub fn follow_newest(max_offset: f32, prev_max: f32, prev_offset: f32) -> Option
 
 /// Applies [`follow_newest`] to `scroll`. It draws nothing; it is a composable of its own so
 /// that reading the offset runs only this function again while the user scrolls.
-#[compose_rust::runtime::composable]
+#[compose_rust::runtime::Composable]
 fn FollowNewest(scroll: cu::ScrollState, key: String) {
     let offset = scroll.offset();
     let max_offset = scroll.max_offset();

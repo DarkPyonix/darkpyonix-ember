@@ -959,7 +959,7 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
                     }
                 });
                 if has_session {
-                    crate::ui::cr::session::IdeChevron(open.clone(), false);
+                    crate::ui::cr::session::IdeChevronSized(open.clone(), false, H_BTN);
                 }
             });
         },
@@ -1870,6 +1870,9 @@ mod tests {
         let ide = src.split("fn IdeMenu(").nth(1).unwrap().split("\nfn ").next().unwrap();
         assert!(ide.contains("PopoverMenu(") && ide.contains("PopKind::Drop") && ide.contains("PopoverAlign::End"));
         assert!(ide.contains("IDE_MENU_HEAD") && ide.contains("ide_pop_rows(&choices, remembered)"));
+        // The chevron stands as high as the 40 dp button, so the menu hangs 6 below both.
+        assert!(ide.contains("IdeChevronSized(open.clone(), false, H_BTN)"));
+        assert_eq!(H_BTN, 40.0);
         assert!(!src.contains("OptionSheet("), "no centred option sheet is left on the project screen");
     }
     use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};

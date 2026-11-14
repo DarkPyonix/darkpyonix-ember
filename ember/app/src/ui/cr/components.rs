@@ -1098,8 +1098,8 @@ pub fn name_then_pill_width(room: f32, natural: f32, pill: f32, gap: f32) -> Opt
 /// and no maximum width: a weighted child fills its share (compose-rust
 /// `renderer/desktop/src/renderer/RenderNode.kt` `WeightedStackPolicy`), and an unweighted one
 /// is measured in order, so a long name would leave the pill no room. So the row measures: the
-/// room, the pill and the name's own width (a copy drawn at zero opacity and left out of the
-/// accessibility tree) are reported by the renderer (`observe_size_every_dp`), and the name gets
+/// room, the pill and the name's own width (a copy in clear ink, left out of the accessibility
+/// tree) are reported by the renderer (`observe_size_every_dp`), and the name gets
 /// the width [`name_then_pill_width`] gives. Until the first report the name takes the room and
 /// the pill sits at its end, which is where every long name ends up anyway.
 pub fn NameThenPill(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, gap: f32, pill: impl FnOnce()) {
@@ -1116,9 +1116,21 @@ pub fn NameThenPill(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, ga
         .alignment(Alignment::CenterStart)
         .modifier(Modifier::new().weight(1.0).width(0.0).observe_size_every_dp(room.token()))
         .content(|| {
-            cu::Row().modifier(Modifier::new().alpha(0.0).hidden(true)).content(|| {
-                cu::Box().modifier(Modifier::new().observe_size_every_dp(natural.token()).hidden(true)).content(|| {
-                    Label(name, fs, weight, color, Some(1));
+            cu::Row().content(|| {
+                cu::Box().modifier(Modifier::new().observe_size_every_dp(natural.token())).content(|| {
+                    // The measuring copy: the name's own font, clear ink, out of the
+                    // accessibility tree (a `hidden` container still exposes its text).
+                    drop(
+                        cu::Text(name)
+                            .word_break(WordBreak::KeepAll)
+                            .font_size(fs.size())
+                            .line_height(fs.line_height())
+                            .font_weight(weight.value())
+                            .letter_spacing(fs.letter_spacing())
+                            .color(Paint::Literal(Color::argb(0)))
+                            .max_lines(1)
+                            .modifier(Modifier::new().hidden(true)),
+                    );
                 });
             });
             cu::Row().alignment(Alignment::CenterStart).spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -3294,12 +3306,45 @@ mod tests {
         // The measuring copy is invisible and out of the accessibility tree.
         let copies: Vec<&EmittedNode> = nodes.iter().filter(|n| n.props.iter().any(|p| p == "Text=String(\"demo-project 세션\")")).collect();
         assert_eq!(copies.len(), 2);
-        let hidden = nodes.iter().find(|n| n.mods.iter().any(|m| m == "Alpha(0.0)")).expect("the zero-opacity copy");
-        assert!(is_under(&nodes, copies[0], hidden.id) && !is_under(&nodes, copies[1], hidden.id));
-        assert!(hidden.mods.iter().any(|m| m.starts_with("Semantics")), "{:?}", hidden.mods);
+        assert!(copies[0].mods.iter().any(|m| m.starts_with("Semantics")), "the copy is hidden: {:?}", copies[0].mods);
         // Before a report the visible name fills the room, so a long name never pushes past it.
         let name_box = parent_of(&nodes, copies[1]);
         assert!(name_box.mods.iter().any(|m| m == "Weight(1.0)"), "{:?}", name_box.mods);
+    }
+
+    #[test]
+    fn fr_l28_name_then_pill_gives_the_name_its_measured_width() {
+        use compose_rust::{WindowHeightClass, WindowSizeClass};
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| Box::new(Recomposer::new(name_then_pill)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let observed: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { node_id, modifier, .. } if format!("{modifier:?}").starts_with("ObserveSize") => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(observed.len(), 3, "the room, the name and the pill");
+        let mut sent = Vec::new();
+        // The renderer reports the room (300), the name's own width (120) and the pill (60).
+        for (node_id, w) in observed.iter().zip([300.0_f32, 120.0, 60.0]) {
+            let payload = EventPayload::WindowSizeChanged {
+                width_dp: w,
+                height_dp: 22.0,
+                class: WindowSizeClass::Compact,
+                height_class: WindowHeightClass::Compact,
+                safe_area_top: 0.0,
+                safe_area_leading: 0.0,
+                safe_area_trailing: 0.0,
+            };
+            let (bytes, _) = host.dispatch(HostEvent { node_id: *node_id, handler_id: 0, payload }).expect("dispatch");
+            sent.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
+        }
+        let sent = sent.join("\n");
+        assert!(sent.contains("Width(121.0)"), "the name keeps its own width: {sent}");
+        compose_rust::window::reset_window_size();
     }
 
     #[test]

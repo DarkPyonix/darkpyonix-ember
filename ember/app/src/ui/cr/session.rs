@@ -522,14 +522,20 @@ pub fn ide_split_style(p: &Palette) -> IdeSplitStyle {
 /// Its accessible name is "다른 IDE 선택" (compose-rust v0.0.7, #460), and it says whether the
 /// chooser is open. Touch target 26x32, under 44 px: #323.
 pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
+    IdeChevronSized(open, on_ink, 32.0);
+}
+
+/// [`IdeChevron`] `height` high, to stand as high as the button beside it: the project header's
+/// 40 dp 열기 button, so its menu hangs 6 below both (review r8: 10 below the 32 chevron).
+pub fn IdeChevronSized(open: MutableState<bool>, on_ink: bool, height: f32) {
     let p = ember_theme().palette;
     let (tint, m) = if on_ink {
-        (ide_split_style(p).ink.to_argb(), Modifier::new().size(26.0, 32.0))
+        (ide_split_style(p).ink.to_argb(), Modifier::new().size(26.0, height))
     } else {
         (
             p.text_2.to_argb(),
             Modifier::new()
-                .size(26.0, 32.0)
+                .size(26.0, height)
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
                 .shape_role(ShapeRole::Full),
@@ -4098,16 +4104,16 @@ fn ToolbarBtn(
             .border(1.0, paint(p.line))
             .shape_role(ShapeRole::Full)
     };
-    // The label is the tooltip (`title` in the mockup). v0.0.7: #417 fixed (pointer events reach
-    // the app); kept as is until checked on a display that the toolkit `Tooltip` shows on hover.
-    // Assistive technology reads it now.
+    // The label is the tooltip (`title` in the mockup) and the button's name. The tooltip sits
+    // inside the button: around it, the toolkit's `Tooltip` box carries the text as its own
+    // description and macOS read the control as static text (review r8; compose-rust
+    // `renderer/desktop/src/renderer/HostOverlay.kt` `HostTooltip`).
     let tip = lbl.clone();
-    // A button named by its label; read as static text it was not one (review r8).
     let m = match expanded {
         Some(open) => m.expanded(open),
         None => m,
     };
-    cu::Tooltip(tip).content(move || NamedClickable(label, m, Alignment::Center, on_click, move || {
+    NamedClickable(label, m, Alignment::Center, on_click, move || cu::Tooltip(tip).content(move || {
         if show_label || chevron {
             cu::Row()
                 .alignment(Alignment::CenterStart)

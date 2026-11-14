@@ -2163,14 +2163,41 @@ mod tests {
         let fill = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.surface)));
         assert!(frame.mods.contains(&border), "{:?}", frame.mods);
         assert!(frame.mods.contains(&fill), "{:?}", frame.mods);
-        // The detail views use it: the 싱글 conversation header, the room header and the
-        // stand-alone conversation's phone header.
-        for (file, src) in [("session.rs", include_str!("session.rs")), ("channels.rs", include_str!("channels.rs")), ("conversation.rs", include_str!("conversation.rs"))] {
+        // The detail views use it: the 싱글 conversation header, the room header, the
+        // stand-alone conversation's phone header and the routine detail on a phone (review r7:
+        // a bare drawn arrow named 목록).
+        for (file, src) in [
+            ("session.rs", include_str!("session.rs")),
+            ("channels.rs", include_str!("channels.rs")),
+            ("conversation.rs", include_str!("conversation.rs")),
+            ("routines.rs", include_str!("routines.rs")),
+        ] {
             let production = src.split("#[cfg(test)]").next().unwrap();
             assert!(production.contains("BackButton("), "{file}");
             assert!(!production.contains("IconButton(IconRole::Back"), "{file}");
         }
         assert!(!include_str!("channels.rs").contains("AppButton(\"목록\""));
+        assert!(!include_str!("routines.rs").contains("FocusOverlay(\"목록\""));
+    }
+
+    #[test]
+    fn fr_l28_a_detail_top_bar_is_56_high_with_20_sides_so_the_back_square_stays_32() {
+        // `.detail{grid-template-rows:56px}`, `.topbar{padding:0 var(--sp5)}`. Review r7: the
+        // 싱글 header was 52 high with 12 padding all round, so the back square drew 32 x 28 at
+        // x 12; the mockup has 32 x 32 at x 20.
+        assert_eq!((TOPBAR_H, TOPBAR_PAD_X), (56.0, 20.0));
+        assert!(TOPBAR_H - H_CTL >= 2.0 * SP[1], "room above and below the 32 dp square");
+        let session = include_str!("session.rs").split("#[cfg(test)]").next().unwrap();
+        let header = session.split("// `.topbar` in `.detail`").nth(1).expect("the 싱글 header").split("ConversationView(").next().unwrap();
+        assert!(header.contains(".height(super::theme::TOPBAR_H)"), "{header}");
+        assert!(!header.contains(".padding(SP[2])") && !header.contains(".height(52.0)"), "{header}");
+        assert_eq!(header.matches("Modifier::new().width(super::theme::TOPBAR_PAD_X)").count(), 2, "both sides");
+        // The member name shrinks with an ellipsis so the panel button stays inside the bar.
+        assert!(header.contains("cu::Column().modifier(Modifier::new().weight(1.0).width(0.0))"), "{header}");
+        let routines = include_str!("routines.rs").split("#[cfg(test)]").next().unwrap();
+        let icons = routines.split("if layout == DetailHeader::Icons {").nth(1).unwrap().split("} else if layout == DetailHeader::Stacked").next().unwrap();
+        assert!(icons.contains("BackButton(") && !icons.contains(".padding(PAD_ROW_V)"), "{icons}");
+        assert_eq!(icons.matches("Modifier::new().width(TOPBAR_PAD_X)").count(), 2, "both sides");
     }
 
     #[test]

@@ -2456,18 +2456,25 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
                     cu::Column()
                         .modifier(Modifier::new().weight(1.0).fill_max_height())
                         .content(move || {
-                            // Compact 1-row .topbar header
+                            // `.topbar` in `.detail` (`grid-template-rows:56px`): 56 high, 20 in
+                            // from each side, nothing above or below. The 52 dp row with 12 dp
+                            // padding all round left 28 dp, so the 32 dp back square drew 32x28
+                            // at x 12 (review r7, conversation-single-390).
                             cu::Row()
                                 .alignment(Alignment::CenterStart)
-                                .space_role(SpaceRole::Sm)
                                 .modifier(
                                     Modifier::new()
                                         .fill_max_width()
-                                        .height(52.0)
-                                        .background(paint(p.surface))
-                                        .padding(SP[2]),
+                                        .height(super::theme::TOPBAR_H)
+                                        .background(paint(p.surface)),
                                 )
                                 .content(move || {
+                                    cu::Spacer().modifier(Modifier::new().width(super::theme::TOPBAR_PAD_X));
+                                    cu::Row()
+                                        .alignment(Alignment::CenterStart)
+                                        .space_role(SpaceRole::Sm)
+                                        .modifier(Modifier::new().weight(1.0))
+                                        .content(move || {
                                     let b_cb = back_cb.clone();
                                     BackButton(move || b_cb());
                                     if let Some((proj_id, m)) = m_opt {
@@ -2481,16 +2488,22 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
                                             CharState::from_status(m.status),
                                             None,
                                         );
-                                        Label(
-                                            &m.accessible_name(),
-                                            Fs::Md,
-                                            Weight::Semibold,
-                                            Some(paint(p.text)),
-                                            Some(1),
-                                        );
+                                        // The name takes the room left with an ellipsis, so
+                                        // the status pill and the panel button keep theirs (a
+                                        // long name pushed the button past the edge at 390).
+                                        cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
+                                            Label(
+                                                &m.accessible_name(),
+                                                Fs::Md,
+                                                Weight::Semibold,
+                                                Some(paint(p.text)),
+                                                Some(1),
+                                            );
+                                        });
                                         Pill(st_txt, st_tone.into(), true);
+                                    } else {
+                                        cu::Spacer().modifier(Modifier::new().weight(1.0));
                                     }
-                                    cu::Spacer().modifier(Modifier::new().weight(1.0));
                                     let io = info_btn.clone();
                                     let pv = pv_btn.clone();
                                     IconButton(IconRole::Sidebar, true, move || {
@@ -2500,6 +2513,8 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
                                             io.set(true);
                                         }
                                     });
+                                        });
+                                    cu::Spacer().modifier(Modifier::new().width(super::theme::TOPBAR_PAD_X));
                                 });
                             cu::Separator(Some(paint(p.line)));
                             cu::Box()

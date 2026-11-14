@@ -304,6 +304,10 @@ pub const H_CTL: f32 = 32.0;
 pub const H_PILL: f32 = 24.0;
 pub const H_PILL_SM: f32 = 20.0;
 pub const H_NAV_ITEM: f32 = 38.0;
+/// A detail view's top bar (`.detail{grid-template-rows:56px ...}`), its controls centred in it.
+pub const TOPBAR_H: f32 = 56.0;
+/// The top bar's sides (`.topbar{padding:0 var(--sp5)}`).
+pub const TOPBAR_PAD_X: f32 = 20.0;
 pub const SIDE_W: f32 = 234.0;
 pub const RAIL_W: f32 = 72.0;
 pub const TABBAR_H: f32 = 64.0;

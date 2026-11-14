@@ -82,14 +82,22 @@ A second device reaches the main server over the peer-to-peer transport, never b
 only, D37). The device's key is its credential (FR-N7). Until a pairing flow exists, the owner
 copies the device's peer id to the server by hand:
 
-1. Start the server with the transport on. It prints its peer id and address:
+1. Start the server with the transport on. It prints its peer id, its address, and (with its
+   relay role on, the default on letify) the device line:
 
    ```sh
    cd ember/server
    EMBER_TRANSPORT=1 cargo run
    # ember server peer id: 6f1c...
    # ember server peer addr: {"peer":"6f1c...","relays":[...],"direct":["192.168.0.10:51234"]}
+   # ember server device address: 6f1c... relay letify://6f1c...@192.168.0.10:7443
    ```
+
+   The device line names the server's peer id and its own relay on the fixed relay port
+   (`EMBER_SERVER_RELAY_PORT`, default 7443), not the direct port, which changes at every start.
+   Its host is the first address the server advertises (`EMBER_LETIFY_ADVERTISE`, or the
+   observed public address); without one the line reads `letify://6f1c...@<host>:7443` and says
+   to replace `<host>` with the address or name the device reaches the server by.
 
 2. On the device, open 설정 and read "이 기기의 peer id" (복사 copies it). The key behind it is
    `<data dir>/device.key`, made on first use with mode 0600.
@@ -100,13 +108,19 @@ copies the device's peer id to the server by hand:
    cargo run -- owner devices add <peer id> phone
    ```
 
-4. On the device, enter the server's address in 설정 > 이 기기 > 서버 주소 (the `peer addr` JSON
-   line, or `<peer id>@<ip>:<port>`), and the relay if the device is not on the server's network
-   (`letify://<server peer id>@<host>:7443`). Press 저장 and restart the app.
+4. On the device, paste the device line into 설정 > 이 기기 > 서버 주소 (with or without the
+   `ember server device address:` prefix). 저장 keeps its peer id as the address and its URL as
+   the relay; a relay typed in the relay field, or `EMBER_RELAY_URL`, beats it. The older forms
+   still work: the `peer addr` JSON line, or `<peer id>@<ip>:<port>` with the relay typed
+   separately. Press 저장 and restart the app.
 
 A device the server does not admit shows "이 기기가 서버에 등록되어 있지 않거나 등록이
-해제되었습니다." at start and in 설정. The server's direct port changes when it restarts, so the
-JSON line is entered again after a restart until the address directory or pairing covers it.
+해제되었습니다." at start and in 설정. The device line is the recommended setting because it does
+not name the direct port. Not working yet (#863): a device with only the peer id and the relay
+does not reach the server, because the transport reaches a peer through a relay only with a
+rendezvous channel (the hub's mailbox) and the relay does not hand a connection addressed to the
+server itself to the server. Until that is closed, the JSON line (with its direct port) is what
+connects, and it is entered again after the server restarts.
 Clearing the address and saving goes back to the local server. Not over the transport yet: the
 terminal relay and the separate Ember 에디터 window, which still need an HTTP address.
 

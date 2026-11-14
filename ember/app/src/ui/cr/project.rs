@@ -903,9 +903,11 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
     // `EMBER_CR_IDE_MENU=1` opens the chooser at the start, for review captures.
     let open = remember_with_key(key.clone(), || mutable_state_of(std::env::var("EMBER_CR_IDE_MENU").as_deref() == Ok("1")));
     let ide = remember_with_key(key.clone(), || mutable_state_of(None::<Result<IdeLaunch, String>>));
+    let computer = remember_with_key(key.clone(), || mutable_state_of(None::<String>));
     let started = remember_with_key(key, || mutable_state_of(false));
     if let (Some(sid), false) = (session.clone(), started.get_untracked()) {
         started.set(true);
+        crate::ui::cr::session::load_session_computer(sid.clone(), computer.clone());
         if services().demo.is_some() {
             let (project, cwd) = services()
                 .client
@@ -927,6 +929,8 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
         .as_ref()
         .and_then(|sid| services().client.read(|s| s.session(sid).map(|v| v.record.cwd.clone())))
         .unwrap_or_default();
+    // `computer:~/project` (mockup `ideMenu`), not the raw folder (review r8).
+    let ide_sub = crate::ui::session::ide_menu_subtitle(computer.get().as_deref(), &cwd);
     let rows = crate::ui::cr::session::ide_pop_rows(&choices, remembered);
     let (close, ui2, ide2) = (open.clone(), ui.clone(), ide.clone());
     // The chooser hangs from the IDE button, lined up with its end (FR-L10.4, #888, review P10).
@@ -936,7 +940,7 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
             name: super::a11y::IDE_PICKER,
             kind: PopKind::Drop,
             head: crate::ui::session::IDE_MENU_HEAD,
-            sub: (!cwd.is_empty()).then_some(cwd.as_str()),
+            sub: ide_sub.as_deref(),
             rows: &rows,
             align: compose_rust::PopoverAlign::End,
         },

@@ -1367,6 +1367,7 @@ name = "ember-app"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "axum",
  "base64 0.22.1",
  "compose-rust",
  "dioxus-compose",

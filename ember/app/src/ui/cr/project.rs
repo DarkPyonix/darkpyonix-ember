@@ -878,11 +878,12 @@ fn launch_ide(ui: &SharedUi, kind: IdeKind, launch: Option<Result<IdeLaunch, Str
         ),
         IdeAction::EmberPlaceholder => {
             let c = IdeLaunch::editor_connection(launch.as_ref());
-            if c.endpoint.as_deref().map_or(true, str::is_empty) {
+            // The relay route alone is enough to reach the OSE (FR-N9.1).
+            if c.endpoint.as_deref().map_or(true, str::is_empty) && c.relay.as_deref().map_or(true, str::is_empty) {
                 notice::post("Ember 에디터: 서버가 OSE 런타임을 시작하지 못했습니다");
                 return;
             }
-            ui.open_editor_connection(c.project, c.folder, c.endpoint, c.token, c.server_url, c.computer);
+            ui.open_editor_connection(c.project, c.folder, c.endpoint, c.token, c.server_url, c.computer, c.relay);
         }
         IdeAction::Unavailable(why) => notice::post(format!("{label}: 사용할 수 없습니다: {why}")),
     }

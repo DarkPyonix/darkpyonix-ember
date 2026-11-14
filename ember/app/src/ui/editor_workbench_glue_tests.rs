@@ -38,6 +38,7 @@ fn target() -> EditorTarget {
         token: String::new(),
         server_url: String::new(),
         computer: String::new(),
+        relay: String::new(),
     }
 }
 

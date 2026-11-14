@@ -510,12 +510,16 @@ async fn ide_relay(
         let Some(c) = &st.computers else {
             return error(StatusCode::NOT_FOUND, format!("unknown computer: {computer}"));
         };
-        return match c.registry().get(&computer) {
-            // FR-W4c: the OSE of a registered computer runs on its node.
-            Ok(Some(_)) => node_relay(c, &computer, &launch_id, ws).await,
-            Ok(None) => error(StatusCode::NOT_FOUND, format!("unknown computer: {computer}")),
-            Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        // The registry answer is not kept across the await below.
+        let registered = match c.registry().get(&computer) {
+            Ok(found) => found.is_some(),
+            Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
         };
+        if !registered {
+            return error(StatusCode::NOT_FOUND, format!("unknown computer: {computer}"));
+        }
+        // FR-W4c: the OSE of a registered computer runs on its node.
+        return node_relay(c, &computer, &launch_id, ws).await;
     }
     let target = match st.ose.open_relay(&computer, &launch_id) {
         Ok(t) => t,

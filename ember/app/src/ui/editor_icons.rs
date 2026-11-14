@@ -43,6 +43,12 @@ fn svg(name: &str, color: &str) -> String {
     if let Some(base) = name.strip_suffix("-w") {
         return svg(base, if color == "#c3bfb7" { "#151514" } else { "#ffffff" });
     }
+    // `<name>-green` is the icon in `c-green` (`style.css:6` light, `:30` dark): the run button's
+    // triangle (`editor.css:23` `.ed-ib.run{color:var(--c-green)}`, FR-L31.31). The rule itself
+    // cannot reach it, because an `img` does not take `currentColor`.
+    if let Some(base) = name.strip_suffix("-green") {
+        return svg(base, if color == "#c3bfb7" { "#6fb287" } else { "#4f9a6c" });
+    }
     if name == "chev-dn" {
         // The mockup turns the right chevron a quarter turn for an open node.
         return format!(
@@ -89,5 +95,33 @@ impl dioxus_compose::html::prelude::ImageResolver for IconResolver {
 
     fn size(&mut self, url: &str) -> Option<dioxus_compose::html::prelude::ImageSize> {
         url.starts_with("icon:").then(|| dioxus_compose::html::prelude::ImageSize::new(16, 16))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FR-L31.31 (#895, design review E6): the run button's icon is drawn in `c-green`, the colour
+    /// the mockup's `.ed-ib.run` rule gives it, in both themes.
+    #[test]
+    fn fr_l31_31_the_run_icon_is_c_green() {
+        assert!(include_str!("../../assets/editor/editor.css").contains(".ed-ib.run{color:var(--c-green)}"));
+        let tokens = include_str!("../../assets/editor/style.css");
+        let (light, dark) = tokens.split_once(":root[data-theme=dark]").expect("the dark tokens");
+        assert!(light.contains("--c-green:#4f9a6c") && dark.contains("--c-green:#6fb287"));
+        let play = path("play").replace('"', "'");
+        for (stroke, green) in [("#56534d", "#4f9a6c"), ("#c3bfb7", "#6fb287")] {
+            let doc = svg("play-green", stroke);
+            assert!(doc.contains(&format!("stroke='{green}'")) && !doc.contains(stroke), "{doc}");
+            assert!(doc.contains(&play), "the same triangle");
+            // The plain icon keeps the theme's stroke (the stop button beside it).
+            assert!(svg("pause", stroke).contains(&format!("stroke='{stroke}'")));
+        }
+        let page = include_str!("editor_workbench.rs");
+        assert!(page.contains(r#"button { class: "ed-ib run", title: "실행", "aria-label": "실행","#));
+        let run = &page[page.find(r#"button { class: "ed-ib run""#).unwrap()..];
+        let run = &run[..run.find('\n').unwrap()];
+        assert!(run.ends_with(r#"{icon("play-green")} }"#), "{run}");
     }
 }

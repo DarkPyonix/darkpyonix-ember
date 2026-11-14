@@ -1617,7 +1617,7 @@ pub mod page {
                 }
                 div { class: "ed-runcfg",
                     button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| crate::ui::editor_tasks::view::open(&runcfg_s), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
-                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| { if let Some(blocked) = crate::ui::workspace_trust::view::blocked(&run_s, crate::ui::workspace_trust::Restricted::Run) { notice(blocked); } else { crate::ui::editor_tasks::view::run_default(&run_s); } }, {icon("play")} }
+                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| { if let Some(blocked) = crate::ui::workspace_trust::view::blocked(&run_s, crate::ui::workspace_trust::Restricted::Run) { notice(blocked); } else { crate::ui::editor_tasks::view::run_default(&run_s); } }, {icon("play-green")} }
                     button { class: "ed-ib", title: "중지", "aria-label": "중지", onclick: move |_| crate::ui::editor_tasks::view::stop(&stop_s), {icon("pause")} }
                 }
                 // The mockup's order (`editor.js:75-76`): run configuration, run, stop, ask agent, theme.

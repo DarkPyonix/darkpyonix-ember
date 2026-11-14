@@ -865,6 +865,31 @@ fn fr_l31_34_tool_window_notices_are_prose_not_terminal_text() {
     assert_eq!(page.bottom_note(), "출력이 없습니다.");
 }
 
+// FR-L31.35 (#895, design review E10): 출력's channels are 30px pills, the shown one filled, by the
+// mockup's bottom-tab rule.
+#[test]
+fn fr_l31_35_output_channels_are_30px_pills() {
+    let css = include_str!("../../assets/editor/editor.css");
+    assert!(css.contains(".ed-btabs button{height:30px;padding:0 var(--sp3);border:0;border-radius:var(--pill);background:none;"));
+    assert!(css.contains(".ed-btabs button.on{background:var(--ink);color:var(--ink-text)}"));
+
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    page.show_bottom_tab("출력");
+    let group = page.find("aria-label", "출력 채널").expect("the channel switch");
+    assert!(page.has_class(group, "ed-btabs"), "the channels take the bottom tabs' rule");
+    let channels = page.all_where(|id| page.parent(id) == Some(group) && page.attr(id, "aria-pressed").is_some());
+    assert_eq!(channels.len(), 1, "워크벤치 alone until an extension opens a channel");
+    let workbench = channels[0];
+    assert_eq!(page.attr(workbench, "aria-pressed").as_deref(), Some("true"));
+    assert!(page.has_class(workbench, "on") && !page.has_class(workbench, "ed-pj"));
+    let _ = page.dom.layout(1440.0, 900.0, 1.0);
+    let list = page.dom.display_list().expect("laid out");
+    let entry = list.get(workbench).expect("the channel's box");
+    assert!(near(entry.rect.height, 30.0), "30px high: {:?}", entry.rect);
+    assert!(entry.background.is_some() && entry.radii.is_some(), "the shown channel is a filled pill");
+}
+
 #[compose_rust::runtime::Composable]
 fn toolkit_probe() {
     compose_rust::ui::Text("probe".to_string());

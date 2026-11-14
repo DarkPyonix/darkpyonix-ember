@@ -3246,7 +3246,9 @@ pub mod page {
 
         rsx! {
             div { class: "ed-tsub", style: "display:flex; align-items:center; gap:var(--sp2); padding:var(--sp1) var(--sp2);",
-                div { role: "group", "aria-label": "출력 채널", style: "display:flex; gap:var(--sp1); align-items:center; overflow-x:auto;",
+                // FR-L31.35: the channels are the mockup's 30px pills (`.ed-btabs button`, `editor.css:89-91`),
+                // the shown one on the `ink` fill, as the tabs of the window above them.
+                div { class: "ed-btabs", role: "group", "aria-label": "출력 채널",
                     for (id, label) in all_channels {
                         {
                             let is_on = id == active_id;
@@ -3256,7 +3258,7 @@ pub mod page {
                             rsx! {
                                 button {
                                     key: "{id}",
-                                    class: if is_on { "ed-pj on" } else { "ed-pj" },
+                                    class: if is_on { "on" } else { "" },
                                     "aria-pressed": "{is_on}",
                                     onclick: move |_| {
                                         sel.set(cid.clone());

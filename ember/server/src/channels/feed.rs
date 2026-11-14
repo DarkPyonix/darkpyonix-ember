@@ -253,11 +253,37 @@ impl Store {
     /// The pending question `question_id` in the feed of `channel`, if there is one (FR-T11).
     /// This is the membership check of the channel's answer route: a question of a session that
     /// is not a member, or one that is no longer pending, is not in the feed, so it is `NotFound`.
+    /// When two or more member sessions hold a pending question with the same `question_id`, it is
+    /// `Conflict`; use [`Store::channel_feed_question_in`] with the target `session_id`.
     pub fn channel_feed_question(&self, channel: &str, question_id: &str) -> Result<FeedItem, ChannelError> {
-        self.channel_feed(channel)?
+        self.channel_feed_question_in(channel, None, question_id)
+    }
+
+    /// The pending question `question_id` (of `session_id` when given) in the feed of `channel`
+    /// (FR-T11). When `session_id` is `None` and two or more member sessions hold a pending
+    /// question with `question_id`, returns [`ChannelError::Conflict`].
+    pub fn channel_feed_question_in(
+        &self,
+        channel: &str,
+        session_id: Option<&str>,
+        question_id: &str,
+    ) -> Result<FeedItem, ChannelError> {
+        let mut matches: Vec<FeedItem> = self
+            .channel_feed(channel)?
             .into_iter()
-            .find(|i| i.kind == "question" && i.question_id.as_deref() == Some(question_id))
-            .ok_or_else(|| ChannelError::NotFound(format!("pending question {question_id} in channel {channel}")))
+            .filter(|i| {
+                i.kind == "question"
+                    && i.question_id.as_deref() == Some(question_id)
+                    && session_id.is_none_or(|s| i.session_id == s)
+            })
+            .collect();
+        match matches.len() {
+            0 => Err(ChannelError::NotFound(format!("pending question {question_id} in channel {channel}"))),
+            1 => Ok(matches.swap_remove(0)),
+            _ => Err(ChannelError::Conflict(format!(
+                "question {question_id} is pending in multiple sessions in channel {channel}; specify session_id"
+            ))),
+        }
     }
 }
 

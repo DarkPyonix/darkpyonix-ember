@@ -17,8 +17,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  version:
+    # The app shows ember/app's crate version and its Velopack package carries the tag's, so a
+    # tag that differs fails here, before anything builds (NFR-R1, #880).
+    name: Tag matches the client version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - run: bash .github/scripts/release/check-tag-version.sh "${{ github.ref_name }}" ember/app/Cargo.toml
+
   build:
     name: Build (${{ matrix.target }})
+    needs: version
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -84,10 +95,15 @@ jobs:
     # scripts/packager-linux/appimage.sh and #116 Windows .msix in
     # scripts/packager-windows/Cargo.toml); the Velopack formats (Setup.exe, .msi, .pkg, .deb,
     # .rpm, Flatpak) are spec only (FR-22.6).
+    # Velopack (NFR-R1, NFR-R2, #880): .github/scripts/release/pack-velopack.sh calls
+    # compose-rust's scripts/package-velopack.py (branch feat/4-velopack-macos-linux until it
+    # lands on develop) for Setup.exe, the Velopack .dmg and .AppImage, the .nupkg files and
+    # releases.<channel>.json, one channel per OS and architecture.
     # Set COMPOSE_RUST_REF to a pinned commit and the variable EMBER_CLIENT_RELEASE to "true"
     # once #505 lands on compose-rust develop ([OWNER ACTION REQUIRED] for tag push and
     # external distribution).
     name: Client app (${{ matrix.target }})
+    needs: version
     if: vars.EMBER_CLIENT_RELEASE == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
@@ -95,15 +111,18 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - { os: macos-14, target: macos-arm64, formats: "app dmg" }
-          - { os: windows-2022, target: windows-x86_64, formats: "zip msix" }
-          - { os: ubuntu-24.04, target: linux-x86_64, formats: "AppImage" }
-          - { os: ubuntu-24.04-arm, target: linux-aarch64, formats: "AppImage" }
+          - { os: macos-14, target: macos-arm64, formats: "app dmg", channel: osx-arm64 }
+          - { os: windows-2022, target: windows-x86_64, formats: "zip msix", channel: win-x64 }
+          - { os: ubuntu-24.04, target: linux-x86_64, formats: "AppImage", channel: linux-x64 }
+          - { os: ubuntu-24.04-arm, target: linux-aarch64, formats: "AppImage", channel: linux-arm64 }
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
+      # Not pinned yet: tracks compose-rust develop (see the TODO above).
       COMPOSE_RUST_REF: develop
+      # Matches the velopack crate in ember/app/Cargo.toml.
+      VPK_VERSION: "1.2.161"
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -149,6 +168,48 @@ jobs:
             --dioxus-toml ember/app/Dioxus.toml --exec ember-app \
             --payload ember/app/target/release/ember-app \
             --version "${GITHUB_REF_NAME#v}" --out-dir dist
+      # Velopack (NFR-R2, #880). vpk is a .NET tool; package-velopack.py needs Python 3.11+.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Install vpk
+        shell: bash
+        run: |
+          dotnet tool install --tool-path "$RUNNER_TEMP/vpk" vpk --version "$VPK_VERSION"
+          echo "$RUNNER_TEMP/vpk" >> "$GITHUB_PATH"
+      # The icon from assets/brand/app-icon.svg: an .icns on macOS, a PNG on Linux. Windows gets
+      # vpk's default icon until the repository has an .ico (Dioxus.toml has no icon yet).
+      - name: App icon (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install librsvg
+          mkdir -p icon/Ember.iconset
+          rsvg-convert -w 1024 -h 1024 ember/app/assets/brand/app-icon.svg -o icon/ember.png
+          for pt in 16 32 128 256 512; do
+            sips -z "$pt" "$pt" icon/ember.png --out "icon/Ember.iconset/icon_${pt}x${pt}.png" >/dev/null
+            sips -z "$((pt * 2))" "$((pt * 2))" icon/ember.png --out "icon/Ember.iconset/icon_${pt}x${pt}@2x.png" >/dev/null
+          done
+          iconutil -c icns icon/Ember.iconset -o icon/Ember.icns
+          echo "ICON=icon/Ember.icns" >> "$GITHUB_ENV"
+      - name: App icon (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y librsvg2-bin
+          mkdir -p icon
+          rsvg-convert -w 512 -h 512 ember/app/assets/brand/app-icon.svg -o icon/ember.png
+          echo "ICON=icon/ember.png" >> "$GITHUB_ENV"
+      - name: Package the client with Velopack
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ matrix.channel }}
+          COMPOSE_RUST_DIR: compose-rust
+          EXECUTABLE: ember/app/target/release/ember-app${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: |
+          PACK_VERSION="${GITHUB_REF_NAME#v}" bash .github/scripts/release/pack-velopack.sh
       - name: Checksums
         shell: bash
         run: |
@@ -187,8 +248,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG" dist/*.tar.gz dist/*.dmg dist/*.zip dist/*.msix dist/*.AppImage dist/SHA256SUMS \
+          # The client files are absent when the client job was skipped.
+          shopt -s nullglob
+          files=(dist/*.tar.gz dist/*.dmg dist/*.zip dist/*.msix dist/*.AppImage dist/*-Setup.exe dist/*.nupkg dist/releases.*.json dist/SHA256SUMS)
+          gh release create "$TAG" "${files[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "Ember ${TAG#v}" \
-            --notes "ember-server and ember-node for macOS arm64, Linux x86_64 and Linux aarch64, and the client app when built, by run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. macOS builds are ad hoc signed, not notarized: clear quarantine with xattr -dr com.apple.quarantine. The MSIX is unsigned. See the install guide."
+            --notes "ember-server and ember-node for macOS arm64, Linux x86_64 and Linux aarch64, and the client app when built, by run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. macOS builds are ad hoc signed, not notarized: clear quarantine with xattr -dr com.apple.quarantine. The MSIX and Setup.exe are unsigned. Installed with Setup.exe, the Velopack .dmg or the Velopack .AppImage, the app updates itself from this feed. See the install guide."

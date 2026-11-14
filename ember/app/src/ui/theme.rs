@@ -69,13 +69,10 @@ impl ThemePref {
     }
 }
 
-/// The scheme the OS reports.
-///
-/// TODO(GAPS: 앱 정의 디자인 토큰): the pinned dioxus-compose resolves `FollowSystem` inside
-/// the renderer and exposes no hook to read the result, so System draws the light palette
-/// until one exists. An explicit Light or Dark choice is exact.
+/// The scheme the OS reports, as `ui::cr::theme::system_scheme` reads it (compose-rust#97,
+/// v0.0.10), and light before the renderer's first report.
 pub fn system_scheme() -> Scheme {
-    Scheme::Light
+    crate::ui::cr::theme::system_scheme()
 }
 
 /// One colour and its soft background pair (the data palette).

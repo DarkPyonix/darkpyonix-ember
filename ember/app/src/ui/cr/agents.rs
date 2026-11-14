@@ -32,7 +32,7 @@ pub use crate::ui::agents::{
     LOCAL_STORE_NOTE, MEM_STEPS_MB, THRESHOLD_MAX, THRESHOLD_MIN, THRESHOLD_STEP,
 };
 use super::components::{
-    AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRow, EmberCard, EmberField, FieldOptions, InsetPanel,
+    AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRowFit, EmberCard, EmberField, FieldOptions, InsetPanel,
     Label, OptionSheet, Pill, PillTone,
 };
 use super::theme::*;
@@ -643,8 +643,9 @@ fn SegGroup<T: Copy + PartialEq + 'static>(
     mut on_pick: impl FnMut(T) + Clone + 'static,
 ) {
     // `.seg`: 8 px apart and wrapping, each a 32 px `.seg button` with the 13/500 label (#878:
-    // the toolkit label drew about 18 px).
-    ChoiceRow(|| {
+    // the toolkit label drew about 18 px). As wide as its choices: it sits at the end of a
+    // SettingRow, beside a title that takes the rest.
+    ChoiceRowFit(|| {
         for (val, label) in options {
             let val = *val;
             let selected = val == current;

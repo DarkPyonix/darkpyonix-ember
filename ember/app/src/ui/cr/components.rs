@@ -938,6 +938,13 @@ pub fn ChoiceRow(content: impl FnOnce()) {
         .content(content);
 }
 
+/// A [`ChoiceRow`] as wide as its choices, for a group at the end of a setting row: a full-width
+/// one took the whole row and drew its choices over the setting's title and hint
+/// (agents-models, review r6). It still starts a new line when the choices do not fit.
+pub fn ChoiceRowFit(content: impl FnOnce()) {
+    cu::FlowRow().horizontal_spacing(SP[1]).vertical_spacing(SP[1]).content(content);
+}
+
 /// A [`ChoiceButton`]'s look, the mockup's `.seg button` (FR-L10.2, #878): the chosen one is
 /// `Primary` (`ink`), the others `Default` (`surface` on a 1 px `line` border) with `text-2`
 /// text, both with the 14/500 (13/500 small) label.
@@ -2108,6 +2115,25 @@ mod tests {
     }
 
     #[test]
+    fn fr_l10_2_choice_row_at_the_end_of_a_row_is_as_wide_as_its_choices() {
+        // Review r6 (agents-models-1440): a full-width group in SettingRow's trailing slot left
+        // the title column a few pixels and drew 낮음 over the hint.
+        let nodes = emitted_nodes(|| {
+            ChoiceRowFit(|| {
+                for label in ["낮음", "보통", "높음"] {
+                    ChoiceButton(label, Choice::Radio, false, true, true, || {});
+                }
+            })
+        });
+        let flow = the(&nodes, "FlowRow");
+        for prop in ["HorizontalSpacing", "VerticalSpacing"] {
+            assert!(flow.props.iter().any(|p| p.starts_with(&format!("{prop}=")) && p.contains("8.0")), "{prop}: {:?}", flow.props);
+        }
+        assert!(!flow.mods.iter().any(|m| m == "FillMaxWidth"), "{:?}", flow.mods);
+        assert_eq!(nodes.iter().filter(|n| n.parent == Some(flow.id)).count(), 3);
+    }
+
+    #[test]
     fn fr_l10_2_choice_groups_wrap_on_settings_and_agents() {
         let settings = include_str!("settings.rs");
         let settings = settings.split("#[cfg(test)]").next().unwrap();
@@ -2115,7 +2141,7 @@ mod tests {
         let agents = include_str!("agents.rs");
         let seg = agents.split("fn SegGroup<").nth(1).unwrap();
         let seg = &seg[..seg.find("\n}\n").unwrap()];
-        assert!(seg.contains("ChoiceRow("), "{seg}");
+        assert!(seg.contains("ChoiceRowFit("), "{seg}");
     }
 
     #[test]
@@ -2134,7 +2160,7 @@ mod tests {
         let seg = agents.split("fn SegGroup<").nth(1).unwrap();
         let seg = &seg[..seg.find("\n}\n").unwrap()];
         assert!(seg.contains("ChoiceButton(label, Choice::Radio, selected, true, true,"), "{seg}");
-        assert!(seg.contains("ChoiceRow(|| {"), "`.seg` gap 8, wrapping: {seg}");
+        assert!(seg.contains("ChoiceRowFit(|| {"), "`.seg` gap 8, wrapping: {seg}");
         assert!(!seg.contains("cu::Button("), "{seg}");
     }
 

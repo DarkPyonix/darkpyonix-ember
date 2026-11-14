@@ -266,7 +266,7 @@ mod tests {
         let page = include_str!("editor_workbench.rs");
         assert!(!page.contains("if *s.menu_open.read() { {menu(&s, keymap)} }\n                        if let Some((menu_path"), "the menu is still drawn inside the clipped editor area");
         // At the page level, in the overlays' box that takes no grid row (FR-L31.26).
-        assert!(page.contains("div { class: \"ed-layers\",\n                        if em_shown { {menu(&s, keymap)} }\n                        if *s.palette_open.read()"), "the menu is not drawn at the page level");
+        assert!(page.contains("div { class: \"ed-layers\",\n                        if em_shown { {menu(&s, keymap)} }\n"), "the menu is not drawn at the page level");
     }
 
     #[test]

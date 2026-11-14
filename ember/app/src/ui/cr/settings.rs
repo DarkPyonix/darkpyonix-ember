@@ -1,6 +1,7 @@
 //! compose-rust settings sheet (#220 phase 8): theme preference (FR-L28), editor keymap and
 //! shortcut reference (FR-L30), remembered default IDE target (FR-L7), archived-session
-//! visibility (FR-L9), this device on the transport (FR-N9), and server/data paths.
+//! visibility (FR-L9), this device on the transport (FR-N9), updates (NFR-R2), and server/data
+//! paths.
 
 #![allow(non_snake_case)]
 
@@ -235,7 +236,16 @@ pub fn SettingsContent() {
 
             cu::Separator(Some(paint(p.line)));
 
-            // 7. Connection & local storage info
+            // 7. Updates of the installed app (NFR-R2, #880)
+            SectionBlock(
+                super::self_update::TITLE,
+                super::self_update::SUBTITLE,
+                super::self_update::SelfUpdateSection,
+            );
+
+            cu::Separator(Some(paint(p.line)));
+
+            // 8. Connection & local storage info
             SectionBlock("연결 및 저장소", "현재 연결된 메인 서버 주소와 로컬 데이터 폴더입니다.", || {
                 InsetPanel(true, || {
                     cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -410,6 +420,40 @@ mod tests {
             p.keymap = Keymap::VsCode;
             p.ide_target = None;
         });
+    }
+
+    #[test]
+    fn nfr_r2_settings_show_the_version_and_the_update_state() {
+        use crate::self_update::UpdateState;
+        let _guard = crate::services::test_guard();
+        let ui = shared_ui();
+        let before = ui.self_update.get_untracked();
+        ui.self_update.set(UpdateState::NotInstalled);
+
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                SettingsSheet(true, || {});
+            }))
+        });
+        let raw = host.rebuild().expect("rebuild").to_vec();
+        let all = texts(&decode_batch(&raw).expect("decode"));
+        for want in [
+            "업데이트",
+            "현재 버전",
+            env!("CARGO_PKG_VERSION"),
+            "업데이트 확인",
+            "설치 프로그램으로 설치한 앱이 아니므로 업데이트를 확인하지 않습니다.",
+        ] {
+            assert!(all.iter().any(|t| t == want), "missing {want}: {all:?}");
+        }
+        assert!(!all.iter().any(|t| t == "업데이트 후 다시 시작"), "no restart without a downloaded update");
+
+        ui.self_update.set(UpdateState::Ready("9.9.9".into()));
+        let next = texts(&decode_batch(host.render_frame(16_000_000).expect("render")).expect("decode"));
+        assert!(next.iter().any(|t| t == "업데이트 후 다시 시작"), "{next:?}");
+        assert!(next.iter().any(|t| t == "새 버전 9.9.9을(를) 내려받았습니다. 다시 시작하면 적용됩니다."), "{next:?}");
+
+        ui.self_update.set(before);
     }
 
     /// Find the `Clickable` ancestor of the `Text` node carrying `label` and return its

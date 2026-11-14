@@ -26,5 +26,18 @@ need 'scripts/packager-linux/appimage\.sh' 'Linux packager path missing'
 need 'dist/\*\.dmg' 'release must upload .dmg'
 need 'dist/\*\.AppImage' 'release must upload .AppImage'
 need 'dist/\*\.msix' 'release must upload .msix'
+# Velopack packaging and the feed (NFR-R1, NFR-R2, #880).
+need 'release/check-tag-version\.sh' 'tag version check missing'
+need 'release/pack-velopack\.sh' 'Velopack packaging step missing'
+need 'VPK_VERSION: "[0-9]+\.[0-9]+\.[0-9]+"' 'vpk version must be pinned'
+for ch in osx-arm64 win-x64 linux-x64 linux-arm64; do need "channel: $ch" "Velopack channel $ch missing"; done
+need 'dist/\*-Setup\.exe' 'release must upload Setup.exe'
+need 'dist/\*\.nupkg' 'release must upload the .nupkg files'
+need 'dist/releases\.\*\.json' 'release must upload releases.<channel>.json'
+for s in .github/scripts/release/check-tag-version.sh .github/scripts/release/pack-velopack.sh; do
+    [ -f "$s" ] || { echo "error: $s missing" >&2; fail=1; }
+done
+grep -q 'scripts/package-velopack\.py' .github/scripts/release/pack-velopack.sh 2>/dev/null \
+    || { echo 'error: pack-velopack.sh must call compose-rust scripts/package-velopack.py' >&2; fail=1; }
 if grep -q "pull_request\|branches:" "$f"; then echo "error: $f must be tag-only" >&2; fail=1; fi
 exit "$fail"

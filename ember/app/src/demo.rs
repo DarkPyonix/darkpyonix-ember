@@ -64,6 +64,8 @@ fn demo_ose_from_env() -> Option<ember_client::wire::EmberOseConnection> {
     let raw = raw.trim();
     (!raw.is_empty()).then(|| ember_client::wire::EmberOseConnection {
         endpoint: format!("http://{raw}"),
+        // The demo's OSE is dialed directly: there is no server relay in demo mode.
+        relay: None,
         connection_token: String::new(),
     })
 }
@@ -2193,6 +2195,7 @@ mod tests {
     fn fr_l31_demo_ember_target_carries_the_given_ose_connection() {
         let ose = ember_client::wire::EmberOseConnection {
             endpoint: "http://127.0.0.1:18765".into(),
+            relay: None,
             connection_token: String::new(),
         };
         let l = ide_launch_with("s", "p", "/w", Some(ose));

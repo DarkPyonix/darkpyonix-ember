@@ -156,6 +156,8 @@ pub struct SharedUi {
     /// The claim prompt the user dismissed (`owner_claim::prompt_key`); a new attempt, a new
     /// pending claim or a 403 `owner_required` opens the sheet again.
     pub owner_claim_dismissed: MutableState<Option<String>>,
+    /// The update check (NFR-R2, #880), written by `self_update` from a worker.
+    pub self_update: MutableState<crate::self_update::UpdateState>,
     mirrors: Arc<OnceLock<DioxusMirrors>>,
 }
 
@@ -179,6 +181,7 @@ impl SharedUi {
             standalone_editor: mutable_state_of(false),
             owner_claim: mutable_state_of(Default::default()),
             owner_claim_dismissed: mutable_state_of(None),
+            self_update: mutable_state_of(crate::self_update::UpdateState::NotInstalled),
             mirrors: Arc::new(OnceLock::new()),
         }
     }
@@ -278,10 +281,11 @@ impl SharedUi {
     /// TODO(dioxus-compose#152): once the `window` element on a shared host lands, open the
     /// editor window in the same process instead of spawning `--editor <project> <folder>`.
     pub fn open_editor(&self, project: String, folder: String) {
-        self.open_editor_connection(project, folder, None, None, None, None);
+        self.open_editor_connection(project, folder, None, None, None, None, None);
     }
 
     /// Open an editor with the remote connection when one is available.
+    #[allow(clippy::too_many_arguments)]
     pub fn open_editor_connection(
         &self,
         project: String,
@@ -290,6 +294,7 @@ impl SharedUi {
         token: Option<String>,
         server_url: Option<String>,
         computer: Option<String>,
+        relay: Option<String>,
     ) {
         let target = EditorTarget {
             project: project.clone(),
@@ -298,6 +303,7 @@ impl SharedUi {
             token: token.unwrap_or_default(),
             server_url: server_url.unwrap_or_default(),
             computer: computer.unwrap_or_default(),
+            relay: relay.unwrap_or_default(),
         };
         #[cfg(not(test))]
         let spawn_target = target.clone();
@@ -459,8 +465,10 @@ mod tests {
             Some("secret".into()),
             Some("http://srv:1".into()),
             Some("node-a".into()),
+            Some("/api/computers/node-a/ide/relay/l1".into()),
         );
         let target = ui.editor.get_untracked().unwrap();
+        assert_eq!(target.relay, "/api/computers/node-a/ide/relay/l1");
         assert_eq!((target.server_url.as_str(), target.computer.as_str()), ("http://srv:1", "node-a"));
         assert_eq!(target.endpoint, "localhost:8000");
         assert_eq!(target.token, "secret");

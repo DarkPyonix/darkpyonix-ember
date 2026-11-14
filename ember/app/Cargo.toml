@@ -64,8 +64,17 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # OS data directory for the cache and preferences.
 dirs = "6"
 
+# Installs and updates the desktop app (SPEC NFR-R2, #880): the startup hook and the update
+# check against the feed on GitHub Releases. Not on Android or iOS, which Velopack does not
+# install. 1.2.161 matches the `vpk` the release job packs with.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+velopack = "1.2.161"
+
 [dev-dependencies]
 tempfile = "3"
 # An in-process server for the device-link tests (SPEC FR-N9, `tests/fr_n9_device_link.rs`), as
 # the client crate's transport tests use it.
 ember-server = { path = "../server" }
+# Serves the in-process server on a loopback listener for the editor relay over HTTP
+# (`tests/fr_n9_device_editor.rs`); the version ember-server uses.
+axum = "0.8"

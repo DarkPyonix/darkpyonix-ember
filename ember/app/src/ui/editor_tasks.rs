@@ -446,7 +446,7 @@ pub mod view {
     use crate::editor_host::HostCommand;
     use crate::terminal_stream::{ChangeCallback, TerminalHandle};
     use crate::ui::editor::ToolWindow;
-    use crate::ui::editor_workbench::page::{icon, icon_px, key_name, terminal_input};
+    use crate::ui::editor_workbench::page::{icon, icon_tone, key_name, terminal_input};
     use crate::ui::editor_workbench::Shared;
 
     thread_local! {
@@ -599,7 +599,7 @@ pub mod view {
         rsx! {
             div { style: "flex:1; min-width:0; display:flex; flex-direction:column;",
                 div { class: "ed-tsub",
-                    button { class: "on", "aria-pressed": "true", {icon_px("play", 14)} "{label}" }
+                    button { class: "on", "aria-pressed": "true", {icon_tone("play", 14, "text")} "{label}" }
                     span { style: "color:var(--muted); font-size:var(--fs-xs);", "{computer}" }
                     div { class: "spacer" }
                     if running {

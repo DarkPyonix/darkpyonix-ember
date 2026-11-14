@@ -883,7 +883,7 @@ pub mod page {
             // popover with a line under it, not a second framed field inside the frame.
             div { class: "ed-menu ed-pal", role: "dialog", "aria-label": "명령 팔레트",
                 div { class: "ed-palq",
-                    {icon("search")}
+                    {icon_tone("search", 16, "muted")}
                     input {
                         "aria-label": "{crate::ui::palette::search_label(mode)}", placeholder: "{hint_text}", value: "{raw_text}", autofocus: true,
                         oninput: move |event| {
@@ -1104,7 +1104,7 @@ pub mod page {
         rsx! {
             div { class: "ed-tsub", role: "search", "aria-label": "문서에서 찾기", style: "flex-wrap:wrap;",
                 div { class: "ed-find", style: "width:220px; height:28px;",
-                    {icon("search")}
+                    {icon_tone("search", 16, "muted")}
                     input {
                         key: "find-query-{focus_seq}",
                         style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
@@ -1287,6 +1287,8 @@ pub mod page {
             if let ember_editor::SessionUpdate::Closed { uri } = &update { s.uris.borrow_mut().remove(&uri.path); }
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.open_errors.borrow_mut().remove(&uri.path); crate::ui::editor_scm::view::open_settled(&uri.path); }
             if let ember_editor::SessionUpdate::Saved { uri } = &update { saved_paths.push(uri.path.clone()); }
+            // Hot exit (FR-L31.6a): the disk text of a restored buffer, or its failed open.
+            crate::editor_backup::view::on_update(&s, &update);
             let action = s.bridge.borrow_mut().apply(update);
             match action {
                 BridgeAction::Resync(uri) => { s.host.send(HostCommand::Resync(uri)); }
@@ -1334,6 +1336,8 @@ pub mod page {
         // Reconnect, auto-save and compare follow the updates (FR-L31.6).
         let now_current = s.tabs.read().current_path().map(str::to_owned);
         crate::ui::editor_states::view::after_updates(&s, now_current.as_deref());
+        // Hot exit (FR-L31.6a): put the backup's buffers back once, then keep the backup current.
+        crate::editor_backup::view::after_updates(&s);
         // The document of an open working-tree diff stays open in the session (FR-L31.10).
         crate::ui::editor_scm::view::sync_diff_document(&s);
         if widget_edits {
@@ -1398,15 +1402,11 @@ pub mod page {
         // closed column is 0 wide and the areas stay as the stylesheet has them.
         let maximized = has_bottom && *s.bottom_max.read();
         let grid = if maximized { crate::ui::editor::editor_grid_style_maximized() } else { crate::ui::editor::editor_grid_style(has_left, has_bottom) };
-        // macOS opens the window FullSize (the page starts at the top and the top bar is the title
-        // strip), so the page is the window's height; elsewhere the native chrome stays and the
-        // page keeps its 76px allowance. TODO(#320): the height is fixed at launch. v0.0.7: #467
-        // fixed (`with_report_size`); workaround kept until checked on a display (the page has to
-        // follow the reported height in the dioxus-compose window).
-        let height = crate::ui::editor::editor_page_height(cfg!(target_os = "macos"));
-        let ed_style = format!("width:100vw; height:{height}; {grid}");
+        // The page is the viewport on every system, and the viewport follows the window's content
+        // box on every dp change, so growing and shrinking both lay the page out again.
+        let ed_style = format!("{} {grid}", crate::ui::editor::editor_page_size_style());
+        let error_style = format!("{} grid-column:1 / -1;", crate::ui::editor::editor_error_padding(cfg!(target_os = "macos"), window_safe.top));
         rsx! {
-            // TODO(#320): shrinking the window does not reflow this page; growing does.
             div { class: "{ed_class}", "data-theme": if dark { "dark" } else { "light" }, tabindex: "-1", style: "{ed_style}",
                 onkeydown: move |event| {
                     let m = event.modifiers();
@@ -1469,7 +1469,7 @@ pub mod page {
                     }
                 },
                 if let Some(error) = error {
-                    div { style: "padding:20px; grid-column:1 / -1; padding-top:76px;", "{error}" button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" } }
+                    div { style: "{error_style}", "{error}" button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" } }
                 } else {
                     {top_bar(&s, &branch, keymap, leading)}
                     div { class: "ed-rail",
@@ -1578,8 +1578,7 @@ pub mod page {
     }
 
     /// A mockup icon as an image: the HTML path draws SVG through `img`, which cannot take
-    /// `currentColor`, so the stroke is the text colour of the light palette.
-    // TODO(editor-redesign step 4): tint per theme once the dark palette is switched on.
+    /// `currentColor`, so the stroke is the palette's `--text-2`, the colour of an icon button.
     pub(crate) fn icon(name: &str) -> Element {
         icon_px(name, 16)
     }
@@ -1588,6 +1587,16 @@ pub mod page {
     pub(crate) fn icon_px(name: &str, px: u32) -> Element {
         let dark = if super::ICON_DARK.with(|d| d.get()) { "@dark" } else { "" };
         rsx! { img { class: "i", src: "icon:{name}{dark}", width: "{px}", height: "{px}" } }
+    }
+
+    /// A mockup icon in the colour editor.css gives its place (`editor_icons::icon_stroke`):
+    /// `muted`, `green` or `text`. An empty tone is the plain icon.
+    pub(crate) fn icon_tone(name: &str, px: u32, tone: &str) -> Element {
+        if tone.is_empty() {
+            return icon_px(name, px);
+        }
+        let dark = if super::ICON_DARK.with(|d| d.get()) { "@dark" } else { "" };
+        rsx! { img { class: "i", src: "icon:{name}.{tone}{dark}", width: "{px}", height: "{px}" } }
     }
 
     fn top_bar(s: &Shared, branch: &str, keymap: Keymap, leading: f32) -> Element {
@@ -1609,23 +1618,23 @@ pub mod page {
         rsx! {
             header { class: "ed-top", style: "{strip_pad}",
                 img { class: "logo logo-img", src: "icon:mark", width: "28", height: "28", alt: "Ember" }
-                button { class: "ed-pj", title: "{project_tip}", "aria-label": "{project_tip}", onclick: move |_| stripes.write().toggle(ToolWindow::Project), "{name}" {icon_px("chev-dn", 12)} }
-                button { class: "ed-pj", title: "브랜치", "aria-label": "브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon("git")} "{branch}" {icon_px("chev-dn", 12)} }
+                button { class: "ed-pj", title: "{project_tip}", "aria-label": "{project_tip}", onclick: move |_| stripes.write().toggle(ToolWindow::Project), "{name}" {icon_tone("chev-dn", 12, "muted")} }
+                button { class: "ed-pj", title: "브랜치", "aria-label": "브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon_tone("git", 16, "text")} "{branch}" {icon_tone("chev-dn", 12, "muted")} }
                 div { class: "spacer" }
                 // FR-L31.29: the pill and the quick open list it opens share one box, so the list is
                 // placed against the pill. The conditional child sits inside the box, where its
                 // placeholder takes no room (dioxus-compose#266: in the bar it would be a flex item).
                 div { class: "ed-findbox",
                 button { class: "ed-find", title: "{find}", "aria-label": "{find}", onclick: move |_| run_action(&find_s, Action::Find),
-                    {icon("search")}
+                    {icon_tone("search", 16, "muted")}
                     span { class: "hide-md", "{crate::ui::editor::FIND_PILL_LABEL}" }
                     kbd { class: "ed-sc", "{find_hint}" }
                 }
                     if *s.palette_open.read() { {palette_sheet(s, keymap)} } else { div { class: "ed-none" } }
                 }
                 div { class: "ed-runcfg",
-                    button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| crate::ui::editor_tasks::view::open(&runcfg_s), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
-                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| { if let Some(blocked) = crate::ui::workspace_trust::view::blocked(&run_s, crate::ui::workspace_trust::Restricted::Run) { notice(blocked); } else { crate::ui::editor_tasks::view::run_default(&run_s); } }, {icon("play-green")} }
+                    button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| crate::ui::editor_tasks::view::open(&runcfg_s), {icon_tone("play", 16, "text")} "실행 구성" {icon_tone("chev-dn", 12, "muted")} }
+                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| { if let Some(blocked) = crate::ui::workspace_trust::view::blocked(&run_s, crate::ui::workspace_trust::Restricted::Run) { notice(blocked); } else { crate::ui::editor_tasks::view::run_default(&run_s); } }, {icon_tone("play", 16, "green")} }
                     button { class: "ed-ib", title: "중지", "aria-label": "중지", onclick: move |_| crate::ui::editor_tasks::view::stop(&stop_s), {icon("pause")} }
                 }
                 // The mockup's order (`editor.js:75-76`): run configuration, run, stop, ask agent, theme.
@@ -1740,7 +1749,7 @@ pub mod page {
                                         keymap_sig.set(k);
                                         crate::services::services().ui.update_prefs(|p| p.keymap = k);
                                     },
-                                        span { class: "ed-mchk", if selected { {icon_px("check", 14)} } }
+                                        span { class: "ed-mchk", if selected { {icon_tone("check", 14, "text")} } }
                                         span { class: "spacer", "{k.label()}" }
                                         span { class: "ed-msc", "{hint}" }
                                     }
@@ -1824,7 +1833,7 @@ pub mod page {
                 if w == ToolWindow::Notifications { crate::ui::editor_notifications::view::toggle_center(&center_s); }
                 else if w.side() == Side::Right { notice(crate::ui::editor_actions::tool_window_notice(w)); } else { stripes.write().toggle(w); }
                 if matches!(w, ToolWindow::Commit | ToolWindow::Git) && stripes.read().is_selected(w) { scm_s.scm.refresh(); }
-            }, {icon(icon_name(w))} }
+            }, {icon_tone(icon_name(w), 16, if selected { "text" } else { "" })} }
         }
     }
 
@@ -2008,7 +2017,7 @@ pub mod page {
                     let icon_name = crate::ui::editor::tree_prompt_icon(&other);
                     rsx! {
                         div { class: "ed-tn", style: "--d:0;",
-                            {icon_px(icon_name, 15)}
+                            {icon_tone(icon_name, 15, "muted")}
                             {field}
                         }
                     }
@@ -2358,7 +2367,7 @@ pub mod page {
                                 tree_drag_src.set(None);
                             }
                         },
-                        {icon_px("chev-dn", 12)} {icon_px("folder", 15)} span { class: "ellipsis", b { "{root_name}" } }
+                        {icon_tone("chev-dn", 12, "muted")} {icon_tone("folder", 15, "muted")} span { class: "ellipsis", b { "{root_name}" } }
                     }
                     if let Some(badge) = clip_badge {
                         div { class: "ed-tn", style: "--d:0; padding:0 var(--sp2); background:var(--surface-2);",
@@ -2526,8 +2535,8 @@ pub mod page {
                                     crate::ui::editor_tree_menu::open(crate::ui::editor_tree_menu::TreeMenuAt::Pointer { x: at.x, y: at.y });
                                     *ctx_revision.write() += 1;
                                 },
-                                if is_dir { if row.open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} } } else { span { class: "chev-sp" } }
-                                if is_dir { {icon_px("folder", 15)} } else { {icon_px("file", 15)} }
+                                if is_dir { if row.open { {icon_tone("chev-dn", 12, "muted")} } else { {icon_tone("chev", 12, "muted")} } } else { span { class: "chev-sp" } }
+                                if is_dir { {icon_tone("folder", 15, "muted")} } else { {icon_tone("file", 15, "muted")} }
                                 if rename_at == Some(row_idx) {
                                     {prompt_inline.take()}
                                 } else {
@@ -2879,7 +2888,7 @@ pub mod page {
         let last = segments.len().saturating_sub(1);
         rsx! { div { class: "ed-crumbs", role: "navigation", "aria-label": "경로",
             for (i, seg) in segments.iter().enumerate() {
-                if i > 0 { {icon_px("chev", 11)} }
+                if i > 0 { {icon_tone("chev", 11, "muted")} }
                 span { key: "{i}", class: if i == last { "cur" } else { "" }, "{seg}" }
             }
             {crate::ui::editor_language::view::symbol_crumbs(s, path)}
@@ -3026,7 +3035,7 @@ pub mod page {
                                             bump();
                                         }
                                     },
-                                    {icon_px("code", 14)} "{label}"
+                                    {icon_tone("code", 14, if on { "text" } else { "" })} "{label}"
                                     if on {
                                         span { class: "ed-ib", role: "button", title: "이름 바꾸기", "aria-label": "이름 바꾸기: {label}", tabindex: "-1",
                                             onclick: move |event| { event.stop_propagation(); terms::begin_rename(&pen); bump(); },

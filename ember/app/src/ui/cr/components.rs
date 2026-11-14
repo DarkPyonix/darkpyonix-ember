@@ -1257,10 +1257,14 @@ pub fn EmberSheetSized(
     // adds space around the frame and prevents a full-screen sheet.
     let modifier = with_shadows(Modifier::new().padding(0.0), theme.shadow_sm()).background(paint(theme.palette.surface));
     let dismiss = on_dismiss.clone();
+    // An empty title draws no header: the share sheet is the mockup's `.fl-share`, which has
+    // none and puts its close button in its first card (FR-L27.7).
     let body = move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
-            SheetHeader(title, dismiss, actions);
-            cu::Separator(Some(paint(theme.palette.line)));
+            if !title.is_empty() {
+                SheetHeader(title, dismiss, actions);
+                cu::Separator(Some(paint(theme.palette.line)));
+            }
             content();
         });
     };
@@ -2284,6 +2288,19 @@ mod tests {
         let sheet = &production[production.find("pub fn EmberSheetSized").expect("sheet")..];
         let sheet = &sheet[..sheet.find("\n}\n").expect("end")];
         assert_eq!(sheet.matches(".scrim(Paint::Literal(MODAL_SCRIM))").count(), 3, "bottom sheet, full screen and dialog");
+    }
+
+    #[test]
+    fn fr_l32_sheet_without_a_title_draws_no_header() {
+        // files.html `.fl-share` has no `.sheet-h`: the share sheet passes an empty title.
+        let _guard = crate::services::test_guard();
+        let headed = emitted_nodes(|| EmberSheetSized("공유 시트", true, 400.0, false, || {}, None, || {}));
+        assert!(headed.iter().any(|n| n.props.iter().any(|p| p.starts_with("OnClick="))), "the header's close button");
+        assert!(headed.iter().any(|n| n.widget == "Separator" || n.widget == "Divider"), "the line under the header");
+        let bare = emitted_nodes(|| EmberSheetSized("", true, 400.0, false, || {}, None, || {}));
+        assert!(!bare.iter().any(|n| n.props.iter().any(|p| p.starts_with("OnClick="))), "no header close button");
+        assert!(!bare.iter().any(|n| n.widget == "Separator" || n.widget == "Divider"), "no header line");
+        assert!(bare.iter().any(|n| n.props.iter().any(|p| p.starts_with("OnDismiss="))), "Escape and the scrim still close it");
     }
 
     #[test]

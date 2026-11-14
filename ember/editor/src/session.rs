@@ -37,7 +37,7 @@ use ember_editor_conn::uri::UriComponents;
 use ember_editor_conn::PINNED_VERSION;
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::coords::WidgetPos;
@@ -120,6 +120,7 @@ impl SessionConfig {
 enum Command {
     Input(Input),
     Resync(UriComponents),
+    CheckDirty { prefix: String, reply: oneshot::Sender<bool> },
     Settings(SettingsScope, SettingsLayer),
     Shutdown,
 }
@@ -176,7 +177,6 @@ fn is_not_found(error: &ember_editor_conn::Error) -> bool {
     text.contains("entrynotfound") || text.contains("enoent") || text.contains("filenotfound") || text.contains("no such file")
 }
 
-/// A connected editor session. Cheap to share by reference; every method is a non-blocking send.
 /// Lists directories on the remote server: [`EditorSession::lister`].
 #[derive(Clone)]
 pub struct DirLister {
@@ -192,6 +192,7 @@ impl DirLister {
     }
 }
 
+/// A connected editor session. Cheap to share by reference; every method is a non-blocking send.
 pub struct EditorSession {
     tx: mpsc::UnboundedSender<Command>,
     authority: String,
@@ -215,6 +216,13 @@ pub struct EditorSession {
     workspace_settings_error: Option<String>,
     machine_settings_error: Option<String>,
     user_files: Vec<std::path::PathBuf>,
+}
+
+fn parent_of_path(path: &str) -> String {
+    match path.trim_end_matches('/').rsplit_once('/') {
+        Some(("", _)) | None => "/".to_string(),
+        Some((parent, _)) => parent.to_string(),
+    }
 }
 
 impl EditorSession {
@@ -546,11 +554,28 @@ impl EditorSession {
         self.fs.stat(uri).await.map_err(Error::Conn)
     }
 
-    /// Refuses a directory that is a symbolic link: an item made in it would land wherever the link points.
-    async fn refuse_symlink_parent(&self, parent: &str) -> Result<(), Error> {
-        let stat = self.fs.stat(&self.uri(parent)).await.map_err(Error::Conn)?;
-        if stat.file_type & ember_editor_conn::remote_fs::file_type::SYMBOLIC_LINK != 0 {
-            return Err(Error::Path(crate::paths::PathError::Symlink));
+    /// Refuses a path where any directory from the workspace root down to `dir` is a symbolic link.
+    async fn refuse_symlink_ancestors(&self, dir: &str) -> Result<(), Error> {
+        let ws = if self.workspace_path == "/" { "" } else { self.workspace_path.trim_end_matches('/') };
+        let target_dir = dir.trim_end_matches('/');
+        if target_dir == ws {
+            return Ok(());
+        }
+        let rest = match target_dir.strip_prefix(ws) {
+            Some(r) if r.starts_with('/') => &r[1..],
+            _ => return Err(Error::Path(crate::paths::PathError::OutsideFolder)),
+        };
+        let mut current = ws.to_string();
+        for part in rest.split('/') {
+            if part.is_empty() {
+                continue;
+            }
+            current.push('/');
+            current.push_str(part);
+            let stat = self.fs.stat(&self.uri(&current)).await.map_err(Error::Conn)?;
+            if stat.file_type & ember_editor_conn::remote_fs::file_type::SYMBOLIC_LINK != 0 {
+                return Err(Error::Path(crate::paths::PathError::Symlink));
+            }
         }
         Ok(())
     }
@@ -559,7 +584,7 @@ impl EditorSession {
     /// file is an error. Returns the new path.
     pub async fn create_file(&self, parent: &str, name: &str) -> Result<String, Error> {
         let path = crate::paths::child_path(&self.workspace_path, parent, name).map_err(Error::Path)?;
-        self.refuse_symlink_parent(parent).await?;
+        self.refuse_symlink_ancestors(parent).await?;
         let opts = WriteOptions { create: true, overwrite: false, unlock: false, atomic: false };
         self.fs.write_file(&self.uri(&path), Vec::new(), &opts).await.map_err(Error::Conn)?;
         Ok(path)
@@ -585,16 +610,23 @@ impl EditorSession {
     /// Creates a directory named `name` in the directory `parent`. Returns the new path.
     pub async fn create_dir(&self, parent: &str, name: &str) -> Result<String, Error> {
         let path = crate::paths::child_path(&self.workspace_path, parent, name).map_err(Error::Path)?;
-        self.refuse_symlink_parent(parent).await?;
+        self.refuse_symlink_ancestors(parent).await?;
         self.fs.mkdir(&self.uri(&path)).await.map_err(Error::Conn)?;
         Ok(path)
     }
 
     /// Renames `path` to `new_name` in the same directory. Never overwrites. A symbolic link is
-    /// renamed itself. Returns the new path.
+    /// renamed itself. Refuses rename if any open document at or below `path` is dirty. Returns the new path.
     pub async fn rename_path(&self, path: &str, new_name: &str) -> Result<String, Error> {
         let to = crate::paths::renamed_path(&self.workspace_path, path, new_name).map_err(Error::Path)?;
         let from = crate::paths::target_path(&self.workspace_path, path).map_err(Error::Path)?;
+        let parent = parent_of_path(&from);
+        self.refuse_symlink_ancestors(&parent).await?;
+        let (tx, rx) = oneshot::channel();
+        self.send(Command::CheckDirty { prefix: from.clone(), reply: tx })?;
+        if rx.await.map_err(|_| Error::Closed)? {
+            return Err(Error::Path(crate::paths::PathError::Dirty));
+        }
         self.fs.rename(&self.uri(&from), &self.uri(&to), false).await.map_err(Error::Conn)?;
         Ok(to)
     }
@@ -603,6 +635,8 @@ impl EditorSession {
     /// cannot be undone. A symbolic link is removed itself and never recursed into.
     pub async fn delete_path(&self, path: &str, is_dir: bool) -> Result<(), Error> {
         let path = crate::paths::target_path(&self.workspace_path, path).map_err(Error::Path)?;
+        let parent = parent_of_path(&path);
+        self.refuse_symlink_ancestors(&parent).await?;
         let stat = self.fs.stat(&self.uri(&path)).await.map_err(Error::Conn)?;
         let is_link = stat.file_type & ember_editor_conn::remote_fs::file_type::SYMBOLIC_LINK != 0;
         let opts = ember_editor_conn::remote_fs::DeleteOptions { recursive: is_dir && !is_link, use_trash: false, atomic: false };
@@ -612,8 +646,14 @@ impl EditorSession {
     /// Moves a file or directory at `src` into `dest_dir`.
     pub async fn move_path(&self, src: &str, dest_dir: &str) -> Result<String, Error> {
         let from = crate::paths::target_path(&self.workspace_path, src).map_err(Error::Path)?;
-        self.refuse_symlink_parent(dest_dir).await?;
+        self.refuse_symlink_ancestors(&parent_of_path(&from)).await?;
+        self.refuse_symlink_ancestors(dest_dir).await?;
         let to = crate::paths::paste_destination(&self.workspace_path, &from, dest_dir, &[], true).map_err(Error::Path)?;
+        let (tx, rx) = oneshot::channel();
+        self.send(Command::CheckDirty { prefix: from.clone(), reply: tx })?;
+        if rx.await.map_err(|_| Error::Closed)? {
+            return Err(Error::Path(crate::paths::PathError::Dirty));
+        }
         self.fs.rename(&self.uri(&from), &self.uri(&to), false).await.map_err(Error::Conn)?;
         Ok(to)
     }
@@ -647,7 +687,8 @@ impl EditorSession {
     pub async fn copy_path(&self, src: &str, dest_dir: &str) -> Result<String, Error> {
         let from = crate::paths::target_path(&self.workspace_path, src).map_err(Error::Path)?;
         let dest_norm = crate::paths::folder_path(&self.workspace_path, dest_dir).map_err(Error::Path)?;
-        self.refuse_symlink_parent(&dest_norm).await?;
+        self.refuse_symlink_ancestors(&parent_of_path(&from)).await?;
+        self.refuse_symlink_ancestors(&dest_norm).await?;
         let entries = self.fs.readdir(&self.uri(&dest_norm)).await.map_err(Error::Conn)?;
         let existing: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
         let to = crate::paths::paste_destination(&self.workspace_path, &from, &dest_norm, &existing, false).map_err(Error::Path)?;
@@ -894,6 +935,11 @@ impl Driver {
                     Some(Command::Resync(uri)) => {
                         let effects = self.core.resync(Instant::now(), &uri);
                         self.execute(effects, &internal_tx);
+                        None
+                    }
+                    Some(Command::CheckDirty { prefix, reply }) => {
+                        let dirty = self.core.is_any_dirty_at_or_below(&prefix);
+                        let _ = reply.send(dirty);
                         None
                     }
                     Some(Command::Settings(scope, layer)) => {

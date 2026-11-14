@@ -12,6 +12,7 @@
 //! - [`owner_claim`]: the owner-presence claim at start (FR-S12, #842).
 //! - [`ui`]: the screens.
 
+pub mod android;
 pub mod bridge;
 pub mod config;
 pub mod demo;
@@ -42,6 +43,15 @@ use crate::services::{Services, install, services};
 
 /// Build the services, start the client, open the window. Returns when the window closes.
 pub fn launch() {
+    prepare();
+    open_window();
+    shutdown();
+}
+
+/// Everything before a window: logging, configuration, the runtime, the client (cache, demo
+/// data or the server connection), prefs and the installed services. Every entry point runs
+/// it once: the desktop `main` through [`launch`], and the Android entry (`android`, FR-L36).
+pub(crate) fn prepare() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("EMBER_LOG").unwrap_or_else(|_| {
@@ -118,7 +128,10 @@ pub fn launch() {
         ui: shared_ui,
         live: OnceLock::new(),
     });
+}
 
+/// The desktop windows: the standalone editor, the component gallery or the shell.
+fn open_window() {
     if let Some(target) = ide::parse_editor_args(std::env::args()) {
         // Separate IDE window (FR-L31): `--editor <project> <folder>` opens the editor as its own
         // HTML-mode window in its own process until dioxus-compose#152 (the `window` element on a
@@ -150,8 +163,6 @@ pub fn launch() {
         let pref = ui::cr::shell::requested().unwrap_or_else(|| services().initial_prefs.theme);
         ui::cr::shell::launch(pref);
     }
-
-    shutdown();
 }
 
 /// Claims the owner key for a real server on this computer (FR-S12, #842) and keeps the claim

@@ -1032,6 +1032,47 @@ pub fn SideListRail(
         });
 }
 
+/// How close to the end still counts as "at the end", in dp: about one line of the transcript.
+pub const FOLLOW_NEAR_END_DP: f32 = 24.0;
+
+/// Where a pane's transcript scrolls to when its scrollable distance changes, the usual chat
+/// rule (NFR-L3, #770): to the end on the first layout, and when new content arrives only if
+/// the view was at the end (within [`FOLLOW_NEAR_END_DP`]). A reader who scrolled up keeps the
+/// position. `prev_max` and `prev_offset` are the distance and the offset before the change
+/// (both 0 before the first layout). `None`: leave the position alone. Pure, for tests.
+///
+/// The first-layout half is what makes the screen the same on every OS. The tail slice below
+/// is cut by the window height, and the toolkit reports a height of 0 before its first size
+/// event and runs a composable again only when the size class changes. A window that opens
+/// compact (macOS at 360 dp) therefore kept the whole transcript and showed its oldest
+/// message, while a phone, whose size is known first, showed the newest.
+pub fn follow_newest(max_offset: f32, prev_max: f32, prev_offset: f32) -> Option<f32> {
+    if max_offset <= 0.0 || max_offset == prev_max {
+        return None;
+    }
+    let first_layout = prev_max <= 0.0;
+    let was_at_end = prev_offset >= prev_max - FOLLOW_NEAR_END_DP;
+    (first_layout || was_at_end).then_some(max_offset)
+}
+
+/// Applies [`follow_newest`] to `scroll`. It draws nothing; it is a composable of its own so
+/// that reading the offset runs only this function again while the user scrolls.
+#[compose_rust::runtime::Composable]
+fn FollowNewest(scroll: cu::ScrollState, key: String) {
+    let offset = scroll.offset();
+    let max_offset = scroll.max_offset();
+    // (distance, offset) as of the last pass.
+    let seen = remember_with_key(key, || mutable_state_of((0.0f32, 0.0f32)));
+    compose_rust::runtime::side_effect(move || {
+        let (prev_max, prev_offset) = seen.get_untracked();
+        let to = follow_newest(max_offset, prev_max, prev_offset);
+        seen.set((max_offset, to.unwrap_or(offset)));
+        if let Some(to) = to {
+            scroll.scroll_to(to);
+        }
+    });
+}
+
 /// The transcript of one pane, with approvals (reuses `ConversationView`'s `TranscriptRow`).
 pub fn PaneTranscript(session: &str, agent: &str) {
     let ui = shared_ui().clone();
@@ -1049,6 +1090,10 @@ pub fn PaneTranscript(session: &str, agent: &str) {
             .read(|st| st.transcript(&sid).map(|t| t.items.clone()).unwrap_or_default())
     };
     let count = items.len();
+
+    // Follow the newest message with the toolkit's scroll state (compose-rust#385, closed).
+    let scroll = cu::remember_scroll_state();
+    FollowNewest(scroll.clone(), sid.clone());
 
     cu::Box()
         .modifier(Modifier::new().fill_max_width().weight(1.0))
@@ -1082,6 +1127,7 @@ pub fn PaneTranscript(session: &str, agent: &str) {
                 let exp_c = expanded.clone();
                 let ans_c = answering.clone();
                 cu::ScrollColumn()
+                    .scroll_state(&scroll)
                     .modifier(Modifier::new().fill_max_width().fill_max_height())
                     .content(move || {
                         cu::Column()
@@ -1089,7 +1135,7 @@ pub fn PaneTranscript(session: &str, agent: &str) {
                             .modifier(Modifier::new().fill_max_width().padding(SP[1]))
                             .content(move || {
                                 for item in items_c.iter() {
-                                    TranscriptRow(&sid_c, &agent_c, item, &exp_c, &ans_c);
+                                    TranscriptRow(&sid_c, &agent_c, item, &exp_c, &ans_c, None);
                                 }
                                 cu::Spacer().modifier(Modifier::new().height(12.0));
                             });
@@ -5011,6 +5057,26 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn nfr_l3_pane_transcript_opens_at_the_newest_message() {
+        // First layout: the whole transcript was kept (height unknown), go to the end.
+        assert_eq!(follow_newest(412.0, 0.0, 0.0), Some(412.0));
+        // Nothing changed: no second request for the same distance.
+        assert_eq!(follow_newest(412.0, 412.0, 412.0), None);
+        // The content fits the pane: nothing to scroll.
+        assert_eq!(follow_newest(0.0, 0.0, 0.0), None);
+    }
+
+    #[test]
+    fn nfr_l3_pane_transcript_follows_new_content_only_from_the_end() {
+        // At the end, or within about a line of it: a new message is followed.
+        assert_eq!(follow_newest(520.0, 412.0, 412.0), Some(520.0));
+        assert_eq!(follow_newest(520.0, 412.0, 412.0 - FOLLOW_NEAR_END_DP), Some(520.0));
+        // Scrolled up to read: the position is left alone.
+        assert_eq!(follow_newest(520.0, 412.0, 412.0 - FOLLOW_NEAR_END_DP - 1.0), None);
+        assert_eq!(follow_newest(520.0, 412.0, 0.0), None);
+    }
     use compose_rust::protocol::{HostEvent, Mutation, PropertyValue, decode_batch};
     use compose_rust::{
         EventPayload, Host, Recomposer, WindowHeightClass, WindowSizeClass, Composable,

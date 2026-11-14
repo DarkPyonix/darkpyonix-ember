@@ -1119,7 +1119,13 @@ mod door {
         assert!(dacl.starts_with("D:P"), "the DACL is not protected: {dacl}");
         assert_eq!(dacl.matches('(').count(), 1, "one access entry only: {dacl}");
         assert!(dacl.contains("(A;"), "{dacl}");
-        assert!(dacl.ends_with(&format!(";;;{sid})")), "the entry is not this user's: {dacl} (user {sid})");
+        // The trustee is the last field of the one entry. Windows writes a well-known account
+        // by its alias (the CI runner's user reads back as `LA`), so it is compared as a SID.
+        let trustee = dacl.trim_end_matches(')').rsplit(';').next().unwrap_or_default();
+        assert!(
+            ember_server::owner::door::sid_is_current_user(trustee).unwrap_or(false),
+            "the entry is not this user's: {dacl} (user {sid})"
+        );
         for other in [";WD)", ";AN)", ";BU)", ";AU)", ";NU)"] {
             assert!(!dacl.contains(other), "{other} in {dacl}");
         }

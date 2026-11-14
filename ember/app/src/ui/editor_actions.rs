@@ -21,10 +21,6 @@ pub fn pending_issue(action: Action) -> Option<u32> {
     match action {
         // Code-OSS runs these through the debug service (Run Without Debugging, Stop).
         Action::RunConfig | Action::Stop => Some(445),
-        // A second terminal needs the terminal list (FR-P6).
-        Action::NewTerminal => Some(337),
-        // The agent window on the right stripe.
-        Action::Ask => Some(766),
         _ => None,
     }
 }
@@ -38,11 +34,10 @@ pub fn not_ready_notice(action: Action) -> String {
 }
 
 /// The notice of a tool window with no panel yet (the right stripe). The notification centre
-/// belongs with the extension notifications (#448); the agent window is #766.
+/// belongs with the extension notifications (#448).
 pub fn tool_window_notice(w: ToolWindow) -> String {
     match w {
         ToolWindow::Notifications => format!("{}: {NOT_READY} (#448)", w.label()),
-        ToolWindow::Agent => format!("{}: {NOT_READY} (#766)", w.label()),
         _ => format!("{}: {NOT_READY}", w.label()),
     }
 }
@@ -137,14 +132,12 @@ mod tests {
     fn fr_l31_15_pending_actions_name_their_issue() {
         assert_eq!(not_ready_notice(Action::RunConfig), "다시 실행: 준비 중입니다 (#445)");
         assert_eq!(not_ready_notice(Action::Stop), "중지: 준비 중입니다 (#445)");
-        assert_eq!(not_ready_notice(Action::NewTerminal), "새 터미널: 준비 중입니다 (#337)");
-        assert_eq!(not_ready_hint(Action::NewTerminal), "준비 중 (#337)");
+        assert_eq!(pending_issue(Action::NewTerminal), None);
         // Format Document is built by the language features (FR-L31.13), so it waits for nothing.
         assert_eq!(pending_issue(Action::Format), None);
+        // 에이전트에게 묻기 is built by the editor agent panel (FR-L31.25, #766).
+        assert_eq!(pending_issue(Action::Ask), None);
         assert!(tool_window_notice(ToolWindow::Notifications).ends_with("(#448)"));
-        assert!(tool_window_notice(ToolWindow::Agent).ends_with("(#766)"));
-        assert_eq!(not_ready_hint(Action::Ask), "준비 중 (#766)");
-        assert_eq!(not_ready_notice(Action::Ask), "에이전트에게 묻기: 준비 중입니다 (#766)");
         for a in Action::ALL {
             assert!(!not_ready_notice(a).contains('\u{2014}'));
         }

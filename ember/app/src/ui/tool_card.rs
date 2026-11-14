@@ -111,13 +111,21 @@ fn str_field<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|k| v.get(*k).and_then(Value::as_str))
 }
 
+/// The lines `old` -> `new` changes: lines both share at the start and the end are dropped, so
+/// an edit that appends a block counts only the block, as its unified diff would.
 fn replace_lines(lines: &mut Vec<DiffLine>, old: &str, new: &str) {
-    if !old.is_empty() {
-        lines.extend(split_lines(old).map(|l| DiffLine::Del(l.to_string())));
-    }
-    if !new.is_empty() {
-        lines.extend(split_lines(new).map(|l| DiffLine::Add(l.to_string())));
-    }
+    let to_vec = |s: &str| -> Vec<String> {
+        if s.is_empty() {
+            return Vec::new();
+        }
+        split_lines(s.strip_suffix('\n').unwrap_or(s)).map(str::to_string).collect()
+    };
+    let (o, n) = (to_vec(old), to_vec(new));
+    let pre = o.iter().zip(n.iter()).take_while(|(a, b)| a == b).count();
+    let max_suf = o.len().min(n.len()) - pre;
+    let suf = o.iter().rev().zip(n.iter().rev()).take(max_suf).take_while(|(a, b)| a == b).count();
+    lines.extend(o[pre..o.len() - suf].iter().cloned().map(DiffLine::Del));
+    lines.extend(n[pre..n.len() - suf].iter().cloned().map(DiffLine::Add));
 }
 
 /// The file change a tool call made, from its input (Claude Code `Edit`, `MultiEdit`, `Write`)
@@ -125,6 +133,13 @@ fn replace_lines(lines: &mut Vec<DiffLine>, old: &str, new: &str) {
 /// `None` for a call that is not a file change, so the card keeps its plain layout.
 pub fn file_diff(tool: &str, input: &Value, output: &str) -> Option<FileDiff> {
     let path = str_field(input, &["file_path", "path", "notebook_path"]);
+    // A unified diff in the result is what really changed: it wins over the input.
+    if let Some(mut d) = parse_unified_diff(output) {
+        if let Some(p) = path {
+            d.file = base_name(p);
+        }
+        return Some(d);
+    }
     let mut lines = Vec::new();
     let from_input = match (tool, path) {
         ("Edit" | "edit" | "str_replace", Some(_)) => {
@@ -143,7 +158,7 @@ pub fn file_diff(tool: &str, input: &Value, output: &str) -> Option<FileDiff> {
         }
         ("Write" | "write" | "create", Some(_)) => {
             let content = str_field(input, &["content", "file_text"]).unwrap_or("");
-            replace_lines(&mut lines, "", content.strip_suffix('\n').unwrap_or(content));
+            replace_lines(&mut lines, "", content);
             true
         }
         _ => false,
@@ -153,12 +168,7 @@ pub fn file_diff(tool: &str, input: &Value, output: &str) -> Option<FileDiff> {
         return Some(FileDiff { file: base_name(path.unwrap_or_default()), added, removed, lines });
     }
     // A patch handed in as input (Codex `apply_patch` carries it in `input`/`patch`).
-    if let Some(patch) = str_field(input, &["patch", "input", "diff"]) {
-        if let Some(d) = parse_unified_diff(patch) {
-            return Some(d);
-        }
-    }
-    parse_unified_diff(output)
+    str_field(input, &["patch", "input", "diff"]).and_then(parse_unified_diff)
 }
 
 /// What an approval asks for: a shell command, a file change, or another tool.
@@ -258,10 +268,19 @@ mod tests {
         });
         let d = file_diff("Edit", &input, "The file has been updated.").unwrap();
         assert_eq!(d.file, "config.rs");
+        // No shared suffix (host = a is followed by tls), shared prefix none: all lines count.
         assert_eq!((d.added, d.removed), (3, 2));
         assert_eq!(d.lines[0], DiffLine::Del("port = 80".into()));
         assert_eq!(d.lines[2], DiffLine::Add("port = 8080".into()));
         assert_eq!(d.lines[2].shown(), "+port = 8080");
+        // An append keeps only the new block, as its unified diff would.
+        let app = json!({"file_path": "c.rs", "old_string": "a\n}\n", "new_string": "a\n}\n\nimpl C {}\n"});
+        let d = file_diff("Edit", &app, "").unwrap();
+        assert_eq!(d.lines, vec![DiffLine::Add(String::new()), DiffLine::Add("impl C {}".into())]);
+        // A diff in the result wins over the input.
+        let out = "--- a/src/c.rs\n+++ b/src/c.rs\n@@ -1 +1,2 @@\n a\n+b\n";
+        let d = file_diff("Edit", &app, out).unwrap();
+        assert_eq!((d.file.as_str(), d.added, d.removed), ("c.rs", 1, 0));
         assert_eq!(d.lines[0].shown(), "-port = 80");
     }
 

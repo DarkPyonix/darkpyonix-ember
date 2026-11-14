@@ -43,6 +43,7 @@ use crate::server::{CurrentComputer, IdeLaunch};
 use crate::services::{run_shared, services};
 use crate::ui::coexist::{SharedUi, shared_ui};
 use crate::ui::question::{self as qv, QuestionDraft};
+use crate::ui::tool_card;
 use crate::ui::Route;
 
 use super::compat::{Badge, Banner, CodeText, MessageText, Spinner, StatusIndicator};
@@ -62,6 +63,47 @@ pub const ICON_SEND_SVG: &str = include_str!("../../../assets/nav/send.svg");
 
 const POPUP_W: f32 = 280.0;
 
+/// Changed lines a closed file-change card draws; "자세히" shows up to `MAX_DIFF_LINES`.
+const DIFF_LINES_CLOSED: usize = 12;
+
+/// The changed lines of a file-change card (mockup `session.css` `.out .add/.del`): monospace,
+/// added lines in the green token, removed ones in the red token, context in `text_2`.
+fn DiffLines(d: &tool_card::FileDiff, cap: usize) {
+    let p = ember_theme().palette;
+    let shown: Vec<(String, compose_rust::Color)> = d
+        .lines
+        .iter()
+        .take(cap)
+        .map(|l| {
+            let col = match l {
+                tool_card::DiffLine::Add(_) => p.green.strong,
+                tool_card::DiffLine::Del(_) => p.red.strong,
+                tool_card::DiffLine::Context(_) => p.text_2,
+            };
+            (l.shown(), col)
+        })
+        .collect();
+    let more = d.lines.len().saturating_sub(cap);
+    cu::Column()
+        .modifier(Modifier::new().fill_max_width().padding_role(SpaceRole::Xs))
+        .content(move || {
+            for (text, col) in shown.iter() {
+                Txt(
+                    text,
+                    TypeRole::Mono,
+                    Some(paint(*col)),
+                    Some(1),
+                    Some(TextOverflow::Ellipsis),
+                    None,
+                    None,
+                );
+            }
+            if more > 0 {
+                Label(&format!("{more}줄 더"), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            }
+        });
+}
+
 /// Estimate the rendered height (dp) of a single transcript item so constrained viewports
 /// can anchor to the latest messages at the bottom. v0.0.7: #385 fixed (`ScrollState::scroll_to`
 /// and `animate_scroll_to`); workaround kept until checked on a display (scrolling to the end
@@ -70,7 +112,12 @@ pub fn estimate_item_height(item: &TranscriptItem, open: bool) -> f32 {
     match item {
         TranscriptItem::User { .. } => 48.0,
         TranscriptItem::Assistant { .. } => 40.0,
-        TranscriptItem::ToolCall { result, .. } => {
+        TranscriptItem::ToolCall { name, input, result, .. } => {
+            let out = result.as_ref().map(|r| r.output.as_str()).unwrap_or("");
+            if let Some(d) = tool_card::file_diff(name, input, out) {
+                let cap = if open { tool_card::MAX_DIFF_LINES } else { DIFF_LINES_CLOSED };
+                return 54.0 + 17.0 * d.lines.len().min(cap) as f32;
+            }
             if open {
                 180.0
             } else if result.as_ref().is_some_and(|r| !r.output.trim().is_empty()) {
@@ -729,6 +776,8 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                 let agent_row = agent.clone();
                                 let exp_row = expanded.clone();
                                 let ans_row = answering.clone();
+                                let computer_row: Option<String> =
+                                    computer.get().map(|c| c.computer.name.clone());
                                 cu::ScrollColumn()
                                     .modifier(
                                         Modifier::new().fill_max_width().fill_max_height(),
@@ -749,6 +798,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                                         item,
                                                         &exp_row,
                                                         &ans_row,
+                                                        computer_row.as_deref(),
                                                     );
                                                 }
                                                 cu::Spacer().modifier(Modifier::new().height(12.0));
@@ -1491,6 +1541,7 @@ pub fn TranscriptRow(
     item: &TranscriptItem,
     expanded: &MutableState<HashSet<String>>,
     answering: &MutableState<HashSet<String>>,
+    computer: Option<&str>,
 ) {
     let theme = ember_theme();
     let p = theme.palette;
@@ -1563,7 +1614,10 @@ pub fn TranscriptRow(
                 .as_ref()
                 .map(|r| (r.output.clone(), r.is_error))
                 .unwrap_or_default();
-            let show_tail = has_result && !out_text.trim().is_empty();
+            // A file change draws as the mockup's edit card (#535): name, +N / -N, coloured lines.
+            let diff = tool_card::file_diff(&tool_name, &input, &out_text);
+            let show_tail = has_result && !out_text.trim().is_empty() && diff.is_none();
+            let diff_hdr = diff.clone();
 
             EmberCard(false, true, None, Some(SP[1]), None, move || {
                 cu::Column()
@@ -1578,20 +1632,46 @@ pub fn TranscriptRow(
                                 if !has_result {
                                     Spinner(12.0);
                                 } else {
+                                } else if diff_hdr.is_some() {
+                                    NavIcon(super::session::ICON_CODE_SVG, p.muted.to_argb(), 15.0);
+                                } else {
                                     NavIcon(ICON_TERMINAL_SVG, p.muted.to_argb(), 15.0);
                                 }
-                                Label(&tool_name, Fs::Sm, Weight::Semibold, None, Some(1));
-                                cu::Box().modifier(Modifier::new().weight(1.0)).content(
-                                    move || {
-                                        Label(
-                                            &summary,
-                                            Fs::Xs,
-                                            Weight::Regular,
-                                            Some(paint(p.muted)),
-                                            Some(1),
-                                        );
-                                    },
-                                );
+                                if let Some(d) = &diff_hdr {
+                                    cu::Box().modifier(Modifier::new().weight(1.0)).content(
+                                        || {
+                                            cu::Row()
+                                                .alignment(Alignment::CenterStart)
+                                                .spacing(SP[1])
+                                                .content(|| {
+                                                    Txt(
+                                                        &d.file,
+                                                        TypeRole::Mono,
+                                                        Some(paint(p.text_2)),
+                                                        Some(1),
+                                                        Some(TextOverflow::Ellipsis),
+                                                        None,
+                                                        None,
+                                                    );
+                                                    Pill(&format!("+{}", d.added), PillTone::Green, true);
+                                                    Pill(&format!("-{}", d.removed), PillTone::Red, true);
+                                                });
+                                        },
+                                    );
+                                } else {
+                                    Label(&tool_name, Fs::Sm, Weight::Semibold, None, Some(1));
+                                    cu::Box().modifier(Modifier::new().weight(1.0)).content(
+                                        move || {
+                                            Label(
+                                                &summary,
+                                                Fs::Xs,
+                                                Weight::Regular,
+                                                Some(paint(p.muted)),
+                                                Some(1),
+                                            );
+                                        },
+                                    );
+                                }
                                 Badge(state_text, tone);
                                 Clickable(
                                     Modifier::new()
@@ -1624,7 +1704,14 @@ pub fn TranscriptRow(
                                     },
                                 );
                             });
-                        if open {
+                        if let Some(d) = &diff {
+                            DiffLines(d, if open { tool_card::MAX_DIFF_LINES } else { DIFF_LINES_CLOSED });
+                        }
+                        if open && diff.is_some() {
+                            if out_err {
+                                CodeText(&out_text, None, true);
+                            }
+                        } else if open {
                             Label("입력", Fs::Sm, Weight::Medium, None, Some(1));
                             CodeText(&model::json_pretty(&input), None, false);
                             if has_result {
@@ -1651,6 +1738,9 @@ pub fn TranscriptRow(
             ..
         } => {
             let in_flight = answering.get().contains(&approval_id);
+            // The command (or file, or a one-line summary) only, never raw JSON (#536).
+            let words = tool_card::approval_text(computer, &tool, &input);
+            let (title, body) = (words.title.clone(), words.body.clone());
             let answer = {
                 let sid = sid.clone();
                 let aid = approval_id.clone();
@@ -1693,19 +1783,24 @@ pub fn TranscriptRow(
                             .modifier(Modifier::new().fill_max_width())
                             .content(|| {
                                 NavIcon(ICON_SHIELD_SVG, p.orange.strong.to_argb(), 16.0);
-                                Label(
-                                    &format!("{tool} 실행을 허용할까요?"),
-                                    Fs::Md,
-                                    Weight::Semibold,
-                                    None,
-                                    Some(1),
-                                );
+                                Label(&title, Fs::Md, Weight::Semibold, None, Some(1));
                                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                                 if state == ApprovalState::Pending {
                                     Pill("대기 중", PillTone::Orange, true);
                                 }
                             });
-                        CodeText(&model::json_pretty(&input), Some(4), false);
+                        if state == ApprovalState::Pending && !body.is_empty() {
+                            // Mockup `.approve .out`: the command in mono, no box.
+                            Txt(
+                                &body,
+                                TypeRole::Mono,
+                                Some(paint(p.text_2)),
+                                Some(4),
+                                Some(TextOverflow::Ellipsis),
+                                None,
+                                None,
+                            );
+                        }
                         match state {
                             ApprovalState::Pending => {
                                 cu::Column()
@@ -1735,7 +1830,7 @@ pub fn TranscriptRow(
                                                             .content(|| {
                                                                 cu::Spacer().modifier(Modifier::new().width(12.0));
                                                                 Label(
-                                                                    "한 번 허용",
+                                                                    tool_card::ALLOW_ONCE,
                                                                     Fs::Xs,
                                                                     Weight::Semibold,
                                                                     Some(paint(p.ink_text)),
@@ -1764,7 +1859,7 @@ pub fn TranscriptRow(
                                                             .content(|| {
                                                                 cu::Spacer().modifier(Modifier::new().width(12.0));
                                                                 Label(
-                                                                    "항상 허용",
+                                                                    tool_card::ALLOW_ALWAYS,
                                                                     Fs::Xs,
                                                                     Weight::Medium,
                                                                     Some(paint(p.text)),
@@ -1793,7 +1888,7 @@ pub fn TranscriptRow(
                                                             .content(|| {
                                                                 cu::Spacer().modifier(Modifier::new().width(12.0));
                                                                 Label(
-                                                                    "거부",
+                                                                    tool_card::DENY,
                                                                     Fs::Xs,
                                                                     Weight::Medium,
                                                                     Some(paint(p.red.strong)),
@@ -1810,12 +1905,27 @@ pub fn TranscriptRow(
                                     });
                             }
                             ApprovalState::Resolved(d) => {
-                                let (txt, col) = match d {
-                                    ApprovalDecision::AllowOnce => ("허용함", p.green.strong),
-                                    ApprovalDecision::AllowAlways => ("항상 허용", p.green.strong),
-                                    ApprovalDecision::Deny => ("거부함", p.red.strong),
-                                };
-                                Label(txt, Fs::Xs, Weight::Medium, Some(paint(col)), Some(1));
+                                // Mockup: the command in mono beside a green or red pill.
+                                let (txt, ok) = tool_card::resolved_label(d);
+                                let body_r = body.clone();
+                                cu::Row()
+                                    .alignment(Alignment::CenterStart)
+                                    .spacing(SP[1])
+                                    .modifier(Modifier::new().fill_max_width())
+                                    .content(move || {
+                                        cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
+                                            Txt(
+                                                &body_r,
+                                                TypeRole::Mono,
+                                                Some(paint(p.text_2)),
+                                                Some(1),
+                                                Some(TextOverflow::Ellipsis),
+                                                None,
+                                                None,
+                                            );
+                                        });
+                                        Pill(txt, if ok { PillTone::Green } else { PillTone::Red }, true);
+                                    });
                             }
                             ApprovalState::Withdrawn => {
                                 Label(
@@ -2206,5 +2316,21 @@ mod tests {
             );
         }
         compose_rust::window::reset_window_size();
+        // #535: the Edit card shows the file name, +N / -N and coloured lines, not the header.
+        // #536: the approval shows the command and the mockup wording, not raw JSON.
+        for want in [
+            "config.rs",
+            "+6",
+            "-0",
+            "+impl Config {",
+            "에서 명령을 실행할까요?",
+            "cargo test --locked",
+            "이 프로젝트에서 항상 허용",
+        ] {
+            assert!(all.iter().any(|t| t == want || t.contains(want)), "missing {want}: {all:?}");
+        }
+        for unwanted in ["+++ b/", "--- a/", "old_string", "실행을 허용할까요?", "\"command\""] {
+            assert!(!all.iter().any(|t| t.contains(unwanted)), "raw {unwanted} shown: {all:?}");
+        }
     }
 }

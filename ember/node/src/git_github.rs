@@ -11,7 +11,7 @@ use std::process::Stdio;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{exec_cmd, network_timeout, open, GitError, Out, PathPolicy};
+use super::{exec_cmd, network_timeout, open, Deadline, GitError, Out, PathPolicy};
 
 /// `gh pr list --limit`: the open count is reported up to this many.
 const PR_LIMIT: usize = 100;
@@ -152,7 +152,7 @@ async fn run_gh(dir: &std::path::Path, args: &[&str]) -> Result<Call, GitError> 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let out = match exec_cmd(cmd, "gh", None, Some(network_timeout())).await {
+    let out = match exec_cmd(cmd, "gh", None, Some(Deadline::Network(network_timeout()))).await {
         Ok(o) => o,
         // A missing `gh` fails the request; a timeout is only this call's failure.
         Err(GitError::Timeout(m)) => return Ok(Call::Failed { text: clean_error(&m), signed_out: false }),

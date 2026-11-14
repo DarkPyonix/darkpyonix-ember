@@ -7,7 +7,8 @@
 //! (empty index, diverged pull, patch that does not apply) answers [`GitError::Conflict`] with
 //! git's own message, and malformed input answers [`GitError::Bad`]. Messages are Korean with
 //! git's text after them as detail. `fetch`, `pull` and `push` stop after
-//! [`network_timeout`] ([`GitError::Timeout`]); output beyond [`max_output`] is
+//! [`network_timeout`] ([`GitError::Timeout`]), and local git commands stop after
+//! [`local_timeout`] ([`GitError::Timeout`]); output beyond [`max_output`] is
 //! [`GitError::TooLarge`].
 
 
@@ -180,7 +181,7 @@ pub enum GitError {
     NotFound(String),
     #[error("{0}")]
     Internal(String),
-    /// A network operation did not finish in time (504).
+    /// A git operation did not finish in time (504).
     #[error("{0}")]
     Timeout(String),
     /// The output exceeded [`max_output`] (413).
@@ -190,9 +191,38 @@ pub enum GitError {
 
 /// Default deadline for `fetch`, `pull` and `push`.
 pub const NETWORK_TIMEOUT_SECS: u64 = 60;
+/// Default deadline for local git commands (state-changing ops, commit signing, index lock waits).
+pub const LOCAL_TIMEOUT_SECS: u64 = 30;
 /// Default cap on the stdout of one git command (8 MiB).
 pub const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Copy)]
+pub(super) enum Deadline {
+    Local(Duration),
+    Network(Duration),
+}
+
+impl Deadline {
+    fn duration(self) -> Duration {
+        match self {
+            Deadline::Local(d) | Deadline::Network(d) => d,
+        }
+    }
+
+    fn timeout_error(self) -> GitError {
+        match self {
+            Deadline::Local(d) => GitError::Timeout(format!(
+                "git 작업이 {}초 안에 끝나지 않아 중단했습니다 (GPG 서명 입력 대기나 잠금을 확인하세요).",
+                d.as_secs()
+            )),
+            Deadline::Network(d) => GitError::Timeout(format!(
+                "원격 저장소가 {}초 안에 응답하지 않아 중단했습니다 (네트워크 연결이나 인증 대기를 확인하세요).",
+                d.as_secs()
+            )),
+        }
+    }
+}
 
 /// The network deadline: `EMBER_GIT_NETWORK_TIMEOUT_SECS` if set to a positive number (tests),
 /// else [`NETWORK_TIMEOUT_SECS`].
@@ -202,6 +232,17 @@ pub fn network_timeout() -> Duration {
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(NETWORK_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+/// The local deadline: `EMBER_GIT_LOCAL_TIMEOUT_SECS` if set to a positive number (tests),
+/// else [`LOCAL_TIMEOUT_SECS`].
+pub fn local_timeout() -> Duration {
+    let secs = std::env::var("EMBER_GIT_LOCAL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(LOCAL_TIMEOUT_SECS);
     Duration::from_secs(secs)
 }
 
@@ -239,12 +280,12 @@ async fn read_capped<R: AsyncRead + Unpin>(mut r: R, cap: usize) -> (Vec<u8>, bo
 }
 
 async fn run(repo: &Path, args: &[&str], stdin: Option<&str>) -> Result<Out, GitError> {
-    run_with(repo, args, stdin, None).await
+    run_with(repo, args, stdin, Some(Deadline::Local(local_timeout()))).await
 }
 
 /// Run git with a deadline (network operations).
 async fn run_net(repo: &Path, args: &[&str]) -> Result<Out, GitError> {
-    run_with(repo, args, None, Some(network_timeout())).await
+    run_with(repo, args, None, Some(Deadline::Network(network_timeout()))).await
 }
 
 /// The `core.sshCommand` git would use here (repository, then global config), if any.
@@ -266,7 +307,7 @@ fn batch_ssh_command(configured: Option<&str>) -> String {
     format!("{} -o BatchMode=yes", configured.unwrap_or("ssh"))
 }
 
-async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Option<Duration>) -> Result<Out, GitError> {
+async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Option<Deadline>) -> Result<Out, GitError> {
     let mut cmd = tokio::process::Command::new("git");
     // Non-ASCII paths stay raw (not octal-quoted), pathspecs are literal (`a[1].txt`, `*.rs`),
     // and nothing may wait for a person: no terminal, credential or ssh prompt. The user's own
@@ -297,7 +338,7 @@ async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Opt
     // Network operations never ask for an ssh password. GIT_SSH_COMMAND outranks the user's
     // `core.sshCommand` (keys, proxy jump), so when the variable is unset the configured command
     // is read and kept, with BatchMode appended.
-    if deadline.is_some() && std::env::var_os("GIT_SSH_COMMAND").is_none() {
+    if matches!(deadline, Some(Deadline::Network(_))) && std::env::var_os("GIT_SSH_COMMAND").is_none() {
         cmd.env("GIT_SSH_COMMAND", batch_ssh_command(configured_ssh_command(repo).await.as_deref()));
     }
     exec_cmd(cmd, "git", stdin, deadline).await
@@ -319,9 +360,9 @@ fn kill_group(_pid: Option<u32>) {}
 
 /// Spawn a prepared command with piped output, the stdout cap and an optional deadline. Shared
 /// by git and the `gh` runner of FR-G8.
-async fn exec_cmd(mut cmd: tokio::process::Command, what: &str, stdin: Option<&str>, deadline: Option<Duration>) -> Result<Out, GitError> {
-    // A deadline marks a network command: it runs in its own process group, so a timeout or the
-    // output cap can end the whole tree (git, ssh, credential helpers), not only git.
+async fn exec_cmd(mut cmd: tokio::process::Command, what: &str, stdin: Option<&str>, deadline: Option<Deadline>) -> Result<Out, GitError> {
+    // A command with a deadline runs in its own process group, so a timeout or the output cap can
+    // end the whole tree (git, ssh, credential helpers, gpg and pinentry), not only git.
     #[cfg(unix)]
     if deadline.is_some() {
         cmd.process_group(0);
@@ -362,15 +403,12 @@ async fn exec_cmd(mut cmd: tokio::process::Command, what: &str, stdin: Option<&s
     };
     match deadline {
         None => work.await,
-        Some(d) => match tokio::time::timeout(d, work).await {
+        Some(d) => match tokio::time::timeout(d.duration(), work).await {
             Ok(r) => r,
             Err(_) => {
                 kill_group(group);
                 let _ = child.kill().await;
-                Err(GitError::Timeout(format!(
-                    "원격 저장소가 {}초 안에 응답하지 않아 중단했습니다 (네트워크 연결이나 인증 대기를 확인하세요).",
-                    d.as_secs()
-                )))
+                Err(d.timeout_error())
             }
         },
     }

@@ -39,6 +39,7 @@ async fn start() -> Fixture {
         std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
         std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
         std::env::set_var("EMBER_GIT_NETWORK_TIMEOUT_SECS", "3");
+        std::env::set_var("EMBER_GIT_LOCAL_TIMEOUT_SECS", "2");
         std::env::set_var("EMBER_GIT_MAX_OUTPUT_BYTES", "1048576");
     });
     let dir = tempfile::Builder::new().prefix("g").tempdir_in(scratch()).unwrap();
@@ -1004,4 +1005,49 @@ async fn fr_g3_a_users_credential_helper_is_used() {
     assert!(has_korean(&msg), "{msg}");
     assert!(std::fs::metadata(&record).is_ok(), "the user's askpass was not run");
     assert!(t.elapsed() < std::time::Duration::from_secs(30));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_g2_a_hung_gpg_signer_times_out_with_504_kills_its_group_and_releases_the_write_lock() {
+    let f = start().await;
+    let repo = f.root.join("r");
+    one_commit(&repo);
+    let script = f.root.join("slow-gpg.sh");
+    let record = f.root.join("gpg-pid.txt");
+    common::write_exec_ready(&script, &format!("#!/bin/sh\necho $$ > '{}'\nsleep 300\n", s(&record)));
+    git(&repo, &["config", "gpg.program", &s(&script)]);
+    git(&repo, &["config", "commit.gpgsign", "true"]);
+    git(&repo, &["config", "user.signingkey", "deadbeef"]);
+
+    write(&repo, "a.txt", "one\ntwo\n");
+    f.stage(&repo, &["a.txt"]).await;
+
+    let t = std::time::Instant::now();
+    let msg = f
+        .err(
+            "commit",
+            &GitCommitRequest { repo: s(&repo), summary: "signed".into(), description: None, amend: false },
+            504,
+            "timeout",
+        )
+        .await;
+    assert!(msg.contains("GPG 서명"), "{msg}");
+    assert!(t.elapsed() < std::time::Duration::from_secs(15));
+
+    let pid = std::fs::read_to_string(&record).expect("the gpg stand-in ran").trim().to_string();
+    let mut gone = false;
+    for _ in 0..50 {
+        if !pid_alive(&pid) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(gone, "gpg child {pid} still runs after the local timeout");
+
+    // The write lock was released on timeout, so turning signing off allows the commit to succeed.
+    git(&repo, &["config", "commit.gpgsign", "false"]);
+    let committed = f.commit(&repo, "unsigned").await;
+    assert_eq!(committed.sha, git(&repo, &["rev-parse", "HEAD"]).trim());
 }

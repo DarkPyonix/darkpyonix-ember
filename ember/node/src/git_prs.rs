@@ -9,7 +9,7 @@ use std::process::Stdio;
 
 use serde::{Deserialize, Serialize};
 
-use super::{exec_cmd, network_timeout, open, GitError, Out, PathPolicy};
+use super::{exec_cmd, network_timeout, open, Deadline, GitError, Out, PathPolicy};
 
 const DEFAULT_LIMIT: u32 = 30;
 const MAX_LIMIT: u32 = 200;
@@ -300,7 +300,7 @@ async fn run_gh(policy: &PathPolicy, repo: &str, args: Vec<OsString>) -> Result<
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let out = exec_cmd(cmd, "gh", None, Some(network_timeout())).await?;
+    let out = exec_cmd(cmd, "gh", None, Some(Deadline::Network(network_timeout()))).await?;
     if out.truncated {
         return Err(super::too_large());
     }

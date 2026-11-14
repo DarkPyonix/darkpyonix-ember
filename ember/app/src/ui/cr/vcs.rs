@@ -38,7 +38,7 @@ use crate::ui::shell::NavMenu;
 use crate::ui::Route;
 
 use super::components::{
-    AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRow, EmberCard, EmberField, EmberSheetSized, FieldOptions, InsetPanel, Label, OptionSheet,
+    AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRow, EmberCard, EmberField, EmberSheetSized, FieldOptions, InsetPanel, Label, OptionSheet, PopExtra, PopKind, PopMenu, PopRow, PopoverMenuWith,
     Clickable, Pill, PillTone, Txt,
 };
 use super::notice;
@@ -534,7 +534,7 @@ fn CircleIconButton(
 pub const VCS_SEL_H: f32 = 36.0;
 
 /// One picker of the repository bar: its icon, the value and a chevron on one line.
-fn BarSelector(icon: &'static str, name: &str, on_click: impl FnMut() + 'static) {
+fn BarSelector(icon: &'static str, name: &str, expanded: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     cu::Box()
         .modifier(Modifier::new().fill_max_width().height(VCS_SEL_H))
@@ -549,18 +549,77 @@ fn BarSelector(icon: &'static str, name: &str, on_click: impl FnMut() + 'static)
                     cu::Spacer().modifier(Modifier::new().width(6.0));
                     NavIcon(ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 16.0);
                 });
-            FocusOverlay(name, on_click);
+            // The clear button over the row is the control: named by the value it shows, and
+            // it says whether its menu is open (FR-L10.4).
+            cu::Button(name)
+                .variant(ButtonVariant::Text)
+                .color(Paint::Literal(Color::argb(0)))
+                .modifier(Modifier::new().fill_max_size().expanded(expanded))
+                .on_click(on_click);
         });
 }
 
 /// Selector row for repository in the bar.
-fn RepoSelector(name: &str, on_click: impl FnMut() + 'static) {
-    BarSelector(ICON_FOLDER_SVG, name, on_click);
+fn RepoSelector(name: &str, expanded: bool, on_click: impl FnMut() + 'static) {
+    BarSelector(ICON_FOLDER_SVG, name, expanded, on_click);
 }
 
 /// Selector row for current branch in the bar.
-fn BranchSelector(name: &str, on_click: impl FnMut() + 'static) {
-    BarSelector(ICON_GIT_SVG, name, on_click);
+fn BranchSelector(name: &str, expanded: bool, on_click: impl FnMut() + 'static) {
+    BarSelector(ICON_GIT_SVG, name, expanded, on_click);
+}
+
+/// The head of the 저장소 menu: what is chosen now.
+pub fn repo_menu_head(name: &str) -> String {
+    format!("저장소 \u{b7} {name}")
+}
+
+/// The 저장소 menu's rows: one per project with the folder glyph and a check on the chosen one.
+/// A project whose id is not its shown name carries the id as its description.
+pub fn repo_menu_rows(projects: &[(String, String)], chosen: Option<usize>) -> Vec<PopRow> {
+    projects
+        .iter()
+        .enumerate()
+        .map(|(i, (id, name))| PopRow {
+            icon: Some(ICON_FOLDER_SVG),
+            title: name.clone(),
+            description: (id != name).then(|| id.clone()),
+            chosen: chosen == Some(i),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// The 저장소 control and its menu (FR-L10.4, #888): the shared menu in the permission-mode
+/// look, under the control and lined up with its start, a bottom sheet with the menu's own head
+/// at 560 and below. The mockup draws a native `<select>` here (`#vcsProj`), which looks
+/// different on every OS; Ember shows one look everywhere, as the Home project chip does.
+fn RepoMenu(open: MutableState<bool>, name: &str, projects: &[(String, String)], chosen: Option<usize>, mut on_pick: impl FnMut(String) + Clone + 'static) {
+    let rows = repo_menu_rows(projects, chosen);
+    let head = repo_menu_head(name);
+    let is_open = open.get();
+    let (dismiss, toggle) = (open.clone(), open.clone());
+    let list = projects.to_vec();
+    PopoverMenuWith(
+        is_open,
+        PopMenu {
+            name: super::a11y::REPO_PICKER,
+            kind: PopKind::Mode,
+            head: &head,
+            sub: None,
+            rows: &rows,
+            align: compose_rust::PopoverAlign::Start,
+        },
+        PopExtra { plain_sheet: true, ..Default::default() },
+        move || dismiss.set(false),
+        move |idx| {
+            if let Some((id, _)) = list.get(idx) {
+                on_pick(id.clone());
+            }
+        },
+        || RepoSelector(name, is_open, move || toggle.set(!toggle.get_untracked())),
+        None,
+    );
 }
 
 /// Main remote action button (Pull with down arrow and count pill, Push, Fetch).
@@ -811,7 +870,7 @@ fn BranchMenu(open: MutableState<bool>, text: &str, branches: &[String], current
                 .role(cu::Role::Menu)
                 .label(super::a11y::BRANCH_PICKER),
         )
-        .anchor(|| BranchSelector(text, move || toggle.set(!toggle.get_untracked())))
+        .anchor(|| BranchSelector(text, is_open, move || toggle.set(!toggle.get_untracked())))
         .content(move || {
             if !is_open {
                 return;
@@ -914,7 +973,8 @@ fn RepoBarWithActions(
     projects: &[(String, String)], project: &ProjectBox, snap: Option<&RepoSnapshot>, grid: RepoBarGrid,
     mut on_pick: impl FnMut(String) + Clone + 'static, actions: Option<Actions>,
 ) {
-    let project_menu = remember(|| mutable_state_of(false));
+    // `EMBER_CR_VCS_MENU=project` opens the 저장소 menu at start, for captures.
+    let project_menu = remember(|| mutable_state_of(std::env::var("EMBER_CR_VCS_MENU").as_deref() == Ok("project")));
     // `EMBER_CR_VCS_MENU=branch` opens the branch popover at start, for captures.
     let branch_menu = remember(|| mutable_state_of(std::env::var("EMBER_CR_VCS_MENU").as_deref() == Ok("branch")));
 
@@ -935,12 +995,10 @@ fn RepoBarWithActions(
     let proj_id = project.id.clone();
     let proj_name = display_name(&project.id);
     let repo_line = crate::ui::vcs::repo_card_line(project, snap);
-    let project_opts: Vec<String> = projects.iter().map(|(_, name)| name.clone()).collect();
     let chosen_proj = projects.iter().position(|(id, _)| id == &proj_id);
 
-    let p_dismiss = project_menu.clone();
     let p_projects = projects.to_vec();
-    let mut on_pick_proj = on_pick.clone();
+    let on_pick_proj = on_pick.clone();
 
     cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
         let (project_menu_c, branch_menu_c) = (project_menu.clone(), branch_menu.clone());
@@ -953,9 +1011,10 @@ fn RepoBarWithActions(
             let p_open = project_menu_c.clone();
             let p_name = proj_name.clone();
             let r_line = repo_line.clone();
+            let (p_list, p_pick) = (p_projects.clone(), on_pick_proj.clone());
             cu::Column().modifier(m.padding(pad)).spacing(SP[1]).content(move || {
                 SmallNote("저장소");
-                RepoSelector(&p_name, move || p_open.set(true));
+                RepoMenu(p_open, &p_name, &p_list, chosen_proj, p_pick);
                 SmallNote(&r_line);
             });
         };
@@ -1024,21 +1083,6 @@ fn RepoBarWithActions(
                 });
             }
         });
-
-        // The 저장소 picker stays a centred sheet: the mockup's is a native `<select>` (`#vcsProj`),
-        // not one of its menus, so there is no menu to follow (FR-L10.4).
-        OptionSheet(
-            project_menu.get(),
-            &project_opts,
-            chosen_proj,
-            240.0,
-            move || p_dismiss.set(false),
-            move |idx| {
-                if let Some((id, _)) = p_projects.get(idx) {
-                    on_pick_proj(id.clone());
-                }
-            },
-        );
     });
 }
 
@@ -5689,6 +5733,58 @@ mod tests {
         assert!(pop.2.iter().any(|p| p == "Open=Bool(false)"), "{:?}", pop.2);
         assert!(!closed.iter().any(|n| n.2.iter().any(|p| p.contains("feat/x") || p.contains(BRANCH_POP_NEW))));
         assert!(closed.iter().any(|n| n.2.iter().any(|p| p.contains("develop"))), "the control stays");
+    }
+
+    static REPO_PICKED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+    fn repo_menu_open() {
+        let state = remember(|| mutable_state_of(true));
+        let projects = vec![("ember".to_string(), "ember".to_string()), ("p-2".to_string(), "core".to_string())];
+        RepoMenu(state, "core", &projects, Some(1), |id| *REPO_PICKED.lock().unwrap() = Some(id));
+    }
+
+    #[test]
+    fn fr_l10_4_repo_menu_is_the_shared_menu_under_its_control() {
+        // The mockup's `#vcsProj` is a native select; it was a centred `OptionSheet`.
+        let _guard = crate::services::test_guard();
+        let nodes = branch_menu_nodes(repo_menu_open);
+        assert!(!nodes.iter().any(|n| n.0 == "Dialog" || n.0 == "Sheet"), "no centred dialog at 1440");
+        let pops: Vec<_> = nodes.iter().filter(|n| n.0 == "Popover").collect();
+        assert_eq!(pops.len(), 1);
+        let (_, mods, props) = pops[0];
+        // The permission-mode look: 340 wide, 8 under the control, not lined up with its end.
+        for want in ["Open=Bool(true)", "Placement=Integer(2)", "OffsetDp=Float(8.0)"] {
+            assert!(props.iter().any(|p| p == want), "{want} in {props:?}");
+        }
+        assert!(!props.iter().any(|p| p == "Align=Integer(3)"), "{props:?}");
+        assert!(mods.iter().any(|m| m == "Width(340.0)"), "{mods:?}");
+        let says = |t: &str| nodes.iter().any(|n| n.2.iter().any(|p| p.contains(t)));
+        for t in ["저장소 \u{b7} core", "ember", "p-2"] {
+            assert!(says(t), "missing {t}");
+        }
+        let items: Vec<_> = nodes.iter().filter(|n| n.1.iter().any(|m| m.starts_with("Semantics") && m.contains("MenuItem"))).collect();
+        assert_eq!(items.len(), 2);
+        let sel = format!("{:?}", compose_rust::schema::Modifier::Background(paint(ember_theme().palette.sel)));
+        assert_eq!(items.iter().filter(|n| n.1.contains(&sel)).count(), 1, "the chosen row is on sel");
+        // The control is a button named by the shown project that says the menu is open.
+        let control = nodes
+            .iter()
+            .find(|n| n.0 == "Button" && n.2.iter().any(|p| p.contains("core")) && n.1.iter().any(|m| m == "FillMaxSize" || m.starts_with("FillMax")))
+            .expect("the control");
+        let state: u32 = control
+            .1
+            .iter()
+            .find_map(|m| m.strip_prefix("Semantics")?.split("state: ").nth(1)?.trim_end_matches([' ', '}']).parse().ok())
+            .expect("a semantics state");
+        assert_eq!((state >> compose_rust::schema::SEMANTICS_EXPANDED_SHIFT) & 3, 2, "{:?}", control.1);
+        let rows = repo_menu_rows(&[("a".into(), "a".into()), ("p-2".into(), "core".into())], Some(0));
+        assert_eq!((rows[0].chosen, rows[0].description.clone()), (true, None));
+        assert_eq!((rows[1].chosen, rows[1].description.as_deref()), (false, Some("p-2")));
+        assert_eq!(repo_menu_head("core"), "저장소 \u{b7} core");
+        let src = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        let bar = src.split("fn RepoBarWithActions(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(!bar.contains("OptionSheet("), "the centred sheet is gone from the bar");
+        assert!(bar.contains("EMBER_CR_VCS_MENU\").as_deref() == Ok(\"project\")"));
     }
 
     #[test]

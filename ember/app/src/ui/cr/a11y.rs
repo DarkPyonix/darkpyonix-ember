@@ -42,6 +42,10 @@ pub const MODEL_PICKER: &str = "하네스와 모델 선택";
 pub const ACCOUNT_PICKER: &str = "계정 선택";
 /// The 버전 관리 branch popover (mockup `aria-label="브랜치 전환"`).
 pub const BRANCH_PICKER: &str = "브랜치 전환";
+/// The 버전 관리 저장소 menu (mockup `aria-label="프로젝트 저장소"`).
+pub const REPO_PICKER: &str = "프로젝트 저장소";
+/// The 새 브랜치 기준 menu.
+pub const BASE_PICKER: &str = "기준 브랜치 선택";
 
 /// The reviewed Korean names of the icon-only controls outside the nav menus (those take
 /// `NavMenu::label`).

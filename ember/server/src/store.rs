@@ -171,6 +171,21 @@ pub(crate) fn migration_position(sql: &str) -> Option<usize> {
     MIGRATIONS.iter().position(|m| *m == sql)
 }
 
+/// Apply the first `count` migrations to `conn` (test helper for migration backfill tests).
+#[cfg(test)]
+pub(crate) fn migrate_up_to(conn: &mut Connection, count: usize) -> anyhow::Result<()> {
+    for (i, sql) in MIGRATIONS.iter().enumerate().take(count) {
+        let tx = conn.transaction()?;
+        tx.execute_batch(sql)?;
+        if *sql == crate::computers::schema::PEER_ID_UNIQUE_MIGRATION {
+            crate::computers::backfill_peer_ids(&tx)?;
+        }
+        tx.pragma_update(None, "user_version", (i + 1) as i64)?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
 /// Bring `conn` up to the latest schema version.
 fn migrate(conn: &mut Connection) -> anyhow::Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -182,6 +197,9 @@ fn migrate(conn: &mut Connection) -> anyhow::Result<()> {
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
         let tx = conn.transaction()?;
         tx.execute_batch(sql)?;
+        if *sql == crate::computers::schema::PEER_ID_UNIQUE_MIGRATION {
+            crate::computers::backfill_peer_ids(&tx)?;
+        }
         tx.pragma_update(None, "user_version", (i + 1) as i64)?;
         tx.commit()?;
     }

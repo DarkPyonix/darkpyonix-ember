@@ -87,6 +87,8 @@ pub enum ChannelError {
     BadRequest(String),
     #[error("{0}")]
     Forbidden(String),
+    #[error("{0}")]
+    Conflict(String),
     /// A mention names no member agent (FR-T13); carries the names.
     #[error("not a member of this channel: {}", .0.join(", "))]
     NotAMember(Vec<String>),

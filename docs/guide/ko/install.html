@@ -155,7 +155,9 @@ cargo build --release --locked
       </p>
       <p>
         소유자 키는 Ember 앱이나 <code>ember-server owner</code> 명령 하나의 메모리에만 있습니다.
-        <code>&lt;데이터 폴더&gt;/owner.sock</code> 으로 받으며, 그 앱이나 명령이 끝나거나 서버가 다시 시작하면
+        <code>&lt;데이터 폴더&gt;/owner.sock</code> 으로 받으며(Windows에서는 내 사용자만 열 수 있고 다른 컴퓨터의
+        접속을 거부하는 이름 있는 파이프 <code>\\.\pipe\ember-owner-&lt;데이터 폴더의 해시&gt;</code> 로 받습니다),
+        그 앱이나 명령이 끝나거나 서버가 다시 시작하면
         무효가 됩니다. 첫 요청 때 서버 콘솔에 코드가 나옵니다(<code>ember owner code: XXXX-XXXX</code>).
         요청한 곳에 그 코드를 입력합니다. 이후 요청은 이미 키를 가진 앱에서 승인할 수 있습니다. 서버 쪽과
         명령은 들어가 있고, 앱의 확인 화면은 아직 만들어지지 않았습니다
@@ -175,9 +177,10 @@ ember-server owner call POST /api/accounts <span class="s">'{"agent": "claude-co
         메서드, 경로, 본문으로 <code>ember-server owner call</code> 을 쓰세요.
         <code>EMBER_OWNER_CONFIRM=off</code> 는 콘솔 코드 없이 키를 내줍니다. 보호를 낮추므로 시험
         환경용입니다. 범위가 <code>full</code> 인 원격 장치는 전송 경로에서 승인에 대해 소유자로
-        취급됩니다. 장치 목록 자체는 서버가 있는 컴퓨터에서만 관리합니다. Windows의 서버에는 아직 소유자
-        소켓이 없습니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/815">#815</a>). 그래서 항상
-        <code>warn</code> 으로 동작하고, 소유자 경로가 토큰에 열려 있습니다.
+        취급됩니다. 장치 목록 자체는 서버가 있는 컴퓨터에서만 관리합니다. Windows의 서버는 이름 있는 파이프로
+        요청을 받고(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/815">#815</a>),
+        <code>EMBER_OWNER_PRESENCE</code> 도 같은 방식으로 따릅니다. 기본값은 <code>warn</code> 이고,
+        <code>enforce</code> 로 하면 토큰만으로는 소유자 경로를 쓸 수 없습니다.
       </p>
       <p>
         <strong>막지 못하는 것.</strong> 기본값인 <code>warn</code> 에서는 아무것도 거부하지 않습니다.

@@ -1,9 +1,13 @@
 # DarkPyonix OSE: Code-OSS (MIT) VS Code web server, renamed and pointed at Open VSX.
 # See ember/ose/README.md. Builds run here, never on a developer machine.
 #
-#   pull_request     -> product job only (product.json overrides + checks; seconds)
-#   push / dispatch  -> product + 4-target build matrix + smoke test, artifacts uploaded
+#   called by ci.yml (the leader dispatches it) -> product + 4-target build matrix + smoke test,
+#                       artifacts uploaded, then the live checks on each target's own runner type
 #   tag ose-v*       -> all of the above; publish-ose.yml then releases this run's artifacts
+#
+# Live checks (SPEC FR-W4 acceptance step 4, NFR-W1; #83, #84): the archive this run built is
+# downloaded, verified and unpacked, the Ember editor session's live tests run against it, and
+# the extension regression installs the pinned list and reads the extension host log.
 name: OSE build
 
 on:
@@ -131,12 +135,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: ember/ose/build.sh --target ${{ matrix.target }} --smoke
 
-      - name: Extension regression (NFR-W1, install-only until a client is wired)
-        # Needs the unpacked build that --smoke just tested. Not yet a release gate: the list
-        # and expected results await the owner (#84).
-        continue-on-error: true
-        run: ember/ose/regress.sh "$(ls -d ember/ose/.work/dpx-ose-*-${{ matrix.target }} | head -1)"
-
       - uses: actions/upload-artifact@v4
         with:
           name: dpx-ose-${{ matrix.target }}
@@ -146,3 +144,71 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  live:
+    name: Live checks (${{ matrix.target }})
+    needs: [product, build]
+    # Each target is checked even when another target's build failed: a missing archive fails
+    # only its own leg, at the download step.
+    if: ${{ !cancelled() && needs.product.result == 'success' && github.event_name != 'pull_request' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.product.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: dpx-ose-${{ matrix.target }}
+          path: ose-download
+
+      - name: Verify the checksum and unpack
+        id: ose
+        run: |
+          cd ose-download
+          if command -v sha256sum >/dev/null; then sha256sum -c ./*.sha256; else shasum -a 256 -c ./*.sha256; fi
+          mkdir -p "$RUNNER_TEMP/ose"
+          tar -xzf ./*.tar.gz -C "$RUNNER_TEMP/ose"
+          dir="$(ls -d "$RUNNER_TEMP"/ose/dpx-ose-*-${{ matrix.target }} | head -1)"
+          test -x "$dir/bin/dpx-ose-server"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "EMBER_OSE_SERVER=$dir/bin/dpx-ose-server" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ember/editor-conn
+            ember/editor
+
+      - name: Live connection test (handshake, management, files, extension host)
+        run: cargo test --locked --manifest-path ember/editor-conn/Cargo.toml --test live_ose -- --ignored --nocapture
+
+      - name: Live session tests (diagnostics, save, external change, explorer)
+        run: cargo test --locked --manifest-path ember/editor/Cargo.toml --test live_session -- --ignored --nocapture --test-threads 1
+
+      - name: Live extension scan (FR-L31.14)
+        run: cargo test --locked --manifest-path ember/editor/Cargo.toml --test fr_l31_14_live_extensions -- --ignored --nocapture
+
+      - name: Extension regression (NFR-W1)
+        # Not yet a release gate: expected.json holds unverified entries until the first real run,
+        # and the owner has not confirmed the list (#84). Remove continue-on-error after that.
+        continue-on-error: true
+        env:
+          OSE_REGRESS_OUT: ${{ runner.temp }}/regress-out
+          OSE_REGRESS_CLIENT: cargo test --locked --manifest-path ember/editor/Cargo.toml --test nfr_w1_extension_regression -- --ignored --nocapture
+        run: ember/ose/regress.sh "${{ steps.ose.outputs.dir }}"
+
+      - name: Keep the regression results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ose-regress-${{ matrix.target }}
+          path: ${{ runner.temp }}/regress-out
+          if-no-files-found: ignore
+          retention-days: 14

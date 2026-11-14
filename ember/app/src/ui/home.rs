@@ -66,12 +66,12 @@ pub fn integrations_layout(width_dp: f32) -> IntegrationsLayout {
 }
 
 /// The GitHub card's rule row (mockup `.int-rule`, data `develop CI 실패 -> 루틴 'CI 고치기'`).
-/// The server has no field that ties a CI failure to a routine and no event trigger runs a
-/// routine yet, so the row names the rule, says honestly that it does not run, and links to 루틴
-/// where an event routine is set up (FR-L23, #498).
+/// Event routines (`ScheduleKind::Event { on: EventOn::CiFailed, repository, branch }`) run when a
+/// GitHub workflow run fails for the configured repository and branch, and the row links to 루틴
+/// where an event routine is set up (FR-L23, #498, #759).
 pub const CI_RULE_WHEN: &str = "CI 실패";
 pub const CI_RULE_THEN: &str = "루틴이 받아 팀원에게 맡깁니다";
-pub const CI_RULE_NOTE: &str = "CI 실패로 루틴을 실행하는 기능은 아직 준비 중입니다";
+pub const CI_RULE_NOTE: &str = "루틴에서 이벤트 트리거로 저장소와 브랜치를 지정하면 CI 실패 시 실행됩니다";
 pub const CI_RULE_LINK: &str = "루틴 보기";
 
 /// `GET /api/integrations/github` `state` (INTENT D41, FR-L35).
@@ -2033,10 +2033,12 @@ mod tests {
     }
 
     #[test]
-    fn fr_l23_ci_rule_links_to_routines_and_says_it_does_not_run() {
+    fn fr_l23_ci_rule_links_to_routines_and_states_it_runs_on_ci_failure() {
         assert_eq!(CI_RULE_WHEN, "CI 실패");
         assert_eq!(CI_RULE_LINK, "루틴 보기");
-        assert!(CI_RULE_NOTE.contains("준비 중"));
+        assert!(CI_RULE_NOTE.contains("CI 실패"));
+        assert!(CI_RULE_NOTE.contains("루틴"));
+        assert!(!CI_RULE_NOTE.contains("준비 중"));
         for s in [CI_RULE_WHEN, CI_RULE_THEN, CI_RULE_NOTE, CI_RULE_LINK] {
             assert!(!s.contains('\u{2014}'));
         }

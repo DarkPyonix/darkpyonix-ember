@@ -364,6 +364,10 @@ fn editor_pane() -> Element {
         key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
         text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), folds: crate::ui::editor::folds(&doc.folds), tab_width: Some(doc.tab_width),
         gutter_decorations,
+        // FR-L31.27: the mockup's code type, row pitch and line number column (`editor.css:2`, `:71`).
+        font_size: Some(crate::ui::fonts::CODE_FONT_SIZE), line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT),
+        gutter_min_width: Some(crate::ui::fonts::CODE_GUTTER_MIN_WIDTH), gutter_padding: Some(crate::ui::fonts::CODE_GUTTER_PADDING), text_inset: Some(crate::ui::fonts::CODE_TEXT_INSET),
+        colors: crate::ui::fonts::CODE_EDITOR_COLORS,
         on_change: move |e: compose_rust::code::CodeChange| { keep_edited_tab(&change_s, &change_uri.path); change_s.editor_versions.borrow_mut().insert(generation, e.version); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); crate::ui::editor_states::view::edited(&change_s, &change_uri.path); },
         on_save: move |e: compose_rust::code::SaveRequest| { if !crate::ui::editor_states::view::manual_save_allowed(&save_s, &save_uri.path) { return; } let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
@@ -1505,7 +1509,9 @@ pub mod page {
                             else if let Some(pane) = current.as_deref().and_then(|p| webview_pane_for_tab(&s, p)) {
                                 {webview_pane_view(&s, &pane)}
                             }
-                            else if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
+                            // FR-L31.27: the mockup's 8px above the first line (`editor.css:68`). The code editor has no
+                            // content padding, so the room is left above its box, in the panel's own `surface`.
+                            else if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:calc(100% - {crate::ui::fonts::CODE_TOP_PADDING_CSS}); margin-top:{crate::ui::fonts::CODE_TOP_PADDING_CSS};" } }
                             else if let Some(error) = current.as_ref().and_then(|p| open_error.clone().map(|e| (p.clone(), e))) {
                                 div { class: "ed-empty", role: "alert",
                                     b { "{crate::ui::editor::display_name(base_name(&error.0))} 파일을 열 수 없습니다" }

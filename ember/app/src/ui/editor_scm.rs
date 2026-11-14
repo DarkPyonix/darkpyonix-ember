@@ -1595,8 +1595,8 @@ pub mod view {
     // dioxus-compose's v0.0.9 move gives `CodeEditor` `on_code_metrics` (`CodeMetrics`),
     // `on_code_scrolled` (`CodeScroll`) and `CodeEditorHandle::set_scroll_offset`; workaround kept
     // until Ember pins that dioxus-compose and the pixel sync is checked on a display (#673). Until
-    // then the base side follows the editor's first visible line and draws 20 px rows on the
-    // assumption that this is the line height.
+    // then the base side follows the editor's first visible line and draws its rows at `--code-lh`
+    // (22 px), the row height the editor is given (FR-L31.27).
     const BASE_ROWS_SHOWN: usize = 400;
 
     /// The editable diff (FR-L31.10): the base read-only on the left, one row per working-tree line
@@ -1617,7 +1617,7 @@ pub mod view {
         let shown: Vec<(usize, super::WorkingRow)> = rows.into_iter().enumerate().skip(start).take(end - start).collect();
         rsx! {
             div { style: "flex:1; min-height:0; min-width:0; display:flex;",
-                div { style: "flex:1; min-width:0; overflow:hidden; font-family:var(--mono); font-size:var(--fs-sm); border-right:1px solid var(--line);", role: "region", "aria-label": "기준 (읽기 전용)",
+                div { style: "flex:1; min-width:0; overflow:hidden; font-family:var(--mono); font-size:var(--code-fs); border-right:1px solid var(--line);", role: "region", "aria-label": "기준 (읽기 전용)",
                     for (ri, row) in shown {
                         {
                             let (bg, sign) = match row.kind {
@@ -1632,7 +1632,7 @@ pub mod view {
                             let mark = if row.deleted_above.is_empty() { "" } else { "box-shadow:inset 0 2px 0 var(--c-red);" };
                             let title = deleted_lines_title(&row.deleted_above);
                             rsx! {
-                                div { key: "base-{ri}", title: "{title}", style: "display:flex; white-space:pre; height:20px; line-height:20px; {bg} {mark}",
+                                div { key: "base-{ri}", title: "{title}", style: "display:flex; white-space:pre; height:var(--code-lh); line-height:var(--code-lh); {bg} {mark}",
                                     span { style: "width:40px; flex:none; text-align:right; padding-right:6px; color:var(--muted);", "{no}" }
                                     span { style: "width:14px; flex:none; text-align:center;", "{sign}" }
                                     span { style: "flex:1; overflow:hidden; text-overflow:ellipsis;", "{text}" }
@@ -2245,6 +2245,10 @@ pub mod diff_editor_view {
             key: "diff-{generation}", width: Some(box_w), height: Some(box_h), handle,
             text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), tab_width: Some(doc.tab_width),
             gutter_decorations,
+            // FR-L31.27: the same code type, row pitch and line number column as the file's editor.
+            font_size: Some(crate::ui::fonts::CODE_FONT_SIZE), line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT),
+            gutter_min_width: Some(crate::ui::fonts::CODE_GUTTER_MIN_WIDTH), gutter_padding: Some(crate::ui::fonts::CODE_GUTTER_PADDING), text_inset: Some(crate::ui::fonts::CODE_TEXT_INSET),
+            colors: crate::ui::fonts::CODE_EDITOR_COLORS,
             on_change: move |e: compose_rust::code::CodeChange| {
                 change_s.editor_versions.borrow_mut().insert(generation, e.version);
                 let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text);

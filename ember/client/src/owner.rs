@@ -2,7 +2,8 @@
 //!
 //! The server token is the non-owner credential. The routes that grant authority, admit a party
 //! or change a secret ([`owner_route`]) also need an owner key: `eok_...`, claimed over the
-//! server's unix socket `<data dir>/owner.sock` ([`OwnerLink`]) and sent as `X-Ember-Owner`.
+//! server's unix socket `<data dir>/owner.sock`, or on Windows its named pipe
+//! `\\.\pipe\ember-owner-<hash>` ([`OwnerEndpoint`], [`OwnerLink`]), and sent as `X-Ember-Owner`.
 //! Without it the server answers 403 `{"code": "owner_required"}`
 //! ([`crate::api::ApiError::is_owner_required`]).
 //!
@@ -13,12 +14,17 @@
 //! transport there is no owner key: the device key is the credential, and an owner route needs
 //! a device with scope `full`.
 
+use std::path::{Path, PathBuf};
+
 use http::Method;
+use sha2::{Digest, Sha256};
 
 /// The header that carries the owner key.
 pub const OWNER_HEADER: &str = "x-ember-owner";
 /// The claim socket's name in the server's data folder.
 pub const SOCKET_FILE: &str = "owner.sock";
+/// The start of the claim pipe's name on Windows; [`pipe_name`] adds the data folder's hash.
+pub const PIPE_PREFIX: &str = r"\\.\pipe\ember-owner-";
 
 /// The owner routes: `(method, path template)`. The same rows as the `Owner` rows of the
 /// server's `owner::ROUTES`; the test `fr_s12_client_owner_routes_match_the_server` compares
@@ -104,21 +110,82 @@ pub fn owner_route(method: &Method, path: &str) -> bool {
     OWNER_ROUTES.iter().any(|(m, t)| *m == method && template_matches(t, &segs))
 }
 
-/// The claim socket: `<data_dir>/owner.sock`, else `<home>/.ember/owner.sock`. This is the
-/// server's data folder (`EMBER_DATA_DIR` of the server, else `~/.ember`), found the way
-/// [`crate::token::server_token`] finds the token file, not the app's own folder.
-pub fn socket_path(data_dir: Option<&std::path::Path>, home: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+/// The server's data folder: `data_dir`, else `<home>/.ember` (`EMBER_DATA_DIR` of the server,
+/// else `~/.ember`), found the way [`crate::token::server_token`] finds the token file, not the
+/// app's own folder.
+fn server_dir(data_dir: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
     match (data_dir, home) {
-        (Some(dir), _) => Some(dir.join(SOCKET_FILE)),
-        (None, Some(home)) => Some(home.join(".ember").join(SOCKET_FILE)),
+        (Some(dir), _) => Some(dir.to_path_buf()),
+        (None, Some(home)) => Some(home.join(".ember")),
         (None, None) => None,
     }
 }
 
+/// The claim socket: `<data_dir>/owner.sock`, else `<home>/.ember/owner.sock` (unix).
+pub fn socket_path(data_dir: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    server_dir(data_dir, home).map(|d| d.join(SOCKET_FILE))
+}
+
 /// [`socket_path`] over the process environment (`EMBER_DATA_DIR`, `HOME`).
-pub fn socket_path_from_env() -> Option<std::path::PathBuf> {
-    let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
-    socket_path(var("EMBER_DATA_DIR").as_deref(), var("HOME").as_deref())
+pub fn socket_path_from_env() -> Option<PathBuf> {
+    socket_path(env_dir("EMBER_DATA_DIR").as_deref(), env_dir("HOME").as_deref())
+}
+
+fn env_dir(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
+/// The claim pipe for the data folder whose canonical path is `canonical` (Windows):
+/// [`PIPE_PREFIX`] plus the first 8 bytes of the SHA-256 of the lower-cased path, in hex. The
+/// server's `owner::pipe_name_of` is the same function; the test
+/// `fr_s12_client_pipe_name_matches_the_server` compares the two.
+pub fn pipe_name_of(canonical: &str) -> String {
+    let digest = Sha256::digest(canonical.to_lowercase().as_bytes());
+    let mut s = String::from(PIPE_PREFIX);
+    for b in &digest[..8] {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// The claim pipe of `data_dir`: [`pipe_name_of`] its canonical path, or of the path as given
+/// when it cannot be canonicalised.
+pub fn pipe_name(data_dir: &Path) -> String {
+    let dir = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    pipe_name_of(&dir.to_string_lossy())
+}
+
+/// Where the server takes claims.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerEndpoint {
+    /// Unix: the socket `<data dir>/owner.sock`.
+    Socket(PathBuf),
+    /// Windows: the named pipe `\\.\pipe\ember-owner-<hash>` ([`pipe_name`]).
+    Pipe(String),
+}
+
+impl OwnerEndpoint {
+    /// This platform's endpoint for the server whose data folder is `data_dir`, else
+    /// `<home>/.ember`.
+    pub fn for_dir(data_dir: Option<&Path>, home: Option<&Path>) -> Option<OwnerEndpoint> {
+        let dir = server_dir(data_dir, home)?;
+        Some(if cfg!(windows) { OwnerEndpoint::Pipe(pipe_name(&dir)) } else { OwnerEndpoint::Socket(dir.join(SOCKET_FILE)) })
+    }
+
+    /// [`OwnerEndpoint::for_dir`] over the process environment (`EMBER_DATA_DIR`, `HOME`), the
+    /// variables the server reads for its own folder.
+    pub fn from_env() -> Option<OwnerEndpoint> {
+        OwnerEndpoint::for_dir(env_dir("EMBER_DATA_DIR").as_deref(), env_dir("HOME").as_deref())
+    }
+}
+
+impl std::fmt::Display for OwnerEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OwnerEndpoint::Socket(p) => write!(f, "{}", p.display()),
+            OwnerEndpoint::Pipe(n) => f.write_str(n),
+        }
+    }
 }
 
 /// An owner key. `Debug` never prints it.
@@ -196,26 +263,69 @@ impl OwnerMessage {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use link::OwnerLink;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod link {
     use std::io;
-    use std::path::Path;
+    use std::pin::Pin;
 
     use serde_json::json;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-    use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-    use tokio::net::UnixStream;
+    use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines};
 
-    use super::OwnerMessage;
+    use super::{OwnerEndpoint, OwnerMessage};
 
-    /// One claim connection to the server's `owner.sock`. The owner key it is granted lives
-    /// exactly as long as this value: drop it and the server voids the key.
+    type Reader = Pin<Box<dyn AsyncRead + Send + Sync>>;
+    type Writer = Pin<Box<dyn AsyncWrite + Send + Sync>>;
+
+    /// `ERROR_PIPE_BUSY`: every pipe instance is taken; the server makes a new one at once.
+    #[cfg(windows)]
+    const ERROR_PIPE_BUSY: i32 = 231;
+
+    #[cfg(unix)]
+    async fn connect(endpoint: &OwnerEndpoint) -> io::Result<(Reader, Writer)> {
+        match endpoint {
+            OwnerEndpoint::Socket(path) => {
+                let (r, w) = tokio::net::UnixStream::connect(path).await?.into_split();
+                let (r, w): (Reader, Writer) = (Box::pin(r), Box::pin(w));
+                Ok((r, w))
+            }
+            OwnerEndpoint::Pipe(_) => {
+                Err(io::Error::new(io::ErrorKind::Unsupported, "a named pipe is a Windows endpoint"))
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    async fn connect(endpoint: &OwnerEndpoint) -> io::Result<(Reader, Writer)> {
+        use tokio::net::windows::named_pipe::ClientOptions;
+        let OwnerEndpoint::Pipe(name) = endpoint else {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "a unix socket is not a Windows endpoint"));
+        };
+        // ClientOptions asks for SECURITY_IDENTIFICATION by default: the server learns who
+        // connects but cannot act as this process.
+        let mut tries = 0;
+        let pipe = loop {
+            match ClientOptions::new().open(name) {
+                Ok(p) => break p,
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && tries < 100 => {
+                    tries += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        };
+        let (r, w) = tokio::io::split(pipe);
+        let (r, w): (Reader, Writer) = (Box::pin(r), Box::pin(w));
+        Ok((r, w))
+    }
+
+    /// One claim connection to the server's claim door ([`OwnerEndpoint`]). The owner key it
+    /// is granted lives exactly as long as this value: drop it and the server voids the key.
     ///
     /// ```text
-    /// let mut link = OwnerLink::claim(&socket, "Ember").await?;
+    /// let mut link = OwnerLink::claim(&OwnerEndpoint::from_env()?, "Ember").await?;
     /// loop {
     ///     match link.next().await? {
     ///         Some(OwnerMessage::Confirm { .. }) => { /* ask for the code, then link.confirm(code) */ }
@@ -227,8 +337,8 @@ mod link {
     /// }
     /// ```
     pub struct OwnerLink {
-        lines: Lines<BufReader<OwnedReadHalf>>,
-        w: OwnedWriteHalf,
+        lines: Lines<BufReader<Reader>>,
+        w: Writer,
     }
 
     impl std::fmt::Debug for OwnerLink {
@@ -238,10 +348,10 @@ mod link {
     }
 
     impl OwnerLink {
-        /// Connects to `socket` and sends the claim. `name` is what the owner is shown for this
-        /// claimant (the app's name). The answer comes from [`OwnerLink::next`].
-        pub async fn claim(socket: &Path, name: &str) -> io::Result<OwnerLink> {
-            let (r, w) = UnixStream::connect(socket).await?.into_split();
+        /// Connects to `endpoint` and sends the claim. `name` is what the owner is shown for
+        /// this claimant (the app's name). The answer comes from [`OwnerLink::next`].
+        pub async fn claim(endpoint: &OwnerEndpoint, name: &str) -> io::Result<OwnerLink> {
+            let (r, w) = connect(endpoint).await?;
             let mut link = OwnerLink { lines: BufReader::new(r).lines(), w };
             // A server that refuses at once may have closed already; its reason is still read.
             let _ = link.send(json!({ "op": "claim", "name": name })).await;
@@ -314,6 +424,21 @@ mod tests {
         assert_eq!(socket_path(Some(Path::new("/d")), Some(Path::new("/h"))), Some("/d/owner.sock".into()));
         assert_eq!(socket_path(None, Some(Path::new("/h"))), Some("/h/.ember/owner.sock".into()));
         assert_eq!(socket_path(None, None), None);
+    }
+
+    #[test]
+    fn fr_s12_the_endpoint_is_this_platforms_door() {
+        let dir = tempfile::tempdir().unwrap();
+        let got = OwnerEndpoint::for_dir(Some(dir.path()), Some(Path::new("/h"))).unwrap();
+        if cfg!(windows) {
+            assert_eq!(got, OwnerEndpoint::Pipe(pipe_name(dir.path())));
+        } else {
+            assert_eq!(got, OwnerEndpoint::Socket(dir.path().join(SOCKET_FILE)));
+        }
+        assert_eq!(OwnerEndpoint::for_dir(None, None), None);
+        let p = pipe_name_of(r"\\?\C:\Users\me\.ember");
+        assert_eq!(p.len(), PIPE_PREFIX.len() + 16);
+        assert_eq!(p, pipe_name_of(r"\\?\c:\users\ME\.ember"));
     }
 
     #[test]

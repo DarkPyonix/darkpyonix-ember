@@ -1,6 +1,7 @@
 //! FR-S12: owner presence on the client (INTENT D37 "Owner presence", #784): the owner key is
 //! sent on owner routes only, a 403 `owner_required` is reported once, and a claim over the
-//! server's real `owner.sock` yields a key the server accepts.
+//! server's real claim door (`owner.sock` on unix, the named pipe on Windows) yields a key the
+//! server accepts.
 
 use std::sync::{Arc, Mutex};
 
@@ -33,6 +34,18 @@ fn fr_s12_client_owner_routes_match_the_server() {
     }
     assert_eq!(owner::OWNER_HEADER, ember_server::owner::OWNER_HEADER);
     assert_eq!(owner::SOCKET_FILE, ember_server::owner::SOCKET_FILE);
+    assert_eq!(owner::PIPE_PREFIX, ember_server::owner::PIPE_PREFIX);
+}
+
+/// The client finds the server's Windows pipe by the same name the server creates. Run on every
+/// platform: the name is only a hash.
+#[test]
+fn fr_s12_client_pipe_name_matches_the_server() {
+    for p in [r"\\?\C:\Users\me\.ember", "/home/me/.ember", "", "D:\\Ember Data\\서버"] {
+        assert_eq!(owner::pipe_name_of(p), ember_server::owner::pipe_name_of(p), "{p}");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(owner::pipe_name(dir.path()), ember_server::owner::pipe_name(dir.path()));
 }
 
 type Seen = Arc<Mutex<Vec<(String, Option<String>)>>>;
@@ -119,16 +132,17 @@ fn fr_s12_the_key_is_not_kept_for_a_remote_host() {
     assert!(!local.has_owner_key());
 }
 
-/// Against the real server layers and the real claim socket: no key, 403; claim, confirm with
-/// the console code, then the same call reaches the handler; drop the link, 403 again.
-#[cfg(unix)]
+/// Against the real server layers and the real claim door (the socket on unix, the pipe on
+/// Windows): no key, 403; claim, confirm with the console code, then the same call reaches the
+/// handler; drop the link, 403 again.
+#[cfg(any(unix, windows))]
 #[tokio::test]
 async fn fr_s12_client_claims_a_key_the_server_accepts() {
     use ember_client::owner::{OwnerLink, OwnerMessage};
     use ember_server::agents::scripted::ScriptedAdapter;
     use ember_server::agents::AgentAdapter;
     use ember_server::auth::{self, ServerAuth};
-    use ember_server::owner::door::{socket_path, DoorConfig, OwnerDoor, Proc, ProcTable};
+    use ember_server::owner::door::{DoorConfig, OwnerDoor, Proc, ProcTable};
     use ember_server::owner::{Claimant, Confirm, Owner, Presence};
     use ember_server::session::Sessions;
     use ember_server::store::Store;
@@ -167,9 +181,12 @@ async fn fr_s12_client_claims_a_key_the_server_accepts() {
     // A normal route works with the token alone.
     assert!(api.sessions(None).await.unwrap().is_empty());
 
-    let socket = owner::socket_path(Some(dir.path()), None).unwrap();
-    assert_eq!(socket, socket_path(dir.path()));
-    let mut link = OwnerLink::claim(&socket, "Ember").await.unwrap();
+    let endpoint = owner::OwnerEndpoint::for_dir(Some(dir.path()), None).unwrap();
+    #[cfg(unix)]
+    assert_eq!(endpoint, owner::OwnerEndpoint::Socket(ember_server::owner::door::socket_path(dir.path())));
+    #[cfg(windows)]
+    assert_eq!(endpoint, owner::OwnerEndpoint::Pipe(ember_server::owner::pipe_name(dir.path())));
+    let mut link = OwnerLink::claim(&endpoint, "Ember").await.unwrap();
     let Some(OwnerMessage::Confirm { holders: 0, .. }) = link.next().await.unwrap() else {
         panic!("the first claim must ask for the console code");
     };

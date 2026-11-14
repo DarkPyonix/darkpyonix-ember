@@ -1,8 +1,11 @@
-//! The claim socket `<data dir>/owner.sock` (SPEC `FR-S12`; INTENT D37 "Owner presence", #784).
+//! The claim door (SPEC `FR-S12`; INTENT D37 "Owner presence", #784, #815).
 //!
-//! A unix socket, mode 0600, removed at stop. One connection is one claim. The key lives while
-//! the connection stays open: a closed connection, a crashed app or a stopped server voids it.
-//! There is no timer and no refresh.
+//! On unix a socket `<data dir>/owner.sock`, mode 0600, removed at stop. On Windows a named pipe
+//! `\\.\pipe\ember-owner-<hash of the data dir>` ([`super::pipe_name`]), whose only access
+//! entry is the server's user and which refuses remote clients (`door/pipe.rs`). One connection is
+//! one claim. The key lives while the connection stays open: a closed connection, a crashed app
+//! or a stopped server voids it. There is no timer and no refresh. Both doors speak the same
+//! protocol and run the same checks; only the peer lookup differs.
 //!
 //! # Protocol
 //!
@@ -28,10 +31,13 @@
 //!
 //! # Checks on every claim
 //!
-//! 1. The peer runs as the server's user (`SO_PEERCRED` on Linux, `getpeereid` on macOS).
+//! 1. The peer runs as the server's user (`SO_PEERCRED` on Linux, `getpeereid` on macOS; on
+//!    Windows the pipe's access list admits the server's user only, and the user of the
+//!    process `GetNamedPipeClientProcessId` names is compared with the server's).
 //! 2. The peer's process, and each of its ancestors, is outside every process tree Ember
 //!    started: the server itself (agents without a shim, the local terminals) and each session
-//!    shim. A process the table does not show is refused.
+//!    shim. A process the table does not show is refused. On Windows the table is the process
+//!    snapshot, and the walk ends at a parent that has exited ([`tree_verdict_exited_parents`]).
 //! 3. Unless [`Confirm::Off`]: the claim is confirmed once, by the code this server prints on
 //!    its console, or by a holder of a live key.
 //!
@@ -47,12 +53,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::OwnedWriteHalf;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{Claimant, Confirm, Owner, OwnerEvent, SOCKET_FILE};
+
+#[cfg(windows)]
+mod pipe;
+#[cfg(windows)]
+pub use pipe::{current_user_sid, pipe_dacl, pipe_exists, sid_is_current_user, snapshot_table, OwnerDoor};
 
 /// The longest line either side sends.
 pub const MAX_LINE: u64 = 4096;
@@ -112,6 +123,52 @@ pub fn tree_verdict(pid: u32, table: &ProcTable, roots: &[u32]) -> TreeVerdict {
     TreeVerdict::Unknown
 }
 
+/// [`tree_verdict`] for Windows, where a process whose parent exits keeps the parent's pid
+/// (nothing reparents it, as unix does to pid 1). The claimant itself must be in the table;
+/// an ancestor missing from it ended the walk: that tree is left. Explorer's parent, for one,
+/// has always exited, so the unix rule would refuse every app started from the desktop.
+///
+/// This is the same exit as daemonising on unix (a process can leave its tree on purpose) and
+/// no weaker: check 2 is not a boundary on either platform.
+///
+/// Pids are reused, so the pid a process keeps for an exited parent can belong to a younger
+/// process, even to one of its own descendants. A walk that comes back to a pid it has seen
+/// has therefore crossed such a stale link (a real parent is never its own descendant): the
+/// real parent has exited, and the walk ends there like at a missing one. The Windows CI
+/// runner showed this: its test process met such a loop about every other run (#815). A
+/// reused pid can also send the walk into an unrelated tree; it then refuses a claim that was
+/// outside or passes one whose real parent had already exited, which the rule above passes
+/// anyway. The roots are checked at every step before any of this, so a claimant whose chain
+/// to a root is intact is still inside.
+pub fn tree_verdict_exited_parents(pid: u32, table: &ProcTable, roots: &[u32]) -> TreeVerdict {
+    if roots.contains(&pid) {
+        return TreeVerdict::Inside(pid);
+    }
+    let Some(me) = table.get(&pid) else { return TreeVerdict::Unknown };
+    let mut seen = vec![pid];
+    let mut cur = me.ppid;
+    // A depth bound on top of the loop check, so no table can hang the claim.
+    for _ in 0..256 {
+        if roots.contains(&cur) {
+            return TreeVerdict::Inside(cur);
+        }
+        // Pid 0 is the idle process, the parent of the roots of the snapshot.
+        if cur == 0 {
+            return TreeVerdict::Outside;
+        }
+        // A pid seen before: a stale parent link through a reused pid.
+        if seen.contains(&cur) {
+            return TreeVerdict::Outside;
+        }
+        seen.push(cur);
+        match table.get(&cur) {
+            Some(p) => cur = p.ppid,
+            None => return TreeVerdict::Outside,
+        }
+    }
+    TreeVerdict::Unknown
+}
+
 /// Parses `ps -A -o pid=,ppid=,comm=` output.
 pub fn parse_ps(text: &str) -> ProcTable {
     let mut out = ProcTable::new();
@@ -130,8 +187,22 @@ pub fn parse_ps(text: &str) -> ProcTable {
     out
 }
 
+/// The process table of this platform: [`ps_table`] on unix, the process snapshot on Windows
+/// ([`snapshot_table`]).
+pub fn process_table() -> ProcTable {
+    #[cfg(unix)]
+    {
+        ps_table()
+    }
+    #[cfg(windows)]
+    {
+        snapshot_table()
+    }
+}
+
 /// The process table from `ps`, as the shim's memory watch reads it (macOS and Linux). Empty
 /// when `ps` cannot run, which refuses every claim.
+#[cfg(unix)]
 pub fn ps_table() -> ProcTable {
     match std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid=,comm="]).output() {
         Ok(out) if out.status.success() => parse_ps(&String::from_utf8_lossy(&out.stdout)),
@@ -179,12 +250,13 @@ pub struct DoorConfig {
 
 impl DoorConfig {
     /// The server's door: confirmation from [`super::CONFIRM_ENV`], the roots of
-    /// [`server_roots`], the table from `ps`, and the code printed on standard output.
+    /// [`server_roots`], the table from [`process_table`], and the code printed on standard
+    /// output.
     pub fn for_server(shim_dir: Option<PathBuf>) -> DoorConfig {
         DoorConfig {
             confirm: Confirm::from_value(std::env::var(super::CONFIRM_ENV).ok().as_deref()),
             roots: server_roots(shim_dir),
-            procs: Arc::new(ps_table),
+            procs: Arc::new(process_table),
             // Printed, not logged: a log line may be shipped or kept; the console is where
             // the owner is.
             console: Arc::new(|code: &str, who: &Claimant| {
@@ -214,6 +286,7 @@ struct Inner {
 }
 
 /// The bound claim socket. Dropping it closes the socket, removes the file and voids every key.
+#[cfg(unix)]
 pub struct OwnerDoor {
     path: PathBuf,
     owner: Arc<Owner>,
@@ -221,6 +294,7 @@ pub struct OwnerDoor {
     task: tokio::task::JoinHandle<()>,
 }
 
+#[cfg(unix)]
 impl OwnerDoor {
     /// Binds `<data_dir>/owner.sock` (mode 0600) and starts accepting claims. A socket file left
     /// by a server that was killed is replaced; one a live server answers on is an error.
@@ -258,6 +332,7 @@ impl OwnerDoor {
     }
 }
 
+#[cfg(unix)]
 impl Drop for OwnerDoor {
     fn drop(&mut self) {
         let _ = self.stop.send(true);
@@ -267,6 +342,7 @@ impl Drop for OwnerDoor {
     }
 }
 
+#[cfg(unix)]
 async fn accept_loop(listener: UnixListener, inner: Arc<Inner>) {
     loop {
         match listener.accept().await {
@@ -298,14 +374,14 @@ async fn read_line<R: AsyncBufRead + Unpin>(r: &mut R) -> io::Result<Option<Stri
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "line is not UTF-8"))
 }
 
-async fn send(w: &mut OwnedWriteHalf, v: Value) -> io::Result<()> {
+async fn send<W: AsyncWrite + Unpin>(w: &mut W, v: Value) -> io::Result<()> {
     let mut line = v.to_string();
     line.push('\n');
     w.write_all(line.as_bytes()).await?;
     w.flush().await
 }
 
-async fn refuse(w: &mut OwnedWriteHalf, reason: &str) {
+async fn refuse<W: AsyncWrite + Unpin>(w: &mut W, reason: &str) {
     let _ = send(w, json!({ "state": "refused", "reason": reason })).await;
     let _ = w.shutdown().await;
 }
@@ -330,7 +406,24 @@ fn normal_code(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect()
 }
 
+/// What the parent walk says about `pid`, as a refusal reason. Logged here, so both doors log
+/// alike.
+fn check_tree(pid: u32, verdict: TreeVerdict) -> Result<(), &'static str> {
+    match verdict {
+        TreeVerdict::Outside => Ok(()),
+        TreeVerdict::Inside(root) => {
+            tracing::warn!(pid, root, "owner claim refused: the claimant runs inside an Ember agent or terminal tree");
+            Err("agent_tree")
+        }
+        TreeVerdict::Unknown => {
+            tracing::warn!(pid, "owner claim refused: the claimant is not in the process table");
+            Err("unknown_process")
+        }
+    }
+}
+
 /// The claimant behind `stream`, or why it gets no key.
+#[cfg(unix)]
 fn check_peer(inner: &Inner, stream: &UnixStream) -> Result<(u32, String), &'static str> {
     let cred = stream.peer_cred().map_err(|_| "no_peer_credentials")?;
     // SAFETY: geteuid has no preconditions and cannot fail.
@@ -343,21 +436,12 @@ fn check_peer(inner: &Inner, stream: &UnixStream) -> Result<(u32, String), &'sta
     };
     let table = (inner.cfg.procs)();
     let roots = (inner.cfg.roots)();
-    match tree_verdict(pid, &table, &roots) {
-        TreeVerdict::Outside => {}
-        TreeVerdict::Inside(root) => {
-            tracing::warn!(pid, root, "owner claim refused: the claimant runs inside an Ember agent or terminal tree");
-            return Err("agent_tree");
-        }
-        TreeVerdict::Unknown => {
-            tracing::warn!(pid, "owner claim refused: the claimant is not in the process table");
-            return Err("unknown_process");
-        }
-    }
+    check_tree(pid, tree_verdict(pid, &table, &roots))?;
     let exe = table.get(&pid).map(|p| p.exe.clone()).unwrap_or_default();
     Ok((pid, exe))
 }
 
+#[cfg(unix)]
 async fn serve_conn(inner: Arc<Inner>, stream: UnixStream) {
     let Ok(_permit) = inner.connections.try_acquire() else {
         let (_, mut w) = stream.into_split();
@@ -365,7 +449,17 @@ async fn serve_conn(inner: Arc<Inner>, stream: UnixStream) {
         return;
     };
     let peer = check_peer(&inner, &stream);
-    let (r, mut w) = stream.into_split();
+    let (r, w) = stream.into_split();
+    serve_split(&inner, r, w, peer).await;
+}
+
+/// One claim connection after the peer checks, on either door. The caller holds the
+/// connection permit for as long as this runs.
+async fn serve_split<R, W>(inner: &Arc<Inner>, r: R, mut w: W, peer: Result<(u32, String), &'static str>)
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin,
+{
     // Lines are read by their own task, so the loops below wait on a channel and lose no
     // partial line when another branch wins.
     let (tx, mut lines) = mpsc::channel::<Value>(8);
@@ -378,14 +472,14 @@ async fn serve_conn(inner: Arc<Inner>, stream: UnixStream) {
             }
         }
     });
-    claim(&inner, &mut w, &mut lines, peer).await;
+    claim(inner, &mut w, &mut lines, peer).await;
     reader.abort();
     let _ = w.shutdown().await;
 }
 
-async fn claim(
+async fn claim<W: AsyncWrite + Unpin>(
     inner: &Arc<Inner>,
-    w: &mut OwnedWriteHalf,
+    w: &mut W,
     lines: &mut mpsc::Receiver<Value>,
     peer: Result<(u32, String), &'static str>,
 ) {
@@ -461,9 +555,9 @@ fn holder_op(inner: &Inner, holder: u64, v: &Value) {
 
 /// Waits for the confirmation of claim `id`. True when it is confirmed. On false the refusal
 /// was already sent.
-async fn confirmed(
+async fn confirmed<W: AsyncWrite + Unpin>(
     inner: &Arc<Inner>,
-    w: &mut OwnedWriteHalf,
+    w: &mut W,
     lines: &mut mpsc::Receiver<Value>,
     id: u64,
     who: &Claimant,
@@ -573,6 +667,33 @@ mod tests {
         // A loop in the table ends as unknown.
         let l = table(&[(7, 8), (8, 7)]);
         assert_eq!(tree_verdict(7, &l, &[5]), TreeVerdict::Unknown);
+    }
+
+    #[test]
+    fn fr_s12_windows_walk_ends_at_an_exited_parent() {
+        // 4 (System) <- 600 (server) <- 700 (shell) <- 800 (curl); 900 (explorer, parent gone)
+        // <- 910 (app); 0 is the idle process.
+        let t = table(&[(4, 0), (600, 4), (700, 600), (800, 700), (900, 512), (910, 900)]);
+        assert_eq!(tree_verdict_exited_parents(800, &t, &[600]), TreeVerdict::Inside(600));
+        assert_eq!(tree_verdict_exited_parents(600, &t, &[600]), TreeVerdict::Inside(600));
+        // The unix rule refuses the app started from the desktop; the Windows rule does not.
+        assert_eq!(tree_verdict(910, &t, &[600]), TreeVerdict::Unknown);
+        assert_eq!(tree_verdict_exited_parents(910, &t, &[600]), TreeVerdict::Outside);
+        // A root that is not in the table still counts: its pid is enough.
+        assert_eq!(tree_verdict_exited_parents(910, &t, &[512]), TreeVerdict::Inside(512));
+        // The claimant itself must be in the table.
+        assert_eq!(tree_verdict_exited_parents(999, &t, &[600]), TreeVerdict::Unknown);
+        // A loop through reused pids is a stale parent link: the real parent has exited.
+        let l = table(&[(7, 8), (8, 9), (9, 8)]);
+        assert_eq!(tree_verdict_exited_parents(7, &l, &[5]), TreeVerdict::Outside);
+        // So is a loop back to the claimant, and a process that names itself as its parent.
+        let b = table(&[(7, 8), (8, 7)]);
+        assert_eq!(tree_verdict_exited_parents(7, &b, &[5]), TreeVerdict::Outside);
+        let s = table(&[(7, 7)]);
+        assert_eq!(tree_verdict_exited_parents(7, &s, &[5]), TreeVerdict::Outside);
+        // A root on the way is found before the loop.
+        let r = table(&[(7, 8), (8, 5), (5, 8)]);
+        assert_eq!(tree_verdict_exited_parents(7, &r, &[5]), TreeVerdict::Inside(5));
     }
 
     #[test]

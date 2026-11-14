@@ -246,6 +246,45 @@ fn keep_edited_tab(s: &Shared, path: &str) {
     }
 }
 
+pub const WEBVIEW_TAB_PREFIX: &str = "ember-webview:";
+
+pub fn webview_tab_path(handle: &str) -> String {
+    format!("{WEBVIEW_TAB_PREFIX}{handle}")
+}
+
+pub fn is_webview_tab(path: &str) -> bool {
+    path.starts_with(WEBVIEW_TAB_PREFIX)
+}
+
+pub fn webview_handle_from_tab(path: &str) -> Option<&str> {
+    path.strip_prefix(WEBVIEW_TAB_PREFIX)
+}
+
+pub fn webview_pane_for_tab(s: &Shared, path: &str) -> Option<ember_editor::webview::WebviewPane> {
+    let handle = webview_handle_from_tab(path)?;
+    s.bridge.borrow().webview_panes().get(handle).cloned()
+}
+
+pub fn post_webview_message(s: &Shared, handle: &str, message: ember_editor_conn::webview::WebviewMessage) {
+    s.host.send(HostCommand::Webview(ember_editor::webview::WebviewEvent::Message {
+        handle: handle.to_string(),
+        message,
+    }));
+}
+
+pub fn set_webview_state(s: &Shared, handle: &str, state: &str) {
+    s.host.send(HostCommand::Webview(ember_editor::webview::WebviewEvent::State {
+        handle: handle.to_string(),
+        state: state.to_string(),
+    }));
+}
+
+pub fn set_webview_ready(s: &Shared, handle: &str) {
+    s.host.send(HostCommand::Webview(ember_editor::webview::WebviewEvent::Ready {
+        handle: handle.to_string(),
+    }));
+}
+
 fn pos(p: compose_rust::code::Position) -> WidgetPos { WidgetPos::new(p.line, p.column) }
 fn send(s: &Shared, event: Option<(ember_editor_conn::uri::UriComponents, u64, ember_editor::WidgetEvent)>) {
     if let Some((uri, generation, event)) = event { s.host.send(HostCommand::Widget(uri, generation, event)); }
@@ -343,7 +382,11 @@ pub mod page {
     use std::sync::Arc;
     use crate::terminal_stream::{self, ChangeCallback, TerminalHandle, TerminalState};
     use crate::ui::editor_terminals as terms;
-    use super::{DOUBLE_CLICK, DOUBLE_SHIFT, now_ms, send, editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, PendingGoto, Shared};
+    use super::{
+        base_name, editor_pane, is_webview_tab, join_path, now_ms, position_text, send, shared,
+        webview_handle_from_tab, webview_pane_for_tab, webview_tab_path, workbench, BridgeAction,
+        HostCommand, PendingGoto, Shared, DOUBLE_CLICK, DOUBLE_SHIFT,
+    };
     use crate::ui::editor::{
         action_for_key, agent_status_text, apply_action, tooltip_text, Side, Stripes, ToolWindow,
     };
@@ -561,18 +604,33 @@ pub mod page {
     }
 
     /// Closes `paths`, tells the session, and focuses the tab that is current afterwards.
-    fn finish_close(s: &Shared, paths: &[String], anchor: Option<&str>) {
+    pub(crate) fn finish_close(s: &Shared, paths: &[String], anchor: Option<&str>) {
         if paths.is_empty() {
             return;
         }
         let mut tabs = s.tabs;
         tabs.write().close_many(paths, anchor);
         for p in paths {
-            s.host.send(HostCommand::Close(p.clone()));
+            if let Some(handle) = webview_handle_from_tab(p) {
+                s.host.send(HostCommand::Webview(ember_editor::webview::WebviewEvent::Closed {
+                    handle: handle.to_string(),
+                }));
+            } else {
+                s.host.send(HostCommand::Close(p.clone()));
+            }
         }
         let next = tabs.read().current_path().map(str::to_owned);
         if let Some(next) = next {
-            s.host.send(HostCommand::Focus(next));
+            if let Some(handle) = webview_handle_from_tab(&next) {
+                s.host.send(HostCommand::Webview(ember_editor::webview::WebviewEvent::ViewState {
+                    handle: handle.to_string(),
+                    visible: true,
+                    active: true,
+                    position: 1,
+                }));
+            } else {
+                s.host.send(HostCommand::Focus(next));
+            }
         }
     }
 
@@ -1103,6 +1161,76 @@ pub mod page {
         })
     }
 
+    fn handle_webview_update(s: &Shared, update: &ember_editor::webview::WebviewUpdate) {
+        use ember_editor::webview::{WebviewKind, WebviewUpdate};
+        match update {
+            WebviewUpdate::Created { handle, kind, reveal, .. } => {
+                match kind {
+                    WebviewKind::Panel { .. } | WebviewKind::CustomEditor { .. } => {
+                        let tab = webview_tab_path(handle);
+                        let mut tabs = s.tabs;
+                        tabs.write().open(&tab);
+                        if reveal.is_some() {
+                            tabs.write().activate(&tab);
+                            s.host.send(HostCommand::Webview(ember_editor::webview::WebviewEvent::ViewState {
+                                handle: handle.clone(),
+                                visible: true,
+                                active: true,
+                                position: 1,
+                            }));
+                        }
+                    }
+                    WebviewKind::View { .. } => {}
+                }
+            }
+            WebviewUpdate::Reveal { handle, preserve_focus, .. } => {
+                let tab = webview_tab_path(handle);
+                let mut tabs = s.tabs;
+                tabs.write().activate(&tab);
+                s.host.send(HostCommand::Webview(ember_editor::webview::WebviewEvent::ViewState {
+                    handle: handle.clone(),
+                    visible: true,
+                    active: true,
+                    position: 1,
+                }));
+                if !*preserve_focus {
+                    s.host.send(HostCommand::Webview(ember_editor::webview::WebviewEvent::Focus {
+                        handle: handle.clone(),
+                        focused: true,
+                    }));
+                }
+            }
+            WebviewUpdate::Disposed { handle } => {
+                let tab = webview_tab_path(handle);
+                let mut tabs = s.tabs;
+                tabs.write().close(&tab);
+            }
+            WebviewUpdate::OpenFailed { reason, .. } => {
+                notice(format!("웹뷰를 열지 못했습니다: {reason}"));
+            }
+            _ => {}
+        }
+    }
+
+    /// A webview panel or custom editor tab: shows the placeholder until the host node exists (FR-E8).
+    pub(crate) fn webview_pane_view(_s: &Shared, pane: &ember_editor::webview::WebviewPane) -> Element {
+        let title = &pane.title;
+        let desc = pane.description.as_deref().unwrap_or("");
+        let status_text = pane.status.text();
+        rsx! {
+            div { class: "ed-empty", role: "region", "aria-label": "{title}",
+                style: "flex:1; width:100%; height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:var(--sp2);",
+                b { "{title}" }
+                if !desc.is_empty() {
+                    span { class: "muted", style: "font-size:var(--fs-xs);", "{desc}" }
+                }
+                if !status_text.is_empty() {
+                    p { class: "muted", "{status_text}" }
+                }
+            }
+        }
+    }
+
     pub(super) fn workbench_page() -> Element {
         let s = shared();
         let _ = *s.revision.read();
@@ -1181,6 +1309,9 @@ pub mod page {
                 BridgeAction::FormatFailed { uri, error } => {
                     tracing::warn!(path = %uri.path, %error, "reopening a file with an encoding failed");
                     notice(crate::ui::editor_status::reopen_failure_text(&crate::ui::editor::display_name(base_name(&uri.path)), None, &error));
+                }
+                BridgeAction::Webview(ref wv_update) => {
+                    handle_webview_update(&s, wv_update);
                 }
                 _ => {}
             }
@@ -1356,7 +1487,7 @@ pub mod page {
                         {crate::ui::workspace_trust::view::banner(&s)}
                         {tab_strip(&s, &paths, &dirty, current.as_deref())}
                         if let Some((menu_path, x, y)) = s.tab_menu.read().clone() { {tab_context_menu(&s, &menu_path, x, y)} }
-                        if let Some(path) = current.as_deref().filter(|_| !settings_shown) {
+                        if let Some(path) = current.as_deref().filter(|p| !settings_shown && !is_webview_tab(p)) {
                             {breadcrumbs(&s, path)}
                         }
                         {crate::ui::editor_states::view::banners(&s, current.as_deref())}
@@ -1366,6 +1497,9 @@ pub mod page {
                             else if diff_shown { {crate::ui::editor_scm::view::diff_pane(&s)} }
                             else if compare_shown { {crate::ui::editor_states::view::compare_pane(&s)} }
                             else if settings_shown { {crate::ui::editor_settings::view::pane(&s)} }
+                            else if let Some(pane) = current.as_deref().and_then(|p| webview_pane_for_tab(&s, p)) {
+                                {webview_pane_view(&s, &pane)}
+                            }
                             else if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
                             else if let Some(error) = current.as_ref().and_then(|p| open_error.clone().map(|e| (p.clone(), e))) {
                                 div { class: "ed-empty", role: "alert",
@@ -2445,7 +2579,16 @@ pub mod page {
                             crate::ui::editor::TabKeyOutcome::Activate(path) => {
                                 scm.close_diff();
                                 tabs.write().activate(&path);
-                                host.send(HostCommand::Focus(path));
+                                if let Some(handle) = webview_handle_from_tab(&path) {
+                                    host.send(HostCommand::Webview(ember_editor::webview::WebviewEvent::ViewState {
+                                        handle: handle.to_string(),
+                                        visible: true,
+                                        active: true,
+                                        position: 1,
+                                    }));
+                                } else {
+                                    host.send(HostCommand::Focus(path));
+                                }
                             }
                             crate::ui::editor::TabKeyOutcome::Close(path) | crate::ui::editor::TabKeyOutcome::RefuseDirty(path) => {
                                 // A dirty tab is not closed at once: the window asks, as Code-OSS does.
@@ -2466,7 +2609,11 @@ pub mod page {
                         let mut recent_files = s.recent_files;
                         let mut key_recent_files = s.recent_files;
                         let selected = current == Some(path.as_str());
-                        let label = base_name(&path).to_string();
+                        let label = if let Some(handle) = webview_handle_from_tab(&path) {
+                            s.bridge.borrow().webview_panes().get(handle).map(|p| p.title.clone()).unwrap_or_else(|| base_name(&path).to_string())
+                        } else {
+                            base_name(&path).to_string()
+                        };
                         let deleted = s.uris.borrow().get(&path).and_then(|u| s.bridge.borrow().document(u).map(|d| crate::ui::editor_states::is_deleted(d.external_change))).unwrap_or(false);
                         let shown_label = crate::ui::editor_states::tab_label(&label, deleted);
                         let label_style = crate::ui::editor_states::tab_label_style(deleted);
@@ -2492,7 +2639,16 @@ pub mod page {
                                     tabs.write().keep_open(&path);
                                 }
                                 record_recent_file(&mut recent_files, &path);
-                                host.send(HostCommand::Focus(path.clone()));
+                                if let Some(handle) = webview_handle_from_tab(&path) {
+                                    host.send(HostCommand::Webview(ember_editor::webview::WebviewEvent::ViewState {
+                                        handle: handle.to_string(),
+                                        visible: true,
+                                        active: true,
+                                        position: 1,
+                                    }));
+                                } else {
+                                    host.send(HostCommand::Focus(path.clone()));
+                                }
                             },
                             ondoubleclick: move |_| {
                                 tabs.write().keep_open(&keep_path);
@@ -2510,7 +2666,16 @@ pub mod page {
                                     key_scm.close_diff();
                                     tabs.write().activate(&tab_path);
                                     record_recent_file(&mut key_recent_files, &tab_path);
-                                    key_host.send(HostCommand::Focus(tab_path.clone()));
+                                    if let Some(handle) = webview_handle_from_tab(&tab_path) {
+                                        key_host.send(HostCommand::Webview(ember_editor::webview::WebviewEvent::ViewState {
+                                            handle: handle.to_string(),
+                                            visible: true,
+                                            active: true,
+                                            position: 1,
+                                        }));
+                                    } else {
+                                        key_host.send(HostCommand::Focus(tab_path.clone()));
+                                    }
                                 }
                             },
                             {icon_px(if selected { "file-w" } else { "file" }, 14)}

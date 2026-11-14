@@ -49,8 +49,8 @@ pub const SEND_OTHER_DEVICE: &str = "휴대폰이나 다른 기기로는 아직 
 pub const SEND_PLAIN_HTTP: &str = "이 컴퓨터는 암호화되지 않은 연결로 등록되어 있어서 파일을 보낼 수 없습니다.";
 /// Why a computer that is not online cannot receive.
 pub const SEND_OFFLINE: &str = "이 컴퓨터가 온라인이 아니어서 파일을 보낼 수 없습니다.";
-/// Why nothing can be sent while the server does not answer.
-pub const NOT_CONNECTED: &str = "서버에 연결되어 있지 않아 파일을 보낼 수 없습니다";
+/// Why nothing can be sent while the server does not answer (the screen says the same, FR-L27.9).
+pub const NOT_CONNECTED: &str = crate::ui::files::SEND_SERVER_LOST;
 /// The server computer's name when the computers list does not have it.
 pub const SERVER_NAME_FALLBACK: &str = crate::ui::files::SERVER_COMPUTER_NAME;
 
@@ -160,6 +160,9 @@ pub struct Book {
     snapshot: Option<TransfersSnapshot>,
     /// Whether the last read of the snapshot succeeded.
     online: bool,
+    /// The last read did not reach the server at all (FR-L27.9), as opposed to a server that
+    /// answered with an error (an older one without the API, a refused token).
+    lost: bool,
     outgoing: Vec<Outgoing>,
     /// Server ids of the sends finished in this run, with the receiver's name.
     sent: Vec<(String, String)>,
@@ -238,8 +241,9 @@ impl Book {
 
     /// Takes a fresh snapshot. `true` when the screen has something new to draw.
     pub fn apply_snapshot(&mut self, snapshot: TransfersSnapshot, now_ms: i64) -> bool {
-        let changed = !self.online || self.snapshot.as_ref() != Some(&snapshot);
+        let changed = !self.online || self.lost || self.snapshot.as_ref() != Some(&snapshot);
         self.online = true;
+        self.lost = false;
         for t in &snapshot.transfers {
             self.rates.entry(t.id.clone()).or_default().observe(now_ms, t.done);
         }
@@ -280,9 +284,29 @@ impl Book {
 
     /// The server did not answer. The last lists stay on screen; sending is blocked.
     pub fn mark_offline(&mut self) -> bool {
-        let changed = self.online;
+        let changed = self.online || self.lost;
         self.online = false;
+        self.lost = false;
         changed
+    }
+
+    /// A read failed with `e`: a transport failure means the server is out of reach and the
+    /// screen says so (FR-L27.9); any answer from the server only blocks sending.
+    /// `true` when the screen has something new to draw.
+    pub fn mark_failed(&mut self, e: &TransferError) -> bool {
+        if matches!(e, TransferError::Connection) {
+            let changed = self.online || !self.lost;
+            self.online = false;
+            self.lost = true;
+            changed
+        } else {
+            self.mark_offline()
+        }
+    }
+
+    /// The server is out of reach (FR-L27.9).
+    pub fn lost(&self) -> bool {
+        self.lost
     }
 
     /// This device's sends first, then what the server computer is receiving from others.
@@ -585,10 +609,11 @@ async fn refresh(book: &Mutex<Book>, api: &Api) -> Result<(), TransferError> {
             Ok(())
         }
         Err(e) => {
-            if lock(book).mark_offline() {
+            let err = TransferError::from_api(&e);
+            if lock(book).mark_failed(&err) {
                 redraw();
             }
-            Err(TransferError::from_api(&e))
+            Err(err)
         }
     }
 }
@@ -808,6 +833,10 @@ impl TransferService for ServerTransferService {
 
     fn can_send(&self) -> bool {
         lock(&self.book).can_send()
+    }
+
+    fn server_lost(&self) -> bool {
+        lock(&self.book).lost()
     }
 
     fn send(&self, device_id: &str, files: Vec<String>) -> Result<(), String> {

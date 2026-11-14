@@ -626,6 +626,12 @@ pub trait TransferService: Send + Sync {
     fn can_send(&self) -> bool {
         self.ready()
     }
+    /// Whether the service's server is out of reach: its last read failed to reach the server
+    /// (FR-L27.9). The lists it read before stay; the screen says so and sending is blocked.
+    /// The demo data and [`NoTransferService`] have no server to lose.
+    fn server_lost(&self) -> bool {
+        false
+    }
     /// Whether transfers are encrypted end to end. The screen shows the claim only when true.
     fn encrypted(&self) -> bool {
         true
@@ -960,19 +966,70 @@ pub struct FilesModel {
     pub received: Vec<ReceivedFile>,
     pub history: Vec<HistoryEntry>,
     pub ready: bool,
+    /// The service's server is out of reach (FR-L27.9).
+    pub lost: bool,
 }
 
 /// Devices are the service's when it has them, else the registered computers; always ordered.
+/// While the server is lost the tiles say so ([`lost_devices`]).
 pub fn build_model(computers: &[Computer], svc: &dyn TransferService) -> FilesModel {
+    let lost = svc.server_lost();
     let devices = svc
         .devices()
         .unwrap_or_else(|| devices_from_computers(computers));
+    let devices = if lost { lost_devices(devices) } else { devices };
     FilesModel {
         devices: order_devices(devices),
         transfers: svc.transfers(),
         received: svc.received(),
         history: svc.history(),
         ready: svc.ready(),
+        lost,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The lost server (FR-L27.9, #786)
+// ---------------------------------------------------------------------------------------------
+
+/// The status line's first sentence while the server is out of reach (as the editor says it).
+pub const SERVER_LOST: &str = "서버에 연결할 수 없습니다";
+/// Its second sentence when the lists were read before.
+pub const SERVER_LOST_KEPT: &str = "아래는 마지막으로 받은 목록입니다. 다시 연결되면 파일을 보낼 수 있습니다.";
+/// Its second sentence when no list was ever read.
+pub const SERVER_LOST_EMPTY: &str = "다시 연결되면 목록을 불러옵니다.";
+/// Why nothing can be sent while the server is out of reach (the service says the same).
+pub const SEND_SERVER_LOST: &str = "서버에 연결되어 있지 않아 파일을 보낼 수 없습니다";
+
+/// The status line under the header, `None` while the server answers.
+pub fn server_status(m: &FilesModel) -> Option<String> {
+    m.lost.then(|| format!("{SERVER_LOST}. {}", if m.ready { SERVER_LOST_KEPT } else { SERVER_LOST_EMPTY }))
+}
+
+/// The tiles while the server is lost: the server's own computer is offline to this device, and
+/// the others are not known, because the server is what reports their state (the mockup's
+/// `st-offline` and `st-unknown`). A path known before is not known any more.
+pub fn lost_devices(devices: Vec<Device>) -> Vec<Device> {
+    devices
+        .into_iter()
+        .map(|d| Device {
+            presence: if d.id == SERVER_COMPUTER_ID { Presence::Offline } else { Presence::Unknown },
+            path: None,
+            latency_ms: None,
+            ..d
+        })
+        .collect()
+}
+
+/// What a tap on a device tile says instead of opening the send sheet: the lost server first,
+/// then a device that is not online; `None` opens the sheet.
+pub fn tile_tap_notice(lost: bool, presence: Presence, name: &str) -> Option<String> {
+    if lost {
+        Some(SEND_SERVER_LOST.to_string())
+    } else if presence != Presence::Online {
+        Some(format!("{name}은(는) 지금 연결되어 있지 않습니다."))
+    } else {
+        None
     }
 }
 
@@ -1204,6 +1261,21 @@ pub fn share_tap(
     }
 }
 
+/// [`share_tap`] with the server: while it is lost a tap says so and sends nothing.
+pub fn share_tap_at(
+    target: &SendTarget,
+    devices: &[Device],
+    files: &[String],
+    picker_available: bool,
+    service_ready: bool,
+    lost: bool,
+) -> ShareTap {
+    if lost {
+        return ShareTap::Blocked(SEND_SERVER_LOST);
+    }
+    share_tap(target, devices, files, picker_available, service_ready)
+}
+
 /// What the file card of the sheet shows: the title, and the reason when it has no file.
 pub fn share_file_card(files: &[String], picker_available: bool) -> (String, Option<&'static str>) {
     match files {
@@ -1287,6 +1359,20 @@ pub fn send_state(
     }
     let can = blocker.is_none();
     (blocker, can)
+}
+
+/// [`send_state`] with the server: while it is lost that is the reason, before any other.
+pub fn send_state_at(
+    d: &SendDraft,
+    devices: &[Device],
+    picker_available: bool,
+    service_ready: bool,
+    lost: bool,
+) -> (Option<&'static str>, bool) {
+    if lost {
+        return (Some(SEND_SERVER_LOST), false);
+    }
+    send_state(d, devices, picker_available, service_ready)
 }
 
 /// Space the sheet frame takes at each side besides the content padding (measured at 390 dp:
@@ -2369,10 +2455,10 @@ mod tests {
         assert_eq!(send_state_at(&draft, &devs, true, false, false), send_state(&draft, &devs, true, false));
         // The share sheet.
         let t = SendTarget::Device(SERVER_COMPUTER_ID.into());
-        assert_eq!(share_tap_at(&t, &devs, &["a".into()], true, true, true), ShareTap::Blocked(SEND_SERVER_LOST));
+        assert_eq!(share_tap_at(&t, &devs, &["a".to_string()], true, true, true), ShareTap::Blocked(SEND_SERVER_LOST));
         let ag = SendTarget::Agent("s1".into());
-        assert_eq!(share_tap_at(&ag, &devs, &["a".into()], true, true, true), ShareTap::Blocked(SEND_SERVER_LOST));
-        assert_eq!(share_tap_at(&ag, &devs, &["a".into()], true, true, false), ShareTap::Send(ag.clone()));
+        assert_eq!(share_tap_at(&ag, &devs, &["a".to_string()], true, true, true), ShareTap::Blocked(SEND_SERVER_LOST));
+        assert_eq!(share_tap_at(&ag, &devs, &["a".to_string()], true, true, false), ShareTap::Send(ag.clone()));
         // A tap on a device tile.
         assert_eq!(tile_tap_notice(true, Presence::Online, "맥"), Some(SEND_SERVER_LOST.to_string()));
         assert_eq!(tile_tap_notice(true, Presence::Unknown, "PC"), Some(SEND_SERVER_LOST.to_string()));

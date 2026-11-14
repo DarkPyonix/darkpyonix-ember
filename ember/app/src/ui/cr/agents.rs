@@ -372,8 +372,9 @@ pub fn AgentsScreenWith(
                         // Compact: horizontal scrolling pills below the header
                         SectionNav(cur_sec, NavShape::Pills, nav_pick);
                         cu::Spacer().modifier(Modifier::new().height(SP[3]));
+                        // `.ag-body{gap:var(--gap-card)}`: 16 px between cards (review AG9).
                         cu::Column()
-                            .spacing(20.0)
+                            .spacing(GAP_CARD)
                             .modifier(Modifier::new().fill_max_width())
                             .content(|| {
                                 match cur_sec {
@@ -394,7 +395,7 @@ pub fn AgentsScreenWith(
                                     SectionNav(cur_sec, NavShape::Side, nav_pick);
                                 });
                                 cu::Column()
-                                    .spacing(20.0)
+                                    .spacing(GAP_CARD)
                                     .modifier(Modifier::new().weight(1.0))
                                     .content(|| {
                                         match cur_sec {
@@ -1516,7 +1517,7 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
             ModelCard(h, store, compact, example);
         }
     } else {
-        cu::Row().spacing(18.0).modifier(Modifier::new().fill_max_width()).content(|| {
+        cu::Row().spacing(GAP_CARD).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                 ModelCard(harnesses[0], store, compact, example);
             });
@@ -1524,7 +1525,7 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
                 ModelCard(harnesses[1], store, compact, example);
             });
         });
-        cu::Row().spacing(18.0).modifier(Modifier::new().fill_max_width()).content(|| {
+        cu::Row().spacing(GAP_CARD).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                 ModelCard(harnesses[2], store, compact, example);
             });
@@ -1974,7 +1975,6 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
             FormulaChip(Some(ICON_SPARK_SVG), "프로필", false);
         });
     }
-    cu::Spacer().modifier(Modifier::new().height(SP[1]));
     Label(
         "하네스마다 프로필 하나를 정하면 그 하네스로 만든 팀원이 모두 그 프로필을 따릅니다. 팀원마다 따로 설정하지 않습니다.",
         Fs::Sm,
@@ -2002,18 +2002,11 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
                     AccountTile(a, extra, live.sample);
                 }
             } else {
-                let chunks: Vec<_> = live.accounts.chunks(3).collect();
-                for chunk in chunks {
-                    cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        for a in chunk {
-                            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                                let extra = if a.limited { Some("한도 가까움") } else { None };
-                                AccountTile(a, extra, live.sample);
-                            });
-                        }
-                    });
-                    cu::Spacer().modifier(Modifier::new().height(SP[2]));
-                }
+                // `.ag-accs`: three fixed columns 12 apart; a short last row keeps the width.
+                FixedGrid(&live.accounts, 3, SP[2], |a| {
+                    let extra = if a.limited { Some("한도 가까움") } else { None };
+                    AccountTile(a, extra, live.sample);
+                });
             }
         });
     });
@@ -2450,9 +2443,7 @@ fn NetworkSection(computers: &[(String, Reachability)], sample: bool, compact: b
         });
     });
 
-    cu::Spacer().modifier(Modifier::new().height(SP[3]));
-
-    // Card 2: 컴퓨터별 상태 (컴퓨터)
+    // Card 2: 컴퓨터별 상태 (컴퓨터), 16 below the first (the section column's gap).
     EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -2466,17 +2457,8 @@ fn NetworkSection(computers: &[(String, Reachability)], sample: bool, compact: b
                     ComputerTile(name, *r, sample);
                 }
             } else {
-                let chunks: Vec<_> = computers.chunks(3).collect();
-                for chunk in chunks {
-                    cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        for (name, r) in chunk {
-                            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                                ComputerTile(name, *r, sample);
-                            });
-                        }
-                    });
-                    cu::Spacer().modifier(Modifier::new().height(SP[2]));
-                }
+                // `.ag-ctiles`: three fixed columns 12 apart; a short last row keeps the width.
+                FixedGrid(computers, 3, SP[2], |(name, r)| ComputerTile(name, *r, sample));
             }
         });
     });
@@ -2547,8 +2529,7 @@ fn UsageSection(
     let pick = window.clone();
     SegGroup(&PERIOD_OPTIONS, window.get(), move |v| pick.set(v));
     let m = usage::section_model(load, &crate::ui::home::today_utc(), window.get() as usize);
-
-    cu::Spacer().modifier(Modifier::new().height(SP[3]));
+    // Cards follow 16 apart: the section column's gap, no spacer on top (review AG9).
 
     // Hero Card: 오늘 토큰, the harnesses and the daily bars
     EmberCard(false, true, None, None, None, || {
@@ -2582,12 +2563,9 @@ fn UsageSection(
         });
     });
 
-    cu::Spacer().modifier(Modifier::new().height(SP[3]));
-
     // 2-Column row: 토큰 종류 & 하네스별 토큰과 비용
     if compact {
         TokenKindsCard(&m, compact);
-        cu::Spacer().modifier(Modifier::new().height(SP[3]));
         HarnessCostCard(&m, bars);
     } else {
         cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -2600,11 +2578,12 @@ fn UsageSection(
         });
     }
 
-    cu::Spacer().modifier(Modifier::new().height(SP[3]));
-
-    // Section Title & Accounts subscription cards
-    Label("계정별 남은 구독량", Fs::Lg, Weight::Semibold, None, Some(1));
-    cu::Spacer().modifier(Modifier::new().height(SP[2]));
+    // Section Title & Accounts subscription cards: `.ag-h2` (15/600, 8 px margin on top), then
+    // the card 16 below it.
+    cu::Column().content(|| {
+        cu::Spacer().modifier(Modifier::new().height(SP[1]));
+        Label("계정별 남은 구독량", Fs::Lg, Weight::Semibold, None, Some(1));
+    });
 
     EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -3001,6 +2980,26 @@ mod tests {
         let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
         let tile = production.split("fn AccountTile(").nth(1).unwrap().split("\nfn ").next().unwrap();
         assert!(tile.contains(".round_rect(paint(p.track), 0.0, 0.0, 115.0, 6.0, 3.0, 0.0)"), "{tile}");
+    }
+
+    #[test]
+    fn fr_l20_cards_are_16_apart_and_tile_grids_keep_their_cells() {
+        // Review AG8, AG9: weighted tiles in `chunks(3)` rows stretched a short last row, and
+        // spacers on top of the 20 px column gap left 58 px between cards (mockup 16-18).
+        let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
+        let screen = production.split("pub fn AgentsScreenWith(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert_eq!(screen.matches(".spacing(GAP_CARD)").count(), 2, "both layouts: {screen}");
+        assert!(!screen.contains(".spacing(20.0)"));
+        assert_eq!(GAP_CARD, 16.0);
+        for f in ["fn ProfilesSection(", "fn NetworkSection(", "fn UsageSection("] {
+            let body = production.split(f).nth(1).unwrap().split("\nfn ").next().unwrap();
+            assert!(!body.contains(".chunks(3)"), "{f}");
+            assert!(!body.contains("cu::Spacer().modifier(Modifier::new().height(SP[3]));"), "{f}: no spacer between cards");
+        }
+        for f in ["fn ProfilesSection(", "fn NetworkSection("] {
+            let body = production.split(f).nth(1).unwrap().split("\nfn ").next().unwrap();
+            assert!(body.contains("FixedGrid("), "{f}");
+        }
     }
 
     #[test]

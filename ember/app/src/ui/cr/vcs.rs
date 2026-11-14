@@ -6430,10 +6430,52 @@ mod tests {
     }
 
     #[test]
-    fn fr_l18_vcs_sheet_layout_scrolls_as_a_page() {
-        assert_eq!(vcs_sheet_layout(WindowSizeClass::Expanded), PaneLayout::Stacked);
-        assert_eq!(vcs_sheet_layout(WindowSizeClass::Medium), PaneLayout::Stacked);
-        assert_eq!(vcs_sheet_layout(WindowSizeClass::Compact), PaneLayout::Tabs);
+    fn fr_l18_1_vcs_sheet_frame_follows_the_mounted_mockup() {
+        // 1440: the sheet is 1296 wide and padded 16, so 1264 inside: the icon rail and the two
+        // panes with the 260 tree (`.vcs-compact .vcs-body`, `.vcs-compact .vcs-chg`).
+        assert_eq!(
+            vcs_sheet_frame(vcs_sheet_width(1440.0), 1440.0),
+            VcsSheetFrame { pad: 16.0, rail: true, layout: PaneLayout::Two, files_w: 260.0 }
+        );
+        // 1024: 921.6 wide, 889.6 inside, still wider than the 760 container rule.
+        assert!(vcs_sheet_frame(vcs_sheet_width(1024.0), 1024.0).rail);
+        // 800: 720 wide, 688 inside: pills over one column (`@container (max-width:760px)`).
+        let m = vcs_sheet_frame(vcs_sheet_width(800.0), 800.0);
+        assert_eq!((m.rail, m.layout), (false, PaneLayout::Stacked));
+        // 390: the whole window padded 12, pills and the 파일 / 차이 / 커밋 tabs.
+        assert_eq!(
+            vcs_sheet_frame(vcs_sheet_width(390.0), 390.0),
+            VcsSheetFrame { pad: 12.0, rail: false, layout: PaneLayout::Tabs, files_w: 260.0 }
+        );
+        assert_eq!((VCS_SHEET_RAIL_W, VCS_SHEET_RAIL_ITEM), (56.0, (48.0, 44.0)));
+    }
+
+    #[test]
+    fn fr_l18_1_vcs_sheet_subtitle_is_branch_changes_and_open_prs() {
+        let snap = sample_snapshot();
+        let n = snap.changes.len();
+        assert_eq!(vcs_sheet_subtitle(Some(&snap), Some(2)), format!("{} \u{b7} 변경 {n} \u{b7} PR 2", snap.branch));
+        // A count not read yet is left out, never shown as 0.
+        assert_eq!(vcs_sheet_subtitle(Some(&snap), None), format!("{} \u{b7} 변경 {n}", snap.branch));
+        assert_eq!(vcs_sheet_subtitle(None, Some(1)), "");
+        assert_eq!(vcs_sheet_title("Ember"), "버전 관리 \u{b7} Ember");
+    }
+
+    #[test]
+    fn fr_l18_1_vcs_sheet_draws_the_header_rail_tree_diff_and_commit_box() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let _ = vcs_sheet_window(1440.0, 900.0);
+        let text = text_of(open_vcs_sheet);
+        let project = sample_project_box();
+        assert!(text.contains(&vcs_sheet_title(&project.name)), "the header names the project");
+        assert!(text.contains("전체 화면"), "the header's full screen button");
+        assert!(text.contains("Width(56.0)"), "the icon rail");
+        assert!(text.contains("Width(260.0)"), "the tree column beside the diff");
+        assert!(text.contains("요약 (필수) 예: Feat: Wire shim"), "the commit box under the tree");
+        let screen = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        let sheet = screen.split("pub fn VcsSheet(").nth(1).unwrap().split("\npub fn ").next().unwrap();
+        assert!(sheet.contains("EmberSheetSized(\"\""), "the sheet draws its own header, not the shared title");
     }
 
     #[test]

@@ -30,3 +30,4 @@ pub mod agents;
 pub mod vcs;
 pub mod settings;
 pub mod device_scope;
+pub mod owner_claim;

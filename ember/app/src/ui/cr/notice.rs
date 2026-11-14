@@ -18,9 +18,23 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 /// Posts `text` to be shown as a long message. Safe from any thread.
 pub fn post(text: impl Into<String>) {
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    // A call the device's scope refused reads as one fixed sentence wherever it fails (FR-N8).
-    let text = crate::ui::device_scope::failure_text(&text.into());
+    let text = owner_or_scope_text(&text.into());
     shared_ui().notice.set(Some((id, text)));
+}
+
+/// A call that needed the owner key (403 `owner_required`, FR-S12, #842) opens the claim sheet
+/// again and claims anew when no claim is in progress, and reads as one fixed sentence. A call
+/// the device's scope refused reads as one fixed sentence too (FR-N8). Anything else unchanged.
+fn owner_or_scope_text(text: &str) -> String {
+    use crate::owner_claim as claim;
+    if claim::text_is_owner_required(text) {
+        if claim::request_claim() {
+            shared_ui().owner_claim_dismissed.set(None);
+            return claim::OWNER_NEEDED.to_string();
+        }
+        return claim::OWNER_NEEDED_ELSEWHERE.to_string();
+    }
+    crate::ui::device_scope::failure_text(text)
 }
 
 /// Shows what [`post`] queued. Compose it once at the root.
@@ -42,6 +56,21 @@ mod tests {
     use super::*;
     use compose_rust::protocol::decode_batch;
     use compose_rust::{Host, Recomposer};
+
+    /// A 403 `owner_required` from any owner action reads as one fixed sentence, never the
+    /// server's English; without a running claim (the tests, a server elsewhere) it points at
+    /// `ember-server owner` (FR-S12, #842).
+    #[test]
+    fn fr_s12_an_owner_required_failure_reads_as_one_sentence() {
+        let _guard = crate::services::test_guard();
+        assert!(crate::owner_claim::handle().is_none());
+        post("응답하지 못했습니다: server answered 403: this route needs owner presence: the Ember app");
+        let shown = shared_ui().notice.get_untracked().map(|(_, t)| t);
+        assert_eq!(shown.as_deref(), Some(crate::owner_claim::OWNER_NEEDED_ELSEWHERE));
+        post("모드를 바꾸지 못했습니다: server answered 500: boom");
+        let shown = shared_ui().notice.get_untracked().map(|(_, t)| t);
+        assert_eq!(shown.as_deref(), Some("모드를 바꾸지 못했습니다: server answered 500: boom"));
+    }
 
     #[test]
     fn fr_l9_a_notice_posted_from_a_worker_thread_is_shown_on_the_ui_thread() {

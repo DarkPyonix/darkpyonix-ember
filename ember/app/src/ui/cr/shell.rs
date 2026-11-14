@@ -780,6 +780,13 @@ pub fn window_chrome(window: Window) -> Window {
 /// Opens the compose-rust shell instead of the app and returns when it is closed.
 /// `services` must be installed.
 pub fn launch(pref: ThemePref) {
+    let (builder, content) = launch_parts(pref);
+    builder.launch(content);
+}
+
+/// The builder and the root every entry point opens the shell with, so the Android entry
+/// (FR-L36) draws what the desktop binary draws.
+pub fn launch_parts(pref: ThemePref) -> (compose_rust::LaunchBuilder, fn()) {
     shared_ui().theme_pref.set(pref);
     let scheme = if pref == ThemePref::Dark { ColorScheme::Dark } else { ColorScheme::Light };
     let (w, h) = requested_size();
@@ -843,10 +850,10 @@ pub fn launch(pref: ThemePref) {
         }
         _ => shell,
     };
-    compose_rust::LaunchBuilder::new()
+    let builder = compose_rust::LaunchBuilder::new()
         .with_theme(crate::ui::fonts::app_theme(scheme))
-        .with_window(crate::ui::cr::shell::window_chrome(Window::new().with_title("Ember").with_size(w, h)))
-        .launch(content);
+        .with_window(crate::ui::cr::shell::window_chrome(Window::new().with_title("Ember").with_size(w, h)));
+    (builder, content)
 }
 
 #[cfg(test)]

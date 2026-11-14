@@ -1135,7 +1135,7 @@ pub fn PaneTranscript(session: &str, agent: &str) {
                             .modifier(Modifier::new().fill_max_width().padding(SP[1]))
                             .content(move || {
                                 for item in items_c.iter() {
-                                    TranscriptRow(&sid_c, &agent_c, item, &exp_c, &ans_c);
+                                    TranscriptRow(&sid_c, &agent_c, item, &exp_c, &ans_c, None);
                                 }
                                 cu::Spacer().modifier(Modifier::new().height(12.0));
                             });

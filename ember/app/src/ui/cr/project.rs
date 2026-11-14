@@ -29,7 +29,7 @@ use super::characters::{CharState, Character, StylePicker};
 use crate::ui::characters::CharStyle;
 use super::components::{
     AppButton, ButtonKind, Clickable, NamedClickable, EmberField, EmberSheet, FieldOptions, FilterChip,
-    IconButton, Label, OptionSheet, Pill, PillTone, SearchField, Select, SheetFooter,
+    IconButton, Label, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu, SearchField, Select, SheetFooter,
 };
 use super::home::{content_width, fit_label, ring_image, text_px, Cols, Part};
 use super::notice;
@@ -922,31 +922,58 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
     }
     let remembered = ui.prefs.get().ide_target.as_deref().and_then(IdeKind::from_key);
     let choices = crate::ui::session::ide_choices(remembered);
-    let labels: Vec<String> = choices.iter().map(|c| c.label.to_string()).collect();
     let has_session = session.is_some();
-    cu::Box().content(|| {
-        cu::Row().alignment(Alignment::Center).spacing(4.0).content(|| {
-            let (o, ui_btn, ide_btn) = (open.clone(), ui.clone(), ide.clone());
-            AppButton(if compact { "IDE" } else { "IDE 열기" }, Some(IconRole::Forward), ButtonKind::Default, false, true, false, move || {
-                if !has_session {
-                    notice::post("세션이 없어 IDE를 열 수 없습니다");
-                } else {
-                    crate::ui::cr::session::ide_main_click(remembered, &o, |kind| {
-                        launch_ide(&ui_btn, kind, ide_btn.get_untracked())
-                    });
-                }
-            });
-            if has_session {
-                crate::ui::cr::session::IdeChevron(open.clone(), false);
-            }
-        });
-        let (close, ui2, ide2) = (open.clone(), ui.clone(), ide.clone());
-        OptionSheet(open.get(), &labels, None, 220.0, move || close.set(false), move |i| {
+    let cwd = session
+        .as_ref()
+        .and_then(|sid| services().client.read(|s| s.session(sid).map(|v| v.record.cwd.clone())))
+        .unwrap_or_default();
+    let rows: Vec<PopRow> = choices
+        .iter()
+        .map(|c| PopRow {
+            icon: Some(crate::ui::cr::session::ICON_CODE_SVG),
+            title: c.label.to_string(),
+            description: Some(crate::ui::session::ide_description(c.kind).to_string()),
+            chosen: Some(c.kind) == remembered,
+            ..Default::default()
+        })
+        .collect();
+    let (close, ui2, ide2) = (open.clone(), ui.clone(), ide.clone());
+    // The chooser hangs from the IDE button, lined up with its end (FR-L10.4, #888, review P10).
+    PopoverMenu(
+        open.get(),
+        PopMenu {
+            name: super::a11y::IDE_PICKER,
+            kind: PopKind::Drop,
+            head: crate::ui::session::IDE_MENU_HEAD,
+            sub: (!cwd.is_empty()).then_some(cwd.as_str()),
+            rows: &rows,
+            align: compose_rust::PopoverAlign::End,
+        },
+        move || close.set(false),
+        move |i| {
             if let Some(c) = choices.get(i) {
                 launch_ide(&ui2, c.kind, ide2.get_untracked());
             }
-        });
-    });
+        },
+        || {
+            cu::Row().alignment(Alignment::Center).spacing(4.0).content(|| {
+                let (o, ui_btn, ide_btn) = (open.clone(), ui.clone(), ide.clone());
+                AppButton(if compact { "IDE" } else { "IDE 열기" }, Some(IconRole::Forward), ButtonKind::Default, false, true, false, move || {
+                    if !has_session {
+                        notice::post("세션이 없어 IDE를 열 수 없습니다");
+                    } else {
+                        crate::ui::cr::session::ide_main_click(remembered, &o, |kind| {
+                            launch_ide(&ui_btn, kind, ide_btn.get_untracked())
+                        });
+                    }
+                });
+                if has_session {
+                    crate::ui::cr::session::IdeChevron(open.clone(), false);
+                }
+            });
+        },
+        None,
+    );
 }
 
 /// `.strip`: members, waiting, running and the week's tokens, with the pinned sessions as chips.
@@ -1845,6 +1872,15 @@ fn DangerRowView(row: &crate::ui::project::DangerRow, enabled: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l10_4_project_ide_chooser_hangs_from_the_ide_button() {
+        let src = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        let ide = src.split("fn IdeMenu(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(ide.contains("PopoverMenu(") && ide.contains("PopKind::Drop") && ide.contains("PopoverAlign::End"));
+        assert!(ide.contains("IDE_MENU_HEAD") && ide.contains("ide_description(c.kind)"));
+        assert!(!src.contains("OptionSheet("), "no centred option sheet is left on the project screen");
+    }
     use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
     use compose_rust::{Host, Recomposer};
 

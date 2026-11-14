@@ -4,7 +4,7 @@
 //! instead of the app; the button at the top flips the scheme without saving the preference.
 //! It goes away with the last phase.
 
-use compose_rust::runtime::{composable, mutable_state_of, remember};
+use compose_rust::runtime::{Composable, mutable_state_of, remember};
 use compose_rust::schema::Window;
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -39,7 +39,7 @@ fn section(title: &str, content: impl FnOnce()) {
     cu::Row().space_role(compose_rust::SpaceRole::Sm).alignment(Alignment::CenterStart).content(content);
 }
 
-#[composable]
+#[Composable]
 pub fn gallery() {
     let theme = ember_theme();
     let p = theme.palette;

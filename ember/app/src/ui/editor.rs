@@ -82,6 +82,16 @@ pub fn row_click_closes_prompt(prompt: &TreePrompt, typed: &str) -> bool {
     }
 }
 
+/// The row whose label the name box replaces: a rename edits the renamed row in place, as Code-OSS's
+/// explorer does (#797). New file and new folder prompts, and a rename of a row that is not shown, get
+/// no row and keep the box at the top of the tree.
+pub fn rename_in_place_row(prompt: Option<&TreePrompt>, rows: &[TreeRow]) -> Option<usize> {
+    match prompt {
+        Some(TreePrompt::Rename { path }) => rows.iter().position(|r| &r.path == path),
+        _ => None,
+    }
+}
+
 /// Whether leaving the new-name field closes its prompt: an empty field has nothing to keep, a typed
 /// name stays so the person can come back to it.
 pub fn blur_closes_prompt(typed: &str) -> bool {
@@ -130,28 +140,243 @@ pub fn folds(regions: &[ember_editor::FoldRegion]) -> compose_rust::code::Folds 
     }))
 }
 
-/// The open files. A tab holds its unsaved mark, so closing a tab drops it.
+/// One open file in the tab strip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Tab {
+    path: String,
+    /// Unsaved edits.
+    dirty: bool,
+    /// Pinned (Code-OSS "sticky"): kept at the front of the strip and skipped by close others, close to the
+    /// right and close all.
+    pinned: bool,
+    /// A preview tab (Code-OSS "preview editor"): drawn in italics, replaced by the next preview open, made
+    /// permanent by an edit, a double-click, pinning or an explicit open.
+    preview: bool,
+}
+
+/// The open files (FR-L31.5). A tab holds its unsaved, pinned and preview marks, so closing a tab drops
+/// them. Pinned tabs always come first, as in Code-OSS, and a reorder never crosses that boundary.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EditorTabs {
-    tabs: Vec<(String, bool)>,
+    tabs: Vec<Tab>,
     current: Option<usize>,
+    /// Tabs whose close waits on their save (저장 in the unsaved-changes question): each closes when its
+    /// save succeeds and stays open and dirty when it fails, as in Code-OSS. Each holds the document
+    /// version the save was asked for, so an edit typed while the save was in flight keeps the tab.
+    closing: Vec<(String, Option<u32>)>,
+    /// The tabs closed, for 닫은 편집기 다시 열기 (FR-L31.15).
+    closed: super::editor_actions::ClosedEditors,
+}
+
+/// What closing one or more tabs needs (FR-L31.5): the tabs to close, the ones among them with unsaved
+/// edits, and the tab to make active afterwards. With no dirty tab it closes at once; with one, the window
+/// asks first (저장 / 저장 안 함 / 취소), as Code-OSS does, and Cancel closes none of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloseRequest {
+    pub paths: Vec<String>,
+    pub dirty: Vec<String>,
+    pub anchor: Option<String>,
+}
+
+/// How a save a closing tab waited on ended: whether it succeeded, and the document's version and unsaved
+/// mark once the session answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SaveOutcome {
+    pub ok: bool,
+    pub version: Option<u32>,
+    pub dirty: bool,
+}
+
+/// The answer to the unsaved-changes question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirtyChoice {
+    Save,
+    DontSave,
+    Cancel,
+}
+
+/// What to do after the answer: save these, then close these.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CloseResolution {
+    pub save: Vec<String>,
+    pub close: Vec<String>,
+}
+
+impl CloseRequest {
+    /// Whether the window has to ask before closing (a tab to close has unsaved edits).
+    pub fn needs_confirm(&self) -> bool {
+        !self.dirty.is_empty()
+    }
+
+    /// Whether there is anything to close.
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    /// The question, as Code-OSS words it: one file by name, several by count.
+    pub fn confirm_title(&self) -> String {
+        match self.dirty.as_slice() {
+            [one] => format!("{}의 변경 내용을 저장하시겠습니까?", display_name(base_name(one))),
+            many => format!("다음 {}개 파일의 변경 내용을 저장하시겠습니까?", many.len()),
+        }
+    }
+
+    /// The line under the question.
+    pub fn confirm_detail(&self) -> &'static str {
+        "저장하지 않으면 변경 내용이 손실됩니다."
+    }
+
+    /// The save button: 저장 for one file, 모두 저장 for several (Code-OSS's Save and Save All).
+    pub fn save_label(&self) -> &'static str {
+        if self.dirty.len() > 1 { "모두 저장" } else { "저장" }
+    }
+
+    /// The file names listed under a question about several files.
+    pub fn dirty_names(&self) -> Vec<String> {
+        if self.dirty.len() > 1 { self.dirty.iter().map(|p| display_name(base_name(p))).collect() } else { Vec::new() }
+    }
+
+    /// What the answer does: Save saves the dirty tabs and closes every tab asked for, 저장 안 함 closes
+    /// them all without saving, 취소 closes none.
+    pub fn resolve(&self, choice: DirtyChoice) -> CloseResolution {
+        match choice {
+            DirtyChoice::Save => CloseResolution { save: self.dirty.clone(), close: self.paths.clone() },
+            DirtyChoice::DontSave => CloseResolution { save: Vec::new(), close: self.paths.clone() },
+            DirtyChoice::Cancel => CloseResolution::default(),
+        }
+    }
 }
 
 impl EditorTabs {
     fn index(&self, path: &str) -> Option<usize> {
-        self.tabs.iter().position(|(p, _)| p == path)
+        self.tabs.iter().position(|t| t.path == path)
     }
 
-    /// Open a file, or activate it when it is already open.
+    fn pinned_count(&self) -> usize {
+        self.tabs.iter().take_while(|t| t.pinned).count()
+    }
+
+    /// Run `f` on the tab list and keep the same tab current, wherever it moved.
+    fn keeping_current(&mut self, f: impl FnOnce(&mut Vec<Tab>)) {
+        let current = self.current_path().map(str::to_owned);
+        f(&mut self.tabs);
+        self.current = current.and_then(|p| self.index(&p));
+    }
+
+    /// Open a file as a permanent tab, or activate it when it is already open (a preview tab opened this
+    /// way becomes permanent, as Code-OSS's pinned open does).
     pub fn open(&mut self, path: &str) {
         let i = match self.index(path) {
-            Some(i) => i,
+            Some(i) => {
+                self.tabs[i].preview = false;
+                i
+            }
             None => {
-                self.tabs.push((path.to_string(), false));
+                self.tabs.push(Tab { path: path.to_string(), dirty: false, pinned: false, preview: false });
                 self.tabs.len() - 1
             }
         };
         self.current = Some(i);
+    }
+
+    /// Open a file as the preview tab (a single click in the explorer or the search results). A file that
+    /// is already open is only activated. Otherwise the current preview tab, if there is one, is replaced
+    /// in its place; its path is returned so the caller closes its document.
+    pub fn open_preview(&mut self, path: &str) -> Option<String> {
+        if let Some(i) = self.index(path) {
+            self.current = Some(i);
+            return None;
+        }
+        let tab = Tab { path: path.to_string(), dirty: false, pinned: false, preview: true };
+        if let Some(i) = self.tabs.iter().position(|t| t.preview && !t.dirty && !t.pinned) {
+            let old = std::mem::replace(&mut self.tabs[i], tab);
+            self.current = Some(i);
+            return Some(old.path);
+        }
+        self.tabs.push(tab);
+        self.current = Some(self.tabs.len() - 1);
+        None
+    }
+
+    /// Make a preview tab permanent (a double-click on it or on its file, or 열린 상태 유지).
+    pub fn keep_open(&mut self, path: &str) {
+        if let Some(i) = self.index(path) {
+            self.tabs[i].preview = false;
+        }
+    }
+
+    pub fn is_preview(&self, path: &str) -> bool {
+        self.index(path).is_some_and(|i| self.tabs[i].preview)
+    }
+
+    pub fn is_pinned(&self, path: &str) -> bool {
+        self.index(path).is_some_and(|i| self.tabs[i].pinned)
+    }
+
+    /// Pin a tab: it becomes permanent and moves to the end of the pinned tabs at the front.
+    pub fn pin(&mut self, path: &str) {
+        let Some(i) = self.index(path) else { return };
+        if self.tabs[i].pinned {
+            return;
+        }
+        let to = self.pinned_count();
+        self.keeping_current(|tabs| {
+            let mut tab = tabs.remove(i);
+            tab.pinned = true;
+            tab.preview = false;
+            tabs.insert(to, tab);
+        });
+    }
+
+    /// Unpin a tab: it moves to the first place after the tabs that stay pinned.
+    pub fn unpin(&mut self, path: &str) {
+        let Some(i) = self.index(path) else { return };
+        if !self.tabs[i].pinned {
+            return;
+        }
+        let to = self.pinned_count() - 1;
+        self.keeping_current(|tabs| {
+            let mut tab = tabs.remove(i);
+            tab.pinned = false;
+            tabs.insert(to, tab);
+        });
+    }
+
+    pub fn toggle_pin(&mut self, path: &str) {
+        if self.is_pinned(path) { self.unpin(path) } else { self.pin(path) }
+    }
+
+    /// Move a tab to `to`, kept inside its own group (pinned tabs among the pinned, others after them).
+    /// Returns whether it moved.
+    pub fn move_to(&mut self, path: &str, to: usize) -> bool {
+        let Some(i) = self.index(path) else { return false };
+        let pinned = self.pinned_count();
+        let (lo, hi) = if self.tabs[i].pinned { (0, pinned - 1) } else { (pinned, self.tabs.len() - 1) };
+        let to = to.clamp(lo, hi);
+        if to == i {
+            return false;
+        }
+        self.keeping_current(|tabs| {
+            let tab = tabs.remove(i);
+            tabs.insert(to, tab);
+        });
+        true
+    }
+
+    /// Move a tab one place left (Code-OSS's Move Editor Left), not across the pinned boundary.
+    pub fn move_left(&mut self, path: &str) -> bool {
+        match self.index(path) {
+            Some(i) if i > 0 => self.move_to(path, i - 1),
+            _ => false,
+        }
+    }
+
+    /// Move a tab one place right (Code-OSS's Move Editor Right), not across the pinned boundary.
+    pub fn move_right(&mut self, path: &str) -> bool {
+        match self.index(path) {
+            Some(i) => self.move_to(path, i + 1),
+            None => false,
+        }
     }
 
     pub fn activate(&mut self, path: &str) {
@@ -164,7 +389,9 @@ impl EditorTabs {
     /// one before it; closing another one keeps the current tab.
     pub fn close(&mut self, path: &str) {
         let Some(i) = self.index(path) else { return };
+        self.closed.push_at(path, i);
         self.tabs.remove(i);
+        self.closing.retain(|(p, _)| p != path);
         self.current = match self.current {
             _ if self.tabs.is_empty() => None,
             Some(c) if c == i => Some(i.min(self.tabs.len() - 1)),
@@ -173,56 +400,258 @@ impl EditorTabs {
         };
     }
 
+    /// Act on the answer to the unsaved-changes question. Returns the tabs to close now: every tab asked
+    /// for after 저장 안 함; after 저장 the clean ones only, while each dirty one waits for its save
+    /// ([`EditorTabs::save_finished`]); none after 취소.
+    /// `version_of` gives each document's version when its save is asked for.
+    pub fn begin_close(&mut self, request: &CloseRequest, choice: DirtyChoice, version_of: impl Fn(&str) -> Option<u32>) -> Vec<String> {
+        let resolution = request.resolve(choice);
+        for p in &resolution.save {
+            if self.index(p).is_some() && !self.is_closing(p) {
+                self.closing.push((p.clone(), version_of(p)));
+            }
+        }
+        resolution.close.into_iter().filter(|p| !resolution.save.contains(p)).collect()
+    }
+
+    /// Whether the tab waits to close on its save.
+    pub fn is_closing(&self, path: &str) -> bool {
+        self.closing.iter().any(|(p, _)| p == path)
+    }
+
+    /// A save finished. Returns whether the tab is to close now: it waited on this save, the save
+    /// succeeded, and the document is still at the version that was saved and not dirty again. On a
+    /// failure, or after an edit typed while the save was in flight, it stays open and dirty and the
+    /// pending close is dropped (Code-OSS keeps an editor open that is dirty after its save).
+    pub fn save_finished(&mut self, path: &str, outcome: SaveOutcome) -> bool {
+        let Some(i) = self.closing.iter().position(|(p, _)| p == path) else { return false };
+        let (_, saved_version) = self.closing.remove(i);
+        let edited = outcome.dirty || outcome.version != saved_version;
+        if !outcome.ok || edited {
+            self.set_dirty(path, true);
+            return false;
+        }
+        self.index(path).is_some()
+    }
+
+    /// Close several tabs, then activate `anchor` when it is still open.
+    pub fn close_many(&mut self, paths: &[String], anchor: Option<&str>) {
+        for p in paths {
+            self.close(p);
+        }
+        if let Some(a) = anchor {
+            self.activate(a);
+        }
+    }
+
+    fn request(&self, paths: Vec<String>, anchor: Option<&str>) -> CloseRequest {
+        let dirty = paths.iter().filter(|p| self.is_dirty(p)).cloned().collect();
+        CloseRequest { paths, dirty, anchor: anchor.map(str::to_owned) }
+    }
+
+    /// Closing one tab (its close button, 닫기, Cmd+W): a request to confirm when it is dirty.
+    pub fn close_request(&self, path: &str) -> CloseRequest {
+        let paths = self.index(path).map(|_| vec![path.to_string()]).unwrap_or_default();
+        self.request(paths, None)
+    }
+
+    /// 다른 항목 닫기: every tab but `path`, skipping pinned tabs as Code-OSS does; `path` becomes active.
+    pub fn close_others_request(&self, path: &str) -> CloseRequest {
+        let paths = self.tabs.iter().filter(|t| t.path != path && !t.pinned).map(|t| t.path.clone()).collect();
+        self.request(paths, Some(path))
+    }
+
+    /// 오른쪽에 있는 항목 닫기: the tabs right of `path`, skipping pinned ones; `path` becomes active.
+    pub fn close_right_request(&self, path: &str) -> CloseRequest {
+        let Some(i) = self.index(path) else { return self.request(Vec::new(), None) };
+        let paths = self.tabs[i + 1..].iter().filter(|t| !t.pinned).map(|t| t.path.clone()).collect();
+        self.request(paths, Some(path))
+    }
+
+    /// 모두 닫기: every tab that is not pinned (Code-OSS keeps pinned editors on Close All).
+    pub fn close_all_request(&self) -> CloseRequest {
+        let paths = self.tabs.iter().filter(|t| !t.pinned).map(|t| t.path.clone()).collect();
+        self.request(paths, None)
+    }
+
     /// A path was renamed: every tab at or below `old` takes the matching path below `new`, keeping its
-    /// place and its dirty mark. Returns the (old, new) pairs of the tabs that moved.
+    /// place and its marks. Returns the (old, new) pairs of the tabs that moved.
     pub fn rename_prefix(&mut self, old: &str, new: &str) -> Vec<(String, String)> {
         let old = old.trim_end_matches('/');
         let new = new.trim_end_matches('/');
         let mut moved = Vec::new();
-        for (path, _) in &mut self.tabs {
-            if is_at_or_below(path, old) {
-                let renamed = format!("{new}{}", &path[old.len()..]);
-                moved.push((std::mem::replace(path, renamed.clone()), renamed));
+        for tab in &mut self.tabs {
+            if is_at_or_below(&tab.path, old) {
+                let renamed = format!("{new}{}", &tab.path[old.len()..]);
+                moved.push((std::mem::replace(&mut tab.path, renamed.clone()), renamed));
             }
         }
         moved
     }
 
+    /// Mark a tab's unsaved edits. An edit makes a preview tab permanent, as in Code-OSS.
     pub fn set_dirty(&mut self, path: &str, dirty: bool) {
         if let Some(i) = self.index(path) {
-            self.tabs[i].1 = dirty;
+            self.tabs[i].dirty = dirty;
+            if dirty {
+                self.tabs[i].preview = false;
+            }
         }
     }
 
     pub fn is_dirty(&self, path: &str) -> bool {
-        self.index(path).is_some_and(|i| self.tabs[i].1)
+        self.index(path).is_some_and(|i| self.tabs[i].dirty)
     }
 
     pub fn has_unsaved(&self) -> bool {
-        self.tabs.iter().any(|(_, d)| *d)
+        self.tabs.iter().any(|t| t.dirty)
     }
 
     pub fn paths(&self) -> Vec<&str> {
-        self.tabs.iter().map(|(p, _)| p.as_str()).collect()
+        self.tabs.iter().map(|t| t.path.as_str()).collect()
     }
 
     pub fn current_path(&self) -> Option<&str> {
-        self.current.map(|i| self.tabs[i].0.as_str())
+        self.current.map(|i| self.tabs[i].path.as_str())
     }
 
-    /// Close every tab except the currently active one, returning the paths of the tabs that closed.
+    /// Close every tab except the currently active one and the pinned ones, without asking, returning the
+    /// paths of the tabs that closed. The window asks first through [`EditorTabs::close_others_request`].
     pub fn close_others(&mut self) -> Vec<String> {
-        let Some(cur) = self.current else { return Vec::new() };
-        let keep = self.tabs[cur].clone();
-        let closed: Vec<String> = self
-            .tabs
-            .iter()
-            .enumerate()
-            .filter_map(|(i, (p, _))| (i != cur).then(|| p.clone()))
-            .collect();
-        self.tabs = vec![keep];
-        self.current = Some(0);
+        let Some(cur) = self.current_path().map(str::to_owned) else { return Vec::new() };
+        let closed = self.close_others_request(&cur).paths;
+        self.close_many(&closed, Some(&cur));
         closed
+    }
+
+    /// 닫은 편집기 다시 열기 (`workbench.action.reopenClosedEditor`): open the tab closed last
+    /// that is not open again, and return its path.
+    pub fn reopen_closed(&mut self) -> Option<String> {
+        let open: Vec<String> = self.tabs.iter().map(|t| t.path.clone()).collect();
+        let (path, index) = self.closed.pop_at(|p| open.iter().any(|o| o == p))?;
+        // Code-OSS puts a reopened editor back at the index it had, or last when fewer tabs are left.
+        // It comes back unpinned, so never inside the pinned group (FR-L31.5).
+        let pinned = self.tabs.iter().filter(|t| t.pinned).count();
+        let at = index.clamp(pinned, self.tabs.len());
+        self.tabs.insert(at, Tab { path: path.clone(), dirty: false, pinned: false, preview: false });
+        self.current = Some(at);
+        Some(path)
+    }
+
+    /// A path was deleted: its tabs are not reopened.
+    pub fn forget_closed_below(&mut self, path: &str) {
+        self.closed.forget_below(path);
+    }
+}
+
+/// The CSS class of a tab with its pinned and preview marks (Ember additions to the mockup's `ed-tab`:
+/// `.pinned` draws the pin in place of the close button, `.preview` sets the name in italics).
+pub fn tab_class_with(active: bool, modified: bool, pinned: bool, preview: bool) -> String {
+    let mut class = tab_class(active, modified).to_string();
+    if pinned {
+        class.push_str(" pinned");
+    }
+    if preview {
+        class.push_str(" preview");
+    }
+    class
+}
+
+/// The tab context menu (FR-L31.5), in Code-OSS's order with Ember's move items for the reorder that drag
+/// cannot do yet (dioxus-compose sends no drag events).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabMenuItem {
+    Close,
+    CloseOthers,
+    CloseRight,
+    CloseAll,
+    KeepOpen,
+    Pin,
+    Unpin,
+    MoveLeft,
+    MoveRight,
+}
+
+impl TabMenuItem {
+    pub fn label(self) -> &'static str {
+        match self {
+            TabMenuItem::Close => "닫기",
+            TabMenuItem::CloseOthers => "다른 항목 닫기",
+            TabMenuItem::CloseRight => "오른쪽에 있는 항목 닫기",
+            TabMenuItem::CloseAll => "모두 닫기",
+            TabMenuItem::KeepOpen => "열린 상태 유지",
+            TabMenuItem::Pin => "고정",
+            TabMenuItem::Unpin => "고정 해제",
+            TabMenuItem::MoveLeft => "왼쪽으로 이동",
+            TabMenuItem::MoveRight => "오른쪽으로 이동",
+        }
+    }
+}
+
+/// The items of the context menu of the tab `path`, with whether each one can run (a close item with
+/// nothing to close, or a move at the edge of its group, is shown disabled, as Code-OSS does).
+pub fn tab_menu_items(tabs: &EditorTabs, path: &str) -> Vec<(TabMenuItem, bool)> {
+    let Some(i) = tabs.index(path) else { return Vec::new() };
+    let pinned = tabs.is_pinned(path);
+    let pc = tabs.pinned_count();
+    let (lo, hi) = if pinned { (0, pc.saturating_sub(1)) } else { (pc, tabs.tabs.len() - 1) };
+    let mut items = vec![
+        (TabMenuItem::Close, true),
+        (TabMenuItem::CloseOthers, !tabs.close_others_request(path).is_empty()),
+        (TabMenuItem::CloseRight, !tabs.close_right_request(path).is_empty()),
+        (TabMenuItem::CloseAll, !tabs.close_all_request().is_empty()),
+    ];
+    if tabs.is_preview(path) {
+        items.push((TabMenuItem::KeepOpen, true));
+    }
+    items.push((if pinned { TabMenuItem::Unpin } else { TabMenuItem::Pin }, true));
+    items.push((TabMenuItem::MoveLeft, i > lo));
+    items.push((TabMenuItem::MoveRight, i < hi));
+    items
+}
+
+/// Two clicks on the same target within this many milliseconds are a double-click (FR-L31.5).
+pub const DOUBLE_CLICK_MS: u64 = 500;
+
+/// Tells a double-click from two clicks out of `onclick` alone. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DoubleClick {
+    last: Option<(String, u64)>,
+}
+
+impl DoubleClick {
+    /// A click on `target` at `now_ms`. Returns true when it is the second click on the same target within
+    /// [`DOUBLE_CLICK_MS`]; that pair is used up, so a third click starts over.
+    pub fn click(&mut self, target: &str, now_ms: u64) -> bool {
+        let double = self
+            .last
+            .as_ref()
+            .is_some_and(|(t, at)| t == target && now_ms.saturating_sub(*at) <= DOUBLE_CLICK_MS);
+        self.last = if double { None } else { Some((target.to_string(), now_ms)) };
+        double
+    }
+}
+
+/// Whether a key on the focused tab strip opens the tab menu: Shift+F10 or the ContextMenu key, as in
+/// Code-OSS. The key and the ⋯ menu stand in for the right-click menu. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
+pub fn tab_menu_key(key: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool {
+    match key {
+        "F10" => shift && !ctrl && !alt && !meta,
+        "ContextMenu" => !ctrl && !shift && !alt && !meta,
+        _ => false,
+    }
+}
+
+/// The tab strip's reorder keys (Code-OSS's Move Editor Left and Right): Ctrl+Shift+PageUp and
+/// Ctrl+Shift+PageDown, the same on every OS. `Some(true)` moves right, `Some(false)` left.
+pub fn tab_move_key(key: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> Option<bool> {
+    if !ctrl || !shift || alt || meta {
+        return None;
+    }
+    match key {
+        "PageUp" => Some(false),
+        "PageDown" => Some(true),
+        _ => None,
     }
 }
 
@@ -374,6 +803,10 @@ pub fn editor_strip_padding(full_size: bool, leading: f32) -> String {
 pub fn editor_grid_style_maximized() -> String {
     "grid-template-rows:52px 0 minmax(0,1fr) var(--sbh);".to_string()
 }
+
+/// The label of the find pill in the top bar (`editor.js:74`), the same in both keymaps; the hover
+/// names the keymap's action (`Keymap::find_label`) and its shortcut.
+pub const FIND_PILL_LABEL: &str = "파일, 동작, 기호 찾기";
 
 /// The breadcrumb line: segments joined with a right-angle quote.
 pub fn breadcrumb_text(path: &str, folder: &str) -> String {
@@ -757,6 +1190,8 @@ pub enum TreeKeyOutcome {
     Collapse(String),
     /// Open a file in the editor.
     OpenFile(String),
+    /// Start renaming the row (`F2`, as Code-OSS's `renameFile` keybinding).
+    Rename(String),
 }
 
 /// Whether the explorer tree container should handle key events (`Escape`, `Cmd/Ctrl+C/X/V`,
@@ -769,6 +1204,7 @@ pub fn tree_handles_key(prompt: Option<&TreePrompt>) -> bool {
 }
 
 /// Handles WAI-ARIA treeview keyboard navigation (`ArrowDown`, `ArrowUp`, `ArrowRight`, `ArrowLeft`, `Home`, `End`, `Enter`, `" "`)
+/// and `F2` (rename the selected row, never the root folder)
 /// over `rows`, given `selected` (`Option<(&str, bool)>`) and `root`.
 pub fn tree_key_action(
     rows: &[TreeRow],
@@ -834,6 +1270,11 @@ pub fn tree_key_action(
             } else {
                 None
             }
+        }
+        "F2" => {
+            let i = current_idx?;
+            let row = &rows[i];
+            (row.path != root).then(|| TreeKeyOutcome::Rename(row.path.clone()))
         }
         "Enter" | " " | "Space" => {
             let i = current_idx?;
@@ -959,6 +1400,8 @@ pub enum ToolWindow {
     Search,
     Commit,
     Git,
+    /// Installed extensions, Open VSX search, install, uninstall, enable and disable (FR-L31.14).
+    Extensions,
     Agent,
     Notifications,
     Terminal,
@@ -968,11 +1411,12 @@ pub enum ToolWindow {
 }
 
 impl ToolWindow {
-    pub const ALL: [ToolWindow; 10] = [
+    pub const ALL: [ToolWindow; 11] = [
         ToolWindow::Project,
         ToolWindow::Search,
         ToolWindow::Commit,
         ToolWindow::Git,
+        ToolWindow::Extensions,
         ToolWindow::Agent,
         ToolWindow::Notifications,
         ToolWindow::Terminal,
@@ -980,10 +1424,19 @@ impl ToolWindow {
         ToolWindow::Problems,
         ToolWindow::Output,
     ];
-    pub const LEFT: [ToolWindow; 4] = [ToolWindow::Project, ToolWindow::Search, ToolWindow::Commit, ToolWindow::Git];
+    pub const LEFT: [ToolWindow; 5] =
+        [ToolWindow::Project, ToolWindow::Search, ToolWindow::Commit, ToolWindow::Git, ToolWindow::Extensions];
     pub const RIGHT: [ToolWindow; 2] = [ToolWindow::Agent, ToolWindow::Notifications];
     pub const BOTTOM: [ToolWindow; 4] =
         [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems, ToolWindow::Output];
+
+    /// The buttons of the left stripe, exactly the mockup's (`editor.js:51`): 프로젝트, 커밋, Git.
+    /// 검색 opens from the top find pill and ⇧⌘F, 확장 from its shortcut and the palette; their
+    /// windows still take the left side (owner placement rule, 2026-11-13, `docs/DESIGN.md` 6.3).
+    pub const LEFT_STRIPE: [ToolWindow; 3] = [ToolWindow::Project, ToolWindow::Commit, ToolWindow::Git];
+    /// The buttons of the bottom stripe, exactly the mockup's: 터미널, 실행, 문제. 출력 is a tab of
+    /// the bottom tool window beside 문제, not a stripe button.
+    pub const BOTTOM_STRIPE: [ToolWindow; 3] = [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -991,6 +1444,7 @@ impl ToolWindow {
             ToolWindow::Search => "검색",
             ToolWindow::Commit => "커밋",
             ToolWindow::Git => "Git",
+            ToolWindow::Extensions => "확장",
             ToolWindow::Agent => "에이전트",
             ToolWindow::Notifications => "알림",
             ToolWindow::Terminal => "터미널",
@@ -1002,7 +1456,7 @@ impl ToolWindow {
 
     pub fn side(self) -> Side {
         match self {
-            ToolWindow::Project | ToolWindow::Search | ToolWindow::Commit | ToolWindow::Git => Side::Left,
+            ToolWindow::Project | ToolWindow::Search | ToolWindow::Commit | ToolWindow::Git | ToolWindow::Extensions => Side::Left,
             ToolWindow::Agent | ToolWindow::Notifications => Side::Right,
             ToolWindow::Terminal | ToolWindow::Run | ToolWindow::Problems | ToolWindow::Output => Side::Bottom,
         }
@@ -1015,6 +1469,7 @@ impl ToolWindow {
             ToolWindow::Search => Some(Action::FindInFiles),
             ToolWindow::Commit => Some(Action::Commit),
             ToolWindow::Git => Some(Action::Git),
+            ToolWindow::Extensions => Some(Action::Extensions),
             ToolWindow::Agent => Some(Action::Ask),
             ToolWindow::Notifications => None,
             ToolWindow::Terminal => Some(Action::Terminal),
@@ -1038,6 +1493,7 @@ impl ToolWindow {
             ToolWindow::Search => IconRole::Search,
             ToolWindow::Commit => IconRole::Check,
             ToolWindow::Git => IconRole::History,
+            ToolWindow::Extensions => IconRole::Library,
             ToolWindow::Agent => IconRole::Compose,
             ToolWindow::Notifications => IconRole::Inbox,
             ToolWindow::Terminal => IconRole::Menu,
@@ -1103,7 +1559,27 @@ impl Stripes {
 pub fn is_implemented(action: Action) -> bool {
     // The right tool windows (agent, notifications) have no panel in the window yet: toggling one shows nothing.
     ToolWindow::from_action(action).is_some_and(|w| w.side() != Side::Right)
-        || matches!(action, Action::Close | Action::HideTool | Action::FindInFile | Action::ReplaceInFiles | Action::Recent | Action::GotoLine)
+        || matches!(
+            action,
+            Action::Close
+                | Action::HideTool
+                | Action::FindInFile
+                | Action::ReplaceInFiles
+                | Action::Recent
+                | Action::GotoLine
+                | Action::Save
+                | Action::MaximizeTool
+                | Action::ReopenClosed
+                | Action::Palette
+                | Action::Find
+                | Action::ZoomIn
+                | Action::ZoomOut
+                | Action::ZoomReset
+                | Action::Settings
+                | Action::SettingsJson
+                | Action::KeybindingsJson
+                | Action::Format
+        )
 }
 
 /// Do what a keymap action does. Returns false for an action the editor cannot do yet (the
@@ -1417,6 +1893,19 @@ mod tests {
     }
 
     #[test]
+    fn fr_l31_4_rename_box_replaces_the_renamed_rows_label() {
+        let row = |path: &str, depth| TreeRow { path: path.into(), name: base_name_for_test(path), depth, is_dir: false, open: false };
+        let rows = vec![row("/w/src", 0), row("/w/src/a.rs", 1), row("/w/b.md", 0)];
+        assert_eq!(rename_in_place_row(Some(&TreePrompt::Rename { path: "/w/src/a.rs".into() }), &rows), Some(1));
+        assert_eq!(rename_in_place_row(Some(&TreePrompt::Rename { path: "/w/b.md".into() }), &rows), Some(2));
+        assert_eq!(rename_in_place_row(Some(&TreePrompt::Rename { path: "/w/gone".into() }), &rows), None);
+        assert_eq!(rename_in_place_row(Some(&TreePrompt::NewFile { parent: "/w/src".into() }), &rows), None);
+        assert_eq!(rename_in_place_row(None, &rows), None);
+    }
+
+    fn base_name_for_test(path: &str) -> String { path.rsplit('/').next().unwrap_or(path).to_string() }
+
+    #[test]
     fn fr_l31_row_click_keeps_a_typed_name_and_closes_an_empty_field() {
         let new_file = TreePrompt::NewFile { parent: "/w".into() };
         assert!(row_click_closes_prompt(&new_file, ""));
@@ -1440,7 +1929,28 @@ mod tests {
         for action in Action::ALL {
             // The palette, find, find-in-file, replace-in-files, recent files and goto-line open sheets and bars in the window:
             // they are not tab or tool window changes, so `apply_action` does not do them.
-            if matches!(action, Action::Palette | Action::Find | Action::FindInFile | Action::ReplaceInFiles | Action::Recent | Action::GotoLine) {
+            // Save, maximize and reopen act on the window's session, panel size and close history (FR-L31.15).
+            // The settings view and the two settings files open a tab through the window (FR-L31.17).
+            // Format document goes to the language features (FR-L31.13), not to a tab or a tool window.
+            if matches!(
+                action,
+                Action::Palette
+                    | Action::Find
+                    | Action::FindInFile
+                    | Action::ReplaceInFiles
+                    | Action::Recent
+                    | Action::GotoLine
+                    | Action::Save
+                    | Action::MaximizeTool
+                    | Action::ReopenClosed
+                    | Action::ZoomIn
+                    | Action::ZoomOut
+                    | Action::ZoomReset
+                    | Action::Settings
+                    | Action::SettingsJson
+                    | Action::KeybindingsJson
+                    | Action::Format
+            ) {
                 continue;
             }
             let mut tabs = EditorTabs::default();
@@ -1448,6 +1958,24 @@ mod tests {
             let mut stripes = Stripes::default();
             assert_eq!(apply_action(action, &mut tabs, &mut stripes), is_implemented(action), "{action:?}");
         }
+    }
+
+    #[test]
+    fn fr_l31_15_reopen_closed_editor_reopens_the_tab_closed_last() {
+        let mut tabs = EditorTabs::default();
+        for p in ["/w/a", "/w/b", "/w/c"] {
+            tabs.open(p);
+        }
+        tabs.close("/w/b");
+        assert_eq!(tabs.reopen_closed().as_deref(), Some("/w/b"));
+        assert_eq!(tabs.current_path(), Some("/w/b"));
+        assert_eq!(tabs.paths(), vec!["/w/a", "/w/b", "/w/c"], "a reopened tab goes back to its old place");
+        tabs.activate("/w/a");
+        assert_eq!(tabs.close_others(), vec!["/w/b".to_string(), "/w/c".to_string()]);
+        assert_eq!(tabs.reopen_closed().as_deref(), Some("/w/c"));
+        tabs.forget_closed_below("/w/b");
+        assert_eq!(tabs.reopen_closed(), None);
+        assert_eq!(tabs.paths(), vec!["/w/a", "/w/c"]);
     }
 
     #[test]

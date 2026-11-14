@@ -19,6 +19,7 @@
 //! | POST | `/fs/pwrite` | [`PwriteRequest`] → [`Stat`] (in-place positional write) |
 //! | POST | `/fs/glob` | [`GlobRequest`] → [`GlobResponse`] |
 //! | POST | `/fs/grep` | [`GrepRequest`] → [`GrepResponse`] |
+//! | POST | `/git/blame` | [`git_blame::GitBlameRequest`] → [`git_blame::GitBlameResponse`] (FR-L31.8: one line's last commit, `commit: null` when none holds it; 400 for a path outside the work tree or a line past the end; 504 `timeout` after 10 s) |
 //! | POST | `/git/log` | [`git_log::GitLogRequest`] → [`git_log::GitLogResponse`] |
 //! | POST | `/git/commit/show` | [`git_commit::GitCommitShowRequest`] → [`git_commit::GitCommitShowResponse`] (FR-G14: one commit with its changed files; 400 for a bad sha, 404 `not_found` for an unknown one) |
 //! | POST | `/git/revert`, `/git/cherry-pick` | [`git_commit::GitCommitActionRequest`] → [`git_commit::GitCommitActionResponse`] (FR-G15; need `confirm: true`; 409 for a dirty tree or a conflict, which is aborted) |
@@ -58,6 +59,7 @@
 //! | POST | `/terms/{id}/control` | [`TermControlRequest`] → 204 |
 //! | POST | `/terms/{id}/kill` | [`KillRequest`] → 204 (default SIGHUP, then SIGKILL) |
 //! | DELETE | `/terms/{id}` | → 204 (409 while running) |
+//! | GET, POST | `/transfers`, `/transfers/offers`, `/transfers/offers/{id}/accept`, `/transfers/offers/{id}/decline`, `/transfers/{id}/chunks`, `/transfers/{id}/resume-offset/{file}`, `/transfers/{id}/complete`, `/pause`, `/resume`, `/cancel`, `/transfers/history` (GET, DELETE) | the file receiver ([`crate::transfers`], FR-F13): the server's `/api/transfers*` bodies; 507 `no_space` (FR-F16); 409 without a state folder |
 //!
 //! Closing the `/exec` socket kills the command's process group; jobs are unaffected by any
 //! connection. Persistent terminal sessions (`/terms`, [`crate::term`]) are owned by the
@@ -103,6 +105,8 @@ struct Inner {
     jobs: Arc<Jobs>,
     terms: Arc<Terms>,
     egress: Arc<crate::egress::EgressPolicy>,
+    /// The file receiver (`FR-F13`).
+    transfers: Arc<crate::transfers::Receiver>,
     /// Serialises writes so a hash precondition and the rename that follows it are atomic with
     /// respect to other writes through this daemon.
     write_lock: tokio::sync::Mutex<()>,
@@ -117,12 +121,18 @@ impl Node {
         anyhow::ensure!(!config.token.is_empty(), "token must not be empty");
         let jobs = Jobs::new();
         let terms = Terms::new(config.state_dir.as_deref(), config.pty_keeper.clone(), jobs.clone());
+        let transfers = Arc::new(crate::transfers::Receiver::open(
+            config.state_dir.as_deref(),
+            config.received_dir.as_deref(),
+            config.receive,
+        )?);
         Ok(Self(Arc::new(Inner {
             token: config.token,
             policy: PathPolicy::with_denied(config.roots, config.denied)?,
             jobs,
             terms,
             egress: Arc::new(config.egress),
+            transfers,
             write_lock: tokio::sync::Mutex::new(()),
         })))
     }
@@ -137,6 +147,10 @@ impl Node {
 
     pub fn policy(&self) -> &PathPolicy {
         &self.0.policy
+    }
+
+    pub fn transfers(&self) -> &Arc<crate::transfers::Receiver> {
+        &self.0.transfers
     }
 
     pub fn egress_policy(&self) -> &Arc<crate::egress::EgressPolicy> {
@@ -173,6 +187,7 @@ pub fn router(node: Node) -> Router {
         .route("/fs/grep", post(grep))
         // FR-G5: history route.
         .route("/git/log", post(git_log_handler))
+        .route("/git/blame", post(git_blame_handler))
         .route("/git/commit/show", post(git_commit_show_handler))
         .route("/git/revert", post(git_revert_handler))
         .route("/git/cherry-pick", post(git_cherry_pick_handler))
@@ -226,6 +241,7 @@ pub fn router(node: Node) -> Router {
         .route("/terms/{id}/attach", get(term_attach_ws))
         .route("/terms/{id}/control", post(term_control))
         .route("/terms/{id}/kill", post(kill_term))
+        .merge(transfer_routes())
         .route_layer(middleware::from_fn_with_state(node.clone(), auth));
     Router::new()
         .route("/health", get(health))
@@ -283,6 +299,18 @@ impl From<PolicyError> for ApiError {
             PolicyError::Outside(_) => ApiError::new(StatusCode::FORBIDDEN, ErrorCode::ForbiddenPath, e.to_string()),
             PolicyError::Io(_, io) if io.kind() == std::io::ErrorKind::NotFound => {
                 ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, e.to_string())
+            }
+            // A NUL byte or similar malformed path is the caller's error, not the node's.
+            PolicyError::Io(_, io) if io.kind() == std::io::ErrorKind::InvalidInput => {
+                ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, e.to_string())
+            }
+            // Linux canonicalize answers ENOTDIR for a trailing slash after a file (macOS drops
+            // the slash, handled in `resolve_existing`); like ENAMETOOLONG and ELOOP it is the
+            // caller's path, not the node's fault.
+            PolicyError::Io(_, io)
+                if matches!(crate::fs::io_errno(io), Some("ENOTDIR" | "EINVAL" | "ENAMETOOLONG" | "ELOOP")) =>
+            {
+                ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, e.to_string())
             }
             PolicyError::Io(..) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, e.to_string()),
         }
@@ -346,6 +374,121 @@ async fn blocking<T: Send + 'static>(
 
 // ---------------------------------------------------------------------------------------------
 // Handlers
+
+// ---------------------------------------------------------------------------------------------
+// File receiver (FR-F13 to FR-F16)
+
+impl From<crate::transfers::RecvError> for ApiError {
+    fn from(e: crate::transfers::RecvError) -> Self {
+        use crate::transfers::RecvError as E;
+        let (status, code) = match &e {
+            E::NotFound(_) => (StatusCode::NOT_FOUND, ErrorCode::NotFound),
+            E::BadRequest(_) => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
+            E::Forbidden(_) => (StatusCode::FORBIDDEN, ErrorCode::Forbidden),
+            E::TooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, ErrorCode::TooLarge),
+            E::Conflict(_) => (StatusCode::CONFLICT, ErrorCode::Conflict),
+            E::NoSpace(_) => (StatusCode::INSUFFICIENT_STORAGE, ErrorCode::NoSpace),
+            E::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal),
+        };
+        ApiError::new(status, code, e.to_string())
+    }
+}
+
+fn transfer_routes() -> Router<Node> {
+    Router::new()
+        .route("/transfers", get(tr_snapshot))
+        .route("/transfers/offers", post(tr_offer))
+        .route("/transfers/offers/{id}/accept", post(tr_accept))
+        .route("/transfers/offers/{id}/decline", post(tr_decline))
+        .route("/transfers/{id}/chunks", post(tr_chunk))
+        .route("/transfers/{id}/resume-offset/{file}", get(tr_resume_offset))
+        .route("/transfers/{id}/complete", post(tr_complete))
+        .route("/transfers/{id}/pause", post(tr_pause))
+        .route("/transfers/{id}/resume", post(tr_resume))
+        .route("/transfers/{id}/cancel", post(tr_cancel))
+        .route("/transfers/history", get(tr_history).delete(tr_clear_history))
+}
+
+/// Runs a receiver call off the async threads: it writes and hashes files.
+async fn on_receiver<T, F>(node: &Node, f: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce(&crate::transfers::Receiver) -> Result<T, crate::transfers::RecvError> + Send + 'static,
+{
+    let rx = node.transfers().clone();
+    tokio::task::spawn_blocking(move || f(&rx))
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, e.to_string()))?
+        .map_err(ApiError::from)
+}
+
+async fn tr_snapshot(State(node): State<Node>) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(on_receiver(&node, |r| r.snapshot()).await?))
+}
+
+async fn tr_offer(
+    State(node): State<Node>,
+    Json(body): Json<crate::transfers::OfferBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    Ok((StatusCode::CREATED, Json(on_receiver(&node, move |r| r.offer(body)).await?)))
+}
+
+async fn tr_accept(State(node): State<Node>, Path(id): Path<String>) -> Result<Json<crate::transfers::Transfer>, ApiError> {
+    Ok(Json(on_receiver(&node, move |r| r.accept(&id)).await?))
+}
+
+async fn tr_decline(
+    State(node): State<Node>,
+    Path(id): Path<String>,
+) -> Result<Json<ember_transfer::store::HistoryRecord>, ApiError> {
+    Ok(Json(on_receiver(&node, move |r| r.decline(&id)).await?))
+}
+
+async fn tr_chunk(
+    State(node): State<Node>,
+    Path(id): Path<String>,
+    Json(body): Json<crate::transfers::ChunkBody>,
+) -> Result<Json<crate::transfers::Transfer>, ApiError> {
+    Ok(Json(on_receiver(&node, move |r| r.chunk(&id, &body)).await?))
+}
+
+async fn tr_resume_offset(
+    State(node): State<Node>,
+    Path((id, file)): Path<(String, usize)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let tid = id.clone();
+    let offset = on_receiver(&node, move |r| r.resume_offset(&tid, file)).await?;
+    Ok(Json(serde_json::json!({ "id": id, "file": file, "offset": offset })))
+}
+
+async fn tr_complete(State(node): State<Node>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+    let stored = on_receiver(&node, move |r| r.complete(&id)).await?;
+    Ok(Json(serde_json::json!({ "stored": stored })))
+}
+
+async fn tr_pause(State(node): State<Node>, Path(id): Path<String>) -> Result<Json<crate::transfers::Transfer>, ApiError> {
+    Ok(Json(on_receiver(&node, move |r| r.pause(&id)).await?))
+}
+
+async fn tr_resume(State(node): State<Node>, Path(id): Path<String>) -> Result<Json<crate::transfers::Transfer>, ApiError> {
+    Ok(Json(on_receiver(&node, move |r| r.resume(&id)).await?))
+}
+
+async fn tr_cancel(
+    State(node): State<Node>,
+    Path(id): Path<String>,
+) -> Result<Json<ember_transfer::store::HistoryRecord>, ApiError> {
+    Ok(Json(on_receiver(&node, move |r| r.cancel(&id)).await?))
+}
+
+async fn tr_history(State(node): State<Node>) -> Result<Json<Vec<ember_transfer::store::HistoryRecord>>, ApiError> {
+    Ok(Json(on_receiver(&node, |r| r.history()).await?))
+}
+
+async fn tr_clear_history(State(node): State<Node>) -> Result<Json<serde_json::Value>, ApiError> {
+    on_receiver(&node, |r| r.clear_history()).await?;
+    Ok(Json(serde_json::json!({ "cleared": true })))
+}
 
 async fn health() -> Json<Health> {
     Json(Health { ok: true, version: env!("CARGO_PKG_VERSION").into() })
@@ -425,6 +568,11 @@ async fn git_log_handler(State(n): State<Node>, Json(r): Json<git_log::GitLogReq
     Ok(Json(git_log::log(&n.0.policy, &r).await?))
 }
 // End FR-G5.
+
+// FR-L31.8: blame of one line (reads only, holds no lock).
+async fn git_blame_handler(State(n): State<Node>, Json(r): Json<git_blame::GitBlameRequest>) -> ApiResult<git_blame::GitBlameResponse> {
+    Ok(Json(git_blame::blame(&n.0.policy, &r).await?))
+}
 
 // FR-G9: branch list handler.
 async fn git_branches_handler(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<git_branches::GitBranchesResponse> {
@@ -793,7 +941,10 @@ async fn create_term(
     let res = tokio::task::spawn_blocking(move || terms.create(&r, cwd))
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, e.to_string()))?
-        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, format!("{e:#}")))?;
+        .map_err(|e| match e.downcast_ref::<crate::term::TermLimit>() {
+            Some(_) => ApiError::new(StatusCode::CONFLICT, ErrorCode::Conflict, format!("{e:#}")),
+            None => ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, format!("{e:#}")),
+        })?;
     let status = if res.created { StatusCode::CREATED } else { StatusCode::OK };
     Ok((status, Json(res)))
 }

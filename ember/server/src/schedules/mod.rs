@@ -15,10 +15,15 @@
 //! Agents create schedules from a conversation with `ember-a2a schedule add|list|rm`, which
 //! calls the token-authenticated routes in [`api`] scoped to the caller's project.
 //!
+//! An event schedule (`kind: event`, FR-L23) has no planned trigger: [`ci::CiWatcher`] starts it
+//! once per failed GitHub workflow run of its repository ([`Scheduler::fire_event`]), and the run
+//! is recorded like any other.
+//!
 //! Time comes from a [`Clock`], so tests drive the scheduler with a [`ManualClock`] and
 //! [`Scheduler::tick`].
 
 pub mod api;
+pub mod ci;
 pub mod schema;
 pub mod timing;
 
@@ -100,6 +105,23 @@ pub enum ScheduleKind {
         #[serde(deserialize_with = "de_time")]
         at: i64,
     },
+    /// On an event instead of a time (FR-L23): no planned trigger, `next_run_at` stays null.
+    Event {
+        on: EventOn,
+        /// GitHub `owner/name` (a `github.com/owner/name` URL form is accepted and matched the same).
+        repository: String,
+        /// Only runs on this branch; omitted = any branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+    },
+}
+
+/// The events an event schedule can wait for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventOn {
+    /// A GitHub Actions workflow run of the repository concluded `failure`.
+    CiFailed,
 }
 
 fn utc() -> String {
@@ -239,6 +261,17 @@ pub struct NewSchedule {
 /// `PATCH /api/schedules/{id}`: `None` leaves a field alone.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SchedulePatch {
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// For `new` sessions: `Some("")` clears `computer_id` to `None` (this server).
+    #[serde(default)]
+    pub computer: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub target: Option<ScheduleTarget>,
     #[serde(default)]
     pub prompt: Option<String>,
     #[serde(default)]
@@ -430,20 +463,25 @@ impl Scheduler {
             .ok_or_else(|| ScheduleError::NotFound(id.to_string()))
     }
 
-    /// Check a kind against the clock: valid, and fires at least once from `now`.
-    fn first_trigger(&self, kind: &ScheduleKind, anchor: i64) -> Result<i64, ScheduleError> {
+    /// Check a kind against the clock: valid, and fires at least once from `now`. An event kind
+    /// has no planned trigger (`None`).
+    fn first_trigger(&self, kind: &ScheduleKind, anchor: i64) -> Result<Option<i64>, ScheduleError> {
         timing::validate(kind).map_err(bad)?;
+        if matches!(kind, ScheduleKind::Event { .. }) {
+            return Ok(None);
+        }
         let now = self.now();
         if let ScheduleKind::Once { at } = kind {
             // A moment in the past (clock skew, typing) still fires right away.
             if *at < now - GRACE_MS {
                 return Err(bad(format!("time {} is in the past", timing::rfc3339(*at))));
             }
-            return Ok((*at).max(now));
+            return Ok(Some((*at).max(now)));
         }
         timing::next_after(kind, anchor, now)
             .map_err(bad)?
             .ok_or_else(|| bad("this schedule would never fire"))
+            .map(Some)
     }
 
     /// Create a schedule (FR-A8). `created_by` is the agent session that asked for it, if any.
@@ -518,7 +556,7 @@ impl Scheduler {
                 new.paused,
                 new.catch_up,
                 now,
-                (!new.paused).then_some(next),
+                next.filter(|_| !new.paused),
                 created_by,
                 now
             ],
@@ -531,23 +569,118 @@ impl Scheduler {
 
     pub fn update(&self, id: &str, patch: SchedulePatch) -> Result<Schedule, ScheduleError> {
         let current = self.get(id)?;
+        let project = match &patch.project {
+            Some(p) => {
+                let p = p.trim();
+                if p.is_empty() {
+                    return Err(bad("project must not be empty"));
+                }
+                p.to_string()
+            }
+            None => current.project.clone(),
+        };
         if patch.prompt.as_deref().is_some_and(|p| p.trim().is_empty()) {
             return Err(bad("prompt must not be empty"));
+        }
+        if matches!(current.target, ScheduleTarget::Continue { .. })
+            && matches!(patch.target, Some(ScheduleTarget::New { .. }))
+            && patch.cwd.as_deref().is_none_or(|c| c.trim().is_empty())
+            && current.cwd.as_deref().is_none_or(|c| c.trim().is_empty())
+        {
+            return Err(bad(
+                "cannot convert a continue-session schedule to a new-session schedule without cwd",
+            ));
+        }
+        let target = patch.target.clone().unwrap_or_else(|| current.target.clone());
+        let (agent, computer_id, cwd) = match &target {
+            ScheduleTarget::Continue { session_id } => {
+                if patch.computer.is_some() || patch.cwd.is_some() {
+                    return Err(bad(
+                        "account, computer and cwd apply to new sessions only; a continued session keeps its own",
+                    ));
+                }
+                let rec = self
+                    .sessions
+                    .store()
+                    .session(session_id)?
+                    .ok_or_else(|| bad(format!("session {session_id} not found")))?;
+                if rec.project != project {
+                    return Err(bad(format!("session {session_id} is not in project {project:?}")));
+                }
+                if let Some(a) = patch.agent.as_deref() {
+                    if AgentKind::parse(a) != Some(rec.agent) {
+                        return Err(bad(format!(
+                            "session {session_id} runs {}, not {a}",
+                            rec.agent.as_str()
+                        )));
+                    }
+                }
+                (rec.agent, None, None)
+            }
+            ScheduleTarget::New { .. } => {
+                let agent = match patch.agent.as_deref() {
+                    Some(a) => AgentKind::parse(a).ok_or_else(|| bad(format!("unknown agent {a}")))?,
+                    None => current.agent,
+                };
+                let computer_id = match &patch.computer {
+                    Some(c) => {
+                        let c = c.trim();
+                        if c.is_empty() || c == "local" {
+                            None
+                        } else {
+                            Some(c.to_string())
+                        }
+                    }
+                    None => current.computer_id.clone(),
+                };
+                let cwd = match &patch.cwd {
+                    Some(c) => {
+                        let c = c.trim();
+                        if c.is_empty() {
+                            return Err(bad("cwd is required for schedules that start new sessions"));
+                        }
+                        Some(c.to_string())
+                    }
+                    None => {
+                        if current.cwd.as_deref().is_none_or(|c| c.trim().is_empty()) {
+                            return Err(bad("cwd is required for schedules that start new sessions"));
+                        }
+                        current.cwd.clone()
+                    }
+                };
+                (agent, computer_id, cwd)
+            }
+        };
+        if project != current.project {
+            let count: i64 = self.conn().query_row(
+                "SELECT COUNT(*) FROM schedules WHERE project = ?1",
+                params![project],
+                |r| r.get(0),
+            )?;
+            if count as usize >= MAX_SCHEDULES_PER_PROJECT {
+                return Err(bad(format!("project {project:?} already has {MAX_SCHEDULES_PER_PROJECT} schedules")));
+            }
         }
         let now = self.now();
         let (kind, anchor, next) = match &patch.kind {
             Some(kind) => {
                 let next = self.first_trigger(kind, now)?;
-                (kind.clone(), now, (!current.paused).then_some(next))
+                (kind.clone(), now, next.filter(|_| !current.paused))
             }
             None => (current.kind.clone(), current.anchor_at, current.next_run_at),
         };
         self.conn().execute(
-            "UPDATE schedules SET prompt = COALESCE(?2, prompt), kind = ?3, catch_up = COALESCE(?4, catch_up),
-                 anchor_at = ?5, next_run_at = ?6, updated_at = ?7
+            "UPDATE schedules SET project = ?2, agent = ?3, computer_id = ?4, cwd = ?5, target = ?6,
+                 prompt = COALESCE(?7, prompt), kind = ?8, catch_up = COALESCE(?9, catch_up),
+                 anchor_at = ?10, next_run_at = ?11, updated_at = ?12
              WHERE id = ?1",
             params![
                 id,
+                project,
+                agent.as_str(),
+                computer_id,
+                cwd,
+                serde_json::to_string(&target).map_err(anyhow::Error::from)?,
                 patch.prompt,
                 serde_json::to_string(&kind).map_err(anyhow::Error::from)?,
                 patch.catch_up,
@@ -598,6 +731,7 @@ impl Scheduler {
             let mut conn = self.conn();
             let tx = conn.transaction()?;
             tx.execute("DELETE FROM schedule_runs WHERE schedule_id = ?1", params![id])?;
+            tx.execute("DELETE FROM schedule_events WHERE schedule_id = ?1", params![id])?;
             tx.execute("DELETE FROM schedules WHERE id = ?1", params![id])?;
             tx.commit()?;
         }
@@ -663,7 +797,34 @@ impl Scheduler {
     /// Run `id` now, outside its schedule (`run-now`). Does not move its next trigger.
     pub async fn run_now(self: &Arc<Self>, id: &str) -> Result<ScheduleRun, ScheduleError> {
         let s = self.get(id)?;
-        Ok(self.execute(&s, self.now()).await?)
+        Ok(self.execute(&s, self.now(), None).await?)
+    }
+
+    /// Start event schedule `s` for event `event_id` (for CI, `ci:<owner/name>:<run id>`), once:
+    /// the pair is stored before the run, so a second call, or a call after a restart, returns
+    /// `None` and sends nothing. `at` is when the event happened (the run's `scheduled_at`);
+    /// `context` is added to the prompt.
+    pub async fn fire_event(
+        self: &Arc<Self>,
+        s: &Schedule,
+        event_id: &str,
+        at: i64,
+        context: &str,
+    ) -> anyhow::Result<Option<ScheduleRun>> {
+        let inserted = self.conn().execute(
+            "INSERT OR IGNORE INTO schedule_events (schedule_id, event_id, seen_at) VALUES (?1, ?2, ?3)",
+            params![s.id, event_id, self.now()],
+        )?;
+        if inserted == 0 {
+            return Ok(None);
+        }
+        let run = self.execute(s, at, Some(context)).await?;
+        self.conn().execute(
+            "UPDATE schedule_events SET run_id = ?3 WHERE schedule_id = ?1 AND event_id = ?2",
+            params![s.id, event_id, run.id],
+        )?;
+        self.conn().execute("UPDATE schedules SET last_run_at = ?2 WHERE id = ?1", params![s.id, at])?;
+        Ok(Some(run))
     }
 
     /// Fire everything due. Returns the runs recorded (missed ones included), oldest first.
@@ -690,7 +851,7 @@ impl Scheduler {
                 Err(e) => tracing::error!(schedule = %s.id, "scheduling failed: {e:#}"),
             }
         }
-        let runs = futures::future::join_all(to_run.iter().map(|(s, at)| self.execute(s, *at))).await;
+        let runs = futures::future::join_all(to_run.iter().map(|(s, at)| self.execute(s, *at, None))).await;
         for r in runs {
             match r {
                 Ok(run) => recorded.push(run),
@@ -764,11 +925,11 @@ impl Scheduler {
 
     /// One run of `s` for the trigger at `scheduled_at`: record it, send the prompt, and follow
     /// the turn in the background.
-    async fn execute(self: &Arc<Self>, s: &Schedule, scheduled_at: i64) -> anyhow::Result<ScheduleRun> {
+    async fn execute(self: &Arc<Self>, s: &Schedule, scheduled_at: i64, context: Option<&str>) -> anyhow::Result<ScheduleRun> {
         let run = self.insert_run(&s.id, scheduled_at, RunStatus::Running, Some(self.now()), None)?;
         // Subscribe before sending so the turn's end cannot be missed.
         let rx = self.sessions.subscribe();
-        match self.send(s, &run.id).await {
+        match self.send(s, &run.id, context).await {
             Ok((session_id, before)) => {
                 self.conn().execute(
                     "UPDATE schedule_runs SET session_id = ?2 WHERE id = ?1",
@@ -789,18 +950,25 @@ impl Scheduler {
     }
 
     /// The text sent for a run.
-    fn render(&self, s: &Schedule, run_id: &str) -> String {
-        format!(
-            "{HEADER_TAG} Scheduled task {} (run {run_id}). This message was sent by a schedule, not \
-             typed by the user just now.\n\n{}",
-            s.id, s.prompt
-        )
+    fn render(&self, s: &Schedule, run_id: &str, context: Option<&str>) -> String {
+        match context {
+            None => format!(
+                "{HEADER_TAG} Scheduled task {} (run {run_id}). This message was sent by a schedule, not \
+                 typed by the user just now.\n\n{}",
+                s.id, s.prompt
+            ),
+            Some(ctx) => format!(
+                "{HEADER_TAG} Event routine {} (run {run_id}). This message was sent by a routine, not \
+                 typed by the user just now. {ctx}\n\n{}",
+                s.id, s.prompt
+            ),
+        }
     }
 
     /// Send the prompt; returns the session and its last event seq before the send.
-    async fn send(&self, s: &Schedule, run_id: &str) -> Result<(String, i64), RunFailure> {
+    async fn send(&self, s: &Schedule, run_id: &str, context: Option<&str>) -> Result<(String, i64), RunFailure> {
         let fail = |e: &dyn std::fmt::Display| RunFailure::Failed(format!("{e:#}"));
-        let text = self.render(s, run_id);
+        let text = self.render(s, run_id, context);
         match &s.target {
             ScheduleTarget::Continue { session_id } => {
                 let rec = self

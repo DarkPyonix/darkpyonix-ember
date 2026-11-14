@@ -19,7 +19,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use compose_rust::runtime::{composable, mutable_state_of, remember};
+use compose_rust::runtime::{Composable, mutable_state_of, remember};
 use compose_rust::schema::Window;
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -576,7 +576,7 @@ pub fn Placeholder(menu: NavMenu) {
     // A `Box` centers on both axes; a `Column`'s alignment is the horizontal one only.
     cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
         cu::Column().alignment(Alignment::Center).space_role(SpaceRole::Sm).content(|| {
-            Label(menu.label(), Fs::Xl3, Weight::Medium, None, None);
+            Label(menu.label(), Fs::Xl3, PAGE_TITLE_WEIGHT, None, None);
             Label(PLACEHOLDER_TEXT, Fs::Md, Weight::Regular, Some(paint(ember_theme().palette.muted)), None);
         });
     });
@@ -595,7 +595,7 @@ pub fn current_mode(collapsed: bool) -> ShellMode {
 }
 
 /// The root layout: navigation around the content area.
-#[composable]
+#[Composable]
 pub fn shell() {
     let ui = shared_ui().clone();
     super::notice::NoticeHost();
@@ -765,8 +765,11 @@ fn requested_size() -> (u16, u16) {
 }
 
 /// On macOS the window opens with content under the traffic lights (FR-L33, compose-rust
-/// v0.0.6 `Chrome::FullSize`); other systems keep their chrome.
+/// v0.0.6 `Chrome::FullSize`); other systems keep their chrome. Every window asks for a size
+/// report on each whole-dp change (compose-rust v0.0.7, #479), because the screens lay out from
+/// `width_dp` and `height_dp`, not only from the size class.
 pub fn window_chrome(window: Window) -> Window {
+    let window = window.with_report_size(true);
     if cfg!(target_os = "macos") {
         window.with_chrome(compose_rust::schema::Chrome::FullSize)
     } else {
@@ -878,7 +881,7 @@ mod tests {
         assert!(!std::ptr::eq(a, c));
     }
 
-    #[composable]
+    #[Composable]
     fn mode_probe() {
         Label(&format!("{:?}", current_mode(false)), Fs::Md, Weight::Regular, None, None);
     }
@@ -941,12 +944,12 @@ mod tests {
         );
     }
 
-    #[composable]
+    #[Composable]
     fn sidebar_probe() {
         Sidebar(false, NavMenu::Sessions, NavCounts::default(), || {}, || {});
     }
 
-    #[composable]
+    #[Composable]
     fn rail_probe() {
         Sidebar(true, NavMenu::Sessions, NavCounts::default(), || {}, || {});
     }
@@ -1002,7 +1005,7 @@ mod tests {
         ui.go(Route::Projects);
     }
 
-    #[composable]
+    #[Composable]
     fn phone_menu_probe() {
         let open = remember(|| mutable_state_of(true));
         PhoneMenu(open, || {});

@@ -35,7 +35,7 @@ pub use crate::ui::session::{
     PaneToggle, ProjectPanes, SIDE_LIST_W, SOON, Section, SessionView, SideListMode, UI_STRINGS,
     add_pane, can_move, close_pane, current_mode, environment_rows, ide_choices, kanban,
     kanban_column, lease_plan, mode_chip_label, mode_chip_warns, mode_rows, model_chip_label,
-    move_pane, page_step, pane_layout, pane_rows, reorder_pane, resolve_project, side_list_mode,
+    move_pane, multi_pane_layout, pane_rows, swipe_pane_width, SWIPE_GAP, reorder_pane, resolve_project, side_list_mode,
     side_sections, single_target, toolbar_fold_level, toolbar_width, view_chips_below,
     view_from_saved, visible_panes,
 };
@@ -50,7 +50,7 @@ use super::characters::{CharState, Character};
 use super::compat::Spinner;
 use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
-    AppButton, ButtonKind, Clickable, CloseButton, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
+    AppButton, ButtonKind, Clickable, CloseButton, NamedClickable, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
     FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, SearchField, Select, SheetFooter, Txt,
     SEARCH_FIELD_H_COMPACT,
 };
@@ -236,7 +236,9 @@ pub fn StopCircleButton(on_click: impl FnMut() + 'static) {
 /// Circular send button (`.sendround` in mockup: `size` circle, `--ink`, send glyph).
 pub fn SendCircleButton(size: f32, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    Clickable(
+    // Named "보내기" for assistive technology (compose-rust v0.0.7, #429).
+    NamedClickable(
+        super::a11y::SEND,
         Modifier::new()
             .size(size, size)
             .background(paint(p.ink))
@@ -496,8 +498,8 @@ pub fn ide_split_style(p: &Palette) -> IdeSplitStyle {
 
 /// The chevron beside a header's "IDE 열기" that opens the chooser even when a default is set
 /// (FR-L7). `on_ink` draws it inside the dark split button; otherwise as a bordered square.
-/// TODO(compose-rust#460): the accessible name "다른 IDE 선택" cannot be set; `Clickable` gives a
-/// button role (compose-rust#372) but no label. Touch target 26x32, under 44 px: #323.
+/// Its accessible name is "다른 IDE 선택" (compose-rust v0.0.7, #460), and it says whether the
+/// chooser is open. Touch target 26x32, under 44 px: #323.
 pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
     let p = ember_theme().palette;
     let (tint, m) = if on_ink {
@@ -512,8 +514,9 @@ pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
                 .shape_role(ShapeRole::Full),
         )
     };
-    Clickable(
-        m,
+    NamedClickable(
+        super::a11y::OTHER_IDE,
+        m.expanded(open.get()),
         Alignment::Center,
         move || open.set(true),
         move || NavIcon(ICON_CHEVRON_DOWN_SVG, tint, 13.0),
@@ -1144,7 +1147,8 @@ pub fn PaneTranscript(session: &str, agent: &str) {
 /// The Terminal side of a pane: the member's terminal, read-only, in the mockup's `.term` colours
 /// (FR-L18). Outside the demo the client has no stream to attach to for a member, so it says so.
 ///
-/// TODO(compose-rust#5): wrap in `SelectionContainer` so the output can be selected and copied.
+/// v0.0.7: #5 fixed (`SelectionContainer`); workaround kept until checked on a display (the
+/// terminal rows are a styled grid, and a selection over them must be tried before wrapping it).
 /// TODO(compose-rust): scroll to the bottom on new output; the pane opens at the top.
 /// Outside the demo it attaches as a read-only viewer to the project's one running agent terminal on
 /// the session's computer, and detaches when the pane leaves the screen (the terminal keeps running).
@@ -1553,10 +1557,11 @@ pub fn Pane(
                             let tg_seg = toggle.clone();
                             if icon_toggle {
                                 // One icon button (`.ph-mode`): shows the view it opens, so the
-                                // title keeps the remaining width. TODO(compose-rust#460): the
-                                // accessible name `switch_label()` cannot be set on a Clickable.
+                                // title keeps the remaining width. Its accessible name is
+                                // `switch_label()`, a fixed set (compose-rust v0.0.7, #460).
                                 let to = cur_toggle.other();
-                                Clickable(
+                                NamedClickable(
+                                    to.switch_label(),
                                     Modifier::new().size(28.0, 28.0).corner_radius(CORNER_SM),
                                     Alignment::Center,
                                     move || tg_seg.set(to),
@@ -1654,14 +1659,7 @@ pub fn MultiView(
     let ui = shared_ui().clone();
     let window = current_window_size();
     let p = ember_theme().palette;
-    let layout = if window.width_dp >= 700.0 {
-        PaneLayout {
-            per_row: 2,
-            paged: false,
-        }
-    } else {
-        pane_layout(window.class)
-    };
+    let layout = multi_pane_layout(window.width_dp, window.class);
     let proj_owned = project.to_string();
     let members_vec = members.to_vec();
 
@@ -1679,7 +1677,6 @@ pub fn MultiView(
         .cloned()
         .collect();
     let n = vis.len();
-    let cur = page.get().min(n.saturating_sub(1));
     let show_help = window.width_dp >= 1280.0;
 
     cu::Box()
@@ -1890,47 +1887,39 @@ pub fn MultiView(
                                     });
                             });
                     } else if layout.paged {
-                        cu::Row()
-                            .alignment(Alignment::CenterStart)
-                            .space_role(SpaceRole::Sm)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
-                                let pg1 = page.clone();
-                                AppButton(
-                                    "이전",
-                                    Some(IconRole::Back),
-                                    ButtonKind::Default,
-                                    true,
-                                    cur > 0,
-                                    false,
-                                    move || pg1.set(page_step(cur, n, false)),
-                                );
-                                Label(
-                                    &format!("{} / {}", cur + 1, n),
-                                    Fs::Sm,
-                                    Weight::Regular,
-                                    Some(paint(p.text_2)),
-                                    Some(1),
-                                );
-                                let pg2 = page.clone();
-                                AppButton(
-                                    "다음",
-                                    Some(IconRole::Forward),
-                                    ButtonKind::Default,
-                                    true,
-                                    cur + 1 < n,
-                                    false,
-                                    move || pg2.set(page_step(cur, n, true)),
-                                );
-                            });
-                        cu::Box()
+                        // Sideways strip, one pane per screen width with the next one peeking
+                        // in (mockup `.mv` at 560 px), instead of a previous / next pager.
+                        // TODO(compose-rust#547): no scroll snapping, so a swipe can stop between
+                        // two panes (mockup `scroll-snap-type:x mandatory`).
+                        let pane_w = swipe_pane_width(window.width_dp);
+                        cu::ScrollRow()
                             .modifier(Modifier::new().fill_max_width().weight(1.0))
                             .content(|| {
-                                if let Some(m) =
-                                    members_vec.iter().find(|m| m.session_id == vis[cur])
-                                {
-                                    Pane(&proj_owned, m, &all, &vis, on_enlarge.clone());
-                                }
+                                cu::Row()
+                                    .spacing(SWIPE_GAP)
+                                    .modifier(Modifier::new().fill_max_height())
+                                    .content(|| {
+                                        for sid in &vis {
+                                            if let Some(m) =
+                                                members_vec.iter().find(|m| &m.session_id == sid)
+                                            {
+                                                let m = m.clone();
+                                                let pr = proj_owned.clone();
+                                                let all_s = all.clone();
+                                                let vis_s = vis.clone();
+                                                let enl = on_enlarge.clone();
+                                                cu::Box()
+                                                    .modifier(
+                                                        Modifier::new()
+                                                            .width(pane_w)
+                                                            .fill_max_height(),
+                                                    )
+                                                    .content(move || {
+                                                        Pane(&pr, &m, &all_s, &vis_s, enl.clone());
+                                                    });
+                                            }
+                                        }
+                                    });
                             });
                     } else {
                         let rows_idx = pane_rows(n, layout.per_row);
@@ -3658,7 +3647,8 @@ fn StatusCardsGrid(width_dp: f32, d: StatusCardsData) {
 
 /// Whether the stat tiles, the timeline card and the kanban card are drawn above the status cards.
 /// `EMBER_CR_SCROLL=cards` hides them for review captures: the toolkit cannot scroll a column from
-/// code (TODO(compose-rust#385)), so the blocks that would have scrolled out are left out and the
+/// code before v0.0.5 (v0.0.7: #385 fixed with `ScrollState::scroll_to`; workaround kept until
+/// checked on a display, because the capture script relies on it), so the blocks that would have scrolled out are left out and the
 /// cards (PR과 CI, 서브 에이전트 스레드, 부하) start at the top at 390 dp.
 fn status_blocks_above_cards(scroll: Option<&str>) -> bool {
     scroll != Some("cards")
@@ -3944,6 +3934,10 @@ fn ViewSeg(
 }
 
 /// Pill-shaped toolbar action button (`.btn.sm` in `.sesshead`).
+/// Session header actions carry no text label (owner placement rule 2026-11-13, rule 6, design
+/// review B6); the label is the tooltip and the accessible name.
+pub const SESSION_HEADER_LABELS: bool = false;
+
 fn ToolbarBtn(
     icon_svg: &'static str,
     label: &str,
@@ -3966,7 +3960,11 @@ fn ToolbarBtn(
             .border(1.0, paint(p.line))
             .shape_role(ShapeRole::Full)
     };
-    Clickable(m, Alignment::Center, on_click, move || {
+    // The label is the tooltip (`title` in the mockup). v0.0.7: #417 fixed (pointer events reach
+    // the app); kept as is until checked on a display that the toolkit `Tooltip` shows on hover.
+    // Assistive technology reads it now.
+    let tip = lbl.clone();
+    cu::Tooltip(tip).content(move || Clickable(m, Alignment::Center, on_click, move || {
         if show_label || chevron {
             cu::Row()
                 .alignment(Alignment::CenterStart)
@@ -3991,7 +3989,7 @@ fn ToolbarBtn(
         } else {
             NavIcon(icon_svg, p.text_2.to_argb(), 15.0);
         }
-    });
+    }));
 }
 
 /// New member sheet (`#snew` in mockup `session.js` lines 386-395).
@@ -4441,7 +4439,6 @@ pub fn SessionScreen(focus: Option<String>) {
         mutable_state_of(std::env::var("EMBER_CR_SESSION_NEW_MEMBER").as_deref() == Ok("1"))
     });
     let project_menu = remember(|| mutable_state_of(false));
-    let more_menu = remember(|| mutable_state_of(false));
     let web_menu = remember(|| mutable_state_of(false));
     // 버전 관리 opens as a sheet over the conversation (FR-L18, #495); `EMBER_CR_SESSION_VCS=1`
     // opens it at start for captures.
@@ -4497,8 +4494,6 @@ pub fn SessionScreen(focus: Option<String>) {
     }
     let chips_below = view_chips_below(window.width_dp);
     let hide_view_lbl = crate::ui::session::view_seg_icon_only(window.width_dp);
-    let show_btn_lbl = window.width_dp >= 1400.0;
-    let show_web_lbl = window.width_dp >= 1400.0;
 
     // Opening the 웹 페이지 list reads the listening ports of the session's computer (FR-P7).
     let open_web_menu = {
@@ -4705,12 +4700,14 @@ pub fn SessionScreen(focus: Option<String>) {
                                 .content(|| {
                                     if is_phone {
                                         let dr = drawer.clone();
-                                        Clickable(
+                                        NamedClickable(
+                                            super::a11y::MENU,
                                             Modifier::new()
                                                 .size(32.0, 32.0)
                                                 .background(paint(p.surface))
                                                 .border(1.0, paint(p.line))
-                                                .shape_role(ShapeRole::Full),
+                                                .shape_role(ShapeRole::Full)
+                                                .expanded(drawer.get()),
                                             Alignment::Center,
                                             move || dr.set(true),
                                             || NavIcon(ICON_LIST_SVG, p.text_2.to_argb(), 15.0),
@@ -4769,43 +4766,16 @@ pub fn SessionScreen(focus: Option<String>) {
                                         let sv = set_view.clone();
                                         ViewSeg(view_now, hide_view_lbl, false, move |v| sv(v));
                                     }
-                                    if !is_phone {
+                                    {
+                                        // Icon-only 32 px buttons with tooltips at every width, as the
+                                        // mockup's `.sesshead` (owner placement rule 2026-11-13, rule 6).
                                         let nm = new_member_open.clone();
-                                        ToolbarBtn(
-                                            ICON_PLUS_SVG,
-                                            "새 팀원",
-                                            show_btn_lbl,
-                                            false,
-                                            move || nm.set(true),
-                                        );
+                                        ToolbarBtn(ICON_PLUS_SVG, "새 팀원", SESSION_HEADER_LABELS, false, move || nm.set(true));
                                         let vo = vcs_open.clone();
-                                        ToolbarBtn(
-                                            ICON_GIT_SVG,
-                                            "버전 관리",
-                                            show_btn_lbl,
-                                            false,
-                                            move || vo.set(true),
-                                        );
+                                        ToolbarBtn(ICON_GIT_SVG, "버전 관리", SESSION_HEADER_LABELS, false, move || vo.set(true));
                                         let wm = open_web_menu.clone();
-                                        ToolbarBtn(
-                                            ICON_GLOBE_SVG,
-                                            "웹 페이지",
-                                            show_web_lbl,
-                                            true,
-                                            move || wm(),
-                                        );
-                                    } else {
-                                        let mm = more_menu.clone();
-                                        Clickable(
-                                            Modifier::new()
-                                                .size(32.0, 32.0)
-                                                .background(paint(p.surface))
-                                                .border(1.0, paint(p.line))
-                                                .shape_role(ShapeRole::Full),
-                                            Alignment::Center,
-                                            move || mm.set(true),
-                                            || NavIcon(ICON_MORE_H_SVG, p.text_2.to_argb(), 16.0),
-                                        );
+                                        #[allow(clippy::redundant_closure)]
+                                        ToolbarBtn(ICON_GLOBE_SVG, "웹 페이지", SESSION_HEADER_LABELS, false, move || wm());
                                     }
                                     if let Some(t) = target.clone() {
                                         IdeMenu(&t);
@@ -4889,10 +4859,10 @@ pub fn SessionScreen(focus: Option<String>) {
             // own edge and Dialog centres, so this is an in-tree overlay stacked in the screen's
             // Box. It covers the session content area, not the phone tab bar or title strip
             // (the shell is outside this screen).
-            // TODO(compose-rust#476): no Escape to the drawer (no key delivery or focus request
-            // in the Rust API); the scrim and the close button close it.
-            // TODO(compose-rust#429): no accessible name for the toggle, the scrim and the
-            // drawer yet.
+            // v0.0.7: #476 fixed (containers take `on_key_down`, and `Batch::request_focus`
+            // exists); workaround kept until checked on a display (the drawer has to take focus
+            // when it opens before Escape can reach it); the scrim and the close button close it.
+            // The toggle, the scrim and the drawer are named (compose-rust v0.0.7, #429).
             if crate::ui::session::drawer_open_effective(show_column, drawer.get()) {
                 let dr_s = drawer.clone();
                 let dr_x = drawer.clone();
@@ -4905,7 +4875,8 @@ pub fn SessionScreen(focus: Option<String>) {
                 let theme = ember_theme();
                 let pal = theme.palette;
                 let w = crate::ui::session::drawer_width(window.width_dp);
-                Clickable(
+                NamedClickable(
+                    super::a11y::CLOSE,
                     Modifier::new()
                         .fill_max_width()
                         .fill_max_height()
@@ -4915,7 +4886,13 @@ pub fn SessionScreen(focus: Option<String>) {
                     || {},
                 );
                 cu::Row()
-                    .modifier(with_shadows(Modifier::new(), theme.shadow_sm()).width(w).fill_max_height())
+                    .modifier(
+                        with_shadows(Modifier::new(), theme.shadow_sm())
+                            .width(w)
+                            .fill_max_height()
+                            .role(compose_rust::ui::Role::Navigation)
+                            .label(super::a11y::SESSION_MENU),
+                    )
                     .content(move || {
                         cu::Box()
                             .modifier(Modifier::new().weight(1.0).fill_max_height())
@@ -4993,36 +4970,42 @@ pub fn SessionScreen(focus: Option<String>) {
                 },
             );
 
-            // Phone folded toolbar actions OptionSheet
-            if is_phone {
-                let more_opts = vec![
-                    "새 팀원".to_string(),
-                    "버전 관리".to_string(),
-                    "웹 페이지".to_string(),
-                ];
-                let mm_d = more_menu.clone();
-                let nm_m = new_member_open.clone();
-                let vcs_m = vcs_open.clone();
-                let open_web = open_web_menu.clone();
-                OptionSheet(
-                    more_menu.get(),
-                    &more_opts,
-                    None,
-                    POPUP_W,
-                    move || mm_d.set(false),
-                    move |idx| match idx {
-                        0 => nm_m.set(true),
-                        1 => vcs_m.set(true),
-                        2 => open_web(),
-                        _ => {}
-                    },
-                );
-            }
         });
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l18_phone_header_keeps_icon_buttons_instead_of_a_folded_menu() {
+        let src = include_str!("session.rs").split("mod tests {").next().unwrap();
+        let head = src.split("// Top toolbar (.sesshead)").nth(1).unwrap();
+        let head = head.split("if chips_below {").next().unwrap();
+        assert!(!head.contains("ICON_MORE_H_SVG"));
+        // Owner placement rule 2026-11-13 (rule 6): icon only at every width.
+        assert!(!super::SESSION_HEADER_LABELS);
+        assert_eq!(head.matches(", SESSION_HEADER_LABELS, false, move ||").count(), 3);
+        assert!(!head.contains("show_btn_lbl"));
+        for icon in ["ICON_PLUS_SVG", "ICON_GIT_SVG", "ICON_GLOBE_SVG", "IdeMenu(&t)"] {
+            assert!(head.contains(icon), "{icon}");
+        }
+        assert!(!src.contains("more_menu"));
+    }
+
+    #[test]
+    fn fr_l18_one_pane_layout_is_a_sideways_strip_not_a_pager() {
+        let src = include_str!("session.rs").split("mod tests {").next().unwrap();
+        let mv = src.split("pub fn MultiView(").nth(1).unwrap();
+        let mv = mv.split("\npub fn ").next().unwrap();
+        let paged = mv.split("} else if layout.paged {").nth(1).unwrap();
+        let paged = paged.split("let rows_idx = pane_rows(").next().unwrap();
+        assert!(paged.contains("cu::ScrollRow()"));
+        assert!(paged.contains(".width(pane_w)"));
+        assert!(paged.contains("TODO(compose-rust#547)"));
+        assert!(mv.contains("multi_pane_layout(window.width_dp, window.class)"));
+        assert!(!paged.contains("\"이전\""));
+        assert!(!paged.contains("\"다음\""));
+    }
+
     #[test]
     fn fr_l18_drawer_state_resets_and_scrim_and_navigation_close_it() {
         let src = include_str!("session.rs").split("mod tests {").next().unwrap();
@@ -5033,7 +5016,10 @@ mod tests {
         // open_member closes it.
         let om = src.split("let open_member = {").nth(1).unwrap();
         assert!(om.split("let same = proj == current;").next().unwrap().contains("drawer.set(false);"));
-        assert!(src.contains("TODO(compose-rust#429)"));
+        // compose-rust#429 (v0.0.7): the toggle, the scrim and the drawer are named.
+        assert!(src.contains("super::a11y::MENU,"));
+        assert!(src.contains(".label(super::a11y::SESSION_MENU)"));
+        assert!(!src.contains("TODO(compose-rust#429)"));
     }
 
     #[test]
@@ -5093,7 +5079,7 @@ mod tests {
     }
     use compose_rust::protocol::{HostEvent, Mutation, PropertyValue, decode_batch};
     use compose_rust::{
-        EventPayload, Host, Recomposer, WindowHeightClass, WindowSizeClass, composable,
+        EventPayload, Host, Recomposer, WindowHeightClass, WindowSizeClass, Composable,
     };
 
     fn texts(batch: &[Mutation<'_>]) -> Vec<String> {
@@ -5113,7 +5099,7 @@ mod tests {
         static CHEVRON_OPEN: RefCell<Option<MutableState<bool>>> = const { RefCell::new(None) };
     }
 
-    #[composable]
+    #[Composable]
     fn host_ide_chevron() {
         let open = remember(|| mutable_state_of(false));
         CHEVRON_OPEN.with(|c| *c.borrow_mut() = Some(open.clone()));
@@ -5173,12 +5159,12 @@ mod tests {
         assert!(open.get_untracked(), "the chevron opened the chooser");
     }
 
-    #[composable]
+    #[Composable]
     fn host_session_multi() {
         SessionScreen(None);
     }
 
-    #[composable]
+    #[Composable]
     fn host_session_single() {
         SessionScreen(Some("demo-s1".to_string()));
     }

@@ -1,25 +1,30 @@
-// Finding a manager the way the darkpyonix CLI does (SPEC FR-C1, FR-M3):
-// a live ephemeral manager from `<home>/managers/<pid>.json`, else spawn one and wait for its
-// registry file; or a configured dedicated manager (URL + token).
+// Finding a manager the way the darkpyonix CLI does (darkpyonix-core SPEC FR-C1, INTENT D4):
+// a given manager (settings, else DARKPYONIX_MANAGER_URL + DARKPYONIX_TOKEN), else spawn our own
+// `darkpyonix manager --ephemeral` and read `{url, token, pid}` from the first line of its stdout.
+// No registry file is read or written. The spawned manager is left running when we leave; it
+// ends by itself after its idle_timeout (FR-M3).
 import { spawn } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export interface RegistryRecord {
-  pid: number;
+export const URL_ENV = "DARKPYONIX_MANAGER_URL";
+export const TOKEN_ENV = "DARKPYONIX_TOKEN";
+/** Rotate manager.log past this size, like the CLI (FR-C1). */
+export const MANAGER_LOG_LIMIT = 1024 * 1024;
+
+/** The one JSON line a manager prints on stdout once it listens (FR-M3, FR-C1). */
+export interface ManagerLine {
   url: string;
   token: string;
-  mode: string;
-  started_at?: string;
-  version?: string;
+  pid: number;
 }
 
 export interface ManagerEndpoint {
   url: string;
   token: string | undefined;
-  /** "ephemeral" (local registry), "spawned" (we started it) or "dedicated" (configured URL). */
-  source: "ephemeral" | "spawned" | "dedicated";
+  /** "settings" (configured URL), "env" (DARKPYONIX_MANAGER_URL) or "spawned" (we started it). */
+  source: "settings" | "env" | "spawned";
   pid?: number;
 }
 
@@ -48,9 +53,7 @@ export async function checkHealth(url: string, timeoutMs = 2000): Promise<boolea
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
     const res = await fetch(url.replace(/\/+$/, "") + "/health", { signal: ctl.signal });
-    if (!res.ok) return false;
-    const body = (await res.json()) as { status?: string };
-    return body.status === "ok";
+    return res.ok;
   } catch {
     return false;
   } finally {
@@ -58,43 +61,26 @@ export async function checkHealth(url: string, timeoutMs = 2000): Promise<boolea
   }
 }
 
-export async function readRegistry(home: string): Promise<RegistryRecord[]> {
-  const dir = join(home, "managers");
-  let names: string[];
+/** Open `<home>/manager.log` for appending (0600), rotating it to `.1` past `limit` bytes. */
+export function openManagerLog(path: string, limit = MANAGER_LOG_LIMIT): number {
   try {
-    names = await fs.readdir(dir);
+    if (statSync(path).size > limit) renameSync(path, path + ".1");
   } catch {
-    return [];
+    // No log yet.
   }
-  const out: RegistryRecord[] = [];
-  for (const name of names) {
-    if (!name.endsWith(".json")) continue;
-    try {
-      const rec = JSON.parse(await fs.readFile(join(dir, name), "utf8")) as RegistryRecord;
-      if (typeof rec.url === "string" && typeof rec.pid === "number") out.push(rec);
-    } catch {
-      // Being written or corrupt; skip.
-    }
+  const fd = openSync(path, "a", 0o600);
+  if (process.platform !== "win32") {
+    try { chmodSync(path, 0o600); } catch { /* best effort */ }
   }
-  // Newest first.
-  out.sort((a, b) => String(b.started_at ?? "").localeCompare(String(a.started_at ?? "")));
-  return out;
+  return fd;
 }
 
-export interface DiscoveryDeps {
-  pidAlive?: (pid: number) => boolean;
-  checkHealth?: (url: string) => Promise<boolean>;
-}
-
-/** A live ephemeral manager of this OS user: pid alive and `/health` answers. */
-export async function findLiveManager(home: string, deps: DiscoveryDeps = {}): Promise<RegistryRecord | undefined> {
-  const alive = deps.pidAlive ?? pidAlive;
-  const healthy = deps.checkHealth ?? checkHealth;
-  for (const rec of await readRegistry(home)) {
-    if (!alive(rec.pid)) continue;
-    if (await healthy(rec.url)) return rec;
+function logTail(path: string, lines = 5): string {
+  try {
+    return readFileSync(path, "utf8").split(/\r?\n/).filter((l) => l !== "").slice(-lines).join("\n");
+  } catch {
+    return "";
   }
-  return undefined;
 }
 
 export interface SpawnOptions {
@@ -107,57 +93,107 @@ export interface SpawnOptions {
   log?: (line: string) => void;
 }
 
-/** Spawn `darkpyonix manager` detached and wait until its registry file appears and is healthy. */
-export async function spawnManager(opts: SpawnOptions, deps: DiscoveryDeps = {}): Promise<RegistryRecord> {
+/**
+ * Spawn `darkpyonix manager --ephemeral` in its own process group, read `{url, token, pid}` from
+ * the first stdout line and wait for `/health`. Its stderr goes to `<home>/manager.log` (a file, not
+ * a pipe, so the manager can keep writing after this process is gone) and the failure message shows
+ * the end of that log.
+ */
+export async function spawnManager(opts: SpawnOptions): Promise<ManagerLine> {
+  mkdirSync(opts.home, { recursive: true });
+  const logPath = join(opts.home, "manager.log");
+  const logFd = openManagerLog(logPath);
   const env = { ...process.env };
   if (opts.passHome) env.DARKPYONIX_HOME = opts.home;
-  const child = spawn(opts.cliPath, opts.args, { detached: true, stdio: ["ignore", "ignore", "pipe"], env });
-  let stderr = "";
-  let exited: { code: number | null; error?: Error } | null = null;
-  child.stderr?.on("data", (d: Buffer) => {
-    stderr += d.toString();
-    if (stderr.length > 8192) stderr = stderr.slice(-8192);
-  });
-  child.on("error", (error) => { exited = { code: null, error }; });
-  child.on("exit", (code) => { exited = exited ?? { code }; });
+  // A manager we spawn must not inherit a URL/token meant for us.
+  delete env[URL_ENV];
+  delete env[TOKEN_ENV];
+  const timeoutMs = opts.timeoutMs ?? 15000;
+  const child = spawn(opts.cliPath, opts.args, { detached: true, stdio: ["ignore", "pipe", logFd], env });
+  closeSync(logFd);
   opts.log?.(`spawned ${opts.cliPath} ${opts.args.join(" ")} (pid ${child.pid})`);
+  const fail = (what: string) => {
+    const tail = logTail(logPath);
+    return new Error(`could not start an ephemeral manager: ${what}${tail ? "\n" + tail : ""}`);
+  };
 
-  const deadline = Date.now() + (opts.timeoutMs ?? 15000);
+  const line = await new Promise<string>((resolve, reject) => {
+    let buf = "";
+    let done = false;
+    const finish = (err: Error | null, value = "") => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(value);
+    };
+    const timer = setTimeout(() => finish(fail(`no address on stdout within ${timeoutMs / 1000} s`)), timeoutMs);
+    child.stdout!.setEncoding("utf8");
+    child.stdout!.on("data", (d: string) => {
+      buf += d;
+      const nl = buf.indexOf("\n");
+      if (nl >= 0) finish(null, buf.slice(0, nl));
+    });
+    child.on("error", (e) => finish(fail(`cannot start ${opts.cliPath}: ${e.message}`)));
+    child.on("exit", (code, signal) => {
+      // Give the log a moment to be flushed by the exiting child.
+      setTimeout(() => finish(fail(`${opts.cliPath} ${opts.args.join(" ")} exited with ${signal ?? `exit code ${code}`} before printing its address`)), 50);
+    });
+  }).catch((err) => {
+    try { if (child.pid) process.kill(child.pid, "SIGTERM"); } catch { /* gone */ }
+    throw err;
+  });
+
+  // Keep draining stdout (the manager prints nothing more) but never hold the event loop for it.
+  child.stdout!.removeAllListeners("data");
+  child.stdout!.resume();
+  child.removeAllListeners("exit");
+  child.unref();
+  (child.stdout as unknown as { unref?: () => void }).unref?.();
+
+  let rec: ManagerLine;
   try {
-    while (Date.now() < deadline) {
-      const recs = await readRegistry(opts.home);
-      const mine = recs.find((r) => r.pid === child.pid) ?? (await findLiveManager(opts.home, deps));
-      if (mine && (await (deps.checkHealth ?? checkHealth)(mine.url))) return mine;
-      if (exited) {
-        const why = (exited as { error?: Error }).error?.message ?? `exit code ${(exited as { code: number | null }).code}`;
-        throw new Error(`darkpyonix manager did not start (${why})${stderr ? ": " + stderr.trim() : ""}`);
-      }
-      await new Promise((r) => setTimeout(r, 150));
-    }
-    throw new Error(`darkpyonix manager did not write ${join(opts.home, "managers")}/<pid>.json within ${(opts.timeoutMs ?? 15000) / 1000}s`);
-  } finally {
-    child.stderr?.removeAllListeners("data");
-    child.stderr?.destroy();
-    child.unref();
+    rec = JSON.parse(line.trim()) as ManagerLine;
+  } catch {
+    throw fail(`unexpected first line on stdout: ${line.trim()}`);
   }
+  if (typeof rec.url !== "string" || typeof rec.token !== "string") throw fail(`unexpected first line on stdout: ${line.trim()}`);
+  if (!(await checkHealth(rec.url))) throw fail(`${rec.url} did not answer /health`);
+  return { url: rec.url, token: rec.token, pid: typeof rec.pid === "number" ? rec.pid : child.pid ?? 0 };
 }
 
 export interface ConnectSettings {
-  remoteUrl?: string;
-  remoteToken?: string;
+  /** `darkpyonix.manager.url` (and the token from the secret store or settings). */
+  url?: string;
+  token?: string;
   home: string;
   passHome: boolean;
   cliPath: string;
   managerArgs: string[];
+  env?: NodeJS.ProcessEnv;
+  spawnTimeoutMs?: number;
   log?: (line: string) => void;
 }
 
-export async function resolveManager(s: ConnectSettings, deps: DiscoveryDeps = {}): Promise<ManagerEndpoint> {
-  if (s.remoteUrl) return { url: s.remoteUrl, token: s.remoteToken || undefined, source: "dedicated" };
-  const live = await findLiveManager(s.home, deps);
-  if (live) return { url: live.url, token: live.token, source: "ephemeral", pid: live.pid };
-  const rec = await spawnManager({ cliPath: s.cliPath, args: s.managerArgs, home: s.home, passHome: s.passHome, log: s.log }, deps);
+/** The given manager (settings, else environment), else a freshly spawned ephemeral one (FR-C1). */
+export async function resolveManager(s: ConnectSettings): Promise<ManagerEndpoint> {
+  const given = givenManager(s);
+  if (given) return given;
+  const rec = await spawnManager({ cliPath: s.cliPath, args: s.managerArgs, home: s.home, passHome: s.passHome, timeoutMs: s.spawnTimeoutMs, log: s.log });
   return { url: rec.url, token: rec.token, source: "spawned", pid: rec.pid };
+}
+
+/** URL and token from the settings, else from the environment; only one of the two is an error. */
+export function givenManager(s: Pick<ConnectSettings, "url" | "token" | "env">): ManagerEndpoint | undefined {
+  const pick = (url: string | undefined, token: string | undefined, source: "settings" | "env", names: string): ManagerEndpoint | undefined => {
+    if (url && token) return { url, token, source };
+    if (url || token) throw new Error(`set both ${names}, or neither`);
+    return undefined;
+  };
+  const fromSettings = pick(s.url || undefined, s.token || undefined, "settings", "darkpyonix.manager.url and its token (DarkPyonix: Connect)");
+  if (fromSettings) return fromSettings;
+  const env = s.env ?? process.env;
+  return pick(env[URL_ENV] || undefined, env[TOKEN_ENV] || undefined, "env", `${URL_ENV} and ${TOKEN_ENV}`);
 }
 
 /** Map a local path to the manager machine's path using prefix rules (dedicated managers). */

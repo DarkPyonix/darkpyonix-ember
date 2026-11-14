@@ -26,6 +26,9 @@ pub enum ClientError {
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
     #[error("protocol: {0}")]
     Protocol(String),
+    /// A fixed Korean sentence for the panel (NFR-L4); the detail is logged, not shown.
+    #[error("{0}")]
+    Refused(&'static str),
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -41,6 +44,53 @@ fn encode_segment(segment: &str) -> String {
         }
     }
     out
+}
+
+/// Whether the relay at `base` may carry a terminal (FR-L31.19). `https` always may, and is
+/// verified against the webpki roots. Plain `http` may only to a loopback host or to a host listed
+/// with an explicit `http://` entry in `EMBER_TOKEN_HOSTS` (`extra_hosts` here), the same rule as
+/// the token (FR-S11), because keystrokes and shell output would otherwise cross a network in
+/// clear. Any other scheme is refused.
+pub fn relay_allowed_with_hosts(base: &str, extra_hosts: &str) -> Result<(), String> {
+    let Ok(url) = reqwest::Url::parse(base) else {
+        return Err(format!("the server address is not a URL: {base}"));
+    };
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if ember_client::token::token_allowed_for_hosts(base, extra_hosts) => Ok(()),
+        "http" => Err(format!(
+            "refusing plain http to {}: use https, or list http://host:port in EMBER_TOKEN_HOSTS",
+            url.host_str().unwrap_or("")
+        )),
+        other => Err(format!("unsupported server scheme {other}: use https or http")),
+    }
+}
+
+/// [`relay_allowed_with_hosts`] with `EMBER_TOKEN_HOSTS` read from the environment.
+pub fn relay_allowed(base: &str) -> Result<(), String> {
+    relay_allowed_with_hosts(base, &std::env::var("EMBER_TOKEN_HOSTS").unwrap_or_default())
+}
+
+/// The fixed Korean sentence the panel shows when [`relay_allowed`] refuses (NFR-L4); the English
+/// reason goes to the log only.
+pub const RELAY_REFUSED: &str =
+    "이 서버 주소로는 터미널을 열 수 없습니다. https 주소를 쓰거나 같은 컴퓨터의 서버에 연결하세요.";
+
+pub(crate) fn check_relay(base: &str) -> Result<(), ClientError> {
+    relay_allowed(base).map_err(|reason| {
+        tracing::warn!("terminal relay refused: {reason}");
+        ClientError::Refused(RELAY_REFUSED)
+    })
+}
+
+/// Installs the ring provider as rustls' process default, once. reqwest and tokio-tungstenite
+/// both build their rustls client config from that default; installing it explicitly keeps the
+/// TLS stack working even if another dependency also enables a second rustls provider.
+fn ensure_tls_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
 }
 
 /// `{base}/api/computers/{computer}/terms`, the create and list endpoint.
@@ -93,9 +143,28 @@ pub enum TermOrigin {
     IdeEmber,
 }
 
+/// What a new terminal runs (the node's `Program`): `None` in the request is the login shell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TermProgram {
+    /// Run this argv directly (no shell).
+    Argv(Vec<String>),
+    /// Run through `/bin/sh -c` on the node.
+    Shell(String),
+}
+
+/// A terminal to start for a task (FR-L31.16): always a new session (no key).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TermLaunch {
+    pub program: TermProgram,
+    pub cwd: String,
+    pub env: std::collections::BTreeMap<String, String>,
+    pub title: String,
+}
+
 #[derive(Serialize)]
 pub struct TermCreateRequest {
-    pub program: Option<()>,
+    pub program: Option<TermProgram>,
     pub cwd: std::path::PathBuf,
     pub env: std::collections::BTreeMap<String, String>,
     pub env_clear: bool,
@@ -132,6 +201,13 @@ pub struct TermInfo {
     pub state: String,
     #[serde(default)]
     pub last_activity_ms: u64,
+    /// The idempotency key it was created with (`"<project>:<folder>"` and its `#n` siblings).
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub cwd: std::path::PathBuf,
+    #[serde(default)]
+    pub created_ms: u64,
 }
 
 /// One attached client.
@@ -397,6 +473,9 @@ pub struct TerminalState {
     pub cursor: (usize, usize),
     /// PTY size as (cols, rows), once known.
     pub size: (u16, u16),
+    /// True while the program enabled bracketed paste (`ESC[?2004h`), so a paste is wrapped
+    /// in `ESC[200~` and `ESC[201~` (FR-L31.21).
+    pub bracketed_paste: bool,
     /// This client's id on the session, once attached.
     pub client: Option<u64>,
     /// The client that holds control, if any.
@@ -407,8 +486,34 @@ pub struct TerminalState {
     pub refusal: Option<TermRefusal>,
     /// Set once the process has exited: (code, signal).
     pub exit: Option<(Option<i32>, Option<i32>)>,
-    /// Attach or relay failure text.
+    /// Attach or relay failure, kept for the log. The panel shows a fixed sentence instead.
     pub error: Option<String>,
+    /// Set when a relay frame could not be read; cleared on the next attach (FR-L31.22).
+    pub frame_error: bool,
+    /// The automatic reconnect in progress, if any (FR-L31.22).
+    pub reconnect: Option<ReconnectLine>,
+}
+
+/// Where the automatic reconnect stands, for the panel's state line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconnectLine {
+    /// Waiting `secs` before attempt `attempt`.
+    Waiting { attempt: u32, secs: u64 },
+    /// Reattaching now.
+    Reconnecting,
+    /// Out of attempts; the panel offers 다시 연결.
+    GaveUp,
+}
+
+impl ReconnectLine {
+    pub fn text(self) -> String {
+        use crate::terminal_reconnect as rc;
+        match self {
+            ReconnectLine::Waiting { attempt, secs } => rc::waiting_text(attempt, std::time::Duration::from_secs(secs)),
+            ReconnectLine::Reconnecting => rc::RECONNECTING_TEXT.to_owned(),
+            ReconnectLine::GaveUp => rc::GAVE_UP_TEXT.to_owned(),
+        }
+    }
 }
 
 /// Updates from the terminal transport and its VT decoder.
@@ -456,9 +561,11 @@ impl TerminalState {
         }
     }
 
-    /// True when the panel should offer a reconnect: the connection is gone or failed.
+    /// True when the panel should offer a reconnect: the connection is gone or failed and no
+    /// automatic attempt is pending.
     pub fn needs_reconnect(&self) -> bool {
-        self.status == TerminalStatus::Disconnected || self.error.is_some()
+        let automatic = matches!(self.reconnect, Some(ReconnectLine::Waiting { .. } | ReconnectLine::Reconnecting));
+        !automatic && (self.status == TerminalStatus::Disconnected || self.error.is_some())
     }
 
     /// True when another client holds control, so input from this one would be refused.
@@ -476,15 +583,23 @@ impl TerminalState {
         })
     }
 
-    /// Text for an attach or relay failure.
+    /// Text for an attach or relay failure: one fixed sentence, never the transport's own text.
+    /// The relay refusal (FR-L31.19) is the app's own sentence and says what to do, so it is shown.
     pub fn error_text(&self) -> Option<String> {
-        self.error.as_ref().map(|e| format!("터미널 오류: {e}"))
+        self.error.as_ref().map(|e| {
+            if e == RELAY_REFUSED { format!("터미널 오류: {RELAY_REFUSED}") } else { crate::terminal_reconnect::FAILED_TEXT.to_owned() }
+        })
     }
 
-    /// The one line to show instead of (or under) the screen: a failure, else the exit status,
-    /// else the connection state.
+    /// The one line to show instead of (or under) the screen: the reconnect state, else a
+    /// failure, else the exit status, else the connection state, else an unreadable frame.
     pub fn notice(&self) -> Option<String> {
-        self.error_text().or_else(|| self.exit_text()).or_else(|| self.message().map(str::to_owned))
+        self.reconnect
+            .map(ReconnectLine::text)
+            .or_else(|| self.error_text())
+            .or_else(|| self.exit_text())
+            .or_else(|| self.message().map(str::to_owned))
+            .or_else(|| self.frame_error.then(|| crate::terminal_reconnect::FRAME_ERROR_TEXT.to_owned()))
     }
 }
 
@@ -511,6 +626,7 @@ impl TerminalSession {
         self.state.cursor = self.screen.cursor();
         let (cols, rows) = self.screen.size();
         self.state.size = (cols, rows);
+        self.state.bracketed_paste = self.screen.bracketed_paste();
     }
 
     pub fn connecting(&mut self) {
@@ -527,12 +643,37 @@ impl TerminalSession {
         self.state.status = TerminalStatus::Disconnected;
     }
 
+    /// A relay frame could not be read. The stream goes on; the panel says so once.
+    pub fn frame_error(&mut self) {
+        self.state.frame_error = true;
+    }
+
+    /// The stream dropped; the next attempt starts after `delay`. The last screen stays.
+    pub fn waiting(&mut self, attempt: u32, delay: std::time::Duration) {
+        self.state.status = TerminalStatus::Disconnected;
+        self.state.reconnect = Some(ReconnectLine::Waiting { attempt, secs: delay.as_secs().max(1) });
+    }
+
+    /// The reattach is in flight.
+    pub fn reconnecting(&mut self) {
+        self.state.status = TerminalStatus::Connecting;
+        self.state.reconnect = Some(ReconnectLine::Reconnecting);
+    }
+
+    /// No attempts left.
+    pub fn gave_up(&mut self) {
+        self.state.status = TerminalStatus::Disconnected;
+        self.state.reconnect = Some(ReconnectLine::GaveUp);
+    }
+
     /// Apply one frame from the relay.
     pub fn apply_event(&mut self, event: TermEvent) {
         match event {
             TermEvent::Attached { client, term } => {
                 self.state.status = TerminalStatus::Connected;
                 self.state.error = None;
+                self.state.reconnect = None;
+                self.state.frame_error = false;
                 if client.is_some() {
                     self.state.client = client;
                 }
@@ -717,11 +858,35 @@ pub fn start(
     project: &str,
     on_change: Option<ChangeCallback>,
 ) -> TerminalHandle {
+    start_with(base_url, computer_id, folder, project, None, on_change)
+}
+
+/// Start a new terminal on `computer_id` that runs `launch` (a task of the 실행 window,
+/// FR-L31.16) and attach to it. The session is the project's (listings filter on `project`).
+pub fn start_task(
+    base_url: &str,
+    computer_id: &str,
+    project: &str,
+    launch: TermLaunch,
+    on_change: Option<ChangeCallback>,
+) -> TerminalHandle {
+    let folder = launch.cwd.clone();
+    start_with(base_url, computer_id, &folder, project, Some(launch), on_change)
+}
+
+fn start_with(
+    base_url: &str,
+    computer_id: &str,
+    folder: &str,
+    project: &str,
+    launch: Option<TermLaunch>,
+    on_change: Option<ChangeCallback>,
+) -> TerminalHandle {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let shared = Arc::new(Shared {
         session: Mutex::new(TerminalSession::new()),
         revision: AtomicU64::new(0),
-        // TODO(#334): PTY resize. The panel never calls resize, so the session stays 80x24.
+        // The size until the panel measures itself (FR-L31.20, `ui::term_fit`).
         size: Mutex::new((80, 24)),
         tx,
         on_change,
@@ -732,7 +897,86 @@ pub fn start(
     let (base, computer, folder, project) =
         (base_url.to_owned(), computer_id.to_owned(), folder.to_owned(), project.to_owned());
     crate::services::services().rt.spawn(async move {
-        if let Err(e) = run(&task_shared, &base, &computer, &folder, &project, rx).await {
+        use crate::terminal_reconnect::{Next, Reconnect, StreamEnd};
+        let mut rx = rx;
+        let mut policy = Reconnect::default();
+        loop {
+            let end = match run(&task_shared, &base, &computer, &folder, &project, launch.clone(), &mut rx, &mut policy).await {
+                Ok(end) => end,
+                Err(e) => {
+                    // The raw text goes to the log; the panel shows a fixed sentence.
+                    tracing::warn!("editor terminal stream failed: {e}");
+                    let Some(shared) = task_shared.upgrade() else { return };
+                    shared.update(|s| s.fail(e.to_string()));
+                    StreamEnd::Dropped
+                }
+            };
+            let Some(shared) = task_shared.upgrade() else { return };
+            // A task terminal has no key (FR-L31.16): attaching again would start the task a second
+            // time, so its stream is not retried (FR-L31.22 covers the keyed panel shell).
+            if launch.is_some() {
+                shared.update(|s| s.disconnected());
+                return;
+            }
+            match policy.on_end(end) {
+                Next::Stop => {
+                    shared.update(|s| s.disconnected());
+                    return;
+                }
+                Next::GiveUp => {
+                    shared.update(|s| s.gave_up());
+                    return;
+                }
+                Next::Retry { attempt, delay } => {
+                    shared.update(|s| s.waiting(attempt, delay));
+                    drop(shared);
+                    tokio::time::sleep(delay).await;
+                    // Keys typed while the stream was down are not replayed into the shell.
+                    loop {
+                        match rx.try_recv() {
+                            Ok(_) => continue,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return,
+                        }
+                    }
+                    let Some(shared) = task_shared.upgrade() else { return };
+                    shared.update(|s| s.reconnecting());
+                }
+            }
+        }
+    });
+    TerminalHandle { shared }
+}
+
+/// Attach the editor to the existing terminal `term_id` (FR-P6: a terminal that survived the window,
+/// listed by [`crate::terminal_list`]). Dropping the last clone detaches; the terminal keeps running.
+pub fn attach_existing(base_url: &str, computer_id: &str, term_id: &str, on_change: Option<ChangeCallback>) -> TerminalHandle {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let shared = Arc::new(Shared {
+        session: Mutex::new(TerminalSession::new()),
+        revision: AtomicU64::new(0),
+        size: Mutex::new((80, 24)),
+        tx,
+        on_change,
+        pick: Mutex::new(None),
+    });
+    shared.update(|s| s.connecting());
+    let task_shared = Arc::downgrade(&shared);
+    let (base, computer, term) = (base_url.to_owned(), computer_id.to_owned(), term_id.to_owned());
+    crate::services::services().rt.spawn(async move {
+        let hello = TermHello {
+            device: device_name(),
+            kind: Some("ember-editor".into()),
+            pid: Some(std::process::id()),
+            size: Some(PtySize { rows: 24, cols: 80 }),
+            active: true,
+            read_only: false,
+            snapshot: true,
+        };
+        let token = server_token(&base);
+        let mut rx = rx;
+        // No reconnect policy: a reattached tab ends when its stream ends, as in #768.
+        if let Err(e) = stream(&task_shared, &base, &computer, &term, hello, token, &mut rx, None).await {
             if let Some(shared) = task_shared.upgrade() {
                 shared.update(|s| s.fail(e.to_string()));
             }
@@ -744,14 +988,23 @@ pub fn start(
     TerminalHandle { shared }
 }
 
+/// The server token, only for a server this machine may trust with it.
+pub(crate) fn server_token(base: &str) -> Option<String> {
+    ember_client::token::token_allowed_for(base)
+        .then(ember_client::token::server_token_from_env)
+        .flatten()
+}
+
 async fn run(
     shared: &std::sync::Weak<Shared>,
     base: &str,
     computer: &str,
     folder: &str,
     project: &str,
-    rx: tokio::sync::mpsc::UnboundedReceiver<String>,
-) -> Result<(), ClientError> {
+    launch: Option<TermLaunch>,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    policy: &mut crate::terminal_reconnect::Reconnect,
+) -> Result<crate::terminal_reconnect::StreamEnd, ClientError> {
     let live = || shared.upgrade().ok_or_else(|| ClientError::Protocol("terminal closed".into()));
     let (cols, rows) = {
         let strong = live()?;
@@ -759,19 +1012,10 @@ async fn run(
         size
     };
     let size = PtySize { rows, cols };
-    let request = TermCreateRequest {
-        program: None,
-        cwd: folder.into(),
-        env: Default::default(),
-        env_clear: false,
-        size: Some(size),
-        origin: TermOrigin::IdeEmber,
-        project: Some(project.to_owned()),
-        title: None,
-        key: Some(session_key(project, folder)),
-        tags: Default::default(),
-    };
-    // TODO(#333): TLS. The client speaks plain http and ws only.
+    let request = task_request(folder, project, size, launch);
+    // FR-L31.19: https is verified (webpki roots); plain http only where FR-S11 allows it.
+    check_relay(base)?;
+    ensure_tls_provider();
     // The shared loader; the token goes only to a server this machine may trust with it.
     let token = ember_client::token::token_allowed_for(base)
         .then(ember_client::token::server_token_from_env)
@@ -795,7 +1039,34 @@ async fn run(
         read_only: false,
         snapshot: true,
     };
-    stream(shared, base, computer, &created.term.id, hello, token, rx).await
+    // Same key, so a reattach after a drop re-adopts the PTY the node kept (FR-P6); the hello
+    // asks for a snapshot, which redraws the screen.
+    stream(shared, base, computer, &created.term.id, hello, token, rx, Some(policy)).await
+}
+
+/// The create request: the panel's shell under the `"<project>:<folder>"` key, or a task's
+/// program in a new session with the task's title and no key (FR-L31.16).
+pub fn task_request(folder: &str, project: &str, size: PtySize, launch: Option<TermLaunch>) -> TermCreateRequest {
+    let base = TermCreateRequest {
+        program: None,
+        cwd: folder.into(),
+        env: Default::default(),
+        env_clear: false,
+        size: Some(size),
+        origin: TermOrigin::IdeEmber,
+        project: Some(project.to_owned()),
+        title: None,
+        key: Some(session_key(project, folder)),
+        tags: Default::default(),
+    };
+    match launch {
+        None => base,
+        Some(l) => {
+            let mut tags = std::collections::BTreeMap::new();
+            tags.insert("ember.task".to_string(), l.title.clone());
+            TermCreateRequest { program: Some(l.program), cwd: l.cwd.into(), env: l.env, title: Some(l.title), key: None, tags, ..base }
+        }
+    }
 }
 
 /// Attaches to terminal `term_id` with `hello` as the first frame and runs until it ends.
@@ -806,10 +1077,14 @@ async fn stream(
     term_id: &str,
     hello: TermHello,
     token: Option<String>,
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
-) -> Result<(), ClientError> {
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    mut policy: Option<&mut crate::terminal_reconnect::Reconnect>,
+) -> Result<crate::terminal_reconnect::StreamEnd, ClientError> {
+    use crate::terminal_reconnect::StreamEnd;
     let live = || shared.upgrade().ok_or_else(|| ClientError::Protocol("terminal closed".into()));
-    // TODO(#333): TLS. Plain ws only; wss is not configured.
+    // FR-L31.19: wss for an https server, verified against the webpki roots.
+    check_relay(base)?;
+    ensure_tls_provider();
     let mut upgrade = attach_url(base, computer, term_id).into_client_request()?;
     if let Some(token) = &token {
         let value = HeaderValue::from_str(&ember_client::token::bearer_header(token))
@@ -822,37 +1097,45 @@ async fn stream(
     loop {
         tokio::select! {
             incoming = ws.next() => match incoming {
-                None | Some(Ok(Message::Close(_))) => break,
+                None | Some(Ok(Message::Close(_))) => return Ok(StreamEnd::Dropped),
                 Some(Ok(Message::Text(text))) => {
-                    // TODO(#336): reconnect and visible protocol errors. An unparsable frame is
-                    // only logged; the panel shows nothing about it.
+                    // An unparsable frame is skipped, logged, and named on the panel (FR-L31.22).
                     let event = match serde_json::from_str::<TermEvent>(&text) {
                         Ok(event) => event,
                         Err(e) => {
                             tracing::warn!("skipping an unparsable terminal frame: {e}");
+                            live()?.update(|s| s.frame_error());
                             continue;
                         }
                     };
-                    let last = matches!(event, TermEvent::Exit { .. } | TermEvent::Error { .. });
+                    if matches!(event, TermEvent::Attached { .. }) {
+                        if let Some(policy) = policy.as_deref_mut() {
+                            policy.attached();
+                        }
+                    }
+                    let end = match &event {
+                        TermEvent::Exit { .. } => Some(StreamEnd::Exited),
+                        TermEvent::Error { .. } => Some(StreamEnd::Dropped),
+                        _ => None,
+                    };
                     live()?.update(|s| s.apply_event(event));
-                    if last {
-                        break;
+                    if let Some(end) = end {
+                        return Ok(end);
                     }
                 }
                 Some(Ok(_)) => {}
-                Some(Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed)) => break,
+                Some(Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed)) => return Ok(StreamEnd::Dropped),
                 Some(Err(e)) => return Err(e.into()),
             },
             outgoing = rx.recv() => match outgoing {
                 Some(frame) => ws.send(Message::Text(frame.into())).await?,
                 None => {
                     let _ = ws.close(None).await;
-                    break;
+                    return Ok(StreamEnd::Released);
                 }
             },
         }
     }
-    Ok(())
 }
 
 /// Watches a project's agent terminal on `computer_id`, read-only: lists the project's running
@@ -895,7 +1178,7 @@ async fn view(
     base: &str,
     computer: &str,
     project: &str,
-    rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
 ) -> Result<(), ClientError> {
     let token = ember_client::token::token_allowed_for(base)
         .then(ember_client::token::server_token_from_env)
@@ -912,7 +1195,7 @@ async fn view(
         }
         return Ok(());
     };
-    stream(shared, base, computer, term_id, TermHello::viewer(), token, rx).await
+    stream(shared, base, computer, term_id, TermHello::viewer(), token, &mut rx, None).await.map(|_| ())
 }
 
 #[cfg(test)]
@@ -927,6 +1210,28 @@ mod tests {
         assert_eq!(hello["snapshot"], true);
         assert_eq!(hello["kind"], "ember-app");
         assert!(hello["size"].is_null());
+    }
+
+    #[test]
+    fn fr_l31_16_a_task_terminal_is_a_new_session_running_the_program() {
+        let size = PtySize { rows: 24, cols: 80 };
+        let panel = serde_json::to_value(task_request("/w", "/w", size, None)).unwrap();
+        assert_eq!(panel["program"], serde_json::Value::Null);
+        assert_eq!(panel["key"], "/w:/w");
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("A".to_string(), "1".to_string());
+        let launch = TermLaunch { program: TermProgram::Shell("cargo build".into()), cwd: "/w/sub".into(), env, title: "build".into() };
+        let json = serde_json::to_value(task_request("/w/sub", "/w", size, Some(launch))).unwrap();
+        // The node's `Program` is snake_case and externally tagged.
+        assert_eq!(json["program"], serde_json::json!({"shell": "cargo build"}));
+        assert_eq!(json["cwd"], "/w/sub");
+        assert_eq!(json["env"]["A"], "1");
+        assert_eq!(json["title"], "build");
+        assert_eq!(json["key"], serde_json::Value::Null, "every run is a new terminal");
+        assert_eq!(json["project"], "/w");
+        assert_eq!(json["origin"], "ide-ember");
+        let argv = serde_json::to_value(TermProgram::Argv(vec!["node".into(), "a.js".into()])).unwrap();
+        assert_eq!(argv, serde_json::json!({"argv": ["node", "a.js"]}));
     }
 
     #[test]
@@ -1055,6 +1360,54 @@ mod tests {
     }
 
     #[test]
+    fn fr_l31_19_attach_scheme_follows_the_server_scheme() {
+        assert_eq!(attach_url("https://srv:8443/", "c", "t"), "wss://srv:8443/api/computers/c/terms/t/attach");
+        assert_eq!(attach_url("http://127.0.0.1:8740", "c", "t"), "ws://127.0.0.1:8740/api/computers/c/terms/t/attach");
+        assert_eq!(terms_url("https://srv:8443", "c"), "https://srv:8443/api/computers/c/terms");
+    }
+
+    #[test]
+    fn fr_l31_19_https_is_always_allowed() {
+        assert!(relay_allowed_with_hosts("https://srv.example:8443", "").is_ok());
+        assert!(relay_allowed_with_hosts("https://10.0.0.5", "").is_ok());
+    }
+
+    #[test]
+    fn fr_l31_19_plain_http_is_allowed_to_loopback_only() {
+        for base in ["http://127.0.0.1:8740", "http://localhost:8740", "http://[::1]:8740", "http://127.1.2.3"] {
+            assert!(relay_allowed_with_hosts(base, "").is_ok(), "{base}");
+        }
+        let err = relay_allowed_with_hosts("http://srv.example:8740", "").unwrap_err();
+        assert!(err.contains("refusing plain http"), "{err}");
+        assert!(relay_allowed_with_hosts("http://192.168.0.2:8740", "").is_err());
+    }
+
+    #[test]
+    fn fr_l31_19_plain_http_to_a_listed_host_needs_an_explicit_http_entry() {
+        // A bare host entry admits that host over https only, as for the token (FR-S11).
+        assert!(relay_allowed_with_hosts("http://srv.example:8740", "srv.example").is_err());
+        assert!(relay_allowed_with_hosts("http://srv.example:8740", "http://srv.example:8740").is_ok());
+        assert!(relay_allowed_with_hosts("http://srv.example:9000", "http://srv.example:8740").is_err());
+    }
+
+    #[test]
+    fn fr_l31_19_other_schemes_and_non_urls_are_refused() {
+        assert!(relay_allowed_with_hosts("ws://127.0.0.1:8740", "").is_err());
+        assert!(relay_allowed_with_hosts("ftp://srv", "").is_err());
+        assert!(relay_allowed_with_hosts("not a url", "").is_err());
+    }
+
+    #[test]
+    fn fr_l31_19_the_refusal_the_panel_shows_is_korean() {
+        let err = check_relay("http://srv.example:8740").unwrap_err();
+        assert_eq!(err.to_string(), RELAY_REFUSED, "the panel text carries no English reason");
+        let mut session = TerminalSession::new();
+        session.fail(err.to_string());
+        assert_eq!(session.state.error_text().as_deref(), Some(format!("터미널 오류: {RELAY_REFUSED}").as_str()));
+        assert!(RELAY_REFUSED.ends_with("하세요."));
+    }
+
+    #[test]
     fn fr_p3_create_request_carries_key_cwd_and_origin() {
         let request = TermCreateRequest {
             program: None, cwd: "/work".into(), env: Default::default(), env_clear: false,
@@ -1117,6 +1470,54 @@ mod tests {
     }
 
     #[test]
+    fn fr_l31_22_drop_shows_waiting_then_reconnecting_and_attach_clears_it() {
+        let mut session = TerminalSession::new();
+        session.apply_event(TermEvent::Snapshot { size: PtySize { rows: 24, cols: 80 }, data: b"$ ls".to_vec() });
+        session.fail("connection reset by peer (os error 54)");
+        session.waiting(1, std::time::Duration::from_secs(1));
+        assert_eq!(session.state.notice().as_deref(), Some("터미널 연결이 끊어졌습니다. 1초 후 다시 연결합니다. (1/6)"));
+        assert_eq!(session.state.lines, ["$ ls"], "the last screen stays while waiting");
+        assert!(!session.state.needs_reconnect(), "no manual button while an attempt is pending");
+        session.reconnecting();
+        assert_eq!(session.state.notice().as_deref(), Some("터미널에 다시 연결하는 중입니다."));
+        assert!(!session.state.needs_reconnect());
+        session.apply_event(TermEvent::Attached { client: Some(3), term: None });
+        assert_eq!(session.state.reconnect, None);
+        assert_eq!(session.state.error, None);
+        assert_eq!(session.state.notice(), None);
+    }
+
+    #[test]
+    fn fr_l31_22_giving_up_offers_the_manual_reconnect() {
+        let mut session = TerminalSession::new();
+        session.fail("timeout");
+        session.gave_up();
+        assert!(session.state.needs_reconnect());
+        assert_eq!(session.state.notice().as_deref(), Some("터미널에 다시 연결하지 못했습니다. 다시 연결을 눌러 주십시오."));
+    }
+
+    #[test]
+    fn fr_l31_22_errors_show_a_fixed_sentence_never_the_transport_text() {
+        let mut session = TerminalSession::new();
+        session.fail("websocket: IO error: Connection refused (os error 61)");
+        let notice = session.state.notice().unwrap();
+        assert_eq!(notice, "터미널 연결에 문제가 생겼습니다.");
+        assert!(!notice.contains("os error"));
+    }
+
+    #[test]
+    fn fr_l31_22_an_unreadable_frame_is_named_on_a_connected_panel() {
+        let mut session = TerminalSession::new();
+        session.apply_event(TermEvent::Attached { client: Some(1), term: None });
+        assert_eq!(session.state.notice(), None);
+        session.frame_error();
+        assert_eq!(session.state.notice().as_deref(), Some("서버가 보낸 터미널 데이터 일부를 읽지 못했습니다."));
+        assert_eq!(session.state.status, TerminalStatus::Connected, "the stream keeps going");
+        session.apply_event(TermEvent::Attached { client: Some(1), term: None });
+        assert!(!session.state.frame_error);
+    }
+
+    #[test]
     fn fr_p4_banner_names_the_other_controller() {
         let mut session = TerminalSession::new();
         session.apply_event(TermEvent::Attached { client: Some(1), term: None });
@@ -1144,7 +1545,7 @@ mod tests {
         session.apply_event(TermEvent::Exit { code: None, signal: Some(9) });
         assert_eq!(session.state.exit_text().as_deref(), Some("프로세스가 종료되었습니다. (시그널 9)"));
         session.apply_event(TermEvent::Error { message: "node unavailable".into() });
-        assert_eq!(session.state.notice().as_deref(), Some("터미널 오류: node unavailable"));
+        assert_eq!(session.state.notice().as_deref(), Some("터미널 연결에 문제가 생겼습니다."));
         assert_eq!(session.state.status, TerminalStatus::Disconnected);
     }
 

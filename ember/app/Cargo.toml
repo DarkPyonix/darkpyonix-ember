@@ -1,9 +1,9 @@
 [package]
 name = "ember-app"
 version = "0.1.0"
-# dioxus-compose is edition 2024 / Rust 1.85; this crate follows it.
+# dioxus-compose is edition 2024 / Rust 1.88 (3f8fc4a1); this crate follows it.
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Ember native client: launcher and conversation UI on dioxus-compose, no webview (SPEC §L, E1)"
 license = "Apache-2.0"
 publish = false
@@ -28,8 +28,8 @@ path = "src/main.rs"
 # ("Local dioxus-compose"). The crate's build script fetches the renderer for its version; set
 # DIOXUS_COMPOSE_RENDERER_DIR to use a renderer you built yourself.
 # TODO: 배포되면 버전 의존성으로 바꾼다 (compose-rust and dioxus-compose are not yet published).
-compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", tag = "v0.0.6", default-features = false }
-dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "877ef59d4ac8341ec26e1bf8af577f12e23a4367" }
+compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", tag = "v0.0.7", default-features = false }
+dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "3f8fc4a173ecce0d0621be7a9af5d814c30614f8" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
 ember-client = { path = "../client" }
@@ -38,14 +38,18 @@ ember-editor-conn = { path = "../editor-conn" }
 alacritty_terminal = { version = "0.26", default-features = false }
 base64 = "0.22"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-tokio-tungstenite = "0.28"
+# TLS for the terminal relay (FR-L31.19, #333): wss verified against the webpki roots, the same
+# rustls stack reqwest uses below. rustls itself is listed only to install the ring provider.
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 # The client's I/O is async; the app owns one multi-thread runtime for it (PR-3: no domain
 # work on the UI thread).
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "fs", "macros"] }
-# Same HTTP stack as ember-client (plain HTTP for now, TLS is undecided: SPEC §N), used for the
-# endpoints ember-client does not wrap yet (accounts, computers, IDE targets).
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# Same HTTP stack as ember-client, used for the endpoints ember-client does not wrap yet
+# (accounts, computers, IDE targets) and the terminal relay. `rustls-tls` (webpki roots, as in
+# ember/node and ember/server) gives https with certificate verification (FR-L31.19, #333).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

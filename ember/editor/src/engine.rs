@@ -38,6 +38,8 @@ use crate::search::{FileHits, ReplaceReport, ReplaceRequest, SearchEnd, SearchRe
 use crate::semantic::{decode_semantic_tokens, overlay_semantic_runs, DocSemanticTokens};
 use crate::widget::{Decoration, DecorationKind, WidgetCommand, WidgetEvent};
 
+mod language;
+
 /// How many versions behind the document an answer of the highlighter may be and still be shown.
 const MAX_SPAN_VERSION_LAG: u32 = 500;
 
@@ -83,6 +85,10 @@ pub enum ReadPurpose {
     Grammar { scope: String },
     /// A file that is not open, read for replace `id` (FR-E7).
     Replace { id: u64 },
+    /// A file that is not open, read for workspace edit `id` (FR-L31.13).
+    WorkspaceEdit { id: u64 },
+    /// A local resource request `request` of webview `handle` (FR-E8).
+    WebviewResource { handle: String, request: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,6 +99,10 @@ pub enum Input {
     Reload { uri: UriComponents },
     /// The editor of `uri` became the active one.
     Focus { uri: UriComponents },
+    /// Show `text` (widget form) as the buffer of `uri`, opening the file first if it is not open: the
+    /// window's buffer kept across a reconnect (FR-L31.6). The document is dirty unless `text` equals
+    /// the file on disk; equal text changes nothing.
+    Restore { uri: UriComponents, text: String },
     /// An event from the `CodeEditor` node rendered with key `generation`.
     Widget { uri: UriComponents, generation: u64, event: WidgetEvent },
     /// Explicit inline-completion request at `pos` (a keyboard command).
@@ -119,6 +129,15 @@ pub enum Input {
     SetEncoding { uri: UriComponents, encoding: Encoding, mode: EncodingMode },
     /// Put an open document under a language id; `None` detects it from the path again (FR-L31.7).
     SetLanguage { uri: UriComponents, language_id: Option<String> },
+    /// The user's answer to the workspace trust prompt (FR-L31.18): `true` grants trust.
+    DecideWorkspaceTrust { trusted: bool },
+    /// The user closed extension message `id`: with the chosen button's handle, or `None` for
+    /// `undefined` (FR-L31.16).
+    AnswerMessage { id: u64, handle: Option<i64> },
+    /// A language feature the window asks for (FR-L31.13); answered with [`SessionUpdate::Language`].
+    Language(crate::language::LanguageRequest),
+    /// An event of an extension webview or its host (FR-E8).
+    Webview(crate::webview::WebviewEvent),
     /// Nothing happened; run due timers.
     Tick,
 }
@@ -181,12 +200,16 @@ pub enum SessionUpdate {
     Closed { uri: UriComponents },
     /// The extension-host or management connection is gone.
     ConnectionLost { reason: String },
+    /// An extension asked for workspace trust (`$requestWorkspaceTrust`) while the folder is in
+    /// restricted mode: the window shows the trust prompt (FR-L31.18).
+    WorkspaceTrustRequested,
     /// The problems list changed: every marker of every file, errors first.
     Problems { problems: Vec<crate::diagnostics::Problem> },
     /// Output channels changed (channels list, or an append/clear).
     OutputChannels { channels: Vec<crate::output::OutputChannel>, active_id: Option<String> },
-    /// An extension surfaced a notification message ($showMessage).
-    ExtensionMessage { severity: crate::output::MessageSeverity, message: String, source: Option<String> },
+    /// An extension surfaced a notification message ($showMessage). The call stays open until
+    /// [`Input::AnswerMessage`] names its id (FR-L31.16).
+    ExtensionMessage(crate::output::ExtensionMessage),
     /// Commands contributed by extensions or registered at runtime.
     Commands { commands: Vec<crate::commands::ContributedCommand> },
     /// More matches of search `id` (FR-E7), in arrival order.
@@ -202,6 +225,10 @@ pub enum SessionUpdate {
     FormatFailed { uri: UriComponents, error: String },
     /// Every language the extensions contribute, for the language mode picker (FR-L31.7).
     Languages { languages: Vec<LanguageInfo> },
+    /// The answer to a language feature request (FR-L31.13).
+    Language(crate::language::LanguageUpdate),
+    /// An extension webview changed (FR-E8): the window applies it to its webview host and panes.
+    Webview(crate::webview::WebviewUpdate),
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +244,10 @@ enum Pending {
     Command { id: String },
     /// `$provideTextSearchResults` of search `id`.
     Search { id: u64 },
+    /// A call of the language features (FR-L31.13).
+    Language(language::PendingLang),
+    /// A call of the webview model (FR-E8).
+    Webview(crate::webview::Pending),
 }
 
 /// The running search: the window's id, the provider session, its call, and the open documents whose
@@ -251,10 +282,14 @@ struct ReplaceWrite {
 
 pub struct SessionCore {
     opts: CoreOptions,
+    /// The window's settings (FR-L31.17); `None` until the session has read them.
+    settings: Option<crate::settings::SettingsScopes>,
     languages: LanguageRegistry,
     language_ids: Vec<String>,
     docs: HashMap<String, OpenDocument>,
     opening: HashSet<String>,
+    /// Buffers to restore once their file has been read ([`Input::Restore`] before the open finished).
+    restores: HashMap<String, String>,
     /// Documents announced to the extension host only (for `$tryOpenDocument`): key → (uri, version).
     exthost_only: HashMap<String, (UriComponents, u64)>,
     active: Option<String>,
@@ -284,13 +319,21 @@ pub struct SessionCore {
     search: Option<ActiveSearch>,
     replaces: HashMap<u64, ReplaceJob>,
     replace_writes: HashMap<Token, ReplaceWrite>,
+    lang: language::LangState,
+    /// Extension webviews (FR-E8).
+    webviews: crate::webview::Webviews,
     next_token: Token,
     next_generation: u64,
     next_editor: u64,
     next_edit_request: u32,
     reply_seq: u64,
+    /// Workspace trust and the trust requests waiting for the user (FR-L31.18).
+    trust: crate::trust::WorkspaceTrust,
     output_seq: u64,
     output_channels: Vec<crate::output::OutputChannel>,
+    /// Open `$showMessage` calls by Ember message id (FR-L31.16).
+    pending_messages: HashMap<u64, u32>,
+    next_message_id: u64,
     touched: BTreeSet<String>,
     out: Vec<Effect>,
     now: Instant,
@@ -312,10 +355,12 @@ impl SessionCore {
         let language_ids = languages.ids();
         Self {
             opts,
+            settings: None,
             languages,
             language_ids,
             docs: HashMap::new(),
             opening: HashSet::new(),
+            restores: HashMap::new(),
             exthost_only: HashMap::new(),
             active: None,
             registry: Registry::new(),
@@ -342,16 +387,39 @@ impl SessionCore {
             search: None,
             replaces: HashMap::new(),
             replace_writes: HashMap::new(),
+            lang: language::LangState::default(),
+            webviews: crate::webview::Webviews::new(),
             next_token: 0,
             next_generation: 0,
             next_editor: 0,
             next_edit_request: 0,
             reply_seq: 0,
+            trust: crate::trust::WorkspaceTrust::default(),
             output_seq: 0,
             output_channels: Vec::new(),
+            pending_messages: HashMap::new(),
+            next_message_id: 0,
             touched: BTreeSet::new(),
             out: Vec::new(),
             now,
+        }
+    }
+
+    /// Take the window's settings (FR-L31.17). `editor.tabSize` and `editor.insertSpaces` apply to
+    /// documents opened from now on; an open document keeps what it was opened with.
+    pub fn set_settings(&mut self, scopes: crate::settings::SettingsScopes) {
+        self.settings = Some(scopes);
+    }
+
+    /// Tab size and insert-spaces for a document of `language`: the settings when the session has
+    /// them, the start-up options otherwise.
+    fn indent_for(&self, language: &str) -> (u32, bool) {
+        match &self.settings {
+            Some(scopes) => {
+                let resolved = crate::settings::EditorSettings::resolve(scopes, Some(language));
+                (resolved.tab_size, resolved.insert_spaces)
+            }
+            None => (self.opts.tab_width, self.opts.insert_spaces),
         }
     }
 
@@ -363,6 +431,7 @@ impl SessionCore {
             Input::Close { uri } => self.on_close(&uri),
             Input::Reload { uri } => self.on_reload(uri),
             Input::Focus { uri } => self.on_focus(&uri),
+            Input::Restore { uri, text } => self.on_restore(uri, text),
             Input::Widget { uri, generation, event } => self.on_widget(&uri, generation, event),
             Input::TriggerInline { uri, generation, pos } => self.on_trigger_inline(&uri, generation, pos),
             Input::ExtHostRequest(r) => self.on_exthost_request(r),
@@ -380,6 +449,18 @@ impl SessionCore {
             Input::SetEol { uri, eol } => self.on_set_eol(&uri, eol),
             Input::SetEncoding { uri, encoding, mode } => self.on_set_encoding(&uri, encoding, mode),
             Input::SetLanguage { uri, language_id } => self.on_set_language(&uri, language_id),
+            Input::DecideWorkspaceTrust { trusted } => self.on_decide_trust(trusted),
+            Input::AnswerMessage { id, handle } => {
+                if let Some(req) = self.pending_messages.remove(&id) {
+                    let reply = match handle { Some(h) => Reply::Json(Value::from(h)), None => Reply::Empty };
+                    self.respond(req, Ok(reply));
+                }
+            }
+            Input::Language(request) => self.on_language(request),
+            Input::Webview(event) => {
+                let out = self.webviews.on_event(event);
+                self.apply_webview(out);
+            }
             Input::Tick => {}
         }
         self.run_timers();
@@ -456,6 +537,26 @@ impl SessionCore {
         self.out.push(Effect::Ui(u));
     }
 
+    /// The trust state the extension host was started with (FR-L31.18); set once, before the
+    /// first input.
+    pub fn set_workspace_trust(&mut self, trust: crate::trust::WorkspaceTrust) {
+        self.trust = trust;
+    }
+
+    pub fn workspace_trusted(&self) -> bool {
+        self.trust.is_trusted()
+    }
+
+    fn on_decide_trust(&mut self, trusted: bool) {
+        let (calls, answers) = self.trust.decide(trusted);
+        for call in calls {
+            self.out.push(Effect::Rpc { token: None, call });
+        }
+        for (req, reply) in answers {
+            self.respond(req, Ok(reply));
+        }
+    }
+
     fn respond(&mut self, req: u32, result: Result<Reply, Option<Value>>) {
         self.out.push(Effect::Respond { req, result });
     }
@@ -487,7 +588,7 @@ impl SessionCore {
     fn emit_folds(&mut self, key: &str) {
         let Some(doc) = self.docs.get(key) else { return };
         let (uri, generation, version) = (doc.uri.clone(), doc.generation(), doc.widget_version());
-        let tab_width = self.opts.tab_width;
+        let tab_width = self.indent_for(&doc.language_id).0;
         let folds = self
             .folds
             .entry(key.to_owned())
@@ -562,7 +663,7 @@ impl SessionCore {
                 generation: d.generation(),
                 text: d.widget_text(),
                 language_id: d.language_id.clone(),
-                tab_width: self.opts.tab_width,
+                tab_width: self.indent_for(&d.language_id).0,
             };
             self.ui(u);
             self.emit_format(&key);
@@ -599,6 +700,7 @@ impl SessionCore {
         self.next_generation += 1;
         self.next_editor += 1;
         let editor_id = format!("ember-editor-{}", self.next_editor);
+        let (tab_width, insert_spaces) = self.indent_for(&language);
         let (mut doc, mut calls) = OpenDocument::open(
             uri.clone(),
             &text,
@@ -607,8 +709,8 @@ impl SessionCore {
             &editor_id,
             ext_version,
             self.next_generation,
-            self.opts.tab_width,
-            self.opts.insert_spaces,
+            tab_width,
+            insert_spaces,
         );
         calls.extend(doc.set_encoding(encoding));
         for c in calls {
@@ -619,7 +721,7 @@ impl SessionCore {
             generation: doc.generation(),
             text: doc.widget_text(),
             language_id: language,
-            tab_width: self.opts.tab_width,
+            tab_width,
         });
         self.docs.insert(key.clone(), doc);
         self.emit_format(&key);
@@ -632,11 +734,43 @@ impl SessionCore {
         self.schedule_codelens(&key, Duration::ZERO);
         self.schedule_folding(&key, Duration::ZERO);
         self.schedule_semantic(&key, Duration::ZERO);
-        self.touched.insert(key);
+        self.touched.insert(key.clone());
+        if let Some(text) = self.restores.remove(&key) {
+            self.restore_doc(&key, &text);
+        }
+    }
+
+    fn on_restore(&mut self, uri: UriComponents, text: String) {
+        let key = uri.key();
+        if self.docs.contains_key(&key) {
+            self.restore_doc(&key, &text);
+            return;
+        }
+        self.restores.insert(key.clone(), text);
+        if self.opening.insert(key) {
+            self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::Open });
+        }
+    }
+
+    /// Put `text` (widget form) in the buffer of open document `key` as a new generation and tell the
+    /// window whether it is dirty. Text equal to the buffer changes nothing.
+    fn restore_doc(&mut self, key: &str, text: &str) {
+        let normalized = text.replace("\r\n", "\n");
+        match self.docs.get(key) {
+            Some(doc) if doc.widget_text() != normalized => {}
+            _ => return,
+        }
+        self.replace_doc(key, |doc, generation| doc.restore(&normalized, generation));
+        if let Some(doc) = self.docs.get(key) {
+            let (uri, dirty) = (doc.uri.clone(), doc.is_dirty());
+            self.ui(SessionUpdate::Dirty { uri, dirty });
+        }
     }
 
     fn on_close(&mut self, uri: &UriComponents) {
         let key = uri.key();
+        self.restores.remove(&key);
+        self.language_close(&key);
         let Some(doc) = self.docs.remove(&key) else { return };
         self.rpc(doc.remove_call());
         if let Some(job) = self.highlights.close(&key) {
@@ -987,6 +1121,9 @@ impl SessionCore {
     fn on_file_written(&mut self, uri: &UriComponents, token: Token, result: Result<(), String>) {
         if let Some(write) = self.replace_writes.remove(&token) {
             self.on_replace_written(uri, write, result);
+            return;
+        }
+        if self.on_workspace_edit_written(uri, token, &result) {
             return;
         }
         let Some((key, ext_version, bytes)) = self.saves.remove(&token) else { return };
@@ -1374,6 +1511,19 @@ impl SessionCore {
 
     fn on_exthost_request(&mut self, r: IncomingRequest) {
         self.reply_seq += 1;
+        if ember_editor_conn::webview::WebviewCall::is_webview_proxy(r.proxy) {
+            match ember_editor_conn::webview::WebviewCall::parse(&r) {
+                Ok(Some(call)) => {
+                    let out = self.webviews.on_call(r.req, call);
+                    self.apply_webview(out);
+                    return;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("ember-editor: cannot decode webview call {:?}.{}: {e}", r.proxy, r.method);
+                }
+            }
+        }
         let parsed = MainThreadCall::parse(&r);
         match parsed {
             Ok(MainThreadCall::DiagnosticsChangeMany { owner, entries }) => {
@@ -1449,14 +1599,15 @@ impl SessionCore {
                 });
                 self.respond(r.req, Ok(Reply::Empty));
             }
-            Ok(MainThreadCall::ShowMessage { severity, message, options, .. }) => {
-                let source = options.get("source").and_then(|v| v.as_str()).map(str::to_owned);
-                self.ui(SessionUpdate::ExtensionMessage {
-                    severity: crate::output::MessageSeverity::from_u8(severity),
-                    message,
-                    source,
-                });
-                self.respond(r.req, Ok(Reply::Empty));
+            Ok(MainThreadCall::ShowMessage { severity, message, options, commands }) => {
+                // Code-OSS answers when the notification closes: the chosen button's handle, or
+                // `undefined`. The call stays open until the UI says (FR-L31.16).
+                self.next_message_id += 1;
+                let id = self.next_message_id;
+                self.pending_messages.insert(id, r.req);
+                self.ui(SessionUpdate::ExtensionMessage(crate::output::ExtensionMessage::from_show_message(
+                    id, severity, message, &options, &commands,
+                )));
             }
             Ok(MainThreadCall::RegisterTextSearchProvider { handle, scheme }) => {
                 // The remote scheme wins over `file` should both ever be registered.
@@ -1481,10 +1632,18 @@ impl SessionCore {
             Ok(MainThreadCall::Other { proxy: Some("MainThreadLanguages"), method }) if method == "$changeLanguage" => {
                 self.on_change_language_request(&r);
             }
-            Ok(MainThreadCall::Other { proxy, method }) => {
-                let reply = session_reply(proxy, &method, self.reply_seq, &self.language_ids);
-                self.respond(r.req, Ok(reply));
+            Ok(MainThreadCall::Other { proxy: Some("MainThreadBulkEdits"), method }) if method == "$tryApplyWorkspaceEdit" => {
+                self.on_try_apply_workspace_edit(&r);
             }
+            Ok(MainThreadCall::Other { proxy, method }) => match self.trust.on_request(proxy, &method, r.req) {
+                // Workspace trust (FR-L31.18).
+                Some(crate::trust::TrustAnswer::Now(reply)) => self.respond(r.req, Ok(reply)),
+                Some(crate::trust::TrustAnswer::Ask) => self.out.push(Effect::Ui(SessionUpdate::WorkspaceTrustRequested)),
+                None => {
+                    let reply = session_reply(proxy, &method, self.reply_seq, &self.language_ids);
+                    self.respond(r.req, Ok(reply));
+                }
+            },
             Ok(call) => {
                 let change = self.registry.apply(&call);
                 self.on_registry_change(change);
@@ -1642,6 +1801,36 @@ impl SessionCore {
                 }
             }
             Pending::Search { id } => self.on_search_reply(id, result),
+            Pending::Language(pending) => self.on_language_reply(token, pending, result),
+            Pending::Webview(pending) => {
+                let out = self.webviews.on_reply(pending, result);
+                self.apply_webview(out);
+            }
+        }
+    }
+
+    // ---- extension webviews (FR-E8) -----------------------------------------------------------
+
+    /// The webview model of this session.
+    pub fn webviews(&self) -> &crate::webview::Webviews {
+        &self.webviews
+    }
+
+    fn apply_webview(&mut self, out: Vec<crate::webview::Out>) {
+        use crate::webview::Out;
+        for o in out {
+            match o {
+                Out::Rpc(call) => self.rpc(call),
+                Out::RpcWith(call, pending) => {
+                    self.rpc_with(call, Pending::Webview(pending));
+                }
+                Out::Respond { req, reply } => self.respond(req, Ok(reply)),
+                Out::Ui(update) => self.ui(SessionUpdate::Webview(update)),
+                Out::ReadFile { uri, handle, request } => {
+                    self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::WebviewResource { handle, request } })
+                }
+                Out::Command { id, arguments } => self.run_command(CommandDto { id, title: String::new(), tooltip: None, arguments }),
+            }
         }
     }
 
@@ -1653,7 +1842,10 @@ impl SessionCore {
                 self.opening.remove(&uri.key());
                 match result {
                     Ok(bytes) => self.finish_open(uri, bytes),
-                    Err(error) => self.ui(SessionUpdate::OpenFailed { uri, error }),
+                    Err(error) => {
+                        self.restores.remove(&uri.key());
+                        self.ui(SessionUpdate::OpenFailed { uri, error })
+                    }
                 }
             }
             ReadPurpose::Reload => {
@@ -1707,6 +1899,11 @@ impl SessionCore {
             ReadPurpose::ExtHostOpen { req } => self.finish_exthost_open(uri, req, result),
             ReadPurpose::Grammar { scope } => self.on_grammar_read(&scope, &uri, result),
             ReadPurpose::Replace { id } => self.on_replace_read(id, uri, result),
+            ReadPurpose::WorkspaceEdit { id } => self.on_workspace_edit_read(id, uri, result),
+            ReadPurpose::WebviewResource { handle, request } => {
+                let out = self.webviews.on_resource_read(handle, request, &uri, result);
+                self.apply_webview(out);
+            }
         }
     }
 
@@ -2018,11 +2215,19 @@ impl SessionCore {
     /// Replace a document's content wholesale (reload from disk, resync). `encoding: None` keeps the
     /// current encoding.
     fn reset_doc(&mut self, key: &str, text: &str, encoding: Option<Encoding>) {
+        self.replace_doc(key, |doc, generation| {
+            let encoding = encoding.unwrap_or_else(|| doc.encoding());
+            doc.reset(text, encoding, generation)
+        });
+    }
+
+    /// Replace a document's content with what `replace` puts in it, as a new widget generation: the
+    /// extension host is re-announced, the overlays of the old text end, and the widget gets `SetText`.
+    fn replace_doc(&mut self, key: &str, replace: impl FnOnce(&mut OpenDocument, u64) -> Vec<Call>) {
         self.next_generation += 1;
         let generation = self.next_generation;
         let Some(doc) = self.docs.get_mut(key) else { return };
-        let encoding = encoding.unwrap_or_else(|| doc.encoding());
-        let calls = doc.reset(text, encoding, generation);
+        let calls = replace(doc, generation);
         let (uri, widget_text) = (doc.uri.clone(), doc.widget_text());
         for c in calls {
             self.rpc(c);

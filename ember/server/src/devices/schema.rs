@@ -10,3 +10,9 @@ CREATE TABLE devices (
     created_at  INTEGER NOT NULL
 );
 ";
+
+/// #366, FR-N8: the device's scope (`full`, `read_only`, `chat_only`). Existing rows keep
+/// today's behaviour (`full`). Appended last in [`crate::store`].
+pub const SCOPE_MIGRATION: &str = "
+ALTER TABLE devices ADD COLUMN scope TEXT NOT NULL DEFAULT 'full';
+";

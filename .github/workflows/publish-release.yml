@@ -67,7 +67,10 @@ jobs:
             tar -C stage -czf "dist/$name.tar.gz" "$name"
             (cd dist && if command -v sha256sum >/dev/null; then sha256sum "$name.tar.gz"; else shasum -a 256 "$name.tar.gz"; fi > "$name.tar.gz.sha256")
           }
-          pack server ember-server ember-exec ember-a2a
+          # ember-term ships next to ember-server too: the server puts that folder on the
+          # OSE's PATH for VS Code tasks (SPEC FR-P5, #26).
+          cp ember/node/target/release/ember-term ember/server/target/release/ember-term
+          pack server ember-server ember-exec ember-a2a ember-term
           pack node ember-node ember-term
           ls -l dist
       - uses: actions/upload-artifact@v4

@@ -66,10 +66,24 @@ pub enum Action {
     FindInFiles,
     /// Search across the project's files with the replace field shown (FR-E7).
     ReplaceInFiles,
+    /// Reopen the editor closed last (FR-L31.15).
+    ReopenClosed,
+    /// View: Zoom In, Zoom Out, Reset Zoom (FR-L31.15).
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+    /// Show the extensions window (FR-L31.14).
+    Extensions,
+    /// The settings view (FR-L31.17).
+    Settings,
+    /// The user's settings.json as a document (FR-L31.17).
+    SettingsJson,
+    /// The user's keybindings.json as a document (FR-L31.17).
+    KeybindingsJson,
 }
 
 impl Action {
-    pub const ALL: [Action; 22] = [
+    pub const ALL: [Action; 30] = [
         Action::Project,
         Action::Commit,
         Action::Git,
@@ -92,6 +106,14 @@ impl Action {
         Action::FindInFile,
         Action::FindInFiles,
         Action::ReplaceInFiles,
+        Action::ReopenClosed,
+        Action::ZoomIn,
+        Action::ZoomOut,
+        Action::ZoomReset,
+        Action::Extensions,
+        Action::Settings,
+        Action::SettingsJson,
+        Action::KeybindingsJson,
     ];
 
     pub fn label(self) -> &'static str {
@@ -118,6 +140,14 @@ impl Action {
             Action::FindInFile => "문서에서 찾기",
             Action::FindInFiles => "파일에서 찾기",
             Action::ReplaceInFiles => "파일에서 바꾸기",
+            Action::ReopenClosed => "닫은 편집기 다시 열기",
+            Action::ZoomIn => "확대",
+            Action::ZoomOut => "축소",
+            Action::ZoomReset => "원래 크기",
+            Action::Extensions => "확장",
+            Action::Settings => "설정",
+            Action::SettingsJson => "사용자 설정 열기 (JSON)",
+            Action::KeybindingsJson => "키보드 단축키 열기 (JSON)",
         }
     }
 }
@@ -245,7 +275,7 @@ impl Chord {
 /// `(action, macOS chord, other chord)`; an empty chord means no default binding.
 type Row = (Action, &'static str, &'static str);
 
-const VSCODE: [Row; 22] = [
+const VSCODE: [Row; 30] = [
     (Action::Project, "\u{21E7}\u{2318}E", "Ctrl+Shift+E"),
     // VS Code has no default for a commit window; the source control view shares Git's chord.
     (Action::Commit, "", ""),
@@ -269,9 +299,19 @@ const VSCODE: [Row; 22] = [
     (Action::FindInFile, "\u{2318}F", "Ctrl+F"),
     (Action::FindInFiles, "\u{21E7}\u{2318}F", "Ctrl+Shift+F"),
     (Action::ReplaceInFiles, "\u{21E7}\u{2318}H", "Ctrl+Shift+H"),
+    (Action::ReopenClosed, "\u{21E7}\u{2318}T", "Ctrl+Shift+T"),
+    (Action::ZoomIn, "\u{2318}=", "Ctrl+="),
+    (Action::ZoomOut, "\u{2318}-", "Ctrl+-"),
+    (Action::ZoomReset, "\u{2318}0", "Ctrl+0"),
+    // Code-OSS: workbench.view.extensions.
+    (Action::Extensions, "\u{21E7}\u{2318}X", "Ctrl+Shift+X"),
+    (Action::Settings, "\u{2318},", "Ctrl+,"),
+    // Code-OSS binds neither JSON file by default (the keyboard shortcuts editor is a two-stroke chord).
+    (Action::SettingsJson, "", ""),
+    (Action::KeybindingsJson, "", ""),
 ];
 
-const JETBRAINS: [Row; 22] = [
+const JETBRAINS: [Row; 30] = [
     (Action::Project, "\u{2318}1", "Alt+1"),
     (Action::Commit, "\u{2318}0", "Alt+0"),
     (Action::Git, "\u{2318}9", "Alt+9"),
@@ -294,6 +334,17 @@ const JETBRAINS: [Row; 22] = [
     (Action::FindInFile, "\u{2318}F", "Ctrl+F"),
     (Action::FindInFiles, "\u{21E7}\u{2318}F", "Ctrl+Shift+F"),
     (Action::ReplaceInFiles, "\u{21E7}\u{2318}R", "Ctrl+Shift+R"),
+    // IntelliJ's Reopen Closed Tab is ⇧⌘T on macOS; elsewhere its Ctrl+Shift+T is the new-terminal row.
+    (Action::ReopenClosed, "\u{21E7}\u{2318}T", ""),
+    // ⌘0 is the commit window here, so the IDE zoom takes IntelliJ's own Zoom IDE chords.
+    (Action::ZoomIn, "\u{2303}\u{21E7}\u{2325}=", "Ctrl+Shift+Alt+="),
+    (Action::ZoomOut, "\u{2303}\u{21E7}\u{2325}-", "Ctrl+Shift+Alt+-"),
+    (Action::ZoomReset, "\u{2303}\u{21E7}\u{2325}0", "Ctrl+Shift+Alt+0"),
+    // The JetBrains keymap has no default chord for Plugins.
+    (Action::Extensions, "", ""),
+    (Action::Settings, "\u{2318},", "Ctrl+Alt+S"),
+    (Action::SettingsJson, "", ""),
+    (Action::KeybindingsJson, "", ""),
 ];
 
 impl Keymap {
@@ -321,7 +372,7 @@ impl Keymap {
         }
     }
 
-    fn table(self) -> &'static [Row; 22] {
+    fn table(self) -> &'static [Row; 30] {
         match self {
             Keymap::VsCode => &VSCODE,
             Keymap::JetBrains => &JETBRAINS,
@@ -346,6 +397,45 @@ impl Keymap {
         Action::ALL
             .into_iter()
             .find(|a| self.chord(*a, os).as_ref() == Some(chord))
+    }
+}
+
+/// An option of the find bar (FR-L31.12). Code-OSS binds these only while the find widget or the editor
+/// has focus, so they live beside the window table rather than in it (JetBrains' ⌥⌘L, 코드 서식, would
+/// otherwise collide with 선택 영역에서 찾기); they are the same in both keymaps, as Code-OSS's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindOption {
+    Regex,
+    InSelection,
+    PreserveCase,
+}
+
+impl FindOption {
+    pub const ALL: [FindOption; 3] = [FindOption::Regex, FindOption::InSelection, FindOption::PreserveCase];
+
+    fn text(self, os: Os) -> &'static str {
+        match (self, os) {
+            (FindOption::Regex, Os::Mac) => "\u{2325}\u{2318}R",
+            (FindOption::InSelection, Os::Mac) => "\u{2325}\u{2318}L",
+            (FindOption::PreserveCase, Os::Mac) => "\u{2325}\u{2318}P",
+            (FindOption::Regex, Os::Other) => "Alt+R",
+            (FindOption::InSelection, Os::Other) => "Alt+L",
+            (FindOption::PreserveCase, Os::Other) => "Alt+P",
+        }
+    }
+
+    pub fn chord(self, os: Os) -> Option<Chord> {
+        Chord::parse(os, self.text(os))
+    }
+
+    /// The chord as the OS writes it, for the button's tooltip.
+    pub fn hint(self, os: Os) -> String {
+        self.chord(os).map(|c| c.display(os)).unwrap_or_default()
+    }
+
+    /// The option a chord pressed in the find bar toggles.
+    pub fn for_chord(chord: &Chord, os: Os) -> Option<FindOption> {
+        FindOption::ALL.into_iter().find(|o| o.chord(os).as_ref() == Some(chord))
     }
 }
 

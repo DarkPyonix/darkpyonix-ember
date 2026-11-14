@@ -13,7 +13,7 @@ use compose_rust::ui::Modifier;
 use compose_rust::{TypeRole};
 use std::time::Duration;
 
-use super::components::{AppButton, ButtonKind, EmberField, EmberSheet, FieldOptions, Label, Pill, SheetFooter};
+use super::components::{copy_notice, AppButton, ButtonKind, EmberField, EmberSheet, FieldOptions, Label, Pill, SheetFooter, COPY_LABEL};
 use super::notice;
 use super::theme::*;
 use crate::model::now_ms;
@@ -519,11 +519,17 @@ fn WaitingBody(ui: &AddUi, code: &str, expires_ms: i64, sample: bool) {
         Label(flow::EXPIRED_LINE, Fs::Sm, Weight::Medium, Some(paint(p.red.strong)), Some(3));
         return;
     }
-    // The code, large and in the mono face. Copy needs the clipboard.
-    // TODO(compose-rust#471): a copy button waits for clipboard support; the text is selectable.
+    // The code, large and in the mono face, and a 복사 button that puts it on the clipboard
+    // through the toolkit (compose-rust v0.0.7, #471).
     let w = compose_rust::runtime::current_window_size();
     let avail = w.width_dp.min(760.0) - 2.0 * SP[4];
     super::components::MonoLabel(code, flow::code_font_size(code.chars().count(), avail), Weight::Semibold, Some(paint(p.text)));
+    {
+        let code = code.to_string();
+        AppButton(COPY_LABEL, None, ButtonKind::Default, true, true, false, move || {
+            notice::post(copy_notice(compose_rust::clipboard::set_text(&code).is_ok()));
+        });
+    }
 
     Label(flow::CODE_ONCE, Fs::Xs, Weight::Regular, muted, Some(2));
     Label(&flow::countdown_text(left), Fs::Sm, Weight::Medium, Some(paint(if left == 0 { p.red.strong } else { p.text_2 })), Some(1));

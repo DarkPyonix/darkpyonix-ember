@@ -1,12 +1,11 @@
 //! Accessible names of the icon-only controls of the rail, the channel header and the project
 //! boxes (FR-L28, FR-L10, #501). The names are Korean and match the mockup's titles.
 //!
-//! The pinned compose-rust (v0.0.6) has no label or content-description modifier for an
-//! icon-only `on_click` container (compose-rust#460, earlier #429), and a toolkit `Button`
-//! with empty text is named from its icon role, in English. An invisible text child does not
-//! name the button (verified with a macOS AX dump, it becomes a separate static text), so the
-//! controls below stay unnamed.
-//! TODO(compose-rust#460): pass these names to the label modifier when the toolkit has one.
+//! compose-rust v0.0.7 names an icon-only `on_click` container with `Modifier::label`
+//! (compose-rust#460, #429): `components::NamedClickable` passes these constants to it. The
+//! toolkit keeps every distinct label for the life of the program, so only this fixed set goes
+//! through `label`; a name built from data (a routine name) takes a `Button`'s
+//! `accessible_name`, which is owned.
 
 pub const THEME: &str = "테마 전환";
 pub const SETTINGS: &str = "설정";
@@ -20,13 +19,20 @@ pub const EMOJI: &str = "이모지";
 pub const VERSION_CONTROL: &str = "버전 관리";
 pub const PROJECT_SETTINGS: &str = "프로젝트 설정";
 pub const OPEN_SESSION: &str = "세션 열기";
+pub const CLOSE: &str = "닫기";
+pub const SEND: &str = "보내기";
+pub const SHARE: &str = "공유 시트 열기";
+pub const OTHER_IDE: &str = "다른 IDE 선택";
+pub const SESSION_MENU: &str = "세션 메뉴";
+pub const OPEN_SCREEN: &str = "화면 열기";
 
 /// The reviewed Korean names of the icon-only controls outside the nav menus (those take
 /// `NavMenu::label`).
-pub fn rail_labels() -> [&'static str; 12] {
+pub fn rail_labels() -> [&'static str; 18] {
     [
         THEME, SETTINGS, PLATFORM, MENU, NEW_CHANNEL, MEMBERS, MORE, ATTACH, EMOJI,
-        VERSION_CONTROL, PROJECT_SETTINGS, OPEN_SESSION,
+        VERSION_CONTROL, PROJECT_SETTINGS, OPEN_SESSION, CLOSE, SEND, SHARE, OTHER_IDE,
+        SESSION_MENU, OPEN_SCREEN,
     ]
 }
 

@@ -9,7 +9,8 @@
 //! Files in the shim directory, per session `<id>`:
 //! - `<id>.sock`: the shim's control socket.
 //! - `<id>.json`: [`ShimMeta`], written by the shim.
-//! - `<id>.log`: the agent's stderr.
+//! - `<id>.log`: the agent's stderr, line by line through the upstream redaction (mode 0600, #544),
+//!   kept after the shim ends and removed by [`sweep_old_logs`] after [`LOG_RETENTION`].
 //! - `<id>.spec.json`: [`ShimSpec`], mode 0600, deleted by the shim once read (it can hold
 //!   secrets in `env`, which is why it is not passed on the command line).
 //!
@@ -33,7 +34,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(unix)]
 use std::sync::{Arc, Mutex as StdMutex};
-#[cfg(unix)]
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,13 @@ use tokio::net::{unix::OwnedWriteHalf, UnixListener, UnixStream};
 use tokio::sync::mpsc;
 #[cfg(unix)]
 use tokio::sync::{oneshot, watch, Mutex, Notify};
+
+/// How long the agent stderr log of an ended shim is kept (#544): [`spawn_shim`] removes older ones.
+pub const LOG_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// The longest stderr line written to the log in one piece; a longer one is split there.
+#[cfg(unix)]
+const LOG_LINE_MAX: usize = 64 * 1024;
 
 /// Most unacknowledged stdout bytes a shim keeps.
 pub const BUFFER_CAP: usize = 64 * 1024 * 1024;
@@ -71,10 +78,13 @@ pub struct ShimSpec {
 pub const ENV_CLEAR: &str = "EMBER_ENV_CLEAR";
 
 /// Set `env` on `cmd`: honours [`ENV_CLEAR`], otherwise the entries are added on top of the
-/// inherited environment.
+/// inherited environment with every Ember secret removed first (FR-A11,
+/// [`crate::sandbox::scrub_env`]). An entry of `env` itself is set after the scrub and survives.
 pub fn apply_env(cmd: &mut tokio::process::Command, env: &[(String, String)]) {
     if env.iter().any(|(k, _)| k == ENV_CLEAR) {
         cmd.env_clear();
+    } else {
+        crate::sandbox::scrub_env(cmd);
     }
     cmd.envs(env.iter().filter(|(k, _)| k != ENV_CLEAR).map(|(k, v)| (k, v)));
 }
@@ -102,6 +112,88 @@ fn spec_path(dir: &Path, id: &str) -> PathBuf {
 }
 fn log_path(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{id}.log"))
+}
+
+/// Makes the shim directory (and missing parents) private to this user (#544): created with mode
+/// 0700, and an existing one with group or other bits is tightened to 0700. The directory holds
+/// the control sockets, the spec files (which can carry secrets) and the stderr logs.
+pub fn private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        let md = std::fs::symlink_metadata(dir)?;
+        if md.file_type().is_symlink() || !md.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("shim dir {} is not a directory", dir.display()),
+            ));
+        }
+        if md.permissions().mode() & 0o077 != 0 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
+/// Removes `<id>.log` files in `dir` older than `max_age` whose shim is gone (no `<id>.json`),
+/// and returns how many it removed (#544). A live shim's log is kept whatever its age.
+pub fn sweep_old_logs(dir: &Path, max_age: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "log") {
+            continue;
+        }
+        let Some(id) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else { continue };
+        if meta_path(dir, &id).exists() {
+            continue;
+        }
+        let Ok(md) = std::fs::symlink_metadata(&path) else { continue };
+        let old = md.modified().ok().and_then(|m| now.duration_since(m).ok()).is_some_and(|age| age > max_age);
+        if md.file_type().is_file() && old && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Opens the stderr log for appending, mode 0600 (also when it already existed).
+#[cfg(unix)]
+fn open_log(dir: &Path, id: &str) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = log_path(dir, id);
+    let file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(file)
+}
+
+/// Copies the agent's stderr to the log one line at a time through
+/// [`crate::agents::acp::redact_upstream_uncapped`] (#544). A line longer than [`LOG_LINE_MAX`]
+/// is split. Ends at the agent's end of stderr.
+#[cfg(unix)]
+async fn copy_stderr_redacted(stderr: tokio::process::ChildStderr, mut log: std::fs::File) {
+    use std::io::Write;
+    let mut reader = BufReader::new(stderr);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let mut limited = (&mut reader).take(LOG_LINE_MAX as u64);
+        match limited.read_until(b'\n', &mut line).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                let text = crate::agents::acp::redact_upstream_uncapped(&String::from_utf8_lossy(&line));
+                let _ = log.write_all(text.as_bytes());
+                let _ = log.write_all(b"\n");
+            }
+        }
+    }
 }
 
 fn cleanup(dir: &Path, id: &str) {
@@ -145,7 +237,8 @@ impl Shared {
 pub async fn run_shim(dir: &Path, id: &str) -> anyhow::Result<()> {
     let spec: ShimSpec = serde_json::from_slice(&std::fs::read(spec_path(dir, id))?)?;
     let _ = std::fs::remove_file(spec_path(dir, id));
-    let stderr = std::fs::OpenOptions::new().create(true).append(true).open(log_path(dir, id))?;
+    private_dir(dir)?;
+    let log = open_log(dir, id)?;
 
     let mut cmd = tokio::process::Command::new(&spec.program);
     apply_env(&mut cmd, &spec.env);
@@ -153,7 +246,7 @@ pub async fn run_shim(dir: &Path, id: &str) -> anyhow::Result<()> {
         .current_dir(&spec.cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(stderr)
+        .stderr(std::process::Stdio::piped())
         .process_group(0);
     let mut child = cmd
         .spawn()
@@ -161,6 +254,9 @@ pub async fn run_shim(dir: &Path, id: &str) -> anyhow::Result<()> {
     let agent_pid = child.id().unwrap_or(0);
     let stdout = child.stdout.take().expect("stdout is piped");
     let stdin = child.stdin.take();
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(copy_stderr_redacted(stderr, log));
+    }
 
     let (tx, _rx) = watch::channel(0u64);
     let shared = Arc::new(Shared {
@@ -581,7 +677,8 @@ pub async fn spawn_shim(
     dir: &Path,
     spec: &ShimSpec,
 ) -> anyhow::Result<ShimClient> {
-    std::fs::create_dir_all(dir)?;
+    private_dir(dir)?;
+    sweep_old_logs(dir, LOG_RETENTION);
     let id = spec.session.clone();
     let mut f = std::fs::OpenOptions::new()
         .write(true)

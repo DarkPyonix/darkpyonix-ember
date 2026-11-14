@@ -168,6 +168,19 @@ pub struct HubInfo {
     /// Where a person approves user codes (`https://api.darkpyonix.dev/link`).
     #[serde(default)]
     pub link_url: Option<String>,
+    /// The batched pkarr long-poll (`GET /pkarr/watch`, core FR-H2 #132). Absent: the hub has
+    /// none, and watched mailboxes are polled one `GET /pkarr/{key}` at a time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pkarr_watch: Option<PkarrWatchInfo>,
+}
+
+/// `/config` `pkarr_watch`: the limits of `GET /pkarr/watch`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PkarrWatchInfo {
+    /// Keys per request.
+    pub max_keys: u32,
+    /// The longest `wait`, in seconds.
+    pub max_wait: u32,
 }
 
 impl HubInfo {

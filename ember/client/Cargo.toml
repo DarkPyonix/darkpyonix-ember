@@ -12,6 +12,9 @@ license = "Apache-2.0"
 [dependencies]
 # Only the HTTP-over-streams layer; the backend feature is enabled by whoever binds a transport.
 ember-transport = { path = "../transport", default-features = false, features = ["http"] }
+# File transfer (FR-F5): chunks travel as base64 in JSON, files and chunks carry a SHA-256.
+base64 = "0.22"
+sha2 = "0.11"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 http = "1"
 http-body-util = "0.1"
@@ -21,13 +24,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_urlencoded = "0.7"
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "sync", "time", "fs", "macros", "net"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "fs", "io-util", "macros", "net"] }
 tokio-tungstenite = "0.28"
 tracing = "0.1"
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["ws"] }
+ember-node = { path = "../node" }
 ember-server = { path = "../server" }
 ember-transport = { path = "../transport", default-features = false, features = ["http", "letify"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
+
+# Only to check the spelled O_NONBLOCK in token.rs against the real value (#430).
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

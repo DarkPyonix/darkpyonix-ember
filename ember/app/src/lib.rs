@@ -22,6 +22,9 @@ pub mod model;
 pub mod prefs;
 pub mod server;
 pub mod services;
+pub mod terminal_input;
+pub mod terminal_reconnect;
+pub mod terminal_list;
 pub mod terminal_stream;
 pub mod ui;
 
@@ -192,12 +195,13 @@ fn flush_before_exit(
 }
 
 fn launch_builder() -> LaunchBuilder {
-    // Follows the host platform's design system (Material 3 where there is no native one).
+    // Used by the separate editor window only (FR-L31).
     LaunchBuilder::new()
         // The toolkit's own widgets follow the saved System / Light / Dark choice (FR-L28).
         .with_theme(
-            // Inter, then Pretendard, then system fonts for every role but Mono.
-            ui::fonts::app_theme(services().initial_prefs.theme.color_scheme()),
+            // Inter, then Pretendard, for prose, JetBrains Mono for Mono, and the code panel
+            // in `surface` (design review 2026-11-13 A1).
+            ui::fonts::editor_theme(services().initial_prefs.theme.color_scheme()),
         )
         .with_window(Window::new().with_title("Ember"))
 }

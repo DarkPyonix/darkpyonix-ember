@@ -116,6 +116,10 @@ pub struct ComputerStatus {
     pub url: String,
     #[serde(default)]
     pub local: bool,
+    /// The node's transport peer id (hex); `None` for a computer registered by plain HTTP and
+    /// for the server's own computer.
+    #[serde(default)]
+    pub peer: Option<String>,
     /// `None` when not probed.
     #[serde(default)]
     pub reachable: Option<bool>,
@@ -489,6 +493,102 @@ impl ServerApi {
     }
 }
 
+/// One Open VSX search result as the server rebuilds it (`GET /api/ide/extensions/search`,
+/// FR-L31.14). The server passes on no URL of the gallery.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub struct GalleryExtension {
+    /// `namespace.name`: what the install route takes.
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub namespace: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub downloads: u64,
+    #[serde(default)]
+    pub verified: bool,
+    #[serde(default)]
+    pub deprecated: bool,
+}
+
+/// One page of `GET /api/ide/extensions/search`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub struct GallerySearch {
+    #[serde(default)]
+    pub offset: u64,
+    /// How many extensions match in all.
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub extensions: Vec<GalleryExtension>,
+}
+
+/// Extension management for the Ember 에디터 (FR-L31.14, `ember/server/src/api/ide_extensions.rs`).
+impl ServerApi {
+    /// `GET /api/ide/extensions/search`: the server asks Open VSX; the client never does.
+    pub async fn ide_extension_search(&self, q: &str, offset: u64) -> ServerResult<GallerySearch> {
+        let offset = offset.to_string();
+        let req = self.http.get(self.url("/ide/extensions/search")).query(&[("q", q), ("offset", offset.as_str())]);
+        Ok(Self::check(req.send().await?).await?.json().await?)
+    }
+
+    /// `POST /api/computers/{id}/ide/extensions` with the id only: the OSE picks the newest
+    /// compatible version. Answers what the command printed.
+    pub async fn ide_extension_install(&self, computer: &str, id: &str) -> ServerResult<String> {
+        let req = self.http.post(self.url(&extensions_path(computer))).json(&json!({ "id": id }));
+        Self::extension_output(req.send().await?).await
+    }
+
+    /// `DELETE /api/computers/{id}/ide/extensions/{publisher.name}`. Answers what the command printed.
+    pub async fn ide_extension_uninstall(&self, computer: &str, id: &str) -> ServerResult<String> {
+        let req = self.http.delete(self.url(&format!("{}/{}", extensions_path(computer), seg(id))));
+        Self::extension_output(req.send().await?).await
+    }
+
+    /// The `output` of an install or uninstall answer; a failure keeps the command's output in
+    /// its message ([`extension_failure`]).
+    async fn extension_output(res: reqwest::Response) -> ServerResult<String> {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(extension_failure(status.as_u16(), body));
+        }
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+        Ok(v.get("output").and_then(|o| o.as_str()).unwrap_or_default().to_string())
+    }
+}
+
+fn extensions_path(computer: &str) -> String {
+    format!("/computers/{}/ide/extensions", seg(computer))
+}
+
+/// How many characters of a failed command's output the message keeps (its end, where the
+/// reason is).
+const EXTENSION_OUTPUT_TAIL: usize = 600;
+
+/// The error for a failed install or uninstall: like [`status_error`], with the end of the
+/// command's `output` after the server's `error` text.
+fn extension_failure(status: u16, body: String) -> ServerError {
+    let output = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("output").and_then(|o| o.as_str()).map(|o| o.trim().to_string()))
+        .unwrap_or_default();
+    match status_error(status, body) {
+        ServerError::Status { status, message } if !output.is_empty() => {
+            let skip = output.chars().count().saturating_sub(EXTENSION_OUTPUT_TAIL);
+            let tail: String = output.chars().skip(skip).collect();
+            ServerError::Status { status, message: format!("{message}\n{tail}") }
+        }
+        other => other,
+    }
+}
+
 /// The error for a non-success answer: 401 is [`ServerError::Unauthorized`], the rest carry the
 /// server's `error` text (or the raw body).
 fn status_error(status: u16, body: String) -> ServerError {
@@ -535,6 +635,44 @@ fn seg(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l31_14_extension_paths_and_answers() {
+        assert_eq!(extensions_path("local"), "/computers/local/ide/extensions");
+        assert_eq!(extensions_path("a/b"), "/computers/a%2Fb/ide/extensions");
+        let page: GallerySearch = serde_json::from_value(json!({
+            "offset": 30, "total": 566,
+            "extensions": [{ "id": "rust-lang.rust-analyzer", "name": "rust-analyzer", "namespace": "rust-lang",
+                "display_name": "rust-analyzer", "description": "Rust", "version": "0.4.1", "downloads": 7, "verified": true,
+                "deprecated": false, "later_field": 1 }, { "id": "a.b" }]
+        }))
+        .unwrap();
+        assert_eq!((page.offset, page.total, page.extensions.len()), (30, 566, 2));
+        assert!(page.extensions[0].verified);
+        assert_eq!(page.extensions[1], GalleryExtension { id: "a.b".into(), ..Default::default() });
+        assert_eq!(serde_json::from_value::<GallerySearch>(json!({})).unwrap(), GallerySearch::default());
+    }
+
+    #[test]
+    fn fr_l31_14_a_failed_install_keeps_the_end_of_the_command_output() {
+        let long = format!("{}Extension 'a.b' not found.", "x".repeat(2000));
+        let body = json!({ "error": "install failed: exit status: 1", "installed": false, "id": "a.b", "output": long }).to_string();
+        match extension_failure(502, body) {
+            ServerError::Status { status, message } => {
+                assert_eq!(status, 502);
+                assert!(message.starts_with("install failed: exit status: 1\n"), "{message}");
+                assert!(message.ends_with("Extension 'a.b' not found."));
+                assert!(message.chars().count() <= 31 + EXTENSION_OUTPUT_TAIL, "{}", message.chars().count());
+            }
+            other => panic!("{other:?}"),
+        }
+        // No output: the server's error text alone. 401 stays an authentication failure.
+        match extension_failure(409, json!({ "error": "busy" }).to_string()) {
+            ServerError::Status { message, .. } => assert_eq!(message, "busy"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(extension_failure(401, json!({ "error": "no", "output": "x" }).to_string()), ServerError::Unauthorized(_)));
+    }
 
     #[test]
     fn fr_l17_choosing_an_account_posts_the_default_endpoint() {

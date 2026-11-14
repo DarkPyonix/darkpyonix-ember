@@ -18,7 +18,9 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 /// Posts `text` to be shown as a long message. Safe from any thread.
 pub fn post(text: impl Into<String>) {
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    shared_ui().notice.set(Some((id, text.into())));
+    // A call the device's scope refused reads as one fixed sentence wherever it fails (FR-N8).
+    let text = crate::ui::device_scope::failure_text(&text.into());
+    shared_ui().notice.set(Some((id, text)));
 }
 
 /// Shows what [`post`] queued. Compose it once at the root.
@@ -28,6 +30,8 @@ pub fn NoticeHost() {
     launched_effect(key, move || async move {
         if let Some((_, text)) = latest {
             // TODO(compose-rust#446): Message has no Modifier for the mockup toast shadow.
+            // TODO(compose-rust#577): Message has no placement, so the toast shows where the
+            // toolkit puts it (top end) and not at the mockup's bottom centre (`.toast`).
             Message::new(text).with_duration(MessageDuration::Long).show();
         }
     });

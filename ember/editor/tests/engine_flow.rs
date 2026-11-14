@@ -632,25 +632,40 @@ fn output_service_and_message_service_flow() {
     }).expect("OutputChannels update on clear");
     assert_eq!(up[0].text, "");
 
-    // Show message
+    // Show message: no answer until the notification closes (FR-L31.16).
     let fx = c.handle(
         t0,
         request(
             4,
             "MainThreadMessageService",
             "$showMessage",
-            vec![json!(3), json!("Rust analyzer crashed"), json!({"source": "rust-analyzer"}), json!([])],
+            vec![
+                json!(3),
+                json!("Rust analyzer crashed"),
+                json!({"source": {"identifier": {"value": "rust-lang.rust-analyzer"}, "label": "rust-analyzer"}}),
+                json!([{"title": "Restart", "isCloseAffordance": false, "handle": 0}]),
+            ],
         ),
     );
-    assert!(fx.contains(&Effect::Respond {
-        req: 4,
-        result: Ok(Reply::Empty),
-    }));
+    assert!(!fx.iter().any(|e| matches!(e, Effect::Respond { req: 4, .. })), "answered before the user chose");
     let msg = updates(&fx).into_iter().find_map(|u| match u {
-        SessionUpdate::ExtensionMessage { severity, message, source } => Some((*severity, message, source)),
+        SessionUpdate::ExtensionMessage(m) => Some(m.clone()),
         _ => None,
     }).expect("ExtensionMessage update");
-    assert_eq!(msg.0, ember_editor::MessageSeverity::Error);
-    assert_eq!(msg.1, "Rust analyzer crashed");
-    assert_eq!(msg.2.as_deref(), Some("rust-analyzer"));
+    assert_eq!(msg.severity, ember_editor::MessageSeverity::Error);
+    assert_eq!(msg.message, "Rust analyzer crashed");
+    assert_eq!(msg.source.as_deref(), Some("rust-analyzer"));
+    assert_eq!(msg.actions.len(), 1);
+
+    let fx = c.handle(t0, Input::AnswerMessage { id: msg.id, handle: Some(0) });
+    assert!(fx.contains(&Effect::Respond { req: 4, result: Ok(Reply::Json(json!(0))) }));
+    // A second answer for the same message is dropped.
+    let fx = c.handle(t0, Input::AnswerMessage { id: msg.id, handle: None });
+    assert!(!fx.iter().any(|e| matches!(e, Effect::Respond { req: 4, .. })));
+
+    // Closed without a button: `undefined`.
+    let fx = c.handle(t0, request(5, "MainThreadMessageService", "$showMessage", vec![json!(1), json!("Hi"), json!({}), json!([])]));
+    let id = updates(&fx).into_iter().find_map(|u| match u { SessionUpdate::ExtensionMessage(m) => Some(m.id), _ => None }).unwrap();
+    let fx = c.handle(t0, Input::AnswerMessage { id, handle: None });
+    assert!(fx.contains(&Effect::Respond { req: 5, result: Ok(Reply::Empty) }));
 }

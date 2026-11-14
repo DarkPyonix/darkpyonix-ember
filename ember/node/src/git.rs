@@ -11,6 +11,8 @@
 //! [`GitError::TooLarge`].
 
 
+#[path = "git_blame.rs"]
+pub mod git_blame;
 #[path = "git_branches.rs"]
 pub mod git_branches;
 #[path = "git_commit.rs"]

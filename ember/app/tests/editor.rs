@@ -930,6 +930,23 @@ mod keyboard_navigation {
     }
 
     #[test]
+    fn fr_l31_4_tree_f2_renames_selected_row_but_not_root() {
+        let rows = sample_tree();
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src/lib.rs", false)), "/p", "F2"),
+            Some(TreeKeyOutcome::Rename("/p/src/lib.rs".to_string()))
+        );
+        assert_eq!(
+            tree_key_action(&rows, Some(("/p/src", true)), "/p", "F2"),
+            Some(TreeKeyOutcome::Rename("/p/src".to_string()))
+        );
+        assert_eq!(tree_key_action(&rows, None, "/p", "F2"), None);
+        let mut with_root = rows.clone();
+        with_root.insert(0, TreeRow { path: "/p".to_string(), name: "p".to_string(), depth: 0, is_dir: true, open: true });
+        assert_eq!(tree_key_action(&with_root, Some(("/p", true)), "/p", "F2"), None);
+    }
+
+    #[test]
     fn fr_l31_tree_arrow_right_expands_or_descends() {
         let rows = sample_tree();
 
@@ -1483,4 +1500,402 @@ fn fr_e6_folds_prop_encodes_fold_regions_and_bridge_toggles_fold() {
     assert_eq!(doc.folds[0].start_line, 1);
     assert_eq!(doc.folds[0].end_line, 4);
     assert!(doc.folds[0].collapsed);
+}
+
+// FR-L31.5 (#439): tabs pin, preview, reorder, close others / right / all and the unsaved confirm, as Code-OSS.
+mod fr_l31_tabs {
+    use ember_app::ui::editor::{tab_class_with, tab_menu_items, tab_move_key, CloseResolution, DirtyChoice, EditorTabs, SaveOutcome, TabMenuItem};
+
+    const SAVED_AT_7: SaveOutcome = SaveOutcome { ok: true, version: Some(7), dirty: false };
+
+    fn tabs(paths: &[&str]) -> EditorTabs {
+        let mut t = EditorTabs::default();
+        for p in paths {
+            t.open(p);
+        }
+        t
+    }
+
+    #[test]
+    fn fr_l31_tabs_pin_moves_to_the_end_of_the_pinned_group_and_unpin_to_the_first_unpinned_place() {
+        let mut t = tabs(&["a", "b", "c", "d"]);
+        t.activate("b");
+        t.pin("c");
+        assert_eq!(t.paths(), vec!["c", "a", "b", "d"]);
+        assert!(t.is_pinned("c"));
+        assert_eq!(t.current_path(), Some("b"), "pinning another tab keeps the current one");
+        t.pin("d");
+        assert_eq!(t.paths(), vec!["c", "d", "a", "b"]);
+        t.pin("d"); // already pinned: no change
+        assert_eq!(t.paths(), vec!["c", "d", "a", "b"]);
+        t.unpin("c");
+        assert_eq!(t.paths(), vec!["d", "c", "a", "b"]);
+        assert!(!t.is_pinned("c"));
+        t.toggle_pin("a");
+        assert_eq!(t.paths(), vec!["d", "a", "c", "b"]);
+        assert!(t.is_pinned("a"));
+        t.toggle_pin("d");
+        assert_eq!(t.paths(), vec!["a", "d", "c", "b"], "unpinned d goes right after the pinned a");
+        t.toggle_pin("d");
+        assert_eq!(t.paths(), vec!["a", "d", "c", "b"]);
+        // A newly opened tab goes after the pinned ones.
+        t.open("e");
+        assert_eq!(t.paths(), vec!["a", "d", "c", "b", "e"]);
+    }
+
+    #[test]
+    fn fr_l31_tabs_preview_is_replaced_by_the_next_preview_and_returns_the_replaced_path() {
+        let mut t = tabs(&["a"]);
+        assert_eq!(t.open_preview("p1"), None);
+        assert!(t.is_preview("p1"));
+        assert_eq!(t.current_path(), Some("p1"));
+        t.open("b");
+        // The next preview takes the old preview's place, not the end.
+        assert_eq!(t.open_preview("p2"), Some("p1".to_string()));
+        assert_eq!(t.paths(), vec!["a", "p2", "b"]);
+        assert_eq!(t.current_path(), Some("p2"));
+        // Previewing a file already open only activates it.
+        assert_eq!(t.open_preview("a"), None);
+        assert_eq!(t.current_path(), Some("a"));
+        assert!(!t.is_preview("a"));
+        assert_eq!(t.paths(), vec!["a", "p2", "b"]);
+    }
+
+    #[test]
+    fn fr_l31_tabs_preview_becomes_permanent_by_edit_double_click_open_or_pin() {
+        let mut t = EditorTabs::default();
+        t.open_preview("p1");
+        t.set_dirty("p1", true);
+        assert!(!t.is_preview("p1"), "an edit keeps the tab");
+        assert_eq!(t.open_preview("p2"), None, "a permanent tab is not replaced");
+        assert_eq!(t.paths(), vec!["p1", "p2"]);
+        t.keep_open("p2");
+        assert!(!t.is_preview("p2"));
+        t.open_preview("p3");
+        t.open("p3");
+        assert!(!t.is_preview("p3"), "an explicit open keeps the tab");
+        t.open_preview("p4");
+        t.pin("p4");
+        assert!(!t.is_preview("p4") && t.is_pinned("p4"));
+        assert_eq!(t.open_preview("p5"), None);
+        assert_eq!(t.paths(), vec!["p4", "p1", "p2", "p3", "p5"]);
+    }
+
+    #[test]
+    fn fr_l31_tabs_reorder_moves_within_its_group_and_keeps_the_current_tab() {
+        let mut t = tabs(&["a", "b", "c", "d"]);
+        t.pin("a");
+        t.activate("c");
+        assert!(t.move_left("c"));
+        assert_eq!(t.paths(), vec!["a", "c", "b", "d"]);
+        assert_eq!(t.current_path(), Some("c"));
+        assert!(!t.move_left("c"), "an unpinned tab does not cross into the pinned group");
+        assert!(t.move_right("c"));
+        assert!(t.move_right("c"));
+        assert_eq!(t.paths(), vec!["a", "b", "d", "c"]);
+        assert!(!t.move_right("c"), "the last tab does not move right");
+        assert!(!t.move_right("a"), "a pinned tab does not cross into the unpinned group");
+        assert!(t.move_to("c", 1));
+        assert_eq!(t.paths(), vec!["a", "c", "b", "d"]);
+        assert!(!t.move_to("c", 0), "move_to clamps to the group");
+        assert!(!t.move_left("missing"));
+        assert_eq!(t.current_path(), Some("c"));
+    }
+
+    #[test]
+    fn fr_l31_tabs_close_others_right_and_all_skip_pinned_tabs() {
+        let mut t = tabs(&["a", "b", "c", "d", "e"]);
+        t.pin("d");
+        // Order: d (pinned), a, b, c, e.
+        assert_eq!(t.paths(), vec!["d", "a", "b", "c", "e"]);
+        let others = t.close_others_request("b");
+        assert_eq!(others.paths, vec!["a", "c", "e"]);
+        assert_eq!(others.anchor.as_deref(), Some("b"));
+        let right = t.close_right_request("a");
+        assert_eq!(right.paths, vec!["b", "c", "e"]);
+        let right_of_pinned = t.close_right_request("d");
+        assert_eq!(right_of_pinned.paths, vec!["a", "b", "c", "e"]);
+        let all = t.close_all_request();
+        assert_eq!(all.paths, vec!["a", "b", "c", "e"]);
+        assert!(!all.needs_confirm());
+        t.close_many(&right.paths, right.anchor.as_deref());
+        assert_eq!(t.paths(), vec!["d", "a"]);
+        assert_eq!(t.current_path(), Some("a"));
+        // The old ⋯ menu entry keeps working and keeps pinned tabs.
+        t.open("f");
+        t.activate("f");
+        assert_eq!(t.close_others(), vec!["a".to_string()]);
+        assert_eq!(t.paths(), vec!["d", "f"]);
+        assert_eq!(t.current_path(), Some("f"));
+    }
+
+    #[test]
+    fn fr_l31_tabs_closing_a_dirty_tab_returns_a_confirm_request_with_save_dont_save_and_cancel() {
+        let mut t = tabs(&["/w/a.rs", "/w/b.rs", "/w/c.rs"]);
+        let clean = t.close_request("/w/a.rs");
+        assert!(!clean.needs_confirm());
+        assert_eq!(clean.paths, vec!["/w/a.rs"]);
+        assert!(t.close_request("/w/missing.rs").is_empty());
+
+        t.set_dirty("/w/b.rs", true);
+        let one = t.close_request("/w/b.rs");
+        assert!(one.needs_confirm());
+        assert_eq!(one.dirty, vec!["/w/b.rs"]);
+        assert_eq!(one.confirm_title(), "b.rs의 변경 내용을 저장하시겠습니까?");
+        assert_eq!(one.confirm_detail(), "저장하지 않으면 변경 내용이 손실됩니다.");
+        assert_eq!(one.save_label(), "저장");
+        assert!(one.dirty_names().is_empty());
+        assert_eq!(one.resolve(DirtyChoice::Save), CloseResolution { save: vec!["/w/b.rs".into()], close: vec!["/w/b.rs".into()] });
+        assert_eq!(one.resolve(DirtyChoice::DontSave), CloseResolution { save: vec![], close: vec!["/w/b.rs".into()] });
+        assert_eq!(one.resolve(DirtyChoice::Cancel), CloseResolution::default());
+
+        t.set_dirty("/w/c.rs", true);
+        let all = t.close_all_request();
+        assert_eq!(all.paths, vec!["/w/a.rs", "/w/b.rs", "/w/c.rs"]);
+        assert_eq!(all.dirty, vec!["/w/b.rs", "/w/c.rs"]);
+        assert_eq!(all.confirm_title(), "다음 2개 파일의 변경 내용을 저장하시겠습니까?");
+        assert_eq!(all.save_label(), "모두 저장");
+        assert_eq!(all.dirty_names(), vec!["b.rs", "c.rs"]);
+        let saved = all.resolve(DirtyChoice::Save);
+        assert_eq!(saved.save, vec!["/w/b.rs", "/w/c.rs"]);
+        assert_eq!(saved.close, vec!["/w/a.rs", "/w/b.rs", "/w/c.rs"]);
+        // Cancel closes nothing, not even the clean tab, as in Code-OSS.
+        assert!(all.resolve(DirtyChoice::Cancel).close.is_empty());
+    }
+
+    #[test]
+    fn fr_l31_tabs_context_menu_items_follow_code_oss_and_disable_what_cannot_run() {
+        let mut t = tabs(&["a", "b", "c"]);
+        let items = tab_menu_items(&t, "c");
+        let labels: Vec<&str> = items.iter().map(|(i, _)| i.label()).collect();
+        assert_eq!(labels, vec!["닫기", "다른 항목 닫기", "오른쪽에 있는 항목 닫기", "모두 닫기", "고정", "왼쪽으로 이동", "오른쪽으로 이동"]);
+        assert!(items.contains(&(TabMenuItem::CloseRight, false)), "nothing is right of the last tab");
+        assert!(items.contains(&(TabMenuItem::MoveRight, false)));
+        assert!(items.contains(&(TabMenuItem::MoveLeft, true)));
+        t.pin("a");
+        let pinned = tab_menu_items(&t, "a");
+        assert!(pinned.contains(&(TabMenuItem::Unpin, true)));
+        assert!(pinned.contains(&(TabMenuItem::MoveRight, false)), "the only pinned tab cannot move");
+        t.open_preview("p");
+        assert!(tab_menu_items(&t, "p").contains(&(TabMenuItem::KeepOpen, true)));
+        assert!(tab_menu_items(&t, "missing").is_empty());
+    }
+
+    #[test]
+    fn fr_l31_tabs_class_marks_pinned_and_preview_and_move_keys_are_the_same_on_every_os() {
+        assert_eq!(tab_class_with(true, false, true, false), "ed-tab on pinned");
+        assert_eq!(tab_class_with(false, true, false, true), "ed-tab vc-mod preview");
+        assert_eq!(tab_class_with(false, false, false, false), "ed-tab");
+        assert_eq!(tab_move_key("PageUp", true, true, false, false), Some(false));
+        assert_eq!(tab_move_key("PageDown", true, true, false, false), Some(true));
+        assert_eq!(tab_move_key("PageDown", true, false, false, false), None);
+        assert_eq!(tab_move_key("PageDown", true, true, false, true), None);
+        assert_eq!(tab_move_key("ArrowLeft", true, true, false, false), None);
+    }
+
+    #[test]
+    fn fr_l31_tabs_save_in_the_confirm_closes_a_dirty_tab_only_after_its_save_succeeds() {
+        let mut t = tabs(&["/w/a.rs", "/w/b.rs", "/w/c.rs"]);
+        t.set_dirty("/w/b.rs", true);
+        t.set_dirty("/w/c.rs", true);
+        let request = t.close_all_request();
+        // 저장: the clean tab closes now, the dirty ones wait for their saves.
+        let now = t.begin_close(&request, DirtyChoice::Save, |_| Some(7));
+        assert_eq!(now, vec!["/w/a.rs"]);
+        t.close_many(&now, None);
+        assert!(t.is_closing("/w/b.rs") && t.is_closing("/w/c.rs"));
+        assert_eq!(t.paths(), vec!["/w/b.rs", "/w/c.rs"]);
+        // Success closes the tab.
+        t.set_dirty("/w/b.rs", false);
+        assert!(t.save_finished("/w/b.rs", SAVED_AT_7));
+        t.close("/w/b.rs");
+        assert!(!t.is_closing("/w/b.rs"));
+        // Failure keeps the tab open and dirty.
+        assert!(!t.save_finished("/w/c.rs", SaveOutcome { ok: false, ..SAVED_AT_7 }));
+        assert_eq!(t.paths(), vec!["/w/c.rs"]);
+        assert!(t.is_dirty("/w/c.rs"));
+        assert!(!t.is_closing("/w/c.rs"));
+        // A later save of that tab (Cmd+S) no longer closes it.
+        assert!(!t.save_finished("/w/c.rs", SAVED_AT_7));
+        assert_eq!(t.paths(), vec!["/w/c.rs"]);
+    }
+
+    #[test]
+    fn fr_l31_tabs_an_edit_typed_while_the_save_is_in_flight_keeps_the_tab_open_and_dirty() {
+        let mut t = tabs(&["/w/a.rs", "/w/b.rs"]);
+        t.set_dirty("/w/a.rs", true);
+        t.set_dirty("/w/b.rs", true);
+        let request = t.close_all_request();
+        assert!(t.begin_close(&request, DirtyChoice::Save, |_| Some(7)).is_empty());
+        // The document moved past the saved version: the save succeeded but the tab stays.
+        assert!(!t.save_finished("/w/a.rs", SaveOutcome { version: Some(8), ..SAVED_AT_7 }));
+        assert!(t.is_dirty("/w/a.rs") && !t.is_closing("/w/a.rs"));
+        // The session still reports it dirty after the save: the tab stays.
+        assert!(!t.save_finished("/w/b.rs", SaveOutcome { dirty: true, ..SAVED_AT_7 }));
+        assert!(t.is_dirty("/w/b.rs") && !t.is_closing("/w/b.rs"));
+        assert_eq!(t.paths(), vec!["/w/a.rs", "/w/b.rs"]);
+    }
+
+    #[test]
+    fn fr_l31_tabs_dont_save_closes_all_at_once_and_cancel_closes_none() {
+        let mut t = tabs(&["/w/a.rs", "/w/b.rs"]);
+        t.set_dirty("/w/b.rs", true);
+        let request = t.close_all_request();
+        assert!(t.begin_close(&request, DirtyChoice::Cancel, |_| None).is_empty());
+        assert!(!t.is_closing("/w/b.rs"));
+        assert_eq!(t.begin_close(&request, DirtyChoice::DontSave, |_| None), vec!["/w/a.rs", "/w/b.rs"]);
+        assert!(!t.is_closing("/w/b.rs"));
+    }
+
+    #[test]
+    fn fr_l31_tabs_two_clicks_on_one_target_within_500_ms_are_a_double_click() {
+        use ember_app::ui::editor::{DoubleClick, DOUBLE_CLICK_MS};
+        assert_eq!(DOUBLE_CLICK_MS, 500);
+        let mut d = DoubleClick::default();
+        assert!(!d.click("tab:a", 1_000));
+        assert!(d.click("tab:a", 1_500), "the second click at 500 ms is a double-click");
+        assert!(!d.click("tab:a", 1_600), "the pair is used up: a third click starts over");
+        assert!(!d.click("tab:a", 2_101), "501 ms later is too slow");
+        assert!(!d.click("tab:b", 2_200), "another target is not a double-click");
+        assert!(!d.click("tab:a", 2_300));
+        assert!(d.click("tab:a", 2_400));
+    }
+
+    #[test]
+    fn fr_l31_tabs_shift_f10_and_the_context_menu_key_open_the_tab_menu() {
+        use ember_app::ui::editor::tab_menu_key;
+        assert!(tab_menu_key("F10", false, true, false, false));
+        assert!(tab_menu_key("ContextMenu", false, false, false, false));
+        assert!(!tab_menu_key("F10", false, false, false, false), "F10 alone is not the menu key");
+        assert!(!tab_menu_key("F10", true, true, false, false));
+        assert!(!tab_menu_key("ContextMenu", false, true, false, false));
+        assert!(!tab_menu_key("Enter", false, true, false, false));
+    }
+}
+
+// Design review 2026-11-13 (A6, A7, A11, A12, A13, A14) and the owner placement rule of the same day
+// (rules 4 and 5): the editor chrome as the mockup draws it.
+mod design_chrome {
+    use ember_app::ui::editor::{ToolWindow, FIND_PILL_LABEL};
+
+    fn compact_css() -> String {
+        let css = ember_app::ui::editor_workbench::page::config().stylesheets.join("\n");
+        css.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    const PAGE: &str = include_str!("../src/ui/editor_workbench.rs");
+
+    #[test]
+    fn design_a13_stripes_are_exactly_the_mockups() {
+        assert_eq!(ToolWindow::LEFT_STRIPE, [ToolWindow::Project, ToolWindow::Commit, ToolWindow::Git]);
+        assert_eq!(ToolWindow::BOTTOM_STRIPE, [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems]);
+        // 검색 and 출력 keep their windows: search on the left, output as a bottom tab.
+        assert_eq!(ToolWindow::Search.side(), ember_app::ui::editor::Side::Left);
+        assert!(ToolWindow::BOTTOM.contains(&ToolWindow::Output));
+        assert!(PAGE.contains("&ToolWindow::LEFT_STRIPE") && PAGE.contains("&ToolWindow::BOTTOM_STRIPE"));
+    }
+
+    #[test]
+    fn design_a13_the_line_above_the_bottom_group_is_drawn_as_an_element() {
+        let css = compact_css();
+        assert!(css.contains(".ed-stripe-sep{flex:none;align-self:center;width:28px;height:1px;background:var(--line)}"));
+        assert!(PAGE.contains("div { class: \"ed-stripe-sep\", role: \"separator\" }"));
+    }
+
+    #[test]
+    fn design_a7_bottom_tab_labels_are_centred() {
+        assert!(compact_css().contains(".ed-btabsbutton{display:inline-flex;align-items:center;justify-content:center;flex:none}"));
+    }
+
+    #[test]
+    fn design_a11_status_bar_is_sbh_high_on_one_centre_line() {
+        let css = compact_css();
+        assert!(css.contains(".ed-status{height:var(--sbh);align-self:end;box-sizing:border-box}"));
+        assert!(css.contains(".ed-sbi.crumbs-s{align-self:center}"));
+    }
+
+    #[test]
+    fn design_a12_find_pill_is_300_wide_with_an_8px_gap_and_the_mockup_label() {
+        assert_eq!(FIND_PILL_LABEL, "파일, 동작, 기호 찾기");
+        let css = compact_css();
+        assert!(css.contains("@media(min-width:1101px){.ed-top.ed-find{flex:none;width:300px}}"));
+        assert!(css.contains(".ed-find>span.hide-md{margin-left:var(--sp2)}"));
+        assert!(css.contains("@media(max-width:560px){.ed-top.ed-find{display:none}}"));
+        assert!(PAGE.contains("span { class: \"hide-md\", \"{crate::ui::editor::FIND_PILL_LABEL}\" }"));
+    }
+
+    #[test]
+    fn design_a6_palette_overlay_takes_no_grid_row() {
+        assert!(PAGE.contains("style: \"position:fixed; grid-row:1; grid-column:1; left:0; top:0; right:0; bottom:0; z-index:39;\""));
+        assert!(PAGE.contains("style: \"position:fixed; grid-row:1; grid-column:1; z-index:40; top:60px;"));
+        assert!(ember_app::ui::editor_menu::menu_style().contains("grid-row:1; grid-column:1;"));
+    }
+
+    #[test]
+    fn design_a14_top_bar_actions_follow_the_mockup_order_without_a_menu_button() {
+        let top = &PAGE[PAGE.find("fn top_bar(").unwrap()..PAGE.find("fn menu(s: &Shared").unwrap()];
+        let at = |label: &str| top.find(&format!("title: \"{label}\"")).unwrap_or_else(|| panic!("{label} missing"));
+        let runcfg = at("실행 구성");
+        let run = at("실행");
+        let stop = at("중지");
+        let ask = at("에이전트에게 묻기");
+        let theme = at("{theme_title}");
+        assert!(runcfg < run && run < stop && stop < ask && ask < theme, "order is not run config, run, stop, ask, theme");
+        assert!(!top.contains("icon(\"more\")"), "the top bar still has a ⋯ button");
+    }
+}
+
+// Owner placement rule 2026-11-13 (`docs/DESIGN.md` 6.3, rules 1 to 4): features beyond the mockup
+// live in surfaces the mockup already has.
+mod design_placement {
+    use ember_app::ui::editor::ToolWindow;
+
+    const PAGE: &str = include_str!("../src/ui/editor_workbench.rs");
+
+    fn project_tree() -> &'static str {
+        &PAGE[PAGE.find("fn project_tree(").unwrap()..PAGE.find("fn tab_strip(").unwrap()]
+    }
+
+    #[test]
+    fn design_rule1_project_header_is_plus_and_the_mockups_three_actions() {
+        let tree = project_tree();
+        let head = &tree[tree.find("div { class: \"ed-twh\",").unwrap()..tree.find("{tree_menu}").unwrap()];
+        let titles: Vec<&str> = head.match_indices("title: \"").map(|(i, _)| {
+            let rest = &head[i + 8..];
+            &rest[..rest.find('"').unwrap()]
+        }).collect();
+        assert_eq!(titles, ember_app::ui::editor_tree_menu::HEADER_ACTIONS);
+        for gone in ["새 파일", "새 폴더", "모두 선택", "파일 검색"] {
+            assert!(!head.contains(&format!("title: \"{gone}\"")), "{gone} is still in the header");
+        }
+    }
+
+    #[test]
+    fn design_rule2_tree_rows_carry_no_inline_actions_and_open_the_context_menu() {
+        let tree = project_tree();
+        for gone in ["잘라내기: {cut_label}", "이름 변경: {rename_label}", "삭제: {rename_label}"] {
+            assert!(!tree.contains(gone), "a row still has the inline {gone} button");
+        }
+        assert!(tree.contains("oncontextmenu: move |event| {"), "rows do not open the context menu");
+        assert!(tree.contains("TreeMenuAt::Pointer { x: at.x, y: at.y }"));
+        // Stand-in openers until dioxus-compose forwards right-click (compose-rust#417 is fixed in
+        // v0.0.7; the editor window waits for dioxus-compose).
+        assert!(tree.contains("TreeMenuAt::Keyboard"), "no Shift+F10 opener");
+        assert!(tree.contains("v0.0.7: #417 fixed; workaround kept until checked on a display"));
+    }
+
+    #[test]
+    fn design_rule3_no_search_stripe_and_the_find_pill_opens_search() {
+        assert!(!ToolWindow::LEFT_STRIPE.contains(&ToolWindow::Search));
+        assert_eq!(ToolWindow::Search.action(), Some(ember_app::ui::keymap::Action::FindInFiles));
+        assert!(PAGE.contains("button { class: \"ed-find\", title: \"{find}\", \"aria-label\": \"{find}\", onclick: move |_| run_action(&find_s, Action::Find),"));
+    }
+
+    #[test]
+    fn design_rule4_output_is_a_bottom_tab_next_to_problems_not_a_stripe() {
+        assert!(!ToolWindow::BOTTOM_STRIPE.contains(&ToolWindow::Output));
+        let problems = ToolWindow::BOTTOM.iter().position(|w| *w == ToolWindow::Problems).unwrap();
+        assert_eq!(ToolWindow::BOTTOM.get(problems + 1), Some(&ToolWindow::Output));
+        assert!(PAGE.contains("for b in ToolWindow::BOTTOM {"), "the bottom tabs are not drawn from the bottom windows");
+    }
 }

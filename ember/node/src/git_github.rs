@@ -25,6 +25,22 @@ const MAX_ERROR_CHARS: usize = 200;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GitGithubRequest {
     pub repo: String,
+    /// Also list the recent failed workflow runs on every branch (`failed_runs`, FR-A8 event
+    /// routines). Off for the Home card, so it costs one `gh` call only for the CI watcher.
+    #[serde(default)]
+    pub failed_runs: bool,
+}
+
+/// One failed workflow run (`gh run list --status failure`), for CI event routines (FR-A8).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CiFailedRun {
+    /// GitHub's run id (`databaseId`), the key the server deduplicates on.
+    pub id: u64,
+    pub branch: Option<String>,
+    pub workflow: Option<String>,
+    pub url: Option<String>,
+    /// `createdAt` as GitHub gives it (RFC 3339).
+    pub created_at: Option<String>,
 }
 
 /// The conclusion of one workflow run.
@@ -51,6 +67,31 @@ pub struct GitGithubResponse {
     pub signed_out: bool,
     /// Korean text of the first failed call, at most 200 characters.
     pub error: Option<String>,
+    /// Recent failed runs on any branch, newest first; only when the request asked for them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_runs: Option<Vec<CiFailedRun>>,
+}
+
+/// Failed runs read for `failed_runs`.
+const FAILED_RUN_LIMIT: usize = 20;
+
+/// The items of `gh run list --json databaseId,headBranch,workflowName,url,createdAt`; an item
+/// without a numeric id is dropped.
+pub fn map_failed_runs(items: &[Value]) -> Vec<CiFailedRun> {
+    let text = |item: &Value, k: &str| item.get(k).and_then(|v| v.as_str()).map(clean_name).filter(|s| !s.is_empty());
+    items
+        .iter()
+        .take(FAILED_RUN_LIMIT)
+        .filter_map(|item| {
+            Some(CiFailedRun {
+                id: item.get("databaseId")?.as_u64()?,
+                branch: text(item, "headBranch"),
+                workflow: text(item, "workflowName"),
+                url: item.get("url").and_then(|v| v.as_str()).filter(|u| u.starts_with("https://")).map(|u| u.chars().filter(|c| !c.is_control()).take(300).collect()),
+                created_at: text(item, "createdAt"),
+            })
+        })
+        .collect()
 }
 
 /// Control characters removed, cut at [`MAX_NAME_CHARS`].
@@ -164,6 +205,7 @@ pub async fn summarize(policy: &PathPolicy, r: &GitGithubRequest) -> Result<GitG
         ci: None,
         signed_out: false,
         error: None,
+        failed_runs: None,
     };
     let fail = |res: &mut GitGithubResponse, text: String, signed_out: bool| {
         res.signed_out |= signed_out;
@@ -222,6 +264,19 @@ pub async fn summarize(policy: &PathPolicy, r: &GitGithubRequest) -> Result<GitG
             Call::Failed { text, signed_out } => fail(&mut res, text, signed_out),
         }
     }
+
+    // 5. Failed runs on any branch, only when asked (the CI watcher, FR-A8).
+    if r.failed_runs {
+        let limit = FAILED_RUN_LIMIT.to_string();
+        let args = ["run", "list", "--status", "failure", "--limit", &limit, "--json", "databaseId,headBranch,workflowName,url,createdAt"];
+        match run_gh(&dir, &args).await? {
+            Call::Ok(text) => match serde_json::from_str::<Vec<Value>>(text.trim()) {
+                Ok(items) => res.failed_runs = Some(map_failed_runs(&items)),
+                Err(_) => fail(&mut res, "gh 출력 형식이 잘못되었습니다.".into(), false),
+            },
+            Call::Failed { text, signed_out } => fail(&mut res, text, signed_out),
+        }
+    }
     Ok(res)
 }
 
@@ -242,5 +297,25 @@ mod tests {
         assert_eq!(map_run(&json!({"status":"completed","conclusion":"skipped"})), CiRun::Cancelled);
         assert_eq!(map_run(&json!({"status":"in_progress","conclusion":""})), CiRun::Pending);
         assert_eq!(map_run(&json!({"status":"completed","conclusion":"timed_out"})), CiRun::Failure);
+    }
+
+    #[test]
+    fn fr_a8_failed_runs_mapping() {
+        let runs = map_failed_runs(&[
+            json!({"databaseId": 42, "headBranch": "main\n", "workflowName": "Test", "url": "https://github.com/o/r/actions/runs/42", "createdAt": "2026-11-13T01:00:00Z"}),
+            json!({"headBranch": "x"}),
+            json!({"databaseId": 7, "url": "javascript:alert(1)"}),
+        ]);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].id, 42);
+        assert_eq!(runs[0].branch.as_deref(), Some("main"));
+        assert_eq!(runs[0].created_at.as_deref(), Some("2026-11-13T01:00:00Z"));
+        assert_eq!(runs[1].url, None);
+    }
+
+    #[test]
+    fn fr_a8_request_defaults_to_no_failed_runs() {
+        let r: GitGithubRequest = serde_json::from_value(json!({"repo": "/x"})).unwrap();
+        assert!(!r.failed_runs);
     }
 }

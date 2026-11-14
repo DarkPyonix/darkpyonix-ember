@@ -203,15 +203,17 @@ pub fn hub_config_for(reg: &Registration) -> HubConfig {
 
 /// Which hub the node uses now, and the token: the registration's hub, or `EMBER_HUB_URL` when
 /// set explicitly (without a token).
-fn hub_in_use(state_dir: &Path) -> anyhow::Result<Option<(HubConfig, Option<String>)>> {
+/// The third value is the device token, for the hub's batched pkarr watch (sent in the header,
+/// never in a URL).
+fn hub_in_use(state_dir: &Path) -> anyhow::Result<Option<(HubConfig, Option<String>, Option<String>)>> {
     if let Some(reg) = active_registration(state_dir)? {
         // The resolver URL carries the resolve token, never the device token (NFR-H2).
         let token = reg.directory_token();
-        return Ok(Some((hub_config_for(&reg), token)));
+        return Ok(Some((hub_config_for(&reg), token, reg.active_token())));
     }
     if HubConfig::explicitly_enabled() {
         if let Some(hub) = HubConfig::from_env() {
-            return Ok(Some((hub, None)));
+            return Ok(Some((hub, None, None)));
         }
     }
     Ok(None)
@@ -223,7 +225,7 @@ fn hub_in_use(state_dir: &Path) -> anyhow::Result<Option<(HubConfig, Option<Stri
 /// relay is derived (`https://relay.<host>`); see [`discovered_transport_config`].
 pub fn transport_config(state_dir: &Path, key: SecretKey) -> anyhow::Result<TransportConfig> {
     Ok(match hub_in_use(state_dir)? {
-        Some((hub, token)) => hub.transport_config(key, token),
+        Some((hub, token, _)) => hub.transport_config(key, token),
         None => TransportConfig::from_env(key),
     })
 }
@@ -236,7 +238,7 @@ pub async fn discovered_transport_config(state_dir: &Path, key: SecretKey) -> an
         ensure_resolve(&registration_file(state_dir), reg).await;
     }
     Ok(match hub_in_use(state_dir)? {
-        Some((hub, token)) => hub.discover().await.transport_config(key, token),
+        Some((hub, token, device_token)) => hub.discover().await.transport_config_with_watch(key, token, device_token),
         None => TransportConfig::from_env(key),
     })
 }
@@ -245,7 +247,7 @@ pub async fn discovered_transport_config(state_dir: &Path, key: SecretKey) -> an
 pub async fn apply_registration(transport: &Transport, state_dir: &Path, reg: &Registration) -> anyhow::Result<()> {
     let reg = ensure_resolve(&registration_file(state_dir), reg.clone()).await;
     let hub = hub_config_for(&reg).discover().await;
-    transport.enable_hub(hub.directory(reg.directory_token()))?;
+    transport.enable_hub(hub.directory_with_watch(reg.directory_token(), reg.active_token()))?;
     transport.set_relays(hub.relay_config()).await?;
     Ok(())
 }
@@ -400,7 +402,7 @@ pub async fn cli(args: &[String]) -> anyhow::Result<()> {
                 }
             }
             let hub = HubConfig::from_env().ok_or_else(|| anyhow::anyhow!("the hub is off ({}=off)", ember_hub::HUB_URL_ENV))?;
-            let key = SecretKey::load_or_generate(dir.join(crate::transport::KEY_FILE))?;
+            let key = crate::keystore::load_transport_key(&dir.join(crate::transport::KEY_FILE))?;
             let name = name.unwrap_or_else(default_name);
             let reg = register(&dir, &key, &hub, &name, None, |p| {
                 println!("To add this computer to your darkpyonix.dev account, open");

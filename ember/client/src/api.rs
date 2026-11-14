@@ -8,7 +8,9 @@
 //!   devices on its allow-list (`FR-N3`). Each request runs on a fresh stream of one cached
 //!   connection; the push socket ([`Api::open_push`]) gets its own stream.
 
+use crate::transfers::TransferTarget;
 use std::fmt;
+use std::sync::Arc;
 
 use ember_transport::{Dialer, PeerAddr, PowerState};
 use http::{header, Method, StatusCode};
@@ -153,6 +155,19 @@ pub(crate) fn fork_body(turn_seq: Option<i64>) -> serde_json::Value {
 }
 
 impl ApiError {
+    /// True for 403 `owner_required` (`FR-S12`, #784): the route needs owner presence and this
+    /// client sent no live owner key. Show "owner presence lost" and claim again; do not retry
+    /// in a loop, because the same call is refused until a claim is granted.
+    pub fn is_owner_required(&self) -> bool {
+        matches!(self, ApiError::Status { status: 403, code: Some(c), .. } if c == "owner_required")
+    }
+
+    /// True for 403 `scope_denied` (`FR-N8`, #366): over the transport, this device's scope
+    /// does not allow the route. Retrying does not help; the owner changes the scope.
+    pub fn is_scope_denied(&self) -> bool {
+        matches!(self, ApiError::Status { status: 403, code: Some(c), .. } if c == "scope_denied")
+    }
+
     /// The server's JSON `code` (`invalid_hours`, `not_found`, ...), when the error body had one.
     pub fn code(&self) -> Option<&str> {
         match self {
@@ -688,8 +703,27 @@ pub struct Api {
     base: String,
     /// The `Authorization` header, sent on the plain HTTP reach only (the transport authenticates
     /// by device key, FR-N3). The value is marked sensitive, so `{:?}` prints `Sensitive`, never
-    /// the token; the plaintext is not kept.
-    auth: Option<header::HeaderMap>,
+    /// the token; the plaintext is not kept. Shared by clones, so a token re-read after a
+    /// rotation (`FR-S9`, #369) reaches every clone.
+    auth: Arc<std::sync::RwLock<Option<header::HeaderMap>>>,
+    /// Where the token came from. Unless it was given ([`Api::with_token`]), a 401 re-reads it
+    /// once and retries, so a rotated `server-token` is picked up (#369).
+    source: TokenSource,
+    /// The owner key as the `X-Ember-Owner` value (`FR-S12`, #784), sent on owner routes on the
+    /// plain HTTP reach only. In memory only, marked sensitive, shared by clones. It has no
+    /// environment or file source: it comes from a live claim ([`crate::owner::OwnerLink`]).
+    owner: Arc<std::sync::RwLock<Option<header::HeaderValue>>>,
+}
+
+/// Where an [`Api`] re-reads its server token after a 401 (#369).
+#[derive(Debug, Clone)]
+enum TokenSource {
+    /// Given by the caller, or no HTTP reach: never re-read.
+    Fixed,
+    /// The environment or the token file, as [`crate::token::server_token_from_env`] finds it.
+    Env,
+    /// This token file (its first line).
+    File(std::path::PathBuf),
 }
 
 /// A status and a fully read body.
@@ -703,11 +737,31 @@ impl Api {
     pub fn new(base_url: &str) -> ApiResult<Api> {
         // A server that is not local gets no token and none is read (FR-S11).
         let token = crate::token::token_allowed_for(base_url).then(crate::token::server_token_from_env).flatten();
-        Api::with_token(base_url, token)
+        let mut api = Api::with_token(base_url, token)?;
+        if crate::token::token_allowed_for(base_url) {
+            api.source = TokenSource::Env;
+        }
+        Ok(api)
+    }
+
+    /// Like [`Api::new`], with the token read from `token_file` (its first line, trimmed) now and
+    /// again after a 401, so a rotated token is picked up without a new `Api` (#369).
+    pub fn with_token_file(base_url: &str, token_file: &std::path::Path) -> ApiResult<Api> {
+        let token = Self::read_first_line(token_file);
+        let mut api = Api::with_token(base_url, token)?;
+        api.source = TokenSource::File(token_file.to_path_buf());
+        Ok(api)
+    }
+
+    fn read_first_line(path: &std::path::Path) -> Option<String> {
+        let s = std::fs::read_to_string(path).ok()?;
+        let s = s.lines().next().unwrap_or_default().trim();
+        (!s.is_empty()).then(|| s.to_owned())
     }
 
     /// Like [`Api::new`] with the server token given (`None` sends no `Authorization` header, as
-    /// an older server expects). The token is read once here, never per request (FR-S11).
+    /// an older server expects). The token is read once here, never per request (FR-S11); a
+    /// token given here is never re-read.
     pub fn with_token(base_url: &str, token: Option<String>) -> ApiResult<Api> {
         let base = base_url.trim_end_matches('/').to_string();
         if !(base.starts_with("http://") || base.starts_with("https://")) {
@@ -718,19 +772,22 @@ impl Api {
             .filter(|_| crate::token::token_allowed_for(&base))
             .as_deref()
             .and_then(crate::token::auth_headers);
-        let mut builder = reqwest::Client::builder();
-        if let Some(headers) = auth.clone() {
-            builder = builder.default_headers(headers);
-        }
-        // A build failure is returned, never answered with a client that lacks the header.
-        Ok(Api { reach: Reach::Http(builder.build()?), base, auth })
+        // The header is added per request from `auth`, so a re-read token replaces it (#369).
+        let builder = reqwest::Client::builder();
+        Ok(Api {
+            reach: Reach::Http(builder.build()?),
+            base,
+            auth: Arc::new(std::sync::RwLock::new(auth)),
+            source: TokenSource::Fixed,
+            owner: Arc::default(),
+        })
     }
 
     /// The server reached over the transport at `addr` (dialed through `dialer`, which holds
     /// this device's identity).
     pub fn over_transport(dialer: Dialer, addr: impl Into<PeerAddr>) -> Api {
         let addr = addr.into();
-        Api { base: format!("peer:{}", addr.peer), reach: Reach::Peer { dialer, addr }, auth: None }
+        Api { base: format!("peer:{}", addr.peer), reach: Reach::Peer { dialer, addr }, auth: Arc::default(), source: TokenSource::Fixed, owner: Arc::default() }
     }
 
     /// The base URL, or `peer:<id>` over the transport.
@@ -778,13 +835,17 @@ impl Api {
     async fn send(&self, method: Method, path: &str, json: Option<serde_json::Value>) -> ApiResult<Raw> {
         match &self.reach {
             Reach::Http(http) => {
-                let mut req = http.request(method, format!("{}/api{path}", self.base));
-                if let Some(body) = json {
-                    req = req.json(&body);
+                let url = format!("{}/api{path}", self.base);
+                // The owner key goes on owner routes only (FR-S12). A 403 `owner_required` is
+                // not retried: the same key would be refused again.
+                let owner = self.owner_header(&method, path);
+                let raw =
+                    Self::send_http(http, method.clone(), &url, json.as_ref(), self.auth_headers(), owner.clone()).await?;
+                // A rotated server token (#369): re-read it once and retry when it changed.
+                if raw.status == StatusCode::UNAUTHORIZED && self.reload_token() {
+                    return Self::send_http(http, method, &url, json.as_ref(), self.auth_headers(), owner).await;
                 }
-                let res = req.send().await?;
-                let status = res.status();
-                Ok(Raw { status, body: res.bytes().await? })
+                Ok(raw)
             }
             Reach::Peer { dialer, addr } => {
                 let stream = dialer.open_bi(addr, SERVER_SERVICE).await.map_err(peer_err)?;
@@ -808,6 +869,92 @@ impl Api {
                 Ok(Raw { status, body })
             }
         }
+    }
+
+    async fn send_http(
+        http: &reqwest::Client,
+        method: Method,
+        url: &str,
+        json: Option<&serde_json::Value>,
+        auth: Option<header::HeaderMap>,
+        owner: Option<header::HeaderValue>,
+    ) -> ApiResult<Raw> {
+        let mut req = http.request(method, url);
+        if let Some(headers) = auth {
+            req = req.headers(headers);
+        }
+        if let Some(key) = owner {
+            req = req.header(crate::owner::OWNER_HEADER, key);
+        }
+        if let Some(body) = json {
+            req = req.json(body);
+        }
+        let res = req.send().await?;
+        let status = res.status();
+        Ok(Raw { status, body: res.bytes().await? })
+    }
+
+    fn auth_headers(&self) -> Option<header::HeaderMap> {
+        self.auth.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Sets or clears the owner key (`FR-S12`, #784), for this `Api` and its clones. Set it when
+    /// a claim is granted ([`crate::owner::OwnerMessage::Granted`]) and clear it when the claim
+    /// link closes. The key is sent as `X-Ember-Owner` on owner routes
+    /// ([`crate::owner::owner_route`]) and only where the server token is sent: a loopback or
+    /// listed host over plain HTTP, never over the transport. False when the key cannot be a
+    /// header value, or this `Api` has nowhere to send it; nothing is stored then.
+    pub fn set_owner_key(&self, key: Option<&crate::owner::OwnerKey>) -> bool {
+        let value = match key {
+            None => None,
+            Some(k) => {
+                if !matches!(self.reach, Reach::Http(_)) || !crate::token::token_allowed_for(&self.base) {
+                    return false;
+                }
+                let Ok(mut v) = header::HeaderValue::from_str(k.expose()) else { return false };
+                v.set_sensitive(true);
+                Some(v)
+            }
+        };
+        *self.owner.write().unwrap_or_else(|e| e.into_inner()) = value;
+        true
+    }
+
+    /// Whether an owner key is set. It may be void already: the server decides.
+    pub fn has_owner_key(&self) -> bool {
+        self.owner.read().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+
+    /// The owner header for `method` on `path` (below `/api`, a query string allowed): the key
+    /// when one is set and the route is an owner route.
+    fn owner_header(&self, method: &Method, path: &str) -> Option<header::HeaderValue> {
+        let key = self.owner.read().unwrap_or_else(|e| e.into_inner()).clone()?;
+        crate::owner::owner_route(method, &format!("/api{path}")).then_some(key)
+    }
+
+    /// Re-reads the server token from the environment or the token file (FR-S11) when this `Api`
+    /// was made by [`Api::new`] or [`Api::with_token_file`]. True when a token was found and
+    /// differs from the one in use, so the caller retries; the server rotated it
+    /// (`POST /api/server-token/rotate`, #369). The token goes only to a loopback or listed host.
+    pub fn reload_token(&self) -> bool {
+        if !crate::token::token_allowed_for(&self.base) {
+            return false;
+        }
+        let token = match &self.source {
+            TokenSource::Fixed => return false,
+            TokenSource::Env => crate::token::server_token_from_env(),
+            TokenSource::File(path) => Self::read_first_line(path),
+        };
+        let Some(fresh) = token.as_deref().and_then(crate::token::auth_headers) else {
+            return false;
+        };
+        let mut cur = self.auth.write().unwrap_or_else(|e| e.into_inner());
+        let same = cur.as_ref().and_then(|h| h.get(header::AUTHORIZATION)) == fresh.get(header::AUTHORIZATION);
+        if same {
+            return false;
+        }
+        *cur = Some(fresh);
+        true
     }
 
     fn check(raw: Raw) -> ApiResult<Raw> {
@@ -887,14 +1034,19 @@ impl Api {
     fn push_request(&self, url: &str) -> ApiResult<http::Request<()>> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let mut request = url.into_client_request().map_err(|e| ApiError::Push(e.to_string()))?;
-        if let (Reach::Http(_), Some(headers)) = (&self.reach, &self.auth) {
-            request.headers_mut().extend(headers.clone());
+        if let (Reach::Http(_), Some(headers)) = (&self.reach, self.auth_headers()) {
+            request.headers_mut().extend(headers);
         }
         Ok(request)
     }
 
     pub async fn health(&self) -> ApiResult<Health> {
         self.get("/health").await
+    }
+
+    /// `GET /api/whoami` (FR-N8): the door this client came through and its scope.
+    pub async fn whoami(&self) -> ApiResult<Whoami> {
+        self.get("/whoami").await
     }
 
     pub async fn agents(&self) -> ApiResult<Vec<DetectedAgent>> {
@@ -1346,6 +1498,22 @@ impl Api {
         Self::decode(self.send(Method::PATCH, &format!("/sessions/{}", seg(id)), Some(body)).await?)
     }
 
+    // ---- device scope (FR-N8, #366) ----------------------------------------------------------
+
+    /// The admitted devices (`GET /api/devices`), each with its scope (FR-N8, #817). Owner only,
+    /// like [`Api::set_device_scope`].
+    pub async fn devices(&self) -> ApiResult<Vec<DeviceRecord>> {
+        self.get("/devices").await
+    }
+
+    /// Sets an admitted device's scope (`PATCH /api/devices/{peer_id}`). Owner only: the route
+    /// is on the local listener with the server token, never on the transport. Answers the
+    /// updated device row.
+    pub async fn set_device_scope(&self, peer_id: &str, scope: DeviceScope) -> ApiResult<DeviceRecord> {
+        let body = serde_json::json!({ "scope": scope });
+        Self::decode(self.send(Method::PATCH, &format!("/devices/{}", seg(peer_id)), Some(body)).await?)
+    }
+
     /// Full-text search across every session's messages, best match first.
     pub async fn search(&self, query: &str, limit: Option<usize>) -> ApiResult<Vec<SearchHit>> {
         let mut q = vec![("q", query.to_string())];
@@ -1428,6 +1596,154 @@ fn authority_addr(authority: &str) -> (String, u16) {
             Err(_) => (authority.to_string(), 80),
         },
         None => (authority.to_string(), 80),
+    }
+}
+
+// ---- file transfer (FR-F3, FR-F4, FR-F5, FR-F8, #487; FR-F14, #773) -------------------------
+
+impl Api {
+    /// Everything the receiving computer holds: devices, transfers, offers, received files,
+    /// history and settings.
+    pub async fn transfers(&self) -> ApiResult<crate::transfers::TransfersSnapshot> {
+        self.transfers_at(&TransferTarget::Server).await
+    }
+
+    /// [`Api::transfers`] of `target`.
+    pub async fn transfers_at(&self, target: &TransferTarget) -> ApiResult<crate::transfers::TransfersSnapshot> {
+        self.get(&target.prefix()).await
+    }
+
+    /// Offers files as device `from`. With `peer_id` the receiver requires a registered device.
+    pub async fn offer_transfer(
+        &self,
+        from: &str,
+        peer_id: Option<&str>,
+        files: &[crate::transfers::DeclaredFile],
+    ) -> ApiResult<crate::transfers::OfferCreated> {
+        self.offer_transfer_at(&TransferTarget::Server, from, peer_id, files).await
+    }
+
+    /// [`Api::offer_transfer`] to `target`.
+    pub async fn offer_transfer_at(
+        &self,
+        target: &TransferTarget,
+        from: &str,
+        peer_id: Option<&str>,
+        files: &[crate::transfers::DeclaredFile],
+    ) -> ApiResult<crate::transfers::OfferCreated> {
+        let body = json!({ "from": from, "peer_id": peer_id, "files": files });
+        Self::decode(self.post(&format!("{}/offers", target.prefix()), body).await?)
+    }
+
+    pub async fn accept_transfer_offer(&self, id: &str) -> ApiResult<crate::transfers::TransferItem> {
+        Self::decode(self.post(&format!("/transfers/offers/{}/accept", seg(id)), json!({})).await?)
+    }
+
+    pub async fn decline_transfer_offer(&self, id: &str) -> ApiResult<crate::transfers::HistoryRecord> {
+        Self::decode(self.post(&format!("/transfers/offers/{}/decline", seg(id)), json!({})).await?)
+    }
+
+    /// Appends `data` to file `file` of transfer `id` at `offset`. `sha256` is the chunk's hash
+    /// (lowercase hex); the receiver refuses a chunk that does not match it (`FR-F5`).
+    pub async fn transfer_chunk(
+        &self,
+        id: &str,
+        file: usize,
+        offset: u64,
+        data: &[u8],
+        sha256: Option<&str>,
+    ) -> ApiResult<crate::transfers::TransferItem> {
+        self.transfer_chunk_at(&TransferTarget::Server, id, file, offset, data, sha256).await
+    }
+
+    /// [`Api::transfer_chunk`] to `target`.
+    pub async fn transfer_chunk_at(
+        &self,
+        target: &TransferTarget,
+        id: &str,
+        file: usize,
+        offset: u64,
+        data: &[u8],
+        sha256: Option<&str>,
+    ) -> ApiResult<crate::transfers::TransferItem> {
+        use base64::Engine;
+        let body = json!({
+            "file": file,
+            "offset": offset,
+            "data_base64": base64::engine::general_purpose::STANDARD.encode(data),
+            "sha256": sha256,
+        });
+        Self::decode(self.post(&format!("{}/{}/chunks", target.prefix(), seg(id)), body).await?)
+    }
+
+    /// The receiver's verified byte offset of file `file` (`FR-F5`): where to continue.
+    pub async fn transfer_resume_offset(&self, id: &str, file: usize) -> ApiResult<u64> {
+        self.transfer_resume_offset_at(&TransferTarget::Server, id, file).await
+    }
+
+    /// [`Api::transfer_resume_offset`] at `target`.
+    pub async fn transfer_resume_offset_at(&self, target: &TransferTarget, id: &str, file: usize) -> ApiResult<u64> {
+        let r: crate::transfers::ResumeOffset =
+            self.get(&format!("{}/{}/resume-offset/{file}", target.prefix(), seg(id))).await?;
+        Ok(r.offset)
+    }
+
+    /// Asks the receiver to verify and store the files of transfer `id`.
+    pub async fn complete_transfer(&self, id: &str) -> ApiResult<Vec<crate::transfers::StoredFile>> {
+        self.complete_transfer_at(&TransferTarget::Server, id).await
+    }
+
+    /// [`Api::complete_transfer`] at `target`.
+    pub async fn complete_transfer_at(
+        &self,
+        target: &TransferTarget,
+        id: &str,
+    ) -> ApiResult<Vec<crate::transfers::StoredFile>> {
+        let r: crate::transfers::Completed =
+            Self::decode(self.post(&format!("{}/{}/complete", target.prefix(), seg(id)), json!({})).await?)?;
+        Ok(r.stored)
+    }
+
+    pub async fn pause_transfer(&self, id: &str) -> ApiResult<crate::transfers::TransferItem> {
+        self.transfer_control_at(&TransferTarget::Server, id, "pause").await
+    }
+
+    pub async fn resume_transfer(&self, id: &str) -> ApiResult<crate::transfers::TransferItem> {
+        self.transfer_control_at(&TransferTarget::Server, id, "resume").await
+    }
+
+    /// Pauses (`op` `"pause"`) or resumes (`"resume"`) transfer `id` at `target`.
+    pub async fn transfer_control_at(
+        &self,
+        target: &TransferTarget,
+        id: &str,
+        op: &str,
+    ) -> ApiResult<crate::transfers::TransferItem> {
+        Self::decode(self.post(&format!("{}/{}/{}", target.prefix(), seg(id), seg(op)), json!({})).await?)
+    }
+
+    /// Cancels an offer or a transfer; the receiver removes the partial files (`FR-F4`).
+    pub async fn cancel_transfer(&self, id: &str) -> ApiResult<crate::transfers::HistoryRecord> {
+        self.cancel_transfer_at(&TransferTarget::Server, id).await
+    }
+
+    /// [`Api::cancel_transfer`] at `target`.
+    pub async fn cancel_transfer_at(
+        &self,
+        target: &TransferTarget,
+        id: &str,
+    ) -> ApiResult<crate::transfers::HistoryRecord> {
+        Self::decode(self.post(&format!("{}/{}/cancel", target.prefix(), seg(id)), json!({})).await?)
+    }
+
+    pub async fn transfer_history(&self) -> ApiResult<Vec<crate::transfers::HistoryRecord>> {
+        self.get("/transfers/history").await
+    }
+
+    /// Clears the history; received files stay on disk (`FR-F8`).
+    pub async fn clear_transfer_history(&self) -> ApiResult<()> {
+        Self::check(self.send(Method::DELETE, "/transfers/history", None).await?)?;
+        Ok(())
     }
 }
 
@@ -1518,6 +1834,145 @@ impl Api {
 
 fn ports_path(computer_id: &str) -> String {
     format!("/computers/{}/ports", seg(computer_id))
+}
+
+/// One client attached to a persistent terminal (FR-P3).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct TermClientInfo {
+    pub client: u64,
+    #[serde(default)]
+    pub device: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+/// A persistent terminal on a computer, as `GET /api/computers/{id}/terms` lists it (FR-P6).
+/// Only the fields a session list needs; unknown fields are ignored so a newer node still decodes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct TermSummary {
+    pub id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// What started it: `ide-vscode`, `ide-ember`, `agent` or `user`.
+    #[serde(default)]
+    pub origin: String,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// `running`, `exited` or `lost`.
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub signal: Option<i32>,
+    #[serde(default)]
+    pub created_ms: i64,
+    #[serde(default)]
+    pub last_activity_ms: i64,
+    #[serde(default)]
+    pub clients: Vec<TermClientInfo>,
+    /// The client in control (FR-P4), if any.
+    #[serde(default)]
+    pub controller: Option<TermClientInfo>,
+    #[serde(default)]
+    pub survives_node_restart: bool,
+    #[serde(default)]
+    pub adopted: bool,
+}
+
+/// Filters for [`Api::computer_terms`]; `None` leaves a filter out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TermFilter {
+    pub project: Option<String>,
+    pub origin: Option<String>,
+    pub running: Option<bool>,
+}
+
+impl Api {
+    /// Persistent terminals on a computer (`local` for this server's machine), oldest first (FR-P6).
+    pub async fn computer_terms(&self, computer_id: &str, filter: &TermFilter) -> ApiResult<Vec<TermSummary>> {
+        self.get(&terms_path(computer_id, filter)).await
+    }
+
+    /// Kill a terminal: SIGHUP, then SIGKILL after 3 s, or `signal` (FR-P6).
+    pub async fn computer_term_kill(&self, computer_id: &str, term_id: &str, signal: Option<i32>) -> ApiResult<()> {
+        let body = match signal {
+            Some(s) => json!({ "signal": s }),
+            None => json!({}),
+        };
+        Self::check(self.post(&format!("{}/kill", term_path(computer_id, term_id)), body).await?)?;
+        Ok(())
+    }
+
+    /// Take (`take: true`) or release control for an attached client id (FR-P4).
+    pub async fn computer_term_control(&self, computer_id: &str, term_id: &str, client: u64, take: bool) -> ApiResult<()> {
+        let body = json!({ "client": client, "take": take });
+        Self::check(self.post(&format!("{}/control", term_path(computer_id, term_id)), body).await?)?;
+        Ok(())
+    }
+
+    /// Remove a finished terminal's record (409 while it runs).
+    pub async fn computer_term_remove(&self, computer_id: &str, term_id: &str) -> ApiResult<()> {
+        Self::check(self.send(Method::DELETE, &term_path(computer_id, term_id), None).await?)?;
+        Ok(())
+    }
+}
+
+fn term_path(computer_id: &str, term_id: &str) -> String {
+    format!("/computers/{}/terms/{}", seg(computer_id), seg(term_id))
+}
+
+fn terms_path(computer_id: &str, f: &TermFilter) -> String {
+    let mut q = Vec::new();
+    if let Some(p) = &f.project {
+        q.push(format!("project={}", seg(p)));
+    }
+    if let Some(o) = &f.origin {
+        q.push(format!("origin={}", seg(o)));
+    }
+    if let Some(r) = f.running {
+        q.push(format!("running={r}"));
+    }
+    let base = format!("/computers/{}/terms", seg(computer_id));
+    if q.is_empty() { base } else { format!("{base}?{}", q.join("&")) }
+}
+
+#[cfg(test)]
+mod terms_tests {
+    use super::*;
+
+    #[test]
+    fn fr_p6_terms_paths_escape_ids_and_carry_filters() {
+        assert_eq!(terms_path("local", &TermFilter::default()), "/computers/local/terms");
+        let f = TermFilter { project: Some("/a b".into()), origin: Some("agent".into()), running: Some(true) };
+        assert_eq!(terms_path("c 1", &f), "/computers/c%201/terms?project=%2Fa%20b&origin=agent&running=true");
+        assert_eq!(term_path("local", "ab/c"), "/computers/local/terms/ab%2Fc");
+    }
+
+    #[test]
+    fn fr_p6_a_term_list_entry_decodes_with_origin_and_controller() {
+        let t: TermSummary = serde_json::from_value(json!({
+            "id": "3f2a", "key": null, "title": "zsh", "origin": "ide-vscode", "project": "/p",
+            "argv": ["/bin/zsh", "-l"], "cwd": "/p", "pid": 4242, "state": "running",
+            "exit_code": null, "signal": null, "size": {"rows": 40, "cols": 120},
+            "created_ms": 1, "finished_ms": null, "last_activity_ms": 2, "tags": {},
+            "clients": [{"client": 7, "device": "Mac", "kind": "vscode-companion", "pid": null,
+                         "read_only": false, "size": null, "attached_ms": 0}],
+            "controller": {"client": 7, "device": "Mac", "kind": null, "read_only": false},
+            "survives_node_restart": true, "adopted": true, "has_screen": true, "future": 1
+        }))
+        .unwrap();
+        assert_eq!(t.origin, "ide-vscode");
+        assert_eq!(t.state, "running");
+        assert_eq!(t.controller.as_ref().map(|c| c.client), Some(7));
+        assert!(t.adopted && t.survives_node_restart);
+    }
 }
 
 #[cfg(test)]
@@ -1712,6 +2167,32 @@ mod metrics_tests {
         assert!(s.memory.is_none() && s.disks.is_empty() && s.processes.is_empty());
         let s: MetricsSample = serde_json::from_value(json!({})).unwrap();
         assert_eq!(s, MetricsSample::default());
+    }
+}
+
+/// Answer of `GET /api/whoami` (FR-N8). `door` is `local` or `transport`; `peer_id` is set only
+/// over the transport; `scope` is `full`, `read_only` or `chat_only`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Whoami {
+    pub door: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<String>,
+    pub scope: String,
+}
+
+#[cfg(test)]
+mod whoami_tests {
+    use super::Whoami;
+
+    #[test]
+    fn whoami_decodes_both_doors() {
+        let local: Whoami = serde_json::from_str(r#"{"door":"local","scope":"full"}"#).unwrap();
+        assert_eq!(local, Whoami { door: "local".into(), peer_id: None, scope: "full".into() });
+        let remote: Whoami =
+            serde_json::from_str(r#"{"door":"transport","peer_id":"abc","scope":"chat_only"}"#).unwrap();
+        assert_eq!(remote.peer_id.as_deref(), Some("abc"));
+        assert_eq!(remote.scope, "chat_only");
+        assert_eq!(serde_json::to_string(&local).unwrap(), r#"{"door":"local","scope":"full"}"#);
     }
 }
 
@@ -2043,6 +2524,16 @@ impl Api {
         }
         serde_json::from_slice(&raw.body).map_err(|e| ProjectPatchError::Api(ApiError::Decode(e.to_string())))
     }
+
+    /// `DELETE /projects/{name}` (FR-L26, #384): deletes an empty project. A refusal keeps
+    /// status and `code` (`project_not_empty` 409, `protected_project` 403, `not_found` 404).
+    pub async fn delete_project(&self, name: &str) -> Result<(), ProjectPatchError> {
+        let raw = self.send(Method::DELETE, &format!("/projects/{}", seg(name)), None).await?;
+        if !raw.status.is_success() {
+            return Err(ProjectPatchError::from_answer(raw.status.as_u16(), &raw.body));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2090,6 +2581,21 @@ mod project_patch_tests {
         assert_eq!(serde_json::to_value(&p).unwrap(), json!({"profile_overrides": {"codex": "acc-1"}}));
         let p = ProjectPatch { profile_overrides: Some(Default::default()), ..Default::default() };
         assert_eq!(serde_json::to_value(&p).unwrap(), json!({"profile_overrides": {}}), "an empty map clears all");
+    }
+
+    #[test]
+    fn fr_l26_archive_is_sent_as_a_bool() {
+        let p = ProjectPatch { archived: Some(true), ..Default::default() };
+        assert!(!p.is_empty());
+        assert_eq!(serde_json::to_value(&p).unwrap(), json!({"archived": true}));
+        let p = ProjectPatch { archived: Some(false), ..Default::default() };
+        assert_eq!(serde_json::to_value(&p).unwrap(), json!({"archived": false}));
+    }
+
+    #[test]
+    fn fr_l26_a_delete_refusal_keeps_status_and_code() {
+        let e = ProjectPatchError::from_answer(409, br#"{"error":"busy","code":"project_not_empty","sessions":2}"#);
+        assert_eq!((e.status(), e.code()), (Some(409), Some("project_not_empty")));
     }
 
     #[test]
@@ -2649,5 +3155,43 @@ mod enrol_tests {
         assert!(matches!(EnrolCallError::from(st(409, "door_off")), EnrolCallError::DoorOff));
         assert!(matches!(EnrolCallError::from(st(409, "door_url_unknown")), EnrolCallError::DoorUrlUnknown));
         assert_eq!(EnrolCallError::from(st(400, "bad")).status(), Some(400));
+    }
+}
+
+// ---- device scope (FR-N8, #366) --------------------------------------------------------------
+
+/// What an admitted device may call over the transport (server `devices::Scope`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceScope {
+    #[default]
+    Full,
+    ReadOnly,
+    ChatOnly,
+}
+
+/// One row of `GET /api/devices` (server `devices::Device`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRecord {
+    pub peer_id: String,
+    pub name: String,
+    pub created_at: i64,
+    pub source: String,
+    /// Absent on a server older than #366, which means `full`.
+    #[serde(default)]
+    pub scope: DeviceScope,
+}
+
+#[cfg(test)]
+mod device_scope_tests {
+    use super::*;
+
+    #[test]
+    fn scope_wire_names_match_the_server() {
+        assert_eq!(serde_json::to_value(DeviceScope::ReadOnly).unwrap(), "read_only");
+        assert_eq!(serde_json::to_value(DeviceScope::ChatOnly).unwrap(), "chat_only");
+        let d: DeviceRecord =
+            serde_json::from_str(r#"{"peer_id":"p","name":"n","created_at":1,"source":"local"}"#).unwrap();
+        assert_eq!(d.scope, DeviceScope::Full);
     }
 }

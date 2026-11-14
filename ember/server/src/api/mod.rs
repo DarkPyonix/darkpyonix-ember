@@ -14,7 +14,8 @@
 //! | GET    | `/api/projects` | → `[Project]` (`{name, created_at, computers, repository, default_branch, member_defaults, character_style, archived}`) |
 //! | POST   | `/api/projects` | `{name}` → 201 `Project` (200 when it existed) |
 //! | GET    | `/api/projects/{name}` | → `Project` |
-//! | PATCH  | `/api/projects/{name}` | `{name?, repository?, default_branch?, member_defaults?, character_style?}` → `Project` (FR-L26); errors `{error, code}` |
+//! | PATCH  | `/api/projects/{name}` | `{name?, repository?, default_branch?, member_defaults?, character_style?, profile_overrides?, character_overrides?, archived?}` → `Project` (FR-L26); errors `{error, code}` |
+//! | DELETE | `/api/projects/{name}` | → 204; 409 `project_not_empty` `{sessions, channels, schedules, teams}` while it holds records, 403 for 기본 프로젝트 (FR-L26) |
 //! | PUT    | `/api/projects/{name}/computers/{computer_id}` | → `Project` (assign; idempotent) |
 //! | DELETE | `/api/projects/{name}/computers/{computer_id}` | → `Project` (unassign; idempotent) |
 //! | PATCH  | `/api/sessions/{id}` | `{title?, pinned?, archived?}` → `SessionRecord` |
@@ -78,6 +79,7 @@ use crate::store::{now_ms, SessionPatch};
 pub fn router(sessions: Arc<Sessions>) -> Router {
     Router::new()
         .route("/api/health", get(|| async { Json(json!({ "ok": true })) }))
+        .route("/api/whoami", get(crate::devices::scope::whoami))
         .route("/api/agents", get(agents))
         // `/api/agents/settings` has three segments, `/api/agents/{agent}/settings` four: no overlap.
         .route("/api/agents/settings", get(get_agent_settings))
@@ -91,7 +93,7 @@ pub fn router(sessions: Arc<Sessions>) -> Router {
         .route("/api/usage/summary", get(usage_summary))
         .route("/api/sessions/{id}/usage", get(session_usage))
         .route("/api/projects", get(list_projects).post(create_project))
-        .route("/api/projects/{name}", get(get_project).patch(patch_project))
+        .route("/api/projects/{name}", get(get_project).patch(patch_project).delete(delete_project))
         .route("/api/projects/{name}/computers/{computer_id}", put(assign).delete(unassign))
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/messages", post(send_message))
@@ -136,7 +138,7 @@ impl From<ProjectError> for ApiError {
             ProjectError::NotFound(_) | ProjectError::ComputerNotFound(_) => StatusCode::NOT_FOUND,
             ProjectError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ProjectError::Protected(_) => StatusCode::FORBIDDEN,
-            ProjectError::NameTaken(_) => StatusCode::CONFLICT,
+            ProjectError::NameTaken(_) | ProjectError::NotEmpty { .. } => StatusCode::CONFLICT,
             ProjectError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError(code, format!("{e:#}"))
@@ -511,16 +513,24 @@ fn project_error(e: ProjectError) -> Response {
         ProjectError::BadRequest(_) => "invalid_field",
         ProjectError::Protected(_) => "protected_project",
         ProjectError::NameTaken(_) => "name_taken",
+        ProjectError::NotEmpty { .. } => "project_not_empty",
         ProjectError::Other(_) => "internal",
     };
     let message = format!("{e:#}");
+    if let ProjectError::NotEmpty { sessions, channels, schedules, teams, .. } = &e {
+        let body = json!({
+            "error": message, "code": code,
+            "sessions": sessions, "channels": channels, "schedules": schedules, "teams": teams,
+        });
+        return (StatusCode::CONFLICT, Json(body)).into_response();
+    }
     coded(ApiError::from(e).0, code, message)
 }
 
 /// Fields of the settings sheet whose server side is not built yet. They are refused by name so
 /// the client sees a clean error and not a silent no-op (leader: blocked on an owner decision,
-/// archive: #384 PR 4).
-const NOT_YET_PROJECT_FIELDS: [&str; 2] = ["leader_session", "archived"];
+/// #384).
+const NOT_YET_PROJECT_FIELDS: [&str; 1] = ["leader_session"];
 
 /// FR-L26: change project settings. Body fields are optional; unknown fields are 400
 /// `unknown_field`, unbuilt ones 400 `not_yet`. Pushes `project_updated` with the new state.
@@ -547,6 +557,20 @@ async fn patch_project(
         Ok(project) => {
             s.publish(Push::ProjectUpdated { project: project.clone() });
             Json(project).into_response()
+        }
+        Err(e) => project_error(e),
+    }
+}
+
+/// FR-L26 (#384 PR 5): delete an empty project. 204 on success; 409 `project_not_empty` with
+/// the counts when it still holds sessions, channels, schedules or teams; 403
+/// `protected_project` for 기본 프로젝트; 404 `not_found`. Pushes `project_deleted`.
+async fn delete_project(State(s): State<Arc<Sessions>>, Path(name): Path<String>) -> Response {
+    match s.store().delete_project(&name) {
+        Ok(()) => {
+            tracing::info!(project = %name, "project deleted");
+            s.publish(Push::ProjectDeleted { name });
+            StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => project_error(e),
     }
@@ -684,9 +708,19 @@ async fn push(
     Ok(ws.on_upgrade(move |socket| push_loop(socket, rx)))
 }
 
+/// Forwards pushes to one socket. It also reads the socket, so a close (or a dead connection)
+/// ends the task and drops its broadcast receiver at once, not on the next push (#369). Anything
+/// the client sends is ignored; axum answers pings itself.
 async fn push_loop(mut socket: WebSocket, mut rx: tokio::sync::broadcast::Receiver<Push>) {
     loop {
-        let msg = match rx.recv().await {
+        let next = tokio::select! {
+            m = rx.recv() => m,
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                Some(Ok(_)) => continue,
+            },
+        };
+        let msg = match next {
             Ok(p) => p,
             // A slow client missed messages: tell it to resync from the events endpoint.
             Err(RecvError::Lagged(n)) => {

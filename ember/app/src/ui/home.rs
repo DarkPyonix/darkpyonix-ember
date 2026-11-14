@@ -51,6 +51,29 @@ pub const LATER_LINE: &str = "12월 이후에 지원합니다";
 /// The services that come after GitHub, in the mockup order.
 pub const LATER_INTEGRATIONS: [&str; 5] = ["Slack", "Discord", "Linear", "캘린더", "메일"];
 
+/// How the 연동 area is laid out at a window width (mockup `.int-grid`, FR-L23, #498).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IntegrationsLayout {
+    /// Above 1279: the wide GitHub card (span 6, two rows) beside the small cards (span 3 each),
+    /// three columns in all. At 1279 and below the GitHub card takes the whole width.
+    pub github_beside: bool,
+    /// Columns of the small 준비 중 cards: two (span 6) above 560, one at 560 and below.
+    pub later_cols: usize,
+}
+
+pub fn integrations_layout(width_dp: f32) -> IntegrationsLayout {
+    IntegrationsLayout { github_beside: width_dp > 1279.0, later_cols: if width_dp > 560.0 { 2 } else { 1 } }
+}
+
+/// The GitHub card's rule row (mockup `.int-rule`, data `develop CI 실패 -> 루틴 'CI 고치기'`).
+/// The server has no field that ties a CI failure to a routine and no event trigger runs a
+/// routine yet, so the row names the rule, says honestly that it does not run, and links to 루틴
+/// where an event routine is set up (FR-L23, #498).
+pub const CI_RULE_WHEN: &str = "CI 실패";
+pub const CI_RULE_THEN: &str = "루틴이 받아 팀원에게 맡깁니다";
+pub const CI_RULE_NOTE: &str = "CI 실패로 루틴을 실행하는 기능은 아직 준비 중입니다";
+pub const CI_RULE_LINK: &str = "루틴 보기";
+
 /// `GET /api/integrations/github` `state` (INTENT D41, FR-L35).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1282,6 +1305,18 @@ pub struct Kpi {
     pub available: bool,
 }
 
+/// A KPI's number and the small muted part after it (`home.css:63` `.hm-kv small`, half the
+/// number's size, 500, `muted`): the unit ("4" and "명"), or for a ratio the denominator ("3" and
+/// "/5", `home.js:52`). Design review 2026-11-13 B9: the denominator was drawn at the number's size.
+pub fn kpi_value_parts(kpi: &Kpi) -> (String, String) {
+    if kpi.unit.is_empty() {
+        if let Some((num, den)) = kpi.value.split_once('/') {
+            return (num.to_string(), format!("/{den}"));
+        }
+    }
+    (kpi.value.clone(), kpi.unit.to_string())
+}
+
 /// The four KPIs: running members, online computers, success rate, approval wait.
 /// Approval wait shows how many are waiting now (the client has that) but not the median
 /// (TODO(server): no approval timing in the client's state).
@@ -1953,6 +1988,27 @@ mod tests {
         );
         assert_eq!(g.totals.ci_pass_percent, None);
         assert_eq!(g.checked_at, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn fr_l23_integrations_grid_follows_the_mockup_breakpoints() {
+        assert_eq!(integrations_layout(1440.0), IntegrationsLayout { github_beside: true, later_cols: 2 });
+        assert_eq!(integrations_layout(1280.0).github_beside, true);
+        assert_eq!(integrations_layout(1279.0), IntegrationsLayout { github_beside: false, later_cols: 2 });
+        assert_eq!(integrations_layout(1024.0), IntegrationsLayout { github_beside: false, later_cols: 2 });
+        assert_eq!(integrations_layout(768.0), IntegrationsLayout { github_beside: false, later_cols: 2 });
+        assert_eq!(integrations_layout(560.0), IntegrationsLayout { github_beside: false, later_cols: 1 });
+        assert_eq!(integrations_layout(390.0), IntegrationsLayout { github_beside: false, later_cols: 1 });
+    }
+
+    #[test]
+    fn fr_l23_ci_rule_links_to_routines_and_says_it_does_not_run() {
+        assert_eq!(CI_RULE_WHEN, "CI 실패");
+        assert_eq!(CI_RULE_LINK, "루틴 보기");
+        assert!(CI_RULE_NOTE.contains("준비 중"));
+        for s in [CI_RULE_WHEN, CI_RULE_THEN, CI_RULE_NOTE, CI_RULE_LINK] {
+            assert!(!s.contains('\u{2014}'));
+        }
     }
 
     #[test]

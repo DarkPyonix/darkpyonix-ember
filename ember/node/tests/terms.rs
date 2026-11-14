@@ -458,3 +458,33 @@ async fn a_new_node_readopts_running_sessions_and_reports_lost_ones() {
     })
     .await;
 }
+
+/// #474: a node with a running-session cap refuses one more create with 409 `conflict`; a keyed
+/// create of a running session still answers it, and killing one frees a slot.
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_p1_terms_running_session_cap_refuses_one_more() {
+    within(async {
+        let f = start().await;
+        f.node.terms().set_max_running(2);
+        let mut keyed = req(&f.root, &["/bin/sh"]);
+        keyed.key = Some("k".into());
+        let a = f.client.term_create(&keyed).await.unwrap();
+        let _b = f.client.term_create(&req(&f.root, &["/bin/sh"])).await.unwrap();
+        let e = f.client.term_create(&req(&f.root, &["/bin/sh"])).await.map(drop).unwrap_err();
+        assert_eq!(e.code(), Some(ErrorCode::Conflict), "{e:?}");
+        let again = f.client.term_create(&keyed).await.unwrap();
+        assert!(!again.created && again.term.id == a.term.id);
+        f.client.term_kill(&a.term.id, None).await.unwrap();
+        let mut freed = false;
+        for _ in 0..100 {
+            if f.client.term_create(&req(&f.root, &["/bin/sh"])).await.is_ok() {
+                freed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(freed, "a killed session frees its slot");
+    })
+    .await;
+}

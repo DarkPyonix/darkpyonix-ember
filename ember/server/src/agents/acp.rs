@@ -592,6 +592,7 @@ impl AcpAdapter {
             // restarted through the agent's native resume instead of rejoined.
             reattachable: false,
             mem_limit_mb: req.mem_limit_mb,
+            os_sandbox: true,
         })
         .await
         .with_context(|| format!("starting {} (ACP agent {})", self.config.command.display(), self.config.name))?;
@@ -1019,6 +1020,19 @@ fn is_secret_char(c: char) -> bool {
 /// are `...` when cut). A heuristic: a secret that looks like an ordinary word, or a long run of
 /// letters only, passes. Raw text may be logged only at `debug`, which is not for sharing.
 pub(crate) fn redact_upstream(text: &str) -> String {
+    let out = redact_upstream_uncapped(text);
+    if out.chars().count() > UPSTREAM_CAP {
+        let mut cut: String = out.chars().take(UPSTREAM_CAP - 3).collect();
+        cut.push_str("...");
+        cut
+    } else {
+        out
+    }
+}
+
+/// [`redact_upstream`] without the 300-character cap, for one line of the shim's agent stderr log
+/// (#544): a debugging log keeps the whole line, only the secrets are cut out.
+pub(crate) fn redact_upstream_uncapped(text: &str) -> String {
     let flat = text
         .split(|c: char| c.is_whitespace() || c.is_control() || c == '\u{2028}' || c == '\u{2029}')
         .filter(|w| !w.is_empty())
@@ -1028,14 +1042,7 @@ pub(crate) fn redact_upstream(text: &str) -> String {
     let out = redact_prefixed_tokens(&out);
     let out = redact_google_keys(&out);
     let out = redact_emails(&out);
-    let out = redact_long_secrets(&out);
-    if out.chars().count() > UPSTREAM_CAP {
-        let mut cut: String = out.chars().take(UPSTREAM_CAP - 3).collect();
-        cut.push_str("...");
-        cut
-    } else {
-        out
-    }
+    redact_long_secrets(&out)
 }
 
 /// The value after `Authorization:` (and a scheme word such as `Bearer`), and the token after a
@@ -1860,6 +1867,15 @@ fn abs_path_param(params: &Value) -> Result<PathBuf, RpcError> {
     Ok(path)
 }
 
+/// Refuse a path inside the agent sandbox's directories (FR-A11): Ember serves Gemini's and omp's
+/// file tools itself, so this is where their file access to the data dir is denied.
+fn deny_data_dir(path: &Path) -> Result<(), RpcError> {
+    if crate::sandbox::is_denied(path) {
+        return Err(RpcError::invalid(crate::sandbox::denied_message(path)));
+    }
+    Ok(())
+}
+
 /// Lines `line` (1-based) .. `line + limit` of `text`, keeping line endings.
 fn slice_lines(text: &str, line: Option<u64>, limit: Option<u64>) -> String {
     if line.is_none() && limit.is_none() {
@@ -1966,6 +1982,7 @@ impl Host {
 
     async fn read_text_file(&self, params: &Value) -> Reply {
         let path = abs_path_param(params)?;
+        deny_data_dir(&path)?;
         let text = match &self.node {
             Some(node) => {
                 let r = node.read_file(&path).await.map_err(|e| RpcError::node(&e, &path.display().to_string()))?;
@@ -1983,6 +2000,7 @@ impl Host {
 
     async fn write_text_file(&self, params: &Value) -> Reply {
         let path = abs_path_param(params)?;
+        deny_data_dir(&path)?;
         let content = str_param(params, "content")?;
         match &self.node {
             Some(node) => {
@@ -2048,7 +2066,12 @@ impl Host {
                 tokio::spawn(drive_node_terminal(term.clone(), session));
             }
             None => {
-                let mut child = Command::new(&command)
+                // The agent asked Ember to run this, so it gets the agent's limits (FR-A11): no
+                // inherited Ember secret, and the OS sandbox where one is installed.
+                let (program, args) = crate::sandbox::wrap(true, &env, Path::new(&command), &args);
+                let mut cmd = Command::new(&program);
+                crate::sandbox::scrub_env(&mut cmd);
+                let mut child = cmd
                     .args(&args)
                     .envs(env)
                     .current_dir(&cwd)

@@ -124,6 +124,50 @@ impl Services {
 }
 
 impl Services {
+    /// The admitted devices with their scope (FR-N8, #817): the server, or the demo list.
+    pub async fn devices(&self) -> Result<Vec<ember_client::api::DeviceRecord>, ember_client::api::ApiError> {
+        if self.demo.is_some() {
+            return Ok(crate::ui::device_scope::demo_devices());
+        }
+        self.client.api().devices().await
+    }
+
+    /// Sets a device's scope (FR-N8, #817): on the server, or in the demo list.
+    pub async fn set_device_scope(
+        &self,
+        peer_id: &str,
+        scope: ember_client::api::DeviceScope,
+    ) -> Result<ember_client::api::DeviceRecord, ember_client::api::ApiError> {
+        if self.demo.is_some() {
+            return crate::ui::device_scope::demo_set_scope(peer_id, scope)
+                .ok_or_else(|| ember_client::api::ApiError::Decode(format!("unknown device {peer_id}")));
+        }
+        self.client.api().set_device_scope(peer_id, scope).await
+    }
+
+    /// What the server says this app is (`Api::whoami`, FR-N8a), asked once and cached. The
+    /// demo is the local door. `None` when the call failed: no self row then.
+    pub async fn whoami(&self) -> Option<ember_client::api::Whoami> {
+        static CACHE: tokio::sync::OnceCell<Option<ember_client::api::Whoami>> = tokio::sync::OnceCell::const_new();
+        CACHE
+            .get_or_init(|| async {
+                if self.demo.is_some() {
+                    return Some(crate::ui::device_scope::demo_whoami());
+                }
+                match self.client.api().whoami().await {
+                    Ok(w) => Some(w),
+                    Err(e) => {
+                        tracing::warn!("whoami failed: {e}");
+                        None
+                    }
+                }
+            })
+            .await
+            .clone()
+    }
+}
+
+impl Services {
     /// Answer an approval: on the server, or in the demo state (#199).
     pub async fn answer(
         &self,

@@ -15,6 +15,13 @@ pub struct FindState {
     pub replacement: Signal<String>,
     pub case_sensitive: Signal<bool>,
     pub whole_word: Signal<bool>,
+    /// 정규식, 대소문자 보존 and 선택 영역에서 찾기 (FR-L31.12).
+    pub regex: Signal<bool>,
+    pub preserve_case: Signal<bool>,
+    pub scope: Signal<Option<crate::ui::find::Scope>>,
+    pub in_selection: Signal<bool>,
+    /// The editor's last selection, anchor and active end, each (line, UTF-16 column).
+    pub selection: Signal<((u32, u32), (u32, u32))>,
     pub current: Signal<Option<usize>>,
     pub cmd: Signal<Option<FindCmd>>,
     pub next_id: Signal<u64>,
@@ -66,6 +73,10 @@ pub struct Shared {
     pub position: Signal<(usize, usize)>,
     pub stripes: Signal<Stripes>,
     pub menu_open: Signal<bool>,
+    /// The tab whose context menu is open, and where (client x, y) (FR-L31.5).
+    pub tab_menu: Signal<Option<(String, f64, f64)>>,
+    /// The unsaved-changes question on a close, while it is open (FR-L31.5).
+    pub close_confirm: Signal<Option<crate::ui::editor::CloseRequest>>,
     pub keymap: Signal<Keymap>,
     pub folder: String,
     pub server_url: String,
@@ -85,14 +96,20 @@ pub struct Shared {
     pub workbench_logs: Signal<Vec<String>>,
     /// Source control of the 커밋 and Git windows (FR-L31.2).
     pub scm: crate::ui::editor_scm::Scm,
+    /// Extension notifications: toasts, the center and modal dialogs (FR-L31.16).
+    pub notifications: Rc<RefCell<ember_editor::notifications::Notifications>>,
+    /// The 확장 window: search, install, uninstall, enable and disable (FR-L31.14).
+    pub extensions: crate::ui::editor_extensions::Extensions,
 }
 
 // WidgetView accepts a function without props and owns a separate tree. Share signals between
 // the trees until WidgetView supports props and flex stretch sizing (dioxus-compose #160).
 thread_local! { static DOUBLE_SHIFT: RefCell<super::editor::DoubleShift> = RefCell::new(super::editor::DoubleShift::default()); }
+// v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately): tells a double-click from two `onclick`s.
+thread_local! { static DOUBLE_CLICK: RefCell<super::editor::DoubleClick> = RefCell::new(super::editor::DoubleClick::default()); }
 
 /// Milliseconds on a clock that only moves forward, for telling two Shift presses apart.
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     use std::sync::OnceLock;
     static START: OnceLock<std::time::Instant> = OnceLock::new();
     START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
@@ -101,7 +118,7 @@ fn now_ms() -> u64 {
 thread_local! { static ICON_DARK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 thread_local! { static MODIFIER_CLICK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 thread_local! { static SHARED: RefCell<Option<Shared>> = const { RefCell::new(None) }; }
-fn shared() -> Shared { SHARED.with(|s| s.borrow().as_ref().expect("workbench initialized").clone()) }
+pub(crate) fn shared() -> Shared { SHARED.with(|s| s.borrow().as_ref().expect("workbench initialized").clone()) }
 
 /// Sets up the shared state for the page. Called first by the root page.
 fn init(target: EditorTarget) {
@@ -125,6 +142,11 @@ fn init(target: EditorTarget) {
         replacement: Signal::new_in_scope(String::new(), root),
         case_sensitive: Signal::new_in_scope(false, root),
         whole_word: Signal::new_in_scope(false, root),
+        regex: Signal::new_in_scope(false, root),
+        preserve_case: Signal::new_in_scope(false, root),
+        scope: Signal::new_in_scope(None, root),
+        in_selection: Signal::new_in_scope(false, root),
+        selection: Signal::new_in_scope(((0, 0), (0, 0)), root),
         current: Signal::new_in_scope(None, root),
         cmd: Signal::new_in_scope(None, root),
         next_id: Signal::new_in_scope(1, root),
@@ -138,9 +160,20 @@ fn init(target: EditorTarget) {
     let prompt_text = use_hook(|| Signal::new_in_scope(String::new(), root));
     let bottom_max = use_hook(|| Signal::new_in_scope(false, root));
     let position = use_hook(|| Signal::new_in_scope((1, 1), root));
-    let stripes = use_hook(|| Signal::new_in_scope(Stripes::default(), root));
+    let stripes = use_hook(|| {
+        let mut initial = Stripes::default();
+        // Debug capture hook: start with the 확장 window showing (FR-L31.14).
+        if crate::ui::editor_extensions::capture_hook().is_some() {
+            initial.toggle(crate::ui::editor::ToolWindow::Extensions);
+        }
+        Signal::new_in_scope(initial, root)
+    });
     let menu_open = use_hook(|| Signal::new_in_scope(false, root));
+    let tab_menu = use_hook(|| Signal::new_in_scope(None::<(String, f64, f64)>, root));
+    let close_confirm = use_hook(|| Signal::new_in_scope(None::<crate::ui::editor::CloseRequest>, root));
     let keymap = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().keymap, root));
+    // The saved zoom (Code-OSS's window.zoomLevel) applies when the window opens (FR-L31.15).
+    use_hook(|| compose_rust::zoom::set_zoom_level(crate::services::services().ui.prefs.get_untracked().editor_zoom_level));
     let bridge = use_hook(|| Rc::new(RefCell::new(WidgetBridge::new())));
     let uris = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
     let open_errors = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
@@ -154,7 +187,30 @@ fn init(target: EditorTarget) {
     let workbench_logs = use_hook(|| Signal::new_in_scope(Vec::<String>::new(), root));
     // The branch in the bars comes from the first status read, so it starts with the window.
     let scm = use_hook(|| { let scm = crate::ui::editor_scm::Scm::new(&target.project, revision); scm.refresh(); scm });
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm }));
+    let notifications = use_hook(|| {
+        let mut n = ember_editor::notifications::Notifications::new();
+        // Debug-only capture hook (FR-L31.16): seeds toasts and a modal so a builder can capture them
+        // without an extension that calls `$showMessage`. Ids above 1<<40 never match a real call.
+        if cfg!(debug_assertions) && std::env::var("EMBER_EDITOR_DEMO_NOTIFICATIONS").is_ok_and(|v| v == "1") {
+            use ember_editor::{ExtensionMessage, MessageAction, MessageSeverity};
+            let act = |t: &str, h: i64, c: bool| MessageAction { title: t.into(), handle: h, is_close_affordance: c };
+            let base = 1u64 << 40;
+            let demo = [
+                (MessageSeverity::Info, "Git 저장소를 찾았습니다.", vec![], false),
+                (MessageSeverity::Warning, "rust-analyzer가 Cargo.toml을 다시 읽어야 합니다.", vec![act("다시 읽기", 0, false), act("나중에", 1, false)], false),
+                (MessageSeverity::Error, "언어 서버가 종료되었습니다.", vec![act("다시 시작", 0, false)], false),
+            ];
+            for (i, (severity, message, actions, modal)) in demo.into_iter().enumerate() {
+                n.push(ExtensionMessage { id: base + i as u64, severity, message: message.into(), source: Some("rust-analyzer".into()), actions, modal, detail: None }, now_ms());
+            }
+            if std::env::var("EMBER_EDITOR_DEMO_MODAL").is_ok_and(|v| v == "1") {
+                n.push(ExtensionMessage { id: base + 9, severity: MessageSeverity::Warning, message: "변경 내용을 버리시겠습니까?".into(), source: Some("Git".into()), actions: vec![act("버리기", 0, false), act("유지", 1, true)], modal: true, detail: Some("이 작업은 되돌릴 수 없습니다.".into()) }, now_ms());
+            }
+        }
+        Rc::new(RefCell::new(n))
+    });
+    let extensions = use_hook(|| crate::ui::editor_extensions::Extensions::new(&target.computer, revision));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { extensions, host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -165,13 +221,26 @@ pub(crate) fn join_path(dir: &str, name: &str) -> String {
 fn unsaved_open_paths(s: &Shared) -> Vec<String> {
     let bridge = s.bridge.borrow();
     let uris = s.uris.borrow();
-    s.tabs
-        .read()
-        .paths()
-        .into_iter()
-        .filter(|p| uris.get(*p).and_then(|u| bridge.document(u)).is_some_and(|d| d.dirty))
-        .map(str::to_owned)
-        .collect()
+    let mut paths: Vec<String> = s.tabs.read().paths().into_iter().map(str::to_owned).collect();
+    // A file edited in a diff without a tab of its own counts too (FR-L31.10).
+    if let Some(rel) = s.scm.working_diff_path() {
+        let abs = join_path(&s.folder, &rel);
+        if !paths.contains(&abs) {
+            paths.push(abs);
+        }
+    }
+    paths.retain(|p| uris.get(p).and_then(|u| bridge.document(u)).is_some_and(|d| d.dirty));
+    paths
+}
+
+/// An edit makes a preview tab permanent, as in Code-OSS (FR-L31.5). The tab signal is written only when the
+/// tab is a preview, so typing does not redraw the strip on every key.
+fn keep_edited_tab(s: &Shared, path: &str) {
+    let preview = s.tabs.read().is_preview(path);
+    if preview {
+        let mut tabs = s.tabs;
+        tabs.write().keep_open(path);
+    }
 }
 
 fn pos(p: compose_rust::code::Position) -> WidgetPos { WidgetPos::new(p.line, p.column) }
@@ -227,6 +296,14 @@ fn editor_pane() -> Element {
             }
         }
     }
+    // Edits the session asks for (an accepted completion, formatting, a rename, a code action) go to
+    // the widget, which applies them as the reader's own and reports them back as changes.
+    for command in s.bridge.borrow_mut().take_pending_edits(&doc.uri) {
+        if let ember_editor::WidgetCommand::EditCode { request_id, base_version, range, text } = command {
+            use compose_rust::code::CodeRange;
+            handle.edit(request_id, base_version, CodeRange::of(range.start.line, range.start.col, range.end.line, range.end.col), text);
+        }
+    }
     let gutter_decorations = {
         let current_path = s.tabs.read().current_path().map(str::to_string);
         if let Some(abs_path) = current_path {
@@ -245,23 +322,25 @@ fn editor_pane() -> Element {
         key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
         text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), folds: crate::ui::editor::folds(&doc.folds), tab_width: Some(doc.tab_width),
         gutter_decorations,
-        on_change: move |e: compose_rust::code::CodeChange| { change_s.editor_versions.borrow_mut().insert(generation, e.version); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); },
-        on_save: move |e: compose_rust::code::SaveRequest| { let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
+        on_change: move |e: compose_rust::code::CodeChange| { keep_edited_tab(&change_s, &change_uri.path); change_s.editor_versions.borrow_mut().insert(generation, e.version); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); crate::ui::editor_states::view::edited(&change_s, &change_uri.path); },
+        on_save: move |e: compose_rust::code::SaveRequest| { if !crate::ui::editor_states::view::manual_save_allowed(&save_s, &save_uri.path) { return; } let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
         on_decoration_click: move |id| { let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id); send(&click_s, event); },
         on_fold_change: move |e: compose_rust::code::FoldChange| { let event = fold_s.bridge.borrow_mut().on_fold_changed(&fold_uri, e.start_line, e.collapsed); send(&fold_s, event); let mut rev = fold_s.revision; *rev.write() += 1; },
-        on_selection_change: move |e: compose_rust::code::SelectionChange| { let mut position = selection_s.position; position.set((e.active.line as usize + 1, e.active.column as usize + 1)); let event = selection_s.bridge.borrow().on_selection_changed(&selection_uri, e.version, pos(e.anchor), pos(e.active)); send(&selection_s, event); },
+        on_selection_change: move |e: compose_rust::code::SelectionChange| { let mut position = selection_s.position; position.set((e.active.line as usize + 1, e.active.column as usize + 1)); let mut find_sel = selection_s.find.selection; find_sel.set(((e.anchor.line, e.anchor.column), (e.active.line, e.active.column))); let event = selection_s.bridge.borrow().on_selection_changed(&selection_uri, e.version, pos(e.anchor), pos(e.active)); send(&selection_s, event); },
     } }
 }
 
 pub mod page {
-    use dioxus_compose::html::prelude::dioxus_elements::point_interaction::ModifiersInteraction;
+    use dioxus_compose::html::prelude::dioxus_elements::point_interaction::{InteractionLocation, ModifiersInteraction};
     use dioxus_compose::html::prelude::dioxus_elements::{Key, Modifiers};
     use dioxus_compose::html::prelude::dioxus_signals::{ReadableExt, WritableExt};
     use dioxus_compose::html::prelude::*;
+    use std::collections::HashMap;
     use std::sync::Arc;
     use crate::terminal_stream::{self, ChangeCallback, TerminalHandle, TerminalState};
-    use super::{DOUBLE_SHIFT, now_ms, send, editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, PendingGoto, Shared};
+    use crate::ui::editor_terminals as terms;
+    use super::{DOUBLE_CLICK, DOUBLE_SHIFT, now_ms, send, editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, PendingGoto, Shared};
     use crate::ui::editor::{
         action_for_key, agent_status_text, apply_action, tooltip_text, Side, Stripes, ToolWindow,
     };
@@ -291,7 +370,7 @@ pub mod page {
     }
 
     /// The key's name as the keymap table writes it.
-    pub(super) fn key_name(key: &Key) -> String {
+    pub(crate) fn key_name(key: &Key) -> String {
         match key {
             Key::Character(c) => c.clone(),
             Key::Escape => "Esc".to_string(),
@@ -332,9 +411,59 @@ pub mod page {
             save_current(s);
             return;
         }
+        if action == Action::Format {
+            crate::ui::editor_language::view::run(s, crate::ui::editor_language::LangAction::Format);
+            return;
+        }
+        // Settings (FR-L31.17): the view is a tab, the two files open as documents.
+        match action {
+            Action::Settings => return crate::ui::editor_settings::view::open(s),
+            Action::SettingsJson => return crate::ui::editor_settings::view::open_file(s, crate::ui::editor_settings::SettingsFile::User),
+            Action::KeybindingsJson => return crate::ui::editor_settings::view::open_file(s, crate::ui::editor_settings::SettingsFile::Keybindings),
+            _ => {}
+        }
         if let Some(mode) = crate::ui::palette::mode_for(action, *s.keymap.read()) {
             open_palette(s, mode);
             return;
+        }
+        let saved_zoom = crate::services::services().ui.prefs.get_untracked().editor_zoom_level;
+        if let Some(level) = crate::ui::editor_actions::zoom_level_after(action, saved_zoom) {
+            compose_rust::zoom::set_zoom_level(level);
+            crate::services::services().ui.update_prefs(|p| p.editor_zoom_level = level);
+            return;
+        }
+        if action == Action::MaximizeTool {
+            let mut bottom_max = s.bottom_max;
+            let max = *bottom_max.read();
+            let mut stripes = s.stripes;
+            let next = crate::ui::editor_actions::toggle_maximized_panel(&mut *stripes.write(), max);
+            bottom_max.set(next);
+            return;
+        }
+        if action == Action::ReopenClosed {
+            let mut tabs = s.tabs;
+            let reopened = tabs.write().reopen_closed();
+            match reopened {
+                Some(path) => {
+                    s.open_errors.borrow_mut().remove(&path);
+                    s.host.send(HostCommand::Open(path.clone()));
+                    s.host.send(HostCommand::Focus(path.clone()));
+                    let mut recent = s.recent_files;
+                    record_recent_file(&mut recent, &path);
+                }
+                None => notice("다시 열 편집기가 없습니다"),
+            }
+            return;
+        }
+        if action == Action::Close {
+            // Bound first: the read guard must be gone before `sync_dirty` writes the tabs.
+            let current = s.tabs.read().current_path().map(str::to_owned);
+            if let Some(path) = current {
+                sync_dirty(s);
+                let request = s.tabs.read().close_request(&path);
+                request_close(s, request);
+                return;
+            }
         }
         let mut tabs = s.tabs;
         let mut stripes = s.stripes;
@@ -350,7 +479,7 @@ pub mod page {
             if let Some(next) = next { s.host.send(HostCommand::Focus(next)); }
         }
         if !handled {
-            notice(format!("{}: {SOON}", action.label()));
+            notice(crate::ui::editor_actions::not_ready_notice(action));
         }
         if handled && matches!(action, Action::Commit | Action::Git) && stripes.read().selected(Side::Left).is_some() {
             s.scm.refresh();
@@ -362,11 +491,126 @@ pub mod page {
     /// request carries no version.
     fn save_current(s: &Shared) {
         let current = s.tabs.read().current_path().map(str::to_owned);
+        // The working tree of a diff being edited is saved instead, while it covers the editor area (FR-L31.10).
+        let editing = s.scm.editable_diff_path(current.as_deref()).map(|rel| join_path(&s.folder, &rel));
+        let current = crate::ui::editor_scm::save_target(current.as_deref(), editing);
         let uri = current.and_then(|p| s.uris.borrow().get(&p).cloned());
         match uri {
+            Some(uri) if !crate::ui::editor_states::view::manual_save_allowed(s, &uri.path) => {}
             Some(uri) => send(s, s.bridge.borrow().on_save_requested(&uri, 0)),
             None => notice("저장할 파일이 열려 있지 않습니다"),
         }
+    }
+
+    /// Copies the unsaved marks of the open documents into the tab model, so a close request knows which
+    /// tabs are dirty (the session reports them to the bridge).
+    pub(crate) fn sync_dirty(s: &Shared) {
+        let flags: Vec<(String, bool)> = {
+            let bridge = s.bridge.borrow();
+            let uris = s.uris.borrow();
+            s.tabs
+                .read()
+                .paths()
+                .into_iter()
+                .map(|p| (p.to_owned(), uris.get(p).and_then(|u| bridge.document(u)).is_some_and(|d| d.dirty)))
+                .collect()
+        };
+        let stale = { let tabs = s.tabs.read(); flags.iter().any(|(p, d)| tabs.is_dirty(p) != *d) };
+        if stale {
+            let mut tabs = s.tabs;
+            let mut t = tabs.write();
+            for (p, d) in flags {
+                t.set_dirty(&p, d);
+            }
+        }
+    }
+
+    /// Closes the tabs of `request` at once, or asks first when one of them has unsaved edits (FR-L31.5).
+    pub(crate) fn request_close(s: &Shared, request: crate::ui::editor::CloseRequest) {
+        if request.is_empty() {
+            return;
+        }
+        if request.needs_confirm() {
+            let mut confirm = s.close_confirm;
+            confirm.set(Some(request));
+        } else {
+            finish_close(s, &request.paths, request.anchor.as_deref());
+        }
+    }
+
+    /// Closes `paths`, tells the session, and focuses the tab that is current afterwards.
+    fn finish_close(s: &Shared, paths: &[String], anchor: Option<&str>) {
+        if paths.is_empty() {
+            return;
+        }
+        let mut tabs = s.tabs;
+        tabs.write().close_many(paths, anchor);
+        for p in paths {
+            s.host.send(HostCommand::Close(p.clone()));
+        }
+        let next = tabs.read().current_path().map(str::to_owned);
+        if let Some(next) = next {
+            s.host.send(HostCommand::Focus(next));
+        }
+    }
+
+    /// The answer to the unsaved-changes question. 저장 sends the saves and closes the clean tabs now; each
+    /// dirty tab closes when its save succeeds (`save_result`) and stays open and dirty when it fails, as in
+    /// Code-OSS. 저장 안 함 closes them all; 취소 none.
+    fn answer_close(s: &Shared, choice: crate::ui::editor::DirtyChoice) {
+        let mut confirm = s.close_confirm;
+        let Some(request) = confirm.read().clone() else { return };
+        confirm.set(None);
+        // The version each save is asked at: an edit after it keeps the tab open (`save_result`).
+        let versions: HashMap<String, u32> = {
+            let bridge = s.bridge.borrow();
+            let uris = s.uris.borrow();
+            request.dirty.iter().filter_map(|p| uris.get(p).and_then(|u| bridge.document(u)).map(|d| (p.clone(), d.version))).collect()
+        };
+        let now = { let mut tabs = s.tabs; tabs.write().begin_close(&request, choice, |p| versions.get(p).copied()) };
+        if choice == crate::ui::editor::DirtyChoice::Save {
+            for p in &request.dirty {
+                let uri = s.uris.borrow().get(p).cloned();
+                let event = uri.and_then(|uri| s.bridge.borrow().on_save_requested(&uri, 0));
+                match event {
+                    Some(event) => send(s, Some(event)),
+                    // No document to save: the tab stays open, as after a failed save.
+                    None => { let mut tabs = s.tabs; tabs.write().save_finished(p, crate::ui::editor::SaveOutcome { ok: false, version: None, dirty: true }); }
+                }
+            }
+        }
+        finish_close(s, &now, request.anchor.as_deref());
+    }
+
+    /// A save finished: a tab that waited on it to close closes on success when its document is still at
+    /// the saved version and clean, and stays open otherwise. Called after the session's updates of the
+    /// same batch are applied, so the unsaved mark that follows `Saved` is already in the bridge.
+    fn save_result(s: &Shared, path: &str, ok: bool) {
+        let (version, dirty) = {
+            let bridge = s.bridge.borrow();
+            let uris = s.uris.borrow();
+            match uris.get(path).and_then(|u| bridge.document(u)) {
+                Some(d) => (Some(d.version), d.dirty),
+                None => (None, true),
+            }
+        };
+        let outcome = crate::ui::editor::SaveOutcome { ok, version, dirty };
+        let close = { let mut tabs = s.tabs; tabs.write().save_finished(path, outcome) };
+        if close {
+            finish_close(s, &[path.to_string()], None);
+        }
+    }
+
+    /// Opens a file as the preview tab (a single click in the explorer or the search results); the
+    /// preview it replaces is closed in the session.
+    pub(crate) fn open_preview(s: &Shared, path: &str) {
+        let mut tabs = s.tabs;
+        let replaced = tabs.write().open_preview(path);
+        if let Some(old) = replaced {
+            s.host.send(HostCommand::Close(old));
+        }
+        s.open_errors.borrow_mut().remove(path);
+        s.host.send(HostCommand::Open(path.to_string()));
     }
 
     fn record_recent_file(recent: &mut super::Signal<Vec<String>>, path: &str) {
@@ -543,9 +787,11 @@ pub mod page {
         let count = shown.len();
         let run_s = s.clone();
         rsx! {
-            div { style: "position:fixed; left:0; top:0; right:0; bottom:0; z-index:39;", onclick: move |_| open.set(false) }
+            // `grid-row` and `grid-column` keep both in the top bar's cell: placed automatically they
+            // took an implicit row of the page grid and pushed the page down one gap (design review A6).
+            div { style: "position:fixed; grid-row:1; grid-column:1; left:0; top:0; right:0; bottom:0; z-index:39;", onclick: move |_| open.set(false) }
             div { class: "ed-menu", role: "dialog", "aria-label": "명령 팔레트",
-                style: "position:fixed; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);",
+                style: "position:fixed; grid-row:1; grid-column:1; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);",
                 div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
                     {icon("search")}
                     input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
@@ -592,7 +838,7 @@ pub mod page {
                             let item = &items[r.index];
                             let segments = highlight_segments(&item.title, &r.matched);
                             let enabled = item.enabled;
-                            let hint = if enabled { item.hint.clone() } else if mode == crate::ui::palette::Mode::GotoLine { String::new() } else { "준비 중".to_string() };
+                            let hint = if enabled { item.hint.clone() } else if mode == crate::ui::palette::Mode::GotoLine { String::new() } else if let crate::ui::palette::Payload::Action(a) = &item.payload { crate::ui::editor_actions::not_ready_hint(*a) } else { "준비 중".to_string() };
                             let payload = apply_line_suffix(item.payload.clone(), line_suffix);
                             let click_s = s.clone();
                             let class = if row == chosen { "ed-tn sel" } else { "ed-tn" };
@@ -620,7 +866,9 @@ pub mod page {
         crate::ui::find::FindOptions {
             case_sensitive: *s.find.case_sensitive.read(),
             whole_word: *s.find.whole_word.read(),
-            regex: false,
+            regex: *s.find.regex.read(),
+            preserve_case: *s.find.preserve_case.read(),
+            scope: if *s.find.in_selection.read() { *s.find.scope.read() } else { None },
         }
     }
 
@@ -672,24 +920,24 @@ pub mod page {
 
     /// Replaces the match the reader is on (the first one when none is chosen yet).
     fn find_replace_one(s: &Shared) {
-        let (matches, _) = {
+        let (matches, text) = {
             let bridge = s.bridge.borrow();
             let Some(doc) = bridge.active_document() else { return; };
-            crate::ui::find::cached_doc_matches(&doc.uri.key(), doc.generation, doc.version, &s.find.query.read(), find_options(s), || &doc.text)
+            (crate::ui::find::cached_doc_matches(&doc.uri.key(), doc.generation, doc.version, &s.find.query.read(), find_options(s), || &doc.text).0, doc.text.clone())
         };
         let mut current = s.find.current;
         let index = current.read().filter(|i| *i < matches.len()).or(if matches.is_empty() { None } else { Some(0) });
         let Some(index) = index else { return };
         let replacement = s.find.replacement.read().clone();
-        find_send(s, None, crate::ui::find::replace_edits(&matches, Some(index), &replacement));
+        find_send(s, None, crate::ui::find::replacement_edits(&text, &s.find.query.read(), find_options(s), &matches, Some(index), &replacement));
         current.set(None);
     }
 
     fn find_replace_all(s: &Shared) {
-        let (matches, truncated) = {
+        let ((matches, truncated), text) = {
             let bridge = s.bridge.borrow();
             let Some(doc) = bridge.active_document() else { return; };
-            crate::ui::find::cached_doc_matches(&doc.uri.key(), doc.generation, doc.version, &s.find.query.read(), find_options(s), || &doc.text)
+            (crate::ui::find::cached_doc_matches(&doc.uri.key(), doc.generation, doc.version, &s.find.query.read(), find_options(s), || &doc.text), doc.text.clone())
         };
         if matches.is_empty() { return; }
         if truncated {
@@ -698,8 +946,41 @@ pub mod page {
         }
         let replacement = s.find.replacement.read().clone();
         let mut current = s.find.current;
-        find_send(s, None, crate::ui::find::replace_edits(&matches, None, &replacement));
+        find_send(s, None, crate::ui::find::replacement_edits(&text, &s.find.query.read(), find_options(s), &matches, None, &replacement));
         current.set(None);
+    }
+
+    /// Turns a find option (FR-L31.12) on or off. Turning 선택 영역에서 찾기 on takes the selection of that
+    /// moment as the scope, as Code-OSS does.
+    fn toggle_find_option(s: &Shared, option: crate::ui::keymap::FindOption) {
+        use crate::ui::keymap::FindOption;
+        let mut current = s.find.current;
+        match option {
+            FindOption::Regex => { let mut r = s.find.regex; let on = *r.read(); r.set(!on); }
+            FindOption::PreserveCase => { let mut p = s.find.preserve_case; let on = *p.read(); p.set(!on); }
+            FindOption::InSelection => {
+                let mut in_sel = s.find.in_selection;
+                let on = *in_sel.read();
+                if !on {
+                    let (anchor, active) = *s.find.selection.read();
+                    let text = s.bridge.borrow().active_document().map(|d| d.text.clone()).unwrap_or_default();
+                    let mut scope = s.find.scope;
+                    scope.set(crate::ui::find::Scope::from_selection(anchor, active, &text));
+                }
+                in_sel.set(!on);
+            }
+        }
+        current.set(None);
+    }
+
+    /// The find option a key pressed in a find bar field toggles, by the physical key so that macOS's
+    /// Option letters (⌥R gives `®`) still match.
+    fn find_option_for_event(event: &dioxus_elements::KeyboardEvent) -> Option<crate::ui::keymap::FindOption> {
+        let m = event.modifiers();
+        let code = format!("{:?}", event.code());
+        let key = code.strip_prefix("Key").filter(|k| k.len() == 1).map(str::to_string).unwrap_or_else(|| key_name(&event.key()));
+        let chord = crate::ui::editor::chord_from_key(&key, m.contains(Modifiers::CONTROL), m.contains(Modifiers::SHIFT), m.contains(Modifiers::ALT), m.contains(Modifiers::META));
+        crate::ui::keymap::FindOption::for_chord(&chord, crate::ui::keymap::Os::current())
     }
 
     /// The find bar over the editor: a field with the case and whole-word options, the counter and the
@@ -718,11 +999,17 @@ pub mod page {
                 (Vec::new(), false)
             }
         };
-        let counter = if truncated { format!("{}개 이상", crate::ui::find::MAX_MATCHES) } else { crate::ui::find::count_text(current.read().filter(|i| *i < matches.len()), matches.len(), &q) };
+        let regex_bad = crate::ui::find::regex_error(&q, find_options(s)).is_some();
+        let counter = if regex_bad { "잘못된 정규식".to_string() } else if truncated { format!("{}개 이상", crate::ui::find::MAX_MATCHES) } else { crate::ui::find::count_text(current.read().filter(|i| *i < matches.len()), matches.len(), &q) };
         let (prev_s, next_s, one_s, all_s, key_s, enter_s) = (s.clone(), s.clone(), s.clone(), s.clone(), s.clone(), s.clone());
         let has_doc = s.bridge.borrow().active_document().is_some();
         let has_matches = has_doc && (!matches.is_empty() || truncated);
         let (case_on, word_on) = (*case_sensitive.read(), *whole_word.read());
+        let (regex_on, preserve_on, sel_on) = (*s.find.regex.read(), *s.find.preserve_case.read(), *s.find.in_selection.read());
+        let (regex_s, sel_s, preserve_s, opt_q, opt_r) = (s.clone(), s.clone(), s.clone(), s.clone(), s.clone());
+        let os = crate::ui::keymap::Os::current();
+        use crate::ui::keymap::FindOption;
+        let (regex_t, sel_t, preserve_t) = (format!("정규식 사용 ({})", FindOption::Regex.hint(os)), format!("선택 영역에서 찾기 ({})", FindOption::InSelection.hint(os)), format!("대소문자 보존 ({})", FindOption::PreserveCase.hint(os)));
         let on = |flag: bool| if flag { "ed-pj on" } else { "ed-pj" };
         rsx! {
             div { class: "ed-tsub", role: "search", "aria-label": "문서에서 찾기", style: "flex-wrap:wrap;",
@@ -737,13 +1024,16 @@ pub mod page {
                             match event.key() {
                                 Key::Enter => { event.stop_propagation(); find_go(&key_s, !event.modifiers().contains(Modifiers::SHIFT)); }
                                 Key::Escape => { event.stop_propagation(); open.set(false); }
-                                _ => {}
+                                _ => if let Some(option) = find_option_for_event(&event) { event.stop_propagation(); event.prevent_default(); toggle_find_option(&opt_q, option); }
                             }
                         },
                     }
                 }
                 button { class: on(case_on), title: "대소문자 구분", "aria-label": "대소문자 구분", "aria-pressed": "{case_on}", style: "border:1px solid var(--line);", onclick: move |_| { case_sensitive.set(!case_on); current.set(None); }, "Aa" }
                 button { class: on(word_on), title: "단어 단위", "aria-label": "단어 단위", "aria-pressed": "{word_on}", style: "border:1px solid var(--line);", onclick: move |_| { whole_word.set(!word_on); current.set(None); }, "단어" }
+                button { class: on(regex_on), title: "{regex_t}", "aria-label": "정규식 사용", "aria-pressed": "{regex_on}", style: "border:1px solid var(--line);", onclick: move |_| toggle_find_option(&regex_s, FindOption::Regex), ".*" }
+                button { class: on(sel_on), title: "{sel_t}", "aria-label": "선택 영역에서 찾기", "aria-pressed": "{sel_on}", style: "border:1px solid var(--line);",
+                    onclick: move |_| toggle_find_option(&sel_s, FindOption::InSelection), "선택" }
                 span { class: "ed-sbi", role: "status", "{counter}" }
                 button { class: "ed-ib", title: "이전 결과", "aria-label": "이전 결과", disabled: !has_matches, onclick: move |_| find_go(&prev_s, false), {icon("up")} }
                 button { class: "ed-ib", title: "다음 결과", "aria-label": "다음 결과", disabled: !has_matches, onclick: move |_| find_go(&next_s, true), {icon("down")} }
@@ -755,11 +1045,12 @@ pub mod page {
                             match event.key() {
                                 Key::Enter => { event.stop_propagation(); find_replace_one(&enter_s); }
                                 Key::Escape => { event.stop_propagation(); open.set(false); }
-                                _ => {}
+                                _ => if let Some(option) = find_option_for_event(&event) { event.stop_propagation(); event.prevent_default(); toggle_find_option(&opt_r, option); }
                             }
                         },
                     }
                 }
+                button { class: on(preserve_on), title: "{preserve_t}", "aria-label": "대소문자 보존", "aria-pressed": "{preserve_on}", style: "border:1px solid var(--line);", onclick: move |_| toggle_find_option(&preserve_s, FindOption::PreserveCase), "AB" }
                 button { class: "ed-pj", style: "border:1px solid var(--line);", disabled: !has_matches, onclick: move |_| find_replace_one(&one_s), "바꾸기" }
                 button { class: "ed-pj", style: "border:1px solid var(--line);", disabled: !has_matches, onclick: move |_| find_replace_all(&all_s), "모두 바꾸기" }
                 div { class: "spacer" }
@@ -816,16 +1107,20 @@ pub mod page {
                 tabs.write().close(&tab);
                 s.host.send(HostCommand::Close(tab));
             }
+            { let mut tabs = s.tabs; tabs.write().forget_closed_below(&path); }
             let mut expanded = s.expanded;
             expanded.write().retain(|p| !crate::ui::editor::is_at_or_below(p, &path));
             let mut tree_sel = s.tree_sel;
             tree_sel.set(None);
         }
         let saved = updates.iter().any(|u| matches!(u, ember_editor::SessionUpdate::Saved { .. }));
+        let mut saved_paths: Vec<String> = Vec::new();
+        let widget_edits = updates.iter().any(|u| matches!(u, ember_editor::SessionUpdate::Command { command: ember_editor::WidgetCommand::EditCode { .. }, .. }));
         for update in updates {
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.uris.borrow_mut().insert(uri.path.clone(), uri.clone()); }
             if let ember_editor::SessionUpdate::Closed { uri } = &update { s.uris.borrow_mut().remove(&uri.path); }
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.open_errors.borrow_mut().remove(&uri.path); }
+            if let ember_editor::SessionUpdate::Saved { uri } = &update { saved_paths.push(uri.path.clone()); }
             let action = s.bridge.borrow_mut().apply(update);
             match action {
                 BridgeAction::Resync(uri) => { s.host.send(HostCommand::Resync(uri)); }
@@ -835,13 +1130,14 @@ pub mod page {
                 }
                 BridgeAction::SaveFailed { uri, error } => {
                     tracing::warn!(path = %uri.path, %error, "saving a file failed");
+                    save_result(&s, &uri.path, false);
                     notice(format!("{}을(를) 저장하지 못했습니다: {}", crate::ui::editor::display_name(base_name(&uri.path)), crate::ui::editor::file_failure_reason(&error)));
                 }
-                BridgeAction::ExtensionNotice { severity, message, source } => {
-                    let prefix = source.as_deref().unwrap_or("알림");
-                    notice(format!("{prefix}: {message}"));
+                BridgeAction::ExtensionNotice(message) => {
+                    let prefix = message.source.clone().unwrap_or_else(|| "알림".to_string());
                     let mut logs = s.workbench_logs;
-                    crate::ui::editor::push_workbench_log(&mut logs.write(), format!("[{prefix}] [{}] {message}", severity.label()));
+                    crate::ui::editor::push_workbench_log(&mut logs.write(), format!("[{prefix}] [{}] {}", message.severity.label(), message.message));
+                    crate::ui::editor_notifications::view::push(&s, message);
                 }
                 BridgeAction::CommandFailed { id, error } => {
                     tracing::warn!(%id, %error, "extension command failed");
@@ -857,10 +1153,24 @@ pub mod page {
                 _ => {}
             }
         }
+        // After the whole batch, so the unsaved mark the session sends with `Saved` is in the bridge. If it
+        // came in a later batch the mark is still the old dirty one and the tab stays open: the safe side.
+        for path in saved_paths { save_result(&s, &path, true); }
         if saved {
             // A save changes the work tree: the changes list and the open diff follow it.
             s.scm.refresh();
         }
+        // Reconnect, auto-save and compare follow the updates (FR-L31.6).
+        let now_current = s.tabs.read().current_path().map(str::to_owned);
+        crate::ui::editor_states::view::after_updates(&s, now_current.as_deref());
+        // The document of an open working-tree diff stays open in the session (FR-L31.10).
+        crate::ui::editor_scm::view::sync_diff_document(&s);
+        if widget_edits {
+            // The editor pane is a tree of its own: one more render so it takes the queued edits.
+            let mut revision = s.revision;
+            *revision.write() += 1;
+        }
+        crate::ui::editor_language::view::after_updates(&s, saved);
         let tabs = s.tabs;
         let current = tabs.read().current_path().map(str::to_owned);
         let paths: Vec<String> = tabs.read().paths().into_iter().map(str::to_owned).collect();
@@ -874,14 +1184,24 @@ pub mod page {
         drop(uris);
         drop(bridge);
         crate::ui::editor_search::view::apply_pending_reveal(&s);
+        crate::ui::editor_settings::view::apply_capture_hook(&s);
+        let settings_shown = current.as_deref().is_some_and(crate::ui::editor_settings::is_settings_tab);
         let (line, col) = *s.position.read();
         let sel = *s.stripes.read();
         let keymap = *s.keymap.read();
+        // A modal blocks the ⋯ menu (#831): it is not drawn, and an open one closes.
+        let modal = modal_up(&s);
+        if modal && *s.menu_open.peek() {
+            let mut menu_open = s.menu_open;
+            menu_open.set(false);
+        }
+        let em_shown = crate::ui::editor_menu::menu_shown(*s.menu_open.read(), modal);
         let (agent_state, project_branch) = project_status(&s.project);
         // The branch git/status returned; the project row's until the first answer.
         let branch = s.scm.branch_line().unwrap_or(project_branch);
         let conflict_shown = s.scm.conflict_visible();
         let diff_shown = s.scm.diff_visible(current.as_deref());
+        let compare_shown = crate::ui::editor_states::view::compare_visible(current.as_deref());
         let key_s = s.clone();
         let has_left = sel.selected(Side::Left).is_some();
         let has_bottom = sel.selected(Side::Bottom).is_some();
@@ -903,7 +1223,9 @@ pub mod page {
         let grid = if maximized { crate::ui::editor::editor_grid_style_maximized() } else { crate::ui::editor::editor_grid_style(has_left, has_bottom) };
         // macOS opens the window FullSize (the page starts at the top and the top bar is the title
         // strip), so the page is the window's height; elsewhere the native chrome stays and the
-        // page keeps its 76px allowance. TODO(#320): the height is fixed at launch (compose-rust#467).
+        // page keeps its 76px allowance. TODO(#320): the height is fixed at launch. v0.0.7: #467
+        // fixed (`with_report_size`); workaround kept until checked on a display (the page has to
+        // follow the reported height in the dioxus-compose window).
         let height = crate::ui::editor::editor_page_height(cfg!(target_os = "macos"));
         let ed_style = format!("width:100vw; height:{height}; {grid}");
         rsx! {
@@ -917,6 +1239,10 @@ pub mod page {
                         if let Some(target) = crate::ui::editor::editor_focus_target(key_s.tabs.read().current_path()) {
                             key_s.host.send(HostCommand::Focus(target));
                         }
+                        crate::ui::editor_language::view::dismiss_hint(&key_s);
+                    }
+                    if let Some(action) = crate::ui::editor_language::action_for_key(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::SHIFT), m.contains(Modifiers::ALT), m.contains(Modifiers::META)) {
+                        crate::ui::editor_language::view::run(&key_s, action);
                     }
                     let double = DOUBLE_SHIFT.with(|d| {
                         d.borrow_mut().press(
@@ -933,7 +1259,7 @@ pub mod page {
                             run_action(&key_s, action);
                         }
                     }
-                    if let Some(action) = action_for_key(
+                    let default_action = action_for_key(
                         keymap,
                         Os::current(),
                         &key_name(&event.key()),
@@ -941,8 +1267,28 @@ pub mod page {
                         m.contains(Modifiers::SHIFT),
                         m.contains(Modifiers::ALT),
                         m.contains(Modifiers::META),
-                    ) {
-                        run_action(&key_s, action);
+                    );
+                    // The user's keybindings.json is read on top of the keymap (FR-L31.17).
+                    let user_rules = key_s.host.state.lock().unwrap().settings.keybindings.clone();
+                    let resolution = if user_rules.is_empty() {
+                        crate::ui::editor_settings::KeyResolution::Default
+                    } else {
+                        let chord = crate::ui::editor::chord_from_key(
+                            &key_name(&event.key()),
+                            m.contains(Modifiers::CONTROL),
+                            m.contains(Modifiers::SHIFT),
+                            m.contains(Modifiers::ALT),
+                            m.contains(Modifiers::META),
+                        );
+                        crate::ui::editor_settings::resolve_key(&user_rules, &chord, default_action)
+                    };
+                    match resolution {
+                        crate::ui::editor_settings::KeyResolution::Default => {
+                            if let Some(action) = default_action { run_action(&key_s, action); }
+                        }
+                        crate::ui::editor_settings::KeyResolution::Unbound => {}
+                        crate::ui::editor_settings::KeyResolution::Action(action) => run_action(&key_s, action),
+                        crate::ui::editor_settings::KeyResolution::Command(id) => { key_s.host.send(HostCommand::ExecuteCommand(id)); }
                     }
                 },
                 if let Some(error) = error {
@@ -951,6 +1297,9 @@ pub mod page {
                     {top_bar(&s, &branch, keymap)}
                     div { class: "ed-rail",
                         {stripe_column(&s, sel, keymap, Strip::Left)}
+                        // The line above the bottom group (`.ed-stripe-b` border-top): drawn as its own
+                        // element, because the HTML path does not draw a border with side margins (A13).
+                        div { class: "ed-stripe-sep", role: "separator" }
                         {stripe_column(&s, sel, keymap, Strip::Bottom)}
                     }
                     if let (Some(w), false) = (sel.selected(Side::Left), maximized) {
@@ -962,20 +1311,27 @@ pub mod page {
                             {crate::ui::editor_scm::view::commit_window(&s)}
                         } else if w == ToolWindow::Git {
                             {crate::ui::editor_scm::view::git_window(&s)}
+                        } else if w == ToolWindow::Extensions {
+                            {crate::ui::editor_extensions::view::panel(&s)}
                         } else {
                             {side_note(w, "ed-left")}
                         }
                     }
                     section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
+                        onmounted: move |event| crate::ui::editor_language::view::mount_editor_area(event.data()),
+                        {crate::ui::workspace_trust::view::banner(&s)}
                         {tab_strip(&s, &paths, &dirty, current.as_deref())}
-                        if *s.menu_open.read() { {menu(&s, keymap)} }
-                        if let Some(path) = current.as_deref() {
-                            {breadcrumbs(path, &s.folder)}
+                        if let Some((menu_path, x, y)) = s.tab_menu.read().clone() { {tab_context_menu(&s, &menu_path, x, y)} }
+                        if let Some(path) = current.as_deref().filter(|_| !settings_shown) {
+                            {breadcrumbs(&s, path)}
                         }
-                        if *s.find.open.read() && active.is_some() && !diff_shown && !conflict_shown { {find_bar(&s)} }
+                        {crate::ui::editor_states::view::banners(&s, current.as_deref())}
+                        if *s.find.open.read() && active.is_some() && !diff_shown && !conflict_shown && !compare_shown { {find_bar(&s)} }
                         div { style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
                             if conflict_shown { {crate::ui::editor_scm::view::conflict_pane(&s)} }
                             else if diff_shown { {crate::ui::editor_scm::view::diff_pane(&s)} }
+                            else if compare_shown { {crate::ui::editor_states::view::compare_pane(&s)} }
+                            else if settings_shown { {crate::ui::editor_settings::view::pane(&s)} }
                             else if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
                             else if let Some(error) = current.as_ref().and_then(|p| open_error.clone().map(|e| (p.clone(), e))) {
                                 div { class: "ed-empty", role: "alert",
@@ -1004,12 +1360,18 @@ pub mod page {
                                 }
                             }
                         }
+                        {crate::ui::editor_language::view::hint_in_editor(&s)}
                     }
                     {stripe_column(&s, sel, keymap, Strip::Right)}
                     if let Some(w) = sel.selected(Side::Bottom) {
                         {bottom_window(&s, w)}
                     }
+                    if em_shown { {menu(&s, keymap)} }
                     if *s.palette_open.read() { {palette_sheet(&s, keymap)} }
+                    if let Some(request) = s.close_confirm.read().clone() { {close_confirm_sheet(&s, &request)} }
+                    {crate::ui::workspace_trust::view::prompt(&s)}
+                    {crate::ui::editor_notifications::view::layer(&s)}
+                    {crate::ui::editor_language::view::overlay(&s)}
                     {status_bar(&s, &agent_state, &branch, current.as_deref().filter(|_| active.is_some()), line, col, active.as_ref().map_or(4, |d| d.tab_width))}
                 }
             }
@@ -1030,7 +1392,6 @@ pub mod page {
     }
 
     fn top_bar(s: &Shared, branch: &str, keymap: Keymap) -> Element {
-        let mut menu_open = s.menu_open;
         let mut theme = s.theme;
         let theme_pref = *s.theme.read();
         let theme_title = format!("테마: {}", theme_pref.label());
@@ -1040,9 +1401,9 @@ pub mod page {
         let find_hint = keymap.hint(Action::Find, Os::current());
         let find_s = s.clone();
         let git_s = s.clone();
+        let (runcfg_s, run_s, stop_s) = (s.clone(), s.clone(), s.clone());
         let mut stripes = s.stripes;
         let project_tip = tooltip_text("프로젝트 창", &keymap.hint(Action::Project, Os::current()));
-        let open = *menu_open.read();
         // The traffic lights float over the top bar's left end under FullSize.
         let strip_pad = crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), crate::ui::safe_area::safe_area().leading);
         rsx! {
@@ -1053,108 +1414,209 @@ pub mod page {
                 div { class: "spacer" }
                 button { class: "ed-find", title: "{find}", "aria-label": "{find}", onclick: move |_| run_action(&find_s, Action::Find),
                     {icon("search")}
-                    span { class: "hide-md", "{keymap.find_label()}" }
+                    span { class: "hide-md", "{crate::ui::editor::FIND_PILL_LABEL}" }
                     kbd { class: "ed-sc", "{find_hint}" }
                 }
                 div { class: "ed-runcfg",
-                    button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| notice(format!("실행 구성: {SOON}")), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
-                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| notice(format!("실행: {SOON}")), {icon("play")} }
-                    button { class: "ed-ib", title: "중지", "aria-label": "중지", onclick: move |_| notice(format!("중지: {SOON}")), {icon("pause")} }
-                    button { class: "ed-ib", title: "{theme_title}", "aria-label": "{theme_title}", onclick: move |_| {
-                        let next = theme_pref.next();
-                        theme.set(next);
-                        crate::services::services().ui.update_prefs(|p| p.theme = next);
-                    }, {icon(if super::ICON_DARK.with(|d| d.get()) { "moon" } else { "sun" })} }
-                    button { class: "ed-ib", title: "에이전트에게 묻기", "aria-label": "에이전트에게 묻기", onclick: move |_| notice(format!("에이전트에게 묻기: {SOON}")), {icon("spark")} }
-                    button { class: "ed-ib", title: "메뉴", "aria-label": "메뉴", onclick: move |_| menu_open.set(!open), {icon("more")} }
+                    button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| crate::ui::editor_tasks::view::open(&runcfg_s), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
+                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| { if let Some(blocked) = crate::ui::workspace_trust::view::blocked(&run_s, crate::ui::workspace_trust::Restricted::Run) { notice(blocked); } else { crate::ui::editor_tasks::view::run_default(&run_s); } }, {icon("play")} }
+                    button { class: "ed-ib", title: "중지", "aria-label": "중지", onclick: move |_| crate::ui::editor_tasks::view::stop(&stop_s), {icon("pause")} }
                 }
+                // The mockup's order (`editor.js:75-76`): run configuration, run, stop, ask agent, theme.
+                // No ⋯ here: the tab strip's ⋯ opens the menu (owner placement rule 2026-11-13, rule 5).
+                button { class: "ed-ib", title: "에이전트에게 묻기", "aria-label": "에이전트에게 묻기", onclick: move |_| notice(crate::ui::editor_actions::not_ready_notice(Action::Ask)), {icon("spark")} }
+                button { class: "ed-ib", title: "{theme_title}", "aria-label": "{theme_title}", onclick: move |_| {
+                    let next = theme_pref.next();
+                    theme.set(next);
+                    crate::services::services().ui.update_prefs(|p| p.theme = next);
+                }, {icon(if super::ICON_DARK.with(|d| d.get()) { "moon" } else { "sun" })} }
             }
         }
     }
 
+    /// The ⋯ menu (FR-L31, #795): fixed under the top bar at the page level, its groups opened as
+    /// submenus beside it (`editor_menu`), so it fits the window without scrolling.
     fn menu(s: &Shared, keymap: Keymap) -> Element {
+        use crate::ui::editor_menu::{self as em, Submenu};
         let os = Os::current();
-        let close_others_s = s.clone();
-        let mut close_others_menu = s.menu_open;
-        let mut close_editor_menu = s.menu_open;
+        // The current tab's items (FR-L31.5) head the menu. They stand in for the right-click menu.
+        // v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
+        let current_tab = s.tabs.read().current_path().map(str::to_owned);
+        let tab_items = current_tab.as_deref().map(|p| crate::ui::editor::tab_menu_items(&s.tabs.read(), p)).unwrap_or_default();
+        let tab_label = current_tab.as_deref().map(|p| format!("탭: {}", crate::ui::editor::display_name(base_name(p)))).unwrap_or_default();
+        let rows = em::top_rows(current_tab.is_some());
+        let open = em::open_submenu().filter(|sub| *sub != Submenu::Tab || current_tab.is_some());
+        let group = |sub: Submenu, label: String| {
+            let mut revision = s.revision;
+            let on = open == Some(sub);
+            rsx! {
+                button { key: "{label}", role: "menuitem", "aria-haspopup": "menu", "aria-expanded": "{on}",
+                    style: if on { "background:var(--hover);" } else { "" },
+                    onclick: move |_| { em::toggle_submenu(sub); *revision.write() += 1; },
+                    span { class: "spacer", "{label}" }
+                    {icon_px("chev", 12)}
+                }
+            }
+        };
+        let submenu = match open {
+            None => rsx! {},
+            Some(sub) => {
+                let size = match sub {
+                    Submenu::Tab => tab_items.len(),
+                    Submenu::Code => 1 + crate::ui::editor_language::MENU.len(),
+                    Submenu::AutoSave => crate::ui::editor_states::AutoSave::ALL.len(),
+                    Submenu::Keymap => Keymap::ALL.len(),
+                };
+                let top = em::submenu_top_fitted(&rows, sub, size).unwrap_or(em::TOP);
+                let style = em::submenu_style(top);
+                let body = match sub {
+                    Submenu::Tab => {
+                        let tab_path = current_tab.clone().unwrap_or_default();
+                        rsx! {
+                            for (item, enabled) in tab_items.into_iter() {
+                                {
+                                    let s = s.clone();
+                                    let path = tab_path.clone();
+                                    let mut menu_open = s.menu_open;
+                                    let aria_disabled = (!enabled).to_string();
+                                    rsx! {
+                                        button { role: "menuitem", disabled: !enabled, "aria-disabled": "{aria_disabled}",
+                                            onclick: move |_| {
+                                                menu_open.set(false);
+                                                if enabled { run_tab_menu_item(&s, item, &path); }
+                                            },
+                                            span { class: "spacer", "{item.label()}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Submenu::Code => rsx! {
+                        {
+                            let s = s.clone();
+                            let label = Action::Format.label();
+                            let hint = keymap.hint(Action::Format, os);
+                            let mut menu_open = s.menu_open;
+                            rsx! {
+                                button { key: "{label}", role: "menuitem", onclick: move |_| { menu_open.set(false); run_action(&s, Action::Format); },
+                                    span { class: "spacer", "{label}" }
+                                    if !hint.is_empty() { span { class: "ed-msc", "{hint}" } }
+                                }
+                            }
+                        }
+                        // The language features are in the menu too: a key pressed while the code has the focus may not reach the page.
+                        // TODO(compose-rust#554): the chords alone are enough once the editor previews keys.
+                        for (action, label, hint) in crate::ui::editor_language::MENU {
+                            {
+                                let s = s.clone();
+                                let mut menu_open = s.menu_open;
+                                rsx! {
+                                    button { key: "{label}", role: "menuitem", onclick: move |_| { menu_open.set(false); crate::ui::editor_language::view::run(&s, action); },
+                                        span { class: "spacer", "{label}" }
+                                        span { class: "ed-msc", "{hint}" }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    Submenu::AutoSave => crate::ui::editor_states::view::menu_items(s),
+                    Submenu::Keymap => rsx! {
+                        for k in Keymap::ALL {
+                            {
+                                let mut menu_open = s.menu_open;
+                                let mut keymap_sig = s.keymap;
+                                let selected = k == keymap;
+                                let hint = k.hint(Action::Find, os);
+                                rsx! {
+                                    button { key: "{k.label()}", role: "menuitemradio", "aria-checked": "{selected}", onclick: move |_| {
+                                        menu_open.set(false);
+                                        keymap_sig.set(k);
+                                        crate::services::services().ui.update_prefs(|p| p.keymap = k);
+                                    },
+                                        span { class: "ed-mchk", if selected { {icon_px("check", 14)} } }
+                                        span { class: "spacer", "{k.label()}" }
+                                        span { class: "ed-msc", "{hint}" }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                };
+                rsx! { div { class: "ed-menu ed-mainmenu", role: "menu", style: "{style}", {body} } }
+            }
+        };
+        let menu_style = em::menu_style();
+        // The mockup's items, a separator, then Ember's (owner placement rule 2026-11-13, rule 5).
+        let entries = em::entries(current_tab.is_some());
+        let item = |top: em::TopItem| -> Element {
+            use em::TopItem as T;
+            let s = s.clone();
+            let mut menu_open = s.menu_open;
+            let (label, hint): (String, String) = match top {
+                T::Save => (Action::Save.label().to_string(), keymap.hint(Action::Save, os)),
+                T::Recent => (Action::Recent.label().to_string(), keymap.hint(Action::Recent, os)),
+                T::GotoLine => (Action::GotoLine.label().to_string(), keymap.hint(Action::GotoLine, os)),
+                T::CloseOthers => ("다른 탭 모두 닫기".to_string(), String::new()),
+                T::Palette => (keymap.palette_label().to_string(), keymap.hint(Action::Palette, os)),
+                T::FindInFile => (Action::FindInFile.label().to_string(), keymap.hint(Action::FindInFile, os)),
+                T::ReopenClosed => (Action::ReopenClosed.label().to_string(), keymap.hint(Action::ReopenClosed, os)),
+                T::Settings => (Action::Settings.label().to_string(), keymap.hint(Action::Settings, os)),
+                T::CloseEditor => ("에디터 닫기".to_string(), String::new()),
+            };
+            let tab_path = current_tab.clone();
+            rsx! {
+                button { key: "{label}", role: "menuitem", onclick: move |_| {
+                    menu_open.set(false);
+                    match top {
+                        T::Save => run_action(&s, Action::Save),
+                        T::Recent => run_action(&s, Action::Recent),
+                        T::GotoLine => run_action(&s, Action::GotoLine),
+                        T::CloseOthers => if let Some(path) = tab_path.as_deref() { run_tab_menu_item(&s, crate::ui::editor::TabMenuItem::CloseOthers, path); },
+                        T::Palette => run_action(&s, Action::Palette),
+                        T::FindInFile => run_action(&s, Action::FindInFile),
+                        T::ReopenClosed => run_action(&s, Action::ReopenClosed),
+                        T::Settings => run_action(&s, Action::Settings),
+                        T::CloseEditor => crate::services::services().ui.close_editor(),
+                    }
+                },
+                    span { class: "spacer", "{label}" }
+                    if !hint.is_empty() { span { class: "ed-msc", "{hint}" } }
+                }
+            }
+        };
         rsx! {
-            div { class: "ed-menu", role: "menu", "aria-label": "편집기 메뉴",
-                for a in [Action::FindInFile, Action::Save, Action::Recent, Action::Format, Action::GotoLine] {
+            div { class: "ed-menu ed-mainmenu", role: "menu", "aria-label": "편집기 메뉴", style: "{menu_style}",
+                for entry in entries.into_iter() {
                     {
-                        let s = s.clone();
-                        let label = a.label();
-                        let hint = keymap.hint(a, os);
-                        let mut menu_open = s.menu_open;
-                        rsx! {
-                            button { key: "{label}", role: "menuitem", onclick: move |_| { menu_open.set(false); run_action(&s, a); },
-                                span { class: "spacer", "{label}" }
-                                if !hint.is_empty() { span { class: "ed-msc", "{hint}" } }
-                            }
-                        }
-                    }
-                }
-                button { role: "menuitem", onclick: move |_| {
-                    close_others_menu.set(false);
-                    let mut tabs = close_others_s.tabs;
-                    let closed = tabs.write().close_others();
-                    for p in closed {
-                        close_others_s.host.send(HostCommand::Close(p));
-                    }
-                },
-                    span { class: "spacer", "다른 탭 모두 닫기" }
-                }
-                {
-                    let s = s.clone();
-                    let label = keymap.palette_label();
-                    let hint = keymap.hint(Action::Palette, os);
-                    let mut menu_open = s.menu_open;
-                    rsx! {
-                        button { key: "{label}", role: "menuitem", onclick: move |_| { menu_open.set(false); run_action(&s, Action::Palette); },
-                            span { class: "spacer", "{label}" }
-                            if !hint.is_empty() { span { class: "ed-msc", "{hint}" } }
-                        }
-                    }
-                }
-                button { role: "menuitem", onclick: move |_| {
-                    close_editor_menu.set(false);
-                    crate::services::services().ui.close_editor();
-                },
-                    span { class: "spacer", "에디터 닫기" }
-                }
-                div { class: "ed-msep" }
-                div { class: "ed-mlab", "단축키 체계" }
-                for k in Keymap::ALL {
-                    {
-                        let mut menu_open = s.menu_open;
-                        let mut keymap_sig = s.keymap;
-                        let selected = k == keymap;
-                        let hint = k.hint(Action::Find, os);
-                        rsx! {
-                            button { key: "{k.label()}", role: "menuitemradio", "aria-checked": "{selected}", onclick: move |_| {
-                                menu_open.set(false);
-                                keymap_sig.set(k);
-                                crate::services::services().ui.update_prefs(|p| p.keymap = k);
-                            },
-                                span { class: "ed-mchk", if selected { {icon_px("check", 14)} } }
-                                span { class: "spacer", "{k.label()}" }
-                                span { class: "ed-msc", "{hint}" }
-                            }
+                        match entry {
+                            em::Entry::Item(top) => item(top),
+                            em::Entry::Group(Submenu::Code) => group(Submenu::Code, "코드".to_string()),
+                            em::Entry::Group(Submenu::Keymap) => group(Submenu::Keymap, "단축키 체계".to_string()),
+                            em::Entry::Group(Submenu::AutoSave) => group(Submenu::AutoSave, "자동 저장".to_string()),
+                            em::Entry::Group(Submenu::Tab) => group(Submenu::Tab, tab_label.clone()),
+                            em::Entry::Sep => rsx! { div { class: "ed-msep" } },
                         }
                     }
                 }
             }
+            {submenu}
         }
     }
 
     fn stripe_button(s: &Shared, w: ToolWindow, selected: bool, keymap: Keymap) -> Element {
         let mut stripes = s.stripes;
         let scm_s = s.clone();
+        // 알림 opens the notification center, an overlay as in Code-OSS, not a side window (FR-L31.16).
+        let selected = if w == ToolWindow::Notifications { s.notifications.borrow().center_open() } else { selected };
+        let center_s = s.clone();
         let hint = w.action().map(|a| keymap.hint(a, Os::current())).unwrap_or_default();
         let tip = tooltip_text(w.label(), &hint);
         let class = if selected { "ed-sb on" } else { "ed-sb" };
         rsx! {
             button { key: "{w.label()}", class, title: "{tip}", "aria-label": "{tip}", "aria-pressed": "{selected}", onclick: move |_| {
-                if w.side() == Side::Right { notice(format!("{}: {SOON}", w.label())); } else { stripes.write().toggle(w); }
+                if w == ToolWindow::Notifications { crate::ui::editor_notifications::view::toggle_center(&center_s); }
+                else if w.side() == Side::Right { notice(crate::ui::editor_actions::tool_window_notice(w)); } else { stripes.write().toggle(w); }
                 if matches!(w, ToolWindow::Commit | ToolWindow::Git) && stripes.read().is_selected(w) { scm_s.scm.refresh(); }
             }, {icon(icon_name(w))} }
         }
@@ -1169,6 +1631,7 @@ pub mod page {
             ToolWindow::Search => "search",
             ToolWindow::Commit => "commit",
             ToolWindow::Git => "git",
+            ToolWindow::Extensions => "blocks",
             ToolWindow::Agent => "spark",
             ToolWindow::Notifications => "bell",
             ToolWindow::Terminal => "code",
@@ -1180,8 +1643,8 @@ pub mod page {
 
     fn stripe_column(s: &Shared, sel: Stripes, keymap: Keymap, strip: Strip) -> Element {
         let (class, windows): (&str, &[ToolWindow]) = match strip {
-            Strip::Left => ("ed-stripe ed-stripe-l", &ToolWindow::LEFT),
-            Strip::Bottom => ("ed-stripe ed-stripe-b", &ToolWindow::BOTTOM),
+            Strip::Left => ("ed-stripe ed-stripe-l", &ToolWindow::LEFT_STRIPE),
+            Strip::Bottom => ("ed-stripe ed-stripe-b", &ToolWindow::BOTTOM_STRIPE),
             Strip::Right => ("ed-stripe ed-stripe-r", &ToolWindow::RIGHT),
         };
         rsx! {
@@ -1220,11 +1683,17 @@ pub mod page {
         let root = s.folder.clone();
         let rows = {
             let state = s.host.state.lock().unwrap();
-            crate::ui::editor::tree_rows(&root, &state.listings, &expanded.read())
+            // `files.exclude` hides rows here, so everything below works on what is shown (FR-L31.17).
+            crate::ui::editor_settings::visible_tree_rows(
+                crate::ui::editor::tree_rows(&root, &state.listings, &expanded.read()),
+                &root,
+                &state.settings.exclude_matcher(),
+            )
         };
         let root_name = base_name(&root).to_string();
         let selected: Option<(String, bool)> = tree_sel.read().clone();
         let tree_rows_owned = rows.clone();
+        let unsaved_for_key = unsaved.clone();
         let tree_root = root.clone();
         let tree_host = s.host.clone();
         let tree_open_errors = s.open_errors.clone();
@@ -1254,6 +1723,9 @@ pub mod page {
         };
         let mut submit_enter = submit.clone();
         let mut submit_ok = submit.clone();
+        // A rename edits the renamed row in place (#797); other prompts sit at the top of the tree.
+        let rename_at = crate::ui::editor::rename_in_place_row(pending.as_ref(), &rows);
+        let mut prompt_inline: Option<Element> = None;
         let prompt_row = match pending.clone() {
             None => rsx! {},
             Some(TreePrompt::Delete { path, is_dir }) => {
@@ -1292,11 +1764,12 @@ pub mod page {
             Some(other) => {
                 let label = match &other { TreePrompt::NewFile { .. } => "새 파일 이름", TreePrompt::NewDir { .. } => "새 폴더 이름", _ => "새 이름" };
                 let enter = other.clone();
-                rsx! {
-                    div { class: "ed-tn", style: "--d:0;",
-                        {icon_px("file", 15)}
+                let field = rsx! {
                         input { style: "flex:1; min-width:0; height:22px; border:1px solid var(--line); border-radius:var(--r-xs); background:var(--surface); color:var(--text); padding:0 6px;",
                             "aria-label": "{label}", placeholder: "{label}", value: "{prompt_text}", autofocus: true,
+                            // In place on a row, a click in the field must not select, open or toggle the row.
+                            onmousedown: move |event| event.stop_propagation(),
+                            onclick: move |event| event.stop_propagation(),
                             oninput: move |event| prompt_text.set(event.value()),
                             onblur: move |_| { if crate::ui::editor::blur_closes_prompt(&prompt_text.read()) { prompt.set(None); } },
                             onkeydown: move |event| {
@@ -1307,12 +1780,144 @@ pub mod page {
                                 }
                             },
                         }
+                };
+                if rename_at.is_some() {
+                    prompt_inline = Some(field);
+                    rsx! {}
+                } else {
+                    rsx! {
+                        div { class: "ed-tn", style: "--d:0;",
+                            {icon_px("file", 15)}
+                            {field}
+                        }
                     }
                 }
             }
         };
-        let search_s = s.clone();
-        let rows_for_sel_all = rows.clone();
+        // The tree's menus (owner placement rule 2026-11-13, rules 1 and 2): the header "+" menu and the
+        // context menu share one item list and one handler.
+        use crate::ui::editor_tree_menu::{self as tm, TreeMenuEntry, TreeMenuItem};
+        let tree_menu_state = tm::TreeMenuState {
+            has_selection: selected.is_some() || !tree_multi_sel.read().is_empty(),
+            has_clipboard: tree_clipboard.read().is_some(),
+            tab_open: selected.as_ref().is_some_and(|(p, d)| !*d && s.tabs.read().paths().contains(&p.as_str())),
+        };
+        let run_host = s.host.clone();
+        let run_root = root.clone();
+        let run_rows = rows.clone();
+        let run_unsaved = unsaved.clone();
+        let run_s = s.clone();
+        let run_selected = selected.clone();
+        let run_tree_item = move |item: TreeMenuItem| {
+            let items = {
+                let sel = tree_multi_sel.read();
+                if sel.is_empty() { run_selected.clone().into_iter().collect::<Vec<_>>() } else { sel.clone() }
+            };
+            let pruned = crate::ui::editor::prune_redundant_selection(&items);
+            match item {
+                TreeMenuItem::NewFile => { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewFile { parent: new_file_parent.clone() })); }
+                TreeMenuItem::NewFolder => { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewDir { parent: new_dir_parent.clone() })); }
+                TreeMenuItem::Cut | TreeMenuItem::Copy => {
+                    if !pruned.is_empty() {
+                        let n = pruned.len();
+                        let cut = item == TreeMenuItem::Cut;
+                        let kind = if cut { crate::ui::editor::ClipboardKind::Cut } else { crate::ui::editor::ClipboardKind::Copy };
+                        tree_clipboard.set(Some(crate::ui::editor::TreeClipboard { kind, paths: pruned }));
+                        notice(if cut { format!("{n}개 항목을 잘라냈습니다") } else { format!("{n}개 항목을 복사했습니다") });
+                    }
+                }
+                TreeMenuItem::Paste => {
+                    let clip = tree_clipboard.read().clone();
+                    if let Some(clip) = clip {
+                        let dest_dir = crate::ui::editor::new_item_parent(run_selected.as_ref().map(|(p, d)| (p.as_str(), *d)), &run_root);
+                        let sources: Vec<String> = clip.paths.into_iter().map(|(p, _)| p).collect();
+                        expanded.write().insert(dest_dir.clone());
+                        match clip.kind {
+                            crate::ui::editor::ClipboardKind::Copy => {
+                                run_host.send(HostCommand::CopyPaths { sources, dest_dir });
+                            }
+                            crate::ui::editor::ClipboardKind::Cut => {
+                                run_host.send(HostCommand::MovePaths { sources, dest_dir });
+                                tree_clipboard.set(None);
+                            }
+                        }
+                    }
+                }
+                TreeMenuItem::Rename => {
+                    if let Some((path, _)) = run_selected.clone() {
+                        let blocked: Vec<String> = run_unsaved.iter().filter(|u| crate::ui::editor::is_at_or_below(u, &path)).cloned().collect();
+                        if !blocked.is_empty() {
+                            notice(format!("저장하지 않은 변경이 있어 이름을 바꿀 수 없습니다. 먼저 저장하세요: {}", blocked.iter().map(|u| base_name(u).to_string()).collect::<Vec<_>>().join(", ")));
+                        } else {
+                            prompt_text.set(base_name(&path).to_string());
+                            prompt.set(Some(TreePrompt::Rename { path }));
+                        }
+                    }
+                }
+                TreeMenuItem::Delete => {
+                    if !pruned.is_empty() {
+                        prompt_at.set(now_ms());
+                        if pruned.len() == 1 {
+                            prompt.set(Some(TreePrompt::Delete { path: pruned[0].0.clone(), is_dir: pruned[0].1 }));
+                        } else {
+                            prompt.set(Some(TreePrompt::DeleteMany { items: pruned }));
+                        }
+                    }
+                }
+                TreeMenuItem::CloseTab => {
+                    if let Some((path, false)) = run_selected.clone() {
+                        run_tab_menu_item(&run_s, crate::ui::editor::TabMenuItem::Close, &path);
+                    }
+                }
+                TreeMenuItem::SelectAll => {
+                    let (all, last) = crate::ui::editor::select_all_tree_rows(&run_rows);
+                    tree_multi_sel.set(all);
+                    tree_sel.set(last);
+                }
+            }
+        };
+        let menu_at = tm::open_menu();
+        let plus_open = menu_at == Some(tm::TreeMenuAt::Plus);
+        let mut tree_revision = s.revision;
+        let mut key_revision = s.revision;
+        let tree_menu = match menu_at {
+            None => rsx! {},
+            Some(at) => {
+                let entries = at.entries(tree_menu_state);
+                let style = at.style();
+                let mac = matches!(Os::current(), Os::Mac);
+                let mut scrim_rev = s.revision;
+                let mut scrim_rev2 = s.revision;
+                rsx! {
+                    div { class: "ed-scrim", style: "z-index:40;",
+                        onclick: move |_| { tm::close(); *scrim_rev.write() += 1; },
+                        oncontextmenu: move |event| { event.prevent_default(); tm::close(); *scrim_rev2.write() += 1; } }
+                    div { class: "ed-menu", role: "menu", "aria-label": "프로젝트 메뉴", style: "{style}",
+                        for (i, entry) in entries.into_iter().enumerate() {
+                            {
+                                match entry {
+                                    TreeMenuEntry::Sep => rsx! { div { key: "sep{i}", class: "ed-msep" } },
+                                    TreeMenuEntry::Heading(h) => rsx! { div { key: "h{i}", class: "ed-mlab", "{h}" } },
+                                    TreeMenuEntry::Item(item, enabled) => {
+                                        let mut run = run_tree_item.clone();
+                                        let hint = item.hint(mac);
+                                        let aria_disabled = (!enabled).to_string();
+                                        let mut rev = s.revision;
+                                        rsx! {
+                                            button { key: "{item.label()}", role: "menuitem", "aria-label": "{item.label()}", disabled: !enabled, "aria-disabled": "{aria_disabled}",
+                                                onclick: move |_| { tm::close(); *rev.write() += 1; if enabled { run(item); } },
+                                                span { class: "spacer", "{item.label()}" }
+                                                if !hint.is_empty() { span { class: "ed-msc", "{hint}" } }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
         let paste_selected = selected.clone();
         let paste_host = s.host.clone();
         let paste_root = root.clone();
@@ -1330,44 +1935,49 @@ pub mod page {
         let reveal_current = current.map(str::to_string);
         let reveal_root = root.clone();
         let reveal_host = s.host.clone();
+        let reveal_disabled = reveal_current.is_none();
         let modified = s.scm.modified_paths(&root);
         rsx! {
             section { class: "ed-tw ed-left", "aria-label": "프로젝트",
-                div { class: "ed-twh", style: "gap:2px;",
+                // The mockup's three actions and one "+" (owner placement rule 2026-11-13, rule 1).
+                div { class: "ed-twh",
                     b { class: "ed-twt", "프로젝트" }
                     div { class: "spacer" }
-                    button { class: "ed-ib", title: "새 파일", "aria-label": "새 파일", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewFile { parent: new_file_parent.clone() })); }, {icon("plus")} }
-                    button { class: "ed-ib", title: "새 폴더", "aria-label": "새 폴더", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewDir { parent: new_dir_parent.clone() })); }, {icon("folder")} }
-                    button { class: "ed-ib", title: "모두 선택", "aria-label": "모두 선택", onclick: move |_| {
-                        let (all, last) = crate::ui::editor::select_all_tree_rows(&rows_for_sel_all);
-                        tree_multi_sel.set(all);
-                        tree_sel.set(last);
-                    }, {icon_px("check", 15)} }
-                    if let Some(ref cur_path) = reveal_current {
-                        {
-                            let cur_path = cur_path.clone();
-                            let reveal_root = reveal_root.clone();
-                            let reveal_host = reveal_host.clone();
-                            rsx! {
-                                button { class: "ed-ib", title: "열린 파일 찾기", "aria-label": "열린 파일 찾기", onclick: move |_| {
-                                    for dir in crate::ui::editor::ancestor_dirs_to_expand(&reveal_root, &cur_path) {
-                                        expanded.write().insert(dir.clone());
-                                        reveal_host.send(HostCommand::List(dir));
-                                    }
-                                    tree_multi_sel.set(vec![(cur_path.clone(), false)]);
-                                    tree_sel.set(Some((cur_path.clone(), false)));
-                                }, {icon_px("dot", 14)} }
-                            }
-                        }
-                    }
+                    button { class: "ed-ib", title: "추가", "aria-label": "추가", "aria-haspopup": "menu", "aria-expanded": "{plus_open}", onclick: move |_| {
+                        crate::ui::editor_tree_menu::toggle_plus();
+                        *tree_revision.write() += 1;
+                    }, {icon("plus")} }
                     button { class: "ed-ib", title: "모두 접기", "aria-label": "모두 접기", onclick: move |_| expanded.write().clear(), {icon_px("chev", 16)} }
-                    button { class: "ed-ib", title: "파일 검색", "aria-label": "파일 검색", onclick: move |_| crate::ui::editor_search::view::open(&search_s, false), {icon("search")} }
+                    button { class: "ed-ib", title: "열린 파일 찾기", "aria-label": "열린 파일 찾기", disabled: reveal_disabled, onclick: move |_| {
+                        if let Some(cur_path) = reveal_current.clone() {
+                            for dir in crate::ui::editor::ancestor_dirs_to_expand(&reveal_root, &cur_path) {
+                                expanded.write().insert(dir.clone());
+                                reveal_host.send(HostCommand::List(dir));
+                            }
+                            tree_multi_sel.set(vec![(cur_path.clone(), false)]);
+                            tree_sel.set(Some((cur_path, false)));
+                        }
+                    }, {icon("search")} }
                     button { class: "ed-ib", title: "숨기기", "aria-label": "숨기기", onclick: move |_| stripes.write().hide(Side::Left), {icon("close")} }
                 }
+                {tree_menu}
                 div { class: "ed-tree", role: "tree", "aria-label": "프로젝트 트리", "aria-multiselectable": "true", tabindex: "{tree_container_ti}",
                     onkeydown: move |event| {
                         if !crate::ui::editor::tree_handles_key(prompt.read().as_ref()) {
                             return;
+                        }
+                        // Shift+F10 stands in for right-click. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick).
+                        // compose-rust#100: v0.0.6 sent only Enter as a key event (#832); recheck on v0.0.7
+                        // whether Shift+F10 now reaches this branch.
+                        {
+                            let m = event.modifiers();
+                            if crate::ui::editor::tab_menu_key(&key_name(&event.key()), m.contains(Modifiers::CONTROL), m.contains(Modifiers::SHIFT), m.contains(Modifiers::ALT), m.contains(Modifiers::META)) {
+                                event.stop_propagation();
+                                event.prevent_default();
+                                crate::ui::editor_tree_menu::open(crate::ui::editor_tree_menu::TreeMenuAt::Keyboard);
+                                *key_revision.write() += 1;
+                                return;
+                            }
                         }
                         if event.key() == Key::Escape {
                             event.stop_propagation();
@@ -1490,6 +2100,15 @@ pub mod page {
                                     tree_host.send(HostCommand::Open(p.clone()));
                                     tree_host.send(HostCommand::Focus(p));
                                 }
+                                crate::ui::editor::TreeKeyOutcome::Rename(p) => {
+                                    let blocked: Vec<String> = unsaved_for_key.iter().filter(|u| crate::ui::editor::is_at_or_below(u, &p)).cloned().collect();
+                                    if !blocked.is_empty() {
+                                        notice(format!("저장하지 않은 변경이 있어 이름을 바꿀 수 없습니다. 먼저 저장하세요: {}", blocked.iter().map(|u| base_name(u).to_string()).collect::<Vec<_>>().join(", ")));
+                                    } else {
+                                        prompt_text.set(base_name(&p).to_string());
+                                        prompt.set(Some(TreePrompt::Rename { path: p }));
+                                    }
+                                }
                             }
                         }
                     },
@@ -1555,7 +2174,6 @@ pub mod page {
                             let path = row.path.clone();
                             let host = s.host.clone();
                             let mut recent_files = s.recent_files;
-                            let open_errors = s.open_errors.clone();
                             let is_dir = row.is_dir;
                             let in_multi = tree_multi_sel.read().iter().any(|(p, _)| p == &row.path);
                             let in_cut = tree_clipboard.read().as_ref().is_some_and(|c| c.kind == crate::ui::editor::ClipboardKind::Cut && c.paths.iter().any(|(p, _)| p == &row.path));
@@ -1565,17 +2183,15 @@ pub mod page {
                             let class = crate::ui::editor::tree_row_class(active_row, is_mod);
                             let depth = row.depth + 1;
                             let row_style = if in_cut { format!("--d:{depth}; opacity:0.55;") } else { format!("--d:{depth};") };
-                            let rename_path = row.path.clone();
-                            let cut_path = row.path.clone();
-                            let delete_path = row.path.clone();
-                            let rename_name = row.name.clone();
-                            let rename_label = row.name.clone();
-                            let cut_label = row.name.clone();
-                            let unsaved_for_rename = unsaved.clone();
+                            let ctx_path = row.path.clone();
+                            let mut ctx_revision = s.revision;
                             let row_label = crate::ui::editor::tree_item_aria_label(&row.name, is_dir);
                             let path_for_down = row.path.clone();
                             let rows_for_down = rows.clone();
                             let rows_for_click = rows.clone();
+                            let preview_s = s.clone();
+                            let keep_s = s.clone();
+                            let keep_path = row.path.clone();
                             let drag_path = row.path.clone();
                             let drop_path = row.path.clone();
                             let drop_is_dir = is_dir;
@@ -1660,56 +2276,41 @@ pub mod page {
                                         if was_open { expanded.write().remove(&path); }
                                         else { expanded.write().insert(path.clone()); host.send(HostCommand::List(path.clone())); }
                                     } else {
-                                        open_errors.borrow_mut().remove(&path);
-                                        tabs.write().open(&path);
+                                        // A single click opens the preview tab; a double-click keeps it (FR-L31.5).
+                                        open_preview(&preview_s, &path);
+                                        // Two clicks within 500 ms stand in for `ondoubleclick`. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
+                                        if DOUBLE_CLICK.with(|d| d.borrow_mut().click(&format!("tree:{path}"), now_ms())) {
+                                            let mut tabs = preview_s.tabs;
+                                            tabs.write().keep_open(&path);
+                                        }
                                         record_recent_file(&mut recent_files, &path);
-                                        host.send(HostCommand::Open(path.clone()));
                                     }
+                                },
+                                ondoubleclick: move |_| {
+                                    if !is_dir {
+                                        let mut tabs = keep_s.tabs;
+                                        tabs.write().keep_open(&keep_path);
+                                    }
+                                },
+                                // Right-click selects the row (keeping a multi-selection it is part of)
+                                // and opens the tree's context menu (owner placement rule, rule 2).
+                                oncontextmenu: move |event| {
+                                    event.prevent_default();
+                                    event.stop_propagation();
+                                    if !tree_multi_sel.read().iter().any(|(p, _)| p == &ctx_path) {
+                                        tree_multi_sel.set(vec![(ctx_path.clone(), is_dir)]);
+                                    }
+                                    tree_sel.set(Some((ctx_path.clone(), is_dir)));
+                                    let at = event.client_coordinates();
+                                    crate::ui::editor_tree_menu::open(crate::ui::editor_tree_menu::TreeMenuAt::Pointer { x: at.x, y: at.y });
+                                    *ctx_revision.write() += 1;
                                 },
                                 if is_dir { if row.open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} } } else { span { class: "chev-sp" } }
                                 if is_dir { {icon_px("folder", 15)} } else { {icon_px("file", 15)} }
-                                span { class: "ellipsis", "{row.name}" }
-                                if chosen {
-                                    div { class: "spacer" }
-                                    button { class: "ed-ib", title: "잘라내기: {cut_label}", "aria-label": "잘라내기: {cut_label}", style: "width:22px; height:22px;",
-                                        onmousedown: move |event| { event.stop_propagation(); },
-                                        onclick: move |event| {
-                                            event.stop_propagation();
-                                            if let Some(clip) = crate::ui::editor::cut_selection(&tree_multi_sel.read(), &cut_path, is_dir) {
-                                                let n = clip.paths.len();
-                                                tree_clipboard.set(Some(clip));
-                                                notice(format!("{n}개 항목을 잘라냈습니다"));
-                                            }
-                                        }, {icon_px("minus", 13)} }
-                                    button { class: "ed-ib", title: "이름 변경: {rename_label}", "aria-label": "이름 변경: {rename_label}", style: "width:22px; height:22px;",
-                                        onmousedown: move |event| { event.stop_propagation(); },
-                                        onclick: move |event| {
-                                            event.stop_propagation();
-                                            let blocked: Vec<String> = unsaved_for_rename.iter().filter(|p| crate::ui::editor::is_at_or_below(p, &rename_path)).cloned().collect();
-                                            if !blocked.is_empty() {
-                                                notice(format!("저장하지 않은 변경이 있어 이름을 바꿀 수 없습니다. 먼저 저장하세요: {}", blocked.iter().map(|p| base_name(p).to_string()).collect::<Vec<_>>().join(", ")));
-                                                return;
-                                            }
-                                            prompt_text.set(rename_name.clone());
-                                            prompt.set(Some(TreePrompt::Rename { path: rename_path.clone() }));
-                                        }, {icon_px("edit", 13)} }
-                                    button { class: "ed-ib", title: "삭제: {rename_label}", "aria-label": "삭제: {rename_label}", style: "width:22px; height:22px; color:var(--c-red);",
-                                        onmousedown: move |event| { event.stop_propagation(); },
-                                        onclick: move |event| {
-                                            event.stop_propagation();
-                                            prompt_at.set(now_ms());
-                                            let multi = tree_multi_sel.read();
-                                            if multi.iter().any(|(p, _)| p == &delete_path) && multi.len() > 1 {
-                                                let pruned = crate::ui::editor::prune_redundant_selection(&multi);
-                                                if pruned.len() == 1 {
-                                                    prompt.set(Some(TreePrompt::Delete { path: pruned[0].0.clone(), is_dir: pruned[0].1 }));
-                                                } else {
-                                                    prompt.set(Some(TreePrompt::DeleteMany { items: pruned }));
-                                                }
-                                            } else {
-                                                prompt.set(Some(TreePrompt::Delete { path: delete_path.clone(), is_dir }));
-                                            }
-                                        }, {icon_px("close", 13)} }
+                                if rename_at == Some(row_idx) {
+                                    {prompt_inline.take()}
+                                } else {
+                                    span { class: "ellipsis", "{row.name}" }
                                 }
                             } }
                         }
@@ -1719,16 +2320,25 @@ pub mod page {
         }
     }
 
+    /// Whether a modal is up: the trust prompt, the unsaved-changes sheet or an extension's modal
+    /// message (#831). Code-OSS's modal dialogs block the workbench, so the ⋯ menu stays closed.
+    fn modal_up(s: &Shared) -> bool {
+        crate::ui::workspace_trust::view::prompt_up(s) || s.close_confirm.peek().is_some() || s.notifications.borrow().modal().is_some()
+    }
+
     fn tab_strip(s: &Shared, paths: &[String], dirty: &[bool], current: Option<&str>) -> Element {
         let mut tabs = s.tabs;
         let mut menu_open = s.menu_open;
         let host = s.host.clone();
         let scm = s.scm.clone();
+        let strip_s = s.clone();
+        let menu_s = s.clone();
         let modified = s.scm.modified_paths(&s.folder);
         let paths_owned: Vec<String> = paths.to_vec();
         let dirty_owned: Vec<bool> = dirty.to_vec();
         let current_owned: Option<String> = current.map(str::to_string);
         let (strip_ti, tab_tis) = crate::ui::editor::tab_strip_roving_tabindex(paths, current);
+        let model = s.tabs.read().clone();
         rsx! {
             div { class: "ed-tabs", role: "tablist", "aria-label": "열린 파일", tabindex: "{strip_ti}",
                 onkeydown: move |event| {
@@ -1740,6 +2350,40 @@ pub mod page {
                         return;
                     }
                     let key_str = key_name(&event.key());
+                    let m = event.modifiers();
+                    // Shift+F10 / ContextMenu opens the ⋯ menu, which holds the current tab's items, while
+                    // the right-click menu cannot open. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
+                    if crate::ui::editor::tab_menu_key(
+                        &key_str,
+                        m.contains(Modifiers::CONTROL),
+                        m.contains(Modifiers::SHIFT),
+                        m.contains(Modifiers::ALT),
+                        m.contains(Modifiers::META),
+                    ) {
+                        event.stop_propagation();
+                        event.prevent_default();
+                        if current_owned.is_some() {
+                            let mut tab_menu = strip_s.tab_menu;
+                            tab_menu.set(None);
+                            menu_open.set(true);
+                        }
+                        return;
+                    }
+                    // Move Editor Left / Right (FR-L31.5): the reorder drag cannot do yet.
+                    if let Some(right) = crate::ui::editor::tab_move_key(
+                        &key_str,
+                        m.contains(Modifiers::CONTROL),
+                        m.contains(Modifiers::SHIFT),
+                        m.contains(Modifiers::ALT),
+                        m.contains(Modifiers::META),
+                    ) {
+                        event.stop_propagation();
+                        if let Some(ref current_path) = current_owned {
+                            let mut t = tabs.write();
+                            if right { t.move_right(current_path); } else { t.move_left(current_path); }
+                        }
+                        return;
+                    }
                     let outcome = crate::ui::editor::tab_strip_key_with_dirty(
                         &paths_owned,
                         &dirty_owned,
@@ -1754,15 +2398,11 @@ pub mod page {
                                 tabs.write().activate(&path);
                                 host.send(HostCommand::Focus(path));
                             }
-                            crate::ui::editor::TabKeyOutcome::Close(path) => {
-                                tabs.write().close(&path);
-                                host.send(HostCommand::Close(path));
-                                if let Some(next) = tabs.read().current_path() {
-                                    host.send(HostCommand::Focus(next.to_string()));
-                                }
-                            }
-                            crate::ui::editor::TabKeyOutcome::RefuseDirty(path) => {
-                                notice(crate::ui::editor::dirty_tab_close_notice(&path));
+                            crate::ui::editor::TabKeyOutcome::Close(path) | crate::ui::editor::TabKeyOutcome::RefuseDirty(path) => {
+                                // A dirty tab is not closed at once: the window asks, as Code-OSS does.
+                                sync_dirty(&strip_s);
+                                let request = strip_s.tabs.read().close_request(&path);
+                                request_close(&strip_s, request);
                             }
                         }
                     }
@@ -1772,25 +2412,48 @@ pub mod page {
                         let tab_ti = tab_tis.get(i).copied().unwrap_or("-1");
                         let path = path.clone(); let close_path = path.clone();
                         let close_path_key = path.clone();
-                        let host = s.host.clone(); let key_host = s.host.clone(); let close_host = s.host.clone();
-                        let close_host_key = s.host.clone();
+                        let host = s.host.clone(); let key_host = s.host.clone();
+                        let close_s = s.clone(); let close_key_s = s.clone();
                         let mut recent_files = s.recent_files;
                         let mut key_recent_files = s.recent_files;
                         let selected = current == Some(path.as_str());
                         let label = base_name(&path).to_string();
+                        let deleted = s.uris.borrow().get(&path).and_then(|u| s.bridge.borrow().document(u).map(|d| crate::ui::editor_states::is_deleted(d.external_change))).unwrap_or(false);
+                        let shown_label = crate::ui::editor_states::tab_label(&label, deleted);
+                        let label_style = crate::ui::editor_states::tab_label_style(deleted);
                         let is_mod = modified.contains(&path);
-                        let class = crate::ui::editor::tab_class(selected, is_mod);
-                        let tab_label = crate::ui::editor::tab_aria_label(&label, dirty[i]);
-                        let close_label = format!("닫기: {label}");
+                        let pinned = model.is_pinned(&path);
+                        let preview = model.is_preview(&path);
+                        let class = crate::ui::editor::tab_class_with(selected, is_mod, pinned, preview);
+                        let tab_label = crate::ui::editor::tab_aria_label(&shown_label, dirty[i]);
+                        let close_label = if pinned { format!("고정 해제: {label}") } else { format!("닫기: {label}") };
                         let scm = s.scm.clone();
                         let key_scm = s.scm.clone();
                         let tab_path = path.clone();
-                        rsx! { div { class, role: "tab", "aria-selected": "{selected}", "aria-label": "{tab_label}", tabindex: "{tab_ti}",
+                        let keep_path = path.clone();
+                        let menu_path = path.clone();
+                        let mut tab_menu = s.tab_menu;
+                        let mut top_menu = s.menu_open;
+                        rsx! { div { class, role: "tab", "aria-selected": "{selected}", "aria-label": "{tab_label}", tabindex: "{tab_ti}", title: "{path}",
                             onclick: move |_| {
                                 scm.close_diff();
                                 tabs.write().activate(&path);
+                                // Two clicks within 500 ms stand in for `ondoubleclick`. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
+                                if DOUBLE_CLICK.with(|d| d.borrow_mut().click(&format!("tab:{path}"), now_ms())) {
+                                    tabs.write().keep_open(&path);
+                                }
                                 record_recent_file(&mut recent_files, &path);
                                 host.send(HostCommand::Focus(path.clone()));
+                            },
+                            ondoubleclick: move |_| {
+                                tabs.write().keep_open(&keep_path);
+                            },
+                            oncontextmenu: move |event| {
+                                event.prevent_default();
+                                event.stop_propagation();
+                                let at = event.client_coordinates();
+                                top_menu.set(false);
+                                tab_menu.set(Some((menu_path.clone(), at.x, at.y)));
                             },
                             onkeydown: move |event| {
                                 if matches!(event.key(), Key::Enter) || matches!(event.key(), Key::Character(ref c) if c == " ") {
@@ -1802,8 +2465,9 @@ pub mod page {
                                 }
                             },
                             {icon_px(if selected { "file-w" } else { "file" }, 14)}
-                            span { class: "ellipsis", "{label}" }
+                            span { class: "ellipsis", style: "{label_style}", "{shown_label}" }
                             if dirty[i] { span { class: "ed-dirty" } }
+                            // A pinned tab shows the pin where the close button is; a click on it unpins, as in Code-OSS.
                             button {
                                 class: "ed-tx",
                                 tabindex: "-1",
@@ -1811,67 +2475,212 @@ pub mod page {
                                 "aria-label": "{close_label}",
                                 onclick: move |event| {
                                     event.stop_propagation();
-                                    tabs.write().close(&close_path);
-                                    close_host.send(HostCommand::Close(close_path.clone()));
-                                    if let Some(next) = tabs.read().current_path() {
-                                        close_host.send(HostCommand::Focus(next.to_string()));
+                                    if pinned {
+                                        let mut t = close_s.tabs;
+                                        t.write().unpin(&close_path);
+                                        return;
                                     }
+                                    sync_dirty(&close_s);
+                                    let request = close_s.tabs.read().close_request(&close_path);
+                                    request_close(&close_s, request);
                                 },
                                 onkeydown: move |event| {
                                     if matches!(event.key(), Key::Enter) || matches!(event.key(), Key::Character(ref c) if c == " ") {
                                         event.stop_propagation();
-                                        tabs.write().close(&close_path_key);
-                                        close_host_key.send(HostCommand::Close(close_path_key.clone()));
-                                        if let Some(next) = tabs.read().current_path() {
-                                            close_host_key.send(HostCommand::Focus(next.to_string()));
+                                        if pinned {
+                                            let mut t = close_key_s.tabs;
+                                            t.write().unpin(&close_path_key);
+                                            return;
                                         }
+                                        sync_dirty(&close_key_s);
+                                        let request = close_key_s.tabs.read().close_request(&close_path_key);
+                                        request_close(&close_key_s, request);
                                     }
                                 },
-                                {icon_px(if selected { "close-w" } else { "close" }, 12)}
+                                if pinned {
+                                    {icon_px(if selected { "pin-w" } else { "pin" }, 12)}
+                                } else {
+                                    {icon_px(if selected { "close-w" } else { "close" }, 12)}
+                                }
                             }
                         } }
                     }
                 }
                 div { class: "spacer" }
-                button { class: "ed-ib", title: "탭 메뉴", "aria-label": "탭 메뉴", onclick: move |_| { let open = *menu_open.read(); menu_open.set(!open); }, {icon("more")} }
+                button { class: "ed-ib", title: "탭 메뉴", "aria-label": "탭 메뉴", onclick: move |_| { crate::ui::editor_menu::close_submenu(); let open = *menu_open.read(); menu_open.set(crate::ui::editor_menu::toggled(open, modal_up(&menu_s))); }, {icon("more")} }
             }
         }
     }
 
-    fn breadcrumbs(path: &str, folder: &str) -> Element {
-        let segments = crate::ui::editor::breadcrumb_segments(path, folder);
+    /// The context menu of a tab (FR-L31.5): Code-OSS's close, pin and keep-open items, and the move items
+    /// that stand in for drag reorder.
+    fn tab_context_menu(s: &Shared, path: &str, x: f64, y: f64) -> Element {
+        use crate::ui::editor::TabMenuItem;
+        let items = crate::ui::editor::tab_menu_items(&s.tabs.read(), path);
+        // Code-OSS's groups: the close items | keep open and pin | (Ember) the move items.
+        let seps: Vec<bool> = items
+            .iter()
+            .enumerate()
+            .map(|(i, (item, _))| match item {
+                TabMenuItem::KeepOpen | TabMenuItem::MoveLeft => true,
+                TabMenuItem::Pin | TabMenuItem::Unpin => i == 0 || items[i - 1].0 != TabMenuItem::KeepOpen,
+                _ => false,
+            })
+            .collect();
+        let mut tab_menu = s.tab_menu;
+        let style = format!("position:fixed; left:{x}px; top:{y}px; right:auto;");
+        rsx! {
+            div { class: "ed-scrim", onclick: move |_| tab_menu.set(None), oncontextmenu: move |event| { event.prevent_default(); tab_menu.set(None); } }
+            div { class: "ed-menu ed-tabmenu", role: "menu", "aria-label": "탭 메뉴", style: "{style}",
+                for (i, (item, enabled)) in items.into_iter().enumerate() {
+                    {
+                        let s = s.clone();
+                        let path = path.to_string();
+                        let mut tab_menu = s.tab_menu;
+                        let sep = seps[i];
+                        let aria_disabled = (!enabled).to_string();
+                        rsx! {
+                            if sep { div { class: "ed-msep" } }
+                            button { role: "menuitem", disabled: !enabled, "aria-disabled": "{aria_disabled}",
+                                onclick: move |_| {
+                                    tab_menu.set(None);
+                                    if enabled { run_tab_menu_item(&s, item, &path); }
+                                },
+                                span { class: "spacer", "{item.label()}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn run_tab_menu_item(s: &Shared, item: crate::ui::editor::TabMenuItem, path: &str) {
+        use crate::ui::editor::TabMenuItem;
+        let mut tabs = s.tabs;
+        match item {
+            TabMenuItem::KeepOpen => tabs.write().keep_open(path),
+            TabMenuItem::Pin => tabs.write().pin(path),
+            TabMenuItem::Unpin => tabs.write().unpin(path),
+            TabMenuItem::MoveLeft => { tabs.write().move_left(path); }
+            TabMenuItem::MoveRight => { tabs.write().move_right(path); }
+            TabMenuItem::Close | TabMenuItem::CloseOthers | TabMenuItem::CloseRight | TabMenuItem::CloseAll => {
+                sync_dirty(s);
+                let request = {
+                    let t = tabs.read();
+                    match item {
+                        TabMenuItem::Close => t.close_request(path),
+                        TabMenuItem::CloseOthers => t.close_others_request(path),
+                        TabMenuItem::CloseRight => t.close_right_request(path),
+                        _ => t.close_all_request(),
+                    }
+                };
+                if request.anchor.is_some() {
+                    s.scm.close_diff();
+                }
+                request_close(s, request);
+            }
+        }
+    }
+
+    /// The unsaved-changes question on a close (FR-L31.5), worded and ordered as Code-OSS's dialog:
+    /// 저장 (모두 저장 for several files), 저장 안 함, 취소. 취소 is the default and Escape answers it.
+    fn close_confirm_sheet(s: &Shared, request: &crate::ui::editor::CloseRequest) -> Element {
+        use crate::ui::editor::DirtyChoice;
+        let title = request.confirm_title();
+        let detail = request.confirm_detail();
+        let save_label = request.save_label();
+        let names = request.dirty_names();
+        let (save_s, dont_s, cancel_s, key_s, scrim_s) = (s.clone(), s.clone(), s.clone(), s.clone(), s.clone());
+        rsx! {
+            div { class: "modal", role: "presentation",
+                onclick: move |_| answer_close(&scrim_s, DirtyChoice::Cancel),
+                onkeydown: move |event| {
+                    if event.key() == Key::Escape {
+                        event.stop_propagation();
+                        answer_close(&key_s, DirtyChoice::Cancel);
+                    }
+                },
+                div { class: "card ed-confirm", role: "alertdialog", "aria-modal": "true", "aria-label": "{title}",
+                    onclick: move |event| event.stop_propagation(),
+                    div { class: "card-b",
+                        b { "{title}" }
+                        if !names.is_empty() {
+                            ul { class: "ed-confirm-files",
+                                for name in names.iter() { li { key: "{name}", "{name}" } }
+                            }
+                        }
+                        p { class: "muted", "{detail}" }
+                        div { class: "ed-confirm-acts",
+                            button { class: "btn primary sm", onclick: move |_| answer_close(&save_s, DirtyChoice::Save), "{save_label}" }
+                            button { class: "btn sm", onclick: move |_| answer_close(&dont_s, DirtyChoice::DontSave), "저장 안 함" }
+                            button { class: "btn sm", autofocus: true, onclick: move |_| answer_close(&cancel_s, DirtyChoice::Cancel), "취소" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn breadcrumbs(s: &Shared, path: &str) -> Element {
+        let segments = crate::ui::editor::breadcrumb_segments(path, &s.folder);
         let last = segments.len().saturating_sub(1);
         rsx! { div { class: "ed-crumbs", role: "navigation", "aria-label": "경로",
             for (i, seg) in segments.iter().enumerate() {
                 if i > 0 { {icon_px("chev", 11)} }
                 span { key: "{i}", class: if i == last { "cur" } else { "" }, "{seg}" }
             }
+            {crate::ui::editor_language::view::symbol_crumbs(s, path)}
         } }
     }
 
     thread_local! {
-        /// The editor's terminal session. Started on first show and kept while the panel is hidden.
-        static TERMINAL: std::cell::RefCell<Option<TerminalHandle>> = const { std::cell::RefCell::new(None) };
+        /// The terminal panel element, to read its laid-out size (FR-L31.20).
+        static TERM_MOUNT: std::cell::RefCell<Option<std::rc::Rc<dioxus_elements::MountedData>>> = const { std::cell::RefCell::new(None) };
+        static TERM_FIT: std::cell::RefCell<crate::ui::term_fit::PanelFit> = std::cell::RefCell::new(Default::default());
+        /// IME composition state of the terminal panel (FR-L31.21): only committed text is sent.
+        static TERMINAL_IME: std::cell::RefCell<crate::terminal_input::ImeInput> = std::cell::RefCell::new(crate::terminal_input::ImeInput::default());
     }
 
-    /// The terminal handle, started on first use. `None` when the editor was not given a server
-    /// URL and a computer to attach to.
+    /// Fits the PTY to the panel on every render (FR-L31.20, #334): the panel's size from the last
+    /// layout, debounced, to [`TerminalHandle::resize`]. A held-back size asks for one more render.
+    // TODO(dioxus-compose#207): dioxus-compose sends no `onresize` (its `convert_resize_data` is "not sent"), so a size
+    // change is seen on the next render (panel drag, output, the wake below), not by an observer.
+    fn fit_terminal(s: &Shared, handle: &TerminalHandle) {
+        use futures_util::FutureExt;
+        let rect = TERM_MOUNT.with(|m| {
+            let m = m.borrow();
+            let r = m.as_ref()?.get_client_rect().now_or_never()?.ok()?;
+            Some((r.size.width as f32, r.size.height as f32))
+        });
+        let step = TERM_FIT.with(|f| f.borrow_mut().step(rect, std::time::Instant::now()));
+        if let Some((cols, rows)) = step.send {
+            handle.resize(cols, rows);
+        }
+        if let Some(after) = step.wake_after {
+            let revision = s.revision;
+            crate::services::services().rt.spawn(async move {
+                tokio::time::sleep(after).await;
+                let mut revision = revision;
+                *revision.write() += 1;
+            });
+        }
+    }
+
+    /// The active terminal tab's attachment (FR-P6, FR-L31.23). The panel lists the folder's
+    /// terminals on first show and reattaches to those the node kept. `None` when the editor was not
+    /// given a server URL and a computer, or the list is not there yet.
     fn terminal_handle(s: &Shared) -> Option<TerminalHandle> {
         if !can_attach(&s.server_url, &s.computer) {
             return None;
         }
-        TERMINAL.with(|t| {
-            let mut slot = t.borrow_mut();
-            if slot.is_none() {
-                let revision = s.revision;
-                let on_change: ChangeCallback = Arc::new(move || {
-                    let mut revision = revision;
-                    *revision.write() += 1;
-                });
-                *slot = Some(terminal_stream::start(&s.server_url, &s.computer, &s.folder, &s.project, Some(on_change)));
-            }
-            slot.clone()
-        })
+        let revision = s.revision;
+        let on_change: ChangeCallback = Arc::new(move || {
+            let mut revision = revision;
+            *revision.write() += 1;
+        });
+        crate::ui::editor_terminals::ensure(&s.server_url, &s.computer, &s.folder, &s.project, on_change);
+        crate::ui::editor_terminals::active_handle()
     }
 
     /// What the terminal panel shows for one state.
@@ -1887,12 +2696,12 @@ pub mod page {
     }
 
     /// The editor can attach only with both a server URL and a computer id.
-    pub(super) fn can_attach(server_url: &str, computer: &str) -> bool {
+    pub(crate) fn can_attach(server_url: &str, computer: &str) -> bool {
         !server_url.trim().is_empty() && !computer.trim().is_empty()
     }
 
     /// Bytes for a key press in the terminal. The Meta key is the app's, not the shell's.
-    pub(super) fn terminal_input(name: &str, ctrl: bool, alt: bool, shift: bool, meta: bool) -> Option<Vec<u8>> {
+    pub(crate) fn terminal_input(name: &str, ctrl: bool, alt: bool, shift: bool, meta: bool) -> Option<Vec<u8>> {
         if meta {
             return None;
         }
@@ -1911,33 +2720,156 @@ pub mod page {
         !state.controlled_by_other()
     }
 
-    fn terminal_body(s: &Shared) -> Element {
-        let Some(handle) = terminal_handle(s) else {
-            return rsx! { div { class: "ed-term", role: "log", "aria-label": "터미널 출력", style: "color:var(--muted);", "터미널은 서버에 연결했을 때만 사용할 수 있습니다. 이 창에는 서버 주소나 컴퓨터가 없습니다." } };
+    /// The terminal tab strip (FR-L31.23): one tab per terminal of the folder with switch, rename
+    /// (double-click) and kill (trash), and + for a new one, as in Code-OSS's terminal tabs.
+    fn terminal_strip(s: &Shared) -> Element {
+        let revision = s.revision;
+        let bump = move || {
+            let mut revision = revision;
+            *revision.write() += 1;
         };
+        strip_of(terms::view(), bump)
+    }
+
+    /// The strip for one [`terms::StripView`]. The + sits outside the scrolling tab list, after it,
+    /// so it stays visible in every state as in Code-OSS (#799); inside the scrolling list the
+    /// renderer drew it only while a rename field was open.
+    /// A terminal tab's width in px from its label (`.ed-tsub>button`: 12 px text, 12 px padding each
+    /// side, 1 px border, 14 px icon, 18 px buttons with -6 px end margin, 6 px gaps), at most 240.
+    pub(super) fn tab_width(label: &str, on: bool) -> u32 {
+        let text: u32 = label.chars().map(|c| if c.is_ascii() { 7 } else { 12 }).sum();
+        let buttons = if on { 2 * (6 + 18) } else { 6 + 18 } - 6;
+        (2 + 24 + 14 + 6 + text + buttons).min(240)
+    }
+
+    pub(super) fn strip_of(view: Option<terms::StripView>, bump: impl Fn() + Copy + 'static) -> Element {
+        let (tabs, active, renaming, error) = match view {
+            Some(v) => (v.tabs, v.active, v.renaming, v.error),
+            None => (Vec::new(), None, None, None),
+        };
+        rsx! {
+            div { class: "ed-tstrip",
+            div { class: "ed-tsub", role: "tablist", "aria-label": "터미널",
+                for (id, label) in tabs {
+                    if renaming.as_ref().is_some_and(|(r, _)| *r == id) {
+                        input { key: "{id}", class: "ed-tren", "aria-label": "터미널 이름", value: renaming.as_ref().map(|(_, t)| t.clone()).unwrap_or_default(),
+                            oninput: move |event| { terms::rename_text(event.value()); bump(); },
+                            onkeydown: move |event| {
+                                match event.key() {
+                                    Key::Enter => { terms::end_rename(true); bump(); }
+                                    Key::Escape => { terms::end_rename(false); bump(); }
+                                    _ => {}
+                                }
+                            },
+                        }
+                    } else {
+                        {
+                            let on = active.as_deref() == Some(id.as_str());
+                            let (sel, ren, del, f2, pen) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
+                            rsx! {
+                                button { key: "{id}", class: if on { "on" } else { "" }, role: "tab", "aria-selected": if on { "true" } else { "false" }, title: "{label}",
+                                    // TODO(dioxus-compose#227): no max-content width, so an inactive tab
+                                    // collapsed to its padding in the scrolling list; its width is set here.
+                                    style: "flex:none; width:{tab_width(&label, on)}px;",
+                                    onclick: move |_| { terms::select(&sel); bump(); },
+                                    // F2 and the pencil button rename until a real double-click arrives.
+                                    // v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
+                                    ondoubleclick: move |_| { terms::begin_rename(&ren); bump(); },
+                                    onkeydown: move |event| {
+                                        let m = event.modifiers();
+                                        let name = key_name(&event.key());
+                                        if crate::terminal_list::tab_key_action(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META)).is_some() {
+                                            event.stop_propagation();
+                                            event.prevent_default();
+                                            terms::begin_rename(&f2);
+                                            bump();
+                                        }
+                                    },
+                                    {icon_px("code", 14)} "{label}"
+                                    if on {
+                                        span { class: "ed-ib", role: "button", title: "이름 바꾸기", "aria-label": "이름 바꾸기: {label}", tabindex: "-1",
+                                            onclick: move |event| { event.stop_propagation(); terms::begin_rename(&pen); bump(); },
+                                            {icon_px("edit", 12)}
+                                        }
+                                    }
+                                    span { class: "ed-ib", role: "button", title: "터미널 종료", "aria-label": "터미널 종료: {label}", tabindex: "-1",
+                                        onclick: move |event| { event.stop_propagation(); terms::kill(&del); bump(); },
+                                        {icon_px("trash", 12)}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+                button { class: "ed-ib ed-tnew", title: "새 터미널", "aria-label": "새 터미널", onclick: move |_| { terms::new_terminal(); bump(); }, {icon("plus")} }
+            }
+            if let Some(error) = error {
+                div { class: "tl", style: "padding:0 var(--sp3); color:var(--c-red);", "{error}" }
+            }
+        }
+    }
+
+    fn terminal_body(s: &Shared) -> Element {
+        if !can_attach(&s.server_url, &s.computer) {
+            return rsx! { div { class: "ed-term", role: "log", "aria-label": "터미널 출력", style: "color:var(--muted);", "터미널은 서버에 연결했을 때만 사용할 수 있습니다. 이 창에는 서버 주소나 컴퓨터가 없습니다." } };
+        }
+        let handle = terminal_handle(s);
+        let strip = terminal_strip(s);
+        let Some(handle) = handle else {
+            let text = match terms::view().map(|v| v.load) {
+                Some(terms::Load::Failed(e)) => e,
+                Some(terms::Load::Ready) => "열린 터미널이 없습니다. +를 눌러 새 터미널을 엽니다.".to_string(),
+                _ => "터미널 목록을 불러오는 중입니다.".to_string(),
+            };
+            return rsx! { {strip} div { class: "ed-term", role: "log", "aria-label": "터미널 출력", style: "color:var(--muted);", "{text}" } };
+        };
+        fit_terminal(s, &handle);
         let view = panel_view(&handle.snapshot());
         let key_handle = handle.clone();
+        let ime_handle = handle.clone();
         let control_handle = handle.clone();
         let offer_control = offers_take_control(&handle.snapshot());
         let offer_reconnect = handle.snapshot().needs_reconnect();
         let revision = s.revision;
-        let computer = if s.computer.is_empty() { "로컬".to_string() } else { s.computer.clone() };
         rsx! {
-            div { class: "ed-tsub",
-                button { class: "on", "aria-pressed": "true", {icon_px("code", 14)} "{computer}" }
-                button { class: "ed-ib", title: "새 터미널", "aria-label": "새 터미널", onclick: move |_| notice(format!("새 터미널: {SOON}")), {icon("plus")} }
-            }
+            {strip}
             div { class: "ed-term", role: "log", "aria-label": "터미널 출력", tabindex: "0", style: "outline:none;",
-                // TODO(#335): paste and IME. Only key presses are forwarded; pasted and composed text is not.
+                onmounted: move |event| TERM_MOUNT.with(|m| *m.borrow_mut() = Some(event.data())),
+                // FR-L31.21: paste chord and IME composition (`crate::terminal_input`).
                 onkeydown: move |event| {
                     let m = event.modifiers();
                     let name = key_name(&event.key());
+                    if TERMINAL_IME.with(|ime| ime.borrow().drops_key(&name, event.is_composing())) {
+                        return;
+                    }
+                    if crate::terminal_input::is_paste_chord(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META)) {
+                        event.stop_propagation();
+                        event.prevent_default();
+                        // v0.0.7: #546 fixed (`compose_rust::clipboard::read_text`); workaround kept
+                        // until checked on a display (the read has to answer inside the dioxus-compose
+                        // window). Then read the clipboard, ask with `needs_multiline_warning` and send
+                        // `paste_bytes(text, state.bracketed_paste)`. Until then the chord only says why
+                        // nothing is pasted.
+                        notice(crate::terminal_input::PASTE_UNAVAILABLE);
+                        return;
+                    }
                     let bytes = terminal_input(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META));
                     let Some(bytes) = bytes else { return };
                     event.stop_propagation();
                     event.prevent_default();
                     if sends_input(&key_handle.snapshot()) {
                         key_handle.send_input(&bytes);
+                    }
+                },
+                // TODO(dioxus-compose#205): the live renderer does not route paste and IME composition
+                // events yet; these handlers run in `HtmlDom` tests but not yet on screen.
+                oncompositionstart: move |_| TERMINAL_IME.with(|ime| ime.borrow_mut().start()),
+                oncompositionupdate: move |event| TERMINAL_IME.with(|ime| ime.borrow_mut().update(&event.data().data())),
+                oncompositionend: move |event| {
+                    let bytes = TERMINAL_IME.with(|ime| ime.borrow_mut().end(&event.data().data()));
+                    if !bytes.is_empty() && sends_input(&ime_handle.snapshot()) {
+                        ime_handle.send_input(&bytes);
                     }
                 },
                 if let Some(banner) = view.banner {
@@ -1964,7 +2896,7 @@ pub mod page {
                     div { style: "display:flex; margin-top:var(--sp2);",
                         button { class: "ed-pj", style: "border:1px solid var(--line);",
                             onclick: move |_| {
-                                TERMINAL.with(|t| *t.borrow_mut() = None);
+                                terms::reattach_active();
                                 let mut revision = revision;
                                 *revision.write() += 1;
                             }, "다시 연결" }
@@ -2181,11 +3113,29 @@ pub mod page {
                     {problems_body(s, problem_rows)}
                 } else if w == ToolWindow::Output {
                     {output_body(s)}
+                } else if w == ToolWindow::Run {
+                    {crate::ui::editor_tasks::view::body(s)}
                 } else {
                     div { class: "ed-term", style: "color:var(--muted);", "{body}" }
                 }
             }
         }
+    }
+
+    /// The blame item's text, hover and accessible name for `line` (from 1) of the open file, or
+    /// `None` while there is nothing to show (FR-L31.8).
+    fn blame_item(s: &Shared, current: Option<&str>, line: usize) -> Option<(String, String, String)> {
+        let abs = current?;
+        let (dirty, version, text) = {
+            let bridge = s.bridge.borrow();
+            let doc = bridge.active_document().filter(|d| d.uri.path == abs)?;
+            (doc.dirty, doc.version, doc.dirty.then(|| doc.text.clone()))
+        };
+        let unsaved = if dirty { text.as_deref().map(|t| (version, t)) } else { None };
+        let b = s.scm.blame.item(&s.folder, abs, u32::try_from(line).ok()?, unsaved)?;
+        let now = crate::ui::editor_blame::now_secs();
+        use crate::ui::editor_blame::{aria_text, hover_text, status_text};
+        Some((status_text(&b, now), hover_text(&b, now), aria_text(&b, now)))
     }
 
     fn status_bar(s: &Shared, agent_state: &str, branch: &str, current: Option<&str>, line: usize, col: usize, tab_width: u32) -> Element {
@@ -2203,11 +3153,16 @@ pub mod page {
         let (eol_s, enc_s, lang_s) = (s.clone(), s.clone(), s.clone());
         let goto_s = s.clone();
         let git_s = s.clone();
+        // FR-L31.8: the cursor line's blame, as Code-OSS's git.blame.statusBarItem.
+        let (blame_text, blame_hover, blame_aria) = blame_item(s, current, line).unwrap_or_default();
         rsx! {
             footer { class: "ed-status", role: "group", "aria-label": "상태 표시줄",
                 span { class: "ed-sbi crumbs-s", "{crumbs}" }
                 div { class: "spacer" }
                 span { class: "ed-sbi", span { class: "{dot}" } "{agent}" }
+                if !blame_text.is_empty() {
+                    span { class: "ed-sbi hide-md", title: "{blame_hover}", "aria-label": "{blame_aria}", {icon("commit")} "{blame_text}" }
+                }
                 if has_file {
                     button { class: "ed-sbi", title: "줄/열로 이동", "aria-label": "줄/열로 이동", onclick: move |_| run_action(&goto_s, Action::GotoLine), "{position}" }
                     button { class: "ed-sbi hide-md", title: "줄 끝 시퀀스 선택", "aria-label": "줄 끝 시퀀스 선택: {eol_t}",
@@ -2223,6 +3178,10 @@ pub mod page {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "editor_terminal_strip_tests.rs"]
+mod terminal_strip_tests;
 
 #[cfg(test)]
 #[path = "editor_workbench_glue_tests.rs"]

@@ -27,6 +27,7 @@ import dev.darkpyonix.intellij.manager.ManagerClient
 import dev.darkpyonix.intellij.manager.ManagerException
 import dev.darkpyonix.intellij.protocol.Actor
 import dev.darkpyonix.intellij.protocol.ApplyResult
+import dev.darkpyonix.intellij.protocol.Capabilities
 import dev.darkpyonix.intellij.protocol.CellCursor
 import dev.darkpyonix.intellij.protocol.CellLock
 import dev.darkpyonix.intellij.protocol.CellMatcher
@@ -73,9 +74,9 @@ class NotebookSession(
     var kernelId: String? = null
         private set
 
-    /** Permission of our token (FR-A3, FR-S8); null until connected. */
+    /** Capabilities of our token (FR-A3, FR-S8); null until connected. */
     @Volatile
-    var permission: String? = null
+    var capabilities: Capabilities? = null
         private set
 
     @Volatile
@@ -139,8 +140,8 @@ class NotebookSession(
     }
 
     val isConnected: Boolean get() = client != null && kernelId != null
-    val canEdit: Boolean get() = permission == "admin" || permission == "editor"
-    val canRun: Boolean get() = canEdit || permission == "viewer3"
+    val canEdit: Boolean get() = capabilities?.canEdit == true
+    val canRun: Boolean get() = capabilities?.canRun == true
 
     fun addListener(parent: Disposable, listener: () -> Unit) {
         listeners += listener
@@ -201,7 +202,9 @@ class NotebookSession(
     }
 
     private fun connect(startKernel: Boolean): Boolean {
-        val c = service.managerClient(spawn = startKernel) ?: run {
+        // Without registry files, attaching on open also needs a manager: spawn one (FR-C1).
+        // It only looks for the file's kernel; starting a kernel still waits for a run.
+        val c = service.managerClient(spawn = true) ?: run {
             setStatus("No DarkPyonix manager running")
             return false
         }
@@ -218,8 +221,8 @@ class NotebookSession(
             }
             k
         }
-        permission = try {
-            c.managerInfo().str("permission")
+        capabilities = try {
+            Capabilities.fromManagerInfo(c.managerInfo())
         } catch (e: ManagerException) {
             null
         }
@@ -514,7 +517,7 @@ class NotebookSession(
                 )
             }
             e.status == 403 -> {
-                permission = permission?.takeIf { it != "editor" && it != "admin" }
+                capabilities = capabilities?.without("edit")
                 service.notify("Your token cannot edit this notebook (FR-S8).", NotificationType.WARNING)
             }
             else -> setStatus("Edit refused: ${e.message}")
@@ -652,7 +655,7 @@ class NotebookSession(
         val c = client ?: return
         val kid = kernelId ?: return
         if (!canRun) {
-            service.notify("Your token cannot run cells (needs viewer3 or above).", NotificationType.WARNING)
+            service.notify("Your token cannot run cells (needs the execute capability).", NotificationType.WARNING)
             return
         }
         try {

@@ -12,7 +12,8 @@
 //!
 //! `EMBER_TRANSPORT=1` turns it on (off by default, since binding contacts relay servers);
 //! `EMBER_RELAY_URL` picks the relays; `EMBER_TRANSPORT_LISTEN` fixes the address it binds
-//! ([`LISTEN_ENV`]).
+//! ([`LISTEN_ENV`]). With the relay role on, a device that has only the line [`device_line`]
+//! prints (peer id plus this server's relay) reaches the server through that relay (`FR-N9`, #898).
 
 use std::future::Future;
 use std::io;
@@ -98,6 +99,57 @@ pub fn device_address_line(listen: Option<SocketAddr>, local: &PeerAddr) -> Opti
             listen.port()
         ),
     })
+}
+
+/// Whether `cfg` makes this endpoint the fleet's relay: the letify backend with a relay address.
+pub fn runs_relay_role(cfg: &TransportConfig) -> bool {
+    cfg.backend == BackendKind::Letify && cfg.letify.relay_listen.is_some()
+}
+
+/// The port of this server's own relay in `local` (`letify://<our peer id>@<ip>:<port>`), `None`
+/// when `local` names no relay of ours (another server's relay from `EMBER_RELAY_URL`).
+fn own_relay_port(local: &PeerAddr) -> Option<u16> {
+    let own = format!("letify://{}@", local.peer);
+    local.relays.iter().find_map(|url| {
+        let (_, port) = url.strip_prefix(&own)?.trim_end_matches('/').rsplit_once(':')?;
+        port.parse::<u16>().ok()
+    })
+}
+
+/// The line a person pastes into the app's address field (SPEC `FR-N9`, #863, #898).
+///
+/// With the relay role on (`relay_role`, [`runs_relay_role`]) it names this server's own relay on
+/// its fixed port, through which a device reaches the server with no direct address and no hub:
+/// `ember server device address: <peer id> relay letify://<peer id>@<host>:<relay port>`, and
+/// with a fixed [`LISTEN_ENV`] as well, `<peer id>@<host>:<port> relay letify://...`. Without the
+/// relay role it is [`device_address_line`]. `<host>` is the bind IP of [`LISTEN_ENV`] when it is
+/// not unspecified, else the first address the transport advertises, else [`HOST_PLACEHOLDER`]
+/// with a note to replace it. The relay's host may be replaced by a DNS name; the direct address
+/// must stay an IP.
+pub fn device_line(listen: Option<SocketAddr>, relay_role: bool, local: &PeerAddr) -> Option<String> {
+    let Some(relay_port) = relay_role.then(|| own_relay_port(local)).flatten() else {
+        return device_address_line(listen, local);
+    };
+    let me = local.peer;
+    let advertised = local.direct.iter().find(|a| !a.ip().is_unspecified());
+    let fixed_ip = listen.map(|l| l.ip()).filter(|ip| !ip.is_unspecified());
+    let relay_host = match fixed_ip.or(advertised.map(|a| a.ip())) {
+        Some(ip) => SocketAddr::new(ip, relay_port).to_string(),
+        None => format!("{HOST_PLACEHOLDER}:{relay_port}"),
+    };
+    let direct = listen.map(|l| match (fixed_ip, advertised) {
+        (Some(_), _) => l.to_string(),
+        (None, Some(a)) => a.to_string(),
+        (None, None) => format!("{HOST_PLACEHOLDER}:{}", l.port()),
+    });
+    let mut line = match direct {
+        Some(d) => format!("{DEVICE_ADDRESS_PREFIX}{me}@{d} relay letify://{me}@{relay_host}"),
+        None => format!("{DEVICE_ADDRESS_PREFIX}{me} relay letify://{me}@{relay_host}"),
+    };
+    if line.contains(HOST_PLACEHOLDER) {
+        line.push_str(&format!(" (replace {HOST_PLACEHOLDER} with this computer's address or name)"));
+    }
+    Some(line)
 }
 
 /// The relay port from [`RELAY_PORT_ENV`], or [`DEFAULT_RELAY_PORT`].
@@ -273,5 +325,62 @@ mod tests {
         // Nothing known: the placeholder and a note.
         let line = device_address_line(Some(any), &local).unwrap();
         assert!(line.starts_with(&format!("{DEVICE_ADDRESS_PREFIX}{me}@<host>:7444 (replace <host> ")), "{line}");
+    }
+
+    #[test]
+    fn fr_n9_device_line_names_the_own_relay_when_the_relay_role_is_on() {
+        let me = me();
+        let local = PeerAddr {
+            peer: me,
+            relays: vec![format!("letify://{me}@203.0.113.4:7443")],
+            direct: vec!["203.0.113.4:51234".parse().unwrap()],
+        };
+        // No fixed transport port: the peer id and the relay, never the random direct port.
+        assert_eq!(
+            device_line(None, true, &local).unwrap(),
+            format!("ember server device address: {me} relay letify://{me}@203.0.113.4:7443")
+        );
+        // A fixed transport port too: the direct address first, then the relay.
+        let any: SocketAddr = "0.0.0.0:7444".parse().unwrap();
+        assert_eq!(
+            device_line(Some(any), true, &local).unwrap(),
+            format!("{DEVICE_ADDRESS_PREFIX}{me}@203.0.113.4:51234 relay letify://{me}@203.0.113.4:7443")
+        );
+        let lan: SocketAddr = "192.168.0.10:7444".parse().unwrap();
+        assert_eq!(
+            device_line(Some(lan), true, &local).unwrap(),
+            format!("{DEVICE_ADDRESS_PREFIX}{me}@192.168.0.10:7444 relay letify://{me}@192.168.0.10:7443")
+        );
+        let v6 = PeerAddr { direct: vec!["[2001:db8::1]:5000".parse().unwrap()], ..local.clone() };
+        assert!(device_line(None, true, &v6).unwrap().ends_with(&format!("letify://{me}@[2001:db8::1]:7443")));
+        // Without the relay role, or with another server's relay, it is the #863 line.
+        assert_eq!(device_line(None, false, &local), None);
+        assert_eq!(device_line(Some(lan), false, &local), device_address_line(Some(lan), &local));
+        let other = SecretKey::from_bytes([12; 32]).peer_id();
+        let elsewhere = PeerAddr { relays: vec![format!("letify://{other}@relay.example:7443")], ..local.clone() };
+        assert_eq!(device_line(None, true, &elsewhere), None);
+    }
+
+    #[test]
+    fn fr_n9_device_line_without_a_known_address_keeps_a_placeholder() {
+        let me = me();
+        // Bound on 0.0.0.0 with nothing advertised or observed: local_addr names the relay on
+        // 127.0.0.1 and no direct address.
+        let local = PeerAddr { peer: me, relays: vec![format!("letify://{me}@127.0.0.1:7443")], direct: vec![] };
+        let line = device_line(None, true, &local).unwrap();
+        assert_eq!(
+            line,
+            format!("{DEVICE_ADDRESS_PREFIX}{me} relay letify://{me}@<host>:7443 (replace <host> with this computer's address or name)")
+        );
+        let line = device_line(Some("0.0.0.0:7444".parse().unwrap()), true, &local).unwrap();
+        assert!(line.starts_with(&format!("{DEVICE_ADDRESS_PREFIX}{me}@<host>:7444 relay letify://{me}@<host>:7443 (replace ")), "{line}");
+    }
+
+    #[test]
+    fn fr_n9_relay_role_follows_the_backend_and_the_relay_address() {
+        let cfg = TransportConfig::new(SecretKey::from_bytes([13; 32])).backend(BackendKind::Letify);
+        assert!(!runs_relay_role(&cfg));
+        let cfg = with_main_server_roles(cfg, 7443);
+        assert!(runs_relay_role(&cfg));
     }
 }

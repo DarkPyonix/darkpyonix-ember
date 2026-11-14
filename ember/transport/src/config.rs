@@ -106,7 +106,9 @@ pub struct LetifyConfig {
     /// and the observed public address.
     pub advertise: Vec<SocketAddr>,
     /// The rendezvous channel. `None` uses the hub's pkarr mailbox when a hub or
-    /// [`LetifyConfig::pkarr`] is configured, and otherwise no rendezvous (so no relayed path).
+    /// [`LetifyConfig::pkarr`] is configured, and otherwise no rendezvous: then the only relayed
+    /// path is to the relay's own peer, the main server, which waits there for each device it
+    /// allows (SPEC `FR-N9`, #898).
     pub signal: Option<Arc<dyn SignalChannel>>,
     /// The pkarr directory. `None` uses [`TransportConfig::hub`] over HTTP.
     pub pkarr: Option<Arc<dyn PkarrStore>>,

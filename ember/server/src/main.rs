@@ -76,7 +76,10 @@ use ember_server::store::Store;
 ///   `0.0.0.0:<port>` is fine (D37 covers the HTTP listeners). A bad value is a startup error.
 ///   When set, the server also prints `ember server device address: <peer id>@<host>:<port>`
 ///   for the app (FR-N9, #863)
-/// - `EMBER_SERVER_RELAY_PORT`: letify relay TCP and QAD UDP port (default 7443)
+/// - `EMBER_SERVER_RELAY_PORT`: letify relay TCP and QAD UDP port (default 7443). With the relay
+///   role on, the server prints `ember server device address: <peer id> relay
+///   letify://<peer id>@<host>:<port>`: a device with only that line reaches the server through
+///   this TCP port, the one port to forward (FR-N9, #898)
 /// - `EMBER_SERVER_RELAY=off`: disable the automatic letify relay and QAD roles
 /// - `EMBER_LETIFY_RELAY_LISTEN`, `EMBER_LETIFY_QAD_LISTEN`: override role addresses
 /// - `EMBER_HUB_URL`: the darkpyonix.dev hub (default `https://api.darkpyonix.dev`; `off` disables).
@@ -246,8 +249,9 @@ async fn serve_main() -> anyhow::Result<()> {
         };
         // A bad EMBER_TRANSPORT_LISTEN stops the start here (#863).
         let listen = server_transport::listen_from_env()?;
-        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), registered, token, device_token)?)
-            .await?;
+        let cfg = server_transport::config_with_hub(key, hub_config.as_ref(), registered, token, device_token)?;
+        let relay_role = server_transport::runs_relay_role(&cfg);
+        let t = Transport::bind(cfg).await?;
         if let Some(h) = &hub {
             h.attach_transport(t.clone());
             let _watch = h.spawn_watch(ember_server::hub::WATCH_PERIOD);
@@ -268,8 +272,9 @@ async fn serve_main() -> anyhow::Result<()> {
         // Printed (not only logged): the peer id goes into each node's allowed peers.
         println!("ember server peer id: {}", t.peer_id());
         println!("ember server peer addr: {}", serde_json::to_string(&t.local_addr())?);
-        // With a fixed transport port, the address a device keeps across restarts (#863).
-        if let Some(line) = server_transport::device_address_line(listen, &t.local_addr()) {
+        // The address a device keeps across restarts: this server's relay (#898), and with a fixed
+        // transport port the direct address too (#863).
+        if let Some(line) = server_transport::device_line(listen, relay_role, &t.local_addr()) {
             println!("{line}");
         }
         Some(ServerTransport::new(t))

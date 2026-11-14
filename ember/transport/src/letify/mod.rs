@@ -13,6 +13,11 @@
 //! - **Relay** (`FR-N2`): the main server runs the relay role (`LetifyConfig::relay_listen`);
 //!   every other endpoint registers it as `letify://<server peer id>@host:port`. Two endpoints
 //!   agree on a pairing token through the rendezvous ([`pkarr`]) and both dial the relay.
+//! - **Standing request** (`FR-N9`, #898): the endpoint that runs the relay role keeps one request
+//!   waiting at its own relay for every peer it was told to allow, under [`STANDING_TOKEN`]. A
+//!   dialer with no rendezvous that dials the relay's own peer id asks the relay for it under the
+//!   same token, so a device that knows only `letify://<server peer id>@host:port` reaches the
+//!   server. letify-link's relay only pairs two requests; it never hands one to a local acceptor.
 //! - **Address observation**: the main server runs a `QadResponder`; other endpoints ask it for
 //!   their public address and publish it in their record.
 //! - **Revocation** (`FR-N3`): [`crate::PeerGate`] calls `revoke_peer`, which revokes the key in
@@ -33,7 +38,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -71,6 +76,21 @@ pub const LETIFY_TRANSPORT_ID: &str = record::DEFAULT_TRANSPORT;
 const MAX_MEETINGS: usize = 8;
 /// At most this many candidate TCP addresses are dialed for one peer.
 const MAX_TCP_CANDIDATES: usize = 8;
+
+/// The pairing token of a standing request (SPEC `FR-N9`, #898): the main server waits at its own
+/// relay for each allowed device under this token, and a device with no rendezvous asks the relay
+/// for the server under it. It is public and fixed. It only matches the two requests: the relay
+/// authenticates both ends by their node keys and pairs them only when each names the other, and
+/// the session on the splice runs its own handshake.
+const STANDING_TOKEN: [u8; 16] = *b"ember-standing-1";
+/// At most this many standing requests are kept. letify-link's relay lets one client hold 64
+/// waiting requests (`max_pending`); the rest is left for the server's own relay offers.
+const MAX_STANDING: usize = 48;
+/// At most this many standing requests start their relay handshake at once, each for this long.
+/// The relay holds at most four unauthenticated connections from one address
+/// (`max_preauth_per_ip`), and every standing request comes from loopback.
+const STANDING_STARTS: usize = 2;
+const STANDING_HEAD_START: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Via {
@@ -140,6 +160,10 @@ struct Inner {
     version: Mutex<u32>,
     power: Mutex<PowerState>,
     meetings: Arc<Semaphore>,
+    /// The standing requests at our own relay, by the canonical id of the peer each waits for
+    /// (`FR-N9`, #898). Empty unless this endpoint runs the relay role.
+    standing: Mutex<HashMap<NodeId, JoinHandle<()>>>,
+    standing_starts: Arc<Semaphore>,
     closed: AtomicBool,
     bg: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -153,6 +177,9 @@ impl Drop for LetifyBackend {
     fn drop(&mut self) {
         self.inner.closed.store(true, Ordering::SeqCst);
         for h in self.inner.bg.lock().unwrap().drain(..) {
+            h.abort();
+        }
+        for (_, h) in self.inner.standing.lock().unwrap().drain() {
             h.abort();
         }
         for list in self.inner.links.lock().unwrap().values() {
@@ -262,6 +289,8 @@ impl LetifyBackend {
             version: Mutex::new(record::unix_now()),
             power: Mutex::new(PowerState::Foreground),
             meetings: Arc::new(Semaphore::new(MAX_MEETINGS)),
+            standing: Mutex::new(HashMap::new()),
+            standing_starts: Arc::new(Semaphore::new(STANDING_STARTS)),
             closed: AtomicBool::new(false),
             bg: Mutex::new(Vec::new()),
         });
@@ -597,6 +626,13 @@ impl Inner {
 
         let mut candidates: Vec<Candidate> = tcp.iter().map(|a| Candidate::tcp(format!("tcp:{a}"), *a)).collect();
         let relayed = match (&relay, &signal) {
+            // The peer is the relay itself (the main server) and there is no rendezvous to agree
+            // on a token through: the server keeps a request for every device it allows waiting
+            // at its own relay under the standing token (FR-N9, #898).
+            (Some(relay), None) if relay.node.canonical() == node.canonical() => {
+                candidates.push(standing_candidate(self.identity.clone(), relay, node));
+                true
+            }
             (Some(relay), Some(signal)) => {
                 candidates.push(relay_candidate(self.identity.clone(), relay, signal.clone(), node));
                 true
@@ -660,6 +696,13 @@ impl Inner {
         for h in bg {
             let _ = h.await;
         }
+        let standing: Vec<JoinHandle<()>> = self.standing.lock().unwrap().drain().map(|(_, h)| h).collect();
+        for h in &standing {
+            h.abort();
+        }
+        for h in standing {
+            let _ = h.await;
+        }
         let links = self.all_links();
         futures::future::join_all(links.iter().map(|l| l.close_local(None))).await;
         *self.pkarr.lock().unwrap() = None;
@@ -675,6 +718,9 @@ impl Inner {
         if let Some(h) = &self.relay_handle {
             h.revoke(node);
         }
+        if let Some(h) = self.standing.lock().unwrap().remove(&node.canonical()) {
+            h.abort();
+        }
         // Sessions we started to that peer (or to an alias of its key): close, and do not redial.
         let class = node.canonical();
         let Ok(handle) = tokio::runtime::Handle::try_current() else { return };
@@ -685,7 +731,7 @@ impl Inner {
         }
     }
 
-    fn allow(&self, peer: PeerId) {
+    fn allow(self: &Arc<Self>, peer: PeerId) {
         let node = node_of(peer);
         self.admitted.lock().unwrap().get_or_insert_with(Default::default).insert(node.canonical());
         self.acceptor.reinstate(node);
@@ -693,6 +739,88 @@ impl Inner {
             h.allow(node);
         }
         self.watch(&[peer]);
+        self.start_standing(node);
+    }
+
+    /// Keeps a request for `node` waiting at this endpoint's own relay (the main server only), so
+    /// a device that has the relay URL and no rendezvous is paired with us (`FR-N9`, #898). Does
+    /// nothing without the relay role, outside a runtime, for ourselves, or when one is running.
+    fn start_standing(self: &Arc<Self>, node: NodeId) {
+        let Some(own) = self.own_relay.clone() else { return };
+        if self.closed.load(Ordering::SeqCst) || node.canonical() == self.identity.node_id().canonical() {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else { return };
+        let mut standing = self.standing.lock().unwrap();
+        standing.retain(|_, h| !h.is_finished());
+        if standing.contains_key(&node.canonical()) {
+            return;
+        }
+        if standing.len() >= MAX_STANDING {
+            tracing::warn!(
+                "{MAX_STANDING} devices already wait at this server's relay; one more allowed device is reachable only by a direct address or through the hub"
+            );
+            return;
+        }
+        let task = handle.spawn(standing_loop(Arc::downgrade(self), own, node, self.standing_starts.clone()));
+        standing.insert(node.canonical(), task);
+    }
+}
+
+/// The path to the relay's own peer with no rendezvous: ask the relay for it under the standing
+/// token, where the peer (the main server) keeps a request waiting for each device it allows.
+fn standing_candidate(identity: Identity, relay: &RelayTarget, peer: NodeId) -> Candidate {
+    RelayDialer::new(relay.addr.clone(), relay.node, identity).candidate(
+        format!("relay:{}", relay.addr),
+        peer,
+        STANDING_TOKEN,
+    )
+}
+
+/// One standing request, posted again after every pairing and every refusal (the relay refuses a
+/// request whose counterpart did not arrive within its pair timeout, 30 s). A request left at the
+/// relay by a device that gave up is paired with ours and fails in the acceptor, which also
+/// clears it. Ends when the transport is dropped or closed; `revoke` aborts it.
+async fn standing_loop(inner: Weak<Inner>, relay: RelayTarget, peer: NodeId, starts: Arc<Semaphore>) {
+    let dialer = match inner.upgrade() {
+        Some(i) => RelayDialer::new(relay.addr.clone(), relay.node, i.identity.clone()),
+        None => return,
+    };
+    loop {
+        match inner.upgrade() {
+            Some(i) if !i.closed.load(Ordering::SeqCst) => {}
+            _ => return,
+        }
+        let dial = dialer.connect(peer, STANDING_TOKEN);
+        tokio::pin!(dial);
+        // The handshake's share of the dial runs under a permit; the wait for the device does not.
+        let early = {
+            let _permit = starts.acquire().await;
+            tokio::time::timeout(STANDING_HEAD_START, &mut dial).await.ok()
+        };
+        let paired = match early {
+            Some(done) => done,
+            None => dial.await,
+        };
+        match paired {
+            Ok(tcp) => {
+                let Some(inner) = inner.upgrade() else { return };
+                tokio::spawn(async move {
+                    match inner.acceptor.accept(tcp).await {
+                        Ok(accepted) => inner.on_accepted(accepted, Via::Relay),
+                        Err(e) => tracing::debug!(error = %e, "a connection paired at our own relay was refused"),
+                    }
+                });
+            }
+            // The relay's own refusal: nobody came within its pair timeout. Ask again.
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "waiting at our own relay failed");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
     }
 }
 

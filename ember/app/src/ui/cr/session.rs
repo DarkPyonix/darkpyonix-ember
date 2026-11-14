@@ -1181,6 +1181,16 @@ pub fn PaneTranscript(session: &str, agent: &str) {
     let agent_name = agent.to_string();
     let expanded = remember_with_key(sid.clone(), || mutable_state_of(HashSet::<String>::new()));
     let answering = remember_with_key(sid.clone(), || mutable_state_of(HashSet::<String>::new()));
+    // The name of the member's computer, for the approval card's title (#536: a pane's card
+    // read 이 컴퓨터에서 because no name was passed).
+    let computer = remember_with_key(format!("{sid}:pane-computer"), || mutable_state_of(None::<String>));
+    {
+        let (sid_load, computer_load) = (sid.clone(), computer.clone());
+        launched_effect(sid.clone(), move || async move {
+            load_session_computer(sid_load, computer_load);
+        });
+    }
+    let computer_name = computer.get();
 
     let items = {
         let _ = ui.live.transcripts.get();
@@ -1225,6 +1235,7 @@ pub fn PaneTranscript(session: &str, agent: &str) {
                 let agent_c = agent_name.clone();
                 let exp_c = expanded.clone();
                 let ans_c = answering.clone();
+                let computer_c = computer_name.clone();
                 cu::ScrollColumn()
                     .scroll_state(&scroll)
                     .modifier(Modifier::new().fill_max_width().fill_max_height())
@@ -1234,7 +1245,7 @@ pub fn PaneTranscript(session: &str, agent: &str) {
                             .modifier(Modifier::new().fill_max_width().padding(SP[1]))
                             .content(move || {
                                 for item in items_c.iter() {
-                                    TranscriptRow(&sid_c, &agent_c, item, &exp_c, &ans_c, None);
+                                    TranscriptRow(&sid_c, &agent_c, item, &exp_c, &ans_c, computer_c.as_deref(), true);
                                 }
                                 cu::Spacer().modifier(Modifier::new().height(12.0));
                             });

@@ -10,8 +10,9 @@
 //! extension is installed once per computer and shared by that computer's folders (SPEC
 //! FR-W4, #459). On the server the data root is `EMBER_OSE_DATA_DIR`, else `<runtime dir>/ose-data`,
 //! where the runtime dir is the data dir's sibling ([`runtime_dir`], FR-A11):
-//! `~/.ember-runtime/ose-data` by default. On a node it is `EMBER_OSE_DATA_DIR`, else
-//! `<state dir>/ose-data`, and the computer id is always [`LOCAL_COMPUTER`].
+//! `~/.ember-runtime/ose-data` by default. On a node it is `<EMBER_OSE_DATA_DIR>/node`, else
+//! `<state dir>/ose-data`, and the computer id is always [`LOCAL_COMPUTER`]. The `node` segment
+//! keeps a node and a server that share one `EMBER_OSE_DATA_DIR` apart ([`node_data_root_from`]).
 //! **Unknown:** how several OSE processes behave on one shared data dir (no lock or race
 //! documentation was found), so nothing here claims it is safe.
 
@@ -220,6 +221,9 @@ pub struct OseManager {
     installing: Arc<Mutex<HashSet<String>>>,
     processes: Arc<Mutex<HashMap<(String, PathBuf), Process>>>,
     terminal_env: TerminalEnv,
+    /// The thread that drops the entries of exited children. `None` for a manager that can start
+    /// nothing ([`OseManager::disabled`]). It ends by itself once the manager is dropped.
+    _reaper: Option<std::thread::JoinHandle<()>>,
 }
 
 /// What the terminals of an OSE window need to reach persistent sessions (SPEC FR-P5, #26).
@@ -645,7 +649,8 @@ impl OseManager {
 
     /// The manager of an `ember-node` daemon (SPEC FR-W4a): the binary is found as on the server
     /// (`EMBER_OSE_SERVER`, else the newest `~/.local/share/dpx-ose-*`), the data root is
-    /// `EMBER_OSE_DATA_DIR`, else `<state dir>/ose-data`. Without either, every start answers why.
+    /// `<EMBER_OSE_DATA_DIR>/node`, else `<state dir>/ose-data` ([`node_data_root_from`]). Without
+    /// either, every start answers why.
     pub fn for_node(state_dir: Option<&Path>) -> Self {
         let root = node_data_root_from(std::env::var_os("EMBER_OSE_DATA_DIR").map(PathBuf::from), state_dir);
         Self::with_root(server_binary(), root)
@@ -653,24 +658,34 @@ impl OseManager {
 
     /// A manager that starts nothing: no binary and no data root. A node built without an OSE
     /// manager (the server's in-process local node, tests) uses it, so its `/ide` routes answer
-    /// 503 instead of starting a second OSE beside the server's own.
+    /// 503 instead of starting a second OSE beside the server's own. It never has a child to
+    /// reap, so it starts no reaper thread (every `Node::new` builds one of these).
     pub fn disabled() -> Self {
-        Self::with_root(None, Err("the OSE is not enabled on this node".to_string()))
+        Self::build(None, Err("the OSE is not enabled on this node".to_string()), false)
     }
 
     fn with_root(binary: Option<PathBuf>, data_root: Result<PathBuf, String>) -> Self {
+        Self::build(binary, data_root, true)
+    }
+
+    /// `reap`: start the thread that drops the entry of a child that exited, once a second, until
+    /// the manager is dropped.
+    fn build(binary: Option<PathBuf>, data_root: Result<PathBuf, String>, reap: bool) -> Self {
         let processes: Arc<Mutex<HashMap<(String, PathBuf), Process>>> = Arc::new(Mutex::new(HashMap::new()));
-        let weak = Arc::downgrade(&processes);
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(1));
-            let Some(processes) = weak.upgrade() else { break };
-            let mut processes = processes.lock().unwrap_or_else(|e| e.into_inner());
-            processes.retain(|_, process| match &mut process.child {
-                Some(child) => matches!(child.try_wait(), Ok(None)),
-                None => true,
-            });
+        let reaper = reap.then(|| {
+            let weak = Arc::downgrade(&processes);
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(1));
+                let Some(processes) = weak.upgrade() else { break };
+                let mut processes = processes.lock().unwrap_or_else(|e| e.into_inner());
+                processes.retain(|_, process| match &mut process.child {
+                    Some(child) => matches!(child.try_wait(), Ok(None)),
+                    None => true,
+                });
+            })
         });
         Self {
+            _reaper: reaper,
             binary,
             data_root,
             install_timeout: INSTALL_TIMEOUT,
@@ -1026,12 +1041,21 @@ impl OseManager {
     }
 }
 
+/// The segment a node adds under an `EMBER_OSE_DATA_DIR` override.
+pub const NODE_DATA_SEGMENT: &str = "node";
+
 /// The OSE data root of a node from its inputs (kept pure so tests need no env): the override
-/// (`EMBER_OSE_DATA_DIR`), else `<state dir>/ose-data`. With neither it is an error: a relative
-/// path under the working directory is never used.
+/// (`EMBER_OSE_DATA_DIR`) with [`NODE_DATA_SEGMENT`] under it, else `<state dir>/ose-data`. With
+/// neither it is an error: a relative path under the working directory is never used.
+///
+/// The segment is there because a server on the same machine reads the same variable and uses
+/// the root itself ([`data_root_from`]): without it both would keep their token files in
+/// `<root>/local/tokens`, and each start-up [`OseManager::sweep_stale_tokens`] would delete the
+/// live files of the other. The server's sweep looks only at `<root>/<computer id>/tokens`, so it
+/// never reaches `<root>/node/local/tokens`; registry computer ids are UUIDs, never `node`.
 pub fn node_data_root_from(ose_dir: Option<PathBuf>, state_dir: Option<&Path>) -> Result<PathBuf, String> {
     if let Some(p) = ose_dir.filter(|p| !p.as_os_str().is_empty()) {
-        return Ok(p);
+        return Ok(p.join(NODE_DATA_SEGMENT));
     }
     state_dir
         .map(|d| d.join("ose-data"))
@@ -1059,7 +1083,8 @@ mod tests {
     fn fr_w4a_node_data_root_is_the_override_or_under_the_state_dir() {
         let state = Path::new("/home/u/.ember/node");
         assert_eq!(node_data_root_from(None, Some(state)), Ok(PathBuf::from("/home/u/.ember/node/ose-data")));
-        assert_eq!(node_data_root_from(Some("/srv/ose".into()), Some(state)), Ok(PathBuf::from("/srv/ose")));
+        assert_eq!(node_data_root_from(Some("/srv/ose".into()), Some(state)), Ok(PathBuf::from("/srv/ose/node")));
+        assert_eq!(node_data_root_from(Some("/srv/ose".into()), None), Ok(PathBuf::from("/srv/ose/node")));
         assert_eq!(node_data_root_from(Some(PathBuf::new()), Some(state)), Ok(PathBuf::from("/home/u/.ember/node/ose-data")));
         assert!(node_data_root_from(None, None).is_err());
     }
@@ -1072,6 +1097,42 @@ mod tests {
         assert_eq!(m.launch_for(LOCAL_COMPUTER, dir.path()), Err(NOT_INSTALLED.to_string()));
         assert_eq!(m.install_extension(LOCAL_COMPUTER, "a.b", None), Err(InstallError::NotInstalled));
         assert!(m.data_root().is_err());
+        // No child can exist, so there is nothing to reap: no thread per `Node::new`.
+        assert!(m._reaper.is_none(), "a disabled manager started a reaper thread");
+        assert!(OseManager::with_data_root(None, dir.path().join("d"))._reaper.is_some());
+    }
+
+    /// FR-W4a (#896): a server and a node that share one `EMBER_OSE_DATA_DIR` keep their token
+    /// files in different directories, and the start-up sweep of one leaves the other's alone.
+    #[test]
+    fn fr_w4a_node_and_server_token_dirs_differ_under_one_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        let server_root = data_root_from(Some(shared.clone()), None, None).unwrap();
+        let node_root = node_data_root_from(Some(shared.clone()), Some(Path::new("/state"))).unwrap();
+        assert_eq!(server_root, shared);
+        assert_eq!(node_root, shared.join("node"));
+        let server_tokens = server_root.join(LOCAL_COMPUTER).join("tokens");
+        let node_tokens = node_root.join(LOCAL_COMPUTER).join("tokens");
+        assert_ne!(server_tokens, node_tokens);
+
+        let server = OseManager::with_root(None, Ok(server_root));
+        let node = OseManager::with_root(None, Ok(node_root));
+        let folder = Path::new("/work/project");
+        let server_file = write_token_file(&server_tokens, folder, "server-token").unwrap();
+        let node_file = write_token_file(&node_tokens, folder, "node-token").unwrap();
+        assert_ne!(server_file.0, node_file.0, "the same folder must not share a token file");
+
+        // The server's sweep removes its own stale file and does not reach the node's.
+        assert_eq!(server.sweep_stale_tokens(), 1);
+        assert!(!server_file.0.exists());
+        assert_eq!(std::fs::read_to_string(&node_file.0).unwrap(), "node-token");
+
+        // The node's sweep removes only the node's.
+        let server_file = write_token_file(&server_tokens, folder, "server-token").unwrap();
+        assert_eq!(node.sweep_stale_tokens(), 1);
+        assert!(!node_file.0.exists());
+        assert_eq!(std::fs::read_to_string(&server_file.0).unwrap(), "server-token");
     }
 
     #[test]

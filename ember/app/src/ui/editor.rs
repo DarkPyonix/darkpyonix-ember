@@ -16,6 +16,9 @@ pub struct EditorTarget {
     pub server_url: String,
     /// The id of the computer the project lives on. Empty when unknown.
     pub computer: String,
+    /// The server's relay route to the OSE (`/api/computers/{id}/ide/relay/{launch}`, FR-W4),
+    /// dialed instead of `endpoint` when set (FR-N9.1). Empty when unknown.
+    pub relay: String,
 }
 
 impl std::fmt::Debug for EditorTarget {
@@ -28,6 +31,7 @@ impl std::fmt::Debug for EditorTarget {
             .field("token", &"[REDACTED]")
             .field("server_url", &self.server_url)
             .field("computer", &self.computer)
+            .field("relay", &self.relay)
             .finish()
     }
 }
@@ -2177,8 +2181,10 @@ mod tests {
             token: "s3cret-token".into(),
             server_url: "http://srv:1".into(),
             computer: "node-a".into(),
+            relay: "/api/computers/node-a/ide/relay/l1".into(),
         };
         let text = format!("{target:?}");
+        assert!(text.contains("/api/computers/node-a/ide/relay/l1"), "{text}");
         assert!(!text.contains("s3cret-token"), "{text}");
         assert!(text.contains("[REDACTED]"));
         assert!(text.contains("127.0.0.1:9000"));

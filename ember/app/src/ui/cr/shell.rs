@@ -24,7 +24,7 @@ use compose_rust::schema::Window;
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{
-    Alignment, AssetKind, ColorScheme, DesignSystem, Paint, SpaceRole, Theme,
+    Alignment, AssetKind, DesignSystem, Paint, SpaceRole, Theme,
 };
 
 pub use crate::ui::shell::{
@@ -790,7 +790,7 @@ pub fn launch(pref: ThemePref) {
 /// (FR-L36) draws what the desktop binary draws.
 pub fn launch_parts(pref: ThemePref) -> (compose_rust::LaunchBuilder, fn()) {
     shared_ui().theme_pref.set(pref);
-    let scheme = if pref == ThemePref::Dark { ColorScheme::Dark } else { ColorScheme::Light };
+    let scheme = pref.color_scheme();
     let (w, h) = requested_size();
     // Until the renderer reports the window's size, a desktop window lays out at this size, not
     // at the phone layout (FR-L10.3). Android's window is the screen, so it records nothing.

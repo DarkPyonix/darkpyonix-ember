@@ -5,5 +5,8 @@
 #![windows_subsystem = "windows"]
 
 fn main() {
+    // Velopack's install, update and uninstall hooks exit here, before any window, in every
+    // process including `--editor` (SPEC NFR-R2, #880).
+    ember_app::self_update::startup();
     ember_app::launch();
 }

@@ -64,8 +64,16 @@ pub fn toolkit_safe_area() -> SafeArea {
 
 /// The safe area of the window the caller is composed in.
 pub fn safe_area() -> SafeArea {
+    let a = toolkit_safe_area();
+    safe_area_from_toolkit(a.top, a.leading, a.trailing)
+}
+
+/// The safe area on this platform for a toolkit report. The editor page (dioxus) reads the report
+/// through `dioxus_compose::use_window_safe_area`, which renders the page again when it changes
+/// (FR-L33.1, #875); a compose-rust screen reads it through [`safe_area`].
+pub fn safe_area_from_toolkit(top: f32, leading: f32, trailing: f32) -> SafeArea {
     let platform = current_platform();
-    let toolkit = if platform == Platform::MacOs { toolkit_safe_area() } else { SafeArea::default() };
+    let toolkit = if platform == Platform::MacOs { SafeArea { top, leading, trailing } } else { SafeArea::default() };
     safe_area_for(platform, toolkit)
 }
 

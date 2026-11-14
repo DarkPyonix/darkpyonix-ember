@@ -7,7 +7,8 @@
 #   no-webview           .github/scripts/checks/check-no-webview.sh (SPEC NFR-L2), when present
 #   sync-release         .github/scripts/tests/sync-release.test.sh (release keeps develop's history)
 #   bench-summary        .github/scripts/bench/tests/summarize-matrix.test.sh (NFR-N1 matrix summarizer)
-#   release-workflow     .github/scripts/checks/check-release-workflow.sh (SPEC NFR-R1)
+#   release-workflow     .github/scripts/checks/check-release-workflow.sh (SPEC NFR-R1) and
+#                        .github/scripts/tests/check-tag-version.test.sh (#880)
 #   node-units           .github/scripts/checks/check-node-units.sh + its test (SPEC FR-P6)
 #   no-em-dash           .github/scripts/checks/check-no-em-dash.sh (AGENTS.md writing rules)
 #   rust                 cargo test for each ember/<crate> dir that exists
@@ -82,6 +83,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: bash .github/scripts/checks/check-release-workflow.sh
+      - name: Run .github/scripts/tests/check-tag-version.test.sh
+        run: bash .github/scripts/tests/check-tag-version.test.sh
 
   vendored-css:
     name: Vendored Code-OSS CSS is reproducible

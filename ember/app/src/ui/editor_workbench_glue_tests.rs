@@ -38,6 +38,7 @@ fn target() -> EditorTarget {
         token: String::new(),
         server_url: String::new(),
         computer: String::new(),
+        relay: String::new(),
     }
 }
 
@@ -92,6 +93,15 @@ impl Page {
 
     /// The page opened on `folder`, with one file, `a.rs`, listed under it.
     fn open_at(folder: &str) -> Page {
+        Page::open_with(folder, None)
+    }
+
+    /// The page with the editor's own stylesheets (`page::config`), so it can be laid out.
+    fn open_styled() -> Page {
+        Page::open_with(ROOT, Some(super::page::config()))
+    }
+
+    fn open_with(folder: &str, config: Option<dioxus_compose::html::HtmlConfig>) -> Page {
         FOLDER.with(|f| *f.borrow_mut() = folder.to_string());
         let (host, commands) = EditorHost::fake();
         {
@@ -103,7 +113,10 @@ impl Page {
             );
         }
         FAKE.with(|f| *f.borrow_mut() = Some(host));
-        let mut dom = HtmlDom::new(app);
+        let mut dom = match config {
+            Some(config) => HtmlDom::with_config(app, config),
+            None => HtmlDom::new(app),
+        };
         dom.render();
         Page { dom, commands }
     }
@@ -563,4 +576,121 @@ fn fr_e8_extension_webview_panel_lifecycle_and_messaging() {
     assert!(page.find_where("the webview tab after close", |id| {
         page.attr(id, "title").as_deref() == Some("ember-webview:wv-md")
     }).is_none(), "webview tab removed after close");
+}
+
+// FR-L31.26 (#874): the status bar is --sbh (32 px) high and its bottom edge is the page's bottom
+// edge, as in the mockup (`editor.html`: the bar's top line at y 868 of a 900 px window). On
+// v0.0.10 the window showed 16 px of page under the bar. This lays the page out with its own
+// stylesheets and no renderer, so it tells the two possible causes apart: when it fails, the
+// grid itself leaves room under the bar (the message lists the page's grid items and their
+// boxes); when it passes and the window still shows the band, the page is laid out in a viewport
+// 16 px shorter than the window, which is the renderer's or dioxus-compose's island size.
+#[test]
+fn fr_l31_26_the_status_bar_is_32_high_and_flush_with_the_page_bottom() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    page.click_row();
+    page.deliver(opened(3));
+    let ed = page.find("class", "ed").expect("the page grid (.ed) with the tree and the bottom window open");
+    let bar = page.find("aria-label", "상태 표시줄").expect("the status bar");
+    let _ = page.dom.layout(1440.0, 900.0, 1.0);
+    let list = page.dom.display_list().expect("laid out");
+    let ed_rect = list.get(ed).expect("the page draws its background").rect;
+    let bar_rect = list.get(bar).expect("the status bar draws its line").rect;
+    let doc = page.dom.document();
+    let items: Vec<String> = doc
+        .get_node(ed)
+        .map(|n| n.children.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| {
+            let node = doc.get_node(id)?;
+            let rect = list.get(id).map(|e| format!("{:?}", e.rect)).unwrap_or_else(|| "no box".into());
+            // A text or comment child is a grid item too (an anonymous one), so it is listed.
+            let tag = match node.element_data() {
+                Some(e) if node.is_anonymous() => format!("anonymous {}", e.name.local),
+                Some(e) => format!("{}.{}", e.name.local, page.attr(id, "class").unwrap_or_default()),
+                None if node.is_text_node() => format!("text {:?}", node.text_data().map(|t| t.content.clone()).unwrap_or_default()),
+                None => "comment or other".to_string(),
+            };
+            Some(format!("{tag} {rect}"))
+        })
+        .collect();
+    // The boxes the grid places (comments are not among them; anonymous blocks are).
+    let laid: Vec<String> = doc
+        .get_node(ed)
+        .and_then(|n| n.layout_children.borrow().clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| {
+            let node = doc.get_node(id)?;
+            let name = node.element_data().map(|e| format!("{}{}.{}", if node.is_anonymous() { "anonymous " } else { "" }, e.name.local, page.attr(id, "class").unwrap_or_default()));
+            let l = node.final_layout;
+            Some(format!("{} at {},{} {}x{}", name.unwrap_or_else(|| "text".into()), l.location.x, l.location.y, l.size.width, l.size.height))
+        })
+        .collect();
+    let items = format!("{items:#?}; grid items {laid:#?}");
+    let close = |a: f32, b: f32| (a - b).abs() < 0.5;
+    assert!(close(bar_rect.height, 32.0), "bar {bar_rect:?}; items {items}");
+    assert!(
+        close(bar_rect.y + bar_rect.height, ed_rect.y + ed_rect.height),
+        "the bar ends at {} but the page at {}; page {ed_rect:?}; items {items}",
+        bar_rect.y + bar_rect.height,
+        ed_rect.y + ed_rect.height,
+    );
+    if cfg!(target_os = "macos") {
+        assert!(close(ed_rect.y + ed_rect.height, 900.0), "the FullSize page fills the window: {ed_rect:?}");
+    }
+}
+
+#[compose_rust::runtime::Composable]
+fn toolkit_probe() {
+    compose_rust::ui::Text("probe".to_string());
+}
+
+// FR-L33.1 (#875): the window's safe area reaches the toolkit after the page's first render. The
+// report renders the page again, so the top bar takes the traffic lights' inset, also while the
+// workspace trust prompt is up and nothing else renders the page.
+#[test]
+fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
+    use compose_rust::protocol::HostEvent;
+    use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
+    use crate::ui::safe_area::{current_platform, safe_area_for, SafeArea};
+    let _guard = crate::services::test_guard();
+    // A toolkit Host resets the window's measurement when it is made, so it comes first.
+    let mut toolkit = compose_rust::Host::new(|| Box::new(compose_rust::Recomposer::new(toolkit_probe)));
+    toolkit.rebuild().expect("rebuild");
+    let mut page = Page::open();
+    page.host().state.lock().unwrap().trust = crate::ui::workspace_trust::TrustState { trusted: false, prompt: true, banner_dismissed: false };
+    page.redraw();
+    assert!(page.find("aria-label", crate::ui::workspace_trust::PROMPT_TITLE).is_some(), "the trust prompt is up");
+    let top = page.find("class", "ed-top").expect("the top bar");
+    let before = page.attr(top, "style").unwrap_or_default();
+    assert_eq!(before, crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), 0.0), "nothing reported yet");
+
+    let lights = SafeArea { top: 28.0, leading: 78.0, trailing: 0.0 };
+    toolkit
+        .dispatch(HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: 1440.0,
+                height_dp: 900.0,
+                class: WindowSizeClass::from_width_dp(1440.0),
+                height_class: WindowHeightClass::from_height_dp(900.0),
+                safe_area_top: lights.top,
+                safe_area_leading: lights.leading,
+                safe_area_trailing: lights.trailing,
+            },
+        })
+        .expect("dispatch");
+    // The report woke the page; nothing else asks it to render.
+    page.dom.virtual_dom_mut().process_events();
+    page.dom.render();
+    let top = page.find("class", "ed-top").expect("the top bar");
+    let after = page.attr(top, "style").unwrap_or_default();
+    let expected = crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), safe_area_for(current_platform(), lights).leading);
+    assert_eq!(after, expected, "the top bar follows the reported safe area with the prompt up");
+    assert!(page.find("aria-label", crate::ui::workspace_trust::PROMPT_TITLE).is_some(), "the prompt is still up");
+    compose_rust::window::reset_window_size();
 }

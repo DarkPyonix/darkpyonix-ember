@@ -24,8 +24,8 @@ use compose_rust::runtime::{
 // Ember's reading: a desktop window that has not reported its size yet reads its opened size
 // (FR-L10.3).
 use crate::ui::window_size::current_window_size;
-use compose_rust::ui::{self as cu, Modifier};
-use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, SpaceRole, TypeRole};
+use compose_rust::ui::{self as cu, Modifier, Side};
+use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, Snap, SpaceRole, TypeRole};
 
 use ember_client::LauncherStatus;
 
@@ -203,11 +203,12 @@ pub fn launch_ide_shared(
         ),
         IdeAction::EmberPlaceholder => {
             let c = IdeLaunch::editor_connection(launch.as_ref());
-            if c.endpoint.as_deref().map_or(true, str::is_empty) {
+            // The relay route alone is enough to reach the OSE (FR-N9.1).
+            if c.endpoint.as_deref().map_or(true, str::is_empty) && c.relay.as_deref().map_or(true, str::is_empty) {
                 notice::post("Ember 에디터: 서버가 OSE 런타임을 시작하지 못했습니다");
                 return;
             }
-            ui.open_editor_connection(c.project, c.folder, c.endpoint, c.token, c.server_url, c.computer);
+            ui.open_editor_connection(c.project, c.folder, c.endpoint, c.token, c.server_url, c.computer, c.relay);
         }
         IdeAction::Unavailable(why) => {
             notice::post(format!("{label}: 사용할 수 없습니다: {why}"));
@@ -1890,39 +1891,41 @@ pub fn MultiView(
                                     });
                             });
                     } else if layout.paged {
-                        // Sideways strip, one pane per screen width with the next one peeking
-                        // in (mockup `.mv` at 560 px), instead of a previous / next pager.
-                        // TODO(compose-rust#547): no scroll snapping, so a swipe can stop between
-                        // two panes (mockup `scroll-snap-type:x mandatory`).
+                        // Sideways strip, one pane per screen width (mockup `.mv` at 560 px,
+                        // `scroll-snap-type:x mandatory`), instead of a previous / next pager.
+                        // Each slot is a direct child of the ScrollRow and as wide as the strip,
+                        // so `Snap::ItemStart` (compose-rust#547) brings a swipe to rest on one
+                        // whole pane. Half a gap on each side of a slot keeps panes a gap apart.
                         let pane_w = swipe_pane_width(window.width_dp);
                         cu::ScrollRow()
+                            .snap(Snap::ItemStart)
                             .modifier(Modifier::new().fill_max_width().weight(1.0))
                             .content(|| {
-                                cu::Row()
-                                    .spacing(SWIPE_GAP)
-                                    .modifier(Modifier::new().fill_max_height())
-                                    .content(|| {
-                                        for sid in &vis {
-                                            if let Some(m) =
-                                                members_vec.iter().find(|m| &m.session_id == sid)
-                                            {
-                                                let m = m.clone();
-                                                let pr = proj_owned.clone();
-                                                let all_s = all.clone();
-                                                let vis_s = vis.clone();
-                                                let enl = on_enlarge.clone();
+                                for sid in &vis {
+                                    if let Some(m) = members_vec.iter().find(|m| &m.session_id == sid)
+                                    {
+                                        let m = m.clone();
+                                        let pr = proj_owned.clone();
+                                        let all_s = all.clone();
+                                        let vis_s = vis.clone();
+                                        let enl = on_enlarge.clone();
+                                        cu::Row()
+                                            .modifier(Modifier::new().width(pane_w).fill_max_height())
+                                            .content(move || {
+                                                cu::Spacer()
+                                                    .modifier(Modifier::new().width(SWIPE_GAP / 2.0));
                                                 cu::Box()
                                                     .modifier(
-                                                        Modifier::new()
-                                                            .width(pane_w)
-                                                            .fill_max_height(),
+                                                        Modifier::new().weight(1.0).fill_max_height(),
                                                     )
                                                     .content(move || {
                                                         Pane(&pr, &m, &all_s, &vis_s, enl.clone());
                                                     });
-                                            }
-                                        }
-                                    });
+                                                cu::Spacer()
+                                                    .modifier(Modifier::new().width(SWIPE_GAP / 2.0));
+                                            });
+                                    }
+                                }
                             });
                     } else {
                         let rows_idx = pane_rows(n, layout.per_row);
@@ -3424,8 +3427,11 @@ fn EmptyText(text: &str) {
 }
 
 /// `.list-row`: the 36 px git tile, `#num title` over `member · branch`, and the CI pill over
-/// the review state. TODO(compose-rust#464): the row divider is inside the card padding, and the
-/// right column is not right-aligned (no column cross-axis alignment in the pinned toolkit).
+/// the review state. The row divider is a 1 dp line inside the card body's padding, where the
+/// mockup's `.list-row` top border reaches the card edges, and the right column is not
+/// right-aligned. Neither waits on the toolkit any more (one-sided borders arrived with
+/// compose-rust#464, v0.0.9); moving the divider out of the padding means laying the body out
+/// without `StatusCardShell`'s inset, which is left for a display check.
 fn PrRowView(row: PrRow, first: bool) {
     let p = ember_theme().palette;
     // The divider sits between rows with 12 dp above and below, clear of the right column.
@@ -3459,8 +3465,14 @@ fn PrRowView(row: PrRow, first: bool) {
 }
 
 /// `.tnode`: an avatar for a member, a spinner or a status dot for a thread, then name and task.
-/// Children are indented. TODO(compose-rust#464): the 1 px guide line (a left border) needs a
-/// one-sided border or a stretching child; indentation alone for now.
+/// Children are indented 14 dp and sit 12 dp right of a 1 dp guide line, the left border of the
+/// children's column (`.tree ul` `margin-left:14px; padding-left:12px; border-left`), drawn with
+/// `Modifier::border_side` (compose-rust#464, v0.0.9).
+/// `.tree ul` `margin-left`: where the guide line stands from the parent's left edge.
+const TREE_GUIDE_INSET: f32 = 14.0;
+/// `.tree ul` `padding-left`: the gap from the guide line to the children.
+const TREE_CHILD_PAD: f32 = 12.0;
+
 fn TreeNodeView(node: SubNode, project: String) {
     let p = ember_theme().palette;
     cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
@@ -3490,12 +3502,21 @@ fn TreeNodeView(node: SubNode, project: String) {
         });
         if !node.children.is_empty() {
             cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[3] + 2.0));
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    for c in node.children.iter() {
-                        TreeNodeView(c.clone(), project.clone());
-                    }
-                });
+                cu::Spacer().modifier(Modifier::new().width(TREE_GUIDE_INSET));
+                cu::Row()
+                    .modifier(
+                        Modifier::new()
+                            .weight(1.0)
+                            .border_side(Side::Start, 1.0, paint(p.line)),
+                    )
+                    .content(|| {
+                        cu::Spacer().modifier(Modifier::new().width(TREE_CHILD_PAD));
+                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                            for c in node.children.iter() {
+                                TreeNodeView(c.clone(), project.clone());
+                            }
+                        });
+                    });
             });
         }
     });
@@ -4995,6 +5016,19 @@ mod tests {
     }
 
     #[test]
+    fn fr_l18_subagent_tree_children_hang_from_a_guide_line() {
+        // compose-rust#464: the children's column has a one-sided left border, as `.tree ul`.
+        let src = include_str!("session.rs").split("mod tests {").next().unwrap();
+        let tree = src.split("fn TreeNodeView(").nth(1).unwrap();
+        let tree = tree.split("\nfn ").next().unwrap();
+        assert!(tree.contains(".border_side(Side::Start, 1.0, paint(p.line))"));
+        assert!(tree.contains("Modifier::new().width(TREE_GUIDE_INSET)"));
+        assert!(tree.contains("Modifier::new().width(TREE_CHILD_PAD)"));
+        assert_eq!((super::TREE_GUIDE_INSET, super::TREE_CHILD_PAD), (14.0, 12.0));
+        assert!(!src.contains(concat!("TODO(compose-rust#", "464)")));
+    }
+
+    #[test]
     fn fr_l18_one_pane_layout_is_a_sideways_strip_not_a_pager() {
         let src = include_str!("session.rs").split("mod tests {").next().unwrap();
         let mv = src.split("pub fn MultiView(").nth(1).unwrap();
@@ -5003,7 +5037,10 @@ mod tests {
         let paged = paged.split("let rows_idx = pane_rows(").next().unwrap();
         assert!(paged.contains("cu::ScrollRow()"));
         assert!(paged.contains(".width(pane_w)"));
-        assert!(paged.contains("TODO(compose-rust#547)"));
+        // compose-rust#547: the strip snaps to whole panes, so no peek stand-in is left.
+        assert!(paged.contains(".snap(Snap::ItemStart)"));
+        assert!(!paged.contains("TODO(compose-rust#547)"));
+        assert!(!paged.contains(".spacing(SWIPE_GAP)"));
         assert!(mv.contains("multi_pane_layout(window.width_dp, window.class)"));
         assert!(!paged.contains("\"이전\""));
         assert!(!paged.contains("\"다음\""));

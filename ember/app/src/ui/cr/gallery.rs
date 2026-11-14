@@ -8,7 +8,7 @@ use compose_rust::runtime::{Composable, mutable_state_of, remember};
 use compose_rust::schema::Window;
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ColorScheme, IconRole, TypeRole};
+use compose_rust::{Alignment, IconRole, TypeRole};
 
 use super::compat::*;
 use super::components::*;
@@ -27,7 +27,7 @@ pub fn requested() -> Option<ThemePref> {
 /// Opens the gallery window and returns when it is closed. `services` must be installed.
 pub fn launch(pref: ThemePref) {
     crate::ui::coexist::shared_ui().theme_pref.set(pref);
-    let scheme = if pref == ThemePref::Dark { ColorScheme::Dark } else { ColorScheme::Light };
+    let scheme = pref.color_scheme();
     compose_rust::LaunchBuilder::new()
         .with_theme(crate::ui::fonts::app_theme(scheme))
         .with_window(Window::new().with_title("Ember components (compose-rust)").with_size(1100, 800))

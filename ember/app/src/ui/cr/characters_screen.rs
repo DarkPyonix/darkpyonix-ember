@@ -17,7 +17,9 @@ use compose_rust::ui::Modifier;
 use compose_rust::{Alignment, IconRole};
 
 use super::characters::{draw, CharSpec, CharState, CharStyle};
-use super::components::{AppButton, ButtonKind, EmberField, FieldOptions, Label, Pill, PillTone, Select};
+use super::components::{
+    AppButton, ButtonKind, Choice, ChoiceButton, EmberField, FieldOptions, Label, NamedSelect, Pill, PillTone,
+};
 use super::theme::*;
 use crate::services::{run_shared, services};
 use crate::ui::characters::{
@@ -358,9 +360,8 @@ pub fn CharactersScreen() {
                         cu::Row().spacing(6.0).alignment(Alignment::CenterStart).content(|| {
                             for &s in line {
                                 let (c, m) = (chosen.clone(), message.clone());
-                                // TODO(compose-rust#473): no pressed state for a screen reader (aria-pressed).
-                                let kind = if s == style { ButtonKind::Primary } else { ButtonKind::Default };
-                                AppButton(s.label(), None, kind, true, true, false, move || {
+                                // The chosen style says it is pressed (aria-pressed, compose-rust#473).
+                                ChoiceButton(s.label(), Choice::Toggle, s == style, true, true, move || {
                                     c.set(Some(s));
                                     m.set(None);
                                 });
@@ -461,14 +462,14 @@ pub fn CharactersScreen() {
                         });
                     });
                 };
-                // TODO(compose-rust#473): the Select trigger is a Clickable with no accessible
-                // name; the visible label above it names it for sighted users only.
+                // Each select is named by its field's label, so a screen reader says which field
+                // it is (`NamedSelect`, compose-rust#473).
                 let harness_field = || {
                     FieldRow("하네스", || {
                         let labels: Vec<String> = EDITOR_HARNESSES.iter().map(|(_, l)| l.to_string()).collect();
                         let at = ed_harness.get().min(labels.len() - 1);
                         let (h, m) = (ed_harness.clone(), ed_message.clone());
-                        Select(&labels[at], &labels, at, 260.0, move |i| {
+                        NamedSelect("하네스", &labels[at], &labels, at, 260.0, move |i| {
                             h.set(i);
                             m.set(None);
                         });
@@ -479,7 +480,7 @@ pub fn CharactersScreen() {
                         let labels: Vec<String> = EDITOR_ROLES.iter().map(|r| r.to_string()).collect();
                         let at = ed_role.get().min(labels.len() - 1);
                         let (r, m) = (ed_role.clone(), ed_message.clone());
-                        Select(&labels[at], &labels, at, 260.0, move |i| {
+                        NamedSelect("역할", &labels[at], &labels, at, 260.0, move |i| {
                             r.set(i);
                             m.set(None);
                         });
@@ -490,7 +491,7 @@ pub fn CharactersScreen() {
                         let labels: Vec<String> = CharStyle::ALL.iter().map(|s| s.label().to_string()).collect();
                         let at = CharStyle::ALL.iter().position(|&s| s == ed_v).unwrap_or(0);
                         let (v, m) = (ed_style.clone(), ed_message.clone());
-                        Select(&labels[at], &labels, at, 260.0, move |i| {
+                        NamedSelect("스타일", &labels[at], &labels, at, 260.0, move |i| {
                             v.set(CharStyle::ALL.get(i).copied());
                             m.set(None);
                         });
@@ -503,7 +504,7 @@ pub fn CharactersScreen() {
                             labels.extend(SILHOUETTES.iter().map(|s| s.to_string()));
                             let at = pin.map(|i| i + 1).unwrap_or(0);
                             let (pn, m) = (ed_pin.clone(), ed_message.clone());
-                            Select(&labels[at], &labels, at, 260.0, move |i| {
+                            NamedSelect("실루엣 고정", &labels[at], &labels, at, 260.0, move |i| {
                                 pn.set(i.checked_sub(1));
                                 m.set(None);
                             });
@@ -519,8 +520,7 @@ pub fn CharactersScreen() {
                             cu::Row().spacing(6.0).content(|| {
                                 for &s in line {
                                     let (st, m) = (ed_state.clone(), ed_message.clone());
-                                    let kind = if ed_state.get() == s { ButtonKind::Primary } else { ButtonKind::Default };
-                                    AppButton(state_label(s), None, kind, true, true, false, move || {
+                                    ChoiceButton(state_label(s), Choice::Toggle, ed_state.get() == s, true, true, move || {
                                         st.set(s);
                                         m.set(None);
                                     });

@@ -5,6 +5,7 @@
 //! for VS Code Web. `tests/no_webview.rs` and `.github/scripts/checks/check-no-webview.sh` enforce it.
 //!
 //! - [`config`]: server URL and data paths.
+//! - [`device_link`]: the app as a device of a server over the transport (FR-N9, #856).
 //! - [`demo`]: the data served inside the app when no server is given (demo only, #199).
 //! - [`services`]: tokio runtime, `ember_client::Client`, extra server API, outbox.
 //! - [`bridge`]: client changes → UI signals.
@@ -16,6 +17,7 @@ pub mod android;
 pub mod bridge;
 pub mod config;
 pub mod demo;
+pub mod device_link;
 pub mod export;
 pub mod editor_host;
 pub mod ide;
@@ -61,6 +63,18 @@ pub(crate) fn prepare() {
         .try_init();
 
     let config = AppConfig::from_env();
+    // Prefs first: the server address saved in 설정 decides the reach (FR-N9).
+    let initial_prefs = config
+        .prefs_path()
+        .map(|p| prefs::load(&p))
+        .unwrap_or_default();
+    let config = match server_choice_from_env(&initial_prefs) {
+        Ok(peer) => config.with_peer(peer),
+        Err(e) => {
+            eprintln!("ember-app: {e}. Give the server's peer id, <peer id>@<ip>:<port>, or the address JSON it prints at start");
+            std::process::exit(2);
+        }
+    };
     tracing::info!(server = %config.server_url, data = ?config.data_dir, "starting ember-app");
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -70,18 +84,47 @@ pub(crate) fn prepare() {
         .build()
         .expect("tokio runtime");
 
+    // Over the transport (FR-N9): bind with this device's key; the client and the app's own
+    // `ServerApi` both call through the one `Api` (it keeps the transport alive).
+    let link = config.server_peer.as_ref().map(|setting| {
+        let Some(dir) = config.data_dir.as_deref() else {
+            eprintln!("ember-app: no data directory for the device key; set EMBER_DATA_DIR");
+            std::process::exit(2);
+        };
+        let key = match device_link::load_key(dir) {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("ember-app: device key: {e}");
+                std::process::exit(2);
+            }
+        };
+        match rt.block_on(device_link::DeviceLink::bind(key, setting)) {
+            Ok(l) => {
+                tracing::info!(device = %l.peer_id(), server = %setting.addr.peer, "reaching the server over the transport");
+                l
+            }
+            Err(e) => {
+                eprintln!("ember-app: cannot bind the transport: {e}");
+                std::process::exit(2);
+            }
+        }
+    });
+
     // Loads the cached snapshot (FR-L1): the first frame shows cached projects and sessions
     // before any network answer.
-    let client = match rt.block_on(Client::new(config.client_config())) {
-        Ok(c) => c,
-        Err(e) => {
-            // Only a malformed EMBER_SERVER_URL gets here.
-            eprintln!(
-                "ember-app: {e}. Set EMBER_SERVER_URL to the main server, e.g. {}",
-                config::DEFAULT_SERVER_URL
-            );
-            std::process::exit(2);
-        }
+    let client = match &link {
+        Some(l) => rt.block_on(Client::with_api(config.client_config(), l.api())),
+        None => match rt.block_on(Client::new(config.client_config())) {
+            Ok(c) => c,
+            Err(e) => {
+                // Only a malformed EMBER_SERVER_URL gets here.
+                eprintln!(
+                    "ember-app: {e}. Set EMBER_SERVER_URL to the main server, e.g. {}",
+                    config::DEFAULT_SERVER_URL
+                );
+                std::process::exit(2);
+            }
+        },
     };
     // Demo only (#199): with EMBER_DEMO_DATA=1 and no EMBER_SERVER_URL the app serves itself;
     // the push connection and sync workers stay off so nothing waits for a server.
@@ -105,18 +148,19 @@ pub(crate) fn prepare() {
         client.start();
     }
 
-    let initial_prefs = config
-        .prefs_path()
-        .map(|p| prefs::load(&p))
-        .unwrap_or_default();
     let shared_ui = ui::coexist::SharedUi::new(initial_prefs.clone());
-    let server = match ServerApi::new(&config.server_url) {
+    let server = match &link {
+        Some(l) => ServerApi::over_transport(l.api()),
+        None => ServerApi::new(&config.server_url),
+    };
+    let server = match server {
         Ok(s) => s,
         Err(e) => {
             eprintln!("ember-app: {e}");
             std::process::exit(2);
         }
     };
+    let check = link.as_ref().filter(|_| demo.is_none()).map(|l| l.api());
     install(Services {
         config,
         rt,
@@ -128,6 +172,28 @@ pub(crate) fn prepare() {
         ui: shared_ui,
         live: OnceLock::new(),
     });
+    // A device the server refuses, or a server out of reach, reads as one Korean sentence at
+    // start (FR-N9); 설정 shows it again.
+    if let Some(api) = check {
+        services().rt.spawn(async move {
+            if let Err(text) = device_link::check(&api).await {
+                tracing::warn!("server check over the transport failed: {text}");
+                ui::cr::notice::post(text);
+            }
+        });
+    }
+}
+
+/// [`config::server_choice`] from the environment and the saved prefs (FR-N9).
+fn server_choice_from_env(prefs: &prefs::Prefs) -> Result<Option<device_link::PeerSetting>, String> {
+    let set = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+    config::server_choice(
+        set(device_link::SERVER_PEER_ENV).as_deref(),
+        set("EMBER_SERVER_URL").is_some(),
+        set(ember_transport::RELAY_URL_ENV).is_some(),
+        prefs.server_peer.as_deref(),
+        prefs.server_relay.as_deref(),
+    )
 }
 
 /// The desktop windows: the standalone editor, the component gallery or the shell.

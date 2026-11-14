@@ -79,6 +79,14 @@ pub struct Prefs {
     /// Ids are stored in lower case and sorted.
     #[serde(default)]
     pub disabled_extensions: BTreeMap<String, Vec<String>>,
+    /// The main server's peer address, as typed in 설정 (FR-N9): a peer id,
+    /// `<peer id>@<ip>:<port>`, or the `PeerAddr` JSON the server prints. `None` (older files):
+    /// plain HTTP as before. Read at start (`config::server_choice`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_peer: Option<String>,
+    /// The relay for that reach, as `EMBER_RELAY_URL` takes it. `None`: the environment's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_relay: Option<String>,
 }
 
 fn format_default() -> u32 {
@@ -102,6 +110,8 @@ impl Default for Prefs {
             editor_zoom_level: 0,
             workspace_trust: BTreeMap::new(),
             disabled_extensions: BTreeMap::new(),
+            server_peer: None,
+            server_relay: None,
         }
     }
 }
@@ -387,6 +397,24 @@ mod tests {
         back.set_extension_enabled("mini", "never.disabled", true);
         assert_eq!(back.disabled_extensions_for("local"), ["golang.go"]);
         assert!(!back.disabled_extensions.contains_key("mini"), "an empty list keeps no entry");
+    }
+
+    #[test]
+    fn fr_n9_server_peer_and_relay_persist_and_older_files_have_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, br#"{"format":1}"#).unwrap();
+        let old = load(&path);
+        assert_eq!((old.server_peer.as_deref(), old.server_relay.as_deref()), (None, None));
+        let p = Prefs {
+            server_peer: Some("ab@127.0.0.1:1".into()),
+            server_relay: Some("none".into()),
+            ..Prefs::default()
+        };
+        save(&path, &p).unwrap();
+        assert_eq!(load(&path), p);
+        save(&path, &Prefs::default()).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("server_peer"), "unset is left out");
     }
 
     #[test]

@@ -40,8 +40,7 @@ use crate::model::status_rank;
 use crate::ide::{open_external, plan, IdeAction, IdeKind};
 use crate::server::IdeLaunch;
 use crate::services::{run_shared, services};
-use crate::ui::project::{archive_patch, danger_hint, danger_rows_for, delete_armed, delete_error_message, delete_step, full_after_removal, is_owner_refusal, DeleteStep};
-use crate::ui::routines::{project_routine_tile, TileLoad};
+use crate::ui::project::{archive_patch, danger_hint, danger_rows_for, delete_armed, delete_error_message, delete_step, full_after_removal, is_owner_refusal, project_routine_tile, DeleteStep, TileLoad};
 use crate::ui::coexist::{shared_ui, SharedUi};
 use crate::ui::shell::NavMenu;
 
@@ -827,7 +826,7 @@ fn FullProject(b: &ProjectBox, chips: &[ComputerChip], st: &Ui, ui: &SharedUi, w
     if services().demo.is_none() {
         let (slot, id) = (routines.clone(), b.id.clone());
         compose_rust::runtime::launched_effect(b.id.clone(), move || async move {
-            run_shared(async move { crate::ui::routines::load_project_tile(services().client.api(), &id).await }, move |l| slot.set(l));
+            run_shared(async move { crate::ui::project::load_project_tile(services().client.api(), &id).await }, move |l| slot.set(l));
         });
     }
     let routine_lines = project_routine_tile(&routines.get(), &b.id, super::routines::now_local()).lines();

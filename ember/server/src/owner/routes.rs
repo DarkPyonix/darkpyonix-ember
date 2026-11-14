@@ -116,8 +116,12 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("DELETE", "/api/computers/{id}", Owner),
     ("GET", "/api/computers/{id}", Token),
     ("POST", "/api/computers/{id}/fs/{op}", Token),
+    ("POST", "/api/computers/{id}/fs/mkdir", Token),
     ("POST", "/api/computers/{id}/fs/pwrite", Token),
+    ("POST", "/api/computers/{id}/fs/remove", Token),
+    ("POST", "/api/computers/{id}/fs/rename", Token),
     ("POST", "/api/computers/{id}/fs/setattr", Token),
+    ("POST", "/api/computers/{id}/fs/symlink", Token),
     ("POST", "/api/computers/{id}/fs/write", Token),
     ("GET", "/api/computers/{id}/transfers", Token),
     ("DELETE", "/api/computers/{id}/transfers/history", Token),
@@ -319,6 +323,10 @@ mod tests {
             (Method::PUT, "/api/agents/defaults"),
             (Method::GET, "/api/hub/link-codes/abc"),
             (Method::POST, "/api/computers/c1/terms"),
+            (Method::POST, "/api/computers/c1/fs/mkdir"),
+            (Method::POST, "/api/computers/c1/fs/remove"),
+            (Method::POST, "/api/computers/c1/fs/rename"),
+            (Method::POST, "/api/computers/c1/fs/symlink"),
         ] {
             assert!(!owner_route(&m, p), "{m} {p}");
         }

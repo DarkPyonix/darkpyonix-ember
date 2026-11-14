@@ -515,7 +515,13 @@ async fn namespace_operations_for_the_mount() {
 
     // symlink / readlink / lstat: the link itself, never followed, even when it points outside.
     std::fs::write(f.outside.join("secret"), "s3cret").unwrap();
-    let s = c.symlink(root.join("a/out"), f.outside.join("secret")).await.unwrap();
+    // The API refuses to plant a link whose target is outside the roots (#456); one made on the
+    // machine by other means is still handled as a link.
+    let e = c.symlink(root.join("a/out"), f.outside.join("secret")).await.unwrap_err();
+    assert_eq!(e.code(), Some(ErrorCode::ForbiddenPath));
+    assert!(std::fs::symlink_metadata(root.join("a/out")).is_err());
+    std::os::unix::fs::symlink(f.outside.join("secret"), root.join("a/out")).unwrap();
+    let s = c.lstat(root.join("a/out")).await.unwrap();
     assert_eq!(s.kind, FileKind::Symlink);
     let l = c.readlink(root.join("a/out")).await.unwrap();
     assert_eq!(l.target, f.outside.join("secret"));

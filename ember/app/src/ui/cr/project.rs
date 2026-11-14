@@ -19,7 +19,7 @@ use ember_client::wire::Project;
 use ember_client::LauncherStatus;
 
 pub use crate::ui::project::{
-    agent_options, build_patch, deck_avatars, deck_names, DECK_AVATARS, DECK_NAMES, strip_arrows_visible, strip_scroll_target, chip_line, computer_chips, danger_allowed, danger_rows, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
+    agent_options, build_patch, deck_avatars, deck_names, DECK_AVATARS, DECK_NAMES, strip_arrow_enabled, strip_arrows_visible, strip_scroll_target, chip_line, computer_chips, danger_allowed, danger_rows, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
     is_default_project, leader_choice_visible, part_supported, project_boxes, project_boxes_with_archived,
     reach_pill, status_pill, validate_settings, visible_tiles, ComputerChip, Member, MemberFilter,
     effective_style, follow_rename, override_harnesses, override_label, override_options, pick_override, AccountsState, CloseAction, SettingsGuard, DISCARD_QUESTION,
@@ -271,13 +271,15 @@ pub fn ProjectScreen() {
 /// The page header: the title and subtitle, and the actions at the right; on a phone the actions
 /// are a row below the title (and the title leaves room for the menu button at the top right).
 pub fn Header(title: &str, sub: &str, compact: bool, trailing: impl FnOnce()) {
-    HeaderGap(title, sub, compact, compact, 0.0, trailing)
+    HeaderGap(title, sub, compact, compact, 0.0, false, trailing)
 }
 
 /// [`Header`] with `gap` dp between the title and the subtitle, and the actions stacked below
 /// the title when `stacked` (a phone, or a tablet in the mockup's files header); `compact` is the
-/// phone: the smaller title and the room for the menu button.
-pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32, trailing: impl FnOnce()) {
+/// phone: the smaller title and the room for the menu button. `end` puts the stacked actions at
+/// the row's right end (the files header on a phone, review row F6: in the mockup the subtitle
+/// fills the line, so `.spacer{flex:1}` wraps with the buttons and pushes them right).
+pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32, end: bool, trailing: impl FnOnce()) {
     let p = ember_theme().palette;
     // On a phone only the title line leaves room for the menu button; the subtitle runs the
     // whole width under it (#878: it wrapped at x 284 of a row that ends at x 374).
@@ -303,7 +305,14 @@ pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32,
     if stacked {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().modifier(Modifier::new().fill_max_width()).content(titles);
-            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(trailing);
+            if end {
+                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    trailing();
+                });
+            } else {
+                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(trailing);
+            }
         });
     } else {
         cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -451,13 +460,14 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
         return;
     }
     let scroll = compose_rust::ui::remember_scroll_state();
+    // TODO(compose-rust#818): `ScrollState` has no viewport size, so the step is taken from the
+    // window's content width, which is wider than the strip between its arrows.
     let viewport = content_width(crate::ui::window_size::current_window_size().width_dp, SP[6]);
-    let (offset, max) = (scroll.offset(), scroll.max_offset());
-    let arrows = strip_arrows_visible(max);
+    // Only the overflow is read here; each arrow reads the offset itself (#671).
+    let arrows = strip_arrows_visible(scroll.max_offset());
     cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(64.0)).content(|| {
         if arrows {
-            let s = scroll.clone();
-            StripArrow(ICON_ARROW_LEFT_SVG, offset > 0.0, move || s.animate_scroll_to(strip_scroll_target(offset, viewport, max + viewport, -1.0)));
+            StripArrow(ICON_ARROW_LEFT_SVG, super::a11y::SCROLL_LEFT, -1.0, &scroll, viewport);
         }
         cu::ScrollRow().scroll_state(&scroll).modifier(Modifier::new().weight(1.0).height(64.0)).content(|| {
             for c in chips {
@@ -466,7 +476,8 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
                 cu::Spacer().modifier(Modifier::new().width(SP[1]));
             }
             // The hub's devices, registered with the node's token (FR-X7, #490).
-            // TODO(compose-rust, #671): no dashed border or stroke-dash API, so the add chip keeps a solid 1 px border.
+            // TODO(compose-rust#817): `Modifier::border` has no stroke dash, so the add chip keeps a
+            // solid 1 px border (`.cchip.add{border-style:dashed}`).
             let add = Modifier::new().height(56.0).border(1.0, paint(p.line)).corner_radius(CORNER_MD);
             let ui = st.add.clone();
             Clickable(add, Alignment::CenterStart, move || ui.show(), || {
@@ -479,8 +490,7 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
             });
         });
         if arrows {
-            let s = scroll.clone();
-            StripArrow(ICON_ARROW_RIGHT_SVG, offset < max, move || s.animate_scroll_to(strip_scroll_target(offset, viewport, max + viewport, 1.0)));
+            StripArrow(ICON_ARROW_RIGHT_SVG, super::a11y::SCROLL_RIGHT, 1.0, &scroll, viewport);
         }
     });
 }
@@ -488,17 +498,23 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
 const ICON_ARROW_LEFT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>"#;
 const ICON_ARROW_RIGHT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>"#;
 
-/// A scroll arrow of the computer strip. Dimmed and inert at the end it points to.
-/// TODO(compose-rust, #671): no label modifier for icon-only controls, so this control has no accessible name.
-fn StripArrow(svg: &'static str, enabled: bool, mut on_click: impl FnMut() + 'static) {
+/// A scroll arrow of the computer strip, pointing in `dir` (-1 or 1) and named `label` for
+/// assistive technology (`Modifier::label`, #671). Dimmed, inert and reported disabled at the end
+/// it points to: it reads the strip's `ScrollState` here, so a scroll composes it again, and a
+/// press reads the offset again and never a value kept from composition.
+fn StripArrow(svg: &'static str, label: &'static str, dir: f32, scroll: &cu::ScrollState, viewport: f32) {
     let p = ember_theme().palette;
+    let enabled = strip_arrow_enabled(scroll.offset(), scroll.max_offset(), dir);
     let color = if enabled { p.text_2 } else { p.line };
-    Clickable(
-        Modifier::new().size(H_CTL, H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
+    let s = scroll.clone();
+    NamedClickable(
+        label,
+        Modifier::new().size(H_CTL, H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full).disabled(!enabled),
         Alignment::Center,
         move || {
-            if enabled {
-                on_click()
+            let (offset, max) = (s.offset(), s.max_offset());
+            if strip_arrow_enabled(offset, max, dir) {
+                s.animate_scroll_to(strip_scroll_target(offset, viewport, max + viewport, dir));
             }
         },
         move || {
@@ -1966,6 +1982,40 @@ mod tests {
     }
 
     #[test]
+    fn fr_l26_strip_arrows_are_named_for_assistive_technology() {
+        // #671: `Modifier::label` sends the name as the node's accessible name.
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let scroll = cu::remember_scroll_state();
+                StripArrow(ICON_ARROW_LEFT_SVG, crate::ui::cr::a11y::SCROLL_LEFT, -1.0, &scroll, 500.0);
+                StripArrow(ICON_ARROW_RIGHT_SVG, crate::ui::cr::a11y::SCROLL_RIGHT, 1.0, &scroll, 500.0);
+            }))
+        });
+        let all = texts(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+        for want in ["왼쪽으로 스크롤", "오른쪽으로 스크롤"] {
+            assert!(all.iter().any(|t| t == want), "missing the name {want}: {all:?}");
+        }
+    }
+
+    #[test]
+    fn fr_l26_strip_arrow_state_comes_from_the_scroll_state() {
+        let src = include_str!("project.rs");
+        let src = &src[..src.find("#[cfg(test)]").unwrap()];
+        let arrow = &src[src.find("fn StripArrow(").unwrap()..];
+        let arrow = &arrow[..arrow.find("\n}\n").unwrap()];
+        // The arrow reads the state itself, at composition and again at the press.
+        assert!(arrow.contains("let enabled = strip_arrow_enabled(scroll.offset(), scroll.max_offset(), dir);"));
+        assert!(arrow.contains("let (offset, max) = (s.offset(), s.max_offset());"));
+        assert!(arrow.contains(".disabled(!enabled)"));
+        let strip = &src[src.find("fn ComputerStrip(").unwrap()..src.find("fn StripArrow(").unwrap()];
+        assert!(!strip.contains("scroll.offset()"), "the strip keeps no offset from composition");
+        // The open toolkit gaps cite their compose-rust issues.
+        assert!(strip.contains("TODO(compose-rust#817)") && strip.contains("TODO(compose-rust#818)"));
+        assert!(!strip.contains("TODO(compose-rust, #671)") && !arrow.contains("TODO("));
+    }
+
+    #[test]
     fn fr_l1_the_project_screen_shows_its_title_the_strip_and_the_boxes() {
         use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
         let _guard = crate::services::test_guard();
@@ -2256,6 +2306,55 @@ mod design_review_tests {
         assert!(room < sub);
         assert!(head.contains("cu::Row().modifier(Modifier::new().fill_max_width()).content(titles);"));
         assert!(!head.contains("width(PHONE_MENU_ROOM)"), "no spacer beside the whole column");
+    }
+
+    #[test]
+    fn fr_l27_7_phone_header_buttons_sit_at_the_right() {
+        // Review row F6: mockup x 213..374 of a 390 window, the app drew them at x 16..144.
+        let src = source();
+        let head = &src[src.find("pub fn HeaderGap(").unwrap()..];
+        let head = &head[..head.find("\n}\n").unwrap()];
+        let at_end = head.find("if end {").expect("the end branch");
+        let spacer = head[at_end..].find("cu::Spacer().modifier(Modifier::new().weight(1.0));").expect("a spacer before the actions");
+        let actions = head[at_end..].find("trailing();").expect("the actions");
+        assert!(spacer < actions, "the spacer comes first, so the actions end at the right edge");
+        // Only the files screen on a phone asks for it; `Header` keeps the left.
+        assert!(src.contains("HeaderGap(title, sub, compact, compact, 0.0, false, trailing)"));
+        let files = include_str!("files.rs");
+        assert!(files.contains("compact, w <= 900.0, 6.0, compact, || {"));
+    }
+
+    /// The right-aligned form composes and sends the same texts as the left one. Where the
+    /// actions land is a layout result, so a capture checks it (files, 390).
+    #[test]
+    fn fr_l27_7_end_header_still_sends_title_subtitle_and_actions() {
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+        use compose_rust::{Host, Recomposer};
+        let _guard = crate::services::test_guard();
+        let texts = |end: bool| -> Vec<String> {
+            let mut host = Host::new(move || {
+                Box::new(Recomposer::new(move || {
+                    HeaderGap("파일", "설명", true, true, 6.0, end, || {
+                        Label("ACTION", Fs::Sm, Weight::Medium, None, Some(1));
+                    });
+                }))
+            });
+            decode_batch(host.rebuild().expect("rebuild"))
+                .expect("decode")
+                .iter()
+                .filter_map(|m| match m {
+                    Mutation::SetProp { value: PropertyValue::String(s), .. } => Some(s.to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Both forms still send the title, the subtitle and the actions.
+        for end in [false, true] {
+            let all = texts(end);
+            for want in ["파일", "설명", "ACTION"] {
+                assert!(all.iter().any(|t| t == want), "end={end} lost {want}: {all:?}");
+            }
+        }
     }
 
     #[test]

@@ -583,6 +583,13 @@ pub fn visible_offers(pending: &[Offer], answered: &[String]) -> Vec<Offer> {
         .collect()
 }
 
+/// Whether the incoming-offer card floats over the page. A sheet's scrim dims everything
+/// behind it, but the card was drawn bright above the scrim (review F8, r7 `files-share`), so
+/// while the send or the share sheet is open the card waits and comes back when it closes.
+pub fn offer_card_shown(has_offer: bool, send_sheet_open: bool, share_sheet_open: bool) -> bool {
+    has_offer && !send_sheet_open && !share_sheet_open
+}
+
 /// Answer an offer: tell the service and remember it as answered. `false` (and nothing sent)
 /// for an unknown or already answered offer.
 pub fn answer_offer(
@@ -1493,6 +1500,14 @@ pub fn chip_text_max(glyph: f32) -> f32 {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn fr_l27_offer_card_waits_while_a_sheet_is_open() {
+        assert!(offer_card_shown(true, false, false));
+        assert!(!offer_card_shown(true, true, false), "under the send sheet's scrim");
+        assert!(!offer_card_shown(true, false, true), "under the share sheet's scrim");
+        assert!(!offer_card_shown(false, false, false));
+    }
 
     fn dev(id: &str, name: &str, presence: Presence) -> Device {
         Device {

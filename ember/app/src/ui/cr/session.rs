@@ -532,7 +532,8 @@ pub fn split_end_radii(height: f32) -> [f32; 4] {
 /// The chevron beside a header's "IDE 열기" that opens the chooser even when a default is set
 /// (FR-L7). `on_ink` draws it inside the dark split button; otherwise as a bordered square.
 /// Its accessible name is "다른 IDE 선택" (compose-rust v0.0.7, #460), and it says whether the
-/// chooser is open. Touch target 26x32, under 44 px: #323.
+/// chooser is open. Touch target 26x32, under 44 px: FR-L34.3, #323 (waits for a toolkit hit
+/// area that does not change layout, compose-rust#472).
 pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
     IdeChevronSized(open, on_ink, 32.0);
 }

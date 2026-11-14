@@ -406,7 +406,7 @@ pub mod view {
     };
     use crate::editor_host::HostCommand;
     use crate::ui::editor::base_name;
-    use crate::ui::editor_workbench::page::{icon, icon_px};
+    use crate::ui::editor_workbench::page::{icon, icon_px, icon_tone};
     use crate::ui::editor_workbench::Shared;
 
     #[derive(Clone, Copy)]
@@ -745,7 +745,7 @@ pub mod view {
                             sig.set(mode);
                             crate::services::services().ui.update_prefs(|p| p.auto_save = mode);
                         },
-                            span { class: "ed-mchk", if selected { {icon_px("check", 14)} } }
+                            span { class: "ed-mchk", if selected { {icon_tone("check", 14, "text")} } }
                             span { class: "spacer", "{mode.label()}" }
                         }
                     }

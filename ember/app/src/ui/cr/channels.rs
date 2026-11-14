@@ -19,7 +19,7 @@ use compose_rust::runtime::{
 };
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, IconRole, SpaceRole};
+use compose_rust::{Alignment, SpaceRole};
 
 pub use crate::ui::channels::{
     bubble_side, compact_shows_room, draft_after_send, empty_text, SendState, feed, filter_chips, group_rooms, last_seq,
@@ -37,6 +37,12 @@ use crate::ui::project::{display_name, harness_tone};
 /// The shell's "a detail view is open" flag; `None` in unit tests without services.
 fn detail_state() -> Option<MutableState<bool>> {
     crate::services::try_services().map(|s| s.ui.detail_open.clone())
+}
+
+/// Whether an open room closes because the detail flag was cleared: only on a phone, where the
+/// room fills the screen while the flag is set (FR-L28, #885). `None`: no services (unit tests).
+pub fn room_closed_by_back(split: bool, room_open: bool, detail_open: Option<bool>) -> bool {
+    !split && room_open && detail_open == Some(false)
 }
 
 /// The list panel's width (`.split`): 340 above 1279 dp, 280 up to 1279, 260 up to 900.
@@ -243,6 +249,11 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
     });
     let window = crate::ui::window_size::current_window_size();
     let split = split_view(window.class);
+    // The system back clears the shell's detail flag (`BackStep::CloseDetail`); on a phone the
+    // open room closes with it, so the list and the tab bar come back together (FR-L28, #885).
+    if room_closed_by_back(split, open.get().is_some(), detail_state().map(|d| d.get())) {
+        open.set(None);
+    }
     // Side by side with nothing open, the first listed room is shown (FR-L12, #509); the
     // compact layout keeps the list first.
     let order: Vec<String> = Vec::new();
@@ -477,8 +488,8 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
             .content(|| {
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
                 if show_back {
-                    // The visible label "목록" names the back button.
-                    AppButton("목록", Some(IconRole::Back), ButtonKind::Default, true, true, false, on_back);
+                    // `.icon-btn.sm.backbtn`: an icon-only 32 px square named 뒤로 (review CH8).
+                    super::components::BackButton(on_back);
                 }
                 RoomIcon(&room.id, &room.project, 36.0);
                 cu::Column().content(|| {
@@ -897,6 +908,15 @@ mod tests {
             assert!(text.contains(want), "missing {want}");
         }
         assert!(!text.contains("채널, 메시지 검색"));
+    }
+
+    #[test]
+    fn fr_l28_the_system_back_closes_a_phone_room() {
+        assert!(room_closed_by_back(false, true, Some(false)));
+        assert!(!room_closed_by_back(false, true, Some(true)), "the room is still the detail view");
+        assert!(!room_closed_by_back(true, true, Some(false)), "side by side the room stays");
+        assert!(!room_closed_by_back(false, false, Some(false)));
+        assert!(!room_closed_by_back(false, true, None));
     }
 
     #[test]

@@ -210,20 +210,31 @@ fn FailureNotice(detail: &str) {
 }
 
 /// The metric cards: the status card first, then CPU, GPU, memory, temperature, disk, network
-/// and fans, `columns` to a row (`.mon-grid`). Cards are 200 high in a grid (`.mon-card`
-/// `min-height: 200px`) and as high as their content in one column.
+/// and fans, `columns` to a row (`.mon-grid`). In a grid a row is at least 200 high (`.mon-card`
+/// `min-height: 200px`) and as high as its tallest card, and every card in it fills that height;
+/// in one column a card is as high as its content (`min-height:0`). A fixed 200 cut the 상태
+/// card's last line at 1440 (review r6).
 fn Grid(columns: usize, c: &ComputerChip, feed: &MonitorFeed, online: bool) {
     let cards: Vec<Card> = std::iter::once(Card::Status)
         .chain(Metric::ALL.iter().copied().map(Card::Metric))
         .collect();
-    let height = card_height(columns);
+    let min = card_min_height(columns);
+    let fill = min.is_some();
     for chunk in cards.chunks(columns) {
-        cu::Row().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width()).content(|| {
+        cu::Row().space_role(SpaceRole::Md).equal_height(fill).modifier(Modifier::new().fill_max_width()).content(|| {
             for card in chunk.iter().copied() {
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| match card {
-                    Card::Status => StatusCard(c, feed, online, height),
-                    Card::Metric(Metric::Fans) => FanCard(height),
-                    Card::Metric(m) => MetricCard(m, card_view(m, feed), empty_text(m, online, feed.status()), meter_fraction(m, feed), height),
+                let cell = Modifier::new().weight(1.0);
+                // A Box stacks the card on a zero-width floor as high as the card minimum, so
+                // the cell is max(200, its card) and the row takes its tallest cell.
+                cu::Box().modifier(if fill { cell.fill_max_height() } else { cell }).content(|| {
+                    if let Some(h) = min {
+                        cu::Spacer().modifier(Modifier::new().width(0.0).height(h));
+                    }
+                    match card {
+                        Card::Status => StatusCard(c, feed, online, fill),
+                        Card::Metric(Metric::Fans) => FanCard(fill),
+                        Card::Metric(m) => MetricCard(m, card_view(m, feed), empty_text(m, online, feed.status()), meter_fraction(m, feed), fill),
+                    }
                 });
             }
             for _ in chunk.len()..columns {
@@ -251,21 +262,17 @@ fn metric_icon(m: Metric) -> &'static str {
     }
 }
 
-/// The inner height of a card: 200 less the card padding in a grid, free in one column.
-pub fn card_height(columns: usize) -> Option<f32> {
-    (columns > 1).then_some(200.0 - 2.0 * PAD_CARD_V)
+/// A card's minimum height: 200 in a grid (`.mon-card{min-height:200px}`), none in one column.
+pub fn card_min_height(columns: usize) -> Option<f32> {
+    (columns > 1).then_some(200.0)
 }
 
 /// `.mon-card`: a 16 px icon, a 13 px semibold `--text-2` label and an optional badge on the
-/// right (`.mon-badge`).
-fn MonCard(icon: &'static str, label: &str, badge: Option<(&str, PillTone)>, height: Option<f32>, body: impl FnOnce()) {
+/// right (`.mon-badge`). With `fill` the card takes its grid row's height.
+fn MonCard(icon: &'static str, label: &str, badge: Option<(&str, PillTone)>, fill: bool, body: impl FnOnce()) {
     let p = ember_theme().palette;
-    EmberCard(false, true, None, None, None, || {
+    super::components::EmberCardSized(false, true, fill, None, None, None, || {
         let m = Modifier::new().fill_max_width();
-        let m = match height {
-            Some(h) => m.height(h),
-            None => m,
-        };
         cu::Column().spacing(SP[2]).modifier(m).content(|| {
             cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).modifier(Modifier::new().fill_max_width()).content(|| {
                 super::shell::NavIcon(icon, p.muted.to_argb(), 16.0);
@@ -286,13 +293,13 @@ fn MonCard(icon: &'static str, label: &str, badge: Option<(&str, PillTone)>, hei
 /// The status card (`.mon-score`): the health score with its word, the main disk's free space,
 /// the score ring in its tone, the RAM badge, and the assigned projects. Without a score the
 /// card says why over an empty track (FR-L21, #389).
-fn StatusCard(c: &ComputerChip, feed: &MonitorFeed, online: bool, height: Option<f32>) {
+fn StatusCard(c: &ComputerChip, feed: &MonitorFeed, online: bool, fill: bool) {
     let p = ember_theme().palette;
     let latest = feed.latest();
     let score = latest.and_then(health_score);
     let badge = latest.and_then(ram_badge);
     let storage = latest.and_then(storage_line);
-    MonCard(super::shell::ICON_GAUGE_SVG, "상태", badge.as_deref().map(|b| (b, PillTone::Grey)), height, || {
+    MonCard(super::shell::ICON_GAUGE_SVG, "상태", badge.as_deref().map(|b| (b, PillTone::Grey)), fill, || {
         cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Column().spacing(4.0).modifier(Modifier::new().weight(1.0)).content(|| {
                 match score {
@@ -338,9 +345,9 @@ fn StatusCard(c: &ComputerChip, feed: &MonitorFeed, online: bool, height: Option
 /// (FR-X7, TODO(#389)). The mode buttons are radio buttons to assistive technology, with 자동
 /// checked (`Choice::Radio`, compose-rust#473, v0.0.9). `Row::radio_group` (#545) moves focus
 /// between toolkit `RadioButton`s only, so the row does not claim it for pill buttons.
-fn FanCard(height: Option<f32>) {
+fn FanCard(fill: bool) {
     let p = ember_theme().palette;
-    MonCard(metric_icon(Metric::Fans), Metric::Fans.title(), None, height, || {
+    MonCard(metric_icon(Metric::Fans), Metric::Fans.title(), None, fill, || {
         cu::Row().alignment(Alignment::BottomStart).space_role(SpaceRole::Xs).content(|| {
             Label("-", Fs::Xl4, Weight::Semibold, Some(paint(p.muted)), Some(1));
             Label("RPM", Fs::Lg, Weight::Medium, Some(paint(p.muted)), Some(1));
@@ -355,9 +362,9 @@ fn FanCard(height: Option<f32>) {
     });
 }
 
-fn MetricCard(metric: Metric, view: Option<CardView>, empty: &str, meter: Option<f32>, height: Option<f32>) {
+fn MetricCard(metric: Metric, view: Option<CardView>, empty: &str, meter: Option<f32>, fill: bool) {
     let p = ember_theme().palette;
-    MonCard(metric_icon(metric), metric.title(), None, height, || match view.as_ref() {
+    MonCard(metric_icon(metric), metric.title(), None, fill, || match view.as_ref() {
         Some(v) => {
             Label(&v.headline, Fs::Xl4, Weight::Semibold, None, Some(1));
             for line in v.lines.iter().take(4) {
@@ -723,9 +730,38 @@ mod tests {
 
     #[test]
     fn fr_l21_health_cards_are_200_high_in_a_grid_and_free_in_one_column() {
-        assert_eq!(card_height(1), None);
-        assert_eq!(card_height(2), Some(200.0 - 2.0 * PAD_CARD_V));
-        assert_eq!(card_height(4), Some(200.0 - 2.0 * PAD_CARD_V));
+        assert_eq!(card_min_height(1), None);
+        assert_eq!(card_min_height(2), Some(200.0));
+        assert_eq!(card_min_height(4), Some(200.0));
+    }
+
+    #[test]
+    fn fr_l21_a_grid_row_is_at_least_200_and_grows_with_its_tallest_card() {
+        // Review r6: the 상태 card at 1440 was a fixed 200 and cut its last line; `.mon-card`
+        // is `min-height:200px` in a grid row that stretches its cards.
+        use compose_rust::protocol::{decode_batch, Mutation};
+        use compose_rust::{Host, Recomposer};
+        let _guard = crate::services::test_guard();
+        fn ui() {
+            Grid(4, &chip(), &MonitorFeed::default(), true);
+        }
+        let mut host = Host::new(|| Box::new(Recomposer::new(ui)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let all: String = batch.iter().map(|m| format!("{m:?}")).collect();
+        assert!(!all.contains(&format!("Height({:?})", 200.0 - 2.0 * PAD_CARD_V)), "no fixed inner height");
+        // Every card of the two rows (4 + 4 cards) stands on the 200 floor in an equal-height row.
+        let floors = batch
+            .iter()
+            .filter(|m| matches!(m, Mutation::SetModifier { modifier, .. } if format!("{modifier:?}") == "Height(200.0)"))
+            .count();
+        assert_eq!(floors, 8, "{all}");
+        let production = include_str!("monitor.rs").split("#[cfg(test)]").next().unwrap();
+        let grid = production.split("fn Grid(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(grid.contains(".equal_height(fill)"), "{grid}");
+        assert!(grid.contains("cell.fill_max_height()"), "{grid}");
+        let card = production.split("fn MonCard(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(card.contains("EmberCardSized(false, true, fill,"), "{card}");
+        assert!(!card.contains(".height(h)"), "{card}");
     }
 
     #[test]
@@ -733,7 +769,7 @@ mod tests {
         use compose_rust::protocol::{Mutation, PropertyValue};
         use compose_rust::PropertyKind;
         let _guard = crate::services::test_guard();
-        let mut host = Host::new(|| Box::new(Recomposer::new(|| FanCard(None))));
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| FanCard(false))));
         let batch = compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode");
         let text: String = batch.iter().map(|m| format!("{m:?}")).collect();
         assert!(text.contains(FAN_MODE_REASON));

@@ -465,6 +465,9 @@ pub struct FieldOptions {
     pub border_width: Option<f32>,
     pub border_color: Option<Paint>,
     pub type_role: Option<TypeRole>,
+    /// The line pitch in dp when it is not the type step's own: the vcs textareas reset it to
+    /// the font's normal one (`.field{font:...}` without a line height).
+    pub line_height: Option<f32>,
     pub on_value_change: Option<Box<dyn FnMut(String)>>,
     pub on_submit: Option<Box<dyn FnMut(String)>>,
     pub on_focus_gained: Option<Box<dyn FnMut()>>,
@@ -655,7 +658,7 @@ fn FieldNode(o: FieldOptions, modifier: Modifier) {
     if let Some(r) = o.type_role {
         f = f.type_role(r);
     }
-    f = f.font_size(fs.size()).line_height(fs.line_height()).letter_spacing(fs.letter_spacing());
+    f = f.font_size(fs.size()).line_height(o.line_height.unwrap_or(fs.line_height())).letter_spacing(fs.letter_spacing());
     // The node's transparent fill alone still left the toolkit's frame drawn inside the
     // composer (H2, SE10, CH1); `bare` drops it.
     if o.bare {
@@ -984,6 +987,31 @@ pub fn IconButton(icon: IconRole, small: bool, on_click: impl FnMut() + 'static)
         .variant(ButtonVariant::Text)
         .modifier(ring)
         .on_click(on_click);
+}
+
+/// The corner of [`BackButton`]: the mockup's `.icon-btn.sm.backbtn` is `border-radius:50%`
+/// with `corner-shape:squircle`, which renders as a rounded square (the 390 room and
+/// conversation renders show its straight edges); the toolkit draws plain arcs until the
+/// squircle lands (#673), so a 10 px arc stands in for it on the 32 px square.
+pub const BACK_BTN_RADIUS: f32 = 10.0;
+
+/// The back button of a phone detail view (`.icon-btn.sm.backbtn`): a 32 px rounded square on
+/// `surface` with a 1 px `line` border and the 18 px `back` arrow in `text-2`, named 뒤로
+/// (review SE13, CH8: the app drew a 40 px circle in the conversation and a "목록" text button
+/// in a room).
+pub fn BackButton(on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    NamedClickable(
+        super::a11y::BACK,
+        Modifier::new()
+            .size(H_CTL, H_CTL)
+            .background(paint(p.surface))
+            .border(1.0, paint(p.line))
+            .corner_radius(BACK_BTN_RADIUS),
+        Alignment::Center,
+        on_click,
+        || super::shell::NavIcon(super::shell::ICON_BACK_SVG, p.text_2.to_argb(), 18.0),
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2112,6 +2140,64 @@ mod tests {
         assert!(flow.mods.iter().any(|m| m == "FillMaxWidth"), "{:?}", flow.mods);
         let pills = nodes.iter().filter(|n| n.parent == Some(flow.id)).count();
         assert_eq!(pills, 4, "each choice is a child of the wrapping row");
+    }
+
+    #[test]
+    fn fr_l28_back_button_is_the_32_px_rounded_square_with_the_arrow() {
+        // `.icon-btn.sm.backbtn`: 32 px, `surface`, 1 px `line`, squircle corners, an 18 px
+        // arrow; review SE13 measured a 40 px circle, CH8 a "목록" text pill.
+        let nodes = emitted_nodes(|| BackButton(|| {}));
+        assert!(!nodes.iter().any(|n| n.widget == "Text"), "an icon, no visible text");
+        assert!(!nodes.iter().any(|n| n.widget == "Button"), "not the toolkit's round icon button");
+        let image = the(&nodes, "Image");
+        assert!(image.mods.iter().any(|m| m == "Width(18.0)"), "{:?}", image.mods);
+        let frame = parent_of(&nodes, image);
+        assert!(frame.props.iter().any(|p| p.starts_with("OnClick=")), "the frame is the control: {:?}", frame.props);
+        for want in ["Width(32.0)", "Height(32.0)"] {
+            assert!(frame.mods.iter().any(|m| m == want), "{want}: {:?}", frame.mods);
+        }
+        assert!(frame.mods.iter().any(|m| m.starts_with("Shape { top_start: 10.0")), "{:?}", frame.mods);
+        assert!(!frame.mods.iter().any(|m| m.starts_with("ShapeRole")), "not a circle: {:?}", frame.mods);
+        let p = ember_theme().palette;
+        let border = format!("{:?}", compose_rust::schema::Modifier::Border { width: 1.0, paint: paint(p.line) });
+        let fill = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.surface)));
+        assert!(frame.mods.contains(&border), "{:?}", frame.mods);
+        assert!(frame.mods.contains(&fill), "{:?}", frame.mods);
+        // The detail views use it: the 싱글 conversation header, the room header, the
+        // stand-alone conversation's phone header and the routine detail on a phone (review r7:
+        // a bare drawn arrow named 목록).
+        for (file, src) in [
+            ("session.rs", include_str!("session.rs")),
+            ("channels.rs", include_str!("channels.rs")),
+            ("conversation.rs", include_str!("conversation.rs")),
+            ("routines.rs", include_str!("routines.rs")),
+        ] {
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            assert!(production.contains("BackButton("), "{file}");
+            assert!(!production.contains("IconButton(IconRole::Back"), "{file}");
+        }
+        assert!(!include_str!("channels.rs").contains("AppButton(\"목록\""));
+        assert!(!include_str!("routines.rs").contains("FocusOverlay(\"목록\""));
+    }
+
+    #[test]
+    fn fr_l28_a_detail_top_bar_is_56_high_with_20_sides_so_the_back_square_stays_32() {
+        // `.detail{grid-template-rows:56px}`, `.topbar{padding:0 var(--sp5)}`. Review r7: the
+        // 싱글 header was 52 high with 12 padding all round, so the back square drew 32 x 28 at
+        // x 12; the mockup has 32 x 32 at x 20.
+        assert_eq!((TOPBAR_H, TOPBAR_PAD_X), (56.0, 20.0));
+        assert!(TOPBAR_H - H_CTL >= 2.0 * SP[1], "room above and below the 32 dp square");
+        let session = include_str!("session.rs").split("#[cfg(test)]").next().unwrap();
+        let header = session.split("// `.topbar` in `.detail`").nth(1).expect("the 싱글 header").split("ConversationView(").next().unwrap();
+        assert!(header.contains(".height(super::theme::TOPBAR_H)"), "{header}");
+        assert!(!header.contains(".padding(SP[2])") && !header.contains(".height(52.0)"), "{header}");
+        assert_eq!(header.matches("Modifier::new().width(super::theme::TOPBAR_PAD_X)").count(), 2, "both sides");
+        // The member name shrinks with an ellipsis so the panel button stays inside the bar.
+        assert!(header.contains("cu::Column().modifier(Modifier::new().weight(1.0).width(0.0))"), "{header}");
+        let routines = include_str!("routines.rs").split("#[cfg(test)]").next().unwrap();
+        let icons = routines.split("if layout == DetailHeader::Icons {").nth(1).unwrap().split("} else if layout == DetailHeader::Stacked").next().unwrap();
+        assert!(icons.contains("BackButton(") && !icons.contains(".padding(PAD_ROW_V)"), "{icons}");
+        assert_eq!(icons.matches("Modifier::new().width(TOPBAR_PAD_X)").count(), 2, "both sides");
     }
 
     #[test]

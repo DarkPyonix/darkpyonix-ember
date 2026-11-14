@@ -50,7 +50,7 @@ use crate::ui::Route;
 
 use super::compat::{Badge, Banner, CodeText, MessageText, Spinner, StatusIndicator};
 use super::components::{
-    AppButton, ButtonKind, Clickable, EmberCard, EmberField, FieldOptions, IconButton, Label,
+    AppButton, BackButton, ButtonKind, Clickable, EmberCard, EmberField, FieldOptions, IconButton, Label,
     OptionSheet, Pill, PillTone, Txt,
 };
 use super::ko;
@@ -600,8 +600,10 @@ pub fn ConversationView(id: &str, embedded: bool) {
     let pinned = record.pinned;
     let agent = record.agent.clone();
 
+    // `.detail{background:var(--surface)}`: the conversation sits on `surface`, not the window
+    // `bg` (review SE9), so its cards and composer do not float on grey.
     cu::Box()
-        .modifier(Modifier::new().fill_max_width().fill_max_height())
+        .modifier(Modifier::new().fill_max_width().fill_max_height().background(paint(p.surface)))
         .content(|| {
             cu::Column()
                 .space_role(SpaceRole::Sm)
@@ -621,7 +623,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                             .content(|| {
                                 if compact {
                                     let u = ui.clone();
-                                    IconButton(IconRole::Back, true, move || u.go(Route::Projects));
+                                    BackButton(move || u.go(Route::Projects));
                                 }
                                 cu::Column()
                                     .modifier(Modifier::new().weight(1.0))
@@ -2336,6 +2338,41 @@ mod tests {
         }
         for unwanted in ["+++ b/", "--- a/", "old_string", "실행을 허용할까요?", "\"command\""] {
             assert!(!all.iter().any(|t| t.contains(unwanted)), "raw {unwanted} shown: {all:?}");
+        }
+    }
+
+    #[Composable]
+    fn host_conversation_s1_embedded() {
+        ConversationView("demo-s1", true);
+    }
+
+    #[test]
+    fn fr_l5_conversation_body_is_painted_with_the_surface_token() {
+        // Review SE9: the mockup's conversation (`.detail{background:var(--surface)}`) is white
+        // (`#ffffff`, dark `#292927`); the app left it on the window `bg`, so the cards and the
+        // composer floated on grey. The view's root box sends the surface fill itself.
+        let _guard = crate::services::test_guard();
+        services().open_session("demo-s1");
+        for content in [host_conversation_s1 as fn(), host_conversation_s1_embedded as fn()] {
+            let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let root = batch
+                .iter()
+                .find_map(|m| match m {
+                    Mutation::Create { node_id, widget } if format!("{widget:?}") == "Box" => Some(*node_id),
+                    _ => None,
+                })
+                .expect("the root box");
+            let mods: Vec<String> = batch
+                .iter()
+                .filter_map(|m| match m {
+                    Mutation::SetModifier { node_id, modifier, .. } if *node_id == root => Some(format!("{modifier:?}")),
+                    _ => None,
+                })
+                .collect();
+            let surface = format!("{:?}", compose_rust::schema::Modifier::Background(paint(ember_theme().palette.surface)));
+            assert!(mods.contains(&surface), "root box {mods:?} lacks {surface}");
+            assert!(mods.iter().any(|m| m == "FillMaxWidth") && mods.iter().any(|m| m == "FillMaxHeight"), "{mods:?}");
         }
     }
 }

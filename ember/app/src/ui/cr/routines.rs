@@ -46,7 +46,7 @@ use crate::ui::home::{
     model_catalog, modes_for, project_options, DEFAULT_PROJECT, Harness, Selection,
 };
 use super::components::{
-    pill_colors, pill_metrics, AppButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
+    pill_colors, pill_metrics, AppButton, BackButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
     CloseButton, FieldOptions, Label, MonoLabel, Pill, PillTone, Select, SheetFooter,
 };
 use super::characters::{CharState, Character};
@@ -2103,27 +2103,24 @@ fn DetailPane(
         cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
             // Header: Topbar with bottom border
             if layout == DetailHeader::Icons {
-                let back_cmd = DrawList::builder()
-                    .line(paint(p.text_2), 20.0, 16.0, 11.0, 16.0, 2.0)
-                    .line(paint(p.text_2), 16.0, 11.0, 11.0, 16.0, 2.0)
-                    .line(paint(p.text_2), 16.0, 21.0, 11.0, 16.0, 2.0)
-                    .build();
+                // `.topbar.rt-dh` on a phone: 56 high, 20 in from each side, and the shared
+                // `.icon-btn.sm.backbtn` (a 32 dp bordered rounded square named 뒤로), where a bare
+                // drawn arrow stood (review r7, routines-detail-390).
                 let on_back_fn = on_back;
                 let toggle_fn = on_toggle_c;
                 let edit_fn = on_edit_c;
                 let run_fn = on_run_c;
                 cu::Row()
                     .alignment(Alignment::CenterStart)
-                    .spacing(SP[1])
-                    .modifier(Modifier::new().fill_max_width().height(DETAIL_HEADER_H).padding(PAD_ROW_V))
+                    .modifier(Modifier::new().fill_max_width().height(DETAIL_HEADER_H))
                     .content(move || {
-                        cu::Box()
-                            .modifier(Modifier::new().size(32.0, 32.0))
-                            .alignment(Alignment::Center)
-                            .content(move || {
-                                cu::Canvas(back_cmd).modifier(Modifier::new().size(32.0, 32.0));
-                                FocusOverlay("목록", move || on_back_fn());
-                            });
+                    cu::Spacer().modifier(Modifier::new().width(TOPBAR_PAD_X));
+                    cu::Row()
+                    .alignment(Alignment::CenterStart)
+                    .spacing(SP[1])
+                    .modifier(Modifier::new().weight(1.0))
+                    .content(move || {
+                        BackButton(move || on_back_fn());
                         cu::Column()
                             .modifier(Modifier::new().weight(1.0))
                             .alignment(Alignment::CenterStart)
@@ -2166,6 +2163,8 @@ fn DetailPane(
                                     FocusOverlay("지금 실행", move || run_fn(run_id_c.clone()));
                                 }
                             });
+                    });
+                    cu::Spacer().modifier(Modifier::new().width(TOPBAR_PAD_X));
                     });
             } else if layout == DetailHeader::Stacked {
                 // Narrow panel (768): the title and pill on top, the actions on their own row,

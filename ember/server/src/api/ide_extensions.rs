@@ -7,8 +7,10 @@
 //! | DELETE | `/api/computers/{id}/ide/extensions/{publisher.name}` | none | 200 `{uninstalled,id,output}` |
 //! | GET | `/api/ide/extensions/search?q=<text>&offset=<n>` | none | 200 `{offset,total,extensions}` |
 //!
-//! Only the local computer has an OSE (same reason as `ide.rs`: it runs on the server machine),
-//! so another registered computer answers 400, an unknown one 404. The id and version are
+//! The local computer's OSE is this server's. A registered computer's OSE runs on its node (SPEC
+//! FR-W4c, #896): the install is forwarded to the node's `POST /ide/extensions` and the node's
+//! status and body come back unchanged (502 when the node does not answer). Uninstall is not
+//! forwarded: for a registered computer it still answers 400. An unknown computer is 404. The id and version are
 //! checked against a strict pattern (`ose::extension_spec`): no VSIX paths, no URLs, nothing
 //! that starts with `-`. The OSE binary runs directly (no shell) with the computer's data dir;
 //! at most one install or uninstall per computer runs at a time (a second answers 409); a run is
@@ -249,19 +251,54 @@ fn error(code: StatusCode, msg: impl Into<String>) -> Response {
     (code, Json(json!({ "error": msg.into() }))).into_response()
 }
 
-/// The answer for a computer that has no OSE here: `None` for the local computer.
-fn not_local(st: &St, computer: &str) -> Option<Response> {
+/// Where the OSE of a computer is.
+enum Place {
+    /// This server's own manager.
+    Local,
+    /// The node of a registered computer (SPEC FR-W4c).
+    Node,
+    /// Nowhere: the answer to give.
+    Refused(Response),
+}
+
+fn place(st: &St, computer: &str) -> Place {
     if !valid_computer_id(computer) {
-        return Some(error(StatusCode::BAD_REQUEST, "invalid computer id"));
+        return Place::Refused(error(StatusCode::BAD_REQUEST, "invalid computer id"));
     }
     if computer == LOCAL {
-        return None;
+        return Place::Local;
     }
-    Some(match st.computers.registry().get(computer) {
-        Ok(Some(_)) => error(StatusCode::BAD_REQUEST, "OSE server is only available on the local computer"),
-        Ok(None) => error(StatusCode::NOT_FOUND, format!("unknown computer: {computer}")),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
-    })
+    match st.computers.registry().get(computer) {
+        Ok(Some(_)) => Place::Node,
+        Ok(None) => Place::Refused(error(StatusCode::NOT_FOUND, format!("unknown computer: {computer}"))),
+        Err(e) => Place::Refused(error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))),
+    }
+}
+
+/// Longest wait for a forwarded install: the node's own 120 s run limit plus the round trip.
+const NODE_INSTALL_TIMEOUT: Duration = Duration::from_secs(150);
+
+/// Forwards an install to the node of the registered computer `computer` and answers with the
+/// node's status and body (SPEC FR-W4c). The node checks the id, runs one install at a time and
+/// enforces the timeout; nothing runs on this server.
+async fn install_on_node(st: &St, computer: &str, body: &[u8]) -> Response {
+    let request: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return error(StatusCode::BAD_REQUEST, format!("bad request body: {e}")),
+    };
+    let node = match st.computers.client(computer) {
+        Ok(n) => n.with_deadline(NODE_INSTALL_TIMEOUT),
+        Err(e) => return error(StatusCode::BAD_GATEWAY, format!("node unreachable: {e:#}")),
+    };
+    match node.post_raw("/ide/extensions", &request).await {
+        Ok((status, bytes)) => (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("node unreachable: {e}")),
+    }
 }
 
 /// The answer for a run that did not succeed. `done` is the body flag of the run (`installed` or
@@ -281,8 +318,10 @@ fn failure(err: InstallError, id: &str, done: &str) -> Response {
 }
 
 async fn install(State(st): State<St>, Path(computer): Path<String>, body: Bytes) -> Response {
-    if let Some(answer) = not_local(&st, &computer) {
-        return answer;
+    match place(&st, &computer) {
+        Place::Local => {}
+        Place::Node => return install_on_node(&st, &computer, &body).await,
+        Place::Refused(answer) => return answer,
     }
     let req: InstallRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -299,8 +338,11 @@ async fn install(State(st): State<St>, Path(computer): Path<String>, body: Bytes
 }
 
 async fn uninstall(State(st): State<St>, Path((computer, extension)): Path<(String, String)>) -> Response {
-    if let Some(answer) = not_local(&st, &computer) {
-        return answer;
+    match place(&st, &computer) {
+        Place::Local => {}
+        // Not forwarded: the node has no uninstall route (FR-W4c covers the install).
+        Place::Node => return error(StatusCode::BAD_REQUEST, "OSE server is only available on the local computer"),
+        Place::Refused(answer) => return answer,
     }
     let ose = st.ose.clone();
     let id = extension.clone();

@@ -31,14 +31,17 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use axum::extract::ws::WebSocketUpgrade;
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use ember_node::ose_api::pump_ose_relay;
+use ember_node::client::ClientError;
+use ember_node::ose_api::{pump_ose_relay, OseRelayStream};
+use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -52,6 +55,16 @@ use crate::store::SessionRecord;
 pub use ember_node::ose_api::RELAY_SUBSTITUTION_WINDOW;
 /// The connection of one OSE launch, defined beside the manager that builds it.
 pub use crate::ose::EmberOseConnection;
+
+/// Why a computer that is neither local nor registered has no Ember target.
+const LOCAL_ONLY: &str = "OSE server is only available on the local computer";
+/// Longest wait for a node's `POST /ide/ose` (SPEC FR-W4c): a new OSE takes up to 10 s to listen
+/// on the node, and a node that never answers must not hold the launch request open.
+pub const NODE_OSE_START_TIMEOUT: Duration = Duration::from_secs(20);
+/// Longest wait for the node's relay socket to open, before the client's upgrade is answered.
+const NODE_RELAY_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Longest wait for a close handshake when a bridged relay ends.
+const NODE_RELAY_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// One computer's IDE endpoints.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -342,23 +355,35 @@ pub fn launch_targets(
     launch_targets_for(rec, &c, server_url, ose)
 }
 
-/// The launch targets for one session on one resolved computer.
+/// The launch targets for one session on one resolved computer, with the OSE of this server for
+/// a local computer. A registered computer's OSE runs on its node: the route asks the node and
+/// calls [`launch_targets_with`] (SPEC FR-W4c).
 pub fn launch_targets_for(
     rec: &SessionRecord,
     target: &IdeComputer,
     server_url: Option<&str>,
     ose: &OseManager,
 ) -> IdeLaunch {
+    let connection = if target.ide.local {
+        ose.connection(std::path::Path::new(&rec.cwd))
+    } else {
+        Err(LOCAL_ONLY.into())
+    };
+    launch_targets_with(rec, target, server_url, connection)
+}
+
+/// The launch targets for one session on one resolved computer, given the OSE connection of the
+/// Ember target (or why there is none).
+pub fn launch_targets_with(
+    rec: &SessionRecord,
+    target: &IdeComputer,
+    server_url: Option<&str>,
+    connection: Result<EmberOseConnection, String>,
+) -> IdeLaunch {
     let computer_name = target.id.as_str();
     let computer = &target.ide;
     let display = target.named.then(|| target.name.clone());
     let folder = rec.cwd.clone();
-
-    let connection = if computer.local {
-        ose.connection(std::path::Path::new(&folder))
-    } else {
-        Err("OSE server is only available on the local computer".into())
-    };
     let ember = Target {
         kind: "ember",
         available: connection.is_ok(),
@@ -482,17 +507,15 @@ async fn ide_relay(
         return error(StatusCode::BAD_REQUEST, "invalid computer id".into());
     }
     if computer != LOCAL {
-        if let Some(c) = &st.computers {
-            match c.registry().get(&computer) {
-                Ok(Some(_)) => {
-                    return error(StatusCode::BAD_REQUEST, "OSE server is only available on the local computer".into())
-                }
-                Ok(None) => return error(StatusCode::NOT_FOUND, format!("unknown computer: {computer}")),
-                Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
-            }
-        } else {
+        let Some(c) = &st.computers else {
             return error(StatusCode::NOT_FOUND, format!("unknown computer: {computer}"));
-        }
+        };
+        return match c.registry().get(&computer) {
+            // FR-W4c: the OSE of a registered computer runs on its node.
+            Ok(Some(_)) => node_relay(c, &computer, &launch_id, ws).await,
+            Ok(None) => error(StatusCode::NOT_FOUND, format!("unknown computer: {computer}")),
+            Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        };
     }
     let target = match st.ose.open_relay(&computer, &launch_id) {
         Ok(t) => t,
@@ -504,6 +527,126 @@ async fn ide_relay(
         }
     };
     ws.on_upgrade(move |socket| pump_ose_relay(socket, target)).into_response()
+}
+
+/// True for an id this server may put into a node path: the manager's 32 hex characters, and in
+/// any case nothing but ASCII letters and digits.
+fn safe_launch_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// The OSE of `folder` on the node of the registered computer `id` (SPEC FR-W4c): the node starts
+/// or reuses it, and the answer is turned into this server's relay path. The token in it is the
+/// node's placeholder; the real one stays on the node. An error is the reason the Ember target is
+/// unavailable.
+async fn node_ose_connection(computers: &Computers, id: &str, folder: &str) -> Result<EmberOseConnection, String> {
+    let node = computers.client(id).map_err(|e| format!("{e:#}"))?.with_deadline(NODE_OSE_START_TIMEOUT);
+    match node.ide_ose(folder).await {
+        Ok(launch) if safe_launch_id(&launch.launch_id) => Ok(EmberOseConnection {
+            endpoint: launch.endpoint,
+            relay: Some(format!("/api/computers/{id}/ide/relay/{}", launch.launch_id)),
+            connection_token: launch.connection_token,
+        }),
+        Ok(_) => Err("the node answered an invalid OSE launch id".into()),
+        Err(ClientError::Api { body, .. }) => Err(body.error),
+        Err(e) => Err(format!("node unreachable: {e}")),
+    }
+}
+
+/// The relay of a registered computer (SPEC FR-W4c). The node's relay socket is opened first, so
+/// its refusal (unknown launch 404, relay limit 429) and an unreachable node (502) are plain
+/// answers; only then is the client upgraded and the two sockets bridged.
+async fn node_relay(computers: &Computers, computer: &str, launch_id: &str, ws: WebSocketUpgrade) -> Response {
+    if !safe_launch_id(launch_id) {
+        return error(StatusCode::NOT_FOUND, format!("unknown OSE launch: {launch_id}"));
+    }
+    let node = match computers.client(computer) {
+        Ok(n) => n,
+        Err(e) => return error(StatusCode::BAD_GATEWAY, format!("node unreachable: {e:#}")),
+    };
+    let upstream = match tokio::time::timeout(NODE_RELAY_OPEN_TIMEOUT, node.ide_ose_relay(launch_id)).await {
+        Ok(Ok(u)) => u,
+        Ok(Err(ClientError::Api { status, body })) => {
+            return error(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), body.error)
+        }
+        Ok(Err(e)) => return error(StatusCode::BAD_GATEWAY, format!("node unreachable: {e}")),
+        Err(_) => return error(StatusCode::BAD_GATEWAY, "node unreachable: the relay did not open in time".into()),
+    };
+    ws.on_upgrade(move |socket| bridge_node_relay(socket, upstream)).into_response()
+}
+
+/// How a bridged relay ended.
+enum BridgeEnd {
+    /// The client sent a text frame: it is told 1003, as on the local relay.
+    ClientText,
+    /// The node closed, with its close code and reason when it sent one (1011: no OSE to dial).
+    NodeClosed(Option<(u16, String)>),
+    /// The client closed or was cut off (a revoked device, `FR-N3`), or a send failed.
+    Other,
+}
+
+/// Bridges one client relay socket to the node's relay socket, binary frames both ways. The two
+/// directions run under one `tokio::select!`: when either side ends, the other socket is closed
+/// too, so a revoked device's stream (the transport closes it within one heartbeat, `FR-N3`) takes
+/// the node's socket, and with it the node's TCP connection to the OSE, down with it. Nothing is
+/// rewritten here: the node replaces the placeholder token.
+async fn bridge_node_relay(socket: WebSocket, upstream: OseRelayStream) {
+    use tokio_tungstenite::tungstenite::Message as NodeMessage;
+
+    let (mut client_tx, mut client_rx) = socket.split();
+    let (mut node_tx, mut node_rx) = upstream.split();
+    let end = {
+        let up = async {
+            loop {
+                match client_rx.next().await {
+                    Some(Ok(Message::Binary(bytes))) => {
+                        if node_tx.send(NodeMessage::Binary(bytes.into())).await.is_err() {
+                            return BridgeEnd::Other;
+                        }
+                    }
+                    Some(Ok(Message::Text(_))) => return BridgeEnd::ClientText,
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return BridgeEnd::Other,
+                }
+            }
+        };
+        let down = async {
+            loop {
+                match node_rx.next().await {
+                    Some(Ok(NodeMessage::Binary(bytes))) => {
+                        if client_tx.send(Message::Binary(bytes.into())).await.is_err() {
+                            return BridgeEnd::Other;
+                        }
+                    }
+                    Some(Ok(NodeMessage::Close(frame))) => {
+                        return BridgeEnd::NodeClosed(
+                            frame.map(|f| (u16::from(f.code), f.reason.as_str().to_string())),
+                        )
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) | None => return BridgeEnd::NodeClosed(None),
+                }
+            }
+        };
+        tokio::select! {
+            end = up => end,
+            end = down => end,
+        }
+    };
+    let close = async {
+        let frame = match end {
+            BridgeEnd::ClientText => Some(CloseFrame {
+                code: 1003,
+                reason: "text frames are not allowed on the OSE binary relay".into(),
+            }),
+            BridgeEnd::NodeClosed(Some((code, reason))) => Some(CloseFrame { code, reason: reason.as_str().into() }),
+            BridgeEnd::NodeClosed(None) | BridgeEnd::Other => None,
+        };
+        let _ = node_tx.close().await;
+        let _ = client_tx.send(Message::Close(frame)).await;
+    };
+    // A peer that is gone never answers a close: do not wait for it.
+    let _ = tokio::time::timeout(NODE_RELAY_CLOSE_TIMEOUT, close).await;
 }
 
 #[derive(Deserialize)]
@@ -572,7 +715,19 @@ async fn ide_targets(
             .and_then(|h| h.to_str().ok())
             .map(|h| format!("http://{h}"))
     });
-    Json(launch_targets_for(&rec, computer, server_url.as_deref(), &st.ose)).into_response()
+    // FR-W4c: a registered computer's OSE runs on its node. A computer marked local in
+    // `EMBER_IDE_COMPUTERS`, or known only from it, keeps the answer of this server's own manager.
+    let on_node = !computer.ide.local
+        && computer.id != LOCAL
+        && registered.as_deref().is_some_and(|l| l.iter().any(|c| c.id == computer.id));
+    let launch = match &st.computers {
+        Some(computers) if on_node => {
+            let connection = node_ose_connection(computers, &computer.id, &rec.cwd).await;
+            launch_targets_with(&rec, computer, server_url.as_deref(), connection)
+        }
+        _ => launch_targets_for(&rec, computer, server_url.as_deref(), &st.ose),
+    };
+    Json(launch).into_response()
 }
 
 #[cfg(test)]

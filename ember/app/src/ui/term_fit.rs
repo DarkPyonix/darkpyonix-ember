@@ -16,10 +16,10 @@ pub struct CellSize {
     pub height: f32,
 }
 
-/// The `.ed-term` cell: `--code-fs` 13 px in `--mono` (JetBrains Mono and the system monospace
-/// fallbacks advance 0.6 em) on `--code-lh` 22 px lines (`assets/editor/editor.css`).
-// TODO(dioxus-compose#196): a fixed 0.6 em is a stand-in. The renderer can drop the font family
-// and reports no text metrics; measure the advance from the font actually used once it does.
+/// The `.ed-term` cell: `--code-fs` 13 px in `--mono` on `--code-lh` 22 px lines
+/// (`assets/editor/editor.css`). The panel's text is drawn in `--mono` (dioxus-compose#196, #241
+/// fixed in the pinned rev), and every face of that stack (JetBrains Mono, SF Mono, Menlo, the
+/// system monospace) advances 0.6 em, so the advance is that and is not measured.
 pub const PANEL_CELL: CellSize = CellSize { width: 13.0 * 0.6, height: 22.0 };
 
 /// The `.ed-term` padding, `var(--sp3) var(--sp4)`: (left plus right, top plus bottom).
@@ -132,6 +132,15 @@ impl PanelFit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// dioxus-compose#196: the cell width is the `--mono` advance, not a stand-in for a dropped font.
+    #[test]
+    fn fr_l31_20_cell_is_the_mono_advance() {
+        let src = include_str!("term_fit.rs");
+        assert!(!src.contains(concat!("TODO(dioxus-compose#", "196)")));
+        assert!(!include_str!("components.rs").contains(concat!("TODO(dioxus-compose#", "196)")));
+        assert_eq!(PANEL_CELL, CellSize { width: 13.0 * 0.6, height: 22.0 });
+    }
 
     /// dioxus-compose#207: the panel follows its `onresize`, so no stand-in for a resize event is left.
     #[test]

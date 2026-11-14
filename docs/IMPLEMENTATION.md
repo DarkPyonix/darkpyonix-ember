@@ -153,7 +153,7 @@ first place; it was always the extension's own HTML running in its own webview c
 question these extensions actually pose is not "can Ember avoid Monaco" but "can Ember avoid a
 webview *anywhere*," and for this category the honest answer is **no, not without asking every
 such extension's author to rewrite their extension against a new, Ember-specific rendering API**,
-which `E3` forecloses on its face (see `INTENT.md` D7's rejected alternative).
+which `E3` forecloses on its face (see `INTENT.md` D7's rejected alternative; D44 Option A and `SPEC.md` `FR-E8` provide the native platform webview container per panel).
 
 ### Category 4: Extensions calling into Monaco's own API directly
 
@@ -178,7 +178,7 @@ anything in this document); it is flagged as a gap, see §6.
 | -------- | ------------------- | ----------------------- | -------------- |
 | 1: Extension Host logic only | Most linters, Git integration, debug adapters | None | Not a design target; works regardless |
 | 2: Structured overlay data | Diagnostics, CodeLens, Hover, inline completions (Copilot-class) | Real but bounded: a correct protocol-compatible Renderer suffices | **First target**, per `INTENT.md` D7 and `SPEC.md` `FR-M2`–`FR-M4` |
-| 3: Self-shipped webview content | Jupyter, Markdown Preview Enhanced, GitLens graphs | Not actually about Monaco; about webviews generally | **Permanently excepted** under `E4`, contained per-panel (`SPEC.md` `FR-M5`) |
+| 3: Self-shipped webview content | Jupyter, Markdown Preview Enhanced, GitLens graphs | Not actually about Monaco; about webviews generally | **Permanently excepted** under `E4`, contained per-panel (`INTENT.md` D44 Option A, `SPEC.md` `FR-E5`, `FR-E8`) |
 | 4: Direct `monaco.editor.*` API calls | A smaller, unsized set of low-level extensions | Total: no protocol-level fix exists | **Unresolved**, see §6 open gap |
 
 ---
@@ -193,7 +193,7 @@ that framing makes the actual trajectory clearer than the milestone IDs alone do
 | **M1** (launcher only) | Nothing yet built that has one | The entire launcher, always |
 | **M2–M5** (wrapped VS Code Web) | The entire editor window's content area: Workbench, Monaco, everything | The launcher (still, always, per `E1`) |
 | **M6, once started, categories 1–2 land** | Category-3 extension panels only | The launcher; the rest of the editor window's steady-state rendering (buffer, diagnostics, CodeLens, Hover, inline completions) |
-| **M6, category-3 handling matures** (`FR-M5`) | A single panel, exactly when and only when a category-3 extension is active and visible | Everything else, all the time |
+| **M8, extension webviews wired** (`FR-E8`, #823) | Platform webview per panel (WKWebView, WebView2, WebKitGTK, Android WebView) with `WebviewPanes` placeholders in workbench tabs | Everything else, all the time |
 
 The end state this plan converges toward, if M6 is pursued to completion, is **not** "zero
 webviews ever". `INTENT.md` correctly does not claim that as achievable, because category 3 makes

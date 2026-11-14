@@ -64,6 +64,17 @@ fn describe(command: &HostCommand) -> String {
         }
         HostCommand::Widget(uri, _, _) => format!("widget event {}", uri.path),
         HostCommand::CreateFile { parent, name } => format!("create file {parent} {name}"),
+        HostCommand::Webview(event) => match event {
+            ember_editor::webview::WebviewEvent::Ready { handle } => format!("webview ready {handle}"),
+            ember_editor::webview::WebviewEvent::Message { handle, message } => format!("webview message {handle} {}", message.json),
+            ember_editor::webview::WebviewEvent::State { handle, state } => format!("webview state {handle} {state}"),
+            ember_editor::webview::WebviewEvent::ViewState { handle, visible, active, position } => {
+                format!("webview view_state {handle} visible={visible} active={active} pos={position}")
+            }
+            ember_editor::webview::WebviewEvent::Closed { handle } => format!("webview closed {handle}"),
+            ember_editor::webview::WebviewEvent::Focus { handle, focused } => format!("webview focus {handle} {focused}"),
+            _ => "webview other".to_string(),
+        },
         _ => "other".to_string(),
     }
 }
@@ -485,4 +496,71 @@ fn fr_l31_9_a_failed_open_from_the_icon_says_so_in_a_notice() {
     page.dom.render();
     assert!(page.sent().iter().all(|c| !c.starts_with("open")), "nothing is asked while the connection is lost");
     assert_eq!(page.notice().unwrap_or_default(), crate::ui::editor_scm::open_offline_text("main.rs"));
+}
+
+#[test]
+fn fr_e8_extension_webview_panel_lifecycle_and_messaging() {
+    use ember_editor::webview::{ContentOptions, PanelOptions, ShowOptions, WebviewKind, WebviewUpdate};
+    use ember_editor_conn::webview::WebviewMessage;
+
+    let mut page = Page::open();
+    let _ = page.sent(); // Clear initial commands
+
+    // 1. Deliver Created for a markdown preview webview panel
+    page.deliver(SessionUpdate::Webview(WebviewUpdate::Created {
+        handle: "wv-md".into(),
+        kind: WebviewKind::Panel { view_type: "markdown.preview".into() },
+        title: "Markdown Preview".into(),
+        content: ContentOptions::default(),
+        panel: PanelOptions::default(),
+        state: None,
+        reveal: Some(ShowOptions { preserve_focus: false, view_column: Some(1) }),
+    }));
+
+    // Check that ViewState was sent to host on reveal
+    let sent = page.sent();
+    assert!(sent.iter().any(|s| s == "webview view_state wv-md visible=true active=true pos=1"));
+
+    // Check that tab was opened
+    let tab = page.find_where("the webview tab", |id| {
+        page.attr(id, "role").as_deref() == Some("tab") && page.attr(id, "title").as_deref() == Some("ember-webview:wv-md")
+    }).expect("webview tab present in tab strip");
+    assert_eq!(page.attr(tab, "aria-selected").as_deref(), Some("true"));
+
+    // Check that webview pane placeholder renders with title and WAITING_TEXT
+    let region = page.find_where("the webview region", |id| {
+        page.attr(id, "role").as_deref() == Some("region") && page.attr(id, "aria-label").as_deref() == Some("Markdown Preview")
+    }).expect("webview region rendered in editor pane");
+    assert!(page.text().contains("Markdown Preview"));
+    assert!(page.text().contains(ember_editor::webview::WAITING_TEXT));
+
+    // 2. Deliver Ready: placeholder updates (WAITING_TEXT is cleared)
+    page.deliver(SessionUpdate::Webview(WebviewUpdate::Ready { handle: "wv-md".into() }));
+    assert!(page.find_where("the webview region after ready", |id| {
+        page.attr(id, "role").as_deref() == Some("region") && page.attr(id, "aria-label").as_deref() == Some("Markdown Preview")
+    }).is_some());
+    assert!(!page.text().contains(ember_editor::webview::WAITING_TEXT));
+
+    // 3. Post message from webview to session
+    let s = super::shared();
+    super::post_webview_message(&s, "wv-md", WebviewMessage {
+        json: r#"{"command":"click","id":42}"#.into(),
+        buffers: Vec::new(),
+    });
+    let sent = page.sent();
+    assert!(sent.iter().any(|s| s == "webview message wv-md {\"command\":\"click\",\"id\":42}"));
+
+    // 4. Set state from webview
+    super::set_webview_state(&s, "wv-md", r#"{"scrollPos":350}"#);
+    let sent = page.sent();
+    assert!(sent.iter().any(|s| s == "webview state wv-md {\"scrollPos\":350}"));
+
+    // 5. Close webview tab
+    super::page::finish_close(&s, &["ember-webview:wv-md".to_string()], None);
+    let sent = page.sent();
+    assert!(sent.iter().any(|s| s == "webview closed wv-md"));
+    page.redraw();
+    assert!(page.find_where("the webview tab after close", |id| {
+        page.attr(id, "title").as_deref() == Some("ember-webview:wv-md")
+    }).is_none(), "webview tab removed after close");
 }

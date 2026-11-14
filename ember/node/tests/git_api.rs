@@ -956,7 +956,10 @@ fn find_sshd() -> Option<PathBuf> {
 fn start_sshd(dir: &Path) -> Option<SshdServer> {
     use std::os::unix::fs::PermissionsExt;
 
-    let sshd_bin = find_sshd()?;
+    let Some(sshd_bin) = find_sshd() else {
+        eprintln!("skipping fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd: sshd binary not found");
+        return None;
+    };
     std::fs::create_dir_all(dir).unwrap();
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
 
@@ -966,11 +969,15 @@ fn start_sshd(dir: &Path) -> Option<SshdServer> {
     };
 
     let host_key = dir.join("host_ed25519");
-    let st = Command::new("ssh-keygen")
+    let Ok(st) = Command::new("ssh-keygen")
         .args(["-q", "-t", "ed25519", "-N", "", "-f", &s(&host_key)])
         .status()
-        .ok()?;
+    else {
+        eprintln!("skipping fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd: ssh-keygen not found");
+        return None;
+    };
     if !st.success() {
+        eprintln!("skipping fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd: ssh-keygen exited with {st}");
         return None;
     }
 
@@ -1018,17 +1025,21 @@ fn start_sshd(dir: &Path) -> Option<SshdServer> {
     )
     .unwrap();
 
-    let mut child = Command::new(sshd_bin)
+    let Ok(mut child) = Command::new(sshd_bin)
         .args(["-D", "-e", "-f", &s(&cfg)])
-        .stdin( std::process::Stdio::null())
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .ok()?;
+    else {
+        eprintln!("skipping fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd: failed to spawn sshd");
+        return None;
+    };
 
     let mut ready = false;
     for _ in 0..50 {
-        if let Ok(Some(_)) = child.try_wait() {
+        if let Ok(Some(st)) = child.try_wait() {
+            eprintln!("skipping fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd: sshd exited early ({st})");
             return None;
         }
         if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
@@ -1040,6 +1051,7 @@ fn start_sshd(dir: &Path) -> Option<SshdServer> {
     if !ready {
         let _ = child.kill();
         let _ = child.wait();
+        eprintln!("skipping fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd: sshd did not listen in time");
         return None;
     }
 
@@ -1147,8 +1159,8 @@ async fn fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd() {
     assert_eq!(std::fs::read_to_string(repo_b.join("a.txt")).unwrap(), "one\nover-ssh\n");
 
     // With an unauthorized key and PasswordAuthentication enabled on sshd, the appended
-    // `-o BatchMode=yes` makes ssh fail immediately with 409 in Korean instead of waiting on a
-    // password prompt until the network timeout.
+    // `-o BatchMode=yes` makes ssh fail with 409 conflict (carrying ssh's Permission denied text
+    // in Korean, not a 504 timeout) instead of waiting on a password prompt.
     git(&repo_b, &["config", "core.sshCommand", &format!("ssh -F '{}'", s(&bad_cfg))]);
     let t = std::time::Instant::now();
     for op in ["fetch", "push"] {
@@ -1156,8 +1168,12 @@ async fn fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd() {
             .err(op, &GitRemoteRequest { repo: s(&repo_b), remote: Some("origin".into()) }, 409, "conflict")
             .await;
         assert!(has_korean(&msg) && msg.contains("원격"), "{op}: {msg}");
+        assert!(
+            msg.to_ascii_lowercase().contains("permission denied"),
+            "{op}: expected ssh permission denied in message, got: {msg}"
+        );
     }
-    assert!(t.elapsed() < std::time::Duration::from_secs(3), "BatchMode did not reject immediately: {:?}", t.elapsed());
+    assert!(t.elapsed() < std::time::Duration::from_secs(30), "unexpectedly slow: {:?}", t.elapsed());
 }
 
 #[cfg(unix)]

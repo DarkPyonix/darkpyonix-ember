@@ -979,6 +979,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                         let send_sub = send.clone();
                                         EmberField(FieldOptions {
                                             bare: true,
+                                            inset: Some((4.0, 0.0)),
                                             fill_max_width: true,
                                             multiline: false,
                                             height: Some(36.0),
@@ -1070,6 +1071,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                 let send_sub = send.clone();
                                 EmberField(FieldOptions {
                                     bare: true,
+                                    inset: Some((8.0, 8.0)),
                                     weight: Some(1.0),
                                     multiline: true,
                                     placeholder: if busy {

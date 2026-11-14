@@ -619,6 +619,7 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
                 EmberField(FieldOptions {
                     weight: Some(1.0),
                     bare: true,
+                    inset: Some((14.0, 0.0)),
                     height: Some(H_BTN),
                     placeholder: "메시지 입력".to_string(),
                     enabled: Some(live.is_some()),

@@ -312,6 +312,29 @@ pub fn trend_days(load: &Load<UsageSummary>, window: usize) -> Vec<(String, u64)
     s.days[start..].iter().map(|d| (d.day.clone(), d.total_tokens)).collect()
 }
 
+/// Each day's `cost_usd` in the window, oldest first, aligned with [`trend_days`]; `None` where
+/// the server sent no cost.
+pub fn trend_costs(load: &Load<UsageSummary>, window: usize) -> Vec<Option<f64>> {
+    window_rows(load, window).iter().map(|d| d.cost_usd).collect()
+}
+
+/// The cost line over the trend's bars (mockup `.hm-line`, #849): one point per day that has a
+/// cost, at that day's bar centre `centers[i]`, scaled so the highest cost sits at 1/1.15 of the
+/// plot height `h` (the mockup's `cmax*1.15`). Empty when no day has a cost, so no line is drawn
+/// rather than one at zero.
+pub fn cost_line_points(costs: &[Option<f64>], centers: &[f32], h: f32) -> Vec<(f32, f32)> {
+    let max = costs.iter().flatten().fold(0.0_f64, |m, c| m.max(*c));
+    if max <= 0.0 {
+        return Vec::new();
+    }
+    let top = max * 1.15;
+    costs
+        .iter()
+        .zip(centers)
+        .filter_map(|(c, x)| c.map(|c| (*x, h - (c / top) as f32 * h)))
+        .collect()
+}
+
 /// The line under the Home trend: the window total, or why there is none.
 pub fn trend_line(load: &Load<UsageSummary>, window: usize) -> String {
     match load {
@@ -513,6 +536,30 @@ mod tests {
 
     fn summary(days: Vec<UsageDayRow>) -> Load<UsageSummary> {
         Load::Ready(UsageSummary { days, ..Default::default() })
+    }
+
+    #[test]
+    fn fr_l23_cost_line_has_a_point_per_costed_day_and_none_without_cost() {
+        let centers = [10.0_f32, 30.0, 50.0];
+        assert!(cost_line_points(&[None, None, None], &centers, 100.0).is_empty());
+        let pts = cost_line_points(&[Some(1.0), None, Some(2.3)], &centers, 115.0);
+        assert_eq!(pts.len(), 2);
+        assert_eq!(pts[0].0, 10.0);
+        assert_eq!(pts[1].0, 50.0);
+        // The highest cost sits at 1/1.15 of the height, measured from the bottom.
+        assert!((pts[1].1 - 15.0).abs() < 0.01, "{pts:?}");
+        assert!(pts[0].1 > pts[1].1);
+    }
+
+    #[test]
+    fn fr_l23_trend_costs_follow_the_window() {
+        let mut a = day("2026-11-01", 10, 0, 1);
+        a.cost_usd = Some(1.5);
+        let b = day("2026-11-02", 10, 0, 1);
+        let load = summary(vec![a, b]);
+        assert_eq!(trend_costs(&load, 14), vec![Some(1.5), None]);
+        assert_eq!(trend_costs(&load, 1), vec![None]);
+        assert!(trend_costs(&Load::Loading, 7).is_empty());
     }
 
     #[test]

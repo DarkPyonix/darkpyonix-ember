@@ -171,6 +171,7 @@ impl IntoResponse for ChannelError {
             ChannelError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             ChannelError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             ChannelError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
+            ChannelError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             ChannelError::NotAMember(names) => {
                 let body = json!({ "error": format!("{self:#}"), "code": "not_a_member", "reason": "not_a_member", "unknown": names });
                 return (StatusCode::BAD_REQUEST, Json(body)).into_response();
@@ -391,28 +392,43 @@ async fn answer_feed(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize, Default)]
+struct FeedQuestionQuery {
+    session_id: Option<String>,
+}
+
 /// Answer or skip a member session's pending question from the feed (FR-T11, FR-A5). The feed
-/// lookup is the membership check (404); the session then validates and records the answer, so
-/// the feed and the session clear together. Errors of the session map as on its own route.
+/// lookup is the membership check (404, or 409 when two member sessions hold the same pending
+/// `question_id` and `?session_id=` is omitted); the session then validates and records the
+/// answer, so the feed and the session clear together. Errors of the session map as on its own
+/// route, with a fixed message for 500.
 async fn answer_feed_question(
     State(c): State<ChannelsCtx>,
     Path((id, question_id)): Path<(String, String)>,
+    Query(q): Query<FeedQuestionQuery>,
     Json(b): Json<QuestionAnswerBody>,
 ) -> Response {
-    let item = match c.store.channel_feed_question(&id, &question_id) {
+    let item = match c.store.channel_feed_question_in(&id, q.session_id.as_deref(), &question_id) {
         Ok(item) => item,
         Err(e) => return e.into_response(),
     };
     match c.sessions.resolve_question_body(&item.session_id, &question_id, b).await {
         Ok(status) => Json(json!({ "status": status })).into_response(),
         Err(e) => {
-            let (code, name) = match &e {
-                QuestionError::NoSession(_) | QuestionError::NotPending(_) => (StatusCode::NOT_FOUND, "not_found"),
-                QuestionError::Invalid(_) | QuestionError::BadBody => (StatusCode::BAD_REQUEST, "bad_request"),
-                QuestionError::NoAgent(_) => (StatusCode::CONFLICT, "conflict"),
-                QuestionError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+            let (code, name, msg) = match &e {
+                QuestionError::NoSession(_) | QuestionError::NotPending(_) => {
+                    (StatusCode::NOT_FOUND, "not_found", format!("{e:#}"))
+                }
+                QuestionError::Invalid(_) | QuestionError::BadBody => {
+                    (StatusCode::BAD_REQUEST, "bad_request", format!("{e:#}"))
+                }
+                QuestionError::NoAgent(_) => (StatusCode::CONFLICT, "conflict", format!("{e:#}")),
+                QuestionError::Other(err) => {
+                    tracing::error!(channel = %id, session = %item.session_id, question = %question_id, "failed to answer question: {err:#}");
+                    (StatusCode::INTERNAL_SERVER_ERROR, "internal", "failed to answer question".to_string())
+                }
             };
-            (code, Json(json!({ "error": format!("{e:#}"), "code": name }))).into_response()
+            (code, Json(json!({ "error": msg, "code": name }))).into_response()
         }
     }
 }

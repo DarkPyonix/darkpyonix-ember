@@ -1094,8 +1094,8 @@ pub fn EmberSheetSized(
     content: impl FnOnce(),
 ) {
     let theme = ember_theme();
-    // TODO(compose-rust#384): expose modal scrim color; the mockup uses rgba(0, 0, 0, 0.3).
-    // The layered card shadow (#214) replaces the Material tint ring that `elevation` painted.
+    // The mockup's `.modal` scrim, rgba(0, 0, 0, 0.3), set on every presentation (compose-rust#384,
+    // v0.0.10 `ModalScope::scrim`). The layered card shadow (#214) replaces the Material tint ring that `elevation` painted.
     // Explicit zero padding suppresses the renderer dialog's theme padding, which otherwise
     // adds space around the frame and prevents a full-screen sheet.
     let modifier = with_shadows(Modifier::new().padding(0.0), theme.shadow_sm()).background(paint(theme.palette.surface));
@@ -1115,20 +1115,26 @@ pub fn EmberSheetSized(
         cu::Sheet(open)
             .modifier(modifier.fill_max_width().corner_radii([CORNER_XL, CORNER_XL, 0.0, 0.0]))
             .max_height_fraction(SHEET_BOTTOM_MAX_FRACTION)
+            .scrim(Paint::Literal(MODAL_SCRIM))
             .on_dismiss(on_dismiss)
             .content(body);
     } else if presentation == SheetPresentation::FullScreen {
         cu::Dialog(open)
             .modifier(modifier.width(window.width_dp).height(window.height_dp))
+            .scrim(Paint::Literal(MODAL_SCRIM))
             .on_dismiss(on_dismiss)
             .content(body);
     } else {
         cu::Dialog(open)
             .modifier(modifier.corner_radius(CORNER_XL).width(sheet_width(window.width_dp, width)))
+            .scrim(Paint::Literal(MODAL_SCRIM))
             .on_dismiss(on_dismiss)
             .content(body);
     }
 }
+
+/// The mockup's modal scrim (`style.css` `.modal`, `rgba(0,0,0,.3)`): black at alpha 0x4D (77 of 255).
+pub const MODAL_SCRIM: Color = Color::argb(0x4D00_0000);
 
 /// A filter chip (`.chip`): 32 px, `--ink` when selected, `--surface-2` otherwise, 12 px medium.
 /// Its label is its name, and it says whether it is selected (compose-rust v0.0.7, #429).
@@ -1760,6 +1766,18 @@ mod tests {
         for src in [chars, monitor] {
             assert!(!src.contains(concat!("TODO(compose-rust#", "473)")));
         }
+    }
+
+    #[test]
+    fn fr_212_modal_scrim_is_the_mockups() {
+        // compose-rust#384 (v0.0.10 `ModalScope::scrim`): every presentation takes the mockup's scrim.
+        let src = include_str!("components.rs");
+        let production = &src[..src.find("#[cfg(test)]").expect("tests")];
+        assert!(!production.contains(concat!("TODO(compose-rust#", "384)")));
+        assert_eq!(MODAL_SCRIM, Color::argb(0x4D00_0000));
+        let sheet = &production[production.find("pub fn EmberSheetSized").expect("sheet")..];
+        let sheet = &sheet[..sheet.find("\n}\n").expect("end")];
+        assert_eq!(sheet.matches(".scrim(Paint::Literal(MODAL_SCRIM))").count(), 3, "bottom sheet, full screen and dialog");
     }
 
     #[test]

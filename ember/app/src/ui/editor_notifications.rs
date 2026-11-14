@@ -13,12 +13,11 @@ pub fn severity_class(severity: MessageSeverity) -> &'static str {
     }
 }
 
-/// The overlay's distance from the page bottom: above the status bar, plus the 76px the page is
-/// shorter than the window when it is not FullSize (the same allowance as `editor_page_height`).
-// TODO(#320): drop the allowance with the fixed page height. v0.0.7: #467 fixed; workaround kept
-// until checked on a display (the editor page has to follow the reported window height).
-pub fn overlay_bottom(full_size: bool) -> &'static str {
-    if full_size { "calc(var(--sbh) + 12px)" } else { "calc(var(--sbh) + 88px)" }
+/// The overlay's distance from the viewport bottom: 12px above the status bar. The page is the
+/// viewport on every system (`editor_page_size_style`), so the status bar is at the viewport's
+/// bottom edge and nothing else is added.
+pub fn overlay_bottom() -> &'static str {
+    "calc(var(--sbh) + 12px)"
 }
 
 /// Whether the toasts and the notification center are drawn (#802). While a modal message waits
@@ -169,7 +168,7 @@ pub mod view {
     pub fn layer(s: &Shared) -> Element {
         s.notifications.borrow_mut().tick(crate::ui::editor_workbench::now_ms());
         let n = s.notifications.borrow();
-        let bottom = overlay_bottom(cfg!(target_os = "macos"));
+        let bottom = overlay_bottom();
         let anchor = format!("position:fixed; z-index:35; right:calc(var(--stw) + 12px); bottom:{bottom}; width:min(420px, calc(100vw - 32px)); display:flex; flex-direction:column; gap:var(--sp2);");
         let toasts: Vec<ExtensionMessage> = n.toasts().into_iter().map(|e| e.message.clone()).collect();
         let center: Option<Vec<ExtensionMessage>> = n.center_open().then(|| n.center().into_iter().map(|e| e.message.clone()).collect());
@@ -215,7 +214,13 @@ mod tests {
         assert_eq!(card_label(MessageSeverity::Error, Some("rust-analyzer")), "오류 알림, rust-analyzer");
         assert_eq!(card_label(MessageSeverity::Info, None), "정보 알림");
         assert_eq!(severity_class(MessageSeverity::Warning), "ed-pdot warn");
-        assert_eq!(overlay_bottom(true), "calc(var(--sbh) + 12px)");
+    }
+
+    // #301: the page is the viewport, so the overlay sits 12px above the status bar on every
+    // system, with no title bar allowance.
+    #[test]
+    fn fr_l31_37_notifications_sit_above_the_status_bar_with_no_title_bar_allowance() {
+        assert_eq!(overlay_bottom(), "calc(var(--sbh) + 12px)");
     }
 
     #[test]

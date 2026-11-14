@@ -463,6 +463,12 @@ pub struct FieldOptions {
 /// The type step of a field's text and placeholder when no role is named (style.css `.field`).
 pub const FIELD_FONT: Fs = Fs::Md;
 
+/// The scale step a field's text and placeholder are set in: [`FIELD_FONT`], or the step Ember
+/// gives the named role ([`type_role_style`], `Label` 13 px), never the toolkit's own ladder.
+pub fn field_fs(role: Option<TypeRole>) -> Fs {
+    role.map_or(FIELD_FONT, |r| type_role_style(r).0)
+}
+
 /// The text inset of a framed single-line field, `(horizontal, vertical)`: style.css `.field`
 /// padding 0 12 (FR-L10.2, #878).
 pub const FIELD_INSET: (f32, f32) = (12.0, 0.0);
@@ -605,12 +611,16 @@ fn FieldNode(o: FieldOptions, modifier: Modifier) {
     if let Some(t) = o.text {
         f = f.text(t);
     }
-    // FR-L10.2 (#844): 14 px text and placeholder (style.css `.field`) unless the caller names a
-    // role; an explicit `font_size` would override the role's size, so it is sent only without one.
-    match o.type_role {
-        Some(r) => f = f.type_role(r),
-        None => f = f.font_size(FIELD_FONT.size()),
+    // FR-L10.2 (#844): the text and the placeholder take Ember's scale step, 14 px
+    // (style.css `.field`) or the named role's step ([`field_fs`]). The role alone is not
+    // enough: the toolkit sizes it from the Cupertino ladder (`Label` 15 sp at -0.24, `Body` 17
+    // at -0.41), so the 13 px compact search drew 15 and a 14 px field kept Body's -0.41
+    // tracking. Size, line height and tracking are always sent; the role stays for its face.
+    let fs = field_fs(o.type_role);
+    if let Some(r) = o.type_role {
+        f = f.type_role(r);
     }
+    f = f.font_size(fs.size()).line_height(fs.line_height()).letter_spacing(fs.letter_spacing());
     // The node's transparent fill alone still left the toolkit's frame drawn inside the
     // composer (H2, SE10, CH1); `bare` drops it.
     if o.bare {
@@ -1371,6 +1381,12 @@ mod tests {
         assert!(wide.iter().any(|m| m == "FontSize=Float(14.0)"), "{wide:?}");
         let compact = emitted_props(|| SearchField("세션 검색", SEARCH_FIELD_H_COMPACT, |_| {}));
         assert!(!compact.iter().any(|m| m == "FontSize=Float(14.0)"), "{compact:?}");
+        // Review r5: without an explicit size the compact `Label` field drew Cupertino's 15 sp,
+        // wider than the 14 px ones; it sends 13 itself.
+        assert!(compact.iter().any(|m| m == "FontSize=Float(13.0)"), "{compact:?}");
+        for props in [&wide, &compact] {
+            assert!(props.iter().any(|m| m == "LetterSpacing=Float(0.0)"), "{props:?}");
+        }
     }
 
     #[test]
@@ -1926,9 +1942,39 @@ mod tests {
         let bare = emitted_props(|| EmberField(FieldOptions { bare: true, multiline: true, ..Default::default() }));
         assert!(bare.iter().any(|m| m == "Bare=Bool(true)"), "{bare:?}");
         assert!(bare.iter().any(|m| m == "FontSize=Float(14.0)"), "{bare:?}");
-        // A named role keeps its own size: no explicit FontSize overrides it.
+        // A named role takes Ember's step for it, never the toolkit's Cupertino size.
         let mono = emitted_props(|| EmberField(FieldOptions { type_role: Some(TypeRole::Mono), ..Default::default() }));
-        assert!(!mono.iter().any(|m| m.starts_with("FontSize=")), "{mono:?}");
+        assert!(mono.iter().any(|m| m == "FontSize=Float(12.0)"), "{mono:?}");
+    }
+
+    #[test]
+    fn fr_l10_2_field_sends_ember_size_line_and_tracking_for_its_placeholder() {
+        // Review r5: the toolkit sets the placeholder in the field's own style (HostTextField.kt
+        // `textStyle.copy(color = ...)`), whose size and tracking come from the Cupertino ladder
+        // unless sent: `Label` drew 15 sp at -0.24 and a 14 px field kept Body's -0.41.
+        let cases: [(Option<TypeRole>, f64, f64); 3] =
+            [(None, 14.0, 22.0), (Some(TypeRole::Label), 13.0, 20.0), (Some(TypeRole::Mono), 12.0, 18.0)];
+        for (role, size, line) in cases {
+            for bare in [false, true] {
+                let props = field_props(role, bare);
+                assert!(props.iter().any(|m| *m == format!("FontSize=Float({size:?})")), "{role:?} {props:?}");
+                assert!(props.iter().any(|m| *m == format!("LineHeight=Float({line:?})")), "{role:?} {props:?}");
+                assert!(props.iter().any(|m| m == "LetterSpacing=Float(0.0)"), "{role:?} {props:?}");
+            }
+        }
+        assert_eq!(field_fs(None), FIELD_FONT);
+        assert_eq!(field_fs(Some(TypeRole::Label)).size(), 13.0);
+    }
+
+    fn field_props(role: Option<TypeRole>, bare: bool) -> Vec<String> {
+        match (role, bare) {
+            (None, false) => emitted_props(|| EmberField(FieldOptions { placeholder: "검색".into(), ..Default::default() })),
+            (None, true) => emitted_props(|| EmberField(FieldOptions { bare: true, placeholder: "검색".into(), ..Default::default() })),
+            (Some(TypeRole::Label), false) => emitted_props(|| EmberField(FieldOptions { type_role: Some(TypeRole::Label), ..Default::default() })),
+            (Some(TypeRole::Label), true) => emitted_props(|| EmberField(FieldOptions { bare: true, type_role: Some(TypeRole::Label), ..Default::default() })),
+            (_, false) => emitted_props(|| EmberField(FieldOptions { type_role: Some(TypeRole::Mono), ..Default::default() })),
+            (_, true) => emitted_props(|| EmberField(FieldOptions { bare: true, type_role: Some(TypeRole::Mono), ..Default::default() })),
+        }
     }
 
     #[test]

@@ -1940,6 +1940,19 @@ mod design_chrome {
         assert!(PAGE.contains("span { class: \"hide-md\", \"{crate::ui::editor::FIND_PILL_LABEL}\" }"));
     }
 
+    /// FR-L31.30 (#895, design review E5): a preview tab's label is upright, as every tab's in the
+    /// mockup (`editor.css:54-56`), and no rule of the page sets a tab label in italics.
+    #[test]
+    fn fr_l31_30_a_preview_tab_keeps_the_mockups_upright_label() {
+        let css = compact_css();
+        assert!(css.contains(".ed-tab{position:relative;display:flex;align-items:center;gap:6px;height:30px;"));
+        assert!(!css.contains(".ed-tab.preview>.ellipsis{font-style:italic}"));
+        let tab_rules: Vec<&str> = css.split('}').filter(|rule| rule.contains(".ed-tab") && rule.contains("font-style")).collect();
+        assert!(tab_rules.is_empty(), "{tab_rules:?}");
+        // The class stays, so the tab is still told apart in the markup.
+        assert_eq!(ember_app::ui::editor::tab_class_with(true, false, false, true), "ed-tab on preview");
+    }
+
     #[test]
     fn design_a6_palette_overlay_takes_no_grid_row() {
         // FR-L31.26 put the overlays in `.ed-layers`, so the palette's scrim needs no grid placement,

@@ -9,8 +9,8 @@ html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font
 .ed-top{-webkit-app-region:drag}
 .ed-top button,.ed-top .ed-menu{-webkit-app-region:no-drag}
 /* FR-L31.5 tabs: the mockup draws no preview or pinned tab, so these follow Code-OSS on the mockup's tokens.
-   A preview tab sets its name in italics; a pinned tab keeps its pin button visible where the close button is. */
-.ed-tab.preview>.ellipsis{font-style:italic}
+   A pinned tab keeps its pin button visible where the close button is. A preview tab keeps the mockup's
+   upright label (FR-L31.30): set in italics, as Code-OSS does, its last letter was cut ("README.ma"). */
 .ed-tab.pinned .ed-tx{opacity:1}
 /* The tab context menu opens where the pointer is, over a transparent scrim that closes it. */
 .ed-scrim{position:fixed;inset:0;z-index:19;background:transparent}

@@ -10,7 +10,7 @@ use compose_rust::ui::Modifier;
 use compose_rust::{Alignment, ShapeRole, TypeRole};
 
 use super::components::{
-    AppButton, ButtonKind, Clickable, EmberSheet, FilterChip, InsetPanel, Label, Pill, PillTone,
+    AppButton, ButtonKind, Choice, ChoiceButton, Clickable, EmberSheet, InsetPanel, Label, Pill, PillTone,
     SheetFooter, Txt,
 };
 use super::theme::*;
@@ -111,7 +111,7 @@ pub fn SettingsContent() {
                 cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
                     for pref in [ThemePref::System, ThemePref::Light, ThemePref::Dark] {
                         let u = ui.clone();
-                        FilterChip(pref.label(), current_theme == pref, move || {
+                        ChoiceButton(pref.label(), Choice::Radio, current_theme == pref, true, true, move || {
                             u.set_theme_pref(pref);
                         });
                     }
@@ -128,7 +128,7 @@ pub fn SettingsContent() {
                     cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
                         for km in Keymap::ALL {
                             let u = ui.clone();
-                            FilterChip(km.label(), current_keymap == km, move || {
+                            ChoiceButton(km.label(), Choice::Radio, current_keymap == km, true, true, move || {
                                 u.update_prefs(|pr| pr.keymap = km);
                             });
                         }
@@ -164,7 +164,7 @@ pub fn SettingsContent() {
                             let u = ui.clone();
                             let selected = current_ide.as_deref() == key;
                             let next = key.map(str::to_string);
-                            FilterChip(label, selected, move || {
+                            ChoiceButton(label, Choice::Radio, selected, true, true, move || {
                                 let v = next.clone();
                                 u.update_prefs(|pr| pr.ide_target = v);
                             });

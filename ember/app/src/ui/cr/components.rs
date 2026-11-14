@@ -832,8 +832,7 @@ pub fn ChoiceButton(
     on_click: impl FnMut() + 'static,
 ) {
     let theme = ember_theme();
-    let kind = if chosen { ButtonKind::Primary } else { ButtonKind::Default };
-    let s = button_style_for(kind, small, enabled, theme.palette);
+    let s = choice_style(chosen, small, enabled, theme.palette);
     let state = match choice {
         Choice::Toggle => Modifier::new().selected(chosen),
         Choice::Radio => Modifier::new().role(Role::RadioButton).checked(chosen),
@@ -855,6 +854,17 @@ pub fn ChoiceButton(
             )
             .on_click(on_click),
     );
+}
+
+/// A [`ChoiceButton`]'s look, the mockup's `.seg button` (FR-L10.2, #878): the chosen one is
+/// `Primary` (`ink`), the others `Default` (`surface` on a 1 px `line` border) with `text-2`
+/// text, both with the 14/500 (13/500 small) label.
+pub fn choice_style(chosen: bool, small: bool, enabled: bool, p: &Palette) -> ButtonStyle {
+    if chosen {
+        button_style_for(ButtonKind::Primary, small, enabled, p)
+    } else {
+        ButtonStyle { text: p.text_2, ..button_style_for(ButtonKind::Default, small, enabled, p) }
+    }
 }
 
 /// How a [`ChoiceButton`] tells assistive technology that it is the chosen one.
@@ -1821,6 +1831,41 @@ mod tests {
     }
 
     #[test]
+    fn fr_l10_2_choice_is_the_seg_button() {
+        for p in [&LIGHT, &DARK] {
+            let off = choice_style(false, true, true, p);
+            assert_eq!((off.height, off.fill, off.border, off.text), (32.0, p.surface, p.line, p.text_2));
+            assert_eq!((off.fs.size(), off.weight.value()), (13.0, 500));
+            let on = choice_style(true, true, true, p);
+            assert_eq!((on.fill, on.border, on.text), (p.ink, p.ink, p.ink_text));
+        }
+        let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        let choice = production.split("pub fn ChoiceButton(").nth(1).unwrap();
+        assert!(choice.contains("choice_style(chosen, small, enabled, theme.palette)"));
+        assert!(choice.contains(".border(1.0, paint(s.border))"));
+    }
+
+    #[test]
+    fn fr_l10_2_choice_call_sites_are_seg_buttons() {
+        let settings = include_str!("settings.rs");
+        let settings = settings.split("#[cfg(test)]").next().unwrap();
+        for call in [
+            "ChoiceButton(pref.label(), Choice::Radio, current_theme == pref, true, true,",
+            "ChoiceButton(km.label(), Choice::Radio, current_keymap == km, true, true,",
+            "ChoiceButton(label, Choice::Radio, selected, true, true,",
+        ] {
+            assert!(settings.contains(call), "{call}");
+        }
+        assert!(!settings.contains("FilterChip("), "the settings choices are not filter chips");
+        let agents = include_str!("agents.rs");
+        let seg = agents.split("fn SegGroup<").nth(1).unwrap();
+        let seg = &seg[..seg.find("\n}\n").unwrap()];
+        assert!(seg.contains("ChoiceButton(label, Choice::Radio, selected, true, true,"), "{seg}");
+        assert!(seg.contains(".spacing(SP[1])"), "`.seg` gap 8: {seg}");
+        assert!(!seg.contains("cu::Button("), "{seg}");
+    }
+
+    #[test]
     fn fr_l10_2_app_button_sends_its_label_size_and_weight() {
         let big = emitted_props(|| AppButton("저장", None, ButtonKind::Primary, false, true, false, || {}));
         assert!(big.iter().any(|m| m == "FontSize=Float(14.0)"), "{big:?}");
@@ -2127,7 +2172,8 @@ mod tests {
             let allowed_buttons = match name {
                 // AppButton, IconButton, PickChip, and ChoiceButton (FR-L10, compose-rust#473).
                 "components.rs" => 4,
-                "agents.rs" => 2,
+                // SegGroup moved onto ChoiceButton (#878).
+                "agents.rs" => 1,
                 "files.rs" => 1,
                 "home.rs" => 0,
                 "launcher.rs" => 1,

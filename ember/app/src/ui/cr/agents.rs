@@ -32,7 +32,7 @@ pub use crate::ui::agents::{
     LOCAL_STORE_NOTE, MEM_STEPS_MB, THRESHOLD_MAX, THRESHOLD_MIN, THRESHOLD_STEP,
 };
 use super::components::{
-    AppButton, ButtonKind, EmberCard, EmberField, FieldOptions, InsetPanel,
+    AppButton, ButtonKind, Choice, ChoiceButton, EmberCard, EmberField, FieldOptions, InsetPanel,
     Label, OptionSheet, Pill, PillTone,
 };
 use super::theme::*;
@@ -642,28 +642,14 @@ fn SegGroup<T: Copy + PartialEq + 'static>(
     current: T,
     mut on_pick: impl FnMut(T) + Clone + 'static,
 ) {
-    let p = ember_theme().palette;
-    cu::Row().spacing(SP[0]).content(|| {
+    // `.seg`: 8 px apart, each a 32 px `.seg button` with the 13/500 label (#878: the toolkit
+    // label drew about 18 px).
+    cu::Row().spacing(SP[1]).content(|| {
         for (val, label) in options {
             let val = *val;
             let selected = val == current;
-            let (bg, fg, border) = if selected {
-                (p.ink, p.ink_text, p.ink)
-            } else {
-                (p.surface, p.text_2, p.line)
-            };
             let mut on_pick = on_pick.clone();
-            cu::Button(*label)
-                .variant(ButtonVariant::Text)
-                .color(paint(fg))
-                .modifier(
-                    Modifier::new()
-                        .height(H_CTL)
-                        .background(paint(bg))
-                        .border(1.0, paint(border))
-                        .shape_role(ShapeRole::Full),
-                )
-                .on_click(move || on_pick(val));
+            ChoiceButton(label, Choice::Radio, selected, true, true, move || on_pick(val));
         }
     });
 }

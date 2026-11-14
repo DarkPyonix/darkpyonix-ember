@@ -100,6 +100,8 @@ pub struct Shared {
     pub notifications: Rc<RefCell<ember_editor::notifications::Notifications>>,
     /// The 확장 window: search, install, uninstall, enable and disable (FR-L31.14).
     pub extensions: crate::ui::editor_extensions::Extensions,
+    /// The 에이전트 tool window and 에이전트에게 묻기 (FR-L31.25, #766).
+    pub agent: crate::ui::editor_agent::AgentTool,
 }
 
 // WidgetView accepts a function without props and owns a separate tree. Share signals between
@@ -210,7 +212,8 @@ fn init(target: EditorTarget) {
         Rc::new(RefCell::new(n))
     });
     let extensions = use_hook(|| crate::ui::editor_extensions::Extensions::new(&target.computer, revision));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { extensions, host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
+    let agent = use_hook(|| crate::ui::editor_agent::AgentTool::new(&target.project, &target.folder, revision));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { extensions, agent, host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -413,6 +416,24 @@ pub mod page {
         }
         if action == Action::Format {
             crate::ui::editor_language::view::run(s, crate::ui::editor_language::LangAction::Format);
+            return;
+        }
+        if action == Action::Ask {
+            let mut stripes = s.stripes;
+            if !stripes.read().is_selected(ToolWindow::Agent) {
+                stripes.write().show(ToolWindow::Agent);
+            }
+            if let Some(path) = s.tabs.read().current_path().map(str::to_owned) {
+                let (anchor, active) = *s.find.selection.read();
+                let context = if anchor != active {
+                    let start = (anchor.0.min(active.0) + 1) as usize;
+                    let end = (anchor.0.max(active.0) + 1) as usize;
+                    crate::ui::editor_agent::format_selection_context(&path, &s.folder, start, end)
+                } else {
+                    crate::ui::editor_agent::format_file_context(&path, &s.folder)
+                };
+                s.agent.attach_context(context);
+            }
             return;
         }
         // Settings (FR-L31.17): the view is a tab, the two files open as documents.
@@ -1324,6 +1345,8 @@ pub mod page {
                             {crate::ui::editor_scm::view::git_window(&s)}
                         } else if w == ToolWindow::Extensions {
                             {crate::ui::editor_extensions::view::panel(&s)}
+                        } else if w == ToolWindow::Agent {
+                            {crate::ui::editor_agent::view::panel(&s)}
                         } else {
                             {side_note(w, "ed-left")}
                         }
@@ -1412,7 +1435,7 @@ pub mod page {
         let find_hint = keymap.hint(Action::Find, Os::current());
         let find_s = s.clone();
         let git_s = s.clone();
-        let (runcfg_s, run_s, stop_s) = (s.clone(), s.clone(), s.clone());
+        let (runcfg_s, run_s, stop_s, ask_s) = (s.clone(), s.clone(), s.clone(), s.clone());
         let mut stripes = s.stripes;
         let project_tip = tooltip_text("프로젝트 창", &keymap.hint(Action::Project, Os::current()));
         // The traffic lights float over the top bar's left end under FullSize.
@@ -1435,7 +1458,7 @@ pub mod page {
                 }
                 // The mockup's order (`editor.js:75-76`): run configuration, run, stop, ask agent, theme.
                 // No ⋯ here: the tab strip's ⋯ opens the menu (owner placement rule 2026-11-13, rule 5).
-                button { class: "ed-ib", title: "에이전트에게 묻기", "aria-label": "에이전트에게 묻기", onclick: move |_| notice(crate::ui::editor_actions::not_ready_notice(Action::Ask)), {icon("spark")} }
+                button { class: "ed-ib", title: "에이전트에게 묻기", "aria-label": "에이전트에게 묻기", onclick: move |_| run_action(&ask_s, Action::Ask), {icon("spark")} }
                 button { class: "ed-ib", title: "{theme_title}", "aria-label": "{theme_title}", onclick: move |_| {
                     let next = theme_pref.next();
                     theme.set(next);

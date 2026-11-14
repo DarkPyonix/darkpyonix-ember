@@ -18,6 +18,7 @@ pub mod components;
 pub mod conversation;
 pub mod editor;
 pub mod editor_actions;
+pub mod editor_agent;
 pub mod enrol_flow;
 pub mod device_scope;
 pub mod editor_icons;

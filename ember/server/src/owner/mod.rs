@@ -12,8 +12,9 @@
 //!   take it for a bad server token and re-read the token file.
 //! - **The mode.** Warn by default for now: a call without a key is logged and served, until
 //!   the app ships its claim. `EMBER_OWNER_PRESENCE=enforce` refuses it ([`Presence`]).
-//! - **How it is claimed.** Over the unix socket `<data dir>/owner.sock` ([`door`]). The key
-//!   lives while that connection stays open.
+//! - **How it is claimed.** Over the unix socket `<data dir>/owner.sock`, or on Windows the
+//!   named pipe `\\.\pipe\ember-owner-<hash of the data dir>` ([`door`], [`pipe_name`]). The
+//!   key lives while that connection stays open.
 //! - **The transport door** has no owner key: there the device key is the credential, and an
 //!   owner route needs a device with scope `full` ([`crate::devices::scope`]). Routes that are
 //!   local only (devices, the token, hub admin, enrol codes) stay local only, so a `full` device
@@ -23,7 +24,7 @@
 //! Sessions it approved things for keep running and stop only on an explicit stop.
 
 pub mod cli;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod door;
 pub mod routes;
 
@@ -51,10 +52,13 @@ pub const OWNER_HEADER: &str = "x-ember-owner";
 pub const KEY_PREFIX: &str = "eok_";
 /// The claim socket's name in the data folder.
 pub const SOCKET_FILE: &str = "owner.sock";
+/// The start of the claim pipe's name on Windows; [`pipe_name`] adds the data folder's hash.
+pub const PIPE_PREFIX: &str = r"\\.\pipe\ember-owner-";
 /// `EMBER_OWNER_PRESENCE=enforce`: an owner route called without a live key gets 403
 /// `owner_required`. Unset or any other value: warn, which logs the call and serves it. Warn is
 /// the default until the app ships its claim (leader, 2026-11-13); enforce becomes the default
-/// in a later change. Where there is no claim socket (Windows, #815) the mode is always warn.
+/// in a later change. Unix (the socket) and Windows (the named pipe, #815) read it alike; a
+/// platform with neither door always warns.
 pub const PRESENCE_ENV: &str = "EMBER_OWNER_PRESENCE";
 /// `EMBER_OWNER_CONFIRM=off`: a claim that passes the peer checks gets a key with no
 /// confirmation (best effort). Unset or any other value: every claim is confirmed.
@@ -78,11 +82,11 @@ impl Presence {
         }
     }
 
-    /// The mode a server runs in for `v` (the value of [`PRESENCE_ENV`]). Without a claim
-    /// socket no key can exist, so enforcing would only close the owner routes: such a
-    /// platform (Windows until the named-pipe door, #815) always warns.
+    /// The mode a server runs in for `v` (the value of [`PRESENCE_ENV`]). Unix has the claim
+    /// socket and Windows the claim pipe (#815), so both follow `v`. Without a door no key can
+    /// exist, so enforcing would only close the owner routes: any other platform always warns.
     pub fn for_platform(v: Option<&str>) -> Presence {
-        if cfg!(unix) {
+        if cfg!(any(unix, windows)) {
             Presence::from_value(v)
         } else {
             Presence::Warn
@@ -143,6 +147,22 @@ pub struct Owner {
     keys: Mutex<HashMap<u64, Held>>,
     next: AtomicU64,
     events: tokio::sync::broadcast::Sender<OwnerEvent>,
+}
+
+/// The claim pipe for the data folder whose canonical path is `canonical` (Windows, #815):
+/// [`PIPE_PREFIX`] plus the first 8 bytes of the SHA-256 of the lower-cased path, in hex.
+/// Lower case, because Windows paths ignore case. `ember/client` computes the same name; the
+/// test `fr_s12_client_pipe_name_matches_the_server` compares the two.
+pub fn pipe_name_of(canonical: &str) -> String {
+    let digest = Sha256::digest(canonical.to_lowercase().as_bytes());
+    format!("{PIPE_PREFIX}{}", hex(&digest[..8]))
+}
+
+/// The claim pipe of `data_dir`: [`pipe_name_of`] its canonical path, or of the path as given
+/// when it cannot be canonicalised (a folder that does not exist has no server).
+pub fn pipe_name(data_dir: &std::path::Path) -> String {
+    let dir = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    pipe_name_of(&dir.to_string_lossy())
 }
 
 fn hash(key: &str) -> [u8; 32] {
@@ -328,12 +348,29 @@ mod tests {
         assert_eq!(Presence::from_value(Some("off")), Presence::Warn);
         assert_eq!(Presence::from_value(Some("warn")), Presence::Warn);
         assert_eq!(Presence::from_value(Some(" ENFORCE ")), Presence::Enforce);
-        // A platform without the claim socket never enforces (#815).
+        // Unix and Windows have a door and follow the value; another platform never enforces.
         let enforced = Presence::for_platform(Some("enforce"));
-        assert_eq!(enforced, if cfg!(unix) { Presence::Enforce } else { Presence::Warn });
+        assert_eq!(enforced, if cfg!(any(unix, windows)) { Presence::Enforce } else { Presence::Warn });
+        assert_eq!(Presence::for_platform(Some("warn")), Presence::Warn);
         assert_eq!(Presence::for_platform(None), Presence::Warn);
         assert_eq!(Confirm::from_value(None), Confirm::Strict);
         assert_eq!(Confirm::from_value(Some("1")), Confirm::Strict);
         assert_eq!(Confirm::from_value(Some("off")), Confirm::Off);
+    }
+
+    #[test]
+    fn fr_s12_pipe_name_is_a_short_hash_of_the_data_dir() {
+        let a = pipe_name_of(r"\\?\C:\Users\me\.ember");
+        assert!(a.starts_with(r"\\.\pipe\ember-owner-"), "{a}");
+        let hash = a.strip_prefix(PIPE_PREFIX).unwrap();
+        assert_eq!(hash.len(), 16);
+        assert!(hash.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        // Case does not matter on Windows; the folder does.
+        assert_eq!(a, pipe_name_of(r"\\?\c:\users\ME\.ember"));
+        assert_ne!(a, pipe_name_of(r"\\?\C:\Users\me\.ember2"));
+        // The same folder by two spellings gets one name.
+        let dir = tempfile::tempdir().unwrap();
+        let dotted = dir.path().join(".");
+        assert_eq!(pipe_name(dir.path()), pipe_name(&dotted));
     }
 }

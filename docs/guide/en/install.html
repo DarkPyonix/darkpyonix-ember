@@ -158,7 +158,9 @@ cargo build --release --locked
       <p>
         The owner key exists only in the memory of the Ember app or of one
         <code>ember-server owner</code> command. It is claimed over
-        <code>&lt;data dir&gt;/owner.sock</code> and is void when that app or command exits, or when the
+        <code>&lt;data dir&gt;/owner.sock</code> (on Windows, over the named pipe
+        <code>\\.\pipe\ember-owner-&lt;hash of the data dir&gt;</code>, which only your user can open and
+        which refuses other computers) and is void when that app or command exits, or when the
         server restarts. The first claim prints a code on the server's console
         (<code>ember owner code: XXXX-XXXX</code>); type it where the claim was made. A later claim can
         be approved in an app that already holds a key. The server side and the command are in place;
@@ -180,9 +182,10 @@ ember-server owner call POST /api/accounts <span class="s">'{"agent": "claude-co
         same method, path and body. <code>EMBER_OWNER_CONFIRM=off</code> grants a claim without the
         console code; it lowers the protection and is meant for test rigs. A remote device with
         scope <code>full</code> counts as the owner for approvals over the transport; the device list
-        itself is managed only on the server's computer. A server on Windows has no owner socket
-        yet (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/815">#815</a>), so it
-        always runs in <code>warn</code> and its owner routes stay open to the token.
+        itself is managed only on the server's computer. A server on Windows takes claims over its
+        named pipe (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/815">#815</a>) and
+        follows <code>EMBER_OWNER_PRESENCE</code> the same way: <code>warn</code> by default, and
+        <code>enforce</code> closes its owner routes to the token alone.
       </p>
       <p>
         <strong>What this does not stop.</strong> In the default <code>warn</code> mode nothing is

@@ -12,7 +12,8 @@
 #   no-em-dash           .github/scripts/checks/check-no-em-dash.sh (AGENTS.md writing rules)
 #   rust                 cargo test for each ember/<crate> dir that exists
 #   oniguruma            the editor core links Oniguruma (a C library) on Windows and macOS too
-#   windows-node-server  ember-node and ember-server binaries build on Windows (#200)
+#   windows-node-server  ember-node and ember-server binaries build on Windows (#200), and the
+#                        owner presence tests run against the named-pipe door (FR-S12, #815)
 name: Test
 
 on:
@@ -190,7 +191,9 @@ jobs:
   windows-node-server:
     name: Windows node and server (windows-latest)
     runs-on: windows-latest
-    timeout-minutes: 30
+    # 30 was enough for the two builds; the owner presence tests add the test profile of the
+    # server and the client (#815).
+    timeout-minutes: 50
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_TERM_COLOR: always
@@ -203,10 +206,18 @@ jobs:
           workspaces: |
             ember/node
             ember/server
+            ember/client
       - name: cargo build (ember-node bins)
         run: cargo build --locked --manifest-path ember/node/Cargo.toml --bins
       - name: cargo build (ember-server bins)
         run: cargo build --locked --manifest-path ember/server/Cargo.toml --bins
+      # FR-S12 on Windows (#815): the claim door is a named pipe there. The door tests are the
+      # unix ones run against the pipe, plus the Windows twins (access list, a taken name, the
+      # process snapshot); the client test claims a key over the real pipe.
+      - name: cargo test (owner presence, server)
+        run: cargo test --locked --manifest-path ember/server/Cargo.toml --test fr_s12_owner_presence
+      - name: cargo test (owner presence, client)
+        run: cargo test --locked --manifest-path ember/client/Cargo.toml --test fr_s12_owner_client
 
   rust:
     name: Cargo test (${{ matrix.crate }})

@@ -712,9 +712,10 @@ pub mod view {
             div { class: "ed-menu", role: "dialog", "aria-label": "{title}",
                 style: "position:fixed; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);",
                 div { style: "padding:var(--sp1) var(--sp3) 0; color:var(--muted); font-size:var(--fs-xs);", "{title}" }
-                div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
+                // FR-L31.29: the query row is a row of the popover, not a framed field inside the frame.
+                div { class: "ed-palq", style: "margin:var(--sp1) calc(var(--sp1) * -1) var(--sp1);",
                     {icon(if is_rename { "edit" } else { "search" })}
-                    input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
+                    input {
                         "aria-label": "{title}", placeholder: "{placeholder}", value: "{text}", autofocus: true,
                         oninput: move |event| { query.set(event.value()); sel.set(0); },
                         onkeydown: move |event| {

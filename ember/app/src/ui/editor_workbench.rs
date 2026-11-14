@@ -876,17 +876,15 @@ pub mod page {
             .filter(|r| items[r.index].enabled)
             .map(|r| apply_line_suffix(items[r.index].payload.clone(), line_suffix));
         let count = shown.len();
-        let backdrop_s = s.clone();
         let key_s = s.clone();
         rsx! {
-            // `grid-row` and `grid-column` keep both in the top bar's cell: placed automatically they
-            // took an implicit row of the page grid and pushed the page down one gap (design review A6).
-            div { style: "position:fixed; grid-row:1; grid-column:1; left:0; top:0; right:0; bottom:0; z-index:39;", onclick: move |_| close_palette(&backdrop_s) }
-            div { class: "ed-menu", role: "dialog", "aria-label": "명령 팔레트",
-                style: "position:fixed; grid-row:1; grid-column:1; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);",
-                div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
+            // FR-L31.29: the list hangs under the find pill (`.ed-findbox` in the top bar is its
+            // containing block, `.ed-pal` in page.css places it), and the query row is a row of the
+            // popover with a line under it, not a second framed field inside the frame.
+            div { class: "ed-menu ed-pal", role: "dialog", "aria-label": "명령 팔레트",
+                div { class: "ed-palq",
                     {icon("search")}
-                    input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
+                    input {
                         "aria-label": "{crate::ui::palette::search_label(mode)}", placeholder: "{hint_text}", value: "{raw_text}", autofocus: true,
                         oninput: move |event| {
                             // Only a changed query moves the highlight back to the top, so an input event that
@@ -917,7 +915,7 @@ pub mod page {
                 if crate::ui::palette::lists_files(mode) && index_capped {
                     div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일이 많아 일부만 표시합니다." }
                 }
-                div { style: "max-height:320px; overflow:auto;", role: "listbox",
+                div { class: "ed-pall", role: "listbox",
                     if shown.is_empty() { div { style: "padding:var(--sp3); color:var(--muted);", "{crate::ui::palette::empty_text(mode, index_running)}" } }
                     if win_start > 0 {
                         div { class: "ed-tn", role: "option", "aria-label": "위 항목 더 보기", style: "--d:0; height:34px; color:var(--muted);",
@@ -1369,6 +1367,7 @@ pub mod page {
             menu_open.set(false);
         }
         let em_shown = crate::ui::editor_menu::menu_shown(*s.menu_open.read(), modal);
+        let palette_scrim_s = s.clone();
         let (agent_state, project_branch) = project_status(&s.project);
         // The branch git/status returned; the project row's until the first answer.
         let branch = s.scm.branch_line().unwrap_or(project_branch);
@@ -1553,7 +1552,12 @@ pub mod page {
                     // in one box that takes no room (`.ed-layers`); a fixed box is drawn from the root.
                     div { class: "ed-layers",
                         if em_shown { {menu(&s, keymap)} }
-                        if *s.palette_open.read() { {palette_sheet(&s, keymap)} }
+                        // FR-L31.29: the palette's scrim. A click outside the list closes it; the list
+                        // itself is drawn under the find pill, from the top bar.
+                        if *s.palette_open.read() {
+                            div { style: "position:fixed; left:0; top:0; right:0; bottom:0; z-index:39;", "data-ed": "palette-scrim",
+                                onclick: move |_| close_palette(&palette_scrim_s) }
+                        }
                         if let Some(request) = s.close_confirm.read().clone() { {close_confirm_sheet(&s, &request)} }
                         {crate::ui::workspace_trust::view::prompt(&s)}
                         {crate::ui::editor_notifications::view::layer(&s)}
@@ -1600,10 +1604,16 @@ pub mod page {
                 button { class: "ed-pj", title: "{project_tip}", "aria-label": "{project_tip}", onclick: move |_| stripes.write().toggle(ToolWindow::Project), "{name}" {icon_px("chev-dn", 12)} }
                 button { class: "ed-pj", title: "브랜치", "aria-label": "브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon("git")} "{branch}" {icon_px("chev-dn", 12)} }
                 div { class: "spacer" }
+                // FR-L31.29: the pill and the quick open list it opens share one box, so the list is
+                // placed against the pill. The conditional child sits inside the box, where its
+                // placeholder takes no room (dioxus-compose#266: in the bar it would be a flex item).
+                div { class: "ed-findbox",
                 button { class: "ed-find", title: "{find}", "aria-label": "{find}", onclick: move |_| run_action(&find_s, Action::Find),
                     {icon("search")}
                     span { class: "hide-md", "{crate::ui::editor::FIND_PILL_LABEL}" }
                     kbd { class: "ed-sc", "{find_hint}" }
+                }
+                    if *s.palette_open.read() { {palette_sheet(s, keymap)} } else { div { class: "ed-none" } }
                 }
                 div { class: "ed-runcfg",
                     button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| crate::ui::editor_tasks::view::open(&runcfg_s), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }

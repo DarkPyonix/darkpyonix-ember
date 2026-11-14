@@ -643,6 +643,60 @@ fn fr_l31_26_the_status_bar_is_32_high_and_flush_with_the_page_bottom() {
     }
 }
 
+impl Page {
+    /// The border boxes (x, y, width, height) of `nodes` with the page laid out at 1440x900.
+    fn boxes(&mut self, nodes: &[(&str, NodeId)]) -> Vec<(f32, f32, f32, f32)> {
+        let _ = self.dom.layout(1440.0, 900.0, 1.0);
+        let list = self.dom.display_list().expect("laid out");
+        nodes
+            .iter()
+            .map(|(what, id)| {
+                let r = list.get(*id).unwrap_or_else(|| panic!("{what} has no box")).rect;
+                (r.x, r.y, r.width, r.height)
+            })
+            .collect()
+    }
+
+    fn parent(&self, node: NodeId) -> Option<NodeId> {
+        self.dom.document().get_node(node).and_then(|n| n.parent)
+    }
+
+    fn has_class(&self, node: NodeId, class: &str) -> bool {
+        self.attr(node, "class").is_some_and(|c| c.split_whitespace().any(|c| c == class))
+    }
+}
+
+fn near(a: f32, b: f32) -> bool {
+    (a - b).abs() < 0.75
+}
+
+// FR-L31.29 (#895, design review E4): quick open hangs under the find pill, ending at the pill's
+// right edge, and its query row is a row of the popover, not a second framed field.
+#[test]
+fn fr_l31_29_quick_open_hangs_under_the_find_pill_in_one_frame() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    let pill = page.find("class", "ed-find").expect("the find pill");
+    page.dom.click_node(pill);
+    page.dom.render();
+    let list = page
+        .find_where("the quick open list", |id| page.attr(id, "role").as_deref() == Some("dialog"))
+        .expect("the find pill opens quick open");
+    // `find` panics on two matches, so this also says the popover holds no framed `.ed-find` field.
+    let pill = page.find("class", "ed-find").expect("the find pill, the only framed field");
+    let query = page.find("class", "ed-palq").expect("the query row");
+    assert_eq!(page.parent(query), Some(list), "the query row is a row of the popover");
+    assert_eq!(page.parent(list), page.parent(pill), "the list is placed against the pill's box");
+    let b = page.boxes(&[("the find pill", pill), ("the quick open list", list), ("the query row", query)]);
+    let (pill, list, query) = (b[0], b[1], b[2]);
+    assert!(near(pill.2, 300.0), "the pill keeps its 300px: {pill:?}");
+    assert!(near(list.0 + list.2, pill.0 + pill.2), "the list ends at the pill's right edge: list {list:?}, pill {pill:?}");
+    let gap = list.1 - (pill.1 + pill.3);
+    assert!((0.0..=8.0).contains(&gap), "the list starts right under the pill: list {list:?}, pill {pill:?}");
+    assert!(near(list.2, 560.0), "the list is 560px wide at 1440: {list:?}");
+    assert!(near(query.2, list.2 - 2.0), "the query row spans the popover inside its border: query {query:?}, list {list:?}");
+}
+
 #[compose_rust::runtime::Composable]
 fn toolkit_probe() {
     compose_rust::ui::Text("probe".to_string());

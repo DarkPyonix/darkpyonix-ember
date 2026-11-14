@@ -1942,8 +1942,13 @@ mod design_chrome {
 
     #[test]
     fn design_a6_palette_overlay_takes_no_grid_row() {
-        assert!(PAGE.contains("style: \"position:fixed; grid-row:1; grid-column:1; left:0; top:0; right:0; bottom:0; z-index:39;\""));
-        assert!(PAGE.contains("style: \"position:fixed; grid-row:1; grid-column:1; z-index:40; top:60px;"));
+        // FR-L31.26 put the overlays in `.ed-layers`, so the palette's scrim needs no grid placement,
+        // and FR-L31.29 hangs its list under the find pill (`.ed-pal`), outside the page grid.
+        assert!(PAGE.contains("style: \"position:fixed; left:0; top:0; right:0; bottom:0; z-index:39;\", \"data-ed\": \"palette-scrim\","));
+        assert!(PAGE.contains("div { class: \"ed-menu ed-pal\", role: \"dialog\", \"aria-label\": \"명령 팔레트\","));
+        let css = compact_css();
+        assert!(css.contains(".ed-menu.ed-pal{position:absolute;z-index:40;top:calc(100%+6px);right:0;left:auto;"));
+        assert!(css.contains(".ed-findbox{position:relative;display:flex;min-width:0}"));
         assert!(ember_app::ui::editor_menu::menu_style().contains("grid-row:1; grid-column:1;"));
     }
 

@@ -657,7 +657,7 @@ fn page_and_bar_boxes(page: &mut Page, ed: NodeId, bar: NodeId, width: f32, heig
 // bottom edge and spans its width. No renderer is attached: this is the page's own layout, given
 // the viewport the HTML runtime takes from the window's content box.
 #[test]
-fn fr_l31_the_page_follows_the_viewport_when_it_grows_and_when_it_shrinks() {
+fn fr_l31_37_the_page_follows_the_viewport_when_it_grows_and_when_it_shrinks() {
     let _guard = crate::services::test_guard();
     let mut page = Page::open_styled();
     page.click_row();

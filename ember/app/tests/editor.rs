@@ -496,13 +496,13 @@ mod title_strip {
 
     // #301, #320: the page is the viewport on every system, with no title bar height taken out.
     #[test]
-    fn fr_l31_the_page_is_the_viewport_with_no_title_bar_allowance() {
+    fn fr_l31_37_the_page_is_the_viewport_with_no_title_bar_allowance() {
         assert_eq!(editor_page_size_style(), "width:100vw; height:100vh;");
     }
 
     // #301: no stylesheet of the page keeps the 76px title bar allowance.
     #[test]
-    fn fr_l31_the_stylesheets_keep_no_title_bar_allowance() {
+    fn fr_l31_37_the_stylesheets_keep_no_title_bar_allowance() {
         let css = ember_app::ui::editor_workbench::page::config().stylesheets.join("\n");
         let compact: String = css.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(!compact.contains("100vh-76px"), "a stylesheet still takes 76px out of the viewport height");
@@ -513,7 +513,7 @@ mod title_strip {
 
     // #301: the error message clears the title strip the window reports, not a fixed height.
     #[test]
-    fn fr_l31_the_error_message_starts_below_the_reported_title_strip() {
+    fn fr_l31_37_the_error_message_starts_below_the_reported_title_strip() {
         assert_eq!(editor_error_padding(true, 28.0), "padding:20px; padding-top:48px;");
         assert_eq!(editor_error_padding(true, 0.0), "padding:20px; padding-top:20px;");
         assert_eq!(editor_error_padding(false, 28.0), "padding:20px; padding-top:20px;");
@@ -548,7 +548,7 @@ mod title_strip {
     // #320: the window asks for a size report on every dp change, so the title strip's safe area
     // and the window size the page's hooks read follow a resize that crosses no size class.
     #[test]
-    fn fr_l31_editor_window_asks_for_a_size_report_on_every_dp_change() {
+    fn fr_l31_37_editor_window_asks_for_a_size_report_on_every_dp_change() {
         use compose_rust::schema::Window;
         assert!(!Window::new().report_size, "the toolkit's default reports on size class changes only");
         assert!(ember_app::ui::cr::shell::window_chrome(Window::new()).report_size);

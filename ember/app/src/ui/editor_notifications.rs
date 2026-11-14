@@ -221,7 +221,7 @@ mod tests {
     // #301: the page is the viewport, so the overlay sits 12px above the status bar on every
     // system, with no title bar allowance.
     #[test]
-    fn fr_l31_notifications_sit_above_the_status_bar_with_no_title_bar_allowance() {
+    fn fr_l31_37_notifications_sit_above_the_status_bar_with_no_title_bar_allowance() {
         assert_eq!(overlay_bottom(), "calc(var(--sbh) + 12px)");
     }
 

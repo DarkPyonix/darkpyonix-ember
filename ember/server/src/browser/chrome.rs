@@ -128,6 +128,12 @@ pub fn chrome_args(o: &LaunchOptions) -> Vec<String> {
         args.push("--disable-dev-shm-usage".into());
     }
     if should_disable_sandbox() {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "Chrome sandbox disabled via EMBER_CHROME_NO_SANDBOX; untrusted pages run without process isolation"
+            );
+        });
         args.push("--no-sandbox".into());
     }
     if let Some(p) = &o.proxy {
@@ -144,11 +150,8 @@ pub fn chrome_args(o: &LaunchOptions) -> Vec<String> {
 pub const DEFAULT_LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn should_disable_sandbox() -> bool {
-    if let Some(v) = std::env::var_os("EMBER_CHROME_NO_SANDBOX") {
-        let s = v.to_string_lossy();
-        return matches!(s.trim(), "1" | "true" | "yes");
-    }
-    cfg!(target_os = "linux") && std::env::var_os("CI").is_some()
+    std::env::var_os("EMBER_CHROME_NO_SANDBOX")
+        .is_some_and(|v| matches!(v.to_string_lossy().trim(), "1" | "true" | "yes"))
 }
 
 /// Time to wait for Chrome to write `DevToolsActivePort` on launch.
@@ -214,13 +217,31 @@ pub async fn launch(o: &LaunchOptions) -> anyhow::Result<Launched> {
     launch_with_timeout(o, launch_timeout()).await
 }
 
+fn open_stderr_log(profile_dir: &Path) -> std::io::Result<std::fs::File> {
+    let path = stderr_log_path(profile_dir);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let file = opts.open(&path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(file)
+}
+
 /// Launch Chrome and wait up to `timeout` for its DevTools endpoint.
 pub async fn launch_with_timeout(o: &LaunchOptions, timeout: Duration) -> anyhow::Result<Launched> {
     std::fs::create_dir_all(&o.profile_dir)
         .with_context(|| format!("creating {}", o.profile_dir.display()))?;
     let port_file = o.profile_dir.join("DevToolsActivePort");
     let _ = std::fs::remove_file(&port_file);
-    let stderr = std::fs::File::create(stderr_log_path(&o.profile_dir))
+    let stderr = open_stderr_log(&o.profile_dir)
         .map(Stdio::from)
         .unwrap_or_else(|_| Stdio::null());
     let mut child = Command::new(&o.chrome)
@@ -354,7 +375,7 @@ mod tests {
         let err = launch_with_timeout(
             &LaunchOptions {
                 chrome: exit_script,
-                profile_dir: profile_exit,
+                profile_dir: profile_exit.clone(),
                 proxy: None,
                 headless: true,
                 window: (800, 600),
@@ -367,6 +388,11 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("browser exited during start"), "unexpected error: {msg}");
         assert!(msg.contains("SingletonLock held by pid 999"), "missing stderr in error: {msg}");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(stderr_log_path(&profile_exit)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "chrome-stderr.log must be 0600, got {mode:04o}");
+        }
 
         let profile_timeout = dir.path().join("profile-timeout");
         let hang_script = write_script(

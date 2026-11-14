@@ -21,6 +21,13 @@ fn manager(dir: &std::path::Path) -> Option<Arc<BrowserManager>> {
         eprintln!("skipping: no Chrome/Chromium found (set EMBER_CHROME_BIN)");
         return None;
     };
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("CI").is_some() && std::env::var_os("EMBER_CHROME_NO_SANDBOX").is_none() {
+        // Safety: browser tests are serialized by `BROWSER_TESTS` before `manager` is called.
+        unsafe {
+            std::env::set_var("EMBER_CHROME_NO_SANDBOX", "1");
+        }
+    }
     let mut cfg = BrowserConfig::from_env(dir);
     cfg.chrome = Some(chrome);
     cfg.headless = true;

@@ -338,7 +338,7 @@ pub fn stage_check_look(check: Check, p: &Palette) -> StageCheckLook {
 
 const ICON_TICK_SVG: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>"#;
 
-// compose-rust gap with no issue filed yet (noted on #845): v0.0.7 `Checkbox` takes a container
+// TODO(compose-rust#767): v0.0.7 `Checkbox` takes a container
 // and check colour and a size (#428, closed), but no shape or corner radius and no partial state. The square is painted and
 // the toolkit checkbox lies over it at alpha 0, so the role, the checked state, keyboard focus and
 // the tap stay the toolkit's. A partial check reports unchecked to assistive tech.

@@ -622,3 +622,55 @@ fn fr_l31_26_the_status_bar_is_32_high_and_flush_with_the_page_bottom() {
         assert!(close(ed_rect.y + ed_rect.height, 900.0), "the FullSize page fills the window: {ed_rect:?}");
     }
 }
+
+#[compose_rust::runtime::Composable]
+fn toolkit_probe() {
+    compose_rust::ui::Text("probe".to_string());
+}
+
+// FR-L33.1 (#875): the window's safe area reaches the toolkit after the page's first render. The
+// report renders the page again, so the top bar takes the traffic lights' inset, also while the
+// workspace trust prompt is up and nothing else renders the page.
+#[test]
+fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
+    use compose_rust::protocol::HostEvent;
+    use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
+    use crate::ui::safe_area::{current_platform, safe_area_for, SafeArea};
+    let _guard = crate::services::test_guard();
+    // A toolkit Host resets the window's measurement when it is made, so it comes first.
+    let mut toolkit = compose_rust::Host::new(|| Box::new(compose_rust::Recomposer::new(toolkit_probe)));
+    toolkit.rebuild().expect("rebuild");
+    let mut page = Page::open();
+    page.host().state.lock().unwrap().trust = crate::ui::workspace_trust::TrustState { trusted: false, prompt: true, banner_dismissed: false };
+    page.redraw();
+    assert!(page.find("aria-label", crate::ui::workspace_trust::PROMPT_TITLE).is_some(), "the trust prompt is up");
+    let top = page.find("class", "ed-top").expect("the top bar");
+    let before = page.attr(top, "style").unwrap_or_default();
+    assert_eq!(before, crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), 0.0), "nothing reported yet");
+
+    let lights = SafeArea { top: 28.0, leading: 78.0, trailing: 0.0 };
+    toolkit
+        .dispatch(HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: 1440.0,
+                height_dp: 900.0,
+                class: WindowSizeClass::from_width_dp(1440.0),
+                height_class: WindowHeightClass::from_height_dp(900.0),
+                safe_area_top: lights.top,
+                safe_area_leading: lights.leading,
+                safe_area_trailing: lights.trailing,
+            },
+        })
+        .expect("dispatch");
+    // The report woke the page; nothing else asks it to render.
+    page.dom.virtual_dom_mut().process_events();
+    page.dom.render();
+    let top = page.find("class", "ed-top").expect("the top bar");
+    let after = page.attr(top, "style").unwrap_or_default();
+    let expected = crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), safe_area_for(current_platform(), lights).leading);
+    assert_eq!(after, expected, "the top bar follows the reported safe area with the prompt up");
+    assert!(page.find("aria-label", crate::ui::workspace_trust::PROMPT_TITLE).is_some(), "the prompt is still up");
+    compose_rust::window::reset_window_size();
+}

@@ -1156,7 +1156,7 @@ pub fn PaneTranscript(session: &str, agent: &str) {
 /// Outside the demo it attaches as a read-only viewer to the project's one running agent terminal on
 /// the session's computer, and detaches when the pane leaves the screen (the terminal keeps running).
 pub fn PaneTerminal(member: &Member, project: &str) {
-    use crate::terminal_stream::{start_view, TerminalHandle};
+    use crate::terminal_stream::{start_view_with, TermReach, TerminalHandle};
     use crate::ui::term_pane::{self as tp, TermRole, TermView};
     let p = ember_theme().palette;
     let demo = services().demo.is_some();
@@ -1183,8 +1183,8 @@ pub fn PaneTerminal(member: &Member, project: &str) {
         let (handle_start, project_start) = (handle.clone(), project.to_string());
         disposable_effect((sid.clone(), computer_id.clone()), move || {
             if let Some(id) = &computer_id {
-                let server = services().config.server_url.clone();
-                *handle_start.borrow_mut() = Some(start_view(&server, id, &project_start, None));
+                // Over the transport when the server is a peer (FR-N9, #867), else over HTTP as before.
+                *handle_start.borrow_mut() = Some(start_view_with(TermReach::of_app(), id, &project_start, None));
             }
             let handle_stop = handle_start.clone();
             on_dispose(move || {

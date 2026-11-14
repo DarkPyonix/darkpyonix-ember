@@ -995,6 +995,299 @@ pub(crate) fn server_token(base: &str) -> Option<String> {
         .flatten()
 }
 
+// ---------------------------------------------------------------------------------------------
+// Reach: plain HTTP or the transport (SPEC FR-N9, #867)
+
+/// How the app reaches the server's terminal relay. With a server reached as a peer the app's
+/// `server_url` is `peer:<id>`, which is not a URL: the relay is then reached through the
+/// client's [`Api`](ember_client::api::Api) over the transport, which sends no token (the device
+/// key is the credential).
+#[derive(Clone, Debug)]
+pub enum TermReach {
+    /// The server's HTTP base URL; the attach is a `ws(s)` socket as before.
+    Http(String),
+    /// The server over the transport.
+    Peer(ember_client::api::Api),
+}
+
+impl TermReach {
+    /// The reach for `api`, the app's client `Api`: over the transport when it has a peer, else
+    /// `server_url` over HTTP.
+    pub fn select(server_url: &str, api: &ember_client::api::Api) -> TermReach {
+        if api.peer().is_some() {
+            TermReach::Peer(api.clone())
+        } else {
+            TermReach::Http(server_url.to_owned())
+        }
+    }
+
+    /// The app's own reach, from [`services`](crate::services::services).
+    pub fn of_app() -> TermReach {
+        let s = crate::services::services();
+        Self::select(&s.config.server_url, s.client.api())
+    }
+
+    pub fn is_peer(&self) -> bool {
+        matches!(self, TermReach::Peer(_))
+    }
+}
+
+/// Where a terminal call goes: a URL over HTTP, or a path below `/api` for the `Api`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TermTarget {
+    Url(String),
+    Api(String),
+}
+
+/// True for the `peer:<id>` base the app keeps while a peer is set.
+fn is_peer_base(base: &str) -> bool {
+    base.starts_with("peer:")
+}
+
+/// A `peer:<id>` base without a transport `Api` is never dialed as a URL.
+fn refuse_peer_base(base: &str) -> Result<(), ClientError> {
+    if is_peer_base(base) {
+        tracing::warn!("terminal relay: {base} is a peer, and no transport is open to it");
+        return Err(ClientError::Refused(crate::device_link::UNREACHABLE));
+    }
+    Ok(())
+}
+
+/// `{path}` without its `/api` prefix, as the `Api` takes it.
+fn below_api(path: String) -> String {
+    path.strip_prefix("/api").map(str::to_owned).unwrap_or(path)
+}
+
+/// The list of a project's terminals ([`terms_list_url`]) on `reach`.
+pub fn list_target(
+    reach: &TermReach,
+    computer_id: &str,
+    project: &str,
+    origin: Option<&str>,
+    running: bool,
+) -> Result<TermTarget, ClientError> {
+    match reach {
+        TermReach::Http(base) => {
+            refuse_peer_base(base)?;
+            Ok(TermTarget::Url(terms_list_url(base, computer_id, project, origin, running)))
+        }
+        TermReach::Peer(_) => Ok(TermTarget::Api(below_api(terms_list_url("", computer_id, project, origin, running)))),
+    }
+}
+
+/// The attach socket of `term_id` ([`attach_url`]) on `reach`. Over HTTP the relay rule applies
+/// (FR-L31.19).
+pub fn attach_target(reach: &TermReach, computer_id: &str, term_id: &str) -> Result<TermTarget, ClientError> {
+    match reach {
+        TermReach::Http(base) => {
+            refuse_peer_base(base)?;
+            check_relay(base)?;
+            Ok(TermTarget::Url(attach_url(base, computer_id, term_id)))
+        }
+        TermReach::Peer(_) => Ok(TermTarget::Api(below_api(attach_url("", computer_id, term_id)))),
+    }
+}
+
+/// The sentence for a refused answer: a 403 `scope_denied` is the device's scope (FR-N8).
+pub fn status_refusal(status: u16, body: &[u8]) -> Option<&'static str> {
+    let code = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_owned));
+    (status == 403 && code.as_deref() == Some("scope_denied")).then_some(crate::ui::device_scope::SCOPE_DENIED)
+}
+
+/// The device sentence `text` is, if it is one: not allowed or revoked, unreachable, or the
+/// scope refused (FR-N8, FR-N9). The session pane shows these as they are.
+pub fn known_refusal(text: &str) -> Option<&'static str> {
+    [crate::device_link::NOT_ALLOWED, crate::device_link::UNREACHABLE, crate::ui::device_scope::SCOPE_DENIED]
+        .into_iter()
+        .find(|t| *t == text)
+}
+
+/// A failed call over the transport as the panel's error: the device sentence when there is one.
+fn api_failure(e: ember_client::api::ApiError) -> ClientError {
+    match crate::device_link::refusal_text(&e) {
+        Some(t) => {
+            tracing::warn!("terminal over the transport refused: {e}");
+            ClientError::Refused(t)
+        }
+        None => ClientError::Protocol(e.to_string()),
+    }
+}
+
+/// Runs `fut` on the app runtime, or on the current one where the app's services are not
+/// installed (the crate's integration tests).
+fn spawn_task(fut: impl std::future::Future<Output = ()> + Send + 'static) {
+    match crate::services::try_services() {
+        Some(s) => {
+            s.rt.spawn(fut);
+        }
+        None => {
+            tokio::spawn(fut);
+        }
+    }
+}
+
+/// A new attachment in the connecting state, and the receiver of its outgoing frames.
+fn new_shared(on_change: Option<ChangeCallback>) -> (Arc<Shared>, tokio::sync::mpsc::UnboundedReceiver<String>) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let shared = Arc::new(Shared {
+        session: Mutex::new(TerminalSession::new()),
+        revision: AtomicU64::new(0),
+        size: Mutex::new((80, 24)),
+        tx,
+        on_change,
+        pick: Mutex::new(None),
+    });
+    shared.update(|s| s.connecting());
+    (shared, rx)
+}
+
+/// A handle that shows `sentence` and never attaches.
+fn refused_handle(sentence: &'static str, on_change: Option<ChangeCallback>) -> TerminalHandle {
+    let (shared, _rx) = new_shared(on_change);
+    shared.update(|s| s.fail(sentence));
+    TerminalHandle { shared }
+}
+
+/// [`start_view`] on `reach` (FR-N9, #867): the session pane's entry. Over HTTP it is
+/// [`start_view`] unchanged; over the transport the list goes through the `Api` and the attach
+/// through [`ember_client::api::Api::open_peer_socket`]. A refusal (the device's scope, a revoked
+/// device, an unreachable server) ends in its sentence; the pane does not retry.
+pub fn start_view_with(
+    reach: TermReach,
+    computer_id: &str,
+    project: &str,
+    on_change: Option<ChangeCallback>,
+) -> TerminalHandle {
+    let api = match reach {
+        TermReach::Http(base) if is_peer_base(&base) => {
+            return refused_handle(crate::device_link::UNREACHABLE, on_change);
+        }
+        TermReach::Http(base) => return start_view(&base, computer_id, project, on_change),
+        TermReach::Peer(api) => api,
+    };
+    let (shared, rx) = new_shared(on_change);
+    let task_shared = Arc::downgrade(&shared);
+    let (computer, project) = (computer_id.to_owned(), project.to_owned());
+    spawn_task(async move {
+        let r = view_peer(&task_shared, &api, &computer, &project, rx).await;
+        finish(&task_shared, r);
+    });
+    TerminalHandle { shared }
+}
+
+/// [`attach_existing`] on `reach`: over HTTP unchanged, over the transport through the `Api`.
+pub fn attach_existing_with(
+    reach: TermReach,
+    computer_id: &str,
+    term_id: &str,
+    on_change: Option<ChangeCallback>,
+) -> TerminalHandle {
+    let api = match reach {
+        TermReach::Http(base) if is_peer_base(&base) => {
+            return refused_handle(crate::device_link::UNREACHABLE, on_change);
+        }
+        TermReach::Http(base) => return attach_existing(&base, computer_id, term_id, on_change),
+        TermReach::Peer(api) => api,
+    };
+    let (shared, rx) = new_shared(on_change);
+    let task_shared = Arc::downgrade(&shared);
+    let (computer, term) = (computer_id.to_owned(), term_id.to_owned());
+    spawn_task(async move {
+        let hello = TermHello {
+            device: device_name(),
+            kind: Some("ember-editor".into()),
+            pid: Some(std::process::id()),
+            size: Some(PtySize { rows: 24, cols: 80 }),
+            active: true,
+            read_only: false,
+            snapshot: true,
+        };
+        let mut rx = rx;
+        let r = stream_peer(&task_shared, &api, &computer, &term, hello, &mut rx).await;
+        let r = after_peer_end(&api, r).await.map(|_| ());
+        finish(&task_shared, r);
+    });
+    TerminalHandle { shared }
+}
+
+/// Records how a stream without reconnects ended: the failure, then disconnected.
+fn finish(shared: &std::sync::Weak<Shared>, r: Result<(), ClientError>) {
+    let Some(shared) = shared.upgrade() else { return };
+    if let Err(e) = r {
+        tracing::warn!("terminal stream over the transport ended: {e}");
+        shared.update(|s| s.fail(e.to_string()));
+    }
+    shared.update(|s| s.disconnected());
+}
+
+async fn view_peer(
+    shared: &std::sync::Weak<Shared>,
+    api: &ember_client::api::Api,
+    computer: &str,
+    project: &str,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+) -> Result<(), ClientError> {
+    let reach = TermReach::Peer(api.clone());
+    let TermTarget::Api(path) = list_target(&reach, computer, project, Some("agent"), true)? else {
+        return Err(ClientError::Protocol("the terminal list has no path over the transport".into()));
+    };
+    let (status, body) = api.raw_request(reqwest::Method::GET, &path, None).await.map_err(api_failure)?;
+    if !(200..300).contains(&status) {
+        return Err(match status_refusal(status, &body) {
+            Some(t) => ClientError::Refused(t),
+            None => ClientError::Protocol(format!("terminal list answered {status}: {}", String::from_utf8_lossy(&body))),
+        });
+    }
+    let list: Vec<TermInfo> = serde_json::from_slice(&body).map_err(|e| ClientError::Protocol(e.to_string()))?;
+    let pick = pick_agent_terminal(&list);
+    let TermPick::One(term_id) = &pick else {
+        if let Some(strong) = shared.upgrade() {
+            *strong.pick.lock().unwrap_or_else(|e| e.into_inner()) = Some(pick);
+        }
+        return Ok(());
+    };
+    let r = stream_peer(shared, api, computer, term_id, TermHello::viewer(), &mut rx).await;
+    after_peer_end(api, r).await.map(|_| ())
+}
+
+/// Attaches to `term_id` over the transport and runs until the stream ends. No reconnect
+/// policy: the pane's viewer and a reattached tab end with their stream, as over HTTP.
+async fn stream_peer(
+    shared: &std::sync::Weak<Shared>,
+    api: &ember_client::api::Api,
+    computer: &str,
+    term_id: &str,
+    hello: TermHello,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+) -> Result<crate::terminal_reconnect::StreamEnd, ClientError> {
+    let TermTarget::Api(path) = attach_target(&TermReach::Peer(api.clone()), computer, term_id)? else {
+        return Err(ClientError::Protocol("the attach has no path over the transport".into()));
+    };
+    let mut ws = api.open_peer_socket(&path).await.map_err(api_failure)?;
+    pump(shared, &mut ws, hello, rx, None).await
+}
+
+/// After a stream over the transport ended (dropped, failed, or the process exited), asks the
+/// server once (`GET /api/health`): a revoked or refused device, or a server that is gone, ends
+/// in the device sentence rather than a dropped stream. A stream this side released, and a
+/// refusal already named, are left as they are.
+async fn after_peer_end(
+    api: &ember_client::api::Api,
+    r: Result<crate::terminal_reconnect::StreamEnd, ClientError>,
+) -> Result<crate::terminal_reconnect::StreamEnd, ClientError> {
+    use crate::terminal_reconnect::StreamEnd;
+    match &r {
+        Ok(StreamEnd::Released) | Err(ClientError::Refused(_)) => return r,
+        _ => {}
+    }
+    match crate::device_link::check(api).await {
+        Err(sentence) => Err(ClientError::Refused(sentence)),
+        Ok(()) => r,
+    }
+}
+
 async fn run(
     shared: &std::sync::Weak<Shared>,
     base: &str,
@@ -1078,10 +1371,8 @@ async fn stream(
     hello: TermHello,
     token: Option<String>,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
-    mut policy: Option<&mut crate::terminal_reconnect::Reconnect>,
+    policy: Option<&mut crate::terminal_reconnect::Reconnect>,
 ) -> Result<crate::terminal_reconnect::StreamEnd, ClientError> {
-    use crate::terminal_reconnect::StreamEnd;
-    let live = || shared.upgrade().ok_or_else(|| ClientError::Protocol("terminal closed".into()));
     // FR-L31.19: wss for an https server, verified against the webpki roots.
     check_relay(base)?;
     ensure_tls_provider();
@@ -1092,6 +1383,23 @@ async fn stream(
         upgrade.headers_mut().insert("Authorization", value);
     }
     let (mut ws, _) = tokio_tungstenite::connect_async(upgrade).await?;
+    pump(shared, &mut ws, hello, rx, policy).await
+}
+
+/// Sends `hello` on an attached socket, then carries frames both ways until the stream ends.
+/// The same for a socket over HTTP and one over the transport (FR-N9).
+async fn pump<S>(
+    shared: &std::sync::Weak<Shared>,
+    ws: &mut tokio_tungstenite::WebSocketStream<S>,
+    hello: TermHello,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    mut policy: Option<&mut crate::terminal_reconnect::Reconnect>,
+) -> Result<crate::terminal_reconnect::StreamEnd, ClientError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use crate::terminal_reconnect::StreamEnd;
+    let live = || shared.upgrade().ok_or_else(|| ClientError::Protocol("terminal closed".into()));
     let hello = serde_json::to_string(&hello).map_err(|e| ClientError::Protocol(e.to_string()))?;
     ws.send(Message::Text(hello.into())).await?;
     loop {
@@ -1602,4 +1910,83 @@ mod tests {
         assert_eq!(text_bytes("a\nb"), b"a\rb".to_vec());
     }
 
+    fn peer_api() -> (ember_transport::mem::MemNetwork, ember_client::api::Api) {
+        let net = ember_transport::mem::MemNetwork::new();
+        let (device, server) = (net.transport(), net.transport());
+        let api = ember_client::api::Api::over_transport(
+            ember_transport::Dialer::new(device),
+            ember_transport::PeerAddr::new(server.peer_id()),
+        );
+        (net, api)
+    }
+
+    #[tokio::test]
+    async fn fr_n9_the_pane_reaches_a_peer_server_through_the_api_not_a_url() {
+        let (_net, api) = peer_api();
+        let reach = TermReach::select(api.base_url(), &api);
+        assert!(matches!(reach, TermReach::Peer(_)), "{reach:?}");
+        assert!(reach.is_peer());
+        // Over the transport: paths below `/api` for the `Api`, never a URL built from `peer:<id>`.
+        assert_eq!(
+            list_target(&reach, "local", "/w", Some("agent"), true).unwrap(),
+            TermTarget::Api("/computers/local/terms?project=%2Fw&origin=agent&running=true".into())
+        );
+        assert_eq!(
+            attach_target(&reach, "c 1", "t/1").unwrap(),
+            TermTarget::Api("/computers/c%201/terms/t%2F1/attach".into())
+        );
+    }
+
+    #[test]
+    fn fr_n9_the_pane_keeps_the_http_path_and_never_reads_peer_as_a_url() {
+        let http = ember_client::api::Api::new("http://127.0.0.1:8740").unwrap();
+        let reach = TermReach::select("http://127.0.0.1:8740", &http);
+        assert!(matches!(&reach, TermReach::Http(u) if u == "http://127.0.0.1:8740"), "{reach:?}");
+        assert!(!reach.is_peer());
+        // Unchanged: the same URLs the HTTP path built before.
+        assert_eq!(
+            list_target(&reach, "local", "/w", Some("agent"), true).unwrap(),
+            TermTarget::Url(terms_list_url("http://127.0.0.1:8740", "local", "/w", Some("agent"), true))
+        );
+        assert_eq!(
+            attach_target(&reach, "local", "t1").unwrap(),
+            TermTarget::Url(attach_url("http://127.0.0.1:8740", "local", "t1"))
+        );
+        // `peer:<id>` with no transport `Api` is refused with the device sentence, not dialed.
+        let peerish = TermReach::Http("peer:abcd".into());
+        for r in [list_target(&peerish, "local", "/w", None, false), attach_target(&peerish, "local", "t1")] {
+            match r {
+                Err(ClientError::Refused(t)) => assert_eq!(t, crate::device_link::UNREACHABLE),
+                other => panic!("{other:?}"),
+            }
+        }
+        // A remote plain http server is still refused as before (FR-L31.19).
+        match attach_target(&TermReach::Http("http://192.0.2.1:8740".into()), "local", "t1") {
+            Err(ClientError::Refused(t)) => assert_eq!(t, RELAY_REFUSED),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn fr_n9_scope_and_device_refusals_read_as_their_sentences() {
+        use crate::device_link::{NOT_ALLOWED, UNREACHABLE};
+        use crate::ui::device_scope::SCOPE_DENIED;
+        let denied = br#"{"code":"scope_denied","error":"this device's scope (chat_only) does not allow this route"}"#;
+        assert_eq!(status_refusal(403, denied), Some(SCOPE_DENIED));
+        assert_eq!(status_refusal(403, br#"{"error":"x"}"#), None);
+        assert_eq!(status_refusal(502, b"bad gateway"), None);
+        for t in [NOT_ALLOWED, UNREACHABLE, SCOPE_DENIED] {
+            assert_eq!(known_refusal(t), Some(t));
+        }
+        assert_eq!(known_refusal("websocket: connection reset"), None);
+        // The pane shows the sentence, not the generic failure, and does not offer a retry loop.
+        let mut s = TerminalSession::new();
+        s.fail(ClientError::Refused(SCOPE_DENIED).to_string());
+        assert_eq!(crate::ui::term_pane::view_from_state(&s.state), crate::ui::term_pane::TermView::Failed(SCOPE_DENIED));
+        s.fail("websocket: connection reset");
+        assert_eq!(
+            crate::ui::term_pane::view_from_state(&s.state),
+            crate::ui::term_pane::TermView::Failed(crate::ui::term_pane::FAILED)
+        );
+    }
 }

@@ -38,7 +38,7 @@ use crate::ui::shell::NavMenu;
 use crate::ui::Route;
 
 use super::components::{
-    AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRow, EmberCard, EmberField, EmberSheetSized, FieldOptions, InsetPanel, Label, OptionSheet, PopExtra, PopKind, PopMenu, PopRow, PopoverMenuWith,
+    AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRow, EmberCard, EmberField, EmberSheetSized, FieldOptions, InsetPanel, Label, PopExtra, PopKind, PopMenu, PopRow, PopoverMenuWith,
     Clickable, Pill, PillTone, Txt,
 };
 use super::notice;
@@ -4101,6 +4101,47 @@ fn BranchRow(e: &BranchEntry, busy: bool, on_switch: impl FnMut() + 'static) {
 /// 브랜치: create a branch from a base and switch to it, then the 기본 브랜치 row and the 작업
 /// 브랜치 rows (the node's order: current, default, newest). `actions` is the project and the
 /// screen's reload counter; `None` shows sample branches. `count` is written for the section list.
+/// The 기준 menu's rows: one per branch with the branch glyph, the name and a check on the
+/// chosen base.
+pub fn base_menu_rows(names: &[String], chosen: Option<usize>) -> Vec<PopRow> {
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| PopRow { icon: Some(ICON_GIT_SVG), title: n.clone(), chosen: chosen == Some(i), ..Default::default() })
+        .collect()
+}
+
+/// The 기준 button of 새 브랜치 and its menu (FR-L10.4, #888): the shared menu in the
+/// permission-mode look under the button, lined up with its start, headed by what is chosen
+/// (`기준: branch`); a bottom sheet with that head at 560 and below. The mockup draws a native
+/// `<select>` (`#vcsBase`). The button keeps its full width, is disabled without branches and
+/// says whether the menu is open.
+fn BaseMenu(open: MutableState<bool>, text: &str, names: &[String], chosen: Option<usize>, base: MutableState<Option<String>>) {
+    let rows = base_menu_rows(names, chosen);
+    let is_open = open.get();
+    let (dismiss, toggle) = (open.clone(), open.clone());
+    let list = names.to_vec();
+    let enabled = !names.is_empty();
+    PopoverMenuWith(
+        is_open,
+        PopMenu {
+            name: super::a11y::BASE_PICKER,
+            kind: PopKind::Mode,
+            head: text,
+            sub: None,
+            rows: &rows,
+            align: compose_rust::PopoverAlign::Start,
+        },
+        PopExtra { plain_sheet: true, ..Default::default() },
+        move || dismiss.set(false),
+        move |idx| base.set(list.get(idx).cloned()),
+        || {
+            super::components::AppMenuButton(text, ButtonKind::Default, false, enabled, true, is_open, move || toggle.set(!toggle.get_untracked()));
+        },
+        None,
+    );
+}
+
 fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layout: PaneLayout) {
     let p = ember_theme().palette;
     let key_project = actions.as_ref().map(|a| a.project.clone());
@@ -4109,7 +4150,8 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
     let name = remember(|| mutable_state_of(String::new()));
     let generation = remember(|| mutable_state_of(0_u64));
     let base = remember(|| mutable_state_of(None::<String>));
-    let base_menu = remember(|| mutable_state_of(false));
+    // `EMBER_CR_VCS_MENU=base` opens the 기준 menu at start, for captures.
+    let base_menu = remember(|| mutable_state_of(std::env::var("EMBER_CR_VCS_MENU").as_deref() == Ok("base")));
     let query = remember_with_key(key_project.clone(), || mutable_state_of(String::new()));
     let switch_busy = remember_with_key(key_project.clone(), || mutable_state_of(false));
     let switch_last = remember_with_key(key_project.clone(), || mutable_state_of(None::<i64>));
@@ -4155,8 +4197,7 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
                             ..Default::default()
                         });
                     });
-                    let open = base_menu.clone();
-                    AppButton(&base_text, None, ButtonKind::Default, false, !names.is_empty(), true, move || open.set(true));
+                    BaseMenu(base_menu.clone(), &base_text, &names, chosen_base, base.clone());
                     SmallNote(if base.get().is_some() { "고른 브랜치에서 만듭니다" } else { "현재 브랜치에서 만듭니다" });
                     Label(BRANCH_CREATE_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
                     let (act, nm, gn, bs) = (actions.clone(), name.clone(), generation.clone(), base.clone());
@@ -4254,17 +4295,7 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
             }
         });
     };
-    let (dismiss, pick_base) = (base_menu.clone(), base.clone());
-    let sheet_menu = base_menu.clone();
-    let content = move || {
-        list();
-        let (d, b, m) = (dismiss.clone(), pick_base.clone(), sheet_menu.clone());
-        let picked = names.clone();
-        OptionSheet(sheet_menu.get(), &names, chosen_base, 240.0, move || d.set(false), move |idx| {
-            b.set(picked.get(idx).cloned());
-            m.set(false);
-        });
-    };
+    let content = list;
     if layout == PaneLayout::Two {
         cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(content);
     } else {
@@ -5785,6 +5816,50 @@ mod tests {
         let bar = src.split("fn RepoBarWithActions(").nth(1).unwrap().split("\nfn ").next().unwrap();
         assert!(!bar.contains("OptionSheet("), "the centred sheet is gone from the bar");
         assert!(bar.contains("EMBER_CR_VCS_MENU\").as_deref() == Ok(\"project\")"));
+    }
+
+    fn base_menu_open() {
+        let state = remember(|| mutable_state_of(true));
+        let base = remember(|| mutable_state_of(Some("develop".to_string())));
+        let names = vec!["main".to_string(), "develop".to_string()];
+        BaseMenu(state, "기준: develop", &names, Some(1), base);
+    }
+
+    #[test]
+    fn fr_l10_4_base_menu_is_the_shared_menu_under_its_button() {
+        // The mockup's `#vcsBase` is a native select; it was a centred `OptionSheet`.
+        let _guard = crate::services::test_guard();
+        let nodes = branch_menu_nodes(base_menu_open);
+        assert!(!nodes.iter().any(|n| n.0 == "Dialog" || n.0 == "Sheet"), "no centred dialog at 1440");
+        let pops: Vec<_> = nodes.iter().filter(|n| n.0 == "Popover").collect();
+        assert_eq!(pops.len(), 1);
+        let (_, mods, props) = pops[0];
+        for want in ["Open=Bool(true)", "Placement=Integer(2)", "OffsetDp=Float(8.0)"] {
+            assert!(props.iter().any(|p| p == want), "{want} in {props:?}");
+        }
+        assert!(!props.iter().any(|p| p == "Align=Integer(3)"), "{props:?}");
+        assert!(mods.iter().any(|m| m == "Width(340.0)"), "{mods:?}");
+        // The head and the button both read what is chosen; the rows are the branches.
+        let head = nodes.iter().filter(|n| n.2.iter().any(|p| p.contains("기준: develop"))).count();
+        assert_eq!(head, 2, "the button and the menu head");
+        let items: Vec<_> = nodes.iter().filter(|n| n.1.iter().any(|m| m.starts_with("Semantics") && m.contains("MenuItem"))).collect();
+        assert_eq!(items.len(), 2);
+        let sel = format!("{:?}", compose_rust::schema::Modifier::Background(paint(ember_theme().palette.sel)));
+        assert_eq!(items.iter().filter(|n| n.1.contains(&sel)).count(), 1);
+        // The button fills its line, as before, and says the menu is open.
+        let button = nodes.iter().find(|n| n.0 == "Button" && n.2.iter().any(|p| p.contains("기준: develop"))).expect("the button");
+        assert!(button.1.iter().any(|m| m == "FillMaxWidth"), "{:?}", button.1);
+        let state: u32 = button
+            .1
+            .iter()
+            .find_map(|m| m.strip_prefix("Semantics")?.split("state: ").nth(1)?.trim_end_matches([' ', '}']).parse().ok())
+            .expect("a semantics state");
+        assert_eq!((state >> compose_rust::schema::SEMANTICS_EXPANDED_SHIFT) & 3, 2, "{:?}", button.1);
+        let rows = base_menu_rows(&["main".into(), "develop".into()], None);
+        assert!(rows.iter().all(|r| !r.chosen) && rows[1].title == "develop");
+        let src = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!src.contains("OptionSheet("), "no centred option sheet is left in 버전 관리");
+        assert!(src.contains("EMBER_CR_VCS_MENU\").as_deref() == Ok(\"base\")"));
     }
 
     #[test]

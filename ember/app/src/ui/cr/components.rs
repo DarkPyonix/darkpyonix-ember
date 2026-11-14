@@ -1395,6 +1395,39 @@ pub fn AppButton(
     drop(b);
 }
 
+/// An [`AppButton`] that opens a menu: the same pill, and it says whether the menu is open
+/// (`Modifier::expanded`, FR-L10.4). Its text is its accessible name.
+pub fn AppMenuButton(
+    text: &str,
+    kind: ButtonKind,
+    small: bool,
+    enabled: bool,
+    fill_max_width: bool,
+    expanded: bool,
+    on_click: impl FnMut() + 'static,
+) {
+    let theme = ember_theme();
+    let s = button_style_for(kind, small, enabled, theme.palette);
+    drop(
+        cu::Button(text)
+            .enabled(enabled)
+            .variant(ButtonVariant::Text)
+            .color(paint(s.text))
+            .font_size(s.fs.size())
+            .font_weight(s.weight.value())
+            .modifier(pressable(
+                Modifier::new()
+                    .fill_max_width_if(fill_max_width)
+                    .height(s.height)
+                    .background(paint(s.fill))
+                    .border(1.0, paint(s.border))
+                    .shape_role(ShapeRole::Full)
+                    .expanded(expanded),
+            ))
+            .on_click(on_click),
+    );
+}
+
 /// A pill that is one choice of several, the mockup's `.seg button`: the chosen one is `ink`,
 /// the others `surface` on a `line` border ([`choice_style`]). To assistive technology a
 /// `Toggle` says it is pressed (`Modifier::selected`, the mockup's `aria-pressed`) and a `Radio`

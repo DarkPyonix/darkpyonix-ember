@@ -432,6 +432,11 @@ pub mod page {
             crate::services::services().ui.update_prefs(|p| p.editor_zoom_level = level);
             return;
         }
+        if action == Action::NewTerminal {
+            let mut stripes = s.stripes;
+            stripes.write().show(ToolWindow::Terminal);
+            return;
+        }
         if action == Action::MaximizeTool {
             let mut bottom_max = s.bottom_max;
             let max = *bottom_max.read();
@@ -445,11 +450,7 @@ pub mod page {
             let reopened = tabs.write().reopen_closed();
             match reopened {
                 Some(path) => {
-                    s.open_errors.borrow_mut().remove(&path);
-                    s.host.send(HostCommand::Open(path.clone()));
-                    s.host.send(HostCommand::Focus(path.clone()));
-                    let mut recent = s.recent_files;
-                    record_recent_file(&mut recent, &path);
+                    open_tab_file(s, &path);
                 }
                 None => notice("다시 열 편집기가 없습니다"),
             }
@@ -613,6 +614,17 @@ pub mod page {
         s.host.send(HostCommand::Open(path.to_string()));
     }
 
+    /// Opens a file in a full tab and focuses it (double click, recent or palette selection).
+    pub(crate) fn open_tab_file(s: &Shared, path: &str) {
+        let mut tabs = s.tabs;
+        tabs.write().open(path);
+        s.open_errors.borrow_mut().remove(path);
+        s.host.send(HostCommand::Open(path.to_string()));
+        s.host.send(HostCommand::Focus(path.to_string()));
+        let mut recent = s.recent_files;
+        record_recent_file(&mut recent, path);
+    }
+
     fn record_recent_file(recent: &mut super::Signal<Vec<String>>, path: &str) {
         let mut list = recent.read().clone();
         crate::ui::palette::record_recent_path(&mut list, path);
@@ -634,27 +646,23 @@ pub mod page {
         open.set(true);
     }
 
+    fn close_palette(s: &Shared) {
+        let mut open = s.palette_open;
+        if *open.read() {
+            open.set(false);
+            s.host.send(HostCommand::CancelIndexFiles);
+        }
+    }
+
     /// Does what a chosen palette item says: runs the action, or opens the file in a tab.
     fn choose_palette_item(s: &Shared, payload: crate::ui::palette::Payload) {
         match payload {
             crate::ui::palette::Payload::Action(action) => run_action(s, action),
             crate::ui::palette::Payload::File(path) => {
-                let mut tabs = s.tabs;
-                tabs.write().open(&path);
-                s.open_errors.borrow_mut().remove(&path);
-                s.host.send(HostCommand::Open(path.clone()));
-                s.host.send(HostCommand::Focus(path.clone()));
-                let mut recent = s.recent_files;
-                record_recent_file(&mut recent, &path);
+                open_tab_file(s, &path);
             }
             crate::ui::palette::Payload::FileAt { path, line, column } => {
-                let mut tabs = s.tabs;
-                tabs.write().open(&path);
-                s.open_errors.borrow_mut().remove(&path);
-                s.host.send(HostCommand::Open(path.clone()));
-                s.host.send(HostCommand::Focus(path.clone()));
-                let mut recent = s.recent_files;
-                record_recent_file(&mut recent, &path);
+                open_tab_file(s, &path);
                 let line0 = line.saturating_sub(1) as u32;
                 let col0 = column.unwrap_or(1).saturating_sub(1) as u32;
                 let target = crate::ui::find::Match { line: line0, start: col0, end: col0 };
@@ -747,7 +755,7 @@ pub mod page {
             let item = goto_line_item(&effective_query);
             let items = vec![item];
             let ranked = vec![crate::ui::palette::Ranked { index: 0, score: 100, matched: Vec::new() }];
-            (items, ranked, None)
+            (std::borrow::Cow::Owned(items), ranked, None)
         } else {
             let (file_q, suffix) = parse_path_line_suffix(&effective_query);
             if crate::ui::editor_status::is_picker(mode) {
@@ -755,7 +763,7 @@ pub mod page {
                 let languages = s.host.state.lock().unwrap().languages.clone();
                 let items = crate::ui::editor_status::picker_items(mode, format.as_ref(), &languages);
                 let ranked = rank(&effective_query, &items);
-                (items, ranked, None)
+                (std::borrow::Cow::Owned(items), ranked, None)
             } else {
                 let items = items_for_workbench(mode, keymap, Os::current(), &s.folder, &files, &ext_commands, &recent);
                 let ranked = rank(file_q, &items);
@@ -785,11 +793,12 @@ pub mod page {
             .filter(|r| items[r.index].enabled)
             .map(|r| apply_line_suffix(items[r.index].payload.clone(), line_suffix));
         let count = shown.len();
-        let run_s = s.clone();
+        let backdrop_s = s.clone();
+        let key_s = s.clone();
         rsx! {
             // `grid-row` and `grid-column` keep both in the top bar's cell: placed automatically they
             // took an implicit row of the page grid and pushed the page down one gap (design review A6).
-            div { style: "position:fixed; grid-row:1; grid-column:1; left:0; top:0; right:0; bottom:0; z-index:39;", onclick: move |_| open.set(false) }
+            div { style: "position:fixed; grid-row:1; grid-column:1; left:0; top:0; right:0; bottom:0; z-index:39;", onclick: move |_| close_palette(&backdrop_s) }
             div { class: "ed-menu", role: "dialog", "aria-label": "명령 팔레트",
                 style: "position:fixed; grid-row:1; grid-column:1; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);",
                 div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
@@ -804,14 +813,14 @@ pub mod page {
                         },
                         onkeydown: move |event| {
                             match event.key() {
-                                Key::Escape => { event.stop_propagation(); open.set(false); }
+                                Key::Escape => { event.stop_propagation(); close_palette(&key_s); }
                                 Key::ArrowDown => { event.stop_propagation(); sel.set(move_selection(chosen, count, true)); }
                                 Key::ArrowUp => { event.stop_propagation(); sel.set(move_selection(chosen, count, false)); }
                                 Key::Enter => {
                                     event.stop_propagation();
                                     if let Some(payload) = enter_payload.clone() {
-                                        open.set(false);
-                                        choose_palette_item(&run_s, payload);
+                                        close_palette(&key_s);
+                                        choose_palette_item(&key_s, payload);
                                     }
                                 }
                                 _ => {}
@@ -846,7 +855,7 @@ pub mod page {
                             rsx! { div { key: "{row}", class, role: "option", "aria-selected": "{row == chosen}", "aria-disabled": "{!enabled}", style: "{row_style}",
                                 onclick: move |_| {
                                     if !enabled { return; }
-                                    open.set(false);
+                                    close_palette(&click_s);
                                     choose_palette_item(&click_s, payload.clone());
                                 },
                                 for (i, (part, hit)) in segments.into_iter().enumerate() {
@@ -1119,7 +1128,7 @@ pub mod page {
         for update in updates {
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.uris.borrow_mut().insert(uri.path.clone(), uri.clone()); }
             if let ember_editor::SessionUpdate::Closed { uri } = &update { s.uris.borrow_mut().remove(&uri.path); }
-            if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.open_errors.borrow_mut().remove(&uri.path); }
+            if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.open_errors.borrow_mut().remove(&uri.path); crate::ui::editor_scm::view::open_settled(&uri.path); }
             if let ember_editor::SessionUpdate::Saved { uri } = &update { saved_paths.push(uri.path.clone()); }
             let action = s.bridge.borrow_mut().apply(update);
             match action {
@@ -1127,6 +1136,8 @@ pub mod page {
                 BridgeAction::OpenFailed { uri, error } => {
                     tracing::warn!(path = %uri.path, %error, "opening a file failed");
                     s.open_errors.borrow_mut().insert(uri.path.clone(), crate::ui::editor::file_failure_reason(&error).to_string());
+                    // 파일 열기 in the 커밋 window says so in a notice too (FR-L31.9, #781).
+                    crate::ui::editor_scm::view::open_failed(&uri.path, crate::ui::editor::file_failure_reason(&error));
                 }
                 BridgeAction::SaveFailed { uri, error } => {
                     tracing::warn!(path = %uri.path, %error, "saving a file failed");

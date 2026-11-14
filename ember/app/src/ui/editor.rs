@@ -1666,6 +1666,14 @@ impl Stripes {
             Side::Bottom => self.bottom = None,
         }
     }
+
+    pub fn show(&mut self, w: ToolWindow) {
+        match w.side() {
+            Side::Left => self.left = Some(w),
+            Side::Right => self.right = Some(w),
+            Side::Bottom => self.bottom = Some(w),
+        }
+    }
 }
 
 
@@ -1694,6 +1702,7 @@ pub fn is_implemented(action: Action) -> bool {
                 | Action::SettingsJson
                 | Action::KeybindingsJson
                 | Action::Format
+                | Action::NewTerminal
         )
 }
 
@@ -1708,6 +1717,10 @@ pub fn apply_action(action: Action, tabs: &mut EditorTabs, stripes: &mut Stripes
         return true;
     }
     match action {
+        Action::NewTerminal => {
+            stripes.show(ToolWindow::Terminal);
+            true
+        }
         Action::Close => match tabs.current_path().map(str::to_string) {
             Some(p) => {
                 tabs.close(&p);

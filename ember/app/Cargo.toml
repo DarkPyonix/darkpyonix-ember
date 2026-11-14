@@ -8,11 +8,13 @@ description = "Ember native client: launcher and conversation UI on dioxus-compo
 license = "Apache-2.0"
 publish = false
 
-# A library with a one-line binary in front of it, the shape dioxus-compose's samples use:
-# the rlib is what the binary and the tests link, and later the Android/iOS entry points.
+# A library with a one-line binary in front of it, the shape the compose-rust samples use:
+# the rlib is what the binary and the tests link, and the cdylib is what the Android Activity
+# loads (FR-L36), because Android runs no `main` of ours. The iOS entry point comes later.
 [lib]
 name = "ember_app"
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "ember-app"

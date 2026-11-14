@@ -2283,6 +2283,15 @@ mod tests {
     }
 
     #[test]
+    fn fr_l31_9_the_open_notices_name_the_file_and_say_why() {
+        assert_eq!(
+            open_failed_text("GUIDE.md", "파일이 없습니다. 지워졌거나 이름이 바뀌었을 수 있습니다"),
+            "GUIDE.md을(를) 열지 못했습니다: 파일이 없습니다. 지워졌거나 이름이 바뀌었을 수 있습니다"
+        );
+        assert_eq!(open_offline_text("main.rs"), "서버와의 연결이 끊어져 main.rs을(를) 열 수 없습니다. 다시 연결한 뒤 여세요");
+    }
+
+    #[test]
     fn fr_l31_2_commit_message_first_line_is_the_summary() {
         assert_eq!(split_message("Fix: thing\n\nWhy it was wrong.\n"), Some(("Fix: thing".into(), "Why it was wrong.".into())));
         assert_eq!(split_message("\n\nOnly summary  "), Some(("Only summary".into(), String::new())));

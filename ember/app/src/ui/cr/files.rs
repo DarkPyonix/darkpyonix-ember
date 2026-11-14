@@ -1898,6 +1898,39 @@ mod tests {
         assert_eq!(sent_to.lock().expect("lock").as_deref(), Some("demo-s1"));
     }
 
+    /// The screen's texts for a model, rendered once at the default window size.
+    fn screen_texts(model: FilesModel) -> Vec<String> {
+        let mut host = Host::new(move || {
+            let model = model.clone();
+            Box::new(Recomposer::new(move || {
+                FilesScreenWith(&model, Vec::new(), Vec::new(), &Extras::default());
+            }))
+        });
+        texts(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"))
+    }
+
+    // FR-L27.9 (#786)
+    #[test]
+    fn fr_l27_9_the_screen_shows_a_lost_server_without_the_send_sheet() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let (model, _) = sample_model();
+        let line = format!("{}. {}", crate::ui::files::SERVER_LOST, crate::ui::files::SERVER_LOST_KEPT);
+
+        let lost = FilesModel { lost: true, ..model.clone() };
+        assert_eq!(crate::ui::files::server_status(&lost).as_deref(), Some(line.as_str()));
+        let all = screen_texts(lost);
+        assert!(all.iter().any(|t| t == &line), "missing the status line: {all:?}");
+        // The kept lists are still drawn under it (FR-L27.8).
+        assert!(all.iter().any(|t| t.contains("design-assets")), "the kept transfer: {all:?}");
+
+        // The server answers again: the line is gone.
+        let up = FilesModel { lost: false, ..model };
+        let all = screen_texts(up);
+        assert!(!all.iter().any(|t| t.contains(crate::ui::files::SERVER_LOST)), "a stale status line: {all:?}");
+        compose_rust::window::reset_window_size();
+    }
+
     #[test]
     fn fr_l27_7_the_share_sheet_is_400_wide_like_the_mockup() {
         assert_eq!(SHARE_SHEET_WIDTH, 400.0);

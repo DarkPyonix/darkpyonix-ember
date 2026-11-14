@@ -1227,4 +1227,44 @@ mod tests {
         assert_eq!(b.history(NOW).len(), 2);
         assert_eq!(b.transfers()[0].state, TransferState::Failed);
     }
+
+    // FR-L27.9 (#786)
+    #[test]
+    fn fr_l27_9_a_server_out_of_reach_marks_the_book_lost_and_an_answer_clears_it() {
+        // Before any answer: the server cannot be reached at all.
+        let mut b = Book::default();
+        assert!(!b.lost());
+        assert!(b.mark_failed(&TransferError::Connection), "the screen has a new line to draw");
+        assert!(b.lost() && !b.ready() && !b.can_send());
+        assert!(!b.mark_failed(&TransferError::Connection), "nothing new the second time");
+
+        // After the first answer: the lists stay, the book is lost, sending is refused.
+        let mut b = Book::default();
+        b.apply_snapshot(snapshot(json!([receiving("tr-9", 250, "sending")]), json!([])), NOW);
+        assert!(!b.lost());
+        assert!(b.mark_failed(&TransferError::Connection));
+        assert!(b.lost() && b.ready() && !b.can_send());
+        assert_eq!(b.transfers().len(), 1);
+        assert_eq!(b.queue_send(SERVER_DEVICE, "mini", &["/tmp/a.txt".into()]), Err(NOT_CONNECTED.to_string()));
+
+        // The server answers again: not lost, sending opens.
+        assert!(b.apply_snapshot(snapshot(json!([receiving("tr-9", 250, "sending")]), json!([])), NOW));
+        assert!(!b.lost() && b.can_send());
+    }
+
+    #[test]
+    fn fr_l27_9_a_server_that_answers_with_an_error_is_not_lost() {
+        // An older server without the API, or a refused token: the server is there.
+        for e in [TransferError::Unsupported, TransferError::Unauthorized, TransferError::Server(500)] {
+            let mut b = Book::default();
+            b.mark_failed(&e);
+            assert!(!b.lost(), "{e:?}");
+            assert!(!b.can_send());
+        }
+        // A lost server that answers with an error is no longer lost.
+        let mut b = online_book();
+        b.mark_failed(&TransferError::Connection);
+        assert!(b.mark_failed(&TransferError::Unsupported));
+        assert!(!b.lost());
+    }
 }

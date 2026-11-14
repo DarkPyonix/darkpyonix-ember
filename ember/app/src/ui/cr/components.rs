@@ -571,17 +571,24 @@ fn OneLineHintField(o: FieldOptions) {
         }
     }));
     let show = empty.get();
-    cu::Box()
-        .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().weight(1.0))
-        .content(move || {
-            if show && !hint.is_empty() {
-                // `WrapLabel` so a path with no space ellipsises inside the box instead of
-                // asking for its whole width.
-                WrapLabel(&hint, FIELD_FONT, Weight::Regular, Some(paint(p.muted)), Some(1));
-            }
-            FieldNode(o, Modifier::new().fill_max_width());
-        });
+    // The desktop renderer gives a weighted child at least its narrowest width, and a one-line
+    // label reports its whole line there: the hint took 708 of the 696 px share (r5 captures,
+    // 1440 and 390), ran under the trailing 12 px inset to the frame and showed no ellipsis.
+    // A zero width makes the column's narrowest width 0, so it takes its share; the box inside
+    // fills it and clips what is left.
+    cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(move || {
+        cu::Box()
+            .alignment(Alignment::CenterStart)
+            .modifier(Modifier::new().fill_max_width().clip(true))
+            .content(move || {
+                if show && !hint.is_empty() {
+                    // `WrapLabel` so a path with no space ellipsises inside the box instead of
+                    // asking for its whole width.
+                    WrapLabel(&hint, FIELD_FONT, Weight::Regular, Some(paint(p.muted)), Some(1));
+                }
+                FieldNode(o, Modifier::new().fill_max_width());
+            });
+    });
 }
 
 /// The toolkit field with every option but the frame, which `modifier` carries.
@@ -1526,7 +1533,13 @@ mod tests {
         // The hint and the field share one box, the hint first so the field is on top.
         let stack = parent_of(&nodes, field);
         assert_eq!(stack.widget, "Box");
+        assert!(stack.mods.iter().any(|m| m.starts_with("Clip")), "{:?}", stack.mods);
         assert_eq!(hint.parent, Some(stack.id));
+        // The share of the row is taken by a column (#878: a weighted Box overran the inset).
+        let share = parent_of(&nodes, stack);
+        assert_eq!(share.widget, "Column");
+        assert!(share.mods.iter().any(|m| m == "Weight(1.0)"), "{:?}", share.mods);
+        assert!(share.mods.iter().any(|m| m == "Width(0.0)"), "no narrowest width: {:?}", share.mods);
         assert!(hint.id < field.id, "the hint is under the field");
         // A field that starts with text shows no hint.
         let nodes = emitted_nodes(|| {

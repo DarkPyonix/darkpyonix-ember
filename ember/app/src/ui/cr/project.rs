@@ -1125,13 +1125,20 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
             super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H,
         )
         .min(900.0);
+        // FR-L26.1 (#878): a body that fits is as tall as its content, so the 1440 dialog has no
+        // blank band above 취소/만들기; only a body taller than the room scrolls at a fixed height.
+        let notes = usize::from(d.branch.trim().is_empty())
+            + if d.is_blank() { 0 } else { errors.len() }
+            + usize::from(st.new_failure.get().is_some());
+        let new_columns = super::characters::style_picker_columns(new_window.width_dp);
+        let new_body_fits = new_project_body_estimate(new_columns, notes) <= new_body_height;
         let new_scroll = cu::remember_scroll_state();
         let review_end = new_sheet_review_end();
         EmberSheet("새 프로젝트", st.new_project.get(), request_close.clone(), None, || {
-            if review_end {
+            if review_end && !new_body_fits {
                 ScrollToEnd(new_scroll.clone());
             }
-            cu::ScrollColumn().scroll_state(&new_scroll).modifier(Modifier::new().fill_max_width().height(new_body_height)).content(|| {
+            let new_body = || {
                 cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
                     // v0.0.7: #374 fixed (`TextField::text`); workaround kept until checked on a
                     // display (a controlled value must not move the caret while typing), so the
@@ -1209,7 +1216,12 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
                         Label(&m, Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
                     }
                 });
-            });
+            };
+            if new_body_fits {
+                cu::Column().modifier(Modifier::new().fill_max_width()).content(new_body);
+            } else {
+                cu::ScrollColumn().scroll_state(&new_scroll).modifier(Modifier::new().fill_max_width().height(new_body_height)).content(new_body);
+            }
             SheetFooter(|| {
                 AppButton("취소", None, ButtonKind::Default, true, true, false, request_close.clone());
                 let (dr, saving_s, failure, leave) =
@@ -1283,6 +1295,25 @@ pub fn sheet_scroll_dp(value: Option<&str>) -> f32 {
 /// Whether `EMBER_CR_SHEET_SCROLL` asks for a sheet's end state (`end`), FR-L32.1.
 pub fn sheet_scroll_is_end(value: Option<&str>) -> bool {
     value == Some("end")
+}
+
+/// How tall the new-project body is, from its rows (FR-L26.1): 20 px padding top and bottom;
+/// 이름 and the 저장소/기본 브랜치 row (a 12/18 label, 4, a 40 px field); the 팀 캐릭터 label and
+/// the picker for `columns`; each of `notes` (the branch hint, errors, the failure) at two lines.
+/// Every row after the first adds the column's 12 px spacing. An estimate, not a measurement:
+/// TODO(compose-rust#778) a body capped at the room would make it unnecessary.
+pub(crate) fn new_project_body_estimate(columns: usize, notes: usize) -> f32 {
+    let field_row = 18.0 + 4.0 + H_BTN;
+    let note = SP[2] + 2.0 * 18.0;
+    SP[4] * 2.0
+        + field_row
+        + SP[2]
+        + field_row
+        + SP[2]
+        + 18.0
+        + SP[2]
+        + super::characters::style_picker_height(columns)
+        + notes as f32 * note
 }
 
 /// The new-project sheet's review setting: `EMBER_CR_SHEET_SCROLL=end` scrolls its body to the
@@ -2068,7 +2099,30 @@ mod tests {
         let production = &src[..src.find("#[cfg(test)]").unwrap()];
         let body = &production[production.find("EmberSheet(\"새 프로젝트\"").unwrap()..];
         let body = &body[..body.find("SheetFooter(").unwrap()];
-        assert!(body.contains("if review_end {\n                ScrollToEnd(new_scroll.clone());"), "{body}");
+        assert!(body.contains("if review_end && !new_body_fits {\n                ScrollToEnd(new_scroll.clone());"), "{body}");
+    }
+
+    #[test]
+    fn fr_l26_1_new_project_body_is_content_height_when_it_fits() {
+        use super::super::characters::style_picker_columns;
+        use super::super::components::{sheet_body_max_height, SHEET_FOOTER_H, SHEET_HEADER_CHROME_H};
+        let room = |w: f32, h: f32| sheet_body_max_height(w, h, false, SHEET_HEADER_CHROME_H + SHEET_FOOTER_H).min(900.0);
+        // 40 + 62 + 12 + 62 + 12 + 18 + 12 + the picker (two rows of 144 and 8), with the branch hint.
+        assert_eq!(new_project_body_estimate(3, 0), 40.0 + 62.0 + 12.0 + 62.0 + 12.0 + 18.0 + 12.0 + 296.0);
+        assert_eq!(new_project_body_estimate(3, 1) - new_project_body_estimate(3, 0), 48.0);
+        // 1440 x 900: three columns, the body fits with room for a few errors (#878: a fixed
+        // body left about 170 px blank above the footer).
+        assert_eq!(style_picker_columns(1440.0), 3);
+        assert!(new_project_body_estimate(3, 3) <= room(1440.0, 900.0));
+        // 390 x 844: two columns of three rows do not fit the 85 percent sheet; it scrolls at a
+        // fixed height so the footer stays on screen (FR-L32.1).
+        assert_eq!(style_picker_columns(390.0), 2);
+        assert!(new_project_body_estimate(2, 1) > room(390.0, 844.0));
+        let src = include_str!("project.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        let body = &production[production.find("EmberSheet(\"새 프로젝트\"").unwrap()..];
+        let body = &body[..body.find("SheetFooter(").unwrap()];
+        assert!(body.contains("if new_body_fits {\n                cu::Column().modifier(Modifier::new().fill_max_width()).content(new_body);"), "{body}");
     }
 }
 

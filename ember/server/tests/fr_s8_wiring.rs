@@ -846,3 +846,180 @@ async fn fr_s8_start_request_carries_the_sessions_memory_limit() {
     let _ = sessions.send(&id, "hi").await;
     assert_eq!(*seen.lock().unwrap(), Some(Some(768)));
 }
+
+fn acp_recovery_config() -> AcpConfig {
+    AcpConfig {
+        name: "fake-acp-s8".into(),
+        command: crate_dir().join("tests/fixtures/acp/fake-acp-agent.sh"),
+        args: Vec::new(),
+        model_args: Vec::new(),
+        instructions_args: Vec::new(),
+        version_args: vec!["--version".into()],
+        env: Vec::new(),
+        env_policy: EnvPolicy::Inherit,
+    }
+}
+
+fn status_of(store: &Store, id: &str) -> SessionStatus {
+    store.session(id).unwrap().unwrap().status
+}
+
+/// A session left mid-turn in the store with no agent behind it: what a crash leaves when the
+/// agent died with the server.
+fn orphan_mid_turn(store: &Store, kind: AgentKind, cwd: &Path) -> String {
+    let id = store.create_session("p", kind, cwd.to_str().unwrap(), None, "orphan").unwrap().id;
+    store.append(&id, &AgentEvent::UserMessage { text: "hi".into() }).unwrap();
+    assert_eq!(status_of(store, &id), SessionStatus::Running);
+    id
+}
+
+/// #310, the startup order: the server start goes through `recover_after_restart`, and from the
+/// state a crash leaves (the session still `running` in the store, nothing fixed up by hand) it
+/// reaches the drain. With the old order (every mid-turn session marked idle first) the drain
+/// never ran in the server binary, because it only looks at mid-turn sessions.
+#[tokio::test]
+async fn fr_s8_recovery_drains_a_running_acp_session_from_the_state_the_crash_left() {
+    let _g = LOCK.lock().await;
+    std::env::remove_var("EMBER_SESSION_SHIM");
+    let shims = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let store = install(shims.path());
+    let kind = AcpAdapter::new(acp_recovery_config()).unwrap().kind();
+    let id = store.create_session("p", kind, work.path().to_str().unwrap(), None, "t").unwrap().id;
+
+    {
+        let (store, id) = (store.clone(), id.clone());
+        let adapter = AcpAdapter::new(acp_recovery_config()).unwrap();
+        run_server1(async move {
+            let sessions = Sessions::new(store.clone(), vec![Arc::new(adapter) as Arc<dyn AgentAdapter>]);
+            sessions.send(&id, "go").await.unwrap();
+            wait_for("two deltas", || {
+                events_of(&store, &id)
+                    .iter()
+                    .filter(|e| matches!(e, AgentEvent::AssistantDelta { .. }))
+                    .count()
+                    >= 2
+            })
+            .await;
+        });
+    }
+    let before = events_of(&store, &id).len();
+    assert!(!ended(&store, &id), "the turn is still running when the server dies");
+    // What the next server finds: the status as stored at the crash.
+    assert_eq!(status_of(&store, &id), SessionStatus::Running);
+    let pid = scan(shims.path()).into_iter().find(|m| m.session == id).expect("the shim survives").agent_pid;
+    assert!(pid_alive(pid));
+
+    let sessions = Sessions::new(
+        store.clone(),
+        vec![Arc::new(AcpAdapter::new(acp_recovery_config()).unwrap()) as Arc<dyn AgentAdapter>],
+    );
+    let recovery = sessions.recover_after_restart(Some(&runtime(shims.path(), &store))).await.unwrap();
+    assert_eq!(recovery.drained, vec![id.clone()], "the interrupted turn was drained");
+    assert!(recovery.rejoined.is_empty(), "an ACP agent is drained, not rejoined");
+    assert_eq!(recovery.reset, 0, "the drained session ended its turn, it was not marked idle");
+    let events = events_of(&store, &id);
+    assert!(events.len() > before, "the rest of the turn was stored");
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::AssistantMessage { text } if text.contains("tick 25 "))),
+        "the message was completed: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| *e == AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
+        "{events:?}"
+    );
+    assert_eq!(status_of(&store, &id), SessionStatus::Finished);
+    wait_for("the surviving agent to be stopped", || !pid_alive(pid)).await;
+    clear_runtime();
+}
+
+/// #310: a session whose agent is rejoined keeps the status it had at the crash (here it waits
+/// on an approval), and in the same start a mid-turn session with no live shim is marked idle.
+#[tokio::test]
+async fn fr_s8_recovery_keeps_a_rejoined_session_mid_turn_and_marks_an_orphan_idle() {
+    let _g = LOCK.lock().await;
+    std::env::remove_var("EMBER_SESSION_SHIM");
+    let shims = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let store = install(shims.path());
+    let bin = crate_dir().join("tests/fixtures/claude/fake-claude-approval.sh");
+    let id = store
+        .create_session("p", AgentKind::ClaudeCode, work.path().to_str().unwrap(), None, "t")
+        .unwrap()
+        .id;
+
+    {
+        let (store, bin, id) = (store.clone(), bin.clone(), id.clone());
+        run_server1(async move {
+            let sessions =
+                Sessions::new(store.clone(), vec![Arc::new(ClaudeCodeAdapter::new(bin)) as Arc<dyn AgentAdapter>]);
+            sessions.send(&id, "hello").await.unwrap();
+            wait_for("the approval request", || {
+                events_of(&store, &id).iter().any(|e| matches!(e, AgentEvent::ApprovalRequested { .. }))
+            })
+            .await;
+            wait_for("a stored offset", || store.shim_offset(&id).unwrap() > 0).await;
+            tokio::time::sleep(Duration::from_millis(700)).await;
+        });
+    }
+    assert_eq!(status_of(&store, &id), SessionStatus::WaitingForApproval);
+    // Its agent died with the old server: no shim, but the store still says running.
+    let orphan = orphan_mid_turn(&store, AgentKind::ClaudeCode, work.path());
+
+    let sessions =
+        Sessions::new(store.clone(), vec![Arc::new(ClaudeCodeAdapter::new(bin)) as Arc<dyn AgentAdapter>]);
+    let recovery = sessions.recover_after_restart(Some(&runtime(shims.path(), &store))).await.unwrap();
+    assert_eq!(recovery.rejoined, vec![id.clone()]);
+    assert!(recovery.drained.is_empty());
+    assert_eq!(recovery.reset, 1, "only the orphan is marked idle");
+    assert_eq!(status_of(&store, &orphan), SessionStatus::Idle);
+    assert_eq!(
+        status_of(&store, &id),
+        SessionStatus::WaitingForApproval,
+        "the rejoined session's turn is still running under its shim"
+    );
+    assert!(sessions.is_live(&id).await, "the rejoined agent is attached");
+    assert!(!sessions.is_live(&orphan).await);
+    // The turn goes on from where it was.
+    sessions
+        .answer(&id, "r1", ApprovalDecision::AllowOnce)
+        .await
+        .expect("the approval taken over from the old server can be answered");
+    wait_for("the turn to end", || ended(&store, &id)).await;
+    sessions.release(&id).await.unwrap();
+    clear_runtime();
+}
+
+/// #310: with shims off (`rt = None`) no agent outlived the server, so every mid-turn session
+/// is marked idle, as before; a session that is not mid-turn is left alone.
+#[tokio::test]
+async fn fr_s8_recovery_without_shims_marks_every_mid_turn_session_idle() {
+    let work = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let running = orphan_mid_turn(&store, AgentKind::ClaudeCode, work.path());
+    let waiting = orphan_mid_turn(&store, AgentKind::ClaudeCode, work.path());
+    store
+        .append(
+            &waiting,
+            &AgentEvent::ApprovalRequested {
+                approval_id: "a1".into(),
+                tool: "Bash".into(),
+                input: serde_json::json!({}),
+                needs_person: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(status_of(&store, &waiting), SessionStatus::WaitingForApproval);
+    let done = orphan_mid_turn(&store, AgentKind::ClaudeCode, work.path());
+    store.append(&done, &AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }).unwrap();
+
+    let bin = crate_dir().join("tests/fixtures/claude/fake-claude-approval.sh");
+    let sessions =
+        Sessions::new(store.clone(), vec![Arc::new(ClaudeCodeAdapter::new(bin)) as Arc<dyn AgentAdapter>]);
+    let recovery = sessions.recover_after_restart(None).await.unwrap();
+    assert!(recovery.rejoined.is_empty() && recovery.drained.is_empty());
+    assert_eq!(recovery.reset, 2);
+    assert_eq!(status_of(&store, &running), SessionStatus::Idle);
+    assert_eq!(status_of(&store, &waiting), SessionStatus::Idle);
+    assert_eq!(status_of(&store, &done), SessionStatus::Finished);
+}

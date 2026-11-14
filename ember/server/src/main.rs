@@ -501,13 +501,14 @@ async fn serve_main() -> anyhow::Result<()> {
         }
         None => None,
     };
-    // FR-S8 startup order: first rejoin or drain the sessions whose agent outlived the previous
-    // server, only then mark idle the mid-turn sessions with no surviving agent. It runs here
-    // because a rejoin needs every start hook above (accounts, members, computers, egress,
-    // browser, MCP, A2A), and nothing may read a session status before it: the A2A flush, the
-    // scheduler, the CI watcher, the transport and the local listener all start below. Until
-    // then a session still reads as running although its agent is gone. The start waits for a
-    // drain (EMBER_SHIM_DRAIN_SECS at most); the listeners are bound, so callers queue.
+    // FR-S8 startup order: first rejoin the sessions whose agent outlived the previous server
+    // or start their drain, only then mark idle the mid-turn sessions with no surviving agent.
+    // It runs here because a rejoin needs every start hook above (accounts, members, computers,
+    // egress, browser, MCP, A2A), and nothing may read a session status before it: the A2A
+    // flush, the scheduler, the CI watcher, the transport and the local listener all start
+    // below. Until then a session still reads as running although its agent is gone. A drain
+    // runs in the background, so the start does not wait for an agent's turn; a draining
+    // session stays running and refuses messages as busy until its drain ends.
     a2a.install_hooks();
     sessions.recover_after_restart(shim_runtime.as_ref()).await?;
     // After binding, so agents woken by queued messages can reach the API.

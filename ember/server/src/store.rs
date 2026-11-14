@@ -515,6 +515,16 @@ impl Store {
         Ok(self.conn.lock().unwrap().execute(&sql, rusqlite::params_from_iter(keep.iter()))?)
     }
 
+    /// Mark one session idle if it is mid-turn (FR-S8): its interrupted turn could neither be
+    /// drained nor ended.
+    pub fn reset_live_status(&self, id: &str) -> anyhow::Result<usize> {
+        Ok(self.conn.lock().unwrap().execute(
+            "UPDATE sessions SET status = 'idle'
+             WHERE id = ?1 AND status IN ('running', 'waiting_for_approval')",
+            params![id],
+        )?)
+    }
+
     /// The tool calls and tool results stored for the turn in flight (the events after the
     /// session's last `turn_ended`), oldest first (FR-S8, #310). The drain of a surviving agent
     /// needs nothing else, so the rest of the session is not read: the kind is filtered in SQL,

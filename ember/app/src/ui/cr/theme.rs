@@ -22,13 +22,14 @@ use compose_rust::ui::{Modifier, Shadow};
 // Dioxus module's definitions are the single source until phase 8 moves them here.
 pub use crate::ui::theme::{Scheme, ThemePref};
 
-/// The scheme the OS reports.
-///
-/// TODO(compose-rust#97): the toolkit resolves `FollowSystem` inside the renderer and exposes no
-/// hook to read the result, so System draws the light palette until one exists. An explicit
-/// Light or Dark choice is exact.
+/// The scheme the OS reports (`compose_rust::system_color_scheme`, compose-rust#97, v0.0.10), and
+/// light before the renderer's first report. The read is not a subscription: a change of the
+/// system appearance shows at the next recomposition.
 pub fn system_scheme() -> Scheme {
-    Scheme::Light
+    match compose_rust::system_color_scheme() {
+        Some(compose_rust::SystemColorScheme::Dark) => Scheme::Dark,
+        _ => Scheme::Light,
+    }
 }
 
 /// One colour and its soft background pair (the data palette).
@@ -615,6 +616,13 @@ mod tests {
         assert_eq!(ember_theme().scheme, Scheme::Light);
         assert_eq!(EmberTheme::select(ThemePref::Dark, system_scheme()).scheme, Scheme::Dark);
         assert_eq!(EmberTheme::select(ThemePref::System, system_scheme()).scheme, Scheme::Light);
+        // compose-rust#97: System follows the reported appearance; no stand-in marker is left.
+        let src = include_str!("theme.rs");
+        assert!(!src[..src.find("#[cfg(test)]").unwrap()].contains(concat!("TODO(compose-rust#", "97)")));
+        // The toolkit's own widgets follow the system with it, not a light stand-in.
+        assert_eq!(ThemePref::System.color_scheme(), compose_rust::ColorScheme::FollowSystem);
+        let shell = include_str!("shell.rs");
+        assert!(shell.contains("let scheme = pref.color_scheme();"), "the shell launches with the preference's scheme");
     }
 
     /// The tokens are the mockup's `--shadow` and `--shadow-lg`, light and dark.

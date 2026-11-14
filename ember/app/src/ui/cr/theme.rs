@@ -10,8 +10,9 @@
 //! compose-rust can register an app palette per colour role (`compose_rust::Palette`), but
 //! the Ember tokens (surface-2, hover, sel, the soft accents) have no role, so the tokens stay
 //! plain constants passed as `Paint::Literal`.
-//! TODO(compose-rust#374): bundled Inter + Pretendard need a font stack per role; the theme
-//! only takes one asset per `TypeRole` (`Theme::with_font`), so the fonts of #216 land after.
+//! v0.0.7: #374 fixed (`Text::font` and `TextField::font` take a `FontRefs` stack); workaround
+//! kept until checked on a display (the Inter and Pretendard files of #216 are not bundled yet,
+//! so the theme still sets one face per `TypeRole`).
 //! Layered card and sheet shadow tokens follow the mockup (#214).
 
 use compose_rust::{Color, Paint};
@@ -254,6 +255,12 @@ impl Fs {
     }
 }
 
+/// A page title (`style.css:66` `.head h1`, 32/400; 28 on a phone): book weight, as the mockup.
+/// Design review 2026-11-13 B8: the titles were drawn Medium or Semibold and read heavier.
+pub const PAGE_TITLE_WEIGHT: Weight = Weight::Regular;
+/// The home greeting (`home.css:233` `.greet`, 32/500, `DESIGN.md` 6.1).
+pub const GREETING_WEIGHT: Weight = Weight::Medium;
+
 /// The three weights. 700 is only for 11px badge numbers and 800 is not used, so neither is
 /// representable here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,9 +322,10 @@ pub const CORNER_TAIL: f32 = 6.0;
 /// Pills are `ShapeRole::Full` in the toolkit; this is the token's value for tests.
 pub const PILL: f32 = 999.0;
 
-/// Squircle smoothing (Figma's corner smoothing). Unused until the toolkit can draw it.
-/// TODO(compose-rust#294): `Modifier::CornerCurve { smoothing }`; until then corners are plain
-/// arcs of the same fixed radius, so only the curve differs and layout is the same.
+/// Squircle smoothing (Figma's corner smoothing).
+/// v0.0.7: #294 fixed (`Modifier::corner_curve(smoothing)`); workaround kept until checked on a
+/// display (each card, sheet and pill must be compared with the mockup before this value goes
+/// onto them). Until then corners are plain arcs of the same radius; layout is the same.
 pub const SQUIRCLE_SMOOTHING: f32 = 0.6;
 
 /// Press: scale 0.975 in 180 ms, held at least 120 ms, back in 200 ms with no overshoot.

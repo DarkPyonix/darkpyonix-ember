@@ -411,8 +411,8 @@ pub fn AgentsScreenWith(
 }
 
 /// A review window (`EMBER_CR_ROUTE=agents`).
-#[compose_rust::runtime::composable]
-pub fn preview() {
+#[compose_rust::runtime::Composable]
+pub fn preview_agents() {
     let p = ember_theme().palette;
     cu::Box()
         .modifier(Modifier::new().fill_max_size().background(paint(p.bg)))
@@ -505,39 +505,31 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
     }
 }
 
-// TODO(compose-rust#426): the toolkit Switch cannot take the ink 36x20 style or an accessible name;
-// drawn on a Canvas under a named Button until it can.
-/// A 36x20 toggle switch matching the mockup (ink track when on, track when off, 16x16 knob).
-///
-/// TODO(compose-rust#372): toolkit Switch cannot be styled (ink track 36x20 not toolkit green 54x32),
-/// so it is built from a toolkit Button with painted track and knob.
-fn MockSwitch(label: &str, checked: bool, enabled: bool, mut on_change: impl FnMut(bool) + 'static) {
+/// A 36x20 toggle switch matching the mockup (ink track when on, `surface-2` when off, `line`
+/// when disabled, a `surface` thumb). The toolkit `Switch` takes the size, the colours and the
+/// accessible name since compose-rust v0.0.7 (#426, #372); the switch announces its own on or
+/// off state, so its name is `label` alone. The mockup's 1 px `line` ring on an enabled, off
+/// switch has no builder and is not drawn.
+fn MockSwitch(label: &str, checked: bool, enabled: bool, on_change: impl FnMut(bool) + 'static) {
     let p = ember_theme().palette;
-    let track_color = if !enabled {
+    cu::Switch(checked)
+        .enabled(enabled)
+        .size(36.0, 20.0)
+        .track_color(paint(switch_track(checked, enabled, p)))
+        .thumb_color(paint(p.surface))
+        .accessible_name(label)
+        .on_change(on_change);
+}
+
+/// The track colour of [`MockSwitch`]: `line` when disabled, `ink` when on, `surface-2` when off.
+fn switch_track(checked: bool, enabled: bool, p: &Palette) -> Color {
+    if !enabled {
         p.line
     } else if checked {
         p.ink
     } else {
         p.surface_2
-    };
-    let knob_color = p.surface;
-    let knob_x = if checked { 26.0 } else { 10.0 };
-
-    let mut list = DrawList::builder()
-        .round_rect(paint(track_color), 0.0, 0.0, 36.0, 20.0, 10.0, 0.0)
-        .circle(paint(knob_color), knob_x, 10.0, 7.5, 0.0);
-    if !checked && enabled {
-        list = list.round_rect(paint(p.line), 0.0, 0.0, 36.0, 20.0, 10.0, 1.0);
     }
-    let draw = list.build();
-    let switch_label = format!("{label} {}", if checked { "끄기" } else { "켜기" });
-
-    cu::Box()
-        .modifier(Modifier::new().size(36.0, 20.0))
-        .content(move || {
-            cu::Canvas(draw).modifier(Modifier::new().size(36.0, 20.0));
-            FocusOverlayEnabled(&switch_label, enabled, move || on_change(!checked));
-        });
 }
 
 /// A 20x20 radio button for model selection matching the mockup.
@@ -563,8 +555,11 @@ fn ModelRadio(label: &str, selected: bool, mut on_click: impl FnMut() + 'static)
         });
 }
 
-// TODO(compose-rust#425, #429): an invisible `Button(label)` over a painted row, only to get focus,
-// role and the accessible name. Remove when Button takes content or a semantics modifier exists.
+// v0.0.7: #425 and #429 fixed (`Button::content`, `Modifier::label`); workaround kept until
+// checked on a display (moving each painted row into a `Button` content slot changes its press
+// feedback and padding). The overlay names itself with `accessible_name` (owned), never
+// `Modifier::label`, so a name built from data (a profile, a model) never fills the toolkit's
+// label table (#455).
 /// An accessible invisible button overlay for a painted row, chip, or pill.
 /// Gives assistive tech the item's label and provides keyboard focus and click handling.
 fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
@@ -573,6 +568,7 @@ fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
 
 fn FocusOverlayEnabled(label: &str, enabled: bool, on_click: impl FnMut() + 'static) {
     cu::Button(label)
+        .accessible_name(label)
         .enabled(enabled)
         .variant(ButtonVariant::Text)
         .color(compose_rust::Paint::Literal(Color::argb(0)))
@@ -580,16 +576,16 @@ fn FocusOverlayEnabled(label: &str, enabled: bool, on_click: impl FnMut() + 'sta
         .on_click(on_click);
 }
 
-// TODO(compose-rust#427): a Box in a Row takes the remaining width and squeezes its sibling text to one
-// glyph per line, so the width is estimated with `text_px` and fixed.
+// TODO(compose-rust#431): the FocusOverlay is a `fill_max_size` Button, and the toolkit has no
+// parent-sized modifier for an overlay, so a chip without a width takes the rest of the row and
+// squeezes the hint beside it to one word per line. compose-rust v0.0.7 (#427) stops the
+// squeeze at a word, not at the overlay: checked on a display 2026-11-13, so the width stays fixed.
 /// A selectable chip matching the mockup's .field.ag-sel: wide enough for the label,
-/// with a 1-line label and accessible FocusOverlay without ellipsis if it fits.
+/// with a 1-line label and an accessible FocusOverlay.
 fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     cu::Box()
         .modifier(
-            // A fixed width: without one the chip takes the whole row and squeezes the hint
-            // beside it to one glyph per line.
             Modifier::new()
                 .width(200.0)
                 .height(H_CTL)
@@ -607,13 +603,11 @@ fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
         });
 }
 
-// TODO(compose-rust#427): a Box in a Row takes the remaining width and squeezes its sibling text to one
-// glyph per line, so the width is estimated with `text_px` and fixed.
-/// A picker pill matching mockup's .pickchip: full pill shape, icon + label with available width.
+// TODO(compose-rust#431): as for `SelectChip`, the `fill_max_size` overlay makes a pill without
+// a width take the rest of the row, so the width is estimated with `text_px` and fixed.
+/// A picker pill matching mockup's .pickchip: full pill shape, icon + label, sized to its content.
 fn ModelPickerPill(text: &str, svg: Option<&'static str>, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    // Sized to its content: a pill without a width takes the rest of a row and squeezes the
-    // hint beside it to one glyph per line.
     let width = 12.0
         + if svg.is_some() { 16.0 + 8.0 } else { 0.0 }
         + super::home::text_px(text, Fs::Sm.size())
@@ -1221,10 +1215,14 @@ fn HarnessCard(
                 "넘으면 그 세션만 종료되고 다른 세션은 계속됩니다.",
                 move || {
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
-                        // TODO(compose-rust#428): the Slider track is nearly invisible and cannot be styled.
+                        // The Slider takes the mockup's colours and its name (compose-rust v0.0.7, #428).
                         cu::Slider(cur_gb)
                             .range(1.0, 16.0)
                             .steps(15)
+                            .track_color(paint(p.line))
+                            .active_track_color(paint(p.ink))
+                            .thumb_color(paint(p.ink))
+                            .accessible_name("세션당 메모리 한도")
                             .modifier(Modifier::new().width(120.0))
                             .on_change(move |v| {
                                 let gb = v.round().clamp(1.0, 16.0) as u32;
@@ -2171,8 +2169,6 @@ fn ProfileCard(
                     "이 계정 하나로만 실행됩니다.",
                     || {
                         let cur_acc = p.accounts.first().map(|a| account_label(&live.accounts, a)).unwrap_or_else(|| "계정 없음".to_string());
-                        // A bounded width, or the pill takes the whole row and the hint beside it
-                        // wraps to one glyph per line.
                         ModelPickerPill(&cur_acc, Some(ICON_USER_SVG), move || {
                             post_notice("고정 계정을 선택합니다");
                         });
@@ -3381,7 +3377,23 @@ mod tests {
         assert!(!src.replace(in_tests, "").contains(&needle), "an empty Button has no screen reader name");
     }
 
-    /// `(node, text)` of every Button in the first frame and after the width report.
+    #[test]
+    fn fr_l20_switch_track_follows_the_mockup() {
+        // compose-rust#426 (v0.0.7): the toolkit Switch takes the mockup's track colours.
+        let p = LIGHT;
+        assert_eq!(switch_track(true, true, &p), p.ink);
+        assert_eq!(switch_track(false, true, &p), p.surface_2);
+        assert_eq!(switch_track(true, false, &p), p.line);
+        let src = include_str!("agents.rs").split("mod tests").next().unwrap();
+        let switch = src.split("fn MockSwitch(").nth(1).unwrap().split("fn switch_track(").next().unwrap();
+        assert!(switch.contains("cu::Switch(checked)") && switch.contains(".size(36.0, 20.0)"));
+        assert!(switch.contains(".accessible_name(label)"));
+        assert!(!switch.contains("Canvas"), "the switch is the toolkit's, not a painted stand-in");
+    }
+
+    /// `(node, name)` of every Button, Switch and Slider in the first frame and after the width
+    /// report. The name is the `accessible_name` when one is set (compose-rust v0.0.7), else the
+    /// visible text.
     fn button_texts_at(width: f32, class: compose_rust::WindowSizeClass, section: Section) -> Vec<(u32, String)> {
         use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
         use compose_rust::{EventPayload, PropertyKind, WidgetKind, WindowHeightClass};
@@ -3394,14 +3406,18 @@ mod tests {
         });
         let mut nodes: HashSet<u32> = HashSet::new();
         let mut texts: HashMap<u32, String> = HashMap::new();
+        let mut names: HashMap<u32, String> = HashMap::new();
         let mut scan = |batch: &[Mutation<'_>]| {
             for m in batch {
                 match m {
-                    Mutation::Create { node_id, widget: WidgetKind::Button } => {
+                    Mutation::Create { node_id, widget: WidgetKind::Button | WidgetKind::Switch | WidgetKind::Slider } => {
                         nodes.insert(*node_id);
                     }
                     Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(t) } => {
                         texts.insert(*node_id, t.to_string());
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::AccessibleName, value: PropertyValue::String(t) } => {
+                        names.insert(*node_id, t.to_string());
                     }
                     _ => {}
                 }
@@ -3424,7 +3440,10 @@ mod tests {
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         scan(&decode_batch(bytes).expect("decode"));
         compose_rust::window::reset_window_size();
-        nodes.into_iter().map(|n| (n, texts.get(&n).cloned().unwrap_or_default())).collect()
+        nodes
+            .into_iter()
+            .map(|n| (n, names.get(&n).or_else(|| texts.get(&n)).cloned().unwrap_or_default()))
+            .collect()
     }
 
     #[test]
@@ -3454,7 +3473,7 @@ mod tests {
             }
             // A radio and a switch name their model.
             assert!(names.iter().any(|n| n.ends_with(" 기본 모델로 선택") && n.len() > " 기본 모델로 선택".len()));
-            assert!(names.iter().any(|n| n.contains("활성화") && n.len() > "활성화 끄기".len()));
+            assert!(names.iter().any(|n| n.ends_with(" 활성화") && n.len() > " 활성화".len()));
         }
     }
 

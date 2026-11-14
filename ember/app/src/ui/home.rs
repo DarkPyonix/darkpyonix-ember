@@ -1305,6 +1305,18 @@ pub struct Kpi {
     pub available: bool,
 }
 
+/// A KPI's number and the small muted part after it (`home.css:63` `.hm-kv small`, half the
+/// number's size, 500, `muted`): the unit ("4" and "명"), or for a ratio the denominator ("3" and
+/// "/5", `home.js:52`). Design review 2026-11-13 B9: the denominator was drawn at the number's size.
+pub fn kpi_value_parts(kpi: &Kpi) -> (String, String) {
+    if kpi.unit.is_empty() {
+        if let Some((num, den)) = kpi.value.split_once('/') {
+            return (num.to_string(), format!("/{den}"));
+        }
+    }
+    (kpi.value.clone(), kpi.unit.to_string())
+}
+
 /// The four KPIs: running members, online computers, success rate, approval wait.
 /// Approval wait shows how many are waiting now (the client has that) but not the median
 /// (TODO(server): no approval timing in the client's state).

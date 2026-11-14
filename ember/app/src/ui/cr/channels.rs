@@ -339,7 +339,8 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
             });
         cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
         cu::Column().space_role(SpaceRole::Sm).modifier(Modifier::new().fill_max_width().fill_max_height().padding(SP[2])).content(|| {
-            // TODO(compose-rust#376, #374): the field is uncontrolled and has no initial value.
+            // v0.0.7: #376 and #374 fixed (`TextField::text`); workaround kept until checked on a
+            // display (a controlled value must not move the caret), so the field is uncontrolled.
             // `.searchbox{display:none}` up to 900 dp: no search field on a phone.
             if !narrow {
                 let query = filter.clone();
@@ -413,7 +414,7 @@ fn RoomIcon(room_id: &str, project: &str, size: f32) {
         .content(|| super::shell::NavIcon(svg, a.strong.to_argb(), size * 0.6));
 }
 
-/// One room in the list. TODO(compose-rust#372): the row is a pointer-up `Clickable`.
+/// One room in the list: the container's `on_click` (compose-rust#372), named by its text.
 fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, open: &MutableState<Option<String>>, feed: Option<Feed>) {
     let p = ember_theme().palette;
     let time = row.last_at.map(|t| time_label(t, local_tz())).unwrap_or_default();
@@ -476,7 +477,7 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
             .content(|| {
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
                 if show_back {
-                    // TODO(compose-rust#429): accessible name (back).
+                    // The visible label "목록" names the back button.
                     AppButton("목록", Some(IconRole::Back), ButtonKind::Default, true, true, false, on_back);
                 }
                 RoomIcon(&room.id, &room.project, 36.0);
@@ -491,11 +492,13 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                     });
                 });
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
-                // TODO(compose-rust#429): accessible name (members, menu).
-                // The members button opens the owner sheet (FR-T14, FR-T15, FR-T17).
+                // The members button opens the owner sheet (FR-T14, FR-T15, FR-T17), named "멤버"
+                // (compose-rust v0.0.7, #429). The more glyph does nothing yet, so it is hidden
+                // from assistive technology.
                 {
                     let st = owner.clone();
-                    super::components::Clickable(
+                    super::components::NamedClickable(
+                        super::a11y::MEMBERS,
                         Modifier::new()
                             .size(H_CTL, H_CTL)
                             .background(paint(p.surface))
@@ -514,7 +517,8 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                                 .size(H_CTL, H_CTL)
                                 .background(paint(p.surface))
                                 .border(1.0, paint(p.line))
-                                .shape_role(compose_rust::ShapeRole::Full),
+                                .shape_role(compose_rust::ShapeRole::Full)
+                                .hidden(true),
                         )
                         .content(|| super::shell::NavIcon(svg, p.text_2.to_argb(), 16.0));
                 }
@@ -548,8 +552,9 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
 
 /// `.inputbar`: a white pill with a 1 px border, 740 wide at most and centered, holding a plus
 /// button, the field, an emoji button and the ink send button.
-/// TODO(compose-rust#376, #375): the field keeps the toolkit's own frame inside the pill, and
-/// the bar has no `--shadow-lg`.
+/// v0.0.7: #376 and #375 fixed (the field takes the node's frame, and `Modifier::shadows`);
+/// workaround kept until checked on a display (the bare field in the pill and the bar's
+/// `--shadow-lg` must be compared with the mockup).
 fn InputBar(room_id: &str, live: Option<Feed>) {
     // The text typed so far, kept per room; sending bumps `generation`, which draws a fresh,
     // empty field (the field is uncontrolled and has no way to be cleared).
@@ -601,11 +606,12 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
             .content(|| {
                 let _generation = generation.get();
                 cu::Spacer().modifier(Modifier::new().width(6.0));
-                // TODO(compose-rust#429): accessible name (attach (+)).
+                // The attach (+) and emoji glyphs do nothing yet, so they are hidden from
+                // assistive technology (compose-rust v0.0.7, #429) until they have a handler.
                 for svg in [super::shell::ICON_PLUS_SVG] {
                     cu::Box()
                         .alignment(Alignment::Center)
-                        .modifier(Modifier::new().size(H_CTL, H_CTL))
+                        .modifier(Modifier::new().size(H_CTL, H_CTL).hidden(true))
                         .content(|| super::shell::NavIcon(svg, p.text_2.to_argb(), 18.0));
                 }
                 EmberField(FieldOptions {
@@ -622,16 +628,15 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
                     })),
                     ..Default::default()
                 });
-                // TODO(compose-rust#429): accessible name (emoji).
                 cu::Box()
                     .alignment(Alignment::Center)
-                    .modifier(Modifier::new().size(H_CTL, H_CTL))
+                    .modifier(Modifier::new().size(H_CTL, H_CTL).hidden(true))
                     .content(|| super::shell::NavIcon(super::shell::ICON_SMILE_SVG, p.text_2.to_argb(), 18.0));
                 // Sending is for the server's rooms; the sample rooms (demo) cannot send.
                 let sending = state.get() == SendState::Sending;
                 let can_send = live.is_some() && !sending && !draft.get().trim().is_empty();
                 let (draft, send) = (draft.clone(), send.clone());
-                // TODO(compose-rust#429): accessible name (send, icon-less label only, no icon role).
+                // The visible label "전송" names the send button.
                 AppButton(if sending { "전송 중" } else { "전송" }, None, ButtonKind::Primary, false, can_send, false, move || send(draft.get_untracked()));
                 cu::Spacer().modifier(Modifier::new().width(6.0));
             });
@@ -779,8 +784,8 @@ pub fn sample_rooms() -> Vec<Room> {
 
 /// A review window (`EMBER_CR_ROUTE=channels`): the channels screen with sample rooms; the
 /// first room is open on a wide window.
-#[compose_rust::runtime::composable]
-pub fn preview() {
+#[compose_rust::runtime::Composable]
+pub fn preview_channels() {
     let p = ember_theme().palette;
     cu::Box().modifier(Modifier::new().fill_max_size().background(paint(p.bg))).content(|| {
         ChannelsScreenWith(sample_rooms());

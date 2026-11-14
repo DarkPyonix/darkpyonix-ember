@@ -55,8 +55,8 @@ const MODEL_RAIL_WIDTH: f32 = 128.0;
 /// Keyboard: each row is a `Clickable`, which the renderer makes a focusable button (Tab, Enter,
 /// Space), named by its title and description. Not built: arrow keys between rows and focus on
 /// the chosen row when the picker opens (TODO(compose-rust#504): only Enter reaches the Host,
-/// compose-rust#100; request focus landed after the pinned v0.0.6), and the selected state for screen readers
-/// (TODO(compose-rust#460): `Modifier.selected` landed after v0.0.6).
+/// compose-rust#100; request focus landed after the pinned v0.0.6). The chosen row says it is
+/// selected to screen readers (`Modifier::selected`, compose-rust v0.0.7, #460).
 fn ModeBody(header: &str, rows: &[ModeRow], width: f32, on_tap: impl FnMut(usize) + Clone + 'static) {
     let p = ember_theme().palette;
     cu::Column().modifier(Modifier::new().width(width)).content(|| {
@@ -72,7 +72,7 @@ fn ModeBody(header: &str, rows: &[ModeRow], width: f32, on_tap: impl FnMut(usize
             let title = if r.danger { p.red.strong } else { p.text };
             let icon = if r.danger { ICON_WARN } else { ICON_SHIELD };
             Clickable(
-                Modifier::new().width(width).background(bg).corner_radius(CORNER_SM).padding(SP[2]),
+                Modifier::new().width(width).background(bg).corner_radius(CORNER_SM).padding(SP[2]).selected(r.chosen),
                 Alignment::CenterStart,
                 move || tap(i),
                 || {
@@ -125,9 +125,10 @@ const ICON_FOLDER: &str = include_str!("../../../assets/nav/folder.svg");
 const ICON_PC: &str = include_str!("../../../assets/nav/pc.svg");
 // TODO(item 6): the model chip's harness glyph; the terminal stands in.
 const ICON_TERMINAL: &str = include_str!("../../../assets/nav/terminal.svg");
-const ICON_CODE: &str = include_str!("../../../assets/nav/code.svg");
 const ICON_GIT: &str = include_str!("../../../assets/nav/git.svg");
 const ICON_CHART_NAV: &str = include_str!("../../../assets/nav/chart.svg");
+/// Heroicons 2.2.0 `sparkles` (MIT), the mockup's `spark` (`icons.js`).
+const ICON_SPARK: &str = line_icon!("M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z");
 const ICON_WARN: &str = line_icon!("M12 9.5v4M12 16.75h.01M10.3 3.9L2.4 17.6a2 2 0 001.7 3h15.8a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z");
 const ICON_CHECK: &str = line_icon!("M5 12.5l4.5 4.5L19 7.5");
 const ICON_CLOCK: &str = line_icon!("M12 7v5l3 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z");
@@ -244,7 +245,7 @@ pub fn ring_svg(size: f32, stroke: f32, track: u32, parts: &[(u32, f32)]) -> Str
     let r = (size - stroke) / 2.0;
     let hex = |v: u32| format!("#{:06x}", v & 0x00ff_ffff);
     let mut s = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{size}\" height=\"{size}\" viewBox=\"0 0 {size} {size}\"><circle cx=\"{c}\" cy=\"{c}\" r=\"{r}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{stroke}\"/>",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100%\" height=\"100%\" viewBox=\"0 0 {size} {size}\"><circle cx=\"{c}\" cy=\"{c}\" r=\"{r}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{stroke}\"/>",
         hex(track)
     );
     let mut at = 0.0_f32;
@@ -351,8 +352,9 @@ pub fn Tile(content: impl FnOnce()) {
 
 /// The inner height of the success tile (donut 132 + head 30 + gap 8 + the card's 16 px padding
 /// each side is outside it): tiles beside it take the same, since the toolkit rows do not
-/// stretch their children. TODO(compose-rust#389): equal-height cards in a row; this number is
-/// fragile when the success tile's content changes.
+/// stretch their children. v0.0.7: #389 fixed (`Row::equal_height` with `fill_max_height`
+/// children, as `EmberCardSized` uses); workaround kept until checked on a display (the tiles
+/// here are not `EmberCardSized` yet). This number is fragile when the success tile's content changes.
 const ROW_TILE_H: f32 = 171.0;
 
 fn TileH(height: Option<f32>, content: impl FnOnce()) {
@@ -376,11 +378,12 @@ pub fn CardHead(icon: &'static str, title: &str, trailing: impl FnOnce()) {
     });
 }
 
-/// `.hm-go`: the round 30 px arrow that opens the tile's screen.
-/// TODO(compose-rust#372): a pointer-up `Clickable` with no keyboard focus or role.
+/// `.hm-go`: the round 30 px arrow that opens the tile's screen, named "화면 열기" for
+/// assistive technology (compose-rust v0.0.7, #372, #460).
 fn GoButton(on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    Clickable(
+    super::components::NamedClickable(
+        super::a11y::OPEN_SCREEN,
         Modifier::new().size(30.0, 30.0).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
         Alignment::Center,
         on_click,
@@ -399,13 +402,14 @@ fn DotOrHatch(hatched: bool, hatch: compose_rust::Color, solid: compose_rust::Co
         return;
     }
     // The bars' pattern: same colour for fill and lines, same step (`legend_hatch_style`).
-    // TODO(compose-rust#428, #429): the dots have no accessible label; the Label beside them is the text.
+    // The square is decoration: the Label beside it is the text, so it is hidden from
+    // assistive technology (compose-rust v0.0.7, #429).
     let (step, _alpha) = usage::legend_hatch_style();
     let mut list = DrawList::builder().round_rect(paint(hatch), 0.0, 0.0, 8.0, 8.0, 2.0, 1.0);
     for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(0.0, 0.0, 8.0, 8.0, step) {
         list = list.line(paint(hatch), x1, y1, x2, y2, 1.0);
     }
-    cu::Canvas(list.build()).modifier(Modifier::new().size(8.0, 8.0));
+    cu::Canvas(list.build()).modifier(Modifier::new().size(8.0, 8.0).hidden(true));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -459,7 +463,8 @@ fn initial_suggestion() -> Option<String> {
 }
 
 /// `EMBER_CR_SCROLL=<dp|bottom|status|usage|efficiency|small>` for review captures: the toolkit cannot scroll a column from
-/// code (TODO(compose-rust#385)), so the blocks that would have scrolled out (by their estimated heights) are left out.
+/// code before v0.0.5 (v0.0.7: #385 fixed with `ScrollState::scroll_to`; workaround kept until
+/// checked on a display, because the capture script relies on it), so the blocks that would have scrolled out (by their estimated heights) are left out.
 struct Skip(std::cell::Cell<f32>);
 
 impl Skip {
@@ -965,9 +970,9 @@ impl Composer {
             // `equal_height`: the rail's `surface-2` runs the popover's full height.
             cu::Row().equal_height(true).modifier(surface).content(|| {
                 // `.mp-rail`: `surface-2`, one entry per harness, the open one marked.
-                // TODO(compose-rust#460): icon-only 36 dp entries in a 52 dp rail as in the
-                // mockup once the pinned toolkit has the label modifier; until then each entry
-                // keeps its harness name as text, which is what names it to a screen reader.
+                // v0.0.7: #460 fixed (`Modifier::label`); workaround kept until checked on a
+                // display (the icon-only 36 dp entries in a 52 dp rail of the mockup need a
+                // capture). Until then each entry keeps its harness name as text, which names it.
                 cu::Column()
                     .spacing(SP[0])
                     .modifier(Modifier::new().width(MODEL_RAIL_WIDTH).fill_max_height().background(paint(p.surface_2)).padding(SP[1]))
@@ -1029,6 +1034,12 @@ const GLYPH_CLAUDE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24"
 const GLYPH_CODEX: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path d="M12 2.8 20 7.4v9.2l-8 4.6-8-4.6V7.4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" fill="none"/><path d="M8.5 10l2.5 2-2.5 2M12.5 14.5h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>"#;
 const GLYPH_GEMINI: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path d="M12 2.5c.6 5.2 4.3 8.9 9.5 9.5-5.2.6-8.9 4.3-9.5 9.5-.6-5.2-4.3-8.9-9.5-9.5 5.2-.6 8.9-4.3 9.5-9.5z" fill="currentColor"/></svg>"#;
 
+/// A composer chip's glyph and tint: the model chip takes the harness glyph in the harness colour,
+/// every other chip keeps its icon in `text-2`.
+fn composer_chip_icon(pick: Pick, icon: &'static str, harness: Harness) -> (&'static str, Option<u32>) {
+    if pick == Pick::Model { (harness_glyph(harness), Some(harness_tint(harness))) } else { (icon, None) }
+}
+
 fn harness_glyph(h: Harness) -> &'static str {
     match h {
         Harness::ClaudeCode => GLYPH_CLAUDE,
@@ -1070,7 +1081,7 @@ fn Hero(c: &Composer, ui: &SharedUi, width_dp: f32, height_dp: f32, content_w: f
         });
         // The mockup greets the signed-in user by name.
         let greeting = format!("{}, {}", DEMO_USER.0, GREETING);
-        Label(&greeting, if l.compact { Fs::Xl2 } else { Fs::Xl3 }, Weight::Medium, None, Some(2));
+        Label(&greeting, if l.compact { Fs::Xl2 } else { Fs::Xl3 }, GREETING_WEIGHT, None, Some(2));
         ComposerCard(c, ui, composer_width(content_w), l);
         Suggestions(c, width_dp);
         cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
@@ -1081,7 +1092,7 @@ fn Hero(c: &Composer, ui: &SharedUi, width_dp: f32, height_dp: f32, content_w: f
 }
 
 /// The plain vendor character of `core.js` `bot()`: one shape per harness in its colour.
-pub fn hero_bot_svg(vendor: &str, status: &str, px: f32, p: &Palette) -> String {
+pub fn hero_bot_svg(vendor: &str, status: &str, _px: f32, p: &Palette) -> String {
     let hex = |c: compose_rust::Color| format!("#{:06x}", c.to_argb() & 0x00ff_ffff);
     let (fill, shape) = match vendor {
         "codex" => (hex(p.blue.strong), "M13 8h14c3.9 0 6 2.1 6 6v13c0 3.9-2.1 6-6 6H13c-3.9 0-6-2.1-6-6V14c0-3.9 2.1-6 6-6z"),
@@ -1095,9 +1106,8 @@ pub fn hero_bot_svg(vendor: &str, status: &str, px: f32, p: &Palette) -> String 
         "fail" => "M16.5 27q3.5-3 7 0",
         _ => "M16.5 24.5q3.5 3.2 7 0",
     };
-    let size = px.round() as i32;
     let mut s = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{size}\" height=\"{size}\" viewBox=\"0 0 40 40\"><ellipse cx=\"20\" cy=\"37.6\" rx=\"9\" ry=\"1.5\" fill=\"#1c1b19\" fill-opacity=\".12\"/><path d=\"{shape}\" fill=\"{fill}\"/><path d=\"M11.5 23.5h2.5M26 23.5h2.5\" fill=\"none\" stroke=\"#ffffff\" stroke-opacity=\".35\" stroke-width=\"2.2\" stroke-linecap=\"round\"/><ellipse cx=\"15.5\" cy=\"19\" rx=\"1.9\" ry=\"2.5\" fill=\"{ink}\"/><ellipse cx=\"24.5\" cy=\"19\" rx=\"1.9\" ry=\"2.5\" fill=\"{ink}\"/><path d=\"{mouth}\" fill=\"none\" stroke=\"{ink}\" stroke-width=\"1.6\" stroke-linecap=\"round\"/>"
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100%\" height=\"100%\" viewBox=\"0 0 40 40\"><ellipse cx=\"20\" cy=\"37.6\" rx=\"9\" ry=\"1.5\" fill=\"#1c1b19\" fill-opacity=\".12\"/><path d=\"{shape}\" fill=\"{fill}\"/><path d=\"M11.5 23.5h2.5M26 23.5h2.5\" fill=\"none\" stroke=\"#ffffff\" stroke-opacity=\".35\" stroke-width=\"2.2\" stroke-linecap=\"round\"/><ellipse cx=\"15.5\" cy=\"19\" rx=\"1.9\" ry=\"2.5\" fill=\"{ink}\"/><ellipse cx=\"24.5\" cy=\"19\" rx=\"1.9\" ry=\"2.5\" fill=\"{ink}\"/><path d=\"{mouth}\" fill=\"none\" stroke=\"{ink}\" stroke-width=\"1.6\" stroke-linecap=\"round\"/>"
     );
     if status == "wait" {
         s.push_str(&format!("<circle cx=\"35\" cy=\"15\" r=\"3\" fill=\"{fill}\"/>"));
@@ -1116,11 +1126,13 @@ fn HeroBot(vendor: &str, status: &str, px: f32) {
 
 /// A composer chip (`.pickchip`): a 32 px `surface-2` pill built like `WarnChip`: 16 px glyph,
 /// 13 px weight 500 label cut with an ellipsis, and the 14 px chevron of a picker. `icon_only`
-/// chips are 32 px circles with the glyph centred.
-/// TODO(compose-rust#372): a pointer-up `Clickable` with no keyboard focus or role.
+/// chips are 32 px circles with the glyph centred. The chip is the container's `on_click`
+/// (compose-rust#372) and says whether it is selected (compose-rust v0.0.7, #429).
+#[allow(clippy::too_many_arguments)]
 fn ComposerChip(
     text: &str,
     icon: &'static str,
+    tint: Option<u32>,
     chevron: bool,
     selected: bool,
     icon_only: bool,
@@ -1129,16 +1141,17 @@ fn ComposerChip(
 ) {
     let p = ember_theme().palette;
     let fill = if selected { p.sel } else { p.surface_2 };
-    let modifier = Modifier::new().height(H_CTL).background(paint(fill)).shape_role(ShapeRole::Full);
+    let modifier = Modifier::new().height(H_CTL).background(paint(fill)).shape_role(ShapeRole::Full).selected(selected);
     let modifier = if icon_only { modifier.width(H_CTL) } else if weighted { modifier.weight(1.0) } else { modifier };
+    let icon_color = tint.unwrap_or(p.text_2.to_argb());
     Clickable(modifier, Alignment::Center, on_click, || {
         if icon_only {
-            NavIcon(icon, p.text_2.to_argb(), 16.0);
+            NavIcon(icon, icon_color, 16.0);
             return;
         }
         cu::Row().alignment(Alignment::CenterStart).content(|| {
             cu::Spacer().modifier(Modifier::new().width(SP[2]));
-            NavIcon(icon, p.text_2.to_argb(), 16.0);
+            NavIcon(icon, icon_color, 16.0);
             cu::Spacer().modifier(Modifier::new().width(SP[1]));
             if weighted {
                 cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
@@ -1226,9 +1239,12 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     let mode_text = sel.mode.label().to_string();
     let chip = |text: &str, icon: &'static str, pick: Pick, selected: bool| {
         let open = c.open.clone();
+        // The harness chip shows the harness's own glyph in its colour (`--v-claude` and so on),
+        // at every width (design review B11; it was a generic terminal glyph).
+        let (icon, tint) = composer_chip_icon(pick, icon, sel.option.harness);
         // Wide chips are content-sized, their text cut to the budget; only the compact project
         // chip takes the rest of the row.
-        ComposerChip(text, icon, chip_has_chevron(pick), selected, icon_only && pick != Pick::Project, icon_only && pick == Pick::Project, move || open.set(Some(pick)));
+        ComposerChip(text, icon, tint, chip_has_chevron(pick), selected, icon_only && pick != Pick::Project, icon_only && pick == Pick::Project, move || open.set(Some(pick)));
     };
     let add = || {
         let open = c.attachment_open.clone();
@@ -1237,8 +1253,7 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     let send = || {
         let (c2, ui2) = (c.clone(), ui.clone());
         // `.sendround`: a 36 px `--ink` circle with the paper plane, always ink. Composer::send
-        // guards `can_send`, so an empty input does nothing.
-        // TODO(compose-rust#428, #429): the circle has no accessible name ("보내기").
+        // guards `can_send`, so an empty input does nothing. The circle is named "보내기".
         super::session::SendCircleButton(SEND_BUTTON_DP, move || c2.send(&ui2));
     };
 
@@ -1284,8 +1299,9 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                     PickChip("첨부", None, false, false, move || add.add_attachment());
                 }
                 let (typed, ui2, c2) = (c.typed.clone(), ui.clone(), c.clone());
-                // TODO(compose-rust#374, #376): the field is uncontrolled with no initial value
-                // and carries the toolkit frame, so a suggestion shows as the placeholder.
+                // v0.0.7: #374 and #376 fixed (`TextField::text`, and the field takes the node's
+                // frame); workaround kept until checked on a display (a controlled value must not
+                // move the caret while typing), so a suggestion shows as the placeholder.
                 EmberField(FieldOptions {
                     fill_max_width: true,
                     multiline: true,
@@ -1374,20 +1390,23 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
 
 /// The glyph of the `i`th suggestion in a line. TODO(item 6): the mockup's spark star needs the
 /// harness glyph asset; `code.svg` stands in until it lands.
+/// The glyph of the `i`th suggestion of [`SUGGESTIONS`], counted over all lines: spark, branch,
+/// chart (`home.js:9`). Design review 2026-11-13 B11: the index restarted on every line, so at 390
+/// the first and the third chip both showed the code glyph.
 fn suggestion_icon(i: usize) -> &'static str {
-    [ICON_CODE, ICON_GIT, ICON_CHART_NAV][i % 3]
+    [ICON_SPARK, ICON_GIT, ICON_CHART_NAV][i % 3]
 }
 
 /// `.sugg`: outlined chips, three a line (two up to 900 px), centred.
 fn Suggestions(c: &Composer, width_dp: f32) {
     let n = suggestion_cols(width_dp);
     cu::Column().alignment(Alignment::Center).spacing(SP[1]).content(|| {
-        for line in SUGGESTIONS.chunks(n) {
+        for (row, line) in SUGGESTIONS.chunks(n).enumerate() {
             cu::Row().spacing(SP[1]).content(|| {
                 for (i, text) in line.iter().enumerate() {
                     let s = c.suggestion.clone();
                     let t = apply_suggestion(&c.typed.get_untracked(), text);
-                    SuggestionChip(text, suggestion_icon(i), move || s.set(Some(t.clone())));
+                    SuggestionChip(text, suggestion_icon(row * n + i), move || s.set(Some(t.clone())));
                 }
             });
         }
@@ -1592,6 +1611,11 @@ fn CiBar(results: &[CiResult]) {
     });
 }
 
+/// The unit or denominator after a KPI number: `.hm-kv small`, half the 28 px number, 500.
+pub const KPI_SMALL: (Fs, Weight) = (Fs::Md, Weight::Medium);
+/// `.hm-kv small{margin-left:2px}`.
+pub const KPI_SMALL_GAP: f32 = 2.0;
+
 /// `.hm-kpis`: label, the number with its unit and note pill; a 1 px rule between the columns.
 fn KpiStrip(k: &[Kpi; 4], counts: &StatusCounts, l: Layout) {
     let cells: Vec<Part> = k
@@ -1616,11 +1640,14 @@ fn KpiCell(kpi: &Kpi, tone: PillTone, rule: bool) {
             Label(kpi.label, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
             if kpi.available {
                 cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
-                    // The unit hugs the number (`small{margin-left:2px}`).
+                    // The unit or the denominator hugs the number (`small{margin-left:2px}`), small
+                    // and muted (design review B9).
+                    let (number, small) = crate::ui::home::kpi_value_parts(kpi);
                     cu::Row().spacing(0.0).alignment(Alignment::CenterStart).content(|| {
-                        Label(&kpi.value, Fs::Xl2, Weight::Regular, None, Some(1));
-                        if !kpi.unit.is_empty() {
-                            Label(kpi.unit, Fs::Md, Weight::Medium, Some(paint(p.muted)), Some(1));
+                        Label(&number, Fs::Xl2, Weight::Regular, None, Some(1));
+                        if !small.is_empty() {
+                            cu::Spacer().modifier(Modifier::new().width(KPI_SMALL_GAP));
+                            Label(&small, KPI_SMALL.0, KPI_SMALL.1, Some(paint(p.muted)), Some(1));
                         }
                     });
                     if let Some(note) = &kpi.note {
@@ -1765,7 +1792,8 @@ fn StatusTile(c: &StatusCounts, ui: &SharedUi, tile_w: f32, compact: bool) {
         // `.hm-blocks`: coloured blocks sized by count, each with the 18 % white stripes. The
         // stripes are a canvas at the block's estimated width (the card's inner width shared by
         // the weights, less 8 dp so an estimate that is a little high stops short rather than
-        // spilling past the block); TODO(compose-rust#388): size-aware drawing so the stripes follow their box.
+        // spilling past the block). v0.0.7: #388 fixed (`Canvas::view_box` and `fractional`);
+        // workaround kept until checked on a display (the stripes must follow the weighted box).
         let bh = if compact { 88.0 } else { 116.0 };
         let weights: Vec<f32> = parts.iter().map(|(_, n, _)| (*n as f32).max(0.6)).collect();
         let sum: f32 = weights.iter().sum();
@@ -2068,7 +2096,7 @@ fn ProjectsTile(tiles: &[ProjectTile], ui: &SharedUi, l: Layout) {
             Box::new(move || {
                 let (u, name) = (ui.clone(), t.name.clone());
                 // `.ptile`: a `surface-2` row, a 40 px ring with the member count, the name and
-                // the counts. TODO(compose-rust#372): a pointer-up `Clickable`.
+                // the counts; the container's `on_click` (compose-rust#372).
                 Clickable(
                     Modifier::new().fill_max_width().background(paint(p.surface_2)).corner_radius(CORNER_MD).padding(10.0),
                     Alignment::CenterStart,
@@ -2224,7 +2252,7 @@ mod tests {
     #[test]
     fn fr_l11_hero_bots_use_the_vendor_colours() {
         let svg = hero_bot_svg("codex", "run", 40.0, &LIGHT);
-        assert!(svg.contains("#3f74d4") && svg.contains("width=\"40\""));
+        assert!(svg.contains("#3f74d4") && svg.contains("width=\"100%\""));
         assert!(hero_bot_svg("gemini", "wait", 32.0, &DARK).contains("#8fb1df"));
     }
 
@@ -2533,5 +2561,56 @@ mod tests {
         assert_eq!(crate::bridge::github_request_count(), after_mount);
         ui.set_menu(crate::ui::shell::NavMenu::Home);
         assert_eq!(crate::bridge::github_request_count(), after_mount + 1);
+    }
+}
+
+/// Design review 2026-11-13 (B8, B9, B11): the home screen against the mockup.
+#[cfg(test)]
+mod design_review_tests {
+    use super::*;
+
+    /// This file without this module, so a source check never finds its own literal.
+    fn source() -> &'static str {
+        let src = include_str!("home.rs");
+        &src[..src.find("mod design_review_tests {").unwrap()]
+    }
+
+    fn kpi(value: &str, unit: &'static str) -> Kpi {
+        Kpi { label: "x", value: value.to_string(), unit, note: None, available: true }
+    }
+
+    #[test]
+    fn design_b9_kpi_unit_and_denominator_are_the_small_muted_part() {
+        assert_eq!(crate::ui::home::kpi_value_parts(&kpi("4", "명")), ("4".to_string(), "명".to_string()));
+        assert_eq!(crate::ui::home::kpi_value_parts(&kpi("3/5", "")), ("3".to_string(), "/5".to_string()));
+        assert_eq!(crate::ui::home::kpi_value_parts(&kpi("87", "%")), ("87".to_string(), "%".to_string()));
+        assert_eq!(KPI_SMALL, (Fs::Md, Weight::Medium));
+        assert_eq!(KPI_SMALL_GAP, 2.0);
+        let src = source();
+        assert!(src.contains("Label(&small, KPI_SMALL.0, KPI_SMALL.1, Some(paint(p.muted)), Some(1));"));
+    }
+
+    #[test]
+    fn design_b8_greeting_is_32_500() {
+        assert_eq!(GREETING_WEIGHT, Weight::Medium);
+        assert!(source().contains("Label(&greeting, if l.compact { Fs::Xl2 } else { Fs::Xl3 }, GREETING_WEIGHT, None, Some(2));"));
+    }
+
+    #[test]
+    fn design_b11_suggestions_are_spark_branch_chart_on_every_line() {
+        assert_eq!(suggestion_icon(0), ICON_SPARK);
+        assert_eq!(suggestion_icon(1), ICON_GIT);
+        assert_eq!(suggestion_icon(2), ICON_CHART_NAV);
+        assert!(source().contains("suggestion_icon(row * n + i)"), "the index restarts on every line");
+    }
+
+    #[test]
+    fn design_b11_harness_chip_shows_the_harness_glyph_in_its_colour() {
+        for h in [Harness::ClaudeCode, Harness::Codex, Harness::Gemini] {
+            let (glyph, tint) = composer_chip_icon(Pick::Model, ICON_TERMINAL, h);
+            assert_eq!(glyph, harness_glyph(h));
+            assert!(tint.is_some());
+        }
+        assert_eq!(composer_chip_icon(Pick::Project, ICON_FOLDER, Harness::Codex), (ICON_FOLDER, None));
     }
 }

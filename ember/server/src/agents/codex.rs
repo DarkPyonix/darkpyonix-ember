@@ -1450,4 +1450,127 @@ mod tests {
         assert_eq!(parse_version("codex-cli 0.155.1\n").as_deref(), Some("0.155.1"));
         assert_eq!(parse_version(""), None);
     }
+
+    // ---- FR-T12 (#380 c): the `channel_post` MCP tool for a Codex session ----
+
+    /// The request as the A2A start-config hook leaves it for a Codex session.
+    fn channel_request() -> StartRequest {
+        StartRequest {
+            mcp_servers: vec![crate::agents::McpServer {
+                name: "ember-channels".into(),
+                command: "/opt/ember/ember-a2a".into(),
+                args: vec!["mcp".into()],
+                startup_timeout_secs: Some(10),
+                env: vec![
+                    ("EMBER_URL".into(), "http://127.0.0.1:8740".into()),
+                    ("EMBER_RUNTIME_TOKEN".into(), "tok-SECRET".into()),
+                ],
+            }],
+            allowed_tools: vec!["mcp__ember-channels__channel_post".into()],
+            ..Default::default()
+        }
+    }
+
+    fn approvals(req: &StartRequest) -> Vec<String> {
+        app_server_args(req).into_iter().filter(|a| a.contains("approval_mode")).collect()
+    }
+
+    /// Recorded on codex-cli 0.167.0 in an isolated `CODEX_HOME`, without a model turn:
+    /// `codex -c … mcp get ember-channels --json` with exactly the overrides below.
+    const MCP_GET: &str = include_str!("../../tests/fixtures/codex/mcp_get_ember_channels_0.167.0.json");
+    /// Recorded on codex-cli 0.167.0: the reply to `mcpServerStatus/list` after `thread/start`,
+    /// with a stand-in MCP server that lists the tool `channel_post`.
+    const MCP_STATUS: &str = include_str!("../../tests/fixtures/codex/mcp_server_status_0.167.0.json");
+
+    #[test]
+    fn fr_t12_codex_overrides_are_the_ones_the_recorded_cli_resolved_to_one_stdio_server() {
+        let recorded: Value = serde_json::from_str(MCP_GET).unwrap();
+        let t = &recorded["transport"];
+        assert_eq!(recorded["name"], "ember-channels");
+        assert_eq!(recorded["enabled"], true);
+        assert_eq!(t["type"], "stdio");
+        assert!(t["env"].is_null(), "the configuration holds no value, only the names in env_vars");
+        let args = app_server_args(&channel_request());
+        let has = |a: String| assert!(args.contains(&a), "{a} not in {args:?}");
+        // `Value`'s display of a string is the quoted form, which is also the TOML basic string here.
+        has(format!("mcp_servers.ember-channels.command={}", t["command"]));
+        has(format!("mcp_servers.ember-channels.args={}", t["args"]));
+        let names: Vec<String> = t["env_vars"].as_array().unwrap().iter().map(Value::to_string).collect();
+        assert_eq!(names, ["\"EMBER_URL\"", "\"EMBER_RUNTIME_TOKEN\""]);
+        has(format!("mcp_servers.ember-channels.env_vars=[{}]", names.join(", ")));
+        assert_eq!(recorded["startup_timeout_sec"], 10.0);
+        has("mcp_servers.ember-channels.startup_timeout_sec=10".to_string());
+    }
+
+    #[test]
+    fn fr_t12_codex_token_is_in_the_process_environment_and_never_an_argument() {
+        let req = channel_request();
+        let args = app_server_args(&req);
+        assert!(!args.join("\n").contains("SECRET"), "{args:?}");
+        assert!(!args.join("\n").contains("127.0.0.1"), "values stay out of the arguments: {args:?}");
+        let (env, skipped) = mcp_process_env(&req);
+        assert!(skipped.is_empty());
+        assert_eq!(
+            env,
+            [
+                ("EMBER_URL".to_string(), "http://127.0.0.1:8740".to_string()),
+                ("EMBER_RUNTIME_TOKEN".to_string(), "tok-SECRET".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn fr_t12_codex_approval_override_names_the_one_tool_the_recorded_server_lists() {
+        let recorded: Value = serde_json::from_str(MCP_STATUS).unwrap();
+        let server = &recorded["result"]["data"][0];
+        let tools: Vec<&str> = server["tools"].as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(tools, ["channel_post"]);
+        let rule = format!("mcp__{}__{}", server["name"].as_str().unwrap(), tools[0]);
+        assert_eq!(rule, crate::a2a::CHANNEL_POST_TOOL);
+        assert_eq!(
+            approvals(&channel_request()),
+            [format!(
+                "mcp_servers.{}.tools.{}.approval_mode=\"approve\"",
+                server["name"].as_str().unwrap(),
+                tools[0]
+            )]
+        );
+    }
+
+    #[test]
+    fn fr_t12_codex_allow_rule_is_one_exact_tool_of_a_server_this_request_registers() {
+        let mut req = channel_request();
+        assert_eq!(approvals(&req), ["mcp_servers.ember-channels.tools.channel_post.approval_mode=\"approve\""]);
+        // Never a server-wide default.
+        assert!(!app_server_args(&req).iter().any(|a| a.contains("default_tools_approval_mode")));
+        // No rule, no override.
+        req.allowed_tools.clear();
+        assert!(approvals(&req).is_empty());
+        for bad in [
+            "mcp__other__channel_post",
+            "mcp__ember-channels__*",
+            "mcp__ember-channels__",
+            "mcp__ember-channels__a b",
+            "mcp__ember-channels__a.b",
+            "mcp__ember-channels__a\"b",
+            "mcp__ember-channels",
+            "ember-channels__channel_post",
+            "mcp__*",
+            "Bash",
+        ] {
+            req.allowed_tools = vec![bad.to_string()];
+            assert!(approvals(&req).is_empty(), "{bad}");
+        }
+        // The same rule twice is one override.
+        req.allowed_tools = vec!["mcp__ember-channels__channel_post".to_string(); 2];
+        assert_eq!(approvals(&req).len(), 1);
+        // A server left out (its variable clashes with an earlier server's) gets none either.
+        let mut clash = channel_request();
+        let mut first = clash.mcp_servers[0].clone();
+        first.name = "first".into();
+        first.env = vec![("EMBER_URL".into(), "http://other".into())];
+        clash.mcp_servers.insert(0, first);
+        assert!(approvals(&clash).is_empty());
+        assert!(!app_server_args(&clash).iter().any(|a| a.starts_with("mcp_servers.ember-channels.")));
+    }
 }

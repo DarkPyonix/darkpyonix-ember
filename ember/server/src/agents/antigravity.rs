@@ -2008,4 +2008,113 @@ mod tests {
         ));
         assert!(matches!(rx.recv().await, Some(AgentEvent::Notice { message }) if message.contains("timed out; retry")));
     }
+
+    // ---- FR-T12 (#380 c): the `channel_post` MCP tool for an Antigravity session ----
+
+    fn channel_server() -> McpServer {
+        McpServer {
+            name: "ember-channels".into(),
+            command: "/opt/ember/ember-a2a".into(),
+            args: vec!["mcp".into()],
+            startup_timeout_secs: Some(10),
+            env: vec![
+                ("EMBER_URL".into(), "http://127.0.0.1:8740".into()),
+                ("EMBER_RUNTIME_TOKEN".into(), "tok-SECRET".into()),
+            ],
+        }
+    }
+
+    #[test]
+    fn fr_t12_agy_channel_server_is_only_in_the_private_file_of_the_session_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("agy");
+        let (root, _) = session_root(&home, None);
+        let req = StartRequest {
+            cwd: dir.path().to_path_buf(),
+            mcp_servers: vec![channel_server()],
+            ..Default::default()
+        };
+        write_session_root(&root, "http://127.0.0.1:1/h", "hook-token", &req).unwrap();
+        let agents = root.join(".agents");
+        let mcp: Value = serde_json::from_slice(&std::fs::read(agents.join("mcp_config.json")).unwrap()).unwrap();
+        assert_eq!(
+            mcp,
+            json!({ "mcpServers": { "ember-channels": {
+                "command": "/opt/ember/ember-a2a",
+                "args": ["mcp"],
+                "env": { "EMBER_URL": "http://127.0.0.1:8740", "EMBER_RUNTIME_TOKEN": "tok-SECRET" },
+            } } }),
+            "the session's server with its two variables and nothing else"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(agents.join("mcp_config.json")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "the file holds the runtime token");
+        }
+        // The runtime token is in no other file of the root, and nothing lands in the project.
+        for other in ["hooks.json", "ember-hook.sh", "rules/ember.md"] {
+            let text = std::fs::read_to_string(agents.join(other)).unwrap();
+            assert!(!text.contains("tok-SECRET"), "{other}");
+        }
+        assert!(!dir.path().join(".agents").exists(), "the project gets no customization root");
+    }
+
+    /// The call reaches the hook as `call_mcp_tool {ServerName, ToolName}` (recorded on 1.2.16,
+    /// SPEC section A row 5). It is not a read-only tool, so the person is asked, an allow lets it
+    /// run and a deny blocks it: the approval flow is neither bypassed nor left waiting.
+    #[tokio::test]
+    async fn fr_t12_agy_channel_post_call_asks_the_person() {
+        assert!(!READ_ONLY_TOOLS.contains(&"call_mcp_tool"));
+        let (tx, mut rx) = mpsc::channel(16);
+        let broker = HookBroker::new();
+        let run = gated(tx, Duration::from_secs(30));
+        broker.register("t", run.clone());
+        let post = call(
+            "call_mcp_tool",
+            3,
+            json!({ "ServerName": "ember-channels", "ToolName": "channel_post",
+                    "Arguments": { "channel": "chan1", "text": "hello" } }),
+        );
+        let b = broker.clone();
+        let p = post.clone();
+        let waiting = tokio::spawn(async move { b.handle("t", &p).await });
+        let Some(AgentEvent::ApprovalRequested { approval_id, tool, input, .. }) = rx.recv().await else {
+            panic!("expected an approval request");
+        };
+        assert_eq!(tool, "call_mcp_tool");
+        assert_eq!(input["ServerName"], "ember-channels");
+        assert_eq!(input["ToolName"], "channel_post");
+        run.answer(&approval_id, ApprovalDecision::AllowOnce).unwrap();
+        assert_eq!(waiting.await.unwrap(), Some(allow_reply()));
+
+        let again = call(
+            "call_mcp_tool",
+            4,
+            json!({ "ServerName": "ember-channels", "ToolName": "channel_post" }),
+        );
+        let b = broker.clone();
+        let waiting = tokio::spawn(async move { b.handle("t", &again).await });
+        let Some(AgentEvent::ApprovalRequested { approval_id, .. }) = rx.recv().await else { panic!() };
+        run.answer(&approval_id, ApprovalDecision::Deny).unwrap();
+        assert_eq!(waiting.await.unwrap().unwrap()["decision"], "deny");
+    }
+
+    /// On another agy version than the pinned one the session is read-only and the call is denied
+    /// without a card, exactly like the `ember-a2a channel post` command.
+    #[tokio::test]
+    async fn fr_t12_agy_channel_post_call_is_denied_in_a_read_only_session() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let run = Arc::new(RunApprovals::new(tx, Duration::from_secs(30), Path::new(ROOT), Policy::ReadOnly));
+        run.open();
+        let broker = HookBroker::new();
+        broker.register("t", run);
+        let post = call(
+            "call_mcp_tool",
+            1,
+            json!({ "ServerName": "ember-channels", "ToolName": "channel_post" }),
+        );
+        assert_eq!(broker.handle("t", &post).await.unwrap()["decision"], "deny");
+        assert!(rx.try_recv().is_err(), "nobody is asked");
+    }
 }

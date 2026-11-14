@@ -1108,7 +1108,8 @@ async fn watch_turns(a2a: Weak<A2a>, mut rx: tokio::sync::broadcast::Receiver<Pu
 
 #[cfg(test)]
 mod channel_tool_tests {
-    //! FR-T12 (#380 b): Claude Code answers a channel mention through the `channel_post` MCP tool.
+    //! FR-T12 (#380 b, c): Claude Code, Codex, Antigravity and ACP agents answer a channel mention
+    //! through the `channel_post` MCP tool.
     use super::*;
     use crate::agents::claude_code::{mcp_config, mcp_needs_file, ClaudeCodeAdapter, PrivateConfigFile};
     use crate::agents::scripted::ScriptedAdapter;
@@ -1226,16 +1227,15 @@ mod channel_tool_tests {
     }
 
     #[test]
-    fn fr_t12_hook_never_touches_other_harnesses() {
+    fn fr_t12_hook_never_touches_the_scripted_agent() {
         let a = world(Some(CLI));
-        for agent in [AgentKind::Codex, AgentKind::Antigravity, AgentKind::Scripted, acp()] {
-            let r = rec(&a, agent);
-            let mut req = request(&a, &r);
-            a.channel_tool_config(&r, &mut req);
-            assert!(req.mcp_servers.is_empty(), "{agent:?}");
-            assert!(req.allowed_tools.is_empty(), "{agent:?}");
-            assert!(!a.channel_reply_by_tool(&r), "{agent:?}");
-        }
+        let r = rec(&a, AgentKind::Scripted);
+        let mut req = request(&a, &r);
+        a.channel_tool_config(&r, &mut req);
+        assert!(req.mcp_servers.is_empty());
+        assert!(req.allowed_tools.is_empty());
+        assert!(!a.channel_reply_by_tool(&r));
+        assert_eq!(a.channel_reply(&r), ChannelReply::Command);
     }
 
     #[test]
@@ -1339,20 +1339,29 @@ mod channel_tool_tests {
         another agent.";
 
     #[test]
-    fn fr_t12_other_harnesses_keep_the_old_prompt_byte_for_byte() {
+    fn fr_t12_a_session_that_keeps_the_command_keeps_the_old_prompt_byte_for_byte() {
         let a = world(Some(CLI));
         let claude = a.instructions_for(&rec(&a, AgentKind::ClaudeCode));
-        for agent in [AgentKind::Codex, AgentKind::Antigravity, AgentKind::Scripted, acp()] {
-            let text = a.instructions_for(&rec(&a, agent));
-            assert!(text.ends_with(OLD_CHANNEL_PARAGRAPH), "{agent:?}: {text}");
-            assert_eq!(text, a.instructions(), "{agent:?}");
+        // The scripted agent, and every harness on another computer.
+        let mut keep = vec![rec(&a, AgentKind::Scripted)];
+        for agent in [AgentKind::Codex, AgentKind::Antigravity, acp()] {
+            let r = rec(&a, agent);
+            move_to(&a, &r, "pi-1");
+            keep.push(r);
+        }
+        for r in &keep {
+            let text = a.instructions_for(r);
+            assert!(text.ends_with(OLD_CHANNEL_PARAGRAPH), "{:?}: {text}", r.agent);
+            assert_eq!(text, a.instructions(), "{:?}", r.agent);
             // Everything before the channel answer is shared with Claude Code.
             let cut = "To answer there, ";
             assert_eq!(text[..text.find(cut).unwrap()], claude[..claude.find(cut).unwrap()]);
         }
-        // Without the binary Claude Code keeps the old text as well.
+        // Without the binary every harness keeps the old text as well.
         let b = world(None);
-        assert!(b.instructions_for(&rec(&b, AgentKind::ClaudeCode)).ends_with(OLD_CHANNEL_PARAGRAPH));
+        for agent in [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Antigravity, acp()] {
+            assert!(b.instructions_for(&rec(&b, agent)).ends_with(OLD_CHANNEL_PARAGRAPH), "{agent:?}");
+        }
     }
 
     fn mention(id: &str, channel: &str, guest_until: Option<i64>) -> A2aMessage {
@@ -1382,9 +1391,21 @@ mod channel_tool_tests {
             "{claude}"
         );
         assert!(!claude.contains("ember-a2a channel post"));
-        let codex = a.render(&rec(&a, AgentKind::Codex), &[m]).unwrap();
+        let scripted = a.render(&rec(&a, AgentKind::Scripted), &[m.clone()]).unwrap();
+        for agent in [AgentKind::Codex, AgentKind::Antigravity, acp()] {
+            let text = a.render(&rec(&a, agent), &[m.clone()]).unwrap();
+            assert!(
+                text.ends_with(
+                    "To reply in the channel: call the channel_post tool of the MCP server ember-channels with channel \"chan1\" and text \"...\"\n\nhi there"
+                ),
+                "{agent:?}: {text}"
+            );
+            assert!(!text.contains("ember-a2a channel post") && !text.contains(CHANNEL_POST_TOOL), "{agent:?}");
+            let cut = |s: &str| s[..s.find("To reply in the channel:").unwrap()].to_string();
+            assert_eq!(cut(&text), cut(&scripted), "{agent:?}: the header is byte-identical");
+        }
         assert_eq!(
-            codex,
+            scripted,
             "[ember a2a] Message m1 from Mina (channel chan1)\n\
              This message is from a person in a channel, not from another agent.\n\
              To reply in the channel: ember-a2a channel post chan1 \"...\"\n\nhi there"
@@ -1395,12 +1416,24 @@ mod channel_tool_tests {
     fn fr_t12_guest_footer_per_recipient_keeps_the_untrusted_block() {
         let a = world(Some(CLI));
         let m = mention("m2", "chan1", Some(0));
-        let codex = a.render(&rec(&a, AgentKind::Codex), &[m.clone()]).unwrap();
+        let codex = a.render(&rec(&a, AgentKind::Scripted), &[m.clone()]).unwrap();
         assert_eq!(
             codex,
             channel::guest_message_text("m2", "Mina", None, "chan1", 0, "hi there"),
-            "unchanged for Codex"
+            "unchanged for a session that keeps the command"
         );
+        for agent in [AgentKind::Codex, AgentKind::Antigravity, acp()] {
+            let text = a.render(&rec(&a, agent), &[m.clone()]).unwrap();
+            assert!(
+                text.ends_with(
+                    "To reply in the channel: call the channel_post tool of the MCP server ember-channels with channel \"chan1\" and text \"...\""
+                ),
+                "{agent:?}: {text}"
+            );
+            let cut = |s: &str| s[..s.rfind("To reply in the channel:").unwrap()].to_string();
+            assert_eq!(cut(&text), cut(&codex), "{agent:?}: header and markers are byte-identical");
+            assert!(text.contains("UNTRUSTED input"), "{agent:?}");
+        }
         assert!(codex.ends_with("To reply in the channel: ember-a2a channel post chan1 \"...\""));
         let claude = a.render(&rec(&a, AgentKind::ClaudeCode), &[m]).unwrap();
         let tail = format!(
@@ -1447,12 +1480,12 @@ mod channel_tool_tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let (home, cfg) = (d.path().join("home"), d.path().join("cfgdir"));
         put(&cfg.join(".claude.json"), &with_server("ember-channels"));
-        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[]), NameCheck::Taken { kind: KIND_USER });
+        assert_eq!(taken(&cwd, Some(home.as_path()), Some(&cfg), &[]), NameCheck::Taken { kind: KIND_USER });
         std::fs::remove_file(cfg.join(".claude.json")).unwrap();
-        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[]), NameCheck::Free);
+        assert_eq!(taken(&cwd, Some(home.as_path()), Some(&cfg), &[]), NameCheck::Free);
         put(&home.join(".claude.json"), &with_server("ember-channels"));
-        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[]), NameCheck::Taken { kind: KIND_USER });
-        assert_eq!(taken(&cwd, Some(&home), None, &[]), NameCheck::Taken { kind: KIND_USER });
+        assert_eq!(taken(&cwd, Some(home.as_path()), Some(&cfg), &[]), NameCheck::Taken { kind: KIND_USER });
+        assert_eq!(taken(&cwd, Some(home.as_path()), None, &[]), NameCheck::Taken { kind: KIND_USER });
     }
 
     #[test]
@@ -1463,11 +1496,11 @@ mod channel_tool_tests {
         let home = d.path().join("home");
         let key = cwd.to_str().unwrap();
         put(&home.join(".claude.json"), &format!(r#"{{"projects":{{"{key}":{}}}}}"#, with_server("Ember-Channels")));
-        assert_eq!(taken(&cwd, Some(&home), None, &[]), NameCheck::Taken { kind: KIND_LOCAL });
+        assert_eq!(taken(&cwd, Some(home.as_path()), None, &[]), NameCheck::Taken { kind: KIND_LOCAL });
         let parent = d.path().join("proj");
         let pkey = parent.to_str().unwrap();
         put(&home.join(".claude.json"), &format!(r#"{{"projects":{{"{pkey}":{}}}}}"#, with_server("ember-channels")));
-        assert_eq!(taken(&cwd, Some(&home), None, &[]), NameCheck::Taken { kind: KIND_LOCAL });
+        assert_eq!(taken(&cwd, Some(home.as_path()), None, &[]), NameCheck::Taken { kind: KIND_LOCAL });
     }
 
     #[test]
@@ -1489,13 +1522,13 @@ mod channel_tool_tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let (home, cfg) = (d.path().join("home"), d.path().join("cfg"));
         let m = d.path().join("none.json");
-        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[m.clone()]), NameCheck::Free, "absent files");
+        assert_eq!(taken(&cwd, Some(home.as_path()), Some(&cfg), &[m.clone()]), NameCheck::Free, "absent files");
         put(&cwd.join(".mcp.json"), &with_server("github"));
         put(&home.join(".claude.json"), &with_server("ember-channels-2"));
         let other = d.path().join("elsewhere");
         let okey = other.to_str().unwrap();
         put(&cfg.join(".claude.json"), &format!(r#"{{"projects":{{"{okey}":{}}}}}"#, with_server("ember-channels")));
-        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[m]), NameCheck::Free);
+        assert_eq!(taken(&cwd, Some(home.as_path()), Some(&cfg), &[m]), NameCheck::Free);
     }
 
     fn unsure(kind: &'static str, why: &'static str) -> NameCheck {
@@ -1515,11 +1548,11 @@ mod channel_tool_tests {
         let home = d.path().join("home");
         let big = format!(r#"{{"pad":"{}"}}"#, "x".repeat(MAX_CONFIG_BYTES as usize));
         put(&home.join(".claude.json"), &big);
-        assert_eq!(taken(&cwd, Some(&home), None, &[]), unsure(KIND_USER, "larger than 4 MiB"));
+        assert_eq!(taken(&cwd, Some(home.as_path()), None, &[]), unsure(KIND_USER, "larger than 4 MiB"));
         // Not a regular file (a directory).
         std::fs::remove_file(home.join(".claude.json")).unwrap();
         std::fs::create_dir_all(home.join(".claude.json")).unwrap();
-        assert_eq!(taken(&cwd, Some(&home), None, &[]), unsure(KIND_USER, "not a regular file"));
+        assert_eq!(taken(&cwd, Some(home.as_path()), None, &[]), unsure(KIND_USER, "not a regular file"));
         // Managed file with invalid JSON.
         let m = d.path().join("m.json");
         put(&m, "[");
@@ -1754,5 +1787,342 @@ mod channel_tool_tests {
         assert!(a.channel_fallback.lock().unwrap().is_empty());
         assert!(a.channel_reply_by_tool(&r));
         assert!(req.instructions.unwrap().contains(CHANNEL_POST_TOOL), "prompt names the tool again");
+    }
+
+    // ---- Codex, Antigravity and ACP agents (FR-T12, #380 c) ----
+
+    fn tool_harnesses() -> [AgentKind; 3] {
+        [AgentKind::Codex, AgentKind::Antigravity, acp()]
+    }
+
+    /// The registered entry is `ember-a2a mcp` with the session's two variables and nothing else.
+    fn assert_channel_entry(a: &A2a, r: &SessionRecord, req: &StartRequest) {
+        assert_eq!(req.mcp_servers.len(), 1, "{:?}", r.agent);
+        let s = &req.mcp_servers[0];
+        assert_eq!(s.name, "ember-channels");
+        assert_eq!(s.command, CLI);
+        assert_eq!(s.args, vec!["mcp".to_string()]);
+        assert_eq!(s.startup_timeout_secs, Some(10));
+        let token = env_of(req, "EMBER_RUNTIME_TOKEN");
+        assert_eq!(
+            s.env,
+            vec![
+                ("EMBER_URL".to_string(), "http://127.0.0.1:8740".to_string()),
+                ("EMBER_RUNTIME_TOKEN".to_string(), token.clone()),
+            ],
+            "the session's credentials and nothing else"
+        );
+        // The same token the command uses: no second one was issued.
+        assert_eq!(a.store.session_for_token(&token).unwrap().as_deref(), Some(r.id.as_str()));
+    }
+
+    #[test]
+    fn fr_t12_hook_registers_the_server_for_codex_antigravity_and_acp() {
+        let a = world(Some(CLI));
+        for agent in tool_harnesses() {
+            let r = rec(&a, agent);
+            let mut req = request(&a, &r);
+            a.channel_tool_config(&r, &mut req);
+            assert_channel_entry(&a, &r, &req);
+            assert!(a.channel_reply_by_tool(&r), "{agent:?}");
+            assert_eq!(a.channel_reply(&r), ChannelReply::McpTool, "{agent:?}");
+        }
+    }
+
+    #[test]
+    fn fr_t12_the_allow_rule_is_for_claude_code_and_codex_only() {
+        let a = world(Some(CLI));
+        for (agent, rule) in
+            [(AgentKind::ClaudeCode, true), (AgentKind::Codex, true), (AgentKind::Antigravity, false), (acp(), false)]
+        {
+            let r = rec(&a, agent);
+            let mut req = request(&a, &r);
+            a.channel_tool_config(&r, &mut req);
+            let want: Vec<String> = if rule { vec![CHANNEL_POST_TOOL.to_string()] } else { Vec::new() };
+            assert_eq!(req.allowed_tools, want, "{agent:?}");
+        }
+    }
+
+    #[test]
+    fn fr_t12_other_harnesses_skip_under_the_same_conditions_as_claude_code() {
+        for agent in tool_harnesses() {
+            // Another computer.
+            let a = world(Some(CLI));
+            let r = rec(&a, agent);
+            move_to(&a, &r, "pi-1");
+            let mut req = request(&a, &r);
+            a.channel_tool_config(&r, &mut req);
+            assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty(), "{agent:?}: another computer");
+            assert!(!a.channel_reply_by_tool(&r), "{agent:?}");
+            // A request that already runs elsewhere.
+            let r = rec(&a, agent);
+            let mut req = request(&a, &r);
+            req.remote = Some(crate::agents::RemoteExec {
+                environment_id: "ember-x".into(),
+                exec_server_url: "ws://x".into(),
+            });
+            a.channel_tool_config(&r, &mut req);
+            assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty(), "{agent:?}: remote");
+            // Missing credentials.
+            for drop in ["EMBER_RUNTIME_TOKEN", "EMBER_URL"] {
+                let mut req = request(&a, &r);
+                req.env.retain(|(k, _)| k != drop);
+                a.channel_tool_config(&r, &mut req);
+                assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty(), "{agent:?}: {drop}");
+            }
+            // A server of that name already in the request.
+            let mut req = request(&a, &r);
+            req.mcp_servers.push(McpServer {
+                name: CHANNEL_MCP_SERVER.into(),
+                command: "/usr/bin/other".into(),
+                ..Default::default()
+            });
+            a.channel_tool_config(&r, &mut req);
+            assert_eq!(req.mcp_servers.len(), 1, "{agent:?}");
+            assert_eq!(req.mcp_servers[0].command, "/usr/bin/other", "{agent:?}");
+            assert!(req.allowed_tools.is_empty(), "{agent:?}");
+            // No binary.
+            let b = world(None);
+            let r = rec(&b, agent);
+            let mut req = request(&b, &r);
+            b.channel_tool_config(&r, &mut req);
+            assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty(), "{agent:?}: no binary");
+        }
+    }
+
+    #[test]
+    fn fr_t12_mcp_prompt_names_the_server_and_the_tool_and_keeps_the_rules_and_the_fallback() {
+        let a = world(Some(CLI));
+        for agent in tool_harnesses() {
+            let text = a.instructions_for(&rec(&a, agent));
+            assert!(
+                text.contains(
+                    "To answer there, call the `channel_post` tool of the MCP server `ember-channels` with `channel` set to the channel id and `text` set to your answer; if the tool is not available, run `ember-a2a channel post <channel-id> \"<text>\"`. Reply only when you were addressed"
+                ),
+                "{agent:?}: {text}"
+            );
+            // No combined tool name is claimed: only Claude Code's is measured.
+            assert!(!text.contains(CHANNEL_POST_TOOL), "{agent:?}");
+            assert!(text.contains("for 30 minutes after a person mentioned you there"));
+            assert!(text.contains(&format!("at most {CHANNEL_POSTS_PER_MINUTE} posts a minute")));
+            assert!(text.contains("Your post is shown to the people in the channel"));
+            // Everything before the channel answer is the shared text.
+            let cut = "To answer there, ";
+            let old = a.instructions();
+            assert_eq!(text[..text.find(cut).unwrap()], old[..old.find(cut).unwrap()], "{agent:?}");
+        }
+    }
+
+    #[test]
+    fn fr_t12_codex_launch_carries_the_server_without_the_token_and_the_one_approval() {
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::Codex);
+        let mut req = request(&a, &r);
+        let token = env_of(&req, "EMBER_RUNTIME_TOKEN");
+        a.channel_tool_config(&r, &mut req);
+        let args = crate::agents::codex::app_server_args(&req);
+        assert_eq!(
+            args,
+            [
+                "app-server",
+                "-c",
+                "mcp_servers.ember-channels.command=\"/opt/ember/ember-a2a\"",
+                "-c",
+                "mcp_servers.ember-channels.args=[\"mcp\"]",
+                "-c",
+                "mcp_servers.ember-channels.startup_timeout_sec=10",
+                "-c",
+                "mcp_servers.ember-channels.env_vars=[\"EMBER_URL\", \"EMBER_RUNTIME_TOKEN\"]",
+                "-c",
+                "mcp_servers.ember-channels.tools.channel_post.approval_mode=\"approve\"",
+            ]
+        );
+        assert!(!args.join("\n").contains(&token), "the token is never an argument");
+        // Codex forwards the two variables by name from its own environment.
+        let (env, skipped) = crate::agents::codex::mcp_process_env(&req);
+        assert!(skipped.is_empty());
+        assert_eq!(
+            env,
+            [
+                ("EMBER_URL".to_string(), "http://127.0.0.1:8740".to_string()),
+                ("EMBER_RUNTIME_TOKEN".to_string(), token),
+            ]
+        );
+    }
+
+    #[test]
+    fn fr_t12_antigravity_session_file_carries_the_server_and_its_credentials() {
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::Antigravity);
+        let mut req = request(&a, &r);
+        let token = env_of(&req, "EMBER_RUNTIME_TOKEN");
+        a.channel_tool_config(&r, &mut req);
+        let cfg = crate::agents::antigravity::mcp_config(&req.mcp_servers).unwrap();
+        assert_eq!(
+            cfg,
+            serde_json::json!({ "mcpServers": { "ember-channels": {
+                "command": CLI,
+                "args": ["mcp"],
+                "env": { "EMBER_URL": "http://127.0.0.1:8740", "EMBER_RUNTIME_TOKEN": token },
+            } } })
+        );
+    }
+
+    #[test]
+    fn fr_t12_acp_session_new_carries_the_server_and_its_credentials() {
+        let a = world(Some(CLI));
+        let r = rec(&a, acp());
+        let mut req = request(&a, &r);
+        let token = env_of(&req, "EMBER_RUNTIME_TOKEN");
+        a.channel_tool_config(&r, &mut req);
+        assert_eq!(
+            crate::agents::acp::mcp_servers_param(&req.mcp_servers),
+            serde_json::json!([{
+                "name": "ember-channels",
+                "command": CLI,
+                "args": ["mcp"],
+                "env": [
+                    { "name": "EMBER_URL", "value": "http://127.0.0.1:8740" },
+                    { "name": "EMBER_RUNTIME_TOKEN", "value": token },
+                ],
+            }])
+        );
+    }
+
+    // ---- name check in the user's own Codex and Antigravity configuration ----
+
+    #[test]
+    fn fr_t12_codex_name_check_reads_the_user_project_and_system_files() {
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().join("proj/sub");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let home = d.path().join("codex-home");
+        assert_eq!(codex_channel_name_taken(&cwd, Some(home.as_path()), &[]), NameCheck::Free, "no file at all");
+        put(&home.join("config.toml"), "model = \"x\"\n[mcp_servers.other]\ncommand = \"y\"\n");
+        assert_eq!(codex_channel_name_taken(&cwd, Some(home.as_path()), &[]), NameCheck::Free);
+        put(&home.join("config.toml"), "[mcp_servers.Ember-Channels]\ncommand = \"y\"\n");
+        assert_eq!(
+            codex_channel_name_taken(&cwd, Some(home.as_path()), &[]),
+            NameCheck::Taken { kind: "user config.toml" },
+            "letter case is ignored"
+        );
+        assert_eq!(codex_channel_name_taken(&cwd, None, &[]), NameCheck::Free);
+        // A project file of an ancestor.
+        put(&d.path().join("proj/.codex/config.toml"), "[mcp_servers.\"ember-channels\"]\ncommand = \"y\"\n");
+        assert_eq!(codex_channel_name_taken(&cwd, None, &[]), NameCheck::Taken { kind: "project .codex/config.toml" });
+        std::fs::remove_file(d.path().join("proj/.codex/config.toml")).unwrap();
+        // A system file.
+        let system = d.path().join("etc/config.toml");
+        put(&system, "# ember-channels is ours\n");
+        assert_eq!(
+            codex_channel_name_taken(&cwd, None, &[system]),
+            NameCheck::Taken { kind: "system config.toml" },
+            "a comment that mentions the name counts: fail closed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_t12_codex_name_check_fails_closed_on_a_file_it_cannot_judge() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("codex-home");
+        std::fs::create_dir_all(home.join("config.toml")).unwrap();
+        assert_eq!(
+            codex_channel_name_taken(d.path(), Some(home.as_path()), &[]),
+            NameCheck::Unsure { kind: "user config.toml", why: "not a regular file" }
+        );
+    }
+
+    #[test]
+    fn fr_t12_agy_name_check_reads_the_user_legacy_and_project_files() {
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().join("proj/sub");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let home = d.path().join("home");
+        assert_eq!(agy_channel_name_taken(&cwd, Some(home.as_path())), NameCheck::Free);
+        // agy accepts comments and trailing commas in this file, and an empty legacy file exists
+        // on real machines: neither is an error for a text search.
+        put(&home.join(".gemini/config/mcp_config.json"), "{ // mine\n \"mcpServers\": { \"other\": { \"command\": \"x\", }, } }");
+        put(&home.join(".gemini/antigravity/mcp_config.json"), "");
+        assert_eq!(agy_channel_name_taken(&cwd, Some(home.as_path())), NameCheck::Free);
+        put(&home.join(".gemini/antigravity/mcp_config.json"), &with_server("EMBER-channels"));
+        assert_eq!(agy_channel_name_taken(&cwd, Some(home.as_path())), NameCheck::Taken { kind: "user mcp_config.json" });
+        put(&home.join(".gemini/antigravity/mcp_config.json"), "");
+        put(&home.join(".gemini/config/mcp_config.json"), &with_server("ember-channels"));
+        assert_eq!(agy_channel_name_taken(&cwd, Some(home.as_path())), NameCheck::Taken { kind: "user mcp_config.json" });
+        put(&d.path().join("proj/.agents/mcp_config.json"), &with_server("ember-channels"));
+        assert_eq!(
+            agy_channel_name_taken(&cwd, None),
+            NameCheck::Taken { kind: "project .agents/mcp_config.json" }
+        );
+    }
+
+    #[test]
+    fn fr_t12_hook_steps_aside_for_a_name_taken_in_codex_or_antigravity_configuration() {
+        let d = tempfile::tempdir().unwrap();
+        let a = world(Some(CLI));
+        set_sources(&a, d.path());
+        put(&d.path().join(".codex/config.toml"), "[mcp_servers.ember-channels]\ncommand = \"y\"\n");
+        put(&d.path().join(".gemini/config/mcp_config.json"), &with_server("ember-channels"));
+        for agent in [AgentKind::Codex, AgentKind::Antigravity] {
+            let r = rec(&a, agent);
+            let mut req = request(&a, &r);
+            req.instructions = Some(a.instructions_for(&r));
+            assert!(req.instructions.as_ref().unwrap().contains("tool of the MCP server"), "{agent:?}");
+            a.channel_tool_config(&r, &mut req);
+            assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty(), "{agent:?}");
+            assert!(a.channel_fallback.lock().unwrap().contains(&r.id), "{agent:?}");
+            assert_eq!(a.channel_reply(&r), ChannelReply::Command, "{agent:?}");
+            // The prompt of this very start is the old text again.
+            assert_eq!(req.instructions.unwrap(), a.instructions(), "{agent:?}");
+            let n = a.sessions.store().events_after(&r.id, 0).unwrap().iter()
+                .filter(|e| matches!(&e.event, AgentEvent::Notice { message } if message == CHANNEL_FALLBACK_NOTICE))
+                .count();
+            assert_eq!(n, 1, "{agent:?}");
+        }
+        // An ACP agent's own configuration is not known to Ember: nothing is checked.
+        let r = rec(&a, acp());
+        let mut req = request(&a, &r);
+        a.channel_tool_config(&r, &mut req);
+        assert_eq!(req.mcp_servers.len(), 1);
+    }
+
+    #[test]
+    fn fr_t12_codex_home_of_the_start_request_wins_over_the_default() {
+        let d = tempfile::tempdir().unwrap();
+        let a = world(Some(CLI));
+        set_sources(&a, d.path());
+        put(&d.path().join(".codex/config.toml"), "[mcp_servers.ember-channels]\ncommand = \"y\"\n");
+        let account = d.path().join("account");
+        std::fs::create_dir_all(&account).unwrap();
+        let r = rec(&a, AgentKind::Codex);
+        let mut req = request(&a, &r);
+        req.env.push(("CODEX_HOME".into(), account.to_string_lossy().into_owned()));
+        a.channel_tool_config(&r, &mut req);
+        assert_eq!(req.mcp_servers.len(), 1, "the account's home has no such server");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_t12_unsure_notice_names_the_harness() {
+        let d = tempfile::tempdir().unwrap();
+        let a = world(Some(CLI));
+        set_sources(&a, d.path());
+        std::fs::create_dir_all(d.path().join(".codex/config.toml")).unwrap();
+        let r = rec(&a, AgentKind::Codex);
+        let mut req = request(&a, &r);
+        a.channel_tool_config(&r, &mut req);
+        assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty(), "fail closed");
+        let notices: Vec<String> = a.sessions.store().events_after(&r.id, 0).unwrap().into_iter()
+            .filter_map(|e| match e.event { AgentEvent::Notice { message } => Some(message), _ => None })
+            .collect();
+        assert_eq!(
+            notices,
+            ["The channel tool was not registered because the Codex configuration (user config.toml) could not be checked (not a regular file); replies use the ember-a2a command."]
+        );
+        assert_eq!(
+            unsure_notice("user config", "unreadable"),
+            "The channel tool was not registered because the Claude Code configuration (user config) could not be checked (unreadable); replies use the ember-a2a command."
+        );
     }
 }

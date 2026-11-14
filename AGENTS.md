@@ -100,6 +100,12 @@ for word; user documents in 합니다체, internal documents in 한다체.
 
 ## CI names
 
+
+- **Development CI runs only by explicit dispatch, one run at a time** (owner, 2026-11-14).
+  Only the leader dispatches `ci.yml` on the latest ref; teammates ask the leader. Batch suites
+  and changes into one run. The `dev-ci` group lets a running run finish and replaces a queued
+  run with the newest dispatch. Release, tag, release-sync, publishing and Pages triggers remain.
+
 Workflows follow the shared thisisthepy naming rule [user, 2026-10-04], so the same check has the
 same name in every repository and main's required checks stay readable:
 `test.yml` "Test" (basic checks), `test-<target>.yml` "<Target> ..." (special checks such as

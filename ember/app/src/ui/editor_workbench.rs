@@ -1285,6 +1285,8 @@ pub mod page {
             if let ember_editor::SessionUpdate::Closed { uri } = &update { s.uris.borrow_mut().remove(&uri.path); }
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.open_errors.borrow_mut().remove(&uri.path); crate::ui::editor_scm::view::open_settled(&uri.path); }
             if let ember_editor::SessionUpdate::Saved { uri } = &update { saved_paths.push(uri.path.clone()); }
+            // Hot exit (FR-L31.6a): the disk text of a restored buffer, or its failed open.
+            crate::editor_backup::view::on_update(&s, &update);
             let action = s.bridge.borrow_mut().apply(update);
             match action {
                 BridgeAction::Resync(uri) => { s.host.send(HostCommand::Resync(uri)); }
@@ -1332,6 +1334,8 @@ pub mod page {
         // Reconnect, auto-save and compare follow the updates (FR-L31.6).
         let now_current = s.tabs.read().current_path().map(str::to_owned);
         crate::ui::editor_states::view::after_updates(&s, now_current.as_deref());
+        // Hot exit (FR-L31.6a): put the backup's buffers back once, then keep the backup current.
+        crate::editor_backup::view::after_updates(&s);
         // The document of an open working-tree diff stays open in the session (FR-L31.10).
         crate::ui::editor_scm::view::sync_diff_document(&s);
         if widget_edits {

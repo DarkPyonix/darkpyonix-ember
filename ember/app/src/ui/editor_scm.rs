@@ -561,6 +561,23 @@ pub fn branch_name(status: &GitStatus) -> String {
     }
 }
 
+/// What the 커밋 window's commit button says (FR-L31.33): the branch, set in mono, and the words
+/// after it. The mockup's button names the branch (`vcs.js:72` "<b>branch</b>에 커밋"); while git is
+/// busy, when the commit amends, or when no branch is known (detached HEAD, no status yet) the
+/// button says only what it does.
+pub fn commit_button_label(busy: bool, amend: bool, status: Option<&GitStatus>) -> (Option<String>, &'static str) {
+    if busy {
+        return (None, "작업하는 중…");
+    }
+    if amend {
+        return (None, "이전 커밋 수정");
+    }
+    match status.map(|s| s.branch.trim()) {
+        Some(branch) if !branch.is_empty() && branch != "(detached)" => (Some(branch.to_string()), "에 커밋"),
+        _ => (None, "커밋"),
+    }
+}
+
 /// The branch with the commits ahead of and behind the upstream, for the status bar.
 pub fn branch_line(status: &GitStatus) -> String {
     let mut line = branch_name(status);
@@ -1702,13 +1719,7 @@ pub mod view {
         let commit_hint = if cfg!(target_os = "macos") { "\u{2318}Enter" } else { "Ctrl+Enter" };
         let commit_title = format!("커밋 ({commit_hint})");
         let (input_s, key_s, click_s, amend_s) = (s.clone(), s.clone(), s.clone(), s.clone());
-        let commit_btn_text = if busy {
-            "작업하는 중…"
-        } else if st.amend {
-            "이전 커밋 수정"
-        } else {
-            "커밋"
-        };
+        let (commit_branch, commit_btn_text) = super::commit_button_label(busy, st.amend, st.load.status());
         rsx! {
             section { class: "ed-tw ed-left", "aria-label": "커밋",
                 {header(s, "커밋")}
@@ -1738,10 +1749,15 @@ pub mod view {
                         }
                         span { "이전 커밋 수정 (amend)" }
                     }
-                    button { class: "ed-pj", title: "{commit_title}", "aria-label": "{commit_title}", disabled: busy,
-                        style: "justify-content:center; background:var(--ink); color:var(--ink-text); height:30px;",
+                    // FR-L31.33: the mockup's commit button (`vcs.css:80-82`): at least 40px, 14/500, the
+                    // branch in mono, the icon in the fill's own text colour.
+                    button { class: "ed-pj ed-scm-commit", title: "{commit_title}", "aria-label": "{commit_title}", disabled: busy,
                         onclick: move |_| click_s.scm.commit(),
-                        {icon_px("check", 14)} "{commit_btn_text}"
+                        {icon_px("commit-w", 16)}
+                        span {
+                            if let Some(branch) = &commit_branch { b { "{branch}" } }
+                            "{commit_btn_text}"
+                        }
                     }
                 }
                 div { class: "ed-tree ed-scm-list", role: "list", "aria-label": "변경된 파일",

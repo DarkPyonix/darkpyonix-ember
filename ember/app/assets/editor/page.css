@@ -71,3 +71,9 @@ html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font
 .ed-scm-st.grey{background:var(--c-grey-soft);color:var(--text-2)}
 .ed-scm-cb{width:18px;height:18px;flex:none;border:1.5px solid var(--c-grey);border-radius:5px;background:var(--surface);cursor:pointer;padding:0;display:grid;place-items:center;box-sizing:border-box}
 .ed-scm-cb.on{background:var(--ink);border-color:var(--ink)}
+/* FR-L31.33 (#895, design review E8): the commit button, as the mockup's `.vcs-cbtn` on the primary
+   button (`vcs.css:80-82`, `style.css:71-74`): at least `--h-btn` high, 14/500, the branch in mono. */
+.ed-pj.ed-scm-commit{justify-content:center;gap:var(--sp2);width:100%;min-width:0;height:auto;min-height:var(--h-btn);padding:8px 16px;background:var(--ink);color:var(--ink-text);font-size:var(--fs-md);font-weight:var(--fw-medium);line-height:var(--lh-md);white-space:normal;text-align:center;box-sizing:border-box}
+.ed-pj.ed-scm-commit:hover{background:var(--ink);opacity:.88}
+.ed-scm-commit>span{overflow-wrap:anywhere}
+.ed-scm-commit b{font-family:var(--mono);font-size:var(--fs-sm);font-weight:var(--fw-medium)}

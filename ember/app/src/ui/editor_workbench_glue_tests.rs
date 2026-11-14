@@ -785,6 +785,39 @@ fn fr_l31_32_status_badges_take_the_soft_pair_of_the_letters_colour() {
     assert!(!scm.contains(r#"r#type: "checkbox""#));
 }
 
+// FR-L31.33 (#895, design review E8): the commit button is the mockup's: at least 40px high across
+// the window, 14/500 with the branch in mono, and its icon in the fill's text colour.
+#[test]
+fn fr_l31_33_the_commit_button_is_40_high_and_names_the_branch() {
+    use crate::ui::editor_scm::commit_button_label;
+    let status = |branch: &str| ember_client::api::GitStatus { branch: branch.into(), ..ember_client::api::GitStatus::default() };
+    assert_eq!(commit_button_label(false, false, Some(&status("feat/git-api"))), (Some("feat/git-api".to_string()), "에 커밋"));
+    assert_eq!(commit_button_label(false, false, Some(&status("(detached)"))), (None, "커밋"));
+    assert_eq!(commit_button_label(false, false, None), (None, "커밋"));
+    assert_eq!(commit_button_label(false, true, Some(&status("main"))), (None, "이전 커밋 수정"));
+    assert_eq!(commit_button_label(true, true, Some(&status("main"))), (None, "작업하는 중…"));
+
+    let css = include_str!("../../assets/editor/page.css");
+    assert!(css.contains("min-height:var(--h-btn);padding:8px 16px;background:var(--ink);color:var(--ink-text);font-size:var(--fs-md);font-weight:var(--fw-medium);"));
+    assert!(css.contains(".ed-scm-commit b{font-family:var(--mono);font-size:var(--fs-sm);font-weight:var(--fw-medium)}"));
+    assert!(include_str!("../../assets/editor/style.css").contains("--h-btn:40px"));
+
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    page.show_changes(ROOT, "", vec![change("a.rs")]);
+    let button = page
+        .find_where("the commit button", |id| page.has_class(id, "ed-scm-commit"))
+        .expect("the commit button");
+    assert!(page.attr(button, "aria-label").is_some_and(|l| l.starts_with("커밋 (")));
+    assert!(page.dom.document().get_node(button).is_some_and(|n| n.text_content() == "main에 커밋"), "the branch, then the words");
+    let icon = page.dom.document().get_node(button).map(|n| n.children.clone()).unwrap_or_default().into_iter().find_map(|id| page.attr(id, "src"));
+    assert!(icon.is_some_and(|src| src.starts_with("icon:commit-w")), "the icon is drawn in the fill's text colour");
+    let message = page.find("aria-label", "커밋 메시지").expect("the message box");
+    let b = page.boxes(&[("the commit button", button), ("the message box", message)]);
+    assert!(near(b[0].3, 40.0), "40px high on one line: {:?}", b[0]);
+    assert!(near(b[0].0, b[1].0) && near(b[0].2, b[1].2), "as wide as the message box: {b:?}");
+}
+
 #[compose_rust::runtime::Composable]
 fn toolkit_probe() {
     compose_rust::ui::Text("probe".to_string());

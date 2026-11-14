@@ -114,9 +114,8 @@ const APP_PALETTE: Palette = Palette::new()
 /// The editor window's palette: the app palette with the code panel as `surface`
 /// (`editor.css:52` `.ed-main` and `:71` `.ed-no`). Cupertino's code editor fills its panel
 /// and gutter with `Background`, so the separate editor process (FR-L31), whose page paints
-/// its own `--bg` in CSS, gives that role `surface`. The current line stays the toolkit's
-/// (Cupertino draws it as `Primary` at 8%; there is no role for it, the mockup's is
-/// `surface-2`, `editor.css:70`), a toolkit gap reported with the design review.
+/// its own `--bg` in CSS, gives that role `surface`. The current line is set on the editor
+/// itself ([`CODE_EDITOR_COLORS`], FR-L31.28), not here: Cupertino draws it as `Primary` at 8%.
 const EDITOR_PALETTE: Palette = APP_PALETTE.with(ColorRole::Background, LIGHT.surface, DARK.surface);
 
 /// The code type of the editor window (FR-L31.27): `editor.css:2` `--code-fs:13px` on a
@@ -144,7 +143,10 @@ pub const CODE_TOP_PADDING_CSS: &str = "var(--sp2)";
 /// `SyntaxComment`, which this palette sets to `muted` (`.t-com`, `editor.css:77`).
 pub const CODE_EDITOR_COLORS: compose_rust::code::CodeEditorColors = compose_rust::code::CodeEditorColors::new()
     .line_number(ColorRole::SyntaxComment)
-    .current_line_number(ColorRole::OnSurface);
+    .current_line_number(ColorRole::OnSurface)
+    // FR-L31.28: the caret line's band is `surface-2` (`editor.css:70` `.ed-ln.cur`), which the
+    // palette gives `SurfaceVariant`. A part named here is drawn opaque, not as a wash.
+    .current_line(ColorRole::SurfaceVariant);
 
 /// The Ember palette's value for a role in one scheme (tests and the capture checks read it).
 pub fn palette_color(role: ColorRole, scheme: ColorScheme) -> Option<compose_rust::Color> {
@@ -309,6 +311,18 @@ mod tests {
             include_str!("editor_workbench.rs").contains("margin-top:{crate::ui::fonts::CODE_TOP_PADDING_CSS}"),
             "the page leaves the top padding above the code editor's box"
         );
+    }
+
+    /// FR-L31.28 (design review E2, #895): the caret line's band is the mockup's `surface-2`
+    /// (`editor.css:70`; `style.css:3` `#f7f6f2`, `:28` `#252523`), not the toolkit's accent wash.
+    #[test]
+    fn fr_l31_28_the_current_line_is_surface_2() {
+        assert!(include_str!("../../assets/editor/editor.css").contains(".ed-ln.cur{background:var(--surface-2)}"));
+        let role = CODE_EDITOR_COLORS.current_line.expect("the editor names its current line colour");
+        for (scheme, rgb) in [(ColorScheme::Light, 0xf7f6f2), (ColorScheme::Dark, 0x252523)] {
+            let colour = editor_theme(scheme).palette.expect("editor palette").get(role, scheme).expect("the role has a value");
+            assert_eq!(colour.to_argb() & 0x00ff_ffff, rgb, "{scheme:?}");
+        }
     }
 
     /// Design review 2026-11-13 C6: `Mono` is the bundled JetBrains Mono stack, not a system face.

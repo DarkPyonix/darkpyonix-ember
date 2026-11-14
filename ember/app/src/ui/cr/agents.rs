@@ -33,7 +33,7 @@ pub use crate::ui::agents::{
 };
 use super::components::{
     AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRowFit, EmberCard, EmberField, FieldOptions, InsetPanel,
-    Label, OptionSheet, Pill, PillTone,
+    Label, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu,
 };
 use super::theme::*;
 use crate::server::{Account, ChatGptAccount};
@@ -1538,7 +1538,6 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
     let acct_open = remember(move || mutable_state_of(hook == Some(crate::ui::agents::SheetHook::Account)));
     let stacked = crate::ui::agents::chips_stacked(crate::ui::window_size::current_window_size().width_dp);
     let rows = crate::ui::agents::pick_rows(&crate::ui::agents::harness_options(&live.detected), model_pairs);
-    let row_labels: Vec<String> = rows.iter().map(|r| r.label.clone()).collect();
     let row_chosen = rows
         .iter()
         .position(|r| r.enabled && Some(r.harness) == chips.harness && r.model == chips.model);
@@ -1562,19 +1561,32 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
                 None,
                 None,
             );
+            // Each chip opens its list as a popover under it (FR-L10.4, #888, review AG14), the
+            // mockup's `.mp-pop` (a bottom sheet at 560 and below). Not built: the harness rail,
+            // search and shortcuts of the shared model picker (FR-L15) in this card.
             let chips_body = || {
+                let pick_rows: Vec<PopRow> = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| PopRow {
+                        icon: Some(ICON_SPARK_SVG),
+                        title: r.label.clone(),
+                        tint: (!r.enabled).then_some(ember_theme().palette.muted),
+                        chosen: row_chosen == Some(i),
+                        ..Default::default()
+                    })
+                    .collect();
+                let close = {
+                    let o = pick_open.clone();
+                    move || o.set(false)
+                };
+                let (st, list) = (store.clone(), rows.clone());
                 let po = pick_open.clone();
-                ModelPickerPill(&harness_pill, Some(ICON_SPARK_SVG), move || po.set(true));
-                let ao = acct_open.clone();
-                ModelPickerPill(&account_pill, Some(ICON_USER_SVG), move || ao.set(true));
-                // One node holds both sheets, so the closed dialogs add no gap.
-                cu::Box().content(|| {
-                    let close = {
-                        let o = pick_open.clone();
-                        move || o.set(false)
-                    };
-                    let (st, list) = (store.clone(), rows.clone());
-                    OptionSheet(pick_open.get(), &row_labels, row_chosen, 320.0, close, move |i| {
+                PopoverMenu(
+                    pick_open.get(),
+                    PopMenu { name: super::a11y::MODEL_PICKER, kind: PopKind::Mode, head: "", sub: None, rows: &pick_rows, align: compose_rust::PopoverAlign::Start },
+                    close,
+                    move |i| {
                         if let Some(r) = list.get(i) {
                             let mut payload = None;
                             edit(&st, |s| {
@@ -1593,21 +1605,41 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
                                 }
                             }
                         }
-                    });
-                    let close = {
-                        let o = acct_open.clone();
-                        move || o.set(false)
-                    };
-                    let list = options.clone();
-                    OptionSheet(acct_open.get(), &acct_rows, None, 320.0, close, move |i| {
+                    },
+                    || ModelPickerPill(&harness_pill, Some(ICON_SPARK_SVG), move || po.set(true)),
+                    None,
+                );
+                let acct_pop: Vec<PopRow> = acct_rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, label)| PopRow {
+                        icon: Some(ICON_USER_SVG),
+                        title: label.clone(),
+                        chosen: live.accounts.get(i).is_some_and(|a| Some(&a.label) == chips.account.as_ref()),
+                        ..Default::default()
+                    })
+                    .collect();
+                let close = {
+                    let o = acct_open.clone();
+                    move || o.set(false)
+                };
+                let list = options.clone();
+                let ao = acct_open.clone();
+                PopoverMenu(
+                    acct_open.get(),
+                    PopMenu { name: super::a11y::ACCOUNT_PICKER, kind: PopKind::Mode, head: "", sub: None, rows: &acct_pop, align: compose_rust::PopoverAlign::Start },
+                    close,
+                    move |i| {
                         let Some(o) = list.get(i) else { return };
                         if example {
                             post_notice(crate::ui::agents::DEMO_CHOICE_NOTE);
                         } else {
                             set_default_account(o.id.clone());
                         }
-                    });
-                });
+                    },
+                    || ModelPickerPill(&account_pill, Some(ICON_USER_SVG), move || ao.set(true)),
+                    None,
+                );
             };
             // Below 560 dp the chips stack so each keeps its full text.
             if stacked {
@@ -3217,6 +3249,16 @@ mod tests {
         assert!(usage.contains("card_inner_width(width_dp, pair_cols)"));
         let kinds = production.split("fn TokenKindsCard(").nth(1).unwrap().split("\nfn ").next().unwrap();
         assert!(!kinds.contains("409.0") && !kinds.contains("326.0"), "no fixed bar width");
+    }
+
+    #[test]
+    fn fr_l10_4_new_member_default_chips_open_popovers_under_them() {
+        let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
+        let body = production.split("fn ModelsSection(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert_eq!(body.matches("PopoverMenu(").count(), 2, "the harness and the account chip");
+        assert!(body.contains("MODEL_PICKER") && body.contains("ACCOUNT_PICKER"));
+        assert!(body.contains("|| ModelPickerPill(&harness_pill") && body.contains("|| ModelPickerPill(&account_pill"), "each chip is its menu's anchor");
+        assert!(!production.contains("OptionSheet("));
     }
 
     #[test]

@@ -52,6 +52,8 @@ pub const ICON_GAUGE_SVG: &str = include_str!("../../../assets/nav/gauge.svg");
 pub const ICON_CLOSE_SVG: &str = include_str!("../../../assets/nav/close.svg");
 pub const ICON_INFO_SVG: &str = include_str!("../../../assets/nav/info.svg");
 pub const ICON_CHEVRON_DOWN_SVG: &str = include_str!("../../../assets/nav/chevron-down.svg");
+/// The mockup's `back` (Heroicons arrow-left, `icons.js`).
+pub const ICON_BACK_SVG: &str = include_str!("../../../assets/nav/back.svg");
 
 use crate::model;
 use crate::ui::coexist::{shared_ui, SharedUi};

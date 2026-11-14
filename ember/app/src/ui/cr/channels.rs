@@ -19,7 +19,7 @@ use compose_rust::runtime::{
 };
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, IconRole, SpaceRole};
+use compose_rust::{Alignment, SpaceRole};
 
 pub use crate::ui::channels::{
     bubble_side, compact_shows_room, draft_after_send, empty_text, SendState, feed, filter_chips, group_rooms, last_seq,
@@ -488,8 +488,8 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
             .content(|| {
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
                 if show_back {
-                    // The visible label "목록" names the back button.
-                    AppButton("목록", Some(IconRole::Back), ButtonKind::Default, true, true, false, on_back);
+                    // `.icon-btn.sm.backbtn`: an icon-only 32 px square named 뒤로 (review CH8).
+                    super::components::BackButton(on_back);
                 }
                 RoomIcon(&room.id, &room.project, 36.0);
                 cu::Column().content(|| {

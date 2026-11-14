@@ -50,7 +50,7 @@ use crate::ui::Route;
 
 use super::compat::{Badge, Banner, CodeText, MessageText, Spinner, StatusIndicator};
 use super::components::{
-    AppButton, ButtonKind, Clickable, EmberCard, EmberField, FieldOptions, IconButton, Label,
+    AppButton, BackButton, ButtonKind, Clickable, EmberCard, EmberField, FieldOptions, IconButton, Label,
     OptionSheet, Pill, PillTone, Txt,
 };
 use super::ko;
@@ -623,7 +623,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                             .content(|| {
                                 if compact {
                                     let u = ui.clone();
-                                    IconButton(IconRole::Back, true, move || u.go(Route::Projects));
+                                    BackButton(move || u.go(Route::Projects));
                                 }
                                 cu::Column()
                                     .modifier(Modifier::new().weight(1.0))

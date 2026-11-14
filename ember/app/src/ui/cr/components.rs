@@ -986,6 +986,31 @@ pub fn IconButton(icon: IconRole, small: bool, on_click: impl FnMut() + 'static)
         .on_click(on_click);
 }
 
+/// The corner of [`BackButton`]: the mockup's `.icon-btn.sm.backbtn` is `border-radius:50%`
+/// with `corner-shape:squircle`, which renders as a rounded square (the 390 room and
+/// conversation renders show its straight edges); the toolkit draws plain arcs until the
+/// squircle lands (#673), so a 10 px arc stands in for it on the 32 px square.
+pub const BACK_BTN_RADIUS: f32 = 10.0;
+
+/// The back button of a phone detail view (`.icon-btn.sm.backbtn`): a 32 px rounded square on
+/// `surface` with a 1 px `line` border and the 18 px `back` arrow in `text-2`, named 뒤로
+/// (review SE13, CH8: the app drew a 40 px circle in the conversation and a "목록" text button
+/// in a room).
+pub fn BackButton(on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    NamedClickable(
+        super::a11y::BACK,
+        Modifier::new()
+            .size(H_CTL, H_CTL)
+            .background(paint(p.surface))
+            .border(1.0, paint(p.line))
+            .corner_radius(BACK_BTN_RADIUS),
+        Alignment::Center,
+        on_click,
+        || super::shell::NavIcon(super::shell::ICON_BACK_SVG, p.text_2.to_argb(), 18.0),
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // Pick chip
 // ---------------------------------------------------------------------------------------------
@@ -2112,6 +2137,37 @@ mod tests {
         assert!(flow.mods.iter().any(|m| m == "FillMaxWidth"), "{:?}", flow.mods);
         let pills = nodes.iter().filter(|n| n.parent == Some(flow.id)).count();
         assert_eq!(pills, 4, "each choice is a child of the wrapping row");
+    }
+
+    #[test]
+    fn fr_l28_back_button_is_the_32_px_rounded_square_with_the_arrow() {
+        // `.icon-btn.sm.backbtn`: 32 px, `surface`, 1 px `line`, squircle corners, an 18 px
+        // arrow; review SE13 measured a 40 px circle, CH8 a "목록" text pill.
+        let nodes = emitted_nodes(|| BackButton(|| {}));
+        assert!(!nodes.iter().any(|n| n.widget == "Text"), "an icon, no visible text");
+        assert!(!nodes.iter().any(|n| n.widget == "Button"), "not the toolkit's round icon button");
+        let image = the(&nodes, "Image");
+        assert!(image.mods.iter().any(|m| m == "Width(18.0)"), "{:?}", image.mods);
+        let frame = parent_of(&nodes, image);
+        assert!(frame.props.iter().any(|p| p.starts_with("OnClick=")), "the frame is the control: {:?}", frame.props);
+        for want in ["Width(32.0)", "Height(32.0)"] {
+            assert!(frame.mods.iter().any(|m| m == want), "{want}: {:?}", frame.mods);
+        }
+        assert!(frame.mods.iter().any(|m| m.starts_with("Shape { top_start: 10.0")), "{:?}", frame.mods);
+        assert!(!frame.mods.iter().any(|m| m.starts_with("ShapeRole")), "not a circle: {:?}", frame.mods);
+        let p = ember_theme().palette;
+        let border = format!("{:?}", compose_rust::schema::Modifier::Border { width: 1.0, paint: paint(p.line) });
+        let fill = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.surface)));
+        assert!(frame.mods.contains(&border), "{:?}", frame.mods);
+        assert!(frame.mods.contains(&fill), "{:?}", frame.mods);
+        // The detail views use it: the 싱글 conversation header, the room header and the
+        // stand-alone conversation's phone header.
+        for (file, src) in [("session.rs", include_str!("session.rs")), ("channels.rs", include_str!("channels.rs")), ("conversation.rs", include_str!("conversation.rs"))] {
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            assert!(production.contains("BackButton("), "{file}");
+            assert!(!production.contains("IconButton(IconRole::Back"), "{file}");
+        }
+        assert!(!include_str!("channels.rs").contains("AppButton(\"목록\""));
     }
 
     #[test]

@@ -53,7 +53,7 @@ use super::characters::{CharState, Character};
 use super::compat::Spinner;
 use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
-    AppButton, ButtonKind, Clickable, CloseButton, NamedClickable, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
+    AppButton, BackButton, ButtonKind, Clickable, CloseButton, NamedClickable, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
     FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, SearchField, Select, SheetFooter, Txt,
     SEARCH_FIELD_H_COMPACT,
 };
@@ -2469,7 +2469,7 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
                                 )
                                 .content(move || {
                                     let b_cb = back_cb.clone();
-                                    IconButton(IconRole::Back, true, move || b_cb());
+                                    BackButton(move || b_cb());
                                     if let Some((proj_id, m)) = m_opt {
                                         let (st_txt, st_tone) = status_pill(m.status);
                                         Character(

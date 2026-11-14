@@ -175,6 +175,53 @@ pub struct OseManager {
     active_relays: Arc<AtomicUsize>,
     installing: Arc<Mutex<HashSet<String>>>,
     processes: Arc<Mutex<HashMap<(String, PathBuf), Process>>>,
+    terminal_env: TerminalEnv,
+}
+
+/// What the terminals of an OSE window need to reach persistent sessions (SPEC FR-P5, #26).
+/// **[provisional]** VS Code runs tasks through `terminal.integrated.automationProfile` =
+/// `ember-term`, and its terminals inherit the OSE server's environment, so:
+/// - `ember_term_dir` (the folder holding `ember-term`) goes first on the child's `PATH`;
+/// - for the local computer, `local_node_state_dir` becomes `EMBER_NODE_STATE_DIR`, whose
+///   `local.json` the built-in node writes at start, so `ember-term` finds that node. No token is
+///   put in the environment.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TerminalEnv {
+    pub ember_term_dir: Option<PathBuf>,
+    pub local_node_state_dir: Option<PathBuf>,
+}
+
+impl TerminalEnv {
+    /// The variables to set on the OSE child of `computer_id`, given the child's `PATH` from
+    /// the allowlist (`base_path`). Pure, for tests.
+    pub fn vars(&self, computer_id: &str, base_path: Option<&std::ffi::OsStr>) -> Vec<(String, std::ffi::OsString)> {
+        let mut out = Vec::new();
+        if let Some(dir) = &self.ember_term_dir {
+            let mut parts = vec![dir.clone()];
+            if let Some(p) = base_path {
+                parts.extend(std::env::split_paths(p).filter(|x| x != dir));
+            }
+            if let Ok(joined) = std::env::join_paths(parts) {
+                out.push(("PATH".to_string(), joined));
+            }
+        }
+        if computer_id == LOCAL_COMPUTER {
+            if let Some(dir) = &self.local_node_state_dir {
+                out.push(("EMBER_NODE_STATE_DIR".to_string(), dir.clone().into_os_string()));
+            }
+        }
+        out
+    }
+}
+
+/// Where `ember-term` is: `EMBER_TERM_BIN` (a file), else next to the server binary (`exe`).
+/// `None` leaves `PATH` as it is (an `ember-term` already on it still works).
+pub fn find_ember_term_dir(env_bin: Option<std::ffi::OsString>, exe: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(p) = env_bin.filter(|v| !v.is_empty()).map(PathBuf::from) {
+        return p.is_file().then(|| p.parent().map(Path::to_path_buf)).flatten();
+    }
+    let dir = exe?.parent()?.to_path_buf();
+    dir.join("ember-term").is_file().then_some(dir)
 }
 
 /// Why an install did not happen.
@@ -574,7 +621,14 @@ impl OseManager {
             active_relays: Arc::new(AtomicUsize::new(0)),
             installing: Arc::new(Mutex::new(HashSet::new())),
             processes,
+            terminal_env: TerminalEnv::default(),
         }
+    }
+
+    /// Sets what OSE windows' terminals need for persistent sessions ([`TerminalEnv`], #26).
+    pub fn with_terminal_env(mut self, env: TerminalEnv) -> Self {
+        self.terminal_env = env;
+        self
     }
 
     /// Overrides the install timeout (tests).
@@ -861,7 +915,12 @@ impl OseManager {
         let launch_id = uuid::Uuid::new_v4().simple().to_string();
         let token_file = write_token_file(&data_dir.join("tokens"), &folder, &token)
             .map_err(|e| format!("cannot write the OSE token file: {e}"))?;
-        let child = ose_command(binary)
+        let mut command = ose_command(binary);
+        let base_path = command.get_envs().find(|(k, _)| k.to_str() == Some("PATH")).and_then(|(_, v)| v.map(|v| v.to_os_string()));
+        for (key, value) in self.terminal_env.vars(computer_id, base_path.as_deref()) {
+            command.env(key, value);
+        }
+        let child = command
             .args(["--host", "127.0.0.1", "--port", &address.port().to_string(), "--connection-token-file"])
             .arg(&token_file.0)
             .args(["--accept-server-license-terms", "--telemetry-level", "off"])
@@ -939,6 +998,60 @@ mod tests {
         cmd.get_envs()
             .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
             .collect()
+    }
+
+    /// FR-P5 (#26): ember-term's folder goes first on the OSE child's PATH (once), and only the
+    /// local computer's child learns the built-in node's state dir. No token is set.
+    #[test]
+    #[cfg(unix)]
+    fn fr_p5_ose_child_gets_ember_term_on_path_and_the_local_node_state_dir() {
+        let te = TerminalEnv {
+            ember_term_dir: Some(PathBuf::from("/opt/ember/bin")),
+            local_node_state_dir: Some(PathBuf::from("/home/u/.ember/local-node")),
+        };
+        let base = std::ffi::OsString::from("/usr/bin:/opt/ember/bin:/bin");
+        let v = te.vars(LOCAL_COMPUTER, Some(&base));
+        assert_eq!(v, vec![
+            ("PATH".to_string(), "/opt/ember/bin:/usr/bin:/bin".into()),
+            ("EMBER_NODE_STATE_DIR".to_string(), "/home/u/.ember/local-node".into()),
+        ]);
+        assert!(!v.iter().any(|(k, _)| k.contains("TOKEN")), "{v:?}");
+        let v = te.vars("pi", None);
+        assert_eq!(v, vec![("PATH".to_string(), "/opt/ember/bin".into())]);
+        assert!(TerminalEnv::default().vars(LOCAL_COMPUTER, Some(&base)).is_empty());
+    }
+
+    /// FR-P5 (#26): the command line of an OSE child carries the terminal variables on top of
+    /// the allowlist.
+    #[test]
+    #[cfg(unix)]
+    fn fr_p5_ose_command_env_has_ember_term_path() {
+        let lookup = |k: &str| match k {
+            "PATH" => Some(std::ffi::OsString::from("/usr/bin")),
+            "HOME" => Some("/home/u".into()),
+            _ => None,
+        };
+        let mut cmd = ose_command_with(Path::new("/bin/true"), None, lookup);
+        let base = cmd.get_envs().find(|(k, _)| k.to_str() == Some("PATH")).and_then(|(_, v)| v.map(|v| v.to_os_string()));
+        let te = TerminalEnv { ember_term_dir: Some("/x/bin".into()), local_node_state_dir: Some("/s".into()) };
+        for (k, v) in te.vars(LOCAL_COMPUTER, base.as_deref()) {
+            cmd.env(k, v);
+        }
+        let e = envs(&cmd);
+        assert!(e.contains(&("PATH".into(), Some("/x/bin:/usr/bin".into()))), "{e:?}");
+        assert!(e.contains(&("EMBER_NODE_STATE_DIR".into(), Some("/s".into()))), "{e:?}");
+    }
+
+    #[test]
+    fn fr_p5_find_ember_term_dir() {
+        let d = tempfile::tempdir().unwrap();
+        let bin = d.path().join("ember-term");
+        std::fs::write(&bin, b"").unwrap();
+        assert_eq!(find_ember_term_dir(Some(bin.clone().into()), None), Some(d.path().to_path_buf()));
+        assert_eq!(find_ember_term_dir(Some(d.path().join("nope").into()), None), None);
+        assert_eq!(find_ember_term_dir(None, Some(d.path().join("ember-server"))), Some(d.path().to_path_buf()));
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(find_ember_term_dir(None, Some(empty.path().join("ember-server"))), None);
     }
 
     /// FR-W4 (#471): a listed variable reaches the child, an unlisted one does not.

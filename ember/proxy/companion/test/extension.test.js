@@ -253,3 +253,16 @@ test('device label and refusal text', () => {
   assert.match(ext.refusalText('controlled', { device: 'phone' }), /controlled by phone/);
   assert.match(ext.refusalText('read_only'), /read-only/);
 });
+
+// #26: the setup command writes the default profile and, with ember-term, the automation
+// profile; the default is the bare name Ember puts on the OSE's PATH.
+test('setupSettings writes the default and automation profiles', () => {
+  assert.equal(ext.DEFAULT_EMBER_TERM, 'ember-term');
+  const all = ext.setupSettings('ember-term');
+  assert.deepEqual(all.map(([k]) => k), [
+    'defaultProfile.osx', 'defaultProfile.linux', 'automationProfile.osx', 'automationProfile.linux',
+  ]);
+  assert.deepEqual(all[2][1], { path: 'ember-term', args: [] });
+  assert.equal(all[0][1], 'Ember (persistent)');
+  assert.deepEqual(ext.setupSettings('').map(([k]) => k), ['defaultProfile.osx', 'defaultProfile.linux']);
+});

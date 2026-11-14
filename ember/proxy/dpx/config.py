@@ -66,3 +66,14 @@ EMBER_NODE_TOKEN = os.environ.get("DPX_EMBER_NODE_TOKEN", "")
 EMBER_NODE_STATE_DIR = Path(
     os.environ.get("EMBER_NODE_STATE_DIR") or (Path.home() / ".ember" / "node")
 )
+# Fallback when no node daemon is found: ember server's built-in node, through the server's
+# `/api/computers/local/terms*` relay (SPEC FR-P6, #26, [provisional]). URL default: the
+# server's default listen address. Token: DPX_EMBER_SERVER_TOKEN, else the server's token file
+# (`$EMBER_DATA_DIR/server-token`, default `~/.ember/server-token`), re-read on every request.
+# The token never reaches the browser. DPX_EMBER_SERVER_URL="" turns the fallback off.
+EMBER_SERVER_URL = os.environ.get("DPX_EMBER_SERVER_URL", "http://127.0.0.1:8740")
+EMBER_SERVER_TOKEN = os.environ.get("DPX_EMBER_SERVER_TOKEN", "")
+EMBER_SERVER_TOKEN_FILE = Path(
+    os.environ.get("DPX_EMBER_SERVER_TOKEN_FILE")
+    or (Path(os.environ.get("EMBER_DATA_DIR") or (Path.home() / ".ember")) / "server-token")
+)

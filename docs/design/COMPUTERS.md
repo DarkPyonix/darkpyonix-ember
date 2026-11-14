@@ -313,7 +313,7 @@ A checklist for the owner's two-machine run. Machine S runs `ember-server`, mach
    The server logs a warning that the door speaks plain HTTP. The door is closed until step 2 mints a code, and closes again when no enrolment needs it (`FR-C2l`; `EMBER_ENROL_AUTO_CLOSE=0` keeps it open). It prints `ember server peer id: <64 hex>`; note it. The owner API stays on `127.0.0.1:8740`.
 2. Mint a code. Minting is an owner route (`FR-S12`, #784): the server token alone gets 403 `owner_required`. From a terminal on S, outside Ember's own terminal panel:
    `ember-server owner enrol-code laptop`
-   The command claims an owner key over `<data dir>/owner.sock`; type the code the server prints on its console (`ember owner code: XXXX-XXXX`).
+   The command claims an owner key over `<data dir>/owner.sock` (on Windows, the claim pipe `\\.\pipe\ember-owner-<hash>`, #815); type the code the server prints on its console (`ember owner code: XXXX-XXXX`).
    The answer has `id`, `code`, `command`, `server`, `door`, `server_peer_id` and `server_fingerprint`. Expect `command` to start `ember-node enrol dpe_`, to name `http://<S-lan-ip>:8742` (not port 8740) and to end `--server-fingerprint <the 64 hex id>`.
 
 **On N**

@@ -547,6 +547,15 @@ impl SessionCore {
         self.trust.is_trusted()
     }
 
+    /// Whether any open document at or below `prefix` is dirty.
+    pub fn is_any_dirty_at_or_below(&self, prefix: &str) -> bool {
+        let prefix = prefix.trim_end_matches('/');
+        self.docs.values().any(|doc| {
+            let path = doc.uri.path.trim_end_matches('/');
+            (path == prefix || path.strip_prefix(prefix).is_some_and(|r| r.starts_with('/'))) && doc.is_dirty()
+        })
+    }
+
     fn on_decide_trust(&mut self, trusted: bool) {
         let (calls, answers) = self.trust.decide(trusted);
         for call in calls {

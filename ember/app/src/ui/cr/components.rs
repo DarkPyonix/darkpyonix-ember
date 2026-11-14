@@ -858,10 +858,16 @@ pub fn AppButton(
     drop(b);
 }
 
-/// A pill button that is one choice of several: the chosen one is `Primary`, the others
-/// `Default`. To assistive technology a `Toggle` says it is pressed (`Modifier::selected`, the
-/// mockup's `aria-pressed`) and a `Radio` is a radio button that is checked or not; compose-rust
-/// v0.0.9 hands both to the platform (#473).
+/// A pill that is one choice of several, the mockup's `.seg button`: the chosen one is `ink`,
+/// the others `surface` on a `line` border ([`choice_style`]). To assistive technology a
+/// `Toggle` says it is pressed (`Modifier::selected`, the mockup's `aria-pressed`) and a `Radio`
+/// is a radio button that is checked or not; compose-rust v0.0.9 hands both to the platform
+/// (#473), and the visible label is its name, as a [`MenuRow`]'s is.
+///
+/// It is Ember's [`Clickable`] rather than the toolkit `Button`, because `.seg button` pads its
+/// label 12 px each side and the toolkit button pads it by the design system's 16 with no way to
+/// change it (review r5, FR-L10.2). A disabled choice takes no click and is drawn at 45 percent
+/// (`vcs.css` `.btn[disabled]{opacity:.45}`); a chosen one keeps [`button_style_for`]'s muted fill.
 pub fn ChoiceButton(
     text: &str,
     choice: Choice,
@@ -876,23 +882,44 @@ pub fn ChoiceButton(
         Choice::Toggle => Modifier::new().selected(chosen),
         Choice::Radio => Modifier::new().role(Role::RadioButton).checked(chosen),
     };
-    drop(
-        cu::Button(text)
-            .enabled(enabled)
-            .variant(ButtonVariant::Text)
-            .color(paint(s.text))
-            // The same 14/500 (13/500 small) label as AppButton (FR-L10.2, #844).
-            .font_size(s.fs.size())
-            .font_weight(s.weight.value())
-            .modifier(
-                state
-                    .height(s.height)
-                    .background(paint(s.fill))
-                    .border(1.0, paint(s.border))
-                    .shape_role(ShapeRole::Full),
-            )
-            .on_click(on_click),
-    );
+    let frame = state
+        .height(s.height)
+        .background(paint(s.fill))
+        .border(1.0, paint(s.border))
+        .shape_role(ShapeRole::Full);
+    // The same 14/500 (13/500 small) label as AppButton (FR-L10.2, #844), on one line.
+    let label = move || {
+        cu::Row().alignment(Alignment::CenterStart).content(|| {
+            cu::Spacer().modifier(Modifier::new().width(CHOICE_PAD_X));
+            Label(text, s.fs, s.weight, Some(paint(s.text)), Some(1));
+            cu::Spacer().modifier(Modifier::new().width(CHOICE_PAD_X));
+        });
+    };
+    if enabled {
+        Clickable(frame, Alignment::Center, on_click, label);
+    } else {
+        let frame = frame.disabled(true);
+        let frame = if chosen { frame } else { frame.alpha(CHOICE_DISABLED_ALPHA) };
+        cu::Box().modifier(frame).alignment(Alignment::Center).content(label);
+    }
+}
+
+/// A choice's label inset at each end (`.seg button` padding 0 `--sp3`).
+pub const CHOICE_PAD_X: f32 = 12.0;
+
+/// How a disabled, unchosen choice is faded (`.btn[disabled]{opacity:.45}`).
+pub const CHOICE_DISABLED_ALPHA: f32 = 0.45;
+
+/// A group of [`ChoiceButton`]s, the mockup's `.seg`: 8 px apart along a line and between lines,
+/// and a choice that does not fit starts the next line (`flex-wrap:wrap`, buttons `flex:none`)
+/// instead of being squeezed (settings-sheet-390, review r5). The toolkit's `FlowRow` measures
+/// each choice at its own width.
+pub fn ChoiceRow(content: impl FnOnce()) {
+    cu::FlowRow()
+        .horizontal_spacing(SP[1])
+        .vertical_spacing(SP[1])
+        .modifier(Modifier::new().fill_max_width())
+        .content(content);
 }
 
 /// A [`ChoiceButton`]'s look, the mockup's `.seg button` (FR-L10.2, #878): the chosen one is
@@ -2001,6 +2028,63 @@ mod tests {
     }
 
     #[test]
+    fn fr_l10_2_choice_label_sits_12_from_each_end_of_its_pill() {
+        // Review r5: the toolkit button put the label 16 px in; `.seg button` padding 0 12.
+        let nodes = emitted_nodes(|| ChoiceButton("JetBrains", Choice::Radio, false, true, true, || {}));
+        assert!(!nodes.iter().any(|n| n.widget == "Button"), "the toolkit button pads by 16");
+        let text = the(&nodes, "Text");
+        assert!(text.props.iter().any(|p| p == "FontSize=Float(13.0)"), "{:?}", text.props);
+        assert!(text.props.iter().any(|p| p == "FontWeight=Integer(500)"), "{:?}", text.props);
+        assert!(text.props.iter().any(|p| p == "MaxLines=Integer(1)"), "{:?}", text.props);
+        let row = parent_of(&nodes, text);
+        let spacers: Vec<_> = nodes.iter().filter(|n| n.widget == "Spacer" && n.parent == Some(row.id)).collect();
+        assert_eq!(spacers.len(), 2, "one spacer each side of the label");
+        assert!(spacers.iter().all(|s| s.mods.iter().any(|m| m == "Width(12.0)")), "{:?}", spacers.iter().map(|s| &s.mods).collect::<Vec<_>>());
+        let pill = parent_of(&nodes, row);
+        assert!(pill.props.iter().any(|p| p.starts_with("OnClick=")), "the pill is the control: {:?}", pill.props);
+        assert!(pill.mods.iter().any(|m| m == "Height(32.0)"), "{:?}", pill.mods);
+        assert!(pill.mods.iter().any(|m| m.starts_with("Border")), "{:?}", pill.mods);
+        assert!(pill.mods.iter().any(|m| m.starts_with("Background")), "{:?}", pill.mods);
+        assert!(pill.mods.iter().any(|m| m.starts_with("ShapeRole") || m.starts_with("Shape")), "{:?}", pill.mods);
+        assert_eq!(CHOICE_PAD_X, 12.0);
+        // A disabled choice is not clickable and is faded.
+        let off = emitted_nodes(|| ChoiceButton("수동", Choice::Radio, false, true, false, || {}));
+        assert!(!off.iter().any(|n| n.props.iter().any(|p| p.starts_with("OnClick="))), "a disabled choice takes no click");
+        assert!(off.iter().any(|n| n.mods.iter().any(|m| m == "Alpha(0.45)")), "faded to 45 percent");
+    }
+
+    #[test]
+    fn fr_l10_2_choice_row_wraps_8_apart() {
+        // `.seg{display:flex;gap:var(--sp2);flex-wrap:wrap}`: settings-sheet-390 squeezed the
+        // fourth 기본 IDE button to 57 px instead of starting a second line.
+        let nodes = emitted_nodes(|| {
+            ChoiceRow(|| {
+                for label in ["Ember 에디터", "VS Code", "JetBrains Gateway", "매번 선택"] {
+                    ChoiceButton(label, Choice::Radio, false, true, true, || {});
+                }
+            })
+        });
+        let flow = the(&nodes, "FlowRow");
+        for prop in ["HorizontalSpacing", "VerticalSpacing"] {
+            assert!(flow.props.iter().any(|p| p.starts_with(&format!("{prop}=")) && p.contains("8.0")), "{prop}: {:?}", flow.props);
+        }
+        assert!(flow.mods.iter().any(|m| m == "FillMaxWidth"), "{:?}", flow.mods);
+        let pills = nodes.iter().filter(|n| n.parent == Some(flow.id)).count();
+        assert_eq!(pills, 4, "each choice is a child of the wrapping row");
+    }
+
+    #[test]
+    fn fr_l10_2_choice_groups_wrap_on_settings_and_agents() {
+        let settings = include_str!("settings.rs");
+        let settings = settings.split("#[cfg(test)]").next().unwrap();
+        assert!(settings.matches("ChoiceRow(").count() >= 3, "화면 테마, 에디터 단축키 and 기본 IDE wrap");
+        let agents = include_str!("agents.rs");
+        let seg = agents.split("fn SegGroup<").nth(1).unwrap();
+        let seg = &seg[..seg.find("\n}\n").unwrap()];
+        assert!(seg.contains("ChoiceRow("), "{seg}");
+    }
+
+    #[test]
     fn fr_l10_2_choice_call_sites_are_seg_buttons() {
         let settings = include_str!("settings.rs");
         let settings = settings.split("#[cfg(test)]").next().unwrap();
@@ -2016,7 +2100,7 @@ mod tests {
         let seg = agents.split("fn SegGroup<").nth(1).unwrap();
         let seg = &seg[..seg.find("\n}\n").unwrap()];
         assert!(seg.contains("ChoiceButton(label, Choice::Radio, selected, true, true,"), "{seg}");
-        assert!(seg.contains(".spacing(SP[1])"), "`.seg` gap 8: {seg}");
+        assert!(seg.contains("ChoiceRow(|| {"), "`.seg` gap 8, wrapping: {seg}");
         assert!(!seg.contains("cu::Button("), "{seg}");
     }
 
@@ -2355,8 +2439,9 @@ mod tests {
             // Existing direct buttons are explicitly counted until their specialized controls
             // move into shared components. Any additional bypass must be reviewed.
             let allowed_buttons = match name {
-                // AppButton, IconButton, PickChip, and ChoiceButton (FR-L10, compose-rust#473).
-                "components.rs" => 4,
+                // AppButton, IconButton and PickChip; ChoiceButton is Ember's clickable pill
+                // since review r5 (its 12 px label inset, FR-L10.2).
+                "components.rs" => 3,
                 // SegGroup moved onto ChoiceButton (#878).
                 "agents.rs" => 1,
                 "files.rs" => 1,

@@ -176,7 +176,6 @@ fn is_not_found(error: &ember_editor_conn::Error) -> bool {
     text.contains("entrynotfound") || text.contains("enoent") || text.contains("filenotfound") || text.contains("no such file")
 }
 
-/// A connected editor session. Cheap to share by reference; every method is a non-blocking send.
 /// Lists directories on the remote server: [`EditorSession::lister`].
 #[derive(Clone)]
 pub struct DirLister {
@@ -192,6 +191,7 @@ impl DirLister {
     }
 }
 
+/// A connected editor session. Cheap to share by reference; every method is a non-blocking send.
 pub struct EditorSession {
     tx: mpsc::UnboundedSender<Command>,
     authority: String,

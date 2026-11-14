@@ -3,11 +3,11 @@
 
 use ember_app::ui::keymap::{Action, Keymap, Os};
 use ember_app::ui::palette::{
-    action_items, apply_line_suffix, effective_mode, empty_text, extension_command_items,
+    action_items, apply_line_suffix, choseong_of, effective_mode, empty_text, extension_command_items,
     file_items, goto_line_item, highlight_segments, items_for, items_for_workbench, mode_for,
-    move_selection, parse_contributed_commands, parse_goto_line, parse_path_line_suffix,
+    move_selection, normalize_hangul, parse_contributed_commands, parse_goto_line, parse_path_line_suffix,
     placeholder, prioritize_recent_files, rank, record_recent_path, search_label,
-    skipped_directory, ContributedCommand, Item, Mode, Payload,
+    skipped_directory, ContributedCommand, Item, Mode, Payload, RankingCache,
 };
 
 fn items(titles: &[&str]) -> Vec<Item> {
@@ -94,8 +94,8 @@ fn fr_l31_commands_the_editor_cannot_do_yet_are_marked_and_listed_after_the_work
     let enabled = |a: Action| list.iter().find(|i| i.payload == Payload::Action(a)).unwrap().enabled;
     assert!(enabled(Action::Terminal) && enabled(Action::Close) && enabled(Action::HideTool) && enabled(Action::Recent) && enabled(Action::GotoLine) && enabled(Action::Format));
     // FR-L31.15: save, maximize and reopen closed editor work in the window.
-    assert!(enabled(Action::Save) && enabled(Action::MaximizeTool) && enabled(Action::ReopenClosed) && enabled(Action::FindInFiles));
-    for a in [Action::RunConfig, Action::Stop, Action::Ask, Action::NewTerminal] {
+    assert!(enabled(Action::Save) && enabled(Action::MaximizeTool) && enabled(Action::ReopenClosed) && enabled(Action::FindInFiles) && enabled(Action::NewTerminal));
+    for a in [Action::RunConfig, Action::Stop, Action::Ask] {
         assert!(!enabled(a), "{a:?} is not implemented");
     }
     let ranked = rank("", &list);
@@ -342,4 +342,84 @@ fn fr_l31_extension_commands_ranking_and_payload() {
     let ranked_cat = rank("git", &items);
     assert_eq!(ranked_cat.len(), 1);
     assert_eq!(items[ranked_cat[0].index].payload, Payload::ExtensionCommand("git.stage".to_string()));
+}
+
+#[test]
+fn fr_604_hangul_choseong_matching() {
+    let list = items(&["설정", "새 터미널", "수정", "파일 열기"]);
+
+    // Choseong ㅅㅈ matches 설정 and 수정
+    let ranked = rank("ㅅㅈ", &list);
+    let matched_titles: Vec<String> = ranked.iter().map(|r| list[r.index].title.clone()).collect();
+    assert!(matched_titles.contains(&"설정".to_string()));
+    assert!(matched_titles.contains(&"수정".to_string()));
+    assert_eq!(ranked[0].matched, vec![0, 1]);
+
+    // Choseong ㅅㅌㅁㄴ matches 새 터미널
+    let ranked_term = rank("ㅅㅌㅁㄴ", &list);
+    assert_eq!(ranked_term.len(), 1);
+    assert_eq!(list[ranked_term[0].index].title, "새 터미널");
+    assert_eq!(ranked_term[0].matched, vec![0, 2, 3, 4]); // '새'(0), ' '(1), '터'(2), '미'(3), '널'(4)
+
+    // Helper checks
+    assert_eq!(choseong_of('설'), Some('ㅅ'));
+    assert_eq!(choseong_of('정'), Some('ㅈ'));
+    assert_eq!(choseong_of('A'), None);
+}
+
+#[test]
+fn fr_604_hangul_nfd_normalization_matching() {
+    let list = items(&["설정", "새 터미널"]);
+
+    // Decomposed NFD 설정 (\u{1109}\u{1165}\u{11AF}\u{110C}\u{1165}\u{11BC})
+    let nfd_query = "\u{1109}\u{1165}\u{11AF}\u{110C}\u{1165}\u{11BC}";
+    let ranked = rank(nfd_query, &list);
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(list[ranked[0].index].title, "설정");
+    assert_eq!(ranked[0].matched, vec![0, 1]);
+
+    // Decomposed NFD lead jamos (\u{1109}\u{110C} -> ㅅ, ㅈ)
+    let nfd_choseong = "\u{1109}\u{110C}";
+    let ranked_cho = rank(nfd_choseong, &list);
+    assert_eq!(ranked_cho.len(), 1);
+    assert_eq!(list[ranked_cho[0].index].title, "설정");
+
+    // normalize_hangul test
+    assert_eq!(normalize_hangul(nfd_query), "설정");
+    assert_eq!(normalize_hangul(nfd_choseong), "ㅅㅈ");
+}
+
+#[test]
+fn fr_604_ranking_cache_reuses_result() {
+    let list = items(&["alpha", "beta", "gamma"]);
+    let mut cache = RankingCache::new();
+
+    let first = cache.rank("al", &list).to_vec();
+    assert_eq!(first.len(), 1);
+    assert_eq!(list[first[0].index].title, "alpha");
+
+    // Second call with same query and slice length returns cached result
+    let second = cache.rank("al", &list);
+    assert_eq!(second, &first);
+
+    // Call with different query updates cache
+    let third = cache.rank("be", &list);
+    assert_eq!(third.len(), 1);
+    assert_eq!(list[third[0].index].title, "beta");
+}
+
+#[test]
+fn fr_604_prioritize_recent_files_zero_copy_when_empty() {
+    use std::borrow::Cow;
+    let list = items(&["src/main.rs", "src/lib.rs"]);
+    let empty_recent: Vec<String> = Vec::new();
+
+    let prioritized = prioritize_recent_files("", &list, &empty_recent);
+    assert!(matches!(prioritized, Cow::Borrowed(_)));
+    assert_eq!(prioritized.len(), 2);
+
+    let recent = vec!["src/lib.rs".to_string()];
+    let prioritized_recent = prioritize_recent_files("", &list, &recent);
+    assert!(matches!(prioritized_recent, Cow::Owned(_)));
+    assert_eq!(prioritized_recent[0].title, "src/lib.rs");
 }

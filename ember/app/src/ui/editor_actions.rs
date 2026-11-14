@@ -21,8 +21,6 @@ pub fn pending_issue(action: Action) -> Option<u32> {
     match action {
         // Code-OSS runs these through the debug service (Run Without Debugging, Stop).
         Action::RunConfig | Action::Stop => Some(445),
-        // A second terminal needs the terminal list (FR-P6).
-        Action::NewTerminal => Some(337),
         // The agent window on the right stripe.
         Action::Ask => Some(766),
         _ => None,
@@ -137,8 +135,7 @@ mod tests {
     fn fr_l31_15_pending_actions_name_their_issue() {
         assert_eq!(not_ready_notice(Action::RunConfig), "다시 실행: 준비 중입니다 (#445)");
         assert_eq!(not_ready_notice(Action::Stop), "중지: 준비 중입니다 (#445)");
-        assert_eq!(not_ready_notice(Action::NewTerminal), "새 터미널: 준비 중입니다 (#337)");
-        assert_eq!(not_ready_hint(Action::NewTerminal), "준비 중 (#337)");
+        assert_eq!(pending_issue(Action::NewTerminal), None);
         // Format Document is built by the language features (FR-L31.13), so it waits for nothing.
         assert_eq!(pending_issue(Action::Format), None);
         assert!(tool_window_notice(ToolWindow::Notifications).ends_with("(#448)"));

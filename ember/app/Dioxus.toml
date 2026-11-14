@@ -5,6 +5,9 @@
 
 [application]
 name = "Ember"
+# Android (FR-L36): Ember's own Activity (data directory, debug launch settings, back) in
+# place of the one the packager would write. See README.md, "Android".
+android_main_activity = "android/MainActivity.kt"
 
 [bundle]
 identifier = "dev.darkpyonix.ember"

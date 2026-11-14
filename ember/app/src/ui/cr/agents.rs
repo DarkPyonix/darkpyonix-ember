@@ -1057,7 +1057,7 @@ fn HarnessSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: 
             sample_pill(example && shim_count.is_some()),
         ),
         ("세션 메모리 한도 합", crate::ui::agents::kpi_text(mem_total), None),
-        ("마지막 감지", last_detect.clone(), sample_pill(example && checked.is_some() || live.sample)),
+        ("마지막 감지", last_detect, sample_pill(example && checked.is_some() || live.sample)),
     ];
     KpiGrid(&kpis, crate::ui::window_size::current_window_size().width_dp);
 

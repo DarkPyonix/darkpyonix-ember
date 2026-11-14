@@ -233,6 +233,7 @@ impl IdeLaunch {
             folder: l.folder.clone(),
             endpoint: ose.map(|o| host_port(&o.endpoint)),
             token: ose.map(|o| o.connection_token.clone()),
+            relay: ose.and_then(|o| o.relay.clone()).filter(|r| !r.is_empty()),
             // The relay path takes the computer's registry id. The display name (`l.computer.name`) is not
             // an id, and writing it into `/api/computers/{id}/terminal` asked for a computer that does not exist.
             computer: ember.map(|e| e.computer.clone()).filter(|c| !c.is_empty()),
@@ -251,6 +252,9 @@ pub struct EditorConnection {
     pub folder: String,
     pub endpoint: Option<String>,
     pub token: Option<String>,
+    /// The server's relay route to the OSE (`/api/computers/{id}/ide/relay/{launch}`, FR-W4),
+    /// which the editor dials instead of `endpoint` when it is set (FR-N9.1).
+    pub relay: Option<String>,
     /// The computer's id for the terminal relay.
     pub computer: Option<String>,
     /// The ember server's base URL for the terminal relay.
@@ -268,6 +272,10 @@ mod editor_connection_tests {
     use super::*;
 
     fn launch(ose: Option<(&str, &str)>) -> Result<IdeLaunch, String> {
+        launch_with_relay(ose, None)
+    }
+
+    fn launch_with_relay(ose: Option<(&str, &str)>, relay: Option<&str>) -> Result<IdeLaunch, String> {
         Ok(IdeLaunch {
             session: "s".into(),
             project: "p".into(),
@@ -286,6 +294,7 @@ mod editor_connection_tests {
                     server_url: Some("http://srv:7".into()),
                     ose: ose.map(|(e, t)| ember_client::wire::EmberOseConnection {
                         endpoint: e.into(),
+                        relay: relay.map(str::to_owned),
                         connection_token: t.into(),
                     }),
                 }),
@@ -302,6 +311,19 @@ mod editor_connection_tests {
         assert_eq!((c.project.as_str(), c.folder.as_str()), ("p", "/w"));
         assert_eq!(c.computer.as_deref(), Some("c"));
         assert_eq!(c.server_url.as_deref(), Some("http://srv:7"));
+    }
+
+    #[test]
+    fn fr_n9_editor_connection_carries_the_relay_path() {
+        let relay = "/api/computers/local/ide/relay/abc";
+        let c = IdeLaunch::editor_connection(Some(&launch_with_relay(Some(("http://127.0.0.1:9000/", "ph")), Some(relay))));
+        assert_eq!(c.relay.as_deref(), Some(relay));
+        assert_eq!(c.endpoint.as_deref(), Some("127.0.0.1:9000"));
+        assert_eq!(c.token.as_deref(), Some("ph"));
+        // An older server sends no relay; an empty one is no relay either.
+        assert_eq!(IdeLaunch::editor_connection(Some(&launch(Some(("http://127.0.0.1:9000/", "t"))))).relay, None);
+        let empty = IdeLaunch::editor_connection(Some(&launch_with_relay(Some(("http://127.0.0.1:9000/", "t")), Some(""))));
+        assert_eq!(empty.relay, None);
     }
 
     #[test]

@@ -20,6 +20,7 @@ pub mod demo;
 pub mod device_link;
 pub mod export;
 pub mod editor_host;
+pub mod editor_reach;
 pub mod ide;
 pub mod model;
 pub mod owner_claim;

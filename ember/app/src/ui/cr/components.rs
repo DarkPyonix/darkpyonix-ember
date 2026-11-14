@@ -441,8 +441,13 @@ pub struct FieldOptions {
     /// The room inside a `bare` field, `(horizontal, vertical)` in dp; `None` is none. The
     /// toolkit's bare field has no padding of its own, so this is the mockup's inset (the
     /// textarea's 2 px, `.inputbar input` 14 px). A vertical inset is taken from both sides and
-    /// also counts towards the horizontal one. Ignored when not `bare`.
+    /// also counts towards the horizontal one. A framed field defaults to [`FIELD_INSET`]
+    /// ([`FIELD_INSET_MULTILINE`] when multiline) and takes this in its place.
     pub inset: Option<(f32, f32)>,
+    /// A single-line field whose hint can be a long value (a remembered path or model): Ember
+    /// draws the hint itself on one line with an ellipsis, under the field while it is empty,
+    /// because the toolkit's placeholder always wraps (FR-L10.1, #878). Ignored when multiline.
+    pub one_line_hint: bool,
     pub height: Option<f32>,
     pub corner_radius: Option<f32>,
     pub background: Option<Paint>,
@@ -458,29 +463,56 @@ pub struct FieldOptions {
 /// The type step of a field's text and placeholder when no role is named (style.css `.field`).
 pub const FIELD_FONT: Fs = Fs::Md;
 
+/// The scale step a field's text and placeholder are set in: [`FIELD_FONT`], or the step Ember
+/// gives the named role ([`type_role_style`], `Label` 13 px), never the toolkit's own ladder.
+pub fn field_fs(role: Option<TypeRole>) -> Fs {
+    role.map_or(FIELD_FONT, |r| type_role_style(r).0)
+}
+
+/// The text inset of a framed single-line field, `(horizontal, vertical)`: style.css `.field`
+/// padding 0 12 (FR-L10.2, #878).
+pub const FIELD_INSET: (f32, f32) = (12.0, 0.0);
+/// The same for a multiline field: `textarea.field` padding 10 12.
+pub const FIELD_INSET_MULTILINE: (f32, f32) = (12.0, 10.0);
+
 /// A text field drawn with the tokens instead of the toolkit's filled style, which stays light
 /// in the dark scheme. Not `bare`: a `surface` field on a `line` border with the
-/// `corner-sm` radius and the 40 px control height (style.css `.field`). `bare`: see
-/// [`BareField`].
+/// `corner-sm` radius and the 40 px control height (style.css `.field`), its text 12 px from
+/// the frame. `bare`: see [`BareField`].
+///
+/// The frame is Ember's own row and the field inside it is bare (FR-L10.2, #878): the toolkit's
+/// framed field puts its text 8 px in, and a per-side inner padding would also have to keep a
+/// single line centred in the 40 px height, which `TextField` cannot do yet.
+/// TODO(compose-rust#771): move the frame and the 12 px inset onto the field once it takes
+/// per-side content padding; until then a click on the 12 px strip does not focus the field.
 pub fn EmberField(o: FieldOptions) {
     if o.bare {
         BareField(o);
         return;
     }
+    let mut o = o;
     let theme = ember_theme();
     let p = theme.palette;
+    let multiline = o.multiline;
+    let height = o.height.or(if multiline { None } else { Some(H_BTN) });
     // compose-rust v0.0.5 (#376) honours a TextField's own Background, Border and Shape in place
-    // of the design system's frame, which stays light in the dark scheme (#510). So every field
-    // names its frame: the token fill and line.
-    let modifier = with_height(with_weight(Modifier::new(), o.weight), o.height.or(if o.multiline { None } else { Some(H_BTN) }))
+    // of the design system's frame, which stays light in the dark scheme (#510). The frame row
+    // names the token fill and line instead.
+    let frame = with_height(with_weight(Modifier::new(), o.weight), height)
         .fill_max_width_if(o.fill_max_width)
-        .background(o.background.unwrap_or_else(|| paint(p.surface)))
-        .corner_radius(o.corner_radius.unwrap_or(CORNER_SM));
+        .background(o.background.take().unwrap_or_else(|| paint(p.surface)))
+        .corner_radius(o.corner_radius.take().unwrap_or(CORNER_SM));
     // A zero-width border is not sent: the desktop renderer passes it to Compose's
     // `Modifier.border(0.dp)`, which is `Dp.Hairline` and draws a 1 px line (FR-L10.2, #844).
-    let border_w = o.border_width.unwrap_or(1.0);
-    let modifier = if border_w > 0.0 { modifier.border(border_w, o.border_color.unwrap_or_else(|| paint(p.line))) } else { modifier };
-    FieldNode(o, modifier);
+    let border_w = o.border_width.take().unwrap_or(1.0);
+    let border_color = o.border_color.take();
+    let frame = if border_w > 0.0 { frame.border(border_w, border_color.unwrap_or_else(|| paint(p.line))) } else { frame };
+    let inset = o.inset.take().unwrap_or(if multiline { FIELD_INSET_MULTILINE } else { FIELD_INSET });
+    let inner = FieldOptions { bare: true, inset: Some(inset), height, weight: None, fill_max_width: true, ..o };
+    cu::Row()
+        .alignment(if multiline { Alignment::TopStart } else { Alignment::CenterStart })
+        .modifier(frame)
+        .content(move || BareField(inner));
 }
 
 /// A field inside a container that draws the frame (FR-L10.2, #844).
@@ -513,11 +545,56 @@ fn BareField(o: FieldOptions) {
             if side > 0.0 {
                 cu::Spacer().modifier(Modifier::new().width(side));
             }
-            FieldNode(o, inner);
+            if o.one_line_hint && !multiline {
+                OneLineHintField(o);
+            } else {
+                FieldNode(o, inner);
+            }
             if side > 0.0 {
                 cu::Spacer().modifier(Modifier::new().width(side));
             }
         });
+}
+
+/// A single-line field with its hint drawn by Ember: a one-line `muted` label that ends in an
+/// ellipsis, under the field, while the field is empty (FR-L10.1, #878). The toolkit draws its
+/// placeholder with no line limit, so a long path wrapped onto a second line the 40 px field
+/// clipped. TODO(compose-rust): a placeholder line limit on `TextField` (no issue yet) lets the
+/// toolkit draw it again.
+fn OneLineHintField(o: FieldOptions) {
+    use compose_rust::runtime::{mutable_state_of, remember};
+    let mut o = o;
+    let p = ember_theme().palette;
+    let starts_empty = o.text.as_deref().map_or(true, str::is_empty);
+    let empty = remember(|| mutable_state_of(starts_empty));
+    let hint = std::mem::take(&mut o.placeholder);
+    let mut user = o.on_value_change.take();
+    let typed = empty.clone();
+    o.on_value_change = Some(Box::new(move |t: String| {
+        typed.set(t.is_empty());
+        if let Some(f) = user.as_mut() {
+            f(t);
+        }
+    }));
+    let show = empty.get();
+    // The desktop renderer gives a weighted child at least its narrowest width, and a one-line
+    // label reports its whole line there: the hint took 708 of the 696 px share (r5 captures,
+    // 1440 and 390), ran under the trailing 12 px inset to the frame and showed no ellipsis.
+    // A zero width makes the column's narrowest width 0, so it takes its share; the box inside
+    // fills it and clips what is left.
+    cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(move || {
+        cu::Box()
+            .alignment(Alignment::CenterStart)
+            .modifier(Modifier::new().fill_max_width().clip(true))
+            .content(move || {
+                if show && !hint.is_empty() {
+                    // `WrapLabel` so a path with no space ellipsises inside the box instead of
+                    // asking for its whole width.
+                    WrapLabel(&hint, FIELD_FONT, Weight::Regular, Some(paint(p.muted)), Some(1));
+                }
+                FieldNode(o, Modifier::new().fill_max_width());
+            });
+    });
 }
 
 /// The toolkit field with every option but the frame, which `modifier` carries.
@@ -534,12 +611,16 @@ fn FieldNode(o: FieldOptions, modifier: Modifier) {
     if let Some(t) = o.text {
         f = f.text(t);
     }
-    // FR-L10.2 (#844): 14 px text and placeholder (style.css `.field`) unless the caller names a
-    // role; an explicit `font_size` would override the role's size, so it is sent only without one.
-    match o.type_role {
-        Some(r) => f = f.type_role(r),
-        None => f = f.font_size(FIELD_FONT.size()),
+    // FR-L10.2 (#844): the text and the placeholder take Ember's scale step, 14 px
+    // (style.css `.field`) or the named role's step ([`field_fs`]). The role alone is not
+    // enough: the toolkit sizes it from the Cupertino ladder (`Label` 15 sp at -0.24, `Body` 17
+    // at -0.41), so the 13 px compact search drew 15 and a 14 px field kept Body's -0.41
+    // tracking. Size, line height and tracking are always sent; the role stays for its face.
+    let fs = field_fs(o.type_role);
+    if let Some(r) = o.type_role {
+        f = f.type_role(r);
     }
+    f = f.font_size(fs.size()).line_height(fs.line_height()).letter_spacing(fs.letter_spacing());
     // The node's transparent fill alone still left the toolkit's frame drawn inside the
     // composer (H2, SE10, CH1); `bare` drops it.
     if o.bare {
@@ -768,8 +849,7 @@ pub fn ChoiceButton(
     on_click: impl FnMut() + 'static,
 ) {
     let theme = ember_theme();
-    let kind = if chosen { ButtonKind::Primary } else { ButtonKind::Default };
-    let s = button_style_for(kind, small, enabled, theme.palette);
+    let s = choice_style(chosen, small, enabled, theme.palette);
     let state = match choice {
         Choice::Toggle => Modifier::new().selected(chosen),
         Choice::Radio => Modifier::new().role(Role::RadioButton).checked(chosen),
@@ -791,6 +871,17 @@ pub fn ChoiceButton(
             )
             .on_click(on_click),
     );
+}
+
+/// A [`ChoiceButton`]'s look, the mockup's `.seg button` (FR-L10.2, #878): the chosen one is
+/// `Primary` (`ink`), the others `Default` (`surface` on a 1 px `line` border) with `text-2`
+/// text, both with the 14/500 (13/500 small) label.
+pub fn choice_style(chosen: bool, small: bool, enabled: bool, p: &Palette) -> ButtonStyle {
+    if chosen {
+        button_style_for(ButtonKind::Primary, small, enabled, p)
+    } else {
+        ButtonStyle { text: p.text_2, ..button_style_for(ButtonKind::Default, small, enabled, p) }
+    }
 }
 
 /// How a [`ChoiceButton`] tells assistive technology that it is the chosen one.
@@ -1186,6 +1277,12 @@ pub fn search_field_padding(height: f32) -> f32 {
     if height < H_BTN { 12.0 } else { 16.0 }
 }
 
+/// The type role of a search field's text: `Label` (13 px) at the compact 36 px height, none
+/// (the 14 px field size, [`FIELD_FONT`]) at the 40 px `.searchbox` height (FR-L10.2, #844).
+pub fn search_field_role(height: f32) -> Option<TypeRole> {
+    if height < H_BTN { Some(TypeRole::Label) } else { None }
+}
+
 /// The visible gap between the magnifier and the typed text (`.searchbox` gap 8).
 pub const SEARCH_FIELD_GAP: f32 = 8.0;
 /// The leading inset the field adds before its text. The v0.0.6 framed field had about 12 px,
@@ -1214,7 +1311,8 @@ pub fn search_field_offset() -> f32 {
 /// A search box: white fill, 1 px border, pill radius, a leading magnifier and a bare field that
 /// takes the rest of the row. Width intent: it fills its column (`fill_max_width`); the mockup's
 /// 280/220 px is for the standalone box, which a caller gets by constraining the parent. The
-/// compact (36 px) field uses the `Label` role (Fs::Sm, 13 px) like the mockup's session field. The field is uncontrolled and keeps its hint `placeholder`.
+/// compact (36 px) field uses the `Label` role (Fs::Sm, 13 px) like the mockup's session field; the
+/// 40 px one the 14 px field text, as `.searchbox input` inherits the body size. The field is uncontrolled and keeps its hint `placeholder`.
 /// v0.0.7: #376 and #374 fixed (`TextField` takes the node's background, border and shape, and
 /// `text`); workaround kept until checked on a display (the bare field inside Ember's own pill
 /// must be compared with the mockup before the frame moves onto the field).
@@ -1242,7 +1340,9 @@ pub fn SearchField(placeholder: &str, height: f32, on_change: impl FnMut(String)
             // the bare field's own row centres the placeholder in the box's height (#844).
             EmberField(FieldOptions {
                 bare: true,
-                type_role: Some(TypeRole::Label), // one 13 dp size for every search field (mockup fs-sm)
+                // `.searchbox input` inherits the 14 px body text; only the 36 px session field
+                // (`.sside .st-q input`) is 13 (#844: every search placeholder drew 13).
+                type_role: search_field_role(height),
                 height: Some(height),
                 weight: Some(1.0),
                 placeholder: placeholder.clone(),
@@ -1271,6 +1371,22 @@ mod tests {
     fn fr_l10_1_search_field_padding_is_16_and_12_when_compact() {
         assert_eq!(search_field_padding(H_BTN), 16.0);
         assert_eq!(search_field_padding(SEARCH_FIELD_H_COMPACT), 12.0);
+    }
+
+    #[test]
+    fn fr_l10_2_search_text_is_14_and_13_when_compact() {
+        assert_eq!(search_field_role(H_BTN), None);
+        assert_eq!(search_field_role(SEARCH_FIELD_H_COMPACT), Some(TypeRole::Label));
+        let wide = emitted_props(|| SearchField("팀원 검색", H_BTN, |_| {}));
+        assert!(wide.iter().any(|m| m == "FontSize=Float(14.0)"), "{wide:?}");
+        let compact = emitted_props(|| SearchField("세션 검색", SEARCH_FIELD_H_COMPACT, |_| {}));
+        assert!(!compact.iter().any(|m| m == "FontSize=Float(14.0)"), "{compact:?}");
+        // Review r5: without an explicit size the compact `Label` field drew Cupertino's 15 sp,
+        // wider than the 14 px ones; it sends 13 itself.
+        assert!(compact.iter().any(|m| m == "FontSize=Float(13.0)"), "{compact:?}");
+        for props in [&wide, &compact] {
+            assert!(props.iter().any(|m| m == "LetterSpacing=Float(0.0)"), "{props:?}");
+        }
     }
 
     #[test]
@@ -1371,9 +1487,110 @@ mod tests {
     #[test]
     fn fr_l10_2_framed_field_never_sends_a_zero_border() {
         let nodes = emitted_nodes(|| EmberField(FieldOptions { border_width: Some(0.0), ..Default::default() }));
+        for n in &nodes {
+            assert!(!n.mods.iter().any(|m| m.starts_with("Border")), "{} {:?}", n.widget, n.mods);
+        }
         let field = the(&nodes, "TextField");
-        assert!(!field.mods.iter().any(|m| m.starts_with("Border")), "{:?}", field.mods);
-        assert!(field.mods.iter().any(|m| m.starts_with("Background")), "{:?}", field.mods);
+        let frame = parent_of(&nodes, parent_of(&nodes, field));
+        assert!(frame.mods.iter().any(|m| m.starts_with("Background")), "{:?}", frame.mods);
+    }
+
+    #[test]
+    fn fr_l10_2_framed_field_draws_the_frame_and_insets_its_text_12() {
+        // style.css `.field`: 40 px, surface fill, 1 px line, corner-sm, padding 0 12 (#878: the
+        // toolkit's framed field put the text 8 px in).
+        let nodes = emitted_nodes(|| EmberField(FieldOptions { fill_max_width: true, ..Default::default() }));
+        let field = the(&nodes, "TextField");
+        assert!(field.props.iter().any(|p| p == "Bare=Bool(true)"), "{:?}", field.props);
+        for m in ["Border", "Background", "Shape", "Height"] {
+            assert!(!field.mods.iter().any(|x| x.starts_with(m)), "the field itself sends no {m}: {:?}", field.mods);
+        }
+        let inset_row = parent_of(&nodes, field);
+        assert_eq!(inset_row.widget, "Row");
+        assert!(inset_row.mods.iter().any(|m| m == "Height(40.0)"), "{:?}", inset_row.mods);
+        let spacers: Vec<_> = nodes.iter().filter(|n| n.widget == "Spacer" && n.parent == Some(inset_row.id)).collect();
+        assert_eq!(spacers.len(), 2, "12 px before and after the text");
+        assert!(spacers.iter().all(|s| s.mods.iter().any(|m| m == "Width(12.0)")));
+        let frame = parent_of(&nodes, inset_row);
+        assert_eq!(frame.widget, "Row");
+        assert!(frame.mods.iter().any(|m| m == "Height(40.0)"), "{:?}", frame.mods);
+        assert!(frame.mods.iter().any(|m| m == "FillMaxWidth"), "{:?}", frame.mods);
+        assert!(frame.mods.iter().any(|m| m.starts_with("Background")), "{:?}", frame.mods);
+        assert!(frame.mods.iter().any(|m| m.starts_with("Border")), "{:?}", frame.mods);
+        assert!(frame.mods.iter().any(|m| m.starts_with("Shape")), "{:?}", frame.mods);
+        let centre = row_alignment(|| cu::Row().alignment(Alignment::CenterStart).content(|| {}));
+        assert!(has_props(frame, &centre), "{:?} has {centre:?}", frame.props);
+        assert_eq!(FIELD_INSET, (12.0, 0.0));
+    }
+
+    #[test]
+    fn fr_l10_1_one_line_hint_is_an_ellipsised_label_under_an_empty_field() {
+        // #878: the 새 세션 folder hint (a long path) wrapped onto a clipped second line.
+        let nodes = emitted_nodes(|| {
+            EmberField(FieldOptions {
+                fill_max_width: true,
+                one_line_hint: true,
+                placeholder: "/Users/someone/work/a-very-long-folder/with/many/parts".to_string(),
+                ..Default::default()
+            })
+        });
+        let field = the(&nodes, "TextField");
+        assert!(
+            !field.props.iter().any(|p| p.starts_with("Placeholder=") && p.contains("/Users")),
+            "the toolkit placeholder is not sent: {:?}",
+            field.props
+        );
+        let hint = nodes
+            .iter()
+            .find(|n| n.widget == "Text" && n.props.iter().any(|p| p.contains("/Users/someone")))
+            .expect("the hint label");
+        assert!(hint.props.iter().any(|p| p == "MaxLines=Integer(1)"), "{:?}", hint.props);
+        assert!(hint.props.iter().any(|p| p.starts_with("Overflow=")), "{:?}", hint.props);
+        // The hint and the field share one box, the hint first so the field is on top.
+        let stack = parent_of(&nodes, field);
+        assert_eq!(stack.widget, "Box");
+        assert!(stack.mods.iter().any(|m| m.starts_with("Clip")), "{:?}", stack.mods);
+        assert_eq!(hint.parent, Some(stack.id));
+        // The share of the row is taken by a column (#878: a weighted Box overran the inset).
+        let share = parent_of(&nodes, stack);
+        assert_eq!(share.widget, "Column");
+        assert!(share.mods.iter().any(|m| m == "Weight(1.0)"), "{:?}", share.mods);
+        assert!(share.mods.iter().any(|m| m == "Width(0.0)"), "no narrowest width: {:?}", share.mods);
+        assert!(hint.id < field.id, "the hint is under the field");
+        // A field that starts with text shows no hint.
+        let nodes = emitted_nodes(|| {
+            EmberField(FieldOptions { one_line_hint: true, placeholder: "힌트".into(), text: Some("값".into()), ..Default::default() })
+        });
+        assert!(!nodes.iter().any(|n| n.widget == "Text" && n.props.iter().any(|p| p.contains("힌트"))));
+    }
+
+    #[test]
+    fn fr_l10_1_new_session_long_hints_stay_on_one_line() {
+        let src = include_str!("new_session.rs");
+        for ph in ["\"/path/to/project\"", "\"에이전트 기본값\""] {
+            let at = src.find(ph).unwrap_or_else(|| panic!("{ph}"));
+            let opts = &src[src[..at].rfind("EmberField(FieldOptions {").expect("field")..at];
+            assert!(opts.contains("one_line_hint: true"), "{ph}: {opts}");
+        }
+    }
+
+    #[test]
+    fn fr_l10_2_framed_multiline_field_insets_10_and_12() {
+        // style.css `textarea.field` padding 10 12: 10 all round, plus 2 more at each side.
+        let nodes = emitted_nodes(|| {
+            EmberField(FieldOptions { fill_max_width: true, multiline: true, height: Some(120.0), ..Default::default() })
+        });
+        let field = the(&nodes, "TextField");
+        assert!(field.mods.iter().any(|m| m == "FillMaxHeight"), "{:?}", field.mods);
+        let inset_row = parent_of(&nodes, field);
+        assert!(inset_row.mods.iter().any(|m| m == "Padding(10.0)"), "{:?}", inset_row.mods);
+        let spacers: Vec<_> = nodes.iter().filter(|n| n.widget == "Spacer" && n.parent == Some(inset_row.id)).collect();
+        assert!(spacers.len() == 2 && spacers.iter().all(|s| s.mods.iter().any(|m| m == "Width(2.0)")));
+        let frame = parent_of(&nodes, inset_row);
+        assert!(frame.mods.iter().any(|m| m == "Height(120.0)"), "{:?}", frame.mods);
+        let top = row_alignment(|| cu::Row().alignment(Alignment::TopStart).content(|| {}));
+        assert!(has_props(frame, &top), "{:?} has {top:?}", frame.props);
+        assert_eq!(FIELD_INSET_MULTILINE, (12.0, 10.0));
     }
 
     #[test]
@@ -1445,13 +1662,15 @@ mod tests {
     #[test]
     fn fr_l10_2_bare_callers_name_the_mockup_inset() {
         // `.inputbar input` 0 14 (channels.css), the composer textarea's 2 px (home.css), and the
-        // session composer's 14 px less the 12 px card padding plus the textarea's 2 px.
+        // session composer's 14 px less its 12 px card padding (#844: the text sat 16 px in at
+        // 1440 and 390; `.composer` padding is 14 at every width).
         let channels = include_str!("channels.rs");
         let at = channels.find("placeholder: \"메시지 입력\"").expect("channel composer field");
         let opts = &channels[channels[..at].rfind("EmberField(FieldOptions {").expect("field")..at];
         assert!(opts.contains("inset: Some((14.0, 0.0))"), "{opts}");
         assert!(include_str!("home.rs").contains("inset: Some((2.0, 2.0))"));
-        assert!(include_str!("conversation.rs").contains("inset: Some((4.0, 0.0))"));
+        assert!(include_str!("conversation.rs").contains("inset: Some((2.0, 0.0))"));
+        assert!(!include_str!("conversation.rs").contains("inset: Some((4.0, 0.0))"));
     }
 
     #[test]
@@ -1662,6 +1881,41 @@ mod tests {
     }
 
     #[test]
+    fn fr_l10_2_choice_is_the_seg_button() {
+        for p in [&LIGHT, &DARK] {
+            let off = choice_style(false, true, true, p);
+            assert_eq!((off.height, off.fill, off.border, off.text), (32.0, p.surface, p.line, p.text_2));
+            assert_eq!((off.fs.size(), off.weight.value()), (13.0, 500));
+            let on = choice_style(true, true, true, p);
+            assert_eq!((on.fill, on.border, on.text), (p.ink, p.ink, p.ink_text));
+        }
+        let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        let choice = production.split("pub fn ChoiceButton(").nth(1).unwrap();
+        assert!(choice.contains("choice_style(chosen, small, enabled, theme.palette)"));
+        assert!(choice.contains(".border(1.0, paint(s.border))"));
+    }
+
+    #[test]
+    fn fr_l10_2_choice_call_sites_are_seg_buttons() {
+        let settings = include_str!("settings.rs");
+        let settings = settings.split("#[cfg(test)]").next().unwrap();
+        for call in [
+            "ChoiceButton(pref.label(), Choice::Radio, current_theme == pref, true, true,",
+            "ChoiceButton(km.label(), Choice::Radio, current_keymap == km, true, true,",
+            "ChoiceButton(label, Choice::Radio, selected, true, true,",
+        ] {
+            assert!(settings.contains(call), "{call}");
+        }
+        assert!(!settings.contains("FilterChip("), "the settings choices are not filter chips");
+        let agents = include_str!("agents.rs");
+        let seg = agents.split("fn SegGroup<").nth(1).unwrap();
+        let seg = &seg[..seg.find("\n}\n").unwrap()];
+        assert!(seg.contains("ChoiceButton(label, Choice::Radio, selected, true, true,"), "{seg}");
+        assert!(seg.contains(".spacing(SP[1])"), "`.seg` gap 8: {seg}");
+        assert!(!seg.contains("cu::Button("), "{seg}");
+    }
+
+    #[test]
     fn fr_l10_2_app_button_sends_its_label_size_and_weight() {
         let big = emitted_props(|| AppButton("저장", None, ButtonKind::Primary, false, true, false, || {}));
         assert!(big.iter().any(|m| m == "FontSize=Float(14.0)"), "{big:?}");
@@ -1682,13 +1936,45 @@ mod tests {
     fn fr_l10_2_field_text_is_14_and_bare_drops_the_toolkit_frame() {
         let plain = emitted_props(|| EmberField(FieldOptions { ..Default::default() }));
         assert!(plain.iter().any(|m| m == "FontSize=Float(14.0)"), "{plain:?}");
-        assert!(!plain.iter().any(|m| m.starts_with("Bare=")), "a framed field sends no Bare: {plain:?}");
+        // #878: a framed field is a bare field inside Ember's own `.field` frame, so the toolkit
+        // frame (and its 8 px inset) is never drawn.
+        assert!(plain.iter().any(|m| m == "Bare=Bool(true)"), "{plain:?}");
         let bare = emitted_props(|| EmberField(FieldOptions { bare: true, multiline: true, ..Default::default() }));
         assert!(bare.iter().any(|m| m == "Bare=Bool(true)"), "{bare:?}");
         assert!(bare.iter().any(|m| m == "FontSize=Float(14.0)"), "{bare:?}");
-        // A named role keeps its own size: no explicit FontSize overrides it.
+        // A named role takes Ember's step for it, never the toolkit's Cupertino size.
         let mono = emitted_props(|| EmberField(FieldOptions { type_role: Some(TypeRole::Mono), ..Default::default() }));
-        assert!(!mono.iter().any(|m| m.starts_with("FontSize=")), "{mono:?}");
+        assert!(mono.iter().any(|m| m == "FontSize=Float(12.0)"), "{mono:?}");
+    }
+
+    #[test]
+    fn fr_l10_2_field_sends_ember_size_line_and_tracking_for_its_placeholder() {
+        // Review r5: the toolkit sets the placeholder in the field's own style (HostTextField.kt
+        // `textStyle.copy(color = ...)`), whose size and tracking come from the Cupertino ladder
+        // unless sent: `Label` drew 15 sp at -0.24 and a 14 px field kept Body's -0.41.
+        let cases: [(Option<TypeRole>, f64, f64); 3] =
+            [(None, 14.0, 22.0), (Some(TypeRole::Label), 13.0, 20.0), (Some(TypeRole::Mono), 12.0, 18.0)];
+        for (role, size, line) in cases {
+            for bare in [false, true] {
+                let props = field_props(role, bare);
+                assert!(props.iter().any(|m| *m == format!("FontSize=Float({size:?})")), "{role:?} {props:?}");
+                assert!(props.iter().any(|m| *m == format!("LineHeight=Float({line:?})")), "{role:?} {props:?}");
+                assert!(props.iter().any(|m| m == "LetterSpacing=Float(0.0)"), "{role:?} {props:?}");
+            }
+        }
+        assert_eq!(field_fs(None), FIELD_FONT);
+        assert_eq!(field_fs(Some(TypeRole::Label)).size(), 13.0);
+    }
+
+    fn field_props(role: Option<TypeRole>, bare: bool) -> Vec<String> {
+        match (role, bare) {
+            (None, false) => emitted_props(|| EmberField(FieldOptions { placeholder: "검색".into(), ..Default::default() })),
+            (None, true) => emitted_props(|| EmberField(FieldOptions { bare: true, placeholder: "검색".into(), ..Default::default() })),
+            (Some(TypeRole::Label), false) => emitted_props(|| EmberField(FieldOptions { type_role: Some(TypeRole::Label), ..Default::default() })),
+            (Some(TypeRole::Label), true) => emitted_props(|| EmberField(FieldOptions { bare: true, type_role: Some(TypeRole::Label), ..Default::default() })),
+            (_, false) => emitted_props(|| EmberField(FieldOptions { type_role: Some(TypeRole::Mono), ..Default::default() })),
+            (_, true) => emitted_props(|| EmberField(FieldOptions { bare: true, type_role: Some(TypeRole::Mono), ..Default::default() })),
+        }
     }
 
     #[test]
@@ -1966,7 +2252,8 @@ mod tests {
             let allowed_buttons = match name {
                 // AppButton, IconButton, PickChip, and ChoiceButton (FR-L10, compose-rust#473).
                 "components.rs" => 4,
-                "agents.rs" => 2,
+                // SegGroup moved onto ChoiceButton (#878).
+                "agents.rs" => 1,
                 "files.rs" => 1,
                 "home.rs" => 0,
                 "launcher.rs" => 1,
@@ -1996,7 +2283,8 @@ mod tests {
         assert!(!production.contains(concat!("TODO(compose-rust#", "444)")));
         // Framed and bare fields both build their TextField in FieldNode (#844).
         let field = production.split("pub fn EmberField(").nth(1).unwrap();
-        assert!(field.contains("FieldNode(o, modifier)"));
+        let field = field.split("\nfn ").next().unwrap();
+        assert!(field.contains("BareField(inner)"), "a framed field is a bare one in Ember's frame (#878)");
         let bare = production.split("fn BareField(").nth(1).unwrap();
         assert!(bare.split("\nfn ").next().unwrap().contains("FieldNode(o, inner)"));
         let node = production.split("fn FieldNode(").nth(1).unwrap();

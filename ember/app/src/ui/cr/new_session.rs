@@ -305,6 +305,7 @@ fn NewSessionForm(preset: &str) {
                     let v = cwd.clone();
                     EmberField(FieldOptions {
                         fill_max_width: true,
+                        one_line_hint: true,
                         placeholder: if default_cwd.is_empty() { "/path/to/project".to_string() } else { default_cwd.clone() },
                         on_value_change: Some(Box::new(move |t| v.set(t))),
                         ..Default::default()
@@ -314,6 +315,7 @@ fn NewSessionForm(preset: &str) {
                     let v = model_text.clone();
                     EmberField(FieldOptions {
                         fill_max_width: true,
+                        one_line_hint: true,
                         placeholder: if default_model.is_empty() { "에이전트 기본값".to_string() } else { default_model.clone() },
                         on_value_change: Some(Box::new(move |t| v.set(t))),
                         ..Default::default()

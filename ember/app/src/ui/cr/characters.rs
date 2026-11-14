@@ -248,7 +248,8 @@ mod tests {
         assert_eq!(mods.iter().filter(|m| *m == "Height(144.0)").count(), CharStyle::ALL.len(), "{mods:?}");
         assert!(mods.iter().filter(|m| m.starts_with("Border")).count() >= CharStyle::ALL.len(), "{mods:?}");
         assert!(mods.iter().any(|m| m == "Padding(12.0)"), "{mods:?}");
-        assert!(mods.iter().any(|m| m.starts_with("Size")), "the 56 px art box: {mods:?}");
+        // `Modifier::size` is sent as a width and a height.
+        assert!(mods.windows(2).any(|w| w[0] == "Width(56.0)" && w[1] == "Height(56.0)"), "the 56 px art box: {mods:?}");
         let buttons = batch
             .iter()
             .filter(|m| matches!(m, Mutation::Create { widget, .. } if format!("{widget:?}") == "Button"))

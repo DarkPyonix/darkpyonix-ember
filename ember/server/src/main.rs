@@ -71,6 +71,11 @@ use ember_server::store::Store;
 ///   API is also served on transport service `ember-server` to allowed devices (FR-N3,
 ///   `/api/devices`, managed on the TCP listener only)
 /// - `EMBER_RELAY_URL`: relay server(s) for the transport (overrides the hub's relay)
+/// - `EMBER_TRANSPORT_LISTEN`: fixed `ip:port` the transport binds (letify: its TCP listener;
+///   iroh: its UDP socket; unset: a random port). It is the device-key gated transport door, so
+///   `0.0.0.0:<port>` is fine (D37 covers the HTTP listeners). A bad value is a startup error.
+///   When set, the server also prints `ember server device address: <peer id>@<host>:<port>`
+///   for the app (FR-N9, #863)
 /// - `EMBER_SERVER_RELAY_PORT`: letify relay TCP and QAD UDP port (default 7443)
 /// - `EMBER_SERVER_RELAY=off`: disable the automatic letify relay and QAD roles
 /// - `EMBER_LETIFY_RELAY_LISTEN`, `EMBER_LETIFY_QAD_LISTEN`: override role addresses
@@ -239,7 +244,9 @@ async fn serve_main() -> anyhow::Result<()> {
             Some(h) if registered => h.registration().ok().flatten().and_then(|r| r.active_token()),
             _ => None,
         };
-        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), registered, token, device_token))
+        // A bad EMBER_TRANSPORT_LISTEN stops the start here (#863).
+        let listen = server_transport::listen_from_env()?;
+        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), registered, token, device_token)?)
             .await?;
         if let Some(h) = &hub {
             h.attach_transport(t.clone());
@@ -261,6 +268,10 @@ async fn serve_main() -> anyhow::Result<()> {
         // Printed (not only logged): the peer id goes into each node's allowed peers.
         println!("ember server peer id: {}", t.peer_id());
         println!("ember server peer addr: {}", serde_json::to_string(&t.local_addr())?);
+        // With a fixed transport port, the address a device keeps across restarts (#863).
+        if let Some(line) = server_transport::device_address_line(listen, &t.local_addr()) {
+            println!("{line}");
+        }
         Some(ServerTransport::new(t))
     } else {
         None

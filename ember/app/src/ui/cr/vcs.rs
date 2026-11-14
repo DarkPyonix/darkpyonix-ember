@@ -498,7 +498,10 @@ pub fn remote_button_labels() -> [&'static str; 4] {
     ["가져오기", "내려받기", "올리기", "스태시"]
 }
 
-/// A 32 px circle icon button with a 44 dp hit target, named for assistive tech via `FocusOverlay`.
+/// A 32 px circle icon button in a 44 dp box that takes the press, named for assistive tech via
+/// `FocusOverlay`. The box asks for 44 by 44 and takes what its row gives: a row with a height
+/// (the 원격 cell's 36, the files header's 52) keeps that height, and the box is then as tall as
+/// the row at most (FR-L19.1, #415; a press area larger than the row waits for compose-rust#472).
 fn CircleIconButton(
     icon: &'static str,
     label: &str,
@@ -801,7 +804,9 @@ fn RepoBarWithActions(
             let remote_actions = remote_actions.clone();
             cu::Column().modifier(m.padding(pad)).spacing(SP[1]).content(move || {
                 SmallNote("원격 origin");
-                cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(10.0).content(move || {
+                // The pickers' height (FR-L19.1, #415): the 44 dp boxes of the round buttons do not
+                // make this cell's value line taller than the other two.
+                cu::Row().modifier(Modifier::new().fill_max_width().height(VCS_SEL_H)).alignment(Alignment::CenterStart).spacing(10.0).content(move || {
                     RemoteControls(action, has, remote_actions.clone());
                 });
                 RemoteSubNote(snap);
@@ -1308,22 +1313,32 @@ fn FilesHeader(
     let st_toggle = staging.clone();
     let d_toggle = diffs.to_vec();
     let all = folder_check(all_checks);
-    cu::Row().modifier(Modifier::new().fill_max_width().height(48.0).padding(SP[2])).alignment(Alignment::CenterStart).spacing(SP[1]).content(move || {
-        StageCheck(all, STAGE_CHECK_SIDE, 24.0, move || {
-            let mut s = st_toggle.get();
-            s.toggle_all(&d_toggle);
-            st_toggle.set(s);
+    // `.vcs-ph{min-height:52px;padding:10px var(--sp4)}`: 52 high with 16 at the sides and no
+    // padding above or below, so the stash button's 44 dp box fits whole (FR-L19.1, #415: at 48
+    // with 12 all round the row had 24 for it).
+    cu::Row().modifier(Modifier::new().fill_max_width().height(VCS_FILES_HEAD_ROW_H)).alignment(Alignment::CenterStart).content(move || {
+        cu::Spacer().modifier(Modifier::new().width(VCS_FILES_HEAD_PAD_X));
+        cu::Row().modifier(Modifier::new().weight(1.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(move || {
+            StageCheck(all, STAGE_CHECK_SIDE, 24.0, move || {
+                let mut s = st_toggle.get();
+                s.toggle_all(&d_toggle);
+                st_toggle.set(s);
+            });
+            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+            Label(&format!("변경 파일 {}", diffs_len), Fs::Sm, Weight::Semibold, Some(paint(p.text)), Some(1));
+            // The note takes the room that is left and no more, so the button after it keeps
+            // its width (unweighted, the note took the row and the button was not drawn).
+            cu::Box().modifier(Modifier::new().weight(1.0)).alignment(Alignment::CenterEnd).content(|| {
+                Label(STASH_NOW_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
+            });
+            CircleIconButton(ICON_STASH_SVG, remote_button_labels()[3], move || {
+                match &stash {
+                    Some(a) => a.stash_now(diffs_len),
+                    None => notice::post(soon_line("스태시")),
+                }
+            });
         });
-        cu::Spacer().modifier(Modifier::new().width(SP[0]));
-        Label(&format!("변경 파일 {}", diffs_len), Fs::Sm, Weight::Semibold, Some(paint(p.text)), Some(1));
-        cu::Spacer().modifier(Modifier::new().weight(1.0));
-        Label(STASH_NOW_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
-        CircleIconButton(ICON_STASH_SVG, remote_button_labels()[3], move || {
-            match &stash {
-                Some(a) => a.stash_now(diffs_len),
-                None => notice::post(soon_line("스태시")),
-            }
-        });
+        cu::Spacer().modifier(Modifier::new().width(VCS_FILES_HEAD_PAD_X));
     });
 }
 
@@ -1335,8 +1350,11 @@ pub const VCS_TREE_MAX_H: f32 = 360.0;
 pub const VCS_TREE_MAX_H_STACKED: f32 = 260.0;
 /// The least the tree keeps when the pane is short: three rows.
 pub const VCS_TREE_MIN_H: f32 = 3.0 * VCS_TREE_ROW_H + 2.0 * VCS_TREE_PAD;
+/// The files header's row (`.vcs-ph{min-height:52px}`) and its side padding (`var(--sp4)`).
+pub const VCS_FILES_HEAD_ROW_H: f32 = 52.0;
+pub const VCS_FILES_HEAD_PAD_X: f32 = 16.0;
 /// The files header (`FilesHeader`) and the two 1 px rules of the changes card.
-pub const VCS_FILES_HEAD_H: f32 = 48.0 + 2.0;
+pub const VCS_FILES_HEAD_H: f32 = VCS_FILES_HEAD_ROW_H + 2.0;
 /// The commit box as drawn: 12 px padding, the 40 px summary, the 64 px description, the 32 px
 /// amend row, the 40 px button and the 18 px note, 8 apart. An estimate for the tree's height
 /// only: an amend warning adds lines the outer scroll still reaches.
@@ -1825,10 +1843,7 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
                 PaneTabs(Section::Changes, tab, move |t| on_tab_pick(t));
                 match tab.unwrap_or(PaneTab::Files) {
                     PaneTab::Diff => DiffPane(&diffs, sel, &staging, diff_width),
-                    PaneTab::Commit => {
-                        CommitPane(&snap.branch, staged_files, &summary, &body, &amend, commit.clone());
-                        cu::Spacer().modifier(Modifier::new().height(super::routines::compact_bottom_clearance()));
-                    }
+                    PaneTab::Commit => CommitPane(&snap.branch, staged_files, &summary, &body, &amend, commit.clone()),
                     _ => {
                         VcsCard(move || {
                             cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
@@ -1839,6 +1854,9 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
                         });
                     }
                 }
+                // Every tab ends clear of the floating tab bar, not only 커밋: the last tree row
+                // and the last diff line scroll above it (FR-L19.1, #415).
+                cu::Spacer().modifier(Modifier::new().height(super::routines::compact_bottom_clearance()));
             });
         }
     }
@@ -6715,6 +6733,8 @@ mod tests {
         id: u32,
         widget: String,
         parent: Option<u32>,
+        /// Its place among its parent's children, as inserted.
+        at: u32,
         mods: Vec<String>,
         props: Vec<String>,
     }
@@ -6726,11 +6746,12 @@ mod tests {
         for m in batch.iter() {
             match m {
                 Mutation::Create { node_id, widget } => {
-                    nodes.push(N { id: *node_id, widget: format!("{widget:?}"), parent: None, mods: Vec::new(), props: Vec::new() })
+                    nodes.push(N { id: *node_id, widget: format!("{widget:?}"), parent: None, at: 0, mods: Vec::new(), props: Vec::new() })
                 }
-                Mutation::Insert { parent_id, node_id, .. } => {
+                Mutation::Insert { parent_id, node_id, index } => {
                     if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
                         n.parent = Some(*parent_id);
+                        n.at = *index;
                     }
                 }
                 Mutation::SetModifier { node_id, modifier, .. } => {
@@ -6858,13 +6879,13 @@ mod tests {
         assert_eq!(tree_cap(VCS_TREE_MAX_H, None), 360.0, "the mockup's cap on the page");
         assert_eq!(tree_cap(VCS_TREE_MAX_H_STACKED, None), 260.0, "stacked panes, 900 and below");
         assert_eq!(VCS_COMMIT_BOX_EST_H, 250.0);
-        // The sheet at 1440 x 900: 749 under the header, 585 for the panes; the header (50)
-        // and the commit box (250) leave the tree 285, so the card ends with the pane.
+        // The sheet at 1440 x 900: 749 under the header, 585 for the panes; the header (54)
+        // and the commit box (250) leave the tree 281, so the card ends with the pane.
         assert!((vcs_sheet_body_height(1440.0, 900.0) - 749.0).abs() < 0.01);
         assert_eq!(sheet_pane_height(749.0, 16.0), 585.0);
-        assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(585.0)), 285.0);
-        assert!(tree_height(10) > 285.0, "the r8 sample's ten rows scroll inside the cap");
-        assert_eq!(VCS_FILES_HEAD_H + 285.0 + VCS_COMMIT_BOX_EST_H, 585.0);
+        assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(585.0)), 281.0);
+        assert!(tree_height(10) > 281.0, "the r8 sample's ten rows scroll inside the cap");
+        assert_eq!(VCS_FILES_HEAD_H + 281.0 + VCS_COMMIT_BOX_EST_H, 585.0);
         // A tall pane keeps the mockup's 360; a short one keeps three rows.
         assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(900.0)), 360.0);
         assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(300.0)), VCS_TREE_MIN_H);
@@ -6886,9 +6907,9 @@ mod tests {
         // Rows keep the height the cap counts with.
         let rows = build_tree(&sample_snapshot().changes.iter().map(|d| d.path.clone()).collect::<Vec<_>>(), &BTreeSet::new()).len();
         assert!(nodes.iter().filter(|n| n.mods.iter().any(|m| m == "Height(34.0)")).count() >= rows);
-        if tree_height(rows) > 285.0 {
+        if tree_height(rows) > 281.0 {
             assert!(
-                nodes.iter().any(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m.starts_with("Height(285.0") || m.starts_with("Height(284.99"))),
+                nodes.iter().any(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m.starts_with("Height(281.0") || m.starts_with("Height(280.99"))),
                 "the tree scrolls inside its cap"
             );
         }
@@ -6897,6 +6918,190 @@ mod tests {
         assert_eq!(two.matches("VcsCard(").count(), 1, "one card for the tree and the commit box: {two}");
         assert!(two.contains("FilesTreeCapped(&d_files, &st_files, &fold_files, &sel_files, on_tab_files, tree_cap(VCS_TREE_MAX_H, pane_h));"));
         assert!(production.contains("TODO(compose-rust#778)"));
+    }
+
+    /// The children of `parent`, in the order they were inserted.
+    fn kids<'a>(nodes: &'a [N], parent: u32) -> Vec<&'a N> {
+        let mut v: Vec<&N> = nodes.iter().filter(|n| n.parent == Some(parent)).collect();
+        v.sort_by_key(|n| n.at);
+        v
+    }
+
+    /// The child of `top` that is `n` or holds it.
+    fn branch_of<'a>(nodes: &'a [N], top: u32, n: &'a N) -> &'a N {
+        if n.parent == Some(top) {
+            return n;
+        }
+        let ups = up(nodes, n);
+        nodes.iter().find(|x| x.parent == Some(top) && ups.contains(&x.id)).expect("under the node")
+    }
+
+    /// A snapshot whose tree (fifteen rows) is taller than any cap.
+    fn long_snapshot() -> RepoSnapshot {
+        let mut snap = sample_snapshot();
+        snap.changes = (0..14)
+            .map(|i| {
+                let mut d = a_diff();
+                d.path = format!("src/f{i}.rs");
+                d
+            })
+            .collect();
+        snap
+    }
+
+    #[compose_rust::runtime::Composable]
+    fn changes_two_pane_probe() {
+        ChangesPaneWithActions(&long_snapshot(), PaneLayout::Two, None, |_| {}, None, 600.0, 320.0, Some(585.0));
+    }
+
+    #[test]
+    fn fr_l19_1_the_commit_box_follows_the_scrolling_tree_inside_the_changes_card() {
+        // #415 (1): the earlier check only found the commit button's text. Since #878 the box is
+        // not pinned under a scroll area; it is the last part of the changes card, and only the
+        // tree above it scrolls.
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let nodes = nodes_of(changes_two_pane_probe);
+        let p = ember_theme().palette;
+        assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(585.0)), 281.0);
+        let tree = nodes
+            .iter()
+            .find(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m == "Height(281.0)"))
+            .expect("the tree scrolls inside its cap");
+        let row = with_text(&nodes, "f13.rs");
+        assert!(up(&nodes, row).contains(&tree.id), "the last file row is inside the scrolling tree");
+        let summary = nodes.iter().find(|n| n.props.iter().any(|x| x.contains("요약 (필수) 예: Feat: Wire shim"))).expect("the summary field");
+        assert!(!up(&nodes, summary).contains(&tree.id), "the commit box does not scroll with the tree");
+        // One column holds the header, a rule, the tree, a rule and the commit box, in that order.
+        let column = tree.parent.expect("the card's column");
+        let parts = kids(&nodes, column);
+        assert_eq!(parts.len(), 5, "{:?}", parts.iter().map(|n| (&n.widget, &n.mods)).collect::<Vec<_>>());
+        let header = with_text(&nodes, "변경 파일 14");
+        assert_eq!(branch_of(&nodes, column, header).id, parts[0].id, "the files header is first");
+        assert_eq!(parts[2].id, tree.id, "the tree is under the header's rule");
+        let commit = branch_of(&nodes, column, summary);
+        assert_eq!(commit.id, parts[4].id, "the commit box is last, after the tree");
+        assert!(commit.at > tree.at);
+        for rule in [parts[1], parts[3]] {
+            assert!(rule.mods.iter().any(|m| m == "Height(1.0)") && rule.mods.iter().any(|m| m == "FillMaxWidth"), "{:?}", rule.mods);
+        }
+        let fill = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.surface_2)));
+        assert!(commit.mods.contains(&fill), "on surface-2: {:?}", commit.mods);
+        assert!(commit.widget == "Column" && !commit.mods.iter().any(|m| m.starts_with("Height(")), "as tall as its fields: {:?}", commit.mods);
+        // The commit button is in that box too.
+        let button = nodes.iter().find(|n| n.widget == "Button" && under(&nodes, commit).iter().any(|x| x.id == n.id)).expect("the commit button");
+        assert!(!up(&nodes, button).contains(&tree.id));
+        // The column is inside one bordered card.
+        let ups = up(&nodes, tree);
+        assert!(nodes.iter().any(|n| ups.contains(&n.id) && n.mods.iter().any(|m| m.starts_with("Border")) && n.mods.iter().any(|m| m.starts_with("Shape { top_start: 14.0"))));
+    }
+
+    #[compose_rust::runtime::Composable]
+    fn phone_files_tab_probe() {
+        ChangesPane(&long_snapshot(), PaneLayout::Tabs, Some(PaneTab::Files), |_| {});
+    }
+
+    #[compose_rust::runtime::Composable]
+    fn phone_diff_tab_probe() {
+        ChangesPane(&long_snapshot(), PaneLayout::Tabs, Some(PaneTab::Diff), |_| {});
+    }
+
+    #[compose_rust::runtime::Composable]
+    fn phone_commit_tab_probe() {
+        ChangesPane(&long_snapshot(), PaneLayout::Tabs, Some(PaneTab::Commit), |_| {});
+    }
+
+    #[test]
+    fn fr_l19_1_every_phone_tab_ends_with_the_floating_bar_clearance() {
+        // #415 (2): only 커밋 ended with the clearance, so the last tree row and the last diff
+        // line stayed under the floating tab bar.
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let clearance = crate::ui::cr::routines::compact_bottom_clearance();
+        assert_eq!(clearance, 90.0);
+        let want = format!("{:?}", compose_rust::schema::Modifier::Height(clearance));
+        let cases: [(&str, fn(), &str); 3] = [
+            ("파일", phone_files_tab_probe, "f13.rs"),
+            ("차이", phone_diff_tab_probe, "이 덩어리 전체"),
+            ("커밋", phone_commit_tab_probe, "마지막 커밋 수정 (amend)"),
+        ];
+        for (name, probe, inside) in cases {
+            let nodes = nodes_of(probe);
+            let spacers: Vec<&N> = nodes.iter().filter(|n| n.widget == "Spacer" && n.mods.contains(&want)).collect();
+            assert_eq!(spacers.len(), 1, "{name}: one clearance");
+            let spacer = spacers[0];
+            let column = spacer.parent.expect("the pane's column");
+            let parts = kids(&nodes, column);
+            assert_eq!(parts.last().map(|n| n.id), Some(spacer.id), "{name}: the clearance is the last thing in the pane");
+            // The tab's own content is in the same column, above the clearance.
+            let content = branch_of(&nodes, column, with_text(&nodes, inside));
+            assert!(content.at < spacer.at, "{name}");
+        }
+    }
+
+    #[test]
+    fn fr_l19_1_the_icon_buttons_do_not_set_the_row_heights() {
+        // #415 (3): the 44 dp box of a round button made the 원격 cell's row 44 beside the 36 dp
+        // pickers, and in the files header (48 with 12 all round) it had 24.
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        assert_eq!((ICON_TOUCH_TARGET, VCS_SEL_H), (44.0, 36.0));
+        assert_eq!((VCS_FILES_HEAD_ROW_H, VCS_FILES_HEAD_PAD_X, VCS_FILES_HEAD_H), (52.0, 16.0, 54.0));
+        let has = |n: &N, m: &str| n.mods.iter().any(|x| x == m);
+        // The nearest row with a height above a node.
+        let row_over = |nodes: &[N], n: &N| -> Vec<String> {
+            let ups = up(nodes, n);
+            let row = ups
+                .iter()
+                .filter_map(|id| nodes.iter().find(|x| x.id == *id))
+                .find(|x| x.widget == "Row" && x.mods.iter().any(|m| m.starts_with("Height(")))
+                .expect("a row with a height");
+            row.mods.clone()
+        };
+        for grid in [RepoBarGrid::Three, RepoBarGrid::TwoRemoteBelow, RepoBarGrid::One] {
+            BAR_GRID.with(|g| g.set(grid));
+            let nodes = nodes_of(repo_bar_sample);
+            for label in ["Pull 1", "가져오기", "내려받기", "올리기"] {
+                let overlay = nodes.iter().find(|n| n.widget == "Button" && n.props.iter().any(|x| x.ends_with(&format!("=String({label:?})")))).unwrap_or_else(|| panic!("{label}"));
+                let mods = row_over(&nodes, overlay);
+                assert!(mods.iter().any(|m| m == "Height(36.0)") && mods.iter().any(|m| m == "FillMaxWidth"), "{grid:?} {label}: {mods:?}");
+            }
+            // The round buttons still ask for the 44 dp box and draw the 32 dp circle.
+            let fetch = nodes.iter().find(|n| n.widget == "Button" && n.props.iter().any(|x| x.ends_with("=String(\"가져오기\")"))).unwrap();
+            let hit = nodes.iter().find(|n| Some(n.id) == fetch.parent).unwrap();
+            assert!(has(hit, "Width(44.0)") && has(hit, "Height(44.0)"), "{:?}", hit.mods);
+            let circle = kids(&nodes, hit.id)[0];
+            assert!(has(circle, "Width(32.0)") && has(circle, "Height(32.0)"), "{:?}", circle.mods);
+            // The two pickers have the same height as the row.
+            assert_eq!(nodes.iter().filter(|n| n.widget == "Box" && has(n, "Height(36.0)") && has(n, "FillMaxWidth")).count(), 2, "{grid:?}");
+        }
+        BAR_GRID.with(|g| g.set(RepoBarGrid::Three));
+        // The files header: 52 high, no padding of its own, 16 at each side, and the stash
+        // button after a note that takes only the room left.
+        let nodes = nodes_of(changes_two_pane_probe);
+        let stash = nodes.iter().find(|n| n.widget == "Button" && n.props.iter().any(|x| x.ends_with("=String(\"스태시\")"))).expect("the stash button");
+        let ups = up(&nodes, stash);
+        let head = ups
+            .iter()
+            .filter_map(|id| nodes.iter().find(|x| x.id == *id))
+            .find(|x| x.widget == "Row" && x.mods.iter().any(|m| m.starts_with("Height(")))
+            .expect("the header row");
+        assert!(has(head, "Height(52.0)") && has(head, "FillMaxWidth"), "{:?}", head.mods);
+        assert!(!head.mods.iter().any(|m| m.starts_with("Padding")), "no padding to take the box's height: {:?}", head.mods);
+        let parts = kids(&nodes, head.id);
+        assert_eq!(parts.len(), 3, "a side, the content, a side");
+        for side in [parts[0], parts[2]] {
+            assert!(side.widget == "Spacer" && has(side, "Width(16.0)"), "{:?}", side.mods);
+        }
+        assert!(parts[1].widget == "Row" && has(parts[1], "Weight(1.0)"), "{:?}", parts[1].mods);
+        let hit = nodes.iter().find(|n| Some(n.id) == stash.parent).unwrap();
+        assert!(has(hit, "Width(44.0)") && has(hit, "Height(44.0)"), "{:?}", hit.mods);
+        assert_eq!(hit.parent, Some(parts[1].id), "the box is a child of the header's content row");
+        let note = with_text(&nodes, STASH_NOW_NOTE);
+        let holder = nodes.iter().find(|n| Some(n.id) == note.parent).unwrap();
+        assert!(holder.widget == "Box" && has(holder, "Weight(1.0)"), "the note gives way: {:?}", holder.mods);
+        assert!(holder.at < hit.at, "the button follows the note");
+        assert!(!kids(&nodes, parts[1].id).iter().any(|n| n.widget == "Spacer" && has(n, "Weight(1.0)")), "the note's box is the only thing that grows");
     }
 
     fn pr_detail_probe() {

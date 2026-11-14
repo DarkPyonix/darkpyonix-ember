@@ -3572,7 +3572,8 @@ mod tests {
     #[test]
     fn fr_l25_detail_inset_panel_fills_its_width() {
         let src = include_str!("components.rs");
-        let inset = src.split("pub fn InsetPanel(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        // `InsetPanel` hands its arguments to `InsetPanelSized`, which builds the row (#886).
+        let inset = src.split("pub fn InsetPanelSized(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(inset.contains("cu::Row().modifier(Modifier::new().fill_max_width_if(fill_max_width))"));
         assert!(inset.contains("cu::Column().modifier(Modifier::new().weight(1.0)).content(content)"));
     }

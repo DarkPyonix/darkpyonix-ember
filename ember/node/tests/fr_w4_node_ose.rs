@@ -282,6 +282,21 @@ async fn fr_w4a_node_without_an_ose_manager_answers_503() {
     assert!(matches!(&e, ClientError::Api { status: 503, .. }), "{e:?}");
 }
 
+/// True, with a message, when `python3` is not on this machine: the stand-in OSE binaries listen
+/// through it, so a test that starts one is skipped instead of failing.
+#[cfg(unix)]
+fn python3_missing(test: &str) -> bool {
+    let have = std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !have {
+        eprintln!("python3 is missing: skipping {test}");
+    }
+    !have
+}
+
 /// A stand-in for `dpx-ose-server`: writes its environment and arguments beside itself, then
 /// listens on `--port` like the real one.
 #[cfg(unix)]
@@ -302,6 +317,9 @@ while True: s.accept()[0].close()' "$@"
 #[cfg(unix)]
 #[tokio::test]
 async fn fr_w4a_node_ose_spawns_per_folder_under_allowed_roots_and_reuses_live_process() {
+    if python3_missing("fr_w4a_node_ose_spawns_per_folder_under_allowed_roots_and_reuses_live_process") {
+        return;
+    }
     let f = start(fake_ose_binary).await;
     let sub = f.root.join("sub");
     std::fs::create_dir_all(&sub).unwrap();
@@ -328,6 +346,9 @@ async fn fr_w4a_node_ose_spawns_per_folder_under_allowed_roots_and_reuses_live_p
 async fn fr_w4a_node_ose_writes_0600_token_file_and_clears_env() {
     use std::os::unix::fs::PermissionsExt;
 
+    if python3_missing("fr_w4a_node_ose_writes_0600_token_file_and_clears_env") {
+        return;
+    }
     let f = start(fake_ose_binary).await;
     let launch = f.client.ide_ose(&f.root).await.unwrap();
 
@@ -356,6 +377,49 @@ async fn fr_w4a_node_ose_writes_0600_token_file_and_clears_env() {
     assert!(!names.iter().any(|n| n.starts_with("CARGO_")), "{names:?}");
     assert!(!names.iter().any(|n| n.contains("TOKEN")), "{names:?}");
     assert!(!env.contains(&real) && !env.contains(TOKEN), "a token is in the OSE environment");
+}
+
+/// FR-W4a (#896): an OSE that is slow to start does not hold up the node's other requests. The
+/// test runtime has ONE worker thread, so a handler that waited for the start (or for the
+/// manager's lock, which the start holds) on that worker would stall the health call below.
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_w4a_a_starting_ose_does_not_stall_other_node_requests() {
+    if python3_missing("fr_w4a_a_starting_ose_does_not_stall_other_node_requests") {
+        return;
+    }
+    // Listens only after 3 s: the launch holds the manager's lock for that long.
+    let f = start(|dir, data| {
+        let script = dir.join("slow-ose");
+        common::write_exec_ready(
+            &script,
+            r##"#!/bin/sh
+sleep 3
+exec python3 -c 'import socket,sys; p=int(sys.argv[sys.argv.index("--port")+1]); s=socket.socket(); s.bind(("127.0.0.1",p)); s.listen();
+while True: s.accept()[0].close()' "$@"
+"##,
+        );
+        OseManager::with_data_root(Some(script), data.to_path_buf())
+    })
+    .await;
+
+    let (client, root) = (f.client.clone(), f.root.clone());
+    let launch = tokio::spawn(async move { client.ide_ose(&root).await });
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    // A relay lookup now waits for the lock the start holds.
+    let client = f.client.clone();
+    let lookup = tokio::spawn(async move { client.ide_ose_relay("0123456789abcdef0123456789abcdef").await.err() });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let asked = std::time::Instant::now();
+    f.client.health().await.expect("the node answers while an OSE starts");
+    assert!(asked.elapsed() < Duration::from_secs(1), "health took {:?} while an OSE started", asked.elapsed());
+    assert!(!launch.is_finished(), "the slow OSE started before the check: the test proved nothing");
+
+    let launched = tokio::time::timeout(WAIT, launch).await.expect("the launch ends").unwrap();
+    assert!(launched.is_ok(), "{launched:?}");
+    let refused = tokio::time::timeout(WAIT, lookup).await.expect("the lookup ends").unwrap();
+    assert!(matches!(&refused, Some(ClientError::Api { status: 404, .. })), "{refused:?}");
 }
 
 #[cfg(unix)]

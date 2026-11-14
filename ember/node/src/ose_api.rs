@@ -87,7 +87,9 @@ async fn launch(State(n): State<Node>, Json(r): Json<OseLaunchRequest>) -> Resul
     }
     let ose = n.ose().clone();
     // A new OSE takes up to 10 s to listen: keep the wait off the async workers.
-    let started = tokio::task::spawn_blocking(move || ose.launch_for(LOCAL_COMPUTER, &folder)).await.map_err(internal)?;
+    let started = tokio::task::spawn_blocking(move || ose.launch_for(LOCAL_COMPUTER, &folder))
+        .await
+        .map_err(|e| internal(format!("OSE launch task failed: {e}")))?;
     match started {
         Ok(l) => Ok(Json(OseLaunchResponse {
             launch_id: l.launch_id,
@@ -100,7 +102,15 @@ async fn launch(State(n): State<Node>, Json(r): Json<OseLaunchRequest>) -> Resul
 }
 
 async fn relay(State(n): State<Node>, Path(launch_id): Path<String>, ws: WebSocketUpgrade) -> Response {
-    match n.ose().open_relay(LOCAL_COMPUTER, &launch_id) {
+    // The lookup takes the manager's lock, which a starting OSE holds for up to 10 s: wait for it
+    // off the async workers, so exec and terminal traffic is not delayed.
+    let ose = n.ose().clone();
+    let id = launch_id.clone();
+    let found = match tokio::task::spawn_blocking(move || ose.open_relay(LOCAL_COMPUTER, &id)).await {
+        Ok(found) => found,
+        Err(e) => return internal(format!("relay lookup task failed: {e}")).into_response(),
+    };
+    match found {
         Ok(target) => ws.on_upgrade(move |socket| pump_ose_relay(socket, target)).into_response(),
         Err(RelayLookupError::NotFound) => {
             ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, format!("unknown OSE launch: {launch_id}"))

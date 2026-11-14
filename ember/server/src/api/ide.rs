@@ -521,7 +521,14 @@ async fn ide_relay(
         // FR-W4c: the OSE of a registered computer runs on its node.
         return node_relay(c, &computer, &launch_id, ws).await;
     }
-    let target = match st.ose.open_relay(&computer, &launch_id) {
+    // The lookup takes the manager's lock, which a starting OSE holds for up to 10 s: wait for it
+    // off the async workers.
+    let (ose, id) = (st.ose.clone(), launch_id.clone());
+    let found = match tokio::task::spawn_blocking(move || ose.open_relay(LOCAL, &id)).await {
+        Ok(found) => found,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("relay lookup task failed: {e}")),
+    };
+    let target = match found {
         Ok(t) => t,
         Err(RelayLookupError::NotFound) => {
             return error(StatusCode::NOT_FOUND, format!("unknown OSE launch: {launch_id}"))
@@ -729,7 +736,18 @@ async fn ide_targets(
             let connection = node_ose_connection(computers, &computer.id, &rec.cwd).await;
             launch_targets_with(&rec, computer, server_url.as_deref(), connection)
         }
-        _ => launch_targets_for(&rec, computer, server_url.as_deref(), &st.ose),
+        _ => {
+            // A new OSE takes up to 10 s to listen: keep the wait off the async workers.
+            let (ose, target) = (st.ose.clone(), computer.clone());
+            let started = tokio::task::spawn_blocking(move || {
+                launch_targets_for(&rec, &target, server_url.as_deref(), &ose)
+            })
+            .await;
+            match started {
+                Ok(launch) => launch,
+                Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("OSE launch task failed: {e}")),
+            }
+        }
     };
     Json(launch).into_response()
 }

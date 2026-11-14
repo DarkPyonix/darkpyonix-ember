@@ -404,6 +404,10 @@ pub const VCS_CONTROL_FS: Fs = Fs::Sm;
 /// The toolkit text role a field takes to draw 13 px: `Label` maps to [`VCS_CONTROL_FS`]
 /// (`type_role_style`). `TextField` has no `font_size` builder in compose-rust v0.0.6.
 pub const VCS_FIELD_ROLE: TypeRole = TypeRole::Label;
+/// The screen's textareas (`.vcs textarea.field`): 64 px high, FR-L10.2.
+pub const VCS_TEXTAREA_H: f32 = 64.0;
+/// Their text inset `(horizontal, vertical)`: `.vcs textarea.field` padding 8 12.
+pub const VCS_TEXTAREA_INSET: (f32, f32) = (12.0, 8.0);
 /// Height of the 이 덩어리 전체 button: smaller than the 32 px control, with a 1 px border.
 pub const VCS_HUNK_BUTTON_H: f32 = 28.0;
 /// Height of the hunk header row (`.vcs-hh`): the 28 px action with 6 px above and below.
@@ -1480,7 +1484,8 @@ fn CommitBox(
             key((field_generation.get(), 1_u8), || {
                 EmberField(FieldOptions {
                     fill_max_width: true,
-                    height: Some(64.0),
+                    height: Some(VCS_TEXTAREA_H),
+                    inset: Some(VCS_TEXTAREA_INSET),
                     text: Some(body_state.get()),
                     placeholder: "설명 (선택)".to_string(),
                     type_role: Some(VCS_FIELD_ROLE),
@@ -3173,7 +3178,9 @@ fn PrDetailActions<R: Fn(GitPrReviewAction) + Clone + 'static, M: Fn() + Clone +
             key(ctl.review_gen.get(), || {
                 EmberField(FieldOptions {
                     fill_max_width: true,
-                    height: Some(56.0),
+                    height: Some(VCS_TEXTAREA_H),
+                    inset: Some(VCS_TEXTAREA_INSET),
+                    type_role: Some(VCS_FIELD_ROLE),
                     multiline: true,
                     text: Some(text.get()),
                     placeholder: "코멘트나 변경 요청의 내용".to_string(),
@@ -3513,7 +3520,9 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
                     key((f_gen.get(), 1_u8), || {
                         EmberField(FieldOptions {
                             fill_max_width: true,
-                            height: Some(64.0),
+                            height: Some(VCS_TEXTAREA_H),
+                            inset: Some(VCS_TEXTAREA_INSET),
+                            type_role: Some(VCS_FIELD_ROLE),
                             multiline: true,
                             text: Some(f_body.get()),
                             placeholder: "설명 (선택)".to_string(),
@@ -6495,6 +6504,60 @@ mod tests {
         let labels = remote_button_labels();
         assert_eq!(labels, ["가져오기", "내려받기", "올리기", "스태시"]);
         assert!(labels.iter().all(|l| !l.is_empty()));
+    }
+
+    fn vcs_textarea() {
+        super::super::components::EmberField(super::super::components::FieldOptions {
+            fill_max_width: true,
+            height: Some(VCS_TEXTAREA_H),
+            inset: Some(VCS_TEXTAREA_INSET),
+            type_role: Some(VCS_FIELD_ROLE),
+            multiline: true,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn fr_l10_2_vcs_textarea_is_64_high_inset_8_12_and_13_px() {
+        // vcs.css `.vcs textarea.field{height:64px;padding:8px 12px;font-size:var(--fs-sm)}`.
+        assert_eq!((VCS_TEXTAREA_H, VCS_TEXTAREA_INSET), (64.0, (12.0, 8.0)));
+        use compose_rust::protocol::{decode_batch, Mutation};
+        use compose_rust::{Host, Recomposer};
+        let mut host = Host::new(|| Box::new(Recomposer::new(vcs_textarea)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let mods: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { modifier, .. } => Some(format!("{modifier:?}")),
+                _ => None,
+            })
+            .collect();
+        let props: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { property, value, .. } => Some(format!("{property:?}={value:?}")),
+                _ => None,
+            })
+            .collect();
+        assert!(mods.iter().any(|m| m == "Height(64.0)"), "{mods:?}");
+        // 8 on every side, and 4 more on each side: 12 from the sides (BareField's inset).
+        assert!(mods.iter().any(|m| m == "Padding(8.0)"), "{mods:?}");
+        assert_eq!(mods.iter().filter(|m| *m == "Width(4.0)").count(), 2, "{mods:?}");
+        assert!(props.iter().any(|p| p == "FontSize=Float(13.0)"), "{props:?}");
+        // Every vcs textarea takes these.
+        let src = include_str!("vcs.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        for placeholder in ["\"설명 (선택)\"", "\"코멘트나 변경 요청의 내용\""] {
+            for (at, _) in production.match_indices(placeholder) {
+                let start = production[..at].rfind("EmberField(FieldOptions {").expect("field");
+                let end = at + production[at..].find("});").expect("end");
+                let opts = &production[start..end];
+                for want in ["height: Some(VCS_TEXTAREA_H)", "inset: Some(VCS_TEXTAREA_INSET)", "type_role: Some(VCS_FIELD_ROLE)", "multiline: true"] {
+                    assert!(opts.contains(want), "{want} in {opts}");
+                }
+            }
+        }
+        assert_eq!(production.matches("height: Some(VCS_TEXTAREA_H)").count(), 3, "commit, PR and review textareas");
     }
 
     #[test]

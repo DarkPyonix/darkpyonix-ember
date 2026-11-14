@@ -745,6 +745,7 @@ mod tests {
     struct Nodes {
         text: std::collections::HashMap<u32, String>,
         click: std::collections::HashMap<u32, u64>,
+        parent: std::collections::HashMap<u32, u32>,
     }
 
     impl Nodes {
@@ -755,18 +756,37 @@ mod tests {
                 self.text.insert(n, t.to_string());
             }
             for m in batch {
-                if let Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } = m {
-                    self.click.insert(*node_id, *h as u64);
+                match m {
+                    Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                        self.click.insert(*node_id, *h as u64);
+                    }
+                    Mutation::Insert { parent_id, node_id, .. } => {
+                        self.parent.insert(*node_id, *parent_id);
+                    }
+                    _ => {}
                 }
             }
         }
 
+        /// The control named `name`: a node with a click handler whose own text is the name (a
+        /// toolkit button) or that holds a text with the name (a `ChoiceButton` pill, FR-L10.2).
         fn button(&self, name: &str) -> (u32, u64) {
-            self.click
-                .iter()
-                .find(|(n, _)| self.text.get(n).is_some_and(|t| t == name))
-                .map(|(n, h)| (*n, *h))
-                .unwrap_or_else(|| panic!("no {name} button with a click handler"))
+            let mut found: Vec<(u32, u64)> = Vec::new();
+            for (n, _) in self.text.iter().filter(|(_, t)| t.as_str() == name) {
+                let mut cur = *n;
+                loop {
+                    if let Some(h) = self.click.get(&cur) {
+                        found.push((cur, *h));
+                        break;
+                    }
+                    match self.parent.get(&cur) {
+                        Some(p) => cur = *p,
+                        None => break,
+                    }
+                }
+            }
+            found.sort();
+            found.into_iter().next().unwrap_or_else(|| panic!("no {name} button with a click handler"))
         }
     }
 

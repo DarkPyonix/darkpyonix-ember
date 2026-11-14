@@ -11,7 +11,7 @@ use compose_rust::ui::Modifier;
 use compose_rust::{Alignment, ShapeRole, TypeRole};
 
 use super::components::{
-    AppButton, ButtonKind, Choice, ChoiceButton, Clickable, EmberSheet, InsetPanel, Label, Pill, PillTone,
+    AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRow, Clickable, EmberSheet, InsetPanel, Label, Pill, PillTone,
     SheetFooter, Txt,
 };
 use super::theme::*;
@@ -109,7 +109,7 @@ pub fn SettingsContent() {
         .content(|| {
             // 1. Theme preference (FR-L28)
             SectionBlock("화면 테마", "앱 전체의 색상 모드를 선택합니다.", || {
-                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                ChoiceRow(|| {
                     for pref in [ThemePref::System, ThemePref::Light, ThemePref::Dark] {
                         let u = ui.clone();
                         ChoiceButton(pref.label(), Choice::Radio, current_theme == pref, true, true, move || {
@@ -126,14 +126,19 @@ pub fn SettingsContent() {
                 "에디터 단축키",
                 "Ember 에디터의 기본 단축키 체계를 선택합니다.",
                 || {
-                    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
-                        for km in Keymap::ALL {
-                            let u = ui.clone();
-                            ChoiceButton(km.label(), Choice::Radio, current_keymap == km, true, true, move || {
-                                u.update_prefs(|pr| pr.keymap = km);
+                    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                        // The choices wrap in the room the table button leaves: a zero width
+                        // keeps a weighted child from asking for its whole line first.
+                        cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
+                            ChoiceRow(|| {
+                                for km in Keymap::ALL {
+                                    let u = ui.clone();
+                                    ChoiceButton(km.label(), Choice::Radio, current_keymap == km, true, true, move || {
+                                        u.update_prefs(|pr| pr.keymap = km);
+                                    });
+                                }
                             });
-                        }
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                        });
                         let toggle = shortcuts_open.clone();
                         let is_open = shortcuts_open.get();
                         AppButton(
@@ -160,7 +165,7 @@ pub fn SettingsContent() {
                 "기본 IDE",
                 "프로젝트나 세션에서 IDE 열기를 눌렀을 때 기본으로 실행할 대상입니다.",
                 || {
-                    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                    ChoiceRow(|| {
                         for (key, label) in IDE_CHOICES {
                             let u = ui.clone();
                             let selected = current_ide.as_deref() == key;

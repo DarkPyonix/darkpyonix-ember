@@ -75,12 +75,13 @@ impl CharStyle {
 
     pub fn blurb(self) -> &'static str {
         match self {
-            CharStyle::Mongle => "눈, 입, 볼이 있는 기본 캐릭터입니다",
-            CharStyle::Malang => "이름으로 정해지는 말랑한 블롭입니다",
-            CharStyle::Crew => "짧은 팔다리와 역할 소품이 있습니다",
-            CharStyle::Pocket => "소품 하나를 단 단순한 마스코트입니다",
-            CharStyle::Cream => "크림색 몸에 하네스 색 옷을 입습니다",
-            CharStyle::Keyring => "고리에 매달린 작은 참입니다",
+            // The mockup's copy (`chars.js` `STYLES[].desc`), FR-L26.1.
+            CharStyle::Mongle => "눈, 입, 볼이 있는 기본 캐릭터입니다. 이름에 따라 몸 모양과 색이 조금씩 달라집니다.",
+            CharStyle::Malang => "이름으로 정해지는 말랑한 블롭입니다. 얼굴은 눈만 있고 상태는 몸의 움직임으로 보입니다.",
+            CharStyle::Crew => "짧은 팔다리가 달린 둥근 사각 몸에 역할 소품(왕관, 넥타이, 헤드폰, 모자)을 답니다.",
+            CharStyle::Pocket => "삼각형, 구름, 토끼, 물방울 같은 단순한 몸에 소품 하나를 단 마스코트입니다. 둥둥 떠 있습니다.",
+            CharStyle::Cream => "크림색 둥근 몸에 하네스 색 옷을 입습니다. 점 눈과 작은 입만 있습니다.",
+            CharStyle::Keyring => "고리에 매달려 흔들리는 작은 참입니다. 좁은 자리에 맞습니다.",
         }
     }
 }

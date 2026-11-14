@@ -42,10 +42,11 @@ pub fn save_values(peer: &str, relay: &str) -> Result<Option<(String, Option<Str
     if peer.is_empty() {
         return Ok(None);
     }
+    // The parts are saved on one line each, also when the paste was wrapped.
     let (addr, line_relay) = device_link::split_relay(peer);
-    let relay = if relay.is_empty() { line_relay.unwrap_or("") } else { relay };
-    PeerSetting::parse(addr, Some(relay)).map_err(|e| e.text_ko())?;
-    Ok(Some((addr.to_string(), (!relay.is_empty()).then(|| relay.to_string()))))
+    let relay = if relay.is_empty() { line_relay.unwrap_or_default() } else { relay.to_string() };
+    PeerSetting::parse(&addr, Some(relay.as_str())).map_err(|e| e.text_ko())?;
+    Ok(Some((addr, (!relay.is_empty()).then_some(relay))))
 }
 
 /// The peer id in two halves of 32 characters, so it fits a phone's width without breaking.

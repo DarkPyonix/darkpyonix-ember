@@ -11,8 +11,9 @@
 //!   as printed and survives a server restart. The relay is what `EMBER_RELAY_URL` takes ([`parse_relay`]).
 //! - **Device line with a relay** (#898): with its relay role on, the server prints
 //!   `ember server device address: <peer id>[@<host>:<port>] relay letify://<peer id>@<host>:<port>`.
-//!   The address field takes it in one paste ([`split_relay`], [`PeerSetting::parse`]); the peer
-//!   id and the relay alone reach the server, with no direct address and no hub.
+//!   The address field takes it in one paste ([`split_relay`], [`PeerSetting::parse`]), also
+//!   when a terminal wrapped it over several lines; the peer id and the relay alone reach the
+//!   server, with no direct address and no hub.
 //! - **Connection**: [`DeviceLink::bind`] binds the transport with the device key and hands out
 //!   an [`Api`] over it ([`DeviceLink::api`]); the `Api` keeps the transport alive.
 //! - **Refusals**: [`refusal_text`] turns a refused or failed call into one Korean sentence.
@@ -52,13 +53,14 @@ pub const PEER_ADDR_PREFIX: &str = "ember server peer addr:";
 /// The word between the address and the relay in the device line.
 const RELAY_WORD: &str = " relay ";
 
-/// Splits a pasted server address into its address part and the relay it names:
-/// `<address> relay <relay URL>`, the device line the server prints with its relay role on
-/// (#898), with or without its prefix. The relay is the first word after ` relay `, so the note
-/// the server appends about `<host>` is not part of it. Without ` relay `, the whole text is the
-/// address and there is no relay.
-pub fn split_relay(text: &str) -> (&str, Option<&str>) {
-    let mut t = text.trim();
+/// `text` on one line: every run of spaces, tabs and line breaks is one space, none at the ends.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Splits one line (see [`one_line`]) at the relay word, after the server's line prefix.
+fn split_line(line: &str) -> (String, Option<String>) {
+    let mut t = line;
     for prefix in [DEVICE_LINE_PREFIX, PEER_ADDR_PREFIX] {
         if let Some(rest) = t.strip_prefix(prefix) {
             t = rest.trim();
@@ -66,8 +68,38 @@ pub fn split_relay(text: &str) -> (&str, Option<&str>) {
         }
     }
     match t.split_once(RELAY_WORD) {
-        Some((addr, relay)) => (addr.trim(), relay.split_whitespace().next()),
-        None => (t, None),
+        Some((addr, relay)) => (addr.trim().to_string(), relay.split_whitespace().next().map(str::to_string)),
+        None => (t.to_string(), None),
+    }
+}
+
+/// Splits a pasted server address into its address part and the relay it names:
+/// `<address> relay <relay URL>`, the device line the server prints with its relay role on
+/// (#898), with or without its prefix. The relay is the first word after `relay`, so the note
+/// the server appends about `<host>` is not part of it. Without the word, the whole text is the
+/// address and there is no relay.
+///
+/// Whitespace is normalised first: any run of spaces, tabs and line breaks is one space, so a
+/// line that was wrapped still splits. A text with line breaks has two readings. A terminal that
+/// wraps at its width cuts inside the peer id or the URL, so the breaks are first read as
+/// nothing; when that reading does not parse (the break stood where a space was), each break is
+/// a space.
+pub fn split_relay(text: &str) -> (String, Option<String>) {
+    let spaced = split_line(&one_line(text));
+    if !text.trim().contains(['\n', '\r']) {
+        return spaced;
+    }
+    let glued: String = text.chars().filter(|c| !matches!(c, '\n' | '\r')).collect();
+    let glued = split_line(&one_line(&glued));
+    let relay_parses = match &glued.1 {
+        Some(relay) => parse_relay(relay).is_ok(),
+        None => true,
+    };
+    let parses = parse_server_addr(&glued.0).is_ok() && relay_parses;
+    if parses {
+        glued
+    } else {
+        spaced
     }
 }
 
@@ -86,8 +118,8 @@ impl PeerSetting {
     /// `relay` is empty.
     pub fn parse(addr: &str, relay: Option<&str>) -> Result<PeerSetting, AddrError> {
         let (addr, line_relay) = split_relay(addr);
-        let addr = parse_server_addr(addr)?;
-        let relay = match relay.map(str::trim).filter(|r| !r.is_empty()).or(line_relay) {
+        let addr = parse_server_addr(&addr)?;
+        let relay = match relay.map(str::trim).filter(|r| !r.is_empty()).or(line_relay.as_deref()) {
             Some(r) => Some(parse_relay(r)?),
             None => None,
         };
@@ -401,7 +433,7 @@ mod tests {
         let bare = format!("{peer} relay {url}");
         let line = format!("{DEVICE_LINE_PREFIX} {bare}");
         for text in [bare.clone(), line.clone(), format!("  {line}\n")] {
-            assert_eq!(split_relay(&text), (peer.to_string().as_str(), Some(url.as_str())), "{text:?}");
+            assert_eq!(split_relay(&text), (peer.to_string(), Some(url.clone())), "{text:?}");
             let s = PeerSetting::parse(&text, None).unwrap();
             assert_eq!(s.addr, PeerAddr::new(peer), "only the peer id, no direct address");
             assert_eq!(s.relay, Some(RelayConfig::Custom(vec![url.clone()])));
@@ -417,7 +449,7 @@ mod tests {
             Some(RelayConfig::Custom(vec![format!("letify://{peer}@home.example.org:7443")]))
         );
         // The other forms still parse, with their prefix or without.
-        assert_eq!(split_relay(&peer.to_string()), (peer.to_string().as_str(), None));
+        assert_eq!(split_relay(&peer.to_string()), (peer.to_string(), None));
         let json = serde_json::to_string(&PeerAddr::new(peer)).unwrap();
         assert_eq!(PeerSetting::parse(&format!("{PEER_ADDR_PREFIX} {json}"), None).unwrap().addr, PeerAddr::new(peer));
         // With a fixed transport port the line carries the direct address too.
@@ -432,6 +464,71 @@ mod tests {
         let both = format!("{peer}@<host>:7444 relay letify://{peer}@<host>:7443");
         assert!(matches!(PeerSetting::parse(&both, None), Err(AddrError::BadDirect(_))));
         assert!(matches!(PeerSetting::parse(&format!("nothex relay {url}"), None), Err(AddrError::BadPeer(_))));
+    }
+
+    #[test]
+    fn fr_n9_a_wrapped_paste_of_the_device_line_parses() {
+        let peer = id();
+        let url = format!("letify://{peer}@203.0.113.4:7443");
+        let want = PeerSetting { addr: PeerAddr::new(peer), relay: Some(RelayConfig::Custom(vec![url.clone()])) };
+        let line = format!("{DEVICE_LINE_PREFIX} {peer} relay {url}");
+
+        // Any run of spaces, tabs and line breaks is one space: breaks where the spaces were.
+        for text in [
+            format!("{peer}\nrelay\n{url}"),
+            format!("{peer} \n relay \r\n {url}\n"),
+            format!("{peer}\trelay\t\t{url}"),
+            format!("{peer}   relay   {url}"),
+            format!("ember server device address:\n{peer}\nrelay {url}"),
+            format!("ember  server\tdevice address: {peer} relay {url}"),
+        ] {
+            assert_eq!(PeerSetting::parse(&text, None), Ok(want.clone()), "{text:?}");
+            assert_eq!(split_relay(&text), (peer.to_string(), Some(url.clone())), "{text:?}");
+        }
+
+        // A terminal that wraps at its width cuts inside the peer id and the URL, at any column.
+        for width in [20, 40, 61, 80, 100, 120] {
+            let wrapped: Vec<String> =
+                line.chars().collect::<Vec<_>>().chunks(width).map(|c| c.iter().collect()).collect();
+            for sep in ["\n", "\r\n"] {
+                let text = wrapped.join(sep);
+                assert_eq!(PeerSetting::parse(&text, None), Ok(want.clone()), "width {width}: {text:?}");
+            }
+        }
+        // The same with the note the server appends, and with a direct address in the line.
+        let noted = format!("{peer}@192.168.1.5:41234 relay {url} (replace <host> with this computer's address or name)");
+        let cut = noted.find(":7443").unwrap() + 3;
+        let s = PeerSetting::parse(&format!("{}\n{}", &noted[..cut], &noted[cut..]), None).unwrap();
+        assert_eq!(s.addr.direct, vec!["192.168.1.5:41234".parse().unwrap()]);
+        assert_eq!(s.relay, want.relay, "a break inside the port does not shorten it");
+
+        // A wrapped paste that is still wrong is refused for what is wrong with it.
+        assert!(matches!(PeerSetting::parse(&format!("nothex\nrelay {url}"), None), Err(AddrError::BadPeer(_))));
+        let placeholder = format!("{peer} relay\nletify://{peer}@<host>:7443");
+        assert!(matches!(PeerSetting::parse(&placeholder, None), Err(AddrError::BadRelay(_))));
+    }
+
+    #[test]
+    fn fr_n9_the_relay_host_is_a_dns_name_or_an_ipv6_literal() {
+        let peer = id();
+        for host in ["home.example.org", "mini.local", "xn--9t4b11yi5a.example", "[2001:db8::1]", "[::1]", "203.0.113.4"] {
+            let url = format!("letify://{peer}@{host}:7443");
+            let want = Some(RelayConfig::Custom(vec![url.clone()]));
+            assert_eq!(PeerSetting::parse(&format!("{peer} relay {url}"), None).unwrap().relay, want, "{host}");
+            // Wrapped inside the host, as a terminal cuts it.
+            let cut = url.len() - 9;
+            let wrapped = format!("{DEVICE_LINE_PREFIX} {peer} relay {}\n{}", &url[..cut], &url[cut..]);
+            let s = PeerSetting::parse(&wrapped, None).unwrap();
+            assert_eq!(s.relay, want, "{host}");
+            assert_eq!(s.addr, PeerAddr::new(peer));
+        }
+        // A direct address takes an IPv6 literal too, beside the relay.
+        let line = format!("{peer}@[2001:db8::7]:7444,192.168.0.10:7444 relay letify://{peer}@[2001:db8::1]:7443");
+        let s = PeerSetting::parse(&line, None).unwrap();
+        assert_eq!(s.addr.direct, vec!["[2001:db8::7]:7444".parse().unwrap(), "192.168.0.10:7444".parse().unwrap()]);
+        // A direct address is an IP, not a name (the relay is the way to use a name).
+        let named = format!("{peer}@home.example.org:7444 relay letify://{peer}@home.example.org:7443");
+        assert!(matches!(PeerSetting::parse(&named, None), Err(AddrError::BadDirect(_))));
     }
 
     #[test]
@@ -479,5 +576,17 @@ mod tests {
         assert_eq!(refusal_text(&scope), Some(crate::ui::device_scope::SCOPE_DENIED));
         let other = ApiError::Status { status: 500, message: "boom".into(), code: None };
         assert_eq!(refusal_text(&other), None);
+        // The early failures of a dial that has only the server's relay (#898): the relay cannot
+        // be reached, it ends the connection before pairing, or the server never comes. None is
+        // the server's own close code, so each reads as the server not being reached.
+        for reason in [
+            "the relay at 203.0.113.4:7443 cannot be reached: Connection refused (os error 61)",
+            "the relay at 203.0.113.4:7443 ended the connection before pairing: the server does not admit this peer id, or the relay is busy",
+            "the server did not answer at its relay 203.0.113.4:7443 within 8 s (it is not waiting there for this peer id, or it is not running behind that address)",
+            "no pairing at the relay 203.0.113.4:7443 in time: the relay refused: a request with this peer and token is already waiting",
+        ] {
+            let e = ApiError::Peer(format!("cannot connect to PeerId(ab): {reason}"));
+            assert_eq!(refusal_text(&e), Some(UNREACHABLE), "{reason}");
+        }
     }
 }

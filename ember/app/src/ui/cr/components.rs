@@ -1079,29 +1079,39 @@ pub fn pill_metrics(small: bool) -> (f32, Fs, Weight) {
     }
 }
 
-/// The width of the name in [`NameThenPill`]: its own width (one dp more, since the toolkit
-/// reports sizes rounded to whole dp) while that fits beside the pill, else what the room leaves
-/// beside the pill. `None` until the renderer has measured all three.
+/// The fixed width of the name in [`NameThenPill`]: its own width (one dp more, since the
+/// toolkit reports sizes rounded to whole dp) when the name, the gap and the pill (one dp more,
+/// for the same rounding) all fit in the room. `None` when they do not fit, or until the
+/// renderer has measured all three: the name then takes what the pill leaves.
+///
+/// The name never gets a fixed width that leaves the pill less than its own: a row measures its
+/// unweighted children in order and the last one gets what is left, so a pill behind a name one
+/// gap too wide was cut, reported its cut width, and the name grew by that much on the next
+/// pass until the pill was an empty blob (review r8 fix round, item 5).
 pub fn name_then_pill_width(room: f32, natural: f32, pill: f32, gap: f32) -> Option<f32> {
     if room <= 0.0 || natural <= 0.0 || pill <= 0.0 {
         return None;
     }
-    Some((natural + 1.0).min((room - pill - gap).max(0.0)))
+    let own = natural + 1.0;
+    (own + gap + pill + 1.0 <= room).then_some(own)
 }
 
 /// A one-line name with a pill right after it, taking the rest of a row (`weight(1)`): a short
 /// name keeps its own width and the pill follows it, a long one is cut with an ellipsis so the
 /// pill and whatever follows the row stay on screen (CSS `flex:0 1 auto;min-width:0` on the
-/// name; `.detail .topbar` in the mockup).
+/// name and `flex:none` on the pill; `.detail .topbar` in the mockup). The pill never shrinks.
 ///
 /// The toolkit has no weight that leaves a child its own size (Compose `weight(fill = false)`)
-/// and no maximum width: a weighted child fills its share (compose-rust
-/// `renderer/desktop/src/renderer/RenderNode.kt` `WeightedStackPolicy`), and an unweighted one
-/// is measured in order, so a long name would leave the pill no room. So the row measures: the
-/// room, the pill and the name's own width (a copy in clear ink, left out of the accessibility
-/// tree) are reported by the renderer (`observe_size_every_dp`), and the name gets
-/// the width [`name_then_pill_width`] gives. Until the first report the name takes the room and
-/// the pill sits at its end, which is where every long name ends up anyway.
+/// and no maximum width: a weighted child fills its share, and unweighted ones are measured
+/// first, in order, each with what the ones before it left (compose-rust
+/// `renderer/desktop/src/renderer/RenderNode.kt` `WeightedStackPolicy`). So the row measures:
+/// the room, the pill and the name's own width (a copy in clear ink, left out of the
+/// accessibility tree) are reported by the renderer (`observe_size_every_dp`), and
+/// [`name_then_pill_width`] picks one of two rows. When everything fits, the name has its own
+/// width and a weighted spacer after the pill takes the rest. When it does not (or before the
+/// first report), the name is the weighted child, so the unweighted pill is measured first at
+/// its own width and the name is cut to the remainder. The gap is a spacer of its own, not row
+/// spacing, so the trailing spacer costs no second gap.
 pub fn NameThenPill(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, gap: f32, pill: impl FnOnce()) {
     let room = compose_rust::runtime::remember_node_size();
     let natural = compose_rust::runtime::remember_node_size();
@@ -1133,7 +1143,7 @@ pub fn NameThenPill(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, ga
                     );
                 });
             });
-            cu::Row().alignment(Alignment::CenterStart).spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                 let name_box = match width {
                     Some(w) => Modifier::new().width(w),
                     None => Modifier::new().weight(1.0).width(0.0),
@@ -1141,6 +1151,8 @@ pub fn NameThenPill(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, ga
                 cu::Box().alignment(Alignment::CenterStart).modifier(name_box).content(|| {
                     Label(name, fs, weight, color, Some(1));
                 });
+                cu::Spacer().modifier(Modifier::new().width(gap));
+                // No weight and no width: the pill is as wide as its content, always.
                 cu::Box().modifier(Modifier::new().observe_size_every_dp(pill_size.token())).content(pill);
                 if width.is_some() {
                     cu::Spacer().modifier(Modifier::new().weight(1.0));
@@ -3288,9 +3300,13 @@ mod tests {
         assert_eq!(name_then_pill_width(300.0, 0.0, 60.0, 8.0), None);
         // A short name keeps its own width (plus the dp lost to rounding); the pill follows it.
         assert_eq!(name_then_pill_width(300.0, 120.0, 60.0, 8.0), Some(121.0));
-        // A long one gets what the pill leaves and is cut with an ellipsis.
-        assert_eq!(name_then_pill_width(300.0, 400.0, 60.0, 8.0), Some(232.0));
-        assert_eq!(name_then_pill_width(50.0, 400.0, 60.0, 8.0), Some(0.0));
+        assert_eq!(name_then_pill_width(300.0, 230.0, 60.0, 8.0), Some(231.0));
+        // A long one has no fixed width: the name takes what the pill leaves and is cut with an
+        // ellipsis. One dp short of fitting is already too long, so the pill is never the one
+        // that gives way (review r8 fix round: the pill read "승인…" beside a name in full).
+        assert_eq!(name_then_pill_width(300.0, 231.0, 60.0, 8.0), None);
+        assert_eq!(name_then_pill_width(300.0, 400.0, 60.0, 8.0), None);
+        assert_eq!(name_then_pill_width(50.0, 400.0, 60.0, 8.0), None);
     }
 
     fn name_then_pill() {
@@ -3313,9 +3329,22 @@ mod tests {
     }
 
     #[test]
-    fn fr_l28_name_then_pill_gives_the_name_its_measured_width() {
+    fn fr_l18_a_team_card_row_cuts_the_name_and_keeps_its_buttons() {
+        // Review r8 fix round (single-long-390): the member name was an unweighted label, the
+        // first child measured, so with a long name 열기 and 종료 got size 0 and the agent text
+        // was drawn over the name. The name is now the row's only weighted part.
+        let conv = include_str!("conversation.rs").split("#[cfg(test)]").next().unwrap();
+        let row = conv.split("for r in rows.iter().cloned() {").nth(1).expect("the team rows").split("\"종료\",").next().unwrap();
+        assert!(row.contains("NameThenPill(\n                                    &name_label,"), "{row}");
+        assert!(!row.contains("Label(\n                                    &name_label,"), "{row}");
+        assert_eq!(row.matches(".weight(").count(), 0, "nothing else in the row is weighted: {row}");
+        assert!(row.contains("\"열기\","), "{row}");
+    }
+
+    /// What `NameThenPill` sends after the renderer reports the room, the name's own width and
+    /// the pill's width, in that order.
+    fn name_then_pill_after_reports(sizes: [f32; 3]) -> String {
         use compose_rust::{WindowHeightClass, WindowSizeClass};
-        let _guard = crate::services::test_guard();
         compose_rust::window::reset_window_size();
         let mut host = Host::new(|| Box::new(Recomposer::new(name_then_pill)));
         let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
@@ -3328,8 +3357,7 @@ mod tests {
             .collect();
         assert_eq!(observed.len(), 3, "the room, the name and the pill");
         let mut sent = Vec::new();
-        // The renderer reports the room (300), the name's own width (120) and the pill (60).
-        for (node_id, w) in observed.iter().zip([300.0_f32, 120.0, 60.0]) {
+        for (node_id, w) in observed.iter().zip(sizes) {
             let payload = EventPayload::WindowSizeChanged {
                 width_dp: w,
                 height_dp: 22.0,
@@ -3342,9 +3370,55 @@ mod tests {
             let (bytes, _) = host.dispatch(HostEvent { node_id: *node_id, handler_id: 0, payload }).expect("dispatch");
             sent.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
         }
-        let sent = sent.join("\n");
-        assert!(sent.contains("Width(121.0)"), "the name keeps its own width: {sent}");
         compose_rust::window::reset_window_size();
+        sent.join("\n")
+    }
+
+    #[test]
+    fn fr_l28_name_then_pill_gives_the_name_its_measured_width() {
+        let _guard = crate::services::test_guard();
+        // The renderer reports the room (300), the name's own width (120) and the pill (60).
+        let sent = name_then_pill_after_reports([300.0, 120.0, 60.0]);
+        assert!(sent.contains("Width(121.0)"), "the name keeps its own width: {sent}");
+    }
+
+    #[test]
+    fn fr_l28_name_then_pill_never_sizes_the_pill() {
+        let _guard = crate::services::test_guard();
+        // What the toolkit gets for the pill: a box with the size observer and nothing else (no
+        // weight, no width), after a gap spacer of its own; the row has no spacing, so the
+        // spacer that follows a short name costs no second gap. An unweighted child is measured
+        // before the weighted name, so the pill is as wide as its text (review r8 fix round,
+        // item 5: the pill read "승인…", then "실…", then nothing, beside a name in full).
+        let nodes = emitted_nodes(name_then_pill);
+        let pill_text = nodes.iter().find(|n| n.props.iter().any(|p| p == "Text=String(\"승인 대기\")")).expect("the pill text");
+        let mut up = parent_of(&nodes, pill_text);
+        while !up.mods.iter().any(|m| m.starts_with("ObserveSize")) {
+            up = parent_of(&nodes, up);
+        }
+        let pill_box = up;
+        let set = |n: &EmittedNode| n.mods.iter().filter(|m| *m != "Empty").cloned().collect::<Vec<String>>();
+        assert_eq!(set(pill_box).len(), 1, "only the size observer: {:?}", pill_box.mods);
+        let row = parent_of(&nodes, pill_box);
+        assert_eq!(row.widget, "Row");
+        assert!(!row.props.iter().chain(row.mods.iter()).any(|p| p.contains("Spac")), "no row spacing: {:?} {:?}", row.props, row.mods);
+        let mut kids: Vec<&EmittedNode> = nodes.iter().filter(|n| n.parent == Some(row.id)).collect();
+        kids.sort_by_key(|n| n.index);
+        assert_eq!(kids.len(), 3, "the name, the gap and the pill");
+        assert!(kids[0].mods.iter().any(|m| m == "Weight(1.0)"), "the name takes the rest: {:?}", kids[0].mods);
+        assert_eq!((kids[1].widget.as_str(), set(kids[1])), ("Spacer", vec!["Width(8.0)".to_string()]));
+        assert_eq!(kids[2].id, pill_box.id);
+
+        // A name too long for the room (400 in 300 beside a pill of 60) gets no fixed width: it
+        // stays the weighted child, so nothing is re-sent and the pill keeps its 60.
+        let long = name_then_pill_after_reports([300.0, 400.0, 60.0]);
+        assert!(!long.contains("Width(") && !long.contains("Weight("), "{long}");
+        // Nor does a short name size the pill: the name gets its width, a weighted spacer is
+        // added after the pill, and no modifier goes to the pill's box.
+        let short = name_then_pill_after_reports([300.0, 120.0, 60.0]);
+        let on_pill = format!("node_id: {}, modifier: W", pill_box.id);
+        assert!(short.contains("Width(121.0)") && short.contains("Weight(1.0)"), "{short}");
+        assert!(!short.contains(&on_pill), "{short}");
     }
 
     #[test]

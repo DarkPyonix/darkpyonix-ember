@@ -517,6 +517,18 @@ pub fn ide_split_style(p: &Palette) -> IdeSplitStyle {
     IdeSplitStyle { fill: p.surface, ink: p.text, border: p.line, divider: p.line }
 }
 
+/// The corners of the leading half of a split pill `height` high: the pill's own arc at the
+/// start, square where it meets the divider (`[top_start, top_end, bottom_end, bottom_start]`).
+pub fn split_start_radii(height: f32) -> [f32; 4] {
+    [height / 2.0, 0.0, 0.0, height / 2.0]
+}
+
+/// The corners of the trailing half of a split pill: square at the divider, the pill's arc at
+/// the end.
+pub fn split_end_radii(height: f32) -> [f32; 4] {
+    [0.0, height / 2.0, height / 2.0, 0.0]
+}
+
 /// The chevron beside a header's "IDE 열기" that opens the chooser even when a default is set
 /// (FR-L7). `on_ink` draws it inside the dark split button; otherwise as a bordered square.
 /// Its accessible name is "다른 IDE 선택" (compose-rust v0.0.7, #460), and it says whether the
@@ -530,7 +542,9 @@ pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
 pub fn IdeChevronSized(open: MutableState<bool>, on_ink: bool, height: f32) {
     let p = ember_theme().palette;
     let (tint, m) = if on_ink {
-        (ide_split_style(p).ink.to_argb(), Modifier::new().size(26.0, height))
+        // The trailing end of the split pill: its hover layer, press tint and focus ring take
+        // the pill's rounded end, not a square that crosses it (FR-L34.2, #251).
+        (ide_split_style(p).ink.to_argb(), Modifier::new().size(26.0, height).corner_radii(split_end_radii(height)))
     } else {
         (
             p.text_2.to_argb(),
@@ -713,7 +727,8 @@ pub fn IdeMenu(session: &str) {
                     )
                     .content(move || {
                         Clickable(
-                            Modifier::new().fill_max_height(),
+                            // The leading half of the 32 dp pill (FR-L34.2, #251).
+                            Modifier::new().fill_max_height().corner_radii(split_start_radii(32.0)),
                             Alignment::Center,
                             move || {
                                 ide_main_click(remembered, &o_main, |kind| {
@@ -5394,6 +5409,47 @@ mod tests {
         ide_main_click(None, &open, |k| launched.push(k));
         assert!(launched.is_empty(), "nothing is launched without a default");
         assert!(open.get_untracked(), "an unset default opens the chooser");
+    }
+
+    #[Composable]
+    fn host_ide_chevron_in_the_pill() {
+        let open = remember(|| mutable_state_of(false));
+        IdeChevron(open.clone(), true);
+    }
+
+    /// FR-L34.2, #251: the two halves of the "IDE 열기" split pill take the pill's rounded ends,
+    /// so the hover layer, the press tint and the keyboard focus ring stay inside the pill.
+    #[test]
+    fn fr_l34_2_the_split_pill_halves_carry_the_pill_ends_as_their_shape() {
+        assert_eq!(split_start_radii(32.0), [16.0, 0.0, 0.0, 16.0]);
+        assert_eq!(split_end_radii(32.0), [0.0, 16.0, 16.0, 0.0]);
+        assert_eq!(split_end_radii(40.0), [0.0, 20.0, 20.0, 0.0]);
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(host_ide_chevron_in_the_pill)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let clicked: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property: compose_rust::PropertyKind::OnClick, .. } => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(clicked.len(), 1, "{clicked:?}");
+        let mods: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { node_id, modifier, .. } if *node_id == clicked[0] => Some(format!("{modifier:?}")),
+                _ => None,
+            })
+            .collect();
+        let want = format!(
+            "{:?}",
+            compose_rust::schema::Modifier::Shape { top_start: 0.0, top_end: 16.0, bottom_end: 16.0, bottom_start: 0.0 }
+        );
+        assert!(mods.contains(&want), "{mods:?}");
+        // The main half is sent with the other end, in the desktop header.
+        let src = include_str!("session.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(src.contains("Modifier::new().fill_max_height().corner_radii(split_start_radii(32.0))"));
     }
 
     /// FR-L7, #271: the chevron offered beside the default IDE carries a click handler that

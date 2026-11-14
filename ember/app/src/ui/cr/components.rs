@@ -2729,6 +2729,28 @@ mod tests {
     }
 
     #[test]
+    fn fr_l34_2_a_shared_pressable_carries_its_fill_and_shape_on_the_node_that_takes_the_click() {
+        // #251. The renderer draws the press tint, the hover layer and the keyboard focus ring
+        // in the shape of the node that has the click handler (`RenderNode.kt` `pressedShape`),
+        // so the fill and its corner are on that node, never on a child or a wrapper.
+        let _guard = crate::services::test_guard();
+        for (name, content) in shared_pressables() {
+            if name.ends_with("Clickable") {
+                continue; // The caller's own modifier; it has no fill here.
+            }
+            let nodes = emitted_nodes(content);
+            let node = clicked(&nodes);
+            assert!(node.mods.iter().any(|m| m.starts_with("Background")), "{name}: {:?}", node.mods);
+            assert!(node.mods.iter().any(|m| m.starts_with("Shape")), "{name}: {:?}", node.mods);
+        }
+        // A pill is a pill to the ring too, and the back square keeps its 10 dp corner.
+        let chip = emitted_nodes(|| FilterChip("전체", true, || {}));
+        assert!(clicked(&chip).mods.iter().any(|m| m.starts_with("ShapeRole(Full")), "{:?}", clicked(&chip).mods);
+        let back = emitted_nodes(|| BackButton(|| {}));
+        assert!(clicked(&back).mods.iter().any(|m| m.starts_with("Shape { top_start: 10.0")), "{:?}", clicked(&back).mods);
+    }
+
+    #[test]
     fn fr_l28_back_button_is_the_32_px_rounded_square_with_the_arrow() {
         // `.icon-btn.sm.backbtn`: 32 px, `surface`, 1 px `line`, squircle corners, an 18 px
         // arrow; review SE13 measured a 40 px circle, CH8 a "목록" text pill.

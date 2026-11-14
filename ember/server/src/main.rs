@@ -72,7 +72,7 @@ use ember_server::store::Store;
 ///   `/api/devices`, managed on the TCP listener only)
 /// - `EMBER_RELAY_URL`: relay server(s) for the transport (overrides the hub's relay)
 /// - `EMBER_TRANSPORT_LISTEN`: fixed `ip:port` the transport binds (letify: its TCP listener;
-///   iroh: its UDP socket; unset: a random port). It is the device-key gated transport door, so
+///   the QUIC backend: its UDP socket; unset: a random port). It is the device-key gated transport door, so
 ///   `0.0.0.0:<port>` is fine (D37 covers the HTTP listeners). A bad value is a startup error.
 ///   When set, the server also prints `ember server device address: <peer id>@<host>:<port>`
 ///   for the app (FR-N9, #863)

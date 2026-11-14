@@ -40,7 +40,7 @@ pub const DEFAULT_RELAY_PORT: u16 = 7443;
 
 /// The fixed address the transport binds (SPEC `FR-N9`, #863, provisional), `ip:port`: on letify
 /// its TCP listener (its UDP sockets do not follow it: the address observer's client binds a
-/// random UDP port and the relay's observer has its own port), on iroh its QUIC UDP socket.
+/// random UDP port and the relay's observer has its own port), on the QUIC backend its UDP socket.
 /// Unset or empty: a random port, as before. A device's saved `<peer id>@<ip>:<port>` then
 /// survives a server restart. This is the transport door, where every peer is admitted only by
 /// its device key (`FR-N7`, the [`PeerGate`]), so a non-loopback address such as `0.0.0.0:<port>`

@@ -17,19 +17,10 @@
 name: Test
 
 on:
-  pull_request:
-  push:
-    branches: [main, develop]
-  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
-
-concurrency:
-  group: checks-${{ github.ref }}
-  # Feature branches and PRs cancel a superseded run; develop, main and release finish every run
-  # so each merge keeps its own result.
-  cancel-in-progress: ${{ !contains(fromJSON('["refs/heads/develop","refs/heads/main","refs/heads/release"]'), github.ref) }}
 
 jobs:
   transport-isolation:

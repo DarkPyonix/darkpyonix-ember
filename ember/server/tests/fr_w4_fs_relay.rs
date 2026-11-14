@@ -343,6 +343,24 @@ async fn fr_w4_fs_relay_namespace_body_is_capped_at_1_mib() {
         for t in tasks {
             t.await.unwrap();
         }
+
+        // Missing or non-JSON Content-Type is rejected with 415 Unsupported Media Type before
+        // touching the node (keeps browser simple cross-site POSTs away from read/write/namespace
+        // routes).
+        for op in ["stat", "write", "mkdir"] {
+            let url = format!("{}/api/computers/{}/fs/{op}", f.base, f.cid);
+            let r = f
+                .c
+                .post(&url)
+                .header("content-type", "text/plain")
+                .body(r#"{"path":"/x"}"#)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 415, "{op} with text/plain");
+            let r = f.c.post(&url).body(r#"{"path":"/x"}"#).send().await.unwrap();
+            assert_eq!(r.status(), 415, "{op} without Content-Type");
+        }
     })
     .await;
 }

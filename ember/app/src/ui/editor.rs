@@ -837,6 +837,121 @@ pub enum TreePrompt {
     DeleteMany { items: Vec<(String, bool)> },
 }
 
+/// The icon name for a tree prompt row.
+pub fn tree_prompt_icon(prompt: &TreePrompt) -> &'static str {
+    match prompt {
+        TreePrompt::NewDir { .. } => "folder",
+        _ => "file",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptKeyOutcome {
+    Submit,
+    Cancel,
+    Ignore,
+}
+
+/// The action a key in a tree prompt row takes.
+pub fn prompt_key_action(prompt: &TreePrompt, key: &str) -> PromptKeyOutcome {
+    match prompt {
+        TreePrompt::NewFile { .. } | TreePrompt::NewDir { .. } | TreePrompt::Rename { .. } => {
+            match key {
+                "Enter" => PromptKeyOutcome::Submit,
+                "Escape" => PromptKeyOutcome::Cancel,
+                _ => PromptKeyOutcome::Ignore,
+            }
+        }
+        TreePrompt::Delete { .. } | TreePrompt::DeleteMany { .. } => {
+            match key {
+                "Enter" | "Escape" => PromptKeyOutcome::Cancel,
+                _ => PromptKeyOutcome::Ignore,
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptSubmitOutcome {
+    CreateFile { parent: String, name: String },
+    CreateDir { parent: String, name: String },
+    Rename { path: String, new_name: String },
+    Delete { path: String, is_dir: bool },
+    DeleteMany { items: Vec<(String, bool)> },
+    BlockedDirty { path: String, dirty_files: Vec<String> },
+    EmptyName,
+}
+
+/// Evaluates submitting a tree prompt: checks empty names and unsaved dirty buffers on rename.
+pub fn evaluate_prompt_submit(
+    prompt: &TreePrompt,
+    typed_name: &str,
+    unsaved_paths: &[String],
+) -> PromptSubmitOutcome {
+    let name = typed_name.trim();
+    if matches!(prompt, TreePrompt::NewFile { .. } | TreePrompt::NewDir { .. } | TreePrompt::Rename { .. }) && name.is_empty() {
+        return PromptSubmitOutcome::EmptyName;
+    }
+    match prompt {
+        TreePrompt::NewFile { parent } => PromptSubmitOutcome::CreateFile {
+            parent: parent.clone(),
+            name: name.to_string(),
+        },
+        TreePrompt::NewDir { parent } => PromptSubmitOutcome::CreateDir {
+            parent: parent.clone(),
+            name: name.to_string(),
+        },
+        TreePrompt::Rename { path } => {
+            let blocked: Vec<String> = unsaved_paths
+                .iter()
+                .filter(|u| is_at_or_below(u, path))
+                .cloned()
+                .collect();
+            if !blocked.is_empty() {
+                PromptSubmitOutcome::BlockedDirty {
+                    path: path.clone(),
+                    dirty_files: blocked,
+                }
+            } else {
+                PromptSubmitOutcome::Rename {
+                    path: path.clone(),
+                    new_name: name.to_string(),
+                }
+            }
+        }
+        TreePrompt::Delete { path, is_dir } => PromptSubmitOutcome::Delete {
+            path: path.clone(),
+            is_dir: *is_dir,
+        },
+        TreePrompt::DeleteMany { items } => PromptSubmitOutcome::DeleteMany {
+            items: items.clone(),
+        },
+    }
+}
+
+/// Remaps expanded directory paths after `old` was renamed to `new`, returning the updated set
+/// and the list of remapped directory paths that should be listed again.
+pub fn remap_expanded_paths(
+    expanded: &std::collections::HashSet<String>,
+    old: &str,
+    new: &str,
+) -> (std::collections::HashSet<String>, Vec<String>) {
+    let mut updated = expanded.clone();
+    let old_trimmed = old.trim_end_matches('/');
+    let new_trimmed = new.trim_end_matches('/');
+    let mut remapped = Vec::new();
+    for p in expanded {
+        if is_at_or_below(p, old) {
+            updated.remove(p);
+            let next = format!("{}{}", new_trimmed, &p[old_trimmed.len()..]);
+            updated.insert(next.clone());
+            remapped.push(next);
+        }
+    }
+    remapped.sort();
+    (updated, remapped)
+}
+
 /// Updates the explorer selection based on shift (range) or toggle (Cmd/Ctrl) modifiers.
 pub fn update_tree_selection(
     current: &[(String, bool)],

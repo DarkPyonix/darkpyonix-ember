@@ -465,6 +465,9 @@ pub struct FieldOptions {
     pub border_width: Option<f32>,
     pub border_color: Option<Paint>,
     pub type_role: Option<TypeRole>,
+    /// The line pitch in dp when it is not the type step's own: the vcs textareas reset it to
+    /// the font's normal one (`.field{font:...}` without a line height).
+    pub line_height: Option<f32>,
     pub on_value_change: Option<Box<dyn FnMut(String)>>,
     pub on_submit: Option<Box<dyn FnMut(String)>>,
     pub on_focus_gained: Option<Box<dyn FnMut()>>,
@@ -655,7 +658,7 @@ fn FieldNode(o: FieldOptions, modifier: Modifier) {
     if let Some(r) = o.type_role {
         f = f.type_role(r);
     }
-    f = f.font_size(fs.size()).line_height(fs.line_height()).letter_spacing(fs.letter_spacing());
+    f = f.font_size(fs.size()).line_height(o.line_height.unwrap_or(fs.line_height())).letter_spacing(fs.letter_spacing());
     // The node's transparent fill alone still left the toolkit's frame drawn inside the
     // composer (H2, SE10, CH1); `bare` drops it.
     if o.bare {

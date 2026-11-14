@@ -408,6 +408,11 @@ pub const VCS_FIELD_ROLE: TypeRole = TypeRole::Label;
 pub const VCS_TEXTAREA_H: f32 = 64.0;
 /// Their text inset `(horizontal, vertical)`: `.vcs textarea.field` padding 8 12.
 pub const VCS_TEXTAREA_INSET: (f32, f32) = (12.0, 8.0);
+/// Their line pitch: `.field{font:var(--fs-md) var(--font)}` resets the line height to the
+/// font's `normal` (about 1.2 em, 16 px at 13 px), which `.vcs textarea.field` keeps. The 13 px
+/// step's own 20 px showed 2.4 lines in the 48 px text area, so an overflowing field cut a line
+/// in half; 16 shows three whole lines (review r6 item 3).
+pub const VCS_TEXTAREA_LINE_H: f32 = 16.0;
 /// Height of the 이 덩어리 전체 button: smaller than the 32 px control, with a 1 px border.
 pub const VCS_HUNK_BUTTON_H: f32 = 28.0;
 /// Height of the hunk header row (`.vcs-hh`): the 28 px action with 6 px above and below.
@@ -1491,6 +1496,7 @@ fn CommitBox(
                     fill_max_width: true,
                     height: Some(VCS_TEXTAREA_H),
                     inset: Some(VCS_TEXTAREA_INSET),
+                    line_height: Some(VCS_TEXTAREA_LINE_H),
                     text: Some(body_state.get()),
                     placeholder: "설명 (선택)".to_string(),
                     type_role: Some(VCS_FIELD_ROLE),
@@ -3180,6 +3186,7 @@ fn PrDetailActions<R: Fn(GitPrReviewAction) + Clone + 'static, M: Fn() + Clone +
                     fill_max_width: true,
                     height: Some(VCS_TEXTAREA_H),
                     inset: Some(VCS_TEXTAREA_INSET),
+                    line_height: Some(VCS_TEXTAREA_LINE_H),
                     type_role: Some(VCS_FIELD_ROLE),
                     multiline: true,
                     text: Some(text.get()),
@@ -3513,6 +3520,8 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
                             fill_max_width: true,
                             height: Some(VCS_TEXTAREA_H),
                             inset: Some(VCS_TEXTAREA_INSET),
+                            line_height: Some(VCS_TEXTAREA_LINE_H),
+                    line_height: Some(VCS_TEXTAREA_LINE_H),
                             type_role: Some(VCS_FIELD_ROLE),
                             multiline: true,
                             text: Some(f_body.get()),
@@ -6548,6 +6557,7 @@ mod tests {
             fill_max_width: true,
             height: Some(VCS_TEXTAREA_H),
             inset: Some(VCS_TEXTAREA_INSET),
+            line_height: Some(VCS_TEXTAREA_LINE_H),
             type_role: Some(VCS_FIELD_ROLE),
             multiline: true,
             ..Default::default()
@@ -6581,6 +6591,10 @@ mod tests {
         assert!(mods.iter().any(|m| m == "Padding(8.0)"), "{mods:?}");
         assert_eq!(mods.iter().filter(|m| *m == "Width(4.0)").count(), 2, "{mods:?}");
         assert!(props.iter().any(|p| p == "FontSize=Float(13.0)"), "{props:?}");
+        // Three whole 16 px lines in the 48 px text area, not 2.4 lines of 20 (review r6).
+        assert!(props.iter().any(|p| p.starts_with("LineHeight=") && p.contains("16.0")), "{props:?}");
+        assert!(!props.iter().any(|p| p.starts_with("LineHeight=") && p.contains("20.0")), "{props:?}");
+        assert_eq!((VCS_TEXTAREA_H - 2.0 * VCS_TEXTAREA_INSET.1) / VCS_TEXTAREA_LINE_H, 3.0);
         // Every vcs textarea takes these.
         let src = include_str!("vcs.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap()];
@@ -6589,7 +6603,7 @@ mod tests {
                 let start = production[..at].rfind("EmberField(FieldOptions {").expect("field");
                 let end = at + production[at..].find("});").expect("end");
                 let opts = &production[start..end];
-                for want in ["height: Some(VCS_TEXTAREA_H)", "inset: Some(VCS_TEXTAREA_INSET)", "type_role: Some(VCS_FIELD_ROLE)", "multiline: true"] {
+                for want in ["height: Some(VCS_TEXTAREA_H)", "inset: Some(VCS_TEXTAREA_INSET)", "line_height: Some(VCS_TEXTAREA_LINE_H)", "type_role: Some(VCS_FIELD_ROLE)", "multiline: true"] {
                     assert!(opts.contains(want), "{want} in {opts}");
                 }
             }

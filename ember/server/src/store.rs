@@ -372,7 +372,23 @@ impl Store {
         )?;
         let seq = last_seq + 1;
         let at = now_ms();
-        let status = parse_status(&status).after(event);
+        let still_pending = if matches!(
+            event,
+            AgentEvent::ApprovalResolved { .. }
+                | AgentEvent::QuestionAnswered { .. }
+                | AgentEvent::PromptWithdrawn { .. }
+        ) {
+            let mut stmt = tx.prepare("SELECT event FROM events WHERE session_id = ?1 ORDER BY seq")?;
+            let mut prior: Vec<AgentEvent> = stmt
+                .query_map(params![session_id], |r| r.get::<_, String>(0))?
+                .filter_map(|r| r.ok().and_then(|s| serde_json::from_str(&s).ok()))
+                .collect();
+            prior.push(event.clone());
+            crate::events::has_pending_prompts(&prior)
+        } else {
+            false
+        };
+        let status = parse_status(&status).after_with_pending(event, still_pending);
         tx.execute(
             "INSERT INTO events (session_id, seq, at, event) VALUES (?1, ?2, ?3, ?4)",
             params![session_id, seq, at, serde_json::to_string(event)?],

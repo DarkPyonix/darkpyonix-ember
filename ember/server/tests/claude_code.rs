@@ -449,3 +449,36 @@ async fn fr_a5_allow_always_on_a_plan_is_not_remembered() {
         .collect();
     assert_eq!(ids, ["p1", "p2"]);
 }
+
+/// FR-A5 (#683): `control_cancel_request` from the CLI withdraws both a pending approval and a
+/// pending question, emitting `PromptWithdrawn` and refusing any answer for the withdrawn ids.
+#[tokio::test]
+async fn fr_a5_cancel_frame_withdraws_approval_and_question_against_fake_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut req = start_req(dir.path());
+    req.env.push(("FAKE_CLAUDE_MODE".into(), "cancel".into()));
+    let mut run = ClaudeCodeAdapter::new(fake_bin()).start(req, tx).await.unwrap();
+    run.send("cancel test").await.unwrap();
+
+    assert_eq!(next(&mut rx, 10).await, AgentEvent::NativeSession { native_id: "fake-session".into() });
+    let AgentEvent::ApprovalRequested { approval_id, tool, .. } = next(&mut rx, 10).await else {
+        panic!("expected approval c1");
+    };
+    assert_eq!((approval_id.as_str(), tool.as_str()), ("c1", "Write"));
+    assert_eq!(next(&mut rx, 10).await, AgentEvent::PromptWithdrawn { prompt_id: "c1".into() });
+
+    let AgentEvent::QuestionAsked { question_id, .. } = next(&mut rx, 10).await else {
+        panic!("expected question q1");
+    };
+    assert_eq!(question_id, "q1");
+    assert_eq!(next(&mut rx, 10).await, AgentEvent::PromptWithdrawn { prompt_id: "q1".into() });
+    assert_eq!(next(&mut rx, 10).await, AgentEvent::Usage { input_tokens: 1, output_tokens: 1 });
+    assert_eq!(next(&mut rx, 10).await, AgentEvent::TurnEnded { outcome: TurnOutcome::Completed });
+
+    // Neither withdrawn prompt can be answered after the cancel frame.
+    assert!(run.answer("c1", ApprovalDecision::AllowOnce).await.is_err());
+    assert!(run.answer_question("q1", &answer_for("q0", "A")).await.is_err());
+    run.shutdown().await.unwrap();
+    assert_eq!(stdin_log(dir.path()).len(), 1, "only the user message was sent on stdin");
+}

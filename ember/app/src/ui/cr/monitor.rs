@@ -750,11 +750,22 @@ mod tests {
                     _ => None,
                 })
                 .unwrap_or_else(|| panic!("no button named {}", mode.label()));
-            let enabled = batch.iter().find_map(|m| match m {
-                Mutation::SetProp { node_id, property: PropertyKind::Enabled, value: PropertyValue::Bool(b) } if *node_id == node => Some(*b),
-                _ => None,
-            });
-            assert_eq!(enabled, Some(false), "{} must be disabled", mode.label());
+            // The choice is Ember's pill (review r5): a disabled one has no click handler on its
+            // label or any node above it.
+            let parent = |id: u32| {
+                batch.iter().find_map(|m| match m {
+                    Mutation::Insert { parent_id, node_id, .. } if *node_id == id => Some(*parent_id),
+                    _ => None,
+                })
+            };
+            let clickable = |id: u32| {
+                batch.iter().any(|m| matches!(m, Mutation::SetProp { node_id, property: PropertyKind::OnClick, .. } if *node_id == id))
+            };
+            let mut at = Some(node);
+            while let Some(id) = at {
+                assert!(!clickable(id), "{} must be disabled", mode.label());
+                at = parent(id);
+            }
         }
     }
 }

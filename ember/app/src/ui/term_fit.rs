@@ -18,8 +18,9 @@ pub struct CellSize {
 
 /// The `.ed-term` cell: `--code-fs` 13 px in `--mono` on `--code-lh` 22 px lines
 /// (`assets/editor/editor.css`). The panel's text is drawn in `--mono` (dioxus-compose#196, #241
-/// fixed in the pinned rev), and every face of that stack (JetBrains Mono, SF Mono, Menlo, the
-/// system monospace) advances 0.6 em, so the advance is that and is not measured.
+/// fixed in the pinned rev), whose first face is JetBrains Mono, bundled with Ember (`ui::fonts`)
+/// and 0.6 em wide. The advance is that and is not measured; a fallback face of another width
+/// (Consolas is 0.55 em) would be off until the page can read text metrics.
 pub const PANEL_CELL: CellSize = CellSize { width: 13.0 * 0.6, height: 22.0 };
 
 /// The `.ed-term` padding, `var(--sp3) var(--sp4)`: (left plus right, top plus bottom).

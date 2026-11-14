@@ -95,7 +95,9 @@ fn fr_l31_commands_the_editor_cannot_do_yet_are_marked_and_listed_after_the_work
     assert!(enabled(Action::Terminal) && enabled(Action::Close) && enabled(Action::HideTool) && enabled(Action::Recent) && enabled(Action::GotoLine) && enabled(Action::Format));
     // FR-L31.15: save, maximize and reopen closed editor work in the window.
     assert!(enabled(Action::Save) && enabled(Action::MaximizeTool) && enabled(Action::ReopenClosed) && enabled(Action::FindInFiles) && enabled(Action::NewTerminal));
-    for a in [Action::RunConfig, Action::Stop, Action::Ask] {
+    // FR-L31 (#766): the ask action opens the 에이전트 tool window.
+    assert!(enabled(Action::Ask));
+    for a in [Action::RunConfig, Action::Stop] {
         assert!(!enabled(a), "{a:?} is not implemented");
     }
     let ranked = rank("", &list);

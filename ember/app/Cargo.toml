@@ -45,7 +45,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 
 # The client's I/O is async; the app owns one multi-thread runtime for it (PR-3: no domain
 # work on the UI thread).
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "fs", "macros"] }
+# `net` and `io-util` for the owner claim over the server's claim socket (FR-S12, #842); the
+# same features ember-client already turns on.
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "fs", "macros", "net", "io-util"] }
 # Same HTTP stack as ember-client, used for the endpoints ember-client does not wrap yet
 # (accounts, computers, IDE targets) and the terminal relay. `rustls-tls` (webpki roots, as in
 # ember/node and ember/server) gives https with certificate verification (FR-L31.19, #333).

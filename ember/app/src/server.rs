@@ -28,6 +28,17 @@ pub enum ServerError {
     Client(String),
 }
 
+impl ServerError {
+    /// True for 403 `owner_required` (FR-S12, #842): the route needs the owner key and none
+    /// live was sent. [`status_error`] keeps the code at the start of the message.
+    pub fn is_owner_required(&self) -> bool {
+        matches!(self, ServerError::Status { status: 403, message } if message.starts_with(OWNER_REQUIRED))
+    }
+}
+
+/// The server's code for a missing owner key, kept at the start of a 403's message.
+const OWNER_REQUIRED: &str = "owner_required";
+
 pub type ServerResult<T> = Result<T, ServerError>;
 
 /// `GET /api/accounts` entry.
@@ -356,6 +367,10 @@ pub struct CreateSession {
 pub struct ServerApi {
     http: reqwest::Client,
     base: String,
+    /// The claimed owner key as the `X-Ember-Owner` value (FR-S12, #842), sent on owner routes
+    /// only. In memory only, marked sensitive (`Debug` prints `Sensitive`), shared by clones;
+    /// set and cleared by the app's claim ([`crate::owner_claim`]).
+    owner: std::sync::Arc<std::sync::RwLock<Option<reqwest::header::HeaderValue>>>,
 }
 
 impl ServerApi {
@@ -391,11 +406,47 @@ impl ServerApi {
         base_url: &str,
     ) -> ServerResult<ServerApi> {
         let http = built.map_err(|e| ServerError::Client(e.to_string()))?;
-        Ok(ServerApi { http, base: base_url.trim_end_matches('/').to_string() })
+        Ok(ServerApi { http, base: base_url.trim_end_matches('/').to_string(), owner: Default::default() })
     }
 
     fn url(&self, path: &str) -> String {
         format!("{}/api{path}", self.base)
+    }
+
+    /// Sets or clears the owner key (FR-S12, #842) for this client and its clones, as
+    /// `ember_client::api::Api::set_owner_key` does: kept only for a loopback or listed host
+    /// (where the token goes) and only when it can be a header. False when it was not kept.
+    pub fn set_owner_key(&self, key: Option<&ember_client::owner::OwnerKey>) -> bool {
+        let value = match key {
+            None => None,
+            Some(k) => {
+                if !ember_client::token::token_allowed_for(&self.base) {
+                    return false;
+                }
+                let Ok(mut v) = reqwest::header::HeaderValue::from_str(k.expose()) else { return false };
+                v.set_sensitive(true);
+                Some(v)
+            }
+        };
+        *self.owner.write().unwrap_or_else(|e| e.into_inner()) = value;
+        true
+    }
+
+    /// The owner header for `method` on `path` (below `/api`): the key when one is set and the
+    /// route is an owner route (`ember_client::owner::owner_route`).
+    fn owner_header(&self, method: &reqwest::Method, path: &str) -> Option<reqwest::header::HeaderValue> {
+        let key = self.owner.read().unwrap_or_else(|e| e.into_inner()).clone()?;
+        ember_client::owner::owner_route(method, &format!("/api{path}")).then_some(key)
+    }
+
+    /// A request to `path` (below `/api`) that carries the owner key when the route needs it.
+    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        let owner = self.owner_header(&method, path);
+        let req = self.http.request(method, self.url(path));
+        match owner {
+            Some(v) => req.header(ember_client::owner::OWNER_HEADER, v),
+            None => req,
+        }
     }
 
     async fn check(res: reqwest::Response) -> ServerResult<reqwest::Response> {
@@ -413,19 +464,19 @@ impl ServerApi {
 
     /// `POST /api/accounts/{id}/default`: the per-agent default account (FR-U1, FR-L17).
     pub async fn set_default_account(&self, id: &str) -> ServerResult<Account> {
-        let req = self.http.post(self.url(&default_path(id)));
+        let req = self.request(reqwest::Method::POST, &default_path(id));
         Ok(Self::check(req.send().await?).await?.json().await?)
     }
 
     /// `POST /api/accounts`: a new account with its own config directory and the login command.
     pub async fn create_account(&self, agent: &str, label: &str) -> ServerResult<AccountWithLogin> {
-        let req = self.http.post(self.url("/accounts")).json(&create_account_body(agent, label));
+        let req = self.request(reqwest::Method::POST, "/accounts").json(&create_account_body(agent, label));
         Ok(Self::check(req.send().await?).await?.json().await?)
     }
 
     /// `POST /api/accounts/{id}/check`: runs the agent's status command, records and returns it.
     pub async fn check_account(&self, id: &str) -> ServerResult<AccountWithLogin> {
-        let req = self.http.post(self.url(&check_path(id)));
+        let req = self.request(reqwest::Method::POST, &check_path(id));
         Ok(Self::check(req.send().await?).await?.json().await?)
     }
 
@@ -485,8 +536,7 @@ impl ServerApi {
     /// `PUT /api/agents/{agent}/settings`: set or clear (`None` or `Some(0)`) the memory limit in MiB (FR-L20, FR-S8).
     pub async fn put_agent_mem_limit(&self, agent: &str, mem_limit_mb: Option<u64>) -> ServerResult<()> {
         let req = self
-            .http
-            .put(self.url(&agent_settings_path(agent)))
+            .request(reqwest::Method::PUT, &agent_settings_path(agent))
             .json(&json!({ "mem_limit_mb": mem_limit_mb }));
         Self::check(req.send().await?).await?;
         Ok(())
@@ -590,12 +640,17 @@ fn extension_failure(status: u16, body: String) -> ServerError {
 }
 
 /// The error for a non-success answer: 401 is [`ServerError::Unauthorized`], the rest carry the
-/// server's `error` text (or the raw body).
+/// server's `error` text (or the raw body). A 403 `owner_required` keeps the code in front of
+/// the text, so it is recognised wherever the error is shown (FR-S12, #842).
 fn status_error(status: u16, body: String) -> ServerError {
-    let message = serde_json::from_str::<serde_json::Value>(&body)
-        .ok()
+    let parsed = serde_json::from_str::<serde_json::Value>(&body).ok();
+    let owner_required =
+        status == 403 && parsed.as_ref().and_then(|v| v.get("code")).and_then(|c| c.as_str()) == Some(OWNER_REQUIRED);
+    let message = parsed
+        .as_ref()
         .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
         .unwrap_or(body);
+    let message = if owner_required { format!("{OWNER_REQUIRED}: {message}") } else { message };
     if status == 401 {
         ServerError::Unauthorized(message)
     } else {
@@ -717,6 +772,44 @@ mod tests {
         let e = ServerApi::from_built(Err("tls backend failed"), "http://127.0.0.1:1").unwrap_err();
         assert!(matches!(&e, ServerError::Client(m) if m == "tls backend failed"));
         assert!(ServerApi::with_token("http://127.0.0.1:1", None).is_ok());
+    }
+
+    /// The app's own HTTP client sends the claimed owner key on owner routes only, keeps it for a
+    /// local server only, never prints it, and marks a 403 `owner_required` (FR-S12, #842).
+    #[test]
+    fn fr_s12_server_api_sends_the_owner_key_on_owner_routes_only() {
+        use ember_client::owner::OwnerKey;
+        use reqwest::Method;
+        let api = ServerApi::with_token("http://127.0.0.1:1", None).unwrap();
+        assert!(api.owner_header(&Method::POST, "/accounts").is_none(), "no key yet");
+        assert!(api.set_owner_key(Some(&OwnerKey::new("eok_app_key"))));
+        let clone = api.clone();
+        for (m, path) in [
+            (Method::POST, "/accounts"),
+            (Method::POST, "/accounts/a1/default"),
+            (Method::POST, "/accounts/a1/check"),
+            (Method::PUT, "/agents/codex/settings"),
+        ] {
+            let v = clone.owner_header(&m, path).unwrap_or_else(|| panic!("{m} {path}"));
+            assert_eq!(v, "eok_app_key");
+            assert!(v.is_sensitive());
+        }
+        for (m, path) in [(Method::GET, "/accounts"), (Method::POST, "/sessions"), (Method::GET, "/agents/settings")] {
+            assert!(api.owner_header(&m, path).is_none(), "{m} {path}");
+        }
+        assert!(!format!("{api:?}").contains("eok_app_key"));
+        assert!(api.set_owner_key(None));
+        assert!(clone.owner_header(&Method::POST, "/accounts").is_none(), "clones share the key");
+        // A server elsewhere never gets the key.
+        let remote = ServerApi::with_token("http://192.0.2.1:8740", None).unwrap();
+        assert!(!remote.set_owner_key(Some(&OwnerKey::new("eok_app_key"))));
+        assert!(remote.owner_header(&Method::POST, "/accounts").is_none());
+
+        let e = status_error(403, r#"{"code":"owner_required","error":"this route needs owner presence"}"#.into());
+        assert!(e.is_owner_required(), "{e:?}");
+        assert!(crate::owner_claim::text_is_owner_required(&e.to_string()), "{e}");
+        assert!(!status_error(403, r#"{"code":"scope_denied","error":"x"}"#.into()).is_owner_required());
+        assert!(!status_error(500, "boom".into()).is_owner_required());
     }
 
     #[test]

@@ -273,6 +273,7 @@ mod tests {
         assert_eq!(d.lines[0], DiffLine::Del("port = 80".into()));
         assert_eq!(d.lines[2], DiffLine::Add("port = 8080".into()));
         assert_eq!(d.lines[2].shown(), "+port = 8080");
+        assert_eq!(d.lines[0].shown(), "-port = 80");
         // An append keeps only the new block, as its unified diff would.
         let app = json!({"file_path": "c.rs", "old_string": "a\n}\n", "new_string": "a\n}\n\nimpl C {}\n"});
         let d = file_diff("Edit", &app, "").unwrap();
@@ -281,7 +282,6 @@ mod tests {
         let out = "--- a/src/c.rs\n+++ b/src/c.rs\n@@ -1 +1,2 @@\n a\n+b\n";
         let d = file_diff("Edit", &app, out).unwrap();
         assert_eq!((d.file.as_str(), d.added, d.removed), ("c.rs", 1, 0));
-        assert_eq!(d.lines[0].shown(), "-port = 80");
     }
 
     #[test]

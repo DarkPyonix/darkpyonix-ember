@@ -1631,7 +1631,6 @@ pub fn TranscriptRow(
                             .content(move || {
                                 if !has_result {
                                     Spinner(12.0);
-                                } else {
                                 } else if diff_hdr.is_some() {
                                     NavIcon(super::session::ICON_CODE_SVG, p.muted.to_argb(), 15.0);
                                 } else {

@@ -1,11 +1,7 @@
 name: IntelliJ plugin
 
 on:
-  push:
-    paths: ["extensions/intellij-darkpyonix/**", ".github/workflows/test-intellij-plugin.yml"]
-  pull_request:
-    paths: ["extensions/intellij-darkpyonix/**", ".github/workflows/test-intellij-plugin.yml"]
-  workflow_dispatch:
+  workflow_call:
 
 jobs:
   build:

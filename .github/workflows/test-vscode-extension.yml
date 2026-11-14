@@ -6,11 +6,7 @@ name: VS Code extension
 # VS Code and is not run here.
 
 on:
-  push:
-    paths: ["extensions/vscode-darkpyonix/**", "extensions/vscode-darkpyonix-theme/**", ".github/workflows/test-vscode-extension.yml"]
-  pull_request:
-    paths: ["extensions/vscode-darkpyonix/**", "extensions/vscode-darkpyonix-theme/**", ".github/workflows/test-vscode-extension.yml"]
-  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

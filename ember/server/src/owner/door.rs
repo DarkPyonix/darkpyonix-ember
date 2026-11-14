@@ -63,7 +63,7 @@ use super::{Claimant, Confirm, Owner, OwnerEvent, SOCKET_FILE};
 #[cfg(windows)]
 mod pipe;
 #[cfg(windows)]
-pub use pipe::{current_user_sid, pipe_dacl, pipe_exists, snapshot_table, OwnerDoor};
+pub use pipe::{current_user_sid, pipe_dacl, pipe_exists, sid_is_current_user, snapshot_table, OwnerDoor};
 
 /// The longest line either side sends.
 pub const MAX_LINE: u64 = 4096;

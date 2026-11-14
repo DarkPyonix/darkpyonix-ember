@@ -37,7 +37,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW, GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
 };
 use windows_sys::Win32::Security::{
     EqualSid, GetTokenInformation, TokenUser, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
@@ -148,6 +148,22 @@ pub fn current_user_sid() -> io::Result<String> {
     let _free = Local(s.cast());
     // SAFETY: ConvertSidToStringSidW wrote a NUL-terminated string.
     Ok(unsafe { from_wide(s) })
+}
+
+/// True when `sid` names the user this process runs as. `sid` is a SID string as SDDL writes
+/// it: `S-1-5-21-...`, or a two-letter alias, because Windows prints a well-known account by
+/// its alias (the built-in administrator reads back as `LA`, not as its `...-500` SID).
+pub fn sid_is_current_user(sid: &str) -> io::Result<bool> {
+    let w = wide(sid);
+    let mut theirs: PSID = null_mut();
+    // SAFETY: `w` is NUL-terminated; `theirs` is LocalFree'd below.
+    if unsafe { ConvertStringSidToSidW(w.as_ptr(), &mut theirs) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let _free = Local(theirs);
+    let mine = my_user()?;
+    // SAFETY: both SIDs are valid for the life of their buffers.
+    Ok(unsafe { EqualSid(mine.sid(), theirs) } != 0)
 }
 
 /// True when the process `pid` runs as this process's user. An error when its token cannot be

@@ -979,7 +979,9 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                         let send_sub = send.clone();
                                         EmberField(FieldOptions {
                                             bare: true,
-                                            inset: Some((4.0, 0.0)),
+                                            // `.composer` padding 14: the card's 12 plus 2
+                                            // (FR-L10.2, #844; 4 put the text 16 px in).
+                                            inset: Some((2.0, 0.0)),
                                             fill_max_width: true,
                                             multiline: false,
                                             height: Some(36.0),

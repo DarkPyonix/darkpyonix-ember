@@ -23,19 +23,12 @@ html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font
 .ed-confirm-files{margin:0;padding-left:var(--sp5);font-size:var(--fs-sm)}
 .ed-confirm-acts{display:flex;justify-content:flex-end;gap:var(--sp2);margin-top:var(--sp2)}
 /* Design review 2026-11-13: the mockup's rules restated where the HTML path lays them out differently
-   from a browser. Each keeps the mockup's measurements (editor.css) and changes only how they are reached. */
-/* A7: a browser centres a button's label by itself, the HTML path does not; inline-flex as .ed-tab. */
-.ed-btabs button{display:inline-flex;align-items:center;justify-content:center;flex:none}
-/* A11: the status bar is --sbh high at the window's bottom even when its grid row is taller, and the
-   path on its left sits on the same centre line as the items on the right. */
+   from a browser. Each keeps the mockup's measurements (editor.css) and changes only how they are reached.
+   A7 (button label centring, dioxus-compose#243), the A11 path centring (#243), the A12 gap inside the
+   find pill (#244) and the A13 line above the bottom stripe group (#245) are fixed in the pinned rev, so
+   the mockup's own rules apply to them. */
+/* A11: the status bar is --sbh high at the window's bottom even when its grid row is taller. */
 .ed-status{height:var(--sbh);align-self:end;box-sizing:border-box}
-.ed-sbi.crumbs-s{align-self:center}
-/* A12: 300px wide, not shrunk by the spacer beside it, 8px between the magnifier and the label. The gap
-   is the label's margin (a gap inside a button is not applied), so it is 8px whether or not gap works. */
-.ed-top .ed-find{display:inline-flex;gap:0}
-.ed-find>span.hide-md{margin-left:var(--sp2)}
+/* A12: 300px wide, not shrunk by the spacer beside it (the mockup's max-width:1100px auto width and
+   560px hide still apply below this). */
 @media (min-width:1101px){.ed-top .ed-find{flex:none;width:300px}}
-@media (max-width:560px){.ed-top .ed-find{display:none}}
-/* A13: the line above the bottom stripe group, as its own element (a border with side margins is not drawn). */
-.ed-stripe-b{border-top:0;margin:0}
-.ed-stripe-sep{flex:none;align-self:center;width:28px;height:1px;background:var(--line)}

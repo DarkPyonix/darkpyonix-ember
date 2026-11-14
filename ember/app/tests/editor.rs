@@ -1899,23 +1899,32 @@ mod design_chrome {
         assert!(PAGE.contains("&ToolWindow::LEFT_STRIPE") && PAGE.contains("&ToolWindow::BOTTOM_STRIPE"));
     }
 
+    /// A13: the line above the bottom group is the mockup's `.ed-stripe-b` border-top with its 6px
+    /// side margins, which the HTML path draws since dioxus-compose#245 (PR #257).
     #[test]
-    fn design_a13_the_line_above_the_bottom_group_is_drawn_as_an_element() {
+    fn design_a13_the_line_above_the_bottom_group_is_the_mockups_border() {
         let css = compact_css();
-        assert!(css.contains(".ed-stripe-sep{flex:none;align-self:center;width:28px;height:1px;background:var(--line)}"));
-        assert!(PAGE.contains("div { class: \"ed-stripe-sep\", role: \"separator\" }"));
+        assert!(css.contains(".ed-stripe-b{border-top:1pxsolidvar(--line);margin:06px}"));
+        assert!(!css.contains(".ed-stripe-sep") && !css.contains(".ed-stripe-b{border-top:0;margin:0}"));
+        assert!(!PAGE.contains("ed-stripe-sep"));
     }
 
+    /// A7: a button centres its label by itself on the HTML path since dioxus-compose#243 (PR #253),
+    /// so the mockup's `.ed-btabs button` applies as written.
     #[test]
     fn design_a7_bottom_tab_labels_are_centred() {
-        assert!(compact_css().contains(".ed-btabsbutton{display:inline-flex;align-items:center;justify-content:center;flex:none}"));
+        let css = compact_css();
+        assert!(css.contains(".ed-btabsbutton{height:30px;"));
+        assert!(!css.contains(".ed-btabsbutton{display:inline-flex"));
     }
 
     #[test]
     fn design_a11_status_bar_is_sbh_high_on_one_centre_line() {
         let css = compact_css();
         assert!(css.contains(".ed-status{height:var(--sbh);align-self:end;box-sizing:border-box}"));
-        assert!(css.contains(".ed-sbi.crumbs-s{align-self:center}"));
+        // dioxus-compose#243 (`fr34_a_block_label_with_its_line_height_is_centred_in_its_bar`): the
+        // path's own line height centres it, as the mockup's `.ed-sbi.crumbs-s` says.
+        assert!(!css.contains(".ed-sbi.crumbs-s{align-self:center}"));
     }
 
     #[test]
@@ -1923,8 +1932,11 @@ mod design_chrome {
         assert_eq!(FIND_PILL_LABEL, "파일, 동작, 기호 찾기");
         let css = compact_css();
         assert!(css.contains("@media(min-width:1101px){.ed-top.ed-find{flex:none;width:300px}}"));
-        assert!(css.contains(".ed-find>span.hide-md{margin-left:var(--sp2)}"));
-        assert!(css.contains("@media(max-width:560px){.ed-top.ed-find{display:none}}"));
+        // dioxus-compose#244 (PR #255): the mockup's `gap:var(--sp2)` on the flex button is applied,
+        // so no margin stands in for it and the mockup's 560px hide is not restated.
+        assert!(css.contains(".ed-find{display:flex;align-items:center;gap:var(--sp2);"));
+        assert!(!css.contains(".ed-find>span.hide-md{margin-left") && !css.contains(".ed-top.ed-find{display:inline-flex;gap:0}"));
+        assert!(!css.contains("@media(max-width:560px){.ed-top.ed-find{display:none}}"));
         assert!(PAGE.contains("span { class: \"hide-md\", \"{crate::ui::editor::FIND_PILL_LABEL}\" }"));
     }
 

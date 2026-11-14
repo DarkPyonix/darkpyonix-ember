@@ -1471,9 +1471,6 @@ pub mod page {
                     {top_bar(&s, &branch, keymap)}
                     div { class: "ed-rail",
                         {stripe_column(&s, sel, keymap, Strip::Left)}
-                        // The line above the bottom group (`.ed-stripe-b` border-top): drawn as its own
-                        // element, because the HTML path does not draw a border with side margins (A13).
-                        div { class: "ed-stripe-sep", role: "separator" }
                         {stripe_column(&s, sel, keymap, Strip::Bottom)}
                     }
                     if let (Some(w), false) = (sel.selected(Side::Left), maximized) {

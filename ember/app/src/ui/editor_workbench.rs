@@ -3107,17 +3107,12 @@ pub mod page {
                     div { class: "tl", style: "padding-top:var(--sp2); color:var(--muted);", "{notice}" }
                 }
                 if offer_reconnect {
-                    // TODO(dioxus-compose#175): the button sits in a flex row of its own because directly under
-                    // the block-level panel the renderer leaves out the second glyph of each word
-                    // ("다시 연결" draws as "다 연"). Drop the wrapper once that is fixed.
-                    div { style: "display:flex; margin-top:var(--sp2);",
-                        button { class: "ed-pj", style: "border:1px solid var(--line);",
-                            onclick: move |_| {
-                                terms::reattach_active();
-                                let mut revision = revision;
-                                *revision.write() += 1;
-                            }, "다시 연결" }
-                    }
+                    button { class: "ed-pj", style: "border:1px solid var(--line); margin-top:var(--sp2);",
+                        onclick: move |_| {
+                            terms::reattach_active();
+                            let mut revision = revision;
+                            *revision.write() += 1;
+                        }, "다시 연결" }
                 }
             }
         }

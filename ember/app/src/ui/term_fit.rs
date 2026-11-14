@@ -143,6 +143,17 @@ mod tests {
         assert_eq!(PANEL_CELL, CellSize { width: 13.0 * 0.6, height: 22.0 });
     }
 
+    /// dioxus-compose#175 (fcc16f8): a button directly under the block-level panel draws every
+    /// glyph, so 다시 연결 sits in the panel without a flex row of its own.
+    #[test]
+    fn fr_l31_20_reconnect_button_sits_in_the_panel() {
+        let page = include_str!("editor_workbench.rs");
+        assert!(!page.contains(concat!("TODO(dioxus-compose#", "175)")));
+        let body = &page[page.find("fn terminal_body").expect("terminal body")..page.find("fn problems_body").expect("problems")];
+        let at = body.find("if offer_reconnect {").expect("reconnect");
+        assert!(body[at..].trim_start_matches("if offer_reconnect {").trim_start().starts_with(r#"button { class: "ed-pj""#), "no wrapper row");
+    }
+
     /// dioxus-compose#207: the panel follows its `onresize`, so no stand-in for a resize event is left.
     #[test]
     fn fr_l31_20_panel_refits_on_its_resize_event() {

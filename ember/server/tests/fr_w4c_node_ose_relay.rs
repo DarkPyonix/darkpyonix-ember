@@ -39,7 +39,7 @@ use ember_transport::mem::MemNetwork;
 use ember_transport::{BiStream, Dialer, PeerAddr, Transport};
 use futures::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;

@@ -47,7 +47,7 @@ use crate::ui::home::{
 };
 use super::components::{
     pill_colors, pill_metrics, AppButton, BackButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
-    CloseButton, FieldOptions, Label, MonoLabel, Pill, PillTone, Select, SheetFooter,
+    CloseButton, FieldOptions, Label, MonoLabel, NamedSelect, Pill, PillTone, SheetFooter,
 };
 use super::characters::{CharState, Character};
 use super::compat::Spinner;
@@ -2678,7 +2678,7 @@ fn FormFields(ctx: &FormCtx) {
                 let (sel_proj, names) = (draft.clone(), project_choices.clone());
                 if pick {
                     let at = project_choices.iter().position(|n| *n == d.sel.project).unwrap_or(0);
-                    Select(&project_choices[at], &project_choices, at, w, move |i| {
+                    NamedSelect("프로젝트", &project_choices[at], &project_choices, at, w, move |i| {
                         let n = names[i].clone();
                         sel_proj.update(|d| d.sel.project = n);
                     });
@@ -2695,7 +2695,7 @@ fn FormFields(ctx: &FormCtx) {
                 let sel_trig = draft.clone();
                 if pick {
                     let at = Trigger::ALL.iter().position(|t| *t == d.trigger).unwrap_or(0);
-                    Select(&labels[at], &labels, at, w, move |i| {
+                    NamedSelect("트리거", &labels[at], &labels, at, w, move |i| {
                         let t = Trigger::ALL[i];
                         sel_trig.update(|d| *d = d.with_trigger(t));
                     });
@@ -2734,7 +2734,7 @@ fn FormFields(ctx: &FormCtx) {
             FormField::Model => {
                 FormLabel("하네스 · 모델 · 추론 강도");
                 let (pick, choices) = (draft.clone(), models.clone());
-                Select(&model_labels[model_at.min(model_labels.len().saturating_sub(1))], &model_labels, model_at, 320.0, move |i| {
+                NamedSelect("하네스 · 모델 · 추론 강도", &model_labels[model_at.min(model_labels.len().saturating_sub(1))], &model_labels, model_at, 320.0, move |i| {
                     if let Some(o) = choices.get(i).copied() {
                         pick.update(|d| {
                             d.sel = d.sel.with_harness(o.harness).with_option(o);
@@ -2746,7 +2746,7 @@ fn FormFields(ctx: &FormCtx) {
             FormField::Mode => {
                 FormLabel("권한 모드");
                 let (pick, choices) = (draft.clone(), modes.clone());
-                Select(&mode_labels[mode_at], &mode_labels, mode_at, 300.0, move |i| {
+                NamedSelect("권한 모드", &mode_labels[mode_at], &mode_labels, mode_at, 300.0, move |i| {
                     if let Some(m) = choices.get(i).copied() {
                         pick.update(|d| d.sel = d.sel.with_mode(m));
                     }
@@ -5041,6 +5041,18 @@ mod design_review_tests {
             assert!(ra.is_some(), "{a} has a row");
             assert_eq!(ra, rb, "{a} and {b} share a row");
         }
+    }
+
+    /// #596 (6): every select of the routine form is named by its field label for assistive
+    /// technology (`NamedSelect`, compose-rust#460 fixed in v0.0.7), not only by its value.
+    #[test]
+    fn issue_596_form_selects_are_named_by_their_label() {
+        let src = source();
+        let fields = src.split("fn FormFields(").nth(1).unwrap().split("\nfn FormLabel(").next().unwrap();
+        for name in ["프로젝트", "트리거", "하네스 · 모델 · 추론 강도", "권한 모드"] {
+            assert!(fields.contains(&format!("NamedSelect(\"{name}\", &")), "{name}");
+        }
+        assert!(!fields.contains("                Select(&") && !fields.contains("                    Select(&"), "no unnamed select");
     }
 
     /// R2: 편집 has a pencil and 지금 실행 a play glyph, 13/500, in every header layout.

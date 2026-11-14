@@ -737,6 +737,8 @@ pub fn shell() {
             let close = settings_open.clone();
             super::settings::SettingsSheet(settings_open.get(), move || close.set(false));
             super::new_session::NewSessionDialog();
+            // The owner claim's code entry and requests (FR-S12, #842).
+            super::owner_claim::OwnerClaimSheet();
         });
 }
 

@@ -146,11 +146,51 @@ pub fn launch() {
         // Default launch (#220 phase 8): start the background bridge and open the compose-rust
         // shell. `EMBER_CR_SHELL` still overrides the initial theme preference when set.
         bridge::start_shared();
+        start_owner_claim();
         let pref = ui::cr::shell::requested().unwrap_or_else(|| services().initial_prefs.theme);
         ui::cr::shell::launch(pref);
     }
 
     shutdown();
+}
+
+/// Claims the owner key for a real server on this computer (FR-S12, #842) and keeps the claim
+/// for the life of the app. Nothing in demo mode, over the transport, or for a server
+/// elsewhere. The separate editor window (`--editor`) does not claim.
+fn start_owner_claim() {
+    let s = services();
+    let api = s.client.api();
+    let endpoint = ember_client::owner::OwnerEndpoint::from_env();
+    if !owner_claim::applicable(s.demo.is_some(), api.base_url(), api.peer().is_some(), endpoint.as_ref()) {
+        return;
+    }
+    #[cfg(any(unix, windows))]
+    if let Some(endpoint) = endpoint {
+        let hooks = Arc::new(AppClaimHooks { api: api.clone(), server: s.server.clone() });
+        owner_claim::install(owner_claim::spawn(s.rt.handle(), endpoint, hooks, owner_claim::Backoff::default()));
+    }
+}
+
+/// The claim's key goes to both HTTP clients of the app; its state goes to the screens.
+struct AppClaimHooks {
+    api: ember_client::api::Api,
+    server: ServerApi,
+}
+
+impl owner_claim::ClaimHooks for AppClaimHooks {
+    fn set_key(&self, key: Option<&ember_client::owner::OwnerKey>) -> bool {
+        let client = self.api.set_owner_key(key);
+        let server = self.server.set_owner_key(key);
+        client && server
+    }
+
+    fn view(&self, view: owner_claim::ClaimView) {
+        ui::coexist::shared_ui().owner_claim.set(view);
+    }
+
+    fn notice(&self, text: String) {
+        ui::cr::notice::post(text);
+    }
 }
 
 /// Flush the current state before the process exits or the window loop returns.

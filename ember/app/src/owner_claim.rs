@@ -7,7 +7,7 @@
 //! waits for this app's yes or no ([`Prompt::Pending`]).
 //!
 //! This module has no UI. [`on_message`], [`on_command`] and [`after_close`] are the pure
-//! transitions; [`drive`] owns the [`OwnerLink`] and runs them; [`ClaimHooks`] is how the
+//! transitions; [`drive`] owns the [`ember_client::owner::OwnerLink`] and runs them; [`ClaimHooks`] is how the
 //! driver hands the key to the [`ember_client::api::Api`] and the view to the screens.
 //!
 //! The key is handed to [`ClaimHooks::set_key`] and to nothing else: it is never logged, never
@@ -144,37 +144,113 @@ impl Default for Backoff {
 impl Backoff {
     /// The wait before try `attempt` (0 is the first retry).
     pub fn delay_ms(&self, attempt: u32) -> u64 {
-        todo!("FR-S12 #842: backoff {attempt}")
+        let factor = 1u64.checked_shl(attempt.min(32)).unwrap_or(u64::MAX);
+        self.first_ms.saturating_mul(factor).min(self.max_ms)
     }
 }
 
 /// Whether the app claims at all: a real server (not the demo), over plain HTTP (not the
 /// transport), on this computer (a loopback host), with a claim door known.
 pub fn applicable(demo: bool, base_url: &str, over_transport: bool, endpoint: Option<&OwnerEndpoint>) -> bool {
-    todo!("FR-S12 #842: applicable {demo} {base_url} {over_transport} {endpoint:?}")
+    if demo || over_transport || endpoint.is_none() || !cfg!(any(unix, windows)) {
+        return false;
+    }
+    let web = base_url.starts_with("http://") || base_url.starts_with("https://");
+    // Loopback only: an empty host list leaves `EMBER_TOKEN_HOSTS` out. The claim door is on
+    // this computer, so a server elsewhere is never claimed from here.
+    web && ember_client::token::token_allowed_for_hosts(base_url, "")
 }
 
 /// A refusal after which the driver claims again by itself (with the backoff).
 pub fn retryable(reason: &str) -> bool {
-    todo!("FR-S12 #842: retryable {reason}")
+    matches!(reason, "busy" | "server_stopping")
+}
+
+/// The `holders` a code prompt in `state` shows (0 outside one).
+fn holders_of(state: &ClaimState) -> u64 {
+    match state {
+        ClaimState::NeedCode { holders } | ClaimState::WrongCode { holders, .. } | ClaimState::Checking { holders } => *holders,
+        _ => 0,
+    }
+}
+
+fn unchanged(state: &ClaimState) -> Step {
+    Step { state: state.clone(), key: None, notice: None, end: false }
 }
 
 /// One server line in `state`.
 pub fn on_message(state: &ClaimState, msg: OwnerMessage) -> Step {
-    todo!("FR-S12 #842: on_message {state:?} {msg:?}")
+    let to = |state: ClaimState| Step { state, key: None, notice: None, end: false };
+    match msg {
+        OwnerMessage::Confirm { holders, .. } => to(ClaimState::NeedCode { holders }),
+        OwnerMessage::WrongCode { left } => to(ClaimState::WrongCode { left, holders: holders_of(state) }),
+        OwnerMessage::Granted { key, .. } => Step { state: ClaimState::Held, key: Some(key), notice: None, end: false },
+        OwnerMessage::Refused { reason } => Step { state: ClaimState::Refused { reason }, key: None, notice: None, end: true },
+        OwnerMessage::ClaimPending { claim, pid, exe, name } => {
+            let mut claims = match state {
+                ClaimState::Held => Vec::new(),
+                ClaimState::PendingOther { claims } => claims.clone(),
+                // Only a holder decides; a claimant ignores the line.
+                _ => return unchanged(state),
+            };
+            if !claims.iter().any(|c| c.claim == claim) {
+                claims.push(PendingClaim { claim, pid, exe, name });
+            }
+            to(ClaimState::PendingOther { claims })
+        }
+        OwnerMessage::ClaimClosed { claim } => match state {
+            ClaimState::PendingOther { claims } => to(without(claims, claim)),
+            _ => unchanged(state),
+        },
+        OwnerMessage::OwnerClaimed { pid, exe, name, .. } => {
+            let who = if name.is_empty() { exe } else { format!("{name} ({exe}, PID {pid})") };
+            Step { notice: Some(format!("다른 프로그램이 소유자 키를 받았습니다: {who}")), ..unchanged(state) }
+        }
+        OwnerMessage::OwnerGone { .. } | OwnerMessage::Other => unchanged(state),
+    }
+}
+
+/// `claims` without `claim`: [`ClaimState::Held`] when none is left.
+fn without(claims: &[PendingClaim], claim: u64) -> ClaimState {
+    let rest: Vec<PendingClaim> = claims.iter().filter(|c| c.claim != claim).cloned().collect();
+    if rest.is_empty() { ClaimState::Held } else { ClaimState::PendingOther { claims: rest } }
 }
 
 /// A user command in `state` while the link is open: what to send, and the state after it.
 /// `None` for the op ignores the command.
 pub fn on_command(state: &ClaimState, cmd: &Command) -> (Option<LinkOp>, ClaimState) {
-    todo!("FR-S12 #842: on_command {state:?} {cmd:?}")
+    let ignore = (None, state.clone());
+    match (cmd, state) {
+        (Command::Submit(code), ClaimState::NeedCode { .. } | ClaimState::WrongCode { .. }) => {
+            let code = code.trim();
+            if code.is_empty() {
+                return ignore;
+            }
+            (Some(LinkOp::Confirm(code.to_string())), ClaimState::Checking { holders: holders_of(state) })
+        }
+        (Command::Approve(id), ClaimState::PendingOther { claims }) if claims.iter().any(|c| c.claim == *id) => {
+            (Some(LinkOp::Approve(*id)), without(claims, *id))
+        }
+        (Command::Deny(id), ClaimState::PendingOther { claims }) if claims.iter().any(|c| c.claim == *id) => {
+            (Some(LinkOp::Deny(*id)), without(claims, *id))
+        }
+        _ => ignore,
+    }
 }
 
 /// The state after the link closed in `last`, with `attempt` failed tries before it and
 /// `held` whether a key was granted on it: the next state, the wait before the next claim
 /// (`None`: wait for [`Command::Retry`]) and the next attempt count.
 pub fn after_close(last: &ClaimState, held: bool, attempt: u32, backoff: &Backoff) -> (ClaimState, Option<Duration>, u32) {
-    todo!("FR-S12 #842: after_close {last:?} {held} {attempt} {backoff:?}")
+    if let ClaimState::Refused { reason } = last {
+        if !retryable(reason) {
+            return (last.clone(), None, 0);
+        }
+    }
+    // A link that held a key starts the count again: the server most likely restarted.
+    let attempt = if held { 0 } else { attempt };
+    let ms = backoff.delay_ms(attempt);
+    (ClaimState::Lost { retry_in_ms: ms }, Some(Duration::from_millis(ms)), attempt.saturating_add(1))
 }
 
 // ---- texts and the prompt the screens show ------------------------------------------------
@@ -201,12 +277,22 @@ pub const OWNER_NEEDED_ELSEWHERE: &str =
 
 /// The line for wrong code with `left` tries remaining.
 pub fn wrong_code_text(left: u64) -> String {
-    todo!("FR-S12 #842: wrong_code_text {left}")
+    format!("코드가 맞지 않습니다. {left}번 더 입력할 수 있습니다.")
 }
 
 /// The fixed sentence for a refusal reason. Never the server's own words.
 pub fn refused_text(reason: &str) -> &'static str {
-    todo!("FR-S12 #842: refused_text {reason}")
+    match reason {
+        "agent_tree" => "Ember 에이전트나 터미널 안에서 실행된 앱에는 소유자 키를 주지 않습니다.",
+        "other_user" => "서버와 다른 사용자로 실행된 앱에는 소유자 키를 주지 않습니다.",
+        "unknown_process" | "no_peer_pid" => "서버가 이 앱의 프로세스를 확인하지 못해 소유자 키를 주지 않았습니다.",
+        "wrong_code" => "코드가 여러 번 틀려 요청이 끝났습니다. 다시 시도하면 새 코드가 표시됩니다.",
+        "denied" => "소유자 키를 가진 다른 창에서 요청을 거부했습니다.",
+        "timeout" => "코드를 입력하지 않아 요청 시간이 지났습니다. 다시 시도하면 새 코드가 표시됩니다.",
+        "busy" => "기다리는 요청이 많아 서버가 받지 않았습니다. 잠시 뒤 다시 시도하세요.",
+        "server_stopping" => "서버가 멈추는 중입니다.",
+        _ => "서버가 소유자 키 요청을 거부했습니다.",
+    }
 }
 
 /// What the claim sheet shows.
@@ -222,25 +308,37 @@ pub enum Prompt {
 
 /// The prompt for `state`; `None` shows no sheet.
 pub fn prompt(state: &ClaimState) -> Option<Prompt> {
-    todo!("FR-S12 #842: prompt {state:?}")
+    match state {
+        ClaimState::NeedCode { holders } => Some(Prompt::Code { holders: *holders, left: None, checking: false }),
+        ClaimState::WrongCode { left, holders } => Some(Prompt::Code { holders: *holders, left: Some(*left), checking: false }),
+        ClaimState::Checking { holders } => Some(Prompt::Code { holders: *holders, left: None, checking: true }),
+        ClaimState::Refused { reason } => Some(Prompt::Refused { text: refused_text(reason) }),
+        ClaimState::PendingOther { claims } => {
+            claims.first().map(|c| Prompt::Pending { claim: c.clone(), more: claims.len() - 1 })
+        }
+        ClaimState::Off | ClaimState::Connecting | ClaimState::Held | ClaimState::Lost { .. } => None,
+    }
 }
 
 /// What dismissing the sheet hides: the attempt for a code or a refusal, the claim for a
 /// pending request. A new attempt or a new claim opens the sheet again.
 pub fn prompt_key(view: &ClaimView) -> Option<String> {
-    todo!("FR-S12 #842: prompt_key {view:?}")
+    match prompt(&view.state)? {
+        Prompt::Code { .. } | Prompt::Refused { .. } => Some(format!("attempt-{}", view.generation)),
+        Prompt::Pending { claim, .. } => Some(format!("claim-{}", claim.claim)),
+    }
 }
 
 /// Whether the sheet is open for `view` when the user dismissed `dismissed`.
 pub fn sheet_open(view: &ClaimView, dismissed: Option<&str>) -> bool {
-    todo!("FR-S12 #842: sheet_open {view:?} {dismissed:?}")
+    prompt_key(view).is_some_and(|k| dismissed != Some(k.as_str()))
 }
 
 /// True for error text that carries a 403 `owner_required`: the code itself (as
 /// [`crate::server::ServerError`] prints it), or the server's message behind a 403 (as
 /// [`ember_client::api::ApiError`] prints it).
 pub fn text_is_owner_required(text: &str) -> bool {
-    todo!("FR-S12 #842: text_is_owner_required {text}")
+    text.contains("owner_required") || (text.contains("403") && text.contains("needs owner presence"))
 }
 
 // ---- the driver ----------------------------------------------------------------------------
@@ -295,10 +393,91 @@ pub async fn drive(
     backoff: Backoff,
     mut cmds: mpsc::UnboundedReceiver<Command>,
 ) {
-    todo!("FR-S12 #842: drive {endpoint} {name} {backoff:?} {}", {
-        let _ = (&hooks, &mut cmds);
-        ""
-    })
+    use ember_client::owner::OwnerLink;
+
+    let mut generation = 0u64;
+    let mut attempt = 0u32;
+    loop {
+        generation += 1;
+        let report = |state: &ClaimState| hooks.view(ClaimView { state: state.clone(), generation });
+        let mut state = ClaimState::Connecting;
+        report(&state);
+        let mut held = false;
+        match OwnerLink::claim(&endpoint, &name).await {
+            // An older server, or a server that is not running: no door. Quiet, with the backoff.
+            Err(e) => tracing::debug!("owner claim: no claim door at {endpoint}: {e}"),
+            Ok(mut link) => loop {
+                tokio::select! {
+                    m = link.next() => {
+                        // `None` or a read error: the server closed the link, the key is void.
+                        let Ok(Some(msg)) = m else { break };
+                        let step = on_message(&state, msg);
+                        if let Some(key) = &step.key {
+                            held = hooks.set_key(Some(key));
+                            if !held {
+                                tracing::warn!("owner claim: the client did not take the granted key");
+                            }
+                        }
+                        drop(step.key);
+                        if let Some(text) = step.notice {
+                            hooks.notice(text);
+                        }
+                        state = step.state;
+                        report(&state);
+                        if step.end {
+                            break;
+                        }
+                    }
+                    cmd = cmds.recv() => {
+                        let Some(cmd) = cmd else {
+                            hooks.set_key(None);
+                            return;
+                        };
+                        let (op, next) = on_command(&state, &cmd);
+                        let sent = match op {
+                            None => continue,
+                            Some(LinkOp::Confirm(code)) => link.confirm(&code).await,
+                            Some(LinkOp::Approve(id)) => link.approve(id).await,
+                            Some(LinkOp::Deny(id)) => link.deny(id).await,
+                        };
+                        if sent.is_err() {
+                            break;
+                        }
+                        state = next;
+                        report(&state);
+                    }
+                }
+            },
+        }
+        // The link is gone (dropping it tells the server): the key is void from now on.
+        hooks.set_key(None);
+        let (next, wait, next_attempt) = after_close(&state, held, attempt, &backoff);
+        attempt = next_attempt;
+        if let ClaimState::Refused { reason } = &next {
+            tracing::info!(reason = reason.as_str(), "owner claim refused");
+        }
+        report(&next);
+        let sleep = async move {
+            match wait {
+                Some(d) => tokio::time::sleep(d).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                _ = &mut sleep => break,
+                cmd = cmds.recv() => match cmd {
+                    None => return,
+                    Some(Command::Retry) => {
+                        attempt = 0;
+                        break;
+                    }
+                    Some(_) => continue,
+                },
+            }
+        }
+    }
 }
 
 static HANDLE: OnceLock<ClaimHandle> = OnceLock::new();
@@ -527,17 +706,20 @@ mod tests {
 
     // ---- the driver against a fake door ----------------------------------------------------
 
+    #[cfg(unix)]
     #[derive(Default)]
     struct Seen {
         views: std::sync::Mutex<Vec<ClaimView>>,
         notices: std::sync::Mutex<Vec<String>>,
     }
 
+    #[cfg(unix)]
     struct TestHooks {
         api: ember_client::api::Api,
         seen: Arc<Seen>,
     }
 
+    #[cfg(unix)]
     impl ClaimHooks for TestHooks {
         fn set_key(&self, key: Option<&OwnerKey>) -> bool {
             self.api.set_owner_key(key)

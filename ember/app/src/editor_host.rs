@@ -367,6 +367,7 @@ impl EditorHost {
                         if wait_for_reconnect(&mut rx, &shared, revision).await { continue } else { return }
                     }
                 };
+                let session = Arc::new(session);
                 {
                     let entries = session.read_dir(&session.workspace_uri()).await;
                     let mut state = shared.lock().unwrap();
@@ -410,33 +411,66 @@ impl EditorHost {
                                 let parent = parent_of(&path);
                                 let result = session.rename_path(&path, &new_name).await;
                                 if let Ok(new_path) = &result {
-                                    let mut state = shared.lock().unwrap();
-                                    state.forget_below(&path);
-                                    state.renamed.push((path.clone(), new_path.clone()));
+                                    let had_listing = {
+                                        let mut state = shared.lock().unwrap();
+                                        let had = state.listings.contains_key(&path);
+                                        state.forget_below(&path);
+                                        state.renamed.push((path.clone(), new_path.clone()));
+                                        had
+                                    };
+                                    if had_listing {
+                                        let listed = session.read_dir(&session.uri(new_path)).await;
+                                        shared.lock().unwrap().set_dir_listing(new_path, listed);
+                                    }
                                 }
                                 finish_edit(&session, &shared, "이름 변경", &parent, result.map(|_| ())).await;
                             }
                             Some(HostCommand::Delete { path, is_dir }) => {
-                                let parent = parent_of(&path);
-                                let result = session.delete_path(&path, is_dir).await;
-                                if result.is_ok() {
-                                    let mut state = shared.lock().unwrap();
-                                    state.forget_below(&path);
-                                    state.gone.push(path.clone());
-                                }
-                                finish_edit(&session, &shared, "삭제", &parent, result).await;
-                            }
-                            Some(HostCommand::DeleteMany { items }) => {
-                                for (path, is_dir) in items {
+                                let session_bg = Arc::clone(&session);
+                                let shared_bg = Arc::clone(&shared);
+                                let mut rev = revision;
+                                tokio::spawn(async move {
+                                    let name = crate::ui::editor::base_name(&path);
+                                    if is_dir {
+                                        shared_bg.lock().unwrap().edit_errors.push(format!("폴더를 삭제하는 중입니다: {name}"));
+                                        *rev.write() += 1;
+                                    }
                                     let parent = parent_of(&path);
-                                    let result = session.delete_path(&path, is_dir).await;
+                                    let result = session_bg.delete_path(&path, is_dir).await;
                                     if result.is_ok() {
-                                        let mut state = shared.lock().unwrap();
+                                        let mut state = shared_bg.lock().unwrap();
                                         state.forget_below(&path);
                                         state.gone.push(path.clone());
+                                        if is_dir {
+                                            state.edit_errors.push(format!("삭제했습니다: {name}"));
+                                        }
                                     }
-                                    finish_edit(&session, &shared, "삭제", &parent, result).await;
-                                }
+                                    finish_edit(&session_bg, &shared_bg, "삭제", &parent, result).await;
+                                    *rev.write() += 1;
+                                });
+                            }
+                            Some(HostCommand::DeleteMany { items }) => {
+                                let session_bg = Arc::clone(&session);
+                                let shared_bg = Arc::clone(&shared);
+                                let mut rev = revision;
+                                tokio::spawn(async move {
+                                    let has_dir = items.iter().any(|(_, d)| *d);
+                                    if has_dir || items.len() > 1 {
+                                        shared_bg.lock().unwrap().edit_errors.push(format!("{}개 항목을 삭제하는 중입니다", items.len()));
+                                        *rev.write() += 1;
+                                    }
+                                    for (path, is_dir) in items {
+                                        let parent = parent_of(&path);
+                                        let result = session_bg.delete_path(&path, is_dir).await;
+                                        if result.is_ok() {
+                                            let mut state = shared_bg.lock().unwrap();
+                                            state.forget_below(&path);
+                                            state.gone.push(path.clone());
+                                        }
+                                        finish_edit(&session_bg, &shared_bg, "삭제", &parent, result).await;
+                                    }
+                                    *rev.write() += 1;
+                                });
                             }
                             Some(HostCommand::CopyPaths { sources, dest_dir }) => {
                                 for src in sources {

@@ -61,6 +61,14 @@ fn renamed_path_refuses_the_same_name() {
 }
 
 #[test]
+fn path_error_dirty_display_korean_reason() {
+    assert_eq!(
+        format!("{}", PathError::Dirty),
+        "저장하지 않은 변경이 있어 이름을 바꿀 수 없습니다. 먼저 저장하세요"
+    );
+}
+
+#[test]
 fn child_path_allows_ordinary_names_with_dots_and_spaces_inside() {
     for name in [".gitignore", "a b.txt", "한글.md", "x.tar.gz", "a-b_c"] {
         assert!(child_path(FOLDER, "/w/p", name).is_ok(), "name {name:?}");

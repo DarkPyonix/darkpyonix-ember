@@ -1099,11 +1099,11 @@ pub mod page {
                 s.host.send(HostCommand::Open(to.clone()));
                 if current.as_deref() == Some(from.as_str()) { s.host.send(HostCommand::Focus(to)); }
             }
+            let (updated, remapped) = crate::ui::editor::remap_expanded_paths(&s.expanded.read(), &old, &new);
             let mut expanded = s.expanded;
-            let remapped: Vec<String> = expanded.read().iter().filter(|p| crate::ui::editor::is_at_or_below(p, &old)).cloned().collect();
-            for p in remapped {
-                expanded.write().remove(&p);
-                expanded.write().insert(format!("{}{}", new.trim_end_matches('/'), &p[old.trim_end_matches('/').len()..]));
+            *expanded.write() = updated;
+            for dir in remapped {
+                s.host.send(HostCommand::List(dir));
             }
             let mut tree_sel = s.tree_sel;
             tree_sel.set(None);
@@ -1713,20 +1713,34 @@ pub mod page {
         let (new_file_parent, new_dir_parent) = (parent_for_new.clone(), parent_for_new);
         let submit_host = s.host.clone();
         let submit_root = root.clone();
-        let mut submit = move |pending: TreePrompt| {
-            let name = prompt_text.read().trim().to_string();
-            match pending {
-                TreePrompt::NewFile { parent } => {
+        let unsaved_for_submit = unsaved.clone();
+        let submit = move |pending: TreePrompt| {
+            let outcome = crate::ui::editor::evaluate_prompt_submit(&pending, &prompt_text.read(), &unsaved_for_submit);
+            match outcome {
+                crate::ui::editor::PromptSubmitOutcome::CreateFile { parent, name } => {
                     expanded.write().insert(parent.clone());
                     submit_host.send(HostCommand::CreateFile { parent, name });
                 }
-                TreePrompt::NewDir { parent } => {
+                crate::ui::editor::PromptSubmitOutcome::CreateDir { parent, name } => {
                     expanded.write().insert(parent.clone());
                     submit_host.send(HostCommand::CreateDir { parent, name });
                 }
-                TreePrompt::Rename { path } => { submit_host.send(HostCommand::Rename { path, new_name: name }); }
-                TreePrompt::Delete { path, is_dir } => { submit_host.send(HostCommand::Delete { path, is_dir }); }
-                TreePrompt::DeleteMany { items } => { submit_host.send(HostCommand::DeleteMany { items }); }
+                crate::ui::editor::PromptSubmitOutcome::Rename { path, new_name } => {
+                    submit_host.send(HostCommand::Rename { path, new_name });
+                }
+                crate::ui::editor::PromptSubmitOutcome::BlockedDirty { dirty_files, .. } => {
+                    notice(format!("저장하지 않은 변경이 있어 이름을 바꿀 수 없습니다. 먼저 저장하세요: {}", dirty_files.iter().map(|u| base_name(u).to_string()).collect::<Vec<_>>().join(", ")));
+                    prompt.set(None);
+                    prompt_text.set(String::new());
+                    return;
+                }
+                crate::ui::editor::PromptSubmitOutcome::Delete { path, is_dir } => {
+                    submit_host.send(HostCommand::Delete { path, is_dir });
+                }
+                crate::ui::editor::PromptSubmitOutcome::DeleteMany { items } => {
+                    submit_host.send(HostCommand::DeleteMany { items });
+                }
+                crate::ui::editor::PromptSubmitOutcome::EmptyName => {}
             }
             let _ = &submit_root;
             prompt.set(None);
@@ -1796,9 +1810,10 @@ pub mod page {
                     prompt_inline = Some(field);
                     rsx! {}
                 } else {
+                    let icon_name = crate::ui::editor::tree_prompt_icon(&other);
                     rsx! {
                         div { class: "ed-tn", style: "--d:0;",
-                            {icon_px("file", 15)}
+                            {icon_px(icon_name, 15)}
                             {field}
                         }
                     }

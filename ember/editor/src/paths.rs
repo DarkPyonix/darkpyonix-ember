@@ -20,6 +20,8 @@ pub enum PathError {
     SameName,
     /// Moving or copying into itself or a subdirectory.
     IntoSelf,
+    /// An open document has unsaved changes.
+    Dirty,
 }
 
 impl std::fmt::Display for PathError {
@@ -31,6 +33,7 @@ impl std::fmt::Display for PathError {
             PathError::Symlink => "심볼릭 링크 폴더 안에는 만들 수 없습니다",
             PathError::SameName => "이름이 그대로입니다",
             PathError::IntoSelf => "폴더를 자기 자신이나 하위 폴더 안으로 옮길 수 없습니다",
+            PathError::Dirty => "저장하지 않은 변경이 있어 이름을 바꿀 수 없습니다. 먼저 저장하세요",
         })
     }
 }

@@ -387,15 +387,21 @@ async fn run_fake_management(mut server: DuplexStream, disk: Arc<Mutex<Vec<u8>>>
                 IpcValue::Int(file_type::FILE as i32),
             ])]),
             ("remoteFilesystem", "stat") => {
+                let is_symlink = match &body {
+                    IpcValue::Array(args) => args.first().map(|a| a.to_json()["path"].as_str().unwrap_or("").contains("symlink")).unwrap_or(false),
+                    _ => false,
+                };
                 let len = disk.lock().unwrap().len() as u64;
+                let ty = if is_symlink { file_type::SYMBOLIC_LINK } else { file_type::FILE };
                 IpcValue::json(&json!({
-                    "type": file_type::FILE,
+                    "type": ty,
                     "mtime": 1700000000000.0,
                     "ctime": 1700000000000.0,
                     "size": len,
                 }))
                 .unwrap()
             }
+            ("remoteFilesystem", "rename") => IpcValue::Undefined,
             ("remoteFilesystem", "readFile") => {
                 let bytes = disk.lock().unwrap().clone();
                 IpcValue::VsBuffer(bytes)
@@ -666,6 +672,20 @@ async fn pinned_commit_connects_lists_workspace_opens_edits_shows_diagnostics_an
         )
         .unwrap();
 
+    // Rename of an open dirty file must be refused with PathError::Dirty
+    let dirty_rename = session.rename_path("/workspace/project/data.json", "renamed.json").await;
+    assert!(
+        matches!(dirty_rename, Err(ember_editor::Error::Path(ember_editor::paths::PathError::Dirty))),
+        "rename of dirty document must be refused"
+    );
+
+    // Symlink in path middle escape rejection
+    let sym_err = session.create_file("/workspace/project/symlink_dir/nested", "x.txt").await;
+    assert!(
+        matches!(sym_err, Err(ember_editor::Error::Path(ember_editor::paths::PathError::Symlink))),
+        "intermediate symlink must be refused"
+    );
+
     // 4. Expect the Error underline decoration from the extension host's `$changeMany`.
     let diags = wait_for("Error underline decoration", &mut updates, |u| match u {
         SessionUpdate::Decorations { uri, generation: g, decorations }
@@ -710,6 +730,10 @@ async fn pinned_commit_connects_lists_workspace_opens_edits_shows_diagnostics_an
         }
     }
     assert!(saw_saved, "extension host did not receive ExtHostDocuments.$acceptModelSaved");
+
+    // Now that `data.json` is clean, rename succeeds
+    let renamed = session.rename_path("/workspace/project/data.json", "renamed.json").await.expect("rename clean file");
+    assert_eq!(renamed, "/workspace/project/renamed.json");
 
     // FR-L31.24: the opened file is below the workspace folder, so it got no watch of its own
     // (the OSE would serve one with `fs.watch()`, refused below `/Volumes/` on macOS).

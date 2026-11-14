@@ -740,6 +740,17 @@ pub fn popover_width(want: f32, window_dp: f32) -> f32 {
     want.min(window_dp - nav_width_for(window_dp) - 24.0).max(280.0)
 }
 
+/// The model popover's height (#849, mockup `.mp-pop{max-height:calc(100vh - 16px)}`): 480 dp,
+/// about seven 56 dp rows under the search as the mockup shows, never more than the window less
+/// 16, and not below 240 so the search and a few rows always show. The height is fixed because
+/// the toolkit cannot size the popover to a scrolling list's content (see `cr/home.rs`
+/// `model_body`).
+pub fn model_popover_height(window_h_dp: f32) -> f32 {
+    MODEL_POPOVER_HEIGHT.min(window_h_dp - 16.0).max(240.0)
+}
+
+pub const MODEL_POPOVER_HEIGHT: f32 = 480.0;
+
 /// The composer's chips in order: project, model, mode, computer.
 pub const CHIP_COUNT: usize = 4;
 /// The most text (composer pixels, [`composer_text_px`]) each chip shows: project 170, model 240
@@ -793,6 +804,25 @@ pub fn composer_chip_budget(composer_w: f32) -> [f32; CHIP_COUNT] {
         *o = o.min(line).max(m);
     }
     out
+}
+
+/// The chip labels as drawn on a composer card `composer_w` wide (#849, review H1): each label
+/// up to its cap, and when the four chips would not fit one line the labels with room above
+/// their minimum give it up in proportion, each cut with an ellipsis, so the chips stay on one
+/// line as in the mockup (`.quick .chip{max-width}` with `text-overflow:ellipsis`). Only when
+/// even the minimums do not fit does the row wrap ([`composer_chip_rows`]).
+pub fn composer_chip_fit(texts: &[String; CHIP_COUNT], composer_w: f32) -> [String; CHIP_COUNT] {
+    let budget = composer_chip_budget(composer_w);
+    let want: Vec<f32> = texts.iter().zip(budget).map(|(t, b)| composer_text_px(t).min(b)).collect();
+    let floor: Vec<f32> = want.iter().zip(CHIP_TEXT_MINS).map(|(w, m)| w.min(m)).collect();
+    let line = composer_chips_avail(composer_w) - CHIP_COUNT as f32 * CHIP_FRAME - (CHIP_COUNT as f32 - 1.0) * CHIP_GAP;
+    let total: f32 = want.iter().sum();
+    let slack: f32 = want.iter().zip(&floor).map(|(w, f)| w - f).sum();
+    let ratio = if total <= line || slack <= 0.0 { 0.0 } else { ((total - line) / slack).min(1.0) };
+    std::array::from_fn(|i| {
+        let max = want[i] - (want[i] - floor[i]) * ratio;
+        composer_fit_text(&texts[i], max)
+    })
 }
 
 /// The chips (by index) per line, `widths` being each chip's full width: a line breaks when the
@@ -868,8 +898,9 @@ const GEMINI_MODELS: [(&str, &str); 2] = [
     ("gemini-2.5-flash", "Gemini Flash"),
 ];
 
-/// The efforts of a harness that has them, lowest first.
-pub const EFFORTS: [&str; 3] = ["Low", "Medium", "High"];
+/// The efforts of a harness that has them, highest first, as the mockup lists them (높음, 보통,
+/// 낮음; review 2026-11-14 K2, #849), so the default 높음 row is the first row.
+pub const EFFORTS: [&str; 3] = ["High", "Medium", "Low"];
 
 /// The Korean name of an effort, as in mockup v8 (낮음, 보통, 높음). The English key stays the
 /// id handed to the agent and kept in settings; only what the user reads is Korean (FR-L15).
@@ -2267,26 +2298,57 @@ mod tests {
     }
 
     #[test]
-    fn fr_l15_default_demo_labels_are_not_truncated_at_718_and_640() {
-        for w in [718.0_f32, 640.0, 700.0] {
-            let b = composer_chip_budget(w);
-            for (t, max) in demo_chip_labels().iter().zip(b) {
-                assert_eq!(&composer_fit_text(t, max), t, "{w} {t}");
+    fn fr_l11_default_demo_labels_are_whole_on_a_wide_card() {
+        let fitted = composer_chip_fit(&demo_chip_labels(), 900.0);
+        assert_eq!(fitted, demo_chip_labels());
+    }
+
+    #[test]
+    fn fr_l11_composer_chips_stay_on_one_line_at_1440_and_cut_with_an_ellipsis() {
+        // Review 2026-11-14 H1 (#849): at 1440 the card is about 718 dp and the mockup keeps the
+        // four chips on one line, cutting long labels, where the app wrapped 이 컴퓨터 to a
+        // second line.
+        let rows = |w: f32| {
+            let widths: Vec<f32> = composer_chip_fit(&demo_chip_labels(), w).iter().map(|t| composer_chip_width(t)).collect();
+            composer_chip_rows(&widths, w).len()
+        };
+        for w in [900.0_f32, 718.0, 700.0, 640.0, 600.0] {
+            assert_eq!(rows(w), 1, "{w}");
+        }
+        let fitted = composer_chip_fit(&demo_chip_labels(), 718.0);
+        assert!(fitted.iter().any(|t| t.ends_with('\u{2026}')), "something is cut at 718: {fitted:?}");
+        for (f, t) in fitted.iter().zip(demo_chip_labels()) {
+            let kept = f.trim_end_matches('\u{2026}');
+            assert!(t.starts_with(kept) && !kept.is_empty(), "{f} is a prefix of {t}");
+        }
+    }
+
+    #[test]
+    fn fr_l11_chip_fit_keeps_every_minimum() {
+        for w in [300.0_f32, 400.0, 560.0, 718.0] {
+            let fitted = composer_chip_fit(&demo_chip_labels(), w);
+            for (i, f) in fitted.iter().enumerate() {
+                let t = &demo_chip_labels()[i];
+                assert!(composer_text_px(f) >= composer_text_px(t).min(CHIP_TEXT_MINS[i]) - 13.5, "{w} {i} {f}");
             }
         }
     }
 
     #[test]
-    fn fr_l15_demo_labels_fit_one_line_at_900_and_two_at_718() {
-        // The 13 dp chips carry an icon and a chevron (CHIP_FRAME 50), so the four demo chips need
-        // about 660 dp: one line from a 900 dp card, and two lines (never cut) at 718.
-        let rows = |w: f32| {
-            let b = composer_chip_budget(w);
-            let widths: Vec<f32> = demo_chip_labels().iter().zip(b).map(|(t, m)| composer_chip_width(&composer_fit_text(t, m))).collect();
-            composer_chip_rows(&widths, w).len()
-        };
-        assert_eq!(rows(900.0), 1);
-        assert_eq!(rows(718.0), 2);
+    fn fr_l15_model_popover_is_480_and_never_taller_than_the_window() {
+        // #849: the popover has a fixed height so its list shows about seven rows.
+        assert_eq!(model_popover_height(900.0), 480.0);
+        assert_eq!(model_popover_height(400.0), 384.0);
+        assert_eq!(model_popover_height(200.0), 240.0);
+    }
+
+    #[test]
+    fn fr_l15_efforts_run_high_first_as_the_mockup() {
+        // Review 2026-11-14 K2 (#849): 높음, 보통, 낮음, so the default 높음 row is the first row.
+        assert_eq!(EFFORTS, ["High", "Medium", "Low"]);
+        let rows = filter_models(&model_catalog(), Some(Harness::ClaudeCode), "");
+        assert_eq!(rows[0], default_option(Harness::ClaudeCode));
+        assert_eq!(model_active_row(&rows, default_option(Harness::ClaudeCode), ""), Some(0));
     }
 
     #[test]

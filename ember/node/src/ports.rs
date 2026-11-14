@@ -514,5 +514,57 @@ mod tests {
         assert_eq!(ports[0].port, 3000);
         assert_eq!(ports[0].scope, PortScope::Loopback);
         assert_eq!(ports[0].process, "node");
+        assert_eq!(ports[0].address.as_deref(), Some("127.0.0.1"), "the bound address (FR-L18, #519)");
+    }
+
+    // ---- The bound address (FR-L18, #519) ----------------------------------------------------
+
+    #[test]
+    fn fr_p7_bound_address_is_the_specific_address_only() {
+        let a = |t: &str| bound_address(t.parse().unwrap());
+        assert_eq!(a("192.168.0.10").as_deref(), Some("192.168.0.10"));
+        assert_eq!(a("127.0.0.2").as_deref(), Some("127.0.0.2"));
+        assert_eq!(a("::1").as_deref(), Some("::1"));
+        assert_eq!(a("fd00::2").as_deref(), Some("fd00::2"));
+        assert_eq!(a("::ffff:10.0.0.2").as_deref(), Some("10.0.0.2"), "IPv4-mapped reads as IPv4");
+        assert_eq!(a("0.0.0.0"), None, "every address: nothing specific to report");
+        assert_eq!(a("::"), None);
+    }
+
+    #[test]
+    fn fr_p7_bound_address_lsof_rows_carry_it_and_two_binds_of_one_port_stay_apart() {
+        let owned = HashMap::from([(
+            501u32,
+            Owned { owner: PortOwner { kind: PortOwnerKind::Term, id: "t".into() }, name: "node".into() },
+        )]);
+        let text = "p501\ncnode\nn192.168.0.10:3000\nn10.8.0.5:3000\nn*:8080\nn10.8.0.5:3000\n";
+        let ports = from_lsof(parse_lsof(text), &owned);
+        let got: Vec<_> = ports.iter().map(|p| (p.port, p.scope, p.address.as_deref())).collect();
+        assert_eq!(
+            got,
+            vec![
+                (3000, PortScope::Lan, Some("10.8.0.5")),
+                (3000, PortScope::Lan, Some("192.168.0.10")),
+                (8080, PortScope::Any, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn fr_p7_bound_address_is_absent_from_the_wire_for_every_address_binds() {
+        let any = ListeningPort {
+            port: 8080,
+            scope: PortScope::Any,
+            process: "n".into(),
+            owner: PortOwner { kind: PortOwnerKind::Job, id: "j".into() },
+            address: None,
+        };
+        let v = serde_json::to_value(&any).unwrap();
+        assert!(v.get("address").is_none(), "{v}");
+        // An older node's row (no address) still reads.
+        let old: ListeningPort = serde_json::from_value(v).unwrap();
+        assert_eq!(old.address, None);
+        let lan = ListeningPort { address: Some("192.168.0.10".into()), scope: PortScope::Lan, ..any };
+        assert_eq!(serde_json::to_value(&lan).unwrap()["address"], "192.168.0.10");
     }
 }

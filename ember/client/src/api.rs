@@ -2056,6 +2056,21 @@ mod ports_tests {
         let off: Ports = serde_json::from_value(json!({"ports": [], "supported": false})).unwrap();
         assert!(!off.supported);
     }
+
+    /// FR-L18 (#519): the bound address of a port, absent from an older node and for a port
+    /// bound to every address.
+    #[test]
+    fn fr_p7_bound_address_reads_when_present() {
+        let p: Ports = serde_json::from_value(json!({
+            "ports": [
+                {"port": 3000, "scope": "lan", "process": "node", "owner": {"kind": "job", "id": "j1"}, "address": "192.168.0.10"},
+                {"port": 8080, "scope": "any", "process": "python3", "owner": {"kind": "term", "id": "t1"}}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(p.ports[0].address.as_deref(), Some("192.168.0.10"));
+        assert_eq!(p.ports[1].address, None);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

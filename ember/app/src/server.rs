@@ -756,6 +756,36 @@ fn seg(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// FR-L18 (#519): the address the server reports for a session's computer.
+    #[test]
+    fn fr_l18_computer_address_reads_every_kind_and_defaults_to_unknown() {
+        let read = |computer: serde_json::Value| -> ComputerView {
+            let c: CurrentComputer =
+                serde_json::from_value(json!({ "session_id": "s1", "computer": computer })).unwrap();
+            c.computer
+        };
+        let by_url = read(json!({
+            "id": "c1", "name": "box", "url": "http://192.168.0.20:8740", "local": false,
+            "address": { "kind": "host", "host": "192.168.0.20" }
+        }));
+        assert_eq!(by_url.address, ComputerAddress::Host { host: "192.168.0.20".into() });
+        assert_eq!(by_url.url, "http://192.168.0.20:8740");
+        let by_peer = read(json!({
+            "id": "c2", "name": "gpu", "url": "", "peer": "abcd", "local": false, "address": { "kind": "peer" }
+        }));
+        assert_eq!(by_peer.address, ComputerAddress::Peer);
+        assert_eq!(by_peer.peer.as_deref(), Some("abcd"));
+        let server = read(json!({ "id": "local", "name": "this server", "url": "", "local": true, "address": { "kind": "server" } }));
+        assert_eq!(server.address, ComputerAddress::Server);
+        // A kind this app does not know, and an older server with no address at all.
+        let later = read(json!({ "id": "c3", "name": "x", "address": { "kind": "relay", "via": "r1" } }));
+        assert_eq!(later.address, ComputerAddress::Unknown);
+        let older = read(json!({ "id": "c4", "name": "y", "local": false }));
+        assert_eq!(older.address, ComputerAddress::Unknown);
+        assert_eq!(older.url, "");
+        assert_eq!(older.peer, None);
+    }
+
     #[test]
     fn fr_l31_14_extension_paths_and_answers() {
         assert_eq!(extensions_path("local"), "/computers/local/ide/extensions");

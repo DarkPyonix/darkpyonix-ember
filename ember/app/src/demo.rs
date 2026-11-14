@@ -2179,7 +2179,7 @@ mod tests {
     #[test]
     fn fr_l18_demo_ports_show_open_and_note_only_rows() {
         use crate::ui::session::{web_pages_from, ComputerHost, WebPagesLoad};
-        let host = ComputerHost { local: false, host: Some(crate::demo::DEMO_HOST.into()) };
+        let host = ComputerHost { host: Some(crate::demo::DEMO_HOST.into()), ..Default::default() };
         let WebPagesLoad::Ready(pages) = web_pages_from(Ok(crate::demo::ports()), &host) else {
             panic!("demo ports are ready");
         };

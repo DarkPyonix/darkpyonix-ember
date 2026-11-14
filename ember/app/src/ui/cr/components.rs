@@ -552,8 +552,13 @@ fn BareField(o: FieldOptions) {
     if iy > 0.0 {
         wrap = wrap.padding(iy);
     }
+    // A multiline field clips its text to itself: the toolkit's bare field clips only to a
+    // corner the node names (`HostTextField.kt`), so a line scrolled up showed in the top inset
+    // (review r5, field-typed-1440; FR-L10.2).
     let inner = if multiline && o.height.is_some() {
-        Modifier::new().weight(1.0).fill_max_height()
+        Modifier::new().weight(1.0).fill_max_height().clip(true)
+    } else if multiline {
+        Modifier::new().weight(1.0).clip(true)
     } else {
         Modifier::new().weight(1.0)
     };
@@ -1644,6 +1649,20 @@ mod tests {
         let blurred = decode_batch(bytes).expect("decode");
         assert_eq!(borders(&blurred), line, "losing focus puts the line back");
         assert_eq!(FOCUS_LOST.load(Ordering::SeqCst), 1, "the caller's own on_focus_lost still runs");
+    }
+
+    #[test]
+    fn fr_l10_2_multiline_field_clips_its_scrolled_text() {
+        // field-typed-1440 (review r5): with four lines in a 64 px field the bottom of line 2
+        // showed in the 10 px top inset; the toolkit's bare field clips only to a named corner.
+        let nodes = emitted_nodes(|| {
+            EmberField(FieldOptions { fill_max_width: true, multiline: true, height: Some(64.0), ..Default::default() })
+        });
+        let field = the(&nodes, "TextField");
+        assert!(field.mods.iter().any(|m| m == "Clip(true)"), "{:?}", field.mods);
+        // A single-line field keeps its own (one line never scrolls up into the inset).
+        let single = emitted_nodes(|| EmberField(FieldOptions { fill_max_width: true, ..Default::default() }));
+        assert!(!the(&single, "TextField").mods.iter().any(|m| m == "Clip(true)"));
     }
 
     #[test]

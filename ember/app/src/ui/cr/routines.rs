@@ -1781,8 +1781,9 @@ pub const ROUTINE_KPI_ROW_GAP: f32 = 16.0;
 /// The detail pane's title: 15/600 (`DESIGN.md` 6.5), design review B5.
 pub const ROUTINE_DETAIL_TITLE: (Fs, Weight) = (Fs::Lg, Weight::Semibold);
 
-// TODO(compose-rust#443): `Text` has no `overflow_wrap`, so a KPI label stays on one line with
-// `max_lines(Some(1))` instead of being allowed to wrap in a narrow column.
+/// A KPI. Its label stays on one line with an ellipsis (#248: 지금 실행 중 and 이번 주 실행 must
+/// not wrap mid-phrase in a narrow column); that is a design choice, not a toolkit gap, so
+/// compose-rust#443's `overflow_wrap` does not change it.
 fn RoutineKpiView(kpi: &RoutineKpi, index: usize) {
     let p = ember_theme().palette;
     cu::Column().modifier(Modifier::new().weight(1.0)).spacing(SP[0]).content(|| {

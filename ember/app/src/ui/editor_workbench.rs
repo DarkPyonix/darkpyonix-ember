@@ -1460,9 +1460,6 @@ pub mod page {
                     {top_bar(&s, &branch, keymap)}
                     div { class: "ed-rail",
                         {stripe_column(&s, sel, keymap, Strip::Left)}
-                        // The line above the bottom group (`.ed-stripe-b` border-top): drawn as its own
-                        // element, because the HTML path does not draw a border with side margins (A13).
-                        div { class: "ed-stripe-sep", role: "separator" }
                         {stripe_column(&s, sel, keymap, Strip::Bottom)}
                     }
                     if let (Some(w), false) = (sel.selected(Side::Left), maximized) {
@@ -1483,7 +1480,6 @@ pub mod page {
                         }
                     }
                     section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
-                        onmounted: move |event| crate::ui::editor_language::view::mount_editor_area(event.data()),
                         {crate::ui::workspace_trust::view::banner(&s)}
                         {tab_strip(&s, &paths, &dirty, current.as_deref())}
                         if let Some((menu_path, x, y)) = s.tab_menu.read().clone() { {tab_context_menu(&s, &menu_path, x, y)} }
@@ -2858,8 +2854,8 @@ pub mod page {
 
     /// Fits the PTY to the panel on every render (FR-L31.20, #334): the panel's size from the last
     /// layout, debounced, to [`TerminalHandle::resize`]. A held-back size asks for one more render.
-    // TODO(dioxus-compose#207): dioxus-compose sends no `onresize` (its `convert_resize_data` is "not sent"), so a size
-    // change is seen on the next render (panel drag, output, the wake below), not by an observer.
+    /// The panel's `onresize` (dioxus-compose#207) asks for a render when its box changes size, as
+    /// xterm's fit addon follows a `ResizeObserver`, so a window or sash resize is seen at once.
     fn fit_terminal(s: &Shared, handle: &TerminalHandle) {
         use futures_util::FutureExt;
         let rect = TERM_MOUNT.with(|m| {
@@ -2948,14 +2944,6 @@ pub mod page {
     /// The strip for one [`terms::StripView`]. The + sits outside the scrolling tab list, after it,
     /// so it stays visible in every state as in Code-OSS (#799); inside the scrolling list the
     /// renderer drew it only while a rename field was open.
-    /// A terminal tab's width in px from its label (`.ed-tsub>button`: 12 px text, 12 px padding each
-    /// side, 1 px border, 14 px icon, 18 px buttons with -6 px end margin, 6 px gaps), at most 240.
-    pub(super) fn tab_width(label: &str, on: bool) -> u32 {
-        let text: u32 = label.chars().map(|c| if c.is_ascii() { 7 } else { 12 }).sum();
-        let buttons = if on { 2 * (6 + 18) } else { 6 + 18 } - 6;
-        (2 + 24 + 14 + 6 + text + buttons).min(240)
-    }
-
     pub(super) fn strip_of(view: Option<terms::StripView>, bump: impl Fn() + Copy + 'static) -> Element {
         let (tabs, active, renaming, error) = match view {
             Some(v) => (v.tabs, v.active, v.renaming, v.error),
@@ -2982,9 +2970,6 @@ pub mod page {
                             let (sel, ren, del, f2, pen) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
                             rsx! {
                                 button { key: "{id}", class: if on { "on" } else { "" }, role: "tab", "aria-selected": if on { "true" } else { "false" }, title: "{label}",
-                                    // TODO(dioxus-compose#227): no max-content width, so an inactive tab
-                                    // collapsed to its padding in the scrolling list; its width is set here.
-                                    style: "flex:none; width:{tab_width(&label, on)}px;",
                                     onclick: move |_| { terms::select(&sel); bump(); },
                                     // F2 and the pencil button rename until a real double-click arrives.
                                     // v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
@@ -3050,6 +3035,10 @@ pub mod page {
             {strip}
             div { class: "ed-term", role: "log", "aria-label": "터미널 출력", tabindex: "0", style: "outline:none;",
                 onmounted: move |event| TERM_MOUNT.with(|m| *m.borrow_mut() = Some(event.data())),
+                onresize: move |_| {
+                    let mut revision = revision;
+                    *revision.write() += 1;
+                },
                 // FR-L31.21: paste chord and IME composition (`crate::terminal_input`).
                 onkeydown: move |event| {
                     let m = event.modifiers();
@@ -3104,17 +3093,12 @@ pub mod page {
                     div { class: "tl", style: "padding-top:var(--sp2); color:var(--muted);", "{notice}" }
                 }
                 if offer_reconnect {
-                    // TODO(dioxus-compose#175): the button sits in a flex row of its own because directly under
-                    // the block-level panel the renderer leaves out the second glyph of each word
-                    // ("다시 연결" draws as "다 연"). Drop the wrapper once that is fixed.
-                    div { style: "display:flex; margin-top:var(--sp2);",
-                        button { class: "ed-pj", style: "border:1px solid var(--line);",
-                            onclick: move |_| {
-                                terms::reattach_active();
-                                let mut revision = revision;
-                                *revision.write() += 1;
-                            }, "다시 연결" }
-                    }
+                    button { class: "ed-pj", style: "border:1px solid var(--line); margin-top:var(--sp2);",
+                        onclick: move |_| {
+                            terms::reattach_active();
+                            let mut revision = revision;
+                            *revision.write() += 1;
+                        }, "다시 연결" }
                 }
             }
         }

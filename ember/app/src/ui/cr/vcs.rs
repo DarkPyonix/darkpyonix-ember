@@ -415,20 +415,21 @@ pub fn vcs_pill_width(text: &str) -> f32 {
     (super::home::text_px(text, VCS_CONTROL_FS.size()) + 28.0).max(64.0)
 }
 
-// TODO(compose-rust#500): toolkit `Button` and `PickChip` take no font size (v0.0.6 `ButtonScope`
-// has no `font_size`/`text_style`), so a chip is painted with a `Label` at the small step and an
-// invisible `FocusOverlay` button on top, as the stash pill does.
-/// A filter chip (`.chip`): 32 px pill, 13 px weight 500 text, `sel` fill when selected.
+/// A filter chip (`.chip`): 32 px pill, 13 px weight 500 text, `sel` fill when selected. The
+/// toolkit `PickChip` still takes no font size in v0.0.10 (only `Button` does, compose-rust#500),
+/// so the chip is a clickable container (`Clickable`, compose-rust#372) named by its text that
+/// says whether it is selected (#429), with no invisible button over it.
 fn VcsChip(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (height, fill) = super::components::pickchip_style(selected, p);
-    cu::Box()
-        .modifier(Modifier::new().width(vcs_pill_width(text)).height(height).background(paint(fill)).shape_role(ShapeRole::Full))
-        .alignment(Alignment::Center)
-        .content(move || {
+    super::components::Clickable(
+        Modifier::new().width(vcs_pill_width(text)).height(height).background(paint(fill)).shape_role(ShapeRole::Full).selected(selected).label(text).role(compose_rust::ui::Role::Button).click_action(true),
+        Alignment::Center,
+        on_click,
+        move || {
             Label(text, VCS_CONTROL_FS, Weight::Medium, Some(paint(p.text_2)), Some(1));
-            FocusOverlay(text, on_click);
-        });
+        },
+    );
 }
 
 /// Card shown when a section's server data is not yet available.
@@ -556,7 +557,8 @@ fn RemoteMainButton(
     enabled: bool,
     on_click: impl FnMut() + 'static,
 ) {
-    // TODO(compose-rust#328): keep button labels visible when the available width is narrow.
+    // The label is a one-line `Label` in a fixed 100 dp pill, so it is not measured narrow
+    // (compose-rust#328, fixed in v0.0.7, was about toolkit Button and Chip labels).
     let p = ember_theme().palette;
     let (action_icon, action_text, action_count) = match action {
         RemoteAction::Pull(n) => (ICON_ARROW_DOWN_SVG, "Pull", Some(n)),
@@ -2469,8 +2471,8 @@ fn CommitDetailBody(v: &CommitDetailView, ctl: &CommitCtl) {
             }
 
             if ctl.show_sha {
-                // TODO(compose-rust#471): no clipboard facility, so the full SHA is shown selectable
-                // (Cmd+C / Ctrl+C); replace with a real copy when the clipboard can be written.
+                // The toolkit clipboard refused the SHA (compose-rust#471 writes it on every system,
+                // v0.0.7), so the full SHA is shown selectable for Cmd+C / Ctrl+C.
                 Label("아래에서 선택해 복사해 주세요", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
                 key(v.sha.clone(), || {
                     EmberField(FieldOptions { fill_max_width: true, text: Some(v.sha.clone()), type_role: Some(TypeRole::Mono), ..Default::default() });
@@ -2715,7 +2717,8 @@ fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool, branch
             } else {
                 false
             };
-            show_sha.set(true);
+            // The selectable SHA is only the fallback for a copy the clipboard refused.
+            show_sha.set(!copied);
             if copied {
                 notice::post("SHA를 클립보드에 복사했습니다.".to_string());
             } else {
@@ -4750,7 +4753,7 @@ fn VcsScreenWithLoad(
             // phone (where the shell's menu button sits) do not (#495).
             if !sheet && !compact {
                 if let Some(s) = crate::services::try_services() {
-                    // TODO(compose-rust#460, #429): the icon-only theme button has no accessible name.
+                    // The icon-only theme button is named `a11y::THEME` (`NamedClickable`, compose-rust#460, #429).
                     super::project::ThemeButton(&s.ui);
                 }
             }
@@ -4944,6 +4947,22 @@ pub fn preview_vcs() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fr_673_stale_vcs_markers_are_gone() {
+        // compose-rust#471, #460/#429 and #500 (v0.0.10): the SHA is copied, the theme button is
+        // named, and a filter chip is a named, selectable container without an overlay button.
+        let src = include_str!("vcs.rs");
+        let production = &src[..src.find("#[cfg(test)]").expect("tests")];
+        for marker in [concat!("TODO(compose-rust#", "471)"), concat!("TODO(compose-rust#", "460, #429)"), concat!("TODO(compose-rust#", "500)"), concat!("TODO(compose-rust#", "328)")] {
+            assert!(!production.contains(marker), "{marker}");
+        }
+        let chip = &production[production.find("fn VcsChip(").expect("chip")..];
+        let chip = &chip[..chip.find("\n}\n").expect("end")];
+        assert!(chip.contains("super::components::Clickable(") && chip.contains(".selected(selected)") && chip.contains(".label(text).role(compose_rust::ui::Role::Button)"), "named by its text");
+        assert!(!chip.contains("FocusOverlay"));
+        assert!(production.contains("show_sha.set(!copied);"), "the selectable SHA is only the fallback");
+    }
+
     #[test]
     fn fr_l19_branch_popover_search_filters_ignoring_case() {
         let b: Vec<String> = ["main", "develop", "feat/Git-API", "feat/ui"].iter().map(|s| s.to_string()).collect();
@@ -5491,7 +5510,7 @@ mod tests {
             fn scan(&mut self, batch: &[Mutation<'_>]) {
                 for m in batch {
                     match m {
-                        Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
                             self.texts.insert(*node_id, s.to_string());
                         }
                         Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
@@ -5567,13 +5586,17 @@ mod tests {
         let cp_text: String = cp_batch.iter().map(|m| format!("{m:?}")).collect();
         assert!(cp_text.contains("정말 가져옵니다"));
 
-        // 6. Click "SHA 복사" -> opens selectable SHA field and posts notice
+        // 6. Click "SHA 복사" -> copies the SHA and says so; only when the clipboard refuses it
+        // (a headless runner) is the selectable SHA field shown instead (compose-rust#471).
         let (node, handler) = tracker.find("SHA 복사");
         let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click SHA 복사");
         let sha_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&sha_batch);
         let sha_text: String = sha_batch.iter().map(|m| format!("{m:?}")).collect();
-        assert!(sha_text.contains("아래에서 선택해 복사해 주세요"));
+        let notice = crate::ui::coexist::shared_ui().notice.get().map(|(_, t)| t).unwrap_or_default();
+        let copied = notice.contains("SHA를 클립보드에 복사했습니다.");
+        assert!(copied || notice.contains("SHA를 아래에서 복사해 주세요"), "{notice}");
+        assert_eq!(sha_text.contains("아래에서 선택해 복사해 주세요"), !copied, "the selectable SHA is only the fallback");
     }
 
     #[test]
@@ -5820,7 +5843,7 @@ mod tests {
         fn absorb(&mut self, batch: &[Mutation<'_>]) {
             for m in batch {
                 match m {
-                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
                         self.texts.insert(*node_id, s.to_string());
                     }
                     Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {

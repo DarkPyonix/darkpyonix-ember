@@ -7,8 +7,8 @@
 //!
 //! Gaps in the pinned compose-rust, each with its issue:
 //! - #372: container `on_click` is in compose-rust v0.0.5 (FR-55);
-//! - #443: `Text` has no `overflow_wrap`, so a long unbreakable token clips (#208);
-//! - #444: `TextField` has no `word_break`, so the placeholder can break inside a word (#208);
+//! - #443 and #444 are fixed in v0.0.8: `Text::overflow_wrap` lets a long token break
+//!   ([`WrapLabel`]), and `TextField::word_break` keeps the placeholder's words whole (#208);
 
 #![allow(non_snake_case)]
 
@@ -16,7 +16,7 @@ use compose_rust::ui as cu;
 use compose_rust::ui::{Modifier, Role};
 use compose_rust::{
     Alignment, ButtonVariant, Color, ColorRole, FontRef, FontRefs, GenericFamily, IconRole,
-    KeyEvent, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole, WordBreak,
+    KeyEvent, OverflowWrap, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole, WordBreak,
 };
 
 use super::theme::*;
@@ -232,19 +232,53 @@ pub fn Select(
     popup_width: f32,
     on_choose: impl FnMut(usize) + Clone + 'static,
 ) {
+    select_field(None, shown, options, chosen, popup_width, on_choose);
+}
+
+/// A [`Select`] named for assistive technology by the label beside it (`FieldRow`'s text), so a
+/// screen reader says which field it is and not only the chosen option. The trigger is a dropdown
+/// list to the platform (`Role::DropdownList`, which compose-rust#473 hands to the platform in
+/// v0.0.9). `name` is `&'static str` for the reason [`NamedClickable`] gives.
+pub fn NamedSelect(
+    name: &'static str,
+    shown: &str,
+    options: &[String],
+    chosen: usize,
+    popup_width: f32,
+    on_choose: impl FnMut(usize) + Clone + 'static,
+) {
+    select_field(Some(name), shown, options, chosen, popup_width, on_choose);
+}
+
+fn select_field(
+    name: Option<&'static str>,
+    shown: &str,
+    options: &[String],
+    chosen: usize,
+    popup_width: f32,
+    on_choose: impl FnMut(usize) + Clone + 'static,
+) {
     use compose_rust::runtime::{mutable_state_of, remember};
     let p = ember_theme().palette;
     let open = remember(|| mutable_state_of(false));
     let toggle = open.clone();
+    let trigger = Modifier::new()
+        .fill_max_width()
+        .height(H_BTN)
+        .background(paint(p.surface))
+        .border(1.0, paint(p.line))
+        .corner_radius(CORNER_SM)
+        .role(Role::DropdownList)
+        .expanded(open.get())
+        .click_action(true);
+    let trigger = match name {
+        Some(n) => trigger.label(n),
+        None => trigger,
+    };
     // One node, so the popup's `Dialog` is not a separate child that a parent's spacing counts.
     cu::Box().modifier(Modifier::new().fill_max_width()).content(|| {
     Clickable(
-        Modifier::new()
-            .fill_max_width()
-            .height(H_BTN)
-            .background(paint(p.surface))
-            .border(1.0, paint(p.line))
-            .corner_radius(CORNER_SM),
+        trigger,
         Alignment::CenterStart,
         move || toggle.set(!toggle.get_untracked()),
         || {
@@ -286,11 +320,32 @@ pub fn SheetFooter(content: impl FnOnce()) {
 // ---------------------------------------------------------------------------------------------
 
 /// Text on the type scale: one of the nine sizes and one of the three weights.
+///
+/// It breaks Korean only at spaces (`WordBreak::KeepAll`) and keeps room for its longest word in
+/// a weighted row (compose-rust#427), so a token wider than its container still clips. Text that
+/// can hold a path, a URL or a long name uses [`WrapLabel`].
 pub fn Label(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines: Option<u32>) {
+    scale_text(text, fs, weight, color, max_lines, false);
+}
+
+/// A [`Label`] whose token too long for its line breaks between its letters, the mockup's
+/// `word-break:keep-all; overflow-wrap:anywhere` (compose-rust#443, v0.0.8). Such a text is as
+/// narrow as its widest letter in a weighted row, so use it where the text should wrap rather
+/// than widen its column.
+pub fn WrapLabel(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines: Option<u32>) {
+    scale_text(text, fs, weight, color, max_lines, true);
+}
+
+fn scale_text(
+    text: &str,
+    fs: Fs,
+    weight: Weight,
+    color: Option<Paint>,
+    max_lines: Option<u32>,
+    wrap_anywhere: bool,
+) {
     let theme = ember_theme();
     let color = color.unwrap_or_else(|| paint(theme.palette.text));
-    // TODO(compose-rust#443): Text has no overflow_wrap builder in v0.0.5, so a single
-    // word wider than its container can still be clipped by the renderer.
     let mut t = cu::Text(text)
         .word_break(WordBreak::KeepAll)
         .font_size(fs.size())
@@ -298,6 +353,9 @@ pub fn Label(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines
         .font_weight(weight.value())
         .letter_spacing(fs.letter_spacing())
         .color(color);
+    if wrap_anywhere {
+        t = t.overflow_wrap(OverflowWrap::Anywhere);
+    }
     if let Some(n) = max_lines {
         t = t.max_lines(n).overflow(TextOverflow::Ellipsis);
     }
@@ -464,10 +522,12 @@ fn BareField(o: FieldOptions) {
 
 /// The toolkit field with every option but the frame, which `modifier` carries.
 fn FieldNode(o: FieldOptions, modifier: Modifier) {
-    // TODO(compose-rust#444): TextField has no word_break or overflow builder; its
-    // multiline placeholder can break Korean words inside a line.
+    // compose-rust#444 (v0.0.8): the placeholder and the typed text break Korean only at spaces,
+    // and a long token such as a path or a URL breaks inside itself rather than clipping.
     let mut f = cu::TextField()
         .modifier(modifier)
+        .word_break(WordBreak::KeepAll)
+        .overflow_wrap(OverflowWrap::Anywhere)
         .placeholder(o.placeholder)
         .multiline(o.multiline)
         .enabled(o.enabled.unwrap_or(true));
@@ -695,6 +755,53 @@ pub fn AppButton(
     drop(b);
 }
 
+/// A pill button that is one choice of several: the chosen one is `Primary`, the others
+/// `Default`. To assistive technology a `Toggle` says it is pressed (`Modifier::selected`, the
+/// mockup's `aria-pressed`) and a `Radio` is a radio button that is checked or not; compose-rust
+/// v0.0.9 hands both to the platform (#473).
+pub fn ChoiceButton(
+    text: &str,
+    choice: Choice,
+    chosen: bool,
+    small: bool,
+    enabled: bool,
+    on_click: impl FnMut() + 'static,
+) {
+    let theme = ember_theme();
+    let kind = if chosen { ButtonKind::Primary } else { ButtonKind::Default };
+    let s = button_style_for(kind, small, enabled, theme.palette);
+    let state = match choice {
+        Choice::Toggle => Modifier::new().selected(chosen),
+        Choice::Radio => Modifier::new().role(Role::RadioButton).checked(chosen),
+    };
+    drop(
+        cu::Button(text)
+            .enabled(enabled)
+            .variant(ButtonVariant::Text)
+            .color(paint(s.text))
+            // The same 14/500 (13/500 small) label as AppButton (FR-L10.2, #844).
+            .font_size(s.fs.size())
+            .font_weight(s.weight.value())
+            .modifier(
+                state
+                    .height(s.height)
+                    .background(paint(s.fill))
+                    .border(1.0, paint(s.border))
+                    .shape_role(ShapeRole::Full),
+            )
+            .on_click(on_click),
+    );
+}
+
+/// How a [`ChoiceButton`] tells assistive technology that it is the chosen one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Choice {
+    /// A pressed toggle (`aria-pressed`), such as the character style switch.
+    Toggle,
+    /// A checked radio button (`role=radio`), such as the fan mode control.
+    Radio,
+}
+
 /// A 40 px (or 32 px) circle with a 1 px border and a glyph.
 pub fn IconButton(icon: IconRole, small: bool, on_click: impl FnMut() + 'static) {
     let theme = ember_theme();
@@ -883,12 +990,15 @@ fn sheet_presentation(window_width_dp: f32, monitor: bool) -> SheetPresentation 
     }
 }
 
+/// The tallest a bottom sheet grows, as a share of the window (`.sheet` `max-height:85vh`).
+pub(crate) const SHEET_BOTTOM_MAX_FRACTION: f32 = 0.85;
+
 /// The tallest a sheet may be (`.sheet` in the mockup): 85 percent of the window for a bottom
 /// sheet, the whole window for the full-screen monitor, and the window less 32 dp for a dialog.
 pub(crate) fn sheet_max_height(window_width_dp: f32, window_height_dp: f32, monitor: bool) -> f32 {
     let h = window_height_dp.max(0.0);
     match sheet_presentation(window_width_dp, monitor) {
-        SheetPresentation::Bottom => h * 0.85,
+        SheetPresentation::Bottom => h * SHEET_BOTTOM_MAX_FRACTION,
         SheetPresentation::FullScreen => h,
         SheetPresentation::Dialog => (h - 32.0).max(0.0),
     }
@@ -984,8 +1094,8 @@ pub fn EmberSheetSized(
     content: impl FnOnce(),
 ) {
     let theme = ember_theme();
-    // TODO(compose-rust#384): expose modal scrim color; the mockup uses rgba(0, 0, 0, 0.3).
-    // The layered card shadow (#214) replaces the Material tint ring that `elevation` painted.
+    // The mockup's `.modal` scrim, rgba(0, 0, 0, 0.3), set on every presentation (compose-rust#384,
+    // v0.0.10 `ModalScope::scrim`). The layered card shadow (#214) replaces the Material tint ring that `elevation` painted.
     // Explicit zero padding suppresses the renderer dialog's theme padding, which otherwise
     // adds space around the frame and prevents a full-screen sheet.
     let modifier = with_shadows(Modifier::new().padding(0.0), theme.shadow_sm()).background(paint(theme.palette.surface));
@@ -1000,25 +1110,31 @@ pub fn EmberSheetSized(
     let window = crate::ui::window_size::current_window_size();
     let presentation = sheet_presentation(window.width_dp, monitor);
     if presentation == SheetPresentation::Bottom {
-        // TODO(compose-rust#445): expose a maximum height constraint so short sheets can wrap
-        // their content instead of occupying the full 85 percent height.
+        // compose-rust#445 (v0.0.9): the sheet is as tall as its content up to 85 percent of the
+        // window, and taller content scrolls inside it, so a short sheet wraps its content.
         cu::Sheet(open)
-            .modifier(modifier.fill_max_width().height(sheet_max_height(window.width_dp, window.height_dp, monitor))
-                .corner_radii([CORNER_XL, CORNER_XL, 0.0, 0.0]))
+            .modifier(modifier.fill_max_width().corner_radii([CORNER_XL, CORNER_XL, 0.0, 0.0]))
+            .max_height_fraction(SHEET_BOTTOM_MAX_FRACTION)
+            .scrim(Paint::Literal(MODAL_SCRIM))
             .on_dismiss(on_dismiss)
             .content(body);
     } else if presentation == SheetPresentation::FullScreen {
         cu::Dialog(open)
             .modifier(modifier.width(window.width_dp).height(window.height_dp))
+            .scrim(Paint::Literal(MODAL_SCRIM))
             .on_dismiss(on_dismiss)
             .content(body);
     } else {
         cu::Dialog(open)
             .modifier(modifier.corner_radius(CORNER_XL).width(sheet_width(window.width_dp, width)))
+            .scrim(Paint::Literal(MODAL_SCRIM))
             .on_dismiss(on_dismiss)
             .content(body);
     }
 }
+
+/// The mockup's modal scrim (`style.css` `.modal`, `rgba(0,0,0,.3)`): black at alpha 0x4D (77 of 255).
+pub const MODAL_SCRIM: Color = Color::argb(0x4D00_0000);
 
 /// A filter chip (`.chip`): 32 px, `--ink` when selected, `--surface-2` otherwise, 12 px medium.
 /// Its label is its name, and it says whether it is selected (compose-rust v0.0.7, #429).
@@ -1541,6 +1657,13 @@ mod tests {
         let small = emitted_props(|| AppButton("취소", None, ButtonKind::Default, true, false, false, || {}));
         assert!(small.iter().any(|m| m == "FontSize=Float(13.0)"), "{small:?}");
         assert!(small.iter().any(|m| m == "FontWeight=Integer(500)"), "{small:?}");
+        // A choice button carries the same label as AppButton.
+        let choice = emitted_props(|| ChoiceButton("자동", Choice::Radio, true, false, true, || {}));
+        assert!(choice.iter().any(|m| m == "FontSize=Float(14.0)"), "{choice:?}");
+        assert!(choice.iter().any(|m| m == "FontWeight=Integer(500)"), "{choice:?}");
+        let choice = emitted_props(|| ChoiceButton("수동", Choice::Toggle, false, true, true, || {}));
+        assert!(choice.iter().any(|m| m == "FontSize=Float(13.0)"), "{choice:?}");
+        assert!(choice.iter().any(|m| m == "FontWeight=Integer(500)"), "{choice:?}");
     }
 
     #[test]
@@ -1619,6 +1742,55 @@ mod tests {
         assert_eq!(sheet_presentation(559.0, false), SheetPresentation::Bottom);
         assert_eq!(sheet_presentation(560.0, false), SheetPresentation::Dialog);
         assert_eq!(sheet_max_height(390.0, 1000.0, false), 850.0);
+    }
+
+    #[test]
+    fn fr_l10_choices_and_selects_carry_their_state_for_assistive_technology() {
+        // compose-rust#473 (v0.0.9): the platform hears declared roles and states, so the style
+        // switch says which style is pressed, the fan modes are radios and a select is named.
+        let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        let choice = production.split("pub fn ChoiceButton(").nth(1).unwrap();
+        assert!(choice.contains("Choice::Toggle => Modifier::new().selected(chosen)"));
+        assert!(choice.contains("Choice::Radio => Modifier::new().role(Role::RadioButton).checked(chosen)"));
+        let select = production.split("fn select_field(").nth(1).unwrap();
+        assert!(select.contains(".role(Role::DropdownList)"));
+        assert!(select.contains(".expanded(open.get())"));
+        assert!(select.contains("Some(n) => trigger.label(n)"));
+        let chars = include_str!("characters_screen.rs");
+        assert!(chars.contains("ChoiceButton(s.label(), Choice::Toggle, s == style"));
+        for name in ["하네스", "역할", "스타일", "실루엣 고정"] {
+            assert!(chars.contains(&format!("NamedSelect(\"{name}\", &labels[at]")), "{name}");
+        }
+        let monitor = include_str!("monitor.rs");
+        assert!(monitor.contains("ChoiceButton(mode.label(), Choice::Radio, mode == FanMode::Auto"));
+        for src in [chars, monitor] {
+            assert!(!src.contains(concat!("TODO(compose-rust#", "473)")));
+        }
+    }
+
+    #[test]
+    fn fr_212_modal_scrim_is_the_mockups() {
+        // compose-rust#384 (v0.0.10 `ModalScope::scrim`): every presentation takes the mockup's scrim.
+        let src = include_str!("components.rs");
+        let production = &src[..src.find("#[cfg(test)]").expect("tests")];
+        assert!(!production.contains(concat!("TODO(compose-rust#", "384)")));
+        assert_eq!(MODAL_SCRIM, Color::argb(0x4D00_0000));
+        let sheet = &production[production.find("pub fn EmberSheetSized").expect("sheet")..];
+        let sheet = &sheet[..sheet.find("\n}\n").expect("end")];
+        assert_eq!(sheet.matches(".scrim(Paint::Literal(MODAL_SCRIM))").count(), 3, "bottom sheet, full screen and dialog");
+    }
+
+    #[test]
+    fn fr_l32_bottom_sheet_wraps_its_content_up_to_the_fraction() {
+        // compose-rust#445: the bottom sheet takes a maximum height instead of a fixed one.
+        let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        let sized = production.split("pub fn EmberSheetSized(").nth(1).unwrap();
+        let bottom = sized.split("if presentation == SheetPresentation::Bottom {").nth(1).unwrap();
+        let bottom = bottom.split("} else if presentation == SheetPresentation::FullScreen {").next().unwrap();
+        assert!(bottom.contains(".max_height_fraction(SHEET_BOTTOM_MAX_FRACTION)"));
+        assert!(!bottom.contains(".height("));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "445)")));
+        assert_eq!(SHEET_BOTTOM_MAX_FRACTION, 0.85);
     }
 
     #[test]
@@ -1759,7 +1931,8 @@ mod tests {
             // Existing direct buttons are explicitly counted until their specialized controls
             // move into shared components. Any additional bypass must be reviewed.
             let allowed_buttons = match name {
-                "components.rs" => 3,
+                // AppButton, IconButton, PickChip, and ChoiceButton (FR-L10, compose-rust#473).
+                "components.rs" => 4,
                 "agents.rs" => 2,
                 "files.rs" => 1,
                 "home.rs" => 0,
@@ -1779,6 +1952,29 @@ mod tests {
         }
         let source = fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/cr/components.rs")).unwrap();
         assert!(source.split("#[cfg(test)]").next().unwrap().matches(".word_break(WordBreak::KeepAll)").count() >= 1);
+    }
+
+    #[test]
+    fn fr_l10_1_fields_keep_words_and_wrap_labels_break_long_tokens() {
+        // compose-rust#443 and #444 (v0.0.8): no workaround markers are left, the field keeps
+        // Korean words whole and breaks a long token, and WrapLabel lets a token break.
+        let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains(concat!("TODO(compose-rust#", "443)")));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "444)")));
+        // Framed and bare fields both build their TextField in FieldNode (#844).
+        let field = production.split("pub fn EmberField(").nth(1).unwrap();
+        assert!(field.contains("FieldNode(o, modifier)"));
+        let bare = production.split("fn BareField(").nth(1).unwrap();
+        assert!(bare.split("\nfn ").next().unwrap().contains("FieldNode(o, inner)"));
+        let node = production.split("fn FieldNode(").nth(1).unwrap();
+        let node = node.split("\nfn ").next().unwrap().split("\npub fn ").next().unwrap();
+        assert!(node.contains(".word_break(WordBreak::KeepAll)"));
+        assert!(node.contains(".overflow_wrap(OverflowWrap::Anywhere)"));
+        let text = production.split("fn scale_text(").nth(1).unwrap();
+        assert!(text.contains("if wrap_anywhere {\n        t = t.overflow_wrap(OverflowWrap::Anywhere);"));
+        for screen in [include_str!("monitor.rs"), include_str!("routines.rs")] {
+            assert!(!screen.contains(concat!("TODO(compose-rust#", "443)")));
+        }
     }
 
     #[test]

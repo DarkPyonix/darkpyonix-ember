@@ -9,6 +9,7 @@
 
 use std::sync::OnceLock;
 
+use compose_rust::schema::OverlayTokens;
 use compose_rust::{asset, AssetKind, ColorRole, ColorScheme, DesignSystem, FontStack, Palette, Theme, TypeRole};
 
 /// One bundled face: its file name under `assets/fonts/` and its bytes.
@@ -123,11 +124,21 @@ pub fn palette_color(role: ColorRole, scheme: ColorScheme) -> Option<compose_rus
     APP_PALETTE.get(role, scheme)
 }
 
+/// The toast's elevation in dp: the mockup's `.toast` casts `--shadow-lg` (`0 10px 32px`).
+pub const TOAST_ELEVATION: u16 = 12;
+
+/// The overlay tokens the app sets: only the toast's shadow and its pill corner (`.toast`
+/// `border-radius:var(--pill)`). A message is not a node and takes no Modifier, so its shadow
+/// is an overlay token (compose-rust#446, v0.0.9); every other token is 0, the design system's.
+pub const APP_OVERLAY: OverlayTokens =
+    OverlayTokens::new().toast_elevation(TOAST_ELEVATION).toast_corner_radius(999);
+
 /// The toolkit theme the app launches with: the prose roles in Inter and Pretendard, `Mono`
 /// in JetBrains Mono.
 pub fn app_theme(scheme: ColorScheme) -> Theme {
     Theme::unified(DesignSystem::Cupertino)
         .with_palette(&APP_PALETTE)
+        .with_overlay_tokens(&APP_OVERLAY)
         .with_color_scheme(scheme)
         .with_default_font(app_font())
         .with_font(TypeRole::Mono, mono_font())
@@ -153,6 +164,17 @@ mod tests {
         assert_eq!(palette.get(ColorRole::Surface, ColorScheme::Dark), Some(DARK.surface));
         assert_eq!(palette.get(ColorRole::OnSurface, ColorScheme::Light), Some(LIGHT.text));
         assert_eq!(palette.get(ColorRole::OnSurface, ColorScheme::Dark), Some(DARK.text));
+    }
+
+    #[test]
+    fn fr_l9_app_theme_gives_the_toast_its_shadow_and_pill_corner() {
+        // compose-rust#446: the toast's shadow and corner are overlay tokens; the rest stay 0.
+        let overlay = app_theme(ColorScheme::Dark).overlay.expect("overlay tokens");
+        assert_eq!(overlay.toast_elevation, TOAST_ELEVATION);
+        assert_eq!(overlay.toast_corner_radius, 999);
+        let rest = OverlayTokens { toast_elevation: 0, toast_corner_radius: 0, ..*overlay };
+        assert_eq!(rest, OverlayTokens::new());
+        assert!(editor_theme(ColorScheme::Light).overlay.is_some());
     }
 
     fn hex(role: ColorRole, scheme: ColorScheme) -> u32 {

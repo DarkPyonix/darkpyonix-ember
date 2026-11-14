@@ -1483,7 +1483,6 @@ pub mod page {
                         }
                     }
                     section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
-                        onmounted: move |event| crate::ui::editor_language::view::mount_editor_area(event.data()),
                         {crate::ui::workspace_trust::view::banner(&s)}
                         {tab_strip(&s, &paths, &dirty, current.as_deref())}
                         if let Some((menu_path, x, y)) = s.tab_menu.read().clone() { {tab_context_menu(&s, &menu_path, x, y)} }
@@ -2948,14 +2947,6 @@ pub mod page {
     /// The strip for one [`terms::StripView`]. The + sits outside the scrolling tab list, after it,
     /// so it stays visible in every state as in Code-OSS (#799); inside the scrolling list the
     /// renderer drew it only while a rename field was open.
-    /// A terminal tab's width in px from its label (`.ed-tsub>button`: 12 px text, 12 px padding each
-    /// side, 1 px border, 14 px icon, 18 px buttons with -6 px end margin, 6 px gaps), at most 240.
-    pub(super) fn tab_width(label: &str, on: bool) -> u32 {
-        let text: u32 = label.chars().map(|c| if c.is_ascii() { 7 } else { 12 }).sum();
-        let buttons = if on { 2 * (6 + 18) } else { 6 + 18 } - 6;
-        (2 + 24 + 14 + 6 + text + buttons).min(240)
-    }
-
     pub(super) fn strip_of(view: Option<terms::StripView>, bump: impl Fn() + Copy + 'static) -> Element {
         let (tabs, active, renaming, error) = match view {
             Some(v) => (v.tabs, v.active, v.renaming, v.error),
@@ -2982,9 +2973,6 @@ pub mod page {
                             let (sel, ren, del, f2, pen) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
                             rsx! {
                                 button { key: "{id}", class: if on { "on" } else { "" }, role: "tab", "aria-selected": if on { "true" } else { "false" }, title: "{label}",
-                                    // TODO(dioxus-compose#227): no max-content width, so an inactive tab
-                                    // collapsed to its padding in the scrolling list; its width is set here.
-                                    style: "flex:none; width:{tab_width(&label, on)}px;",
                                     onclick: move |_| { terms::select(&sel); bump(); },
                                     // F2 and the pencil button rename until a real double-click arrives.
                                     // v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).

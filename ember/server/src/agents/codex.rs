@@ -52,6 +52,14 @@
 //! a `config` map, but whether it can add MCP servers to an already-running app-server is
 //! unverified, so the process-level overrides are used.)
 //!
+//! An exact allow rule for a tool of such a server ([`StartRequest::allowed_tools`], FR-T12: the
+//! `channel_post` tool of `ember-channels`) becomes
+//! `-c mcp_servers.<name>.tools.<tool>.approval_mode="approve"`. Measured on codex-cli 0.167.0
+//! without a model turn: the overrides resolve to one stdio server whose `env` is null, the child
+//! started at `thread/start` receives the variables named in `env_vars` and no unlisted one, and
+//! `--strict-config` accepts the approval key (fixtures `tests/fixtures/codex/mcp_*_0.167.0.json`).
+//! A real turn calling the tool is not measured.
+//!
 //! Codex's own settings (approval policy, sandbox, model, config.toml) apply as they do natively
 //! (FR-A4); the adapter only overrides what the session asks for (model, cwd) or what it was built
 //! with ([`CodexAdapter::with_approval_policy`], [`CodexAdapter::with_sandbox`]).
@@ -322,7 +330,14 @@ pub fn proxy_config_args(base_url: &str) -> Vec<String> {
 /// possibly secrets) is never written here: only its variable names, as
 /// `mcp_servers.<name>.env_vars=[…]`, which makes Codex forward those variables from its own
 /// process environment ([`mcp_process_env`]) to the MCP server.
-fn app_server_args(req: &StartRequest) -> Vec<String> {
+///
+/// An allow rule in [`StartRequest::allowed_tools`] (FR-T12) becomes
+/// `mcp_servers.<name>.tools.<tool>.approval_mode="approve"` ([`approved_mcp_tools`]). The key and
+/// its values `auto`, `prompt`, `writes`, `approve` are from the configuration reference and were
+/// accepted by `codex app-server --strict-config --print-startup-config` on codex-cli 0.167.0;
+/// that a real turn then calls the tool without an `mcpServer/elicitation/request` is not
+/// measured.
+pub(crate) fn app_server_args(req: &StartRequest) -> Vec<String> {
     let mut args = vec!["app-server".to_string()];
     if let Some((_, base)) = req.env.iter().find(|(k, _)| k == PROXY_BASE_ENV) {
         args.extend(proxy_config_args(base));
@@ -345,13 +360,43 @@ fn app_server_args(req: &StartRequest) -> Vec<String> {
             args.push(format!("{key}.env_vars=[{names}]"));
         }
     }
+    for (server, tool) in approved_mcp_tools(req, &skipped) {
+        args.push("-c".into());
+        args.push(format!("mcp_servers.{server}.tools.{tool}.approval_mode=\"approve\""));
+    }
     args
+}
+
+/// The `(server, tool)` pairs Codex may call without asking: every entry of
+/// [`StartRequest::allowed_tools`] of the form `mcp__<server>__<tool>` whose server is one this
+/// request registers (and did not skip). A rule for any other server is dropped, so the request
+/// can never loosen a server from the user's own `config.toml`, and there is no server-wide
+/// default. Both names must be TOML bare keys (letters, digits, `-`, `_`), because they are
+/// written into a dotted key.
+fn approved_mcp_tools<'a>(req: &'a StartRequest, skipped: &[String]) -> Vec<(&'a str, &'a str)> {
+    fn bare(s: &str) -> bool {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    }
+    let mut out: Vec<(&'a str, &'a str)> = Vec::new();
+    for rule in &req.allowed_tools {
+        let Some(rest) = rule.strip_prefix("mcp__") else { continue };
+        for m in req.mcp_servers.iter().filter(|m| !skipped.contains(&m.name)) {
+            let Some(tool) = rest.strip_prefix(m.name.as_str()).and_then(|t| t.strip_prefix("__")) else {
+                continue;
+            };
+            let pair = (m.name.as_str(), tool);
+            if bare(pair.0) && bare(pair.1) && !out.contains(&pair) {
+                out.push(pair);
+            }
+        }
+    }
+    out
 }
 
 /// The app-server process environment carrying the MCP servers' variables, and the names of
 /// servers left out because one of their variables is already set to a different value by an
 /// earlier server (one process environment cannot hold both).
-fn mcp_process_env(req: &StartRequest) -> (Vec<(String, String)>, Vec<String>) {
+pub(crate) fn mcp_process_env(req: &StartRequest) -> (Vec<(String, String)>, Vec<String>) {
     let mut env: Vec<(String, String)> = Vec::new();
     let mut skipped = Vec::new();
     for m in &req.mcp_servers {

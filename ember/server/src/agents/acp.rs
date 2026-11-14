@@ -886,7 +886,7 @@ fn initialize_params() -> Value {
 
 /// ACP `McpServerStdio` entries (`{name, command, args, env: [{name, value}]}`). The environment
 /// (registry secrets, FR-A7) travels over the agent's stdin, never on a command line.
-fn mcp_servers_param(servers: &[McpServer]) -> Value {
+pub(crate) fn mcp_servers_param(servers: &[McpServer]) -> Value {
     Value::Array(
         servers
             .iter()

@@ -109,17 +109,34 @@ fn find_marker(text: &str) -> Option<(usize, usize)> {
     best
 }
 
-/// The line that tells an agent how to answer in a channel (FR-T13). With `by_tool` (a Claude Code
-/// recipient that has the `channel_post` MCP tool, FR-T12) it names the tool; otherwise it is the
+/// How a recipient answers in a channel (FR-T12, FR-T13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelReply {
+    /// The `ember-a2a channel post` command (every session that has no tool).
+    Command,
+    /// The MCP tool under the name Claude Code gives it, [`super::CHANNEL_POST_TOOL`] (measured).
+    ClaudeTool,
+    /// The MCP tool named by its server and its own name. Codex, Antigravity and ACP agents each
+    /// show an MCP tool to the model under a name of their own, which is not measured, so the
+    /// text names the server and the tool and claims no combined name.
+    McpTool,
+}
+
+/// The line that tells an agent how to answer in a channel (FR-T13). A recipient that has the
+/// `channel_post` MCP tool (FR-T12) is pointed at the tool; otherwise it is the
 /// `ember-a2a channel post` command, unchanged.
-pub fn reply_hint(channel_id: &str, by_tool: bool) -> String {
-    if by_tool {
-        format!(
+pub fn reply_hint(channel_id: &str, how: ChannelReply) -> String {
+    match how {
+        ChannelReply::ClaudeTool => format!(
             "To reply in the channel: call the tool {} with channel \"{channel_id}\" and text \"...\"",
             super::CHANNEL_POST_TOOL
-        )
-    } else {
-        format!("To reply in the channel: {CLI_NAME} channel post {channel_id} \"...\"")
+        ),
+        ChannelReply::McpTool => format!(
+            "To reply in the channel: call the {} tool of the MCP server {} with channel \"{channel_id}\" and text \"...\"",
+            super::mcp::TOOL_NAME,
+            super::CHANNEL_MCP_SERVER
+        ),
+        ChannelReply::Command => format!("To reply in the channel: {CLI_NAME} channel post {channel_id} \"...\""),
     }
 }
 
@@ -135,11 +152,11 @@ pub fn guest_message_text(
     until_ms: i64,
     text: &str,
 ) -> String {
-    guest_message_text_for(id, guest_name, channel_name, channel_id, until_ms, text, false)
+    guest_message_text_for(id, guest_name, channel_name, channel_id, until_ms, text, ChannelReply::Command)
 }
 
 /// [`guest_message_text`] for a recipient that may answer through the `channel_post` MCP tool
-/// (`by_tool`, FR-T12); everything but the last line is identical.
+/// (`how`, FR-T12); everything but the last line is identical.
 pub fn guest_message_text_for(
     id: &str,
     guest_name: &str,
@@ -147,7 +164,7 @@ pub fn guest_message_text_for(
     channel_id: &str,
     until_ms: i64,
     text: &str,
-    by_tool: bool,
+    how: ChannelReply,
 ) -> String {
     let place = match channel_name.map(|n| neutralize_guest_text(&sanitize_label(n))) {
         Some(name) => format!("channel #{name} (id {channel_id})"),
@@ -165,7 +182,7 @@ pub fn guest_message_text_for(
          {}",
         neutralize_guest_text(&sanitize_label(guest_name)),
         neutralize_guest_text(text),
-        reply_hint(channel_id, by_tool),
+        reply_hint(channel_id, how),
     )
 }
 

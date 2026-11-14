@@ -34,6 +34,7 @@ use crate::agents::{AgentKind, McpServer, StartRequest};
 use crate::events::{AgentEvent, SessionStatus};
 use crate::session::{Push, Sessions};
 use crate::store::SessionRecord;
+pub use channel::ChannelReply;
 pub use store::{A2aMessage, A2aStore};
 
 /// Name of the agent-side command (a bin target of this crate).
@@ -178,8 +179,8 @@ pub struct A2a {
     /// Recent channel posts per (session, channel), for the rate limit of `channel post`.
     channel_posts: StdMutex<HashMap<(String, String), std::collections::VecDeque<Instant>>>,
     /// Sessions whose last start skipped the `ember-channels` registration because the user's own
-    /// Claude Code configuration already names that server (FR-T12). The prompt builders read it
-    /// through [`A2a::channel_reply_by_tool`]. It lives in memory: after a server restart it is
+    /// configuration of the harness already names that server (FR-T12). The prompt builders read it
+    /// through [`A2a::channel_reply`]. It lives in memory: after a server restart it is
     /// empty, so a surviving agent is again told "by tool" (its prompt already carries the CLI
     /// fallback sentence) until its next start runs the check again. An entry is removed when the
     /// session's start finds the name free, when the session's team membership ends (end hook)
@@ -198,6 +199,11 @@ pub struct ClaudeConfigSources {
     pub config_dir: Option<PathBuf>,
     /// Managed MCP files.
     pub managed: Vec<PathBuf>,
+    /// `CODEX_HOME` of this server's own environment (a value in the start request wins; without
+    /// either it is `<home>/.codex`).
+    pub codex_home: Option<PathBuf>,
+    /// Codex configuration files outside the user's home.
+    pub codex_system: Vec<PathBuf>,
 }
 
 impl ClaudeConfigSources {
@@ -208,6 +214,11 @@ impl ClaudeConfigSources {
             managed: vec![
                 PathBuf::from("/Library/Application Support/ClaudeCode/managed-mcp.json"),
                 PathBuf::from("/etc/claude-code/managed-mcp.json"),
+            ],
+            codex_home: std::env::var_os("CODEX_HOME").filter(|v| !v.is_empty()).map(PathBuf::from),
+            codex_system: vec![
+                PathBuf::from("/etc/codex/config.toml"),
+                PathBuf::from("/etc/codex/managed_config.toml"),
             ],
         }
     }
@@ -221,6 +232,11 @@ const KIND_USER: &str = "user config";
 const KIND_LOCAL: &str = "local config";
 const KIND_MANAGED: &str = "managed";
 const KIND_REQUEST: &str = "start request";
+const KIND_CODEX_USER: &str = "user config.toml";
+const KIND_CODEX_PROJECT: &str = "project .codex/config.toml";
+const KIND_CODEX_SYSTEM: &str = "system config.toml";
+const KIND_AGY_USER: &str = "user mcp_config.json";
+const KIND_AGY_PROJECT: &str = "project .agents/mcp_config.json";
 const REASON_TAKEN: &str = "a server with this name is already configured";
 
 /// The closed set of reasons a configuration file could not be checked. Static on purpose:
@@ -243,10 +259,66 @@ pub enum NameCheck {
 }
 
 /// The notice for a start that skipped the registration because a file could not be checked.
+#[cfg(test)]
 fn unsure_notice(kind: &str, why: &str) -> String {
+    unsure_notice_for(ToolHarness::Claude, kind, why)
+}
+
+/// [`unsure_notice`] naming the harness whose configuration could not be checked.
+fn unsure_notice_for(harness: ToolHarness, kind: &str, why: &str) -> String {
     format!(
-        "The channel tool was not registered because the Claude Code configuration ({kind}) could not be checked ({why}); replies use the ember-a2a command."
+        "The channel tool was not registered because the {} configuration ({kind}) could not be checked ({why}); replies use the ember-a2a command.",
+        harness.label()
     )
+}
+
+/// The harnesses that get the `channel_post` MCP tool (FR-T12), each through its own
+/// session-scoped mechanism: Claude Code's private `--mcp-config` file, Codex's `-c` overrides,
+/// the Antigravity session root's `mcp_config.json`, and `mcpServers` of an ACP `session/new`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolHarness {
+    Claude,
+    Codex,
+    Antigravity,
+    Acp,
+}
+
+impl ToolHarness {
+    /// `None` for the scripted test agent, which has no MCP client.
+    fn of(agent: AgentKind) -> Option<ToolHarness> {
+        match agent {
+            AgentKind::ClaudeCode => Some(ToolHarness::Claude),
+            AgentKind::Codex => Some(ToolHarness::Codex),
+            AgentKind::Antigravity => Some(ToolHarness::Antigravity),
+            AgentKind::Acp(_) => Some(ToolHarness::Acp),
+            AgentKind::Scripted => None,
+        }
+    }
+
+    /// How the prompt names the tool. Only Claude Code's combined name is measured.
+    fn reply(self) -> ChannelReply {
+        match self {
+            ToolHarness::Claude => ChannelReply::ClaudeTool,
+            ToolHarness::Codex | ToolHarness::Antigravity | ToolHarness::Acp => ChannelReply::McpTool,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            ToolHarness::Claude => "Claude Code",
+            ToolHarness::Codex => "Codex",
+            ToolHarness::Antigravity => "Antigravity",
+            ToolHarness::Acp => "ACP agent",
+        }
+    }
+
+    /// Whether the start request carries the one allow rule. Claude Code denies the call without
+    /// it (measured), and Codex could only ask through `mcpServer/elicitation/request`, which
+    /// Ember does not answer. Antigravity's call goes through Ember's hook and an ACP agent's
+    /// through `session/request_permission`, so the person is asked there and no rule is added.
+    fn allow_rule(self) -> bool {
+        matches!(self, ToolHarness::Claude | ToolHarness::Codex)
+    }
 }
 
 /// `Ok(None)` for a missing file, `Ok(Some(json))` for a regular JSON file of at most
@@ -255,6 +327,14 @@ fn unsure_notice(kind: &str, why: &str) -> String {
 /// between a check and the open cannot stall the session start. A symlink is followed on purpose
 /// (dotfile managers link these files).
 fn read_config_json(path: &Path) -> Result<Option<serde_json::Value>, &'static str> {
+    read_config_bytes(path)?
+        .map(|buf| serde_json::from_slice(&buf).map_err(|_| WHY_NOT_JSON))
+        .transpose()
+}
+
+/// [`read_config_json`] without the parsing: the bytes of a regular file of at most
+/// [`MAX_CONFIG_BYTES`], `Ok(None)` for a missing file.
+fn read_config_bytes(path: &Path) -> Result<Option<Vec<u8>>, &'static str> {
     use std::io::Read;
     let mut opts = std::fs::OpenOptions::new();
     opts.read(true);
@@ -280,7 +360,80 @@ fn read_config_json(path: &Path) -> Result<Option<serde_json::Value>, &'static s
     if buf.len() as u64 > MAX_CONFIG_BYTES {
         return Err(WHY_TOO_BIG);
     }
-    serde_json::from_slice(&buf).map(Some).map_err(|_| WHY_NOT_JSON)
+    Ok(Some(buf))
+}
+
+/// Whether `bytes` contain [`CHANNEL_MCP_SERVER`] anywhere, ignoring ASCII case. Used for the
+/// configuration files of Codex (TOML) and Antigravity (JSON that may hold comments and trailing
+/// commas): a plain text search needs no parser and fails closed, since a comment that mentions
+/// the name counts as taken.
+fn mentions_channel_server(bytes: &[u8]) -> bool {
+    let needle = CHANNEL_MCP_SERVER.as_bytes();
+    bytes.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
+}
+
+/// The first file of `files` that mentions the server name or cannot be checked decides.
+fn text_name_check(files: Vec<(PathBuf, &'static str)>) -> NameCheck {
+    for (file, kind) in files {
+        match read_config_bytes(&file) {
+            Err(why) => return NameCheck::Unsure { kind, why },
+            Ok(Some(bytes)) if mentions_channel_server(&bytes) => return NameCheck::Taken { kind },
+            Ok(_) => {}
+        }
+    }
+    NameCheck::Free
+}
+
+/// `cwd` (made absolute) and every ancestor, then the same for its canonical form.
+fn session_dirs(cwd: &Path) -> Vec<PathBuf> {
+    let cwd = if cwd.is_absolute() {
+        cwd.to_path_buf()
+    } else {
+        std::env::current_dir().map(|d| d.join(cwd)).unwrap_or_else(|_| cwd.to_path_buf())
+    };
+    let mut dirs: Vec<PathBuf> = cwd.ancestors().map(Path::to_path_buf).collect();
+    if let Ok(real) = cwd.canonicalize() {
+        for a in real.ancestors() {
+            if !dirs.iter().any(|d| d == a) {
+                dirs.push(a.to_path_buf());
+            }
+        }
+    }
+    dirs
+}
+
+/// Whether the user's own Codex configuration mentions an MCP server named `ember-channels`
+/// (FR-T12): `.codex/config.toml` in `cwd` and every ancestor, `<codex_home>/config.toml`, and
+/// the `system` files. A `-c mcp_servers.ember-channels.…` override would merge into such an
+/// entry, so the registration steps aside. Fails closed like [`channel_server_name_taken`].
+pub fn codex_channel_name_taken(cwd: &Path, codex_home: Option<&Path>, system: &[PathBuf]) -> NameCheck {
+    let mut files: Vec<(PathBuf, &'static str)> = session_dirs(cwd)
+        .into_iter()
+        .map(|d| (d.join(".codex").join("config.toml"), KIND_CODEX_PROJECT))
+        .collect();
+    if let Some(home) = codex_home {
+        files.push((home.join("config.toml"), KIND_CODEX_USER));
+    }
+    files.extend(system.iter().map(|f| (f.clone(), KIND_CODEX_SYSTEM)));
+    text_name_check(files)
+}
+
+/// Whether the user's own Antigravity configuration mentions an MCP server named
+/// `ember-channels` (FR-T12): `.agents/mcp_config.json` in `cwd` and every ancestor, and under
+/// `home` the user file `.gemini/config/mcp_config.json` and the legacy
+/// `.gemini/antigravity/mcp_config.json` (agy has no variable that moves `~/.gemini`). Fails
+/// closed like [`channel_server_name_taken`].
+pub fn agy_channel_name_taken(cwd: &Path, home: Option<&Path>) -> NameCheck {
+    let mut files: Vec<(PathBuf, &'static str)> = session_dirs(cwd)
+        .into_iter()
+        .map(|d| (d.join(".agents").join("mcp_config.json"), KIND_AGY_PROJECT))
+        .collect();
+    if let Some(home) = home {
+        let gemini = home.join(".gemini");
+        files.push((gemini.join("config").join("mcp_config.json"), KIND_AGY_USER));
+        files.push((gemini.join("antigravity").join("mcp_config.json"), KIND_AGY_USER));
+    }
+    text_name_check(files)
 }
 
 /// Whether the `mcpServers` object `servers` has a key equal to [`CHANNEL_MCP_SERVER`], ignoring
@@ -307,19 +460,7 @@ pub fn channel_server_name_taken(
     config_dir: Option<&Path>,
     managed: &[PathBuf],
 ) -> NameCheck {
-    let cwd = if cwd.is_absolute() {
-        cwd.to_path_buf()
-    } else {
-        std::env::current_dir().map(|d| d.join(cwd)).unwrap_or_else(|_| cwd.to_path_buf())
-    };
-    let mut dirs: Vec<PathBuf> = cwd.ancestors().map(Path::to_path_buf).collect();
-    if let Ok(real) = cwd.canonicalize() {
-        for a in real.ancestors() {
-            if !dirs.iter().any(|d| d == a) {
-                dirs.push(a.to_path_buf());
-            }
-        }
-    }
+    let dirs = session_dirs(cwd);
     for d in &dirs {
         match read_config_json(&d.join(".mcp.json")) {
             Err(why) => return NameCheck::Unsure { kind: KIND_PROJECT, why },
@@ -406,7 +547,8 @@ impl A2a {
         self.sessions.add_instructions_hook(Arc::new(move |rec: &SessionRecord| {
             weak.upgrade().map(|a| a.instructions_for(rec))
         }));
-        // FR-T12 (#380): Claude Code answers a mention through the `channel_post` MCP tool.
+        // FR-T12 (#380): Claude Code, Codex, Antigravity and ACP agents answer a mention through
+        // the `channel_post` MCP tool.
         let weak = Arc::downgrade(self);
         self.sessions.add_start_config_hook(Arc::new(move |rec: &SessionRecord, req: &mut StartRequest| {
             if let Some(a) = weak.upgrade() {
@@ -449,22 +591,36 @@ impl A2a {
         &self.store
     }
 
-    /// Whether `rec` answers a channel mention through the `channel_post` MCP tool instead of the
-    /// `ember-a2a channel post` command (FR-T12, FR-T13). Only Claude Code does (the only harness
-    /// where the tool name and the approval rule are measured), only with the `ember-a2a` binary
-    /// installed, and only on this computer: on another computer the MCP child would need the
-    /// binary there, so those sessions keep the command. The start hook and both prompt builders
-    /// ask this one function, so they cannot disagree. A lookup error counts as another computer.
-    /// A session whose last start found the server name taken in the user's own Claude Code
-    /// configuration answers `false` (see `channel_fallback`).
-    fn channel_reply_by_tool(&self, rec: &SessionRecord) -> bool {
-        self.channel_reply_eligible(rec) && !self.channel_fallback.lock().unwrap().contains(&rec.id)
+    /// How `rec` is told to answer a channel mention: through the `channel_post` MCP tool, under
+    /// the name its harness is known to give it, or with the `ember-a2a channel post` command
+    /// (FR-T12, FR-T13). Every harness with an MCP client gets the tool ([`ToolHarness`]), only
+    /// with the `ember-a2a` binary installed, and only on this computer: on another computer the
+    /// MCP child would need the binary there, so those sessions keep the command. The start hook
+    /// and both prompt builders ask this one function, so they cannot disagree. A lookup error
+    /// counts as another computer. A session whose last start found the server name taken in the
+    /// user's own configuration of the harness gets the command (see `channel_fallback`).
+    fn channel_reply(&self, rec: &SessionRecord) -> ChannelReply {
+        match ToolHarness::of(rec.agent) {
+            Some(harness)
+                if self.channel_reply_eligible(rec)
+                    && !self.channel_fallback.lock().unwrap().contains(&rec.id) =>
+            {
+                harness.reply()
+            }
+            _ => ChannelReply::Command,
+        }
     }
 
-    /// [`A2a::channel_reply_by_tool`] before the name-collision fallback: what the harness, the
+    /// Whether [`A2a::channel_reply`] is a tool (test helper).
+    #[cfg(test)]
+    fn channel_reply_by_tool(&self, rec: &SessionRecord) -> bool {
+        self.channel_reply(rec) != ChannelReply::Command
+    }
+
+    /// [`A2a::channel_reply`] before the name-collision fallback: what the harness, the
     /// binary and the computer allow. The start hook asks this one, then runs the collision check.
     fn channel_reply_eligible(&self, rec: &SessionRecord) -> bool {
-        if rec.agent != AgentKind::ClaudeCode || self.config.cli_path.is_none() {
+        if ToolHarness::of(rec.agent).is_none() || self.config.cli_path.is_none() {
             return false;
         }
         match self.session_computer_id(&rec.id) {
@@ -489,18 +645,21 @@ impl A2a {
         .optional()
     }
 
-    /// Start-config hook (FR-T12): register the `ember-channels` MCP server and its one allow
-    /// rule for a Claude Code session that [`A2a::channel_reply_by_tool`]. It reuses the
-    /// `EMBER_URL` and `EMBER_RUNTIME_TOKEN` already in `req.env` (made by [`A2a::runtime_env`]),
-    /// so no second token is issued and the child gets no wider scope than the CLI has. Claude
-    /// Code writes an MCP entry with environment into a private file, never onto the command line.
-    /// Never logs the token.
+    /// Start-config hook (FR-T12): register the `ember-channels` MCP server for a session that
+    /// [`A2a::channel_reply`], and its one allow rule where the harness needs one
+    /// ([`ToolHarness::allow_rule`]). It reuses the `EMBER_URL` and `EMBER_RUNTIME_TOKEN` already
+    /// in `req.env` (made by [`A2a::runtime_env`]), so no second token is issued and the child
+    /// gets no wider scope than the CLI has. No adapter puts the entry's environment on a command
+    /// line: Claude Code writes a private file, Codex forwards the two variables by name from its
+    /// own process environment, Antigravity writes a private file in the session root, and an ACP
+    /// agent reads `session/new` from its stdin. Never logs the token.
     fn channel_tool_config(&self, rec: &SessionRecord, req: &mut StartRequest) {
         if !self.channel_reply_eligible(rec) || req.remote.is_some() || req.computer.is_some() {
             self.channel_fallback.lock().unwrap().remove(&rec.id);
             return;
         }
         let Some(cli) = self.config.cli_path.as_ref() else { return };
+        let Some(harness) = ToolHarness::of(rec.agent) else { return };
         let env_value = |name: &str| {
             req.env.iter().rev().find(|(k, v)| k == name && !v.is_empty()).map(|(_, v)| v.clone())
         };
@@ -511,8 +670,23 @@ impl A2a {
             NameCheck::Taken { kind: KIND_REQUEST }
         } else {
             let sources = self.claude_sources.lock().unwrap().clone();
-            let config_dir = env_value("CLAUDE_CONFIG_DIR").map(PathBuf::from).or(sources.config_dir.clone());
-            channel_server_name_taken(&req.cwd, sources.home.as_deref(), config_dir.as_deref(), &sources.managed)
+            match harness {
+                ToolHarness::Claude => {
+                    let config_dir =
+                        env_value("CLAUDE_CONFIG_DIR").map(PathBuf::from).or(sources.config_dir.clone());
+                    channel_server_name_taken(&req.cwd, sources.home.as_deref(), config_dir.as_deref(), &sources.managed)
+                }
+                ToolHarness::Codex => {
+                    let codex_home = env_value("CODEX_HOME")
+                        .map(PathBuf::from)
+                        .or(sources.codex_home.clone())
+                        .or(sources.home.as_ref().map(|h| h.join(".codex")));
+                    codex_channel_name_taken(&req.cwd, codex_home.as_deref(), &sources.codex_system)
+                }
+                ToolHarness::Antigravity => agy_channel_name_taken(&req.cwd, sources.home.as_deref()),
+                // Where an ACP agent keeps its own MCP servers is not known to Ember.
+                ToolHarness::Acp => NameCheck::Free,
+            }
         };
         // Never the file contents: `kind`, `why` and the reason are static strings.
         let skip_notice = match check {
@@ -523,14 +697,15 @@ impl A2a {
             }
             NameCheck::Unsure { kind, why } => {
                 tracing::warn!(session = %rec.id, source = kind, "not registering {CHANNEL_MCP_SERVER}: the configuration could not be checked ({why})");
-                Some(unsure_notice(kind, why))
+                Some(unsure_notice_for(harness, kind, why))
             }
         };
         if let Some(notice) = skip_notice {
             let first = self.channel_fallback.lock().unwrap().insert(rec.id.clone());
             // The instructions hook ran before this one and named the tool: put the command back.
             if let Some(text) = req.instructions.as_mut() {
-                *text = text.replace(&self.instructions_with(true), &self.instructions_with(false));
+                *text = text
+                    .replace(&self.instructions_with(harness.reply()), &self.instructions_with(ChannelReply::Command));
             }
             if first {
                 let event = AgentEvent::Notice { message: notice };
@@ -543,7 +718,8 @@ impl A2a {
         if self.channel_fallback.lock().unwrap().remove(&rec.id) {
             // The instructions hook ran with the fallback still set: name the tool again.
             if let Some(text) = req.instructions.as_mut() {
-                *text = text.replace(&self.instructions_with(false), &self.instructions_with(true));
+                *text = text
+                    .replace(&self.instructions_with(ChannelReply::Command), &self.instructions_with(harness.reply()));
             }
         }
         req.mcp_servers.push(McpServer {
@@ -553,7 +729,7 @@ impl A2a {
             startup_timeout_secs: Some(10),
             env: vec![("EMBER_URL".to_string(), url), ("EMBER_RUNTIME_TOKEN".to_string(), token)],
         });
-        if !req.allowed_tools.iter().any(|t| t == CHANNEL_POST_TOOL) {
+        if harness.allow_rule() && !req.allowed_tools.iter().any(|t| t == CHANNEL_POST_TOOL) {
             req.allowed_tools.push(CHANNEL_POST_TOOL.to_string());
         }
     }
@@ -590,23 +766,28 @@ impl A2a {
     /// How the agent uses A2A. Stable across restarts (no per-process values), so it does not
     /// disturb prompt caching on resume.
     pub fn instructions(&self) -> String {
-        self.instructions_with(false)
+        self.instructions_with(ChannelReply::Command)
     }
 
-    /// [`A2a::instructions`]; `channel_by_tool` names the `channel_post` MCP tool as the way to
+    /// [`A2a::instructions`]; with a tool `how` it names the `channel_post` MCP tool as the way to
     /// answer a channel mention (with the command as a fallback) instead of the command alone.
-    fn instructions_with(&self, channel_by_tool: bool) -> String {
-        let channel_answer = if channel_by_tool {
-            format!(
+    fn instructions_with(&self, how: ChannelReply) -> String {
+        let channel_answer = match how {
+            ChannelReply::ClaudeTool => format!(
                 "call the tool `{CHANNEL_POST_TOOL}` with `channel` set to the channel id and \
                  `text` set to your answer; if the tool is not available, run `{CLI_NAME} channel \
                  post <channel-id> \"<text>\"`"
-            )
-        } else {
-            format!(
+            ),
+            ChannelReply::McpTool => format!(
+                "call the `{}` tool of the MCP server `{CHANNEL_MCP_SERVER}` with `channel` set to \
+                 the channel id and `text` set to your answer; if the tool is not available, run \
+                 `{CLI_NAME} channel post <channel-id> \"<text>\"`",
+                mcp::TOOL_NAME
+            ),
+            ChannelReply::Command => format!(
                 "run `{CLI_NAME} channel post <channel-id> \"<text>\"` (use `-` to read the text \
                  from stdin)"
-            )
+            ),
         };
         let path_note = match &self.config.cli_path {
             Some(p) => format!(" (also at `{}`, or `$EMBER_A2A_BIN`)", p.display()),
@@ -686,7 +867,7 @@ impl A2a {
 
     /// [`A2a::instructions`] plus, for an active teammate, its team role.
     pub fn instructions_for(&self, rec: &SessionRecord) -> String {
-        let base = self.instructions_with(self.channel_reply_by_tool(rec));
+        let base = self.instructions_with(self.channel_reply(rec));
         match self.teammate_instructions(rec) {
             Some(team) => format!("{base}\n\n{team}"),
             None => base,
@@ -1020,7 +1201,7 @@ impl A2a {
 
     /// The user-message text for a batch of messages to one target (FR-T3).
     fn render(&self, rec: &SessionRecord, msgs: &[A2aMessage]) -> anyhow::Result<String> {
-        let by_tool = self.channel_reply_by_tool(rec);
+        let how = self.channel_reply(rec);
         let mut parts = Vec::new();
         for m in msgs {
             if let (Some(channel_id), Some(until)) = (&m.origin_channel, m.origin_guest_until) {
@@ -1032,7 +1213,7 @@ impl A2a {
                     channel_id,
                     until,
                     &m.text,
-                    by_tool,
+                    how,
                 ));
                 continue;
             }
@@ -1043,7 +1224,7 @@ impl A2a {
                     Some(name) => format!("channel #{name}, id {channel_id}"),
                     None => format!("channel {channel_id}"),
                 };
-                let reply_hint = channel::reply_hint(channel_id, by_tool);
+                let reply_hint = channel::reply_hint(channel_id, how);
                 parts.push(format!(
                     "{HEADER_TAG} Message {} from {who} ({place})\n\
                      This message is from a person in a channel, not from another agent.\n\

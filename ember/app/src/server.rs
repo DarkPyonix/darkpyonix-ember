@@ -23,8 +23,10 @@ pub enum ServerError {
     /// The server answered 401: the token is missing or wrong (FR-S11). Not retried.
     #[error("authentication failed: the server refused the token ({0})")]
     Unauthorized(String),
-    /// The HTTP client could not be built (for example the TLS backend failed to initialise).
-    #[error("cannot build the HTTP client: {0}")]
+    /// The HTTP client could not be built (for example the TLS backend failed to initialise),
+    /// the call could not be made over the transport (FR-N9), or the answer did not decode.
+    /// The screens read it as "could not reach the server".
+    #[error("server client failed: {0}")]
     Client(String),
 }
 
@@ -371,6 +373,9 @@ pub struct ServerApi {
     /// only. In memory only, marked sensitive (`Debug` prints `Sensitive`), shared by clones;
     /// set and cleared by the app's claim ([`crate::owner_claim`]).
     owner: std::sync::Arc<std::sync::RwLock<Option<reqwest::header::HeaderValue>>>,
+    /// The server over the transport (FR-N9): every call goes through this `Api`
+    /// (`Api::raw_request`) instead of `http`. `None`: plain HTTP to `base`.
+    peer: Option<ember_client::api::Api>,
 }
 
 impl ServerApi {
@@ -399,6 +404,15 @@ impl ServerApi {
         Self::from_built(builder.build(), base_url)
     }
 
+    /// The server over the transport (FR-N9): the same calls, sent through `api` (an
+    /// `Api::over_transport`). No token and no owner key travel on this reach; the device key
+    /// is the credential (FR-N7). Fails only when the (unused) HTTP client cannot be built.
+    pub fn over_transport(api: ember_client::api::Api) -> ServerResult<ServerApi> {
+        let mut s = Self::from_built(reqwest::Client::builder().build(), api.base_url())?;
+        s.peer = Some(api);
+        Ok(s)
+    }
+
     /// Wraps the result of building the HTTP client; a build failure becomes
     /// [`ServerError::Client`].
     fn from_built<E: std::fmt::Display>(
@@ -406,7 +420,12 @@ impl ServerApi {
         base_url: &str,
     ) -> ServerResult<ServerApi> {
         let http = built.map_err(|e| ServerError::Client(e.to_string()))?;
-        Ok(ServerApi { http, base: base_url.trim_end_matches('/').to_string(), owner: Default::default() })
+        Ok(ServerApi { http, base: base_url.trim_end_matches('/').to_string(), owner: Default::default(), peer: None })
+    }
+
+    /// True when the calls go over the transport (FR-N9).
+    pub fn is_over_transport(&self) -> bool {
+        self.peer.is_some()
     }
 
     fn url(&self, path: &str) -> String {
@@ -415,12 +434,13 @@ impl ServerApi {
 
     /// Sets or clears the owner key (FR-S12, #842) for this client and its clones, as
     /// `ember_client::api::Api::set_owner_key` does: kept only for a loopback or listed host
-    /// (where the token goes) and only when it can be a header. False when it was not kept.
+    /// (where the token goes) and only when it can be a header. False when it was not kept,
+    /// and always for the transport reach.
     pub fn set_owner_key(&self, key: Option<&ember_client::owner::OwnerKey>) -> bool {
         let value = match key {
             None => None,
             Some(k) => {
-                if !ember_client::token::token_allowed_for(&self.base) {
+                if self.peer.is_some() || !ember_client::token::token_allowed_for(&self.base) {
                     return false;
                 }
                 let Ok(mut v) = reqwest::header::HeaderValue::from_str(k.expose()) else { return false };
@@ -439,107 +459,133 @@ impl ServerApi {
         ember_client::owner::owner_route(method, &format!("/api{path}")).then_some(key)
     }
 
-    /// A request to `path` (below `/api`) that carries the owner key when the route needs it.
-    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        let owner = self.owner_header(&method, path);
-        let req = self.http.request(method, self.url(path));
-        match owner {
-            Some(v) => req.header(ember_client::owner::OWNER_HEADER, v),
-            None => req,
+    /// One call to `path` (below `/api`, a query string allowed) on whichever reach this client
+    /// has; the status and body as they came. `owner`: the call may carry the owner key on an
+    /// owner route (the calls that did before FR-N9 still do; the others still do not).
+    async fn call(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        owner: bool,
+    ) -> ServerResult<(u16, String)> {
+        if let Some(api) = &self.peer {
+            let (status, bytes) = api
+                .raw_request(method, path, body)
+                .await
+                .map_err(|e| ServerError::Client(format!("over the transport: {e}")))?;
+            return Ok((status, String::from_utf8_lossy(&bytes).into_owned()));
         }
+        let key = if owner { self.owner_header(&method, path) } else { None };
+        let mut req = self.http.request(method, self.url(path));
+        if let Some(v) = key {
+            req = req.header(ember_client::owner::OWNER_HEADER, v);
+        }
+        if let Some(b) = &body {
+            req = req.json(b);
+        }
+        let res = req.send().await?;
+        let status = res.status().as_u16();
+        Ok((status, res.text().await?))
     }
 
-    async fn check(res: reqwest::Response) -> ServerResult<reqwest::Response> {
-        let status = res.status();
-        if status.is_success() {
-            return Ok(res);
+    /// [`ServerApi::call`], a non-success answer as [`status_error`], the body decoded.
+    async fn json<T: serde::de::DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        owner: bool,
+    ) -> ServerResult<T> {
+        let body = Self::ok(self.call(method, path, body, owner).await?)?;
+        serde_json::from_str(&body).map_err(|e| ServerError::Client(format!("invalid response: {e}")))
+    }
+
+    /// The body of a success answer, or the error for any other.
+    fn ok((status, body): (u16, String)) -> ServerResult<String> {
+        if (200..300).contains(&status) {
+            Ok(body)
+        } else {
+            Err(status_error(status, body))
         }
-        let body = res.text().await.unwrap_or_default();
-        Err(status_error(status.as_u16(), body))
     }
 
     pub async fn accounts(&self) -> ServerResult<Vec<Account>> {
-        Ok(Self::check(self.http.get(self.url("/accounts")).send().await?).await?.json().await?)
+        self.json(reqwest::Method::GET, "/accounts", None, false).await
     }
 
     /// `POST /api/accounts/{id}/default`: the per-agent default account (FR-U1, FR-L17).
     pub async fn set_default_account(&self, id: &str) -> ServerResult<Account> {
-        let req = self.request(reqwest::Method::POST, &default_path(id));
-        Ok(Self::check(req.send().await?).await?.json().await?)
+        self.json(reqwest::Method::POST, &default_path(id), None, true).await
     }
 
     /// `POST /api/accounts`: a new account with its own config directory and the login command.
     pub async fn create_account(&self, agent: &str, label: &str) -> ServerResult<AccountWithLogin> {
-        let req = self.request(reqwest::Method::POST, "/accounts").json(&create_account_body(agent, label));
-        Ok(Self::check(req.send().await?).await?.json().await?)
+        self.json(reqwest::Method::POST, "/accounts", Some(create_account_body(agent, label)), true).await
     }
 
     /// `POST /api/accounts/{id}/check`: runs the agent's status command, records and returns it.
     pub async fn check_account(&self, id: &str) -> ServerResult<AccountWithLogin> {
-        let req = self.request(reqwest::Method::POST, &check_path(id));
-        Ok(Self::check(req.send().await?).await?.json().await?)
+        self.json(reqwest::Method::POST, &check_path(id), None, true).await
     }
 
     /// ChatGPT plan accounts; an error (404 when sign-in is off, e.g. hosted) means none.
     pub async fn chatgpt_accounts(&self) -> ServerResult<Vec<ChatGptAccount>> {
-        Ok(Self::check(self.http.get(self.url("/chatgpt/accounts")).send().await?).await?.json().await?)
+        self.json(reqwest::Method::GET, "/chatgpt/accounts", None, false).await
     }
 
     /// `probe = false` answers at once with `reachable: None`; `true` asks every node.
     pub async fn computers(&self, probe: bool) -> ServerResult<Vec<ComputerStatus>> {
-        let req = self.http.get(self.url("/computers")).query(&[("probe", probe)]);
-        Ok(Self::check(req.send().await?).await?.json().await?)
+        self.json(reqwest::Method::GET, &format!("/computers?probe={probe}"), None, false).await
     }
 
     pub async fn session_computer(&self, id: &str) -> ServerResult<CurrentComputer> {
-        let req = self.http.get(self.url(&format!("/sessions/{}/computer", seg(id))));
-        Ok(Self::check(req.send().await?).await?.json().await?)
+        self.json(reqwest::Method::GET, &format!("/sessions/{}/computer", seg(id)), None, false).await
     }
 
     pub async fn switch_computer(&self, id: &str, computer_id: &str) -> ServerResult<SwitchOutcome> {
-        let req = self
-            .http
-            .put(self.url(&format!("/sessions/{}/computer", seg(id))))
-            .json(&json!({ "computer_id": computer_id }));
-        Ok(Self::check(req.send().await?).await?.json().await?)
+        let body = json!({ "computer_id": computer_id });
+        self.json(reqwest::Method::PUT, &format!("/sessions/{}/computer", seg(id)), Some(body), false).await
     }
 
     pub async fn ide_targets(&self, id: &str, computer: Option<&str>) -> ServerResult<IdeLaunch> {
-        let mut req = self.http.get(self.url(&format!("/sessions/{}/ide", seg(id))));
-        if let Some(c) = computer {
-            req = req.query(&[("computer", c)]);
-        }
-        Ok(Self::check(req.send().await?).await?.json().await?)
+        self.json(reqwest::Method::GET, &ide_targets_path(id, computer), None, false).await
     }
 
     pub async fn create_session(&self, body: &CreateSession) -> ServerResult<SessionRecord> {
-        let req = self.http.post(self.url("/sessions")).json(body);
-        Ok(Self::check(req.send().await?).await?.json().await?)
+        let body = serde_json::to_value(body).map_err(|e| ServerError::Client(e.to_string()))?;
+        self.json(reqwest::Method::POST, "/sessions", Some(body), false).await
     }
 
     /// `GET /api/agents/defaults`: global new-member defaults (`새 팀원 기본값`, FR-L20, #481, #670).
     pub async fn agent_defaults(&self) -> ServerResult<AgentDefaults> {
-        Ok(Self::check(self.http.get(self.url("/agents/defaults")).send().await?).await?.json().await?)
+        self.json(reqwest::Method::GET, "/agents/defaults", None, false).await
     }
 
     /// `PUT /api/agents/defaults`: save global new-member defaults (FR-L20, #481, #670).
     pub async fn put_agent_defaults(&self, defaults: &AgentDefaults) -> ServerResult<AgentDefaults> {
-        let req = self.http.put(self.url("/agents/defaults")).json(defaults);
-        Ok(Self::check(req.send().await?).await?.json().await?)
+        let body = serde_json::to_value(defaults).map_err(|e| ServerError::Client(e.to_string()))?;
+        self.json(reqwest::Method::PUT, "/agents/defaults", Some(body), false).await
     }
 
     /// `GET /api/agents/settings`: per-harness settings (`mem_limit_mb`, FR-L20, FR-S8).
     pub async fn agent_settings(&self) -> ServerResult<AgentSettingsResponse> {
-        Ok(Self::check(self.http.get(self.url("/agents/settings")).send().await?).await?.json().await?)
+        self.json(reqwest::Method::GET, "/agents/settings", None, false).await
     }
 
     /// `PUT /api/agents/{agent}/settings`: set or clear (`None` or `Some(0)`) the memory limit in MiB (FR-L20, FR-S8).
     pub async fn put_agent_mem_limit(&self, agent: &str, mem_limit_mb: Option<u64>) -> ServerResult<()> {
-        let req = self
-            .request(reqwest::Method::PUT, &agent_settings_path(agent))
-            .json(&json!({ "mem_limit_mb": mem_limit_mb }));
-        Self::check(req.send().await?).await?;
+        let body = json!({ "mem_limit_mb": mem_limit_mb });
+        Self::ok(self.call(reqwest::Method::PUT, &agent_settings_path(agent), Some(body), true).await?)?;
         Ok(())
+    }
+}
+
+/// `GET /api/sessions/{id}/ide`, with `?computer=` when one is named.
+fn ide_targets_path(id: &str, computer: Option<&str>) -> String {
+    match computer {
+        Some(c) => format!("/sessions/{}/ide?computer={}", seg(id), seg(c)),
+        None => format!("/sessions/{}/ide", seg(id)),
     }
 }
 
@@ -583,31 +629,28 @@ pub struct GallerySearch {
 impl ServerApi {
     /// `GET /api/ide/extensions/search`: the server asks Open VSX; the client never does.
     pub async fn ide_extension_search(&self, q: &str, offset: u64) -> ServerResult<GallerySearch> {
-        let offset = offset.to_string();
-        let req = self.http.get(self.url("/ide/extensions/search")).query(&[("q", q), ("offset", offset.as_str())]);
-        Ok(Self::check(req.send().await?).await?.json().await?)
+        let path = format!("/ide/extensions/search?q={}&offset={offset}", seg(q));
+        self.json(reqwest::Method::GET, &path, None, false).await
     }
 
     /// `POST /api/computers/{id}/ide/extensions` with the id only: the OSE picks the newest
     /// compatible version. Answers what the command printed.
     pub async fn ide_extension_install(&self, computer: &str, id: &str) -> ServerResult<String> {
-        let req = self.http.post(self.url(&extensions_path(computer))).json(&json!({ "id": id }));
-        Self::extension_output(req.send().await?).await
+        let answer = self.call(reqwest::Method::POST, &extensions_path(computer), Some(json!({ "id": id })), false).await?;
+        Self::extension_output(answer)
     }
 
     /// `DELETE /api/computers/{id}/ide/extensions/{publisher.name}`. Answers what the command printed.
     pub async fn ide_extension_uninstall(&self, computer: &str, id: &str) -> ServerResult<String> {
-        let req = self.http.delete(self.url(&format!("{}/{}", extensions_path(computer), seg(id))));
-        Self::extension_output(req.send().await?).await
+        let path = format!("{}/{}", extensions_path(computer), seg(id));
+        Self::extension_output(self.call(reqwest::Method::DELETE, &path, None, false).await?)
     }
 
     /// The `output` of an install or uninstall answer; a failure keeps the command's output in
     /// its message ([`extension_failure`]).
-    async fn extension_output(res: reqwest::Response) -> ServerResult<String> {
-        let status = res.status();
-        let body = res.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(extension_failure(status.as_u16(), body));
+    fn extension_output((status, body): (u16, String)) -> ServerResult<String> {
+        if !(200..300).contains(&status) {
+            return Err(extension_failure(status, body));
         }
         let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
         Ok(v.get("output").and_then(|o| o.as_str()).unwrap_or_default().to_string())
@@ -810,6 +853,23 @@ mod tests {
         assert!(crate::owner_claim::text_is_owner_required(&e.to_string()), "{e}");
         assert!(!status_error(403, r#"{"code":"scope_denied","error":"x"}"#.into()).is_owner_required());
         assert!(!status_error(500, "boom".into()).is_owner_required());
+    }
+
+    /// Over the transport the app's own client names the peer, never keeps an owner key, and
+    /// builds the same paths it sends over HTTP (FR-N9).
+    #[tokio::test]
+    async fn fr_n9_server_api_over_the_transport_names_the_peer_and_takes_no_owner_key() {
+        let net = ember_transport::mem::MemNetwork::new();
+        let (me, server) = (net.transport(), net.transport());
+        let api = ember_client::api::Api::over_transport(ember_transport::Dialer::new(me), server.peer_id());
+        let s = ServerApi::over_transport(api).unwrap();
+        assert!(s.is_over_transport());
+        assert_eq!(s.base, format!("peer:{}", server.peer_id()));
+        assert!(!s.set_owner_key(Some(&ember_client::owner::OwnerKey::new("eok_app_key"))));
+        assert!(s.owner_header(&reqwest::Method::POST, "/accounts").is_none());
+        assert!(!ServerApi::with_token("http://127.0.0.1:1", None).unwrap().is_over_transport());
+        assert_eq!(ide_targets_path("s 1", Some("a/b")), "/sessions/s%201/ide?computer=a%2Fb");
+        assert_eq!(ide_targets_path("s", None), "/sessions/s/ide");
     }
 
     #[test]

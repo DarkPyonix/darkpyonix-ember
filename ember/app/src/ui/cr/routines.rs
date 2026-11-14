@@ -13,9 +13,10 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use compose_rust::runtime::{
-    current_window_size, launched_effect, mutable_state_of, remember, remember_with_key,
+    launched_effect, mutable_state_of, remember, remember_with_key,
     MutableState,
 };
+use crate::ui::window_size::current_window_size;
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{Alignment, ButtonVariant, Color, DrawList, IconRole, Paint, ShapeRole};

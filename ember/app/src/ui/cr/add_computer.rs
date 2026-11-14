@@ -414,7 +414,7 @@ pub fn AddComputerSheet(ui: &AddUi) {
             }
         });
     }
-    let w = compose_rust::runtime::current_window_size();
+    let w = crate::ui::window_size::current_window_size();
     let body_h = super::components::sheet_body_max_height(w.width_dp, w.height_dp, false, 60.0).min(700.0);
     EmberSheet("컴퓨터 추가", ui.open.get(), close.clone(), None, || {
         cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_h)).content(|| {
@@ -521,7 +521,7 @@ fn WaitingBody(ui: &AddUi, code: &str, expires_ms: i64, sample: bool) {
     }
     // The code, large and in the mono face, and a 복사 button that puts it on the clipboard
     // through the toolkit (compose-rust v0.0.7, #471).
-    let w = compose_rust::runtime::current_window_size();
+    let w = crate::ui::window_size::current_window_size();
     let avail = w.width_dp.min(760.0) - 2.0 * SP[4];
     super::components::MonoLabel(code, flow::code_font_size(code.chars().count(), avail), Weight::Semibold, Some(paint(p.text)));
     {

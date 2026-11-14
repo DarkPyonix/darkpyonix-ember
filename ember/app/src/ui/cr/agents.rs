@@ -843,26 +843,53 @@ fn Block(title: &str, pills: impl FnOnce(), content: impl FnOnce()) {
     });
 }
 
-/// One setting: title and hint on the left, the control on the right.
+/// Whether a setting row puts its control under its title and hint: below 560 px the mockup's
+/// `.ag-row` wraps and `.ag-rc` takes the whole line (`flex:1 1 100%`, start aligned), where a
+/// control beside the text left the hints 2 to 4 words a line (review AG13, r6 item 1d).
+pub fn setting_row_stacked(width_dp: f32) -> bool {
+    width_dp <= 560.0
+}
+
+/// One setting: title and hint on the left, the control on the right; below 560 px the control
+/// sits under the text.
 fn SettingRow(title: &str, hint: &str, control: impl FnOnce()) {
+    SettingRowAt(setting_row_stacked(crate::ui::window_size::current_window_size().width_dp), title, hint, control);
+}
+
+fn SettingRowAt(stacked: bool, title: &str, hint: &str, control: impl FnOnce()) {
     let p = ember_theme().palette;
+    let text = |m: Modifier| {
+        cu::Column().modifier(m).content(|| {
+            Label(title, Fs::Md, Weight::Medium, None, Some(1));
+            if !hint.is_empty() {
+                cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                Label(hint, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+            }
+        });
+    };
     cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
         cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
         cu::Spacer().modifier(Modifier::new().height(SP[1]));
-        cu::Row()
-            .alignment(Alignment::CenterStart)
-            .spacing(SP[3])
-            .modifier(Modifier::new().fill_max_width())
-            .content(|| {
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    Label(title, Fs::Md, Weight::Medium, None, Some(1));
-                    if !hint.is_empty() {
-                        cu::Spacer().modifier(Modifier::new().height(SP[0]));
-                        Label(hint, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                    }
+        if stacked {
+            // `.ag-row{gap:var(--sp2)}` once wrapped: 8 px between the text and the control.
+            cu::Column()
+                .alignment(Alignment::TopStart)
+                .spacing(SP[1])
+                .modifier(Modifier::new().fill_max_width())
+                .content(|| {
+                    text(Modifier::new().fill_max_width());
+                    control();
                 });
-                control();
-            });
+        } else {
+            cu::Row()
+                .alignment(Alignment::CenterStart)
+                .spacing(SP[3])
+                .modifier(Modifier::new().fill_max_width())
+                .content(|| {
+                    text(Modifier::new().weight(1.0));
+                    control();
+                });
+        }
         cu::Spacer().modifier(Modifier::new().height(SP[1]));
     });
 }
@@ -3041,6 +3068,31 @@ mod tests {
         let line = nodes.iter().find(|n| Some(n.id) == holder.parent).unwrap();
         assert_eq!(Some(line.id), pill.parent, "name and pill share the line");
         assert!(line.mods.iter().any(|m| m == "FillMaxWidth"), "{:?}", line.mods);
+    }
+
+    #[test]
+    fn fr_l20_below_560_a_setting_row_puts_its_control_under_the_text() {
+        assert!(setting_row_stacked(390.0));
+        assert!(setting_row_stacked(560.0));
+        assert!(!setting_row_stacked(561.0));
+        assert!(!setting_row_stacked(1440.0));
+        let probe = |nodes: &[Node]| {
+            let title = text_node(nodes, "추론 강도");
+            let text_col = nodes.iter().find(|n| Some(n.id) == title.parent).unwrap();
+            let line = nodes.iter().find(|n| Some(n.id) == text_col.parent).unwrap();
+            let control = text_node(nodes, "CONTROL");
+            (line.widget.clone(), Some(line.id) == control.parent, text_col.mods.clone())
+        };
+        let stacked = nodes_of(|| SettingRowAt(true, "추론 강도", "다음 세션부터 적용합니다", || Label("CONTROL", Fs::Sm, Weight::Regular, None, None)));
+        let (widget, same, mods) = probe(&stacked);
+        assert_eq!(widget, "Column", "the control goes under the text");
+        assert!(same);
+        assert!(mods.iter().any(|m| m == "FillMaxWidth"), "the text takes the whole line: {mods:?}");
+        let beside = nodes_of(|| SettingRowAt(false, "추론 강도", "다음 세션부터 적용합니다", || Label("CONTROL", Fs::Sm, Weight::Regular, None, None)));
+        let (widget, same, mods) = probe(&beside);
+        assert_eq!(widget, "Row");
+        assert!(same);
+        assert!(mods.iter().any(|m| m == "Weight(1.0)"), "{mods:?}");
     }
 
     #[test]

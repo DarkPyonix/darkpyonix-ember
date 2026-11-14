@@ -3328,9 +3328,9 @@ mod tests {
             // Existing direct buttons are explicitly counted until their specialized controls
             // move into shared components. Any additional bypass must be reviewed.
             let allowed_buttons = match name {
-                // AppButton, IconButton, InkIconButton and PickChip; ChoiceButton is Ember's
-                // clickable pill since review r5 (its 12 px label inset, FR-L10.2).
-                "components.rs" => 4,
+                // AppButton, AppMenuButton, IconButton, InkIconButton and PickChip; ChoiceButton
+                // is Ember's clickable pill since review r5 (its 12 px label inset, FR-L10.2).
+                "components.rs" => 5,
                 // SegGroup moved onto ChoiceButton (#878). The one left is the invisible
                 // overlay that names a painted row from data (FR-L34.5).
                 "agents.rs" => 1,
@@ -3344,8 +3344,9 @@ mod tests {
                 // The wide 새 루틴 pill (toolkit label style and a fixed width, which AppButton
                 // would change) and the invisible overlay named from data.
                 "routines.rs" => 2,
-                // FocusOverlay and the StashPill accessible-name overlay (FR-G6, #350).
-                "vcs.rs" => 2,
+                // FocusOverlay, the StashPill accessible-name overlay (FR-G6, #350) and the
+                // bar selector's clear control, which says whether its menu is open (FR-L10.4).
+                "vcs.rs" => 3,
                 // The accessible-name overlay of the channel + button (#499); it keeps its
                 // visible text and `accessible_name` until #425's content slot is checked.
                 "new_channel.rs" => 1,

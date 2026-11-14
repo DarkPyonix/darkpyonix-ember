@@ -4098,9 +4098,6 @@ fn BranchRow(e: &BranchEntry, busy: bool, on_switch: impl FnMut() + 'static) {
     });
 }
 
-/// 브랜치: create a branch from a base and switch to it, then the 기본 브랜치 row and the 작업
-/// 브랜치 rows (the node's order: current, default, newest). `actions` is the project and the
-/// screen's reload counter; `None` shows sample branches. `count` is written for the section list.
 /// The 기준 menu's rows: one per branch with the branch glyph, the name and a check on the
 /// chosen base.
 pub fn base_menu_rows(names: &[String], chosen: Option<usize>) -> Vec<PopRow> {
@@ -4142,6 +4139,9 @@ fn BaseMenu(open: MutableState<bool>, text: &str, names: &[String], chosen: Opti
     );
 }
 
+/// 브랜치: create a branch from a base and switch to it, then the 기본 브랜치 row and the 작업
+/// 브랜치 rows (the node's order: current, default, newest). `actions` is the project and the
+/// screen's reload counter; `None` shows sample branches. `count` is written for the section list.
 fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layout: PaneLayout) {
     let p = ember_theme().palette;
     let key_project = actions.as_ref().map(|a| a.project.clone());
@@ -7172,7 +7172,7 @@ mod tests {
         // Review r8 fix round: 저장소 was 44 high and 현재 브랜치 36 (`.vcs-sel{height:36px}`), so
         // the two cells sat 4 px apart on the value line and 8 on the note under it.
         assert_eq!(VCS_SEL_H, 36.0);
-        for nodes in [nodes_of(|| RepoSelector("ember", || {})), nodes_of(|| BranchSelector("feat/session-shim", || {}))] {
+        for nodes in [nodes_of(|| RepoSelector("ember", false, || {})), nodes_of(|| BranchSelector("feat/session-shim", false, || {}))] {
             let frame = nodes.iter().find(|n| n.widget == "Box").expect("the picker");
             assert!(frame.mods.iter().any(|m| m == "Height(36.0)"), "{:?}", frame.mods);
             assert!(frame.mods.iter().any(|m| m == "FillMaxWidth"), "{:?}", frame.mods);

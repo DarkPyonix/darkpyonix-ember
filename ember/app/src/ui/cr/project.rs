@@ -1113,11 +1113,25 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
         // style rows at 390). When the window has not reported a size (390 can read 0x0) the
         // shared formula falls back to 240 dp. v0.0.7: #479 fixed (`with_report_size`);
         // fallback kept until checked on a display (the first composition still reads 0x0).
+        // FR-L32.1 (#876): the body leaves room for the header and the 취소/만들기 footer, so the
+        // footer stays inside the 85 percent bottom sheet at 390 (it was cut off below the body).
+        // TODO(compose-rust#778): cap the body at this height instead of fixing it, so a short
+        // body does not leave blank space above the footer.
         let new_window = crate::ui::window_size::current_window_size();
-        let new_body_height =
-            super::components::sheet_body_max_height(new_window.width_dp, new_window.height_dp, false, 60.0).min(900.0);
+        let new_body_height = super::components::sheet_body_max_height(
+            new_window.width_dp,
+            new_window.height_dp,
+            false,
+            super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H,
+        )
+        .min(900.0);
+        let new_scroll = cu::remember_scroll_state();
+        let review_end = new_sheet_review_end();
         EmberSheet("새 프로젝트", st.new_project.get(), request_close.clone(), None, || {
-            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(new_body_height)).content(|| {
+            if review_end {
+                ScrollToEnd(new_scroll.clone());
+            }
+            cu::ScrollColumn().scroll_state(&new_scroll).modifier(Modifier::new().fill_max_width().height(new_body_height)).content(|| {
                 cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
                     // v0.0.7: #374 fixed (`TextField::text`); workaround kept until checked on a
                     // display (a controlled value must not move the caret while typing), so the
@@ -1263,6 +1277,29 @@ pub fn sheet_scroll_dp(value: Option<&str>) -> f32 {
         Some("end") => EST_SEC_BASIC + EST_SEC_COMPUTERS + EST_SEC_DEFAULTS + EST_SEC_PROFILE + EST_SEC_STYLE,
         Some(n) => n.parse::<f32>().unwrap_or(0.0).max(0.0),
         None => 0.0,
+    }
+}
+
+/// Whether `EMBER_CR_SHEET_SCROLL` asks for a sheet's end state (`end`), FR-L32.1.
+pub fn sheet_scroll_is_end(value: Option<&str>) -> bool {
+    value == Some("end")
+}
+
+/// The new-project sheet's review setting: `EMBER_CR_SHEET_SCROLL=end` scrolls its body to the
+/// end (debug builds only), so the end state can be captured as the settings sheet's can.
+fn new_sheet_review_end() -> bool {
+    let value = if cfg!(debug_assertions) { std::env::var("EMBER_CR_SHEET_SCROLL").ok() } else { None };
+    sheet_scroll_is_end(value.as_deref())
+}
+
+/// Keeps `scroll` at its end once the content is measured (review captures, FR-L32.1). It draws
+/// nothing; it is a composable of its own so reading the distance runs only this function again.
+#[compose_rust::runtime::Composable]
+fn ScrollToEnd(scroll: cu::ScrollState) {
+    // Only the distance is read, so the user can still scroll back up after the jump.
+    let max = scroll.max_offset();
+    if max > 0.0 {
+        compose_rust::runtime::side_effect(move || scroll.scroll_to(max));
     }
 }
 
@@ -1989,6 +2026,49 @@ mod tests {
         assert_eq!(sheet_scroll_dp(Some("120")), 120.0);
         assert_eq!(sheet_scroll_dp(Some("junk")), 0.0);
         assert_eq!(sheet_scroll_dp(Some("end")), 1450.0);
+    }
+
+    #[test]
+    fn fr_l32_1_new_project_body_leaves_room_for_its_footer() {
+        // #876: at 390 the body took the whole 85 percent less the header, so 취소/만들기 fell
+        // below the sheet. The body now leaves room for the footer too.
+        let src = include_str!("project.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        let sheet = &production[production.find("let new_body_height").unwrap()..production.find("EmberSheet(\"새 프로젝트\"").unwrap()];
+        assert!(sheet.contains("super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H"), "{sheet}");
+        assert!(production.contains("TODO(compose-rust#778)"));
+        let body = &production[production.find("EmberSheet(\"새 프로젝트\"").unwrap()..];
+        let body = &body[..body.find("SheetFooter(").unwrap()];
+        assert!(body.contains(".scroll_state(&new_scroll).modifier(Modifier::new().fill_max_width().height(new_body_height))"));
+    }
+
+    #[test]
+    fn fr_l32_1_add_computer_takes_its_content_height_in_the_bottom_sheet() {
+        // #876: at 390 the sheet started at y 127 with its content ending at y 465, because the
+        // body was fixed at 85 percent less the header. Below 560 dp the body now wraps.
+        let src = include_str!("add_computer.rs");
+        let sheet = &src[src.find("pub fn AddComputerSheet(").unwrap()..];
+        let sheet = &sheet[..sheet.find("\n}\n").unwrap()];
+        assert!(sheet.contains("let wraps = super::components::sheet_wraps_content(w.width_dp);"));
+        let bottom = &sheet[sheet.find("if wraps {").unwrap()..];
+        let bottom = &bottom[..bottom.find("} else {").unwrap()];
+        assert!(bottom.contains("cu::Column().modifier(Modifier::new().fill_max_width()).content("), "{bottom}");
+        assert!(!bottom.contains(".height("), "{bottom}");
+        assert!(!bottom.contains("ScrollColumn"), "{bottom}");
+        assert!(sheet.contains("super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H"));
+        assert!(sheet.contains("TODO(compose-rust#778)"));
+    }
+
+    #[test]
+    fn fr_l32_1_sheet_scroll_end_reaches_the_new_project_sheet() {
+        assert!(sheet_scroll_is_end(Some("end")));
+        assert!(!sheet_scroll_is_end(Some("120")));
+        assert!(!sheet_scroll_is_end(None));
+        let src = include_str!("project.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        let body = &production[production.find("EmberSheet(\"새 프로젝트\"").unwrap()..];
+        let body = &body[..body.find("SheetFooter(").unwrap()];
+        assert!(body.contains("if review_end {\n                ScrollToEnd(new_scroll.clone());"), "{body}");
     }
 }
 

@@ -1119,7 +1119,7 @@ pub mod page {
         for update in updates {
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.uris.borrow_mut().insert(uri.path.clone(), uri.clone()); }
             if let ember_editor::SessionUpdate::Closed { uri } = &update { s.uris.borrow_mut().remove(&uri.path); }
-            if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.open_errors.borrow_mut().remove(&uri.path); }
+            if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.open_errors.borrow_mut().remove(&uri.path); crate::ui::editor_scm::view::open_settled(&uri.path); }
             if let ember_editor::SessionUpdate::Saved { uri } = &update { saved_paths.push(uri.path.clone()); }
             let action = s.bridge.borrow_mut().apply(update);
             match action {
@@ -1127,6 +1127,8 @@ pub mod page {
                 BridgeAction::OpenFailed { uri, error } => {
                     tracing::warn!(path = %uri.path, %error, "opening a file failed");
                     s.open_errors.borrow_mut().insert(uri.path.clone(), crate::ui::editor::file_failure_reason(&error).to_string());
+                    // 파일 열기 in the 커밋 window says so in a notice too (FR-L31.9, #781).
+                    crate::ui::editor_scm::view::open_failed(&uri.path, crate::ui::editor::file_failure_reason(&error));
                 }
                 BridgeAction::SaveFailed { uri, error } => {
                     tracing::warn!(path = %uri.path, %error, "saving a file failed");

@@ -94,16 +94,23 @@ pub const STYLE_CARD_PAD: f32 = 12.0;
 pub const STYLE_CARD_ART: (f32, f32) = (56.0, 48.0);
 /// The gap between the art, the name and the description (`.cs-card` gap `--sp1`).
 pub const STYLE_CARD_INNER_GAP: f32 = 4.0;
-/// The description's lines: two at 12/18, so every card of a row is one height.
-pub const STYLE_CARD_DESC_LINES: u32 = 2;
-/// One card's height: padding, art, name (13/20), two description lines (12/18), padding.
-pub const STYLE_CARD_H: f32 = STYLE_CARD_PAD
-    + STYLE_CARD_ART.0
-    + STYLE_CARD_INNER_GAP
-    + 20.0
-    + STYLE_CARD_INNER_GAP
-    + 18.0 * STYLE_CARD_DESC_LINES as f32
-    + STYLE_CARD_PAD;
+/// The description's lines at 12/18: three in three columns, four in two (the mockup's copy
+/// takes two to three lines at 1440), with an ellipsis after that.
+pub fn style_card_desc_lines(columns: usize) -> u32 {
+    if columns >= 3 { 3 } else { 4 }
+}
+
+/// One card's height for `columns`: padding, art, name (13/20), the description's lines (12/18),
+/// padding. Every card of a row is this high, as the mockup's grid row stretches them.
+pub fn style_card_height(columns: usize) -> f32 {
+    STYLE_CARD_PAD
+        + STYLE_CARD_ART.0
+        + STYLE_CARD_INNER_GAP
+        + 20.0
+        + STYLE_CARD_INNER_GAP
+        + 18.0 * style_card_desc_lines(columns) as f32
+        + STYLE_CARD_PAD
+}
 
 /// The picker's columns: three, two at a window 560 dp wide or narrower (`.cs-grid` and its
 /// `@media (max-width:560px)`). A window that has not reported its width counts as wide.
@@ -118,7 +125,7 @@ pub fn style_picker_columns(window_width_dp: f32) -> usize {
 /// The picker's height for `columns`: its rows of cards and the gaps between them.
 pub fn style_picker_height(columns: usize) -> f32 {
     let rows = CharStyle::ALL.len().div_ceil(columns.max(1));
-    rows as f32 * STYLE_CARD_H + rows.saturating_sub(1) as f32 * STYLE_CARD_GAP
+    rows as f32 * style_card_height(columns) + rows.saturating_sub(1) as f32 * STYLE_CARD_GAP
 }
 
 /// The 팀 캐릭터 picker of the 새 프로젝트 and project settings sheets: the mockup's six
@@ -136,7 +143,7 @@ fn StyleGrid(seed_name: &str, current: CharStyle, columns: usize, on_pick: impl 
             cu::Row().spacing(STYLE_CARD_GAP).modifier(Modifier::new().fill_max_width()).content(|| {
                 for &style in row {
                     let mut pick = on_pick.clone();
-                    StyleCard(seed_name, style, style == current, move || pick(style));
+                    StyleCard(seed_name, style, style == current, columns, move || pick(style));
                 }
                 // A short last row keeps the cards at the grid's column width.
                 for _ in row.len()..columns.max(1) {
@@ -148,14 +155,14 @@ fn StyleGrid(seed_name: &str, current: CharStyle, columns: usize, on_pick: impl 
 }
 
 /// One `.cs-card`: the character, the style name and its description, chosen or not.
-fn StyleCard(seed_name: &str, style: CharStyle, chosen: bool, on_click: impl FnMut() + 'static) {
+fn StyleCard(seed_name: &str, style: CharStyle, chosen: bool, columns: usize, on_click: impl FnMut() + 'static) {
     let theme = ember_theme();
     let p = theme.palette;
     let dark = theme.scheme == Scheme::Dark;
     let (fill, line) = super::components::card_colors(chosen, p);
     let card = Modifier::new()
         .weight(1.0)
-        .height(STYLE_CARD_H)
+        .height(style_card_height(columns))
         .background(paint(fill))
         .border(1.0, paint(line))
         .corner_radius(CORNER_MD)
@@ -192,7 +199,7 @@ fn StyleCard(seed_name: &str, style: CharStyle, chosen: bool, on_click: impl FnM
                     style.blurb(),
                     TypeRole::Caption,
                     Some(paint(p.muted)),
-                    Some(STYLE_CARD_DESC_LINES),
+                    Some(style_card_desc_lines(columns)),
                     Some(TextOverflow::Ellipsis),
                     None,
                     Some(TextAlign::Center),
@@ -220,10 +227,63 @@ mod tests {
         assert_eq!(style_picker_columns(560.0), 2);
         assert_eq!(style_picker_columns(390.0), 2);
         assert_eq!(style_picker_columns(0.0), 3, "an unreported window counts as wide");
-        // 12 + 56 + 4 + 20 + 4 + 2 x 18 + 12.
-        assert_eq!(STYLE_CARD_H, 144.0);
-        assert_eq!(style_picker_height(3), 2.0 * 144.0 + 8.0);
-        assert_eq!(style_picker_height(2), 3.0 * 144.0 + 16.0);
+        // 12 + 56 + 4 + 20 + 4 + 3 x 18 + 12 in three columns (the mockup's card is 163 px at
+        // 1440), four description lines in two.
+        assert_eq!((style_card_desc_lines(3), style_card_desc_lines(2)), (3, 4));
+        assert_eq!(style_card_height(3), 162.0);
+        assert_eq!(style_card_height(2), 180.0);
+        assert_eq!(style_picker_height(3), 2.0 * 162.0 + 8.0);
+        assert_eq!(style_picker_height(2), 3.0 * 180.0 + 16.0);
+    }
+
+    #[test]
+    fn fr_l26_1_card_description_is_the_mockups_copy() {
+        // chars.js STYLES[].desc, which project.html loads (r5: the cards showed one short line).
+        let want = [
+            (CharStyle::Mongle, "눈, 입, 볼이 있는 기본 캐릭터입니다. 이름에 따라 몸 모양과 색이 조금씩 달라집니다."),
+            (CharStyle::Malang, "이름으로 정해지는 말랑한 블롭입니다. 얼굴은 눈만 있고 상태는 몸의 움직임으로 보입니다."),
+            (CharStyle::Crew, "짧은 팔다리가 달린 둥근 사각 몸에 역할 소품(왕관, 넥타이, 헤드폰, 모자)을 답니다."),
+            (CharStyle::Pocket, "삼각형, 구름, 토끼, 물방울 같은 단순한 몸에 소품 하나를 단 마스코트입니다. 둥둥 떠 있습니다."),
+            (CharStyle::Cream, "크림색 둥근 몸에 하네스 색 옷을 입습니다. 점 눈과 작은 입만 있습니다."),
+            (CharStyle::Keyring, "고리에 매달려 흔들리는 작은 참입니다. 좁은 자리에 맞습니다."),
+        ];
+        assert_eq!(want.len(), CharStyle::ALL.len());
+        for (style, text) in want {
+            assert_eq!(style.blurb(), text, "{style:?}");
+        }
+    }
+
+    #[test]
+    fn fr_l26_1_card_sends_its_description_lines_and_height_per_column_count() {
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+        use compose_rust::PropertyKind;
+        let _guard = crate::services::test_guard();
+        for (columns, lines, height) in [(3usize, 3i64, 162.0f32), (2, 4, 180.0)] {
+            let mut host = Host::new(move || {
+                Box::new(Recomposer::new(move || StyleGrid("ember", CharStyle::Crew, columns, |_| {})))
+            });
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let line_props = batch
+                .iter()
+                .filter(|m| matches!(m, Mutation::SetProp { property: PropertyKind::MaxLines, value: PropertyValue::Integer(n), .. } if *n == lines))
+                .count();
+            assert!(line_props >= CharStyle::ALL.len(), "{columns} columns: each description takes {lines} lines");
+            let h = format!("Height({height:?})");
+            let cards = batch
+                .iter()
+                .filter(|m| matches!(m, Mutation::SetModifier { modifier, .. } if format!("{modifier:?}") == h))
+                .count();
+            assert_eq!(cards, CharStyle::ALL.len(), "{columns} columns: every card is {height} high");
+            // The character is 48 px in its 56 px box, as the mockup draws it.
+            let mods: Vec<String> = batch
+                .iter()
+                .filter_map(|m| match m {
+                    Mutation::SetModifier { modifier, .. } => Some(format!("{modifier:?}")),
+                    _ => None,
+                })
+                .collect();
+            assert!(mods.windows(2).any(|w| w[0] == "Width(48.0)" && w[1] == "Height(48.0)"), "{mods:?}");
+        }
     }
 
     #[test]
@@ -245,7 +305,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(mods.iter().filter(|m| *m == "Height(144.0)").count(), CharStyle::ALL.len(), "{mods:?}");
+        assert_eq!(mods.iter().filter(|m| *m == "Height(162.0)").count(), CharStyle::ALL.len(), "{mods:?}");
         assert!(mods.iter().filter(|m| m.starts_with("Border")).count() >= CharStyle::ALL.len(), "{mods:?}");
         assert!(mods.iter().any(|m| m == "Padding(12.0)"), "{mods:?}");
         // `Modifier::size` is sent as a width and a height.

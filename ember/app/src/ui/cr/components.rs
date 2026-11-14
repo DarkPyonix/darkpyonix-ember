@@ -1260,6 +1260,12 @@ pub fn search_field_padding(height: f32) -> f32 {
     if height < H_BTN { 12.0 } else { 16.0 }
 }
 
+/// The type role of a search field's text: `Label` (13 px) at the compact 36 px height, none
+/// (the 14 px field size, [`FIELD_FONT`]) at the 40 px `.searchbox` height (FR-L10.2, #844).
+pub fn search_field_role(height: f32) -> Option<TypeRole> {
+    if height < H_BTN { Some(TypeRole::Label) } else { None }
+}
+
 /// The visible gap between the magnifier and the typed text (`.searchbox` gap 8).
 pub const SEARCH_FIELD_GAP: f32 = 8.0;
 /// The leading inset the field adds before its text. The v0.0.6 framed field had about 12 px,
@@ -1288,7 +1294,8 @@ pub fn search_field_offset() -> f32 {
 /// A search box: white fill, 1 px border, pill radius, a leading magnifier and a bare field that
 /// takes the rest of the row. Width intent: it fills its column (`fill_max_width`); the mockup's
 /// 280/220 px is for the standalone box, which a caller gets by constraining the parent. The
-/// compact (36 px) field uses the `Label` role (Fs::Sm, 13 px) like the mockup's session field. The field is uncontrolled and keeps its hint `placeholder`.
+/// compact (36 px) field uses the `Label` role (Fs::Sm, 13 px) like the mockup's session field; the
+/// 40 px one the 14 px field text, as `.searchbox input` inherits the body size. The field is uncontrolled and keeps its hint `placeholder`.
 /// v0.0.7: #376 and #374 fixed (`TextField` takes the node's background, border and shape, and
 /// `text`); workaround kept until checked on a display (the bare field inside Ember's own pill
 /// must be compared with the mockup before the frame moves onto the field).
@@ -1316,7 +1323,9 @@ pub fn SearchField(placeholder: &str, height: f32, on_change: impl FnMut(String)
             // the bare field's own row centres the placeholder in the box's height (#844).
             EmberField(FieldOptions {
                 bare: true,
-                type_role: Some(TypeRole::Label), // one 13 dp size for every search field (mockup fs-sm)
+                // `.searchbox input` inherits the 14 px body text; only the 36 px session field
+                // (`.sside .st-q input`) is 13 (#844: every search placeholder drew 13).
+                type_role: search_field_role(height),
                 height: Some(height),
                 weight: Some(1.0),
                 placeholder: placeholder.clone(),
@@ -1345,6 +1354,16 @@ mod tests {
     fn fr_l10_1_search_field_padding_is_16_and_12_when_compact() {
         assert_eq!(search_field_padding(H_BTN), 16.0);
         assert_eq!(search_field_padding(SEARCH_FIELD_H_COMPACT), 12.0);
+    }
+
+    #[test]
+    fn fr_l10_2_search_text_is_14_and_13_when_compact() {
+        assert_eq!(search_field_role(H_BTN), None);
+        assert_eq!(search_field_role(SEARCH_FIELD_H_COMPACT), Some(TypeRole::Label));
+        let wide = emitted_props(|| SearchField("팀원 검색", H_BTN, |_| {}));
+        assert!(wide.iter().any(|m| m == "FontSize=Float(14.0)"), "{wide:?}");
+        let compact = emitted_props(|| SearchField("세션 검색", SEARCH_FIELD_H_COMPACT, |_| {}));
+        assert!(!compact.iter().any(|m| m == "FontSize=Float(14.0)"), "{compact:?}");
     }
 
     #[test]

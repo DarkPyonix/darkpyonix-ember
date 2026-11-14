@@ -298,24 +298,98 @@ fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
         .on_click(on_click);
 }
 
-/// One unmerged file of the 충돌 list: a warning mark and the mono path, left-aligned, the whole row
+/// Side of a stage check on the header, a file row and the form boxes (`vcs.css:68`).
+pub const STAGE_CHECK_SIDE: f32 = 18.0;
+/// Side of the check on a diff line (the mockup's 14 px line variant).
+pub const STAGE_LINE_CHECK_SIDE: f32 = 14.0;
+/// Corner radius of a stage check (`vcs.css:68`, `border-radius:5px`).
+pub const STAGE_CHECK_RADIUS: f32 = CORNER_2XS;
+/// Border width of a stage check that is off or partial (`vcs.css:68`).
+pub const STAGE_CHECK_BORDER: f32 = 1.5;
+/// Width of the tap area around a stage check; its height is the row's.
+pub const STAGE_CHECK_HIT_W: f32 = 26.0;
+
+/// What a stage check draws inside its square.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckMark {
+    None,
+    Tick,
+    Dash,
+}
+
+/// The painted look of a stage check (`vcs.css:68-72`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StageCheckLook {
+    pub fill: Color,
+    pub border: Color,
+    pub mark: CheckMark,
+    pub mark_color: Color,
+}
+
+/// Off: `surface` with a `grey` border. On: `ink` fill and border with an `ink_text` tick.
+/// Partial: `surface` with an `ink` border and an `ink` dash.
+pub fn stage_check_look(check: Check, p: &Palette) -> StageCheckLook {
+    match check {
+        Check::Off => StageCheckLook { fill: p.surface, border: p.grey.strong, mark: CheckMark::None, mark_color: p.ink },
+        Check::On => StageCheckLook { fill: p.ink, border: p.ink, mark: CheckMark::Tick, mark_color: p.ink_text },
+        Check::Partial => StageCheckLook { fill: p.surface, border: p.ink, mark: CheckMark::Dash, mark_color: p.ink },
+    }
+}
+
+const ICON_TICK_SVG: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>"#;
+
+// compose-rust gap with no issue filed yet (noted on #845): v0.0.7 `Checkbox` takes a container
+// and check colour and a size (#428, closed), but no shape or corner radius and no partial state. The square is painted and
+// the toolkit checkbox lies over it at alpha 0, so the role, the checked state, keyboard focus and
+// the tap stay the toolkit's. A partial check reports unchecked to assistive tech.
+/// A stage check (`.vcs-cb`): a painted `side` px square over an invisible toolkit checkbox that
+/// fills a [`STAGE_CHECK_HIT_W`] by `hit_h` tap area. A tap calls `on_toggle`.
+fn StageCheck(check: Check, side: f32, hit_h: f32, on_toggle: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let look = stage_check_look(check, &p);
+    let mut on_toggle = on_toggle;
+    cu::Box().modifier(Modifier::new().width(STAGE_CHECK_HIT_W.max(side)).height(hit_h.max(side))).alignment(Alignment::Center).content(move || {
+        cu::Box()
+            .modifier(Modifier::new().size(side, side).background(paint(look.fill)).border(STAGE_CHECK_BORDER, paint(look.border)).corner_radius(STAGE_CHECK_RADIUS))
+            .alignment(Alignment::Center)
+            .content(move || match look.mark {
+                CheckMark::None => {}
+                CheckMark::Tick => NavIcon(ICON_TICK_SVG, look.mark_color.to_argb(), side - 4.0),
+                CheckMark::Dash => {
+                    cu::Box().modifier(Modifier::new().width(side - 6.0 - 2.0 * STAGE_CHECK_BORDER).height(2.0).background(paint(look.mark_color)).corner_radius(1.0));
+                }
+            });
+        cu::Checkbox(check == Check::On)
+            .modifier(Modifier::new().fill_max_size().alpha(0.0))
+            .on_change(move |_| on_toggle());
+    });
+}
+
+/// Height of a 충돌 list row (`.vcs-file`, `vcs.css:59`, #694).
+pub const CONFLICT_ROW_H: f32 = 34.0;
+/// Gap between the warning tile and the path (`vcs.css:59`, #694).
+pub const CONFLICT_ROW_GAP: f32 = 6.0;
+/// The small warning tile of a 충돌 row (`.vcs-wico.sm`, `vcs.css:167-168`).
+pub const CONFLICT_TILE: f32 = 22.0;
+/// The warning glyph inside the tile.
+pub const CONFLICT_GLYPH: f32 = 14.0;
+
+/// One unmerged file of the 충돌 list (`.vcs-cflist .vcs-file`, #694): 34 px, no border or fill, a
+/// 14 px warning glyph in a 22 px `orange.soft` tile, a gap of 6, then the mono path. The whole row
 /// is the tap target and carries the path as its accessible name.
 fn ConflictFileRow(path: &str, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let shown = path.to_string();
     cu::Box()
-        .modifier(
-            Modifier::new()
-                .fill_max_width()
-                .height(H_BTN)
-                .background(paint(p.surface_2))
-                .border(1.0, paint(p.line))
-                .corner_radius(CORNER_SM),
-        )
+        .modifier(Modifier::new().fill_max_width().height(CONFLICT_ROW_H).corner_radius(CORNER_SM))
         .alignment(Alignment::CenterStart)
         .content(move || {
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
-                NavIcon(ICON_WARN_SVG, p.orange.strong.to_argb(), 16.0);
+            cu::Row().alignment(Alignment::CenterStart).spacing(CONFLICT_ROW_GAP).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+                // `.vcs-cflist .vcs-file{padding-left:10px}`; the row gap adds 6.
+                cu::Spacer().modifier(Modifier::new().width(10.0 - CONFLICT_ROW_GAP));
+                cu::Box().modifier(Modifier::new().size(CONFLICT_TILE, CONFLICT_TILE).background(paint(p.orange.soft)).corner_radius(CORNER_XS)).alignment(Alignment::Center).content(|| {
+                    NavIcon(ICON_WARN_SVG, p.orange.strong.to_argb(), CONFLICT_GLYPH);
+                });
                 Txt(&shown, TypeRole::Mono, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), Some(1.0), None);
             });
             FocusOverlay(&shown, on_click);
@@ -331,6 +405,8 @@ pub const VCS_CONTROL_FS: Fs = Fs::Sm;
 pub const VCS_FIELD_ROLE: TypeRole = TypeRole::Label;
 /// Height of the 이 덩어리 전체 button: smaller than the 32 px control, with a 1 px border.
 pub const VCS_HUNK_BUTTON_H: f32 = 28.0;
+/// Height of the hunk header row (`.vcs-hh`): the 28 px action with 6 px above and below.
+pub const VCS_HUNK_HEADER_H: f32 = VCS_HUNK_BUTTON_H + 12.0;
 
 /// Width of a painted small pill or chip: the text at [`VCS_CONTROL_FS`] plus 14 px each side,
 /// at least 64. A Box in a Row takes the remaining width (compose-rust#427), so it is fixed.
@@ -926,18 +1002,45 @@ pub fn SectionPills(
     SectionPillsAtWidth(active, current_window_size().width_dp, on_pick);
 }
 
+/// Whether the section pills scroll sideways in one row (`.vcs-nav` at 900 px and below) rather
+/// than sitting in one row that fits.
+pub fn section_pills_scroll(width_dp: f32) -> bool {
+    width_dp < 820.0
+}
+
 fn SectionPillsAtWidth(active: Section, width: f32, on_pick: impl FnMut(Section) + Clone + 'static) {
-    let per_row = if width < 820.0 { 3 } else { Section::ALL.len() };
-    cu::Column().modifier(Modifier::new().fill_max_width()).spacing(SP[1]).content(|| {
-        for row in Section::ALL.chunks(per_row) {
-            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
-                for sec in row.iter().copied() {
-                    let mut pick = on_pick.clone();
-                    PickChip(sec.label(), None, sec == active, false, move || pick(sec));
-                }
-            });
-        }
-    });
+    let pills = || {
+        cu::Row().spacing(SP[0] + 2.0).alignment(Alignment::CenterStart).content(|| {
+            for sec in Section::ALL {
+                let mut pick = on_pick.clone();
+                PickChip(sec.label(), None, sec == active, false, move || pick(sec));
+            }
+        });
+    };
+    if section_pills_scroll(width) {
+        // One row that scrolls sideways (`.vcs-nav{flex-direction:row;overflow-x:auto;gap:6px}`).
+        cu::ScrollRow().modifier(Modifier::new().fill_max_width()).content(pills);
+    } else {
+        pills();
+    }
+}
+
+/// The look of one pane tab (`.seg button`, `style.css:238-242`): fill, border and text colour.
+pub fn pane_tab_look(on: bool, p: &Palette) -> (Color, Color, Color) {
+    if on { (p.ink, p.ink, p.ink_text) } else { (p.surface, p.line, p.text_2) }
+}
+
+/// One equal segment of the pane tabs: a `H_CTL` pill that takes its share of the row.
+fn PaneTabSegment(text: &str, on: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let (fill, border, ink) = pane_tab_look(on, &p);
+    cu::Box()
+        .modifier(Modifier::new().weight(1.0).height(H_CTL).background(paint(fill)).border(1.0, paint(border)).shape_role(ShapeRole::Full))
+        .alignment(Alignment::Center)
+        .content(move || {
+            Label(text, VCS_CONTROL_FS, Weight::Medium, Some(paint(ink)), Some(1));
+            FocusOverlay(text, on_click);
+        });
 }
 
 /// Tabs within a section on compact windows.
@@ -946,10 +1049,11 @@ pub fn PaneTabs(
     active: Option<PaneTab>,
     mut on_pick: impl FnMut(PaneTab) + Clone + 'static,
 ) {
+    // Equal segments across the width (`.vcs-subs.seg`, `vcs.css` at 560 px and below).
     cu::Row().modifier(Modifier::new().fill_max_width()).spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
         for t in pane_tabs(section).iter().copied() {
             let mut pick = on_pick.clone();
-            PickChip(t.label(), None, Some(t) == active, false, move || pick(t));
+            PaneTabSegment(t.label(), Some(t) == active, move || pick(t));
         }
     });
 }
@@ -1015,9 +1119,11 @@ fn DiffViewAtWidth(file: &FileDiff, staging: &MutableState<Staging>, pane_width:
         }
 
         for (hi, h) in file.hunks.iter().enumerate() {
-            // Keep the action below the header so long hunk labels cannot overlap it.
-            cu::Column().modifier(Modifier::new().fill_max_width().background(paint(p.surface_2)).padding(SP[2])).spacing(SP[1]).content(|| {
-                Label(&h.header, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            // One row (`.vcs-hh`, `vcs.css:87-88`): the mono header takes the rest and is cut with an
+            // ellipsis, so a long header never overlaps the right-aligned action.
+            cu::Row().modifier(Modifier::new().fill_max_width().height(VCS_HUNK_HEADER_H).background(paint(p.surface_2))).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                Txt(&h.header, TypeRole::Mono, Some(paint(p.muted)), Some(1), Some(TextOverflow::Ellipsis), Some(1.0), None);
                 let st_hunk = staging.clone();
                 let f_hunk = file.clone();
                 cu::Box()
@@ -1038,6 +1144,7 @@ fn DiffViewAtWidth(file: &FileDiff, staging: &MutableState<Staging>, pane_width:
                             st_hunk.set(s);
                         });
                     });
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
             });
 
             cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
@@ -1055,18 +1162,14 @@ fn DiffViewAtWidth(file: &FileDiff, staging: &MutableState<Staging>, pane_width:
                             let is_line_staged = staging.get().file(&file.path).is_some_and(|s| s.is_staged(hi, li));
                             let st_line = staging.clone();
                             let f_line = file.clone();
-                            let cb_alpha = if is_line_staged { 1.0 } else { 0.45 };
-                            cu::Box().modifier(Modifier::new().width(24.0).height(21.0).alpha(cb_alpha)).alignment(Alignment::Center).content(|| {
-                                cu::Checkbox(is_line_staged)
-                                    .modifier(Modifier::new().size(14.0, 14.0))
-                                    .on_change(move |_| {
-                                        let mut s = st_line.get();
-                                        s.file_mut(&f_line.path).toggle_line(&f_line, hi, li);
-                                        st_line.set(s);
-                                    });
+                            let line_check = if is_line_staged { Check::On } else { Check::Off };
+                            StageCheck(line_check, STAGE_LINE_CHECK_SIDE, 21.0, move || {
+                                let mut s = st_line.get();
+                                s.file_mut(&f_line.path).toggle_line(&f_line, hi, li);
+                                st_line.set(s);
                             });
                         } else {
-                            cu::Spacer().modifier(Modifier::new().width(24.0));
+                            cu::Spacer().modifier(Modifier::new().width(STAGE_CHECK_HIT_W));
                         }
 
                         let old_str = l.old_no.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
@@ -1114,15 +1217,13 @@ fn FilesHeader(
     let p = ember_theme().palette;
     let st_toggle = staging.clone();
     let d_toggle = diffs.to_vec();
-    let all_on = folder_check(all_checks) == Check::On;
+    let all = folder_check(all_checks);
     cu::Row().modifier(Modifier::new().fill_max_width().height(48.0).padding(SP[2])).alignment(Alignment::CenterStart).spacing(SP[1]).content(move || {
-        cu::Checkbox(all_on)
-            .modifier(Modifier::new().size(18.0, 18.0))
-            .on_change(move |_| {
-                let mut s = st_toggle.get();
-                s.toggle_all(&d_toggle);
-                st_toggle.set(s);
-            });
+        StageCheck(all, STAGE_CHECK_SIDE, 24.0, move || {
+            let mut s = st_toggle.get();
+            s.toggle_all(&d_toggle);
+            st_toggle.set(s);
+        });
         cu::Spacer().modifier(Modifier::new().width(SP[0]));
         Label(&format!("변경 파일 {}", diffs_len), Fs::Sm, Weight::Semibold, Some(paint(p.text)), Some(1));
         cu::Spacer().modifier(Modifier::new().weight(1.0));
@@ -1229,13 +1330,11 @@ fn FilesTree(
                                     cu::Spacer().modifier(Modifier::new().width(depth as f32 * 14.0));
                                 }
                                 cu::Spacer().modifier(Modifier::new().width(4.0));
-                                cu::Checkbox(is_staged == Check::On)
-                                    .modifier(Modifier::new().size(18.0, 18.0))
-                                    .on_change(move |_| {
-                                        let mut s = st_file.get();
-                                        s.toggle_file(&d_file);
-                                        st_file.set(s);
-                                    });
+                                StageCheck(is_staged, STAGE_CHECK_SIDE, 34.0, move || {
+                                    let mut s = st_file.get();
+                                    s.toggle_file(&d_file);
+                                    st_file.set(s);
+                                });
                                 cu::Spacer().modifier(Modifier::new().width(4.0));
                                 let file_name = name.clone();
                                 cu::Box()
@@ -1395,13 +1494,10 @@ fn CommitBox(
             cu::Row().modifier(Modifier::new().fill_max_width().height(32.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
                 let am = amend_state.clone();
                 let am_armed = armed.clone();
-                // TODO(compose-rust#428): Checkbox has no ink fill or tick style, so staging looks hollow.
-                cu::Checkbox(is_amend)
-                    .modifier(Modifier::new().size(18.0, 18.0))
-                    .on_change(move |v| {
-                        am_armed.set(0);
-                        am.set(v);
-                    });
+                StageCheck(if is_amend { Check::On } else { Check::Off }, STAGE_CHECK_SIDE, 32.0, move || {
+                    am_armed.set(0);
+                    am.set(!am.get());
+                });
                 Label("마지막 커밋 수정 (amend)", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
             });
             if let Some(text) = warning {
@@ -3426,10 +3522,7 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
                     Label("원격에 올라가 있는 브랜치여야 합니다", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
                     cu::Row().modifier(Modifier::new().fill_max_width().height(32.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
                         let flag = f_draft.clone();
-                        // TODO(compose-rust#428): Checkbox has no ink fill or tick style, so it looks hollow.
-                        cu::Checkbox(f_draft.get())
-                            .modifier(Modifier::new().size(18.0, 18.0))
-                            .on_change(move |v| flag.set(v));
+                        StageCheck(if f_draft.get() { Check::On } else { Check::Off }, STAGE_CHECK_SIDE, 32.0, move || flag.set(!flag.get()));
                         Label("초안", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
                     });
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -3598,16 +3691,36 @@ fn BranchBar(fraction: f32, fill: Paint) {
     });
 }
 
+/// Side of the icon tile at the start of a branch or stash row (`.vcs-bico`).
+pub const ROW_ICON_TILE: f32 = 32.0;
+
+/// The `.vcs-bico` tile: 32 px, `CORNER_SM`, a 1 px `line` border, the glyph in `text_2`.
+fn RowIconTile(svg: &'static str) {
+    let p = ember_theme().palette;
+    cu::Box()
+        .modifier(Modifier::new().size(ROW_ICON_TILE, ROW_ICON_TILE).border(1.0, paint(p.line)).corner_radius(CORNER_SM))
+        .alignment(Alignment::Center)
+        .content(|| NavIcon(svg, p.text_2.to_argb(), 16.0));
+}
+
+fn BranchIconTile() {
+    RowIconTile(ICON_GIT_SVG);
+}
+
 /// One branch: name with the 현재 pill, ahead/behind text and bars, the last commit line, the
 /// worktree pill and the 전환 button (off for the current branch).
 fn BranchRow(e: &BranchEntry, busy: bool, on_switch: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (a, b) = branch_bar_fractions(e.ahead, e.behind);
     let show_bars = e.has_upstream && (e.ahead > 0 || e.behind > 0);
-    cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(move || {
-        cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| {
+    // `.vcs-brow` (`vcs.css:140-143`): the current row on `surface_2`, a 32 px icon tile with a
+    // `line` border, the mono name, then the 전환 button on the right.
+    let row_fill = if e.current { paint(p.surface_2) } else { Paint::Literal(Color::argb(0)) };
+    cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width().background(row_fill).padding(SP[2])).content(move || {
+        BranchIconTile();
+        cu::Column().spacing(SP[0]).modifier(Modifier::new().weight(1.0)).content(|| {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                Txt(&e.name, TypeRole::BodyStrong, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+                Txt(&e.name, TypeRole::Mono, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), None, None);
                 if e.current {
                     Pill("현재", PillTone::Green, true);
                 }
@@ -4370,10 +4483,7 @@ fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layou
                     });
                     cu::Row().modifier(Modifier::new().fill_max_width().height(32.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
                         let flag = untracked.clone();
-                        // TODO(compose-rust#428): Checkbox has no ink fill or tick style, so it looks hollow.
-                        cu::Checkbox(untracked.get())
-                            .modifier(Modifier::new().size(18.0, 18.0))
-                            .on_change(move |v| flag.set(v));
+                        StageCheck(if untracked.get() { Check::On } else { Check::Off }, STAGE_CHECK_SIDE, 32.0, move || flag.set(!flag.get()));
                         Label("추적하지 않는 파일 포함", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
                     });
                     AppButton("스태시 만들기", None, ButtonKind::Primary, false, !is_busy, true, make);
@@ -4421,13 +4531,19 @@ fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layou
     }
 }
 
+/// Whether a stash row keeps its actions on its own line's right end (wide) or puts them on a
+/// line of their own under the text (phone, `.vcs-sact{width:100%}`).
+pub fn stash_actions_inline(layout: PaneLayout) -> bool {
+    layout == PaneLayout::Two
+}
+
 /// One stash: message, meta line and the 적용, 꺼내기, 삭제 buttons. 삭제 needs a second tap on
 /// the same button, which then reads "정말 삭제합니다"; 적용 and 꺼내기 ask the same way when
 /// `dirty`, under a line that says why. The armed label shows only while `armed_label_visible`
 /// holds at composition: nothing re-renders on a timer, so it may stay on screen until the next
 /// recomposition after 4 seconds, and `stash_tap` decides what a tap does. Each button has an
 /// accessible name with the index and message (visible text stays 적용, 꺼내기, 삭제).
-fn StashRow(e: &StashEntry, _layout: PaneLayout, busy: bool, dirty: bool, armed: MutableState<Option<(usize, i64)>>, run: impl Fn(StashAction, u32) + Clone + 'static) {
+fn StashRow(e: &StashEntry, layout: PaneLayout, busy: bool, dirty: bool, armed: MutableState<Option<(usize, i64)>>, run: impl Fn(StashAction, u32) + Clone + 'static) {
     let p = ember_theme().palette;
     let index = e.index;
     let now = crate::demo::now_ms();
@@ -4447,16 +4563,20 @@ fn StashRow(e: &StashEntry, _layout: PaneLayout, busy: bool, dirty: bool, armed:
             }
         }
     };
-    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+    // `.vcs-brow` with `.vcs-sact` (`vcs.css:140, 156`): icon tile, the text, the actions on the
+    // right; on a phone the actions take their own line, still right-aligned (`vcs.css` 560 px).
+    let text = || {
         Txt(&e.message, TypeRole::BodyStrong, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
-        Txt(&stash_meta(e), TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+        Txt(&stash_meta(e), TypeRole::Mono, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
         if asking {
             Label(STASH_DIRTY_WARNING, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
             if shows(StashAction::Pop) {
                 Label(STASH_POP_NOTE, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
             }
         }
-        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+    };
+    let actions = || {
+        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
             for (action, verb, kind, ask) in [
                 (StashAction::Apply, "적용", ButtonKind::Default, dirty),
                 (StashAction::Pop, "꺼내기", ButtonKind::Default, dirty),
@@ -4467,7 +4587,25 @@ fn StashRow(e: &StashEntry, _layout: PaneLayout, busy: bool, dirty: bool, armed:
                 StashPill(stash_button_text(action, armed_now), &stash_button_label(index, &e.message, verb), kind, !busy, move || on_tap(action));
             }
         });
-    });
+    };
+    if stash_actions_inline(layout) {
+        cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+            RowIconTile(ICON_STASH_SVG);
+            cu::Column().spacing(SP[0]).modifier(Modifier::new().weight(1.0)).content(text);
+            actions();
+        });
+    } else {
+        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                RowIconTile(ICON_STASH_SVG);
+                cu::Column().spacing(SP[0]).modifier(Modifier::new().weight(1.0)).content(text);
+            });
+            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                actions();
+            });
+        });
+    }
 }
 
 // TODO(compose-rust#425, #429): the pill is painted and an invisible `Button` over it carries the
@@ -4565,7 +4703,7 @@ fn VcsScreenWithLoad(
     let layout = if sheet { vcs_sheet_layout(class) } else { pane_layout(class) };
     let wide = !sheet && section_nav(class) == SectionNav::List;
     let compact = class == WindowSizeClass::Compact;
-    let pad = if compact { SP[2] } else { 32.0 };
+    let pad = vcs_page_pad(compact);
     let content_width = ((if sheet { vcs_sheet_width(window.width_dp) } else { window.width_dp }) - 2.0 * pad).max(0.0);
     let section_width = (content_width - if wide { 200.0 + SP[3] } else { 0.0 }).max(0.0);
     let diff_width = (section_width - if layout == PaneLayout::Two { 320.0 + GAP_CARD } else { 0.0 }).max(0.0);
@@ -4691,6 +4829,11 @@ fn VcsScreenWithLoad(
             });
         });
     }
+}
+
+/// The page gutter: 16 px on a phone (`vcs-changes-390` mockup), 32 px otherwise.
+pub fn vcs_page_pad(compact: bool) -> f32 {
+    if compact { SP[3] } else { 32.0 }
 }
 
 /// The pane layout inside the 버전 관리 sheet (FR-L18, #495): the sheet body scrolls as a page, so
@@ -5901,6 +6044,162 @@ mod tests {
         compose_rust::window::reset_window_size();
         let text = text_of(conflict_file_row_sample as fn());
         assert!(text.contains("docs/SPEC.md"), "the path is shown (and is the row's accessible name)");
+
+        // One tap target: a host click on the row's own button selects the file (#694).
+        let mut host = Host::new(|| Box::new(Recomposer::new(conflict_row_pick_sample)));
+        let bytes = host.rebuild().expect("rebuild").to_vec();
+        let batch = decode_batch(&bytes).expect("decode");
+        let mut texts = std::collections::HashMap::new();
+        let mut handlers = std::collections::HashMap::new();
+        for m in &batch {
+            match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                    texts.insert(*node_id, s.to_string());
+                }
+                Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                    handlers.insert(*node_id, *h as u64);
+                }
+                _ => {}
+            }
+        }
+        let before: String = batch.iter().map(|m| format!("{m:?}")).collect();
+        assert!(before.contains("고른 파일 없음"), "nothing is selected before the tap");
+        let targets: Vec<(u32, u64)> = texts
+            .iter()
+            .filter(|(_, t)| t.as_str() == "docs/SPEC.md")
+            .filter_map(|(id, _)| handlers.get(id).map(|h| (*id, *h)))
+            .collect();
+        assert_eq!(targets.len(), 1, "the row has exactly one tap target named by its path");
+        let (node_id, handler_id) = targets[0];
+        let after = host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch").0.to_vec();
+        let after: String = decode_batch(&after).expect("decode").iter().map(|m| format!("{m:?}")).collect();
+        assert!(after.contains("고른 파일 docs/SPEC.md"), "the tap selects the file: {after}");
+    }
+
+    #[compose_rust::runtime::Composable]
+    fn conflict_row_pick_sample() {
+        let picked = remember(|| mutable_state_of(None::<String>));
+        let set = picked.clone();
+        ConflictFileRow("docs/SPEC.md", move || set.set(Some("docs/SPEC.md".to_string())));
+        let shown = match picked.get() {
+            Some(path) => format!("고른 파일 {path}"),
+            None => "고른 파일 없음".to_string(),
+        };
+        Label(&shown, Fs::Sm, Weight::Regular, None, None);
+    }
+
+    #[test]
+    fn fr_l19_conflict_rows_follow_the_mockup_metrics() {
+        // #694: 34 px, gap 6, a 14 px glyph in a 22 px tile; no border or fill on the row.
+        assert_eq!(CONFLICT_ROW_H, 34.0);
+        assert_eq!(CONFLICT_ROW_GAP, 6.0);
+        assert_eq!(CONFLICT_TILE, 22.0);
+        assert_eq!(CONFLICT_GLYPH, 14.0);
+        let src = include_str!("vcs.rs");
+        let start = src.find("fn ConflictFileRow(").expect("ConflictFileRow");
+        let end = start + src[start..].find("\n}\n").expect("end of ConflictFileRow");
+        let body = &src[start..end];
+        assert!(!body.contains(".border("), "the conflict row has no border");
+        assert!(!body.contains("surface_2"), "the conflict row has no fill");
+        assert!(body.contains("p.orange.soft"), "the warning tile is soft orange");
+    }
+
+    #[test]
+    fn fr_l19_stage_checks_are_ink_squares_with_a_partial_dash() {
+        let p = super::super::theme::LIGHT;
+        assert_eq!(STAGE_CHECK_SIDE, 18.0);
+        assert_eq!(STAGE_CHECK_RADIUS, 5.0);
+        let on = stage_check_look(Check::On, &p);
+        assert_eq!((on.fill, on.border, on.mark, on.mark_color), (p.ink, p.ink, CheckMark::Tick, p.ink_text));
+        let part = stage_check_look(Check::Partial, &p);
+        assert_eq!((part.fill, part.border, part.mark, part.mark_color), (p.surface, p.ink, CheckMark::Dash, p.ink));
+        let off = stage_check_look(Check::Off, &p);
+        assert_eq!((off.fill, off.border, off.mark), (p.surface, p.grey.strong, CheckMark::None));
+        assert!(STAGE_CHECK_HIT_W >= STAGE_CHECK_SIDE, "the tap area is at least the square");
+        // Every stage check on the screen is the painted square; the only toolkit checkbox left is
+        // the invisible one inside `StageCheck` that keeps the role and the keyboard.
+        let src = include_str!("vcs.rs");
+        let code = &src[..src.find("#[cfg(test)]").expect("tests")];
+        assert_eq!(code.matches("cu::Checkbox(").count(), 1);
+    }
+
+    #[compose_rust::runtime::Composable]
+    fn stage_check_toggle_sample() {
+        let check = remember(|| mutable_state_of(Check::Partial));
+        let set = check.clone();
+        StageCheck(check.get(), STAGE_CHECK_SIDE, 34.0, move || set.set(if set.get() == Check::On { Check::Off } else { Check::On }));
+        Label(&format!("상태 {:?}", check.get()), Fs::Sm, Weight::Regular, None, None);
+    }
+
+    #[test]
+    fn fr_l19_a_stage_check_keeps_the_toolkit_toggle() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let text = text_of(stage_check_toggle_sample);
+        assert!(text.contains("상태 Partial"));
+        assert!(text.contains("Checkbox"), "the toolkit checkbox carries the role: {text}");
+    }
+
+    #[test]
+    fn fr_l19_hunk_action_sits_in_the_header_row() {
+        let src = include_str!("vcs.rs");
+        let start = src.find("fn DiffViewAtWidth(").expect("DiffViewAtWidth");
+        let end = start + src[start..].find("fn FilesHeader(").expect("FilesHeader");
+        let body = &src[start..end];
+        let header = body.find("Txt(&h.header, TypeRole::Mono").expect("mono hunk header");
+        let action = body.find("\"이 덩어리 전체\"").expect("hunk action");
+        let row = body[..header].rfind("cu::Row()").expect("header row");
+        let column = body[..header].rfind("cu::Column()").unwrap_or(0);
+        assert!(row > column, "header and action share one row, not a column");
+        assert!(!body[header..action].contains("cu::Column()"), "the action is not on its own row");
+        assert!(action > header, "the action follows the header text, on the right");
+        assert_eq!(VCS_HUNK_HEADER_H, VCS_HUNK_BUTTON_H + 12.0);
+    }
+
+    #[test]
+    fn fr_l19_compact_pills_scroll_tabs_are_segments_and_the_gutter_is_16() {
+        assert!(section_pills_scroll(390.0 - 32.0));
+        assert!(section_pills_scroll(704.0));
+        assert!(!section_pills_scroll(1024.0));
+        assert_eq!(vcs_page_pad(true), 16.0);
+        assert_eq!(vcs_page_pad(false), 32.0);
+        let p = super::super::theme::LIGHT;
+        assert_eq!(pane_tab_look(true, &p), (p.ink, p.ink, p.ink_text));
+        assert_eq!(pane_tab_look(false, &p), (p.surface, p.line, p.text_2));
+    }
+
+    #[compose_rust::runtime::Composable]
+    fn compact_pills_sample() {
+        SectionPillsAtWidth(Section::Changes, 358.0, |_| {});
+        PaneTabs(Section::Changes, Some(PaneTab::Files), |_| {});
+    }
+
+    #[test]
+    fn fr_l19_compact_pills_render_in_one_scroll_row() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let text = text_of(compact_pills_sample);
+        assert!(text.contains("ScrollRow"), "the pills scroll sideways: {text}");
+        for section in Section::ALL {
+            assert!(text.contains(section.label()), "missing {}", section.label());
+        }
+        for t in pane_tabs(Section::Changes) {
+            assert!(text.contains(t.label()), "missing tab {}", t.label());
+        }
+    }
+
+    #[test]
+    fn fr_l19_branch_and_stash_rows_follow_the_mockup() {
+        assert_eq!(ROW_ICON_TILE, 32.0);
+        assert!(stash_actions_inline(PaneLayout::Two));
+        assert!(!stash_actions_inline(PaneLayout::Tabs));
+        let src = include_str!("vcs.rs");
+        let start = src.find("fn BranchRow(").expect("BranchRow");
+        let end = start + src[start..].find("fn BranchesPane(").expect("BranchesPane");
+        let body = &src[start..end];
+        assert!(body.contains("Txt(&e.name, TypeRole::Mono"), "branch names are mono");
+        assert!(body.contains("BranchIconTile()"), "a branch row starts with the icon tile");
+        assert!(body.contains("p.surface_2"), "the current branch row is on surface_2");
     }
 
     #[test]

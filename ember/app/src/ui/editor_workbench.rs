@@ -1394,15 +1394,11 @@ pub mod page {
         // closed column is 0 wide and the areas stay as the stylesheet has them.
         let maximized = has_bottom && *s.bottom_max.read();
         let grid = if maximized { crate::ui::editor::editor_grid_style_maximized() } else { crate::ui::editor::editor_grid_style(has_left, has_bottom) };
-        // macOS opens the window FullSize (the page starts at the top and the top bar is the title
-        // strip), so the page is the window's height; elsewhere the native chrome stays and the
-        // page keeps its 76px allowance. TODO(#320): the height is fixed at launch. v0.0.7: #467
-        // fixed (`with_report_size`); workaround kept until checked on a display (the page has to
-        // follow the reported height in the dioxus-compose window).
-        let height = crate::ui::editor::editor_page_height(cfg!(target_os = "macos"));
-        let ed_style = format!("width:100vw; height:{height}; {grid}");
+        // The page is the viewport on every system, and the viewport follows the window's content
+        // box on every dp change, so growing and shrinking both lay the page out again.
+        let ed_style = format!("{} {grid}", crate::ui::editor::editor_page_size_style());
+        let error_style = format!("{} grid-column:1 / -1;", crate::ui::editor::editor_error_padding(cfg!(target_os = "macos"), window_safe.top));
         rsx! {
-            // TODO(#320): shrinking the window does not reflow this page; growing does.
             div { class: "{ed_class}", "data-theme": if dark { "dark" } else { "light" }, tabindex: "-1", style: "{ed_style}",
                 onkeydown: move |event| {
                     let m = event.modifiers();
@@ -1465,7 +1461,7 @@ pub mod page {
                     }
                 },
                 if let Some(error) = error {
-                    div { style: "padding:20px; grid-column:1 / -1; padding-top:76px;", "{error}" button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" } }
+                    div { style: "{error_style}", "{error}" button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" } }
                 } else {
                     {top_bar(&s, &branch, keymap, leading)}
                     div { class: "ed-rail",

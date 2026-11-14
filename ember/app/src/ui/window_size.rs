@@ -22,6 +22,8 @@ static OPENED: OnceLock<(f32, f32)> = OnceLock::new();
 thread_local! {
     /// The last size the renderer reported in this run, kept while the guard is active.
     static LAST: Cell<Option<(f32, f32)>> = const { Cell::new(None) };
+    /// The toolkit reading last logged, so each change is logged once, not once per read.
+    static LOGGED: Cell<Option<(f32, f32)>> = const { Cell::new(None) };
     /// A test's opened size, on the test's own thread, so parallel tests are not affected.
     #[cfg(test)]
     static TEST_OPENED: Cell<Option<(f32, f32)>> = const { Cell::new(None) };
@@ -78,6 +80,13 @@ fn resolved(read: WindowSize) -> WindowSize {
     let Some(opened) = opened() else {
         return read;
     };
+    // One line per change of the toolkit's reading, for a live check of the missing report
+    // (FR-L10.3): `0x0` lines that never turn into the window's size mean the renderer's report
+    // did not arrive; a real size followed by `0x0` means a zero size was reported.
+    let raw = (read.width_dp, read.height_dp);
+    if LOGGED.with(|logged| logged.replace(Some(raw))) != Some(raw) {
+        tracing::info!(width_dp = raw.0, height_dp = raw.1, reported = is_reported(&read), "window size read");
+    }
     if is_reported(&read) {
         LAST.with(|last| last.set(Some((read.width_dp, read.height_dp))));
         return read;

@@ -11,7 +11,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use ember_editor_conn::exthost::{DocumentFilter, MainThreadCall};
+use ember_editor_conn::exthost::{DocumentFilter, MainThreadCall, SemanticTokensLegend};
+use ember_editor_conn::language::LanguageFeature;
 use ember_editor_conn::uri::UriComponents;
 use serde_json::Value;
 
@@ -55,6 +56,11 @@ pub enum ProviderKind {
     Hover,
     CodeLens { event_handle: Option<i64> },
     InlineCompletions(InlineMeta),
+    FoldingRange { event_handle: Option<i64> },
+    DocumentSemanticTokens { legend: SemanticTokensLegend, event_handle: Option<i64> },
+    /// Completion, definition, references, rename, code actions, formatting, signature help or
+    /// document symbols (FR-L31.13), with what its registration said.
+    Language(LanguageFeature),
 }
 
 /// Which kind of provider a query is for.
@@ -63,6 +69,17 @@ pub enum KindTag {
     Hover,
     CodeLens,
     InlineCompletions,
+    FoldingRange,
+    DocumentSemanticTokens,
+    Completion,
+    Definition,
+    Reference,
+    CodeAction,
+    DocumentFormatting,
+    RangeFormatting,
+    Rename,
+    SignatureHelp,
+    DocumentSymbol,
 }
 
 impl ProviderKind {
@@ -71,6 +88,28 @@ impl ProviderKind {
             Self::Hover => KindTag::Hover,
             Self::CodeLens { .. } => KindTag::CodeLens,
             Self::InlineCompletions(_) => KindTag::InlineCompletions,
+            Self::FoldingRange { .. } => KindTag::FoldingRange,
+            Self::DocumentSemanticTokens { .. } => KindTag::DocumentSemanticTokens,
+            Self::Language(feature) => match feature {
+                LanguageFeature::Completion { .. } => KindTag::Completion,
+                LanguageFeature::Definition => KindTag::Definition,
+                LanguageFeature::Reference => KindTag::Reference,
+                LanguageFeature::CodeAction { .. } => KindTag::CodeAction,
+                LanguageFeature::DocumentFormatting { .. } => KindTag::DocumentFormatting,
+                LanguageFeature::RangeFormatting { .. } => KindTag::RangeFormatting,
+                LanguageFeature::Rename { .. } => KindTag::Rename,
+                LanguageFeature::SignatureHelp { .. } => KindTag::SignatureHelp,
+                LanguageFeature::DocumentSymbol { .. } => KindTag::DocumentSymbol,
+            },
+        }
+    }
+
+    pub fn event_handle(&self) -> Option<i64> {
+        match self {
+            Self::CodeLens { event_handle }
+            | Self::FoldingRange { event_handle }
+            | Self::DocumentSemanticTokens { event_handle, .. } => *event_handle,
+            Self::Hover | Self::InlineCompletions(_) | Self::Language(_) => None,
         }
     }
 }
@@ -92,6 +131,8 @@ pub enum RegistryChange {
     /// `$emitCodeLensEvent(eventHandle)` resolved to the provider handle.
     CodeLensChanged { handle: i64 },
     InlineCompletionsChanged { handle: i64 },
+    FoldingRangeChanged { handle: i64 },
+    SemanticTokensChanged { handle: i64 },
     CommandsChanged,
     None,
 }
@@ -112,8 +153,8 @@ impl Registry {
     fn insert(&mut self, handle: i64, selector: Vec<DocumentFilter>, kind: ProviderKind) -> RegistryChange {
         self.seq += 1;
         let tag = kind.tag();
-        if let ProviderKind::CodeLens { event_handle: Some(e) } = &kind {
-            self.event_handles.insert(*e, handle);
+        if let Some(e) = kind.event_handle() {
+            self.event_handles.insert(e, handle);
         }
         self.providers.insert(handle, Provider { handle, selector, kind, seq: self.seq });
         RegistryChange::Registered { handle, kind: tag }
@@ -129,11 +170,32 @@ impl Registry {
             MainThreadCall::RegisterCodeLensSupport { handle, selector, event_handle } => {
                 self.insert(*handle, selector.clone(), ProviderKind::CodeLens { event_handle: *event_handle })
             }
+            MainThreadCall::RegisterFoldingRangeProvider { handle, selector, event_handle } => {
+                self.insert(*handle, selector.clone(), ProviderKind::FoldingRange { event_handle: *event_handle })
+            }
+            MainThreadCall::RegisterDocumentSemanticTokensProvider { handle, selector, legend, event_handle } => {
+                self.insert(
+                    *handle,
+                    selector.clone(),
+                    ProviderKind::DocumentSemanticTokens { legend: legend.clone(), event_handle: *event_handle },
+                )
+            }
             MainThreadCall::RegisterInlineCompletionsSupport { handle, selector, raw, .. } => {
                 self.insert(*handle, selector.clone(), ProviderKind::InlineCompletions(InlineMeta::from_raw(raw)))
             }
+            MainThreadCall::RegisterLanguageFeature { handle, selector, feature } => {
+                self.insert(*handle, selector.clone(), ProviderKind::Language(feature.clone()))
+            }
             MainThreadCall::EmitCodeLensEvent { event_handle } => match self.event_handles.get(event_handle) {
                 Some(&handle) => RegistryChange::CodeLensChanged { handle },
+                None => RegistryChange::None,
+            },
+            MainThreadCall::EmitFoldingRangeEvent { event_handle } => match self.event_handles.get(event_handle) {
+                Some(&handle) => RegistryChange::FoldingRangeChanged { handle },
+                None => RegistryChange::None,
+            },
+            MainThreadCall::EmitDocumentSemanticTokensEvent { event_handle } => match self.event_handles.get(event_handle) {
+                Some(&handle) => RegistryChange::SemanticTokensChanged { handle },
                 None => RegistryChange::None,
             },
             MainThreadCall::EmitInlineCompletionsChange { handle } => {
@@ -151,7 +213,7 @@ impl Registry {
                 }
                 match self.providers.remove(handle) {
                     Some(p) => {
-                        if let ProviderKind::CodeLens { event_handle: Some(e) } = p.kind {
+                        if let Some(e) = p.kind.event_handle() {
                             self.event_handles.remove(&e);
                         }
                         RegistryChange::Unregistered { handle: *handle, kind: p.kind.tag() }
@@ -219,6 +281,26 @@ mod tests {
     }
 
     #[test]
+    fn fr_l31_13_language_features_register_match_and_unregister() {
+        let mut r = Registry::new();
+        let u = UriComponents::remote("h", "/w/a.rs");
+        let feature = LanguageFeature::Completion { trigger_characters: vec![".".into()], supports_resolve: true };
+        assert_eq!(
+            r.apply(&MainThreadCall::RegisterLanguageFeature { handle: 9, selector: sel(json!([{"language": "rust"}])), feature: feature.clone() }),
+            RegistryChange::Registered { handle: 9, kind: KindTag::Completion }
+        );
+        r.apply(&MainThreadCall::RegisterLanguageFeature { handle: 10, selector: sel(json!([{"language": "rust"}])), feature: LanguageFeature::Definition });
+        let found = r.matching(KindTag::Completion, &u, "rust");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind, ProviderKind::Language(feature));
+        assert_eq!(r.matching(KindTag::Definition, &u, "rust").len(), 1);
+        assert!(r.matching(KindTag::Completion, &u, "json").is_empty());
+        assert!(r.matching(KindTag::Rename, &u, "rust").is_empty());
+        assert_eq!(r.apply(&MainThreadCall::Unregister { handle: 9 }), RegistryChange::Unregistered { handle: 9, kind: KindTag::Completion });
+        assert!(r.matching(KindTag::Completion, &u, "rust").is_empty());
+    }
+
+    #[test]
     fn code_lens_event_handles_and_unregister() {
         let mut r = Registry::new();
         r.apply(&MainThreadCall::RegisterCodeLensSupport { handle: 7, selector: vec![], event_handle: Some(8) });
@@ -269,5 +351,56 @@ mod tests {
         assert!(r.has_command("__vsc123"));
         r.apply(&MainThreadCall::UnregisterCommand { id: "__vsc123".into() });
         assert!(!r.has_command("__vsc123"));
+    }
+
+    #[test]
+    fn fr_e6_folding_and_semantic_tokens_providers_and_events() {
+        let mut r = Registry::new();
+        let u = UriComponents::remote("h", "/w/src/lib.rs");
+        assert_eq!(
+            r.apply(&MainThreadCall::RegisterFoldingRangeProvider {
+                handle: 10,
+                selector: sel(json!([{"language": "rust"}])),
+                event_handle: Some(11),
+            }),
+            RegistryChange::Registered { handle: 10, kind: KindTag::FoldingRange }
+        );
+        assert_eq!(r.matching(KindTag::FoldingRange, &u, "rust").len(), 1);
+        assert_eq!(
+            r.apply(&MainThreadCall::EmitFoldingRangeEvent { event_handle: 11 }),
+            RegistryChange::FoldingRangeChanged { handle: 10 }
+        );
+
+        let legend = SemanticTokensLegend {
+            token_types: vec!["namespace".into(), "type".into(), "function".into()],
+            token_modifiers: vec!["declaration".into()],
+        };
+        assert_eq!(
+            r.apply(&MainThreadCall::RegisterDocumentSemanticTokensProvider {
+                handle: 20,
+                selector: sel(json!([{"language": "rust"}])),
+                legend: legend.clone(),
+                event_handle: Some(21),
+            }),
+            RegistryChange::Registered { handle: 20, kind: KindTag::DocumentSemanticTokens }
+        );
+        let matched = r.matching(KindTag::DocumentSemanticTokens, &u, "rust");
+        assert_eq!(matched.len(), 1);
+        assert_eq!(
+            matched[0].kind,
+            ProviderKind::DocumentSemanticTokens { legend, event_handle: Some(21) }
+        );
+        assert_eq!(
+            r.apply(&MainThreadCall::EmitDocumentSemanticTokensEvent { event_handle: 21 }),
+            RegistryChange::SemanticTokensChanged { handle: 20 }
+        );
+        assert_eq!(
+            r.apply(&MainThreadCall::Unregister { handle: 20 }),
+            RegistryChange::Unregistered { handle: 20, kind: KindTag::DocumentSemanticTokens }
+        );
+        assert_eq!(
+            r.apply(&MainThreadCall::EmitDocumentSemanticTokensEvent { event_handle: 21 }),
+            RegistryChange::None
+        );
     }
 }

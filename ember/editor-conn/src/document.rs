@@ -314,10 +314,12 @@ impl DocumentMirror {
         })
     }
 
-    /// Change the EOL sequence (`model.setEOL`): no content changes, `isEolChange`.
+    /// Change the EOL sequence (`model.pushEOL`): no content changes, `isEolChange`, and the
+    /// document dirty (the text to save changed).
     pub fn set_eol(&mut self, eol: &str) -> ModelContentChangedEvent {
         self.eol = eol.to_owned();
         self.version += 1;
+        self.dirty = true;
         ModelContentChangedEvent {
             changes: Vec::new(),
             eol: self.eol.clone(),
@@ -332,6 +334,12 @@ impl DocumentMirror {
 
     pub fn mark_saved(&mut self) {
         self.dirty = false;
+    }
+
+    /// The content is not what is on disk (a buffer restored after a reconnect, `ember-editor`
+    /// `OpenDocument::restore`). `added_data` then announces the document as dirty.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
     }
 }
 
@@ -578,5 +586,21 @@ mod tests {
         assert_eq!(ev.changes[0].range, r(1, 1, 2, 3));
         assert_eq!((ev.changes[0].range_offset, ev.changes[0].range_length), (0, 4));
         assert_eq!(d.text(), "z");
+    }
+
+    // FR-L31.7: changing the EOL is a content event with no changes, one version later, dirty.
+    #[test]
+    fn fr_l31_7_set_eol_is_an_eol_change_and_makes_the_document_dirty() {
+        let mut d = doc("a\nb").with_version(3);
+        assert!(!d.is_dirty());
+        let ev = d.set_eol("\r\n");
+        assert!(ev.is_eol_change && !ev.is_flush);
+        assert!(ev.changes.is_empty());
+        assert_eq!((ev.eol.as_str(), ev.version_id), ("\r\n", 4));
+        assert!(d.is_dirty());
+        assert_eq!(d.text(), "a\r\nb");
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["isEolChange"], true);
+        assert_eq!(json["eol"], "\r\n");
     }
 }

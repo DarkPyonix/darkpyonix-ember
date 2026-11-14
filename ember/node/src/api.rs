@@ -1,52 +1,76 @@
-//! The daemon's HTTP/WebSocket API. All routes are under `/v1`; every route except
-//! `/v1/health` requires `Authorization: Bearer <EMBER_NODE_TOKEN>`.
+//! The daemon's HTTP/WebSocket API. Routes carry no version prefix; every route except
+//! `/health` requires `Authorization: Bearer <EMBER_NODE_TOKEN>`.
 //!
 //! | Method | Path | Body → Response |
 //! | ------ | ---- | --------------- |
-//! | GET  | `/v1/health` | → [`Health`] (no auth) |
-//! | GET  | `/v1/env` | → [`EnvInfo`] |
-//! | POST | `/v1/fs/stat` | [`PathRequest`] → [`Stat`] |
-//! | POST | `/v1/fs/read` | [`ReadRequest`] → [`ReadResponse`] |
-//! | POST | `/v1/fs/write` | [`WriteRequest`] → [`WriteResponse`] (412 on precondition) |
-//! | POST | `/v1/fs/list` | [`PathRequest`] → [`ListResponse`] |
-//! | POST | `/v1/fs/lstat` | [`PathRequest`] → [`Stat`] (final symlink not followed) |
-//! | POST | `/v1/fs/readlink` | [`PathRequest`] → [`ReadlinkResponse`] |
-//! | POST | `/v1/fs/symlink` | [`SymlinkRequest`] → [`Stat`] |
-//! | POST | `/v1/fs/mkdir` | [`MkdirRequest`] → [`Stat`] |
-//! | POST | `/v1/fs/remove` | [`RemoveRequest`] → 204 |
-//! | POST | `/v1/fs/rename` | [`RenameRequest`] → 204 |
-//! | POST | `/v1/fs/setattr` | [`SetAttrRequest`] → [`Stat`] (chmod / truncate / utimes) |
-//! | POST | `/v1/fs/pwrite` | [`PwriteRequest`] → [`Stat`] (in-place positional write) |
-//! | POST | `/v1/fs/glob` | [`GlobRequest`] → [`GlobResponse`] |
-//! | POST | `/v1/fs/grep` | [`GrepRequest`] → [`GrepResponse`] |
-//! | GET (WS) | `/v1/exec` | send [`ExecRequest`], then [`ExecInput`]s; receive [`ExecEvent`]s |
-//! | GET (WS) | `/v1/exec-server` | raw byte relay to `codex exec-server --listen stdio` ([`crate::exec_server`]) |
-//! | GET (WS) | `/v1/egress` | one proxied TCP connection as a raw SOCKS5 byte stream ([`crate::egress`]; 403 when disabled) |
-//! | POST | `/v1/jobs` | [`JobRequest`] → [`JobInfo`] |
-//! | GET  | `/v1/jobs` | → `[JobInfo]` |
-//! | GET  | `/v1/jobs/{id}?tail=<bytes>` | → [`JobDetail`] |
-//! | POST | `/v1/jobs/{id}/kill` | [`KillRequest`] → 204 |
-//! | DELETE | `/v1/jobs/{id}` | → 204 (409 while running) |
-//! | GET (WS) | `/v1/events?after=<seq>` | receive [`NodeEvent`]s |
-//! | POST | `/v1/terms` | [`TermCreateRequest`] → [`TermCreateResponse`] (201 created, 200 key matched) |
-//! | GET  | `/v1/terms?project=&origin=&running=` | → `[TermInfo]` |
-//! | GET  | `/v1/terms/{id}` | → [`TermInfo`] |
-//! | GET  | `/v1/terms/{id}/snapshot` | → [`TermSnapshot`] |
-//! | GET (WS) | `/v1/terms/{id}/attach` | send [`TermHello`], then [`TermInput`]s; receive [`TermEvent`]s |
-//! | POST | `/v1/terms/{id}/control` | [`TermControlRequest`] → 204 |
-//! | POST | `/v1/terms/{id}/kill` | [`KillRequest`] → 204 (default SIGHUP, then SIGKILL) |
-//! | DELETE | `/v1/terms/{id}` | → 204 (409 while running) |
+//! | GET  | `/health` | → [`Health`] (no auth) |
+//! | GET  | `/env` | → [`EnvInfo`] |
+//! | POST | `/fs/stat` | [`PathRequest`] → [`Stat`] |
+//! | POST | `/fs/read` | [`ReadRequest`] → [`ReadResponse`] |
+//! | POST | `/fs/write` | [`WriteRequest`] → [`WriteResponse`] (412 on precondition) |
+//! | POST | `/fs/list` | [`PathRequest`] → [`ListResponse`] |
+//! | POST | `/fs/lstat` | [`PathRequest`] → [`Stat`] (final symlink not followed) |
+//! | POST | `/fs/readlink` | [`PathRequest`] → [`ReadlinkResponse`] |
+//! | POST | `/fs/symlink` | [`SymlinkRequest`] → [`Stat`] |
+//! | POST | `/fs/mkdir` | [`MkdirRequest`] → [`Stat`] |
+//! | POST | `/fs/remove` | [`RemoveRequest`] → 204 |
+//! | POST | `/fs/rename` | [`RenameRequest`] → 204 |
+//! | POST | `/fs/setattr` | [`SetAttrRequest`] → [`Stat`] (chmod / truncate / utimes) |
+//! | POST | `/fs/pwrite` | [`PwriteRequest`] → [`Stat`] (in-place positional write) |
+//! | POST | `/fs/glob` | [`GlobRequest`] → [`GlobResponse`] |
+//! | POST | `/fs/grep` | [`GrepRequest`] → [`GrepResponse`] |
+//! | POST | `/git/blame` | [`git_blame::GitBlameRequest`] → [`git_blame::GitBlameResponse`] (FR-L31.8: one line's last commit, `commit: null` when none holds it; 400 for a path outside the work tree or a line past the end; 504 `timeout` after 10 s) |
+//! | POST | `/git/log` | [`git_log::GitLogRequest`] → [`git_log::GitLogResponse`] |
+//! | POST | `/git/commit/show` | [`git_commit::GitCommitShowRequest`] → [`git_commit::GitCommitShowResponse`] (FR-G14: one commit with its changed files; 400 for a bad sha, 404 `not_found` for an unknown one) |
+//! | POST | `/git/revert`, `/git/cherry-pick` | [`git_commit::GitCommitActionRequest`] → [`git_commit::GitCommitActionResponse`] (FR-G15; need `confirm: true`; 409 for a dirty tree or a conflict, which is aborted) |
+//! | POST | `/git/branches` | [`GitRepoRequest`] → [`git_branches::GitBranchesResponse`] (FR-G9: local branches with upstream ahead/behind, last commit, default and worktree) |
+//! | POST | `/git/github` | [`git_github::GitGithubRequest`] → [`git_github::GitGithubResponse`] (FR-G13, through `gh`; each failed call nulls its own fields; 409 when gh is missing) |
+//! | POST | `/git/prs` | [`git_prs::GitPrsRequest`] → [`git_prs::GitPrsResponse`] (FR-G8, through `gh pr list`; 409 when gh is missing, not logged in or the repository has no GitHub remote) |
+//! | POST | `/git/pr`, `/git/pr/review`, `/git/pr/merge`, `/git/pr/create` | [`git_prs::GitPrRef`], [`git_prs::GitPrReviewRequest`], [`git_prs::GitPrMergeRequest`], [`git_prs::GitPrCreateRequest`] (FR-G10 to FR-G12, through `gh`; changing calls need `confirm: true`, merge answers 409 with the gate reason when closed) |
+//! | POST | `/git/status` | [`GitRepoRequest`] → [`GitStatus`] (404 `not_a_repo`; 409 for a bare repository or dubious ownership) |
+//! | POST | `/git/toplevel` | [`GitRepoRequest`] → [`GitToplevel`] (FR-L31.9: the work tree root and the directory's path below it; `diff`, `stage`, `unstage` and `apply` run at that root) |
+//! | POST | `/git/diff` | [`GitDiffRequest`] → [`GitDiff`] (`include_untracked` adds all untracked files; 413 `too_large` past 8 MiB of git output) |
+//! | POST | `/git/stage`, `/git/unstage` | [`GitPathsRequest`] → 204 |
+//! | POST | `/git/apply` | [`GitApplyRequest`] → 204 (patch to the index; 409 if it does not apply) |
+//! | POST | `/git/commit` | [`GitCommitRequest`] → [`GitCommitResponse`] (409 on an empty index) |
+//! | POST | `/git/checkout` | [`GitCheckoutRequest`] → 204 |
+//! | POST | `/git/branch` | [`GitBranchRequest`] → 204 (creates and checks out) |
+//! | POST | `/git/fetch`, `/git/pull`, `/git/push` | [`GitRemoteRequest`] → [`GitOutput`] (409 with a Korean message and git's text; 400 for a remote that is not in `git remote`; 504 `timeout` after 60 s; pull is fast-forward only; none of them holds the write lock across the network) |
+//! | POST | `/git/merge` | [`GitRepoRequest`] → [`git_merge::GitMergeState`] (FR-G16: is a merge in progress, from, into, conflict count, `can_commit`) |
+//! | POST | `/git/merge/abort`, `/git/merge/commit` | [`git_merge::GitMergeActionRequest`] → [`git_merge::GitMergeAborted`] or [`git_commit::GitCommitActionResponse`] (FR-G17; need `confirm: true`; 409 without a merge, and for commit with conflicts left) |
+//! | POST | `/git/stash/{list,push,apply,pop,drop}` | FR-G6 stash list and operations (409 on conflicts) |
+//! | POST | `/git/conflict`, `/git/resolve` | conflict blocks and resolution (FR-G7) |
+//! | POST | `/git/conflicts` | [`GitRepoRequest`] → [`GitConflicts`] |
+//! | GET (WS) | `/exec` | send [`ExecRequest`], then [`ExecInput`]s; receive [`ExecEvent`]s |
+//! | GET (WS) | `/exec-server` | raw byte relay to `codex exec-server --listen stdio` ([`crate::exec_server`]) |
+//! | GET (WS) | `/egress` | one proxied TCP connection as a raw SOCKS5 byte stream ([`crate::egress`]; 403 when disabled) |
+//! | POST | `/jobs` | [`JobRequest`] → [`JobInfo`] |
+//! | GET  | `/jobs` | → `[JobInfo]` |
+//! | GET  | `/jobs/{id}?tail=<bytes>` | → [`JobDetail`] |
+//! | POST | `/jobs/{id}/kill` | [`KillRequest`] → 204 |
+//! | DELETE | `/jobs/{id}` | → 204 (409 while running) |
+//! | GET (WS) | `/events?after=<seq>` | receive [`NodeEvent`]s |
+//! | GET  | `/ports` | → [`PortsResponse`] (FR-P7: listening TCP ports of processes under node-owned terms and jobs) |
+//! | POST | `/terms` | [`TermCreateRequest`] → [`TermCreateResponse`] (201 created, 200 key matched) |
+//! | GET  | `/terms?project=&origin=&running=` | → `[TermInfo]` |
+//! | GET  | `/terms/{id}` | → [`TermInfo`] |
+//! | GET  | `/terms/{id}/snapshot` | → [`TermSnapshot`] |
+//! | GET (WS) | `/terms/{id}/attach` | send [`TermHello`], then [`TermInput`]s; receive [`TermEvent`]s |
+//! | POST | `/terms/{id}/control` | [`TermControlRequest`] → 204 |
+//! | POST | `/terms/{id}/kill` | [`KillRequest`] → 204 (default SIGHUP, then SIGKILL) |
+//! | DELETE | `/terms/{id}` | → 204 (409 while running) |
+//! | GET, POST | `/transfers`, `/transfers/offers`, `/transfers/offers/{id}/accept`, `/transfers/offers/{id}/decline`, `/transfers/{id}/chunks`, `/transfers/{id}/resume-offset/{file}`, `/transfers/{id}/complete`, `/pause`, `/resume`, `/cancel`, `/transfers/history` (GET, DELETE) | the file receiver ([`crate::transfers`], FR-F13): the server's `/api/transfers*` bodies; 507 `no_space` (FR-F16); 409 without a state folder |
 //!
-//! Closing the `/v1/exec` socket kills the command's process group; jobs are unaffected by any
-//! connection. Persistent terminal sessions (`/v1/terms`, [`crate::term`]) are owned by the
+//! Closing the `/exec` socket kills the command's process group; jobs are unaffected by any
+//! connection. Persistent terminal sessions (`/terms`, [`crate::term`]) are owned by the
 //! daemon: closing an attach socket only detaches. Errors are [`ErrorBody`] with a matching
 //! status code; file errors also carry the portable `errno` name (409 for `EEXIST` /
 //! `ENOTEMPTY`, 400 for `ENOTDIR` / `EISDIR` / `EINVAL`).
 //!
 //! The router is transport-agnostic: [`serve`] accepts any [`axum::serve::Listener`], so the same
 //! API runs over TCP and over the peer-to-peer transport ([`crate::transport`], service
-//! `ember-node/1`, peer allow-list in front). The remote browser's SOCKS5 egress (FR-R1) is the
-//! `/v1/egress` route, so it rides the same authenticated connection; an optional plain SOCKS5
+//! `ember-node`, peer allow-list in front). The remote browser's SOCKS5 egress (FR-R1) is the
+//! `/egress` route, so it rides the same authenticated connection; an optional plain SOCKS5
 //! listener is in [`crate::egress`].
 
 use std::sync::Arc;
@@ -65,6 +89,11 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::config::NodeConfig;
 use crate::exec::{self, kill_group};
 use crate::fs::{self, FsError};
+use crate::git::{self, *};
+use crate::git::git_commit;
+use crate::git::git_merge;
+use crate::git::git_stash::{self, GitStashEntry, GitStashIndexRequest, GitStashOperation, GitStashPushRequest};
+use crate::git_conflict::{self, GitConflict, GitConflictRequest, GitResolveRequest};
 use crate::jobs::{Jobs, Removal};
 use crate::policy::{PathPolicy, PolicyError};
 use crate::proto::*;
@@ -76,6 +105,8 @@ struct Inner {
     jobs: Arc<Jobs>,
     terms: Arc<Terms>,
     egress: Arc<crate::egress::EgressPolicy>,
+    /// The file receiver (`FR-F13`).
+    transfers: Arc<crate::transfers::Receiver>,
     /// Serialises writes so a hash precondition and the rename that follows it are atomic with
     /// respect to other writes through this daemon.
     write_lock: tokio::sync::Mutex<()>,
@@ -90,12 +121,18 @@ impl Node {
         anyhow::ensure!(!config.token.is_empty(), "token must not be empty");
         let jobs = Jobs::new();
         let terms = Terms::new(config.state_dir.as_deref(), config.pty_keeper.clone(), jobs.clone());
+        let transfers = Arc::new(crate::transfers::Receiver::open(
+            config.state_dir.as_deref(),
+            config.received_dir.as_deref(),
+            config.receive,
+        )?);
         Ok(Self(Arc::new(Inner {
             token: config.token,
-            policy: PathPolicy::new(config.roots)?,
+            policy: PathPolicy::with_denied(config.roots, config.denied)?,
             jobs,
             terms,
             egress: Arc::new(config.egress),
+            transfers,
             write_lock: tokio::sync::Mutex::new(()),
         })))
     }
@@ -110,6 +147,10 @@ impl Node {
 
     pub fn policy(&self) -> &PathPolicy {
         &self.0.policy
+    }
+
+    pub fn transfers(&self) -> &Arc<crate::transfers::Receiver> {
+        &self.0.transfers
     }
 
     pub fn egress_policy(&self) -> &Arc<crate::egress::EgressPolicy> {
@@ -128,37 +169,82 @@ where
 
 pub fn router(node: Node) -> Router {
     let authed = Router::new()
-        .route("/v1/env", get(env))
-        .route("/v1/fs/stat", post(stat))
-        .route("/v1/fs/read", post(read))
-        .route("/v1/fs/write", post(write))
-        .route("/v1/fs/list", post(list))
-        .route("/v1/fs/lstat", post(lstat))
-        .route("/v1/fs/readlink", post(readlink))
-        .route("/v1/fs/symlink", post(symlink))
-        .route("/v1/fs/mkdir", post(mkdir))
-        .route("/v1/fs/remove", post(remove))
-        .route("/v1/fs/rename", post(rename))
-        .route("/v1/fs/setattr", post(setattr))
-        .route("/v1/fs/pwrite", post(pwrite))
-        .route("/v1/fs/glob", post(glob))
-        .route("/v1/fs/grep", post(grep))
-        .route("/v1/exec", get(exec_ws))
-        .route("/v1/exec-server", get(crate::exec_server::ws))
-        .route("/v1/egress", get(crate::egress::ws))
-        .route("/v1/jobs", get(list_jobs).post(start_job))
-        .route("/v1/jobs/{id}", get(get_job).delete(remove_job))
-        .route("/v1/jobs/{id}/kill", post(kill_job))
-        .route("/v1/events", get(events_ws))
-        .route("/v1/terms", get(list_terms).post(create_term))
-        .route("/v1/terms/{id}", get(get_term).delete(remove_term))
-        .route("/v1/terms/{id}/snapshot", get(term_snapshot))
-        .route("/v1/terms/{id}/attach", get(term_attach_ws))
-        .route("/v1/terms/{id}/control", post(term_control))
-        .route("/v1/terms/{id}/kill", post(kill_term))
+        .route("/env", get(env))
+        .route("/metrics", get(metrics))
+        .route("/fs/stat", post(stat))
+        .route("/fs/read", post(read))
+        .route("/fs/write", post(write))
+        .route("/fs/list", post(list))
+        .route("/fs/lstat", post(lstat))
+        .route("/fs/readlink", post(readlink))
+        .route("/fs/symlink", post(symlink))
+        .route("/fs/mkdir", post(mkdir))
+        .route("/fs/remove", post(remove))
+        .route("/fs/rename", post(rename))
+        .route("/fs/setattr", post(setattr))
+        .route("/fs/pwrite", post(pwrite))
+        .route("/fs/glob", post(glob))
+        .route("/fs/grep", post(grep))
+        // FR-G5: history route.
+        .route("/git/log", post(git_log_handler))
+        .route("/git/blame", post(git_blame_handler))
+        .route("/git/commit/show", post(git_commit_show_handler))
+        .route("/git/revert", post(git_revert_handler))
+        .route("/git/cherry-pick", post(git_cherry_pick_handler))
+        .route("/git/merge", post(git_merge_state_handler))
+        .route("/git/merge/abort", post(git_merge_abort_handler))
+        .route("/git/merge/commit", post(git_merge_commit_handler))
+        .route("/git/branches", post(git_branches_handler))
+        .route("/git/prs", post(git_prs_handler))
+        .route("/git/github", post(git_github_handler))
+        .route("/git/pr", post(git_pr_handler))
+        .route("/git/pr/review", post(git_pr_review_handler))
+        .route("/git/pr/merge", post(git_pr_merge_handler))
+        .route("/git/pr/create", post(git_pr_create_handler))
+        // End FR-G5.
+
+        .route("/git/status", post(git_status))
+        .route("/git/toplevel", post(git_toplevel))
+        .route("/git/diff", post(git_diff))
+        .route("/git/stage", post(git_stage))
+        .route("/git/unstage", post(git_unstage))
+        .route("/git/apply", post(git_apply))
+        .route("/git/commit", post(git_commit))
+        .route("/git/checkout", post(git_checkout))
+        .route("/git/branch", post(git_branch))
+        .route("/git/fetch", post(git_fetch))
+        .route("/git/pull", post(git_pull))
+        .route("/git/push", post(git_push))
+        .route("/git/conflicts", post(git_conflicts))
+        // FR-G6 stash routes.
+        .route("/git/stash/list", post(git_stash_list))
+        .route("/git/stash/push", post(git_stash_push))
+        .route("/git/stash/apply", post(git_stash_apply))
+        .route("/git/stash/pop", post(git_stash_pop))
+        .route("/git/stash/drop", post(git_stash_drop))
+        // End FR-G6 stash routes.
+        // FR-G7 routes begin.
+        .route("/git/conflict", post(git_conflict))
+        .route("/git/resolve", post(git_resolve))
+        // FR-G7 routes end.
+        .route("/exec", get(exec_ws))
+        .route("/exec-server", get(crate::exec_server::ws))
+        .route("/egress", get(crate::egress::ws))
+        .route("/jobs", get(list_jobs).post(start_job))
+        .route("/jobs/{id}", get(get_job).delete(remove_job))
+        .route("/jobs/{id}/kill", post(kill_job))
+        .route("/events", get(events_ws))
+        .route("/ports", get(list_ports))
+        .route("/terms", get(list_terms).post(create_term))
+        .route("/terms/{id}", get(get_term).delete(remove_term))
+        .route("/terms/{id}/snapshot", get(term_snapshot))
+        .route("/terms/{id}/attach", get(term_attach_ws))
+        .route("/terms/{id}/control", post(term_control))
+        .route("/terms/{id}/kill", post(kill_term))
+        .merge(transfer_routes())
         .route_layer(middleware::from_fn_with_state(node.clone(), auth));
     Router::new()
-        .route("/v1/health", get(health))
+        .route("/health", get(health))
         .merge(authed)
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(node)
@@ -214,6 +300,18 @@ impl From<PolicyError> for ApiError {
             PolicyError::Io(_, io) if io.kind() == std::io::ErrorKind::NotFound => {
                 ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, e.to_string())
             }
+            // A NUL byte or similar malformed path is the caller's error, not the node's.
+            PolicyError::Io(_, io) if io.kind() == std::io::ErrorKind::InvalidInput => {
+                ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, e.to_string())
+            }
+            // Linux canonicalize answers ENOTDIR for a trailing slash after a file (macOS drops
+            // the slash, handled in `resolve_existing`); like ENAMETOOLONG and ELOOP it is the
+            // caller's path, not the node's fault.
+            PolicyError::Io(_, io)
+                if matches!(crate::fs::io_errno(io), Some("ENOTDIR" | "EINVAL" | "ENAMETOOLONG" | "ELOOP")) =>
+            {
+                ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, e.to_string())
+            }
             PolicyError::Io(..) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, e.to_string()),
         }
     }
@@ -247,6 +345,21 @@ impl From<FsError> for ApiError {
     }
 }
 
+impl From<GitError> for ApiError {
+    fn from(e: GitError) -> Self {
+        match e {
+            GitError::Policy(p) => p.into(),
+            GitError::NotARepo(m) => ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotARepo, m),
+            GitError::Bad(m) => ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, m),
+            GitError::Conflict(m) => ApiError::new(StatusCode::CONFLICT, ErrorCode::Conflict, m),
+            GitError::NotFound(m) => ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, m),
+            GitError::Internal(m) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, m),
+            GitError::Timeout(m) => ApiError::new(StatusCode::GATEWAY_TIMEOUT, ErrorCode::Timeout, m),
+            GitError::TooLarge(m) => ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, ErrorCode::TooLarge, m),
+        }
+    }
+}
+
 type ApiResult<T> = Result<Json<T>, ApiError>;
 
 /// Run a blocking file operation on the blocking pool.
@@ -262,12 +375,135 @@ async fn blocking<T: Send + 'static>(
 // ---------------------------------------------------------------------------------------------
 // Handlers
 
+// ---------------------------------------------------------------------------------------------
+// File receiver (FR-F13 to FR-F16)
+
+impl From<crate::transfers::RecvError> for ApiError {
+    fn from(e: crate::transfers::RecvError) -> Self {
+        use crate::transfers::RecvError as E;
+        let (status, code) = match &e {
+            E::NotFound(_) => (StatusCode::NOT_FOUND, ErrorCode::NotFound),
+            E::BadRequest(_) => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
+            E::Forbidden(_) => (StatusCode::FORBIDDEN, ErrorCode::Forbidden),
+            E::TooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, ErrorCode::TooLarge),
+            E::Conflict(_) => (StatusCode::CONFLICT, ErrorCode::Conflict),
+            E::NoSpace(_) => (StatusCode::INSUFFICIENT_STORAGE, ErrorCode::NoSpace),
+            E::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal),
+        };
+        ApiError::new(status, code, e.to_string())
+    }
+}
+
+fn transfer_routes() -> Router<Node> {
+    Router::new()
+        .route("/transfers", get(tr_snapshot))
+        .route("/transfers/offers", post(tr_offer))
+        .route("/transfers/offers/{id}/accept", post(tr_accept))
+        .route("/transfers/offers/{id}/decline", post(tr_decline))
+        .route("/transfers/{id}/chunks", post(tr_chunk))
+        .route("/transfers/{id}/resume-offset/{file}", get(tr_resume_offset))
+        .route("/transfers/{id}/complete", post(tr_complete))
+        .route("/transfers/{id}/pause", post(tr_pause))
+        .route("/transfers/{id}/resume", post(tr_resume))
+        .route("/transfers/{id}/cancel", post(tr_cancel))
+        .route("/transfers/history", get(tr_history).delete(tr_clear_history))
+}
+
+/// Runs a receiver call off the async threads: it writes and hashes files.
+async fn on_receiver<T, F>(node: &Node, f: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce(&crate::transfers::Receiver) -> Result<T, crate::transfers::RecvError> + Send + 'static,
+{
+    let rx = node.transfers().clone();
+    tokio::task::spawn_blocking(move || f(&rx))
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, e.to_string()))?
+        .map_err(ApiError::from)
+}
+
+async fn tr_snapshot(State(node): State<Node>) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(on_receiver(&node, |r| r.snapshot()).await?))
+}
+
+async fn tr_offer(
+    State(node): State<Node>,
+    Json(body): Json<crate::transfers::OfferBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    Ok((StatusCode::CREATED, Json(on_receiver(&node, move |r| r.offer(body)).await?)))
+}
+
+async fn tr_accept(State(node): State<Node>, Path(id): Path<String>) -> Result<Json<crate::transfers::Transfer>, ApiError> {
+    Ok(Json(on_receiver(&node, move |r| r.accept(&id)).await?))
+}
+
+async fn tr_decline(
+    State(node): State<Node>,
+    Path(id): Path<String>,
+) -> Result<Json<ember_transfer::store::HistoryRecord>, ApiError> {
+    Ok(Json(on_receiver(&node, move |r| r.decline(&id)).await?))
+}
+
+async fn tr_chunk(
+    State(node): State<Node>,
+    Path(id): Path<String>,
+    Json(body): Json<crate::transfers::ChunkBody>,
+) -> Result<Json<crate::transfers::Transfer>, ApiError> {
+    Ok(Json(on_receiver(&node, move |r| r.chunk(&id, &body)).await?))
+}
+
+async fn tr_resume_offset(
+    State(node): State<Node>,
+    Path((id, file)): Path<(String, usize)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let tid = id.clone();
+    let offset = on_receiver(&node, move |r| r.resume_offset(&tid, file)).await?;
+    Ok(Json(serde_json::json!({ "id": id, "file": file, "offset": offset })))
+}
+
+async fn tr_complete(State(node): State<Node>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+    let stored = on_receiver(&node, move |r| r.complete(&id)).await?;
+    Ok(Json(serde_json::json!({ "stored": stored })))
+}
+
+async fn tr_pause(State(node): State<Node>, Path(id): Path<String>) -> Result<Json<crate::transfers::Transfer>, ApiError> {
+    Ok(Json(on_receiver(&node, move |r| r.pause(&id)).await?))
+}
+
+async fn tr_resume(State(node): State<Node>, Path(id): Path<String>) -> Result<Json<crate::transfers::Transfer>, ApiError> {
+    Ok(Json(on_receiver(&node, move |r| r.resume(&id)).await?))
+}
+
+async fn tr_cancel(
+    State(node): State<Node>,
+    Path(id): Path<String>,
+) -> Result<Json<ember_transfer::store::HistoryRecord>, ApiError> {
+    Ok(Json(on_receiver(&node, move |r| r.cancel(&id)).await?))
+}
+
+async fn tr_history(State(node): State<Node>) -> Result<Json<Vec<ember_transfer::store::HistoryRecord>>, ApiError> {
+    Ok(Json(on_receiver(&node, |r| r.history()).await?))
+}
+
+async fn tr_clear_history(State(node): State<Node>) -> Result<Json<serde_json::Value>, ApiError> {
+    on_receiver(&node, |r| r.clear_history()).await?;
+    Ok(Json(serde_json::json!({ "cleared": true })))
+}
+
 async fn health() -> Json<Health> {
-    Json(Health { ok: true, version: env!("CARGO_PKG_VERSION").into(), protocol: PROTOCOL_VERSION })
+    Json(Health { ok: true, version: env!("CARGO_PKG_VERSION").into() })
 }
 
 async fn env(State(n): State<Node>) -> Json<EnvInfo> {
     Json(crate::envinfo::describe(n.0.policy.roots().to_vec()).await)
+}
+
+async fn metrics(Query(q): Query<MetricsQuery>) -> ApiResult<MetricsSample> {
+    let top = q.top.unwrap_or(crate::metrics::DEFAULT_TOP).min(crate::metrics::MAX_TOP);
+    match tokio::task::spawn_blocking(move || crate::metrics::sample(top)).await {
+        Ok(s) => Ok(Json(s)),
+        Err(e) => Err(ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, e.to_string())),
+    }
 }
 
 async fn stat(State(n): State<Node>, Json(r): Json<PathRequest>) -> ApiResult<Stat> {
@@ -321,6 +557,162 @@ async fn rename(State(n): State<Node>, Json(r): Json<RenameRequest>) -> Result<S
     let _guard = n.0.write_lock.lock().await;
     let n2 = n.clone();
     blocking(move || fs::rename(&n2.0.policy, &r)).await.map(|_| StatusCode::NO_CONTENT)
+}
+
+// Git handlers: each resolves the repository through the path policy, then runs the `git` CLI
+// ([`crate::git`]). Operations that change the index or work tree take the write lock like the file writes do;
+// fetch, push and the network half of pull do not, because they can take a long time.
+
+// FR-G5: history handler.
+async fn git_log_handler(State(n): State<Node>, Json(r): Json<git_log::GitLogRequest>) -> ApiResult<git_log::GitLogResponse> {
+    Ok(Json(git_log::log(&n.0.policy, &r).await?))
+}
+// End FR-G5.
+
+// FR-L31.8: blame of one line (reads only, holds no lock).
+async fn git_blame_handler(State(n): State<Node>, Json(r): Json<git_blame::GitBlameRequest>) -> ApiResult<git_blame::GitBlameResponse> {
+    Ok(Json(git_blame::blame(&n.0.policy, &r).await?))
+}
+
+// FR-G9: branch list handler.
+async fn git_branches_handler(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<git_branches::GitBranchesResponse> {
+    Ok(Json(git_branches::list(&n.0.policy, &r).await?))
+}
+// End FR-G9.
+
+// FR-G8: pull request list handler (runs `gh`, holds no lock).
+async fn git_prs_handler(State(n): State<Node>, Json(r): Json<git_prs::GitPrsRequest>) -> ApiResult<git_prs::GitPrsResponse> {
+    Ok(Json(git_prs::list(&n.0.policy, &r).await?))
+}
+// End FR-G8.
+
+// FR-G13: GitHub card summary handler (runs `gh`, holds no lock).
+async fn git_github_handler(State(n): State<Node>, Json(r): Json<git_github::GitGithubRequest>) -> ApiResult<git_github::GitGithubResponse> {
+    Ok(Json(git_github::summarize(&n.0.policy, &r).await?))
+}
+// End FR-G13.
+// FR-G10 to FR-G12: pull request detail, review, merge and create (run `gh`, hold no lock).
+async fn git_pr_handler(State(n): State<Node>, Json(r): Json<git_prs::GitPrRef>) -> ApiResult<git_prs::GitPrDetail> {
+    Ok(Json(git_prs::detail(&n.0.policy, &r).await?))
+}
+async fn git_pr_review_handler(State(n): State<Node>, Json(r): Json<git_prs::GitPrReviewRequest>) -> ApiResult<git_prs::GitPrReviewResponse> {
+    Ok(Json(git_prs::review(&n.0.policy, &r).await?))
+}
+async fn git_pr_merge_handler(State(n): State<Node>, Json(r): Json<git_prs::GitPrMergeRequest>) -> ApiResult<git_prs::GitPrMergeResponse> {
+    Ok(Json(git_prs::merge(&n.0.policy, &r).await?))
+}
+async fn git_pr_create_handler(State(n): State<Node>, Json(r): Json<git_prs::GitPrCreateRequest>) -> ApiResult<git_prs::GitPrCreateResponse> {
+    Ok(Json(git_prs::create(&n.0.policy, &r).await?))
+}
+// End FR-G10 to FR-G12.
+
+async fn git_status(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<GitStatus> {
+    Ok(Json(git::status(&n.0.policy, &r).await?))
+}
+
+async fn git_toplevel(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<GitToplevel> {
+    Ok(Json(git::toplevel(&n.0.policy, &r).await?))
+}
+
+async fn git_diff(State(n): State<Node>, Json(r): Json<GitDiffRequest>) -> ApiResult<GitDiff> {
+    Ok(Json(git::diff(&n.0.policy, &r).await?))
+}
+
+async fn git_stage(State(n): State<Node>, Json(r): Json<GitPathsRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git::stage(&n.0.policy, &r).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn git_unstage(State(n): State<Node>, Json(r): Json<GitPathsRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git::unstage(&n.0.policy, &r).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn git_apply(State(n): State<Node>, Json(r): Json<GitApplyRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git::apply(&n.0.policy, &r).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn git_commit(State(n): State<Node>, Json(r): Json<GitCommitRequest>) -> ApiResult<GitCommitResponse> {
+    let _guard = n.0.write_lock.lock().await;
+    Ok(Json(git::commit(&n.0.policy, &r).await?))
+}
+
+async fn git_checkout(State(n): State<Node>, Json(r): Json<GitCheckoutRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git::checkout(&n.0.policy, &r).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn git_branch(State(n): State<Node>, Json(r): Json<GitBranchRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git::branch(&n.0.policy, &r).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn git_fetch(State(n): State<Node>, Json(r): Json<GitRemoteRequest>) -> ApiResult<GitOutput> {
+    Ok(Json(git::fetch(&n.0.policy, &r).await?))
+}
+
+async fn git_pull(State(n): State<Node>, Json(r): Json<GitRemoteRequest>) -> ApiResult<GitOutput> {
+    // The network fetch runs without the lock; only the local fast-forward takes it.
+    let f = git::pull_fetch(&n.0.policy, &r).await?;
+    let _guard = n.0.write_lock.lock().await;
+    let m = git::pull_merge(&n.0.policy, &GitRepoRequest { repo: r.repo.clone() }).await?;
+    let output = [f.output, m.output].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
+    Ok(Json(GitOutput { output }))
+}
+
+async fn git_push(State(n): State<Node>, Json(r): Json<GitRemoteRequest>) -> ApiResult<GitOutput> {
+    Ok(Json(git::push(&n.0.policy, &r).await?))
+}
+
+async fn git_conflicts(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<GitConflicts> {
+    Ok(Json(git::conflicts(&n.0.policy, &r).await?))
+}
+
+// FR-G6 stash handlers.
+async fn git_stash_list(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<Vec<GitStashEntry>> {
+    Ok(Json(git_stash::list(&n.0.policy, &r).await?))
+}
+
+async fn git_stash_push(State(n): State<Node>, Json(r): Json<GitStashPushRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git_stash::push(&n.0.policy, &r).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn git_stash_apply(State(n): State<Node>, Json(r): Json<GitStashIndexRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git_stash::change(&n.0.policy, &r, GitStashOperation::Apply).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn git_stash_pop(State(n): State<Node>, Json(r): Json<GitStashIndexRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git_stash::change(&n.0.policy, &r, GitStashOperation::Pop).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn git_stash_drop(State(n): State<Node>, Json(r): Json<GitStashIndexRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git_stash::change(&n.0.policy, &r, GitStashOperation::Drop).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+// End FR-G6 stash handlers.
+
+// FR-G7 handlers.
+async fn git_conflict(State(n): State<Node>, Json(r): Json<GitConflictRequest>) -> ApiResult<GitConflict> {
+    Ok(Json(git_conflict::conflict(&n.0.policy, &r).await?))
+}
+
+async fn git_resolve(State(n): State<Node>, Json(r): Json<GitResolveRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git_conflict::resolve(&n.0.policy, &r).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn setattr(State(n): State<Node>, Json(r): Json<SetAttrRequest>) -> ApiResult<Stat> {
@@ -435,7 +827,7 @@ async fn exec_session(node: Node, mut ws: WebSocket) {
     let pid = running.pid;
     tracing::debug!(pid, pty = req.pty.is_some(), "exec started");
     if !send_json(&mut ws, &ExecEvent::Started { pid }).await {
-        kill_group(pid, libc::SIGKILL);
+        kill_group(pid, crate::exec::SIGKILL);
         return;
     }
 
@@ -465,7 +857,7 @@ async fn exec_session(node: Node, mut ws: WebSocket) {
                     Ok(ExecInput::Stdin { data }) => running.control.write_stdin(data).await,
                     Ok(ExecInput::CloseStdin) => { running.control.close_stdin(); Ok(()) }
                     Ok(ExecInput::Resize { size }) => running.control.resize(size),
-                    Ok(ExecInput::Kill { signal }) => { kill_group(pid, signal.unwrap_or(libc::SIGTERM)); Ok(()) }
+                    Ok(ExecInput::Kill { signal }) => { kill_group(pid, signal.unwrap_or(crate::exec::SIGTERM)); Ok(()) }
                     Err(e) => Err(anyhow::anyhow!("bad input: {e}")),
                 };
                 if let Err(e) = res {
@@ -477,7 +869,7 @@ async fn exec_session(node: Node, mut ws: WebSocket) {
     if !finished {
         // The controlling connection went away: a foreground command does not outlive it.
         tracing::debug!(pid, "exec connection closed; killing process group");
-        kill_group(pid, libc::SIGKILL);
+        kill_group(pid, crate::exec::SIGKILL);
     }
     let _ = sink.close().await;
     // Read whatever the client still sends until it answers the close. Dropping the socket with
@@ -549,9 +941,29 @@ async fn create_term(
     let res = tokio::task::spawn_blocking(move || terms.create(&r, cwd))
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, e.to_string()))?
-        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, format!("{e:#}")))?;
+        .map_err(|e| match e.downcast_ref::<crate::term::TermLimit>() {
+            Some(_) => ApiError::new(StatusCode::CONFLICT, ErrorCode::Conflict, format!("{e:#}")),
+            None => ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, format!("{e:#}")),
+        })?;
     let status = if res.created { StatusCode::CREATED } else { StatusCode::OK };
     Ok((status, Json(res)))
+}
+
+/// FR-P7: best effort, never an error. The owned roots are the running terms and jobs.
+async fn list_ports(State(n): State<Node>) -> Json<PortsResponse> {
+    let mut roots = Vec::new();
+    for t in n.0.terms.list(&TermListQuery::default()) {
+        if let (Some(pid), TermState::Running) = (t.pid, t.state) {
+            roots.push(crate::ports::Root { pid, owner: PortOwner { kind: PortOwnerKind::Term, id: t.id } });
+        }
+    }
+    for j in n.0.jobs.list() {
+        if let (Some(pid), JobState::Running) = (j.pid, j.state) {
+            roots.push(crate::ports::Root { pid, owner: PortOwner { kind: PortOwnerKind::Job, id: j.id } });
+        }
+    }
+    let ports = crate::ports::listening(roots).await;
+    Json(PortsResponse { ports, supported: crate::ports::ports_supported() })
 }
 
 async fn list_terms(State(n): State<Node>, Query(q): Query<TermListQuery>) -> Json<Vec<TermInfo>> {
@@ -681,3 +1093,36 @@ async fn term_attach_session(node: Node, id: String, mut ws: WebSocket) {
     let _ = sink.close().await;
     tracing::debug!(term = %id, client, "terminal client detached");
 }
+
+
+// FR-G14, FR-G15: commit detail, revert and cherry-pick.
+async fn git_commit_show_handler(State(n): State<Node>, Json(r): Json<git_commit::GitCommitShowRequest>) -> ApiResult<git_commit::GitCommitShowResponse> {
+    Ok(Json(git_commit::show(&n.0.policy, &r).await?))
+}
+
+async fn git_revert_handler(State(n): State<Node>, Json(r): Json<git_commit::GitCommitActionRequest>) -> ApiResult<git_commit::GitCommitActionResponse> {
+    let _guard = n.0.write_lock.lock().await;
+    Ok(Json(git_commit::revert(&n.0.policy, &r).await?))
+}
+
+async fn git_cherry_pick_handler(State(n): State<Node>, Json(r): Json<git_commit::GitCommitActionRequest>) -> ApiResult<git_commit::GitCommitActionResponse> {
+    let _guard = n.0.write_lock.lock().await;
+    Ok(Json(git_commit::cherry_pick(&n.0.policy, &r).await?))
+}
+// End FR-G14, FR-G15.
+
+// FR-G16, FR-G17: merge state, abort and commit.
+async fn git_merge_state_handler(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<git_merge::GitMergeState> {
+    Ok(Json(git_merge::state(&n.0.policy, &r).await?))
+}
+
+async fn git_merge_abort_handler(State(n): State<Node>, Json(r): Json<git_merge::GitMergeActionRequest>) -> ApiResult<git_merge::GitMergeAborted> {
+    let _guard = n.0.write_lock.lock().await;
+    Ok(Json(git_merge::abort(&n.0.policy, &r).await?))
+}
+
+async fn git_merge_commit_handler(State(n): State<Node>, Json(r): Json<git_merge::GitMergeActionRequest>) -> ApiResult<git_commit::GitCommitActionResponse> {
+    let _guard = n.0.write_lock.lock().await;
+    Ok(Json(git_merge::commit(&n.0.policy, &r).await?))
+}
+// End FR-G16, FR-G17.

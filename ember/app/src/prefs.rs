@@ -41,6 +41,52 @@ pub struct Prefs {
     /// `ember`, `vscode` or `gateway`.
     #[serde(default)]
     pub ide_target: Option<String>,
+    /// System, Light or Dark (FR-L28). Older files have none, which reads as System.
+    #[serde(default)]
+    pub theme: crate::ui::theme::ThemePref,
+    /// The session screen's view: `multi`, `single` or `status` (FR-L18).
+    #[serde(default)]
+    pub session_view: Option<String>,
+    /// Pane tabs per project (FR-L18).
+    #[serde(default)]
+    pub panes: BTreeMap<String, crate::ui::session::ProjectPanes>,
+    /// Team character style per project id (FR-L22). Absent means the default, 몽글.
+    /// TODO(server): the project stores its own style once the server has the field.
+    #[serde(default)]
+    pub character_styles: BTreeMap<String, crate::ui::characters::CharStyle>,
+    /// Per-member character overrides per project id (FR-L22, #489). Fallback when the server has
+    /// none for the project.
+    #[serde(default)]
+    pub character_overrides: BTreeMap<String, BTreeMap<String, ember_client::wire::CharacterOverride>>,
+    /// The editor's shortcut set (FR-L30). Older files have none, which reads as VS Code.
+    #[serde(default)]
+    pub keymap: crate::ui::keymap::Keymap,
+    /// The editor's auto-save (Code-OSS `files.autoSave`, FR-L31.6). Older files have none, which reads
+    /// as off, Code-OSS's default.
+    #[serde(default)]
+    pub auto_save: crate::ui::editor_states::AutoSave,
+    /// The editor window's zoom level, Code-OSS's `window.zoomLevel` (FR-L31.15). Older files
+    /// have none, which reads as 0 (the system's size).
+    #[serde(default)]
+    pub editor_zoom_level: i8,
+    /// The editor's workspace trust answers (FR-L31.18), keyed by
+    /// [`crate::ui::workspace_trust::trust_key`] (computer and folder). `true` is trusted, `false`
+    /// restricted mode. Older files have none: every folder asks once.
+    #[serde(default)]
+    pub workspace_trust: BTreeMap<String, bool>,
+    /// Extension ids disabled in the Ember 에디터, per computer id (FR-L31.14). Kept on the device
+    /// because Code-OSS keeps its disabled list in the workbench's own storage, not on the server.
+    /// Ids are stored in lower case and sorted.
+    #[serde(default)]
+    pub disabled_extensions: BTreeMap<String, Vec<String>>,
+    /// The main server's peer address, as typed in 설정 (FR-N9): a peer id,
+    /// `<peer id>@<ip>:<port>`, or the `PeerAddr` JSON the server prints. `None` (older files):
+    /// plain HTTP as before. Read at start (`config::server_choice`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_peer: Option<String>,
+    /// The relay for that reach, as `EMBER_RELAY_URL` takes it. `None`: the environment's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_relay: Option<String>,
 }
 
 fn format_default() -> u32 {
@@ -54,6 +100,112 @@ impl Default for Prefs {
             last_used: BTreeMap::new(),
             last_project: None,
             ide_target: None,
+            theme: crate::ui::theme::ThemePref::default(),
+            session_view: None,
+            panes: BTreeMap::new(),
+            character_styles: BTreeMap::new(),
+            character_overrides: BTreeMap::new(),
+            keymap: crate::ui::keymap::Keymap::default(),
+            auto_save: crate::ui::editor_states::AutoSave::default(),
+            editor_zoom_level: 0,
+            workspace_trust: BTreeMap::new(),
+            disabled_extensions: BTreeMap::new(),
+            server_peer: None,
+            server_relay: None,
+        }
+    }
+}
+
+impl Prefs {
+    /// The project's team character style; 몽글 when none was chosen.
+    pub fn character_style(&self, project: &str) -> crate::ui::characters::CharStyle {
+        self.character_styles
+            .get(project)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// The style this device remembers for the project, if any (the fallback of FR-L26).
+    pub fn saved_character_style(&self, project: &str) -> Option<crate::ui::characters::CharStyle> {
+        self.character_styles.get(project).copied()
+    }
+
+    /// The per-member character overrides this device remembers for `project` (FR-L22, #489).
+    pub fn saved_character_overrides(
+        &self,
+        project: &str,
+    ) -> Option<&BTreeMap<String, ember_client::wire::CharacterOverride>> {
+        self.character_overrides.get(project)
+    }
+
+    pub fn set_character_overrides(
+        &mut self,
+        project: &str,
+        overrides: BTreeMap<String, ember_client::wire::CharacterOverride>,
+    ) {
+        if overrides.is_empty() {
+            self.character_overrides.remove(project);
+        } else {
+            self.character_overrides.insert(project.to_string(), overrides);
+        }
+    }
+
+    /// A rename moves the remembered style to the new name (FR-L26).
+    pub fn move_character_style(&mut self, old: &str, new: &str) {
+        if old != new {
+            if let Some(st) = self.character_styles.remove(old) {
+                self.character_styles.entry(new.to_string()).or_insert(st);
+            }
+            if let Some(ov) = self.character_overrides.remove(old) {
+                self.character_overrides.entry(new.to_string()).or_insert(ov);
+            }
+        }
+    }
+
+    /// A rename moves every per-project entry to the new name (FR-L26, #412): last-used
+    /// combination, pane tabs, character style and the last selected project. If the new name
+    /// already has an entry, it is kept and the old one is dropped, because the new key is the
+    /// one this device used most recently under that name.
+    pub fn rename_project_keys(&mut self, old: &str, new: &str) {
+        if old == new {
+            return;
+        }
+        if let Some(v) = self.last_used.remove(old) {
+            self.last_used.entry(new.to_string()).or_insert(v);
+        }
+        if let Some(v) = self.panes.remove(old) {
+            self.panes.entry(new.to_string()).or_insert(v);
+        }
+        self.move_character_style(old, new);
+        if self.last_project.as_deref() == Some(old) {
+            self.last_project = Some(new.to_string());
+        }
+    }
+
+    pub fn set_character_style(&mut self, project: &str, style: crate::ui::characters::CharStyle) {
+        self.character_styles.insert(project.to_string(), style);
+    }
+
+    /// The extension ids disabled on `computer` (FR-L31.14), in lower case.
+    pub fn disabled_extensions_for(&self, computer: &str) -> Vec<String> {
+        self.disabled_extensions.get(computer).cloned().unwrap_or_default()
+    }
+
+    /// Enables or disables one extension on `computer`. Ids compare without regard to case; a
+    /// computer with nothing disabled keeps no entry.
+    pub fn set_extension_enabled(&mut self, computer: &str, id: &str, enabled: bool) {
+        let key = id.trim().to_lowercase();
+        if key.is_empty() {
+            return;
+        }
+        let list = self.disabled_extensions.entry(computer.to_string()).or_default();
+        list.retain(|d| *d != key);
+        if !enabled {
+            list.push(key);
+            list.sort();
+        }
+        if list.is_empty() {
+            self.disabled_extensions.remove(computer);
         }
     }
 }
@@ -100,13 +252,65 @@ mod tests {
         let mut p = Prefs::default();
         p.last_used.insert(
             "ember".into(),
-            LastUsed { agent: "codex".into(), account: Some("a1".into()), computer: Some("c1".into()), model: Some("o3".into()), cwd: "/w".into() },
+            LastUsed {
+                agent: "codex".into(),
+                account: Some("a1".into()),
+                computer: Some("c1".into()),
+                model: Some("o3".into()),
+                cwd: "/w".into(),
+            },
         );
         p.ide_target = Some("vscode".into());
         save(&path, &p).unwrap();
         assert_eq!(load(&path), p);
         std::fs::write(&path, b"{nope").unwrap();
         assert_eq!(load(&path), Prefs::default());
+    }
+
+    #[test]
+    fn fr_l31_15_editor_zoom_level_persists_and_defaults_to_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, br#"{"format":1}"#).unwrap();
+        assert_eq!(load(&path).editor_zoom_level, 0);
+        let p = Prefs {
+            editor_zoom_level: -2,
+            ..Prefs::default()
+        };
+        save(&path, &p).unwrap();
+        assert_eq!(load(&path).editor_zoom_level, -2);
+    }
+
+    #[test]
+    fn fr_l28_theme_choice_persists_and_defaults_to_system() {
+        use crate::ui::theme::ThemePref;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, br#"{"format":1}"#).unwrap();
+        assert_eq!(load(&path).theme, ThemePref::System);
+        let p = Prefs {
+            theme: ThemePref::Dark,
+            ..Prefs::default()
+        };
+        save(&path, &p).unwrap();
+        assert_eq!(load(&path).theme, ThemePref::Dark);
+    }
+
+    // FR-L22: the project character style is kept per device, default 몽글.
+    #[test]
+    fn fr_l22_character_style_round_trips_per_project() {
+        use crate::ui::characters::CharStyle;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, br#"{"format":1}"#).unwrap();
+        assert_eq!(load(&path).character_style("ember"), CharStyle::Mongle);
+        let mut p = Prefs::default();
+        p.set_character_style("ember", CharStyle::Crew);
+        save(&path, &p).unwrap();
+        let back = load(&path);
+        assert_eq!(back.character_style("ember"), CharStyle::Crew);
+        assert_eq!(back.character_style("other"), CharStyle::Mongle);
+        back.clone().set_character_style("ember", CharStyle::Mongle);
     }
 
     #[test]
@@ -121,6 +325,109 @@ mod tests {
         let p = load(&path);
         assert_eq!(p.ide_target.as_deref(), Some("ember"));
         save(&path, &p).unwrap();
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("pinned"), "dropped on save");
+        assert!(
+            !std::fs::read_to_string(&path).unwrap().contains("pinned"),
+            "dropped on save"
+        );
+    }
+
+    #[test]
+    fn fr_l26_prefs_key_moves_on_rename() {
+        use crate::ui::characters::CharStyle;
+        let mut p = Prefs::default();
+        p.set_character_style("old", CharStyle::Crew);
+        p.move_character_style("old", "new");
+        assert_eq!(p.saved_character_style("new"), Some(CharStyle::Crew));
+        assert_eq!(p.saved_character_style("old"), None);
+        p.move_character_style("missing", "x");
+        assert_eq!(p.saved_character_style("x"), None);
+    }
+
+    #[test]
+    fn fr_l26_rename_moves_last_used() {
+        let mut p = Prefs::default();
+        p.last_used.insert("old".into(), LastUsed { agent: "claude".into(), ..Default::default() });
+        p.rename_project_keys("old", "new");
+        assert_eq!(p.last_used.get("new").map(|l| l.agent.as_str()), Some("claude"));
+        assert!(!p.last_used.contains_key("old"));
+    }
+
+    #[test]
+    fn fr_l26_rename_moves_pane_tabs() {
+        use crate::ui::session::ProjectPanes;
+        let mut p = Prefs::default();
+        p.panes.insert("old".into(), ProjectPanes { tabs: Vec::new(), active: 3 });
+        p.rename_project_keys("old", "new");
+        assert_eq!(p.panes.get("new").map(|v| v.active), Some(3));
+        assert!(!p.panes.contains_key("old"));
+    }
+
+    #[test]
+    fn fr_l26_rename_moves_character_style_and_last_project() {
+        use crate::ui::characters::CharStyle;
+        let mut p = Prefs::default();
+        p.set_character_style("old", CharStyle::Crew);
+        p.last_project = Some("old".into());
+        p.rename_project_keys("old", "new");
+        assert_eq!(p.saved_character_style("new"), Some(CharStyle::Crew));
+        assert_eq!(p.saved_character_style("old"), None);
+        assert_eq!(p.last_project.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn fr_l31_14_disabled_extensions_round_trip_per_computer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, br#"{"format":1}"#).unwrap();
+        assert!(load(&path).disabled_extensions_for("local").is_empty(), "older files have none");
+        let mut p = Prefs::default();
+        p.set_extension_enabled("local", "RedHat.Java", false);
+        p.set_extension_enabled("local", " golang.go ", false);
+        p.set_extension_enabled("local", "redhat.java", false);
+        p.set_extension_enabled("mini", "a.b", false);
+        p.set_extension_enabled("local", "", false);
+        save(&path, &p).unwrap();
+        let back = load(&path);
+        assert_eq!(back.disabled_extensions_for("local"), ["golang.go", "redhat.java"]);
+        assert_eq!(back.disabled_extensions_for("mini"), ["a.b"]);
+        assert!(back.disabled_extensions_for("other").is_empty());
+        let mut back = back;
+        back.set_extension_enabled("local", "REDHAT.java", true);
+        back.set_extension_enabled("mini", "a.b", true);
+        back.set_extension_enabled("mini", "never.disabled", true);
+        assert_eq!(back.disabled_extensions_for("local"), ["golang.go"]);
+        assert!(!back.disabled_extensions.contains_key("mini"), "an empty list keeps no entry");
+    }
+
+    #[test]
+    fn fr_n9_server_peer_and_relay_persist_and_older_files_have_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, br#"{"format":1}"#).unwrap();
+        let old = load(&path);
+        assert_eq!((old.server_peer.as_deref(), old.server_relay.as_deref()), (None, None));
+        let p = Prefs {
+            server_peer: Some("ab@127.0.0.1:1".into()),
+            server_relay: Some("none".into()),
+            ..Prefs::default()
+        };
+        save(&path, &p).unwrap();
+        assert_eq!(load(&path), p);
+        save(&path, &Prefs::default()).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("server_peer"), "unset is left out");
+    }
+
+    #[test]
+    fn fr_l26_rename_keeps_existing_new_entry() {
+        use crate::ui::session::ProjectPanes;
+        let mut p = Prefs::default();
+        p.panes.insert("old".into(), ProjectPanes { tabs: Vec::new(), active: 1 });
+        p.panes.insert("new".into(), ProjectPanes { tabs: Vec::new(), active: 2 });
+        p.rename_project_keys("old", "new");
+        assert_eq!(p.panes.get("new").map(|v| v.active), Some(2));
+        assert!(!p.panes.contains_key("old"));
+        p.last_project = Some("other".into());
+        p.rename_project_keys("old", "new");
+        assert_eq!(p.last_project.as_deref(), Some("other"));
     }
 }

@@ -4,11 +4,11 @@
 //! storage, logins, history) lives under `<data dir>/browser/<project>/profile` (FR-R2) and can be
 //! wiped per project (FR-R4). Network egress is chosen per project (FR-R1, [`egress::Egress`]):
 //! direct, a configured proxy URL, or a registered computer, whose ember node's SOCKS5 exit
-//! (`/v1/egress`) is reached through a loopback listener in this server
+//! (`/egress`) is reached through a loopback listener in this server
 //! ([`crate::computers::egress`]). The choice is persisted ([`egress::EgressStore`]) and survives
 //! restarts. Switching egress restarts Chrome on the same profile, so logins survive (FR-R2).
 //!
-//! Three ways in, all under `/api/v1/browsers/{project}` (see [`api`] and
+//! Three ways in, all under `/api/browsers/{project}` (see [`api`] and
 //! `docs/design/REMOTE-BROWSER.md`):
 //! - **view**: a WebSocket carrying JPEG screencast frames out and pointer/keyboard input in
 //!   (no webview in the client, E1);
@@ -31,9 +31,6 @@ use anyhow::bail;
 
 pub use egress::{Egress, EgressResolver, EgressStore};
 pub use instance::{BrowserInfo, BrowserInstance, InputEvent, ScreencastOptions, ViewState};
-
-/// Version of the view stream protocol (frames, state, input). Bump on incompatible change.
-pub const STREAM_VERSION: u32 = 1;
 
 /// Server-wide browser settings.
 #[derive(Debug, Clone)]

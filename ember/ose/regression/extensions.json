@@ -1,0 +1,15 @@
+{
+  "_todo": "TODO(owner, #84): confirm this list. These are a provisional guess at popular Open VSX extensions; add, remove or pin versions as needed.",
+  "extensions": [
+    "redhat.vscode-yaml",
+    "esbenp.prettier-vscode",
+    "dbaeumer.vscode-eslint",
+    "ms-python.python",
+    "rust-lang.rust-analyzer",
+    "golang.go",
+    "vscodevim.vim",
+    "eamodio.gitlens",
+    "tamasfe.even-better-toml",
+    "redhat.java"
+  ]
+}

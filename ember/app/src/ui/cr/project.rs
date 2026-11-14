@@ -1,0 +1,2023 @@
+//! compose-rust version of the Project screen (#220 phase 5; FR-L1 to FR-L4, FR-L24, FR-L26,
+//! `docs/DESIGN.md` section 6.2): the computer strip, a grid of project boxes with their team
+//! members, the full view of one project and its settings sheet.
+//!
+//! The decisions (boxes, members, ordering, filters, deck, settings rules) are `ui::project`'s
+//! plain functions, used as they are. The settings sheet saves name, repository, default
+//! branch, new member defaults, character style and profile override per harness with
+//! `PATCH /api/projects/{name}` (FR-L26, #327). Leader, archive and delete stay disabled: the server does not
+//! support them yet (TODO(#384)).
+
+#![allow(non_snake_case)]
+
+use compose_rust::runtime::{mutable_state_of, remember, remember_with_key, MutableState};
+use compose_rust::ui as cu;
+use compose_rust::ui::Modifier;
+use compose_rust::{Alignment, ButtonVariant, IconRole, ShapeRole};
+
+use ember_client::wire::Project;
+use ember_client::LauncherStatus;
+
+pub use crate::ui::project::{
+    agent_options, build_patch, deck_avatars, deck_names, DECK_AVATARS, DECK_NAMES, strip_arrows_visible, strip_scroll_target, chip_line, computer_chips, danger_allowed, danger_rows, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
+    is_default_project, leader_choice_visible, part_supported, project_boxes, project_boxes_with_archived,
+    reach_pill, status_pill, validate_settings, visible_tiles, ComputerChip, Member, MemberFilter,
+    effective_style, follow_rename, override_harnesses, override_label, override_options, pick_override, AccountsState, CloseAction, SettingsGuard, DISCARD_QUESTION,
+    create_error_message, NewProjectDraft, NewProjectOutcome, ProjectBox, SettingsDraft, SettingsPart, MAX_TILES, NOT_YET, SETTINGS_SAVE_AVAILABLE, SOON,
+};
+use super::characters::{CharState, Character, StylePicker};
+use crate::ui::characters::CharStyle;
+use super::components::{
+    AppButton, ButtonKind, Clickable, NamedClickable, EmberField, EmberSheet, FieldOptions, FilterChip,
+    IconButton, Label, OptionSheet, Pill, PillTone, SearchField, Select, SheetFooter,
+};
+use super::home::{content_width, fit_label, ring_image, text_px, Cols, Part};
+use super::notice;
+use super::shell::{self, NavIcon};
+use super::theme::*;
+use crate::model::status_rank;
+use crate::ide::{open_external, plan, IdeAction, IdeKind};
+use crate::server::IdeLaunch;
+use crate::services::{run_shared, services};
+use crate::ui::coexist::{shared_ui, SharedUi};
+use crate::ui::shell::NavMenu;
+
+// ---------------------------------------------------------------------------------------------
+// Layout decisions (project.css breakpoints, on the window width)
+// ---------------------------------------------------------------------------------------------
+
+/// Project box columns: 3 above 1279, 2 above 900, 1 below (`.pgrid`).
+pub fn grid_cols(width_dp: f32) -> usize {
+    if width_dp > 1279.0 {
+        3
+    } else if width_dp > 900.0 {
+        2
+    } else {
+        1
+    }
+}
+
+/// Member tile columns inside a box: 2, 1 on a phone (`.pbox-team`).
+pub fn team_cols(width_dp: f32) -> usize {
+    if width_dp > 560.0 {
+        2
+    } else {
+        1
+    }
+}
+
+/// The full view puts the routine and channel cards beside the members above 900 px.
+pub fn full_two_columns(width_dp: f32) -> bool {
+    width_dp > 900.0
+}
+
+/// The colour of a status in the donut and the stats (`teamSegs`).
+fn status_color(s: LauncherStatus, p: &Palette) -> compose_rust::Color {
+    match s {
+        LauncherStatus::Running => p.blue.strong,
+        LauncherStatus::WaitingForApproval => p.orange.strong,
+        LauncherStatus::FinishedUnread => p.sky.strong,
+        LauncherStatus::Finished => p.grey.strong,
+        LauncherStatus::Failed => p.red.strong,
+        _ => p.grey.strong,
+    }
+}
+
+/// The five segments of a project's team, in the mockup's order: (label, status, count).
+pub fn team_segments(members: &[Member]) -> Vec<(&'static str, LauncherStatus, usize)> {
+    let n = |s: LauncherStatus| members.iter().filter(|m| m.status == s).count();
+    vec![
+        ("실행", LauncherStatus::Running, n(LauncherStatus::Running)),
+        ("승인 대기", LauncherStatus::WaitingForApproval, n(LauncherStatus::WaitingForApproval)),
+        ("새 결과", LauncherStatus::FinishedUnread, n(LauncherStatus::FinishedUnread)),
+        ("완료", LauncherStatus::Finished, n(LauncherStatus::Finished)),
+        ("실패", LauncherStatus::Failed, n(LauncherStatus::Failed)),
+    ]
+}
+
+/// The members of one status in the full view's list, in the mockup's group order (`memberList`).
+pub fn grouped(members: &[Member]) -> Vec<(LauncherStatus, Vec<Member>)> {
+    let mut groups: Vec<(LauncherStatus, Vec<Member>)> = Vec::new();
+    for m in members {
+        match groups.iter_mut().find(|(s, _)| *s == m.status) {
+            Some((_, v)) => v.push(m.clone()),
+            None => groups.push((m.status, vec![m.clone()])),
+        }
+    }
+    groups.sort_by(|a, b| status_rank(b.0).cmp(&status_rank(a.0)));
+    groups
+}
+
+/// Whether a project box matches the search text: its name or one of its members.
+pub fn box_matches(b: &ProjectBox, query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    q.is_empty()
+        || b.name.to_lowercase().contains(&q)
+        || b.members.iter().any(|m| m.name.to_lowercase().contains(&q) || m.task.to_lowercase().contains(&q))
+}
+
+/// Greedy line breaking for the stats: the indices of `widths` per line, `gap` apart, in `avail`.
+pub fn wrap_lines(widths: &[f32], gap: f32, avail: f32) -> Vec<Vec<usize>> {
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    let mut used = 0.0;
+    for (i, w) in widths.iter().enumerate() {
+        match lines.last_mut() {
+            Some(line) if used + gap + w <= avail => {
+                line.push(i);
+                used += gap + w;
+            }
+            _ => {
+                lines.push(vec![i]);
+                used = *w;
+            }
+        }
+    }
+    lines
+}
+
+/// The width of one stat: the 8 px mark, the number and the label, 4 px apart.
+pub fn stat_width(n: usize, label: &str) -> f32 {
+    8.0 + 4.0 + text_px(&n.to_string(), Fs::Md.size()) + 4.0 + text_px(label, Fs::Md.size())
+}
+
+/// The computer chip's second line: the status and the running members (`온라인 · 실행 2`). The
+/// project count is left out because the 180 px line cut it (#490); the monitor sheet lists the
+/// projects. TODO(FR-X7): the OS joins when ember node reports it.
+pub fn chip_sub(c: &ComputerChip) -> String {
+    let mut s = reach_pill(c.reachability).0.to_string();
+    if c.running > 0 {
+        s.push_str(&format!(" \u{b7} 실행 {}", c.running));
+    }
+    s
+}
+
+// ---------------------------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------------------------
+
+/// What the screen has open and typed. `EMBER_CR_ROUTE=project-detail` opens the first
+/// project's full view (`EMBER_CR_PROJECT=<id>` another), `EMBER_CR_PROJECT_SHEET=settings|
+/// computer|new|add-computer` a sheet, `EMBER_CR_PROJECT_EXPAND=1` expands every box's deck.
+#[derive(Clone)]
+struct Ui {
+    full: MutableState<Option<String>>,
+    settings: MutableState<Option<String>>,
+    computer: MutableState<Option<String>>,
+    new_project: MutableState<bool>,
+    new_draft: MutableState<NewProjectDraft>,
+    new_saving: MutableState<bool>,
+    new_failure: MutableState<Option<String>>,
+    new_confirm: MutableState<bool>,
+    add: super::add_computer::AddUi,
+    query: MutableState<String>,
+    expanded: MutableState<Vec<String>>,
+    filter: MutableState<MemberFilter>,
+    member_query: MutableState<String>,
+    /// The inline search row opened by the header icon at 900 dp and below (FR-L26).
+    search_open: MutableState<bool>,
+}
+
+/// `EMBER_CR_PROJECT_SEARCH=open` starts with the inline search row open. Debug builds only.
+fn search_hook_open(debug: bool, value: Option<&str>) -> bool {
+    debug && value == Some("open")
+}
+
+impl Ui {
+    fn new(boxes: &[ProjectBox], chips: &[ComputerChip]) -> Ui {
+        let first = boxes.first().map(|b| b.id.clone());
+        let full = match std::env::var("EMBER_CR_PROJECT").ok() {
+            Some(id) if !id.is_empty() => Some(id),
+            _ if std::env::var("EMBER_CR_ROUTE").as_deref() == Ok("project-detail") => first.clone(),
+            _ => None,
+        };
+        let sheet = std::env::var("EMBER_CR_PROJECT_SHEET").ok();
+        let expand = std::env::var("EMBER_CR_PROJECT_EXPAND").as_deref() == Ok("1");
+        let search = search_hook_open(
+            cfg!(debug_assertions),
+            std::env::var("EMBER_CR_PROJECT_SEARCH").ok().as_deref(),
+        );
+        Ui {
+            settings: mutable_state_of((sheet.as_deref() == Some("settings")).then(|| full.clone().or(first.clone())).flatten()),
+            computer: mutable_state_of((sheet.as_deref() == Some("computer")).then(|| chips.first().map(|c| c.id.clone())).flatten()),
+            new_project: mutable_state_of(sheet.as_deref() == Some("new")),
+            full: mutable_state_of(full),
+            new_draft: mutable_state_of(NewProjectDraft::default()),
+            new_saving: mutable_state_of(false),
+            new_failure: mutable_state_of(None),
+            new_confirm: mutable_state_of(false),
+            add: super::add_computer::AddUi::for_review(),
+            query: mutable_state_of(String::new()),
+            expanded: mutable_state_of(if expand { boxes.iter().map(|b| b.id.clone()).collect() } else { Vec::new() }),
+            filter: mutable_state_of(MemberFilter::All),
+            member_query: mutable_state_of(String::new()),
+            search_open: mutable_state_of(search),
+        }
+    }
+}
+
+/// Assign or unassign a computer on the main server (FR-L4); say so when it fails.
+fn set_assignment(project: String, computer_id: String, assign: bool) {
+    run_shared(
+        async move {
+            let c = &services().client;
+            let r = if assign { c.assign_computer(&project, &computer_id).await } else { c.unassign_computer(&project, &computer_id).await };
+            r.map(|_| ()).map_err(|e| e.to_string())
+        },
+        |r| {
+            if let Err(e) = r {
+                notice::post(format!("컴퓨터 할당을 바꾸지 못했습니다: {e}"));
+            }
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The screen
+// ---------------------------------------------------------------------------------------------
+
+pub fn ProjectScreen() {
+    let ui = shared_ui().clone();
+    let _ = ui.live.launcher.get();
+    let show_archived = ui.show_archived.get();
+    let (boxes, chips) = services().client.read(|s| {
+        let boxes = project_boxes_with_archived(s, show_archived);
+        let chips = computer_chips(s, &boxes);
+        (boxes, chips)
+    });
+    let st = remember(|| Ui::new(&boxes, &chips));
+    let window = crate::ui::window_size::current_window_size();
+    let w = window.width_dp;
+    let compact = w <= 560.0;
+    let pad = if compact { SP[3] } else { SP[6] };
+    let full = st.full.get();
+
+    cu::Box().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+            cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width().padding(pad)).content(|| {
+                super::launcher::ConnectionBanner();
+                match full.as_ref().and_then(|id| boxes.iter().find(|b| &b.id == id)) {
+                    Some(b) => FullProject(b, &chips, &st, &ui, w),
+                    None if full.is_some() => {
+                        Label("프로젝트를 찾을 수 없습니다", Fs::Md, Weight::Regular, Some(paint(ember_theme().palette.muted)), None)
+                    }
+                    None => Grid(&boxes, &chips, &st, &ui, w),
+                }
+            });
+        });
+        Sheets(&boxes, &chips, &st, &ui);
+    });
+}
+
+/// The page header: the title and subtitle, and the actions at the right; on a phone the actions
+/// are a row below the title (and the title leaves room for the menu button at the top right).
+pub fn Header(title: &str, sub: &str, compact: bool, trailing: impl FnOnce()) {
+    HeaderGap(title, sub, compact, compact, 0.0, trailing)
+}
+
+/// [`Header`] with `gap` dp between the title and the subtitle, and the actions stacked below
+/// the title when `stacked` (a phone, or a tablet in the mockup's files header); `compact` is the
+/// phone: the smaller title and the room for the menu button.
+pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32, trailing: impl FnOnce()) {
+    let p = ember_theme().palette;
+    let titles = || {
+        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+            Label(title, if compact { Fs::Xl2 } else { Fs::Xl3 }, PAGE_TITLE_WEIGHT, None, Some(1));
+            if !sub.is_empty() {
+                if gap > 0.0 {
+                    cu::Spacer().modifier(Modifier::new().height(gap));
+                }
+                Label(sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+            }
+        });
+    };
+    if stacked {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+                titles();
+                if compact {
+                    cu::Spacer().modifier(Modifier::new().width(PHONE_MENU_ROOM));
+                }
+            });
+            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(trailing);
+        });
+    } else {
+        cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+            titles();
+            trailing();
+        });
+    }
+}
+
+/// The room the shell's floating menu button takes at the top right of a phone.
+pub const PHONE_MENU_ROOM: f32 = 52.0;
+
+/// The theme toggle of the page header: a 40 px round button with a sun or a moon (Ember's SVG,
+/// the toolkit has no such glyph), named "테마 전환" (compose-rust v0.0.7, #372, #460).
+pub fn ThemeButton(ui: &SharedUi) {
+    let p = ember_theme().palette;
+    let dark = ember_theme().scheme == Scheme::Dark;
+    let u = ui.clone();
+    NamedClickable(
+        super::a11y::THEME,
+        Modifier::new().size(H_BTN, H_BTN).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        move || u.set_theme_pref(u.theme_pref.get_untracked().next()),
+        || {
+            NavIcon(if dark { shell::ICON_SUN_SVG } else { shell::ICON_MOON_SVG }, p.text_2.to_argb(), 18.0);
+        },
+    );
+}
+
+/// The icon toggles the filter row. Closing it clears the query, so the list is never left
+/// filtered by a field nobody can see.
+pub fn toggle_search(open: bool, query: &str) -> (bool, String) {
+    if open {
+        (false, String::new())
+    } else {
+        (true, query.to_string())
+    }
+}
+
+/// Whether the inline project filter is drawn: always above 900 dp, else when the icon opened it.
+pub fn search_field_visible(w: f32, open: bool) -> bool {
+    w > 900.0 || open
+}
+
+/// Whether the search icon button is drawn: only at 900 dp and below (the mockup hides it above).
+pub fn search_icon_visible(w: f32) -> bool {
+    w <= 900.0
+}
+
+/// The list header's actions: the inline filter (above 900 dp), 새 프로젝트, the theme toggle and
+/// 새 팀원. At 900 dp and below a search icon toggles the filter row under the header. The global
+/// search is the 검색 row of the sidebar tools (FR-L10).
+fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
+    if w > 900.0 {
+        let q = st.query.clone();
+        // v0.0.7: #376 and #374 fixed (the field takes the node's frame); workaround kept until
+        // checked on a display (the "/" key hint beside the field is not drawn yet).
+        cu::Column().modifier(Modifier::new().width(240.0)).content(|| {
+            SearchField("팀원 검색", H_BTN, move |v| q.set(v));
+        });
+    }
+    if search_icon_visible(w) {
+        let o = st.search_open.clone();
+        let q = st.query.clone();
+        // v0.0.7: #428 and #429 fixed (`accessible_name`, `Modifier::expanded`); workaround kept
+        // until checked on a display (`IconButton` takes a toolkit glyph and no name yet, see
+        // components.rs), so the name "팀원 검색 열기" and the expanded state are not set.
+        IconButton(IconRole::Search, false, move || {
+            let (open, query) = toggle_search(o.get_untracked(), &q.get_untracked());
+            o.set(open);
+            q.set(query);
+        });
+    }
+    let n = st.new_project.clone();
+    // Enabled in the demo only: it makes a local project there (#218).
+    let can_create = services().demo.is_some();
+    let open_new = move || {
+        if can_create {
+            n.set(true)
+        } else {
+            notice::post(SOON)
+        }
+    };
+    if w > 900.0 {
+        AppButton("새 프로젝트", Some(IconRole::Library), ButtonKind::Default, false, can_create, false, open_new);
+    } else {
+        IconButton(IconRole::Library, false, open_new);
+    }
+    ThemeButton(ui);
+    NewMemberButton(ui, None, w);
+}
+
+/// 새 팀원: a primary button; a 40 px ink circle on a phone.
+fn NewMemberButton(ui: &SharedUi, project: Option<String>, w: f32) {
+    let p = ember_theme().palette;
+    let u = ui.clone();
+    if w > 560.0 {
+        AppButton("새 팀원", Some(IconRole::Add), ButtonKind::Primary, false, true, false, move || u.open_new_session(project.clone()));
+    } else {
+        cu::Button("")
+            .icon(IconRole::Add)
+            .variant(ButtonVariant::Text)
+            .color(paint(p.ink_text))
+            .modifier(Modifier::new().size(H_BTN, H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full))
+            .on_click(move || u.open_new_session(project.clone()));
+    }
+}
+
+fn Grid(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi, w: f32) {
+    let p = ember_theme().palette;
+    let query = st.query.get();
+    let shown: Vec<&ProjectBox> = boxes.iter().filter(|b| box_matches(b, &query)).collect();
+    Header("프로젝트", "프로젝트를 누르면 세션으로 들어가 팀원들의 대화를 함께 봅니다.", w <= 560.0, || ListActions(st, ui, w));
+    if w <= 900.0 && search_field_visible(w, st.search_open.get()) {
+        // TODO: focus the field on open (compose-rust#410 `FocusHandle` and
+        // `Batch::request_focus`, in v0.0.7; not wired yet).
+        let q = st.query.clone();
+        cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+            SearchField("팀원 검색", H_BTN, move |v| q.set(v));
+        });
+    }
+    ComputerStrip(chips, st);
+    if shown.is_empty() {
+        let text = if boxes.is_empty() { "아직 프로젝트가 없습니다" } else { "일치하는 프로젝트가 없습니다" };
+        Label(text, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+    }
+    let cols = grid_cols(w);
+    let pad = if w <= 560.0 { SP[3] } else { SP[6] };
+    // The box's inner width: its share of the content, less the 20 px side padding.
+    let box_inner = ((content_width(w, pad) - (cols as f32 - 1.0) * SP[4]) / cols as f32 - 2.0 * SP[4]).max(200.0);
+    let parts: Vec<Part> = shown
+        .into_iter()
+        .map(|b| -> Part { Box::new(move || ProjectBoxView(b, st, ui, w, box_inner)) })
+        .collect();
+    Cols(cols, SP[4], parts);
+}
+
+// --- computers -------------------------------------------------------------------------------
+
+/// `.cstrip`: a row of computer chips, then the add chip.
+fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
+    let p = ember_theme().palette;
+    if chips.is_empty() {
+        Label("등록된 컴퓨터가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
+        return;
+    }
+    let scroll = compose_rust::ui::remember_scroll_state();
+    let viewport = content_width(crate::ui::window_size::current_window_size().width_dp, SP[6]);
+    let (offset, max) = (scroll.offset(), scroll.max_offset());
+    let arrows = strip_arrows_visible(max);
+    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(64.0)).content(|| {
+        if arrows {
+            let s = scroll.clone();
+            StripArrow(ICON_ARROW_LEFT_SVG, offset > 0.0, move || s.animate_scroll_to(strip_scroll_target(offset, viewport, max + viewport, -1.0)));
+        }
+        cu::ScrollRow().scroll_state(&scroll).modifier(Modifier::new().weight(1.0).height(64.0)).content(|| {
+            for c in chips {
+                let (open, id) = (st.computer.clone(), c.id.clone());
+                ComputerChipView(c, move || open.set(Some(id.clone())));
+                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            }
+            // The hub's devices, registered with the node's token (FR-X7, #490).
+            // TODO(compose-rust, #671): no dashed border or stroke-dash API, so the add chip keeps a solid 1 px border.
+            let add = Modifier::new().height(56.0).border(1.0, paint(p.line)).corner_radius(CORNER_MD);
+            let ui = st.add.clone();
+            Clickable(add, Alignment::CenterStart, move || ui.show(), || {
+                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                    cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                    NavIcon(shell::ICON_PLUS_SVG, p.text_2.to_argb(), 18.0);
+                    Label("컴퓨터 추가", Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                    cu::Spacer().modifier(Modifier::new().width(SP[3]));
+                });
+            });
+        });
+        if arrows {
+            let s = scroll.clone();
+            StripArrow(ICON_ARROW_RIGHT_SVG, offset < max, move || s.animate_scroll_to(strip_scroll_target(offset, viewport, max + viewport, 1.0)));
+        }
+    });
+}
+
+const ICON_ARROW_LEFT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>"#;
+const ICON_ARROW_RIGHT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>"#;
+
+/// A scroll arrow of the computer strip. Dimmed and inert at the end it points to.
+/// TODO(compose-rust, #671): no label modifier for icon-only controls, so this control has no accessible name.
+fn StripArrow(svg: &'static str, enabled: bool, mut on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let color = if enabled { p.text_2 } else { p.line };
+    Clickable(
+        Modifier::new().size(H_CTL, H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        move || {
+            if enabled {
+                on_click()
+            }
+        },
+        move || {
+            NavIcon(svg, color.to_argb(), 16.0);
+        },
+    );
+}
+
+/// `.cchip` (`project.css:176`): 200 by 56 px, design review 2026-11-13 B7.
+pub const COMPUTER_CHIP: (f32, f32) = (200.0, 56.0);
+/// The chip's text width: 200 less the 8 px lead, the 38 px tile, two 10 px gaps and the 14 px end.
+pub const COMPUTER_CHIP_TEXT_W: f32 = 200.0 - 8.0 - 38.0 - 10.0 - 10.0 - 14.0;
+/// The project box's name: `.pbox .pname` `fs-xl` 18/600 (`project.css:174`, `DESIGN.md` 6.2), B7.
+pub const PROJECT_NAME: (Fs, Weight) = (Fs::Xl, Weight::Semibold);
+
+/// `.cchip`: 56 px, an icon tile with a status dot, the name and the status line; the
+/// container's `on_click` (compose-rust#372), named by its text.
+fn ComputerChipView(c: &ComputerChip, on_open: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let (_, tone) = reach_pill(c.reachability);
+    let dot = super::components::pill_colors(tone.into(), p).0;
+    let offline = !matches!(c.reachability, ember_client::state::Reachability::Online);
+    let m = Modifier::new().size(COMPUTER_CHIP.0, COMPUTER_CHIP.1).background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_MD);
+    Clickable(if offline { m.alpha(0.6) } else { m }, Alignment::CenterStart, on_open, || {
+        cu::Row().spacing(10.0).alignment(Alignment::CenterStart).content(|| {
+            cu::Spacer().modifier(Modifier::new().width(1.0));
+            cu::Box().modifier(Modifier::new().size(38.0, 38.0)).content(|| {
+                cu::Box()
+                    .alignment(Alignment::Center)
+                    .modifier(Modifier::new().size(38.0, 38.0).background(paint(p.surface_2)).corner_radius(CORNER_SM))
+                    .content(|| NavIcon(shell::ICON_CPU_SVG, p.text_2.to_argb(), 18.0));
+                cu::Box().alignment(Alignment::BottomEnd).modifier(Modifier::new().size(38.0, 38.0)).content(|| {
+                    cu::Spacer().modifier(Modifier::new().size(10.0, 10.0).background(paint(dot)).border(2.0, paint(p.surface)).shape_role(ShapeRole::Full));
+                });
+            });
+            cu::Column().content(|| {
+                Label(&fit_label(&c.name, COMPUTER_CHIP_TEXT_W, Fs::Sm.size()), Fs::Sm, Weight::Semibold, None, Some(1));
+                Label(&fit_label(&chip_sub(c), COMPUTER_CHIP_TEXT_W, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            });
+            cu::Spacer().modifier(Modifier::new().width(4.0));
+        });
+    });
+}
+
+// --- project boxes ---------------------------------------------------------------------------
+
+/// `.donut`: the team ring, the member count and "팀원".
+fn TeamDonut(members: &[Member], size: f32) {
+    let p = ember_theme().palette;
+    let total = members.len().max(1) as f32;
+    let parts: Vec<(u32, f32)> = team_segments(members)
+        .into_iter()
+        .map(|(_, s, n)| (status_color(s, p).to_argb(), n as f32 / total))
+        .collect();
+    cu::Box().alignment(Alignment::Center).modifier(Modifier::new().size(size, size)).content(|| {
+        ring_image(size, 6.0, &parts);
+        cu::Column().alignment(Alignment::Center).content(|| {
+            Label(&members.len().to_string(), Fs::Lg, Weight::Semibold, None, Some(1));
+            Label("팀원", Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+        });
+    });
+}
+
+/// `.pbox`: the header (ring, name and repository, actions, stats) and, below a rule, the
+/// full-width `surface-2` team area.
+/// v0.0.7: #392 fixed (`Modifier::corner_radii` and `clip`); workaround kept until checked on a
+/// display (the team area is a rounded box over the card's bottom corners, so its top corners are
+/// rounded too, until the card clips it).
+fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
+    let p = ember_theme().palette;
+    let expanded = st.expanded.get().contains(&b.id);
+    let total = b.members.len();
+    let shown = visible_tiles(total, expanded);
+    let deck = deck_count(total, expanded);
+    cu::Box()
+        .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_XL))
+        .content(|| {
+            cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+                    cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                        TeamDonut(&b.members, 60.0);
+                        let (full, id) = (st.full.clone(), b.id.clone());
+                        // The name opens the full view (the container's `on_click`, compose-rust#372).
+                        Clickable(Modifier::new().weight(1.0), Alignment::CenterStart, move || full.set(Some(id.clone())), || {
+                            cu::Column().content(|| {
+                                Label(&b.name, PROJECT_NAME.0, PROJECT_NAME.1, None, Some(1));
+                                Label(&b.repo_line(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            });
+                        });
+                        // `.pbox-act`: version control, settings, and the primary "세션 열기".
+                        cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
+                            let (u, id) = (ui.clone(), b.id.clone());
+                            IconAction(super::session::ICON_GIT_SVG, super::a11y::VERSION_CONTROL, move || {
+                                u.set_selected_project(Some(id.clone()));
+                                shell::choose(&u, NavMenu::VersionControl);
+                            });
+                            let (settings, id) = (st.settings.clone(), b.id.clone());
+                            IconAction(shell::ICON_GEAR_SVG, super::a11y::PROJECT_SETTINGS, move || settings.set(Some(id.clone())));
+                            OpenSessionButton(b, ui, true);
+                        });
+                    });
+                    Stats(b, inner);
+                });
+                cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                cu::Box()
+                    .modifier(Modifier::new().fill_max_width().background(paint(p.surface_2)).corner_radius(CORNER_XL).padding(SP[3]))
+                    .content(|| {
+                        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                            if total == 0 {
+                                Label("아직 팀원이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                            }
+                            let tiles: Vec<Part> = b
+                                .members
+                                .iter()
+                                .take(shown)
+                                .map(|m| -> Part { Box::new(move || MemberTile(m, &b.id, ui)) })
+                                .collect();
+                            Cols(team_cols(w), SP[1], tiles);
+                            if deck > 0 {
+                                let rest = &b.members[shown..];
+                                let (e, id) = (st.expanded.clone(), b.id.clone());
+                                DeckCard(rest, &b.id, deck, move || {
+                                    let mut v = e.get_untracked();
+                                    v.push(id.clone());
+                                    e.set(v);
+                                });
+                            } else if total > MAX_TILES {
+                                let e = st.expanded.clone();
+                                let id = b.id.clone();
+                                AppButton("접기", None, ButtonKind::Default, true, true, true, move || {
+                                    let mut v = e.get_untracked();
+                                    v.retain(|x| x != &id);
+                                    e.set(v);
+                                });
+                            }
+                        });
+                    });
+            });
+        });
+}
+
+/// The deck: overlapped avatars of the first hidden members, `외 N명` and the first three names.
+/// Clicking it expands the box (the container's `on_click`, compose-rust#372).
+fn DeckCard(rest: &[Member], project_id: &str, count: usize, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    const AV: f32 = 26.0;
+    const STEP: f32 = 16.0;
+    Clickable(
+        Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_MD).padding(10.0),
+        Alignment::CenterStart,
+        on_click,
+        || {
+            cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                let avatars = deck_avatars(rest, DECK_AVATARS);
+                let width = AV + STEP * avatars.len().saturating_sub(1) as f32;
+                cu::Box().modifier(Modifier::new().size(width, AV)).content(|| {
+                    for (i, m) in avatars.iter().enumerate() {
+                        cu::Box().modifier(Modifier::new().size(AV, AV).offset(STEP * i as f32, 0.0)).content(|| {
+                            Character(&m.agent, m.leader, AV, &m.name, project_id, CharState::from_status(m.status), None);
+                        });
+                    }
+                });
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label(&deck_label(count), Fs::Sm, Weight::Semibold, None, Some(1));
+                    Label(&deck_names(rest, DECK_NAMES), Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                });
+            });
+        },
+    );
+}
+
+/// 세션 열기: the first member's conversation, or a new session when the project has none.
+/// The mockup's grid glyph, named 세션 열기 (FR-L26, #501).
+fn OpenSessionButton(b: &ProjectBox, ui: &SharedUi, small: bool) {
+    let p = ember_theme().palette;
+    let size = if small { H_CTL } else { H_BTN };
+    let (u, first, id) = (ui.clone(), b.members.first().map(|m| m.session_id.clone()), b.id.clone());
+    NamedClickable(
+        super::a11y::OPEN_SESSION,
+        Modifier::new().size(size, size).background(paint(p.ink)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        move || match &first {
+            Some(s) => u.open_conversation(s),
+            None => u.open_new_session(Some(id.clone())),
+        },
+        || {
+            NavIcon(super::session::ICON_GRID_SVG, p.ink_text.to_argb(), if small { 16.0 } else { 18.0 });
+        },
+    );
+}
+
+/// A 32 px round icon button from the app's own SVG set (the mockup's `.icon-btn.sm`), named
+/// for assistive technology by `label` (compose-rust v0.0.7, #460).
+fn IconAction(svg: &'static str, label: &'static str, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    NamedClickable(
+        label,
+        Modifier::new().size(H_CTL, H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        on_click,
+        move || {
+            NavIcon(svg, p.text_2.to_argb(), 16.0);
+        },
+    );
+}
+
+/// `.pbox-stats`: the non-empty segments and the computer count flow left to right, 14 px apart,
+/// and wrap; the computer count sits at the right end of the last line.
+fn Stats(b: &ProjectBox, inner: f32) {
+    let p = ember_theme().palette;
+    let mut items: Vec<(String, usize, Option<compose_rust::Color>)> = team_segments(&b.members)
+        .into_iter()
+        .filter(|(_, _, n)| *n > 0)
+        .map(|(label, s, n)| (label.to_string(), n, Some(status_color(s, p))))
+        .collect();
+    items.push(("컴퓨터".to_string(), b.computers.len(), None));
+    let widths: Vec<f32> = items.iter().map(|(l, n, _)| stat_width(*n, l)).collect();
+    let lines = wrap_lines(&widths, 14.0, inner);
+    let last = items.len() - 1;
+    cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
+        for line in lines {
+            cu::Row().spacing(14.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                for i in line {
+                    let (label, n, color) = &items[i];
+                    if i == last {
+                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    }
+                    cu::Row().spacing(4.0).alignment(Alignment::CenterStart).content(|| {
+                        match color {
+                            // The mark is an 8 px rounded square (radius 3).
+                            Some(c) => {
+                                cu::Spacer().modifier(Modifier::new().size(8.0, 8.0).background(paint(*c)).corner_radius(3.0));
+                            }
+                            None => NavIcon(shell::ICON_CPU_SVG, p.muted.to_argb(), 14.0),
+                        }
+                        Label(&n.to_string(), Fs::Md, Weight::Semibold, None, Some(1));
+                        Label(label, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    });
+                }
+            });
+        }
+    });
+}
+
+/// `.mtile`: the character, the name, the task and the status; a waiting member's border takes
+/// the orange. The tile is the container's `on_click` (compose-rust#372).
+fn MemberTile(m: &Member, project_id: &str, ui: &SharedUi) {
+    let p = ember_theme().palette;
+    let (label, tone) = status_pill(m.status);
+    let border = if m.status == LauncherStatus::WaitingForApproval {
+        super::compat::mix(p.orange.strong, p.line, 0.55)
+    } else {
+        p.line
+    };
+    let (u, id) = (ui.clone(), m.session_id.clone());
+    Clickable(
+        Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(border)).corner_radius(CORNER_MD).padding(10.0),
+        Alignment::CenterStart,
+        move || u.open_conversation(&id),
+        || {
+            cu::Column().spacing(6.0).modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    Character(&m.agent, m.leader, 34.0, &m.name, project_id, CharState::from_status(m.status), None);
+                    Label(&m.accessible_name(), Fs::Sm, Weight::Semibold, None, Some(2));
+                });
+                Label(&m.task, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
+                Pill(label, tone.into(), true);
+            });
+        },
+    );
+}
+
+// --- full project view -----------------------------------------------------------------------
+
+fn FullProject(b: &ProjectBox, chips: &[ComputerChip], st: &Ui, ui: &SharedUi, w: f32) {
+    let p = ember_theme().palette;
+    let compact = w <= 560.0;
+    let assigned: Vec<ComputerChip> = chips.iter().filter(|c| b.computers.contains(&c.id)).cloned().collect();
+    let two = full_two_columns(w);
+    // The top bar: back at the left; version control, settings and "세션 열기" at the right
+    // (round icon buttons on a phone, leaving room for the menu button).
+    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+        let full = st.full.clone();
+        AppButton("프로젝트", Some(IconRole::Back), ButtonKind::Default, true, true, false, move || full.set(None));
+        cu::Spacer().modifier(Modifier::new().weight(1.0));
+        let (u, id) = (ui.clone(), b.id.clone());
+        let vcs = move || {
+            u.set_selected_project(Some(id.clone()));
+            shell::choose(&u, NavMenu::VersionControl);
+        };
+        let (settings, id) = (st.settings.clone(), b.id.clone());
+        let open_settings = move || settings.set(Some(id.clone()));
+        if compact {
+            IconAction(super::session::ICON_GIT_SVG, super::a11y::VERSION_CONTROL, vcs);
+            IconAction(shell::ICON_GEAR_SVG, super::a11y::PROJECT_SETTINGS, open_settings);
+            OpenSessionButton(b, ui, true);
+            cu::Spacer().modifier(Modifier::new().width(PHONE_MENU_ROOM));
+        } else {
+            AppButton("버전 관리", Some(IconRole::History), ButtonKind::Default, true, true, false, vcs);
+            AppButton("설정", Some(IconRole::Settings), ButtonKind::Default, true, true, false, open_settings);
+            let (u, first, id) = (ui.clone(), b.members.first().map(|m| m.session_id.clone()), b.id.clone());
+            AppButton("세션 열기", Some(IconRole::Forward), ButtonKind::Primary, true, true, false, move || match &first {
+                Some(s) => u.open_conversation(s),
+                None => u.open_new_session(Some(id.clone())),
+            });
+        }
+    });
+    Header(&b.name, &b.repo_line(), compact, || {
+        IdeMenu(b, ui, compact);
+        ThemeButton(ui);
+        NewMemberButton(ui, Some(b.id.clone()), w);
+    });
+    if assigned.is_empty() {
+        Label("할당된 컴퓨터가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
+    } else {
+        ComputerStrip(&assigned, st);
+    }
+    KpiStrip(b, ui, w);
+    let members = || MembersCard(b, st, ui);
+    let side = || {
+        cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
+            // TODO(routines, channels screens, phase 7): they list the project's items here.
+            for (icon, title, empty) in [(shell::ICON_GAUGE_SVG, "루틴", "루틴이 없습니다"), (shell::ICON_HASH_SVG, "채널", "채널이 없습니다")] {
+                super::home::Tile(|| {
+                    super::home::CardHead(icon, title, || {});
+                    Label(&format!("{empty}. {SOON}"), Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
+                });
+            }
+        });
+    };
+    if two {
+        cu::Row().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Column().modifier(Modifier::new().weight(2.0)).content(members);
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(side);
+        });
+    } else {
+        cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
+            members();
+            side();
+        });
+    }
+}
+
+// --- IDE 열기 ---------------------------------------------------------------------------------
+
+/// The name a chooser entry shows.
+fn ide_name(kind: IdeKind) -> &'static str {
+    match kind {
+        IdeKind::Ember => "Ember 에디터",
+        IdeKind::VsCode => "VS Code",
+        IdeKind::Gateway => "JetBrains Gateway",
+    }
+}
+
+/// Hand an IDE choice to the OS, or open the Ember editor (FR-L7, FR-L31). The same steps as
+/// the Dioxus conversation view's `launch_ide` (D32: exactly the three IDEs).
+fn launch_ide(ui: &SharedUi, kind: IdeKind, launch: Option<Result<IdeLaunch, String>>) {
+    let target = match &launch {
+        None => {
+            notice::post("IDE 목록을 받아오는 중입니다");
+            return;
+        }
+        Some(Err(e)) => {
+            notice::post(format!("IDE 목록을 받지 못했습니다: {e}"));
+            return;
+        }
+        Some(Ok(l)) => l.target(kind.key()).cloned(),
+    };
+    let label = ide_name(kind);
+    match plan(kind, target.as_ref()) {
+        IdeAction::OpenUrl(url) => run_shared(
+            async move {
+                tokio::task::spawn_blocking(move || open_external(&url))
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r.map_err(|e| e.to_string()))
+            },
+            move |r| match r {
+                Ok(()) => notice::post(format!("{label}: 여는 중입니다")),
+                Err(e) => notice::post(format!("{label}: 열지 못했습니다: {e}")),
+            },
+        ),
+        IdeAction::EmberPlaceholder => {
+            let c = IdeLaunch::editor_connection(launch.as_ref());
+            if c.endpoint.as_deref().map_or(true, str::is_empty) {
+                notice::post("Ember 에디터: 서버가 OSE 런타임을 시작하지 못했습니다");
+                return;
+            }
+            ui.open_editor_connection(c.project, c.folder, c.endpoint, c.token, c.server_url, c.computer);
+        }
+        IdeAction::Unavailable(why) => notice::post(format!("{label}: 사용할 수 없습니다: {why}")),
+    }
+}
+
+/// "IDE 열기" with the three-entry chooser. It asks the server for the targets of the project's
+/// first session when it appears (the demo serves the list itself); a project without a session
+/// has nothing to open.
+fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
+    let session = b.members.first().map(|m| m.session_id.clone());
+    let key = session.clone().unwrap_or_default();
+    // `EMBER_CR_IDE_MENU=1` opens the chooser at the start, for review captures.
+    let open = remember_with_key(key.clone(), || mutable_state_of(std::env::var("EMBER_CR_IDE_MENU").as_deref() == Ok("1")));
+    let ide = remember_with_key(key.clone(), || mutable_state_of(None::<Result<IdeLaunch, String>>));
+    let started = remember_with_key(key, || mutable_state_of(false));
+    if let (Some(sid), false) = (session.clone(), started.get_untracked()) {
+        started.set(true);
+        if services().demo.is_some() {
+            let (project, cwd) = services()
+                .client
+                .read(|s| s.session(&sid).map(|v| (v.record.project.clone(), v.record.cwd.clone())))
+                .unwrap_or_default();
+            ide.set(Some(Ok(crate::demo::ide_launch(&sid, &project, &cwd))));
+        } else {
+            let ide = ide.clone();
+            run_shared(
+                async move { services().server.ide_targets(&sid, None).await.map_err(|e| e.to_string()) },
+                move |r| ide.set(Some(r)),
+            );
+        }
+    }
+    let remembered = ui.prefs.get().ide_target.as_deref().and_then(IdeKind::from_key);
+    let choices = crate::ui::session::ide_choices(remembered);
+    let labels: Vec<String> = choices.iter().map(|c| c.label.to_string()).collect();
+    let has_session = session.is_some();
+    cu::Box().content(|| {
+        cu::Row().alignment(Alignment::Center).spacing(4.0).content(|| {
+            let (o, ui_btn, ide_btn) = (open.clone(), ui.clone(), ide.clone());
+            AppButton(if compact { "IDE" } else { "IDE 열기" }, Some(IconRole::Forward), ButtonKind::Default, false, true, false, move || {
+                if !has_session {
+                    notice::post("세션이 없어 IDE를 열 수 없습니다");
+                } else {
+                    crate::ui::cr::session::ide_main_click(remembered, &o, |kind| {
+                        launch_ide(&ui_btn, kind, ide_btn.get_untracked())
+                    });
+                }
+            });
+            if has_session {
+                crate::ui::cr::session::IdeChevron(open.clone(), false);
+            }
+        });
+        let (close, ui2, ide2) = (open.clone(), ui.clone(), ide.clone());
+        OptionSheet(open.get(), &labels, None, 220.0, move || close.set(false), move |i| {
+            if let Some(c) = choices.get(i) {
+                launch_ide(&ui2, c.kind, ide2.get_untracked());
+            }
+        });
+    });
+}
+
+/// `.strip`: members, waiting, running and the week's tokens, with the pinned sessions as chips.
+fn KpiStrip(b: &ProjectBox, ui: &SharedUi, w: f32) {
+    let p = ember_theme().palette;
+    let items = [
+        ("멤버", b.members.len().to_string()),
+        ("승인 대기", b.waiting.to_string()),
+        ("실행 중", b.running.to_string()),
+        ("이번 주 토큰", SOON.to_string()),
+    ];
+    let pinned: Vec<&Member> = services().client.read(|s| {
+        b.members.iter().filter(|m| s.session(&m.session_id).map_or(false, |v| v.record.pinned)).collect::<Vec<_>>()
+    });
+    let kpis = || {
+        let cells: Vec<Part> = items
+            .iter()
+            .map(|(label, v)| -> Part {
+                Box::new(move || {
+                    cu::Column().spacing(SP[0]).content(|| {
+                        Label(label, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        if *v == SOON {
+                            Label(v, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        } else {
+                            Label(v, Fs::Xl2, Weight::Regular, None, Some(1));
+                        }
+                    });
+                })
+            })
+            .collect();
+        Cols(if w > 560.0 { 4 } else { 2 }, SP[4], cells);
+    };
+    let pins = || {
+        if pinned.is_empty() {
+            return;
+        }
+        cu::Column().spacing(6.0).content(|| {
+            Label("고정", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
+            for m in pinned.iter() {
+                let (u, id) = (ui.clone(), m.session_id.clone());
+                // `.pins .chip`: an outlined chip with the status mark and the title.
+                Clickable(
+                    Modifier::new().height(H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
+                    Alignment::CenterStart,
+                    move || u.open_conversation(&id),
+                    || {
+                        cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                            super::home::Dot(status_color(m.status, p));
+                            Label(&fit_label(&m.task, 220.0, Fs::Sm.size()), Fs::Sm, Weight::Regular, None, Some(1));
+                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                        });
+                    },
+                );
+            }
+        });
+    };
+    cu::Box()
+        .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[3]))
+        .content(|| {
+            if w > 1279.0 && !pinned.is_empty() {
+                cu::Row().spacing(SP[5]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    cu::Column().modifier(Modifier::new().weight(4.0)).content(kpis);
+                    cu::Column().modifier(Modifier::new().weight(2.0)).content(pins);
+                });
+            } else {
+                cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    kpis();
+                    pins();
+                });
+            }
+        });
+}
+
+/// 멤버: the search, the status filters and the members grouped by status.
+fn MembersCard(b: &ProjectBox, st: &Ui, ui: &SharedUi) {
+    let p = ember_theme().palette;
+    let filter = st.filter.get();
+    let list = filter_members(&b.members, filter, &st.member_query.get());
+    super::components::EmberCard(false, true, None, None, None, || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            super::home::CardHead(shell::ICON_USERS_SVG, "멤버", || {
+                Pill(&format!("{}명", b.members.len()), PillTone::Grey, false);
+            });
+            let q = st.member_query.clone();
+            SearchField("멤버 검색", H_CTL, move |v| q.set(v));
+            cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
+                for f in MemberFilter::ALL {
+                    let s = st.filter.clone();
+                    FilterChip(f.label(), f == filter, move || s.set(f));
+                    cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                }
+            });
+            if list.is_empty() {
+                Label("일치하는 멤버가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
+            }
+            for (gi, (status, members)) in grouped(&list).into_iter().enumerate() {
+                // `.grp`: a rule above every group but the first, the status and its count.
+                if gi > 0 {
+                    cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                }
+                Label(&format!("{} \u{b7} {}", status_pill(status).0, members.len()), Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1));
+                for (i, m) in members.iter().enumerate() {
+                    MemberRow(m, &b.id, ui, i > 0);
+                }
+            }
+        });
+    });
+}
+
+/// `.member`: a 36 px character, the name with its status pill, and the task line; the
+/// container's `on_click` (compose-rust#372).
+fn MemberRow(m: &Member, project_id: &str, ui: &SharedUi, rule: bool) {
+    let p = ember_theme().palette;
+    let (label, tone) = status_pill(m.status);
+    let (u, id) = (ui.clone(), m.session_id.clone());
+    if rule {
+        cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+    }
+    // TODO(FR-X7): the computer the member runs on and the pending approval's request line need
+    // the server (the client knows neither).
+    Clickable(Modifier::new().fill_max_width().padding(SP[0]), Alignment::CenterStart, move || u.open_conversation(&id), || {
+        cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+            Character(&m.agent, m.leader, 36.0, &m.name, project_id, CharState::from_status(m.status), None);
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                    Label(&fit_label(&m.accessible_name(), 220.0, Fs::Md.size()), Fs::Md, Weight::Medium, None, Some(1));
+                    Pill(label, tone.into(), true);
+                });
+                let line = format!("{} \u{b7} {}", m.task, m.agent);
+                Label(&fit_label(&line, 520.0, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            });
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sheets
+// ---------------------------------------------------------------------------------------------
+
+fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) {
+    // New project (FR-L26, FR-L1): name, repository, default branch and team character. Creating
+    // takes only the name; the other fields go in a second PATCH.
+    {
+        let d = st.new_draft.get();
+        let existing: Vec<String> = services().client.read(|s| s.projects().into_iter().map(|p| p.name).collect());
+        let errors = d.validate(&existing);
+        let saving = st.new_saving.get();
+        let can_create = errors.is_empty() && !saving;
+        // 취소, X and the backdrop: nothing while saving, a question when something was typed.
+        let guard = SettingsGuard::new(saving, d.is_blank());
+        let leave = {
+            let (n, dr, f) = (st.new_project.clone(), st.new_draft.clone(), st.new_failure.clone());
+            move || {
+                n.set(false);
+                dr.set(NewProjectDraft::default());
+                f.set(None);
+            }
+        };
+        let request_close = {
+            let (confirm, leave) = (st.new_confirm.clone(), leave.clone());
+            move || match guard.on_close() {
+                CloseAction::Ignore => {}
+                CloseAction::Confirm => confirm.set(true),
+                CloseAction::Close => leave.clone()(),
+            }
+        };
+        let p = ember_theme().palette;
+        // The body follows the window like the settings sheet (a fixed 560 dp cut the last
+        // style rows at 390). When the window has not reported a size (390 can read 0x0) the
+        // shared formula falls back to 240 dp. v0.0.7: #479 fixed (`with_report_size`);
+        // fallback kept until checked on a display (the first composition still reads 0x0).
+        let new_window = crate::ui::window_size::current_window_size();
+        let new_body_height =
+            super::components::sheet_body_max_height(new_window.width_dp, new_window.height_dp, false, 60.0).min(900.0);
+        EmberSheet("새 프로젝트", st.new_project.get(), request_close.clone(), None, || {
+            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(new_body_height)).content(|| {
+                cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+                    // v0.0.7: #374 fixed (`TextField::text`); workaround kept until checked on a
+                    // display (a controlled value must not move the caret while typing), so the
+                    // fields are uncontrolled.
+                    let (d1, d2, d3) = (st.new_draft.clone(), st.new_draft.clone(), st.new_draft.clone());
+                    let (f1, f2, f3) = (st.new_failure.clone(), st.new_failure.clone(), st.new_failure.clone());
+                    let submit = {
+                        let (dr, saving_s, failure, leave) =
+                            (st.new_draft.clone(), st.new_saving.clone(), st.new_failure.clone(), leave.clone());
+                        let existing = existing.clone();
+                        move |_: String| {
+                            let d = dr.get_untracked();
+                            if d.validate(&existing).is_empty() && !saving_s.get_untracked() {
+                                create_project(d, saving_s.clone(), failure.clone(), leave.clone());
+                            }
+                        }
+                    };
+                    let (s1, s2, s3) = (submit.clone(), submit.clone(), submit);
+                    FieldRow("이름", || {
+                        EmberField(FieldOptions {
+                            fill_max_width: true,
+                            placeholder: "프로젝트 이름".to_string(),
+                            on_value_change: Some(Box::new(move |v| {
+                                f1.set(None);
+                                d1.update(|s| s.name = v)
+                            })),
+                            on_submit: Some(Box::new(s1)),
+                            ..Default::default()
+                        });
+                    });
+                    cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                            FieldRow("저장소", || {
+                                EmberField(FieldOptions {
+                                    fill_max_width: true,
+                                    placeholder: "github.com/...".to_string(),
+                                    on_value_change: Some(Box::new(move |v| {
+                                f2.set(None);
+                                d2.update(|s| s.repo = v)
+                            })),
+                            on_submit: Some(Box::new(s2)),
+                                    ..Default::default()
+                                });
+                            });
+                        });
+                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                            FieldRow("기본 브랜치", || {
+                                EmberField(FieldOptions {
+                                    fill_max_width: true,
+                                    placeholder: "develop".to_string(),
+                                    on_value_change: Some(Box::new(move |v| {
+                                f3.set(None);
+                                d3.update(|s| s.branch = v)
+                            })),
+                            on_submit: Some(Box::new(s3)),
+                                    ..Default::default()
+                                });
+                            });
+                        });
+                    });
+                    if d.branch.trim().is_empty() {
+                        Label(&format!("비워 두면 {}을 씁니다", NewProjectDraft::DEFAULT_BRANCH), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    }
+                    Label("팀 캐릭터", Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                    let dr = st.new_draft.clone();
+                    let shown = effective_style(if d.style.is_empty() { None } else { Some(&d.style) }, None);
+                    StylePicker(&d.name, shown, move |c| dr.update(|s| s.style = c.id().to_string()));
+                    // Errors only once something was typed, so an empty sheet is not red.
+                    if !d.is_blank() {
+                        for e in errors.iter() {
+                            Label(e.message(), Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
+                        }
+                    }
+                    if let Some(m) = st.new_failure.get() {
+                        Label(&m, Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
+                    }
+                });
+            });
+            SheetFooter(|| {
+                AppButton("취소", None, ButtonKind::Default, true, true, false, request_close.clone());
+                let (dr, saving_s, failure, leave) =
+                    (st.new_draft.clone(), st.new_saving.clone(), st.new_failure.clone(), leave.clone());
+                AppButton(if saving { "만드는 중" } else { "만들기" }, None, ButtonKind::Primary, true, can_create, false, move || {
+                    create_project(dr.get_untracked(), saving_s.clone(), failure.clone(), leave.clone())
+                });
+            });
+        });
+        // The unsaved-changes question, as the settings sheet asks it.
+        let keep = {
+            let c = st.new_confirm.clone();
+            move || c.set(false)
+        };
+        EmberSheet("변경 사항", st.new_confirm.get(), keep.clone(), None, || {
+            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+                Label(DISCARD_QUESTION, Fs::Md, Weight::Regular, None, Some(3));
+            });
+            SheetFooter(|| {
+                AppButton("계속 편집", None, ButtonKind::Default, true, true, false, keep.clone());
+                let (c, leave) = (st.new_confirm.clone(), leave.clone());
+                AppButton("닫기", None, ButtonKind::Primary, true, true, false, move || {
+                    c.set(false);
+                    leave.clone()();
+                });
+            });
+        });
+    }
+    super::add_computer::AddComputerSheet(&st.add);
+    // A computer's monitor.
+    if let Some(id) = st.computer.get() {
+        let c = st.computer.clone();
+        super::monitor::MonitorSheet(chips.iter().find(|x| x.id == id), boxes, move || c.set(None));
+    }
+    // The project's settings.
+    if let Some(id) = st.settings.get() {
+        if let Some(b) = boxes.iter().find(|b| b.id == id) {
+            let s = st.settings.clone();
+            SettingsSheet(b, chips, st.settings.clone(), st.full.clone(), move || s.set(None));
+        }
+        let _ = ui;
+    }
+}
+
+// --- review captures: the settings sheet body ------------------------------------------------
+
+/// Estimated heights (dp) of the settings sections, top to bottom, for `EMBER_CR_SHEET_SCROLL`.
+const EST_SEC_BASIC: f32 = 330.0;
+const EST_SEC_COMPUTERS: f32 = 170.0;
+const EST_SEC_DEFAULTS: f32 = 330.0;
+const EST_SEC_STYLE: f32 = 500.0;
+const EST_SEC_LEADER: f32 = 110.0;
+const EST_SEC_PROFILE: f32 = 120.0;
+const EST_SEC_LINKS: f32 = 100.0;
+const EST_SEC_DANGER: f32 = 150.0;
+
+/// How many dp of the settings sheet body to leave out, from `EMBER_CR_SHEET_SCROLL=<dp|end>`
+/// (`end` shows leader, connections and the danger zone). Same idea as
+/// `EMBER_CR_SCROLL` in home.rs and files.rs: the toolkit cannot scroll a column from code
+/// before v0.0.5 (v0.0.7: #385 fixed with `ScrollState::scroll_to`; workaround kept until checked
+/// on a display, because the capture script relies on it), so the sections that would have
+/// scrolled out are left out.
+pub fn sheet_scroll_dp(value: Option<&str>) -> f32 {
+    match value {
+        Some("end") => EST_SEC_BASIC + EST_SEC_COMPUTERS + EST_SEC_DEFAULTS + EST_SEC_PROFILE + EST_SEC_STYLE,
+        Some(n) => n.parse::<f32>().unwrap_or(0.0).max(0.0),
+        None => 0.0,
+    }
+}
+
+struct SheetSkip(std::cell::Cell<f32>);
+
+impl SheetSkip {
+    /// Review captures only: release builds ignore `EMBER_CR_SHEET_SCROLL`.
+    fn from_env() -> SheetSkip {
+        let value = if cfg!(debug_assertions) { std::env::var("EMBER_CR_SHEET_SCROLL").ok() } else { None };
+        SheetSkip(std::cell::Cell::new(sheet_scroll_dp(value.as_deref())))
+    }
+
+    /// Whether a section of about `est` dp is still in view.
+    fn show(&self, est: f32) -> bool {
+        let left = self.0.get();
+        if left >= est {
+            self.0.set(left - est);
+            false
+        } else {
+            self.0.set(0.0);
+            true
+        }
+    }
+}
+
+/// [`Section`], left out when `EMBER_CR_SHEET_SCROLL` scrolled it away.
+fn SkipSection(skip: &SheetSkip, est: f32, title: &str, hint: &str, first: bool, content: impl FnOnce()) {
+    if skip.show(est) {
+        Section(title, hint, first, content);
+    }
+}
+
+/// A settings section: a rule above (except the first), the 16 px title, its hint, the content.
+fn Section(title: &str, hint: &str, first: bool, content: impl FnOnce()) {
+    let p = ember_theme().palette;
+    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+        if !first {
+            cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+        }
+        Label(title, Fs::Lg, Weight::Semibold, None, Some(1));
+        if !hint.is_empty() {
+            Label(hint, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(3));
+        }
+        content();
+    });
+}
+
+/// `.ps-field`: a small label above its field.
+fn FieldRow(label: &str, content: impl FnOnce()) {
+    let p = ember_theme().palette;
+    cu::Column().spacing(4.0).modifier(Modifier::new().fill_max_width()).content(|| {
+        Label(label, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
+        content();
+    });
+}
+
+/// Creates the project, then sends the filled fields in a second PATCH (FR-L26). A failed second
+/// step keeps the project and says so with a fixed sentence; a failed first step keeps the sheet
+/// open with its content. The repository value is never logged.
+fn create_project(
+    draft: NewProjectDraft,
+    saving: MutableState<bool>,
+    failure: MutableState<Option<String>>,
+    leave: impl FnOnce() + Send + 'static,
+) {
+    saving.set(true);
+    failure.set(None);
+    let patch = draft.followup_patch();
+    let name = draft.trimmed_name();
+    let style = CharStyle::from_id(&draft.style);
+    let ui = shared_ui().clone();
+    let name_for_prefs = name.clone();
+    run_shared(
+        async move {
+            let s = services();
+            if let Some(d) = &s.demo {
+                let mut project = d.create_project(&s.client, &name)?;
+                if !patch.is_empty() {
+                    project.repository = patch.repository.clone();
+                    project.default_branch = patch.default_branch.clone();
+                    project.character_style = patch.character_style.clone();
+                    s.client.apply(ember_client::state::Input::Push(ember_client::wire::Push::ProjectUpdated { project }));
+                }
+                return Ok(false);
+            }
+            s.client
+                .api()
+                .create_project(&name)
+                .await
+                .map_err(|e| create_error_message(e.code()).to_string())?;
+            let _ = s.client.load_projects().await;
+            if patch.is_empty() {
+                return Ok(false);
+            }
+            Ok::<bool, String>(s.client.patch_project(&name, &patch).await.is_err())
+        },
+        move |r: Result<bool, String>| {
+            saving.set(false);
+            match r {
+                Ok(followup_failed) => {
+                    let outcome = NewProjectOutcome::after_followup(followup_failed);
+                    if !followup_failed {
+                        if let Some(st) = style {
+                            ui.update_prefs(|pr| pr.set_character_style(&name_for_prefs, st));
+                        }
+                    }
+                    if let Some(m) = outcome.notice {
+                        notice::post(m.to_string());
+                    }
+                    leave();
+                }
+                Err(e) => failure.set(Some(e)),
+            }
+        },
+    );
+}
+
+/// Sends the patch and shows the honest result: close on success, a fixed Korean sentence on
+/// failure (FR-L26). After a rename the selected project and the open project view follow the new
+/// name, and this device's remembered style moves with it. The character style is also kept in
+/// this device's prefs, but only as the fallback the tiles read when the server has none.
+/// TODO(#384): leader, archive and delete are not sent (server `not_yet`).
+fn save_settings(
+    project: String,
+    patch: ember_client::wire::ProjectPatch,
+    style: Option<CharStyle>,
+    closed: MutableState<Option<String>>,
+    full: MutableState<Option<String>>,
+    saving: MutableState<bool>,
+    failure: MutableState<Option<String>>,
+) {
+    saving.set(true);
+    failure.set(None);
+    let ui = shared_ui().clone();
+    let style_changed = patch.character_style.is_some();
+    let renamed = patch.name.clone();
+    let sent = patch.clone();
+    let saved_as = renamed.clone().unwrap_or_else(|| project.clone());
+    let old = project.clone();
+    run_shared(
+        async move { services().client.patch_project(&project, &patch).await.map(|_| ()) },
+        move |r| {
+            saving.set(false);
+            match r {
+                Ok(()) => {
+                    if let Some(new) = &renamed {
+                        ui.set_selected_project(follow_rename(ui.selected_project.get_untracked().as_deref(), &old, new));
+                        let open = follow_rename(full.get_untracked().as_deref(), &old, new);
+                        full.set(open);
+                        ui.update_prefs(|pr| pr.rename_project_keys(&old, new));
+                    }
+                    if let (true, Some(st)) = (style_changed, style) {
+                        ui.update_prefs(|pr| pr.set_character_style(&saved_as, st));
+                    }
+                    closed.set(None);
+                }
+                Err(e) => failure.set(Some(patch_error_message(e.status(), e.code(), &sent).to_string())),
+            }
+        },
+    );
+}
+
+/// The settings sheet has 취소 and 저장 in the header beside the close button.
+fn SettingsSheet(
+    b: &ProjectBox,
+    chips: &[ComputerChip],
+    closed: MutableState<Option<String>>,
+    full: MutableState<Option<String>>,
+    on_close: impl FnMut() + Clone + 'static,
+) {
+    let p = ember_theme().palette;
+    let default_project = is_default_project(&b.id);
+    // What the server holds now; the draft starts from it and 저장 sends only the difference.
+    let server = services().client.read(|s| s.project(&b.id).cloned()).unwrap_or_else(|| Project { name: b.id.clone(), ..Default::default() });
+    let draft = remember_with_key(b.id.clone(), {
+        let server = server.clone();
+        move || mutable_state_of(SettingsDraft::from_project(&server))
+    });
+    let saving = remember_with_key(b.id.clone(), || mutable_state_of(false));
+    let failure = remember_with_key(b.id.clone(), || mutable_state_of(None::<String>));
+    let sheet_skip = SheetSkip::from_env();
+    let confirm = remember_with_key(b.id.clone(), || mutable_state_of(false));
+    let d = draft.get();
+    let errors = validate_settings(&d, &b.id);
+    let patch = build_patch(&server, &d);
+    let can_save = SETTINGS_SAVE_AVAILABLE && errors.is_empty() && !patch.is_empty() && !saving.get();
+    let window = crate::ui::window_size::current_window_size();
+    let body_height = super::components::sheet_body_max_height(window.width_dp, window.height_dp, false, 60.0).min(900.0);
+    // 취소, X and the backdrop: nothing while saving, a question when the draft has changes.
+    let guard = SettingsGuard::new(saving.get(), patch.is_empty());
+    let request_close = {
+        let (confirm, on_close) = (confirm.clone(), on_close.clone());
+        move || match guard.on_close() {
+            CloseAction::Ignore => {}
+            CloseAction::Confirm => confirm.set(true),
+            CloseAction::Close => on_close.clone()(),
+        }
+    };
+    let mut actions = {
+        let close = request_close.clone();
+        let (patch, project, closed, saving, failure) = (patch.clone(), b.id.clone(), closed.clone(), saving.clone(), failure.clone());
+        let (full, saving_now) = (full.clone(), saving.get());
+        let style = CharStyle::from_id(d.style.as_str());
+        move || {
+            AppButton("취소", None, ButtonKind::Default, true, true, false, close.clone());
+            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+            let (patch, project, closed, saving, failure) = (patch.clone(), project.clone(), closed.clone(), saving.clone(), failure.clone());
+            let full = full.clone();
+            AppButton(if saving_now { "저장 중" } else { "저장" }, None, ButtonKind::Primary, true, can_save, false, move || {
+                save_settings(project.clone(), patch.clone(), style, closed.clone(), full.clone(), saving.clone(), failure.clone())
+            });
+            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+        }
+    };
+    EmberSheet(&format!("{} 설정", b.name), true, request_close, Some(&mut actions), || {
+        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_height)).content(|| {
+            cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+                SkipSection(&sheet_skip, EST_SEC_BASIC, "기본", "프로젝트 이름과 저장소입니다. 비워서 저장하면 저장소와 브랜치 설정이 지워집니다", true, || {
+                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        let (d1, d2, d3) = (draft.clone(), draft.clone(), draft.clone());
+                        FieldRow("이름", || {
+                            EmberField(FieldOptions {
+                                fill_max_width: true,
+                                placeholder: b.name.clone(),
+                                enabled: Some(part_supported(SettingsPart::Name) && !default_project),
+                                on_value_change: Some(Box::new(move |v| d1.update(|s| s.name = v))),
+                                ..Default::default()
+                            });
+                        });
+                        cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                                FieldRow("저장소", || {
+                                    EmberField(FieldOptions {
+                                        fill_max_width: true,
+                                        placeholder: b.repo.clone().unwrap_or_else(|| "github.com/...".to_string()),
+                                        enabled: Some(part_supported(SettingsPart::Repository)),
+                                        on_value_change: Some(Box::new(move |v| d2.update(|s| s.repo = v))),
+                                        ..Default::default()
+                                    });
+                                });
+                            });
+                            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                                FieldRow("기본 브랜치", || {
+                                    EmberField(FieldOptions {
+                                        fill_max_width: true,
+                                        placeholder: b.branch.clone().unwrap_or_else(|| "develop".to_string()),
+                                        enabled: Some(part_supported(SettingsPart::Repository)),
+                                        on_value_change: Some(Box::new(move |v| d3.update(|s| s.branch = v))),
+                                        ..Default::default()
+                                    });
+                                });
+                            });
+                        });
+                        for e in errors.iter() {
+                            Label(e.message(), Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
+                        }
+                        if let Some(m) = failure.get() {
+                            Label(&m, Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
+                        }
+                    });
+                });
+                SkipSection(&sheet_skip, EST_SEC_COMPUTERS, "컴퓨터", "이 프로젝트의 팀원이 일할 수 있는 컴퓨터입니다", false, || {
+                    if chips.is_empty() {
+                        Label("등록된 컴퓨터가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
+                    }
+                    // `.ps-chips` of `.ps-check`: a check box, the computer's icon, its name and
+                    // the status dot, wrapping. Ticking assigns at once (FR-L4), as before.
+                    // TODO(FR-X7): one icon for every kind, because node does not report the kind.
+                    // v0.0.7: #521 fixed (`FlowRow`); workaround kept until checked on a display
+                    // (the toolkit's wrap must match the mockup), so lines are cut by estimated width.
+                    let avail = window.width_dp.min(760.0) - 2.0 * SP[4];
+                    let widths: Vec<f32> = chips.iter().map(|c| crate::ui::project::computer_check_width(&c.name) + 26.0).collect();
+                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        for line in wrap_lines(&widths, SP[1], avail) {
+                            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                                for k in line {
+                                    let c = &chips[k];
+                                    ComputerCheck(c, b.computers.contains(&c.id), b.id.clone());
+                                }
+                            });
+                        }
+                    });
+                });
+                SkipSection(&sheet_skip, EST_SEC_DEFAULTS, "새 팀원 기본값", "하네스, 모델, 권한 모드는 새 팀원에게만 적용됩니다", false, || {
+                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        let agents = agent_options();
+                        let agent_labels: Vec<String> = agents.iter().map(|(_, l)| l.to_string()).collect();
+                        let agent_at = agents.iter().position(|(k, _)| *k == d.agent).unwrap_or(0);
+                        FieldRow("하네스", || {
+                            let (dr, agents) = (draft.clone(), agents.clone());
+                            Select(&agent_labels[agent_at], &agent_labels, agent_at, 260.0, move |i| {
+                                if let Some((k, _)) = agents.get(i) {
+                                    dr.update(|s| s.agent = k.to_string());
+                                }
+                            });
+                        });
+                        FieldRow("모델", || {
+                            let dr = draft.clone();
+                            // The model picker sheet of the new session screen needs the harness
+                            // catalog (an Ember gap, not compose-rust#383, which is fixed); the id
+                            // is typed until it is shared. v0.0.7: #374 fixed (`TextField::text`);
+                            // workaround kept until checked on a display, so the server's current
+                            // model stays the placeholder.
+                            EmberField(FieldOptions {
+                                fill_max_width: true,
+                                placeholder: server.member_defaults.as_ref().and_then(|m| m.model.clone()).unwrap_or_else(|| "비워 두면 하네스 기본값을 씁니다".to_string()),
+                                enabled: Some(part_supported(SettingsPart::MemberDefaults)),
+                                on_value_change: Some(Box::new(move |v| dr.update(|s| s.model = v))),
+                                ..Default::default()
+                            });
+                        });
+                        let modes = mode_options();
+                        let mode_labels: Vec<String> = modes.iter().map(|(_, l)| l.to_string()).collect();
+                        let mode_at = modes.iter().position(|(k, _)| *k == d.mode).unwrap_or(0);
+                        FieldRow("권한 모드", || {
+                            let (dr, modes) = (draft.clone(), modes.clone());
+                            Select(&mode_labels[mode_at], &mode_labels, mode_at, 260.0, move |i| {
+                                if let Some((k, _)) = modes.get(i) {
+                                    dr.update(|s| s.mode = k.to_string());
+                                }
+                            });
+                        });
+                    });
+                });
+                SkipSection(&sheet_skip, EST_SEC_PROFILE, "프로필 덮어쓰기", "이 프로젝트에서만 하네스에 고정할 계정입니다. 팀원 정의에 고정 계정이 없을 때 새 세션에 쓰입니다", false, || {
+                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        let accounts: Vec<(String, String, String)> = crate::services::try_services()
+                            .map(|s| s.ui.live.accounts.get().iter().map(|a| (a.id.clone(), a.agent.clone(), a.label.clone())).collect())
+                            .unwrap_or_default();
+                        for (kind, name) in override_harnesses() {
+                            let opts = override_options(kind, &accounts);
+                            let labels: Vec<String> = opts.iter().map(|(_, l)| l.clone()).collect();
+                            let at = d.overrides.get(kind).and_then(|id| opts.iter().position(|(i, _)| i == id)).unwrap_or(0);
+                            let shown = override_label(&server, &d, kind, &accounts, AccountsState::of(&accounts));
+                            FieldRow(name, || {
+                                let (dr, opts, sv) = (draft.clone(), opts.clone(), server.clone());
+                                Select(&shown, &labels, at, 260.0, move |i| {
+                                    if let Some((id, _)) = opts.get(i) {
+                                        dr.update(|s| pick_override(&sv, s, kind, id));
+                                    }
+                                });
+                            });
+                        }
+                    });
+                });
+                SkipSection(&sheet_skip, EST_SEC_STYLE, "팀 캐릭터", "팀원이 모두 고른 모양으로 보입니다. 저장하면 서버에 기록됩니다", false, || {
+                    let dr = draft.clone();
+                    let device = shared_ui().prefs.get().saved_character_style(&b.id);
+                    let shown = if d.style.is_empty() { effective_style(None, device) } else { effective_style(Some(&d.style), device) };
+                    StylePicker(&b.name, shown, move |st| dr.update(|s| s.style = st.id().to_string()));
+                    // The team character screen is no sidebar entry (D26, #503): this link is the way in.
+                    // It leaves the sheet, so it waits for a clean draft instead of dropping edits.
+                    let (u, closed, id) = (shared_ui().clone(), closed.clone(), b.id.clone());
+                    AppButton("캐릭터 전체 보기", None, ButtonKind::Default, true, patch.is_empty() && !saving.get(), false, move || {
+                        closed.set(None);
+                        u.open_characters(&id);
+                    });
+                    if let Some(reason) = crate::ui::project::characters_link_reason(!patch.is_empty()) {
+                        Label(reason, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                    }
+                });
+                if leader_choice_visible(&b.id) {
+                    // `.ps-leads`: one radio per member, the leader ticked. Read only until the
+                    // server takes a leader (400 `not_yet`, TODO(#384)).
+                    SkipSection(&sheet_skip, EST_SEC_LEADER, "리더 (오케스트레이터)", "다른 팀원에게 일을 나누고 모으는 팀원 한 명입니다. 리더 지정은 서버가 아직 지원하지 않습니다", false, || {
+                        if b.members.is_empty() {
+                            Label("팀원이 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                        }
+                        let cols = crate::ui::project::leader_cols(window.width_dp);
+                        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                            for row in b.members.chunks(cols) {
+                                cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                                    for m in row {
+                                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| LeaderOption(m));
+                                    }
+                                    for _ in row.len()..cols {
+                                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                    }
+                                });
+                            }
+                        });
+                    });
+                } else {
+                    SkipSection(&sheet_skip, EST_SEC_LEADER, "리더 (오케스트레이터)", "기본 프로젝트는 리더를 두지 않습니다", false, || {
+                        Label("리더가 필요하면 프로젝트를 새로 만들어 옮기세요.", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                    });
+                }
+                SkipSection(&sheet_skip, EST_SEC_LINKS, "연결", "이 프로젝트에 묶인 채널, 루틴, 버전 관리입니다. 채널과 루틴 연결은 서버가 아직 알려 주지 않습니다", false, || {
+                    // `.ps-chips` of outline chips; only 버전 관리 is known to the client.
+                    let (u, closed, id) = (shared_ui().clone(), closed.clone(), b.id.clone());
+                    AppButton("버전 관리", Some(IconRole::History), ButtonKind::Default, true, patch.is_empty() && !saving.get(), false, move || {
+                        closed.set(None);
+                        u.set_selected_project(Some(id.clone()));
+                        shell::choose(&u, NavMenu::VersionControl);
+                    });
+                });
+                SkipSection(&sheet_skip, EST_SEC_DANGER, "위험 영역", if default_project { "되돌리기 어려운 작업입니다. 기본 프로젝트는 보관하거나 지울 수 없습니다" } else { "되돌리기 어려운 작업입니다. 보관과 삭제는 서버가 아직 지원하지 않습니다" }, false, || {
+                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        for row in danger_rows(&b.id, b.members.len()) {
+                            DangerRowView(&row, danger_allowed(&b.id, row.part));
+                        }
+                    });
+                });
+            });
+        });
+    });
+    // The unsaved-changes question (FR-L26): 닫기 leaves, 계속 편집 goes back to the form.
+    {
+        let keep = {
+            let c = confirm.clone();
+            move || c.set(false)
+        };
+        EmberSheet("변경 사항", confirm.get(), keep.clone(), None, || {
+            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+                Label(DISCARD_QUESTION, Fs::Md, Weight::Regular, None, Some(3));
+            });
+            SheetFooter(|| {
+                AppButton("계속 편집", None, ButtonKind::Default, true, true, false, keep.clone());
+                let (c, mut leave) = (confirm.clone(), on_close.clone());
+                AppButton("닫기", None, ButtonKind::Primary, true, true, false, move || {
+                    c.set(false);
+                    leave();
+                });
+            });
+        });
+    }
+}
+
+/// `.ps-check`: a check box, the computer icon, the name and the status dot, ticked when the
+/// computer is assigned. Ticking assigns or unassigns at once (FR-L4).
+fn ComputerCheck(c: &ComputerChip, on: bool, project: String) {
+    let p = ember_theme().palette;
+    let (_, tone) = reach_pill(c.reachability);
+    let dot = super::components::pill_colors(tone.into(), p).0;
+    let (bg, edge) = if on { (p.sel, p.ink) } else { (p.surface, p.line) };
+    cu::Row()
+        .spacing(SP[1])
+        .alignment(Alignment::CenterStart)
+        .modifier(Modifier::new().height(H_CTL).background(paint(bg)).border(1.0, paint(edge)).corner_radius(CORNER_SM))
+        .content(|| {
+            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            let id = c.id.clone();
+            cu::Checkbox(on).modifier(Modifier::new().size(16.0, 16.0)).on_change(move |v| set_assignment(project.clone(), id.clone(), v));
+            NavIcon(shell::ICON_CPU_SVG, p.text_2.to_argb(), 16.0);
+            Label(&c.name, Fs::Sm, Weight::Regular, None, Some(1));
+            super::home::Dot(dot);
+            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+        });
+}
+
+/// `.ps-lead`: a radio mark, the member's name and task. Read only: the server does not take a
+/// leader yet (TODO(#384)), so the mark shows the current leader and does not react.
+fn LeaderOption(m: &Member) {
+    let p = ember_theme().palette;
+    cu::Row()
+        .spacing(10.0)
+        .alignment(Alignment::CenterStart)
+        .modifier(Modifier::new().fill_max_width().padding(10.0).border(1.0, paint(if m.leader { p.ink } else { p.line })).corner_radius(CORNER_MD))
+        .content(|| {
+            // TODO(compose-rust#545): no RadioButton; a ring with a filled centre stands in.
+            cu::Box().alignment(Alignment::Center).modifier(Modifier::new().size(16.0, 16.0).border(1.5, paint(p.text_2)).shape_role(ShapeRole::Full)).content(|| {
+                if m.leader {
+                    cu::Spacer().modifier(Modifier::new().size(8.0, 8.0).background(paint(p.ink)).shape_role(ShapeRole::Full));
+                }
+            });
+            cu::Column().spacing(2.0).modifier(Modifier::new().weight(1.0)).content(|| {
+                Label(&m.name, Fs::Sm, Weight::Semibold, None, Some(1));
+                Label(&m.task, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+            });
+        });
+}
+
+/// `.ps-danger`: the title and what it does at the left, the destructive button at the right.
+fn DangerRowView(row: &crate::ui::project::DangerRow, enabled: bool) {
+    let p = ember_theme().palette;
+    cu::Row()
+        .spacing(SP[2])
+        .alignment(Alignment::CenterStart)
+        .modifier(Modifier::new().fill_max_width().padding(SP[2]).border(1.0, paint(p.red.soft)).corner_radius(CORNER_MD))
+        .content(|| {
+            cu::Column().spacing(2.0).modifier(Modifier::new().weight(1.0)).content(|| {
+                Label(row.title, Fs::Sm, Weight::Semibold, None, Some(1));
+                Label(&row.note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+            });
+            AppButton(row.button, None, ButtonKind::Destructive, true, enabled, false, || {});
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
+    use compose_rust::{Host, Recomposer};
+
+    #[test]
+    fn fr_c2_add_computer_chip_sub_is_short_enough_to_show_whole() {
+        let c = ComputerChip {
+            id: "a".into(),
+            name: "a".into(),
+            reachability: ember_client::state::Reachability::Online,
+            running: 2,
+            projects: vec!["p".into(); 3],
+        };
+        assert_eq!(chip_sub(&c), "온라인 \u{b7} 실행 2");
+        assert!(text_px(&chip_sub(&c), Fs::Xs.size()) <= 180.0);
+    }
+
+    fn member(id: &str, status: LauncherStatus) -> Member {
+        Member {
+            session_id: id.into(),
+            name: format!("m-{id}"),
+            task: "task".into(),
+            agent: "claude-code".into(),
+            status,
+            leader: false,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn fr_l1_the_grid_follows_the_mockup_breakpoints() {
+        assert_eq!((grid_cols(1440.0), grid_cols(1024.0), grid_cols(768.0), grid_cols(390.0)), (3, 2, 1, 1));
+        assert_eq!((team_cols(768.0), team_cols(390.0)), (2, 1));
+        assert!(full_two_columns(1024.0) && !full_two_columns(768.0));
+    }
+
+    #[test]
+    fn fr_l2_the_team_segments_count_each_status_and_the_groups_put_waiting_first() {
+        let ms = vec![
+            member("a", LauncherStatus::Running),
+            member("b", LauncherStatus::WaitingForApproval),
+            member("c", LauncherStatus::Running),
+            member("d", LauncherStatus::Failed),
+        ];
+        let segs = team_segments(&ms);
+        assert_eq!(segs.iter().map(|s| s.2).collect::<Vec<_>>(), vec![2, 1, 0, 0, 1]);
+        let g = grouped(&ms);
+        assert_eq!(g[0].0, LauncherStatus::WaitingForApproval);
+        assert_eq!(g[1].1.len(), 2);
+    }
+
+    #[test]
+    fn fr_l1_stats_wrap_greedily_into_lines() {
+        assert_eq!(wrap_lines(&[60.0, 60.0, 60.0], 14.0, 208.0), vec![vec![0, 1, 2]]);
+        // Three 60 wide stats and two 14 gaps take 208.
+        assert_eq!(wrap_lines(&[60.0, 60.0, 60.0], 14.0, 207.0), vec![vec![0, 1], vec![2]]);
+        assert_eq!(wrap_lines(&[60.0, 60.0, 60.0], 14.0, 150.0), vec![vec![0, 1], vec![2]]);
+        assert_eq!(wrap_lines(&[300.0, 20.0], 14.0, 100.0), vec![vec![0], vec![1]]);
+        assert!(wrap_lines(&[], 14.0, 100.0).is_empty());
+        assert!(stat_width(12, "승인 대기") > stat_width(1, "실행"));
+    }
+
+    #[test]
+    fn fr_l1_a_box_matches_its_name_and_its_members() {
+        let b = ProjectBox {
+            id: "p".into(),
+            name: "darkpyonix-ember".into(),
+            members: vec![member("a", LauncherStatus::Running)],
+            running: 1,
+            waiting: 0,
+            computers: vec![],
+            top: None,
+            repo: None,
+            branch: None,
+        };
+        assert!(box_matches(&b, ""));
+        assert!(box_matches(&b, "EMBER"));
+        assert!(box_matches(&b, "m-a"));
+        assert!(!box_matches(&b, "zzz"));
+    }
+
+    fn texts(batch: &[Mutation<'_>]) -> Vec<String> {
+        batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { value: PropertyValue::String(s), .. } => Some(s.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fr_l1_the_project_screen_shows_its_title_the_strip_and_the_boxes() {
+        use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| Box::new(Recomposer::new(ProjectScreen)));
+        let mut all = texts(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+        let event = HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: 1440.0,
+                height_dp: 900.0,
+                class: WindowSizeClass::Expanded,
+                height_class: WindowHeightClass::Medium,
+                safe_area_top: 0.0,
+                safe_area_leading: 0.0,
+                safe_area_trailing: 0.0,
+            },
+        };
+        let (bytes, _) = host.dispatch(event).expect("dispatch");
+        all.extend(texts(&decode_batch(bytes).expect("decode")));
+        let has = |want: &str| all.iter().any(|t| t.contains(want));
+        for want in ["프로젝트", "새 프로젝트", "새 팀원"] {
+            assert!(has(want), "missing {want}: {all:?}");
+        }
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l9_show_archived_includes_archived_sessions_in_project_boxes_and_side_sections() {
+        use ember_client::wire::{SessionRecord, SessionStatus};
+        use ember_client::Input;
+        let mut state = ember_client::State::default();
+        let active = SessionRecord {
+            id: "s-active".into(),
+            project: "ember".into(),
+            title: "활성 작업".into(),
+            agent: "claude-code".into(),
+            cwd: "/work".into(),
+            model: None,
+            native_id: None,
+            status: SessionStatus::Running,
+            created_at: 100,
+            updated_at: 200,
+            last_seq: 1,
+            account_id: None,
+            account_reason: None,
+            pinned: false,
+            archived: false,
+        };
+        let mut archived = active.clone();
+        archived.id = "s-archived".into();
+        archived.title = "보관된 작업".into();
+        archived.archived = true;
+        state.apply(Input::SessionsLoaded(vec![active, archived]));
+
+        let hidden = project_boxes_with_archived(&state, false);
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].members.len(), 1);
+        assert_eq!(hidden[0].members[0].session_id, "s-active");
+
+        let shown = project_boxes_with_archived(&state, true);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].members.len(), 2);
+        assert!(shown[0].members.iter().any(|m| m.session_id == "s-archived"));
+
+        let secs = crate::ui::session::side_sections(&shown, "ember", "");
+        assert_eq!(secs.len(), 1);
+        assert_eq!(secs[0].members.len(), 2);
+    }
+
+    #[test]
+    fn fr_l26_wide_header_has_inline_search_and_no_icon_button() {
+        use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
+        let _guard = crate::services::test_guard();
+        let ui = shared_ui();
+        ui.go(crate::ui::Route::Projects);
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| Box::new(Recomposer::new(ProjectScreen)));
+        let _ = host.rebuild().expect("rebuild");
+        let event = HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: 1440.0,
+                height_dp: 900.0,
+                class: WindowSizeClass::Expanded,
+                height_class: WindowHeightClass::Medium,
+                safe_area_top: 0.0,
+                safe_area_leading: 0.0,
+                safe_area_trailing: 0.0,
+            },
+        };
+        let (bytes, _) = host.dispatch(event).expect("dispatch");
+        let batch = decode_batch(bytes).expect("decode");
+        // Verify both the inline "팀원 검색" placeholder and the Search icon button exist at 1440dp.
+        let has_placeholder = batch.iter().any(|m| {
+            matches!(m, Mutation::SetProp { value: PropertyValue::String(s), .. } if *s == "팀원 검색")
+        });
+        let has_search_icon = batch.iter().any(|m| {
+            matches!(m, Mutation::SetProp { property: compose_rust::schema::PropertyKind::Icon, .. }) && format!("{m:?}").contains("Search")
+        });
+        assert!(has_placeholder, "expected inline filter field at 1440dp");
+        assert!(!has_search_icon, "no search icon button above 900dp");
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l26_header_search_icon_toggles_field_at_900_and_below() {
+        assert!(search_icon_visible(900.0));
+        assert!(search_icon_visible(390.0));
+        assert!(!search_field_visible(800.0, false));
+        assert!(search_field_visible(800.0, true));
+        assert!(search_field_visible(1440.0, false));
+    }
+
+    #[test]
+    fn fr_l26_header_has_no_icon_above_900() {
+        assert!(!search_icon_visible(901.0));
+        assert!(!search_icon_visible(1440.0));
+    }
+
+    #[test]
+    fn fr_l26_project_search_hook_is_debug_only() {
+        assert!(search_hook_open(true, Some("open")));
+        assert!(!search_hook_open(false, Some("open")));
+        assert!(!search_hook_open(true, Some("1")));
+        assert!(!search_hook_open(true, None));
+    }
+
+    #[test]
+    fn fr_l26_closing_the_filter_clears_the_query() {
+        assert_eq!(toggle_search(true, "abc"), (false, String::new()));
+        assert_eq!(toggle_search(false, "abc"), (true, "abc".to_string()));
+        assert_eq!(toggle_search(false, ""), (true, String::new()));
+    }
+
+    #[test]
+    fn fr_l26_sheet_scroll_hook_reads_dp_or_end() {
+        assert_eq!(sheet_scroll_dp(None), 0.0);
+        assert_eq!(sheet_scroll_dp(Some("120")), 120.0);
+        assert_eq!(sheet_scroll_dp(Some("junk")), 0.0);
+        assert_eq!(sheet_scroll_dp(Some("end")), 1450.0);
+    }
+}
+
+/// Design review 2026-11-13 (B7, B8): the project screen against the mockup.
+#[cfg(test)]
+mod design_review_tests {
+    use super::*;
+
+    /// This file without this module, so a source check never finds its own literal.
+    fn source() -> &'static str {
+        let src = include_str!("project.rs");
+        &src[..src.find("mod design_review_tests {").unwrap()]
+    }
+
+    #[test]
+    fn design_b7_computer_chips_are_200_by_56_and_the_name_is_18_600() {
+        assert_eq!(COMPUTER_CHIP, (200.0, 56.0));
+        assert_eq!(COMPUTER_CHIP_TEXT_W, 120.0);
+        assert_eq!(PROJECT_NAME, (Fs::Xl, Weight::Semibold));
+        let src = source();
+        assert!(src.contains("Modifier::new().size(COMPUTER_CHIP.0, COMPUTER_CHIP.1)"));
+        assert!(src.contains("Label(&b.name, PROJECT_NAME.0, PROJECT_NAME.1, None, Some(1));"));
+    }
+
+    #[test]
+    fn design_b8_page_titles_are_32_400() {
+        assert_eq!(PAGE_TITLE_WEIGHT, Weight::Regular);
+        assert!(source().contains("Label(title, if compact { Fs::Xl2 } else { Fs::Xl3 }, PAGE_TITLE_WEIGHT, None, Some(1));"));
+        assert!(include_str!("shell.rs").contains("Label(menu.label(), Fs::Xl3, PAGE_TITLE_WEIGHT, None, None);"));
+        assert!(include_str!("vcs.rs").contains("Label(\"버전 관리\", Fs::Xl3, PAGE_TITLE_WEIGHT, None, None);"));
+    }
+}

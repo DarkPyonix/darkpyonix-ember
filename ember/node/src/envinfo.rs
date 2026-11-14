@@ -40,12 +40,31 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(name)).find(|p| is_executable(p))
+    for d in std::env::split_paths(&path) {
+        let candidate = d.join(name);
+        if is_executable(&candidate) {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        for ext in [".exe", ".cmd", ".bat"] {
+            let with_ext = d.join(format!("{name}{ext}"));
+            if is_executable(&with_ext) {
+                return Some(with_ext);
+            }
+        }
+    }
+    None
 }
 
+#[cfg(unix)]
 fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(p: &Path) -> bool {
+    std::fs::metadata(p).is_ok_and(|m| m.is_file())
 }
 
 async fn first_line(program: &Path, args: &[&str]) -> Option<String> {
@@ -71,7 +90,8 @@ async fn first_line(program: &Path, args: &[&str]) -> Option<String> {
         .find(|l| !l.is_empty())
 }
 
-fn hostname() -> String {
+#[cfg(unix)]
+pub(crate) fn hostname() -> String {
     let mut buf = [0u8; 256];
     // SAFETY: buffer and length are valid; result is NUL-terminated on success.
     let r = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
@@ -82,6 +102,14 @@ fn hostname() -> String {
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
+#[cfg(not(unix))]
+pub(crate) fn hostname() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_default()
+}
+
+#[cfg(unix)]
 fn kernel_release() -> Option<String> {
     // SAFETY: utsname is plain data; uname fills it.
     let mut u: libc::utsname = unsafe { std::mem::zeroed() };
@@ -91,6 +119,11 @@ fn kernel_release() -> Option<String> {
     // SAFETY: `release` is NUL-terminated after a successful uname.
     let s = unsafe { std::ffi::CStr::from_ptr(u.release.as_ptr()) };
     Some(s.to_string_lossy().into_owned())
+}
+
+#[cfg(not(unix))]
+fn kernel_release() -> Option<String> {
+    None
 }
 
 async fn os_version() -> Option<String> {
@@ -119,9 +152,11 @@ pub async fn describe(roots: Vec<PathBuf>) -> EnvInfo {
         kernel: kernel_release(),
         arch: std::env::consts::ARCH.into(),
         hostname: hostname(),
-        user: std::env::var("USER").ok(),
-        home: std::env::var_os("HOME").map(PathBuf::from),
-        shell: std::env::var("SHELL").ok(),
+        user: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).ok(),
+        home: std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from),
+        shell: std::env::var("SHELL").or_else(|_| std::env::var("COMSPEC")).ok(),
         roots,
         toolchains,
     }

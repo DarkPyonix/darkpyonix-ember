@@ -949,18 +949,13 @@ function activate(context) {
     vscode.commands.registerCommand('ember.terminals.setup', async () => {
       const term = vscode.workspace.getConfiguration('terminal.integrated');
       const target = vscode.ConfigurationTarget.Global;
-      for (const os of ['osx', 'linux']) {
-        await term.update(`defaultProfile.${os}`, PROFILE_TITLE, target);
-      }
       const path = await vscode.window.showInputBox({
-        prompt: 'Absolute path of ember-term on the workspace computer (for tasks); leave empty to skip',
-        value: cfg().get('emberTermPath') || '',
+        prompt: 'ember-term for tasks: a bare name is looked up on the VS Code server PATH (Ember puts it there); leave empty to skip',
+        value: cfg().get('emberTermPath') || DEFAULT_EMBER_TERM,
       });
-      if (path) {
-        await cfg().update('emberTermPath', path, target);
-        for (const os of ['osx', 'linux']) {
-          await term.update(`automationProfile.${os}`, { path, args: [] }, target);
-        }
+      if (path) await cfg().update('emberTermPath', path, target);
+      for (const [key, value] of setupSettings(path)) {
+        await term.update(key, value, target);
       }
       vscode.window.showInformationMessage(
         path
@@ -1027,7 +1022,29 @@ function deactivate() {
   deactivating = true;
 }
 
+// The setup command's default for tasks: a bare `ember-term`, which the VS Code server finds on
+// its PATH. Ember puts the folder of ember-term first on the PATH of the OSE it starts and
+// points it at the built-in node (SPEC FR-P5, #26, [provisional]); with `code serve-web` started
+// by hand, ember-term must be on that PATH (cargo install puts it in ~/.cargo/bin).
+const DEFAULT_EMBER_TERM = 'ember-term';
+
+/**
+ * The `terminal.integrated.*` updates of the setup command: the default profile always, the
+ * automation profile (tasks, debug runInTerminal) only when an ember-term path or name is given.
+ * Pure, for tests.
+ */
+function setupSettings(emberTerm) {
+  const out = [];
+  for (const os of ['osx', 'linux']) out.push([`defaultProfile.${os}`, PROFILE_TITLE]);
+  if (emberTerm) {
+    for (const os of ['osx', 'linux']) out.push([`automationProfile.${os}`, { path: emberTerm, args: [] }]);
+  }
+  return out;
+}
+
 module.exports = {
+  setupSettings,
+  DEFAULT_EMBER_TERM,
   activate,
   deactivate,
   // for tests

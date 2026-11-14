@@ -2,15 +2,12 @@
 //!
 //! Every request and response is JSON. Byte payloads (file contents, process output, stdin) are
 //! base64 strings so that one encoding carries over any transport. The node ↔ server transport
-//! is not decided yet (`INTENT.md` Q7). Bump [`PROTOCOL_VERSION`] on any incompatible change.
+//! is not decided yet (`INTENT.md` Q7).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-
-/// Incremented on incompatible wire changes; reported by `/v1/health`.
-pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Serde helper: `Vec<u8>` as a standard base64 string.
 pub mod b64 {
@@ -56,6 +53,20 @@ pub enum ErrorCode {
     PreconditionFailed,
     BadRequest,
     Internal,
+    /// The git API (FR-G1): the path is not a git repository (404).
+    NotARepo,
+    /// The git API (FR-G2, FR-G3): git refused the operation, e.g. an empty index or a diverged
+    /// pull (409); the message is git's own. Also a terminal create refused at the node's
+    /// running-session cap (409, #474).
+    Conflict,
+    /// The git API: a network operation hit its deadline (504).
+    Timeout,
+    /// The git API: the output exceeded the cap (413). The file receiver: above the size limit.
+    TooLarge,
+    /// The file receiver (FR-F16): not enough free space for an offer (507).
+    NoSpace,
+    /// The file receiver: the receive mode refuses the offer (403).
+    Forbidden,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -65,7 +76,6 @@ pub enum ErrorCode {
 pub struct Health {
     pub ok: bool,
     pub version: String,
-    pub protocol: u32,
 }
 
 /// Description of the computer, for the agent's replaceable environment block (FR-X3, FR-S7).
@@ -95,6 +105,150 @@ pub struct Toolchain {
     pub path: PathBuf,
     /// First non-empty line of `<tool> --version` (or the tool's equivalent).
     pub version: Option<String>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Computer metrics (FR-X7)
+
+/// One sample of the computer's status, for the monitor sheet (FR-L21). A value the OS does not
+/// expose is `None` or an empty list, never an estimate. Network counters are cumulative since
+/// boot: the client derives rates from two samples.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MetricsSample {
+    /// Wall clock of the sample, milliseconds since the Unix epoch.
+    pub at_ms: u64,
+    pub cpu: CpuMetrics,
+    pub memory: Option<MemoryMetrics>,
+    pub disks: Vec<DiskMetrics>,
+    pub network: Vec<NetMetrics>,
+    /// Sensors the OS exposes; empty when none (many macOS and VM hosts).
+    pub temperatures: Vec<TempMetrics>,
+    pub gpu: GpuReport,
+    /// The top processes, busiest first (CPU, then memory).
+    pub processes: Vec<ProcessMetrics>,
+    /// How many processes the computer runs in all (the list above is cut to the top).
+    pub process_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CpuMetrics {
+    /// Mean over all cores, 0 to 100.
+    pub total_percent: Option<f32>,
+    /// Per logical core, 0 to 100.
+    pub cores: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryMetrics {
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub swap_total_bytes: u64,
+    pub swap_used_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiskMetrics {
+    pub name: String,
+    pub mount: String,
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetMetrics {
+    pub interface: String,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TempMetrics {
+    pub label: String,
+    pub celsius: f32,
+}
+
+/// GPU status. `devices` is empty with a `reason` when the node has no verified way to read it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GpuReport {
+    pub devices: Vec<GpuMetrics>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GpuMetrics {
+    pub name: String,
+    pub utilization_percent: Option<f32>,
+    pub memory_total_bytes: Option<u64>,
+    pub memory_used_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProcessMetrics {
+    pub pid: u32,
+    pub name: String,
+    /// Percent of one core (a busy multi-thread process can exceed 100).
+    pub cpu_percent: f32,
+    /// Resident memory.
+    pub memory_bytes: u64,
+}
+
+/// `GET /metrics?top=<n>`: how many processes to list (default 20, at most 200).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MetricsQuery {
+    pub top: Option<usize>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Listening ports of node-owned sessions (FR-P7)
+// ---------------------------------------------------------------------------------------------
+
+/// How far a listening socket is reachable, from its local address.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PortScope {
+    /// 127.0.0.0/8 or ::1.
+    Loopback,
+    /// Any other concrete address.
+    Lan,
+    /// 0.0.0.0 or ::.
+    Any,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PortOwnerKind {
+    Term,
+    Job,
+}
+
+/// The terminal or job a listening process descends from.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PortOwner {
+    pub kind: PortOwnerKind,
+    pub id: String,
+}
+
+/// One TCP port in LISTEN state. Carries no command line, environment, cwd or user name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListeningPort {
+    pub port: u16,
+    pub scope: PortScope,
+    /// Executable name only.
+    pub process: String,
+    pub owner: PortOwner,
+}
+
+/// `GET /ports`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PortsResponse {
+    pub ports: Vec<ListeningPort>,
+    /// False where the node cannot look (platforms other than Linux and macOS); `ports` is then empty.
+    #[serde(default = "ports_supported_default")]
+    pub supported: bool,
+}
+
+fn ports_supported_default() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -225,7 +379,7 @@ pub struct ListResponse {
     pub entries: Vec<DirEntry>,
 }
 
-/// `POST /v1/fs/readlink` response.
+/// `POST /fs/readlink` response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadlinkResponse {
     pub path: PathBuf,
@@ -396,7 +550,7 @@ pub struct PtySize {
     pub cols: u16,
 }
 
-/// First message a client sends on `/v1/exec`.
+/// First message a client sends on `/exec`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecRequest {
     #[serde(flatten)]
@@ -406,7 +560,7 @@ pub struct ExecRequest {
     pub pty: Option<PtySize>,
 }
 
-/// Client → daemon messages on `/v1/exec` after the [`ExecRequest`].
+/// Client → daemon messages on `/exec` after the [`ExecRequest`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ExecInput {
@@ -425,7 +579,7 @@ pub enum ExecInput {
     },
 }
 
-/// Daemon → client messages on `/v1/exec`.
+/// Daemon → client messages on `/exec`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ExecEvent {
@@ -494,7 +648,7 @@ pub struct KillRequest {
     pub signal: Option<i32>,
 }
 
-/// Node → server notifications on `/v1/events?after=<seq>`.
+/// Node → server notifications on `/events?after=<seq>`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NodeEvent {
     /// Strictly increasing for the daemon's lifetime; resume with `after=<last seen>`.
@@ -561,7 +715,7 @@ impl std::str::FromStr for TermOrigin {
     }
 }
 
-/// `POST /v1/terms`.
+/// `POST /terms`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TermCreateRequest {
     /// What to run. `None`: the login shell of the daemon's user (`$SHELL`, else `/bin/sh`;
@@ -674,7 +828,7 @@ pub struct TermInfo {
     pub has_screen: bool,
 }
 
-/// `GET /v1/terms` query.
+/// `GET /terms` query.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TermListQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -686,7 +840,7 @@ pub struct TermListQuery {
     pub running: Option<bool>,
 }
 
-/// `GET /v1/terms/{id}/snapshot`.
+/// `GET /terms/{id}/snapshot`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TermSnapshot {
     pub size: PtySize,
@@ -697,7 +851,7 @@ pub struct TermSnapshot {
     pub text: String,
 }
 
-/// `POST /v1/terms/{id}/control`.
+/// `POST /terms/{id}/control`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TermControlRequest {
     /// The attached client that takes or releases control.
@@ -705,7 +859,7 @@ pub struct TermControlRequest {
     pub take: bool,
 }
 
-/// First message a client sends on `/v1/terms/{id}/attach`.
+/// First message a client sends on `/terms/{id}/attach`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TermHello {
     pub device: String,
@@ -728,7 +882,7 @@ pub struct TermHello {
     pub snapshot: bool,
 }
 
-/// Client → daemon messages on `/v1/terms/{id}/attach` after the [`TermHello`].
+/// Client → daemon messages on `/terms/{id}/attach` after the [`TermHello`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum TermInput {
@@ -761,7 +915,7 @@ pub enum TermRefusal {
     NotRunning,
 }
 
-/// Daemon → client messages on `/v1/terms/{id}/attach`.
+/// Daemon → client messages on `/terms/{id}/attach`.
 // A wire message: `Attached` is sent once per attach, so its size does not matter.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

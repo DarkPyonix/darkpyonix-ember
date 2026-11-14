@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::transcript::{Applied, Transcript};
-use crate::wire::{AgentEvent, Project, Push, SessionRecord, SessionStatus, StoredEvent, TeamView};
+use crate::wire::{AgentEvent, ForkInfo, Project, Push, SessionRecord, SessionStatus, StoredEvent, TeamView};
 
 /// Session status as the launcher shows it (FR-L2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,9 +59,6 @@ pub enum ConnectionState {
     Connected,
     /// Lost or failed; retrying after a backoff.
     Reconnecting { attempt: u32, retry_in_ms: u64, error: String },
-    /// The server speaks a push version this client does not. Not retried: the user must update
-    /// one side.
-    Incompatible { server: u32, client: u32 },
 }
 
 /// Something that happened, fed to [`State::apply`].
@@ -82,9 +79,16 @@ pub enum Input {
     ComputersLoaded(Vec<Computer>),
     /// `GET /projects` answered (FR-L4).
     ProjectsLoaded(Vec<Project>),
+    /// A rename was saved (FR-L26): sessions and the project record move to the new name at once,
+    /// so nothing shows the old name until the next refresh.
+    ProjectRenamed { old: String, new: String },
     /// `GET /sessions/{id}/team` answered (FR-T7): the team `session_id` leads or belongs to,
     /// or `None`.
     TeamLoaded { session_id: String, team: Option<TeamView> },
+    /// `GET /sessions/{id}` or `PUT /sessions/{id}/approve-all` answered (FR-A5).
+    ApproveAllLoaded { session_id: String, enabled: bool },
+    /// `GET /sessions/{id}` answered: the fork facts (FR-S5).
+    ForkInfoLoaded { session_id: String, info: ForkInfo },
 }
 
 /// What an input changed. A UI redraws the named parts; the sync layer acts on `resync*`.
@@ -178,6 +182,12 @@ pub struct State {
     teams: BTreeMap<String, TeamView>,
     /// Which team each member session is in (leader and teammates, ended ones included).
     team_of: HashMap<String, String>,
+    /// Sessions in approve-everything mode (FR-A5). Not cached: asked when a conversation opens
+    /// and kept by push.
+    approve_all: BTreeSet<String>,
+    /// Fork facts per session (FR-S5). Not cached: asked when a conversation opens and after
+    /// each turn ends.
+    fork_info: HashMap<String, ForkInfo>,
     connection: ConnectionState,
     revision: u64,
 }
@@ -195,6 +205,8 @@ impl Default for State {
             projects_known: false,
             teams: BTreeMap::new(),
             team_of: HashMap::new(),
+            approve_all: BTreeSet::new(),
+            fork_info: HashMap::new(),
             connection: ConnectionState::Offline,
             revision: 0,
         }
@@ -298,6 +310,16 @@ impl State {
         self.open.iter()
     }
 
+    /// Whether `id` is in approve-everything mode (FR-A5): the UI shows an indicator while it is.
+    pub fn approve_all(&self, id: &str) -> bool {
+        self.approve_all.contains(id)
+    }
+
+    /// Fork facts for `id` (FR-S5); the default (no fork offered) until loaded.
+    pub fn fork_info(&self, id: &str) -> ForkInfo {
+        self.fork_info.get(id).cloned().unwrap_or_default()
+    }
+
     pub fn is_open(&self, id: &str) -> bool {
         self.open.contains(id)
     }
@@ -366,6 +388,28 @@ impl State {
                     ch.computers |= self.derive_computer_projects();
                 }
             }
+            Input::Push(Push::ProjectDeleted { name }) => {
+                if self.project_records.remove(&name).is_some() {
+                    ch.projects = true;
+                    ch.persist = true;
+                    ch.computers |= self.derive_computer_projects();
+                }
+            }
+            Input::ProjectRenamed { old, new } => {
+                if old != new {
+                    for rec in self.sessions.values_mut().filter(|r| r.project == old) {
+                        rec.project = new.clone();
+                        ch.sessions.insert(rec.id.clone());
+                    }
+                    if let Some(mut p) = self.project_records.remove(&old) {
+                        p.name = new.clone();
+                        self.project_records.insert(new, p);
+                    }
+                    ch.projects = true;
+                    ch.persist = true;
+                    ch.computers |= self.derive_computer_projects();
+                }
+            }
             Input::ProjectsLoaded(list) => {
                 let fresh: BTreeMap<String, Project> = list.into_iter().map(|p| (p.name.clone(), p)).collect();
                 self.projects_known = true;
@@ -377,6 +421,25 @@ impl State {
                 ch.computers |= self.derive_computer_projects();
                 ch.persist |= ch.computers;
             }
+            Input::Push(Push::ApproveAll { session_id, enabled })
+            | Input::ApproveAllLoaded { session_id, enabled } => {
+                let changed = if enabled {
+                    self.approve_all.insert(session_id.clone())
+                } else {
+                    self.approve_all.remove(&session_id)
+                };
+                if changed {
+                    ch.sessions.insert(session_id);
+                }
+            }
+            Input::ForkInfoLoaded { session_id, info } => {
+                if self.fork_info.get(&session_id) != Some(&info) {
+                    self.fork_info.insert(session_id.clone(), info);
+                    ch.sessions.insert(session_id);
+                }
+            }
+            // Channels are read through the API by the channels UI, not held in the reducer.
+            Input::Push(Push::ChannelMessage { .. }) => {}
             Input::Push(Push::TeamUpdated { team }) => self.put_team(team, &mut ch),
             Input::TeamLoaded { session_id, team: Some(team) } => {
                 if team.member(&session_id).is_none() {
@@ -563,6 +626,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::ForkOrigin;
     use crate::wire::{ApprovalDecision, TurnOutcome};
     use serde_json::json;
 
@@ -785,6 +849,7 @@ mod tests {
             name: name.into(),
             created_at: 0,
             computers: computers.iter().map(|c| c.to_string()).collect(),
+            ..Default::default()
         };
         let ch = s.apply(Input::ProjectsLoaded(vec![proj("alpha", &["studio"]), proj("empty", &[])]));
         assert!(ch.projects && ch.computers);
@@ -802,6 +867,13 @@ mod tests {
         // Repeating it changes nothing.
         assert!(s.apply(Input::Push(Push::ProjectUpdated { project: proj("empty", &["local", "studio"]) })).is_empty());
 
+        // FR-L26: a pushed delete removes the record; a second one changes nothing.
+        let mut d = s.clone();
+        let ch = d.apply(Input::Push(Push::ProjectDeleted { name: "empty".into() }));
+        assert!(ch.projects && ch.persist);
+        assert_eq!(d.projects().iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["alpha"]);
+        assert!(d.apply(Input::Push(Push::ProjectDeleted { name: "empty".into() })).is_empty());
+
         // Fresh computer lists keep the derived assignment.
         s.apply(Input::ComputersLoaded(vec![pc("local", &[]), pc("studio", &[]), pc("new", &[])]));
         assert_eq!(s.computers()[1].projects, vec!["alpha".to_string(), "empty".to_string()]);
@@ -810,6 +882,18 @@ mod tests {
         let c = State::from_cache(s.to_cache());
         assert_eq!(c.project_computers("alpha"), ["studio".to_string()]);
         assert_eq!(c.computers()[0].projects, vec!["empty".to_string()]);
+    }
+
+    #[test]
+    fn fr_l22_a_project_answer_replaces_the_character_style() {
+        let mut s = State::default();
+        let mut p = Project { name: "alpha".into(), created_at: 0, ..Default::default() };
+        p.character_style = Some("crew".into());
+        s.apply(Input::Push(Push::ProjectUpdated { project: p.clone() }));
+        p.character_style = Some("cream".into());
+        let ch = s.apply(Input::Push(Push::ProjectUpdated { project: p }));
+        assert!(ch.projects);
+        assert_eq!(s.project("alpha").and_then(|p| p.character_style.clone()).as_deref(), Some("cream"));
     }
 
     fn member(sid: &str, name: &str, role: crate::wire::TeamRole, ended: Option<i64>) -> crate::wire::TeamMember {
@@ -899,5 +983,48 @@ mod tests {
         assert!(s.team_for_session("b").is_none());
         // Teams are not part of the cache.
         assert!(State::from_cache(s.to_cache()).team_for_session("lead").is_none());
+    }
+
+    #[test]
+    fn fr_a5_approve_all_follows_push_and_load() {
+        let mut s = State::new();
+        s.apply(Input::SessionsLoaded(vec![rec("a", "p", SessionStatus::Idle, 0)]));
+        assert!(!s.approve_all("a"));
+        let ch = s.apply(Input::Push(Push::ApproveAll { session_id: "a".into(), enabled: true }));
+        assert!(s.approve_all("a"));
+        assert!(ch.sessions.contains("a"));
+        // Same value again changes nothing.
+        assert!(s.apply(Input::ApproveAllLoaded { session_id: "a".into(), enabled: true }).is_empty());
+        let ch = s.apply(Input::Push(Push::ApproveAll { session_id: "a".into(), enabled: false }));
+        assert!(!s.approve_all("a"));
+        assert!(ch.sessions.contains("a"));
+    }
+
+    #[test]
+    fn fr_s5_fork_info_loads_and_defaults_to_no_fork() {
+        let mut s = State::new();
+        assert!(!s.fork_info("a").can_fork);
+        let info = ForkInfo {
+            can_fork: true,
+            turns: vec![4, 9],
+            origin: Some(ForkOrigin { parent_id: "p".into(), turn_seq: 4, forked_at: 1 }),
+        };
+        let ch = s.apply(Input::ForkInfoLoaded { session_id: "a".into(), info: info.clone() });
+        assert!(ch.sessions.contains("a"));
+        assert_eq!(s.fork_info("a"), info);
+        assert!(s.apply(Input::ForkInfoLoaded { session_id: "a".into(), info }).is_empty());
+    }
+
+    #[test]
+    fn fr_l26_rename_updates_selection_state_sessions_show_the_new_name() {
+        let mut s = State::default();
+        s.apply(Input::SessionsLoaded(vec![rec("a", "old", SessionStatus::Running, 1), rec("b", "other", SessionStatus::Running, 1)]));
+        s.apply(Input::ProjectsLoaded(vec![Project { name: "old".into(), created_at: 0, ..Default::default() }]));
+        let ch = s.apply(Input::ProjectRenamed { old: "old".into(), new: "new".into() });
+        assert!(ch.projects && ch.persist && ch.sessions.contains("a") && !ch.sessions.contains("b"));
+        assert_eq!(s.session("a").unwrap().record.project, "new");
+        assert_eq!(s.session("b").unwrap().record.project, "other");
+        assert!(s.project("old").is_none() && s.project("new").is_some());
+        assert!(s.apply(Input::ProjectRenamed { old: "new".into(), new: "new".into() }).is_empty());
     }
 }

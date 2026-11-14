@@ -1,0 +1,41 @@
+/* Ember-owned additions to the mockup's editor styles. */
+html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font)}
+@media (max-width:900px){
+ /* The page is 76px shorter than the window (see TODO(#320) in the page), so the overlay's bottom edge follows it. */
+ .ed-left{bottom:calc(var(--sbh) + 76px)}
+}
+.ed{color:var(--text);font-family:var(--font)}
+/* The top bar is the window's title strip under FullSize: a drag region, with its controls cut out. */
+.ed-top{-webkit-app-region:drag}
+.ed-top button,.ed-top .ed-menu{-webkit-app-region:no-drag}
+/* FR-L31.5 tabs: the mockup draws no preview or pinned tab, so these follow Code-OSS on the mockup's tokens.
+   A preview tab sets its name in italics; a pinned tab keeps its pin button visible where the close button is. */
+.ed-tab.preview>.ellipsis{font-style:italic}
+.ed-tab.pinned .ed-tx{opacity:1}
+/* The tab context menu opens where the pointer is, over a transparent scrim that closes it. */
+.ed-scrim{position:fixed;inset:0;z-index:19;background:transparent}
+.ed-menu.ed-tabmenu{z-index:20;min-width:220px}
+.ed-menu button:disabled{color:var(--muted);cursor:default;background:none}
+/* The unsaved-changes question on a close. */
+.ed-confirm{width:min(440px,100%)}
+.ed-confirm .card-b{display:flex;flex-direction:column;gap:var(--sp2)}
+.ed-confirm p{margin:0}
+.ed-confirm-files{margin:0;padding-left:var(--sp5);font-size:var(--fs-sm)}
+.ed-confirm-acts{display:flex;justify-content:flex-end;gap:var(--sp2);margin-top:var(--sp2)}
+/* Design review 2026-11-13: the mockup's rules restated where the HTML path lays them out differently
+   from a browser. Each keeps the mockup's measurements (editor.css) and changes only how they are reached. */
+/* A7: a browser centres a button's label by itself, the HTML path does not; inline-flex as .ed-tab. */
+.ed-btabs button{display:inline-flex;align-items:center;justify-content:center;flex:none}
+/* A11: the status bar is --sbh high at the window's bottom even when its grid row is taller, and the
+   path on its left sits on the same centre line as the items on the right. */
+.ed-status{height:var(--sbh);align-self:end;box-sizing:border-box}
+.ed-sbi.crumbs-s{align-self:center}
+/* A12: 300px wide, not shrunk by the spacer beside it, 8px between the magnifier and the label. The gap
+   is the label's margin (a gap inside a button is not applied), so it is 8px whether or not gap works. */
+.ed-top .ed-find{display:inline-flex;gap:0}
+.ed-find>span.hide-md{margin-left:var(--sp2)}
+@media (min-width:1101px){.ed-top .ed-find{flex:none;width:300px}}
+@media (max-width:560px){.ed-top .ed-find{display:none}}
+/* A13: the line above the bottom stripe group, as its own element (a border with side margins is not drawn). */
+.ed-stripe-b{border-top:0;margin:0}
+.ed-stripe-sep{flex:none;align-self:center;width:28px;height:1px;background:var(--line)}

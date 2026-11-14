@@ -1,11 +1,7 @@
 name: IntelliJ plugin
 
 on:
-  push:
-    paths: ["extensions/intellij-darkpyonix/**", ".github/workflows/test-intellij-plugin.yml"]
-  pull_request:
-    paths: ["extensions/intellij-darkpyonix/**", ".github/workflows/test-intellij-plugin.yml"]
-  workflow_dispatch:
+  workflow_call:
 
 jobs:
   build:
@@ -21,9 +17,28 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
+      # The real-manager test (core issue #22) runs against a manager built from a pinned
+      # core commit; bump the pinned ref on purpose when the contract moves.
+      - name: Check out the darkpyonix core
+        uses: actions/checkout@v4
+        with:
+          repository: DarkPyonix/darkpyonix
+          ref: 1de32bed50cfd510a21bb096f5a27284d958ea9d
+          path: .core
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .core/darkpyonix/manager
+      - name: Build the darkpyonix manager
+        working-directory: .core/darkpyonix/manager
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: cargo build --release --locked --bin darkpyonix
       - name: Build plugin
         run: ./gradlew --no-daemon buildPlugin
       - name: Test
+        env:
+          DARKPYONIX_BIN: ${{ github.workspace }}/.core/darkpyonix/manager/target/release/darkpyonix
         run: ./gradlew --no-daemon test
       - name: Verify plugin structure
         run: ./gradlew --no-daemon verifyPluginStructure
@@ -32,3 +47,8 @@ jobs:
         with:
           name: intellij-darkpyonix
           path: extensions/intellij-darkpyonix/build/distributions/*.zip
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: intellij-darkpyonix-test-reports
+          path: extensions/intellij-darkpyonix/build/reports/tests/

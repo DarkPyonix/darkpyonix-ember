@@ -53,7 +53,7 @@
 
 | | (a) Shell shim + filesystem view | (b) Hooks / MCP tools replace built-ins | (c) Native remote executor |
 |-|-|-|-|
-| **Mechanism** | Mount the node's project directory on the server **at the same absolute path**. Point the shell prefix at an `ember-exec` shim that runs the command through ember node `/v1/exec`. | Disable the built-ins and inject an MCP server whose Read/Edit/Bash call ember node. Hooks can only deny or rewrite; they cannot execute remotely. | Codex: attach the node as an exec-server environment. Claude Code: no equivalent found. |
+| **Mechanism** | Mount the node's project directory on the server **at the same absolute path**. Point the shell prefix at an `ember-exec` shim that runs the command through ember node `/exec`. | Disable the built-ins and inject an MCP server whose Read/Edit/Bash call ember node. Hooks can only deny or rewrite; they cannot execute remotely. | Codex: attach the node as an exec-server environment. Claude Code: no equivalent found. |
 | **Native behaviour kept** | Claude: every built-in tool, the read-before-edit tracking, edit diffs, permission UI and transcript shape all stay as they are. Codex: file tools only; its shell still runs on the server. | Little. The model is tuned to the built-in tool schemas. Read-before-edit state, diff cards, background-shell handling and approval semantics would have to be re-implemented, which goes against E2. | Codex: all of it, including the shell, PTY and apply_patch (**[U]** until a turn is tested). |
 | **Lost / risky** | cwd tracking: the prefix also wraps `pwd -P >| <tmp>`, so the shim must return that file to the server. Shell snapshot sourcing must work on the node's shell. Paths: `/home/x` on a macOS server needs `synthetic.conf`. | Prompt and tool drift on every CLI release. MCP results render as generic tool calls. | Experimental protocol that may change between Codex releases. A codex binary is needed on the node, outside FR-X5's "ember node only". |
 | **Latency** | One round trip per syscall. Kernel attribute caching helps but can serve stale data. Grep walks the mount, which is slow on large trees. Exec costs one round trip. | One round trip per tool call, which is the best case. | One round trip per RPC, about per tool call. |
@@ -67,7 +67,7 @@
    listener-agnostic. ember server registers it with `environment/add`. First, verify with a real
    turn that the shell and apply_patch execute remotely.
 2. **Claude Code: (a).** Set `CLAUDE_CODE_SHELL_PREFIX` to an `ember-exec` shim. The shim calls
-   `/v1/exec` with the session's node, cwd and env, and copies the cwd file back. Add a filesystem
+   `/exec` with the session's node, cwd and env, and copies the cwd file back. Add a filesystem
    view of the project roots, backed by ember node's fs API: FUSE on Linux servers, a loopback
    NFSv3 server inside ember server on macOS (no kext). It is mounted at the node's own absolute
    paths so FR-X2 holds.
@@ -80,4 +80,4 @@
    mount); the batched stat is covered by listings that carry attributes, and the change feed is
    replaced for now by a 1 s TTL plus an invalidation from `ember-exec` after each command.)*
 5. Measure the latency of (a) on the Pi before committing. If the per-syscall cost is too high,
-   prefetch the project tree by content hash, which already exists in `/v1/fs/read`.
+   prefetch the project tree by content hash, which already exists in `/fs/read`.

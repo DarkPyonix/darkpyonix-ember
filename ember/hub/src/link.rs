@@ -1,7 +1,7 @@
 //! Joining the user's account: the device-link flow (hub `FR-H1`), the shape of the OAuth
 //! device authorization grant (RFC 8628) with proof of key possession added.
 //!
-//! 1. [`DeviceLink::start`]: `POST /v1/device-links {endpoint_id, name, role}` returns a user
+//! 1. [`DeviceLink::start`]: `POST /device-links {endpoint_id, name, role}` returns a user
 //!    code, a verification URL and a challenge.
 //! 2. The person opens the verification URL (signed in with GitHub) and approves the code, or
 //!    types the code into their ember server, which approves it with its own device token.
@@ -10,10 +10,10 @@
 //!    `interval` seconds until it is approved (device token and resolve token, shown once),
 //!    denied or expired.
 //! 4. A device that restarted while waiting reads the link back with
-//!    [`DeviceLink::resume_by_id`] (`GET /v1/device-links/{link_id}`, no credentials).
+//!    [`DeviceLink::resume_by_id`] (`GET /device-links/{link_id}`, no credentials).
 //!
 //! A removed key gets `409` from step 1 until the account owner re-admits it on the hub
-//! (`POST /v1/devices/{id}/readmit`, a signed-in session, FR-H11); within the next 15 minutes
+//! (`POST /devices/{id}/readmit`, a signed-in session, FR-H11); within the next 15 minutes
 //! it may link again, a signed-in person approves it, and the same device comes back with new
 //! tokens.
 
@@ -85,7 +85,7 @@ impl DeviceLink {
         Self { client: client.without_token(), key: key.clone(), pending, poll_interval: None }
     }
 
-    /// Reads a link started before a restart (`GET /v1/device-links/{link_id}`) and resumes
+    /// Reads a link started before a restart (`GET /device-links/{link_id}`) and resumes
     /// it when it is still pending or approved-but-unclaimed. A denied, expired (or deleted)
     /// or already claimed link is an error, as is one for another key.
     pub async fn resume_by_id(client: &HubClient, key: &SecretKey, link_id: &str) -> Result<Self, LinkError> {

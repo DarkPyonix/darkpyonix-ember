@@ -44,6 +44,7 @@
       <ul>
         <li><a href="#requirements">준비물</a></li>
         <li><a href="#checkout">코드 받기</a></li>
+        <li><a href="#release">릴리스로 설치</a></li>
         <li><a href="#server">ember server</a></li>
         <li><a href="#node">ember node</a></li>
         <li><a href="#client">클라이언트</a></li>
@@ -69,6 +70,18 @@
       <li><strong>C 컴파일러.</strong> 서버가 SQLite를 자기 안에 컴파일해 넣기 때문입니다.</li>
       <li><strong>에이전트 CLI, 메인 서버에만</strong>: <code>claude</code>, <code>codex</code>, <code>agy</code>, <code>omp</code> 를 각 제조사의 안내대로 설치하고, <code>ember-server</code> 를 실행할 사용자로 로그인해 둡니다. Ember는 <code>PATH</code> 에서 이들을 찾고, 없는 것은 오류 대신 "설치되지 않음"으로 표시합니다.</li>
     </ul>
+
+    <h2 id="release">릴리스로 설치</h2>
+    <p>태그 릴리스 <span class="pill planned">계획</span> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/72">#72</a>)는 macOS arm64, Linux x86_64, Linux aarch64용 <code>ember-server</code>와 <code>ember-node</code> 압축 파일을 <code>SHA256SUMS</code>와 함께 올립니다. 워크플로는 작성되었지만 아직 태그를 낸 적이 없어서, 위 버전은 예시입니다.</p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell</figcaption>
+<pre><code>gh release download v0.1.0 --repo DarkPyonix/darkpyonix-ember \
+  --pattern <span class="s">'ember-*-macos-arm64.tar.gz'</span> --pattern SHA256SUMS
+shasum -a 256 -c --ignore-missing SHA256SUMS
+tar -xzf ember-server-v0.1.0-macos-arm64.tar.gz</code></pre>
+    </figure>
+    <p>각 압축 파일에는 아래에서 설명하는 프로그램(<code>ember-server</code>, <code>ember-exec</code>, <code>ember-a2a</code>와 <code>ember-node</code>, <code>ember-term</code>)이 들어 있습니다. 한 묶음은 한 디렉터리에 두십시오. macOS 바이너리와 앱은 임시(ad hoc) 서명만 되어 있고 공증은 하지 않으므로(Apple 계정 없음) Gatekeeper가 첫 실행을 막습니다. 풀어낸 파일에는 <code>xattr -d com.apple.quarantine</code>을, <code>.app</code>에는 <code>xattr -dr com.apple.quarantine Ember.app</code>을 실행해 격리 표시를 지우거나, 우클릭 후 열기를 고릅니다. Windows <code>.msix</code>는 서명되어 있지 않으므로 개발자 모드를 켜거나 신뢰하는 인증서로 다시 서명합니다.</p>
+    <p>릴리스 워크플로의 클라이언트 작업은 활성화되면(<code>EMBER_CLIENT_RELEASE=true</code>) macOS <code>.app</code>과 <code>.dmg</code>, Windows <code>.zip</code>과 <code>.msix</code>, Linux <code>.AppImage</code>를 함께 묶습니다. 첫 태그 릴리스가 올라오기 전까지는 <a href="#client">클라이언트</a>에 나온 대로 소스에서 빌드하십시오.</p>
 
     <h2 id="checkout">코드 받기</h2>
     <p>
@@ -103,17 +116,84 @@ cargo build --release --locked
     </p>
     <figure class="codeblock" data-copy="복사" data-copied="복사됨">
       <figcaption>shell</figcaption>
-<pre><code>curl http://127.0.0.1:8740/api/v1/health
-<span class="c"># {"ok":true,"push_version":1}</span></code></pre>
+<pre><code>curl http://127.0.0.1:8740/api/health
+<span class="c"># {"ok":true}</span></code></pre>
     </figure>
     <div class="warn">
-      <span class="label">HTTP 리스너에는 로그인이 없습니다</span>
+      <span class="label">HTTP 리스너는 서버 토큰을 요구합니다</span>
       <p>
-        <code>EMBER_LISTEN</code> 에 닿을 수 있는 사람은 계정, 장치, 허브 등록을 포함한 모든 경로를
-        쓸 수 있습니다. 기본값인 루프백이나 믿을 수 있는 네트워크에만 두세요. 인증되는 경로는 서버의
-        허용 목록에 있는 장치만 받아들이는 P2P 전송입니다(<a href="computers.html#peer">컴퓨터와 허브</a>).
-        지금 다른 기계에서 클라이언트를 쓰려면 SSH로 포트를 전달합니다:
-        <code>ssh -N -L 8740:127.0.0.1:8740 you@mini.local</code>.
+        <span class="pill works">동작</span> 서버는 처음 시작할 때 무작위 토큰을
+        <code>&lt;데이터 폴더&gt;/server-token</code> (권한 0600)에 쓰고, 모든 경로에서
+        <code>Authorization: Bearer &lt;토큰&gt;</code> 을 요구합니다. 토큰 없이 답하는 것은
+        <code>GET /api/health</code> 뿐입니다. 같은 컴퓨터의 앱과 클라이언트는 이 파일이나
+        <code>EMBER_SERVER_TOKEN</code> 을 읽고, 루프백이나 <code>EMBER_TOKEN_HOSTS</code> 의 호스트에만 보냅니다.
+        모든 요청은 <code>Host</code> 와 <code>Origin</code> 검사도 거치므로 열어 둔 웹 페이지가 다른 사이트에서
+        서버에 닿을 수 없습니다. 이름을 더하려면 <code>EMBER_ALLOWED_HOSTS</code> 를 씁니다.
+      </p>
+      <p>
+        리스너는 평문 HTTP라서 루프백에 둡니다. 루프백이 아닌 <code>EMBER_LISTEN</code>
+        (<code>0.0.0.0</code>, <code>::</code>, LAN 주소)은 <code>EMBER_ALLOW_NON_LOOPBACK_LISTEN=1</code> 이
+        없으면 서버가 시작하지 않고, 있으면 경고를 남깁니다. 토큰이 그 네트워크를 평문으로 지나가기 때문입니다.
+        원격 장치는 서버 허용 목록의 장치만 받는 P2P 전송(<a href="computers.html#peer">컴퓨터와 허브</a>)이나
+        SSH로 들어옵니다: <code>ssh -N -L 8740:127.0.0.1:8740 you@mini.local</code>.
+      </p>
+    </div>
+    <div class="warn" id="owner-presence">
+      <span class="label">소유자 경로는 소유자 확인을 요구합니다</span>
+      <p>
+        <span class="pill partial">부분</span> 토큰 파일은 다른 사용자와 웹 페이지를 막을 뿐, 내 계정의
+        프로세스는 막지 못합니다. 에이전트는 내 계정으로 실행되므로 <code>server-token</code> 을 읽을 수
+        있습니다. 그래서 권한을 주거나, 누군가를 들이거나, 비밀을 바꾸는 경로는 두 번째 자격인 소유자 키를
+        요구합니다. <code>EMBER_OWNER_PRESENCE=enforce</code> 로 시작한 서버는 토큰만 보내면 <code>403</code> 과
+        <code>{"code": "owner_required"}</code> 로 답합니다. 지금 기본값은 <code>warn</code> 입니다. 앱이 아직
+        키를 받을 수 없어서, 호출을 로그에 남기고 처리합니다. 앱이 키를 받을 수 있게 되면 enforce 가 기본값이
+        됩니다.
+        해당 경로는 다음과 같습니다: 도구 승인 응답과 모두 승인, 장치 목록, 계정과 프로바이더의 추가, 삭제,
+        확인과 ChatGPT 로그인, 컴퓨터 추가와 삭제 및 등록 코드, 토큰 교체, 허브 등록, MCP 서버, 에이전트별
+        설정과 A2A 설정, 브라우저 트래픽이 나가는 곳 설정, 채널 초대와 게스트, 허용 설정. 읽기, 세션, 메시지, 터미널,
+        에이전트 질문에 대한 답은 토큰만으로 됩니다.
+      </p>
+      <p>
+        소유자 키는 Ember 앱이나 <code>ember-server owner</code> 명령 하나의 메모리에만 있습니다.
+        <code>&lt;데이터 폴더&gt;/owner.sock</code> 으로 받으며(Windows에서는 내 사용자만 열 수 있고 다른 컴퓨터의
+        접속을 거부하는 이름 있는 파이프 <code>\\.\pipe\ember-owner-&lt;데이터 폴더의 해시&gt;</code> 로 받습니다),
+        그 앱이나 명령이 끝나거나 서버가 다시 시작하면
+        무효가 됩니다. 첫 요청 때 서버 콘솔에 코드가 나옵니다(<code>ember owner code: XXXX-XXXX</code>).
+        요청한 곳에 그 코드를 입력합니다. 이후 요청은 이미 키를 가진 앱에서 승인할 수 있습니다. 서버 쪽과
+        명령은 들어가 있고, 앱의 확인 화면은 아직 만들어지지 않았습니다
+        (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/784">#784</a>). 그때까지는 서버가
+        있는 컴퓨터의 터미널에서 명령을 씁니다:
+      </p>
+      <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+        <figcaption>shell, 메인 서버에서</figcaption>
+<pre><code>ember-server owner enrol-code laptop            <span class="c"># 새 컴퓨터용 코드</span>
+ember-server owner devices list
+ember-server owner approve &lt;세션&gt; &lt;승인&gt; allow
+ember-server owner call POST /api/accounts <span class="s">'{"agent": "claude-code", "label": "work"}'</span></code></pre>
+      </figure>
+      <p>
+        이 명령은 실제 터미널이 필요하며, Ember의 터미널 패널이나 에이전트 안에서는 거부됩니다. 서버가
+        시작한 프로세스 트리 안이기 때문입니다. 이 안내서에서 위 경로에 <code>curl</code> 을 쓰는 곳은 같은
+        메서드, 경로, 본문으로 <code>ember-server owner call</code> 을 쓰세요.
+        <code>EMBER_OWNER_CONFIRM=off</code> 는 콘솔 코드 없이 키를 내줍니다. 보호를 낮추므로 시험
+        환경용입니다. 범위가 <code>full</code> 인 원격 장치는 전송 경로에서 승인에 대해 소유자로
+        취급됩니다. 장치 목록 자체는 서버가 있는 컴퓨터에서만 관리합니다. Windows의 서버는 이름 있는 파이프로
+        요청을 받고(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/815">#815</a>),
+        <code>EMBER_OWNER_PRESENCE</code> 도 같은 방식으로 따릅니다. 기본값은 <code>warn</code> 이고,
+        <code>enforce</code> 로 하면 토큰만으로는 소유자 경로를 쓸 수 없습니다.
+      </p>
+      <p>
+        <strong>막지 못하는 것.</strong> 기본값인 <code>warn</code> 에서는 아무것도 거부하지 않습니다.
+        <code>server-token</code> 을 읽은 프로세스는 이 경로를 그대로 호출할 수 있고, 서버는 로그만 남깁니다.
+        닫으려면 <code>EMBER_OWNER_PRESENCE=enforce</code> 를 설정하세요. 그렇게 해도, 내 계정으로 임의 코드를
+        실행하고 샌드박스에 들어 있지 않은
+        프로세스는 여전히 데이터 폴더의 Ember 데이터베이스와 키를 직접 읽거나 바꿀 수 있고, 앱에 붙거나,
+        에이전트의 프로세스 트리를 벗어나 키를 요청해서 앱을 흉내 낼 수 있습니다. 콘솔 코드는 그 프로세스가
+        서버 콘솔 출력을 읽지 못할 때만 마지막 경우를 막습니다. 그러니 서버 출력을 에이전트가 읽을 수 있는
+        파일로 보내지 마세요. 에이전트를 데이터 폴더가 가려진 상태로 시작하는 것(하네스별 샌드박스)과 키를
+        OS 키 저장소로 옮기는 것은 아직 만들어지지 않았습니다
+        (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/784">#784</a>). 믿지 않는 에이전트는
+        자체 샌드박스가 있는 하네스나 별도의 컴퓨터에서 실행하세요.
       </p>
     </div>
 
@@ -144,13 +224,15 @@ cargo build --release --locked --features mount-fuse</code></pre>
         <thead><tr><th scope="col">변수</th><th scope="col">기본값</th><th scope="col">뜻</th></tr></thead>
         <tbody>
           <tr><td><code>EMBER_DATA_DIR</code></td><td><code>~/.ember</code></td><td>데이터베이스, 키, 계정, 브라우저 프로필을 두는 곳.</td></tr>
-          <tr><td><code>EMBER_LISTEN</code></td><td><code>127.0.0.1:8740</code></td><td>HTTP 리스너.</td></tr>
+          <tr><td><code>EMBER_LISTEN</code></td><td><code>127.0.0.1:8740</code></td><td>HTTP 리스너. 다음 변수가 없으면 루프백만 됩니다.</td></tr>
+          <tr><td><code>EMBER_ALLOW_NON_LOOPBACK_LISTEN</code></td><td>없음</td><td><code>1</code> 이면 <code>EMBER_LISTEN</code> 이 루프백이 아닌 주소에 바인드합니다(평문 HTTP, 시작 시 경고).</td></tr>
           <tr><td><code>EMBER_IDLE_SECS</code></td><td><code>300</code></td><td>활동이 없을 때 에이전트 프로세스를 내려놓기까지의 시간. 다음 메시지가 다시 이어 갑니다.</td></tr>
           <tr><td><code>EMBER_CLAUDE_BIN</code>, <code>EMBER_CODEX_BIN</code>, <code>EMBER_AGY_BIN</code></td><td><code>PATH</code> 의 <code>claude</code>, <code>codex</code>, <code>agy</code></td><td>실행할 에이전트 CLI.</td></tr>
           <tr><td><code>EMBER_ACP_AGENTS</code></td><td>없음</td><td>제공할 ACP 에이전트, JSON으로. 예: <code>["omp"]</code>. <a href="agents.html">에이전트</a> 참고.</td></tr>
           <tr><td><code>EMBER_TRANSPORT</code></td><td>꺼짐</td><td><code>1</code> 이면 P2P 전송을 엽니다. 피어 주소로 추가한 컴퓨터와 허브에 필요합니다.</td></tr>
           <tr><td><code>EMBER_HUB_URL</code></td><td><code>https://darkpyonix.dev</code></td><td>허브. <code>off</code> 면 끕니다. <code>EMBER_TRANSPORT=1</code> 일 때만 씁니다. 기본값은 허브 전용 서브도메인으로 바뀝니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>).</td></tr>
           <tr><td><code>EMBER_RELAY_URL</code></td><td>허브의 릴레이</td><td>전송에 쓸 릴레이 서버.</td></tr>
+          <tr><td><code>EMBER_TRANSPORT_LISTEN</code></td><td>임의의 포트</td><td>전송이 쓸 고정 <code>ip:port</code>(예: <code>0.0.0.0:7444</code>). 서버를 다시 시작해도 기기에 저장한 주소가 그대로 맞습니다. 이때 서버는 앱에 붙여 넣을 <code>ember server device address: &lt;peer id&gt;@&lt;host&gt;:&lt;port&gt;</code> 줄을 출력합니다. 허용된 기기 키만 들어오므로 <code>0.0.0.0</code> 이어도 됩니다. 값이 잘못되면 시작하지 않습니다. 아직 컴파일하지 않았습니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/863">#863</a>).</td></tr>
           <tr><td><code>EMBER_MOUNT</code></td><td><code>auto</code></td><td><code>nfs</code>, <code>fuse</code>, <code>off</code>. <code>auto</code> 는 빌드에 들어 있는 기능을 씁니다.</td></tr>
           <tr><td><code>EMBER_A2A</code></td><td>켜짐</td><td><code>0</code> 이면 에이전트 간 메시지를 끈 채로 시작합니다.</td></tr>
           <tr><td><code>EMBER_CHROME_BIN</code></td><td>기계에서 찾음</td><td><a href="browser.html">원격 브라우저</a>에 쓸 브라우저.</td></tr>
@@ -177,6 +259,7 @@ cargo build --release --locked --features mount-fuse</code></pre>
           <tr><td><code>transport.key</code></td><td>서버의 피어 신원. <code>EMBER_TRANSPORT=1</code> 일 때 만들어집니다.</td></tr>
         </tbody>
       </table>
+      <p id="keystore"><strong>OS 키 저장소의 키.</strong> <code>secret.key</code> 와 <code>transport.key</code>(서버와 각 노드의 것)는 응답하는 OS 키 저장소가 있으면 그곳에 둡니다: macOS 키체인, Windows 자격 증명 관리자, Linux Secret Service. 기존 파일이 있는 상태로 처음 시작하면 Ember 가 키를 키 저장소에 복사하고 다시 읽어 확인한 뒤에야 파일을 지우고 <code>&lt;파일&gt;.migrated</code> 를 남깁니다. 키 저장소에 쓰지 못하면 파일을 그대로 둡니다. <code>EMBER_KEYSTORE</code> 로 <code>auto</code>(기본값: 키 저장소가 있으면 그것, 없으면 파일), <code>os</code>(키 저장소가 없으면 시작하지 않음), <code>file</code> 중 하나를 고릅니다. 키 저장소 항목(서비스 <code>dev.darkpyonix.ember</code>)도 <code>ember.db</code> 와 함께 백업하세요. <strong>남는 위험.</strong> 키 저장소가 없으면(화면 없는 Linux 서버에는 Secret Service 가 없습니다) 키는 0600 파일이므로, 같은 사용자로 도는 프로세스와 데이터 폴더 사본을 가진 사람은 누구나 읽을 수 있습니다. 키 저장소가 있어도 잠금이 풀린 세션에서는 같은 사용자의 프로세스가 키를 요청할 수 있습니다. 키 저장소는 데이터 폴더의 사본과 백업을 지키며, 탈취된 사용자 계정을 지키지는 않습니다.</p>
     </div>
 
     <h2 id="node">ember node, 각 컴퓨터에</h2>

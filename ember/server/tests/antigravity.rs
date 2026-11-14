@@ -42,7 +42,7 @@ async fn until_approval(rx: &mut mpsc::Receiver<AgentEvent>) -> (String, Vec<Age
     let mut before = Vec::new();
     loop {
         match next(rx, 20).await {
-            AgentEvent::ApprovalRequested { approval_id, tool, input } => {
+            AgentEvent::ApprovalRequested { approval_id, tool, input, .. } => {
                 assert_eq!(tool, "run_command");
                 assert_eq!(input["CommandLine"], "echo hi");
                 return (approval_id, before);
@@ -155,7 +155,7 @@ async fn fake_cli_turns_with_hook_approvals_resume_and_interrupt() {
     for pair in lines.chunks(2) {
         assert!(pair[0].starts_with("-p /hooks --output-format json --add-dir "), "{args}");
         assert!(pair[1].contains("--output-format stream-json"), "{args}");
-        assert!(pair[1].contains("--dangerously-skip-permissions") && pair[1].contains("--sandbox"), "{args}");
+        assert!(pair[1].contains("--dangerously-skip-permissions")  && !pair[1].contains("--sandbox"), "{args}");
     }
     assert!(lines[1].contains("--model m1") && !lines[1].contains("--conversation"), "{args}");
     for l in [lines[3], lines[5], lines[7]] {
@@ -172,14 +172,10 @@ async fn fake_cli_turns_with_hook_approvals_resume_and_interrupt() {
 async fn a_hook_that_was_not_loaded_fails_the_turn() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
-    // A fake that lists no hooks.
-    let bin = cwd.path().join("agy-without-hooks.sh");
-    std::fs::write(&bin, "#!/bin/sh\necho \"$*\" >> args.log\nexit 0\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    // A checked-in fake that lists no hooks. The test must not write the script itself: a script
+    // written and exec'd at once fails with ETXTBSY ("Text file busy") when another test thread
+    // forks while the write fd is open, and the turn then fails with that error, not the hook one.
+    let bin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agy/fake-agy-without-hooks.sh");
     let adapter = AntigravityAdapter::new(&bin, home.path(), serve_hooks().await);
     let (tx, mut rx) = mpsc::channel(16);
     let mut run =

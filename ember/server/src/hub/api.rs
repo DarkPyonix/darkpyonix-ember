@@ -1,7 +1,7 @@
 //! HTTP API for the hub integration (FR-N2), in two routers:
 //!
 //! - [`router`]: reading the status and the account's devices, and adding one as a computer.
-//!   Served like `/api/v1/computers` (TCP and, to allowed devices, the transport).
+//!   Served like `/api/computers` (TCP and, to allowed devices, the transport).
 //! - [`admin_router`]: everything else. **Local only**: `main.rs` merges it into the TCP
 //!   listener's app, never into the app served over the transport (like device management: a
 //!   device must not be able to (de)register the server, let devices into the account or
@@ -9,19 +9,19 @@
 //!
 //! | Method | Path | Body → Response |
 //! | ------ | ---- | --------------- |
-//! | GET    | `/api/v1/hub` | → `HubStatus` (503 when the hub is off) |
-//! | GET    | `/api/v1/hub/devices` | → `[HubDeviceView]` (the account's devices) |
-//! | POST   | `/api/v1/hub/devices/{endpoint_id}/computer` | `{name?, token}` → 201 `Computer` |
+//! | GET    | `/api/hub` | → `HubStatus` (503 when the hub is off) |
+//! | GET    | `/api/hub/devices` | → `[HubDeviceView]` (the account's devices) |
+//! | POST   | `/api/hub/devices/{endpoint_id}/computer` | `{name?, token}` → 201 `Computer` |
 //! | *admin* | | |
-//! | POST   | `/api/v1/hub/link` | `{name?}` → 202 `PendingView` (user code + verification URL); 409 if registered. A removed server may link again once the owner re-admitted it on darkpyonix.dev (else 409 with that advice) |
-//! | DELETE | `/api/v1/hub/link` | → 204 (stop waiting) |
-//! | POST   | `/api/v1/hub/check` | → `{state}`: `active`, `revoked`, `rejected`, `unreachable`, `unregistered` |
-//! | DELETE | `/api/v1/hub/registration[?local=1]` | → 204: leave the account (removed on the hub with the server's own token, then forgotten); `local=1` only forgets here |
-//! | DELETE | `/api/v1/hub/devices/{endpoint_id}` | → 204 (removed on the hub) |
-//! | GET    | `/api/v1/hub/link-codes/{user_code}` | → `LinkCodeInfo` |
-//! | POST   | `/api/v1/hub/link-codes/{user_code}` | `{approve}` → 204; 403 when the hub needs a browser session (a `main_server` link, a re-admitted device) |
-//! | POST   | `/api/v1/hub/sync-devices` | → `SyncReport` (devices allow-list ← account) |
-//! | PUT    | `/api/v1/hub/sync-devices` | `{enabled}` → 204 (periodic sync on/off) |
+//! | POST   | `/api/hub/link` | `{name?}` → 202 `PendingView` (user code + verification URL); 409 if registered. A removed server may link again once the owner re-admitted it on darkpyonix.dev (else 409 with that advice) |
+//! | DELETE | `/api/hub/link` | → 204 (stop waiting) |
+//! | POST   | `/api/hub/check` | → `{state}`: `active`, `revoked`, `rejected`, `unreachable`, `unregistered` |
+//! | DELETE | `/api/hub/registration[?local=1]` | → 204: leave the account (removed on the hub with the server's own token, then forgotten); `local=1` only forgets here |
+//! | DELETE | `/api/hub/devices/{endpoint_id}` | → 204 (removed on the hub) |
+//! | GET    | `/api/hub/link-codes/{user_code}` | → `LinkCodeInfo` |
+//! | POST   | `/api/hub/link-codes/{user_code}` | `{approve}` → 204; 403 when the hub needs a browser session (a `main_server` link, a re-admitted device) |
+//! | POST   | `/api/hub/sync-devices` | → `SyncReport` (devices allow-list ← account) |
+//! | PUT    | `/api/hub/sync-devices` | `{enabled}` → 204 (periodic sync on/off) |
 //!
 //! A revoked registration answers `410 Gone` on calls that need the hub token.
 
@@ -50,21 +50,21 @@ struct AppState {
 /// `EMBER_HUB_URL=off`): every route then answers 503 with the reason.
 pub fn router(hub: Option<Arc<ServerHub>>, computers: Arc<Computers>) -> Router {
     Router::new()
-        .route("/api/v1/hub", get(status))
-        .route("/api/v1/hub/devices", get(devices))
-        .route("/api/v1/hub/devices/{id}/computer", post(add_computer))
+        .route("/api/hub", get(status))
+        .route("/api/hub/devices", get(devices))
+        .route("/api/hub/devices/{id}/computer", post(add_computer))
         .with_state(AppState { hub, computers })
 }
 
 /// The local-only routes (TCP listener only).
 pub fn admin_router(hub: Option<Arc<ServerHub>>, computers: Arc<Computers>) -> Router {
     Router::new()
-        .route("/api/v1/hub/link", post(start_link).delete(cancel_link))
-        .route("/api/v1/hub/check", post(check))
-        .route("/api/v1/hub/registration", axum::routing::delete(forget))
-        .route("/api/v1/hub/devices/{id}", axum::routing::delete(remove_device))
-        .route("/api/v1/hub/link-codes/{code}", get(lookup_code).post(decide_code))
-        .route("/api/v1/hub/sync-devices", post(sync_now).put(set_sync))
+        .route("/api/hub/link", post(start_link).delete(cancel_link))
+        .route("/api/hub/check", post(check))
+        .route("/api/hub/registration", axum::routing::delete(forget))
+        .route("/api/hub/devices/{id}", axum::routing::delete(remove_device))
+        .route("/api/hub/link-codes/{code}", get(lookup_code).post(decide_code))
+        .route("/api/hub/sync-devices", post(sync_now).put(set_sync))
         .with_state(AppState { hub, computers })
 }
 

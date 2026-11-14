@@ -3,10 +3,10 @@
 //!
 //! ```text
 //! Chrome --proxy-server=socks5://127.0.0.1:<port>
-//!    └─TCP─▶ EgressListener ──/v1/egress (WebSocket, + token)──▶ node: SOCKS5 server ──TCP─▶ target
+//!    └─TCP─▶ EgressListener ──/egress (WebSocket, + token)──▶ node: SOCKS5 server ──TCP─▶ target
 //! ```
 //!
-//! The listener does not parse SOCKS5: each accepted connection gets its own `/v1/egress` stream
+//! The listener does not parse SOCKS5: each accepted connection gets its own `/egress` stream
 //! and bytes are copied unchanged ([`ember_node::egress::bridge`]), so Chrome's SOCKS5 client
 //! talks to the node's SOCKS5 server end to end and DNS is resolved on the node. Chrome cannot
 //! authenticate to a SOCKS5 proxy, so the listener is bound to loopback without authentication:
@@ -62,7 +62,7 @@ impl EgressListener {
                         Err(e) => {
                             // Chrome sees the connection close during the handshake and reports
                             // ERR_PROXY_CONNECTION_FAILED / ERR_SOCKS_CONNECTION_FAILED.
-                            tracing::warn!("egress: opening the node's /v1/egress failed: {e}");
+                            tracing::warn!("egress: opening the node's /egress failed: {e}");
                             return;
                         }
                     };

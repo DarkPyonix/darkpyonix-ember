@@ -1,0 +1,1241 @@
+# Vendored from darkpyonix-core, docs/api/hub.openapi.yaml at commit daa80b5 (develop). Do not edit; re-vendor from the source.
+openapi: 3.1.0
+info:
+  title: DarkPyonix Hub API (darkpyonix.dev)
+  version: 0.3.0
+  summary: GitHub accounts, device registry, address directory, share links and HTTPS names for DarkPyonix; the iroh relay on its own host.
+  description: |
+    The hub connects a user's machines (the main server and its branch computers) and lets
+    shared notebooks reach a dedicated manager, **without seeing their traffic** (SPEC NFR-H1).
+
+    **Two hosts** (SPEC §10, INTENT D15):
+
+    - `https://darkpyonix.dev` is a **Cloudflare Worker** (`darkpyonix/hub/worker/`, TypeScript, D1).
+      It serves GitHub sign-in, the device registry, the address directory, share links, the
+      ash viewer (Workers static assets) and HTTPS names (ACME TXT through the Cloudflare DNS
+      API).
+    - `https://relay.darkpyonix.dev` is the **relay host** (`darkpyonix/hub/server/`, the `iroh-relay`
+      server crate). Workers cannot accept UDP, and iroh's QUIC address discovery (QAD) needs
+      UDP 7842, so the relay runs where it can. Operations served there carry a path-level
+      `servers` entry. The relay asks the Worker whom to admit
+      (`/internal/relay/admit`), and the Worker tells the relay to drop removed devices
+      (`/admin/disconnect`).
+
+    The peer-to-peer transport is **iroh 1.x** (PROJECT Q1). A device *is* an iroh endpoint:
+    its id is the endpoint id, the lowercase hex of its ed25519 public key.
+    `PUT`/`GET /pkarr/{key}` is iroh's pkarr relay protocol, so the stock `PkarrPublisher`
+    and `PkarrResolver` work against `https://darkpyonix.dev/pkarr`.
+
+    **Accounts (FR-H6).** An account is a GitHub user (its numeric user id). People sign in
+    in a browser (`/auth/login`, OAuth authorization code with PKCE S256 and state) and get a
+    session cookie. OpenAI / Sign in with ChatGPT is not a hub feature; it stays in the
+    user's own ember server.
+
+    **Devices (FR-H1).** Roles: `main_server` (account rights, may hold names), `computer`
+    (runs kernels; may publish shares), `client` (only connects to other devices, e.g. a
+    phone; may not publish shares or hold names). The `client` role is provisional.
+    An account has at most one active `main_server` (Ember INTENT D3); a new one joins only
+    as an explicit replacement of the current one (`replace` on approval).
+    A device asks to join with `POST /device-links`, a signed-in person
+    (or the account's main server) approves the user code, and the device claims a device
+    token by signing the challenge with its iroh key.
+
+    **Credentials.** `Authorization: Bearer <device token>`, or the `__Host-dp_session` cookie
+    for a signed-in browser. Where a stock iroh client cannot set headers (`GET /pkarr/{key}`)
+    a **resolve token** (`dpr_...`, read-only: it reads same-account address records and
+    nothing else) goes in the `token` query parameter; device tokens are never accepted in
+    a query (SPEC NFR-H2). The Worker never logs request URLs. Cookie-authenticated writes must come
+    from `https://darkpyonix.dev` (`Origin`), else 403. Tokens and session ids are stored
+    hashed. "Account rights" means a signed-in session or the account's `main_server` device.
+
+    **No versions.** Paths carry no version segment (INTENT D16, SPEC NFR-V1). The API only
+    grows: fields, optional request fields, paths and error codes are added, never renamed,
+    retyped or removed. Clients ignore fields they do not know. A replaced field or path stays,
+    marked `deprecated: true`.
+
+    **Errors.** Error bodies are `Error` objects. Every 401 carries a `code`:
+    `device_removed` when the device token belongs to a removed device (stop retrying, drop
+    the token), `invalid_credentials` for anything else (missing, unknown or expired).
+  license:
+    name: Apache-2.0
+    url: https://github.com/DarkPyonix/darkpyonix/blob/main/LICENSE
+servers:
+  - url: https://darkpyonix.dev
+security:
+  - device: []
+  - session: []
+tags:
+  - name: System
+  - name: Accounts
+    description: GitHub sign-in and browser sessions (FR-H6).
+  - name: Devices
+    description: iroh endpoints joined to an account through device links (FR-H1).
+  - name: Directory
+    description: Signed iroh address records, iroh pkarr relay protocol (FR-H2).
+  - name: Relay
+    description: The iroh relay on relay.darkpyonix.dev, and the Worker callbacks it uses (FR-H3).
+  - name: Shares
+    description: Public share links and the ash viewer (FR-H4).
+  - name: Names
+    description: "`<name>.darkpyonix.dev` and ACME DNS-01 challenges (FR-H5)."
+
+paths:
+  /health:
+    get:
+      tags: [System]
+      operationId: getHubHealth
+      summary: Liveness check
+      security: []
+      responses:
+        "200":
+          description: Up.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, version]
+                properties:
+                  status: {type: string, const: ok}
+                  version: {type: string}
+
+  /config:
+    get:
+      tags: [System]
+      operationId: getHubConfig
+      summary: Where the relays and the pkarr directory are (FR-H8)
+      description: |
+        Public and cacheable (5 minutes). Clients read their relay map and pkarr URL from here
+        instead of building them in. There is no API version (INTENT D16): the API only grows,
+        and clients look for the fields they need. `hub_version` is informational.
+      security: []
+      responses:
+        "200":
+          description: The hub's configuration.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [hub_version, relay_urls, pkarr_url, link_url]
+                properties:
+                  hub_version: {type: string}
+                  relay_urls:
+                    type: array
+                    items: {type: string}
+                    description: iroh relays for the client's RelayMap.
+                    example: ["https://relay.darkpyonix.dev/"]
+                  pkarr_url:
+                    type: string
+                    description: Base URL for iroh's PkarrPublisher and PkarrResolver (append `?token=<resolve token>` to resolve).
+                    example: "https://darkpyonix.dev/pkarr"
+                  link_url: {type: string, example: "https://darkpyonix.dev/link"}
+
+  /.well-known/org.flathub.VerifiedApps.txt:
+    get:
+      tags: [System]
+      operationId: getFlathubVerifiedApps
+      summary: Flathub website verification (FR-H7)
+      description: |
+        The token Flathub issues to verify app ids under this domain (`dev.darkpyonix.Ember`),
+        as plain text. Its content is the Worker's `FLATHUB_VERIFICATION_TOKEN` var or secret;
+        when that is unset or empty the file does not exist.
+      security: []
+      responses:
+        "200":
+          description: The verification token.
+          content:
+            text/plain:
+              schema: {type: string}
+        "404":
+          description: No token configured.
+
+  # ------------------------------------------------------------------ accounts (FR-H6)
+
+  /auth/login:
+    get:
+      tags: [Accounts]
+      operationId: startLogin
+      summary: Start GitHub sign-in (redirects to GitHub)
+      description: |
+        Redirects to `https://github.com/login/oauth/authorize` with `client_id`,
+        `redirect_uri=https://darkpyonix.dev/auth/callback`, a random `state`, and a PKCE
+        `code_challenge` (S256). No scope is requested: only the public profile is read. The
+        state is also set in the `__Host-dp_oauth` cookie (10 minutes).
+      security: []
+      parameters:
+        - name: return_to
+          in: query
+          required: false
+          description: A path on this origin to return to after sign-in (anything else becomes `/`).
+          schema: {type: string}
+      responses:
+        "302":
+          description: To GitHub.
+        "503":
+          description: GitHub sign-in is not configured on this hub.
+
+  /auth/callback:
+    get:
+      tags: [Accounts]
+      operationId: finishLogin
+      summary: GitHub redirects here; sets the session cookie
+      description: |
+        Checks that `state` matches the `__Host-dp_oauth` cookie and an unexpired, unused
+        transaction; exchanges `code` with the PKCE verifier; reads `GET https://api.github.com/user`;
+        revokes the GitHub token; finds or creates the account for that GitHub user id; sets
+        `__Host-dp_session` (HttpOnly, Secure, SameSite=Lax, 30 days) and redirects to
+        `return_to`.
+      security: []
+      parameters:
+        - {name: code, in: query, required: false, schema: {type: string}}
+        - {name: state, in: query, required: false, schema: {type: string}}
+        - {name: error, in: query, required: false, schema: {type: string}}
+      responses:
+        "302":
+          description: Signed in; to `return_to`.
+        "400":
+          description: Missing code or state, state not bound to this browser, unknown/used/expired state, or GitHub refused the code.
+        "403":
+          description: This GitHub user may not create an account here (operator allowlist).
+        "502":
+          description: GitHub did not return the user.
+        "503":
+          description: GitHub sign-in is not configured on this hub.
+
+  /auth/logout:
+    post:
+      tags: [Accounts]
+      operationId: logout
+      summary: End the browser session
+      security: []
+      responses:
+        "204":
+          description: Signed out (also when there was no session).
+        "403":
+          description: Cross-origin request.
+
+  /me:
+    get:
+      tags: [Accounts]
+      operationId: getMe
+      summary: The caller's account
+      responses:
+        "200":
+          description: The account.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [account_id, github_login, via, endpoint_id]
+                properties:
+                  account_id: {type: string, pattern: "^a_[0-9a-f]{16}$"}
+                  github_login: {type: string, description: Display only; the account is keyed by the GitHub user id.}
+                  via: {type: string, enum: [session, device]}
+                  endpoint_id: {type: [string, "null"], description: The calling device, when `via` is `device`.}
+        "401":
+          description: No valid session or device token; `code` is `device_removed` for a removed device's token.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+
+  /me/resolve-token:
+    post:
+      tags: [Accounts]
+      operationId: rotateResolveToken
+      summary: Issue a new read-only resolve token for the calling device (NFR-H2)
+      description: |
+        Device token in the `Authorization` header only. The device's previous resolve token
+        stops working at once.
+      security:
+        - device: []
+      responses:
+        "201":
+          description: The new resolve token, shown once.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [resolve_token]
+                properties:
+                  resolve_token: {type: string}
+        "401":
+          description: No valid device token in the header.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+
+  # ------------------------------------------------------------------ devices (FR-H1)
+
+  /link:
+    get:
+      tags: [Devices]
+      operationId: openLinkPage
+      summary: The page where a signed-in person approves a device's user code
+      security: []
+      parameters:
+        - {name: code, in: query, required: false, schema: {type: string, example: BCDF-GHJK}}
+      responses:
+        "200":
+          description: HTML (signed in).
+          content:
+            text/html: {}
+        "302":
+          description: Not signed in; to `/auth/login?return_to=/link?code=...`.
+
+  /device-links:
+    post:
+      tags: [Devices]
+      operationId: createDeviceLink
+      summary: A device asks to join an account
+      description: |
+        Unauthenticated (rate-limited). Show `user_code` (or open `verification_uri_complete`)
+        to a person who is signed in, or hand it to the account's main server. Poll
+        `POST /device-links/{link_id}/token` every `interval` seconds until `expires_at`
+        (15 minutes).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint_id, name, role]
+              properties:
+                endpoint_id: {type: string, pattern: "^[0-9a-f]{64}$"}
+                name: {type: string, minLength: 1, maxLength: 64}
+                role: {type: string, enum: [main_server, computer, client]}
+      responses:
+        "201":
+          description: Link created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [link_id, user_code, verification_uri, verification_uri_complete, challenge, interval, expires_at]
+                properties:
+                  link_id: {type: string, pattern: "^l_[0-9a-f]{32}$"}
+                  user_code: {type: string, pattern: "^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$"}
+                  verification_uri: {type: string, example: "https://darkpyonix.dev/link"}
+                  verification_uri_complete: {type: string, example: "https://darkpyonix.dev/link?code=BCDF-GHJK"}
+                  challenge: {type: string, pattern: "^[0-9a-f]{64}$"}
+                  interval: {type: integer, description: Seconds between polls.}
+                  expires_at: {type: integer, description: Unix seconds.}
+        "400":
+          description: Malformed endpoint id, name or role.
+        "409":
+          description: This endpoint id is registered, or was removed and its owner has not re-admitted it (FR-H11).
+        "429":
+          description: Too many link requests from this address.
+        "503":
+          description: Could not allocate a user code.
+
+  /device-links/{link_id}:
+    parameters:
+      - name: link_id
+        in: path
+        required: true
+        schema: {type: string, pattern: "^l_[0-9a-f]{32}$"}
+    get:
+      tags: [Devices]
+      operationId: getDeviceLink
+      summary: A device link's status, for a device that restarted while waiting
+      description: |
+        No credentials: the link id is 128 random bits known only to the device. The
+        challenge is not secret (claiming needs the endpoint's key) and no token is returned.
+        Expired links are deleted hourly, after which this is 404.
+      security: []
+      responses:
+        "200":
+          description: The link.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [link_id, status, endpoint_id, name, role, user_code, verification_uri_complete, challenge, interval, expires_at]
+                properties:
+                  link_id: {type: string}
+                  status: {type: string, enum: [pending, approved, denied, claimed, expired]}
+                  endpoint_id: {type: string, pattern: "^[0-9a-f]{64}$"}
+                  name: {type: string}
+                  role: {type: string, enum: [main_server, computer, client]}
+                  user_code: {type: string}
+                  verification_uri_complete: {type: string}
+                  challenge: {type: string, pattern: "^[0-9a-f]{64}$"}
+                  interval: {type: integer}
+                  expires_at: {type: integer}
+        "404":
+          description: Unknown link, or an expired one already deleted.
+
+  /device-links/{link_id}/token:
+    parameters:
+      - name: link_id
+        in: path
+        required: true
+        schema: {type: string, pattern: "^l_[0-9a-f]{32}$"}
+    post:
+      tags: [Devices]
+      operationId: claimDeviceToken
+      summary: The device polls for, and claims, its device token
+      description: |
+        The body proves possession of the endpoint's secret key: hex of the ed25519 signature
+        (iroh `SecretKey::sign`) over the UTF-8 bytes of
+        `darkpyonix-hub/v2/link\n<link_id>\n<challenge>`. Checked on every poll.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [signature]
+              properties:
+                signature: {type: string, pattern: "^[0-9a-f]{128}$"}
+      responses:
+        "201":
+          description: Approved; the device token is shown once.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [device, device_token, resolve_token]
+                properties:
+                  device: {$ref: "#/components/schemas/Device"}
+                  device_token: {type: string, description: "`dpd_...`; headers only."}
+                  resolve_token: {type: string, description: "`dpr_...`; read-only, for `GET /pkarr/{key}?token=` (NFR-H2)."}
+        "202":
+          description: Not decided yet; poll again after `interval`.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, const: pending}
+        "400":
+          description: Malformed body or the signature does not verify.
+        "403":
+          description: The link was denied.
+        "404":
+          description: Unknown, expired or already claimed link.
+        "409":
+          description: "The endpoint id was registered meanwhile; or `code` `main_server_exists`: another main server joined the account after this `main_server` link was approved (the link becomes `denied`)."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+
+  /link-codes/{user_code}:
+    parameters:
+      - name: user_code
+        in: path
+        required: true
+        description: As shown by the device; case and the dash are not significant.
+        schema: {type: string}
+    get:
+      tags: [Devices]
+      operationId: getLinkCode
+      summary: What device a pending user code would let in
+      description: Account rights required.
+      responses:
+        "200":
+          description: The pending request.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user_code, endpoint_id, name, role, expires_at, current_main_server]
+                properties:
+                  user_code: {type: string}
+                  endpoint_id: {type: string, pattern: "^[0-9a-f]{64}$"}
+                  name: {type: string}
+                  role: {type: string, enum: [main_server, computer, client]}
+                  expires_at: {type: integer}
+                  current_main_server:
+                    description: For a `main_server` link, the account's current main server, which approving would replace (FR-H1); null if there is none or the link is for another role.
+                    oneOf:
+                      - type: object
+                        required: [endpoint_id, name]
+                        properties:
+                          endpoint_id: {type: string, pattern: "^[0-9a-f]{64}$"}
+                          name: {type: string}
+                      - {type: "null"}
+        "401":
+          description: No valid session or device token.
+        "403":
+          description: A computer's device token (needs account rights).
+        "404":
+          description: Unknown, decided or expired code.
+        "429":
+          description: Too many code lookups or decisions from this account.
+    post:
+      tags: [Devices]
+      operationId: decideLinkCode
+      summary: Approve or deny a device into the caller's account
+      description: |
+        Account rights required. Approving adds the device to the caller's account.
+        Approving a link that asks for the `main_server` role needs a signed-in browser
+        session; a main server's device token gets 403 for it (it may still deny it), so a
+        leaked main server token cannot mint more devices with account rights.
+
+        An account has one main server (FR-H1, Ember INTENT D3). If it has one, approving a
+        `main_server` link must name it in `replace`; the claim then removes it (its token gets
+        401 `device_removed`, it is listed in `/removed-devices`, its shares and address
+        record go, its relay connections drop) and moves its names to the new main server, in
+        one transaction.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approve]
+              properties:
+                approve: {type: boolean}
+                replace:
+                  type: string
+                  pattern: "^[0-9a-f]{64}$"
+                  description: "The account's current main server, when approving a `main_server` link replaces it. Only with `approve` true on a `main_server` link."
+      responses:
+        "204":
+          description: Decided.
+        "400":
+          description: Malformed body.
+        "401":
+          description: No valid session or device token.
+        "403":
+          description: A computer's device token; a device token approving a `main_server` link or a re-admitted key's link (FR-H11); a session of another account for a re-admitted key; or a cross-origin cookie request.
+        "404":
+          description: Unknown, decided or expired code.
+        "409":
+          description: "`code` `main_server_exists`: approving a `main_server` link without `replace` while the account has a main server. `code` `replace_mismatch`: `replace` is not the account's current main server."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "429":
+          description: Too many code lookups or decisions from this account.
+
+  /devices:
+    get:
+      tags: [Devices]
+      operationId: listDevices
+      summary: Devices of the caller's account, with change notification by ETag and long-poll
+      description: |
+        The response carries a weak `ETag` for the account's device list; it changes when a
+        device is added, restored, removed, renamed, reports its app, or goes on/offline
+        (not for `last_seen` alone). Send it back as `If-None-Match` to get 304 when nothing
+        changed. Add `wait` to long-poll: the hub holds the request until the list changes
+        (200) or `wait` seconds pass (304), checking about every 2 seconds (FR-H9, provisional).
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: {type: string, example: 'W/"v12"'}
+        - name: wait
+          in: query
+          required: false
+          description: Seconds to wait for a change when `If-None-Match` matches. 0 to 25.
+          schema: {type: integer, minimum: 0, maximum: 25}
+      responses:
+        "200":
+          description: Devices, oldest first. Removed devices are not listed.
+          headers:
+            ETag:
+              schema: {type: string, example: 'W/"v12"'}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [devices]
+                properties:
+                  devices:
+                    type: array
+                    items: {$ref: "#/components/schemas/Device"}
+        "304":
+          description: Unchanged since `If-None-Match` (after waiting, if `wait` was given).
+          headers:
+            ETag:
+              schema: {type: string}
+        "400":
+          description: "`wait` is not an integer from 0 to 25."
+        "401":
+          description: No valid session or device token; `code` is `device_removed` for a removed device's token (also when the waiting device was removed meanwhile).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+
+  /devices/{endpoint_id}:
+    parameters:
+      - $ref: "#/components/parameters/EndpointId"
+    get:
+      tags: [Devices]
+      operationId: getDevice
+      summary: One device of the caller's account
+      responses:
+        "200":
+          description: The device.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Device"}
+        "401":
+          description: No valid session or device token.
+        "404":
+          description: No such device in the caller's account.
+    patch:
+      tags: [Devices]
+      operationId: updateDevice
+      summary: Rename a device, or set the app it reports
+      description: |
+        Fields left out are unchanged. `name`: account rights or the device's own token.
+        `app` (FR-H10, provisional): the device's own token only; `null` clears it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              additionalProperties: false
+              properties:
+                name: {type: string, minLength: 1, maxLength: 64}
+                app:
+                  oneOf:
+                    - {$ref: "#/components/schemas/DeviceApp"}
+                    - {type: "null"}
+      responses:
+        "200":
+          description: The updated device.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Device"}
+        "400":
+          description: Malformed body, unknown field or bad value.
+        "401":
+          description: No valid session or device token.
+        "403":
+          description: Another device's token without account rights; anyone but the device itself setting `app`; or a cross-origin cookie request.
+        "404":
+          description: No such device in the caller's account.
+    delete:
+      tags: [Devices]
+      operationId: removeDevice
+      summary: Remove a device; revokes its token and key, its names, shares and record, and drops its relay connections
+      description: |
+        A signed-in session removes any device of the account. A main server's token removes
+        `computer` and `client` devices and itself (an account has no other main server; one
+        is replaced only through a session-approved link, FR-H1). Any device's own token
+        removes that device (a device leaving its account by itself).
+      responses:
+        "204":
+          description: Removed.
+        "401":
+          description: No valid session or device token.
+        "403":
+          description: Another device's token without account rights, or a cross-origin cookie request.
+        "404":
+          description: No such device in the account.
+
+  /devices/{endpoint_id}/readmit:
+    parameters:
+      - $ref: "#/components/parameters/EndpointId"
+    post:
+      tags: [Devices]
+      operationId: readmitDevice
+      summary: Let a removed key join again through a device link (FR-H11, provisional)
+      description: |
+        A signed-in browser session of the account the device was removed from; device
+        tokens (even the main server's) get 403. For 15 minutes the key may start a device
+        link; that link must also be approved by a session of this account. Claiming it
+        restores the device with new tokens.
+      security:
+        - session: []
+      responses:
+        "200":
+          description: Re-admission open.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [endpoint_id, expires_at]
+                properties:
+                  endpoint_id: {type: string}
+                  expires_at: {type: integer, description: Unix seconds; start the device link before this.}
+        "401":
+          description: No valid session or device token.
+        "403":
+          description: A device token, or a cross-origin cookie request.
+        "404":
+          description: No device with this key was ever in the caller's account.
+        "409":
+          description: The device is not removed.
+
+  /removed-devices:
+    get:
+      tags: [Devices]
+      operationId: listRemovedDevices
+      summary: Removed devices of the caller's account, to pick one to re-admit (FR-H11, provisional)
+      description: |
+        A signed-in browser session only; device tokens (even the main server's) get 403.
+        Newest removal first, at most 100. A re-admitted device that claimed its link is back
+        in `GET /devices` and no longer here.
+      security:
+        - session: []
+      responses:
+        "200":
+          description: Removed devices, most recently removed first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [devices]
+                properties:
+                  devices:
+                    type: array
+                    maxItems: 100
+                    items: {$ref: "#/components/schemas/RemovedDevice"}
+        "401":
+          description: No valid session or device token.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "403":
+          description: A device token.
+
+  # ------------------------------------------------------------------ directory (FR-H2)
+
+  /devices/{endpoint_id}/addresses:
+    parameters:
+      - $ref: "#/components/parameters/EndpointId"
+    get:
+      tags: [Directory]
+      operationId: getDeviceAddresses
+      summary: The device's latest signed address record, decoded
+      description: Same data as `GET /pkarr/{key}`, as JSON. Same-account callers only.
+      responses:
+        "200":
+          description: The record.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AddressRecord"}
+        "401":
+          description: No valid session or device token.
+        "404":
+          description: No such device in the caller's account, or it has published nothing yet.
+
+  /pkarr/{key}:
+    parameters:
+      - name: key
+        in: path
+        required: true
+        description: The endpoint's public key in z-base-32 (52 characters), as iroh's pkarr client sends it.
+        schema: {type: string, pattern: "^[ybndrfg8ejkmcpqxot1uwisza345h769]{52}$"}
+    put:
+      tags: [Directory]
+      operationId: publishAddressRecord
+      summary: Publish a signed pkarr packet (iroh pkarr relay protocol)
+      description: |
+        Body: the pkarr relay payload, `signature (64) || timestamp_us big-endian (8) || DNS packet`
+        (at most 1000 bytes of DNS). The signature (ed25519 over the BEP 44 form
+        `3:seqi<timestamp_us>e1:v<len>:<dns>`) authenticates the request; no token is needed.
+        Only registered, non-removed devices are accepted, and only packets newer than the
+        stored one.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+      responses:
+        "204":
+          description: Stored.
+        "400":
+          description: Malformed key or payload, or the signature does not verify.
+        "403":
+          description: The key is not a registered device.
+        "409":
+          description: Not newer than the stored packet.
+        "429":
+          description: Publishing too often.
+    get:
+      tags: [Directory]
+      operationId: resolveAddressRecord
+      summary: Fetch a device's signed pkarr packet (iroh pkarr relay protocol)
+      description: |
+        Requires a resolve token, device token or session of the same account. For iroh's
+        stock `PkarrResolver`, configure the URL as
+        `https://darkpyonix.dev/pkarr?token=<resolve token>` (iroh appends the key as a path
+        segment and keeps the query). Only resolve tokens are accepted in the query (NFR-H2).
+      parameters:
+        - name: token
+          in: query
+          required: false
+          description: A resolve token (`dpr_...`). A device token here is refused (401 `invalid_credentials`).
+          schema: {type: string}
+      responses:
+        "200":
+          description: The pkarr relay payload; verify it with the key.
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        "400":
+          description: Malformed key.
+        "401":
+          description: No valid resolve token, session or device token (a device token in the query counts as none); `code` is `device_removed` for a removed device's token.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "404":
+          description: Unknown key, another account's device, or nothing published.
+
+  # ------------------------------------------------------------------ relay (FR-H3)
+
+  /relay:
+    servers:
+      - url: https://relay.darkpyonix.dev
+    get:
+      tags: [Relay]
+      operationId: openRelay
+      summary: iroh relay (WebSocket upgrade, iroh relay protocol), on the relay host
+      description: |
+        Served by the `iroh-relay` crate on the relay host. The relay handshake proves the
+        client's endpoint id; the relay then asks `POST https://darkpyonix.dev/internal/relay/admit`
+        (with the auth token the client presented, if any) and may cache an allow for
+        `cache_secs`. Admitted: registered, non-removed devices; or any endpoint presenting
+        a valid guest relay pass from `GET /shares/{share_id}` as `Authorization: Bearer`
+        or `?token=`.
+      security: []
+      responses:
+        "101":
+          description: Switching Protocols.
+        "400":
+          description: Not a valid relay upgrade request.
+
+  /ping:
+    servers:
+      - url: https://relay.darkpyonix.dev
+    get:
+      tags: [Relay]
+      operationId: relayProbe
+      summary: HTTPS latency probe used by iroh's net report, on the relay host
+      security: []
+      responses:
+        "200":
+          description: Empty.
+
+  /generate_204:
+    servers:
+      - url: https://relay.darkpyonix.dev
+      - url: http://relay.darkpyonix.dev
+    get:
+      tags: [Relay]
+      operationId: captivePortalProbe
+      summary: Captive portal check used by iroh, on the relay host
+      description: "Echoes `X-Iroh-Challenge` as `X-Iroh-Response: response <challenge>`. Also served on plain HTTP port 80. QAD is QUIC on UDP 7842 of the same host (not HTTP)."
+      security: []
+      responses:
+        "204":
+          description: No content.
+
+  /admin/disconnect:
+    servers:
+      - url: https://relay.darkpyonix.dev
+    post:
+      tags: [Relay]
+      operationId: relayDisconnect
+      summary: The Worker tells the relay host to drop a removed device's connections
+      security:
+        - relaySecret: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint_id]
+              properties:
+                endpoint_id: {type: string, pattern: "^[0-9a-f]{64}$"}
+      responses:
+        "204":
+          description: Dropped (or it was not connected).
+        "400":
+          description: Malformed body.
+        "401":
+          description: Relay secret missing or wrong.
+
+  /internal/relay/admit:
+    post:
+      tags: [Relay]
+      operationId: relayAdmit
+      summary: The relay host asks whether to admit an endpoint
+      security:
+        - relaySecret: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint_id]
+              properties:
+                endpoint_id: {type: string, pattern: "^[0-9a-f]{64}$", description: Proven by the relay handshake.}
+                token: {type: [string, "null"], description: The auth token the client presented, if any.}
+      responses:
+        "200":
+          description: The decision. Registered devices also get their `last_seen` updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [allow, cache_secs]
+                properties:
+                  allow: {type: boolean}
+                  kind: {type: string, enum: [device, guest]}
+                  reason: {type: string}
+                  cache_secs: {type: integer, description: How long the relay may reuse this answer for new connections (0 = do not cache).}
+        "400":
+          description: Malformed body.
+        "401":
+          description: Relay secret missing or wrong.
+
+  /internal/relay/presence:
+    post:
+      tags: [Relay]
+      operationId: relayPresence
+      summary: The relay host reports that an endpoint's first connection opened or its last one closed
+      security:
+        - relaySecret: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint_id, online]
+              properties:
+                endpoint_id: {type: string, pattern: "^[0-9a-f]{64}$"}
+                online: {type: boolean}
+      responses:
+        "204":
+          description: Recorded (ignored for unknown or removed endpoints).
+        "400":
+          description: Malformed body.
+        "401":
+          description: Relay secret missing or wrong.
+
+  # ------------------------------------------------------------------ shares (FR-H4)
+
+  /shares:
+    post:
+      tags: [Shares]
+      operationId: publishShare
+      summary: Publish a share hosted by the calling device
+      description: Requires the device token of the hosting device (the dedicated manager's machine).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [share_id]
+              properties:
+                share_id: {type: string, pattern: "^s_[0-9a-f]{16}$", description: The share created on the dedicated manager.}
+      responses:
+        "201":
+          description: Published (also when this device had already published it). The share token travels in the URL fragment and never reaches the hub.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [share_id, url]
+                properties:
+                  share_id: {type: string}
+                  url: {type: string, example: "https://darkpyonix.dev/s/s_0f1e2d3c4b5a6978"}
+        "400":
+          description: Malformed share id.
+        "401":
+          description: Missing or invalid device token.
+        "403":
+          description: A `client` device (it hosts nothing to share).
+        "409":
+          description: The share id is published by another device.
+
+  /shares/{share_id}:
+    parameters:
+      - $ref: "#/components/parameters/ShareId"
+    get:
+      tags: [Shares]
+      operationId: resolveShare
+      summary: Resolve a share to its hosting device, with a guest relay pass
+      security: []
+      responses:
+        "200":
+          description: How to reach the hosting device. ash dials `endpoint_id` via `relay_url` with `relay_token`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [share_id, endpoint_id, relay_url, relay_token, relay_token_expires_at]
+                properties:
+                  share_id: {type: string}
+                  endpoint_id: {type: string, pattern: "^[0-9a-f]{64}$"}
+                  relay_url: {type: string, format: uri, description: "The device's published home relay, or https://relay.darkpyonix.dev/."}
+                  relay_token: {type: string, description: Guest relay pass (10 minutes).}
+                  relay_token_expires_at: {type: integer, description: Unix seconds.}
+        "404":
+          description: Unknown or unpublished share, or its device was removed.
+    delete:
+      tags: [Shares]
+      operationId: unpublishShare
+      summary: Remove a published share (its guest passes stop working)
+      description: The hosting device's token, or account rights.
+      responses:
+        "204":
+          description: Removed.
+        "401":
+          description: No valid session or device token.
+        "403":
+          description: Cross-origin cookie request.
+        "404":
+          description: No such share in the caller's reach.
+
+  /s/{share_id}:
+    parameters:
+      - $ref: "#/components/parameters/ShareId"
+    get:
+      tags: [Shares]
+      operationId: openShareLink
+      summary: The page a share link opens (ash viewer; a placeholder until ash ships)
+      description: The token in the URL fragment stays in the browser.
+      security: []
+      responses:
+        "200":
+          description: HTML.
+          content:
+            text/html: {}
+        "404":
+          description: Unknown or unpublished share.
+
+  /ash/:
+    get:
+      tags: [Shares]
+      operationId: getAshViewer
+      summary: The official ash viewer (Workers static assets; a placeholder until ash ships)
+      description: |
+        The built ash viewer is deployed as static assets under `/ash/` (its other files are
+        outside this contract, like the manager's `/docs/` pages), and `/s/{share_id}`
+        serves its `index.html`.
+      security: []
+      responses:
+        "200":
+          description: HTML.
+          content:
+            text/html: {}
+
+  # ------------------------------------------------------------------ names (FR-H5)
+
+  /names:
+    get:
+      tags: [Names]
+      operationId: listNames
+      summary: Names reserved by the caller's account
+      responses:
+        "200":
+          description: Names.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [names]
+                properties:
+                  names:
+                    type: array
+                    items: {$ref: "#/components/schemas/Name"}
+        "401":
+          description: No valid session or device token.
+
+  /names/{name}:
+    parameters:
+      - $ref: "#/components/parameters/Name"
+    put:
+      tags: [Names]
+      operationId: reserveName
+      summary: Reserve `<name>.darkpyonix.dev` for the calling main server
+      description: Requires the device token of a device with role `main_server`.
+      responses:
+        "200":
+          description: Already reserved by this device.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Name"}
+        "201":
+          description: Reserved.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Name"}
+        "400":
+          description: Malformed or reserved word.
+        "401":
+          description: Missing or invalid device token.
+        "403":
+          description: The caller is not a main server.
+        "409":
+          description: Taken by another device.
+    delete:
+      tags: [Names]
+      operationId: releaseName
+      summary: Release a name (and clear its challenge records)
+      description: The holding device, or account rights.
+      responses:
+        "204":
+          description: Released.
+        "401":
+          description: No valid session or device token.
+        "403":
+          description: Cross-origin cookie request.
+        "404":
+          description: Not reserved in the caller's reach.
+
+  /names/{name}/acme-challenge:
+    parameters:
+      - $ref: "#/components/parameters/Name"
+    put:
+      tags: [Names]
+      operationId: setAcmeChallenge
+      summary: Publish `_acme-challenge.<name>.darkpyonix.dev` TXT values for ACME DNS-01
+      description: |
+        The main server runs its own ACME client and keeps its private key; the hub only
+        publishes the TXT values through the Cloudflare DNS API (SPEC FR-H5 option A), in one
+        atomic batch that replaces any previous values (TTL 60 s).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [values]
+              properties:
+                values:
+                  type: array
+                  minItems: 1
+                  maxItems: 4
+                  items: {type: string, pattern: "^[A-Za-z0-9_-]{43}$", description: Base64url SHA-256 key authorization digest.}
+      responses:
+        "204":
+          description: Published.
+        "400":
+          description: Malformed values.
+        "401":
+          description: Missing or invalid device token.
+        "404":
+          description: Not reserved by the calling device.
+        "502":
+          description: No DNS provider is configured, or Cloudflare refused the change.
+    delete:
+      tags: [Names]
+      operationId: clearAcmeChallenge
+      summary: Remove the challenge TXT values
+      responses:
+        "204":
+          description: Removed.
+        "401":
+          description: Missing or invalid device token.
+        "404":
+          description: Not reserved by the calling device.
+        "502":
+          description: No DNS provider is configured, or Cloudflare refused the change.
+
+components:
+  securitySchemes:
+    device:
+      type: http
+      scheme: bearer
+      description: A device token (`dpd_...`), as each operation states.
+    session:
+      type: apiKey
+      in: cookie
+      name: __Host-dp_session
+      description: Browser session after GitHub sign-in.
+    relaySecret:
+      type: http
+      scheme: bearer
+      description: The secret shared by the Worker and the relay host (`RELAY_SHARED_SECRET`).
+  parameters:
+    EndpointId:
+      name: endpoint_id
+      in: path
+      required: true
+      description: iroh endpoint id, lowercase hex of the ed25519 public key.
+      schema: {type: string, pattern: "^[0-9a-f]{64}$"}
+    ShareId:
+      name: share_id
+      in: path
+      required: true
+      schema: {type: string, pattern: "^s_[0-9a-f]{16}$"}
+    Name:
+      name: name
+      in: path
+      required: true
+      schema: {type: string, pattern: "^[a-z0-9]([a-z0-9-]{1,30}[a-z0-9])$"}
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string, description: Human-readable.}
+        code:
+          type: string
+          description: Machine-readable, where documented. Every 401 has one.
+          enum: [invalid_credentials, device_removed, main_server_exists, replace_mismatch]
+    Device:
+      type: object
+      required: [endpoint_id, name, role, created_at, last_seen, online, app]
+      properties:
+        endpoint_id: {type: string, pattern: "^[0-9a-f]{64}$"}
+        name: {type: string}
+        role: {type: string, enum: [main_server, computer, client]}
+        created_at: {type: integer, description: Unix seconds.}
+        last_seen: {type: [integer, "null"], description: Unix seconds of the last relay admission, presence report or address publish.}
+        online: {type: boolean, description: Connected to the relay host now, as it last reported.}
+        app:
+          description: What the device says it runs (FR-H10); self-reported, a hint only.
+          oneOf:
+            - {$ref: "#/components/schemas/DeviceApp"}
+            - {type: "null"}
+    RemovedDevice:
+      type: object
+      required: [endpoint_id, name, role, created_at, removed_at, readmit_until]
+      properties:
+        endpoint_id: {type: string, pattern: "^[0-9a-f]{64}$"}
+        name: {type: string, description: Its name when it was removed.}
+        role: {type: string, enum: [main_server, computer, client], description: Its role when it was removed.}
+        created_at: {type: integer, description: Unix seconds it first joined.}
+        removed_at: {type: integer, description: Unix seconds it was removed.}
+        readmit_until:
+          type: [integer, "null"]
+          description: While a re-admission is open (`POST /devices/{endpoint_id}/readmit`), its expiry in Unix seconds; else null.
+    DeviceApp:
+      type: object
+      required: [kind, version, services]
+      additionalProperties: false
+      description: In a request `services` may be left out (empty).
+      properties:
+        kind: {type: string, pattern: "^[a-z][a-z0-9-]{0,31}$", example: ember}
+        version: {type: string, pattern: "^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$", example: "0.4.0"}
+        services:
+          type: array
+          maxItems: 16
+          uniqueItems: true
+          items: {type: string, pattern: "^[a-z][a-z0-9-]{0,31}$"}
+          example: [kernel-manager, ash-host]
+    AddressRecord:
+      type: object
+      required: [endpoint_id, relay_urls, direct_addresses, published_at_us, signed_packet]
+      properties:
+        endpoint_id: {type: string}
+        relay_urls: {type: array, items: {type: string}}
+        direct_addresses: {type: array, items: {type: string, description: "ip:port"}}
+        published_at_us: {type: integer, description: The packet's signed timestamp, microseconds since the epoch.}
+        signed_packet: {type: string, description: "The pkarr relay payload, base64url without padding, for end-to-end verification."}
+    Name:
+      type: object
+      required: [name, fqdn, endpoint_id]
+      properties:
+        name: {type: string}
+        fqdn: {type: string, example: "studio.darkpyonix.dev"}
+        endpoint_id: {type: string}

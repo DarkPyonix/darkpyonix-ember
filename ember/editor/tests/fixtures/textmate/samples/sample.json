@@ -1,0 +1,16 @@
+{
+  "name": "demo",
+  "version": "1.0.0",
+  "private": true,
+  "count": 42,
+  "ratio": -3.14e+2,
+  "nothing": null,
+  "tags": ["a", "b\n", "unicode \u00e9 \" quote"],
+  "nested": {
+    "empty": {},
+    "list": [1, 2, [3, 4], { "deep": false }],
+    "path": "C:\\dir\\file.txt"
+  },
+  "한글": "안녕 😀",
+  "bad": [1, 2,]
+}

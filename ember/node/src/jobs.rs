@@ -181,7 +181,7 @@ impl Jobs {
         match jobs.get(id) {
             Some(j) => {
                 if let Some(pid) = j.info.pid {
-                    kill_group(pid, signal.unwrap_or(libc::SIGTERM));
+                    kill_group(pid, signal.unwrap_or(crate::exec::SIGTERM));
                 }
                 true
             }

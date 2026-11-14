@@ -228,6 +228,222 @@ async fn live_session_json_diagnostics_save_and_reload() {
     drop(server);
 }
 
+/// Every log the server wrote below `root`: its stdout and stderr, and the files of its data dir.
+fn server_logs(root: &Path) -> String {
+    fn walk(dir: &Path, out: &mut String) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "log") {
+                out.push_str(&std::fs::read_to_string(&p).unwrap_or_default());
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(root, &mut out);
+    out
+}
+
+/// FR-L31.24 (#789): an external change reaches the session when the workspace is on an external
+/// volume. `EMBER_LIVE_WS_ROOT` names a directory to create the workspace in; on macOS point it
+/// below `/Volumes/<disk>` (unset: the temp dir, where the test only repeats the reload check).
+/// The server must not log that it refuses to watch a workspace path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a real OSE server: EMBER_OSE_SERVER=<unpacked build>/bin/dpx-ose-server"]
+async fn live_fr_l31_24_external_change_under_ws_root() {
+    let Some(bin) = std::env::var_os("EMBER_OSE_SERVER").map(PathBuf::from) else {
+        eprintln!("[live-session] EMBER_OSE_SERVER not set; skipping");
+        return;
+    };
+    let base = std::env::var_os("EMBER_LIVE_WS_ROOT").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let root = base.join(format!("ember-watch-{}", uuid_short()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    println!("[live-session] workspace root {}", root.display());
+    let ws = root.join("ws");
+    std::fs::create_dir_all(ws.join("sub")).unwrap();
+    let doc_path = ws.join("sub").join("data.json");
+    std::fs::write(&doc_path, DOC_TEXT).unwrap();
+
+    let mut server = Server::start(&bin, &root);
+    let addr = format!("127.0.0.1:{}", server.port);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while tokio::net::TcpStream::connect(&addr).await.is_err() {
+        assert!(Instant::now() < deadline, "server not listening on {addr}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let config = SessionConfig::new(addr.clone(), ws.to_str().unwrap());
+    let (session, mut rx) = tokio::time::timeout(Duration::from_secs(120), EditorSession::connect_tcp(config))
+        .await
+        .expect("connect timed out")
+        .unwrap_or_else(|e| panic!("connect: {e}"));
+    let uri = session.uri(doc_path.to_str().unwrap());
+    session.open(uri.clone()).unwrap();
+    let generation = wait_for("Opened", 30, &mut rx, |u| match u {
+        SessionUpdate::Opened { generation, .. } => Some(*generation),
+        SessionUpdate::OpenFailed { error, .. } => panic!("open failed: {error}"),
+        _ => None,
+    })
+    .await;
+
+    let reloaded = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            std::fs::write(&doc_path, DOC_TEXT_EXTERNAL).unwrap();
+            let until = tokio::time::Instant::now() + Duration::from_secs(3);
+            while let Ok(u) = tokio::time::timeout_at(until, rx.recv()).await {
+                match u {
+                    Some(SessionUpdate::Command { command: WidgetCommand::SetText { generation, text }, .. }) => {
+                        return (generation, text);
+                    }
+                    Some(SessionUpdate::ConnectionLost { reason }) => panic!("connection lost: {reason}"),
+                    Some(_) => {}
+                    None => panic!("session ended while waiting for the reload"),
+                }
+            }
+        }
+    })
+    .await;
+
+    session.close(uri).unwrap();
+    session.shutdown().await;
+    server.stop();
+    let logs = server_logs(&root);
+    // The server's own data dir is below `root` here, and the OSE watches it with `fs.watch()` by
+    // itself; only the workspace is the session's business.
+    let ws_str = ws.to_str().unwrap();
+    let refused: Vec<&str> =
+        logs.lines().filter(|l| l.contains("possibly being a network share") && l.contains(ws_str)).collect();
+    assert!(refused.is_empty(), "the OSE refused to watch a workspace path: {refused:#?}");
+    let (gen2, text) = reloaded.expect("no reload after the external change");
+    assert_ne!(gen2, generation);
+    assert_eq!(text, DOC_TEXT_EXTERNAL);
+}
+
 fn uuid_short() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..8].to_owned()
+}
+
+/// Explorer edits through the OSE file channel (D38, #438): create, rename and delete on disk, never
+/// overwriting, and refusing paths the explorer must not touch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a real OSE server: EMBER_OSE_SERVER=<unpacked build>/bin/dpx-ose-server"]
+async fn live_session_explorer_create_rename_delete() {
+    let Some(bin) = std::env::var_os("EMBER_OSE_SERVER").map(PathBuf::from) else {
+        eprintln!("[live-session] EMBER_OSE_SERVER not set; skipping");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("ember-explorer-{}", uuid_short()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let ws = root.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let ws_str = ws.to_str().unwrap().to_string();
+
+    let server = Server::start(&bin, &root);
+    let addr = format!("127.0.0.1:{}", server.port);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while tokio::net::TcpStream::connect(&addr).await.is_err() {
+        assert!(Instant::now() < deadline, "server not listening on {addr}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let config = SessionConfig::new(addr.clone(), ws_str.clone());
+    let (session, mut rx) = tokio::time::timeout(Duration::from_secs(120), EditorSession::connect_tcp(config))
+        .await
+        .expect("connect timed out")
+        .unwrap_or_else(|e| panic!("connect: {e}"));
+
+    // Create a file and a directory; an existing name is an error and the file is left as it was.
+    let file = session.create_file(&ws_str, "a.txt").await.expect("create_file");
+    assert_eq!(file, format!("{ws_str}/a.txt"));
+    assert!(ws.join("a.txt").is_file());
+    std::fs::write(ws.join("a.txt"), "keep").unwrap();
+    assert!(session.create_file(&ws_str, "a.txt").await.is_err(), "an existing file is not overwritten");
+    assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "keep");
+    let dir = session.create_dir(&ws_str, "sub").await.expect("create_dir");
+    assert!(ws.join("sub").is_dir());
+    session.create_file(&dir, "inner.txt").await.expect("create in a subdirectory");
+
+    // Rename: new name in the same directory; an existing target is an error, nothing is lost.
+    let renamed = session.rename_path(&file, "b.txt").await.expect("rename");
+    assert_eq!(renamed, format!("{ws_str}/b.txt"));
+    assert!(!ws.join("a.txt").exists() && ws.join("b.txt").is_file());
+    std::fs::write(ws.join("c.txt"), "other").unwrap();
+    assert!(session.rename_path(&renamed, "c.txt").await.is_err(), "rename never overwrites");
+    assert_eq!(std::fs::read_to_string(ws.join("c.txt")).unwrap(), "other");
+    assert!(ws.join("b.txt").is_file());
+
+    // Delete a file, then a directory with its contents.
+    session.delete_path(&renamed, false).await.expect("delete file");
+    assert!(!ws.join("b.txt").exists());
+    session.delete_path(&dir, true).await.expect("delete directory");
+    assert!(!ws.join("sub").exists());
+
+    // Symbolic links: a link is renamed and deleted as itself, never followed, and nothing is made inside one.
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("precious.txt"), "do not touch").unwrap();
+    let link = ws.join("link");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    let link_str = link.to_str().unwrap().to_string();
+    assert!(
+        matches!(session.create_file(&link_str, "x.txt").await, Err(ember_editor::Error::Path(ember_editor::paths::PathError::Symlink))),
+        "nothing is created inside a symlinked directory"
+    );
+    assert!(!outside.join("x.txt").exists());
+    let moved = session.rename_path(&link_str, "link2").await.expect("rename the link itself");
+    assert!(std::fs::symlink_metadata(ws.join("link2")).unwrap().file_type().is_symlink());
+    assert!(!ws.join("link").exists() && outside.join("precious.txt").is_file());
+    session.delete_path(&moved, true).await.expect("delete the link");
+    assert!(std::fs::symlink_metadata(ws.join("link2")).is_err(), "the link is gone");
+    assert_eq!(std::fs::read_to_string(outside.join("precious.txt")).unwrap(), "do not touch", "what the link pointed at is untouched");
+
+    // Symbolic link in the middle of a path:
+    let mid_dir = ws.join("mid_parent");
+    std::fs::create_dir_all(&mid_dir).unwrap();
+    let mid_link = mid_dir.join("mid_link");
+    std::os::unix::fs::symlink(&outside, &mid_link).unwrap();
+    let mid_path = format!("{ws_str}/mid_parent/mid_link/nested");
+    assert!(
+        matches!(session.create_file(&mid_path, "escape.txt").await, Err(ember_editor::Error::Path(ember_editor::paths::PathError::Symlink))),
+        "symlink in the middle of a path is refused"
+    );
+
+    // Open file rename: dirty document is refused, clean document succeeds
+    let open_file = session.create_file(&ws_str, "open.txt").await.expect("create open.txt");
+    let open_uri = session.uri(&open_file);
+    session.open(open_uri.clone()).unwrap();
+    let generation = wait_for("Opened open.txt", 30, &mut rx, |u| match u {
+        SessionUpdate::Opened { uri, generation, .. } if uri.path == open_uri.path => Some(*generation),
+        _ => None,
+    }).await;
+    session.widget_event(open_uri.clone(), generation, WidgetEvent::CodeChanged {
+        version: 1,
+        range: WidgetRange::empty(WidgetPos::new(0, 0)),
+        text: "dirty text".into(),
+    }).unwrap();
+    assert!(
+        matches!(session.rename_path(&open_file, "open2.txt").await, Err(ember_editor::Error::Path(ember_editor::paths::PathError::Dirty))),
+        "rename of an open dirty file is refused"
+    );
+    session.widget_event(open_uri.clone(), generation, WidgetEvent::CodeSaveRequested { version: 1 }).unwrap();
+    wait_for("Saved open.txt", 30, &mut rx, |u| match u {
+        SessionUpdate::Saved { uri } if uri.path == open_uri.path => Some(()),
+        _ => None,
+    }).await;
+    let open_renamed = session.rename_path(&open_file, "open2.txt").await.expect("rename clean file");
+    assert_eq!(open_renamed, format!("{ws_str}/open2.txt"));
+    assert!(!ws.join("open.txt").exists() && ws.join("open2.txt").is_file());
+    session.close(open_uri).unwrap();
+
+    // Paths the explorer must not touch are refused before anything is sent.
+    use ember_editor::paths::PathError;
+    let refused = |r: Result<String, ember_editor::Error>| matches!(r, Err(ember_editor::Error::Path(_)));
+    assert!(refused(session.create_file(&ws_str, "../escape.txt").await));
+    assert!(refused(session.create_file(root.to_str().unwrap(), "x.txt").await));
+    assert!(refused(session.rename_path(&ws_str, "x").await));
+    assert!(matches!(session.delete_path(&ws_str, true).await, Err(ember_editor::Error::Path(PathError::FolderRoot))));
+    assert!(ws.is_dir());
+    assert!(!root.join("escape.txt").exists());
+    session.shutdown().await;
 }

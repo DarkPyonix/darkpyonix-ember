@@ -1,6 +1,6 @@
 //! Persistent terminal sessions (SPEC §P, FR-P1–FR-P6; design: `docs/design/TERMINALS.md`).
 //!
-//! Unlike `/v1/exec`, whose PTY lives exactly as long as the WebSocket that started it, a
+//! Unlike `/exec`, whose PTY lives exactly as long as the WebSocket that started it, a
 //! persistent session is owned by ember node: it is created by one request, any number of
 //! clients attach and detach over WebSockets, and the process keeps running when every client
 //! is gone. Clients are the VS Code window (through `ember-term`), the Ember editor, agents and
@@ -32,6 +32,7 @@ use std::time::Duration;
 use crate::jobs::{now_ms, Jobs, Removal};
 use crate::proto::*;
 
+#[cfg(unix)]
 use self::pty::Pty;
 use self::session::{Child, Session, TermRecord};
 use self::store::Store;
@@ -62,8 +63,16 @@ impl Shared {
     }
 }
 
+/// [`Terms::create`] refused a new session because [`Terms::set_max_running`] sessions are
+/// already running (#474). The API answers 409 `conflict`.
+#[derive(Debug, thiserror::Error)]
+#[error("terminal limit reached: {0} sessions are running; close one first")]
+pub struct TermLimit(pub usize);
+
 pub struct Terms {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// The most running sessions [`Terms::create`] allows; `usize::MAX` (the default) is no cap.
+    max_running: std::sync::atomic::AtomicUsize,
     shared: Arc<Shared>,
     /// The `ember-node` binary used to start PTY keepers; `None` disables them.
     keeper_exe: Option<PathBuf>,
@@ -71,6 +80,13 @@ pub struct Terms {
 
 /// The default program: the user's shell, as a login shell on macOS (as VS Code does there).
 pub fn default_argv() -> Vec<String> {
+    if cfg!(windows) {
+        let shell = std::env::var("COMSPEC")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "powershell.exe".into());
+        return vec![shell];
+    }
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
     if cfg!(target_os = "macos") {
         vec![shell, "-l".into()]
@@ -92,7 +108,12 @@ impl Terms {
         });
         let keeper_exe = if store.is_some() { keeper_exe } else { None };
         let shared = Arc::new(Shared { store, events });
-        let terms = Arc::new(Terms { sessions: Mutex::new(HashMap::new()), shared, keeper_exe });
+        let terms = Arc::new(Terms {
+            sessions: Mutex::new(HashMap::new()),
+            max_running: std::sync::atomic::AtomicUsize::new(usize::MAX),
+            shared,
+            keeper_exe,
+        });
         terms.load();
         terms.prune();
 
@@ -123,27 +144,30 @@ impl Terms {
 
     /// Recover a session from its keeper, or mark it lost.
     fn readopt(&self, rec: &mut TermRecord) -> Arc<Session> {
-        let store = self.shared.store.as_ref().expect("load only runs with a store");
-        let fd = match (rec.pid, &rec.keeper_socket) {
-            (Some(pid), Some(sock)) if pty::alive(pid) => match pty::fetch_from_keeper(sock) {
-                Ok(fd) => Some(fd),
-                Err(e) => {
-                    tracing::warn!(term = %rec.id, "keeper unreachable: {e}");
-                    None
+        #[cfg(unix)]
+        {
+            let store = self.shared.store.as_ref().expect("load only runs with a store");
+            let fd = match (rec.pid, &rec.keeper_socket) {
+                (Some(pid), Some(sock)) if pty::alive(pid) => match pty::fetch_from_keeper(sock) {
+                    Ok(fd) => Some(fd),
+                    Err(e) => {
+                        tracing::warn!(term = %rec.id, "keeper unreachable: {e}");
+                        None
+                    }
+                },
+                _ => None,
+            };
+            let restore = store.take_snapshot(&rec.id);
+            if let Some(fd) = fd {
+                rec.adopted = true;
+                match Session::start(self.shared.clone(), rec.clone(), Pty::from_fd(fd), Child::Adopted, restore) {
+                    Ok(s) => {
+                        tracing::info!(term = %rec.id, pid = ?rec.pid, "re-adopted terminal session");
+                        self.shared.emit(NodeEventKind::TermStarted { term: s.info() });
+                        return s;
+                    }
+                    Err(e) => tracing::warn!(term = %rec.id, "could not re-adopt: {e:#}"),
                 }
-            },
-            _ => None,
-        };
-        let restore = store.take_snapshot(&rec.id);
-        if let Some(fd) = fd {
-            rec.adopted = true;
-            match Session::start(self.shared.clone(), rec.clone(), Pty::from_fd(fd), Child::Adopted, restore) {
-                Ok(s) => {
-                    tracing::info!(term = %rec.id, pid = ?rec.pid, "re-adopted terminal session");
-                    self.shared.emit(NodeEventKind::TermStarted { term: s.info() });
-                    return s;
-                }
-                Err(e) => tracing::warn!(term = %rec.id, "could not re-adopt: {e:#}"),
             }
         }
         if let Some(sock) = &rec.keeper_socket {
@@ -182,13 +206,24 @@ impl Terms {
         }
     }
 
-    /// Start a session (or return the running one with the same `key`).
+    /// Cap the number of running sessions (#474). A real node has no cap; the server's in-process
+    /// local node sets one, so a client cannot start PTYs without bound.
+    pub fn set_max_running(&self, max: usize) {
+        self.max_running.store(max, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Start a session (or return the running one with the same `key`). Fails with [`TermLimit`]
+    /// when the cap is reached; returning a keyed running session is still allowed then.
     pub fn create(&self, req: &TermCreateRequest, cwd: PathBuf) -> anyhow::Result<TermCreateResponse> {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(key) = &req.key {
             if let Some(s) = sessions.values().find(|s| s.is_running() && s.key().as_deref() == Some(key.as_str())) {
                 return Ok(TermCreateResponse { created: false, term: s.info() });
             }
+        }
+        let max = self.max_running.load(std::sync::atomic::Ordering::SeqCst);
+        if sessions.values().filter(|s| s.is_running()).count() >= max {
+            return Err(TermLimit(max).into());
         }
         let argv = match &req.program {
             Some(p) => crate::exec::argv(p)?,

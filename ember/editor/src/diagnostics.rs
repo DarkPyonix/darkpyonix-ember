@@ -31,6 +31,18 @@ pub struct TrackedMarker {
     pub range: WidgetRange,
 }
 
+/// One entry of the problems list: a marker of some file, in widget coordinates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Problem {
+    pub uri: UriComponents,
+    pub owner: String,
+    pub severity: Severity,
+    pub message: String,
+    pub source: Option<String>,
+    pub code: Option<String>,
+    pub range: WidgetRange,
+}
+
 /// What a hover shows for a diagnostic under the pointer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HoverDiagnostic {
@@ -45,6 +57,10 @@ pub struct HoverDiagnostic {
 pub struct Diagnostics {
     /// uri key → owner → markers
     by_doc: HashMap<String, BTreeMap<String, Vec<TrackedMarker>>>,
+    /// uri key → the uri, for the problems list.
+    uris: HashMap<String, UriComponents>,
+    /// decoration id → (doc key, clamped range) from the latest `decorations` call
+    by_id: HashMap<u64, (String, WidgetRange)>,
 }
 
 fn code_string(code: &Option<Value>) -> Option<String> {
@@ -67,6 +83,7 @@ impl Diagnostics {
         let mut touched = Vec::new();
         for (uri, markers) in entries {
             let key = uri.key();
+            self.uris.insert(key.clone(), uri.clone());
             let doc = self.by_doc.entry(key.clone()).or_default();
             match markers {
                 Some(ms) if !ms.is_empty() => {
@@ -90,10 +107,38 @@ impl Diagnostics {
             }
             if doc.is_empty() {
                 self.by_doc.remove(&key);
+                self.uris.remove(&key);
             }
             touched.push(key);
         }
         touched
+    }
+
+    /// Every marker of every file as a problem: errors first, then warnings, information and
+    /// hints, each group by file path and position.
+    pub fn problems(&self) -> Vec<Problem> {
+        let mut out = Vec::new();
+        for (key, owners) in &self.by_doc {
+            let Some(uri) = self.uris.get(key) else { continue };
+            for (owner, markers) in owners {
+                for t in markers {
+                    out.push(Problem {
+                        uri: uri.clone(),
+                        owner: owner.clone(),
+                        severity: Severity::from_marker(t.marker.severity),
+                        message: t.marker.message.clone(),
+                        source: t.marker.source.clone(),
+                        code: code_string(&t.marker.code),
+                        range: t.range,
+                    });
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            (a.severity as u8, &a.uri.path, a.range.start.line, a.range.start.col, &a.message)
+                .cmp(&(b.severity as u8, &b.uri.path, b.range.start.line, b.range.start.col, &b.message))
+        });
+        out
     }
 
     /// `$clear(owner)`. Returns the uri keys that had markers from `owner`.
@@ -105,7 +150,20 @@ impl Diagnostics {
             }
         }
         self.by_doc.retain(|_, d| !d.is_empty());
+        let by_doc = &self.by_doc;
+        self.uris.retain(|key, _| by_doc.contains_key(key));
         touched
+    }
+
+    /// Remove all markers recorded for a document key (e.g. when a file closes).
+    /// Returns true if markers were present for this document.
+    pub fn remove_document(&mut self, key: &str) -> bool {
+        self.uris.remove(key);
+        let removed = self.by_doc.remove(key).is_some();
+        if removed {
+            self.by_id.retain(|_, (doc, _)| doc != key);
+        }
+        removed
     }
 
     /// Carry every marker of a document through one widget edit; markers whose range was deleted
@@ -134,11 +192,13 @@ impl Diagnostics {
 
     /// Underline decorations for a document at widget `version`. Ranges are clamped to the text;
     /// an empty range is widened to one character, like Monaco does for zero-width markers.
-    pub fn decorations(&self, doc: &str, version: u32, lines: &[String], ids: &mut DecorationIds) -> Vec<Decoration> {
+    pub fn decorations(&mut self, doc: &str, version: u32, lines: &[String], ids: &mut DecorationIds) -> Vec<Decoration> {
         let mut out = Vec::new();
         let mut seen: HashMap<String, u32> = HashMap::new();
         let mut live = HashSet::new();
-        for (owner, t) in self.markers(doc) {
+        self.by_id.retain(|_, (d, _)| d.as_str() != doc);
+        let markers: Vec<(String, TrackedMarker)> = self.markers(doc).map(|(o, t)| (o.to_owned(), t.clone())).collect();
+        for (owner, t) in markers {
             let m = &t.marker;
             let base = format!(
                 "{owner}|{}|{}|{}|{}",
@@ -168,6 +228,7 @@ impl Diagnostics {
                     }
                 }
             }
+            self.by_id.insert(id.get(), (doc.to_owned(), range));
             out.push(Decoration {
                 id,
                 version,
@@ -181,6 +242,33 @@ impl Diagnostics {
         ids.retain(IdSpace::Diagnostic, doc, &live);
         out.sort_by(|a, b| a.range.cmp(&b.range).then(a.id.cmp(&b.id)));
         out
+    }
+
+    /// Look up the range of a diagnostic decoration by its id in `doc`.
+    pub fn range_of_id(&self, doc: &str, id: u64, lines: &[String], ids: &mut DecorationIds) -> Option<WidgetRange> {
+        if let Some((d, r)) = self.by_id.get(&id) {
+            if d == doc {
+                return Some(*r);
+            }
+        }
+        let mut seen: HashMap<String, u32> = HashMap::new();
+        for (owner, t) in self.markers(doc) {
+            let m = &t.marker;
+            let base = format!(
+                "{owner}|{}|{}|{}|{}",
+                m.severity,
+                m.source.as_deref().unwrap_or(""),
+                code_string(&m.code).unwrap_or_default(),
+                m.message
+            );
+            let n = seen.entry(base.clone()).or_insert(0);
+            let key = format!("{base}|{n}");
+            *n += 1;
+            if ids.id(IdSpace::Diagnostic, doc, &key).get() == id {
+                return Some(clamp_range(lines, t.range));
+            }
+        }
+        None
     }
 
     /// Diagnostics under a position, most severe first (what a hover shows above provider content).
@@ -291,5 +379,26 @@ mod tests {
         // Deleting its text removes it.
         d.on_edit(&k, WidgetRange::new(WidgetPos::new(2, 0), WidgetPos::new(2, 9)), "");
         assert_eq!(d.markers(&k).count(), 0);
+    }
+
+    #[test]
+    fn remove_document_clears_markers_and_updates_problems() {
+        let mut d = Diagnostics::new();
+        let a = UriComponents::remote("h", "/w/a.json");
+        let b = UriComponents::remote("h", "/w/b.json");
+        d.change_many("json", vec![
+            (a.clone(), Some(vec![marker(8, "error in a", 1, 1, 2)])),
+            (b.clone(), Some(vec![marker(4, "warn in b", 2, 1, 2)])),
+        ]);
+        assert_eq!(d.problems().len(), 2);
+
+        // Remove document a: only b remains
+        assert!(d.remove_document(&a.key()));
+        let problems = d.problems();
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].uri.path, "/w/b.json");
+
+        // Removing non-existent returns false
+        assert!(!d.remove_document(&a.key()));
     }
 }

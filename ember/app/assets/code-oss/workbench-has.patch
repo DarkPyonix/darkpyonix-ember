@@ -1,0 +1,85 @@
+Ember rewrites of Code-OSS :has() rules into state classes (issues #142, #143, INTENT D23).
+The renderer's stylo does not parse :has(), so each rule would be dropped. The chrome rsx sets
+the class instead. Applied by ember/ose/vendor-workbench-css.sh with `patch -p1`.
+
+  views.css            .monaco-list-row:has(.actions .action-item)       -> .monaco-list-row.has-actions
+                       (3 rules: :hover, .selected, .focused stay as they are)
+                       .monaco-list-row:has(.monaco-icon-label:is(.monaco-decoration-itemColor,
+                       .monaco-decoration-badge))                        -> .monaco-list-row.has-decoration
+                       .viewpane-filter-container:has(input :focus, controls :focus)
+                                                                         -> .viewpane-filter-container.is-focused
+  titlebarpart.css     .command-center-center:has(.compact-mode)         -> .command-center-center.compact-mode
+                       (3 rules)
+  actionWidget.css     .action-widget:has(.action-list-header)           -> .action-widget.has-header
+                       (derived: the rule tests for a header banner child; the widget sets
+                       has-header when it draws one)
+
+diff a/actionWidget.css b/actionWidget.css
+--- a/actionWidget.css	2026-10-25 08:18:34
++++ b/actionWidget.css	2026-10-25 08:18:42
+@@ -527,7 +527,7 @@
+ }
+ 
+ /* Give widgets with a header banner more room so the banner text reads well. */
+-.action-widget:has(.action-list-header) {
++.action-widget.has-header {
+ 	min-width: 160px;
+ }
+ 
+diff a/titlebarpart.css b/titlebarpart.css
+--- a/titlebarpart.css	2026-10-25 08:18:34
++++ b/titlebarpart.css	2026-10-25 08:18:42
+@@ -214,15 +214,15 @@
+ 	flex: 1;
+ }
+ 
+-.monaco-workbench .part.titlebar > .titlebar-container > .titlebar-center > .window-title > .command-center .action-item.command-center-center:has(.compact-mode) > .monaco-toolbar > .monaco-action-bar > .actions-container {
++.monaco-workbench .part.titlebar > .titlebar-container > .titlebar-center > .window-title > .command-center .action-item.command-center-center.compact-mode > .monaco-toolbar > .monaco-action-bar > .actions-container {
+ 	margin: 0;
+ }
+ 
+-.monaco-workbench .part.titlebar > .titlebar-container > .titlebar-center > .window-title > .command-center .action-item.command-center-center:has(.compact-mode) > .monaco-toolbar {
++.monaco-workbench .part.titlebar > .titlebar-container > .titlebar-center > .window-title > .command-center .action-item.command-center-center.compact-mode > .monaco-toolbar {
+ 	flex: 1;
+ }
+ 
+-.monaco-workbench .part.titlebar > .titlebar-container > .titlebar-center > .window-title > .command-center .action-item.command-center-center:has(.compact-mode) > .monaco-toolbar > .monaco-action-bar {
++.monaco-workbench .part.titlebar > .titlebar-container > .titlebar-center > .window-title > .command-center .action-item.command-center-center.compact-mode > .monaco-toolbar > .monaco-action-bar {
+ 	width: 100%;
+ }
+ 
+diff a/views.css b/views.css
+--- a/views.css
++++ b/views.css
+@@ -259,18 +259,18 @@
+ }
+ 
+ /* When horizontal scrolling is enabled, shift actions back to the viewport's right edge */
+-.customview-tree .monaco-list.horizontal-scrolling .monaco-list-row:has(.actions .action-item):hover .custom-view-tree-node-item .actions,
++.customview-tree .monaco-list.horizontal-scrolling .monaco-list-row.has-actions:hover .custom-view-tree-node-item .actions,
+ 
+-.customview-tree .monaco-list.horizontal-scrolling .monaco-list-row:has(.actions .action-item).selected .custom-view-tree-node-item .actions,
++.customview-tree .monaco-list.horizontal-scrolling .monaco-list-row.has-actions.selected .custom-view-tree-node-item .actions,
+ 
+-.customview-tree .monaco-list.horizontal-scrolling .monaco-list-row:has(.actions .action-item).focused .custom-view-tree-node-item .actions {
++.customview-tree .monaco-list.horizontal-scrolling .monaco-list-row.has-actions.focused .custom-view-tree-node-item .actions {
+ 	position: relative;
+ 	right: var(--list-scroll-right-offset, 0px);
+ 	background-color: var(--vscode-list-hoverBackground);
+ 	padding-left: 4px;
+ }
+ 
+-.customview-tree .monaco-list.horizontal-scrolling .monaco-list-row:has(.monaco-icon-label:is(.monaco-decoration-itemColor, .monaco-decoration-badge)) .actions {
++.customview-tree .monaco-list.horizontal-scrolling .monaco-list-row.has-decoration .actions {
+ 	right: max(calc(var(--list-scroll-right-offset, 0px) - 17px),
+ 			0px) !important;
+ }
+@@ -350,7 +350,7 @@
+ 	margin-right: 10px;
+ }
+ 
+-.panel > .title .monaco-action-bar .action-item.viewpane-filter-container:has(.monaco-inputbox .input:focus, .viewpane-filter-controls :focus) {
++.panel > .title .monaco-action-bar .action-item.viewpane-filter-container.is-focused {
+ 	max-width: 400px;
+ }
+ 

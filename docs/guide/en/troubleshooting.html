@@ -76,7 +76,7 @@
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
       <figcaption>shell</figcaption>
 <pre><code>RUST_LOG=info ./target/release/ember-server 2&gt;&amp;1 | tee -a ember-server.log
-curl http://127.0.0.1:8740/api/v1/health   <span class="c"># {"ok":true,"push_version":1}</span></code></pre>
+curl http://127.0.0.1:8740/api/health   <span class="c"># {"ok":true}</span></code></pre>
     </figure>
     <p>
       Warnings at start are worth reading: the server says there which optional pieces it could not
@@ -113,7 +113,7 @@ curl http://127.0.0.1:8740/api/v1/health   <span class="c"># {"ok":true,"push_ve
       The agent's CLI was not found on the main server. Install it for the user that runs
       <code>ember-server</code>, or point the server at it with <code>EMBER_CLAUDE_BIN</code>,
       <code>EMBER_CODEX_BIN</code> or <code>EMBER_AGY_BIN</code>. An ACP agent must also be listed
-      in <code>EMBER_ACP_AGENTS</code>. <code>GET /api/v1/agents</code> shows what the server
+      in <code>EMBER_ACP_AGENTS</code>. <code>GET /api/agents</code> shows what the server
       detected and which versions.
     </p>
     <h3>"working directory &hellip; does not exist on the ember server"</h3>
@@ -134,9 +134,9 @@ curl http://127.0.0.1:8740/api/v1/health   <span class="c"># {"ok":true,"push_ve
     <p>
       When an agent has accounts but none is available (all rate-limited or logged out), the
       server refuses to start a session rather than fall back to another login, and gives the
-      reason. <code>GET /api/v1/accounts/route?agent=claude-code</code> shows what the router would
-      pick now and why. <code>POST /api/v1/accounts/{id}/check</code> runs the agent's own login
-      status command, and <code>POST /api/v1/accounts/{id}/clear-limit</code> clears a rate-limit
+      reason. <code>GET /api/accounts/route?agent=claude-code</code> shows what the router would
+      pick now and why. <code>POST /api/accounts/{id}/check</code> runs the agent's own login
+      status command, and <code>POST /api/accounts/{id}/clear-limit</code> clears a rate-limit
       mark.
     </p>
 
@@ -183,8 +183,8 @@ curl http://127.0.0.1:8740/api/v1/health   <span class="c"># {"ok":true,"push_ve
       <table>
         <thead><tr><th scope="col">Message</th><th scope="col">What to do</th></tr></thead>
         <tbody>
-          <tr><td>HTTP 503 from any <code>/api/v1/hub</code> route</td><td>The hub is off: the server runs without <code>EMBER_TRANSPORT=1</code>, or with <code>EMBER_HUB_URL=off</code>.</td></tr>
-          <tr><td><code>this server is not registered with the hub; start with POST /api/v1/hub/link</code></td><td>Link the server first (<a href="computers.html#hub-server">Computers and the hub</a>).</td></tr>
+          <tr><td>HTTP 503 from any <code>/api/hub</code> route</td><td>The hub is off: the server runs without <code>EMBER_TRANSPORT=1</code>, or with <code>EMBER_HUB_URL=off</code>.</td></tr>
+          <tr><td><code>this server is not registered with the hub; start with POST /api/hub/link</code></td><td>Link the server first (<a href="computers.html#hub-server">Computers and the hub</a>).</td></tr>
           <tr><td><code>the hub is off (EMBER_HUB_URL=off)</code> (<code>ember-node hub register</code>)</td><td>Unset <code>EMBER_HUB_URL</code> or set it to the hub's address.</td></tr>
           <tr><td><code>cannot reach the hub: &hellip;</code></td><td>Check the network and <code>EMBER_HUB_URL</code>. The default address is changing (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>).</td></tr>
           <tr><td><code>the link expired before it was approved (user code &hellip;)</code></td><td>Run the link again and approve it sooner.</td></tr>

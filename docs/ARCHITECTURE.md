@@ -16,7 +16,7 @@
 
 ```
                          ┌─────────────────────────────── darkpyonix.dev ───────────────────────────────┐
-                         │  hole-punch coordination + relay fallback (FR-N2) · sign-in                    │
+                         │  address directory + rendezvous (FR-N2) · sign-in                    │
                          └───────────────▲──────────────────────────▲───────────────────────────▲─────┘
                                          │                            │                             │
   ┌──────────────────────────┐   P2P    │   ┌────────────────────────┴───────────────────────┐   │   ┌──────────────────────────┐
@@ -48,7 +48,7 @@
 | **Main server** | Every agent CLI process; every transcript and the agents' native session files; accounts and credentials; projects, computers and assignments; A2A queues; schedules; browser profiles | Project source as a system of record (that lives on the computers) |
 | **Computer** | Project files; the processes tools start (builds, tests, servers); **ember node** (the execution daemon); the VS Code server for an IDE window on that computer | Agent CLIs; transcripts; credentials for agent accounts |
 | **Client** | A cache of what the main server last pushed, for instant cold start | Anything authoritative |
-| **darkpyonix.dev** | Connection coordination and relay | Conversations, files, credentials |
+| **darkpyonix.dev** | Address directory, rendezvous and sign-in (no relay: the main server is the relay on the default letify backend, FR-N2; the legacy iroh backend keeps its hub iroh-relay for one release) | Conversations, files, credentials |
 
 ### 1.2 How a tool call travels
 
@@ -76,7 +76,8 @@ accounts or computer switching.
 | ---- | ---- |
 | `ember/server/` | ember server (Rust) |
 | `ember/node/` | ember node, the execution daemon (Rust) |
-| `ember/transport/` | the transport interface and its iroh backend (FR-N5); see §1.5 |
+| `ember/transport/` | the transport interface with letify-link as default and a legacy iroh backend (FR-N5, D36); see §1.5 |
+| `ember/transfer/` | device-side file transfer over `ember-transport` streams (FR-F1..FR-F10); a library, the server is not in the path |
 | `ember/client/` | the client core below the dioxus-compose UI |
 | `ember/proxy/` | the IDE window wrapping layer (Python) |
 | `ember/bridge/` | the IDE window bridge: message types and the `WebviewBridge` trait (`ember-bridge`, FR-B1–B4) |
@@ -104,7 +105,7 @@ WebSockets and the client's push channel run unchanged. Nothing outside `ember/t
 backend; tests use the in-memory `MemNetwork`.
 
 ```
- client device ──ember-server/1──▶ ember server ──ember-node/1──▶ ember node
+ client device ──ember-server──▶ ember server ──ember-node──▶ ember node
    (Dialer)        gate: devices      (Dialer, one       gate: allowed server
                    table (FR-N3)       connection/node)   peer ids (FR-N3)
                                        │
@@ -123,15 +124,22 @@ backend; tests use the in-memory `MemNetwork`.
 | Computers by peer | `ember/server/src/computers/` | `peer_json` column (migration 5); probes, exec relay and the shim bridge dial through the server's `Dialer` |
 | `Api` | `ember/client/src/api.rs` | Same API and push socket over HTTP (`new`) or the transport (`over_transport`) |
 
+On the default letify backend, the main server runs the TCP relay and UDP QAD address
+observer by default on port 7443 (FR-N2). Devices discover signed addresses and exchange relay
+pairing offers through the hub directory; they connect directly when possible and otherwise meet
+at the main server relay. The relay admits gated devices and carries end-to-end encrypted traffic.
+The main server must be reachable from each device. UDP hole punching and the real two-NAT run
+remain open (#229, #10); the current paths are TCP and relay. The legacy iroh backend retains its
+hub-provided relay during the overlap.
+
 Both daemons keep their TCP listener for local use (`ember-term`, the VS Code companion,
 loopback admin). Bearer tokens (node API) are kept as a second factor on top of the peer
 allow-list for now. Peers find each other beyond address hints through the hub (`FR-N2`,
 `docs/design/HUB-INTEGRATION.md`): devices register under the user's GitHub account with the
 `ember-hub` crate, and `ember_transport::HubDirectory` (an `AddressDirectory`) publishes and
 resolves signed address records at the hub's `/pkarr`. Tested against `ember_hub::fake::FakeHub`
-in CI; not yet run against the real hub. The default hub address (`https://darkpyonix.dev`)
-and its `/v1` paths are to change (#62, draft PR #75), which waits for darkpyonix #41 and
-darkpyonix-core #42.
+in CI; not yet run against the real hub. The hub paths are unversioned like the real hub's
+(`/config`, `/devices`; checked against the vendored `hub.openapi.yaml`). The default hub address is `https://api.darkpyonix.dev` (#62).
 
 ---
 
@@ -147,7 +155,7 @@ architecture, running server-side under `--serve-web` (or equivalently under `co
 | VS Code's own process | Role | Can Ember substitute it? |
 | ---------------------- | ---- | -------------------------- |
 | **Extension Host** (`LocalProcess` kind: a Node.js child process) | Loads and runs marketplace extension code; exposes the VS Code Extension API (`vscode.*`) to it | **No.** This is `E2`/`D2`, unconditional. See `IMPLEMENTATION.md` §1. |
-| **Renderer / Workbench** | In desktop VS Code, an Electron renderer process painting the UI. Under `--serve-web`, this is the JS/CSS bundle that loads *inside the browser/webview*, i.e., inside Ember's editor window's webview. | This is the piece D6/M6 eventually targets for a Compose-native replacement, but not before M6, and even then category-3 (webview-panel) extensions still need *something* webview-shaped. See `IMPLEMENTATION.md` §3–5. |
+| **Renderer / Workbench** | In desktop VS Code, an Electron renderer process painting the UI. Under `--serve-web`, this is the JS/CSS bundle that loads *inside the browser/webview*, i.e., inside Ember's editor window's webview. | Replaced by the Compose-native editor core (D9a, M8) drawn by dioxus-compose. Under INTENT D44 Option A and SPEC FR-E8, extension webview panels, webview views and custom editors run in platform webviews contained per panel inside the editor window, while the workbench DOM itself has no webview or JS engine. See `IMPLEMENTATION.md` §3–5. |
 | **Language servers / debug adapters** | Separate processes already, communicating over stdio with JSON (LSP/DAP) | Already decoupled from VS Code core by design upstream; Ember does not need to do anything special here beyond making sure the server host can spawn them, which `--serve-web` already handles. |
 | **Pty Host** | Manages integrated terminal instances | Same as above: already its own process upstream; not a substitution question for Ember. |
 | **Shared Process** | Background tasks: storage, telemetry | Not user-visible; not a target for substitution. |
@@ -187,7 +195,6 @@ API, not a generic transport:
 // webview → native, on tab detach (FR-B2)
 {
   "kind": "tab_detach",
-  "version": 1,
   "sourceWindowId": "...",
   "fileUri": "vscode-remote://...",
   "cursor": { "line": 42, "column": 7 },
@@ -198,21 +205,19 @@ API, not a generic transport:
 // native → webview, cross-window sync push (FR-B4)
 {
   "kind": "sibling_window_closed",
-  "version": 1,
   "windowId": "..."
 }
 ```
 
 Implemented as `ember/proxy/static/detach.js` (webview) and the `ember/bridge/` crate (native; message
-types, `WebviewBridge`, version handling). Concretely: positions are **0-based**; the payload
-crosses as a JSON string; `version` is per `kind` (`tab_detach`, `sibling_window_closed`,
-`open_window`, all 1); `tab_detach` also carries the additive fields `workspace.folder`,
+types, `WebviewBridge`). Concretely: positions are **0-based**; the payload
+crosses as a JSON string; there is no `version` (D15); `tab_detach` also carries the additive fields `workspace.folder`,
 `screen`, `label`, `editor` and `sentAtMs`; the WKWebView handler is named `emberBridge`, and
 native → webview pushes call `window.__emberBridge.receive(json)`.
 
-Schemas are versioned (`"version"`) from the start (per `FR-B2`'s acceptance criteria), because
-the launcher and any number of editor windows may be running builds that drifted by a release or
-two, and a silent schema mismatch is a worse failure mode than a logged, ignored, versioned one.
+Schemas carry no version (INTENT D15): the launcher and any number of editor windows may be
+running builds that drifted by a release or two, so messages only gain fields, a receiver ignores
+fields it does not know, and a message of an unknown `kind` is logged and kept, not dropped.
 
 **What deliberately does not cross the bridge:** editor content on every keystroke, rendering
 state, anything resembling the high-frequency traffic that would actually need JSI-grade

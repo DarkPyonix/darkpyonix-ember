@@ -1,40 +1,61 @@
 [package]
 name = "ember-app"
 version = "0.1.0"
-# dioxus-compose is edition 2024 / Rust 1.85; this crate follows it.
+# dioxus-compose is edition 2024 / Rust 1.88 (3f8fc4a1); this crate follows it.
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Ember native client: launcher and conversation UI on dioxus-compose, no webview (SPEC §L, E1)"
 license = "Apache-2.0"
 publish = false
 
-# A library with a one-line binary in front of it, the shape dioxus-compose's samples use:
-# the rlib is what the binary and the tests link, and later the Android/iOS entry points.
+# A library with a one-line binary in front of it, the shape the compose-rust samples use:
+# the rlib is what the binary and the tests link, and the cdylib is what the Android Activity
+# loads (FR-L36), because Android runs no `main` of ours. The iOS entry point comes later.
 [lib]
 name = "ember_app"
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "ember-app"
 path = "src/main.rs"
 
 [dependencies]
-# The UI toolkit. A git dependency rather than a path one so the manifest does not depend on
-# where this checkout sits relative to the dioxus-compose checkout (a worktree is three levels
-# deeper than the main checkout). To build against a local checkout, see README.md ("Local
-# dioxus-compose"). The crate's build script fetches the renderer for its version; set
+# The UI toolkit. Base screens are written on compose-rust directly; IDE screens use
+# dioxus-compose (SPEC §L, INTENT D9). A git dependency rather than a path one so the manifest
+# does not depend on where this checkout sits relative to the toolkit checkout (a worktree is
+# three levels deeper than the main checkout). To build against a local checkout, see README.md
+# ("Local dioxus-compose"). The crate's build script fetches the renderer for its version; set
 # DIOXUS_COMPOSE_RENDERER_DIR to use a renderer you built yourself.
-dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "b71b20e" }
+# TODO: 배포되면 버전 의존성으로 바꾼다 (compose-rust and dioxus-compose are not yet published).
+compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", tag = "v0.0.7", default-features = false }
+dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "3f8fc4a173ecce0d0621be7a9af5d814c30614f8" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
 ember-client = { path = "../client" }
+ember-editor = { path = "../editor" }
+ember-editor-conn = { path = "../editor-conn" }
+# The peer-to-peer transport, so the app can join a server as a device (SPEC FR-N9, #856): its
+# device key, the bind, and the dialer `Api::over_transport` takes. The same features the client
+# tests and the server use: the default backend (`letify`) and HTTP over streams.
+ember-transport = { path = "../transport", default-features = false, features = ["http", "letify"] }
+alacritty_terminal = { version = "0.26", default-features = false }
+base64 = "0.22"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# TLS for the terminal relay (FR-L31.19, #333): wss verified against the webpki roots, the same
+# rustls stack reqwest uses below. rustls itself is listed only to install the ring provider.
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 # The client's I/O is async; the app owns one multi-thread runtime for it (PR-3: no domain
 # work on the UI thread).
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "fs", "macros"] }
-# Same HTTP stack as ember-client (plain HTTP for now, TLS is undecided: SPEC §N), used for the
-# endpoints ember-client does not wrap yet (accounts, computers, IDE targets).
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# `net` and `io-util` for the owner claim over the server's claim socket (FR-S12, #842); the
+# same features ember-client already turns on.
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "fs", "macros", "net", "io-util"] }
+# Same HTTP stack as ember-client, used for the endpoints ember-client does not wrap yet
+# (accounts, computers, IDE targets) and the terminal relay. `rustls-tls` (webpki roots, as in
+# ember/node and ember/server) gives https with certificate verification (FR-L31.19, #333).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -45,3 +66,6 @@ dirs = "6"
 
 [dev-dependencies]
 tempfile = "3"
+# An in-process server for the device-link tests (SPEC FR-N9, `tests/fr_n9_device_link.rs`), as
+# the client crate's transport tests use it.
+ember-server = { path = "../server" }

@@ -16,6 +16,7 @@ pub mod acp;
 pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
+pub mod proc;
 pub mod scripted;
 
 /// Which agent CLI a session runs.
@@ -181,6 +182,40 @@ pub struct StartRequest {
     /// adapters that perform the agent's tool I/O themselves: the ACP adapter serves the agent's
     /// `fs/*` and `terminal/*` requests through it ([`acp`]). `None` = this server.
     pub computer: Option<ember_node::client::NodeClient>,
+    /// Start as a native fork of another session instead of a new or resumed one (FR-S5). Set only
+    /// for a fork whose parent the agent can fork. `resume_native_id` is `None` then. An adapter
+    /// that fails to fork returns an error; the session layer falls back to the conversation copy.
+    pub fork_from: Option<ForkFrom>,
+    /// Memory limit of the agent's process tree in MiB (FR-S8, FR-L20). Handed to the shim, which
+    /// kills only this session's agent above it. `None` = the server default
+    /// (`EMBER_SESSION_MEM_LIMIT_MB`), else no limit. Set by `Sessions::ensure_live` from
+    /// `Sessions::set_mem_limit_mb`; a start-config hook may override it.
+    pub mem_limit_mb: Option<u64>,
+    /// Tools the harness may call without asking, each one exact tool name (never a pattern).
+    /// Claude Code only, passed as `--allowedTools`: without the rule a call to an MCP tool is
+    /// denied in `-p` mode (measured, FR-T12). Other adapters ignore it.
+    pub allowed_tools: Vec<String>,
+}
+
+/// The native session a fork starts from (FR-S5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkFrom {
+    /// The parent's native session id.
+    pub native_id: String,
+    /// Completed turns of the parent to keep, oldest first. `None` = the whole session (the
+    /// parent's last completed turn is its end).
+    pub keep_turns: Option<usize>,
+}
+
+/// What an agent's own fork can do (FR-S5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeFork {
+    /// No native fork: the fork copies the conversation.
+    None,
+    /// Forks the whole native session: only from the parent's last completed turn.
+    Latest,
+    /// Forks through a chosen completed turn.
+    AtTurn,
 }
 
 /// A stdio MCP server handed to an agent through its documented CLI configuration (E2).
@@ -217,7 +252,7 @@ pub struct RemoteExec {
     /// Stable id for the environment inside the agent (one per computer).
     pub environment_id: String,
     /// WebSocket URL of an exec-server speaking Codex's protocol (ember server's local relay to
-    /// the node's `/v1/exec-server`).
+    /// the node's `/exec-server`).
     pub exec_server_url: String,
 }
 
@@ -229,12 +264,100 @@ pub struct Detected {
     pub version: Option<String>,
 }
 
+/// A detection with where it found the CLI and when (FR-A6.1).
+#[derive(Debug, Clone, Serialize)]
+pub struct Probe {
+    pub kind: AgentKind,
+    pub installed: bool,
+    pub version: Option<String>,
+    /// The resolved executable, `None` when it is not found.
+    pub path: Option<String>,
+    /// Epoch milliseconds when the probe ran.
+    pub detected_at: i64,
+}
+
+/// A version token is accepted only when it starts with a digit (after an optional `v`), so
+/// that garbage output is never shown as a version (FR-A6.1).
+pub(crate) fn version_token(tok: &str) -> Option<String> {
+    let t = tok.trim();
+    let digits = t.strip_prefix('v').unwrap_or(t);
+    digits.chars().next().filter(char::is_ascii_digit).map(|_| t.to_string())
+}
+
+/// Resolve a command the way the OS would: a path with a separator is taken as it is when it is
+/// a file; a bare name is searched in `PATH`. `None` when nothing executable is found.
+pub fn resolve_executable(bin: &std::path::Path) -> Option<std::path::PathBuf> {
+    #[cfg(unix)]
+    let ok = |p: &std::path::Path| {
+        use std::os::unix::fs::PermissionsExt;
+        p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    };
+    #[cfg(not(unix))]
+    let ok = |p: &std::path::Path| p.metadata().map(|m| m.is_file()).unwrap_or(false);
+    if bin.components().count() > 1 || bin.is_absolute() {
+        return ok(bin).then(|| bin.to_path_buf());
+    }
+    let path = std::env::var_os("PATH")?;
+    for d in std::env::split_paths(&path) {
+        let c = d.join(bin);
+        if ok(&c) {
+            return Some(c);
+        }
+        #[cfg(windows)]
+        if let Some(name) = bin.to_str() {
+            for ext in [".exe", ".cmd", ".bat"] {
+                let with_ext = d.join(format!("{name}{ext}"));
+                if ok(&with_ext) {
+                    return Some(with_ext);
+                }
+            }
+        }
+    }
+    None
+}
+
 #[async_trait]
 pub trait AgentAdapter: Send + Sync {
     fn kind(&self) -> AgentKind;
 
+    /// The command `detect` runs, to report where the CLI was found (FR-A6.1). Default: none.
+    fn binary(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
     /// Is the agent installed on this server, and which version? Missing is not an error.
     async fn detect(&self) -> Detected;
+
+    /// What the agent's own session fork can do (FR-S5). Default: nothing, so a fork copies the
+    /// conversation.
+    fn native_fork(&self) -> NativeFork {
+        NativeFork::None
+    }
+
+    /// Whether an agent that outlived the server under its shim can be rejoined as it runs
+    /// (FR-S8). Default: no, the session resumes natively on its next message.
+    fn rejoins_shim(&self) -> bool {
+        false
+    }
+
+    /// Whether the output of an agent that outlived the server mid-turn can be read back without
+    /// rejoining it (FR-S8): [`AgentAdapter::drain_turn_end`] and
+    /// [`AgentAdapter::translate_drained`] are then used before the old process is stopped.
+    /// Default: no.
+    fn drains_shim(&self) -> bool {
+        false
+    }
+
+    /// Whether `line` of drained output ends the draining (the turn finished, or the agent asks
+    /// something nobody can answer any more).
+    fn drain_turn_end(&self, _line: &str) -> bool {
+        false
+    }
+
+    /// The events behind output lines drained from a surviving agent (FR-S8).
+    fn translate_drained(&self, _lines: &[String]) -> Vec<AgentEvent> {
+        Vec::new()
+    }
 
     /// Start (or resume) the agent. Events are sent on `events` until the process exits.
     async fn start(
@@ -254,6 +377,31 @@ pub trait AgentRun: Send {
     /// Answer a pending approval.
     async fn answer(&mut self, approval_id: &str, decision: ApprovalDecision)
         -> anyhow::Result<()>;
+
+    /// Prompts that were pending when the previous server died, found in the store after this
+    /// run rejoined its surviving agent (FR-S8). Each is `(approval_id, tool, input, needs_person)`. An
+    /// adapter that holds its pending approvals in memory rebuilds them here. Default: nothing.
+    async fn restore_pending_approvals(&mut self, _pending: Vec<(String, String, serde_json::Value, bool)>) {}
+
+    /// Questions that were pending when the previous server died, found in the store after this
+    /// run rejoined its surviving agent: `(question id, questions)`. Default: nothing.
+    async fn restore_pending_questions(&mut self, _pending: Vec<(String, Vec<crate::events::Question>)>) {}
+
+    /// Answer a pending question with the person's answers (already validated against the
+    /// stored question by the session). Default: the agent has no questions.
+    async fn answer_question(
+        &mut self,
+        _question_id: &str,
+        _answers: &[crate::events::QuestionAnswer],
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("this agent does not support questions")
+    }
+
+    /// The person skips a pending question: the agent is told that nobody answered. Default: the
+    /// agent has no questions.
+    async fn decline_question(&mut self, _question_id: &str) -> anyhow::Result<()> {
+        anyhow::bail!("this agent does not support questions")
+    }
 
     /// Interrupt the current turn; the adapter emits `TurnEnded { Interrupted }`.
     async fn interrupt(&mut self) -> anyhow::Result<()>;

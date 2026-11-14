@@ -67,10 +67,11 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{AgentAdapter, AgentKind, AgentRun, Detected, RemoteExec, StartRequest};
+use super::proc::{spawn_agent, AgentCommand, AgentStdin, AgentStdout, ProcHandle};
+use super::{AgentAdapter, AgentKind, AgentRun, Detected, NativeFork, RemoteExec, StartRequest};
 use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
 
 /// How long to wait for a response to one of our requests.
@@ -133,6 +134,45 @@ impl AgentAdapter for CodexAdapter {
         AgentKind::Codex
     }
 
+    /// `thread/fork` takes `lastTurnId`, so a fork can start after any completed turn (FR-S5).
+    fn native_fork(&self) -> NativeFork {
+        NativeFork::AtTurn
+    }
+
+    /// A turn in flight when the server died is read back from the surviving app-server (FR-S8).
+    fn drains_shim(&self) -> bool {
+        true
+    }
+
+    fn drain_turn_end(&self, line: &str) -> bool {
+        let Ok(msg) = serde_json::from_str::<Value>(line) else { return false };
+        match (msg.get("method").and_then(Value::as_str), msg.get("id")) {
+            (Some("turn/completed"), None) => true,
+            // A request to the client (an approval): nobody is there to answer it.
+            (Some(_), Some(_)) => true,
+            _ => false,
+        }
+    }
+
+    fn translate_drained(&self, lines: &[String]) -> Vec<AgentEvent> {
+        let mut mapper = Mapper::default();
+        let mut out = Vec::new();
+        for line in lines {
+            let Ok(msg) = serde_json::from_str::<Value>(line) else { continue };
+            let null = Value::Null;
+            let params = msg.get("params").unwrap_or(&null);
+            // Only notifications: replies and requests belong to a connection that is gone.
+            if let (Some(method), None) = (msg.get("method").and_then(Value::as_str), msg.get("id")) {
+                out.extend(mapper.on_notification(method, params));
+            }
+        }
+        out
+    }
+
+    fn binary(&self) -> Option<PathBuf> {
+        Some(self.bin.clone())
+    }
+
     async fn detect(&self) -> Detected {
         let out = tokio::time::timeout(
             Duration::from_secs(10),
@@ -161,20 +201,27 @@ impl AgentAdapter for CodexAdapter {
             req.cwd.clone()
         };
         let (mcp_env, _) = mcp_process_env(&req);
-        let mut child = Command::new(&self.bin)
-            .envs(mcp_env.iter().map(|(k, v)| (k, v)))
-            .envs(req.env.iter().map(|(k, v)| (k, v)))
-            .args(app_server_args(&req))
-            .current_dir(&spawn_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("starting {} app-server", self.bin.display()))?;
-        let stdin = child.stdin.take().context("app-server stdin")?;
-        let stdout = child.stdout.take().context("app-server stdout")?;
-        let stderr = child.stderr.take().context("app-server stderr")?;
+        let mut env: Vec<(String, String)> = mcp_env.clone();
+        env.extend(req.env.iter().cloned());
+        let proc = spawn_agent(AgentCommand {
+            program: self.bin.clone(),
+            args: app_server_args(&req),
+            env,
+            cwd: spawn_dir.clone(),
+            // `initialize` has to run on a fresh app-server, so a surviving one is restarted
+            // through `thread/resume` instead of rejoined.
+            reattachable: false,
+            mem_limit_mb: req.mem_limit_mb,
+            // Codex runs its commands under its own Seatbelt / Landlock sandbox; nesting under
+            // Ember's is not measured, so Codex is partial in FR-A11.
+            os_sandbox: false,
+        })
+        .await
+        .with_context(|| format!("starting {} app-server", self.bin.display()))?;
+        let stdin = proc.stdin;
+        let stdout = proc.stdout;
+        let stderr = proc.stderr;
+        let child = proc.handle;
 
         let conn = Arc::new(Conn {
             stdin: tokio::sync::Mutex::new(Some(stdin)),
@@ -184,12 +231,14 @@ impl AgentAdapter for CodexAdapter {
             closing: AtomicBool::new(false),
         });
 
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "codex", "{line}");
-            }
-        });
+        if let Some(stderr) = stderr {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!(target: "codex", "{line}");
+                }
+            });
+        }
         tokio::spawn(read_loop(conn.clone(), stdout, events.clone()));
 
         conn.request("initialize", initialize_params(req.remote.is_some()))
@@ -211,15 +260,36 @@ impl AgentAdapter for CodexAdapter {
         if let (Some(envs), None) = (&environments, &req.resume_native_id) {
             params.insert("environments".into(), envs.clone());
         }
-        let resp = match &req.resume_native_id {
-            Some(id) => {
+        let resp = match (&req.resume_native_id, &req.fork_from) {
+            (None, Some(from)) => {
+                // FR-S5: `thread/fork {threadId, lastTurnId}` copies the thread through that turn.
+                // Its params have no `environments`, so a fork on another computer is left to the
+                // conversation copy.
+                anyhow::ensure!(req.remote.is_none(), "thread/fork cannot target a remote exec-server");
+                params.insert("threadId".into(), json!(from.native_id));
+                if let Some(keep) = from.keep_turns {
+                    let list = conn
+                        .request(
+                            "thread/turns/list",
+                            json!({ "threadId": from.native_id, "sortDirection": "asc", "limit": 10_000 }),
+                        )
+                        .await
+                        .context("thread/turns/list")?;
+                    let turn = fork_turn_id(&list, keep)
+                        .with_context(|| format!("the thread has no completed turn number {keep}"))?;
+                    params.insert("lastTurnId".into(), json!(turn));
+                }
+                params.insert("excludeTurns".into(), json!(true));
+                conn.request("thread/fork", Value::Object(params)).await.context("thread/fork")?
+            }
+            (Some(id), _) => {
                 params.insert("threadId".into(), json!(id));
                 params.insert("excludeTurns".into(), json!(true));
                 conn.request("thread/resume", Value::Object(params))
                     .await
                     .context("thread/resume")?
             }
-            None => {
+            (None, None) => {
                 conn.request("thread/start", Value::Object(params)).await.context("thread/start")?
             }
         };
@@ -231,12 +301,32 @@ impl AgentAdapter for CodexAdapter {
     }
 }
 
+/// Spawn-env name carrying a model proxy base URL for Codex (SPEC FR-U6, set by
+/// `members::proxy_env`). Codex ignores `OPENAI_BASE_URL` (verified, codex-cli 0.164.0), so the
+/// adapter turns this into `-c` overrides ([`proxy_config_args`]) instead.
+pub const PROXY_BASE_ENV: &str = "EMBER_CODEX_PROXY_BASE_URL";
+/// Spawn-env name carrying the key the proxy provider reads (`env_key`); never written to args.
+pub const PROXY_KEY_ENV: &str = "EMBER_CODEX_PROXY_KEY";
+
+/// The `-c` overrides that send Codex's model traffic to `base_url` through a custom provider,
+/// whatever its login mode. The key is read by Codex from [`PROXY_KEY_ENV`], not passed here.
+pub fn proxy_config_args(base_url: &str) -> Vec<String> {
+    let provider = format!(
+        "model_providers.ember_proxy={{name=\"ember-proxy\", base_url={}, env_key=\"{PROXY_KEY_ENV}\", wire_api=\"responses\"}}",
+        toml_str(base_url)
+    );
+    vec!["-c".into(), provider, "-c".into(), "model_provider=\"ember_proxy\"".into()]
+}
+
 /// `app-server` plus a `-c` override per MCP server setting. A server's environment (FR-A7,
 /// possibly secrets) is never written here: only its variable names, as
 /// `mcp_servers.<name>.env_vars=[…]`, which makes Codex forward those variables from its own
 /// process environment ([`mcp_process_env`]) to the MCP server.
 fn app_server_args(req: &StartRequest) -> Vec<String> {
     let mut args = vec!["app-server".to_string()];
+    if let Some((_, base)) = req.env.iter().find(|(k, _)| k == PROXY_BASE_ENV) {
+        args.extend(proxy_config_args(base));
+    }
     let (_, skipped) = mcp_process_env(req);
     for m in req.mcp_servers.iter().filter(|m| !skipped.contains(&m.name)) {
         let key = format!("mcp_servers.{}", m.name);
@@ -290,7 +380,7 @@ fn toml_str(s: &str) -> String {
 
 /// `codex-cli 0.155.1` → `0.155.1`.
 fn parse_version(stdout: &str) -> Option<String> {
-    stdout.lines().next()?.split_whitespace().last().map(str::to_string)
+    stdout.lines().next()?.split_whitespace().last().and_then(super::version_token)
 }
 
 fn initialize_params(experimental: bool) -> Value {
@@ -316,6 +406,19 @@ fn environments_param(remote: &RemoteExec, cwd: &std::path::Path) -> Value {
     json!([{ "environmentId": remote.environment_id, "cwd": cwd.to_string_lossy() }])
 }
 
+/// The id of the `keep`-th completed turn (1-based, oldest first) in a `thread/turns/list`
+/// response, the `lastTurnId` of a fork through that turn (FR-S5).
+fn fork_turn_id(list: &Value, keep: usize) -> Option<String> {
+    let turns = list.get("data")?.as_array()?;
+    turns
+        .iter()
+        .filter(|t| t.get("status").and_then(Value::as_str) == Some("completed"))
+        .nth(keep.checked_sub(1)?)?
+        .get("id")?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// `result.thread.id` of a `thread/start` / `thread/resume` response.
 fn thread_id_of(result: &Value) -> Option<String> {
     result.pointer("/thread/id")?.as_str().map(str::to_string)
@@ -332,7 +435,7 @@ type Reply = Result<Value, String>;
 
 /// One app-server process's JSON-RPC connection.
 struct Conn {
-    stdin: tokio::sync::Mutex<Option<ChildStdin>>,
+    stdin: tokio::sync::Mutex<Option<AgentStdin>>,
     pending: Mutex<HashMap<i64, oneshot::Sender<Reply>>>,
     next_id: AtomicI64,
     mapper: Mutex<Mapper>,
@@ -381,7 +484,7 @@ impl Conn {
 
 async fn read_loop(
     conn: Arc<Conn>,
-    stdout: tokio::process::ChildStdout,
+    stdout: AgentStdout,
     events: mpsc::Sender<AgentEvent>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
@@ -448,7 +551,7 @@ async fn read_loop(
 
 struct CodexRun {
     conn: Arc<Conn>,
-    child: Option<Child>,
+    child: Option<ProcHandle>,
     events: mpsc::Sender<AgentEvent>,
     thread_id: String,
     /// `environments` for every `turn/start` when the tools run on another computer.
@@ -529,10 +632,8 @@ impl AgentRun for CodexRun {
         self.conn.closing.store(true, Ordering::Relaxed);
         // Closing stdin makes app-server exit; the thread stays on disk for `thread/resume`.
         self.conn.stdin.lock().await.take();
-        if let Some(mut child) = self.child.take() {
-            if tokio::time::timeout(EXIT_GRACE, child.wait()).await.is_err() {
-                child.kill().await?;
-            }
+        if let Some(handle) = self.child.take() {
+            handle.shutdown(EXIT_GRACE).await?;
         }
         Ok(())
     }
@@ -795,7 +896,7 @@ impl Mapper {
         }
         self.approvals
             .insert(approval_id.clone(), PendingApproval { rpc_id, kind, params: p.clone() });
-        Ok(vec![AgentEvent::ApprovalRequested { approval_id, tool, input }])
+        Ok(vec![AgentEvent::ApprovalRequested { approval_id, tool, input, needs_person: false }])
     }
 
     /// The app-server exited without being asked to.
@@ -956,6 +1057,19 @@ fn strip_nulls(v: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fork_turn_id_picks_the_nth_completed_turn() {
+        let list = json!({ "data": [
+            { "id": "t1", "status": "completed" },
+            { "id": "t2", "status": "interrupted" },
+            { "id": "t3", "status": "completed" },
+        ] });
+        assert_eq!(fork_turn_id(&list, 1).as_deref(), Some("t1"));
+        assert_eq!(fork_turn_id(&list, 2).as_deref(), Some("t3"));
+        assert_eq!(fork_turn_id(&list, 3), None);
+        assert_eq!(fork_turn_id(&list, 0), None);
+    }
+
     use super::*;
 
     /// One fixture line: `{"dir": "in" | "out" | "note", "msg": …}`.
@@ -1103,7 +1217,8 @@ mod tests {
                 &AgentEvent::ApprovalRequested {
                     approval_id: exec.into(),
                     tool: "command".into(),
-                    input
+                    input,
+                    needs_person: false
                 },
                 &AgentEvent::ToolResult {
                     call_id: exec.into(),
@@ -1180,6 +1295,7 @@ mod tests {
                     approval_id: "call_fc1".into(),
                     tool: "file_change".into(),
                     input: json!({ "changes": changes }),
+                    needs_person: false,
                 },
                 AgentEvent::ToolResult {
                     call_id: "call_fc1".into(),

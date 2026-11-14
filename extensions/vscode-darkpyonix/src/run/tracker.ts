@@ -73,7 +73,9 @@ export class RunTracker {
     return this.runs.has(runId);
   }
 
-  private cellFor(r: RunState, index: number): string | undefined {
+  /** The event's shared-document cell_id (draft.4), else the cell at its file index. */
+  private cellFor(r: RunState, index: number, cellId?: string | null): string | undefined {
+    if (typeof cellId === "string" && cellId) return cellId;
     return r.indexes.get(index) ?? this.resolve(index);
   }
 
@@ -100,17 +102,18 @@ export class RunTracker {
         if (!runId) return;
         const r = this.run(runId, d.started_by);
         if (Array.isArray(d.cells)) {
-          for (const index of d.cells as number[]) {
-            const id = this.cellFor(r, index);
+          const ids: Array<string | null> = Array.isArray(d.cell_ids) ? d.cell_ids : [];
+          (d.cells as number[]).forEach((index, k) => {
+            const id = this.cellFor(r, index, ids[k]);
             if (id && !r.started.has(id)) this.sink.attribution(id, { runId, by: r.by, mine: r.mine, state: "queued" });
-          }
+          });
         }
         return;
       }
       case "cell.started": {
         if (!runId) return;
         const r = this.run(runId, d.started_by);
-        const id = this.cellFor(r, d.index);
+        const id = this.cellFor(r, d.index, d.cell_id);
         if (!id) return;
         r.indexes.set(d.index, id);
         let h = r.execs.get(id);
@@ -128,7 +131,7 @@ export class RunTracker {
       case "output": {
         if (!runId) return;
         const r = this.run(runId);
-        const id = this.cellFor(r, d.index);
+        const id = this.cellFor(r, d.index, d.cell_id);
         if (!id || !d.output) return;
         this.exec(r, runId, id)?.output(d.output as NbOutput);
         return;
@@ -136,7 +139,7 @@ export class RunTracker {
       case "output.clear": {
         if (!runId) return;
         const r = this.run(runId);
-        const id = this.cellFor(r, d.index);
+        const id = this.cellFor(r, d.index, d.cell_id);
         if (!id) return;
         this.exec(r, runId, id)?.clear(!!d.wait);
         return;
@@ -145,7 +148,7 @@ export class RunTracker {
         if (!runId) return;
         const r = this.runs.get(runId);
         if (!r) return;
-        const id = this.cellFor(r, d.index);
+        const id = this.cellFor(r, d.index, d.cell_id);
         if (!id) return;
         r.execs.get(id)?.end(d.status);
         r.execs.delete(id);

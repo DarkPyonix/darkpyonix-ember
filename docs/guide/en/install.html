@@ -43,6 +43,7 @@
       <h2>On this page</h2>
       <ul>
         <li><a href="#requirements">What you need</a></li>
+        <li><a href="#release">From a release</a></li>
         <li><a href="#checkout">Get the code</a></li>
         <li><a href="#server">ember server</a></li>
         <li><a href="#node">ember node</a></li>
@@ -57,8 +58,7 @@
     <h1>Build Ember from source</h1>
     <p class="lede">
       Ember is three programs: <code>ember-server</code> on the main server, <code>ember-node</code>
-      on every other computer, and the client <code>ember-app</code> wherever you sit. There are no
-      releases or installers yet <span class="pill planned">Planned</span> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/72">#72</a>), so each one is built
+      on every other computer, and the client <code>ember-app</code> wherever you sit. Releases are planned (<a href="#release">below</a>); until one is tagged, each one is built
       with cargo from a checkout.
     </p>
 
@@ -69,6 +69,18 @@
       <li><strong>A C compiler</strong>, because the server compiles SQLite into itself.</li>
       <li><strong>The agent CLIs, on the main server only</strong>: <code>claude</code>, <code>codex</code>, <code>agy</code> or <code>omp</code>, installed the way each vendor documents and logged in as the user that will run <code>ember-server</code>. Ember finds them on <code>PATH</code> and lists a missing one as not installed rather than failing.</li>
     </ul>
+
+    <h2 id="release">From a release</h2>
+    <p>Tagged releases <span class="pill planned">Planned</span> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/72">#72</a>) attach <code>ember-server</code> and <code>ember-node</code> archives for macOS arm64, Linux x86_64 and Linux aarch64, with a <code>SHA256SUMS</code> file. The workflow is written, but no tag has been released yet, so the version above is an example.</p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell</figcaption>
+<pre><code>gh release download v0.1.0 --repo DarkPyonix/darkpyonix-ember \
+  --pattern <span class="s">'ember-*-macos-arm64.tar.gz'</span> --pattern SHA256SUMS
+shasum -a 256 -c --ignore-missing SHA256SUMS
+tar -xzf ember-server-v0.1.0-macos-arm64.tar.gz</code></pre>
+    </figure>
+    <p>Each archive holds the programs described below (<code>ember-server</code>, <code>ember-exec</code> and <code>ember-a2a</code>; <code>ember-node</code> and <code>ember-term</code>); keep each set in one directory. macOS binaries and apps are ad hoc signed only (no Apple account, no notarization), so Gatekeeper blocks the first launch. Clear the quarantine flag with <code>xattr -d com.apple.quarantine</code> on the extracted files. For the <code>.app</code>, run <code>xattr -dr com.apple.quarantine Ember.app</code>, or right-click and choose Open. The Windows <code>.msix</code> is unsigned: enable developer mode or re-sign it with a certificate you trust.</p>
+    <p>The client job in the release workflow packages macOS <code>.app</code> and <code>.dmg</code>, Windows <code>.zip</code> and <code>.msix</code>, and Linux <code>.AppImage</code> once enabled (<code>EMBER_CLIENT_RELEASE=true</code>); until the first tag is published, build the client from source as shown in <a href="#client">The client</a>.</p>
 
     <h2 id="checkout">Get the code</h2>
     <p>
@@ -103,18 +115,91 @@ cargo build --release --locked
     </p>
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
       <figcaption>shell</figcaption>
-<pre><code>curl http://127.0.0.1:8740/api/v1/health
-<span class="c"># {"ok":true,"push_version":1}</span></code></pre>
+<pre><code>curl http://127.0.0.1:8740/api/health
+<span class="c"># {"ok":true}</span></code></pre>
     </figure>
     <div class="warn">
-      <span class="label">The HTTP listener has no login</span>
+      <span class="label">The HTTP listener needs the server token</span>
       <p>
-        Anyone who can reach <code>EMBER_LISTEN</code> can use every route, including accounts,
-        devices and the hub registration. Keep it on loopback (the default) or on a network you
-        trust. The authenticated path is the peer-to-peer transport, which admits only devices on
-        the server's allow-list (<a href="computers.html#peer">Computers and the hub</a>). To use
-        the client from another machine today, forward the port over SSH:
+        <span class="pill works">Works</span> On first start the server writes a random token to
+        <code>&lt;data dir&gt;/server-token</code> (mode 0600) and asks for it on every route as
+        <code>Authorization: Bearer &lt;token&gt;</code>; only <code>GET /api/health</code> answers without it.
+        The app and the client on the same computer read the file, or <code>EMBER_SERVER_TOKEN</code>, and
+        send it only to loopback or a host in <code>EMBER_TOKEN_HOSTS</code>. Every request also passes a
+        <code>Host</code> and <code>Origin</code> check, so a web page you open cannot reach the server
+        cross-site; add extra names with <code>EMBER_ALLOWED_HOSTS</code>.
+      </p>
+      <p>
+        The listener speaks plain HTTP, so it stays on loopback. A non-loopback <code>EMBER_LISTEN</code>
+        (<code>0.0.0.0</code>, <code>::</code>, a LAN address) stops the server at start unless
+        <code>EMBER_ALLOW_NON_LOOPBACK_LISTEN=1</code> is set, and then it logs a warning, because the token
+        would cross that network in clear. Remote devices come in through the peer-to-peer transport,
+        which admits only devices on the server's allow-list
+        (<a href="computers.html#peer">Computers and the hub</a>), or over SSH:
         <code>ssh -N -L 8740:127.0.0.1:8740 you@mini.local</code>.
+      </p>
+    </div>
+    <div class="warn" id="owner-presence">
+      <span class="label">Owner routes need owner presence</span>
+      <p>
+        <span class="pill partial">Partial</span> The token file stops other users and web pages, not
+        your own processes. An agent runs as you and can read <code>server-token</code>. So the routes
+        that grant authority, admit someone or change a secret need a second credential, the owner key.
+        On a server started with <code>EMBER_OWNER_PRESENCE=enforce</code>, they answer
+        <code>403</code> with <code>{"code": "owner_required"}</code> to the token alone. The default
+        is <code>warn</code> for now: the call is logged and served, because the app cannot claim a
+        key yet. Enforce becomes the default once it can.
+        These routes are: answering a tool approval and approve-all; the device list; adding, removing
+        and checking accounts and providers, and ChatGPT sign-in; adding and removing computers, and
+        enrol codes; rotating the token; hub registration; MCP servers; the per-agent, A2A and browser
+        egress settings; channel invites, guests and allowances. Reading, sessions, messages,
+        terminals and answering an agent's question need the token only.
+      </p>
+      <p>
+        The owner key exists only in the memory of the Ember app or of one
+        <code>ember-server owner</code> command. It is claimed over
+        <code>&lt;data dir&gt;/owner.sock</code> (on Windows, over the named pipe
+        <code>\\.\pipe\ember-owner-&lt;hash of the data dir&gt;</code>, which only your user can open and
+        which refuses other computers) and is void when that app or command exits, or when the
+        server restarts. The first claim prints a code on the server's console
+        (<code>ember owner code: XXXX-XXXX</code>); type it where the claim was made. A later claim can
+        be approved in an app that already holds a key. The server side and the command are in place;
+        the app's screen for the claim is not built yet
+        (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/784">#784</a>). Until it is,
+        use the command from a terminal on the server's computer:
+      </p>
+      <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+        <figcaption>shell, on the main server</figcaption>
+<pre><code>ember-server owner enrol-code laptop            <span class="c"># a code for a new computer</span>
+ember-server owner devices list
+ember-server owner approve &lt;session&gt; &lt;approval&gt; allow
+ember-server owner call POST /api/accounts <span class="s">'{"agent": "claude-code", "label": "work"}'</span></code></pre>
+      </figure>
+      <p>
+        The command needs a real terminal and is refused inside Ember's own terminal panel or an
+        agent, because those run in process trees the server started. Where this guide shows
+        <code>curl</code> on one of the routes above, use <code>ember-server owner call</code> with the
+        same method, path and body. <code>EMBER_OWNER_CONFIRM=off</code> grants a claim without the
+        console code; it lowers the protection and is meant for test rigs. A remote device with
+        scope <code>full</code> counts as the owner for approvals over the transport; the device list
+        itself is managed only on the server's computer. A server on Windows takes claims over its
+        named pipe (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/815">#815</a>) and
+        follows <code>EMBER_OWNER_PRESENCE</code> the same way: <code>warn</code> by default, and
+        <code>enforce</code> closes its owner routes to the token alone.
+      </p>
+      <p>
+        <strong>What this does not stop.</strong> In the default <code>warn</code> mode nothing is
+        refused: a process that reads <code>server-token</code> can still call these routes, and the
+        server only logs it. Set <code>EMBER_OWNER_PRESENCE=enforce</code> to close them. Even
+        then, a process that runs arbitrary code as you and is
+        not sandboxed can still read or change Ember's database and keys in the data folder
+        directly, attach to the app, or imitate it by leaving the agent's process tree and asking
+        for a key. The console code stops the last one only while that process cannot read the
+        server's console output, so do not send the server's output to a file agents can read.
+        Starting agents with the data folder hidden (a sandbox per harness) and moving the keys to
+        the OS keystore are not built yet
+        (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/784">#784</a>). For an agent
+        you do not trust, use a harness with its own sandbox or a separate computer.
       </p>
     </div>
 
@@ -145,13 +230,15 @@ cargo build --release --locked --features mount-fuse</code></pre>
         <thead><tr><th scope="col">Variable</th><th scope="col">Default</th><th scope="col">Meaning</th></tr></thead>
         <tbody>
           <tr><td><code>EMBER_DATA_DIR</code></td><td><code>~/.ember</code></td><td>Where the database, keys, accounts and browser profiles live.</td></tr>
-          <tr><td><code>EMBER_LISTEN</code></td><td><code>127.0.0.1:8740</code></td><td>The HTTP listener.</td></tr>
+          <tr><td><code>EMBER_LISTEN</code></td><td><code>127.0.0.1:8740</code></td><td>The HTTP listener. Loopback only unless the next variable is set.</td></tr>
+          <tr><td><code>EMBER_ALLOW_NON_LOOPBACK_LISTEN</code></td><td>unset</td><td><code>1</code> lets <code>EMBER_LISTEN</code> bind a non-loopback address (plain HTTP, a warning at start).</td></tr>
           <tr><td><code>EMBER_IDLE_SECS</code></td><td><code>300</code></td><td>Release an agent process after this long without activity. The next message resumes it.</td></tr>
           <tr><td><code>EMBER_CLAUDE_BIN</code>, <code>EMBER_CODEX_BIN</code>, <code>EMBER_AGY_BIN</code></td><td><code>claude</code>, <code>codex</code>, <code>agy</code> on <code>PATH</code></td><td>Which agent CLI to run.</td></tr>
           <tr><td><code>EMBER_ACP_AGENTS</code></td><td>none</td><td>ACP agents to offer, as JSON, for example <code>["omp"]</code>. See <a href="agents.html">Agents</a>.</td></tr>
           <tr><td><code>EMBER_TRANSPORT</code></td><td>off</td><td><code>1</code> binds the peer-to-peer transport. Needed for computers added by peer address and for the hub.</td></tr>
           <tr><td><code>EMBER_HUB_URL</code></td><td><code>https://darkpyonix.dev</code></td><td>The hub; <code>off</code> disables it. Used only with <code>EMBER_TRANSPORT=1</code>. The default moves to the hub's own subdomain (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>).</td></tr>
           <tr><td><code>EMBER_RELAY_URL</code></td><td>the hub's relay</td><td>Relay server(s) for the transport.</td></tr>
+          <tr><td><code>EMBER_TRANSPORT_LISTEN</code></td><td>a random port</td><td>A fixed <code>ip:port</code> for the transport, for example <code>0.0.0.0:7444</code>, so a device's saved address survives a server restart. The server then prints <code>ember server device address: &lt;peer id&gt;@&lt;host&gt;:&lt;port&gt;</code> to paste into the app. Only allowed device keys get in, so <code>0.0.0.0</code> is fine. A bad value stops the start. Not yet compiled (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/863">#863</a>).</td></tr>
           <tr><td><code>EMBER_MOUNT</code></td><td><code>auto</code></td><td><code>nfs</code>, <code>fuse</code> or <code>off</code>; <code>auto</code> uses whichever feature the build has.</td></tr>
           <tr><td><code>EMBER_A2A</code></td><td>on</td><td><code>0</code> starts agent-to-agent messaging switched off.</td></tr>
           <tr><td><code>EMBER_CHROME_BIN</code></td><td>found on the machine</td><td>The browser for <a href="browser.html">remote browsing</a>.</td></tr>
@@ -177,6 +264,7 @@ cargo build --release --locked --features mount-fuse</code></pre>
           <tr><td><code>transport.key</code></td><td>The server's peer identity, created with <code>EMBER_TRANSPORT=1</code>.</td></tr>
         </tbody>
       </table>
+      <p id="keystore"><strong>Keys in the OS keystore.</strong> <code>secret.key</code> and <code>transport.key</code> (the server's and each node's) go to the OS keystore where one answers: the macOS Keychain, the Windows Credential Manager or a Linux Secret Service. On the first start with an existing file, Ember copies the key into the keystore, reads it back, and only then deletes the file and leaves <code>&lt;file&gt;.migrated</code>; if the keystore write fails, the file stays. <code>EMBER_KEYSTORE</code> picks <code>auto</code> (the default: the keystore if available, else the file), <code>os</code> (refuse to start without one) or <code>file</code>. Back up the keystore entries (service <code>dev.darkpyonix.ember</code>) along with <code>ember.db</code>. <strong>Residual risk.</strong> Without a keystore (a headless Linux server has no Secret Service), the key is a 0600 file, so any process running as the same user, and anyone holding a copy of the data folder, can read it. With a keystore, a process running as the same user can still ask for the key on an unlocked session: the keystore protects copies and backups of the data folder, not a compromised user account.</p>
     </div>
 
     <h2 id="node">ember node, on each computer</h2>

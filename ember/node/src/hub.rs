@@ -5,17 +5,17 @@
 //!   code at the verification URL (or types it into Ember, which approves it as the account's
 //!   main server). The device token and the read-only resolve token are kept in
 //!   `<state dir>/hub.json`, mode 0600. A link waiting for approval is remembered in
-//!   `<state dir>/hub-link.json` and resumed (`GET /v1/device-links/{id}`) if `register` runs
+//!   `<state dir>/hub-link.json` and resumed (`GET /device-links/{id}`) if `register` runs
 //!   again. A node the hub removed can rejoin with the same key after the account owner
 //!   re-admits it on the hub (FR-H11); the new link is approved in the browser.
 //! - **App record** (FR-H10): after registering and at start the node reports
-//!   `{kind: "ember-node", version, services: ["ember-node-v1"]}` with its own token.
+//!   `{kind: "ember-node", version, services: ["ember-node"]}` with its own token.
 //! - **Leaving** (`ember-node hub forget`): removes the node on the hub with its own token, then
 //!   deletes `hub.json` (`--local`: only the file).
 //! - **Transport**: a registered node publishes its address to the hub's directory and uses the
 //!   hub's relay ([`transport_config`]); the server then adds it by picking it from the account's
 //!   device list instead of pasting an address.
-//! - **Discovery**: the relay and directory come from the hub's `GET /v1/config` when it serves
+//! - **Discovery**: the relay and directory come from the hub's `GET /config` when it serves
 //!   it ([`discovered_transport_config`]); otherwise `https://relay.<host>` and `<hub>/pkarr`.
 //! - **Revocation**: [`spawn_watch`] holds a long-poll on the account's device list when the hub
 //!   offers it (a removal is seen at once), else asks the hub every minute. When the hub removed
@@ -95,7 +95,7 @@ pub async fn ensure_resolve(file: &RegistrationFile, mut reg: Registration) -> R
     reg
 }
 
-/// Reports the node's app on the hub with its own token (`PATCH /v1/devices/{id} {app}`),
+/// Reports the node's app on the hub with its own token (`PATCH /devices/{id} {app}`),
 /// unless the stored device already shows it. Failures are logged (the record is a hint).
 pub async fn publish_app(file: &RegistrationFile, reg: &Registration) {
     let app = node_app();
@@ -203,15 +203,17 @@ pub fn hub_config_for(reg: &Registration) -> HubConfig {
 
 /// Which hub the node uses now, and the token: the registration's hub, or `EMBER_HUB_URL` when
 /// set explicitly (without a token).
-fn hub_in_use(state_dir: &Path) -> anyhow::Result<Option<(HubConfig, Option<String>)>> {
+/// The third value is the device token, for the hub's batched pkarr watch (sent in the header,
+/// never in a URL).
+fn hub_in_use(state_dir: &Path) -> anyhow::Result<Option<(HubConfig, Option<String>, Option<String>)>> {
     if let Some(reg) = active_registration(state_dir)? {
         // The resolver URL carries the resolve token, never the device token (NFR-H2).
         let token = reg.directory_token();
-        return Ok(Some((hub_config_for(&reg), token)));
+        return Ok(Some((hub_config_for(&reg), token, reg.active_token())));
     }
     if HubConfig::explicitly_enabled() {
         if let Some(hub) = HubConfig::from_env() {
-            return Ok(Some((hub, None)));
+            return Ok(Some((hub, None, None)));
         }
     }
     Ok(None)
@@ -223,12 +225,12 @@ fn hub_in_use(state_dir: &Path) -> anyhow::Result<Option<(HubConfig, Option<Stri
 /// relay is derived (`https://relay.<host>`); see [`discovered_transport_config`].
 pub fn transport_config(state_dir: &Path, key: SecretKey) -> anyhow::Result<TransportConfig> {
     Ok(match hub_in_use(state_dir)? {
-        Some((hub, token)) => hub.transport_config(key, token),
+        Some((hub, token, _)) => hub.transport_config(key, token),
         None => TransportConfig::from_env(key),
     })
 }
 
-/// [`transport_config`], with the relay and directory the hub advertises in `GET /v1/config`
+/// [`transport_config`], with the relay and directory the hub advertises in `GET /config`
 /// (falling back to the derived ones when it does not serve it or cannot be reached), after
 /// fetching a resolve token for a registration that has none.
 pub async fn discovered_transport_config(state_dir: &Path, key: SecretKey) -> anyhow::Result<TransportConfig> {
@@ -236,7 +238,7 @@ pub async fn discovered_transport_config(state_dir: &Path, key: SecretKey) -> an
         ensure_resolve(&registration_file(state_dir), reg).await;
     }
     Ok(match hub_in_use(state_dir)? {
-        Some((hub, token)) => hub.discover().await.transport_config(key, token),
+        Some((hub, token, device_token)) => hub.discover().await.transport_config_with_watch(key, token, device_token),
         None => TransportConfig::from_env(key),
     })
 }
@@ -245,7 +247,7 @@ pub async fn discovered_transport_config(state_dir: &Path, key: SecretKey) -> an
 pub async fn apply_registration(transport: &Transport, state_dir: &Path, reg: &Registration) -> anyhow::Result<()> {
     let reg = ensure_resolve(&registration_file(state_dir), reg.clone()).await;
     let hub = hub_config_for(&reg).discover().await;
-    transport.enable_hub(hub.directory(reg.directory_token()))?;
+    transport.enable_hub(hub.directory_with_watch(reg.directory_token(), reg.active_token()))?;
     transport.set_relays(hub.relay_config()).await?;
     Ok(())
 }
@@ -319,8 +321,8 @@ fn on_revoked(
 /// directory token, and (with `allow_servers`) narrows `gate` back to `base_allowed`. While
 /// active with `allow_servers`, keeps `gate` = `base_allowed` ∪ the account's main servers.
 ///
-/// When the hub advertises the device-list long-poll (`GET /v1/config`, asked once per watch),
-/// a held `GET /v1/devices?wait=` sees removal and server changes as they happen; otherwise
+/// When the hub advertises the device-list long-poll (`GET /config`, asked once per watch),
+/// a held `GET /devices?wait=` sees removal and server changes as they happen; otherwise
 /// the hub is asked every `period`.
 pub fn spawn_watch(
     state_dir: &Path,
@@ -400,7 +402,7 @@ pub async fn cli(args: &[String]) -> anyhow::Result<()> {
                 }
             }
             let hub = HubConfig::from_env().ok_or_else(|| anyhow::anyhow!("the hub is off ({}=off)", ember_hub::HUB_URL_ENV))?;
-            let key = SecretKey::load_or_generate(dir.join(crate::transport::KEY_FILE))?;
+            let key = crate::keystore::load_transport_key(&dir.join(crate::transport::KEY_FILE))?;
             let name = name.unwrap_or_else(default_name);
             let reg = register(&dir, &key, &hub, &name, None, |p| {
                 println!("To add this computer to your darkpyonix.dev account, open");

@@ -1,6 +1,6 @@
 //! HTTP and WebSocket routes for the remote browser. Protocol: `docs/design/REMOTE-BROWSER.md`.
 //!
-//! | Route (under `/api/v1/browsers`) | |
+//! | Route (under `/api/browsers`) | |
 //! | --- | --- |
 //! | `GET /` | list browsers |
 //! | `GET /{project}` | one browser's info and state |
@@ -12,7 +12,8 @@
 //! | `POST /{project}/input` | one input event (same JSON as on the view socket) |
 //! | `GET /{project}/view` (WebSocket) | screencast frames out, input in |
 //! | `GET /{project}/cdp` (WebSocket) | DevTools relay for agents |
-//! | `GET /{project}/cdp/json/version` | DevTools discovery document pointing at the relay |
+//! | `GET /{project}/cdp/json/version` | DevTools discovery document pointing at the relay (the nonce URL) |
+//! | `GET /{project}/cdp/{nonce}/json/version` | the same document, reachable without the server token (agent tools) |
 //! | `GET /{project}/agent-config?mcp=` | MCP config for Claude Code and Codex |
 
 use std::sync::Arc;
@@ -30,19 +31,22 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio_tungstenite::tungstenite::Message as TMessage;
 
 use super::agent::{self, BrowserMcp};
-use super::{BrowserInstance, BrowserManager, Egress, InputEvent, STREAM_VERSION};
+use super::{BrowserInstance, BrowserManager, Egress, InputEvent};
 
 pub fn router(browsers: Arc<BrowserManager>) -> Router {
     Router::new()
-        .route("/api/v1/browsers", get(list))
-        .route("/api/v1/browsers/{project}", get(info).post(open).delete(stop))
-        .route("/api/v1/browsers/{project}/egress", get(get_egress).put(egress))
-        .route("/api/v1/browsers/{project}/data", axum::routing::delete(clear))
-        .route("/api/v1/browsers/{project}/input", post(input))
-        .route("/api/v1/browsers/{project}/view", get(view))
-        .route("/api/v1/browsers/{project}/cdp", get(cdp))
-        .route("/api/v1/browsers/{project}/cdp/json/version", get(cdp_version))
-        .route("/api/v1/browsers/{project}/agent-config", get(agent_config))
+        .route("/api/browsers", get(list))
+        .route("/api/browsers/{project}", get(info).post(open).delete(stop))
+        .route("/api/browsers/{project}/egress", get(get_egress).put(egress))
+        .route("/api/browsers/{project}/data", axum::routing::delete(clear))
+        .route("/api/browsers/{project}/input", post(input))
+        .route("/api/browsers/{project}/view", get(view))
+        .route("/api/browsers/{project}/cdp", get(cdp))
+        .route("/api/browsers/{project}/cdp/json/version", get(cdp_version))
+        // The agent form: the nonce is checked by the server auth layer (FR-S9), not here.
+        .route("/api/browsers/{project}/cdp/{nonce}", get(cdp_agent))
+        .route("/api/browsers/{project}/cdp/{nonce}/json/version", get(cdp_version_agent))
+        .route("/api/browsers/{project}/agent-config", get(agent_config))
         .with_state(browsers)
 }
 
@@ -72,7 +76,7 @@ async fn instance(m: &BrowserManager, project: &str) -> ApiResult<Arc<BrowserIns
 }
 
 async fn list(State(m): S) -> impl IntoResponse {
-    Json(json!({ "v": STREAM_VERSION, "chrome": m.config().chrome, "browsers": m.list().await }))
+    Json(json!({ "chrome": m.config().chrome, "browsers": m.list().await }))
 }
 
 async fn info(State(m): S, Path(project): Path<String>) -> ApiResult<impl IntoResponse> {
@@ -185,15 +189,17 @@ async fn input(
 async fn view(
     State(m): S,
     Path(project): Path<String>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> ApiResult<impl IntoResponse> {
+    crate::api::origin::check_origin(&headers).map_err(|c| ApiError(c, "origin not allowed".into()))?;
     let b = instance(&m, &project).await?;
     Ok(ws.on_upgrade(move |socket| view_loop(socket, b)))
 }
 
 fn state_msg(kind: &str, b: &BrowserInstance) -> Message {
     let st = b.state().borrow().clone();
-    let msg = json!({ "type": kind, "v": STREAM_VERSION, "project": b.project, "state": st });
+    let msg = json!({ "type": kind, "project": b.project, "state": st });
     Message::Text(msg.to_string().into())
 }
 
@@ -239,7 +245,7 @@ async fn view_loop(socket: WebSocket, b: Arc<BrowserInstance>) {
                     Err(e) => Err(anyhow::anyhow!("bad input message: {e}")),
                 };
                 if let Err(e) = res {
-                    let msg = json!({ "type": "error", "v": STREAM_VERSION, "message": format!("{e:#}") });
+                    let msg = json!({ "type": "error", "message": format!("{e:#}") });
                     if tx.send(Message::Text(msg.to_string().into())).await.is_err() { return; }
                 }
             }
@@ -252,11 +258,22 @@ async fn view_loop(socket: WebSocket, b: Arc<BrowserInstance>) {
 async fn cdp(
     State(m): S,
     Path(project): Path<String>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> ApiResult<impl IntoResponse> {
+    crate::api::origin::check_origin(&headers).map_err(|c| ApiError(c, "origin not allowed".into()))?;
     let b = instance(&m, &project).await?;
     let upstream = b.devtools_ws().await?;
     Ok(ws.on_upgrade(move |socket| relay(socket, b, upstream)))
+}
+
+async fn cdp_agent(
+    State(m): S,
+    Path((project, _nonce)): Path<(String, String)>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> ApiResult<impl IntoResponse> {
+    cdp(State(m), Path(project), headers, ws).await
 }
 
 async fn relay(socket: WebSocket, b: Arc<BrowserInstance>, upstream: String) {
@@ -321,11 +338,17 @@ async fn cdp_version(
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
     instance(&m, &project).await?;
-    Ok(Json(json!({
-        "Browser": "ember-remote-browser",
-        "Protocol-Version": "1.3",
-        "webSocketDebuggerUrl": agent::cdp_ws_url(&base_url(&headers), &project),
-    })))
+    Ok(Json(agent::cdp_version_doc(&base_url(&headers), &project)))
+}
+
+/// The discovery document under the nonce path, which the token layer lets through without a
+/// header (FR-S9); the nonce is checked there, not here.
+async fn cdp_version_agent(
+    State(m): S,
+    Path((project, _nonce)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<impl IntoResponse> {
+    cdp_version(State(m), Path(project), headers).await
 }
 
 #[derive(Deserialize)]
@@ -345,6 +368,6 @@ async fn agent_config(
         Some(s) => BrowserMcp::parse(s)
             .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, format!("unknown mcp {s}")))?,
     };
-    let ws = agent::cdp_ws_url(&base_url(&headers), &project);
+    let ws = agent::agent_cdp_ws_url(&base_url(&headers), &project);
     Ok(Json(agent::agent_config(&ws, mcp)))
 }

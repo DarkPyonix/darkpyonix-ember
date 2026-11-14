@@ -42,7 +42,7 @@ use tokio_tungstenite::WebSocketStream;
 use crate::proto::*;
 
 /// Transport service name of the node API (`FR-N5`). Versioned with the API's major version.
-pub const NODE_SERVICE: &str = "ember-node/1";
+pub const NODE_SERVICE: &str = "ember-node";
 
 /// Host name used in requests over the transport (the stream already names the peer).
 const PEER_HOST: &str = "ember-node";
@@ -152,6 +152,9 @@ pub struct NodeClient {
     token: String,
     /// Bound on each HTTP request ([`NodeClient::with_deadline`]); `None` waits forever.
     deadline: Option<Duration>,
+    /// The HTTP client ignores proxy variables ([`NodeClient::new_local`]); kept across
+    /// [`NodeClient::with_deadline`].
+    no_proxy: bool,
 }
 
 impl fmt::Debug for NodeClient {
@@ -177,7 +180,19 @@ impl NodeClient {
         if !base.starts_with("http://") && !base.starts_with("https://") {
             return Err(ClientError::Url(base));
         }
-        Ok(Self { reach: Reach::Http { base, http: reqwest::Client::new() }, token: token.into(), deadline: None })
+        Ok(Self { reach: Reach::Http { base, http: reqwest::Client::new() }, token: token.into(), deadline: None, no_proxy: false })
+    }
+
+    /// Like [`NodeClient::new`], but the HTTP client ignores `HTTP_PROXY`, `HTTPS_PROXY` and
+    /// `ALL_PROXY` (#474): for a node on this machine's loopback, whose Bearer token must never
+    /// go to a proxy named in the environment. WebSockets never use a proxy.
+    pub fn new_local(base: impl Into<String>, token: impl Into<String>) -> Result<Self> {
+        let mut c = Self::new(base, token)?;
+        if let Reach::Http { http, .. } = &mut c.reach {
+            *http = reqwest::Client::builder().no_proxy().build()?;
+        }
+        c.no_proxy = true;
+        Ok(c)
     }
 
     /// Like [`NodeClient::new`], but every HTTP request fails after `timeout` (and connecting
@@ -197,7 +212,11 @@ impl NodeClient {
     /// terminal attach) are not affected.
     pub fn with_deadline(mut self, deadline: Duration) -> Self {
         if let Reach::Http { http, .. } = &mut self.reach {
-            match reqwest::Client::builder()
+            let mut b = reqwest::Client::builder();
+            if self.no_proxy {
+                b = b.no_proxy();
+            }
+            match b
                 .timeout(deadline)
                 .connect_timeout(deadline.min(Duration::from_secs(5)))
                 .build()
@@ -220,7 +239,7 @@ impl NodeClient {
     /// optional address hints), dialed through `dialer` for [`NODE_SERVICE`]. Clients sharing a
     /// dialer share its connection to the node. The bearer token is still sent.
     pub fn over_transport(dialer: Dialer, addr: impl Into<PeerAddr>, token: impl Into<String>) -> Self {
-        Self { reach: Reach::Peer { dialer, addr: addr.into() }, token: token.into(), deadline: None }
+        Self { reach: Reach::Peer { dialer, addr: addr.into() }, token: token.into(), deadline: None, no_proxy: false }
     }
 
     /// The node's transport address, when reached over the transport.
@@ -317,6 +336,20 @@ impl NodeClient {
         Self::decode(self.send(Method::POST, path, Some(Self::json(body)), true).await?)
     }
 
+    /// POST `body` to `path` and return the node's status and body untouched, success or not.
+    /// For relays that forward a request as is (the server's `/projects/{name}/git/...`, FR-G4).
+    pub async fn post_raw(&self, path: &str, body: &serde_json::Value) -> Result<(u16, Vec<u8>)> {
+        let raw = self.send(Method::POST, path, Some(Self::json(body)), true).await?;
+        Ok((raw.status.as_u16(), raw.body.to_vec()))
+    }
+
+    /// Any method on `path`, with an optional JSON body, answered with the node's status and body
+    /// untouched (the server's transfer relay, FR-F14).
+    pub async fn request_raw(&self, method: Method, path: &str, body: Option<&serde_json::Value>) -> Result<(u16, Vec<u8>)> {
+        let raw = self.send(method, path, body.map(Self::json), true).await?;
+        Ok((raw.status.as_u16(), raw.body.to_vec()))
+    }
+
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         Self::decode(self.send(Method::GET, path, None, true).await?)
     }
@@ -372,18 +405,31 @@ impl NodeClient {
 
     // -----------------------------------------------------------------------------------------
 
-    /// Unauthenticated liveness and protocol version.
+    /// Unauthenticated liveness.
     pub async fn health(&self) -> Result<Health> {
-        let raw = self.send(Method::GET, "/v1/health", None, false).await?;
+        let raw = self.send(Method::GET, "/health", None, false).await?;
         serde_json::from_slice(&raw.body).map_err(|e| ClientError::Protocol(e.to_string()))
     }
 
     pub async fn env(&self) -> Result<EnvInfo> {
-        self.get("/v1/env").await
+        self.get("/env").await
+    }
+
+    /// One metrics sample (FR-X7); `top` limits the process list.
+    pub async fn metrics(&self, top: Option<usize>) -> Result<MetricsSample> {
+        match top {
+            Some(n) => self.get(&format!("/metrics?top={n}")).await,
+            None => self.get("/metrics").await,
+        }
+    }
+
+    /// Listening TCP ports of processes under this node's terminals and jobs (FR-P7).
+    pub async fn ports(&self) -> Result<PortsResponse> {
+        self.get("/ports").await
     }
 
     pub async fn stat(&self, path: impl AsRef<Path>) -> Result<Stat> {
-        self.post("/v1/fs/stat", &PathRequest { path: path.as_ref().into() }).await
+        self.post("/fs/stat", &PathRequest { path: path.as_ref().into() }).await
     }
 
     /// Read a whole file (up to [`MAX_READ`]) with its hash.
@@ -392,11 +438,11 @@ impl NodeClient {
     }
 
     pub async fn read(&self, req: &ReadRequest) -> Result<ReadResponse> {
-        self.post("/v1/fs/read", req).await
+        self.post("/fs/read", req).await
     }
 
     pub async fn write(&self, req: &WriteRequest) -> Result<WriteResponse> {
-        self.post("/v1/fs/write", req).await
+        self.post("/fs/write", req).await
     }
 
     /// Write `data`, optionally only if the file is unchanged since it was read with `expect`.
@@ -411,55 +457,55 @@ impl NodeClient {
     }
 
     pub async fn list(&self, path: impl AsRef<Path>) -> Result<ListResponse> {
-        self.post("/v1/fs/list", &PathRequest { path: path.as_ref().into() }).await
+        self.post("/fs/list", &PathRequest { path: path.as_ref().into() }).await
     }
 
     /// Like [`NodeClient::stat`] but a final symbolic link is described, not followed.
     pub async fn lstat(&self, path: impl AsRef<Path>) -> Result<Stat> {
-        self.post("/v1/fs/lstat", &PathRequest { path: path.as_ref().into() }).await
+        self.post("/fs/lstat", &PathRequest { path: path.as_ref().into() }).await
     }
 
     pub async fn readlink(&self, path: impl AsRef<Path>) -> Result<ReadlinkResponse> {
-        self.post("/v1/fs/readlink", &PathRequest { path: path.as_ref().into() }).await
+        self.post("/fs/readlink", &PathRequest { path: path.as_ref().into() }).await
     }
 
     pub async fn symlink(&self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> Result<Stat> {
-        self.post("/v1/fs/symlink", &SymlinkRequest { path: path.as_ref().into(), target: target.as_ref().into() })
+        self.post("/fs/symlink", &SymlinkRequest { path: path.as_ref().into(), target: target.as_ref().into() })
             .await
     }
 
     pub async fn mkdir(&self, req: &MkdirRequest) -> Result<Stat> {
-        self.post("/v1/fs/mkdir", req).await
+        self.post("/fs/mkdir", req).await
     }
 
     pub async fn remove(&self, path: impl AsRef<Path>, recursive: bool) -> Result<()> {
         let body = RemoveRequest { path: path.as_ref().into(), recursive };
-        self.no_content(Method::POST, "/v1/fs/remove", Some(Self::json(&body))).await
+        self.no_content(Method::POST, "/fs/remove", Some(Self::json(&body))).await
     }
 
     pub async fn rename(&self, req: &RenameRequest) -> Result<()> {
-        self.no_content(Method::POST, "/v1/fs/rename", Some(Self::json(req))).await
+        self.no_content(Method::POST, "/fs/rename", Some(Self::json(req))).await
     }
 
     pub async fn setattr(&self, req: &SetAttrRequest) -> Result<Stat> {
-        self.post("/v1/fs/setattr", req).await
+        self.post("/fs/setattr", req).await
     }
 
     pub async fn pwrite(&self, path: impl AsRef<Path>, offset: u64, data: impl Into<Vec<u8>>) -> Result<Stat> {
-        self.post("/v1/fs/pwrite", &PwriteRequest { path: path.as_ref().into(), offset, data: data.into() }).await
+        self.post("/fs/pwrite", &PwriteRequest { path: path.as_ref().into(), offset, data: data.into() }).await
     }
 
     pub async fn glob(&self, req: &GlobRequest) -> Result<GlobResponse> {
-        self.post("/v1/fs/glob", req).await
+        self.post("/fs/glob", req).await
     }
 
     pub async fn grep(&self, req: &GrepRequest) -> Result<GrepResponse> {
-        self.post("/v1/fs/grep", req).await
+        self.post("/fs/grep", req).await
     }
 
     /// Start a command and return its live session. Dropping the session kills the command.
     pub async fn exec(&self, req: &ExecRequest) -> Result<ExecSession> {
-        let mut ws = self.websocket("/v1/exec").await?;
+        let mut ws = self.websocket("/exec").await?;
         ws.send(Message::Text(serde_json::to_string(req).expect("serialisable").into())).await?;
         let (sink, stream) = ws.split();
         let mut session = ExecSession { tx: ExecSender { sink }, rx: ExecReceiver { stream }, pid: 0 };
@@ -498,59 +544,59 @@ impl NodeClient {
     }
 
     pub async fn start_job(&self, req: &JobRequest) -> Result<JobInfo> {
-        self.post("/v1/jobs", req).await
+        self.post("/jobs", req).await
     }
 
     pub async fn jobs(&self) -> Result<Vec<JobInfo>> {
-        self.get("/v1/jobs").await
+        self.get("/jobs").await
     }
 
     pub async fn job(&self, id: &str, tail_bytes: Option<usize>) -> Result<JobDetail> {
         match tail_bytes {
-            Some(n) => self.get(&format!("/v1/jobs/{id}?tail={n}")).await,
-            None => self.get(&format!("/v1/jobs/{id}")).await,
+            Some(n) => self.get(&format!("/jobs/{id}?tail={n}")).await,
+            None => self.get(&format!("/jobs/{id}")).await,
         }
     }
 
     pub async fn kill_job(&self, id: &str, signal: Option<i32>) -> Result<()> {
-        self.no_content(Method::POST, &format!("/v1/jobs/{id}/kill"), Some(Self::json(&KillRequest { signal })))
+        self.no_content(Method::POST, &format!("/jobs/{id}/kill"), Some(Self::json(&KillRequest { signal })))
             .await
     }
 
     pub async fn remove_job(&self, id: &str) -> Result<()> {
-        self.no_content(Method::DELETE, &format!("/v1/jobs/{id}"), None).await
+        self.no_content(Method::DELETE, &format!("/jobs/{id}"), None).await
     }
 
     /// Subscribe to node events with `seq > after` (0 for everything still in history).
     pub async fn events(&self, after: u64) -> Result<EventStream> {
-        Ok(EventStream { ws: self.websocket(&format!("/v1/events?after={after}")).await? })
+        Ok(EventStream { ws: self.websocket(&format!("/events?after={after}")).await? })
     }
 
     // -----------------------------------------------------------------------------------------
-    // Persistent terminal sessions (`/v1/terms`)
+    // Persistent terminal sessions (`/terms`)
 
     /// Start a persistent session, or (with `key`) return the running one with that key.
     pub async fn term_create(&self, req: &TermCreateRequest) -> Result<TermCreateResponse> {
-        self.post("/v1/terms", req).await
+        self.post("/terms", req).await
     }
 
     /// Sessions on this computer, filtered by `q`, oldest first.
     pub async fn terms(&self, q: &TermListQuery) -> Result<Vec<TermInfo>> {
         let query = serde_urlencoded::to_string(q).map_err(|e| ClientError::Protocol(e.to_string()))?;
         if query.is_empty() {
-            self.get("/v1/terms").await
+            self.get("/terms").await
         } else {
-            self.get(&format!("/v1/terms?{query}")).await
+            self.get(&format!("/terms?{query}")).await
         }
     }
 
     pub async fn term(&self, id: &str) -> Result<TermInfo> {
-        self.get(&format!("/v1/terms/{id}")).await
+        self.get(&format!("/terms/{id}")).await
     }
 
     /// The session's current screen (escape sequences and plain text), without attaching.
     pub async fn term_snapshot(&self, id: &str) -> Result<TermSnapshot> {
-        self.get(&format!("/v1/terms/{id}/snapshot")).await
+        self.get(&format!("/terms/{id}/snapshot")).await
     }
 
     /// Take or release control on behalf of an attached client (e.g. from a UI that is not
@@ -558,7 +604,7 @@ impl NodeClient {
     pub async fn term_control(&self, id: &str, client: u64, take: bool) -> Result<()> {
         self.no_content(
             Method::POST,
-            &format!("/v1/terms/{id}/control"),
+            &format!("/terms/{id}/control"),
             Some(Self::json(&TermControlRequest { client, take })),
         )
         .await
@@ -566,20 +612,20 @@ impl NodeClient {
 
     /// Signal a session (default SIGHUP, then SIGKILL after a grace period).
     pub async fn term_kill(&self, id: &str, signal: Option<i32>) -> Result<()> {
-        self.no_content(Method::POST, &format!("/v1/terms/{id}/kill"), Some(Self::json(&KillRequest { signal })))
+        self.no_content(Method::POST, &format!("/terms/{id}/kill"), Some(Self::json(&KillRequest { signal })))
             .await
     }
 
     /// Forget a finished session.
     pub async fn term_remove(&self, id: &str) -> Result<()> {
-        self.no_content(Method::DELETE, &format!("/v1/terms/{id}"), None).await
+        self.no_content(Method::DELETE, &format!("/terms/{id}"), None).await
     }
 
     /// Attach to a session. The first events after [`TermAttachment::client`] are the snapshot
     /// (if `hello.snapshot`) and then the live stream. Dropping the attachment detaches; it
     /// never ends the session.
     pub async fn term_attach(&self, id: &str, hello: &TermHello) -> Result<TermAttachment> {
-        let mut ws = self.websocket(&format!("/v1/terms/{id}/attach")).await?;
+        let mut ws = self.websocket(&format!("/terms/{id}/attach")).await?;
         ws.send(Message::Text(serde_json::to_string(hello).expect("serialisable").into())).await?;
         let (sink, stream) = ws.split();
         let mut rx = TermReceiver { stream };

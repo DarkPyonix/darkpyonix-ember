@@ -24,17 +24,30 @@ use ember_server::store::Store;
 /// Configuration from the environment.
 /// - `EMBER_DATA_DIR`: where `ember.db`, `secret.key` and `accounts/` live (default `~/.ember`)
 /// - `EMBER_LISTEN`: listen address (default `127.0.0.1:8740`)
+/// - `EMBER_ALLOWED_HOSTS`: extra host names accepted in `Host` (comma-separated, FR-S10); the
+///   token is in `<data dir>/server-token` (FR-S9); `ember-server rotate-token` replaces it and
+///   exits, and `POST /api/server-token/rotate` does the same on a running server (#369)
+/// - Owner presence (FR-S12, #784): owner routes also need the in-memory owner key, claimed over
+///   `<data dir>/owner.sock` (Windows: the named pipe `\\.\pipe\ember-owner-<hash>`, #815) by
+///   the app or by `ember-server owner <verb>` (a terminal only). The default mode is warn: a
+///   call without a key is logged and served, until the app ships its claim.
+///   `EMBER_OWNER_PRESENCE=enforce` refuses it with 403, on Windows too;
+///   `EMBER_OWNER_CONFIRM=off` grants a claim without the console code (best effort)
 /// - `EMBER_IDLE_SECS`: release an agent process after this long without activity (default 300)
 /// - `EMBER_CLAUDE_BIN`: the Claude Code CLI (default `claude` on `PATH`)
 /// - `EMBER_CODEX_BIN`: the Codex CLI (default `codex` on `PATH`)
 /// - `EMBER_AGY_BIN`: the Antigravity CLI (default `agy` on `PATH`). Its sessions keep a private
-///   configuration folder each under `<data dir>/agy/`. A version other than the tested one runs
-///   read-only (INTENT D14); `EMBER_AGY_SANDBOX=0` drops agy's `--sandbox`
+///   configuration folder each under `<data dir>-runtime/agy/` (FR-A11). A version other than the tested one runs
+///   read-only (INTENT D14); `EMBER_AGY_SANDBOX=1` adds agy's `--sandbox` (off by default)
+/// - `EMBER_AGENT_SANDBOX=off`: start agents without the OS sandbox that hides the data dir
+///   (FR-A11; macOS `sandbox-exec`, Linux `bwrap`, used when found and working)
 /// - `EMBER_SCRIPTED_AGENT=1`: also offer the test agent (development only)
+/// - `EMBER_DEMO_DATA=1`: add a demo ChatGPT plan account with 14 days of usage (screenshots only)
 /// - `EMBER_ACP_AGENTS`: Agent Client Protocol agents to offer, as JSON: a list of preset names
 ///   (`["omp"]`) and/or objects `{"name", "command", "args", "model_args", "instructions_args",
 ///   "version_args", "env"}`; `EMBER_ACP_AGENTS_FILE` reads the same JSON from a file. Presets:
-///   `omp` (`omp acp`; `EMBER_OMP_BIN` picks the binary). See `agents::acp`.
+///   `omp` (`omp acp`; `EMBER_OMP_BIN` picks the binary) and `gemini` (`gemini --acp`, API key or
+///   Enterprise only; `EMBER_GEMINI_BIN` picks the binary). Both are opt-in. See `agents::acp`.
 /// - `EMBER_CHROME_BIN`: the browser for remote browsing (default: found on the machine)
 /// - `EMBER_BROWSER_MCP`: `chrome-devtools`, `playwright` or `off` (default): give agents the
 ///   project's browser as an MCP server, run with `npx`/`bunx` (`EMBER_BROWSER_MCP_RUNNER`)
@@ -55,33 +68,115 @@ use ember_server::store::Store;
 ///   redirect (default: the `EMBER_LISTEN` port)
 /// - `EMBER_TRANSPORT=1`: bind the peer-to-peer transport (key in `<data dir>/transport.key`;
 ///   peer id and address printed at start). Computers can then be registered by peer, and the
-///   API is also served on transport service `ember-server/1` to allowed devices (FR-N3,
-///   `/api/v1/devices`, managed on the TCP listener only)
+///   API is also served on transport service `ember-server` to allowed devices (FR-N3,
+///   `/api/devices`, managed on the TCP listener only)
 /// - `EMBER_RELAY_URL`: relay server(s) for the transport (overrides the hub's relay)
-/// - `EMBER_HUB_URL`: the darkpyonix.dev hub (default `https://darkpyonix.dev`; `off` disables).
+/// - `EMBER_TRANSPORT_LISTEN`: fixed `ip:port` the transport binds (letify: its TCP listener;
+///   the QUIC backend: its UDP socket; unset: a random port). It is the device-key gated transport door, so
+///   `0.0.0.0:<port>` is fine (D37 covers the HTTP listeners). A bad value is a startup error.
+///   When set, the server also prints `ember server device address: <peer id>@<host>:<port>`
+///   for the app (FR-N9, #863)
+/// - `EMBER_SERVER_RELAY_PORT`: letify relay TCP and QAD UDP port (default 7443)
+/// - `EMBER_SERVER_RELAY=off`: disable the automatic letify relay and QAD roles
+/// - `EMBER_LETIFY_RELAY_LISTEN`, `EMBER_LETIFY_QAD_LISTEN`: override role addresses
+/// - `EMBER_HUB_URL`: the darkpyonix.dev hub (default `https://api.darkpyonix.dev`; `off` disables).
 ///   With the transport on, the server can register to the user's GitHub account there
-///   (`POST /api/v1/hub/link`, local only), then publishes its address and resolves computers
+///   (`POST /api/hub/link`, local only), then publishes its address and resolves computers
 ///   through the hub's directory and uses its relay (FR-N2). `EMBER_HUB_RELAY_URL` overrides
 ///   the relay derived from the hub URL; `EMBER_HUB_SYNC_DEVICES=1` keeps the devices
 ///   allow-list in sync with the account's devices
+/// - `EMBER_GUEST_LISTEN`: the guest door (FR-T14), off when unset: a second listener that serves
+///   only the guest routes and `/join`, never the owner API. `EMBER_GUEST_LISTEN_ALLOW_REMOTE=1`
+///   is required for a non-loopback address; `EMBER_GUEST_ALLOWED_HOSTS` and
+///   `EMBER_GUEST_PUBLIC_URL` name the hosts guests use. See `guest_door`.
+/// `ember-server __keep-pty …` is the local node's PTY keeper (FR-P6): dispatched before any
+/// runtime or logging starts, as in `ember-node`, so a keeper holds one fd and little memory.
+fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some(ember_node::term::pty::KEEPER_SUBCOMMAND) {
+        std::process::exit(ember_node::term::pty::keeper_main(&args[2..]));
+    }
+    serve_main()
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn serve_main() -> anyhow::Result<()> {
+    let started = std::time::SystemTime::now();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info".into()),
         )
         .init();
+    // Private MCP config files left by a crashed run hold env values such as runtime tokens.
+    ember_server::agents::claude_code::cleanup_stale_mcp_files(&std::env::temp_dir(), started);
+
+    // Keys in the OS keystore where available (FR-S13, EMBER_KEYSTORE=file|os|auto).
+    ember_node::keystore::install_from_env()?;
 
     let data_dir = std::env::var_os("EMBER_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| {
         PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".ember")
     });
     std::fs::create_dir_all(&data_dir)?;
+    // FR-A11 (#784): agy homes and the OSE data root live in the data dir's sibling runtime dir;
+    // a data dir from before is moved once (idempotent).
+    let runtime = ember_server::runtime_dir::runtime_dir(&data_dir);
+    ember_server::runtime_dir::migrate_logged(&data_dir, &runtime);
+    // `ember-server rotate-token` (#369): replace `<data dir>/server-token` and exit. A running
+    // server takes the new token on the next request that presents it; the old one gets 401.
+    if std::env::args().nth(1).as_deref() == Some("rotate-token") {
+        ember_server::auth::rotate_token(&data_dir)?;
+        println!(
+            "server token rotated: {} (clients on this computer re-read it)",
+            ember_server::auth::token_path(&data_dir).display()
+        );
+        return Ok(());
+    }
+    // `ember-server owner <verb>` (FR-S12, #784): one owner route from a terminal, with a key
+    // claimed over the running server's owner socket for this call only.
+    if std::env::args().nth(1).as_deref() == Some("owner") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        return ember_server::owner::cli::run(&args, &data_dir).await;
+    }
     let store = Arc::new(Store::open(&data_dir.join("ember.db"))?);
+    // Agents never see the data dir or the OSE data root (FR-A11): OS sandbox where available,
+    // Ember's own file handlers and Claude Code's deny rules otherwise.
+    {
+        let mut denied = vec![std::path::absolute(&data_dir).unwrap_or_else(|_| data_dir.clone())];
+        if let Ok(ose) = ember_server::ose::data_root_from(
+            std::env::var_os("EMBER_OSE_DATA_DIR").map(PathBuf::from),
+            Some(denied[0].clone()),
+            None,
+        ) {
+            denied.push(std::path::absolute(&ose).unwrap_or(ose));
+        }
+        ember_server::sandbox::install(ember_server::sandbox::from_env(denied));
+    }
+    // Agents run under per-session shims and outlive this server (FR-S8, EMBER_SESSION_SHIM=off
+    // keeps direct children). Stopping the server leaves the shims, and so the agents, running.
+    let shim_runtime = match ember_server::agents::proc::find_shim_bin() {
+        Some(bin) if ember_server::agents::proc::shim_enabled() => {
+            let dir = data_dir.join("shims");
+            ember_server::session_shim::private_dir(&dir)?;
+            let rt = ember_server::agents::proc::ShimRuntime { bin, dir, store: store.clone() };
+            ember_server::agents::proc::install_runtime(rt.clone());
+            Some(rt)
+        }
+        _ => {
+            tracing::warn!("session shims off; agents stop with the server");
+            None
+        }
+    };
+    // Demo only (#193): off unless EMBER_DEMO_DATA=1.
+    ember_server::chatgpt::demo::seed(&store, std::env::var(ember_server::chatgpt::demo::ENV).ok().as_deref())?;
     let reset = store.reset_live_statuses()?;
     if reset > 0 {
         tracing::info!("{reset} session(s) were mid-turn at shutdown; marked idle for resume");
     }
+    // Repair the per-channel JSONL files against the store before any router serves (FR-T16).
+    // It only logs: a problem here never stops the start. It uses its own JsonlLog and shares no lock
+    // with the routers' instances, so it must stay synchronous and ahead of every router.
+    ember_server::channels::jsonl::JsonlLog::new(&data_dir).recover(&store);
 
     // Always offered; detection reports a missing binary as not installed (FR-A6).
     // Antigravity's tool approvals arrive over HTTP from its PreToolUse hook (FR-A5).
@@ -114,9 +209,22 @@ async fn main() -> anyhow::Result<()> {
         )),
         None => None,
     };
+    // The server's identity for the enrol flow (FR-C2j, #541): its transport key, loaded (and
+    // created on first use) whether or not the transport is on, so the minted command always
+    // pins the server and the redeem answer always proves it. A key that cannot be loaded with
+    // the transport off is not fatal: enrol then runs without a pin, as before.
+    let transport_on = server_transport::enabled_from_env();
+    let mut server_key: Option<ember_transport::SecretKey> = None;
+    if !transport_on {
+        match server_transport::load_key(&data_dir) {
+            Ok(k) => server_key = Some(k),
+            Err(e) => tracing::warn!("no server identity key, enrol commands carry no --server-fingerprint: {e}"),
+        }
+    }
     // The peer-to-peer transport (FR-N1), opt-in.
-    let net = if server_transport::enabled_from_env() {
+    let net = if transport_on {
         let key = server_transport::load_key(&data_dir)?;
+        server_key = Some(key.clone());
         let registered = hub.as_ref().is_some_and(|h| h.is_registered());
         // The resolve token (`dpr_`) goes in the directory resolver's URL; a registration from
         // before the hub issued them gets one now.
@@ -124,14 +232,22 @@ async fn main() -> anyhow::Result<()> {
             Some(h) if registered => h.ensure_resolve_token().await,
             _ => None,
         };
-        // The hub's relay and directory from its `/v1/config` (derived when it has none). Asked
+        // The hub's relay and directory from its `/config` (derived when it has none). Asked
         // only when the hub will be used now, so an unregistered server does not contact it.
         let hub_config = match &hub {
             Some(h) if registered || ember_hub::HubConfig::explicitly_enabled() => Some(h.discover().await),
             Some(h) => Some(h.config()),
             None => hub_config,
         };
-        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), registered, token)).await?;
+        // The device token, for the hub's batched pkarr watch (header only, never a URL).
+        let device_token = match &hub {
+            Some(h) if registered => h.registration().ok().flatten().and_then(|r| r.active_token()),
+            _ => None,
+        };
+        // A bad EMBER_TRANSPORT_LISTEN stops the start here (#863).
+        let listen = server_transport::listen_from_env()?;
+        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), registered, token, device_token)?)
+            .await?;
         if let Some(h) = &hub {
             h.attach_transport(t.clone());
             let _watch = h.spawn_watch(ember_server::hub::WATCH_PERIOD);
@@ -145,13 +261,17 @@ async fn main() -> anyhow::Result<()> {
             match (&st.device, st.revoked) {
                 (Some(d), false) => tracing::info!(hub = %st.hub_url, name = %d.name, "registered with the hub"),
                 (Some(_), true) => tracing::warn!(hub = %st.hub_url, "the hub removed this server; register again with a new key"),
-                (None, _) => tracing::info!(hub = %st.hub_url, "not registered with the hub (POST /api/v1/hub/link)"),
+                (None, _) => tracing::info!(hub = %st.hub_url, "not registered with the hub (POST /api/hub/link)"),
             }
         }
         t.wait_online(std::time::Duration::from_secs(5)).await;
         // Printed (not only logged): the peer id goes into each node's allowed peers.
         println!("ember server peer id: {}", t.peer_id());
         println!("ember server peer addr: {}", serde_json::to_string(&t.local_addr())?);
+        // With a fixed transport port, the address a device keeps across restarts (#863).
+        if let Some(line) = server_transport::device_address_line(listen, &t.local_addr()) {
+            println!("{line}");
+        }
         Some(ServerTransport::new(t))
     } else {
         None
@@ -161,8 +281,16 @@ async fn main() -> anyhow::Result<()> {
     let computer_registry = Registry::new(store.clone());
     let browser_egress_store: Arc<dyn ember_server::browser::EgressStore> = store.clone();
     let store_for_mcp = store.clone();
+    let store_for_channels = store.clone();
+    let store_for_guest = store.clone();
+    // One `Enrol` for the whole process: the owner's routes (mint, confirm, deny) and the enrol door
+    // (redeem, poll, from step C3a) share its failure windows and its pending-token map, which live per instance.
+    let enrol = computers::enrol::Enrol::with_server_key(store.clone(), server_key, transport_on);
     let sessions = Sessions::new(store, adapters);
+    // Per-harness memory limits stored by the settings API (FR-L20, FR-S8).
+    sessions.load_settings();
     accounts.install(&sessions);
+    ember_server::members::install(&sessions);
     let shim = computers::find_shim();
     if shim.is_none() {
         tracing::warn!("ember-exec not found; Claude Code sessions cannot run on other computers");
@@ -171,8 +299,17 @@ async fn main() -> anyhow::Result<()> {
         computer_registry,
         computers::connector(dialer.clone()),
         shim,
-        dialer,
+        dialer.clone(),
     );
+    // The local computer's terminals outlive this process (FR-P6): records and PTY keepers in
+    // `<data dir>/local-node`; a restart re-adopts them. EMBER_NODE_KEEP_PTY=0 turns it off.
+    let local_node_options = computers::local_node::LocalNodeOptions::from_env(&data_dir);
+    computers.set_local_node_options(local_node_options.clone());
+    match computers.resume_local_node() {
+        Ok(true) => tracing::info!("local node resumed the terminals of the previous run"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("local node could not resume terminals: {e}"),
+    }
     // Claude Code's file tools on other computers (EMBER_MOUNT=off|nfs|fuse|auto).
     // Opened like every other node client, so computers registered by peer mount too.
     if let Some(mounts) = computers::mount::ProjectMounts::from_env(computers.node_fs()) {
@@ -183,10 +320,46 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("project mount off; Claude Code file tools stay on this server");
     }
     computers.install(&sessions);
+    // The agent CLI's own API traffic leaves through the session's current computer (FR-X6).
+    // EMBER_AGENT_EGRESS=off keeps it on this server.
+    if std::env::var("EMBER_AGENT_EGRESS").map(|v| v != "off").unwrap_or(true) {
+        let (c, d) = (computers.clone(), dialer.clone());
+        let route: ember_server::egress_proxy::Route = Arc::new(move |sid| {
+            match c.registry().session_computer(sid)? {
+                Some(sc) if sc.computer_id != computers::LOCAL => {
+                    let comp = c
+                        .registry()
+                        .get(&sc.computer_id)?
+                        .ok_or_else(|| anyhow::anyhow!("computer {} is gone", sc.computer_id))?;
+                    Ok(Some(computers::node_client(&comp, d.as_ref())?))
+                }
+                _ => Ok(None),
+            }
+        });
+        let egress = ember_server::egress_proxy::SessionEgress::new(route);
+        sessions.add_start_hook(egress.clone().start_hook());
+        sessions.add_end_hook(egress.end_hook());
+    }
 
-    let addr: SocketAddr = std::env::var("EMBER_LISTEN")
-        .unwrap_or_else(|_| "127.0.0.1:8740".into())
-        .parse()?;
+    // FR-S10 listen guard: a non-loopback EMBER_LISTEN needs EMBER_ALLOW_NON_LOOPBACK_LISTEN=1.
+    let addr: SocketAddr = ember_server::auth::parse_listen(std::env::var("EMBER_LISTEN").ok().as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let allow = std::env::var(ember_server::auth::ALLOW_NON_LOOPBACK_LISTEN).ok();
+    if ember_server::auth::check_listen(addr, allow.as_deref()).map_err(|e| anyhow::anyhow!(e))?
+        == ember_server::auth::ListenCheck::NonLoopbackAllowed
+    {
+        tracing::warn!(
+            "EMBER_LISTEN={addr} is reachable from that network over plain HTTP; the server token travels in clear. Prefer the transport (EMBER_TRANSPORT=1) for remote devices."
+        );
+    }
+    // The guest door (FR-T14): off unless EMBER_GUEST_LISTEN is set. A bad value is a startup error.
+    let guest_door = ember_server::guest_door::GuestDoor::from_env(addr)?;
+    // The enrol door (FR-C2e): off unless EMBER_ENROL_LISTEN is set. A bad value, or an address
+    // that clashes with the owner's or the guest door's, is a startup error.
+    let enrol_door = ember_server::enrol_door::EnrolDoor::from_env(addr, guest_door.as_ref().map(|d| d.listen))?;
+    // The URL the enrol command prints is the DOOR's (EMBER_ENROL_PUBLIC_URL, else its specific
+    // listen address), never the owner API address: that port serves no /enrol/redeem (FR-C1).
+    let enrol_door_url = ember_server::enrol_door::EnrolDoor::door_url(enrol_door.as_ref());
     // This server as seen from this machine (an unspecified address replaced by loopback).
     let local_url = {
         let mut local = addr;
@@ -278,13 +451,58 @@ async fn main() -> anyhow::Result<()> {
     } else if !addr.ip().is_loopback() && !addr.ip().is_unspecified() {
         tracing::warn!(
             "ChatGPT sign-in redirects to {}, but the server listens on {addr}; paste the final \
-             URL into POST /api/v1/chatgpt/signin/complete",
+             URL into POST /api/chatgpt/signin/complete",
             chatgpt.config().redirect_uri()
         );
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("ember server listening on http://{addr}");
+    // Bound before the owner server starts serving, so a bind failure aborts the start.
+    let guest_listener = match &guest_door {
+        Some(d) => {
+            let l = d.bind().await.map_err(|e| anyhow::anyhow!("guest door: cannot bind {}: {e}", d.listen))?;
+            if d.is_remote() {
+                tracing::warn!(
+                    "guest door on {} is reachable from that network (EMBER_GUEST_LISTEN_ALLOW_REMOTE=1); it \
+                     speaks plain HTTP and anyone with an invite link can join a channel; put TLS in \
+                     front of it",
+                    d.listen
+                );
+            } else {
+                tracing::info!("guest door on {} (loopback)", d.listen);
+            }
+            Some(l)
+        }
+        None => None,
+    };
+    // Bound before the owner server starts serving, so a bind failure aborts the start.
+    let enrol_listener = match &enrol_door {
+        Some(d) => {
+            let l = d.bind().await.map_err(|e| anyhow::anyhow!("enrol door: cannot bind {}: {e}", d.listen))?;
+            // An auto-closing door (#539) is bound here only to fail the start on a bad address;
+            // it is released at once and bound again by the first mint.
+            let l = if d.auto_close {
+                drop(l);
+                tracing::info!("enrol door on {} stays closed until a code is minted (EMBER_ENROL_AUTO_CLOSE=0 keeps it open)", d.listen);
+                None
+            } else {
+                Some(l)
+            };
+            if d.is_remote() {
+                tracing::warn!(
+                    "enrol door on {} is reachable from that network (EMBER_ENROL_LISTEN_ALLOW_REMOTE=1); it \
+                     speaks plain HTTP, so an enrol code and the poll secret cross the network in clear \
+                     (the credential itself is sealed to the node); put TLS in front of it",
+                    d.listen
+                );
+            } else {
+                tracing::info!("enrol door on {} (loopback)", d.listen);
+            }
+            l
+        }
+        None => None,
+    };
     // After binding, so agents woken by queued messages can reach the API.
     a2a.install();
     // Scheduled tasks (FR-A8): the first tick reports triggers missed while the server was down.
@@ -306,25 +524,89 @@ async fn main() -> anyhow::Result<()> {
         scheduler.set_computer_placer(Arc::new(place));
     }
     let _scheduler_task = scheduler.start();
-    // TODO(computers): "Open IDE" still takes its per-computer targets from
-    // EMBER_IDE_COMPUTERS; derive them from the computers registry (and the session's current
-    // computer) instead of a second, hand-maintained list.
+    // CI event routines (FR-L23): a failed workflow run of a project's repository starts them.
+    let ci_watcher = ember_server::schedules::ci::CiWatcher::new(
+        scheduler.clone(),
+        Arc::new(ember_server::schedules::ci::NodeCiSource::new(sessions.clone(), computers.clone())),
+    );
+    let _ci_task = ci_watcher.start(ember_server::schedules::ci::CiWatcher::interval_from_env());
+    // "Open IDE" takes its computers from the registry and the session's current computer
+    // (FR-L7, FR-W4); EMBER_IDE_COMPUTERS stays as an override merged onto them.
     let ide = Arc::new(ember_server::api::ide::IdeConfig::from_env()?);
+    // FR-P5 (#26): OSE terminals run tasks through `ember-term`; put it on the OSE child's PATH
+    // and point it at the built-in node's `local.json`. The node starts now so the file names
+    // the running node before a task asks for it. [provisional]
+    let ember_term_dir = ember_server::ose::find_ember_term_dir(
+        std::env::var_os("EMBER_TERM_BIN"),
+        std::env::current_exe().ok(),
+    );
+    if ember_term_dir.is_none() {
+        tracing::warn!("ember-term not found (EMBER_TERM_BIN or next to ember-server); VS Code tasks use it only if it is on PATH");
+    }
+    if ember_term_dir.is_some() && local_node_options.state_dir.is_some() {
+        if let Err(e) = computers.local_node_client() {
+            tracing::warn!("local node did not start for ember-term: {e}");
+        }
+    }
+    let ose = Arc::new(ember_server::ose::OseManager::default().with_terminal_env(
+        ember_server::ose::TerminalEnv {
+            ember_term_dir,
+            local_node_state_dir: local_node_options.state_dir.clone(),
+        },
+    ));
+    // A SIGKILL of the previous server skips the token file drop (#521).
+    ose.sweep_stale_tokens();
+    let transfers = ember_server::transfers::TransferManager::new(
+        &data_dir,
+        Some(devices.clone()),
+        Some(computers.clone()),
+    );
+    // The guest router is built only when the door is on, wrapped only by the door's guards, and
+    // never merged into `app` (not under auth::protect either).
+    let guest_app = guest_door.as_ref().map(|d| {
+        d.wrap_limited(
+            ember_server::channels::guest::guest_router_with_a2a(
+                store_for_guest.clone(),
+                sessions.clone(),
+                &data_dir,
+                a2a.clone(),
+            ),
+            d.limits(),
+        )
+    });
+    // The enrol door's router is built only when the door is on, wrapped only by the door's
+    // guards, and never merged into `app` or `local_app` (not under auth::protect either).
+    let enrol_gate = enrol_door
+        .as_ref()
+        .filter(|d| d.auto_close)
+        .map(|d| ember_server::enrol_door::DoorGate::new(d.clone(), enrol.clone()));
+    let enrol_app = enrol_door.as_ref().filter(|d| !d.auto_close).map(|d| d.app(enrol.clone()));
     let app = ember_server::api::router(sessions.clone())
         .merge(computers::api::router(computers.clone(), sessions.clone()))
-        .merge(ember_server::api::ide::router(sessions, ide))
+        .merge(computers::terms::router(computers.clone()))
+        .merge(computers::metrics::router(computers.clone()))
+        .merge(computers::fs::router(computers.clone()))
+        .merge(computers::transfers::router(computers.clone()))
+        .merge(computers::ports::router(computers.clone()))
+        .merge(ember_server::api::harnesses::router(sessions.clone(), computers.clone()))
+        .merge(ember_server::api::git::router(sessions.clone(), computers.clone()))
+        .merge(ember_server::api::integrations::router(sessions.clone(), computers.clone()))
+        .merge(ember_server::api::ide::router_with_computers_and_ose(sessions.clone(), ide, computers.clone(), ose.clone()))
+        .merge(ember_server::api::ide_extensions::router(computers.clone(), ose))
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
         .merge(ember_server::schedules::api::router(scheduler))
         .merge(ember_server::mcp::api::router(mcp))
+        .merge(ember_server::channels::api::router_with_a2a_door(store_for_channels, sessions.clone(), &data_dir, a2a.clone(), guest_door.clone()))
         .merge(ember_server::a2a::api::router(a2a))
         .merge(ember_server::accounts::api::router(accounts))
         .merge(ember_server::chatgpt::api::router(chatgpt))
         .merge(ember_server::browser::api::router(browsers.clone()))
-        .merge(ember_server::hub::api::router(hub.clone(), computers.clone()));
+        .merge(ember_server::hub::api::router(hub.clone(), computers.clone()))
+        .merge(ember_server::transfers::router(transfers));
     // Over the transport: the same API to allowed devices, without device management.
     let transport_task = match &net {
         Some(n) => {
-            let serve = server_transport::serve(&n.transport, app.clone(), devices.gate().clone())?;
+            let serve = server_transport::serve_scoped(&n.transport, app.clone(), devices.clone())?;
             tracing::info!(
                 peer = %n.transport.peer_id(),
                 service = server_transport::SERVER_SERVICE,
@@ -343,12 +625,140 @@ async fn main() -> anyhow::Result<()> {
     let local_app = app
         .merge(devices::api::router(devices.clone()))
         .merge(antigravity::router(agy_hooks))
-        .merge(ember_server::hub::api::admin_router(hub.clone(), computers.clone()));
-    axum::serve(listener, local_app)
+        .merge(ember_server::hub::api::admin_router(hub.clone(), computers.clone()))
+        // FR-C1: minting an enrol code is an admin act, local and token-protected only. There is
+        // no redeem route (docs/design/COMPUTERS.md, "Adding a computer with an enrol code").
+        // FR-C2c: the owner's confirm and deny are on this router too, and so is the registrar
+        // that adds the confirmed computer to the registry.
+        .merge(computers::enrol::router_with_gate(
+            enrol.clone(),
+            enrol_door_url,
+            Arc::new(
+                computers::enrol::ComputersRegistrar::new(computers.clone())
+                    .with_server_peer_id(enrol.server_peer_id().map(String::from)),
+            ),
+            enrol_gate.clone(),
+        ));
+    // FR-S12: the live owner keys, in memory only.
+    let owner = ember_server::owner::Owner::from_env();
+    if owner.presence() == ember_server::owner::Presence::Warn {
+        tracing::warn!("owner presence is in warn mode: owner routes are served with the server token alone and logged (EMBER_OWNER_PRESENCE=enforce refuses them)");
+    }
+    // FR-S9, FR-S10: the token and the Origin/Host check on the local listener, every route.
+    // The transport above serves `app` unwrapped: its callers passed the device gate (FR-N7).
+    let local_app = {
+        tracing::info!(
+            "server token file: {} (send it as Authorization: Bearer)",
+            ember_server::auth::token_path(&data_dir).display()
+        );
+        let mut hosts: Vec<String> = std::env::var("EMBER_ALLOWED_HOSTS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::to_string)
+            .collect();
+        if let Ok(u) = std::env::var("EMBER_AGENT_URL") {
+            if let Some((_, rest)) = u.split_once("://") {
+                hosts.push(ember_server::api::origin::host_of(rest.split('/').next().unwrap_or("")));
+            }
+        }
+        // The token file is followed, so `ember-server rotate-token` and
+        // `POST /api/server-token/rotate` take effect without a restart (#369).
+        let auth = ember_server::auth::ServerAuth::with_token_file(&data_dir, addr, hosts)?;
+        let local_app = local_app.merge(ember_server::auth::rotate_router(auth.clone()));
+        // FR-S12: owner routes also need the owner key. The transport door has the device scope.
+        ember_server::auth::protect_with_owner(local_app, auth, owner.clone())
+    };
+    // FR-S12: the claim socket (unix) or claim pipe (Windows, #815). Without it no key can be
+    // claimed: in enforce mode the owner routes of the local listener then stay closed; the rest
+    // of the server works.
+    #[cfg(any(unix, windows))]
+    let _owner_door = {
+        // The shim folder is scanned on every claim, shims left by an earlier server included.
+        let cfg = ember_server::owner::door::DoorConfig::for_server(Some(data_dir.join("shims")));
+        if cfg.confirm == ember_server::owner::Confirm::Off {
+            tracing::warn!("EMBER_OWNER_CONFIRM=off: owner claims are not confirmed by the console code");
+        }
+        match ember_server::owner::door::OwnerDoor::bind(&data_dir, owner.clone(), cfg) {
+            Ok(door) => {
+                tracing::info!("owner door: {}", door.path().display());
+                Some(door)
+            }
+            Err(e) => {
+                tracing::error!("owner door could not be bound, no owner key can be claimed (in enforce mode owner routes stay closed): {e}");
+                None
+            }
+        }
+    };
+    #[cfg(not(any(unix, windows)))]
+    tracing::warn!("no owner door on this platform: owner presence stays in warn mode (FR-S12)");
+    if let Some(rt) = &shim_runtime {
+        let rejoined = sessions.rejoin_shims(rt).await;
+        if !rejoined.is_empty() {
+            tracing::info!("rejoined {} running session(s) from the previous server", rejoined.len());
+        }
+    }
+    // The guest door stops with the owner server. Its failure never stops the owner server.
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let guest_task = match (guest_listener, guest_app) {
+        (Some(listener), Some(app)) => {
+            let mut stop = stop_rx.clone();
+            Some(tokio::spawn(async move {
+                let shutdown = async move {
+                    let _ = stop.wait_for(|v| *v).await;
+                };
+                if let Err(e) = ember_server::guest_door::GuestDoor::serve(listener, app, shutdown).await {
+                    tracing::error!("guest door failed and is closed: {e}");
+                }
+            }))
+        }
+        _ => None,
+    };
+    // The enrol door is its own task on the same stop watch. Its failure never stops the owner server.
+    let enrol_task = match (enrol_listener, enrol_app) {
+        (Some(listener), Some(app)) => {
+            let mut stop = stop_rx.clone();
+            Some(tokio::spawn(async move {
+                let shutdown = async move {
+                    let _ = stop.wait_for(|v| *v).await;
+                };
+                if let Err(e) = ember_server::enrol_door::EnrolDoor::serve(listener, app, shutdown).await {
+                    tracing::error!("enrol door failed and is closed: {e}");
+                }
+            }))
+        }
+        _ => None,
+    };
+    // The auto-closing door's watch: it closes the door when no enrolment needs it, and at stop.
+    let enrol_task = match (enrol_task, &enrol_gate) {
+        (None, Some(gate)) => {
+            let mut stop = stop_rx.clone();
+            let gate = gate.clone();
+            Some(tokio::spawn(async move {
+                let shutdown = async move {
+                    let _ = stop.wait_for(|v| *v).await;
+                };
+                gate.watch(ember_server::enrol_door::ENROL_GATE_CHECK_INTERVAL, shutdown).await;
+            }))
+        }
+        (t, _) => t,
+    };
+    let served = axum::serve(listener, local_app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
-        .await?;
+        .await;
+    let _ = stop_tx.send(true);
+    if let Some(mut task) = guest_task {
+        if tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await.is_err() {
+            task.abort();
+        }
+    }
+    if let Some(mut task) = enrol_task {
+        if tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await.is_err() {
+            task.abort();
+        }
+    }
+    served?;
     if let Some(task) = transport_task {
         task.abort();
     }

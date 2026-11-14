@@ -1,5 +1,5 @@
 //! Browser egress through a computer (FR-R1), without Chrome: the server's loopback SOCKS5
-//! listener for a registered computer → that node's `/v1/egress` → a TCP target, exactly the path
+//! listener for a registered computer → that node's `/egress` → a TCP target, exactly the path
 //! Chrome's `--proxy-server=socks5://127.0.0.1:<port>` takes. Plus: a computer a browser egresses
 //! through cannot be removed, and the browser manager resolves the computer to the listener.
 

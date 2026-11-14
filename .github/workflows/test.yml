@@ -3,24 +3,24 @@
 #   transport-isolation  .github/scripts/checks/check-transport-isolation.sh (SPEC FR-N5), when present
 #   editor-conn-pin      ember/editor-conn/src/rpc_ids.rs + PINNED_VERSION/PINNED_COMMIT match the
 #                        Code-OSS tag in ember/ose/VERSION (regenerated with gen_rpc_ids.sh), when present
+#   vendored-css         .github/scripts/checks/check-vendored-css.sh + check-no-has-selector.sh (D23, #143)
 #   no-webview           .github/scripts/checks/check-no-webview.sh (SPEC NFR-L2), when present
 #   sync-release         .github/scripts/tests/sync-release.test.sh (release keeps develop's history)
+#   bench-summary        .github/scripts/bench/tests/summarize-matrix.test.sh (NFR-N1 matrix summarizer)
+#   release-workflow     .github/scripts/checks/check-release-workflow.sh (SPEC NFR-R1)
+#   node-units           .github/scripts/checks/check-node-units.sh + its test (SPEC FR-P6)
 #   no-em-dash           .github/scripts/checks/check-no-em-dash.sh (AGENTS.md writing rules)
 #   rust                 cargo test for each ember/<crate> dir that exists
+#   oniguruma            the editor core links Oniguruma (a C library) on Windows and macOS too
+#   windows-node-server  ember-node and ember-server binaries build on Windows (#200), and the
+#                        owner presence tests run against the named-pipe door (FR-S12, #815)
 name: Test
 
 on:
-  pull_request:
-  push:
-    branches: [main, develop]
-  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
-
-concurrency:
-  group: checks-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   transport-isolation:
@@ -46,6 +46,26 @@ jobs:
       - name: Run .github/scripts/tests/sync-release.test.sh
         run: bash .github/scripts/tests/sync-release.test.sh
 
+  node-units:
+    name: Node service units keep PTY keepers (FR-P6)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run .github/scripts/tests/check-node-units.test.sh
+        run: bash .github/scripts/tests/check-node-units.test.sh
+      - name: Run .github/scripts/checks/check-node-units.sh
+        run: bash .github/scripts/checks/check-node-units.sh
+
+  bench-summary:
+    name: Bench matrix summarizer (NFR-N1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run .github/scripts/bench/tests/summarize-matrix.test.sh
+        run: bash .github/scripts/bench/tests/summarize-matrix.test.sh
+
   no-em-dash:
     name: No em-dash
     runs-on: ubuntu-latest
@@ -54,6 +74,25 @@ jobs:
       - uses: actions/checkout@v5
       - name: Run .github/scripts/checks/check-no-em-dash.sh
         run: bash .github/scripts/checks/check-no-em-dash.sh
+
+  release-workflow:
+    name: Release workflow follows the rules (NFR-R1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - run: bash .github/scripts/checks/check-release-workflow.sh
+
+  vendored-css:
+    name: Vendored Code-OSS CSS is reproducible
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Vendored copy equals pristine plus patch (offline)
+        run: bash .github/scripts/checks/check-vendored-css.sh
+      - name: No :has( in Ember-owned CSS
+        run: bash .github/scripts/checks/check-no-has-selector.sh
 
   no-webview:
     name: No webview in the launcher (NFR-L2)
@@ -116,6 +155,61 @@ jobs:
           fi
           exit "$fail"
 
+  oniguruma:
+    name: Oniguruma builds (${{ matrix.os }})
+    # onig_sys compiles the C library with `cc`. Linux is covered by "Cargo test (editor)"; these two
+    # prove a C compiler and the library build on the other desktop platforms.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ember/editor
+      - name: cargo test (Oniguruma link test)
+        working-directory: ember/editor
+        run: cargo test --locked --test onig_link
+
+  windows-node-server:
+    name: Windows node and server (windows-latest)
+    runs-on: windows-latest
+    # 30 was enough for the two builds; the owner presence tests add the test profile of the
+    # server and the client (#815).
+    timeout-minutes: 50
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ember/node
+            ember/server
+            ember/client
+      - name: cargo build (ember-node bins)
+        run: cargo build --locked --manifest-path ember/node/Cargo.toml --bins
+      - name: cargo build (ember-server bins)
+        run: cargo build --locked --manifest-path ember/server/Cargo.toml --bins
+      # FR-S12 on Windows (#815): the claim door is a named pipe there. The door tests are the
+      # unix ones run against the pipe, plus the Windows twins (access list, a taken name, the
+      # process snapshot); the client test claims a key over the real pipe.
+      - name: cargo test (owner presence, server)
+        run: cargo test --locked --manifest-path ember/server/Cargo.toml --test fr_s12_owner_presence
+      - name: cargo test (owner presence, client)
+        run: cargo test --locked --manifest-path ember/client/Cargo.toml --test fr_s12_owner_client
+
   rust:
     name: Cargo test (${{ matrix.crate }})
     runs-on: ubuntu-latest
@@ -123,7 +217,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [server, node, transport, hub, client, bridge, editor-conn, editor]
+        crate: [server, node, transport, transfer, hub, client, bridge, editor-conn, editor, app]
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_TERM_COLOR: always
@@ -141,8 +235,25 @@ jobs:
         if: steps.present.outputs.yes == 'true'
         with:
           workspaces: ember/${{ matrix.crate }}
+      - name: Renderer system libraries
+        if: steps.present.outputs.yes == 'true' && matrix.crate == 'app'
+        # The compose-rust renderer links X11, GL, fontconfig and freetype on Linux.
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxext-dev libgl1-mesa-dev libfontconfig1-dev libfreetype-dev
+      - name: Fetch every platform's crates
+        if: steps.present.outputs.yes == 'true' && matrix.crate == 'app'
+        # tests/no_webview.rs reads the whole dependency graph with `cargo metadata
+        # --offline`, which needs the crates of every platform on disk, not only Linux's.
+        working-directory: ember/app
+        run: cargo fetch --locked
       - name: cargo test
         if: steps.present.outputs.yes == 'true'
         working-directory: ember/${{ matrix.crate }}
         run: |
           if [ -f Cargo.lock ]; then cargo test --locked; else cargo test; fi
+      - name: cargo test (legacy iroh backend)
+        # SPEC FR-N5: letify-link is the default backend (INTENT D36), so the plain test above
+        # covers it. The iroh backend stays for one release; its suite runs with the feature on.
+        # Removal is tracked in a follow-up issue.
+        if: steps.present.outputs.yes == 'true' && matrix.crate == 'transport'
+        working-directory: ember/transport
+        run: cargo test --locked --features iroh

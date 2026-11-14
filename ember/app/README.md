@@ -15,6 +15,9 @@ EMBER_SERVER_URL=http://127.0.0.1:8740 cargo run      # the main server (default
 | Variable | Default | Meaning |
 |---|---|---|
 | `EMBER_SERVER_URL` | `http://127.0.0.1:8740` | Main server base URL |
+| `EMBER_SERVER_PEER` | (none) | The main server over the transport for this run (FR-N9): its peer id, `<peer id>@<ip>:<port>`, or the address JSON it prints. Beats `EMBER_SERVER_URL` and the address saved in 설정 |
+| `EMBER_RELAY_URL` | (backend default) | The relay for that reach, `letify://<server peer id>@host:7443`. Beats the relay saved in 설정 |
+| `EMBER_DEMO_DATA` | off | `1` with no `EMBER_SERVER_URL`: the app serves demo data itself and contacts no server (demo only) |
 | `EMBER_DATA_DIR` | `<OS data dir>/ember` | Cache (`client-cache.json`), prefs (`prefs.json`), `exports/` |
 | `EMBER_LOG` | `warn,ember_app=info,ember_client=info` | `tracing` filter |
 | `DIOXUS_COMPOSE_RENDERER_DIR` | (download) | Use a renderer you built instead of the released one (absolute path) |
@@ -30,6 +33,97 @@ where this checkout sits. To build against a local checkout instead:
 ```sh
 cargo run --config 'patch."https://github.com/DarkPyonix/dioxus-compose".dioxus-compose.path="/abs/path/to/dioxus-compose/dioxus-compose"'
 ```
+
+## Android
+
+The same screens run on Android as one APK (FR-L36, #770), built the way the compose-rust
+samples are: this crate is also a `cdylib`, `src/android.rs` declares the entry with
+`compose_rust::android_application!`, and dx (dioxus-cli 0.7, the packager only) generates the
+Gradle project into which compose-rust's build script puts the renderer's Kotlin.
+
+Needs: dx (`cargo install dioxus-cli`), the Android SDK with NDK 27.1.12297006
+(`ANDROID_HOME`, `ANDROID_NDK_HOME`; the script defaults to `~/Library/Android/sdk`), the Rust
+target (`rustup target add aarch64-linux-android`) and a JDK no newer than 21 in `JAVA_HOME`
+(the Android Gradle plugin's `jlink` step fails above 21).
+
+```sh
+cd ember/app
+JAVA_HOME=$(/usr/libexec/java_home -v 21) ./scripts/build-android.sh     # debug APK, arm64-v8a
+adb install -r target/dx/ember-app/debug/android/app/app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n dev.darkpyonix.ember/dev.dioxus.main.MainActivity \
+    --es EMBER_DEMO_DATA 1                                               # demo data, no server
+adb shell am start -n dev.darkpyonix.ember/dev.dioxus.main.MainActivity \
+    --es EMBER_SERVER_URL http://192.168.0.10:8740                       # a main server
+```
+
+The script is `dx build --platform android --target aarch64-linux-android` with
+`COMPOSE_RUST_ANDROID_KOTLIN_DIR` set to the generated project's Kotlin source root, so that
+compose-rust writes no Activity over Ember's own, and with the Gradle daemon off
+(`GRADLE_OPTS=-Dorg.gradle.daemon=false`: dx generates the Gradle project, so there is no
+`gradle.properties` of Ember's to put it in).
+
+| Piece | What |
+|---|---|
+| `android/MainActivity.kt` | The Activity (named by `android_main_activity` in `Dioxus.toml`). It sets `EMBER_DATA_DIR` to the application's files directory, passes the launch settings, and sends the system back to the app. Its package (`dev.dioxus.main`) and the library name (`libmain.so`) are dx's; the application id is `dev.darkpyonix.ember` |
+| `src/android.rs` | The entry point and the JNI function behind back |
+| `src/ui/back.rs` | The back order: sheet, detail view, 홈, then leave the app |
+
+The launch settings are the string extras `EMBER_DEMO_DATA`, `EMBER_SERVER_URL`,
+`EMBER_CR_SHELL` and `EMBER_CR_ROUTE`, read as the variables of the same names. Only a
+debuggable build reads them, and only when the process starts (stop the app first:
+`adb shell am force-stop dev.darkpyonix.ember`). A release build names a remote server only
+through 설정 (below). The process is killed, not shut down, so prefs are written when they change and
+the cache by the client's own writer.
+
+### A phone or a second computer as a device (FR-N9, #856)
+
+A second device reaches the main server over the peer-to-peer transport, never by plain HTTP
+(the token is not sent to a remote host, FR-S11, and the server's TCP listener takes loopback
+only, D37). The device's key is its credential (FR-N7). Until a pairing flow exists, the owner
+copies the device's peer id to the server by hand:
+
+1. Start the server with the transport on a fixed port (`EMBER_TRANSPORT_LISTEN`, #863), so
+   the address the device saves survives a server restart. It prints its peer id, its address
+   and the line for the device:
+
+   ```sh
+   cd ember/server
+   EMBER_TRANSPORT=1 EMBER_TRANSPORT_LISTEN=0.0.0.0:7444 cargo run
+   # ember server peer id: 6f1c...
+   # ember server peer addr: {"peer":"6f1c...","relays":[...],"direct":["192.168.0.10:7444"]}
+   # ember server device address: 6f1c...@192.168.0.10:7444
+   ```
+
+   The host in that line is the bind IP, or with `0.0.0.0` the first address the server
+   advertises (`EMBER_LETIFY_ADVERTISE`, or the observed public address). When it knows none,
+   the line reads `6f1c...@<host>:7444 (replace <host> ...)`: put in the address or name the
+   device reaches this computer by. Any port works; the transport admits only allowed device
+   keys, so binding `0.0.0.0` is fine. Without `EMBER_TRANSPORT_LISTEN` the port is random at
+   every start and no device line is printed.
+
+2. On the device, open 설정 and read "이 기기의 peer id" (복사 copies it). The key behind it is
+   `<data dir>/device.key`, made on first use with mode 0600.
+3. On the server's computer, allow the device:
+
+   ```sh
+   cd ember/server
+   cargo run -- owner devices add <peer id> phone
+   ```
+
+4. On the device, paste the `ember server device address:` line into 설정 > 이 기기 > 서버 주소
+   as printed (or type `<peer id>@<ip>:<port>`, or the `peer addr` JSON line). Press 저장 and
+   restart the app.
+
+A device the server does not admit shows "이 기기가 서버에 등록되어 있지 않거나 등록이
+해제되었습니다." at start and in 설정. With `EMBER_TRANSPORT_LISTEN` the saved address keeps
+working after the server restarts; without it the direct port changes at every start and the
+address is entered again. The peer id plus the server's relay alone does not connect a device
+(#863).
+Clearing the address and saving goes back to the local server. Not over the transport yet: the
+terminal relay and the separate Ember 에디터 window, which still need an HTTP address.
+
+Not on Android yet: the Ember 에디터 window and VS Code Web (FR-W5), the share sheet (FR-F7),
+opening a URL in the system browser, a CI job for this build.
 
 ## Tests
 
@@ -90,3 +184,18 @@ pattern).
   server; they are dropped on the next prefs save.
 - **Ember IDE target**: placeholder until the editor core (M8).
 - **Auto-scroll** to the newest message: `LazyColumn` has no scroll-to API yet.
+
+### Linux GUI test container
+
+On an arm64 Docker host, run `scripts/linux-gui/start.sh` from this checkout. The first
+start builds the release binary in the container with two Cargo jobs. The named
+`ember-linux-gui-target` volume caches build output. Check progress with
+`docker logs -f ember-linux-gui`.
+
+Use `scripts/linux-gui/capture.sh home` to save `.scratch/linux-gui/home.png`,
+`scripts/linux-gui/click.sh 100 100` to click, and `scripts/linux-gui/key.sh Tab` to
+send a key. The display is 1440 by 900 and uses Mesa software rendering. The app
+runs with demo data and without a server.
+
+When finished, remove the container with `docker rm -f ember-linux-gui` and the
+build cache with `docker volume rm ember-linux-gui-target`.

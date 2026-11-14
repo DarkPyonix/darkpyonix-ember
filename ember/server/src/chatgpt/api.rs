@@ -1,18 +1,18 @@
 //! HTTP routes for Sign in with ChatGPT (FR-U4). Every route answers 403 on a hosted server.
 //!
-//! - `GET    /api/v1/chatgpt`                          enabled?, redirect URI, how the cap works
-//! - `POST   /api/v1/chatgpt/signin`                   `{label?, account_id?}` → authorization URL
-//! - `GET    /api/v1/chatgpt/signin/{state}`           `pending` | `signed_in` | `failed`
-//! - `POST   /api/v1/chatgpt/signin/complete`          `{callback_url}` pasted by the user
+//! - `GET    /api/chatgpt`                          enabled?, redirect URI, how the cap works
+//! - `POST   /api/chatgpt/signin`                   `{label?, account_id?}` → authorization URL
+//! - `GET    /api/chatgpt/signin/{state}`           `pending` | `signed_in` | `failed`
+//! - `POST   /api/chatgpt/signin/complete`          `{callback_url}` pasted by the user
 //! - `GET    /auth/callback`                           the loopback redirect target
-//! - `GET    /api/v1/chatgpt/accounts`                 accounts with today's tokens and the cap
-//! - `GET    /api/v1/chatgpt/accounts/{id}`
-//! - `DELETE /api/v1/chatgpt/accounts/{id}`            revoke (best effort) and forget
-//! - `POST   /api/v1/chatgpt/accounts/{id}/refresh`    refresh the tokens now
-//! - `POST   /api/v1/chatgpt/accounts/{id}/clear-limit`
-//! - `GET    /api/v1/chatgpt/accounts/{id}/models`     models the plan may use
+//! - `GET    /api/chatgpt/accounts`                 accounts with today's tokens and the cap
+//! - `GET    /api/chatgpt/accounts/{id}`
+//! - `DELETE /api/chatgpt/accounts/{id}`            revoke (best effort) and forget
+//! - `POST   /api/chatgpt/accounts/{id}/refresh`    refresh the tokens now
+//! - `POST   /api/chatgpt/accounts/{id}/clear-limit`
+//! - `GET    /api/chatgpt/accounts/{id}/models`     models the plan may use
 //!
-//! No response ever contains a token. Usage per day appears in `GET /api/v1/usage` with the
+//! No response ever contains a token. Usage per day appears in `GET /api/usage` with the
 //! agent accounts' rows.
 
 use std::collections::HashMap;
@@ -31,19 +31,19 @@ use crate::store::now_ms;
 
 pub fn router(chatgpt: Arc<ChatGpt>) -> Router {
     Router::new()
-        .route("/api/v1/chatgpt", get(status))
-        .route("/api/v1/chatgpt/signin", post(start))
-        .route("/api/v1/chatgpt/signin/complete", post(complete_pasted))
-        .route("/api/v1/chatgpt/signin/{state}", get(signin_status))
+        .route("/api/chatgpt", get(status))
+        .route("/api/chatgpt/signin", post(start))
+        .route("/api/chatgpt/signin/complete", post(complete_pasted))
+        .route("/api/chatgpt/signin/{state}", get(signin_status))
         .route(super::oauth::CALLBACK_PATH, get(callback))
-        .route("/api/v1/chatgpt/accounts", get(list))
+        .route("/api/chatgpt/accounts", get(list))
         .route(
-            "/api/v1/chatgpt/accounts/{id}",
+            "/api/chatgpt/accounts/{id}",
             get(get_one).delete(sign_out),
         )
-        .route("/api/v1/chatgpt/accounts/{id}/refresh", post(refresh))
-        .route("/api/v1/chatgpt/accounts/{id}/clear-limit", post(clear_limit))
-        .route("/api/v1/chatgpt/accounts/{id}/models", get(models))
+        .route("/api/chatgpt/accounts/{id}/refresh", post(refresh))
+        .route("/api/chatgpt/accounts/{id}/clear-limit", post(clear_limit))
+        .route("/api/chatgpt/accounts/{id}/models", get(models))
         .with_state(chatgpt)
 }
 

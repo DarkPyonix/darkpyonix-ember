@@ -1,8 +1,9 @@
-//! `/v1/exec-server`: the raw byte relay to `codex exec-server --listen stdio`, exercised with a
+//! `/exec-server`: the raw byte relay to `codex exec-server --listen stdio`, exercised with a
 //! fake codex (a shell script that checks its arguments and echoes stdin back).
 
-use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
+
+mod common;
 
 use ember_node::api::{self, Node};
 use ember_node::client::{ClientError, NodeClient};
@@ -17,12 +18,10 @@ async fn relays_bytes_both_ways_and_requires_the_token() {
     let root = dir.path().canonicalize().unwrap();
     let fake = root.join("fake-codex");
     // Only the exact arguments the bridge promises are accepted.
-    std::fs::write(
+    common::write_exec_ready(
         &fake,
         "#!/bin/sh\n[ \"$*\" = \"exec-server --listen stdio\" ] || { echo \"bad args: $*\" >&2; exit 2; }\nexec cat\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     // The only test in this binary, so setting process environment is safe.
     std::env::set_var(CODEX_BIN_ENV, &fake);
 

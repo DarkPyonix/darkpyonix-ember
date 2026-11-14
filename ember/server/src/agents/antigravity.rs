@@ -98,7 +98,7 @@
 //! headless gate soft-denies anything that needs a permission) **and** with the hook in
 //! [`Policy::ReadOnly`]. The pin moves only after the SPEC §A tests pass on the new version.
 //!
-//! `--sandbox` (agy's terminal sandbox) is on unless `EMBER_AGY_SANDBOX=0`. Recorded on 1.2.16:
+//! `--sandbox` (agy's terminal sandbox) is off unless `EMBER_AGY_SANDBOX=1`; the hook is the gate. Recorded on 1.2.16:
 //! with it, shell commands could not write even in the project (`Operation not permitted`) while
 //! the file-edit tools could.
 //!
@@ -131,13 +131,34 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
+use super::proc::{reattach_agent, spawn_agent, AgentCommand, AgentProc};
 use super::{AgentAdapter, AgentKind, AgentRun, Detected, McpServer, StartRequest};
-use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
+use crate::events::{approval_policy, AgentEvent, ApprovalDecision, TurnOutcome};
 
 /// The route agy's `PreToolUse` hook calls (local listener only).
-pub const HOOK_ROUTE: &str = "/api/v1/agents/antigravity/hook";
+pub const HOOK_ROUTE: &str = "/api/agents/antigravity/hook";
 /// Name of Ember's hook in `hooks.json`; also what the pre-flight check looks for.
 pub const HOOK_NAME: &str = "ember-approvals";
+/// Spawn env that points agy at a model proxy (SPEC FR-U6, #146; `members::proxy_env`). agy reads
+/// it itself, but only in its Gemini API mode, so [`proxy_args`] adds `modelProvider: "gemini"`.
+pub const PROXY_BASE_ENV: &str = "GOOGLE_GEMINI_BASE_URL";
+/// The key agy sends to the proxy (as `x-goog-api-key`) in that mode.
+pub const PROXY_KEY_ENV: &str = "GEMINI_API_KEY";
+/// agy checks `GOOGLE_API_KEY` before `GEMINI_API_KEY`, so `members::proxy_env` sets both to the
+/// member's proxy key to prevent a server-side `GOOGLE_API_KEY` from overriding the member key.
+pub const PROXY_ALT_KEY_ENV: &str = "GOOGLE_API_KEY";
+
+/// Extra agy arguments when the spawn env carries a proxy base URL: a per-session `--settings`
+/// (never saved to `~/.gemini`) that switches agy from its Google sign-in to the Gemini API route.
+/// Without it agy ignores both variables and asks for a login (probed on agy 1.5.1).
+pub fn proxy_args(env: &[(String, String)]) -> Vec<String> {
+    if env.iter().any(|(k, v)| k == PROXY_BASE_ENV && !v.is_empty()) {
+        vec!["--settings".into(), r#"{"modelProvider":"gemini"}"#.into()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// The agy version the SPEC §A Antigravity hook tests passed on. Any other version runs read-only.
 pub const PINNED_VERSION: &str = "1.2.16";
 /// agy's own timeout for the hook command, in seconds (agy's default is 30). Measured on 1.2.16:
@@ -189,7 +210,8 @@ pub enum Policy {
 
 pub struct AntigravityAdapter {
     bin: PathBuf,
-    /// `<data dir>/agy`: session roots and the conversation → root index.
+    /// `<runtime dir>/agy`: session roots and the conversation → root index (FR-A11: outside
+    /// the data dir, so the agent sandbox can deny all of it).
     home: PathBuf,
     hooks: Arc<HookBroker>,
     /// Pass `--sandbox`.
@@ -198,25 +220,26 @@ pub struct AntigravityAdapter {
 
 impl AntigravityAdapter {
     pub fn new(bin: impl Into<PathBuf>, home: impl Into<PathBuf>, hooks: Arc<HookBroker>) -> Self {
-        AntigravityAdapter { bin: bin.into(), home: home.into(), hooks, sandbox: true }
+        AntigravityAdapter { bin: bin.into(), home: home.into(), hooks, sandbox: false }
     }
 
-    /// Turn agy's terminal sandbox off (`--sandbox` is passed by default).
-    pub fn without_sandbox(mut self) -> Self {
-        self.sandbox = false;
+    /// Turn agy's terminal sandbox on (`--sandbox`; off by default, the hook is the gate).
+    pub fn with_sandbox(mut self) -> Self {
+        self.sandbox = true;
         self
     }
 
     /// The binary from `EMBER_AGY_BIN`, else `agy` on `PATH`; session roots under
-    /// `<data_dir>/agy`; `EMBER_AGY_SANDBOX=0` drops `--sandbox`.
+    /// `<runtime dir>/agy` (the data dir's sibling, [`crate::runtime_dir`]); `EMBER_AGY_SANDBOX=1`
+    /// adds `--sandbox`.
     pub fn from_env(data_dir: &Path, hooks: Arc<HookBroker>) -> Self {
         let adapter = Self::new(
             std::env::var_os("EMBER_AGY_BIN").unwrap_or_else(|| "agy".into()),
-            data_dir.join("agy"),
+            crate::runtime_dir::runtime_dir(data_dir).join("agy"),
             hooks,
         );
-        if std::env::var("EMBER_AGY_SANDBOX").as_deref() == Ok("0") {
-            adapter.without_sandbox()
+        if std::env::var("EMBER_AGY_SANDBOX").as_deref() == Ok("1") {
+            adapter.with_sandbox()
         } else {
             adapter
         }
@@ -309,6 +332,14 @@ impl AgentAdapter for AntigravityAdapter {
         AgentKind::Antigravity
     }
 
+    fn rejoins_shim(&self) -> bool {
+        true
+    }
+
+    fn binary(&self) -> Option<PathBuf> {
+        Some(self.bin.clone())
+    }
+
     async fn detect(&self) -> Detected {
         let out = Command::new(&self.bin)
             .arg("--version")
@@ -323,7 +354,7 @@ impl AgentAdapter for AntigravityAdapter {
                 version: String::from_utf8_lossy(&o.stdout)
                     .split_whitespace()
                     .next()
-                    .map(String::from),
+                    .and_then(super::version_token),
             },
             _ => Detected { kind: AgentKind::Antigravity, installed: false, version: None },
         }
@@ -353,7 +384,8 @@ impl AgentAdapter for AntigravityAdapter {
         let approvals = Arc::new(RunApprovals::new(events.clone(), APPROVAL_TIMEOUT, &root, Policy::ReadOnly));
         // A fresh token per run (session (re)creation); revoked in `shutdown` / `Drop`.
         self.hooks.register(&token, approvals.clone());
-        Ok(Box::new(AgyRun {
+        let reattached = reattach_agent(&req.env).await?;
+        let mut run = AgyRun {
             bin: self.bin.clone(),
             home: self.home.clone(),
             root,
@@ -367,7 +399,12 @@ impl AgentAdapter for AntigravityAdapter {
             state: Arc::new(StdMutex::new(TurnState::default())),
             turn_task: None,
             policy: None,
-        }))
+        };
+        if let Some(proc) = reattached {
+            run.approvals.open();
+            run.start_reader(proc);
+        }
+        Ok(Box::new(run))
     }
 }
 
@@ -693,6 +730,34 @@ fn mentions(v: &Value, roots: &[String]) -> bool {
     }
 }
 
+/// The first of `denied` (the agent sandbox's directories, FR-A11) that a string in `v` names,
+/// as a path prefix or inside a command line. agy's file tools and shell commands both carry
+/// paths as strings, so a mention is enough to deny.
+pub fn data_dir_mentioned(v: &Value, denied: &[PathBuf]) -> Option<PathBuf> {
+    let strs: Vec<String> = denied.iter().map(|d| d.to_string_lossy().trim_end_matches('/').to_string()).collect();
+    if strs.is_empty() {
+        return None;
+    }
+    let hit = |s: &str| {
+        strs.iter().position(|d| {
+            s.match_indices(d.as_str()).any(|(i, _)| {
+                // `/h/.ember` must not match `/h/.ember-runtime` or `/h/.ember2`.
+                let next = s[i + d.len()..].chars().next();
+                next.is_none_or(|c| c == '/' || c.is_whitespace() || "\"'`;:)".contains(c))
+            })
+        })
+    };
+    fn walk(v: &Value, hit: &dyn Fn(&str) -> Option<usize>) -> Option<usize> {
+        match v {
+            Value::String(s) => hit(s),
+            Value::Array(a) => a.iter().find_map(|x| walk(x, hit)),
+            Value::Object(o) => o.values().find_map(|x| walk(x, hit)),
+            _ => None,
+        }
+    }
+    walk(v, &hit).map(|i| denied[i].clone())
+}
+
 /// Pending approvals of one run.
 struct RunApprovals {
     events: mpsc::Sender<AgentEvent>,
@@ -757,7 +822,7 @@ impl RunApprovals {
         let call = HookCall::from_payload(payload);
         let (open, policy, timeout, always) = {
             let st = self.state.lock().unwrap();
-            (st.open, st.policy, st.timeout, st.always_allowed.contains(&call.tool))
+            (st.open, st.policy, st.timeout, approval_policy(&call.tool, false).remember_always && st.always_allowed.contains(&call.tool))
         };
         if !open {
             return deny_reply("No Ember turn is running for this Antigravity session.");
@@ -768,6 +833,9 @@ impl RunApprovals {
                  the project's folder instead (use it as the working directory).",
                 self.roots[0]
             ));
+        }
+        if let Some(dir) = data_dir_mentioned(&call.input, crate::sandbox::denied_dirs()) {
+            return deny_reply(&crate::sandbox::denied_message(&dir));
         }
         if READ_ONLY_TOOLS.contains(&call.tool.as_str()) {
             let mut bases: Vec<PathBuf> = payload["workspacePaths"]
@@ -807,6 +875,7 @@ impl RunApprovals {
                 approval_id: call.approval_id.clone(),
                 tool: call.tool.clone(),
                 input: call.input.clone(),
+                needs_person: false,
             })
             .await;
         if asked.is_err() {
@@ -849,7 +918,7 @@ impl RunApprovals {
             .pending
             .remove(approval_id)
             .ok_or_else(|| anyhow::anyhow!("unknown approval {approval_id}"))?;
-        if decision == ApprovalDecision::AllowAlways {
+        if decision == ApprovalDecision::AllowAlways && approval_policy(&tool, false).remember_always {
             st.always_allowed.insert(tool);
         }
         // The hook may have given up already; nothing to do then.
@@ -904,6 +973,23 @@ struct AgyRun {
 }
 
 impl AgyRun {
+    fn start_reader(&mut self, proc: AgentProc) {
+        let seq = {
+            let mut st = self.state.lock().unwrap();
+            st.active = true;
+            st.seq += 1;
+            st.interrupted = false;
+            st.pid = proc.pid;
+            st.seq
+        };
+        let turn = Turn {
+            events: self.events.clone(), state: self.state.clone(),
+            approvals: self.approvals.clone(), home: self.home.clone(),
+            root: self.new_root.then(|| self.root.clone()), seq,
+        };
+        self.turn_task = Some(tokio::spawn(turn.run(proc)));
+    }
+
     /// End a turn that could not start: `Error` then `TurnEnded { Failed }`.
     async fn fail(&self, message: String) -> anyhow::Result<()> {
         self.events.send(AgentEvent::Error { message }).await?;
@@ -952,6 +1038,7 @@ impl AgyRun {
         let out = Command::new(&self.bin)
             .args(["-p", "/hooks", "--output-format", "json", "--add-dir"])
             .arg(&self.root)
+            .args(proxy_args(&self.req.env))
             .envs(self.req.env.iter().map(|(k, v)| (k, v)))
             .current_dir(&self.req.cwd)
             .stdin(Stdio::null())
@@ -1009,7 +1096,7 @@ impl AgentRun for AgyRun {
             let st = self.state.lock().unwrap();
             st.native_id.clone().or_else(|| self.req.resume_native_id.clone())
         };
-        let args = AntigravityAdapter::turn_args(
+        let mut args = AntigravityAdapter::turn_args(
             text,
             conversation.as_deref(),
             self.req.model.as_deref(),
@@ -1017,42 +1104,21 @@ impl AgentRun for AgyRun {
             policy,
             self.sandbox,
         );
+        args.extend(proxy_args(&self.req.env));
         self.approvals.open();
-        let spawned = Command::new(&self.bin)
-            .envs(self.req.env.iter().map(|(k, v)| (k, v)))
-            .args(&args)
-            .current_dir(&self.req.cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn();
-        let mut child = match spawned {
-            Ok(c) => c,
+        let proc = match spawn_agent(AgentCommand {
+            program: self.bin.clone(), args, env: self.req.env.clone(),
+            cwd: self.req.cwd.clone(), reattachable: true,
+            mem_limit_mb: self.req.mem_limit_mb,
+            os_sandbox: true,
+        }).await {
+            Ok(proc) => proc,
             Err(e) => {
                 self.approvals.close();
                 return self.fail(format!("failed to start {}: {e}", self.bin.display())).await;
             }
         };
-        let seq = {
-            let mut st = self.state.lock().unwrap();
-            st.active = true;
-            st.seq += 1;
-            st.interrupted = false;
-            st.pid = child.id();
-            st.seq
-        };
-        let stdout = child.stdout.take().expect("stdout is piped");
-        let stderr = child.stderr.take().expect("stderr is piped");
-        let turn = Turn {
-            events: self.events.clone(),
-            state: self.state.clone(),
-            approvals: self.approvals.clone(),
-            home: self.home.clone(),
-            root: self.new_root.then(|| self.root.clone()),
-            seq,
-        };
-        self.turn_task = Some(tokio::spawn(turn.run(child, stdout, stderr)));
+        self.start_reader(proc);
         Ok(())
     }
 
@@ -1123,19 +1189,16 @@ struct Turn {
 }
 
 impl Turn {
-    async fn run(
-        mut self,
-        mut child: tokio::process::Child,
-        stdout: tokio::process::ChildStdout,
-        stderr: tokio::process::ChildStderr,
-    ) {
-        let pid = child.id();
+    async fn run(mut self, proc: AgentProc) {
+        let AgentProc { stdin: _stdin, stdout, stderr, pid, handle, .. } = proc;
         let stderr_task = tokio::spawn(async move {
             let mut errors = StderrErrors::default();
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::warn!(target: "ember::agy", pid, "stderr: {line}");
-                errors.push(&line);
+            if let Some(stderr) = stderr {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::warn!(target: "ember::agy", pid, "stderr: {line}");
+                    errors.push(&line);
+                }
             }
             errors
         });
@@ -1177,10 +1240,10 @@ impl Turn {
             }
         }
         let errors = stderr_task.await.unwrap_or_default();
-        let status = child.wait().await;
+        let status = handle.shutdown(Duration::from_secs(1)).await;
         if end.is_none() {
             let reason = errors.message().unwrap_or_else(|| match &status {
-                Ok(s) => format!("agy exited ({s}) without a result"),
+                Ok(()) => "agy exited without a result".to_string(),
                 Err(e) => format!("agy failed: {e}"),
             });
             if let Some(limit) = errors.rate_limit() {
@@ -1618,6 +1681,13 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_is_off_by_default_and_on_when_asked() {
+        let a = AntigravityAdapter::new("agy", "/h", HookBroker::new());
+        assert!(!a.sandbox, "the hook is the gate; EMBER_AGY_SANDBOX unset means no --sandbox");
+        assert!(a.with_sandbox().sandbox);
+    }
+
+    #[test]
     fn args_cover_resume_model_sandbox_and_the_session_root() {
         let args = AntigravityAdapter::turn_args(
             "hi",
@@ -1638,6 +1708,14 @@ mod tests {
         let args = AntigravityAdapter::turn_args("-x", None, None, Path::new("/r"), Policy::Gated, false);
         assert_eq!(args[1], " -x");
         assert!(!args.iter().any(|a| a.starts_with("--conversation") || a == "--model" || a == "--sandbox"));
+    }
+
+    #[test]
+    fn fr_u6_proxy_args_switch_agy_to_the_gemini_api_route_only_with_a_base_url() {
+        let env = vec![(PROXY_BASE_ENV.to_string(), "http://127.0.0.1:1".to_string())];
+        assert_eq!(proxy_args(&env), ["--settings", r#"{"modelProvider":"gemini"}"#]);
+        assert!(proxy_args(&[]).is_empty());
+        assert!(proxy_args(&[("OTHER".into(), "x".into())]).is_empty());
     }
 
     #[test]

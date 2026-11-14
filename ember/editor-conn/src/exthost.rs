@@ -45,6 +45,7 @@ pub mod proxy {
     pub const EXT_HOST_EXTENSION_SERVICE: &str = "ExtHostExtensionService";
     pub const EXT_HOST_WORKSPACE: &str = "ExtHostWorkspace";
     pub const EXT_HOST_FILE_SYSTEM_INFO: &str = "ExtHostFileSystemInfo";
+    pub const EXT_HOST_SEARCH: &str = "ExtHostSearch";
 
     pub const MAIN_THREAD_COMMANDS: &str = "MainThreadCommands";
     pub const MAIN_THREAD_DIAGNOSTICS: &str = "MainThreadDiagnostics";
@@ -53,6 +54,9 @@ pub mod proxy {
     pub const MAIN_THREAD_WINDOW: &str = "MainThreadWindow";
     pub const MAIN_THREAD_WORKSPACE: &str = "MainThreadWorkspace";
     pub const MAIN_THREAD_EXTENSION_SERVICE: &str = "MainThreadExtensionService";
+    pub const MAIN_THREAD_OUTPUT_SERVICE: &str = "MainThreadOutputService";
+    pub const MAIN_THREAD_MESSAGE_SERVICE: &str = "MainThreadMessageService";
+    pub const MAIN_THREAD_SEARCH: &str = "MainThreadSearch";
 }
 
 // ---- init data ------------------------------------------------------------------------------
@@ -316,6 +320,16 @@ pub struct DocumentFilter {
     pub notebook_type: Option<String>,
 }
 
+/// `SemanticTokensLegend` (`languages.ts`, sent with `$registerDocumentSemanticTokensProvider`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticTokensLegend {
+    #[serde(default)]
+    pub token_types: Vec<String>,
+    #[serde(default)]
+    pub token_modifiers: Vec<String>,
+}
+
 // ---- Ember → extension host -----------------------------------------------------------------
 
 /// One outgoing call: target proxy, method, positional args, whether a cancellation token is
@@ -329,10 +343,10 @@ pub struct Call {
 }
 
 impl Call {
-    fn new(proxy: &'static str, method: &'static str, args: Vec<Arg>) -> Self {
+    pub(crate) fn new(proxy: &'static str, method: &'static str, args: Vec<Arg>) -> Self {
         Self { proxy, method, args, cancellable: false }
     }
-    fn cancellable(mut self) -> Self {
+    pub(crate) fn cancellable(mut self) -> Self {
         self.cancellable = true;
         self
     }
@@ -342,7 +356,7 @@ impl Call {
     }
 }
 
-fn j<T: Serialize>(v: &T) -> Arg {
+pub(crate) fn j<T: Serialize>(v: &T) -> Arg {
     Arg::Json(serde_json::to_value(v).unwrap_or(Value::Null))
 }
 
@@ -360,48 +374,139 @@ pub fn bootstrap_calls(workspace: Option<&WorkspaceData>, trusted: bool, configu
     ]
 }
 
+/// One language override block of a settings file: `"[rust]": { "editor.tabSize": 2 }`, or
+/// `"[javascript][typescript]"` with two identifiers.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConfigOverride {
+    pub identifiers: Vec<String>,
+    /// Dotted keys and their values inside the block.
+    pub values: Vec<(String, Value)>,
+}
+
+/// The settings of one scope (defaults, user, remote or workspace) as dotted keys, plus its
+/// language override blocks. It becomes one `IConfigurationModel` (configuration.ts L209-220).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConfigModel {
+    pub values: Vec<(String, Value)>,
+    pub overrides: Vec<ConfigOverride>,
+}
+
+impl ConfigModel {
+    /// A model of plain keys with no override blocks.
+    pub fn from_values(values: Vec<(String, Value)>) -> Self {
+        Self { values, overrides: Vec::new() }
+    }
+
+    /// The key Code-OSS writes an override block under: `[rust]`, `[javascript][typescript]`.
+    pub fn override_key(identifiers: &[String]) -> String {
+        identifiers.iter().map(|i| format!("[{i}]")).collect()
+    }
+
+    /// `IConfigurationModel`: `contents` nests dotted keys (as `toValuesTree` does), `keys` lists
+    /// them flat, and every override block appears three times as upstream's parser leaves it: its
+    /// own key in `keys`, its raw object in `contents`, and a nested entry in `overrides`
+    /// (`configurationModels.ts` `ConfigurationModelParser.doParseRaw` and `toOverrides`).
+    pub fn to_json(&self) -> Value {
+        let mut contents = nested_contents(&self.values);
+        let mut keys: Vec<String> = self.values.iter().map(|(k, _)| k.clone()).collect();
+        let mut overrides = Vec::new();
+        for o in &self.overrides {
+            let key = Self::override_key(&o.identifiers);
+            let raw: Map<String, Value> = o.values.iter().cloned().collect();
+            contents.insert(key.clone(), Value::Object(raw));
+            keys.push(key);
+            let inner_keys: Vec<&str> = o.values.iter().map(|(k, _)| k.as_str()).collect();
+            overrides.push(json!({
+                "identifiers": o.identifiers,
+                "keys": inner_keys,
+                "contents": nested_contents(&o.values),
+            }));
+        }
+        json!({ "contents": contents, "keys": keys, "overrides": overrides })
+    }
+}
+
+fn insert_path(obj: &mut Map<String, Value>, parts: &[&str], v: Value) {
+    match parts {
+        [] => {}
+        [last] => {
+            obj.insert((*last).to_owned(), v);
+        }
+        [head, rest @ ..] => {
+            let child = obj.entry((*head).to_owned()).or_insert_with(|| Value::Object(Map::new()));
+            if !child.is_object() {
+                *child = Value::Object(Map::new());
+            }
+            if let Some(m) = child.as_object_mut() {
+                insert_path(m, rest, v);
+            }
+        }
+    }
+}
+
+/// Dotted keys as the nested object `ConfigurationModel.contents` holds.
+fn nested_contents(entries: &[(String, Value)]) -> Map<String, Value> {
+    let mut contents = Map::new();
+    for (k, v) in entries {
+        let parts: Vec<&str> = k.split('.').collect();
+        insert_path(&mut contents, &parts, v.clone());
+    }
+    contents
+}
+
 /// `IConfigurationInitData` (extHost.protocol.ts L116) from defaults + user settings. Values are
 /// nested objects keyed by dotted paths split on `.` (as `ConfigurationModel.contents`).
 pub fn configuration_init_data(defaults: &[(String, Value, Option<u8>)], user: &[(String, Value)]) -> Value {
-    fn insert_path(obj: &mut Map<String, Value>, parts: &[&str], v: Value) {
-        match parts {
-            [] => {}
-            [last] => {
-                obj.insert((*last).to_owned(), v);
-            }
-            [head, rest @ ..] => {
-                let child = obj.entry((*head).to_owned()).or_insert_with(|| Value::Object(Map::new()));
-                if !child.is_object() {
-                    *child = Value::Object(Map::new());
-                }
-                if let Some(m) = child.as_object_mut() {
-                    insert_path(m, rest, v);
-                }
-            }
-        }
-    }
-    fn model(entries: &[(String, Value)]) -> Value {
-        let mut contents = Map::new();
-        for (k, v) in entries {
-            let parts: Vec<&str> = k.split('.').collect();
-            insert_path(&mut contents, &parts, v.clone());
-        }
-        let keys: Vec<&str> = entries.iter().map(|(k, _)| k.as_str()).collect();
-        json!({ "contents": contents, "keys": keys, "overrides": [] })
-    }
-    let empty = model(&[]);
     let default_entries: Vec<(String, Value)> = defaults.iter().map(|(k, v, _)| (k.clone(), v.clone())).collect();
-    let scopes: Vec<Value> = defaults.iter().map(|(k, _, s)| json!([k, s])).collect();
+    let scopes: Vec<(String, Option<u8>)> = defaults.iter().map(|(k, _, s)| (k.clone(), *s)).collect();
+    configuration_data(
+        &ConfigModel::from_values(default_entries),
+        &scopes,
+        &ConfigModel::from_values(user.to_vec()),
+        &ConfigModel::default(),
+        &ConfigModel::default(),
+    )
+}
+
+/// `IConfigurationInitData` with every scope Ember fills (FR-L31.17): `defaults` (contributed and
+/// Ember's own), `userLocal` (the client's settings.json), `userRemote` (the server's Machine
+/// settings.json) and `workspace` (`.vscode/settings.json`). `policy`, `application` and `folders`
+/// stay empty: Ember has no policy file, no application-scoped profile and one workspace folder,
+/// whose settings are the workspace model. The extension host merges them itself in upstream's
+/// order (`Configuration.parse`, configurationModels.ts L1163).
+pub fn configuration_data(
+    defaults: &ConfigModel,
+    scopes: &[(String, Option<u8>)],
+    user_local: &ConfigModel,
+    user_remote: &ConfigModel,
+    workspace: &ConfigModel,
+) -> Value {
+    let empty = ConfigModel::default().to_json();
+    let scopes: Vec<Value> = scopes.iter().map(|(k, s)| json!([k, s])).collect();
     json!({
-        "defaults": model(&default_entries),
+        "defaults": defaults.to_json(),
         "policy": empty,
         "application": empty,
-        "userLocal": model(user),
-        "userRemote": empty,
-        "workspace": empty,
+        "userLocal": user_local.to_json(),
+        "userRemote": user_remote.to_json(),
+        "workspace": workspace.to_json(),
         "folders": [],
         "configurationScopes": scopes,
     })
+}
+
+/// `ExtHostConfigurationShape.$acceptConfigurationChanged(data, change)` (extHost.protocol.ts
+/// L2379). `data` is the whole new `IConfigurationInitData`; `change` is `IConfigurationChange`
+/// (configuration.ts L63-66): the plain keys that changed, and per language identifier the keys
+/// that changed inside its override blocks. The extension host replaces its configuration with
+/// `data` and fires `onDidChangeConfiguration` from `change` (extHostConfiguration.ts L160-165).
+pub fn accept_configuration_changed(data: &Value, keys: &[String], overrides: &[(String, Vec<String>)]) -> Call {
+    let overrides: Vec<Value> = overrides.iter().map(|(id, keys)| json!([id, keys])).collect();
+    Call::new(
+        proxy::EXT_HOST_CONFIGURATION,
+        "$acceptConfigurationChanged",
+        vec![Arg::Json(data.clone()), Arg::Json(json!({ "keys": keys, "overrides": overrides }))],
+    )
 }
 
 /// Collect `(key, default, scope)` from extensions' `contributes.configuration`.
@@ -514,8 +619,16 @@ pub fn accept_dirty_state_changed(uri: &UriComponents, is_dirty: bool) -> Call {
     Call::new(proxy::EXT_HOST_DOCUMENTS, "$acceptDirtyStateChanged", vec![j(uri), Arg::Json(is_dirty.into())])
 }
 
+/// `$acceptModelLanguageChanged(strURL, newLanguageId)` (extHost.protocol.ts L2400): the extension
+/// host treats it as remove + add of the document under the new language id.
 pub fn accept_model_language_changed(uri: &UriComponents, language_id: &str) -> Call {
     Call::new(proxy::EXT_HOST_DOCUMENTS, "$acceptModelLanguageChanged", vec![j(uri), Arg::Json(language_id.into())])
+}
+
+/// `$acceptEncodingChanged(strURL, encoding)` (extHost.protocol.ts L2403), `encoding` a Code-OSS
+/// encoding id such as `utf16le`.
+pub fn accept_encoding_changed(uri: &UriComponents, encoding: &str) -> Call {
+    Call::new(proxy::EXT_HOST_DOCUMENTS, "$acceptEncodingChanged", vec![j(uri), Arg::Json(encoding.into())])
 }
 
 /// `$provideHover(handle, resource, position, context | undefined, token)` → `HoverWithId | undefined`
@@ -545,6 +658,37 @@ pub fn resolve_code_lens(handle: i64, lens: &Value) -> Call {
 /// `$releaseCodeLenses(handle, cacheId)`: required, or the extension host leaks the list.
 pub fn release_code_lenses(handle: i64, cache_id: i64) -> Call {
     Call::new(proxy::EXT_HOST_LANGUAGE_FEATURES, "$releaseCodeLenses", vec![Arg::Json(handle.into()), Arg::Json(cache_id.into())])
+}
+
+/// `$provideFoldingRanges(handle, resource, context, token)` → `IFoldingRangeDto[] | undefined`
+/// (extHost.protocol.ts, `Eb.from` converts 0-based provider lines to 1-based `{ start, end, kind? }`).
+pub fn provide_folding_ranges(handle: i64, uri: &UriComponents) -> Call {
+    Call::new(
+        proxy::EXT_HOST_LANGUAGE_FEATURES,
+        "$provideFoldingRanges",
+        vec![Arg::Json(handle.into()), j(uri), Arg::Json(json!({}))],
+    )
+    .cancellable()
+}
+
+/// `$provideDocumentSemanticTokens(handle, resource, previousResultId, token)` → `VSBuffer | null`
+/// (`Reply::Buffer`, little-endian u32 words: `id`, `kind` (`1` = full), `data_len`, then 5-tuples).
+pub fn provide_document_semantic_tokens(handle: i64, uri: &UriComponents, previous_result_id: i64) -> Call {
+    Call::new(
+        proxy::EXT_HOST_LANGUAGE_FEATURES,
+        "$provideDocumentSemanticTokens",
+        vec![Arg::Json(handle.into()), j(uri), Arg::Json(previous_result_id.into())],
+    )
+    .cancellable()
+}
+
+/// `$releaseDocumentSemanticTokens(handle, semanticColoringResultId)` to free the previous result in the extension host.
+pub fn release_document_semantic_tokens(handle: i64, result_id: i64) -> Call {
+    Call::new(
+        proxy::EXT_HOST_LANGUAGE_FEATURES,
+        "$releaseDocumentSemanticTokens",
+        vec![Arg::Json(handle.into()), Arg::Json(result_id.into())],
+    )
 }
 
 /// `InlineCompletionContext` (languages.ts L767-795).
@@ -625,22 +769,48 @@ pub enum MainThreadCall {
     RegisterHoverProvider { handle: i64, selector: Vec<DocumentFilter> },
     RegisterCodeLensSupport { handle: i64, selector: Vec<DocumentFilter>, event_handle: Option<i64> },
     EmitCodeLensEvent { event_handle: i64 },
+    /// `MainThreadLanguageFeatures.$registerFoldingRangeProvider(handle, selector, extensionId, eventHandle)` (FR-E6).
+    RegisterFoldingRangeProvider { handle: i64, selector: Vec<DocumentFilter>, event_handle: Option<i64> },
+    /// `MainThreadLanguageFeatures.$emitFoldingRangeEvent(eventHandle, ranges?)` (FR-E6).
+    EmitFoldingRangeEvent { event_handle: i64 },
+    /// `MainThreadLanguageFeatures.$registerDocumentSemanticTokensProvider(handle, selector, legend, eventHandle)` (FR-E6).
+    RegisterDocumentSemanticTokensProvider { handle: i64, selector: Vec<DocumentFilter>, legend: SemanticTokensLegend, event_handle: Option<i64> },
+    /// `MainThreadLanguageFeatures.$emitDocumentSemanticTokensEvent(eventHandle)` (FR-E6).
+    EmitDocumentSemanticTokensEvent { event_handle: i64 },
     /// 17 positional args at the pinned commit (extHost.protocol.ts L558-576); only the stable
     /// head is decoded, the rest kept raw.
     RegisterInlineCompletionsSupport { handle: i64, selector: Vec<DocumentFilter>, extension_id: String, raw: Vec<Value> },
     EmitInlineCompletionsChange { handle: i64 },
+    /// A registration of [`crate::language`]: completion, definition, references, rename, code actions,
+    /// formatting, signature help or document symbols (FR-L31.13).
+    RegisterLanguageFeature { handle: i64, selector: Vec<DocumentFilter>, feature: crate::language::LanguageFeature },
     Unregister { handle: i64 },
     RegisterCommand { id: String },
     UnregisterCommand { id: String },
     ExecuteCommand { id: String, args: Value },
+    /// MainThreadOutputService calls
+    OutputRegister { label: String, file: Option<UriComponents>, language_id: Option<String>, extension_id: Option<String> },
+    OutputUpdate { channel_id: String },
+    OutputAppend { channel_id: String, value: String },
+    OutputClear { channel_id: String, till: Option<i64> },
+    OutputReveal { channel_id: String, preserve_focus: bool },
+    OutputDispose { channel_id: String },
+    /// MainThreadMessageService.$showMessage
+    ShowMessage { severity: u8, message: String, options: Value, commands: Vec<Value> },
+    /// `MainThreadSearch.$registerTextSearchProvider(handle, scheme)` (FR-E7).
+    RegisterTextSearchProvider { handle: i64, scheme: String },
+    /// `MainThreadSearch.$unregisterProvider(handle)`: any search provider kind.
+    UnregisterSearchProvider { handle: i64 },
+    /// `MainThreadSearch.$handleTextMatch(handle, session, IRawFileMatch2[])`: matches of a running search.
+    HandleTextMatch { handle: i64, session: i64, matches: Vec<crate::search::FileMatch> },
     Other { proxy: Option<&'static str>, method: String },
 }
 
-fn arg_json(args: &[Arg], i: usize) -> Value {
+pub(crate) fn arg_json(args: &[Arg], i: usize) -> Value {
     args.get(i).and_then(Arg::as_json).cloned().unwrap_or(Value::Null)
 }
 
-fn arg_i64(args: &[Arg], i: usize) -> Result<i64> {
+pub(crate) fn arg_i64(args: &[Arg], i: usize) -> Result<i64> {
     arg_json(args, i).as_i64().ok_or_else(|| Error::Malformed(format!("arg {i} is not an integer")))
 }
 
@@ -673,6 +843,25 @@ impl MainThreadCall {
             (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$emitCodeLensEvent") => {
                 Self::EmitCodeLensEvent { event_handle: arg_i64(a, 0)? }
             }
+            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$registerFoldingRangeProvider") => Self::RegisterFoldingRangeProvider {
+                handle: arg_i64(a, 0)?,
+                selector: serde_json::from_value(arg_json(a, 1))?,
+                event_handle: arg_json(a, 3).as_i64(),
+            },
+            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$emitFoldingRangeEvent") => {
+                Self::EmitFoldingRangeEvent { event_handle: arg_i64(a, 0)? }
+            }
+            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$registerDocumentSemanticTokensProvider") => {
+                Self::RegisterDocumentSemanticTokensProvider {
+                    handle: arg_i64(a, 0)?,
+                    selector: serde_json::from_value(arg_json(a, 1))?,
+                    legend: serde_json::from_value(arg_json(a, 2))?,
+                    event_handle: arg_json(a, 3).as_i64(),
+                }
+            }
+            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$emitDocumentSemanticTokensEvent") => {
+                Self::EmitDocumentSemanticTokensEvent { event_handle: arg_i64(a, 0)? }
+            }
             (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$registerInlineCompletionsSupport") => {
                 Self::RegisterInlineCompletionsSupport {
                     handle: arg_i64(a, 0)?,
@@ -684,12 +873,57 @@ impl MainThreadCall {
             (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$emitInlineCompletionsChange") => {
                 Self::EmitInlineCompletionsChange { handle: arg_i64(a, 0)? }
             }
+            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), m) if crate::language::is_registration(m) => {
+                match crate::language::parse_registration(m, a)? {
+                    Some((handle, selector, feature)) => Self::RegisterLanguageFeature { handle, selector, feature },
+                    None => Self::Other { proxy: r.proxy, method: r.method.clone() },
+                }
+            }
             (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$unregister") => Self::Unregister { handle: arg_i64(a, 0)? },
             (Some(proxy::MAIN_THREAD_COMMANDS), "$registerCommand") => Self::RegisterCommand { id: arg_str(a, 0)? },
             (Some(proxy::MAIN_THREAD_COMMANDS), "$unregisterCommand") => Self::UnregisterCommand { id: arg_str(a, 0)? },
             (Some(proxy::MAIN_THREAD_COMMANDS), "$executeCommand") => {
                 Self::ExecuteCommand { id: arg_str(a, 0)?, args: arg_json(a, 1) }
             }
+            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$register") => Self::OutputRegister {
+                label: arg_str(a, 0)?,
+                file: serde_json::from_value(arg_json(a, 1)).ok(),
+                language_id: arg_json(a, 2).as_str().map(str::to_owned),
+                extension_id: arg_json(a, 3).as_str().map(str::to_owned),
+            },
+            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$update") => Self::OutputUpdate {
+                channel_id: arg_str(a, 0)?,
+            },
+            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$append") => Self::OutputAppend {
+                channel_id: arg_str(a, 0)?,
+                value: arg_str(a, 1)?,
+            },
+            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$clear") => Self::OutputClear {
+                channel_id: arg_str(a, 0)?,
+                till: arg_json(a, 1).as_i64(),
+            },
+            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$reveal") => Self::OutputReveal {
+                channel_id: arg_str(a, 0)?,
+                preserve_focus: arg_json(a, 1).as_bool().unwrap_or(false),
+            },
+            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$dispose" | "$close") => Self::OutputDispose {
+                channel_id: arg_str(a, 0)?,
+            },
+            (Some(proxy::MAIN_THREAD_MESSAGE_SERVICE), "$showMessage") => Self::ShowMessage {
+                severity: arg_i64(a, 0).map(|s| s as u8).unwrap_or(1),
+                message: arg_str(a, 1)?,
+                options: arg_json(a, 2),
+                commands: arg_json(a, 3).as_array().cloned().unwrap_or_default(),
+            },
+            (Some(proxy::MAIN_THREAD_SEARCH), "$registerTextSearchProvider") => {
+                Self::RegisterTextSearchProvider { handle: arg_i64(a, 0)?, scheme: arg_str(a, 1)? }
+            }
+            (Some(proxy::MAIN_THREAD_SEARCH), "$unregisterProvider") => Self::UnregisterSearchProvider { handle: arg_i64(a, 0)? },
+            (Some(proxy::MAIN_THREAD_SEARCH), "$handleTextMatch") => Self::HandleTextMatch {
+                handle: arg_i64(a, 0)?,
+                session: arg_i64(a, 1)?,
+                matches: crate::search::parse_file_matches(&arg_json(a, 2))?,
+            },
             (proxy, _) => Self::Other { proxy, method: r.method.clone() },
         })
     }
@@ -705,7 +939,8 @@ impl MainThreadCall {
 /// * `MainThreadWindow.$getInitialState` (L2301): `{ isFocused, isActive }`.
 /// * `MainThreadWorkspace.$checkExists` (L1976): `workspaceContains:` activation; `false` until Ember
 ///   implements glob search over the remote filesystem.
-/// * `MainThreadWorkspace.$isResourceTrusted` / `$requestWorkspaceTrust` (L1986 / L1985): trusted.
+/// * `MainThreadWorkspace.$isResourceTrusted` / `$requestWorkspaceTrust` (L1986 / L1985): trusted
+///   (the session answers these from its workspace trust first, see `ember_editor::trust`).
 /// * `MainThreadCommands.$getCommands` (L139): empty list.
 pub fn default_reply(proxy: Option<&str>, method: &str) -> Reply {
     match (proxy, method) {
@@ -730,6 +965,20 @@ mod tests {
             args: args.as_array().unwrap().iter().cloned().map(Arg::Json).collect(),
             cancellable: false,
         }
+    }
+
+    // FR-L31.7: the language and encoding changes are the ExtHostDocuments calls of the pinned commit.
+    #[test]
+    fn fr_l31_7_language_and_encoding_change_calls() {
+        let uri = UriComponents::remote("h", "/w/a.txt");
+        let c = accept_model_language_changed(&uri, "markdown");
+        assert_eq!((c.proxy, c.method), ("ExtHostDocuments", "$acceptModelLanguageChanged"));
+        assert_eq!(c.args[0].as_json().unwrap()["path"], "/w/a.txt");
+        assert_eq!(c.args[1], Arg::Json(json!("markdown")));
+        let c = accept_encoding_changed(&uri, "utf16le");
+        assert_eq!((c.proxy, c.method), ("ExtHostDocuments", "$acceptEncodingChanged"));
+        assert_eq!(c.args[1], Arg::Json(json!("utf16le")));
+        assert!(crate::rpc_ids::id_of(c.proxy).is_some());
     }
 
     #[test]
@@ -775,6 +1024,32 @@ mod tests {
     }
 
     #[test]
+    fn fr_e7_parses_text_search_registration_and_matches() {
+        let r = req(proxy::MAIN_THREAD_SEARCH, "$registerTextSearchProvider", json!([1, "vscode-remote"]));
+        assert_eq!(
+            MainThreadCall::parse(&r).unwrap(),
+            MainThreadCall::RegisterTextSearchProvider { handle: 1, scheme: "vscode-remote".into() }
+        );
+        let r = req(proxy::MAIN_THREAD_SEARCH, "$unregisterProvider", json!([1]));
+        assert_eq!(MainThreadCall::parse(&r).unwrap(), MainThreadCall::UnregisterSearchProvider { handle: 1 });
+        let r = req(
+            proxy::MAIN_THREAD_SEARCH,
+            "$handleTextMatch",
+            json!([1, 3, [{"resource": {"$mid": 1, "scheme": "vscode-remote", "authority": "h", "path": "/w/a.rs"},
+                "results": [{"previewText": "foo", "rangeLocations": [{
+                    "source": {"startLineNumber": 0, "startColumn": 0, "endLineNumber": 0, "endColumn": 3},
+                    "preview": {"startLineNumber": 0, "startColumn": 0, "endLineNumber": 0, "endColumn": 3}}]}]}]]),
+        );
+        match MainThreadCall::parse(&r).unwrap() {
+            MainThreadCall::HandleTextMatch { handle, session, matches } => {
+                assert_eq!((handle, session), (1, 3));
+                assert_eq!(matches[0].matches[0].preview_text, "foo");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn hover_call_is_cancellable_with_undefined_context() {
         let c = provide_hover(4, &UriComponents::remote("h", "/w/a.rs"), Position { line_number: 1, column: 2 });
         assert!(c.cancellable);
@@ -802,6 +1077,60 @@ mod tests {
     }
 
     #[test]
+    fn fr_l31_17_configuration_payload_carries_every_scope_and_override() {
+        let defaults = ConfigModel::from_values(vec![("editor.tabSize".into(), json!(4))]);
+        let user = ConfigModel {
+            values: vec![("editor.tabSize".into(), json!(2)), ("files.autoSave".into(), json!("afterDelay"))],
+            overrides: vec![ConfigOverride {
+                identifiers: vec!["rust".into(), "toml".into()],
+                values: vec![("editor.tabSize".into(), json!(8))],
+            }],
+        };
+        let remote = ConfigModel::from_values(vec![("terminal.integrated.shell".into(), json!("/bin/zsh"))]);
+        let workspace = ConfigModel::from_values(vec![("editor.insertSpaces".into(), json!(false))]);
+        let data = configuration_data(&defaults, &[("editor.tabSize".into(), Some(6))], &user, &remote, &workspace);
+        assert_eq!(data["defaults"]["contents"]["editor"]["tabSize"], 4);
+        assert_eq!(data["userLocal"]["contents"]["editor"]["tabSize"], 2);
+        assert_eq!(data["userLocal"]["contents"]["files"]["autoSave"], "afterDelay");
+        // An override block is listed under its own key, kept raw in contents and nested in overrides.
+        assert_eq!(data["userLocal"]["keys"], json!(["editor.tabSize", "files.autoSave", "[rust][toml]"]));
+        assert_eq!(data["userLocal"]["contents"]["[rust][toml]"], json!({ "editor.tabSize": 8 }));
+        assert_eq!(
+            data["userLocal"]["overrides"],
+            json!([{ "identifiers": ["rust", "toml"], "keys": ["editor.tabSize"], "contents": { "editor": { "tabSize": 8 } } }])
+        );
+        assert_eq!(data["userRemote"]["contents"]["terminal"]["integrated"]["shell"], "/bin/zsh");
+        assert_eq!(data["workspace"]["contents"]["editor"]["insertSpaces"], false);
+        assert_eq!(data["workspace"]["overrides"], json!([]));
+        assert_eq!(data["policy"]["keys"], json!([]));
+        assert_eq!(data["application"]["keys"], json!([]));
+        assert_eq!(data["folders"], json!([]));
+        assert_eq!(data["configurationScopes"], json!([["editor.tabSize", 6]]));
+    }
+
+    #[test]
+    fn fr_l31_17_configuration_change_call_shape() {
+        let data = configuration_data(
+            &ConfigModel::default(),
+            &[],
+            &ConfigModel::from_values(vec![("editor.tabSize".into(), json!(2))]),
+            &ConfigModel::default(),
+            &ConfigModel::default(),
+        );
+        let call = accept_configuration_changed(&data, &["editor.tabSize".into()], &[("rust".into(), vec!["editor.tabSize".into()])]);
+        assert_eq!(call.proxy, proxy::EXT_HOST_CONFIGURATION);
+        assert_eq!(call.method, "$acceptConfigurationChanged");
+        assert_eq!(call.args.len(), 2);
+        match (&call.args[0], &call.args[1]) {
+            (Arg::Json(sent), Arg::Json(change)) => {
+                assert_eq!(sent, &data);
+                assert_eq!(change, &json!({ "keys": ["editor.tabSize"], "overrides": [["rust", ["editor.tabSize"]]] }));
+            }
+            _ => panic!("both arguments are JSON"),
+        }
+    }
+
+    #[test]
     fn configuration_model_nests_dotted_keys() {
         let data = configuration_init_data(
             &[("editor.tabSize".into(), json!(4), Some(6)), ("rust-analyzer.check.command".into(), json!("check"), None)],
@@ -820,5 +1149,129 @@ mod tests {
             default_reply(Some(proxy::MAIN_THREAD_WINDOW), "$getInitialState"),
             Reply::Json(json!({"isFocused": true, "isActive": true}))
         );
+    }
+
+    #[test]
+    fn parses_output_and_message_service_calls() {
+        let r1 = req(
+            proxy::MAIN_THREAD_OUTPUT_SERVICE,
+            "$register",
+            json!(["Git", null, "git", "vscode.git"]),
+        );
+        match MainThreadCall::parse(&r1).unwrap() {
+            MainThreadCall::OutputRegister { label, file, language_id, extension_id } => {
+                assert_eq!(label, "Git");
+                assert!(file.is_none());
+                assert_eq!(language_id.as_deref(), Some("git"));
+                assert_eq!(extension_id.as_deref(), Some("vscode.git"));
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let r2 = req(
+            proxy::MAIN_THREAD_OUTPUT_SERVICE,
+            "$append",
+            json!(["ember-output-1", "hello world\n"]),
+        );
+        assert_eq!(
+            MainThreadCall::parse(&r2).unwrap(),
+            MainThreadCall::OutputAppend { channel_id: "ember-output-1".into(), value: "hello world\n".into() }
+        );
+
+        let r3 = req(
+            proxy::MAIN_THREAD_OUTPUT_SERVICE,
+            "$clear",
+            json!(["ember-output-1"]),
+        );
+        assert_eq!(
+            MainThreadCall::parse(&r3).unwrap(),
+            MainThreadCall::OutputClear { channel_id: "ember-output-1".into(), till: None }
+        );
+
+        let r4 = req(
+            proxy::MAIN_THREAD_OUTPUT_SERVICE,
+            "$reveal",
+            json!(["ember-output-1", true]),
+        );
+        assert_eq!(
+            MainThreadCall::parse(&r4).unwrap(),
+            MainThreadCall::OutputReveal { channel_id: "ember-output-1".into(), preserve_focus: true }
+        );
+
+        let r5 = req(
+            proxy::MAIN_THREAD_OUTPUT_SERVICE,
+            "$dispose",
+            json!(["ember-output-1"]),
+        );
+        assert_eq!(
+            MainThreadCall::parse(&r5).unwrap(),
+            MainThreadCall::OutputDispose { channel_id: "ember-output-1".into() }
+        );
+
+        let r6 = req(
+            proxy::MAIN_THREAD_MESSAGE_SERVICE,
+            "$showMessage",
+            json!([3, "Build failed", {"source": "Rust Analyzer"}, []]),
+        );
+        match MainThreadCall::parse(&r6).unwrap() {
+            MainThreadCall::ShowMessage { severity, message, options, commands } => {
+                assert_eq!(severity, 3);
+                assert_eq!(message, "Build failed");
+                assert_eq!(options["source"], "Rust Analyzer");
+                assert!(commands.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn fr_e6_parses_folding_and_semantic_tokens_registrations() {
+        let rf = req(
+            proxy::MAIN_THREAD_LANGUAGE_FEATURES,
+            "$registerFoldingRangeProvider",
+            json!([11, [{"language": "rust"}], {"value": "rust-lang.rust-analyzer"}, 12]),
+        );
+        assert_eq!(
+            MainThreadCall::parse(&rf).unwrap(),
+            MainThreadCall::RegisterFoldingRangeProvider {
+                handle: 11,
+                selector: vec![DocumentFilter {
+                    language: Some("rust".into()),
+                    scheme: None,
+                    pattern: None,
+                    exclusive: None,
+                    notebook_type: None,
+                }],
+                event_handle: Some(12),
+            }
+        );
+        let ef = req(proxy::MAIN_THREAD_LANGUAGE_FEATURES, "$emitFoldingRangeEvent", json!([12]));
+        assert_eq!(MainThreadCall::parse(&ef).unwrap(), MainThreadCall::EmitFoldingRangeEvent { event_handle: 12 });
+
+        let rs = req(
+            proxy::MAIN_THREAD_LANGUAGE_FEATURES,
+            "$registerDocumentSemanticTokensProvider",
+            json!([21, [{"language": "rust"}], {"tokenTypes": ["namespace", "type", "function"], "tokenModifiers": ["declaration"]}, 22]),
+        );
+        assert_eq!(
+            MainThreadCall::parse(&rs).unwrap(),
+            MainThreadCall::RegisterDocumentSemanticTokensProvider {
+                handle: 21,
+                selector: vec![DocumentFilter {
+                    language: Some("rust".into()),
+                    scheme: None,
+                    pattern: None,
+                    exclusive: None,
+                    notebook_type: None,
+                }],
+                legend: SemanticTokensLegend {
+                    token_types: vec!["namespace".into(), "type".into(), "function".into()],
+                    token_modifiers: vec!["declaration".into()],
+                },
+                event_handle: Some(22),
+            }
+        );
+        let es = req(proxy::MAIN_THREAD_LANGUAGE_FEATURES, "$emitDocumentSemanticTokensEvent", json!([22]));
+        assert_eq!(MainThreadCall::parse(&es).unwrap(), MainThreadCall::EmitDocumentSemanticTokensEvent { event_handle: 22 });
     }
 }

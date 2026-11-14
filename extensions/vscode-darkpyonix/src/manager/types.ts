@@ -1,7 +1,8 @@
 // Shapes of the DarkPyonix Kernel Manager API (darkpyonix-core docs/api/manager.openapi.yaml,
-// version 1.0.0-draft.3) used by this extension. Fields the extension does not read are omitted.
+// version 1.0.0-draft.4) used by this extension. Fields the extension does not read are omitted.
 
-export type Permission = "admin" | "editor" | "viewer3" | "viewer2" | "viewer1";
+/** A token capability (core SPEC FR-A3, INTENT D18): a set, not a tier. */
+export type Capability = "read" | "history" | "execute" | "edit" | "manage";
 
 export interface Kernel {
   kernel_id: string;
@@ -52,7 +53,7 @@ export interface Presence {
   nickname: string;
   user: string;
   avatar?: string | null;
-  permission?: Permission;
+  capabilities?: Capability[];
   focused_cell_id?: string | null;
   focused_at?: string | null;
   cursor?: Cursor | null;
@@ -63,6 +64,8 @@ export interface DocumentCell {
   cell_id: string;
   index: number;
   type: string;
+  /** The marker type as written (draft.4); `type` is canonical. */
+  raw_type?: string | null;
   title?: string | null;
   source: string;
   source_sha256: string;

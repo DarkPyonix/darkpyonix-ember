@@ -1,18 +1,20 @@
 //! "Open IDE" (FR-L7): what each target does once the server has said how to reach it
-//! (`GET /api/v1/sessions/{id}/ide`).
+//! (`GET /api/sessions/{id}/ide`).
 //!
 //! - **VS Code**: the wrapped VS Code Web URL, opened in the **system browser**. This process
 //!   never hosts it (NFR-L2): the URL is handed to the OS URL handler.
 //! - **Gateway**: the `jetbrains-gateway://` link, handed to the OS URL handler, which starts
 //!   JetBrains Gateway on this machine.
-//! - **Ember**: the editor core arrives in M8; until then it is a placeholder.
+//! - **Ember**: the editor screen (FR-L31); its code area waits for the editor core (M8).
 //!
 //! Only `http`, `https` and the JetBrains schemes are ever passed to the OS, so a server
 //! answer cannot make this app open an arbitrary file or program.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::server::IdeTarget;
+use crate::ui::editor::EditorTarget;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdeKind {
@@ -51,7 +53,7 @@ impl IdeKind {
 pub enum IdeAction {
     /// Hand this URL to the OS.
     OpenUrl(String),
-    /// The Ember editor (M8) is not built yet.
+    /// Open the Ember editor screen (its code area waits for the editor core, M8).
     EmberPlaceholder,
     /// Why it cannot be opened.
     Unavailable(String),
@@ -59,8 +61,7 @@ pub enum IdeAction {
 
 pub fn plan(kind: IdeKind, target: Option<&IdeTarget>) -> IdeAction {
     if kind == IdeKind::Ember {
-        // TODO(M8, editor core): open the Ember IDE window with `target.launch`
-        // (session, project, computer, folder, server_url).
+        // The caller opens the editor screen (FR-L31) from the launch data (project, folder).
         return IdeAction::EmberPlaceholder;
     }
     let Some(t) = target else {
@@ -104,6 +105,99 @@ pub fn open_external(url: &str) -> std::io::Result<()> {
     Command::new(&argv[0]).args(&argv[1..]).spawn().map(|_| ())
 }
 
+/// CLI flag that launches this binary directly into the editor, which runs as its own HTML-mode window (FR-L31).
+/// TODO(dioxus-compose#152): once the `window` element on a shared host lands, open the editor
+/// window on the same host instead of spawning a second process.
+pub const EDITOR_ARG: &str = "--editor";
+
+/// Parse `--editor <project> [folder]` from an argument list (`std::env::args()`).
+pub fn parse_editor_args<I, S>(args: I) -> Option<EditorTarget>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let var = |name: &str| std::env::var(name).unwrap_or_default();
+    parse_editor_args_with_env(args, var(EDITOR_TOKEN_ENV), var(EDITOR_SERVER_ENV), var(EDITOR_COMPUTER_ENV))
+}
+
+/// Environment variable carrying the editor connection token (never argv).
+pub const EDITOR_TOKEN_ENV: &str = "EMBER_EDITOR_TOKEN";
+/// Environment variable carrying the ember server's base URL.
+pub const EDITOR_SERVER_ENV: &str = "EMBER_EDITOR_SERVER";
+/// Environment variable carrying the computer id for the terminal relay.
+pub const EDITOR_COMPUTER_ENV: &str = "EMBER_EDITOR_COMPUTER";
+
+fn parse_editor_args_with_env<I, S>(args: I, token: String, server_url: String, computer: String) -> Option<EditorTarget>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut it = args.into_iter();
+    while let Some(arg) = it.next() {
+        if arg.as_ref() == EDITOR_ARG {
+            let project = it.next()?.as_ref().to_string();
+            let folder = it
+                .next()
+                .map(|s| s.as_ref().to_string())
+                .unwrap_or_default();
+            let endpoint = it.next().map(|s| s.as_ref().to_string()).unwrap_or_default();
+            return Some(EditorTarget { project, folder, endpoint, token, server_url, computer });
+        }
+    }
+    None
+}
+
+/// The `(executable, args)` pair that spawns a separate Ember editor window (FR-L31).
+/// TODO(dioxus-compose#152): replace with an in-process `window` node once #152 lands.
+pub fn editor_command(exe: &Path, project: &str, folder: &str, endpoint: &str) -> (PathBuf, Vec<String>) {
+    (
+        exe.to_path_buf(),
+        vec![
+            EDITOR_ARG.to_string(),
+            project.to_string(),
+            folder.to_string(),
+            endpoint.to_string(),
+        ],
+    )
+}
+
+/// Spawn `exe --editor <project> <folder>` and return without waiting for the window to close.
+pub fn spawn_editor_with(exe: &Path, project: &str, folder: &str) -> std::io::Result<std::process::Child> {
+    spawn_editor_target(exe, &EditorTarget { project: project.into(), folder: folder.into(), ..Default::default() })
+}
+
+/// Spawn an editor with the token in the child environment, never in argv.
+pub fn spawn_editor_target(exe: &Path, target: &EditorTarget) -> std::io::Result<std::process::Child> {
+    let (bin, args) = editor_command(exe, &target.project, &target.folder, &target.endpoint);
+    Command::new(bin)
+        .args(args)
+        .env(EDITOR_TOKEN_ENV, &target.token)
+        .env(EDITOR_SERVER_ENV, &target.server_url)
+        .env(EDITOR_COMPUTER_ENV, &target.computer)
+        .spawn()
+}
+
+/// Spawn a new Ember process in `--editor <project> <folder>` mode (FR-L31).
+pub fn spawn_editor_process(project: &str, folder: &str) -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    spawn_editor_with(&exe, project, folder).map(|_| ())
+}
+
+/// Run `spawner(project, folder)` and format the user-facing notice string for the result.
+pub fn spawn_editor_notice(
+    project: &str,
+    folder: &str,
+    spawner: impl FnOnce(&str, &str) -> std::io::Result<()>,
+) -> String {
+    match spawner(project, folder) {
+        Ok(()) => "Ember 에디터: 새 창에서 여는 중입니다".to_string(),
+        Err(e) => {
+            tracing::warn!(project = %project, "could not spawn editor window: {e}");
+            format!("Ember 에디터: 열지 못했습니다: {e}")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +239,66 @@ mod tests {
         ));
         assert_eq!(IdeKind::from_key("gateway"), Some(IdeKind::Gateway));
         assert_eq!(open_command("u").last().map(String::as_str), Some("u"));
+    }
+
+    #[test]
+    fn fr_l31_editor_args_parse_and_spawn_separate_window_process() {
+        assert_eq!(parse_editor_args(["ember"]), None);
+        assert_eq!(parse_editor_args(["ember", "--editor"]), None);
+        assert_eq!(
+            parse_editor_args(["ember", "--editor", "demo-project", "/work/demo"]),
+            Some(EditorTarget {
+                project: "demo-project".into(),
+                folder: "/work/demo".into(),
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            parse_editor_args(["ember", "--editor", "demo-project"]),
+            Some(EditorTarget {
+                project: "demo-project".into(),
+                folder: String::new(),
+                ..Default::default()
+            })
+        );
+
+        let (exe, args) = editor_command(Path::new("/usr/local/bin/ember"), "ember-core", "/repo", "");
+        assert_eq!(exe, PathBuf::from("/usr/local/bin/ember"));
+        assert_eq!(args, vec!["--editor", "ember-core", "/repo", ""]);
+        assert_eq!(
+            parse_editor_args(std::iter::once("ember".to_string()).chain(args)),
+            Some(EditorTarget {
+                project: "ember-core".into(),
+                folder: "/repo".into(),
+                ..Default::default()
+            })
+        );
+
+        // Verify the spawn path executes a child process cleanly with the `--editor` arguments.
+        #[cfg(unix)]
+        {
+            let mut child = spawn_editor_with(Path::new("/usr/bin/true"), "ember-core", "/repo")
+                .expect("spawn editor process");
+            let status = child.wait().expect("wait for child");
+            assert!(status.success());
+        }
+    }
+
+    #[test]
+    fn fr_l31_editor_connection_arguments_round_trip() {
+        let (_, args) = editor_command(Path::new("ember"), "project", "/work", "localhost:8000");
+        assert!(!args.iter().any(|arg| arg == "secret"));
+        assert!(!args.iter().any(|arg| arg == "http://srv:1" || arg == "node-a"));
+        let target = parse_editor_args_with_env(
+            std::iter::once("ember".to_owned()).chain(args),
+            "secret".into(),
+            "http://srv:1".into(),
+            "node-a".into(),
+        )
+        .unwrap();
+        assert_eq!(target.endpoint, "localhost:8000");
+        assert_eq!(target.token, "secret");
+        assert_eq!(target.server_url, "http://srv:1");
+        assert_eq!(target.computer, "node-a");
     }
 }

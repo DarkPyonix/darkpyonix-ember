@@ -143,7 +143,10 @@ class DocumentState {
                 currentRunStartedBy = Actor.from(data["started_by"])
                 val runId = currentRunId
                 // Cells about to run show as queued until their cell.started.
-                data.list("cells")?.mapNotNull { (it as? Number)?.toInt() }?.forEach { idx ->
+                val indexes = data.list("cells") ?: emptyList()
+                val ids = data.list("cell_ids") ?: emptyList()
+                for (k in indexes.indices) {
+                    val idx = cellIndex(ids.getOrNull(k) as? String, (indexes[k] as? Number)?.toInt()) ?: continue
                     replaceAt(idx) { it.copy(status = "queued", runId = runId) }
                 }
                 ApplyResult(ApplyResult.Kind.APPLIED, outputsChanged = true, runChanged = true)
@@ -165,7 +168,7 @@ class DocumentState {
                 ApplyResult(ApplyResult.Kind.APPLIED, outputsChanged = true, runChanged = true)
             }
             "cell.started" -> {
-                val idx = data.int("index") ?: return ApplyResult.IGNORED
+                val idx = cellIndex(data) ?: return ApplyResult.IGNORED
                 pendingClear.remove(idx)
                 replaceAt(idx) {
                     it.copy(
@@ -177,12 +180,12 @@ class DocumentState {
                 ApplyResult(ApplyResult.Kind.APPLIED, outputsChanged = true)
             }
             "cell.finished" -> {
-                val idx = data.int("index") ?: return ApplyResult.IGNORED
+                val idx = cellIndex(data) ?: return ApplyResult.IGNORED
                 replaceAt(idx) { it.copy(status = data.str("status")) }
                 ApplyResult(ApplyResult.Kind.APPLIED, outputsChanged = true)
             }
             "output" -> {
-                val idx = data.int("index") ?: return ApplyResult.IGNORED
+                val idx = cellIndex(data) ?: return ApplyResult.IGNORED
                 val output = data.obj("output") ?: return ApplyResult.IGNORED
                 val clear = pendingClear.remove(idx)
                 replaceAt(idx) {
@@ -193,7 +196,7 @@ class DocumentState {
                 ApplyResult(ApplyResult.Kind.APPLIED, outputsChanged = true)
             }
             "output.clear" -> {
-                val idx = data.int("index") ?: return ApplyResult.IGNORED
+                val idx = cellIndex(data) ?: return ApplyResult.IGNORED
                 if (data.bool("wait") == true) {
                     pendingClear.add(idx)
                 } else {
@@ -317,6 +320,17 @@ class DocumentState {
 
     @Synchronized
     fun setLock(cellId: String, lock: CellLock?) = replaceById(cellId) { it.copy(lock = lock) }
+
+    /**
+     * The current index of the cell an execution event names: by `cell_id` when the kernel
+     * sent one we know (PROTOCOL 3.4, draft.4: cells may move during a run), else by `index`.
+     */
+    private fun cellIndex(cellId: String?, index: Int?): Int? {
+        if (cellId != null) cellList.firstOrNull { it.cellId == cellId }?.let { return it.index }
+        return index
+    }
+
+    private fun cellIndex(data: Map<String, Any?>): Int? = cellIndex(data.str("cell_id"), data.int("index"))
 
     private inline fun replaceAt(index: Int, f: (DocCell) -> DocCell) {
         val i = cellList.indexOfFirst { it.index == index }

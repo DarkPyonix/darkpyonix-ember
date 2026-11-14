@@ -1,8 +1,7 @@
 //! The sync engine: keeps a [`State`] in step with one main server (PR-1, FR-L1, FR-S6).
 //!
 //! - **Push**: one WebSocket, reconnected with exponential backoff. Before each connect the
-//!   server's push version is checked (`/health`), and every message's `v` is checked again; a
-//!   mismatch becomes [`ConnectionState::Incompatible`] and stops reconnecting.
+//!   server is probed (`/health`). Unknown message types and fields are skipped.
 //! - **Gap recovery**: after every (re)connect and on `lagged`, the session list is reloaded and
 //!   every open session fetches `events?after=<last applied seq>`. Transcripts drop duplicates
 //!   and hold early events by sequence number, so nothing is lost or applied twice.
@@ -17,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::Duration;
 
+use ember_transport::PowerState;
 use futures_util::StreamExt;
 use tokio::sync::{broadcast, mpsc, watch, Notify};
 use tokio::task::JoinHandle;
@@ -27,8 +27,8 @@ use crate::cache;
 use crate::push::{self, Backoff, DecodeError};
 use crate::state::{Changes, ConnectionState, Input, State};
 use crate::wire::{
-    ApprovalDecision, DetectedAgent, MentionCandidate, NewSession, Project, Push, SearchHit, SessionPatch,
-    SessionRecord, TeamMail, TeamMember, TeamView, PUSH_VERSION,
+    ApprovalDecision, DetectedAgent, ForkInfo, MentionCandidate, NewSession, Project, Push, SearchHit, SessionPatch,
+    SessionRecord, TeamMail, TeamMember, TeamView,
 };
 
 #[derive(Debug, Clone)]
@@ -158,17 +158,28 @@ impl Client {
 
     /// Drop the push connection and stay disconnected (e.g. app backgrounded on mobile).
     pub fn pause_push(&self) {
+        // The app is in the background: the transport may slow its keepalives. There is no
+        // "device saves power" signal in this crate yet; the app would pass
+        // `PowerState::PowerSave` to `Api::set_power_state` from the platform's low power mode.
+        // TODO(#229): wire the OS low power mode on Android and iOS.
+        self.inner.api.set_power_state(PowerState::Background);
         self.inner.push_mode.send_replace(PushMode::Paused);
     }
 
     /// Reconnect after [`Client::pause_push`]; catches up on everything missed meanwhile.
     pub fn resume_push(&self) {
+        // Back in the foreground: normal keepalives, and re-establish the paths at once, since a
+        // suspended app cannot tell which of its paths still reach the server.
+        self.inner.api.set_power_state(PowerState::Foreground);
+        self.inner.api.resume_transport();
         self.inner.push_mode.send_replace(PushMode::Run);
     }
 
     /// Drop the current push socket and reconnect right away (e.g. the network changed). The
     /// reconnect catches up on anything missed, like any other.
     pub fn reconnect_push(&self) {
+        // A new network may reach paths the old one did not.
+        self.inner.api.resume_transport();
         self.inner.reconnect.notify_one();
     }
 
@@ -249,6 +260,47 @@ impl Client {
         self.inner.api.answer(id, approval_id, decision).await
     }
 
+    /// Answer or skip an agent's question (FR-T11). The transcript follows from the server's
+    /// `QuestionAnswered` push, not from this call.
+    pub async fn answer_question(
+        &self,
+        id: &str,
+        question_id: &str,
+        reply: &crate::api::QuestionReply,
+    ) -> ApiResult<()> {
+        self.inner.api.answer_question(id, question_id, reply).await
+    }
+
+    /// Switch a session's approve-everything mode (FR-A5). The state follows at once; the
+    /// server's push tells every other client.
+    pub async fn set_approve_all(&self, id: &str, enabled: bool) -> ApiResult<()> {
+        self.inner.api.set_approve_all(id, enabled).await?;
+        self.inner.apply(Input::ApproveAllLoaded { session_id: id.to_string(), enabled });
+        Ok(())
+    }
+
+    /// Ask the server whether `id` is in approve-everything mode and take the answer.
+    pub async fn load_approve_all(&self, id: &str) -> ApiResult<bool> {
+        let enabled = self.inner.api.session(id).await?.approve_all;
+        self.inner.apply(Input::ApproveAllLoaded { session_id: id.to_string(), enabled });
+        Ok(enabled)
+    }
+
+    /// Fork `id` after its completed turn `turn_seq` (the last when `None`, FR-S5). The new
+    /// session enters the state at once; the caller opens it.
+    pub async fn fork_session(&self, id: &str, turn_seq: Option<i64>) -> ApiResult<SessionRecord> {
+        let rec = self.inner.api.fork_session(id, turn_seq).await?;
+        self.inner.apply(Input::SessionLoaded(rec.clone()));
+        Ok(rec)
+    }
+
+    /// Ask the server for `id`'s fork facts (can_fork, turns, parent) and take the answer.
+    pub async fn load_fork_info(&self, id: &str) -> ApiResult<()> {
+        let detail = self.inner.api.session(id).await?;
+        self.inner.apply(Input::ForkInfoLoaded { session_id: id.to_string(), info: ForkInfo::from(&detail) });
+        Ok(())
+    }
+
     pub async fn interrupt(&self, id: &str) -> ApiResult<()> {
         self.inner.api.interrupt(id).await
     }
@@ -270,6 +322,30 @@ impl Client {
         let list = self.inner.api.projects().await?;
         self.inner.apply(Input::ProjectsLoaded(list.clone()));
         Ok(list)
+    }
+
+    /// Save project settings (FR-L26). The state takes the answer at once; after a rename the
+    /// list is reloaded so the old name goes away. The server's `project_updated` push tells
+    /// every other client.
+    pub async fn patch_project(&self, name: &str, patch: &crate::wire::ProjectPatch) -> Result<Project, crate::api::ProjectPatchError> {
+        let p = self.inner.api.patch_project(name, patch).await?;
+        // The rename first, so the answer (already under the new name) lands on the moved record.
+        if let Some(new) = &patch.name {
+            self.inner.apply(Input::ProjectRenamed { old: name.to_string(), new: new.clone() });
+        }
+        self.inner.apply(Input::Push(Push::ProjectUpdated { project: p.clone() }));
+        if patch.name.is_some() {
+            let _ = self.load_projects().await;
+        }
+        Ok(p)
+    }
+
+    /// Delete an empty project (FR-L26, #384). The state drops it at once; the server's
+    /// `project_deleted` push tells every other client.
+    pub async fn delete_project(&self, name: &str) -> Result<(), crate::api::ProjectPatchError> {
+        self.inner.api.delete_project(name).await?;
+        self.inner.apply(Input::Push(Push::ProjectDeleted { name: name.to_string() }));
+        Ok(())
     }
 
     /// Assign a computer to a project (FR-L4).
@@ -448,8 +524,6 @@ async fn cache_writer(inner: Arc<Inner>) {
 }
 
 enum Ended {
-    /// Server push version differs: stop.
-    Incompatible { server: u32 },
     /// Connection lost or failed: retry.
     Lost(String),
     /// Paused by the app.
@@ -470,13 +544,6 @@ async fn push_loop(inner: Arc<Inner>) {
         inner.apply(Input::Connection(ConnectionState::Connecting { attempt: backoff.attempt() }));
         let ended = connect_and_run(&inner, &mut mode, &mut backoff).await;
         match ended {
-            Ended::Incompatible { server } => {
-                inner.apply(Input::Connection(ConnectionState::Incompatible { server, client: PUSH_VERSION }));
-                // Only an explicit pause/resume (e.g. after the user updated) retries.
-                if mode.changed().await.is_err() {
-                    return;
-                }
-            }
             Ended::Paused => {}
             Ended::Lost(error) => {
                 let delay = backoff.next_delay();
@@ -500,7 +567,6 @@ async fn connect_and_run(
     backoff: &mut Backoff,
 ) -> Ended {
     match inner.api.health().await {
-        Ok(h) if h.push_version != PUSH_VERSION => return Ended::Incompatible { server: h.push_version },
         Ok(_) => {}
         Err(e) => return Ended::Lost(e.to_string()),
     }
@@ -527,9 +593,8 @@ async fn connect_and_run(
                     Ok(p) => {
                         inner.apply(Input::Push(p));
                     }
-                    Err(DecodeError::Version { server, .. }) => break Ended::Incompatible { server },
                     Err(DecodeError::Skipped(kind)) => tracing::trace!("ignoring push {kind}"),
-                    // An unknown push type from a compatible server is additive: skip it.
+                    // An unknown push type is additive: skip it.
                     Err(e) => tracing::warn!("skipping push message: {e}"),
                 },
                 Some(Ok(Message::Close(_))) | None => break Ended::Lost("push connection closed".into()),

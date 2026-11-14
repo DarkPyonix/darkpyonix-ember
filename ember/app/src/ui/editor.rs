@@ -790,10 +790,13 @@ pub fn editor_grid_style(has_left: bool, has_bottom: bool) -> String {
     style
 }
 
-/// The page's height rule: macOS opens the window FullSize, so the page is the window's height;
-/// elsewhere the native chrome stays and the page keeps its 76px allowance.
-pub fn editor_page_height(full_size: bool) -> &'static str {
-    if full_size { "100vh" } else { "calc(100vh - 76px)" }
+/// The page's size rule, the same on every system: the page is the viewport. The viewport is the
+/// box the window gives its content (the whole window under FullSize on macOS, the area below the
+/// native title bar elsewhere), and the HTML runtime lays the page out again on every dp change
+/// of that box, so the page follows the window both when it grows and when it shrinks (#301,
+/// #320). No title bar height is taken out here: the viewport already excludes it.
+pub fn editor_page_size_style() -> &'static str {
+    "width:100vw; height:100vh;"
 }
 
 /// The top bar's left padding past the window controls: under FullSize the traffic lights float

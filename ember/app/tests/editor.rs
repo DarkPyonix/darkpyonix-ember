@@ -492,13 +492,25 @@ mod status {
 
 // FR-L31 (D38): the window opens FullSize on macOS, the top bar is the title strip.
 mod title_strip {
-    use ember_app::ui::editor::{editor_page_height, editor_strip_padding};
+    use ember_app::ui::editor::{editor_page_size_style, editor_strip_padding};
 
+    // #301, #320: the page is the viewport on every system, with no title bar height taken out.
     #[test]
-    fn fr_l31_full_size_page_is_the_window_height_and_other_chrome_keeps_its_allowance() {
-        assert_eq!(editor_page_height(true), "100vh");
-        assert_eq!(editor_page_height(false), "calc(100vh - 76px)");
+    fn fr_l31_the_page_is_the_viewport_with_no_title_bar_allowance() {
+        assert_eq!(editor_page_size_style(), "width:100vw; height:100vh;");
     }
+
+    // #301: no stylesheet of the page keeps the 76px title bar allowance.
+    #[test]
+    fn fr_l31_the_stylesheets_keep_no_title_bar_allowance() {
+        let css = ember_app::ui::editor_workbench::page::config().stylesheets.join("\n");
+        let compact: String = css.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(!compact.contains("100vh-76px"), "a stylesheet still takes 76px out of the viewport height");
+        assert!(!compact.contains("var(--sbh)+76px"), "a stylesheet still adds 76px above the status bar");
+        // The mockup's own rule places the overlaid left tool window down to the status bar.
+        assert!(compact.contains("top:52px;bottom:var(--sbh);"), "the left tool window overlay does not end at the status bar");
+    }
+
 
     #[test]
     fn fr_l31_top_bar_clears_the_traffic_lights_only_under_full_size() {
@@ -524,6 +536,15 @@ mod title_strip {
         let given = ember_app::ui::cr::shell::window_chrome(Window::new()).chrome;
         let plain = Window::new().chrome;
         assert_eq!(given, if cfg!(target_os = "macos") { Chrome::FullSize } else { plain });
+    }
+
+    // #320: the window asks for a size report on every dp change, so the title strip's safe area
+    // and the window size the page's hooks read follow a resize that crosses no size class.
+    #[test]
+    fn fr_l31_editor_window_asks_for_a_size_report_on_every_dp_change() {
+        use compose_rust::schema::Window;
+        assert!(!Window::new().report_size, "the toolkit's default reports on size class changes only");
+        assert!(ember_app::ui::cr::shell::window_chrome(Window::new()).report_size);
     }
 }
 

@@ -231,7 +231,15 @@ impl LetifyBackend {
             let bound = relay.local_addr();
             relay.allow(identity.node_id());
             relay_handle = Some(relay.handle());
-            let local = SocketAddr::from(([127, 0, 0, 1], bound.port()));
+            // This endpoint dials its own relay where the relay listens: on loopback when it is
+            // bound to every address, else on the one address it is bound to (a relay bound to a
+            // LAN address does not answer on 127.0.0.1, and the standing requests would never
+            // be posted, FR-N9).
+            let local = match bound.ip() {
+                ip if !ip.is_unspecified() => bound,
+                std::net::IpAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, bound.port())),
+                std::net::IpAddr::V4(_) => SocketAddr::from(([127, 0, 0, 1], bound.port())),
+            };
             own_relay = Some(RelayTarget {
                 addr: local.to_string(),
                 node: identity.node_id(),
@@ -812,8 +820,10 @@ async fn standing_loop(inner: Weak<Inner>, relay: RelayTarget, peer: NodeId, sta
                     }
                 });
             }
-            // The relay's own refusal: nobody came within its pair timeout. Ask again.
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            // The relay's own refusal because nobody came within its pair timeout: ask again at
+            // once. Its other refusals (a request of ours still waiting after a revoke, too many
+            // waiting requests) last for a while, so they take the slow retry below.
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && e.to_string().contains("no counterpart") => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             Err(e) => {

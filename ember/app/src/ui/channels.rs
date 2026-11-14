@@ -489,6 +489,44 @@ pub fn avatar_kind(is_agent: bool, harness: &str) -> AvatarKind {
     }
 }
 
+/// The list pane's geometry from the mockup (`.listpane`, `.room-item`, review CH4, #630): a room
+/// row runs edge to edge of the pane with 10 above and below and 16 at the sides, 12 between the
+/// icon, the text and the time; the search field and the filter segments sit 12 in from the
+/// sides; the title row (`.ph`) has 16 above and at the sides and 8 below.
+pub const ROOM_ROW_PAD_H: f32 = 16.0;
+pub const ROOM_ROW_GAP: f32 = 12.0;
+pub const LIST_PANE_INSET: f32 = 12.0;
+pub const LIST_HEAD_PAD_TOP: f32 = 16.0;
+pub const LIST_HEAD_PAD_SIDE: f32 = 16.0;
+pub const LIST_HEAD_PAD_BOTTOM: f32 = 8.0;
+/// The room header's height and side padding (`.topbar`: 56 high, `padding: 0 var(--sp5)`).
+pub const ROOM_HEAD_H: f32 = 56.0;
+pub const ROOM_HEAD_PAD: f32 = 20.0;
+/// The room mark in the room header (`roomIcon(room, 30)`).
+pub const ROOM_HEAD_ICON: f32 = 30.0;
+
+/// Whether the room header names the project (`.ch-proj.hide-sm`: not at 560 px and below).
+pub fn room_head_shows_project(width_dp: f32) -> bool {
+    width_dp > 560.0
+}
+
+/// How wide the room's name may run in the header before it ends in an ellipsis. The mockup's
+/// header keeps the buttons right after the title (`.topbar > * { flex: none }`), so the name
+/// gets a cap instead of the leftover width: on a phone what the back button, the mark, the
+/// count, the two buttons and the gaps leave (230 dp), else 160 up to 1279 dp and 240 above.
+/// An unknown window (0 before the first frame) takes the wide cap, so no name is cut for a frame.
+pub fn room_title_max(width_dp: f32) -> f32 {
+    if width_dp <= 0.0 {
+        240.0
+    } else if width_dp <= 560.0 {
+        (width_dp - 230.0).max(60.0)
+    } else if width_dp <= 1279.0 {
+        160.0
+    } else {
+        240.0
+    }
+}
+
 /// What a compact window shows: the room when one is open, the list otherwise.
 pub fn compact_shows_room(open: &Option<String>) -> bool {
     open.is_some()
@@ -954,6 +992,20 @@ mod tests {
 #[cfg(test)]
 mod layout_tests {
     use super::*;
+
+    #[test]
+    fn fr_l12_list_pane_and_room_head_follow_the_mockup() {
+        assert_eq!((ROOM_ROW_PAD_H, ROOM_ROW_GAP, LIST_PANE_INSET), (16.0, 12.0, 12.0));
+        assert_eq!((LIST_HEAD_PAD_TOP, LIST_HEAD_PAD_SIDE, LIST_HEAD_PAD_BOTTOM), (16.0, 16.0, 8.0));
+        assert_eq!((ROOM_HEAD_H, ROOM_HEAD_PAD, ROOM_HEAD_ICON), (56.0, 20.0, 30.0));
+        assert!(room_head_shows_project(1440.0));
+        assert!(!room_head_shows_project(390.0));
+        assert_eq!(room_title_max(390.0), 160.0);
+        assert_eq!(room_title_max(1024.0), 160.0);
+        assert_eq!(room_title_max(1440.0), 240.0);
+        assert_eq!(room_title_max(0.0), 240.0, "before the first frame no name is cut");
+        assert_eq!(room_title_max(200.0), 60.0);
+    }
 
     #[test]
     fn fr_l12_compact_switches_between_list_and_room_and_wider_windows_split() {

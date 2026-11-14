@@ -350,7 +350,9 @@ pub fn pop_metrics(kind: PopKind) -> PopMetrics {
             offset: 8.0,
         },
         // `.sdrop{width:360px;padding:6px;top:calc(100% + 6px)}`, `.sdrop-h{padding:8px 10px}`,
-        // `.sdrop-i{padding:8px 10px;gap:10px;border-radius:var(--r)}`.
+        // `.sdrop-i{padding:8px 10px;gap:10px;border-radius:var(--r)}`. A row has no minimum in
+        // the CSS, but its title (`b`, 14 at the body's 1.5 line height, 21) over the 12
+        // `.small` line (18) with 8 above and below is 55 high (review r8: ours drew 50).
         PopKind::Drop => PopMetrics {
             width: 360.0,
             box_pad: 6.0,
@@ -358,7 +360,7 @@ pub fn pop_metrics(kind: PopKind) -> PopMetrics {
             list_pad: (0.0, 0.0, 0.0),
             row_pad: (8.0, 10.0),
             row_gap: 10.0,
-            row_min_h: 0.0,
+            row_min_h: DROP_ROW_MIN_H,
             row_radius: CORNER_MD,
             offset: 6.0,
         },
@@ -372,6 +374,34 @@ pub fn pop_chosen_fill(kind: PopKind, p: &Palette) -> Color {
         PopKind::Mode => p.sel,
         PopKind::Drop => p.hover,
     }
+}
+
+/// The height of a drop menu row with a title and a description line (`.sdrop-i`: 8 + 21 + 18 + 8).
+pub const DROP_ROW_MIN_H: f32 = 55.0;
+
+/// How far the toolkit keeps a popover from the window's edges: `popoverWindowMargin`, the
+/// theme's `SpaceRole.Sm` (compose-rust `renderer/desktop/src/renderer/HostPopover.kt`
+/// `popoverWindowMargin`, `shiftInside`).
+pub const TOOLKIT_POPOVER_MARGIN: f32 = 8.0;
+
+/// The phone drop panel's side gap (`.sdrop{left:12px;right:12px}` at 560 and below).
+pub const DROP_PHONE_SIDE: f32 = 12.0;
+
+/// The sideways shift a drop menu takes at 560 and below, so the panel sits 12 from each side.
+///
+/// The toolkit places a popover by its anchor and then slides it inside the window, never
+/// nearer than its own 8 dp margin (`HostPopover.kt` `shiftInside`: `x.coerceAtMost(window -
+/// margin - width).coerceAtLeast(margin)`), and the Host cannot name a margin or a coordinate.
+/// The panel is the window less 24 wide and lined up with the end of a control that ends at
+/// least 16 from the window's right edge (every drop menu's control does), so the toolkit puts
+/// its start at 8. `Modifier::offset` then draws it 4 further right, at 12..window-12, without
+/// moving where the toolkit placed it. The 4 dp strip at the right of the drawn box is outside
+/// the popup's own bounds, so a press there counts as a press outside (it is inside the box's 6
+/// dp padding, where nothing is pressable). Wider windows need none: the panel stays on the
+/// control's end, well inside the margin.
+pub fn pop_phone_shift(kind: PopKind, window_width_dp: f32) -> f32 {
+    let phone = window_width_dp > 0.0 && window_width_dp <= 560.0;
+    if kind == PopKind::Drop && phone { DROP_PHONE_SIDE - TOOLKIT_POPOVER_MARGIN } else { 0.0 }
 }
 
 /// How a menu is shown at a window width.
@@ -473,6 +503,8 @@ pub fn PopoverMenu(
         }
         PopPresentation::Popover => {
             let width = pop_width(menu.kind, window.width_dp);
+            let shift = pop_phone_shift(menu.kind, window.width_dp);
+            let placed = if shift != 0.0 { Modifier::new().offset(shift, 0.0) } else { Modifier::new() };
             cu::Popover(open)
                 .placement(compose_rust::PopoverPlacement::Bottom)
                 .align(menu.align)
@@ -482,7 +514,7 @@ pub fn PopoverMenu(
                     // `elevation(0)`: the box casts its own shadow, so the toolkit's menu
                     // elevation is turned off. Without it the renderer casts a second shadow
                     // from the inner surface, which shows through the box as a grey band.
-                    with_shadows(Modifier::new(), theme.shadow_lg())
+                    with_shadows(placed, theme.shadow_lg())
                         .elevation(0.0)
                         .width(width)
                         .background(paint(p.surface))
@@ -1045,6 +1077,64 @@ pub fn pill_metrics(small: bool) -> (f32, Fs, Weight) {
     } else {
         (H_PILL, Fs::Xs, Weight::Medium)
     }
+}
+
+/// The width of the name in [`NameThenPill`]: its own width (one dp more, since the toolkit
+/// reports sizes rounded to whole dp) while that fits beside the pill, else what the room leaves
+/// beside the pill. `None` until the renderer has measured all three.
+pub fn name_then_pill_width(room: f32, natural: f32, pill: f32, gap: f32) -> Option<f32> {
+    if room <= 0.0 || natural <= 0.0 || pill <= 0.0 {
+        return None;
+    }
+    Some((natural + 1.0).min((room - pill - gap).max(0.0)))
+}
+
+/// A one-line name with a pill right after it, taking the rest of a row (`weight(1)`): a short
+/// name keeps its own width and the pill follows it, a long one is cut with an ellipsis so the
+/// pill and whatever follows the row stay on screen (CSS `flex:0 1 auto;min-width:0` on the
+/// name; `.detail .topbar` in the mockup).
+///
+/// The toolkit has no weight that leaves a child its own size (Compose `weight(fill = false)`)
+/// and no maximum width: a weighted child fills its share (compose-rust
+/// `renderer/desktop/src/renderer/RenderNode.kt` `WeightedStackPolicy`), and an unweighted one
+/// is measured in order, so a long name would leave the pill no room. So the row measures: the
+/// room, the pill and the name's own width (a copy drawn at zero opacity and left out of the
+/// accessibility tree) are reported by the renderer (`observe_size_every_dp`), and the name gets
+/// the width [`name_then_pill_width`] gives. Until the first report the name takes the room and
+/// the pill sits at its end, which is where every long name ends up anyway.
+pub fn NameThenPill(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, gap: f32, pill: impl FnOnce()) {
+    let room = compose_rust::runtime::remember_node_size();
+    let natural = compose_rust::runtime::remember_node_size();
+    let pill_size = compose_rust::runtime::remember_node_size();
+    let width = name_then_pill_width(
+        room.measured().width_dp,
+        natural.measured().width_dp,
+        pill_size.measured().width_dp,
+        gap,
+    );
+    cu::Box()
+        .alignment(Alignment::CenterStart)
+        .modifier(Modifier::new().weight(1.0).width(0.0).observe_size_every_dp(room.token()))
+        .content(|| {
+            cu::Row().modifier(Modifier::new().alpha(0.0).hidden(true)).content(|| {
+                cu::Box().modifier(Modifier::new().observe_size_every_dp(natural.token()).hidden(true)).content(|| {
+                    Label(name, fs, weight, color, Some(1));
+                });
+            });
+            cu::Row().alignment(Alignment::CenterStart).spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
+                let name_box = match width {
+                    Some(w) => Modifier::new().width(w),
+                    None => Modifier::new().weight(1.0).width(0.0),
+                };
+                cu::Box().alignment(Alignment::CenterStart).modifier(name_box).content(|| {
+                    Label(name, fs, weight, color, Some(1));
+                });
+                cu::Box().modifier(Modifier::new().observe_size_every_dp(pill_size.token())).content(pill);
+                if width.is_some() {
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                }
+            });
+        });
 }
 
 /// A status or count pill. Pills carry status and counts, never actions.
@@ -2508,8 +2598,10 @@ mod tests {
         assert!(header.contains(".height(super::theme::TOPBAR_H)"), "{header}");
         assert!(!header.contains(".padding(SP[2])") && !header.contains(".height(52.0)"), "{header}");
         assert_eq!(header.matches("Modifier::new().width(super::theme::TOPBAR_PAD_X)").count(), 2, "both sides");
-        // The member name shrinks with an ellipsis so the panel button stays inside the bar.
-        assert!(header.contains("cu::Column().modifier(Modifier::new().weight(1.0).width(0.0))"), "{header}");
+        // The member name shrinks with an ellipsis so the panel button stays inside the bar,
+        // and the status pill follows the name rather than the far end (review r8).
+        assert!(header.contains("NameThenPill("), "{header}");
+        assert!(header.contains("|| Pill(st_txt, st_tone.into(), true)"), "{header}");
         let routines = include_str!("routines.rs").split("#[cfg(test)]").next().unwrap();
         let icons = routines.split("if layout == DetailHeader::Icons {").nth(1).unwrap().split("} else if layout == DetailHeader::Stacked").next().unwrap();
         assert!(icons.contains("BackButton(") && !icons.contains(".padding(PAD_ROW_V)"), "{icons}");
@@ -3138,7 +3230,8 @@ mod tests {
         let d = pop_metrics(PopKind::Drop);
         assert_eq!((d.width, d.box_pad, d.offset), (360.0, 6.0, 6.0));
         assert_eq!((d.head_pad, d.list_pad), ((8.0, 10.0, 8.0), (0.0, 0.0, 0.0)));
-        assert_eq!((d.row_pad, d.row_gap, d.row_min_h, d.row_radius), ((8.0, 10.0), 10.0, 0.0, CORNER_MD));
+        // `.sdrop-i`: 8 + 21 (14 at 1.5) + 18 (`.small`) + 8 = 55 with a description.
+        assert_eq!((d.row_pad, d.row_gap, d.row_min_h, d.row_radius), ((8.0, 10.0), 10.0, 55.0, CORNER_MD));
         // `.md-row.on{background:var(--sel)}`, `.sdrop-i.on{background:var(--hover)}`.
         assert_eq!(pop_chosen_fill(PopKind::Mode, &LIGHT), LIGHT.sel);
         assert_eq!(pop_chosen_fill(PopKind::Drop, &DARK), DARK.hover);
@@ -3174,6 +3267,62 @@ mod tests {
         assert!(!is_under(&nodes, text_node(&nodes, "IDE 버튼"), sheet.id), "the control stays on the page");
         let pop = the(&drop, "Popover");
         assert!(pop.mods.iter().any(|m| m == "Width(366.0)"), "{:?}", pop.mods);
+    }
+
+    #[test]
+    fn fr_l28_a_name_keeps_its_width_with_the_pill_after_it_and_a_long_one_gives_way() {
+        // Unmeasured: the name takes the room (the pill at the end) until the renderer reports.
+        assert_eq!(name_then_pill_width(0.0, 120.0, 60.0, 8.0), None);
+        assert_eq!(name_then_pill_width(300.0, 0.0, 60.0, 8.0), None);
+        // A short name keeps its own width (plus the dp lost to rounding); the pill follows it.
+        assert_eq!(name_then_pill_width(300.0, 120.0, 60.0, 8.0), Some(121.0));
+        // A long one gets what the pill leaves and is cut with an ellipsis.
+        assert_eq!(name_then_pill_width(300.0, 400.0, 60.0, 8.0), Some(232.0));
+        assert_eq!(name_then_pill_width(50.0, 400.0, 60.0, 8.0), Some(0.0));
+    }
+
+    fn name_then_pill() {
+        NameThenPill("demo-project 세션", Fs::Md, Weight::Semibold, None, 8.0, || Pill("승인 대기", PillTone::Orange, true));
+    }
+
+    #[test]
+    fn fr_l28_name_then_pill_measures_the_room_the_name_and_the_pill() {
+        let _guard = crate::services::test_guard();
+        let nodes = emitted_nodes(name_then_pill);
+        let observed = nodes.iter().filter(|n| n.mods.iter().any(|m| m.starts_with("ObserveSize") && m.contains("every_dp: true"))).count();
+        assert_eq!(observed, 3, "the room, the name's own width and the pill");
+        // The measuring copy is invisible and out of the accessibility tree.
+        let copies: Vec<&EmittedNode> = nodes.iter().filter(|n| n.props.iter().any(|p| p == "Text=String(\"demo-project 세션\")")).collect();
+        assert_eq!(copies.len(), 2);
+        let hidden = nodes.iter().find(|n| n.mods.iter().any(|m| m == "Alpha(0.0)")).expect("the zero-opacity copy");
+        assert!(is_under(&nodes, copies[0], hidden.id) && !is_under(&nodes, copies[1], hidden.id));
+        assert!(hidden.mods.iter().any(|m| m.starts_with("Semantics")), "{:?}", hidden.mods);
+        // Before a report the visible name fills the room, so a long name never pushes past it.
+        let name_box = parent_of(&nodes, copies[1]);
+        assert!(name_box.mods.iter().any(|m| m == "Weight(1.0)"), "{:?}", name_box.mods);
+    }
+
+    #[test]
+    fn fr_l10_4_a_phone_drop_panel_is_drawn_12_from_each_side() {
+        // The toolkit keeps a popover 8 from the window's edges and puts a window-less-24 panel
+        // on the end of a control that ends 16 or more from the right edge at x 8; the 4 dp
+        // shift draws it at 12..378 in a 390 window (`.sdrop{left:12px;right:12px}`, review r8).
+        assert_eq!(TOOLKIT_POPOVER_MARGIN + pop_phone_shift(PopKind::Drop, 390.0), 12.0);
+        assert_eq!(TOOLKIT_POPOVER_MARGIN + pop_phone_shift(PopKind::Drop, 390.0) + pop_width(PopKind::Drop, 390.0), 390.0 - 12.0);
+        assert_eq!(pop_phone_shift(PopKind::Drop, 560.0), 4.0);
+        assert_eq!(pop_phone_shift(PopKind::Drop, 561.0), 0.0);
+        assert_eq!(pop_phone_shift(PopKind::Drop, 0.0), 0.0, "no size reported yet");
+        assert_eq!(pop_phone_shift(PopKind::Mode, 390.0), 0.0, "a mode menu is a sheet there");
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+        let phone = emitted_nodes(drop_menu);
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let wide = emitted_nodes(drop_menu);
+        crate::ui::window_size::set_opened_for_test(None);
+        let pop = the(&phone, "Popover");
+        assert!(pop.mods.iter().any(|m| m == "Offset { x: 4.0, y: 0.0 }"), "{:?}", pop.mods);
+        let pop = the(&wide, "Popover");
+        assert!(!pop.mods.iter().any(|m| m.starts_with("Offset")), "{:?}", pop.mods);
     }
 
     static CLICKS: AtomicUsize = AtomicUsize::new(0);

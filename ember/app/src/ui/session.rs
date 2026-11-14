@@ -731,6 +731,13 @@ pub fn ide_description(kind: IdeKind) -> &'static str {
     }
 }
 
+/// The IDE the menu marks as current: the remembered one, else Ember's own editor, which the
+/// mockup names on the button and checks in the menu before anything is chosen (`ideMenu`,
+/// `on = s.ide || "ember"`; review r8: a fresh profile showed no current row).
+pub fn current_ide(remembered: Option<IdeKind>) -> IdeKind {
+    remembered.unwrap_or(IdeKind::Ember)
+}
+
 /// Exactly the three IDEs of D32, the remembered one first.
 pub fn ide_choices(remembered: Option<IdeKind>) -> Vec<IdeChoice> {
     let mut kinds: Vec<IdeKind> = IdeKind::ALL.to_vec();

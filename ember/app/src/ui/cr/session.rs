@@ -53,7 +53,7 @@ use super::characters::{CharState, Character};
 use super::compat::Spinner;
 use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
-    AppButton, BackButton, ButtonKind, Clickable, CloseButton, NamedClickable, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
+    AppButton, BackButton, ButtonKind, Clickable, CloseButton, NamedClickable, NameThenPill, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
     FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu, SearchField, Select, SheetFooter, Txt,
     SEARCH_FIELD_H_COMPACT,
 };
@@ -544,6 +544,23 @@ pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
     );
 }
 
+/// The IDE menu's rows (session and project): the code glyph, the name, what the client does
+/// with it, and the fill and check on the current IDE ([`crate::ui::session::current_ide`]: Ember
+/// when none is remembered).
+pub fn ide_pop_rows(choices: &[crate::ui::session::IdeChoice], remembered: Option<IdeKind>) -> Vec<PopRow> {
+    let current = crate::ui::session::current_ide(remembered);
+    choices
+        .iter()
+        .map(|c| PopRow {
+            icon: Some(ICON_CODE_SVG),
+            title: c.label.to_string(),
+            description: Some(crate::ui::session::ide_description(c.kind).to_string()),
+            chosen: c.kind == current,
+            ..Default::default()
+        })
+        .collect()
+}
+
 /// "IDE 열기" split button with the three-entry chooser (`.idesplit`, FR-L7), a menu under the
 /// split button (FR-L10.4, #888, mockup `ideMenu`): "어느 IDE로 열까요" over the session's folder,
 /// one row per IDE with the code glyph, its name, what it does and a check on the remembered one.
@@ -607,16 +624,7 @@ pub fn IdeMenu(session: &str) {
         .client
         .read(|s| s.session(&sid).map(|v| v.record.cwd.clone()))
         .unwrap_or_default();
-    let rows: Vec<PopRow> = choices
-        .iter()
-        .map(|c| PopRow {
-            icon: Some(ICON_CODE_SVG),
-            title: c.label.to_string(),
-            description: Some(crate::ui::session::ide_description(c.kind).to_string()),
-            chosen: Some(c.kind) == remembered,
-            ..Default::default()
-        })
-        .collect();
+    let rows = ide_pop_rows(&choices, remembered);
     let o_d = open.clone();
     let choices_c = choices.clone();
     let ui_c = ui.clone();
@@ -2531,19 +2539,19 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
                                             CharState::from_status(m.status),
                                             None,
                                         );
-                                        // The name takes the room left with an ellipsis, so
-                                        // the status pill and the panel button keep theirs (a
-                                        // long name pushed the button past the edge at 390).
-                                        cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
-                                            Label(
-                                                &m.accessible_name(),
-                                                Fs::Md,
-                                                Weight::Semibold,
-                                                Some(paint(p.text)),
-                                                Some(1),
-                                            );
-                                        });
-                                        Pill(st_txt, st_tone.into(), true);
+                                        // The status pill sits right after the name, as the
+                                        // mockup's; a long name is cut with an ellipsis so the
+                                        // pill and the panel button keep their room (a long name
+                                        // pushed the button past the edge at 390; review r8: a
+                                        // name filling the row pushed the pill to the far end).
+                                        NameThenPill(
+                                            &m.accessible_name(),
+                                            Fs::Md,
+                                            Weight::Semibold,
+                                            Some(paint(p.text)),
+                                            SP[1],
+                                            || Pill(st_txt, st_tone.into(), true),
+                                        );
                                     } else {
                                         cu::Spacer().modifier(Modifier::new().weight(1.0));
                                     }
@@ -4060,16 +4068,19 @@ fn WebMenu(open: bool, load: &WebPagesLoad, on_dismiss: impl FnMut() + Clone + '
             WebTap::Say(text) => notice::post(text),
             WebTap::Nothing => {}
         },
-        move || ToolbarBtn(ICON_GLOBE_SVG, "웹 페이지", SESSION_HEADER_LABELS, true, on_open),
+        move || ToolbarBtn(ICON_GLOBE_SVG, "웹 페이지", SESSION_HEADER_LABELS, true, Some(open), on_open),
         None,
     );
 }
 
+/// A header action: a named button (`label` is its name and its tooltip), and, when it opens a
+/// menu, whether that menu is open (`expanded`, FR-L10.4).
 fn ToolbarBtn(
     icon_svg: &'static str,
-    label: &str,
+    label: &'static str,
     show_label: bool,
     chevron: bool,
+    expanded: Option<bool>,
     on_click: impl FnMut() + 'static,
 ) {
     let p = ember_theme().palette;
@@ -4091,7 +4102,12 @@ fn ToolbarBtn(
     // the app); kept as is until checked on a display that the toolkit `Tooltip` shows on hover.
     // Assistive technology reads it now.
     let tip = lbl.clone();
-    cu::Tooltip(tip).content(move || Clickable(m, Alignment::Center, on_click, move || {
+    // A button named by its label; read as static text it was not one (review r8).
+    let m = match expanded {
+        Some(open) => m.expanded(open),
+        None => m,
+    };
+    cu::Tooltip(tip).content(move || NamedClickable(label, m, Alignment::Center, on_click, move || {
         if show_label || chevron {
             cu::Row()
                 .alignment(Alignment::CenterStart)
@@ -4922,9 +4938,9 @@ pub fn SessionScreen(focus: Option<String>) {
                                         // Icon-only 32 px buttons with tooltips at every width, as the
                                         // mockup's `.sesshead` (owner placement rule 2026-11-13, rule 6).
                                         let nm = new_member_open.clone();
-                                        ToolbarBtn(ICON_PLUS_SVG, "새 팀원", SESSION_HEADER_LABELS, false, move || nm.set(true));
+                                        ToolbarBtn(ICON_PLUS_SVG, "새 팀원", SESSION_HEADER_LABELS, false, None, move || nm.set(true));
                                         let vo = vcs_open.clone();
-                                        ToolbarBtn(ICON_GIT_SVG, "버전 관리", SESSION_HEADER_LABELS, false, move || vo.set(true));
+                                        ToolbarBtn(ICON_GIT_SVG, "버전 관리", SESSION_HEADER_LABELS, false, None, move || vo.set(true));
                                         let wm = open_web_menu.clone();
                                         let wm_d = web_menu.clone();
                                         #[allow(clippy::redundant_closure)]
@@ -5113,15 +5129,66 @@ mod tests {
         assert!(!head.contains("ICON_MORE_H_SVG"));
         // Owner placement rule 2026-11-13 (rule 6): icon only at every width.
         assert!(!super::SESSION_HEADER_LABELS);
-        assert_eq!(head.matches(", SESSION_HEADER_LABELS, false, move ||").count(), 2);
+        assert_eq!(head.matches(", SESSION_HEADER_LABELS, false, None, move ||").count(), 2);
         assert!(!head.contains("show_btn_lbl"));
         // The globe is the 웹 페이지 menu's control, a split with a chevron (review SE3, #888).
         let web = src.split("fn WebMenu(").nth(1).unwrap().split("\nfn ").next().unwrap();
-        assert!(web.contains("ToolbarBtn(ICON_GLOBE_SVG, \"웹 페이지\", SESSION_HEADER_LABELS, true, on_open)"));
+        assert!(web.contains("ToolbarBtn(ICON_GLOBE_SVG, \"웹 페이지\", SESSION_HEADER_LABELS, true, Some(open), on_open)"));
         for icon in ["ICON_PLUS_SVG", "ICON_GIT_SVG", "WebMenu(", "IdeMenu(&t)"] {
             assert!(head.contains(icon), "{icon}");
         }
         assert!(!src.contains("more_menu"));
+    }
+
+    fn globe_semantics(expanded: Option<bool>) -> Vec<String> {
+        use compose_rust::protocol::{decode_batch, Mutation};
+        use compose_rust::{Host, Recomposer};
+        thread_local!(static EXPANDED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) });
+        EXPANDED.with(|e| e.set(expanded));
+        fn globe() {
+            ToolbarBtn(ICON_GLOBE_SVG, "웹 페이지", false, true, EXPANDED.with(|e| e.get()), || {});
+        }
+        let mut host = Host::new(|| Box::new(Recomposer::new(globe)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { modifier, .. } => Some(format!("{modifier:?}")),
+                Mutation::SetProp { property, value, .. } => Some(format!("{property:?}={value:?}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fr_l10_4_the_globe_is_a_named_button_that_says_whether_its_menu_is_open() {
+        let _guard = crate::services::test_guard();
+        let (closed, open, plain) = (globe_semantics(Some(false)), globe_semantics(Some(true)), globe_semantics(None));
+        let sem = |all: &[String]| all.iter().find(|m| m.starts_with("Semantics")).cloned().expect("semantics");
+        assert!(sem(&closed).contains("Button"), "{closed:?}");
+        assert!(closed.iter().any(|p| p.contains("웹 페이지") && !p.starts_with("Text=")), "named: {closed:?}");
+        // Collapsed, expanded and (for a plain action) neither are three different states.
+        assert_ne!(sem(&closed), sem(&open));
+        assert_ne!(sem(&closed), sem(&plain));
+        assert_ne!(sem(&open), sem(&plain));
+    }
+
+    #[test]
+    fn fr_l10_4_the_ide_menu_always_marks_the_current_ide() {
+        use crate::ide::IdeKind;
+        use crate::ui::session::{current_ide, ide_choices};
+        // A fresh profile: Ember's own editor is the current one (mockup `on = s.ide || "ember"`).
+        assert_eq!(current_ide(None), IdeKind::Ember);
+        let rows = ide_pop_rows(&ide_choices(None), None);
+        let chosen: Vec<&str> = rows.iter().filter(|r| r.chosen).map(|r| r.title.as_str()).collect();
+        assert_eq!(chosen, ["Ember 에디터"]);
+        // A remembered IDE is first and the only one marked.
+        let rows = ide_pop_rows(&ide_choices(Some(IdeKind::VsCode)), Some(IdeKind::VsCode));
+        assert_eq!((rows[0].title.as_str(), rows[0].chosen), ("VS Code", true));
+        assert_eq!(rows.iter().filter(|r| r.chosen).count(), 1);
+        // Both IDE menus build their rows here.
+        let project = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(project.contains("crate::ui::cr::session::ide_pop_rows(&choices, remembered)"));
     }
 
     #[test]
@@ -5137,9 +5204,11 @@ mod tests {
         assert!(mode.contains(".expanded(expanded)"), "the chip says whether the menu is open");
         let ide = body("IdeMenu");
         assert!(ide.contains("PopoverMenu(") && ide.contains("PopKind::Drop") && ide.contains("PopoverAlign::End"));
-        assert!(ide.contains("IDE_MENU_HEAD") && ide.contains("ide_description(c.kind)"));
+        assert!(ide.contains("IDE_MENU_HEAD") && ide.contains("ide_pop_rows(&choices, remembered)"));
         let web = body("WebMenu");
         assert!(web.contains("PopoverMenu(") && web.contains("WEB_MENU_HEAD") && web.contains("PillTone::Green"));
+        // The globe is a named button that says whether its menu is open (review r8).
+        assert!(web.contains("ToolbarBtn(ICON_GLOBE_SVG, \"웹 페이지\", SESSION_HEADER_LABELS, true, Some(open), on_open)"), "{web}");
         for b in [&mode, &ide, &web] {
             assert!(!b.contains("OptionSheet("), "no centred option sheet is left in {b:.40}");
         }

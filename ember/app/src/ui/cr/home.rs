@@ -1198,11 +1198,13 @@ fn ComposerChip(
     selected: bool,
     icon_only: bool,
     weighted: bool,
+    expanded: bool,
     on_click: impl FnMut() + 'static,
 ) {
     let p = ember_theme().palette;
     let fill = if selected { p.sel } else { p.surface_2 };
-    let modifier = Modifier::new().height(H_CTL).background(paint(fill)).shape_role(ShapeRole::Full).selected(selected);
+    // Every composer chip opens a list, so it says whether that list is open (FR-L10.4).
+    let modifier = Modifier::new().height(H_CTL).background(paint(fill)).shape_role(ShapeRole::Full).selected(selected).expanded(expanded);
     let modifier = if icon_only { modifier.width(H_CTL) } else if weighted { modifier.weight(1.0) } else { modifier };
     let icon_color = tint.unwrap_or(p.text_2.to_argb());
     Clickable(modifier, Alignment::Center, on_click, || {
@@ -1305,7 +1307,8 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
         let (icon, tint) = composer_chip_icon(pick, icon, sel.option.harness);
         // Wide chips are content-sized, their text cut to the budget; only the compact project
         // chip takes the rest of the row.
-        ComposerChip(text, icon, tint, chip_has_chevron(pick), selected, icon_only && pick != Pick::Project, icon_only && pick == Pick::Project, move || open.set(Some(pick)));
+        let expanded = open.get() == Some(pick);
+        ComposerChip(text, icon, tint, chip_has_chevron(pick), selected, icon_only && pick != Pick::Project, icon_only && pick == Pick::Project, expanded, move || open.set(Some(pick)));
     };
     let add = || {
         let open = c.attachment_open.clone();
@@ -2581,6 +2584,31 @@ mod tests {
             .expect("enter");
         assert_eq!(c.selection.get_untracked(), before);
         assert_eq!(c.open.get_untracked(), Some(Pick::Model));
+    }
+
+    fn chip_semantics(expanded: bool) -> String {
+        use compose_rust::protocol::{decode_batch, Mutation};
+        let mut host = Host::new(move || {
+            Box::new(Recomposer::new(move || {
+                ComposerChip("demo-project", ICON_FOLDER, None, true, false, false, false, expanded, || {});
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetModifier { modifier, .. } if format!("{modifier:?}").starts_with("Semantics") => Some(format!("{modifier:?}")),
+                _ => None,
+            })
+            .expect("the chip's semantics")
+    }
+
+    #[test]
+    fn fr_l10_4_composer_chips_say_whether_their_list_is_open() {
+        let _guard = crate::services::test_guard();
+        assert_ne!(chip_semantics(true), chip_semantics(false), "expanded and collapsed differ");
+        let src = include_str!("home.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(src.contains("let expanded = open.get() == Some(pick);"));
     }
 
     #[test]

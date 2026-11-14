@@ -29,7 +29,7 @@ use super::characters::{CharState, Character, StylePicker};
 use crate::ui::characters::CharStyle;
 use super::components::{
     AppButton, ButtonKind, Clickable, NamedClickable, EmberField, EmberSheet, FieldOptions, FilterChip,
-    IconButton, Label, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu, SearchField, Select, SheetFooter,
+    IconButton, Label, Pill, PillTone, PopKind, PopMenu, PopoverMenu, SearchField, Select, SheetFooter,
 };
 use super::home::{content_width, fit_label, ring_image, text_px, Cols, Part};
 use super::notice;
@@ -927,16 +927,7 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
         .as_ref()
         .and_then(|sid| services().client.read(|s| s.session(sid).map(|v| v.record.cwd.clone())))
         .unwrap_or_default();
-    let rows: Vec<PopRow> = choices
-        .iter()
-        .map(|c| PopRow {
-            icon: Some(crate::ui::cr::session::ICON_CODE_SVG),
-            title: c.label.to_string(),
-            description: Some(crate::ui::session::ide_description(c.kind).to_string()),
-            chosen: Some(c.kind) == remembered,
-            ..Default::default()
-        })
-        .collect();
+    let rows = crate::ui::cr::session::ide_pop_rows(&choices, remembered);
     let (close, ui2, ide2) = (open.clone(), ui.clone(), ide.clone());
     // The chooser hangs from the IDE button, lined up with its end (FR-L10.4, #888, review P10).
     PopoverMenu(
@@ -1878,7 +1869,7 @@ mod tests {
         let src = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
         let ide = src.split("fn IdeMenu(").nth(1).unwrap().split("\nfn ").next().unwrap();
         assert!(ide.contains("PopoverMenu(") && ide.contains("PopKind::Drop") && ide.contains("PopoverAlign::End"));
-        assert!(ide.contains("IDE_MENU_HEAD") && ide.contains("ide_description(c.kind)"));
+        assert!(ide.contains("IDE_MENU_HEAD") && ide.contains("ide_pop_rows(&choices, remembered)"));
         assert!(!src.contains("OptionSheet("), "no centred option sheet is left on the project screen");
     }
     use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};

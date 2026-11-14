@@ -1162,11 +1162,34 @@ pub const SHARE_NO_FILE: &str = "공유할 파일이 없습니다";
 pub const SHARE_NOTE: &str =
     "파일 전송 서비스(#487)가 준비되면 휴대폰에서 공유 버튼을 눌러 이 시트로 보낼 수 있습니다. 받는 장비에서 수락하면 전송이 시작됩니다.";
 
-/// Under "에이전트에게": agents work in the folder of one of the user's own computers (D24).
-pub const SHARE_AGENTS_NOTE: &str = "에이전트가 일하는 내 컴퓨터의 작업 폴더로 보냅니다";
+/// The label of the agents' row: the mockup's `팀원에게` (`files.js`), with no hint line under
+/// it (review r6 found "에이전트에게" and a hint).
+pub const SHARE_AGENTS_LABEL: &str = "팀원에게";
 
-/// A tile name wraps to this many lines before it is cut with an ellipsis.
-pub const SHARE_NAME_LINES: u32 = 2;
+/// A tile name is one line, cut with an ellipsis (`.fl-sh-dev .ellipsis{max-width:72px}`);
+/// review r6 found names on two lines ("BREW의 / iPhone").
+pub const SHARE_NAME_LINES: u32 = 1;
+
+/// The presence dot on a reachable device's avatar (`.fl-sh-av i`): green for a nearby path,
+/// blue for a direct one, the grey family otherwise; none when the device is not online.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareDot {
+    Green,
+    Blue,
+    Grey,
+}
+
+/// The dot for a device that is `online` over `path` (`FL_PATH` near green, p2p blue).
+pub fn share_dot(online: bool, path: Option<PathKind>) -> Option<ShareDot> {
+    if !online {
+        return None;
+    }
+    Some(match path {
+        Some(PathKind::Nearby) => ShareDot::Green,
+        Some(PathKind::Direct) => ShareDot::Blue,
+        _ => ShareDot::Grey,
+    })
+}
 
 /// The sheet's own actions (the mockup's list); none of them exists without the transfer
 /// service, so each says [`UNAVAILABLE`].
@@ -1175,7 +1198,7 @@ pub const SHARE_ACTIONS: [&str; 3] = ["파일에 저장", "채널에 올리기",
 /// What the sheet says when the chosen device is not connected.
 pub const SHARE_OFFLINE: &str = "이 장비는 지금 연결되어 있지 않습니다";
 
-/// The mockup shows at most three agents under "에이전트에게".
+/// The mockup shows at most three agents under "팀원에게".
 pub const SHARE_AGENTS_MAX: usize = 3;
 
 /// A device in the sheet's "Ember로 보내기" row.
@@ -1187,6 +1210,8 @@ pub struct ShareDevice {
     pub online: bool,
     /// The small line under the name: the path when known, else the kind; "꺼짐" when not online.
     pub caption: String,
+    /// The presence dot on the avatar; `None` when not online.
+    pub dot: Option<ShareDot>,
 }
 
 /// Every device for the row, online ones first (then by name), so the reachable ones are
@@ -1214,12 +1239,13 @@ pub fn share_devices(devices: &[Device]) -> Vec<ShareDevice> {
                 kind: d.kind,
                 online,
                 caption,
+                dot: share_dot(online, d.path),
             }
         })
         .collect()
 }
 
-/// The agents shown under "에이전트에게": the first [`SHARE_AGENTS_MAX`], in the order given.
+/// The agents shown under "팀원에게": the first [`SHARE_AGENTS_MAX`], in the order given.
 pub fn share_agents<T: Clone>(agents: &[T]) -> Vec<T> {
     agents.iter().take(SHARE_AGENTS_MAX).cloned().collect()
 }
@@ -2222,13 +2248,22 @@ mod tests {
     fn fr_l27_7_the_note_does_not_state_unbuilt_behaviour_as_fact() {
         assert!(SHARE_NOTE.contains("#487"), "names the service it depends on");
         assert!(SHARE_NOTE.contains("준비되면"), "says it is not ready");
-        assert_eq!(SHARE_NAME_LINES, 2);
-        assert!(SHARE_AGENTS_NOTE.contains("내 컴퓨터"));
+        assert_eq!(SHARE_NAME_LINES, 1, "one line with an ellipsis");
+        assert_eq!(SHARE_AGENTS_LABEL, "팀원에게");
+    }
+
+    #[test]
+    fn fr_l27_7_a_reachable_device_shows_its_path_dot() {
+        assert_eq!(share_dot(true, Some(PathKind::Nearby)), Some(ShareDot::Green));
+        assert_eq!(share_dot(true, Some(PathKind::Direct)), Some(ShareDot::Blue));
+        assert_eq!(share_dot(true, Some(PathKind::Relay)), Some(ShareDot::Grey));
+        assert_eq!(share_dot(true, None), Some(ShareDot::Grey));
+        assert_eq!(share_dot(false, Some(PathKind::Nearby)), None, "an offline device has no dot");
     }
 
     #[test]
     fn fr_l27_7_the_share_texts_are_polite_and_have_no_em_dash() {
-        let mut all: Vec<&str> = vec![SHARE_NO_FILE, SHARE_NOTE, SHARE_OFFLINE, SHARE_AGENTS_NOTE];
+        let mut all: Vec<&str> = vec![SHARE_NO_FILE, SHARE_NOTE, SHARE_OFFLINE];
         all.extend(SHARE_ACTIONS);
         for t in all {
             assert!(!t.ends_with('다') || t.ends_with("니다"), "plain ending: {t}");

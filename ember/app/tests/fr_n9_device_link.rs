@@ -168,3 +168,96 @@ async fn fr_n9_app_device_link_over_loopback_letify() {
     stranger.dialer.transport().close().await;
     server_t.close().await;
 }
+
+/// A free TCP port on loopback for the relay role (bound and released at once).
+fn free_tcp_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+/// The main server's letify endpoint on loopback with `key`, its relay on `relay_port`, as
+/// `ember_server::transport::with_main_server_roles` sets it up (the address observer on a free
+/// loopback UDP port so it does not need the relay's port free on UDP too).
+async fn letify_main_server(key: SecretKey, relay_port: u16) -> Transport {
+    let letify = LetifyConfig {
+        connect_timeout: Duration::from_secs(2),
+        relay_listen: Some(std::net::SocketAddr::from(([127, 0, 0, 1], relay_port))),
+        qad_listen: Some("127.0.0.1:0".parse().unwrap()),
+        ..LetifyConfig::default()
+    };
+    let config = TransportConfig::new(key)
+        .backend(BackendKind::Letify)
+        .letify(letify)
+        .bind_addr("127.0.0.1:0".parse().unwrap());
+    let config = ember_server::transport::with_main_server_roles(config, relay_port);
+    Transport::bind(config).await.unwrap()
+}
+
+/// Asks until the server answers, for a link whose server just came back.
+async fn check_until_ok(api: &ember_client::api::Api) -> Result<(), &'static str> {
+    let mut last = Err(UNREACHABLE);
+    for _ in 0..20 {
+        last = tokio::time::timeout(WAIT, device_link::check(api)).await.unwrap();
+        if last.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    last
+}
+
+/// #863: the setting a device keeps is the server's peer id and the server's own relay (fixed
+/// port), pasted as the line the server prints; it still reaches the server after the server's
+/// transport is bound again with the same key and relay port and a new direct port.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a device with only the peer id and the relay cannot reach the server: the letify dialer builds a relayed path only with a rendezvous (hub mailbox) and the letify-link relay never hands a request addressed to its own id to the server's acceptor, #863"]
+async fn fr_n9_a_device_keeps_the_server_through_its_relay_after_a_restart() {
+    let server_key = SecretKey::generate();
+    let relay_port = free_tcp_port();
+    let server_t = letify_main_server(server_key.clone(), relay_port).await;
+    let devices = serve(&server_t);
+    let data = scratch();
+    let key = device_link::load_key(data.path()).unwrap();
+    devices.add(key.peer_id(), "phone").unwrap();
+
+    // The line the server prints at start, pasted into the address field in one go.
+    let line = ember_server::transport::device_address_line(true, &server_t.local_addr()).expect("relay role on");
+    let id = server_t.peer_id();
+    assert_eq!(
+        line,
+        format!("{}{id} relay letify://{id}@127.0.0.1:{relay_port}", ember_server::transport::DEVICE_ADDRESS_PREFIX)
+    );
+    let setting = PeerSetting::parse(&line, None).unwrap();
+    assert_eq!(setting.addr.peer, id);
+    assert!(setting.addr.direct.is_empty(), "no direct address is saved: {setting:?}");
+    assert!(setting.addr.relays.is_empty());
+    assert_eq!(
+        setting.relay,
+        Some(ember_transport::RelayConfig::Custom(vec![format!("letify://{id}@127.0.0.1:{relay_port}")]))
+    );
+
+    let link = letify_device(key.clone(), &setting).await;
+    let api = link.api();
+    assert_eq!(tokio::time::timeout(WAIT, device_link::check(&api)).await.unwrap(), Ok(()));
+    let server = ServerApi::over_transport(link.api()).unwrap();
+    assert!(tokio::time::timeout(WAIT, server.agent_defaults()).await.unwrap().is_ok());
+
+    // The server restarts: same key, same relay port, a new direct port.
+    let old_direct = server_t.local_addr().direct.clone();
+    server_t.close().await;
+    drop(server_t);
+    let server_t = letify_main_server(server_key, relay_port).await;
+    assert_eq!(server_t.peer_id(), id);
+    assert_ne!(server_t.local_addr().direct, old_direct, "a new direct port");
+    let devices = serve(&server_t);
+    devices.add(key.peer_id(), "phone").unwrap();
+
+    // The same live app transport, with the unchanged setting.
+    assert_eq!(check_until_ok(&api).await, Ok(()));
+    // A fresh bind of the app side, as after an app restart.
+    let again = letify_device(key, &setting).await;
+    assert_eq!(tokio::time::timeout(WAIT, device_link::check(&again.api())).await.unwrap(), Ok(()));
+
+    link.dialer.transport().close().await;
+    again.dialer.transport().close().await;
+    server_t.close().await;
+}

@@ -434,8 +434,15 @@ pub struct FieldOptions {
     pub multiline: bool,
     /// `None` keeps the field enabled.
     pub enabled: Option<bool>,
-    /// The field inside the composer or a row: no fill, no border.
+    /// The field inside the composer or a row: no fill, no border, and no toolkit frame
+    /// (`TextField::bare`, compose-rust v0.0.7). `background`, `border_*` and `corner_radius`
+    /// are not sent for it: the container draws the frame.
     pub bare: bool,
+    /// The room inside a `bare` field, `(horizontal, vertical)` in dp; `None` is none. The
+    /// toolkit's bare field has no padding of its own, so this is the mockup's inset (the
+    /// textarea's 2 px, `.inputbar input` 14 px). A vertical inset is taken from both sides and
+    /// also counts towards the horizontal one. Ignored when not `bare`.
+    pub inset: Option<(f32, f32)>,
     pub height: Option<f32>,
     pub corner_radius: Option<f32>,
     pub background: Option<Paint>,
@@ -448,21 +455,73 @@ pub struct FieldOptions {
     pub on_key_down: Option<Box<dyn FnMut(KeyEvent)>>,
 }
 
+/// The type step of a field's text and placeholder when no role is named (style.css `.field`).
+pub const FIELD_FONT: Fs = Fs::Md;
+
 /// A text field drawn with the tokens instead of the toolkit's filled style, which stays light
 /// in the dark scheme. Not `bare`: a `surface` field on a `line` border with the
-/// `corner-sm` radius and the 40 px control height (style.css `.field`).
+/// `corner-sm` radius and the 40 px control height (style.css `.field`). `bare`: see
+/// [`BareField`].
 pub fn EmberField(o: FieldOptions) {
+    if o.bare {
+        BareField(o);
+        return;
+    }
     let theme = ember_theme();
     let p = theme.palette;
-    let (fill, border_w) = if o.bare { (Color::argb(0), 0.0) } else { (p.surface, 1.0) };
     // compose-rust v0.0.5 (#376) honours a TextField's own Background, Border and Shape in place
     // of the design system's frame, which stays light in the dark scheme (#510). So every field
-    // names its frame: the token fill and line, or a transparent one when `bare`.
-    let modifier = with_height(with_weight(Modifier::new(), o.weight), o.height.or(if o.multiline || o.bare { None } else { Some(H_BTN) }))
+    // names its frame: the token fill and line.
+    let modifier = with_height(with_weight(Modifier::new(), o.weight), o.height.or(if o.multiline { None } else { Some(H_BTN) }))
         .fill_max_width_if(o.fill_max_width)
-        .background(o.background.unwrap_or_else(|| paint(fill)))
-        .border(o.border_width.unwrap_or(border_w), o.border_color.unwrap_or_else(|| paint(p.line)))
+        .background(o.background.unwrap_or_else(|| paint(p.surface)))
         .corner_radius(o.corner_radius.unwrap_or(CORNER_SM));
+    // A zero-width border is not sent: the desktop renderer passes it to Compose's
+    // `Modifier.border(0.dp)`, which is `Dp.Hairline` and draws a 1 px line (FR-L10.2, #844).
+    let border_w = o.border_width.unwrap_or(1.0);
+    let modifier = if border_w > 0.0 { modifier.border(border_w, o.border_color.unwrap_or_else(|| paint(p.line))) } else { modifier };
+    FieldNode(o, modifier);
+}
+
+/// A field inside a container that draws the frame (FR-L10.2, #844).
+///
+/// The toolkit's bare field (compose-rust v0.0.7 `HostTextField.kt`, `Bare`) draws no frame,
+/// has no inner padding and sets its text at the top of whatever height it is given
+/// (`contentAlignment = TopStart`). So the height, weight, width and inset the caller asked for
+/// go on a Row around it, which centres a single line vertically, and the field itself takes
+/// only the row's remaining width (and its height, when multiline). No background, border or
+/// shape is sent: a zero-width border is drawn as a 1 px hairline, the frame that was still
+/// visible inside the composers.
+fn BareField(o: FieldOptions) {
+    let (ix, iy) = o.inset.unwrap_or((0.0, 0.0));
+    let (ix, iy) = (ix.max(0.0), iy.max(0.0));
+    let side = (ix - iy).max(0.0);
+    let multiline = o.multiline;
+    let mut wrap = with_height(with_weight(Modifier::new(), o.weight), o.height).fill_max_width_if(o.fill_max_width);
+    if iy > 0.0 {
+        wrap = wrap.padding(iy);
+    }
+    let inner = if multiline && o.height.is_some() {
+        Modifier::new().weight(1.0).fill_max_height()
+    } else {
+        Modifier::new().weight(1.0)
+    };
+    cu::Row()
+        .alignment(if multiline { Alignment::TopStart } else { Alignment::CenterStart })
+        .modifier(wrap)
+        .content(move || {
+            if side > 0.0 {
+                cu::Spacer().modifier(Modifier::new().width(side));
+            }
+            FieldNode(o, inner);
+            if side > 0.0 {
+                cu::Spacer().modifier(Modifier::new().width(side));
+            }
+        });
+}
+
+/// The toolkit field with every option but the frame, which `modifier` carries.
+fn FieldNode(o: FieldOptions, modifier: Modifier) {
     // compose-rust#444 (v0.0.8): the placeholder and the typed text break Korean only at spaces,
     // and a long token such as a path or a URL breaks inside itself rather than clipping.
     let mut f = cu::TextField()
@@ -475,8 +534,16 @@ pub fn EmberField(o: FieldOptions) {
     if let Some(t) = o.text {
         f = f.text(t);
     }
-    if let Some(r) = o.type_role {
-        f = f.type_role(r);
+    // FR-L10.2 (#844): 14 px text and placeholder (style.css `.field`) unless the caller names a
+    // role; an explicit `font_size` would override the role's size, so it is sent only without one.
+    match o.type_role {
+        Some(r) => f = f.type_role(r),
+        None => f = f.font_size(FIELD_FONT.size()),
+    }
+    // The node's transparent fill alone still left the toolkit's frame drawn inside the
+    // composer (H2, SE10, CH1); `bare` drops it.
+    if o.bare {
+        f = f.bare();
     }
     if let Some(h) = o.on_value_change {
         f = f.on_value_change(h);
@@ -600,7 +667,10 @@ pub struct ButtonStyle {
     pub fill: Color,
     pub text: Color,
     pub border: Color,
+    /// The label's step on the type scale: 14 (`Fs::Md`), or 13 (`Fs::Sm`) when small.
     pub fs: Fs,
+    /// The label's weight: 500 for every kind (style.css `.btn`, FR-L10.2).
+    pub weight: Weight,
 }
 
 pub fn button_style(kind: ButtonKind, small: bool, p: &Palette) -> ButtonStyle {
@@ -616,6 +686,7 @@ pub fn button_style(kind: ButtonKind, small: bool, p: &Palette) -> ButtonStyle {
             text: p.text,
             border: p.line,
             fs,
+            weight: Weight::Medium,
         },
         ButtonKind::Primary => ButtonStyle {
             height,
@@ -623,6 +694,7 @@ pub fn button_style(kind: ButtonKind, small: bool, p: &Palette) -> ButtonStyle {
             text: p.ink_text,
             border: p.ink,
             fs,
+            weight: Weight::Medium,
         },
         ButtonKind::Destructive => ButtonStyle {
             height,
@@ -630,6 +702,7 @@ pub fn button_style(kind: ButtonKind, small: bool, p: &Palette) -> ButtonStyle {
             text: p.red.strong,
             border: p.red.soft,
             fs,
+            weight: Weight::Medium,
         },
     }
 }
@@ -663,6 +736,10 @@ pub fn AppButton(
         .enabled(enabled)
         .variant(ButtonVariant::Text)
         .color(paint(s.text))
+        // FR-L10.2 (#844): the mockup's `.btn` 14/500 (`.btn.sm` 13/500), not the toolkit's
+        // label style (about 17/600). compose-rust v0.0.7 sends both only when they are set.
+        .font_size(s.fs.size())
+        .font_weight(s.weight.value())
         .modifier(
             Modifier::new()
                 .fill_max_width_if(fill_max_width)
@@ -702,6 +779,9 @@ pub fn ChoiceButton(
             .enabled(enabled)
             .variant(ButtonVariant::Text)
             .color(paint(s.text))
+            // The same 14/500 (13/500 small) label as AppButton (FR-L10.2, #844).
+            .font_size(s.fs.size())
+            .font_weight(s.weight.value())
             .modifier(
                 state
                     .height(s.height)
@@ -1090,10 +1170,11 @@ pub fn search_field_padding(height: f32) -> f32 {
 
 /// The visible gap between the magnifier and the typed text (`.searchbox` gap 8).
 pub const SEARCH_FIELD_GAP: f32 = 8.0;
-/// The leading inset the bare toolkit text field adds before its text. The v0.0.6 field has about
-/// 12 px: with the old 20 px assumption the -12 px offset left the magnifier touching the
-/// placeholder (design review 2026-11-13 C4, "Q팀원 검색"). Re-measure if the toolkit changes it.
-pub const SEARCH_FIELD_INSET: f32 = 12.0;
+/// The leading inset the field adds before its text. The v0.0.6 framed field had about 12 px,
+/// taken back with a -4 px offset (design review 2026-11-13 C4). Since #844 the field is the
+/// toolkit's bare one (compose-rust v0.0.7), which has none, so the -4 px offset drew the
+/// placeholder over the magnifier (design review round 2); the 8 px gap is now a spacer.
+pub const SEARCH_FIELD_INSET: f32 = 0.0;
 
 /// The visible icon-to-text gap: a spacer, the field's own inset and an offset, which together
 /// always come to [`SEARCH_FIELD_GAP`].
@@ -1106,7 +1187,8 @@ pub fn search_field_spacer() -> f32 {
     (SEARCH_FIELD_GAP - SEARCH_FIELD_INSET).max(0.0)
 }
 
-/// The negative x offset applied to the bare field, for an inset larger than the gap.
+/// The negative x offset an inset larger than the gap would need; 0 since the field is bare
+/// (#844), so [`SearchField`] no longer sends one.
 pub fn search_field_offset() -> f32 {
     (SEARCH_FIELD_GAP - SEARCH_FIELD_INSET).min(0.0)
 }
@@ -1138,23 +1220,19 @@ pub fn SearchField(placeholder: &str, height: f32, on_change: impl FnMut(String)
             if search_field_spacer() > 0.0 {
                 cu::Spacer().modifier(Modifier::new().width(search_field_spacer()));
             }
-            // The field takes the row's remaining width by weight, so it never overruns it.
-            let cb = on_change.clone();
-            let placeholder = placeholder.clone();
-            cu::Box().modifier(Modifier::new().weight(1.0).height(height).offset(search_field_offset(), 0.0)).content(move || {
-                EmberField(FieldOptions {
-                    bare: true,
-                    type_role: Some(TypeRole::Label), // one 13 dp size for every search field (mockup fs-sm)
-                    background: Some(Paint::Literal(Color::argb(0))),
-                    border_width: Some(0.0),
-                    border_color: Some(Paint::Literal(Color::argb(0))),
-                    height: Some(height),
-                    fill_max_width: true,
-                    placeholder: placeholder.clone(),
-                    on_value_change: cb.borrow_mut().take().map(|f| Box::new(f) as Box<dyn FnMut(String)>),
-                    ..Default::default()
-                });
+            // The field takes the row's remaining width by weight, so it never overruns it, and
+            // the bare field's own row centres the placeholder in the box's height (#844).
+            EmberField(FieldOptions {
+                bare: true,
+                type_role: Some(TypeRole::Label), // one 13 dp size for every search field (mockup fs-sm)
+                height: Some(height),
+                weight: Some(1.0),
+                placeholder: placeholder.clone(),
+                on_value_change: on_change.borrow_mut().take().map(|f| Box::new(f) as Box<dyn FnMut(String)>),
+                ..Default::default()
             });
+            // `.searchbox` padding 0 16: typed text stops short of the round end.
+            cu::Spacer().modifier(Modifier::new().width(search_field_padding(height)));
         });
 }
 
@@ -1179,11 +1257,183 @@ mod tests {
 
     #[test]
     fn fr_l10_1_search_field_visible_gap_is_8() {
-        // Design review 2026-11-13 C4: 8 px after the magnifier, with the field's 12 px inset.
+        // Design review 2026-11-13 C4: 8 px after the magnifier. The bare field (#844) has no
+        // inset, so the gap is all spacer and nothing is pulled over the magnifier.
         assert_eq!(search_field_gap(), 8.0);
-        assert_eq!(SEARCH_FIELD_INSET, 12.0);
-        assert_eq!(search_field_offset(), -4.0);
-        assert_eq!(search_field_spacer(), 0.0);
+        assert_eq!(SEARCH_FIELD_INSET, 0.0);
+        assert_eq!(search_field_offset(), 0.0);
+        assert_eq!(search_field_spacer(), 8.0);
+    }
+
+    /// One node of a composition: its widget, its parent, and its modifiers and props as
+    /// `"Height(40.0)"` and `"Bare=Bool(true)"`.
+    struct EmittedNode {
+        id: u32,
+        widget: String,
+        parent: Option<u32>,
+        mods: Vec<String>,
+        props: Vec<String>,
+    }
+
+    fn emitted_nodes(content: fn()) -> Vec<EmittedNode> {
+        use compose_rust::protocol::{decode_batch, Mutation};
+        use compose_rust::{Host, Recomposer};
+        let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let mut nodes: Vec<EmittedNode> = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::Create { node_id, widget } => nodes.push(EmittedNode {
+                    id: *node_id,
+                    widget: format!("{widget:?}"),
+                    parent: None,
+                    mods: Vec::new(),
+                    props: Vec::new(),
+                }),
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.parent = Some(*parent_id);
+                    }
+                }
+                Mutation::SetModifier { node_id, modifier, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.mods.push(format!("{modifier:?}"));
+                    }
+                }
+                Mutation::SetProp { node_id, property, value } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.props.push(format!("{property:?}={value:?}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        nodes
+    }
+
+    fn the<'a>(nodes: &'a [EmittedNode], widget: &str) -> &'a EmittedNode {
+        nodes.iter().find(|n| n.widget == widget).unwrap_or_else(|| panic!("no {widget} node"))
+    }
+
+    fn parent_of<'a>(nodes: &'a [EmittedNode], child: &EmittedNode) -> &'a EmittedNode {
+        nodes.iter().find(|n| Some(n.id) == child.parent).expect("parent node")
+    }
+
+    /// The props a bare `Row` with this alignment sends, to compare a wrapper's with.
+    fn row_alignment(content: fn()) -> Vec<String> {
+        let nodes = emitted_nodes(content);
+        let row = nodes.iter().rev().find(|n| n.widget == "Row").expect("the Row");
+        assert!(!row.props.is_empty(), "the alignment is sent as a prop");
+        row.props.clone()
+    }
+
+    fn has_props(node: &EmittedNode, props: &[String]) -> bool {
+        props.iter().all(|p| node.props.contains(p))
+    }
+
+    #[test]
+    fn fr_l10_2_bare_field_sends_no_border_background_or_shape() {
+        // Compose draws `border(0.dp)` as a 1 px hairline, the frame still seen inside the home,
+        // conversation and channel composers (design review round 2).
+        let nodes = emitted_nodes(|| {
+            EmberField(FieldOptions { bare: true, weight: Some(1.0), height: Some(40.0), ..Default::default() })
+        });
+        let field = the(&nodes, "TextField");
+        assert!(field.props.iter().any(|p| p == "Bare=Bool(true)"), "{:?}", field.props);
+        for n in &nodes {
+            assert!(
+                !n.mods.iter().any(|m| m.starts_with("Border") || m.starts_with("Background") || m.starts_with("Shape")),
+                "{} {:?}",
+                n.widget,
+                n.mods
+            );
+        }
+    }
+
+    #[test]
+    fn fr_l10_2_framed_field_never_sends_a_zero_border() {
+        let nodes = emitted_nodes(|| EmberField(FieldOptions { border_width: Some(0.0), ..Default::default() }));
+        let field = the(&nodes, "TextField");
+        assert!(!field.mods.iter().any(|m| m.starts_with("Border")), "{:?}", field.mods);
+        assert!(field.mods.iter().any(|m| m.starts_with("Background")), "{:?}", field.mods);
+    }
+
+    #[test]
+    fn fr_l10_2_bare_single_line_field_is_centred_in_the_callers_height() {
+        // HostTextField.kt sets a bare field's text at the top of the height it is given, so the
+        // height and weight go on a row that centres it.
+        let nodes = emitted_nodes(|| {
+            EmberField(FieldOptions { bare: true, weight: Some(1.0), height: Some(40.0), ..Default::default() })
+        });
+        let field = the(&nodes, "TextField");
+        assert!(!field.mods.iter().any(|m| m.starts_with("Height")), "{:?}", field.mods);
+        assert!(field.mods.iter().any(|m| m == "Weight(1.0)"), "{:?}", field.mods);
+        let row = parent_of(&nodes, field);
+        assert_eq!(row.widget, "Row");
+        assert!(row.mods.iter().any(|m| m == "Height(40.0)"), "{:?}", row.mods);
+        assert!(row.mods.iter().any(|m| m == "Weight(1.0)"), "{:?}", row.mods);
+        let centre = row_alignment(|| cu::Row().alignment(Alignment::CenterStart).content(|| {}));
+        assert!(has_props(row, &centre), "{:?} has {centre:?}", row.props);
+        // No inset was asked for: no spacer beside the field.
+        assert!(!nodes.iter().any(|n| n.widget == "Spacer"));
+    }
+
+    #[test]
+    fn fr_l10_2_bare_field_takes_the_callers_inset() {
+        // `.inputbar input` padding 0 14.
+        let nodes = emitted_nodes(|| {
+            EmberField(FieldOptions { bare: true, fill_max_width: true, inset: Some((14.0, 0.0)), ..Default::default() })
+        });
+        let field = the(&nodes, "TextField");
+        let row = parent_of(&nodes, field);
+        assert!(row.mods.iter().any(|m| m == "FillMaxWidth"), "{:?}", row.mods);
+        let spacers: Vec<_> = nodes.iter().filter(|n| n.widget == "Spacer" && n.parent == Some(row.id)).collect();
+        assert_eq!(spacers.len(), 2);
+        assert!(spacers.iter().all(|s| s.mods.iter().any(|m| m == "Width(14.0)")));
+        // A multiline field fills the row's height inside the vertical inset, text at the top.
+        let nodes = emitted_nodes(|| {
+            EmberField(FieldOptions {
+                bare: true,
+                multiline: true,
+                fill_max_width: true,
+                height: Some(84.0),
+                inset: Some((2.0, 2.0)),
+                ..Default::default()
+            })
+        });
+        let field = the(&nodes, "TextField");
+        assert!(field.mods.iter().any(|m| m == "FillMaxHeight"), "{:?}", field.mods);
+        let row = parent_of(&nodes, field);
+        assert!(row.mods.iter().any(|m| m == "Height(84.0)"), "{:?}", row.mods);
+        assert!(row.mods.iter().any(|m| m == "Padding(2.0)"), "{:?}", row.mods);
+        let top = row_alignment(|| cu::Row().alignment(Alignment::TopStart).content(|| {}));
+        assert!(has_props(row, &top), "{:?} has {top:?}", row.props);
+        assert!(!nodes.iter().any(|n| n.widget == "Spacer"), "the 2 px all round is the padding alone");
+    }
+
+    #[test]
+    fn fr_l10_2_search_field_centres_its_placeholder_8_after_the_magnifier() {
+        let nodes = emitted_nodes(|| SearchField("세션 검색", SEARCH_FIELD_H_COMPACT, |_| {}));
+        let field = the(&nodes, "TextField");
+        assert!(!field.mods.iter().any(|m| m.starts_with("Height") || m.starts_with("Offset")), "{:?}", field.mods);
+        let row = parent_of(&nodes, field);
+        assert!(row.mods.iter().any(|m| m == "Height(36.0)"), "{:?}", row.mods);
+        let centre = row_alignment(|| cu::Row().alignment(Alignment::CenterStart).content(|| {}));
+        assert!(has_props(row, &centre), "{:?} has {centre:?}", row.props);
+        assert!(nodes.iter().any(|n| n.widget == "Spacer" && n.mods.iter().any(|m| m == "Width(8.0)")), "the 8 px gap");
+        assert!(!nodes.iter().any(|n| n.mods.iter().any(|m| m.starts_with("Offset"))), "nothing is pulled over the magnifier");
+    }
+
+    #[test]
+    fn fr_l10_2_bare_callers_name_the_mockup_inset() {
+        // `.inputbar input` 0 14 (channels.css), the composer textarea's 2 px (home.css), and the
+        // session composer's 14 px less the 12 px card padding plus the textarea's 2 px.
+        let channels = include_str!("channels.rs");
+        let at = channels.find("placeholder: \"메시지 입력\"").expect("channel composer field");
+        let opts = &channels[channels[..at].rfind("EmberField(FieldOptions {").expect("field")..at];
+        assert!(opts.contains("inset: Some((14.0, 0.0))"), "{opts}");
+        assert!(include_str!("home.rs").contains("inset: Some((2.0, 2.0))"));
+        assert!(include_str!("conversation.rs").contains("inset: Some((4.0, 0.0))"));
     }
 
     #[test]
@@ -1362,6 +1612,76 @@ mod tests {
         assert!(field.iter().any(|m| m.starts_with("Shape")), "{field:?}");
         assert!(field.iter().any(|m| m.starts_with("Background")), "{field:?}");
         assert!(field.iter().any(|m| m.starts_with("Border")), "{field:?}");
+    }
+
+    /// Every `SetProp` of one composition as `"Property=Value"`, e.g. `"FontSize=Float(14.0)"`.
+    fn emitted_props(content: fn()) -> Vec<String> {
+        use compose_rust::protocol::{decode_batch, Mutation};
+        use compose_rust::{Host, Recomposer};
+        let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { property, value, .. } => Some(format!("{property:?}={value:?}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fr_l10_2_button_style_is_14_500_and_13_500_small() {
+        for p in [&LIGHT, &DARK] {
+            for kind in [ButtonKind::Default, ButtonKind::Primary, ButtonKind::Destructive] {
+                for enabled in [true, false] {
+                    let s = button_style_for(kind, false, enabled, p);
+                    assert_eq!((s.fs.size(), s.weight.value()), (14.0, 500), "{kind:?}");
+                    let s = button_style_for(kind, true, enabled, p);
+                    assert_eq!((s.fs.size(), s.weight.value()), (13.0, 500), "{kind:?} small");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fr_l10_2_app_button_sends_its_label_size_and_weight() {
+        let big = emitted_props(|| AppButton("저장", None, ButtonKind::Primary, false, true, false, || {}));
+        assert!(big.iter().any(|m| m == "FontSize=Float(14.0)"), "{big:?}");
+        assert!(big.iter().any(|m| m == "FontWeight=Integer(500)"), "{big:?}");
+        let small = emitted_props(|| AppButton("취소", None, ButtonKind::Default, true, false, false, || {}));
+        assert!(small.iter().any(|m| m == "FontSize=Float(13.0)"), "{small:?}");
+        assert!(small.iter().any(|m| m == "FontWeight=Integer(500)"), "{small:?}");
+        // A choice button carries the same label as AppButton.
+        let choice = emitted_props(|| ChoiceButton("자동", Choice::Radio, true, false, true, || {}));
+        assert!(choice.iter().any(|m| m == "FontSize=Float(14.0)"), "{choice:?}");
+        assert!(choice.iter().any(|m| m == "FontWeight=Integer(500)"), "{choice:?}");
+        let choice = emitted_props(|| ChoiceButton("수동", Choice::Toggle, false, true, true, || {}));
+        assert!(choice.iter().any(|m| m == "FontSize=Float(13.0)"), "{choice:?}");
+        assert!(choice.iter().any(|m| m == "FontWeight=Integer(500)"), "{choice:?}");
+    }
+
+    #[test]
+    fn fr_l10_2_field_text_is_14_and_bare_drops_the_toolkit_frame() {
+        let plain = emitted_props(|| EmberField(FieldOptions { ..Default::default() }));
+        assert!(plain.iter().any(|m| m == "FontSize=Float(14.0)"), "{plain:?}");
+        assert!(!plain.iter().any(|m| m.starts_with("Bare=")), "a framed field sends no Bare: {plain:?}");
+        let bare = emitted_props(|| EmberField(FieldOptions { bare: true, multiline: true, ..Default::default() }));
+        assert!(bare.iter().any(|m| m == "Bare=Bool(true)"), "{bare:?}");
+        assert!(bare.iter().any(|m| m == "FontSize=Float(14.0)"), "{bare:?}");
+        // A named role keeps its own size: no explicit FontSize overrides it.
+        let mono = emitted_props(|| EmberField(FieldOptions { type_role: Some(TypeRole::Mono), ..Default::default() }));
+        assert!(!mono.iter().any(|m| m.starts_with("FontSize=")), "{mono:?}");
+    }
+
+    #[test]
+    fn fr_l10_2_composers_inside_a_frame_pass_bare() {
+        let channels = include_str!("channels.rs");
+        let at = channels.find("placeholder: \"메시지 입력\"").expect("channel composer field");
+        let opts = &channels[channels[..at].rfind("EmberField(FieldOptions {").expect("field")..at];
+        assert!(opts.contains("bare: true"), "channel composer field is bare: {opts}");
+        // The home and conversation composers already pass it (H2, SE10).
+        assert!(include_str!("home.rs").contains("bare: true"));
+        assert!(include_str!("conversation.rs").contains("bare: true"));
     }
 
     #[test]
@@ -1623,10 +1943,15 @@ mod tests {
         let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
         assert!(!production.contains(concat!("TODO(compose-rust#", "443)")));
         assert!(!production.contains(concat!("TODO(compose-rust#", "444)")));
+        // Framed and bare fields both build their TextField in FieldNode (#844).
         let field = production.split("pub fn EmberField(").nth(1).unwrap();
-        let field = field.split("\npub fn ").next().unwrap();
-        assert!(field.contains(".word_break(WordBreak::KeepAll)"));
-        assert!(field.contains(".overflow_wrap(OverflowWrap::Anywhere)"));
+        assert!(field.contains("FieldNode(o, modifier)"));
+        let bare = production.split("fn BareField(").nth(1).unwrap();
+        assert!(bare.split("\nfn ").next().unwrap().contains("FieldNode(o, inner)"));
+        let node = production.split("fn FieldNode(").nth(1).unwrap();
+        let node = node.split("\nfn ").next().unwrap().split("\npub fn ").next().unwrap();
+        assert!(node.contains(".word_break(WordBreak::KeepAll)"));
+        assert!(node.contains(".overflow_wrap(OverflowWrap::Anywhere)"));
         let text = production.split("fn scale_text(").nth(1).unwrap();
         assert!(text.contains("if wrap_anywhere {\n        t = t.overflow_wrap(OverflowWrap::Anywhere);"));
         for screen in [include_str!("monitor.rs"), include_str!("routines.rs")] {

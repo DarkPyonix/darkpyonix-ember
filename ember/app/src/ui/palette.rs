@@ -5,6 +5,7 @@
 //! ignored). The best alignment is chosen by score: a letter that starts a word or the title, a run of
 //! letters in a row, and a late start all count. Equal scores: the shorter title, then the list's order.
 
+use std::borrow::Cow;
 use super::keymap::{Action, Keymap, Os};
 pub use ember_editor::{parse_contributed_commands, ContributedCommand};
 
@@ -60,6 +61,74 @@ const RUN: i32 = 5;
 const GAP_PENALTY_CAP: i32 = 3;
 const LEAD_PENALTY_CAP: i32 = 5;
 
+const CHOSEONG: [char; 19] = [
+    'ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ', 'ㅆ', 'ㅇ', 'ㅈ', 'ㅉ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ',
+];
+
+/// The Hangul initial consonant (초성) of a syllable, or `None` if `c` is not a precomposed Hangul syllable.
+pub fn choseong_of(c: char) -> Option<char> {
+    let code = c as u32;
+    if (0xAC00..=0xD7A3).contains(&code) {
+        let choseong_idx = ((code - 0xAC00) / (21 * 28)) as usize;
+        Some(CHOSEONG[choseong_idx])
+    } else {
+        None
+    }
+}
+
+/// Normalizes Hangul: composes NFD jamo sequences into precomposed syllables (NFC)
+/// and converts isolated lead consonant jamo (U+1100..U+1112) to compatibility jamo (U+3131..U+314E).
+pub fn normalize_hangul(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let code = c as u32;
+        if (0x1100..=0x1112).contains(&code) {
+            if i + 1 < chars.len() && (0x1161..=0x1175).contains(&(chars[i + 1] as u32)) {
+                let l_idx = code - 0x1100;
+                let v_idx = chars[i + 1] as u32 - 0x1161;
+                let mut t_idx = 0;
+                let mut advance = 2;
+                if i + 2 < chars.len() && (0x11A8..=0x11C2).contains(&(chars[i + 2] as u32)) {
+                    t_idx = chars[i + 2] as u32 - 0x11A7;
+                    advance = 3;
+                }
+                if let Some(syllable) = char::from_u32(0xAC00 + (l_idx * 21 + v_idx) * 28 + t_idx) {
+                    out.push(syllable);
+                    i += advance;
+                    continue;
+                }
+            } else {
+                let idx = (code - 0x1100) as usize;
+                out.push(CHOSEONG[idx]);
+                i += 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+fn char_matches(q: char, t: char) -> bool {
+    if q == t {
+        return true;
+    }
+    if let Some(ch) = choseong_of(t) {
+        if q == ch {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_choseong_match(q: char, t: char) -> bool {
+    choseong_of(t) == Some(q)
+}
+
 fn starts_word(chars: &[char], at: usize) -> bool {
     at == 0 || {
         let prev = chars[at - 1];
@@ -79,9 +148,9 @@ fn best_match(query: &[char], title: &[char]) -> Option<(i32, Vec<usize>)> {
     let mut dp = vec![vec![i32::MIN; n]; m];
     let mut from = vec![vec![usize::MAX; n]; m];
     for j in 0..n {
-        if lower[j] == query[0] {
+        if char_matches(query[0], lower[j]) {
             let mut s = 1;
-            if starts_word(title, j) {
+            if starts_word(title, j) || is_choseong_match(query[0], lower[j]) {
                 s += WORD_START;
             }
             if j == 0 {
@@ -92,7 +161,7 @@ fn best_match(query: &[char], title: &[char]) -> Option<(i32, Vec<usize>)> {
     }
     for i in 1..m {
         for j in i..n {
-            if lower[j] != query[i] {
+            if !char_matches(query[i], lower[j]) {
                 continue;
             }
             let mut best = i32::MIN;
@@ -111,7 +180,7 @@ fn best_match(query: &[char], title: &[char]) -> Option<(i32, Vec<usize>)> {
             }
             if best != i32::MIN {
                 let mut s = best + 1;
-                if starts_word(title, j) {
+                if starts_word(title, j) || is_choseong_match(query[i], lower[j]) {
                     s += WORD_START;
                 }
                 dp[i][j] = s;
@@ -139,7 +208,8 @@ fn best_match(query: &[char], title: &[char]) -> Option<(i32, Vec<usize>)> {
 
 /// The items whose title holds the query, best first. An empty or blank query lists every item in order.
 pub fn rank(query: &str, items: &[Item]) -> Vec<Ranked> {
-    let query: Vec<char> = query.chars().filter(|c| !c.is_whitespace()).flat_map(|c| c.to_lowercase()).collect();
+    let query_norm = normalize_hangul(query);
+    let query: Vec<char> = query_norm.chars().filter(|c| !c.is_whitespace()).flat_map(|c| c.to_lowercase()).collect();
     if query.is_empty() {
         let mut all: Vec<Ranked> = (0..items.len()).map(|index| Ranked { index, score: 0, matched: Vec::new() }).collect();
         all.sort_by_key(|r| !items[r.index].enabled);
@@ -149,7 +219,8 @@ pub fn rank(query: &str, items: &[Item]) -> Vec<Ranked> {
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
-            let chars: Vec<char> = item.title.chars().collect();
+            let title_norm = normalize_hangul(&item.title);
+            let chars: Vec<char> = title_norm.chars().collect();
             best_match(&query, &chars).map(|(score, matched)| Ranked { index, score, matched })
         })
         .collect();
@@ -162,6 +233,30 @@ pub fn rank(query: &str, items: &[Item]) -> Vec<Ranked> {
             .then(a.index.cmp(&b.index))
     });
     ranked
+}
+
+/// Caches the ranked result for a query against a list of items.
+#[derive(Debug, Clone, Default)]
+pub struct RankingCache {
+    query: String,
+    items_len: usize,
+    result: Vec<Ranked>,
+}
+
+impl RankingCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn rank(&mut self, query: &str, items: &[Item]) -> &[Ranked] {
+        if self.query == query && self.items_len == items.len() {
+            return &self.result;
+        }
+        self.result = rank(query, items);
+        self.query = query.to_string();
+        self.items_len = items.len();
+        &self.result
+    }
 }
 
 /// The editor's own actions, with the shortcut of `keymap` on `os`. Neither the palette nor find is a
@@ -312,9 +407,9 @@ pub fn record_recent_path(recent: &mut Vec<String>, path: &str) {
 }
 
 /// Order `files` so that recently accessed files come first in MRU order.
-pub fn prioritize_recent_files(folder: &str, files: &[Item], recent_paths: &[String]) -> Vec<Item> {
+pub fn prioritize_recent_files<'a>(folder: &str, files: &'a [Item], recent_paths: &[String]) -> Cow<'a, [Item]> {
     if recent_paths.is_empty() {
-        return files.to_vec();
+        return Cow::Borrowed(files);
     }
     let mut recent_items = Vec::new();
     let mut matched_recent = std::collections::HashSet::new();
@@ -346,41 +441,42 @@ pub fn prioritize_recent_files(folder: &str, files: &[Item], recent_paths: &[Str
         }
         result.push(item.clone());
     }
-    result
+    Cow::Owned(result)
 }
 
 /// The items for a mode, including extension commands and prioritized recent files.
-pub fn items_for_workbench(
+pub fn items_for_workbench<'a>(
     mode: Mode,
     keymap: Keymap,
     os: Os,
     folder: &str,
-    files: &[Item],
+    files: &'a [Item],
     extension_commands: &[ContributedCommand],
     recent_paths: &[String],
-) -> Vec<Item> {
+) -> Cow<'a, [Item]> {
     match mode {
         Mode::Commands => {
             let mut items = action_items(keymap, os);
             items.extend(extension_command_items(extension_commands));
-            items
+            Cow::Owned(items)
         }
         Mode::Files | Mode::Recent => prioritize_recent_files(folder, files, recent_paths),
         Mode::Everything => {
             let mut items = action_items(keymap, os);
             items.extend(extension_command_items(extension_commands));
-            items.extend(prioritize_recent_files(folder, files, recent_paths));
-            items
+            let recents = prioritize_recent_files(folder, files, recent_paths);
+            items.extend(recents.iter().cloned());
+            Cow::Owned(items)
         }
         // The status bar's pickers get their rows from `editor_status::picker_items`.
-        Mode::GotoLine | Mode::Eol | Mode::EncodingAction | Mode::Encoding(_) | Mode::ConfirmReopen(_) | Mode::Language => Vec::new(),
+        Mode::GotoLine | Mode::Eol | Mode::EncodingAction | Mode::Encoding(_) | Mode::ConfirmReopen(_) | Mode::Language => Cow::Owned(Vec::new()),
     }
 }
 
 /// The items for a mode: commands, files, or commands then files. `files` are the indexed files as
 /// [`file_items`] makes them.
 pub fn items_for(mode: Mode, keymap: Keymap, os: Os, files: &[Item]) -> Vec<Item> {
-    items_for_workbench(mode, keymap, os, "", files, &[], &[])
+    items_for_workbench(mode, keymap, os, "", files, &[], &[]).into_owned()
 }
 
 /// Resolve the effective palette mode and the query string after stripping prefix markers.

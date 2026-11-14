@@ -1,4 +1,6 @@
 //! NFR-L2 (E1 made testable): the launcher and conversation UI never allocate a webview.
+//! Per INTENT D44 Option A and SPEC FR-E8: only the editor window's webview host module
+//! may interface with platform webviews for extension content.
 //!
 //! Fails if any webview crate is in this app's dependency graph (every target platform), or
 //! if a webview API is named in the app's or the client core's sources. The same check runs
@@ -74,7 +76,12 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
+            if p.file_name().is_some_and(|n| n == "editor_webview") {
+                continue;
+            }
             rust_files(&p, out);
+        } else if p.file_name().is_some_and(|n| n == "editor_webview.rs") {
+            continue;
         } else if p.extension().is_some_and(|x| x == "rs") || p.file_name().is_some_and(|n| n == "Cargo.toml") {
             out.push(p);
         }

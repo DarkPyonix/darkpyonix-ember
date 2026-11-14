@@ -1456,6 +1456,17 @@ impl Scm {
     }
 }
 
+/// The notice when 파일 열기 could not open a change (FR-L31.9, #781): the file and the reason.
+pub fn open_failed_text(name: &str, reason: &str) -> String {
+    format!("{name}을(를) 열지 못했습니다: {reason}")
+}
+
+/// The notice when 파일 열기 is clicked while the connection is lost: the host drops the open then,
+/// so the window says so instead of nothing happening (FR-L31.9, #781).
+pub fn open_offline_text(name: &str) -> String {
+    format!("서버와의 연결이 끊어져 {name}을(를) 열 수 없습니다. 다시 연결한 뒤 여세요")
+}
+
 /// The island tool windows and the diff view.
 pub mod view {
     use dioxus_compose::html::prelude::dioxus_elements::point_interaction::ModifiersInteraction;
@@ -1478,10 +1489,21 @@ pub mod view {
         path.rfind('/').map(|i| &path[..i]).unwrap_or("")
     }
 
+    thread_local! {
+        /// The paths 파일 열기 asked the session to open and that have not opened or failed yet, so
+        /// a failure among them is said in a notice (FR-L31.9, #781).
+        static OPEN_ASKED: std::cell::RefCell<std::collections::HashSet<String>> = std::cell::RefCell::new(std::collections::HashSet::new());
+    }
+
     /// Opens the file of a repository path in a tab: below the folder as the explorer opens it,
-    /// outside it by its absolute path (FR-L31.9).
+    /// outside it by its absolute path (FR-L31.9). While the connection is lost the host would drop
+    /// the open, so a notice says so instead (#781).
     fn open_file(s: &Shared, rel: &str) {
         let path = s.scm.editor_path(&s.folder, rel);
+        if s.host.state.lock().unwrap_or_else(|e| e.into_inner()).lost.is_some() {
+            crate::ui::cr::notice::post(super::open_offline_text(&crate::ui::editor::display_name(base_name(&path))));
+            return;
+        }
         s.scm.close_diff();
         s.open_errors.borrow_mut().remove(&path);
         let mut tabs = s.tabs;
@@ -1489,9 +1511,23 @@ pub mod view {
         // A document the diff already opened is not opened again: a second open would clear its
         // unsaved mark (FR-L31.10).
         if !s.uris.borrow().contains_key(&path) {
+            OPEN_ASKED.with(|asked| asked.borrow_mut().insert(path.clone()));
             s.host.send(HostCommand::Open(path.clone()));
         }
         s.host.send(HostCommand::Focus(path));
+    }
+
+    /// The session opened `path`: a later failure of another open of it is not 파일 열기's.
+    pub fn open_settled(path: &str) {
+        OPEN_ASKED.with(|asked| asked.borrow_mut().remove(path));
+    }
+
+    /// The session could not open `path`: when 파일 열기 asked for it, a notice names the file and
+    /// the reason (FR-L31.9, #781); the editor area shows the reason as for any other open.
+    pub fn open_failed(path: &str, reason: &str) {
+        if OPEN_ASKED.with(|asked| asked.borrow_mut().remove(path)) {
+            crate::ui::cr::notice::post(super::open_failed_text(&crate::ui::editor::display_name(base_name(path)), reason));
+        }
     }
 
     thread_local! {
@@ -1768,32 +1804,36 @@ pub mod view {
         let is_armed = armed.is_some_and(|(p, at)| p == e.path && (now_ms.saturating_sub(at)) >= 600 && (now_ms.saturating_sub(at)) < 4000);
         let discard_title = if is_armed { "정말 변경 사항을 취소합니다" } else { "변경 사항 취소" };
 
+        // The diff opens from the row's file icon, name and folder, and from its status letter: two
+        // click targets beside the action buttons, never around them. When the row itself took the
+        // click, the 파일 열기 icon was a click target inside another one, and in the window a click
+        // on it opened nothing (#781). Side by side, each point of the row has one target under it,
+        // whatever the renderer does with nested ones; Enter and Space on the row still open the diff.
+        let open_row_diff = move |s: &Shared, path: &str| {
+            if group == Group::Conflicts {
+                s.scm.open_conflict(path);
+            } else {
+                let over = s.tabs.read().current_path().map(str::to_owned);
+                s.scm.open_diff(path, group.staged(), over);
+            }
+        };
+        let (letter_s, letter_path) = (s.clone(), e.path.clone());
+
         rsx! {
             div { key: "{group.title()}:{e.path}", class, role: "listitem", "aria-label": "{row_label}", title: "{tip}", tabindex: "0", style: "--d:1; gap:3px; padding-right:var(--sp2);",
-                onclick: move |_| {
-                    if group == Group::Conflicts {
-                        diff_s.scm.open_conflict(&diff_path);
-                    } else {
-                        let over = diff_s.tabs.read().current_path().map(str::to_owned);
-                        diff_s.scm.open_diff(&diff_path, group.staged(), over);
-                    }
-                },
                 onkeydown: move |event| {
                     if matches!(event.key(), Key::Enter) || matches!(event.key(), Key::Character(ref c) if c == " ") {
                         event.stop_propagation();
                         event.prevent_default();
-                        if group == Group::Conflicts {
-                            key_diff_s.scm.open_conflict(&key_diff_path);
-                        } else {
-                            let over = key_diff_s.tabs.read().current_path().map(str::to_owned);
-                            key_diff_s.scm.open_diff(&key_diff_path, group.staged(), over);
-                        }
+                        open_row_diff(&key_diff_s, &key_diff_path);
                     }
                 },
-                {icon_px("file", 15)}
-                span { style: "overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; min-width:20px;", "{name}" }
-                if !dir.is_empty() { span { style: "color:var(--muted); font-size:var(--fs-2xs); overflow:hidden; text-overflow:ellipsis; flex:1 2 0px; min-width:0;", "{dir}" } }
-                div { class: "spacer" }
+                div { style: "display:flex; align-items:center; gap:3px; flex:1; min-width:0; align-self:stretch;",
+                    onclick: move |_| open_row_diff(&diff_s, &diff_path),
+                    {icon_px("file", 15)}
+                    span { style: "overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; min-width:20px;", "{name}" }
+                    if !dir.is_empty() { span { style: "color:var(--muted); font-size:var(--fs-2xs); overflow:hidden; text-overflow:ellipsis; flex:1 2 0px; min-width:0;", "{dir}" } }
+                }
                 if !deleted {
                     button { class: "ed-ib", style: "width:20px; height:20px; flex:none;", title: "파일 열기: {name}", "aria-label": "파일 열기: {name}",
                         onclick: move |event| { event.stop_propagation(); open_file(&open_s, &open_path); }, {icon_px("file", 13)} }
@@ -1814,7 +1854,8 @@ pub mod view {
                             if group == Group::Staged { op_s.scm.unstage(&op_entry) } else { op_s.scm.stage(&op_entry) }
                         }, {icon_px(op_icon, 13)} }
                 }
-                span { style: "width:14px; flex:none; text-align:center; font-family:var(--mono); font-size:var(--fs-xs); font-weight:var(--fw-semibold); color:{color};", title: "{label}", "{e.letter}" }
+                span { style: "width:14px; flex:none; text-align:center; font-family:var(--mono); font-size:var(--fs-xs); font-weight:var(--fw-semibold); color:{color}; align-self:stretch; display:flex; align-items:center; justify-content:center;", title: "{label}",
+                    onclick: move |_| open_row_diff(&letter_s, &letter_path), "{e.letter}" }
             }
         }
     }
@@ -2283,6 +2324,15 @@ mod tests {
         let g = groups(&status(vec![f, file("a.rs", 'M', '.'), w]));
         assert_eq!(op_paths(&g.staged), vec!["a.rs", "new.rs", "old.rs"]);
         assert_eq!(op_paths(&g.changes), vec!["moved.rs"]);
+    }
+
+    #[test]
+    fn fr_l31_9_the_open_notices_name_the_file_and_say_why() {
+        assert_eq!(
+            open_failed_text("GUIDE.md", "파일이 없습니다. 지워졌거나 이름이 바뀌었을 수 있습니다"),
+            "GUIDE.md을(를) 열지 못했습니다: 파일이 없습니다. 지워졌거나 이름이 바뀌었을 수 있습니다"
+        );
+        assert_eq!(open_offline_text("main.rs"), "서버와의 연결이 끊어져 main.rs을(를) 열 수 없습니다. 다시 연결한 뒤 여세요");
     }
 
     #[test]

@@ -336,17 +336,18 @@ pub enum RunStatus {
 /// 24 dp bars at 10 dp gaps, and 120 tall with 16 dp bars at 6 dp gaps on a narrow layout.
 pub fn weekday_chart_size(compact: bool) -> (f32, f32, f32) {
     if compact {
-        (148.0, 120.0, 6.0)
+        (148.0, 94.0, 6.0)
     } else {
-        (228.0, 150.0, 10.0)
+        (228.0, 126.0, 10.0)
     }
 }
 
 /// Height of the weekday card content in dp: heading (16) + gap (4) + chart (+1 baseline) + the
-/// 24 dp day-label row + 2 x 16 dp padding, so the card grows to hold the labels (FR-L25).
+/// 24 dp day-label row. The card's own 16 dp padding and 1 dp border come on top, so the card is
+/// 205 dp high at 1440 and 173 at 390, as the mockup's `.rt-topwrap` cards (FR-L25, #848).
 pub fn weekday_card_height(narrow: bool) -> f32 {
     let (_, chart_h, _) = weekday_chart_size(narrow);
-    16.0 + 4.0 + chart_h + 1.0 + 24.0 + 2.0 * 16.0
+    16.0 + 4.0 + chart_h + 1.0 + 24.0
 }
 
 /// Corner radius of a weekday bar: a pill (half the width), never more than half the height.
@@ -482,6 +483,31 @@ pub enum FormLayout {
     Inline,
     /// A modal sheet: the compact layouts have no detail area beside the list.
     Sheet,
+}
+
+/// The inline form's fields go two to a row from this field width (mockup `.form`, a two-column
+/// grid), and one to a row below it (FR-L25, #848).
+pub const FORM_TWO_COLUMNS_FROM: f32 = 480.0;
+
+/// Whether the form lays its fields out in two columns: inline and wide enough.
+pub fn form_two_columns(layout: FormLayout, field_w: f32) -> bool {
+    layout == FormLayout::Inline && field_w >= FORM_TWO_COLUMNS_FROM
+}
+
+/// The form's rows, each one or two fields, in `FORM_FIELDS` order. In two columns the mockup's
+/// pairs share a row: 프로젝트 and 트리거, 일정 설명 and cron, model and 권한 모드 (#848).
+pub fn form_rows(two_columns: bool) -> Vec<Vec<FormField>> {
+    if !two_columns {
+        return FORM_FIELDS.iter().map(|f| vec![*f]).collect();
+    }
+    vec![
+        vec![FormField::Name],
+        vec![FormField::Project, FormField::Trigger],
+        vec![FormField::ScheduleDescription, FormField::Schedule],
+        vec![FormField::Model, FormField::Mode],
+        vec![FormField::Computer],
+        vec![FormField::Prompt],
+    ]
 }
 
 /// Wide layouts (list and detail side by side) open the form in the detail area; the compact
@@ -1138,14 +1164,25 @@ pub struct RunRowText {
     pub status: &'static str,
     pub flag: Option<&'static str>,
     pub ago: String,
+    /// The run's time as the mockup's `.runtile` heads it: "오늘 09:00" (#848).
+    pub when: String,
+    /// The tile's second line: the session the run made, or that it made none.
+    pub sub: &'static str,
     pub opens_session: bool,
 }
+
+/// The run tile's second line when the run has a session, and when it has none. The mockup
+/// names the member; a run carries only its session id, so the line says what the tile opens.
+pub const RUN_TILE_SESSION: &str = "세션";
+pub const RUN_TILE_NO_SESSION: &str = "세션 없음";
 
 pub fn run_row_text(r: &Run, now: Minutes, simulated: bool) -> RunRowText {
     RunRowText {
         status: r.status.label(),
         flag: simulated.then_some(SAMPLE_FLAG),
         ago: ago(now, r.at),
+        when: format_next(r.at, now),
+        sub: if r.session.is_some() { RUN_TILE_SESSION } else { RUN_TILE_NO_SESSION },
         opens_session: r.session.is_some(),
     }
 }
@@ -2223,14 +2260,44 @@ mod tests {
     fn fr_l25_weekday_card_fits_chart_and_labels() {
         for narrow in [false, true] {
             let (_, chart_h, _) = weekday_chart_size(narrow);
-            assert!(weekday_card_height(narrow) >= chart_h + 24.0 + 16.0 + 2.0 * 16.0);
+            assert_eq!(weekday_card_height(narrow), 16.0 + 4.0 + chart_h + 1.0 + 24.0);
         }
+        // With the card's 16 dp padding and 1 dp border: the mockup's 205 at 1440, 173 at 390.
+        assert_eq!(weekday_card_height(false) + 2.0 * 16.0 + 2.0, 205.0);
+        assert_eq!(weekday_card_height(true) + 2.0 * 16.0 + 2.0, 173.0);
+    }
+
+    #[test]
+    fn fr_l25_form_pairs_fields_in_two_columns_when_inline_and_wide() {
+        assert!(form_two_columns(FormLayout::Inline, 686.0));
+        assert!(!form_two_columns(FormLayout::Inline, 400.0));
+        assert!(!form_two_columns(FormLayout::Sheet, 720.0));
+        let one: Vec<FormField> = form_rows(false).into_iter().flatten().collect();
+        let two: Vec<FormField> = form_rows(true).into_iter().flatten().collect();
+        assert_eq!(one, FORM_FIELDS.to_vec());
+        assert_eq!(two, FORM_FIELDS.to_vec(), "same fields, same order");
+        assert!(form_rows(false).iter().all(|r| r.len() == 1));
+        let rows = form_rows(true);
+        assert!(rows.contains(&vec![FormField::Project, FormField::Trigger]));
+        assert!(rows.contains(&vec![FormField::ScheduleDescription, FormField::Schedule]));
+        assert!(rows.contains(&vec![FormField::Model, FormField::Mode]));
+    }
+
+    #[test]
+    fn fr_l25_run_tile_heads_with_the_time_and_names_the_session() {
+        let now = 20_000 * 1440 + 10 * 60;
+        let with = Run { at: 20_000 * 1440 + 9 * 60, status: RunStatus::Done, session: Some("s1".into()) };
+        let t = run_row_text(&with, now, false);
+        assert_eq!(t.when, "오늘 09:00");
+        assert_eq!(t.sub, RUN_TILE_SESSION);
+        let without = Run { session: None, ..with };
+        assert_eq!(run_row_text(&without, now, false).sub, RUN_TILE_NO_SESSION);
     }
 
     #[test]
     fn fr_l25_weekday_bars_geometry() {
-        assert_eq!(weekday_chart_size(false), (228.0, 150.0, 10.0));
-        assert_eq!(weekday_chart_size(true), (148.0, 120.0, 6.0));
+        assert_eq!(weekday_chart_size(false), (228.0, 126.0, 10.0));
+        assert_eq!(weekday_chart_size(true), (148.0, 94.0, 6.0));
         // 24 dp and 16 dp bars, as in the mockup.
         let bar_w = |(w, _, g): (f32, f32, f32)| (w - 6.0 * g) / 7.0;
         assert_eq!(bar_w(weekday_chart_size(false)), 24.0);

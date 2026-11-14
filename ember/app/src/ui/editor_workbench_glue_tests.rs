@@ -26,12 +26,14 @@ thread_local! {
     /// The host the page under test talks to. `init` builds a real one in its hook; the test app
     /// puts this one in its place on every render.
     static FAKE: RefCell<Option<EditorHost>> = const { RefCell::new(None) };
+    /// The folder the page under test is opened on ([`Page::open_at`]).
+    static FOLDER: RefCell<String> = RefCell::new(ROOT.to_string());
 }
 
 fn target() -> EditorTarget {
     EditorTarget {
         project: String::new(),
-        folder: ROOT.to_string(),
+        folder: FOLDER.with(|f| f.borrow().clone()),
         endpoint: String::new(),
         token: String::new(),
         server_url: String::new(),
@@ -62,6 +64,17 @@ fn describe(command: &HostCommand) -> String {
         }
         HostCommand::Widget(uri, _, _) => format!("widget event {}", uri.path),
         HostCommand::CreateFile { parent, name } => format!("create file {parent} {name}"),
+        HostCommand::Webview(event) => match event {
+            ember_editor::webview::WebviewEvent::Ready { handle } => format!("webview ready {handle}"),
+            ember_editor::webview::WebviewEvent::Message { handle, message } => format!("webview message {handle} {}", message.json),
+            ember_editor::webview::WebviewEvent::State { handle, state } => format!("webview state {handle} {state}"),
+            ember_editor::webview::WebviewEvent::ViewState { handle, visible, active, position } => {
+                format!("webview view_state {handle} visible={visible} active={active} pos={position}")
+            }
+            ember_editor::webview::WebviewEvent::Closed { handle } => format!("webview closed {handle}"),
+            ember_editor::webview::WebviewEvent::Focus { handle, focused } => format!("webview focus {handle} {focused}"),
+            _ => "webview other".to_string(),
+        },
         _ => "other".to_string(),
     }
 }
@@ -74,12 +87,18 @@ struct Page {
 impl Page {
     /// The page with one file, `a.rs`, listed under the project folder.
     fn open() -> Page {
+        Page::open_at(ROOT)
+    }
+
+    /// The page opened on `folder`, with one file, `a.rs`, listed under it.
+    fn open_at(folder: &str) -> Page {
+        FOLDER.with(|f| *f.borrow_mut() = folder.to_string());
         let (host, commands) = EditorHost::fake();
         {
             let mut state = host.state.lock().unwrap();
             state.connected = true;
             state.listings.insert(
-                ROOT.to_string(),
+                folder.to_string(),
                 vec![("a.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE)],
             );
         }
@@ -319,4 +338,229 @@ fn fr_l31_shift_f10_and_the_context_menu_key_on_a_tree_row_open_its_context_menu
     page.dom.key_down(row, Key::F10, Code::F10, Modifiers::empty());
     page.dom.render();
     assert_eq!(crate::ui::editor_tree_menu::open_menu(), None);
+}
+
+// FR-L31.9 (#781): 파일 열기 on a change row of the 커밋 window. The window's status and repository
+// root are put in the source control state directly (the page has no project, so nothing is read from
+// a server), and the window is shown with its stripe button.
+
+fn change(path: &str) -> ember_client::api::GitFile {
+    ember_client::api::GitFile { path: path.into(), old_path: None, index: '.', worktree: 'M' }
+}
+
+impl Page {
+    /// Shows the 커밋 window with `files` as the work tree changes of the repository at `toplevel`,
+    /// the folder being `prefix` below it.
+    fn show_changes(&mut self, toplevel: &str, prefix: &str, files: Vec<ember_client::api::GitFile>) {
+        {
+            let s = super::shared();
+            let mut st = s.scm.state.lock().unwrap();
+            st.toplevel = Some(crate::ui::editor_scm_repo::Toplevel { toplevel: toplevel.into(), prefix: prefix.into() });
+            st.load = crate::ui::editor_scm::ScmLoad::Ready(ember_client::api::GitStatus {
+                branch: "main".into(),
+                files,
+                ..ember_client::api::GitStatus::default()
+            });
+        }
+        let stripe = self
+            .find_where("the 커밋 stripe button", |id| {
+                self.attr(id, "aria-pressed").is_some() && self.attr(id, "title").is_some_and(|t| t.starts_with("커밋"))
+            })
+            .expect("the 커밋 stripe button");
+        self.dom.click_node(stripe);
+        self.dom.render();
+        assert!(self.find("aria-label", "변경된 파일").is_some(), "the 커밋 window lists the changes");
+    }
+
+    /// The 파일 열기 icon of the change row of `name`.
+    fn open_icon(&self, name: &str) -> NodeId {
+        self.find("aria-label", &format!("파일 열기: {name}")).unwrap_or_else(|| panic!("the 파일 열기 icon of {name}"))
+    }
+
+    /// Whether the editor's tab strip has `path` as its current tab.
+    fn current_tab_is(&self, path: &str) -> bool {
+        self.find_where(&format!("the tab of {path}"), |id| {
+            self.attr(id, "role").as_deref() == Some("tab") && self.attr(id, "title").as_deref() == Some(path)
+        })
+        .is_some_and(|tab| self.attr(tab, "aria-selected").as_deref() == Some("true"))
+    }
+
+    /// The elements around `node`, nearest first, up to the 변경된 파일 list (included).
+    fn around_in_list(&self, node: NodeId) -> Vec<NodeId> {
+        let doc = self.dom.document();
+        let mut out = Vec::new();
+        let mut at = doc.get_node(node).and_then(|n| n.parent);
+        while let Some(id) = at {
+            out.push(id);
+            if self.attr(id, "aria-label").as_deref() == Some("변경된 파일") {
+                break;
+            }
+            at = doc.get_node(id).and_then(|n| n.parent);
+        }
+        out
+    }
+
+    fn notice(&self) -> Option<String> {
+        crate::ui::coexist::shared_ui().notice.get_untracked().map(|(_, text)| text)
+    }
+
+    fn diff_open(&self) -> bool {
+        super::shared().scm.snapshot().diff.is_some()
+    }
+}
+
+/// Clicks 파일 열기 on `name` and checks that `path` opens in a tab and nothing else happens.
+fn assert_icon_opens(page: &mut Page, name: &str, path: &str) {
+    page.sent();
+    let icon = page.open_icon(name);
+    page.dom.click_node(icon);
+    page.dom.render();
+    let sent = page.sent();
+    assert!(sent.contains(&format!("open {path}")), "{name}: {sent:?}");
+    assert!(sent.contains(&format!("focus {path}")), "{name}: {sent:?}");
+    assert!(page.current_tab_is(path), "{name} is the current tab, {path}");
+    assert!(!page.diff_open(), "{name}: the icon opens the file, not the diff");
+}
+
+// The icon is a click target of its own: no element around it, up to the list, takes the click, so
+// the renderer has one box under the pointer and the row's diff click cannot take it instead or as
+// well. The row's file icon and name still open the diff (a target beside the icon, not around it).
+#[test]
+fn fr_l31_9_the_open_icon_is_not_inside_the_rows_click_target() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_at("/w/r/app");
+    page.show_changes("/w/r", "app", vec![change("app/src/main.rs"), change("docs/GUIDE.md")]);
+
+    for name in ["main.rs", "GUIDE.md"] {
+        let icon = page.open_icon(name);
+        assert!(page.dom.listeners(icon).contains(&"click"), "{name}: the icon listens for clicks");
+        let around: Vec<NodeId> = page.around_in_list(icon).into_iter().filter(|&id| page.dom.listeners(id).contains(&"click")).collect();
+        assert!(around.is_empty(), "{name}: an element around the 파일 열기 icon takes clicks: {around:?}");
+
+        let label = page
+            .find_where(&format!("the name {name}"), |id| {
+                page.dom.document().get_node(id).is_some_and(|n| n.is_element() && n.text_content() == name)
+                    && page.attr(id, "aria-label").is_none()
+            })
+            .unwrap_or_else(|| panic!("the name {name} in its row"));
+        let (target, _) = page.dom.listener_target(label, "click").unwrap_or_else(|| panic!("{name}: a click on the name has a target"));
+        assert!(!page.around_in_list(icon).contains(&target), "{name}: the name's diff target is beside the icon");
+    }
+}
+
+// Inside the folder: the folder path, the same tab the explorer opens.
+#[test]
+fn fr_l31_9_the_open_icon_opens_a_change_inside_the_folder() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_at("/w/r/app");
+    page.show_changes("/w/r", "app", vec![change("app/src/main.rs"), change("docs/GUIDE.md")]);
+    assert_icon_opens(&mut page, "main.rs", "/w/r/app/src/main.rs");
+}
+
+// Outside the folder: the absolute path below the repository root.
+#[test]
+fn fr_l31_9_the_open_icon_opens_a_change_outside_the_folder() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_at("/w/r/app");
+    page.show_changes("/w/r", "app", vec![change("app/src/main.rs"), change("docs/GUIDE.md")]);
+    assert_icon_opens(&mut page, "GUIDE.md", "/w/r/docs/GUIDE.md");
+}
+
+// The folder is the repository root.
+#[test]
+fn fr_l31_9_the_open_icon_opens_a_change_when_the_folder_is_the_root() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_at("/w/r");
+    page.show_changes("/w/r", "", vec![change("src/main.rs"), change("README.md")]);
+    assert_icon_opens(&mut page, "main.rs", "/w/r/src/main.rs");
+    assert_icon_opens(&mut page, "README.md", "/w/r/README.md");
+}
+
+// A file that cannot be opened is named in a notice with the reason: the session's open failed, or
+// the connection is lost (the host drops commands then, so nothing is asked).
+#[test]
+fn fr_l31_9_a_failed_open_from_the_icon_says_so_in_a_notice() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_at("/w/r/app");
+    page.show_changes("/w/r", "app", vec![change("app/src/main.rs"), change("docs/GUIDE.md")]);
+
+    assert_icon_opens(&mut page, "GUIDE.md", "/w/r/docs/GUIDE.md");
+    page.deliver(SessionUpdate::OpenFailed { uri: UriComponents::remote("test", "/w/r/docs/GUIDE.md"), error: NOT_FOUND.into() });
+    let notice = page.notice().unwrap_or_default();
+    assert_eq!(notice, crate::ui::editor_scm::open_failed_text("GUIDE.md", file_failure_reason(NOT_FOUND)));
+
+    page.host().state.lock().unwrap().lost = Some("connection closed".into());
+    page.sent();
+    let icon = page.open_icon("main.rs");
+    page.dom.click_node(icon);
+    page.dom.render();
+    assert!(page.sent().iter().all(|c| !c.starts_with("open")), "nothing is asked while the connection is lost");
+    assert_eq!(page.notice().unwrap_or_default(), crate::ui::editor_scm::open_offline_text("main.rs"));
+}
+
+#[test]
+fn fr_e8_extension_webview_panel_lifecycle_and_messaging() {
+    use ember_editor::webview::{ContentOptions, PanelOptions, ShowOptions, WebviewKind, WebviewUpdate};
+    use ember_editor_conn::webview::WebviewMessage;
+
+    let mut page = Page::open();
+    let _ = page.sent(); // Clear initial commands
+
+    // 1. Deliver Created for a markdown preview webview panel
+    page.deliver(SessionUpdate::Webview(WebviewUpdate::Created {
+        handle: "wv-md".into(),
+        kind: WebviewKind::Panel { view_type: "markdown.preview".into() },
+        title: "Markdown Preview".into(),
+        content: ContentOptions::default(),
+        panel: PanelOptions::default(),
+        state: None,
+        reveal: Some(ShowOptions { preserve_focus: false, view_column: Some(1) }),
+    }));
+
+    // Check that ViewState was sent to host on reveal
+    let sent = page.sent();
+    assert!(sent.iter().any(|s| s == "webview view_state wv-md visible=true active=true pos=1"));
+
+    // Check that tab was opened
+    let tab = page.find_where("the webview tab", |id| {
+        page.attr(id, "role").as_deref() == Some("tab") && page.attr(id, "title").as_deref() == Some("ember-webview:wv-md")
+    }).expect("webview tab present in tab strip");
+    assert_eq!(page.attr(tab, "aria-selected").as_deref(), Some("true"));
+
+    // Check that webview pane placeholder renders with title and WAITING_TEXT
+    let region = page.find_where("the webview region", |id| {
+        page.attr(id, "role").as_deref() == Some("region") && page.attr(id, "aria-label").as_deref() == Some("Markdown Preview")
+    }).expect("webview region rendered in editor pane");
+    assert!(page.text().contains("Markdown Preview"));
+    assert!(page.text().contains(ember_editor::webview::WAITING_TEXT));
+
+    // 2. Deliver Ready: placeholder updates (WAITING_TEXT is cleared)
+    page.deliver(SessionUpdate::Webview(WebviewUpdate::Ready { handle: "wv-md".into() }));
+    assert!(page.find_where("the webview region after ready", |id| {
+        page.attr(id, "role").as_deref() == Some("region") && page.attr(id, "aria-label").as_deref() == Some("Markdown Preview")
+    }).is_some());
+    assert!(!page.text().contains(ember_editor::webview::WAITING_TEXT));
+
+    // 3. Post message from webview to session
+    let s = super::shared();
+    super::post_webview_message(&s, "wv-md", WebviewMessage {
+        json: r#"{"command":"click","id":42}"#.into(),
+        buffers: Vec::new(),
+    });
+    let sent = page.sent();
+    assert!(sent.iter().any(|s| s == "webview message wv-md {\"command\":\"click\",\"id\":42}"));
+
+    // 4. Set state from webview
+    super::set_webview_state(&s, "wv-md", r#"{"scrollPos":350}"#);
+    let sent = page.sent();
+    assert!(sent.iter().any(|s| s == "webview state wv-md {\"scrollPos\":350}"));
+
+    // 5. Close webview tab
+    super::page::finish_close(&s, &["ember-webview:wv-md".to_string()], None);
+    let sent = page.sent();
+    assert!(sent.iter().any(|s| s == "webview closed wv-md"));
+    page.redraw();
+    assert!(page.find_where("the webview tab after close", |id| {
+        page.attr(id, "title").as_deref() == Some("ember-webview:wv-md")
+    }).is_none(), "webview tab removed after close");
 }

@@ -151,6 +151,11 @@ pub struct SharedUi {
     /// `true` when this process was launched directly with `--editor <project> <folder>`, so
     /// closing the editor exits the process instead of leaving a blank window.
     pub standalone_editor: MutableState<bool>,
+    /// The owner claim (FR-S12, #842), written by the claim driver from a worker. Holds no key.
+    pub owner_claim: MutableState<crate::owner_claim::ClaimView>,
+    /// The claim prompt the user dismissed (`owner_claim::prompt_key`); a new attempt, a new
+    /// pending claim or a 403 `owner_required` opens the sheet again.
+    pub owner_claim_dismissed: MutableState<Option<String>>,
     mirrors: Arc<OnceLock<DioxusMirrors>>,
 }
 
@@ -172,6 +177,8 @@ impl SharedUi {
             detail_open: mutable_state_of(false),
             characters: mutable_state_of(None),
             standalone_editor: mutable_state_of(false),
+            owner_claim: mutable_state_of(Default::default()),
+            owner_claim_dismissed: mutable_state_of(None),
             mirrors: Arc::new(OnceLock::new()),
         }
     }

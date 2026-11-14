@@ -1,7 +1,8 @@
 //! `ember-server owner <verb>`: owner routes from a terminal, for a server with no app beside it
 //! (SPEC `FR-S12`; INTENT D37 "Owner presence", #784).
 //!
-//! The command claims an owner key over `<data dir>/owner.sock` like the app does, holds it for
+//! The command claims an owner key over `<data dir>/owner.sock` (on Windows the claim pipe,
+//! [`super::pipe_name`]) like the app does, holds it for
 //! this one call, and sends it with the server token to the local listener. It refuses to run
 //! when standard input is not a terminal, and the server refuses the claim from inside an Ember
 //! agent or terminal tree, so it does not work in Ember's own terminal panel.
@@ -118,13 +119,13 @@ pub fn parse(args: &[String]) -> Result<Call, String> {
 }
 
 /// Runs `ember-server owner <args>` against the server whose data folder is `data_dir`.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub async fn run(_args: &[String], _data_dir: &std::path::Path) -> anyhow::Result<()> {
-    anyhow::bail!("ember-server owner needs the owner socket, which exists on unix only")
+    anyhow::bail!("ember-server owner needs the owner socket or pipe, which exist on unix and Windows only")
 }
 
 /// Runs `ember-server owner <args>` against the server whose data folder is `data_dir`.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub async fn run(args: &[String], data_dir: &std::path::Path) -> anyhow::Result<()> {
     use std::io::IsTerminal;
 
@@ -146,8 +147,10 @@ pub async fn run(args: &[String], data_dir: &std::path::Path) -> anyhow::Result<
     }
 
     // The connection is the key's life: it stays open until the call is answered.
-    let sock = super::door::socket_path(data_dir);
-    let (_conn, key) = unix::claim(&sock)?;
+    #[cfg(unix)]
+    let (_conn, key) = unix::claim(&super::door::socket_path(data_dir))?;
+    #[cfg(windows)]
+    let (_conn, key) = pipe::claim(&super::pipe_name(data_dir))?;
 
     let mut owner = reqwest::header::HeaderValue::from_str(&key)?;
     owner.set_sensitive(true);
@@ -176,71 +179,114 @@ pub async fn run(args: &[String], data_dir: &std::path::Path) -> anyhow::Result<
     Ok(())
 }
 
-#[cfg(unix)]
-mod unix {
-    use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixStream;
-    use std::path::Path;
+/// The claim exchange over an open connection, either door: `conn` writes, `lines` reads the
+/// same connection. Asks the terminal for the code when the server wants one. Returns the key.
+#[cfg(any(unix, windows))]
+fn exchange<W: std::io::Write, R: std::io::BufRead>(conn: &mut W, lines: R) -> anyhow::Result<String> {
+    use std::io::{BufRead as _, Write as _};
 
-    use serde_json::{json, Value};
-
-    fn send(conn: &mut UnixStream, v: Value) -> std::io::Result<()> {
+    fn send<W: std::io::Write>(conn: &mut W, v: Value) -> std::io::Result<()> {
         let mut line = v.to_string();
         line.push('\n');
         conn.write_all(line.as_bytes())
     }
 
-    /// Claims an owner key over `sock`, asking the terminal for the code when the server wants
-    /// one. Returns the open connection (the key's life) and the key.
+    send(conn, json!({ "op": "claim", "name": "ember-server owner" }))?;
+    let mut lines = lines.lines();
+    loop {
+        let Some(line) = lines.next() else {
+            anyhow::bail!("the server closed the claim connection before it gave a key");
+        };
+        let v: Value = serde_json::from_str(&line?)?;
+        match v["state"].as_str() {
+            Some("granted") => {
+                let key = v["key"].as_str().unwrap_or_default().to_string();
+                if key.is_empty() {
+                    anyhow::bail!("the server granted the claim without a key");
+                }
+                return Ok(key);
+            }
+            Some("refused") => {
+                let reason = v["reason"].as_str().unwrap_or("unknown");
+                let why = match reason {
+                    "agent_tree" => "this command runs inside an Ember agent or terminal; use a terminal outside Ember",
+                    "other_user" => "this command runs as another user than the server",
+                    "wrong_code" => "the code was wrong too many times",
+                    "denied" => "the claim was denied in the Ember app",
+                    "timeout" => "the claim was not confirmed in time",
+                    "busy" => "too many claims are waiting; try again",
+                    other => other,
+                };
+                anyhow::bail!("owner claim refused: {why}");
+            }
+            Some("confirm") | Some("wrong_code") => {
+                if let Some(left) = v["left"].as_u64() {
+                    eprintln!("wrong code ({left} tries left)");
+                }
+                eprint!("Code shown on the server console (or approve in the Ember app, then press Enter): ");
+                std::io::stderr().flush().ok();
+                let mut typed = String::new();
+                std::io::stdin().lock().read_line(&mut typed)?;
+                let typed = typed.trim();
+                // An empty line waits for the app's decision instead.
+                if !typed.is_empty() {
+                    send(conn, json!({ "op": "confirm", "code": typed }))?;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(unix)]
+mod unix {
+    use std::io::BufReader;
+    use std::os::unix::net::UnixStream;
+    use std::path::Path;
+
+    /// Claims an owner key over `sock`. Returns the open connection (the key's life) and the
+    /// key.
     pub fn claim(sock: &Path) -> anyhow::Result<(UnixStream, String)> {
         let mut conn = UnixStream::connect(sock).map_err(|e| {
             anyhow::anyhow!("cannot reach the server's owner socket {}: {e} (is the server running?)", sock.display())
         })?;
-        send(&mut conn, json!({ "op": "claim", "name": "ember-server owner" }))?;
-        let mut lines = BufReader::new(conn.try_clone()?).lines();
-        loop {
-            let Some(line) = lines.next() else {
-                anyhow::bail!("the server closed the owner socket before it gave a key");
-            };
-            let v: Value = serde_json::from_str(&line?)?;
-            match v["state"].as_str() {
-                Some("granted") => {
-                    let key = v["key"].as_str().unwrap_or_default().to_string();
-                    if key.is_empty() {
-                        anyhow::bail!("the server granted the claim without a key");
-                    }
-                    return Ok((conn, key));
+        let reader = BufReader::new(conn.try_clone()?);
+        let key = super::exchange(&mut conn, reader)?;
+        Ok((conn, key))
+    }
+}
+
+#[cfg(windows)]
+mod pipe {
+    use std::fs::{File, OpenOptions};
+    use std::io::BufReader;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::time::{Duration, Instant};
+
+    /// `ERROR_PIPE_BUSY`: every instance is taken; the server makes a new one at once.
+    const ERROR_PIPE_BUSY: i32 = 231;
+    /// `SECURITY_IDENTIFICATION`: the server may learn who connects but not act as them.
+    const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
+
+    /// Claims an owner key over the pipe `name`. Returns the open connection (the key's life)
+    /// and the key. Reads and writes take turns, so one synchronous handle and its clone do
+    /// not block each other.
+    pub fn claim(name: &str) -> anyhow::Result<(File, String)> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut conn = loop {
+            match OpenOptions::new().read(true).write(true).security_qos_flags(SECURITY_IDENTIFICATION).open(name) {
+                Ok(f) => break f,
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
                 }
-                Some("refused") => {
-                    let reason = v["reason"].as_str().unwrap_or("unknown");
-                    let why = match reason {
-                        "agent_tree" => "this command runs inside an Ember agent or terminal; use a terminal outside Ember",
-                        "other_user" => "this command runs as another user than the server",
-                        "wrong_code" => "the code was wrong too many times",
-                        "denied" => "the claim was denied in the Ember app",
-                        "timeout" => "the claim was not confirmed in time",
-                        "busy" => "too many claims are waiting; try again",
-                        other => other,
-                    };
-                    anyhow::bail!("owner claim refused: {why}");
+                Err(e) => {
+                    anyhow::bail!("cannot reach the server's owner pipe {name}: {e} (is the server running?)")
                 }
-                Some("confirm") | Some("wrong_code") => {
-                    if let Some(left) = v["left"].as_u64() {
-                        eprintln!("wrong code ({left} tries left)");
-                    }
-                    eprint!("Code shown on the server console (or approve in the Ember app, then press Enter): ");
-                    std::io::stderr().flush().ok();
-                    let mut typed = String::new();
-                    std::io::stdin().lock().read_line(&mut typed)?;
-                    let typed = typed.trim();
-                    // An empty line waits for the app's decision instead.
-                    if !typed.is_empty() {
-                        send(&mut conn, json!({ "op": "confirm", "code": typed }))?;
-                    }
-                }
-                _ => {}
             }
-        }
+        };
+        let reader = BufReader::new(conn.try_clone()?);
+        let key = super::exchange(&mut conn, reader)?;
+        Ok((conn, key))
     }
 }
 

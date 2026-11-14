@@ -8,11 +8,13 @@ description = "Ember native client: launcher and conversation UI on dioxus-compo
 license = "Apache-2.0"
 publish = false
 
-# A library with a one-line binary in front of it, the shape dioxus-compose's samples use:
-# the rlib is what the binary and the tests link, and later the Android/iOS entry points.
+# A library with a one-line binary in front of it, the shape the compose-rust samples use:
+# the rlib is what the binary and the tests link, and the cdylib is what the Android Activity
+# loads (FR-L36), because Android runs no `main` of ours. The iOS entry point comes later.
 [lib]
 name = "ember_app"
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "ember-app"
@@ -43,7 +45,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 
 # The client's I/O is async; the app owns one multi-thread runtime for it (PR-3: no domain
 # work on the UI thread).
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "fs", "macros"] }
+# `net` and `io-util` for the owner claim over the server's claim socket (FR-S12, #842); the
+# same features ember-client already turns on.
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "fs", "macros", "net", "io-util"] }
 # Same HTTP stack as ember-client, used for the endpoints ember-client does not wrap yet
 # (accounts, computers, IDE targets) and the terminal relay. `rustls-tls` (webpki roots, as in
 # ember/node and ember/server) gives https with certificate verification (FR-L31.19, #333).

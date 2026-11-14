@@ -569,6 +569,85 @@ async fn fr_s8_acp_mid_turn_output_drained_and_persisted_after_server_crash() {
     clear_runtime();
 }
 
+/// #310: a tool call announced (and stored) before the server died is not stored a second time
+/// when its updates are drained; it gets its final result once. A call that starts while no
+/// server is attached is stored once as well.
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_s8_acp_drain_stores_each_tool_call_once() {
+    let _g = LOCK.lock().await;
+    std::env::remove_var("EMBER_SESSION_SHIM");
+    let shims = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let store = install(shims.path());
+    let config = || AcpConfig {
+        name: "fake-acp-s8".into(),
+        command: crate_dir().join("tests/fixtures/acp/fake-acp-agent.sh"),
+        args: Vec::new(),
+        model_args: Vec::new(),
+        instructions_args: Vec::new(),
+        version_args: vec!["--version".into()],
+        env: vec![("FAKE_TOOLS".into(), "1".into())],
+        env_policy: EnvPolicy::Inherit,
+    };
+    let kind = AcpAdapter::new(config()).unwrap().kind();
+    let id = store.create_session("p", kind, work.path().to_str().unwrap(), None, "t").unwrap().id;
+    let calls = |events: &[AgentEvent], want: &str| {
+        events.iter().filter(|e| matches!(e, AgentEvent::ToolCall { call_id, .. } if call_id == want)).count()
+    };
+    let results = |events: &[AgentEvent], want: &str| -> Vec<(String, bool)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolResult { call_id, output, is_error } if call_id == want => {
+                    Some((output.clone(), *is_error))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+
+    {
+        let (store, id) = (store.clone(), id.clone());
+        let adapter = AcpAdapter::new(config()).unwrap();
+        run_server1(async move {
+            let sessions = Sessions::new(store.clone(), vec![Arc::new(adapter) as Arc<dyn AgentAdapter>]);
+            sessions.send(&id, "go").await.unwrap();
+            wait_for("the announced tool call and two deltas", || {
+                let events = events_of(&store, &id);
+                events.iter().any(|e| matches!(e, AgentEvent::ToolCall { call_id, .. } if call_id == "t1"))
+                    && events.iter().filter(|e| matches!(e, AgentEvent::AssistantDelta { .. })).count() >= 2
+            })
+            .await;
+        });
+    }
+    let before = events_of(&store, &id);
+    assert!(!ended(&store, &id), "the turn is still running when the server dies");
+    assert_eq!(calls(&before, "t1"), 1, "t1 was announced before the crash: {before:?}");
+    assert!(results(&before, "t1").is_empty(), "t1 is not finished before the crash: {before:?}");
+    assert_eq!(calls(&before, "t2"), 0, "t2 starts only after the crash: {before:?}");
+    let pid = scan(shims.path()).into_iter().find(|m| m.session == id).expect("the shim survives").agent_pid;
+
+    let sessions = Sessions::new(
+        store.clone(),
+        vec![Arc::new(AcpAdapter::new(config()).unwrap()) as Arc<dyn AgentAdapter>],
+    );
+    let rejoined = sessions.rejoin_shims(&runtime(shims.path(), &store)).await;
+    assert!(rejoined.is_empty(), "an ACP agent is drained, not rejoined");
+    let events = events_of(&store, &id);
+    assert_eq!(calls(&events, "t1"), 1, "the stored call is not repeated: {events:?}");
+    assert_eq!(results(&events, "t1"), vec![("one".to_string(), false)], "{events:?}");
+    assert_eq!(calls(&events, "t2"), 1, "the call that started during the drain is stored once: {events:?}");
+    assert_eq!(results(&events, "t2"), vec![("two".to_string(), false)], "{events:?}");
+    assert!(
+        events.iter().any(|e| *e == AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
+        "{events:?}"
+    );
+    assert_eq!(store.session(&id).unwrap().unwrap().status, SessionStatus::Finished);
+    wait_for("the surviving agent to be stopped", || !pid_alive(pid)).await;
+    clear_runtime();
+}
+
 /// Update the server with three sessions running: none stops, none loses a turn.
 #[tokio::test]
 async fn fr_s8_update_server_with_three_sessions_running_none_stops_or_loses_turn() {

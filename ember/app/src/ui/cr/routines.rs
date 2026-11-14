@@ -4473,6 +4473,9 @@ mod tests {
         texts: std::collections::HashMap<u32, String>,
         clickables: std::collections::HashMap<u32, u64>,
         enabled: std::collections::HashMap<u32, bool>,
+        /// Child to parent, so a removed node takes its whole subtree with it (a glyph button's
+        /// label is a child of the removed box, #848).
+        parents: std::collections::HashMap<u32, u32>,
     }
 
     impl Seen {
@@ -4488,14 +4491,37 @@ mod tests {
                     Mutation::SetProp { node_id, property: PropertyKind::Enabled, value: PropertyValue::Bool(b) } => {
                         self.enabled.insert(*node_id, *b);
                     }
+                    Mutation::Insert { parent_id, node_id, .. } | Mutation::Move { parent_id, node_id, .. } => {
+                        self.parents.insert(*node_id, *parent_id);
+                    }
                     Mutation::Remove { node_id } => {
-                        self.texts.remove(node_id);
-                        self.clickables.remove(node_id);
-                        self.enabled.remove(node_id);
+                        let gone: Vec<u32> = self
+                            .parents
+                            .keys()
+                            .copied()
+                            .filter(|n| self.descends_from(*n, *node_id))
+                            .chain(std::iter::once(*node_id))
+                            .collect();
+                        for n in gone {
+                            self.texts.remove(&n);
+                            self.clickables.remove(&n);
+                            self.enabled.remove(&n);
+                            self.parents.remove(&n);
+                        }
                     }
                     _ => {}
                 }
             }
+        }
+
+        fn descends_from(&self, mut node: u32, root: u32) -> bool {
+            while let Some(&up) = self.parents.get(&node) {
+                if up == root {
+                    return true;
+                }
+                node = up;
+            }
+            false
         }
     }
 

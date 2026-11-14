@@ -75,3 +75,6 @@ tempfile = "3"
 # An in-process server for the device-link tests (SPEC FR-N9, `tests/fr_n9_device_link.rs`), as
 # the client crate's transport tests use it.
 ember-server = { path = "../server" }
+# Serves the in-process server on a loopback listener for the editor relay over HTTP
+# (`tests/fr_n9_device_editor.rs`); the version ember-server uses.
+axum = "0.8"

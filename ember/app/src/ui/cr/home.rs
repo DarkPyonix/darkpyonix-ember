@@ -981,7 +981,7 @@ impl Composer {
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
                 .corner_radius(CORNER_MD);
-            // A fixed height, not `equal_height` (#849): the toolkit sizes an `equal_height` row
+            // A fixed height, not `equal_height` (#849, toolkit bug compose-rust#766): the toolkit sizes an `equal_height` row
             // by its children's intrinsic heights and counts a child holding a scrolling list
             // as 0 (renderer `RenderNode.kt` `WeightedStackPolicy.intrinsic`), so the row took
             // the rail's height and the list showed one row. With a fixed height the rail's

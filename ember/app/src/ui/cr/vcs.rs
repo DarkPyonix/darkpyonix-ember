@@ -668,11 +668,33 @@ fn VcsCard(content: impl FnOnce()) {
     });
 }
 
-/// Columns of the repository, branch and remote cards: three side by side from 1100 dp, one
-/// stacked column below it (the 768 dp mockup), where the remote card's Pull and icon buttons
-/// were cut at the right edge (FR-L19).
-pub fn repo_bar_columns(width_dp: f32) -> usize {
-    if width_dp >= 1100.0 { 3 } else { 1 }
+/// How the repository bar lays out its three cells (`.vcs-bar`, `vcs.css`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepoBarGrid {
+    /// 저장소, 현재 브랜치 and 원격 side by side (`1.1fr 1.1fr 1fr`).
+    Three,
+    /// 저장소 and 현재 브랜치 side by side, 원격 under them across both (`.vcs-remote{grid-column:1/3}`).
+    TwoRemoteBelow,
+    /// One column.
+    One,
+}
+
+/// The bar's layout at a window width, as the mockup's rules give it: the page follows the
+/// viewport (`@media (max-width:900px)` two columns with 원격 across, `@media (max-width:560px)`
+/// one), the sheet's mounted screen also follows its container, the padded body
+/// (`@container (max-width:760px)` two columns with 원격 across, which beats the 560 rule, so a
+/// phone sheet keeps two). Review r8: one 334 dp stack at 1024 and 800 where the mockup has
+/// three columns and two.
+pub fn repo_bar_grid(window_w: f32, sheet_body_w: Option<f32>) -> RepoBarGrid {
+    if sheet_body_w.is_some_and(|w| w <= 760.0) {
+        RepoBarGrid::TwoRemoteBelow
+    } else if window_w <= 560.0 {
+        RepoBarGrid::One
+    } else if window_w <= 900.0 {
+        RepoBarGrid::TwoRemoteBelow
+    } else {
+        RepoBarGrid::Three
+    }
 }
 
 /// The diff header wraps to two lines (title and path, then the chips) when the diff pane is
@@ -708,11 +730,12 @@ pub fn RepoBar(
     compact: bool,
     mut on_pick: impl FnMut(String) + Clone + 'static,
 ) {
-    RepoBarWithActions(projects, project, snap, compact, current_window_size().width_dp, on_pick, None);
+    let _ = compact;
+    RepoBarWithActions(projects, project, snap, repo_bar_grid(current_window_size().width_dp, None), on_pick, None);
 }
 
 fn RepoBarWithActions(
-    projects: &[(String, String)], project: &ProjectBox, snap: Option<&RepoSnapshot>, compact: bool, content_width: f32,
+    projects: &[(String, String)], project: &ProjectBox, snap: Option<&RepoSnapshot>, grid: RepoBarGrid,
     mut on_pick: impl FnMut(String) + Clone + 'static, actions: Option<Actions>,
 ) {
     let project_menu = remember(|| mutable_state_of(false));
@@ -753,78 +776,80 @@ fn RepoBarWithActions(
     let mut on_pick_proj = on_pick.clone();
     let b_dismiss = branch_menu.clone();
 
-    // Below 1100 dp the three cards stack, so the remote card's buttons are not clipped (FR-L19).
-    let stacked = repo_bar_columns(content_width) == 1;
     cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
         let (project_menu_c, branch_menu_c) = (project_menu.clone(), branch_menu.clone());
         let p = ember_theme().palette;
         let remote_actions = actions.clone();
-        VcsCard(move || {
-            if compact || stacked {
-                cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
-                    let p_open = project_menu_c.clone();
-                    let p_name = proj_name.clone();
-                    let r_line = repo_line.clone();
-                    cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[2])).spacing(SP[1]).content(move || {
-                        SmallNote("저장소");
-                        RepoSelector(&p_name, move || p_open.set(true));
-                        SmallNote(&r_line);
-                    });
-
-                    cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-
-                    let b_open = branch_menu_c.clone();
-                    let b_text = branch_text.clone();
-                    let u_text = upstream.clone();
-                    cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[2])).spacing(SP[1]).content(move || {
-                        SmallNote("현재 브랜치");
-                        BranchSelector(&b_text, move || b_open.set(true));
-                        SmallNote(&u_text);
-                    });
-
-                    cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-
-                    cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[2])).spacing(SP[1]).content(move || {
-                        SmallNote("원격 origin");
-                        cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(10.0).content(move || {
-                            RemoteControls(action, has, remote_actions.clone());
-                        });
-                        RemoteSubNote(snap);
-                    });
+        // `.vcs-cell{padding:var(--pad-card)}`: 16 beside each other, 12 in the phone's one column.
+        let pad = if grid == RepoBarGrid::One { SP[2] } else { SP[3] };
+        let repo_cell = move |m: Modifier| {
+            let p_open = project_menu_c.clone();
+            let p_name = proj_name.clone();
+            let r_line = repo_line.clone();
+            cu::Column().modifier(m.padding(pad)).spacing(SP[1]).content(move || {
+                SmallNote("저장소");
+                RepoSelector(&p_name, move || p_open.set(true));
+                SmallNote(&r_line);
+            });
+        };
+        let branch_cell = move |m: Modifier| {
+            let b_open = branch_menu_c.clone();
+            let b_text = branch_text.clone();
+            let u_text = upstream.clone();
+            cu::Column().modifier(m.padding(pad)).spacing(SP[1]).content(move || {
+                SmallNote("현재 브랜치");
+                BranchSelector(&b_text, move || b_open.set(true));
+                SmallNote(&u_text);
+            });
+        };
+        let remote_cell = move |m: Modifier| {
+            let remote_actions = remote_actions.clone();
+            cu::Column().modifier(m.padding(pad)).spacing(SP[1]).content(move || {
+                SmallNote("원격 origin");
+                cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(10.0).content(move || {
+                    RemoteControls(action, has, remote_actions.clone());
                 });
-            } else {
-                // No fixed height (#407): the row sizes to its tallest column and `equal_height` stretches the
-                // others, so the URL line and the ahead/behind line are never cut.
+                RemoteSubNote(snap);
+            });
+        };
+        let line_v = move || {
+            cu::Box().modifier(Modifier::new().width(1.0).fill_max_height().background(paint(p.line)));
+        };
+        let line_h = move || {
+            cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+        };
+        VcsCard(move || match grid {
+            RepoBarGrid::One => {
+                cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+                    repo_cell(Modifier::new().fill_max_width());
+                    line_h();
+                    branch_cell(Modifier::new().fill_max_width());
+                    line_h();
+                    remote_cell(Modifier::new().fill_max_width());
+                });
+            }
+            RepoBarGrid::TwoRemoteBelow => {
+                // `@media (max-width:900px)`, `@container (max-width:760px)`: two columns, then
+                // 원격 across both under a line.
+                cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+                    cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::TopStart).equal_height(true).content(move || {
+                        repo_cell(Modifier::new().weight(1.0).fill_max_height());
+                        line_v();
+                        branch_cell(Modifier::new().weight(1.0).fill_max_height());
+                    });
+                    line_h();
+                    remote_cell(Modifier::new().fill_max_width());
+                });
+            }
+            RepoBarGrid::Three => {
+                // No fixed height (#407): the row sizes to its tallest column and `equal_height`
+                // stretches the others, so the URL line and the ahead/behind line are never cut.
                 cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::TopStart).equal_height(true).content(move || {
-                    let p_open = project_menu_c.clone();
-                    let p_name = proj_name.clone();
-                    let r_line = repo_line.clone();
-                    cu::Column().modifier(Modifier::new().weight(1.1).fill_max_height().padding(SP[3])).spacing(SP[1]).content(move || {
-                        SmallNote("저장소");
-                        RepoSelector(&p_name, move || p_open.set(true));
-                        SmallNote(&r_line);
-                    });
-
-                    cu::Box().modifier(Modifier::new().width(1.0).fill_max_height().background(paint(p.line)));
-
-                    let b_open = branch_menu_c.clone();
-                    let b_text = branch_text.clone();
-                    let u_text = upstream.clone();
-                    cu::Column().modifier(Modifier::new().weight(1.1).fill_max_height().padding(SP[3])).spacing(SP[1]).content(move || {
-                        SmallNote("현재 브랜치");
-                        BranchSelector(&b_text, move || b_open.set(true));
-                        SmallNote(&u_text);
-                    });
-
-                    cu::Box().modifier(Modifier::new().width(1.0).fill_max_height().background(paint(p.line)));
-
-                    cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height().padding(SP[3])).spacing(SP[1]).content(move || {
-                        SmallNote("원격 origin");
-                        cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(10.0).content(move || {
-                            RemoteControls(action, has, remote_actions.clone());
-                        });
-                        RemoteSubNote(snap);
-                    });
+                    repo_cell(Modifier::new().weight(1.1).fill_max_height());
+                    line_v();
+                    branch_cell(Modifier::new().weight(1.1).fill_max_height());
+                    line_v();
+                    remote_cell(Modifier::new().weight(1.0).fill_max_height());
                 });
             }
         });
@@ -4727,6 +4752,8 @@ fn VcsScreenWithLoad(
     let nav_w = if sheet { VCS_SHEET_RAIL_W + SP[3] } else { 200.0 + SP[3] };
     let section_width = (content_width - if wide { nav_w } else { 0.0 }).max(0.0);
     let diff_width = (section_width - if layout == PaneLayout::Two { files_w + GAP_CARD } else { 0.0 }).max(0.0);
+    // The repository bar follows the window, and in the sheet its padded body too (FR-L19).
+    let bar_grid = repo_bar_grid(sheet_ctl.as_ref().map_or(window.width_dp, |c| c.window_w), sheet.then_some(content_width));
 
     // `EMBER_CR_VCS_SECTION=<key>` opens a section directly, for captures without clicks.
     let section = remember(|| mutable_state_of(std::env::var("EMBER_CR_VCS_SECTION").map(|k| route_section(&k)).unwrap_or(Section::Changes)));
@@ -4789,8 +4816,7 @@ fn VcsScreenWithLoad(
                         &projects,
                         &project,
                         snap.as_ref(),
-                        compact,
-                        content_width,
+                        bar_grid,
                         move |id: String| {
                             sel_proj.set(Some(id.clone()));
                             if !sheet {
@@ -4869,6 +4895,12 @@ fn VcsScreenWithLoad(
             let subtitle = vcs_sheet_subtitle(snap.as_ref(), prs);
             let phone = ctl.window_w <= VCS_SHEET_PHONE_DP;
             cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+                if ctl.top_inset > 0.0 {
+                    // `.svcs-box{padding-top:env(safe-area-inset-top)}` on a phone: the header
+                    // starts below the window's buttons (review r8: the traffic lights sat on the
+                    // tile and the title).
+                    cu::Spacer().modifier(Modifier::new().fill_max_width().height(ctl.top_inset).background(paint(p.bg)));
+                }
                 VcsSheetHeader(&vcs_sheet_title(&project_name), &subtitle, phone, current.clone(), ctl.on_close.clone());
                 page();
             });
@@ -4888,6 +4920,8 @@ pub fn vcs_page_pad(compact: bool) -> f32 {
 struct VcsSheetCtl {
     window_w: f32,
     sheet_w: f32,
+    /// The strip above the header that the window's own buttons cover ([`vcs_sheet_top_inset`]).
+    top_inset: f32,
     on_close: std::rc::Rc<std::cell::RefCell<dyn FnMut()>>,
 }
 
@@ -4921,6 +4955,15 @@ pub fn vcs_sheet_frame(sheet_w: f32, window_w: f32) -> VcsSheetFrame {
         PaneLayout::Stacked
     };
     VcsSheetFrame { pad, rail, layout, files_w: 260.0 }
+}
+
+/// The strip the full-screen sheet leaves above its header for the window's own buttons: on a
+/// phone-wide window (below 560, where the sheet is the whole window) the height the macOS
+/// traffic lights cover, as the shell's bottom-tab layout leaves above every screen
+/// (`safe_area::title_strip_height`, FR-L33); none on a wider window, where the sheet floats in
+/// the middle, clear of them.
+pub fn vcs_sheet_top_inset(window_w: f32, area: crate::ui::safe_area::SafeArea) -> f32 {
+    if window_w < VCS_SHEET_PHONE_DP { crate::ui::safe_area::title_strip_height(area, true) } else { 0.0 }
 }
 
 /// The sheet header's title (`.vcs-mhead b`).
@@ -5120,6 +5163,7 @@ pub fn VcsSheet(project_id: &str, open: bool, on_close: impl FnMut() + Clone + '
     let ctl = VcsSheetCtl {
         window_w: win_w,
         sheet_w,
+        top_inset: vcs_sheet_top_inset(win_w, crate::ui::safe_area::safe_area()),
         on_close: std::rc::Rc::new(std::cell::RefCell::new(on_close.clone())),
     };
     // No shared title: the mounted screen draws the mockup's header (`.vcs-mhead`, FR-L18.1).
@@ -5283,13 +5327,58 @@ mod tests {
         assert_eq!(pane_layout(WindowSizeClass::Compact), PaneLayout::Tabs);
     }
 
+    thread_local!(static BAR_GRID: std::cell::Cell<RepoBarGrid> = const { std::cell::Cell::new(RepoBarGrid::Three) });
+
+    #[compose_rust::runtime::Composable]
+    fn repo_bar_sample() {
+        let project = sample_project_box();
+        let projects = vec![(project.id.clone(), project.name.clone())];
+        let snap = sample_snapshot();
+        RepoBarWithActions(&projects, &project, Some(&snap), BAR_GRID.with(|g| g.get()), |_| {}, None);
+    }
+
+    /// The vertical and the horizontal lines between the bar's cells.
+    fn bar_lines(grid: RepoBarGrid) -> (usize, usize) {
+        BAR_GRID.with(|g| g.set(grid));
+        let mut host = Host::new(|| Box::new(Recomposer::new(repo_bar_sample)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let mut mods: std::collections::HashMap<u32, Vec<String>> = Default::default();
+        for m in batch.iter() {
+            if let Mutation::SetModifier { node_id, modifier, .. } = m {
+                mods.entry(*node_id).or_default().push(format!("{modifier:?}"));
+            }
+        }
+        let has = |v: &Vec<String>, a: &str, b: &str| v.iter().any(|m| m == a) && v.iter().any(|m| m == b);
+        let v = mods.values().filter(|m| has(m, "Width(1.0)", "FillMaxHeight")).count();
+        let h = mods.values().filter(|m| has(m, "Height(1.0)", "FillMaxWidth")).count();
+        (v, h)
+    }
+
     #[test]
-    fn fr_l19_repo_bar_stacks_below_1100dp() {
-        assert_eq!(repo_bar_columns(1440.0), 3);
-        assert_eq!(repo_bar_columns(1024.0), 1);
-        assert_eq!(repo_bar_columns(1100.0), 3);
-        assert_eq!(repo_bar_columns(768.0), 1);
-        assert_eq!(repo_bar_columns(390.0), 1);
+    fn fr_l19_repo_bar_sends_three_columns_two_with_the_remote_below_or_one() {
+        let _guard = crate::services::test_guard();
+        assert_eq!(bar_lines(RepoBarGrid::Three), (2, 0), "three cells side by side");
+        assert_eq!(bar_lines(RepoBarGrid::TwoRemoteBelow), (1, 1), "two side by side, 원격 under a line");
+        assert_eq!(bar_lines(RepoBarGrid::One), (0, 2), "three stacked");
+    }
+
+    #[test]
+    fn fr_l19_repo_bar_follows_the_mockups_breakpoints() {
+        // The page: three columns above 900, two with 원격 across at 900 and below, one at 560.
+        assert_eq!(repo_bar_grid(1440.0, None), RepoBarGrid::Three);
+        assert_eq!(repo_bar_grid(1024.0, None), RepoBarGrid::Three);
+        assert_eq!(repo_bar_grid(901.0, None), RepoBarGrid::Three);
+        assert_eq!(repo_bar_grid(900.0, None), RepoBarGrid::TwoRemoteBelow);
+        assert_eq!(repo_bar_grid(800.0, None), RepoBarGrid::TwoRemoteBelow);
+        assert_eq!(repo_bar_grid(561.0, None), RepoBarGrid::TwoRemoteBelow);
+        assert_eq!(repo_bar_grid(560.0, None), RepoBarGrid::One);
+        assert_eq!(repo_bar_grid(390.0, None), RepoBarGrid::One);
+        // The sheet: its padded body at 760 and below is two columns, also on a phone.
+        let body = |w: f32| vcs_sheet_width(w) - 2.0 * vcs_sheet_frame(vcs_sheet_width(w), w).pad;
+        assert_eq!(repo_bar_grid(1440.0, Some(body(1440.0))), RepoBarGrid::Three);
+        assert_eq!(repo_bar_grid(1024.0, Some(body(1024.0))), RepoBarGrid::Three);
+        assert_eq!(repo_bar_grid(800.0, Some(body(800.0))), RepoBarGrid::TwoRemoteBelow);
+        assert_eq!(repo_bar_grid(390.0, Some(body(390.0))), RepoBarGrid::TwoRemoteBelow);
     }
 
     #[test]
@@ -5674,7 +5763,7 @@ mod tests {
         assert!(fields.contains("설명 (선택)"));
         let theme = text_of(theme_button_sample);
         assert!(theme.contains("OnClick"), "theme control must render: {theme}");
-        assert_eq!(repo_bar_columns(vcs_sheet_width(1024.0) - 64.0), 1);
+        assert_eq!(repo_bar_grid(1024.0, Some(vcs_sheet_width(1024.0) - 32.0)), RepoBarGrid::Three);
         assert!(diff_header_wraps(500.0));
     }
 
@@ -6741,8 +6830,36 @@ mod tests {
     #[compose_rust::runtime::Composable]
     fn open_vcs_sheet_sample() {
         let reload = remember(|| mutable_state_of(0_u64));
-        let ctl = VcsSheetCtl { window_w: 1440.0, sheet_w: vcs_sheet_width(1440.0), on_close: std::rc::Rc::new(std::cell::RefCell::new(|| {})) };
+        let ctl = VcsSheetCtl { window_w: 1440.0, sheet_w: vcs_sheet_width(1440.0), top_inset: 0.0, on_close: std::rc::Rc::new(std::cell::RefCell::new(|| {})) };
         VcsScreenWithLoad(Load::Ready(sample_snapshot()), sample_projects(), Some("ember".into()), reload, true, Some(ctl));
+    }
+
+    #[compose_rust::runtime::Composable]
+    fn open_vcs_sheet_phone_sample() {
+        let reload = remember(|| mutable_state_of(0_u64));
+        let lights = crate::ui::safe_area::SafeArea { top: 28.0, leading: 72.0, trailing: 0.0 };
+        let ctl = VcsSheetCtl { window_w: 390.0, sheet_w: 390.0, top_inset: vcs_sheet_top_inset(390.0, lights), on_close: std::rc::Rc::new(std::cell::RefCell::new(|| {})) };
+        VcsScreenWithLoad(Load::Ready(sample_snapshot()), sample_projects(), Some("ember".into()), reload, true, Some(ctl));
+    }
+
+    #[test]
+    fn fr_l18_1_the_phone_sheet_header_starts_below_the_window_buttons() {
+        use crate::ui::safe_area::SafeArea;
+        let lights = SafeArea { top: 28.0, leading: 72.0, trailing: 0.0 };
+        assert_eq!(vcs_sheet_top_inset(390.0, lights), 28.0);
+        assert_eq!(vcs_sheet_top_inset(559.0, lights), 28.0);
+        assert_eq!(vcs_sheet_top_inset(560.0, lights), 0.0, "the sheet floats from 560");
+        assert_eq!(vcs_sheet_top_inset(1440.0, lights), 0.0);
+        assert_eq!(vcs_sheet_top_inset(390.0, SafeArea::default()), 0.0, "nothing to clear");
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let text = text_of(open_vcs_sheet_phone_sample);
+        let strip = text.find("Height(28.0)").expect("the 28 strip");
+        let title = text.find(&vcs_sheet_title(&sample_project_box().name)).expect("the title");
+        assert!(strip < title, "the strip comes before the header");
+        let wide = text_of(open_vcs_sheet_sample);
+        let wide_title = wide.find(&vcs_sheet_title(&sample_project_box().name)).expect("the title");
+        assert!(wide.find("Height(28.0)").map_or(true, |i| i > wide_title), "no strip above a floating sheet");
     }
 
     #[compose_rust::runtime::Composable]

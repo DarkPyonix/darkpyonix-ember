@@ -161,7 +161,22 @@ async fn fr_n9_revoking_a_device_ends_its_path_through_the_relay() {
     let gate = PeerGate::allow_list([key.peer_id()]);
     gate.attach(&server);
 
-    let phone = device(key.clone(), &relay_url, Duration::from_secs(3)).await;
+    // A short resume window: the relay cuts the splice at the revoke, possibly before the
+    // session's close arrives, and with no other path the session then ends after the window.
+    let letify = LetifyConfig {
+        connect_timeout: Duration::from_secs(3),
+        resume_window: Duration::from_secs(2),
+        ..LetifyConfig::default()
+    };
+    let phone = Transport::bind(
+        TransportConfig::new(key.clone())
+            .backend(BackendKind::Letify)
+            .bind_addr("127.0.0.1:0".parse().unwrap())
+            .relay(RelayConfig::Custom(vec![relay_url.clone()]))
+            .letify(letify),
+    )
+    .await
+    .unwrap();
     let conn = tokio::time::timeout(Duration::from_secs(20), phone.connect(server.peer_id(), "svc")).await.unwrap().unwrap();
     assert_eq!(echo_roundtrip(&conn, b"alive").await, b"alive");
 

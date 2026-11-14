@@ -11,21 +11,24 @@
 
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
-use compose_rust::ui::Modifier;
+use compose_rust::ui::{Modifier, Role};
 use compose_rust::{Alignment, Color, DrawList, Paint, IconRole, ShapeRole};
 
 pub use crate::ui::home::{
     apply_suggestion, can_send, computers_line, default_mode, effective_message, filter_models,
-    harness_block, kpis, mode_after_harness_change, composer_chip_rows, composer_chip_width, mode_header, mode_picker_rows_pending, mode_tap, popover_width, model_catalog, modes_for, needs_approve_all,
+    harness_block, kpis, mode_after_harness_change, composer_chip_rows, composer_chip_width, composer_chip_line, ChipLine, mode_header, mode_picker_rows_pending, mode_tap, popover_width, model_catalog, modes_for, needs_approve_all,
     project_options, project_tile_line, resolve_cwd, shortcut_label, split_chip_rows,
     success_percent, title_from_message, CrewMember, Dash, Harness, HarnessBar, Kpi, ModelOption,
     ModeRow, PermMode, ProjectTile, Selection, StatusCounts, ComposerAttachment, ATTACH_HINT, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
     EMPTY_CREW, EMPTY_HARNESS_USAGE, CiResult, GithubCard, GithubPill, GithubSampleKind, INTEGRATIONS_TITLE, LATER_INTEGRATIONS, integrations_layout, CI_RULE_WHEN, CI_RULE_THEN, CI_RULE_NOTE, CI_RULE_LINK, LATER_LINE, LATER_PILL, GITHUB_NAME, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
 };
-use crate::ui::home::{model_active_row, model_enter, model_popover_height, model_row_detail, model_view, ModelEnter};
+use crate::ui::home::{
+    composer_pop_offset, mode_hover, model_active_row, model_key, model_pick, model_popover_height, model_row_detail,
+    model_sheet_height, model_view, ModelEnter, ModelKey,
+};
 use super::components::{
-    AppButton, ButtonKind, Clickable, EmberField, EmberSheet, FieldOptions, FilterChip, Label,
-    PickChip, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu,
+    pop_anchor_weight, pop_chosen_fill, pop_metrics, AppButton, ButtonKind, Clickable, EmberField, EmberSheet,
+    FieldOptions, Label, NamedClickable, PickChip, Pill, PillTone, PopExtra, PopKind, PopMenu, PopRow, PopoverMenuWith,
 };
 use super::notice;
 use super::shell::{self, NavIcon};
@@ -40,71 +43,39 @@ use crate::ui::shell::{NavMenu, ShellMode, DEMO_USER};
 
 pub type Part<'a> = Box<dyn FnOnce() + 'a>;
 
-/// The permission popover (mockup `.mp-pop.mp-mode`).
-const MODE_POPOVER_WIDTH: f32 = 340.0;
-/// The model popover: a rail of harnesses beside the search and the rows.
-const MODEL_POPOVER_WIDTH: f32 = 560.0;
-const MODEL_RAIL_WIDTH: f32 = 128.0;
+/// The model popover (mockup `.mp-pop{width:400px}`, review K4): the harness rail beside the
+/// search and the rows.
+const MODEL_POPOVER_WIDTH: f32 = 400.0;
+/// `.mp-rail{width:52px}`, its 1 dp right line included.
+const MODEL_RAIL_WIDTH: f32 = 52.0;
+/// `.mp-rail-b{width:36px;height:36px}`.
+const MODEL_RAIL_BUTTON: f32 = 36.0;
+/// `.mp-k`: a 12/18 label with 2 above and below.
+const MODEL_KEY_CAP_H: f32 = 22.0;
+/// `.mp-k{min-width:52px}`.
+const MODEL_KEY_CAP_W: f32 = 52.0;
+/// `.mp-search{height:40px}`, its 1 dp blue underline included.
+const MODEL_SEARCH_H: f32 = 40.0;
 
-/// The permission-mode rows (FR-L16, mockup v8 `.md-row`): a header "권한 모드 · harness", then
-/// one row per mode with a shield (a warning triangle on the danger row), the title, a
-/// one-line description and a check on the chosen row. The bypass row is red. Tapping calls
-/// `on_tap(i)`; closing and the bypass confirmation belong to the caller.
-/// Keyboard: each row is a `Clickable`, which the renderer makes a focusable button (Tab, Enter,
-/// Space), named by its title and description. Not built: arrow keys between rows and focus on
-/// the chosen row when the picker opens (TODO(compose-rust#504): only Enter reaches the Host,
-/// compose-rust#100; request focus landed after the pinned v0.0.6). The chosen row says it is
-/// selected to screen readers (`Modifier::selected`, compose-rust v0.0.7, #460).
-fn ModeBody(header: &str, rows: &[ModeRow], width: f32, on_tap: impl FnMut(usize) + Clone + 'static) {
-    let p = ember_theme().palette;
-    cu::Column().modifier(Modifier::new().width(width)).content(|| {
-        if !header.is_empty() {
-            cu::Row().modifier(Modifier::new().width(width).padding(SP[2])).content(|| {
-                Label(header, Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1));
-            });
-        }
-        for (i, r) in rows.iter().enumerate() {
-            let mut tap = on_tap.clone();
-            let bg = if r.chosen { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
-            let tone = if r.danger { p.red.strong } else { p.muted };
-            let title = if r.danger { p.red.strong } else { p.text };
-            let icon = if r.danger { ICON_WARN } else { ICON_SHIELD };
-            Clickable(
-                Modifier::new().width(width).background(bg).corner_radius(CORNER_SM).padding(SP[2]).selected(r.chosen),
-                Alignment::CenterStart,
-                move || tap(i),
-                || {
-                    cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                        NavIcon(icon, tone.to_argb(), 16.0);
-                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                            Label(r.title, Fs::Sm, Weight::Medium, Some(paint(title)), Some(1));
-                            Label(r.description, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-                        });
-                        if r.chosen {
-                            cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                            NavIcon(ICON_CHECK, p.text.to_argb(), 16.0);
-                        }
-                    });
-                },
-            );
-        }
-    });
-}
+/// The composer card's padding above 560 (`.bigcomposer`), which also places its pickers.
+const COMPOSER_PAD: f32 = SP[3];
 
-/// The permission picker as a bottom sheet at 560 and below (the shared sheet, FR-L32), with
-/// the same header, rows and bypass confirmation as the popover.
-fn ModeSheet(
-    open: bool,
-    header: &str,
-    rows: &[ModeRow],
-    on_dismiss: impl FnMut() + Clone + 'static,
-    on_tap: impl FnMut(usize) + Clone + 'static,
-) {
-    let width = (crate::ui::window_size::current_window_size().width_dp - 2.0 * SP[3]).max(240.0);
-    EmberSheet(header, open, on_dismiss, None, || {
-        cu::Box().modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| ModeBody("", rows, width - 2.0 * SP[1], on_tap));
-    });
+/// The permission picker's rows as the shared option menu draws them (FR-L16, mockup
+/// `.md-row`, review r8): a shield (the warning triangle on the bypass row), the title at
+/// 14/600 over the one-line description, the current row filled with a check, the bypass row
+/// red. The row is a menu item that says whether it is the current one
+/// (`components::PopRowView`).
+fn mode_pop_rows(rows: &[ModeRow]) -> Vec<PopRow> {
+    rows.iter()
+        .map(|r| PopRow {
+            icon: Some(if r.danger { ICON_WARN } else { ICON_SHIELD }),
+            title: r.title.to_string(),
+            description: Some(r.description.to_string()),
+            chosen: r.chosen,
+            danger: r.danger,
+            ..Default::default()
+        })
+        .collect()
 }
 
 macro_rules! line_icon {
@@ -555,6 +526,12 @@ struct Composer {
     mode_pending: MutableState<crate::ui::home::ModePending>,
     harness_filter: MutableState<Option<Harness>>,
     query: MutableState<String>,
+    /// The row the arrow keys moved to in the model picker (`st.act`); `None` is the default
+    /// row ([`model_active_row`]).
+    model_act: MutableState<Option<usize>>,
+    /// The search field keeps what was typed on its own (it is uncontrolled), so a rail tap
+    /// that clears the query gives the field a new identity, which starts empty.
+    model_field_gen: MutableState<u32>,
 }
 
 impl Composer {
@@ -580,6 +557,8 @@ impl Composer {
             ),
             harness_filter: mutable_state_of(None),
             query: mutable_state_of(String::new()),
+            model_act: mutable_state_of(None),
+            model_field_gen: mutable_state_of(0),
         }
     }
 
@@ -714,27 +693,17 @@ impl Composer {
             let o = self.open.clone();
             move || o.set(None)
         };
-        // Wider than 560 the project, model, mode and computer lists are popovers under their
-        // chips, drawn in the composer card (`project_menu`, `model_popover`, `mode_popover`,
+        // Wider than 560 the project, model, mode and computer lists are popovers under the
+        // composer, drawn in the composer card (`project_menu`, `model_popover`, `mode_menu`,
         // `computer_menu`); at 560 and below they are bottom sheets, drawn here so a sheet does
         // not wrap the chip that takes the rest of the row.
         let compact = layout(crate::ui::window_size::current_window_size().width_dp).compact;
         if compact {
-            self.project_menu(ui, || {});
-            self.computer_menu(ui, || {});
+            self.project_menu(ui, None, || {});
+            self.computer_menu(ui, None, || {});
+            self.mode_menu(&sel, None, || {});
         }
-        if compact {
-            let me = self.clone();
-            let dismiss = self.dismiss_mode();
-            ModeSheet(
-                open == Some(Pick::Mode),
-                &mode_header(sel.option.harness),
-                &mode_picker_rows_pending(sel.option.harness, sel.mode, self.mode_pending.get().map(|(m, _)| m)),
-                dismiss,
-                move |i| me.tap_mode(i),
-            );
-        }
-        self.model_sheet(ui, &sel, compact && self.open.get() == Some(Pick::Model), close);
+        self.model_sheet(ui, &sel, compact && open == Some(Pick::Model), close);
     }
 
     /// Closing a chip's list: only the open one, so a late dismiss does not close another.
@@ -747,10 +716,16 @@ impl Composer {
         }
     }
 
-    /// The project chip's list (FR-L10.4, #888, review K10): a popover under the chip, or a
+    /// What the composer's pickers ask of the shared menu: the box 8 below the composer card
+    /// (review r8) and the weight the chip takes when the chips share their line (#573).
+    fn pop_extra(share: Option<f32>) -> PopExtra {
+        PopExtra { offset: Some(composer_pop_offset(COMPOSER_PAD)), anchor_weight: share, ..Default::default() }
+    }
+
+    /// The project chip's list (FR-L10.4, #888, review K10): a popover under the composer, or a
     /// bottom sheet at 560 and below; one row per project with the folder glyph and a check on
     /// the chosen one.
-    fn project_menu(&self, ui: &SharedUi, anchor: impl FnOnce()) {
+    fn project_menu(&self, ui: &SharedUi, share: Option<f32>, anchor: impl FnOnce()) {
         let (projects, _) = self.live(ui);
         let sel = self.selection.get();
         let options = project_options(&projects);
@@ -759,9 +734,10 @@ impl Composer {
             .map(|p| PopRow { icon: Some(ICON_FOLDER), title: p.clone(), chosen: *p == sel.project, ..Default::default() })
             .collect();
         let (selection, list) = (self.selection.clone(), options.clone());
-        PopoverMenu(
+        PopoverMenuWith(
             self.open.get() == Some(Pick::Project),
             PopMenu { name: super::a11y::PROJECT_PICKER, kind: PopKind::Mode, head: "", sub: None, rows: &rows, align: compose_rust::PopoverAlign::Start },
+            Self::pop_extra(share),
             self.close_pick(Pick::Project),
             move |i| {
                 if let Some(p) = list.get(i) {
@@ -777,7 +753,7 @@ impl Composer {
 
     /// The computer chip's list, as [`Composer::project_menu`]: this server's own computer first,
     /// then the registered ones.
-    fn computer_menu(&self, ui: &SharedUi, anchor: impl FnOnce()) {
+    fn computer_menu(&self, ui: &SharedUi, share: Option<f32>, anchor: impl FnOnce()) {
         let (_, computers) = self.live(ui);
         let sel = self.selection.get();
         let mut labels = vec![self.local_name(ui)];
@@ -789,9 +765,10 @@ impl Composer {
             .map(|(i, n)| PopRow { icon: Some(ICON_PC), title: n.clone(), chosen: i == at, ..Default::default() })
             .collect();
         let (selection, list) = (self.selection.clone(), computers.clone());
-        PopoverMenu(
+        PopoverMenuWith(
             self.open.get() == Some(Pick::Computer),
             PopMenu { name: super::a11y::COMPUTER_PICKER, kind: PopKind::Mode, head: "", sub: None, rows: &rows, align: compose_rust::PopoverAlign::Start },
+            Self::pop_extra(share),
             self.close_pick(Pick::Computer),
             move |i| {
                 let mut s = selection.get_untracked();
@@ -826,44 +803,76 @@ impl Composer {
         }
     }
 
-    /// The permission picker as a popover under the mode chip (mockup `.mp-pop.mp-mode`, 340 dp).
-    fn mode_popover(&self, sel: &Selection, anchor: impl FnOnce()) {
-        let theme = ember_theme();
-        let p = theme.palette;
-        let open = self.open.get() == Some(Pick::Mode);
-        let width = MODE_POPOVER_WIDTH;
-        let rows = mode_picker_rows_pending(sel.option.harness, sel.mode, self.mode_pending.get().map(|(m, _)| m));
+    /// The pointer came over row `i` of the permission picker: pointing at another row withdraws
+    /// a waiting bypass confirmation (FR-L16, `mode_hover`, #574).
+    fn hover_mode(&self, i: usize) {
+        let Some(m) = modes_for(self.selection.get_untracked().option.harness).get(i).copied() else { return };
+        let now = self.mode_pending.get_untracked();
+        let next = mode_hover(now, m);
+        if next != now {
+            self.mode_pending.set(next);
+        }
+    }
+
+    /// The permission picker (FR-L16, review r8): the shared option menu of the session's
+    /// permission chip (`PopoverMenu`, `PopKind::Mode`, mockup `.mp-pop.mp-mode`), so the two
+    /// read as one family: 340 wide, the 12/600 head "권한 모드 · harness", 56 dp rows with
+    /// 14/600 titles, the current row on `sel` with a check, and no focus ring on the current
+    /// row when it opens. It opens 8 below the composer card. A row tap does not close the menu
+    /// by itself (`keep_open`): [`Composer::tap_mode`] closes it once a mode is applied, and
+    /// the first tap on 바이패스 only arms that row. At 560 and below it is a bottom sheet with
+    /// the same head and rows and no title bar (`plain_sheet`, review K8).
+    /// Not built: arrow keys between the rows and focus on the current row when it opens. A
+    /// `Popover` moves no focus between its rows (compose-rust#810).
+    fn mode_menu(&self, sel: &Selection, share: Option<f32>, anchor: impl FnOnce()) {
+        let rows = mode_pop_rows(&mode_picker_rows_pending(sel.option.harness, sel.mode, self.mode_pending.get().map(|(m, _)| m)));
         let header = mode_header(sel.option.harness);
-        cu::Menu(open).on_dismiss(self.dismiss_mode()).anchor(anchor).content(|| {
-            let me = self.clone();
-            cu::Box()
-                .modifier(
-                    with_shadows(Modifier::new(), theme.shadow_lg())
-                        .width(width)
-                        .background(paint(p.surface))
-                        .border(1.0, paint(p.line))
-                        .corner_radius(CORNER_MD)
-                        .padding(SP[1]),
-                )
-                .content(|| ModeBody(&header, &rows, width - 2.0 * SP[1], move |i| me.tap_mode(i)));
-        });
+        let (me, hovered) = (self.clone(), self.clone());
+        PopoverMenuWith(
+            self.open.get() == Some(Pick::Mode),
+            PopMenu { name: super::a11y::MODE_PICKER, kind: PopKind::Mode, head: &header, sub: None, rows: &rows, align: compose_rust::PopoverAlign::Start },
+            PopExtra {
+                keep_open: true,
+                plain_sheet: true,
+                on_hover: Some(std::rc::Rc::new(move |i: usize| hovered.hover_mode(i))),
+                ..Self::pop_extra(share)
+            },
+            self.dismiss_mode(),
+            move |i| me.tap_mode(i),
+            anchor,
+            None,
+        );
     }
 
     /// Closing the model picker: the next opening starts on the chosen harness with an empty
-    /// search, as the mockup's `open()` does (the search field is new each time it opens).
+    /// search and the default active row, as the mockup's `open()` does (the search field is
+    /// new each time it opens).
     fn close_model(&self) -> impl FnMut() + Clone + 'static {
-        let (o, f, q) = (self.open.clone(), self.harness_filter.clone(), self.query.clone());
+        let (o, f, q, a) = (self.open.clone(), self.harness_filter.clone(), self.query.clone(), self.model_act.clone());
         move || {
             f.set(None);
             q.set(String::new());
+            a.set(None);
             if o.get_untracked() == Some(Pick::Model) {
                 o.set(None);
             }
         }
     }
 
-    /// The model picker as a modal (compact widths, where the spec asks for a bottom sheet):
-    /// harness chips on top, search and the rows with their reasons (FR-L15).
+    /// A tap on a rail entry: that harness's models, with an empty search and the default
+    /// active row (mockup `data-mpv`: `st.view=...; st.q=""; st.act=-1`).
+    fn rail_tap(&self, h: Harness) {
+        if !self.query.get_untracked().is_empty() {
+            self.query.set(String::new());
+            self.model_field_gen.set(self.model_field_gen.get_untracked().wrapping_add(1));
+        }
+        self.model_act.set(None);
+        self.harness_filter.set(Some(h));
+    }
+
+    /// The model picker at 560 and below (review K7, mockup `.mp-pop` under `@media
+    /// (max-width:560px)`): the same rail, search and rows as a bottom sheet with no title bar,
+    /// four fifths of the window high at most, and no key caps.
     fn model_sheet(&self, ui: &SharedUi, sel: &Selection, open: bool, close: impl FnMut() + Clone + 'static) {
         let mut reset = self.close_model();
         let mut close = close;
@@ -871,20 +880,24 @@ impl Composer {
             reset();
             close();
         };
-        EmberSheet("모델 선택", open, dismiss.clone(), None, || {
-            self.model_body(ui, sel, false, dismiss);
+        let height = model_sheet_height(crate::ui::window_size::current_window_size().height_dp);
+        EmberSheet("", open, dismiss.clone(), None, || {
+            cu::Row()
+                .modifier(Modifier::new().fill_max_width().height(height).label(super::a11y::MODEL_PICKER))
+                .content(|| self.model_body(ui, sel, true, dismiss));
         });
     }
 
-    /// The model picker as a popover hanging under the model chip (FR-L15, mockup v8 `.mpick`):
-    /// a left rail of harnesses, then search and the rows. The toolkit `Menu` places its popup
-    /// below its anchor since compose-rust v0.0.5 (#383), with any content as its entries; the
-    /// popup is a focusable platform popup, so Escape and a click outside call `on_dismiss`.
+    /// The model picker as a popover (FR-L15, mockup v8 `.mp-pop`, review r8): the toolkit
+    /// `Popover` with the box of the shared option menu (`surface`, a 1 dp `line`, radius 14,
+    /// `shadow-lg`, the toolkit's own elevation off), 400 wide, 8 below the composer card and
+    /// lined up with the chip's start. Inside: the 52 dp harness rail, then the search and the
+    /// rows ([`Composer::model_body`]). Escape and a press outside call `on_dismiss`.
     /// Not built: the rail's favourites group and the favourite stars (no place stores them),
-    /// profile names (FR-L17 profiles are not built), arrow keys and `Ctrl+number`: the pinned
-    /// toolkit delivers only Enter to the Host (TODO(compose-rust#504) for arrows and focus in
-    /// the popup, TODO(compose-rust#100) for `Ctrl+number`).
-    fn model_popover(&self, ui: &SharedUi, sel: &Selection, anchor: impl FnOnce(), close: impl FnMut() + Clone + 'static) {
+    /// profile names (FR-L17 profiles are not built), and focus on the search when it opens
+    /// (`FieldOptions` carries no focus handle), so the arrow keys and `Ctrl+number` work once
+    /// the search has focus.
+    fn model_popover(&self, ui: &SharedUi, sel: &Selection, share: Option<f32>, anchor: impl FnOnce(), close: impl FnMut() + Clone + 'static) {
         let open = self.open.get() == Some(Pick::Model);
         let mut reset = self.close_model();
         let mut close = close;
@@ -892,15 +905,48 @@ impl Composer {
             reset();
             close();
         };
-        cu::Menu(open).on_dismiss(dismiss.clone()).anchor(anchor).content(|| {
-            self.model_body(ui, sel, true, dismiss);
-        });
+        let theme = ember_theme();
+        let p = theme.palette;
+        let window = crate::ui::window_size::current_window_size();
+        cu::Popover(open)
+            .placement(compose_rust::PopoverPlacement::Bottom)
+            .align(compose_rust::PopoverAlign::Start)
+            .offset(composer_pop_offset(COMPOSER_PAD))
+            .on_dismiss(dismiss.clone())
+            .modifier(pop_anchor_weight(
+                share,
+                // A fixed height, not `equal_height` (#849, toolkit bug compose-rust#766): the
+                // toolkit sizes an `equal_height` row by its children's intrinsic heights and
+                // counts a child holding a scrolling list as 0, so the row took the rail's
+                // height and the list showed one row. `elevation(0)` as in `PopoverMenu`: the
+                // box casts its own shadow.
+                with_shadows(Modifier::new(), theme.shadow_lg())
+                    .elevation(0.0)
+                    .width(popover_width(MODEL_POPOVER_WIDTH, window.width_dp))
+                    .height(model_popover_height(window.height_dp))
+                    .background(paint(p.surface))
+                    .border(1.0, paint(p.line))
+                    .corner_radius(CORNER_LG)
+                    .label(super::a11y::MODEL_PICKER),
+            ))
+            .anchor(anchor)
+            .content(|| {
+                cu::Row()
+                    .modifier(Modifier::new().fill_max_width().fill_max_height())
+                    .content(|| self.model_body(ui, sel, false, dismiss));
+            });
     }
 
-    /// The picker's contents. With `rail` the harness switch is a vertical rail at the left
-    /// and the list is a fixed-width column beside it; without, chips run along the top. Either
-    /// way it opens on the chosen model's harness and has no "all" entry (mockup v8).
-    fn model_body(&self, ui: &SharedUi, sel: &Selection, rail: bool, close: impl FnMut() + Clone + 'static) {
+    /// The picker's contents, the children of a row with a fixed height: the harness rail
+    /// (`.mp-rail`), its 1 dp line, then the search over the rows (`.mp-main`). It opens on the
+    /// chosen model's harness and has no "all" entry (mockup v8). `phone` is the bottom sheet,
+    /// which hides the key caps (`.mp-k{display:none}` at 560 and below).
+    ///
+    /// Keyboard, in the search field: Enter takes the active row, the arrows move it, Home and
+    /// End jump to the ends while nothing is typed and `Ctrl+1` to `Ctrl+9` choose a row
+    /// (`model_key`, #574). The field consumes the keys it acts on. Not built: scrolling the
+    /// active row into view (a `ScrollColumn` cannot be scrolled to a child from the Host).
+    fn model_body(&self, ui: &SharedUi, sel: &Selection, phone: bool, close: impl FnMut() + Clone + 'static) {
         let p = ember_theme().palette;
         let agents: Vec<(String, bool)> = ui.live.agents.get().iter().map(|a| (a.kind.clone(), a.installed)).collect();
         let limited: Vec<String> = {
@@ -919,175 +965,216 @@ impl Composer {
         let view = model_view(self.harness_filter.get(), sel.option.harness);
         let query = self.query.get();
         let rows = filter_models(&all, Some(view), &query);
-        let active = model_active_row(&rows, sel.option, &query);
+        // `st.act`: where the arrows left it, else the chosen row (the first match once
+        // something is typed).
+        let active = self.model_act.get().filter(|i| *i < rows.len()).or_else(|| model_active_row(&rows, sel.option, &query));
         let blocks: Vec<Option<&'static str>> = rows.iter().map(|o| harness_block(o.harness, &agents, &limited)).collect();
-        // The search field keeps what was typed on its own (it is uncontrolled), so a rail tap
-        // that clears the query gives the field a new identity, which starts empty.
-        let field_gen = remember(|| mutable_state_of(0u32));
-        let list = || {
-            let col = if rail { Modifier::new().fill_max_width().fill_max_height() } else { Modifier::new().fill_max_width() };
-            cu::Column().spacing(SP[1]).modifier(col).content(|| {
-                let q = self.query.clone();
-                // Enter takes the active row (FR-L15): the chosen row, or the first match once
-                // something is typed. A blocked row says why and the picker stays open.
-                let enter = {
-                    let (rows, current, query) = (rows.clone(), sel.option, query.clone());
-                    let (agents, limited) = (agents.clone(), limited.clone());
-                    let (selection, mut done) = (self.selection.clone(), close.clone());
-                    move |_: String| match model_enter(&rows, current, &query, |h| harness_block(h, &agents, &limited)) {
-                        ModelEnter::Choose(o) => {
-                            selection.set(selection.get_untracked().with_option(o));
-                            done();
-                        }
-                        ModelEnter::Blocked(reason) => notice::post(reason),
-                        ModelEnter::Nothing => {}
-                    }
-                };
-                compose_rust::runtime::key(field_gen.get(), || {
-                    EmberField(FieldOptions {
-                        fill_max_width: true,
-                        placeholder: "모델 검색".to_string(),
-                        text: Some(query.clone()),
-                        on_value_change: Some(Box::new(move |v| q.set(v))),
-                        on_submit: Some(Box::new(enter)),
-                        ..Default::default()
-                    })
-                });
-                if rows.is_empty() {
-                    Label("일치하는 모델이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+        // Choosing row `i` by a tap, Enter or `Ctrl+number`: a blocked row says why and the
+        // picker stays open.
+        let pick = {
+            let (rows, agents, limited) = (rows.clone(), agents.clone(), limited.clone());
+            let (selection, done) = (self.selection.clone(), close.clone());
+            move |i: usize| match model_pick(&rows, i, |h| harness_block(h, &agents, &limited)) {
+                ModelEnter::Choose(o) => {
+                    selection.set(selection.get_untracked().with_option(o));
+                    let mut done = done.clone();
+                    done();
                 }
-                // In the popover the list takes what the fixed-height card leaves under the
-                // search (`.mp-body{flex:1 1 auto}`); in the sheet it keeps its 320 dp.
-                let list_m = if rail { Modifier::new().fill_max_width().weight(1.0) } else { Modifier::new().fill_max_width().height(320.0) };
-                cu::ScrollColumn().modifier(list_m).content(|| {
-                    cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        for (i, o) in rows.iter().copied().enumerate() {
-                            let block = blocks[i];
-                            let (selection, mut done) = (self.selection.clone(), close.clone());
-                            // `.mp-row.on` is the chosen row, `.mp-row.act` the one Enter takes.
-                            let fill = if o == sel.option {
-                                paint(p.sel)
-                            } else if active == Some(i) && !query.trim().is_empty() {
-                                paint(p.hover)
-                            } else {
-                                paint(compose_rust::Color::argb(0))
-                            };
-                            let m = Modifier::new().fill_max_width().height(56.0).background(fill).corner_radius(CORNER_SM);
-                            // A row: the name over the harness (and why it cannot be chosen),
-                            // the shortcut at the right. A blocked row says why when tapped.
-                            Clickable(
-                                if block.is_some() { m.alpha(0.5) } else { m },
-                                Alignment::CenterStart,
-                                move || match block {
-                                    Some(reason) => notice::post(reason),
-                                    None => {
-                                        selection.set(selection.get_untracked().with_option(o));
-                                        done();
-                                    }
-                                },
-                                || {
-                                    cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                                        cu::Spacer().modifier(Modifier::new().width(SP[3]));
-                                        cu::Column().spacing(2.0).modifier(Modifier::new().weight(1.0)).content(|| {
-                                            Label(&o.row_title(), Fs::Md, Weight::Semibold, None, Some(1));
-                                            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
-                                                NavIcon(harness_glyph(o.harness), harness_tint(o.harness), 14.0);
-                                                let tone = if block.is_some() { p.red.strong } else { p.muted };
-                                                Label(&model_row_detail(&o, block), Fs::Sm, Weight::Regular, Some(paint(tone)), Some(1));
-                                            });
-                                        });
-                                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                                        // `.mp-k`: the shortcut in a `surface-2` key cap, 52 dp at least
-                                        // (review 2026-11-14 K5, #849).
-                                        cu::Row().modifier(Modifier::new().width(56.0)).content(|| {
-                                            if let Some(k) = shortcut_label(i) {
-                                                cu::Box()
-                                                    .alignment(Alignment::Center)
-                                                    .modifier(Modifier::new().size(52.0, 20.0).background(paint(p.surface_2)).corner_radius(CORNER_2XS))
-                                                    .content(|| Label(&k, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1)));
-                                            }
-                                        });
-                                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                                    });
-                                },
-                            );
-                        }
-                    });
-                });
-            });
+                ModelEnter::Blocked(reason) => notice::post(reason),
+                ModelEnter::Nothing => {}
+            }
         };
-        if rail {
-            let window = crate::ui::window_size::current_window_size();
-            let surface = with_shadows(Modifier::new(), ember_theme().shadow_lg())
-                .width(popover_width(MODEL_POPOVER_WIDTH, window.width_dp))
-                .height(model_popover_height(window.height_dp))
-                .background(paint(p.surface))
-                .border(1.0, paint(p.line))
-                .corner_radius(CORNER_MD);
-            // A fixed height, not `equal_height` (#849, toolkit bug compose-rust#766): the toolkit sizes an `equal_height` row
-            // by its children's intrinsic heights and counts a child holding a scrolling list
-            // as 0 (renderer `RenderNode.kt` `WeightedStackPolicy.intrinsic`), so the row took
-            // the rail's height and the list showed one row. With a fixed height the rail's
-            // `fill_max_height` still runs the full height.
-            cu::Row().modifier(surface).content(|| {
-                // `.mp-rail`: `surface-2`, one entry per harness, the open one marked.
-                // v0.0.7: #460 fixed (`Modifier::label`); workaround kept until checked on a
-                // display (the icon-only 36 dp entries in a 52 dp rail of the mockup need a
-                // capture). Until then each entry keeps its harness name as text, which names it.
-                cu::Column()
-                    .spacing(SP[0])
-                    .modifier(Modifier::new().width(MODEL_RAIL_WIDTH).fill_max_height().background(paint(p.surface_2)).padding(SP[1]))
-                    .content(|| {
-                        for h in Harness::ALL {
-                            let (f, q, g) = (self.harness_filter.clone(), self.query.clone(), field_gen.clone());
-                            RailEntry(h, view == h && query.trim().is_empty(), move || {
-                                if !q.get_untracked().is_empty() {
-                                    q.set(String::new());
-                                    g.set(g.get_untracked().wrapping_add(1));
-                                }
-                                f.set(Some(h));
-                            });
-                        }
-                    });
-                cu::Box().modifier(Modifier::new().weight(1.0).fill_max_height().padding(SP[2])).content(list);
+
+        // `.mp-rail`: `surface-2`, 8 above the first entry, 4 between entries, one icon-only
+        // entry per harness named for assistive technology (review K3).
+        cu::Column()
+            .spacing(SP[0])
+            .modifier(
+                Modifier::new()
+                    .width(MODEL_RAIL_WIDTH - 1.0)
+                    .fill_max_height()
+                    .background(paint(p.surface_2))
+                    // The box's own corners, inside its 1 dp line; the sheet's top is `r-xl`.
+                    .corner_radii(if phone { [CORNER_XL, 0.0, 0.0, 0.0] } else { [CORNER_LG - 1.0, 0.0, 0.0, CORNER_LG - 1.0] }),
+            )
+            .content(|| {
+                cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                for h in Harness::ALL {
+                    let me = self.clone();
+                    RailEntry(h, view == h && query.trim().is_empty(), move || me.rail_tap(h));
+                }
             });
-        } else {
-            cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[3])).content(|| {
-                cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
-                    for h in Harness::ALL {
-                        cu::Spacer().modifier(Modifier::new().width(SP[0]).height(SP[0]));
-                        let f = self.harness_filter.clone();
-                        FilterChip(h.label(), view == h, move || f.set(Some(h)));
+        cu::Spacer().modifier(Modifier::new().width(1.0).fill_max_height().background(paint(p.line)));
+        // `.mp-main`. Zero wide and weighted: it holds a scrolling list.
+        cu::Column().modifier(Modifier::new().width(0.0).weight(1.0).fill_max_height()).content(|| {
+            // `.mp-top{padding:8px 12px}` around `.mp-search`: 40 high, a magnifier, the field
+            // at 14 and a 1 dp blue underline (review K4).
+            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+            cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
+                    cu::Row()
+                        .alignment(Alignment::CenterStart)
+                        .modifier(Modifier::new().fill_max_width().height(MODEL_SEARCH_H - 1.0))
+                        .content(|| {
+                            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                            NavIcon(super::shell::ICON_SEARCH_SVG, p.muted.to_argb(), 18.0);
+                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                            let (q, act) = (self.query.clone(), self.model_act.clone());
+                            let enter = {
+                                let pick = pick.clone();
+                                move |_: String| {
+                                    if let Some(i) = active {
+                                        pick(i);
+                                    }
+                                }
+                            };
+                            let keys = {
+                                let (pick, act) = (pick.clone(), self.model_act.clone());
+                                let (n, query_empty) = (rows.len(), query.trim().is_empty());
+                                move |k: compose_rust::KeyEvent| {
+                                    let name = match k.key() {
+                                        compose_rust::Key::ArrowDown => "ArrowDown",
+                                        compose_rust::Key::ArrowUp => "ArrowUp",
+                                        compose_rust::Key::Home => "Home",
+                                        compose_rust::Key::End => "End",
+                                        _ => k.text(),
+                                    };
+                                    match model_key(name, k.code(), k.ctrl_key(), n, active, query_empty) {
+                                        ModelKey::Move(i) => {
+                                            k.consume();
+                                            act.set(Some(i));
+                                        }
+                                        ModelKey::Pick(i) => {
+                                            k.consume();
+                                            pick(i);
+                                        }
+                                        ModelKey::Nothing => {}
+                                    }
+                                }
+                            };
+                            compose_rust::runtime::key(self.model_field_gen.get(), || {
+                                EmberField(FieldOptions {
+                                    bare: true,
+                                    height: Some(MODEL_SEARCH_H - 1.0),
+                                    weight: Some(1.0),
+                                    placeholder: "모델 검색".to_string(),
+                                    text: Some(query.clone()),
+                                    // Typing starts again from the first match (`st.act=0`).
+                                    on_value_change: Some(Box::new(move |v| {
+                                        act.set(None);
+                                        q.set(v);
+                                    })),
+                                    on_submit: Some(Box::new(enter)),
+                                    on_key_down: Some(Box::new(keys)),
+                                    ..Default::default()
+                                })
+                            });
+                            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                        });
+                    cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.blue.strong)));
+                });
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            });
+            cu::Spacer().modifier(Modifier::new().height(SP[0]));
+            // `.mp-body{flex:1 1 auto;overflow:auto;padding:4px 8px 8px}`: the list takes what
+            // the fixed height leaves under the search.
+            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(|| {
+                cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| {
+                    if rows.is_empty() {
+                        // `.mp-empty`.
+                        cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+                            Label("일치하는 모델이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                        });
+                    }
+                    for (i, o) in rows.iter().copied().enumerate() {
+                        let block = blocks[i];
+                        let pick = pick.clone();
+                        ModelRow(&o, block, o == sel.option, active == Some(i), if phone { None } else { shortcut_label(i) }, move || pick(i));
                     }
                 });
-                list();
             });
-        }
+        });
     }
 }
 
-/// One entry of the model popover's rail (mockup `.mp-rail-b`): the harness glyph in its vendor
-/// colour and the harness name, on `sel` with the 3 dp blue bar at the right edge when open.
+/// The fill of a model row: `sel` on the chosen one (`.mp-row.on`), `hover` on the one the keys
+/// are on (`.mp-row.act`), none otherwise. The chosen fill is the shared option menu's.
+fn model_row_fill(chosen: bool, active: bool, p: &Palette) -> Option<Color> {
+    if chosen {
+        Some(pop_chosen_fill(PopKind::Mode, p))
+    } else if active {
+        Some(p.hover)
+    } else {
+        None
+    }
+}
+
+/// One row of the model picker (mockup `.mp-row`), with the shared option menu's row values
+/// (`pop_metrics(PopKind::Mode)`: 56 high at least, radius 8): 12 before the text, the name at
+/// 14/600 over the harness glyph, the harness and, in red, why the row cannot be chosen; then
+/// the shortcut in a `surface-2` key cap 52 wide (review K5) and 8 after it. A row that cannot
+/// be chosen is drawn at half strength and says why when tapped. It is a menu item that says
+/// whether it is the chosen one, as the rows of the other menus do (#574).
+fn ModelRow(o: &ModelOption, block: Option<&'static str>, chosen: bool, active: bool, shortcut: Option<String>, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let m = pop_metrics(PopKind::Mode);
+    let fill = match model_row_fill(chosen, active, p) {
+        Some(c) => paint(c),
+        None => Paint::Literal(Color::argb(0)),
+    };
+    let modifier = Modifier::new()
+        .fill_max_width()
+        .height(m.row_min_h)
+        .background(fill)
+        .corner_radius(m.row_radius)
+        .role(Role::MenuItem)
+        .selected(chosen)
+        .click_action(true);
+    Clickable(if block.is_some() { modifier.alpha(0.5) } else { modifier }, Alignment::CenterStart, on_click, || {
+        cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Spacer().modifier(Modifier::new().width(m.row_pad.1));
+            // Zero wide and weighted, so a long name ends in an ellipsis.
+            cu::Column().spacing(2.0).modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
+                Label(&o.row_title(), Fs::Md, Weight::Semibold, None, Some(1));
+                cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
+                    NavIcon(harness_glyph(o.harness), harness_tint(o.harness), 16.0);
+                    let tone = if block.is_some() { p.red.strong } else { p.muted };
+                    Label(&model_row_detail(o, block), Fs::Sm, Weight::Regular, Some(paint(tone)), Some(1));
+                });
+            });
+            if let Some(k) = shortcut {
+                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                cu::Box()
+                    .alignment(Alignment::Center)
+                    .modifier(Modifier::new().size(MODEL_KEY_CAP_W, MODEL_KEY_CAP_H).background(paint(p.surface_2)).corner_radius(CORNER_2XS))
+                    .content(|| Label(&k, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1)));
+            }
+            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+        });
+    });
+}
+
+/// One entry of the model popover's rail (mockup `.mp-rail-b`, review K3): a 36 dp button with
+/// only the harness glyph, 22 dp in its vendor colour, named by the harness for assistive
+/// technology, and the 3 dp blue bar at the rail's right edge beside the open one
+/// (`.mp-rail-b.on::after`). The open entry has no fill of its own in the mockup.
 fn RailEntry(h: Harness, on: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    let bg = if on { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
-    Clickable(
-        Modifier::new().fill_max_width().height(36.0).background(bg).corner_radius(CORNER_SM),
-        Alignment::CenterStart,
-        on_click,
-        || {
-            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                NavIcon(harness_glyph(h), harness_tint(h), 20.0);
-                cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                Label(h.label(), Fs::Sm, if on { Weight::Semibold } else { Weight::Regular }, None, Some(1));
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
-                if on {
-                    cu::Spacer().modifier(Modifier::new().size(3.0, 20.0).background(paint(p.blue.strong)).corner_radius(2.0));
-                }
-            });
-        },
-    );
+    let side = (MODEL_RAIL_WIDTH - 1.0 - MODEL_RAIL_BUTTON) / 2.0;
+    cu::Row().alignment(Alignment::CenterStart).content(|| {
+        cu::Spacer().modifier(Modifier::new().width(side.floor()));
+        NamedClickable(
+            h.label(),
+            Modifier::new().size(MODEL_RAIL_BUTTON, MODEL_RAIL_BUTTON).corner_radius(CORNER_SM).selected(on),
+            Alignment::Center,
+            on_click,
+            || NavIcon(harness_glyph(h), harness_tint(h), 22.0),
+        );
+        cu::Spacer().modifier(Modifier::new().width(MODEL_RAIL_WIDTH - 1.0 - side.floor() - MODEL_RAIL_BUTTON - 3.0));
+        let bar = Modifier::new().size(3.0, MODEL_RAIL_BUTTON - 2.0 * SP[1]).corner_radius(2.0);
+        cu::Spacer().modifier(if on { bar.background(paint(p.blue.strong)) } else { bar });
+    });
 }
 
 /// The harness glyphs of mockup v8 (`core.js` `GLYPH`), drawn in `currentColor`.
@@ -1185,47 +1272,110 @@ fn HeroBot(vendor: &str, status: &str, px: f32) {
     cu::Image(compose_rust::asset(compose_rust::AssetKind::Svg, shell::leak_doc(doc))).modifier(Modifier::new().size(px, px));
 }
 
-/// A composer chip (`.pickchip`): a 32 px `surface-2` pill built like `WarnChip`: 16 px glyph,
-/// 13 px weight 500 label cut with an ellipsis, and the 14 px chevron of a picker. `icon_only`
-/// chips are 32 px circles with the glyph centred. The chip is the container's `on_click`
-/// (compose-rust#372) and says whether it is selected (compose-rust v0.0.7, #429).
-#[allow(clippy::too_many_arguments)]
-fn ComposerChip(
-    text: &str,
+/// How wide a composer chip is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ChipWidth {
+    /// As wide as its content.
+    Content,
+    /// A 32 dp circle with only the glyph (560 and below, `.hm-pick .pickchip{width:32px}`).
+    Circle,
+    /// The rest of the row (the project chip at 560 and below).
+    Rest,
+    /// A share of the line by this weight, the label cut by the toolkit (`ChipLine::Shared`,
+    /// #573). The weight itself goes on the popover the chip is the anchor of, which is the
+    /// row's direct child (`PopExtra::anchor_weight`); the chip is zero wide so the share, not
+    /// its label, decides its width.
+    Share(f32),
+}
+
+/// What a composer chip shows.
+struct ChipSpec<'a> {
+    text: &'a str,
     icon: &'static str,
+    /// The glyph's own colour (the harness glyph); else the chip's ink.
     tint: Option<u32>,
     chevron: bool,
-    selected: bool,
-    icon_only: bool,
-    weighted: bool,
+    /// The mode chip while bypass is on (`.mdpick.warn`).
+    warn: bool,
+    width: ChipWidth,
+    /// Whether the chip's list is open (FR-L10.4).
     expanded: bool,
-    on_click: impl FnMut() + 'static,
-) {
+    /// The name of an icon-only chip for assistive technology ([`chip_name`]).
+    name: Option<String>,
+}
+
+/// A composer chip's fill, its ink (glyph and label) and its chevron (mockup `.pickchip`):
+/// `surface-2` with `text-2` and a `muted` chevron; `hover` with `text` while its list is open
+/// (`.pickchip[aria-expanded=true]`); `red-soft` with red ink and a red chevron while bypass is
+/// on, open or not (`.mdpick.warn`, `.mdpick.warn .mp-chev{color:inherit}`).
+fn chip_colors(warn: bool, expanded: bool, p: &Palette) -> (Color, Color, Color) {
+    if warn {
+        (p.red.soft, p.red.strong, p.red.strong)
+    } else if expanded {
+        (p.hover, p.text, p.muted)
+    } else {
+        (p.surface_2, p.text_2, p.muted)
+    }
+}
+
+/// What an icon-only composer chip is called (#639; the mockup's `aria-label`s "하네스와 모델:
+/// ..." and "권한 모드: ..." and its `title`s 프로젝트 and 컴퓨터). The model and mode names carry
+/// the choice, which comes from a fixed list; a project or computer name is data, and the
+/// toolkit keeps every distinct name for the life of the program, so those chips say only what
+/// they are.
+fn chip_name(pick: Pick, text: &str) -> String {
+    match pick {
+        Pick::Project => "프로젝트".to_string(),
+        Pick::Model => format!("하네스와 모델: {text}"),
+        Pick::Mode => format!("권한 모드: {text}"),
+        Pick::Computer => "컴퓨터".to_string(),
+    }
+}
+
+/// A composer chip (`.pickchip`): a 32 dp pill, 12 at each side, a 16 dp glyph, 8, the label at
+/// 13/500 on one line ending in an ellipsis when the chip is narrower than it, and for a picker
+/// 8 and the 14 dp chevron. A [`ChipWidth::Circle`] chip is a 32 dp circle with the glyph
+/// centred and a name. The chip is the container's `on_click` (compose-rust#372) and says
+/// whether its list is open.
+fn ComposerChip(c: ChipSpec<'_>, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    let fill = if selected { p.sel } else { p.surface_2 };
+    let (fill, ink, chev) = chip_colors(c.warn, c.expanded, p);
     // Every composer chip opens a list, so it says whether that list is open (FR-L10.4).
-    let modifier = Modifier::new().height(H_CTL).background(paint(fill)).shape_role(ShapeRole::Full).selected(selected).expanded(expanded);
-    let modifier = if icon_only { modifier.width(H_CTL) } else if weighted { modifier.weight(1.0) } else { modifier };
-    let icon_color = tint.unwrap_or(p.text_2.to_argb());
+    let base = Modifier::new().height(H_CTL).background(paint(fill)).shape_role(ShapeRole::Full).selected(false).expanded(c.expanded);
+    let modifier = match c.width {
+        ChipWidth::Content => base,
+        ChipWidth::Circle => base.width(H_CTL),
+        ChipWidth::Rest => base.weight(1.0),
+        ChipWidth::Share(_) => base.width(0.0),
+    };
+    let modifier = match (&c.name, c.width) {
+        (Some(name), ChipWidth::Circle) => modifier.label(name).role(Role::Button).click_action(true),
+        _ => modifier,
+    };
+    let icon_color = c.tint.unwrap_or(ink.to_argb());
     Clickable(modifier, Alignment::Center, on_click, || {
-        if icon_only {
-            NavIcon(icon, icon_color, 16.0);
+        if c.width == ChipWidth::Circle {
+            NavIcon(c.icon, icon_color, 16.0);
             return;
         }
-        cu::Row().alignment(Alignment::CenterStart).content(|| {
+        // A chip that is given its width hands the label what the glyph and chevron leave.
+        let given = matches!(c.width, ChipWidth::Rest | ChipWidth::Share(_));
+        let row = cu::Row().alignment(Alignment::CenterStart);
+        let row = if given { row.modifier(Modifier::new().fill_max_width()) } else { row };
+        row.content(|| {
             cu::Spacer().modifier(Modifier::new().width(SP[2]));
-            NavIcon(icon, icon_color, 16.0);
+            NavIcon(c.icon, icon_color, 16.0);
             cu::Spacer().modifier(Modifier::new().width(SP[1]));
-            if weighted {
-                cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
-                    Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
+            if given {
+                cu::Box().modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
+                    Label(c.text, Fs::Sm, Weight::Medium, Some(paint(ink)), Some(1));
                 });
             } else {
-                Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                Label(c.text, Fs::Sm, Weight::Medium, Some(paint(ink)), Some(1));
             }
-            if chevron {
+            if c.chevron {
                 cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                NavIcon(super::shell::ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 14.0);
+                NavIcon(super::shell::ICON_CHEVRON_DOWN_SVG, chev.to_argb(), 14.0);
             }
             cu::Spacer().modifier(Modifier::new().width(SP[2]));
         });
@@ -1259,31 +1409,11 @@ fn SuggestionChip(text: &str, icon: &'static str, on_click: impl FnMut() + 'stat
 /// The side of the Home send button (`.sendround`).
 pub const SEND_BUTTON_DP: f32 = 36.0;
 
-/// Whether a composer chip draws the picker chevron: the project, model and mode pickers do, the
-/// computer chip does not (mockup `.mp-chev`, FR-L11).
+/// Whether a composer chip draws the picker chevron: the model and mode pickers do
+/// (`.mp-chev`); the project and computer chips are the mockup's `select.pickchip`, which has
+/// none (`home.js` `.hm-sel`, #573).
 fn chip_has_chevron(pick: Pick) -> bool {
-    pick != Pick::Computer
-}
-
-/// The composer's mode chip while bypass is on: `red-soft` fill, red text, the warning triangle.
-fn WarnChip(text: &str, icon_only: bool, on_click: impl FnMut() + 'static) {
-    let p = ember_theme().palette;
-    Clickable(
-        Modifier::new().height(H_CTL).background(paint(p.red.soft)).shape_role(ShapeRole::Full),
-        Alignment::Center,
-        on_click,
-        || {
-            cu::Row().alignment(Alignment::CenterStart).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(if icon_only { SP[1] } else { SP[2] }));
-                NavIcon(ICON_WARN, p.red.strong.to_argb(), 16.0);
-                if !icon_only {
-                    cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                    Label(text, Fs::Sm, Weight::Medium, Some(paint(p.red.strong)), Some(1));
-                }
-                cu::Spacer().modifier(Modifier::new().width(if icon_only { SP[1] } else { SP[2] }));
-            });
-        },
-    );
+    matches!(pick, Pick::Model | Pick::Mode)
 }
 
 fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
@@ -1296,19 +1426,30 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     let placeholder = c.suggestion.get().unwrap_or_else(|| COMPOSER_PLACEHOLDER.to_string());
     let computer_text = crate::ui::home::computer_chip_text(sel.computer.as_deref(), &computers);
     let computer_text = if sel.computer.is_none() { c.local_name(ui) } else { computer_text };
-    let icon_only = l.compact;
     let gap = if l.compact { SP[0] } else { 6.0 };
     let model_text = sel.option.chip_label();
     let mode_text = sel.mode.label().to_string();
-    let chip = |text: &str, icon: &'static str, pick: Pick, selected: bool| {
+    let chip = |text: &str, icon: &'static str, pick: Pick, width: ChipWidth| {
         let open = c.open.clone();
         // The harness chip shows the harness's own glyph in its colour (`--v-claude` and so on),
         // at every width (design review B11; it was a generic terminal glyph).
         let (icon, tint) = composer_chip_icon(pick, icon, sel.option.harness);
-        // Wide chips are content-sized, their text cut to the budget; only the compact project
-        // chip takes the rest of the row.
         let expanded = open.get() == Some(pick);
-        ComposerChip(text, icon, tint, chip_has_chevron(pick), selected, icon_only && pick != Pick::Project, icon_only && pick == Pick::Project, expanded, move || open.set(Some(pick)));
+        // Bypass draws the mode chip in the warning state (mockup `.mdpick.warn`): red on
+        // `red-soft` with the warning triangle, and the same chevron, open state and name as
+        // the other chips (#574, #639).
+        let warn = pick == Pick::Mode && sel.mode.is_bypass();
+        let spec = ChipSpec {
+            text,
+            icon: if warn { ICON_WARN } else { icon },
+            tint: if warn { None } else { tint },
+            chevron: chip_has_chevron(pick),
+            warn,
+            width,
+            expanded,
+            name: (width == ChipWidth::Circle).then(|| chip_name(pick, text)),
+        };
+        ComposerChip(spec, move || open.set(Some(pick)));
     };
     let add = || {
         let open = c.attachment_open.clone();
@@ -1329,7 +1470,7 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
                 .corner_radius(CORNER_XL)
-                .padding(if l.compact { SP[2] } else { SP[3] }),
+                .padding(if l.compact { SP[2] } else { COMPOSER_PAD }),
         )
         .content(|| {
             cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -1388,47 +1529,50 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                 cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                     cu::Box().modifier(Modifier::new().size(36.0, 36.0)).content(add);
                     cu::Column().spacing(SP[0]).modifier(Modifier::new().weight(1.0).clip(true)).content(|| {
-                        // Bypass draws the chip in the warning state (mockup `.mdpick.warn`).
-                        let chip_at = |i: usize, text: &str| match i {
-                            0 => {
-                                if l.compact {
-                                    chip(text, ICON_FOLDER, Pick::Project, false);
-                                } else {
-                                    c.project_menu(ui, || chip(text, ICON_FOLDER, Pick::Project, false));
-                                }
-                            }
-                            1 => {
-                                let close = {
-                                    let o = c.open.clone();
-                                    move || o.set(None)
-                                };
-                                let one = || chip(text, ICON_TERMINAL, Pick::Model, false);
-                                if l.compact {
-                                    one();
-                                } else {
-                                    c.model_popover(ui, &sel, one, close);
-                                }
-                            }
-                            2 => {
-                                let one = || {
-                                    if sel.mode.is_bypass() {
-                                        let open = c.open.clone();
-                                        WarnChip(text, icon_only, move || open.set(Some(Pick::Mode)));
+                        // A chip with a share is one of four that share the line by weight; at
+                        // 560 and below the project chip takes the rest and the others are
+                        // circles. Above 560 each chip is the anchor of its own picker.
+                        let chip_at = |i: usize, text: &str, share: Option<f32>| {
+                            let width = match share {
+                                Some(weight) => ChipWidth::Share(weight),
+                                None if !l.compact => ChipWidth::Content,
+                                None if i == 0 => ChipWidth::Rest,
+                                None => ChipWidth::Circle,
+                            };
+                            match i {
+                                0 => {
+                                    if l.compact {
+                                        chip(text, ICON_FOLDER, Pick::Project, width);
                                     } else {
-                                        chip(text, ICON_SHIELD, Pick::Mode, false);
+                                        c.project_menu(ui, share, || chip(text, ICON_FOLDER, Pick::Project, width));
                                     }
-                                };
-                                if l.compact {
-                                    one();
-                                } else {
-                                    c.mode_popover(&sel, one);
                                 }
-                            }
-                            _ => {
-                                if l.compact {
-                                    chip(text, ICON_PC, Pick::Computer, false);
-                                } else {
-                                    c.computer_menu(ui, || chip(text, ICON_PC, Pick::Computer, false));
+                                1 => {
+                                    let close = {
+                                        let o = c.open.clone();
+                                        move || o.set(None)
+                                    };
+                                    let one = || chip(text, ICON_TERMINAL, Pick::Model, width);
+                                    if l.compact {
+                                        one();
+                                    } else {
+                                        c.model_popover(ui, &sel, share, one, close);
+                                    }
+                                }
+                                2 => {
+                                    let one = || chip(text, ICON_SHIELD, Pick::Mode, width);
+                                    if l.compact {
+                                        one();
+                                    } else {
+                                        c.mode_menu(&sel, share, one);
+                                    }
+                                }
+                                _ => {
+                                    if l.compact {
+                                        chip(text, ICON_PC, Pick::Computer, width);
+                                    } else {
+                                        c.computer_menu(ui, share, || chip(text, ICON_PC, Pick::Computer, width));
+                                    }
                                 }
                             }
                         };
@@ -1436,21 +1580,41 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                         if l.compact {
                             cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                                 for (i, t) in texts.iter().enumerate() {
-                                    chip_at(i, t);
+                                    chip_at(i, t, None);
                                 }
                             });
                         } else {
-                            // One line as the mockup (#849, review H1): long labels give up room
-                            // and end in an ellipsis; the row wraps only when even the shortest
-                            // labels do not fit, rather than dropping a chip.
+                            // One line as the mockup (#849 review H1, #573): the labels go to
+                            // the toolkit whole (cut only at their caps). With room every chip
+                            // is as wide as its content; without, the four share the line by
+                            // weight and the toolkit ends each label in an ellipsis by its
+                            // measured width; the row wraps only when even the shortest labels
+                            // do not fit, rather than dropping a chip.
                             let fitted = crate::ui::home::composer_chip_fit(&texts, w);
-                            let widths: Vec<f32> = fitted.iter().map(|t| composer_chip_width(t)).collect();
-                            for row in composer_chip_rows(&widths, w) {
-                                cu::Row().spacing(gap).alignment(Alignment::CenterStart).content(|| {
-                                    for i in row {
-                                        chip_at(i, &fitted[i]);
+                            match composer_chip_line(&fitted, w) {
+                                ChipLine::Natural => {
+                                    cu::Row().spacing(gap).alignment(Alignment::CenterStart).content(|| {
+                                        for (i, t) in fitted.iter().enumerate() {
+                                            chip_at(i, t, None);
+                                        }
+                                    });
+                                }
+                                ChipLine::Shared(weights) => {
+                                    cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                                        for (i, t) in fitted.iter().enumerate() {
+                                            chip_at(i, t, Some(weights[i]));
+                                        }
+                                    });
+                                }
+                                ChipLine::Wrapped(rows) => {
+                                    for row in rows {
+                                        cu::Row().spacing(gap).alignment(Alignment::CenterStart).content(|| {
+                                            for i in row {
+                                                chip_at(i, &fitted[i], None);
+                                            }
+                                        });
                                     }
-                                });
+                                }
                             }
                         }
                     });
@@ -1769,32 +1933,8 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
     let load = ui.live.usage_summary.get();
     let series = usage::trend_days(&load, days.get());
     let values: Vec<u64> = series.iter().map(|(_, t)| *t).collect();
-    const H: f32 = 160.0;
-    let usize_values: Vec<usize> = values.iter().map(|v| *v as usize).collect();
-    let rects = crate::ui::home::bar_rects(&usize_values, chart_w, H, 6.0);
-    let centers: Vec<f32> = rects.iter().map(|(x, _, w, _)| x + w / 2.0).collect();
-    let now = rects.len().saturating_sub(1);
-    let mut list = DrawList::builder().rect(paint(p.line), 0.0, H, chart_w, 1.0, 0.0);
-    for (i, (x, y, w, h)) in rects.into_iter().enumerate() {
-        if h > 0.0 {
-            let color = paint(if i == now { p.orange.strong } else { p.grey.strong });
-            list = list.round_rect(color, x, y, w, h, 3.0, 1.0);
-            for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(x, y, w, h, usage::legend_hatch_style().0) {
-                list = list.line(color, x1, y1, x2, y2, 1.0);
-            }
-        }
-    }
-    // `.hm-line` and `.hm-pt` (#849): the ink cost line over the bars and a ringed point on the
-    // last costed day, only for days the server sent a cost (none today, so no line is drawn).
-    // Not drawn: the 5 % ink area under the line (the toolkit `DrawList` has no filled path).
-    let points = usage::cost_line_points(&usage::trend_costs(&load, days.get()), &centers, H);
-    for pair in points.windows(2) {
-        list = list.line(paint(p.ink), pair[0].0, pair[0].1, pair[1].0, pair[1].1, 2.0);
-    }
-    if let Some((x, y)) = points.last() {
-        list = list.circle(paint(p.surface), *x, *y, 6.0, 0.0).circle(paint(p.ink), *x, *y, 4.5, 3.0);
-    }
-    let commands = list.build();
+    const H: f32 = TREND_PLOT_H;
+    let commands = trend_draw_list(&values, &usage::trend_costs(&load, days.get()), chart_w, p);
     let narrow = layout(crate::ui::window_size::current_window_size().width_dp).compact;
     let legend = usage::cost_legend(
         usage::period_cost(&load, days.get()).is_some(),
@@ -1847,6 +1987,49 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
         // TODO(compose-rust): a tooltip or per-bar tap needs hover or a click on the Canvas; the
         // toolkit has neither, so no day is selectable.
     });
+}
+
+/// The trend plot's height.
+const TREND_PLOT_H: f32 = 160.0;
+
+/// The paint of the area under the cost line: `ink` at 5 % (`.hm-area`).
+fn cost_area_paint(p: &Palette) -> Paint {
+    Paint::Literal(Color::argb((usage::COST_AREA_ALPHA << 24) | (p.ink.to_argb() & 0x00ff_ffff)))
+}
+
+/// What the trend plot draws, `chart_w` wide and [`TREND_PLOT_H`] high over a 1 dp baseline:
+/// one hatched bar per day (the last in orange), and over them the cost of the days the server
+/// priced (mockup `.hm-area`, `.hm-line`, `.hm-pt`, #849): the 5 % ink area under the line, the
+/// 2 dp ink line, and a ringed point on the last costed day. With no cost in the window (the
+/// server sends none today) only the bars are drawn, never a line at zero.
+fn trend_draw_list(values: &[u64], costs: &[Option<f64>], chart_w: f32, p: &Palette) -> DrawList {
+    const H: f32 = TREND_PLOT_H;
+    let usize_values: Vec<usize> = values.iter().map(|v| *v as usize).collect();
+    let rects = crate::ui::home::bar_rects(&usize_values, chart_w, H, 6.0);
+    let centers: Vec<f32> = rects.iter().map(|(x, _, w, _)| x + w / 2.0).collect();
+    let now = rects.len().saturating_sub(1);
+    let mut list = DrawList::builder().rect(paint(p.line), 0.0, H, chart_w, 1.0, 0.0);
+    for (i, (x, y, w, h)) in rects.into_iter().enumerate() {
+        if h > 0.0 {
+            let color = paint(if i == now { p.orange.strong } else { p.grey.strong });
+            list = list.round_rect(color, x, y, w, h, 3.0, 1.0);
+            for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(x, y, w, h, usage::legend_hatch_style().0) {
+                list = list.line(color, x1, y1, x2, y2, 1.0);
+            }
+        }
+    }
+    let points = usage::cost_line_points(costs, &centers, H);
+    // The toolkit's `DrawList` has no filled path, so the area is columns of the line's height.
+    for (x, y) in usage::cost_area_columns(&points, usage::COST_AREA_STEP) {
+        list = list.line(cost_area_paint(p), x, y, x, H, usage::COST_AREA_STEP);
+    }
+    for pair in points.windows(2) {
+        list = list.line(paint(p.ink), pair[0].0, pair[0].1, pair[1].0, pair[1].1, 2.0);
+    }
+    if let Some((x, y)) = points.last() {
+        list = list.circle(paint(p.surface), *x, *y, 6.0, 0.0).circle(paint(p.ink), *x, *y, 4.5, 3.0);
+    }
+    list.build()
 }
 
 /// `.hm-seg button`: the 7일 / 14일 toggle, 28 dp pills (`.hm-seg button{height:28px}`) with a
@@ -2345,8 +2528,10 @@ mod tests {
     fn fr_l10_home_send_button_chips_are_not_toolkit_buttons() {
         let production = include_str!("home.rs").split("#[cfg(test)]").next().unwrap();
         assert_eq!(production.matches("cu::Button(").count(), 0);
-        assert!(chip_has_chevron(Pick::Project) && chip_has_chevron(Pick::Model) && chip_has_chevron(Pick::Mode));
-        assert!(!chip_has_chevron(Pick::Computer));
+        // The pickers carry the chevron; the project and computer chips are the mockup's
+        // `select.pickchip`, which has none (#573).
+        assert!(chip_has_chevron(Pick::Model) && chip_has_chevron(Pick::Mode));
+        assert!(!chip_has_chevron(Pick::Project) && !chip_has_chevron(Pick::Computer));
     }
 
     #[test]
@@ -2438,6 +2623,11 @@ mod tests {
         parent: std::collections::HashMap<u32, u32>,
         /// Texts in the order they were last sent.
         sent: Vec<String>,
+        /// The last `Width` and `Weight` modifiers of each node.
+        width: std::collections::HashMap<u32, f32>,
+        weight: std::collections::HashMap<u32, f32>,
+        /// Every mutation as its debug text, for properties the tests read by name.
+        log: Vec<String>,
     }
 
     use compose_rust::schema::PropertyKind;
@@ -2461,9 +2651,33 @@ mod tests {
                     Mutation::Insert { parent_id, node_id, .. } => {
                         self.parent.insert(node_id, parent_id);
                     }
+                    Mutation::SetModifier { node_id, modifier: compose_rust::Modifier::Width(w), .. } => {
+                        self.width.insert(node_id, w);
+                    }
+                    Mutation::SetModifier { node_id, modifier: compose_rust::Modifier::Weight(w), .. } => {
+                        self.weight.insert(node_id, w);
+                    }
                     _ => {}
                 }
             }
+            self.log.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
+        }
+
+        /// The node of the text `label`.
+        fn text_node(&self, label: &str) -> u32 {
+            *self.text.iter().find(|(_, t)| t.as_str() == label).unwrap_or_else(|| panic!("no text {label}")).0
+        }
+
+        /// The debug texts of the mutations that set `property` (by its name) on `node`.
+        fn props(&self, node: u32, property: &str) -> Vec<&String> {
+            let (id, name) = (format!("node_id: {node},"), format!("property: {property},"));
+            self.log.iter().filter(|m| m.starts_with("SetProp") && m.contains(&id) && m.contains(&name)).collect()
+        }
+
+        /// The debug texts of every mutation that sets `property`.
+        fn all_props(&self, property: &str) -> Vec<&String> {
+            let name = format!("property: {property},");
+            self.log.iter().filter(|m| m.starts_with("SetProp") && m.contains(&name)).collect()
         }
 
         fn has(&self, want: &str) -> bool {
@@ -2485,6 +2699,11 @@ mod tests {
         fn field(&self, placeholder: &str, property: PropertyKind) -> (u32, u64) {
             let node = *self.placeholder.iter().find(|(_, t)| t.as_str() == placeholder).expect("field").0;
             (node, self.handler_of(node, property).expect("handler"))
+        }
+
+        /// How many nodes are `side` wide and take a click (a square button of that side).
+        fn clickable_squares(&self, side: f32) -> usize {
+            self.width.iter().filter(|(n, w)| **w == side && self.handler_of(**n, PropertyKind::OnClick).is_some()).count()
         }
 
         fn handler_of(&self, node: u32, property: PropertyKind) -> Option<u64> {
@@ -2526,9 +2745,10 @@ mod tests {
         let _guard = crate::services::test_guard();
         let (_host, tree, c) = model_picker_host();
         assert_eq!(c.selection.get_untracked().option.harness, Harness::ClaudeCode);
-        for h in Harness::ALL {
-            assert!(tree.has(h.label()), "rail entry {}", h.label());
-        }
+        // The rail is icon-only (review K3): three 36 dp buttons beside the send circle, none
+        // of them a text.
+        assert!(!tree.has(Harness::Codex.label()) && !tree.has(Harness::Gemini.label()), "rail entries are glyphs: {:?}", tree.sent);
+        assert!(tree.clickable_squares(MODEL_RAIL_BUTTON) >= Harness::ALL.len() + 1, "three rail buttons and the send circle");
         assert!(!tree.has("전체"), "the rail has no all entry (mockup v8)");
         assert!(tree.has("Opus 5.5 (높음)") && tree.has("Haiku 5.5 (낮음)"));
         assert!(!tree.has("GPT-5 (높음)"), "only the chosen harness is listed");
@@ -2539,7 +2759,8 @@ mod tests {
     fn fr_l15_rail_tap_lists_that_harness_and_a_row_tap_chooses_and_closes() {
         let _guard = crate::services::test_guard();
         let (mut host, mut tree, c) = model_picker_host();
-        click(&mut host, &mut tree, "Codex");
+        c.rail_tap(Harness::Codex);
+        tree.read(host.render_frame(1).expect("frame"));
         assert!(tree.has("GPT-5 mini (보통)"), "codex rows after the rail tap: {:?}", tree.sent);
         click(&mut host, &mut tree, "GPT-5 mini (보통)");
         let sel = c.selection.get_untracked();
@@ -2590,7 +2811,8 @@ mod tests {
         use compose_rust::protocol::{decode_batch, Mutation};
         let mut host = Host::new(move || {
             Box::new(Recomposer::new(move || {
-                ComposerChip("demo-project", ICON_FOLDER, None, true, false, false, false, expanded, || {});
+                let spec = ChipSpec { text: "demo-project", icon: ICON_FOLDER, tint: None, chevron: false, warn: false, width: ChipWidth::Content, expanded, name: None };
+                ComposerChip(spec, || {});
             }))
         });
         let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
@@ -2614,11 +2836,12 @@ mod tests {
     #[test]
     fn fr_l10_4_project_and_computer_chips_open_popovers_under_them() {
         let src = include_str!("home.rs").split("#[cfg(test)]").next().unwrap();
-        assert!(src.contains("c.project_menu(ui, || chip(text, ICON_FOLDER, Pick::Project, false));"));
-        assert!(src.contains("c.computer_menu(ui, || chip(text, ICON_PC, Pick::Computer, false));"));
+        assert!(src.contains("c.project_menu(ui, share, || chip(text, ICON_FOLDER, Pick::Project, width));"));
+        assert!(src.contains("c.computer_menu(ui, share, || chip(text, ICON_PC, Pick::Computer, width));"));
         // At 560 and below the same rows are a bottom sheet, drawn without wrapping the chip.
         let lists = src.split("fn lists(").nth(1).unwrap().split("\n    fn ").next().unwrap();
-        assert!(lists.contains("self.project_menu(ui, || {});") && lists.contains("self.computer_menu(ui, || {});"));
+        assert!(lists.contains("self.project_menu(ui, None, || {});") && lists.contains("self.computer_menu(ui, None, || {});"));
+        assert!(lists.contains("self.mode_menu(&sel, None, || {});"), "the permission sheet is the same menu");
         assert!(!src.contains("OptionSheet("), "no centred option sheet is left on Home");
     }
 
@@ -2673,6 +2896,246 @@ mod tests {
         click(&mut host, &mut tree, PermMode::Edits.label());
         assert_eq!(c.selection.get_untracked().mode, PermMode::Edits);
         assert_eq!(c.open.get_untracked(), None);
+    }
+
+    /// The composer card at 1440 dp with `pick` open and `mode` chosen, and the composer.
+    fn picker_host(pick: Option<Pick>, mode: PermMode) -> (Host, Tree, Composer) {
+        let mut host = Host::new(move || {
+            Box::new(Recomposer::new(move || {
+                let c = remember(|| {
+                    let c = Composer::new();
+                    c.open.set(pick);
+                    c.selection.set(c.selection.get_untracked().with_mode(mode));
+                    c
+                });
+                PICKER.with(|p| *p.borrow_mut() = Some(c.clone()));
+                ComposerCard(&c, shared_ui(), composer_width(1390.0), layout(1440.0));
+            }))
+        });
+        let mut tree = Tree::default();
+        tree.read(host.rebuild().expect("rebuild"));
+        let c = PICKER.with(|p| p.borrow().clone()).expect("composed");
+        (host, tree, c)
+    }
+
+    fn key_down(host: &mut Host, tree: &mut Tree, key: compose_rust::Key, ctrl_key: bool, code: u32, text: &'static str) -> i64 {
+        let (node_id, handler_id) = tree.field("모델 검색", PropertyKind::OnKeyDown);
+        let payload = compose_rust::EventPayload::KeyDown { key, shift_key: false, ctrl_key, alt_key: false, meta_key: false, repeat: false, code, text };
+        let (bytes, consumed) = host.dispatch(HostEvent { node_id, handler_id, payload }).expect("key");
+        let bytes = bytes.to_vec();
+        tree.read(&bytes);
+        consumed
+    }
+
+    #[test]
+    fn fr_l11_the_four_chips_share_the_line_by_weight_at_1440() {
+        // #573: at 1440 the demo labels need more than the 604 dp the chips have, so each
+        // picker node carries its chip's weight and the toolkit cuts the labels itself. The
+        // labels reach it whole: no estimate cut them.
+        let _guard = crate::services::test_guard();
+        let (_host, tree, c) = picker_host(None, PermMode::Ask);
+        let sel = c.selection.get_untracked();
+        assert!(tree.has(&sel.option.chip_label()), "the model label is whole: {:?}", tree.sent);
+        assert!(tree.has(PermMode::Ask.label()) && tree.has(&sel.project));
+        let model = composer_chip_width(1, &sel.option.chip_label());
+        let mode = composer_chip_width(2, PermMode::Ask.label());
+        let shares: Vec<f32> = tree.weight.values().copied().filter(|w| *w > 1.0).collect();
+        assert_eq!(shares.len(), 4, "one share per chip: {shares:?}");
+        assert!(shares.contains(&model) && shares.contains(&mode), "{shares:?} against {model} and {mode}");
+        // A chip with a share is zero wide, so the share and not its label decides its width.
+        assert!(tree.width.values().filter(|w| **w == 0.0).count() >= 4);
+    }
+
+    #[test]
+    fn fr_l10_4_the_four_pickers_are_popovers_8_below_the_composer_card() {
+        // Review r8: the menus opened 8 below the chip and overlapped the composer's edge.
+        let _guard = crate::services::test_guard();
+        let (_host, tree, _c) = picker_host(None, PermMode::Ask);
+        let popovers = tree.log.iter().filter(|m| m.starts_with("Create") && m.contains("widget: Popover")).count();
+        assert_eq!(popovers, 4, "project, model, mode and computer");
+        assert_eq!(tree.log.iter().filter(|m| m.starts_with("Create") && m.contains("widget: Menu")).count(), 0, "no toolkit Menu is left");
+        let offsets = tree.all_props("OffsetDp");
+        assert_eq!(offsets.len(), 4);
+        assert!(offsets.iter().all(|m| m.contains("Float(26.0)")), "{offsets:?}");
+    }
+
+    #[test]
+    fn fr_l16_the_mode_menu_reads_as_the_session_permission_menu() {
+        // Review r8: the home mode popover had 13 px medium titles; the shared menu's are
+        // 14/600 over a 12 px description, under the 12/600 head.
+        let _guard = crate::services::test_guard();
+        let (_host, tree, _c) = picker_host(Some(Pick::Mode), PermMode::Ask);
+        let title = tree.text_node(PermMode::Edits.label());
+        assert!(tree.props(title, "FontSize").iter().any(|m| m.contains("(14")), "{:?}", tree.props(title, "FontSize"));
+        assert!(tree.props(title, "FontWeight").iter().any(|m| m.contains("(600")), "{:?}", tree.props(title, "FontWeight"));
+        let head = tree.text_node("권한 모드 \u{b7} Claude Code");
+        assert!(tree.props(head, "FontSize").iter().any(|m| m.contains("(12")));
+        assert!(tree.props(head, "FontWeight").iter().any(|m| m.contains("(600")));
+        let rows = mode_pop_rows(&mode_picker_rows_pending(Harness::ClaudeCode, PermMode::Ask, None));
+        assert_eq!(rows.len(), 4);
+        assert!(rows[0].chosen && !rows[0].danger && rows[0].icon == Some(ICON_SHIELD));
+        assert!(rows[2].danger && rows[2].icon == Some(ICON_WARN));
+        assert_eq!(rows[1].description.as_deref(), Some(PermMode::Edits.description()));
+    }
+
+    #[test]
+    fn fr_l16_the_first_bypass_tap_arms_the_row_and_the_menu_stays_open() {
+        // #574: the armed state. The shared menu closes on a row tap unless asked not to.
+        let _guard = crate::services::test_guard();
+        let (mut host, mut tree, c) = picker_host(Some(Pick::Mode), PermMode::Ask);
+        click(&mut host, &mut tree, PermMode::Bypass.label());
+        assert_eq!(c.open.get_untracked(), Some(Pick::Mode), "the menu is still open");
+        assert_eq!(c.mode_pending.get_untracked().map(|(m, _)| m), Some(PermMode::Bypass));
+        assert_eq!(c.selection.get_untracked().mode, PermMode::Ask, "nothing is applied yet");
+        assert!(tree.has(crate::ui::home::BYPASS_CONFIRM_TITLE), "the row asks for the second tap: {:?}", tree.sent);
+        assert!(tree.has(crate::ui::home::BYPASS_CONFIRM_TEXT));
+    }
+
+    #[test]
+    fn fr_l16_pointing_at_another_row_withdraws_the_bypass_confirmation() {
+        // #574: `mode_hover` is wired. Every row hears the pointer come over it.
+        let _guard = crate::services::test_guard();
+        let (mut host, mut tree, c) = picker_host(Some(Pick::Mode), PermMode::Ask);
+        assert_eq!(tree.all_props("OnPointer").len(), modes_for(Harness::ClaudeCode).len(), "one subscription per row");
+        click(&mut host, &mut tree, PermMode::Bypass.label());
+        let bypass = modes_for(Harness::ClaudeCode).iter().position(|m| m.is_bypass()).unwrap();
+        c.hover_mode(bypass);
+        assert!(c.mode_pending.get_untracked().is_some(), "the armed row itself keeps the confirmation");
+        c.hover_mode(0);
+        assert_eq!(c.mode_pending.get_untracked(), None);
+        tree.read(host.render_frame(1).expect("frame"));
+        assert!(tree.has(PermMode::Bypass.label()), "the row reads as before: {:?}", tree.sent);
+        assert_eq!(c.open.get_untracked(), Some(Pick::Mode));
+    }
+
+    #[test]
+    fn fr_l16_bypass_draws_the_mode_chip_in_the_warning_state() {
+        // #574, #639: red on `red-soft` with a red chevron, open or not; a plain chip turns to
+        // `hover` with `text` while its list is open (`.pickchip[aria-expanded=true]`).
+        let p = ember_theme().palette;
+        assert_eq!(chip_colors(true, false, p), (p.red.soft, p.red.strong, p.red.strong));
+        assert_eq!(chip_colors(true, true, p), (p.red.soft, p.red.strong, p.red.strong));
+        assert_eq!(chip_colors(false, false, p), (p.surface_2, p.text_2, p.muted));
+        assert_eq!(chip_colors(false, true, p), (p.hover, p.text, p.muted));
+        // The warning chip is the same chip as the others, so it carries the chevron, the open
+        // state and the name. Its label is on the wire twice: the chip and the picker's row.
+        let _guard = crate::services::test_guard();
+        let (_host, tree, _c) = picker_host(None, PermMode::Bypass);
+        assert_eq!(tree.text.values().filter(|t| t.as_str() == PermMode::Bypass.label()).count(), 2, "{:?}", tree.sent);
+        let src = include_str!("home.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(src.contains("icon: if warn { ICON_WARN } else { icon },"));
+        assert!(src.contains("let warn = pick == Pick::Mode && sel.mode.is_bypass();"));
+        assert!(!src.contains("fn WarnChip("), "no second chip implementation is left");
+    }
+
+    #[test]
+    fn fr_l11_icon_only_chips_have_names() {
+        // #639: at 560 and below three chips are circles with no text.
+        assert_eq!(chip_name(Pick::Mode, PermMode::Bypass.label()), "권한 모드: 바이패스(모두 허용)");
+        assert_eq!(chip_name(Pick::Model, "Claude Code \u{b7} Opus 5.5 \u{b7} 높음"), "하네스와 모델: Claude Code \u{b7} Opus 5.5 \u{b7} 높음");
+        // A project or computer name is data, so those names say only what the chip is.
+        assert_eq!(chip_name(Pick::Project, "demo"), "프로젝트");
+        assert_eq!(chip_name(Pick::Computer, "스튜디오"), "컴퓨터");
+        let semantics = |name: Option<String>| {
+            let mut host = Host::new(move || {
+                let name = name.clone();
+                Box::new(Recomposer::new(move || {
+                    let spec = ChipSpec { text: "x", icon: ICON_PC, tint: None, chevron: false, warn: false, width: ChipWidth::Circle, expanded: false, name: name.clone() };
+                    ComposerChip(spec, || {});
+                }))
+            });
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            batch.iter().filter(|m| matches!(m, Mutation::SetModifier { .. })).map(|m| format!("{m:?}")).filter(|m| m.contains("Semantics")).collect::<Vec<_>>()
+        };
+        assert_ne!(semantics(Some("컴퓨터".to_string())), semantics(None), "the name reaches the toolkit");
+    }
+
+    #[test]
+    fn fr_l15_the_model_popover_is_400_wide_with_the_shared_row_values() {
+        // #849, review r8: 400 wide with the 52 dp rail (it was 560 and 128), rows as the
+        // shared menu's (56 high, 14/600 titles), the shortcut in a 52 dp key cap.
+        let _guard = crate::services::test_guard();
+        let (_host, tree, _c) = model_picker_host();
+        assert_eq!((MODEL_POPOVER_WIDTH, MODEL_RAIL_WIDTH), (400.0, 52.0));
+        assert_eq!(popover_width(MODEL_POPOVER_WIDTH, 1440.0), 400.0);
+        assert_eq!(popover_width(MODEL_POPOVER_WIDTH, 561.0), 400.0, "it fits beside the rail at every popover width");
+        // The box is as wide as the window in this test allows (no window size is reported).
+        let boxed = popover_width(MODEL_POPOVER_WIDTH, crate::ui::window_size::current_window_size().width_dp);
+        assert!(tree.width.values().any(|w| *w == boxed), "the box takes the popover width");
+        assert!(!tree.width.values().any(|w| *w == 560.0 || *w == 128.0));
+        assert!(tree.width.values().any(|w| *w == MODEL_RAIL_WIDTH - 1.0), "the rail, beside its 1 dp line");
+        assert_eq!(pop_metrics(PopKind::Mode).row_min_h, 56.0);
+        let title = tree.text_node("Opus 5.5 (보통)");
+        assert!(tree.props(title, "FontSize").iter().any(|m| m.contains("14")));
+        assert!(tree.props(title, "FontWeight").iter().any(|m| m.contains("600")));
+        let cap = tree.text_node("Ctrl+2");
+        assert_eq!(tree.width.get(tree.parent.get(&cap).unwrap()), Some(&MODEL_KEY_CAP_W));
+        let p = ember_theme().palette;
+        assert_eq!(model_row_fill(true, true, p), Some(p.sel));
+        assert_eq!(model_row_fill(false, true, p), Some(p.hover));
+        assert_eq!(model_row_fill(false, false, p), None);
+        // The key cap is `surface-2` in both themes, which the mockup's dark tokens match
+        // (#252523 on the #1f1f1d surface), so #849's "no visible fill" needed no token change.
+        assert_eq!((DARK.surface_2, DARK.surface), (Color::rgb(0x252523), Color::rgb(0x1f1f1d)));
+    }
+
+    #[test]
+    fn fr_l15_arrow_keys_move_the_active_row_and_enter_takes_it() {
+        // #574: the keys in the search field.
+        let _guard = crate::services::test_guard();
+        let (mut host, mut tree, c) = model_picker_host();
+        assert_eq!(key_down(&mut host, &mut tree, compose_rust::Key::ArrowDown, false, 0x51, "ArrowDown"), 1, "the field consumes the arrow");
+        assert_eq!(c.model_act.get_untracked(), Some(1));
+        key_down(&mut host, &mut tree, compose_rust::Key::ArrowDown, false, 0x51, "ArrowDown");
+        key_down(&mut host, &mut tree, compose_rust::Key::ArrowUp, false, 0x52, "ArrowUp");
+        assert_eq!(c.model_act.get_untracked(), Some(1));
+        assert_eq!(key_down(&mut host, &mut tree, compose_rust::Key::Other, false, 0x04, "a"), 0, "a letter stays the field's");
+        // The active row is drawn on `hover` (`.mp-row.act`); the fill is `model_row_fill`'s.
+        let (node_id, handler_id) = tree.field("모델 검색", PropertyKind::OnSubmit);
+        host.dispatch(HostEvent { node_id, handler_id, payload: compose_rust::EventPayload::TextSubmitted("") }).expect("enter");
+        let sel = c.selection.get_untracked();
+        assert_eq!((sel.option.model, sel.option.effort), ("opus", Some("Medium")), "the second row, Opus 5.5 (보통)");
+        assert_eq!(c.open.get_untracked(), None);
+        assert_eq!(c.model_act.get_untracked(), None, "the next opening starts on the chosen row");
+    }
+
+    #[test]
+    fn fr_l15_ctrl_number_chooses_the_row_with_that_key_cap() {
+        let _guard = crate::services::test_guard();
+        let (mut host, mut tree, c) = model_picker_host();
+        assert!(tree.has("Ctrl+3"));
+        assert_eq!(key_down(&mut host, &mut tree, compose_rust::Key::Other, true, 0x20, "3"), 1);
+        let sel = c.selection.get_untracked();
+        assert_eq!((sel.option.model, sel.option.effort), ("opus", Some("Low")), "the third row, Opus 5.5 (낮음)");
+        assert_eq!(c.open.get_untracked(), None);
+    }
+
+    #[test]
+    fn fr_l23_the_trend_draws_the_cost_line_its_area_and_the_last_point_once_a_cost_arrives() {
+        // #849: what the plot hands the toolkit. Four days, three of them priced.
+        use compose_rust::DrawCommand;
+        let p = ember_theme().palette;
+        let values = [10_u64, 20, 30, 40];
+        let ink = |list: &DrawList| {
+            let cmds = list.decode().expect("decode");
+            let line = cmds.iter().filter(|c| matches!(c, DrawCommand::Line { paint: pt, stroke_width, .. } if *pt == paint(p.ink) && *stroke_width == 2.0)).count();
+            let area = cmds.iter().filter(|c| matches!(c, DrawCommand::Line { paint: pt, .. } if *pt == cost_area_paint(p))).count();
+            let ring = cmds.iter().filter(|c| matches!(c, DrawCommand::Circle { .. })).count();
+            (line, area, ring)
+        };
+        let none = trend_draw_list(&values, &[None, None, None, None], 400.0, p);
+        assert_eq!(ink(&none), (0, 0, 0), "no cost, no line");
+        let priced = trend_draw_list(&values, &[Some(1.0), None, Some(3.0), Some(2.0)], 400.0, p);
+        let (line, area, ring) = ink(&priced);
+        assert_eq!(line, 2, "one segment between each pair of costed days");
+        assert_eq!(ring, 2, "the surface disc and the ink ring of `.hm-pt`");
+        // The area spans the first to the last costed day, which are three bar pitches apart
+        // of the four that fill 400 dp, in 2 dp columns.
+        assert!((140..=160).contains(&area), "{area} columns");
+        // The area is `ink` at 5 %, not opaque.
+        assert_eq!(cost_area_paint(p), Paint::Literal(Color::argb(0x0D00_0000 | (p.ink.to_argb() & 0x00ff_ffff))));
+        let one = trend_draw_list(&values, &[None, Some(1.0), None, None], 400.0, p);
+        assert_eq!(ink(&one), (0, 0, 2), "a single costed day is a point");
     }
 
     #[test]
@@ -2788,7 +3251,7 @@ mod design_review_tests {
         // #849: an `equal_height` row counted the list (a scrolling child) as 0 high, so the
         // popover took the rail's height and showed one row. The popover keeps a fixed height.
         let src = include_str!("home.rs");
-        let body = &src[src.find("fn model_body").expect("model_body")..src.find("fn RailEntry").expect("RailEntry")];
+        let body = &src[src.find("fn model_popover").expect("model_popover")..src.find("fn RailEntry").expect("RailEntry")];
         assert!(!body.contains(concat!("equal_height", "(true)")));
         assert!(body.contains("model_popover_height("));
     }

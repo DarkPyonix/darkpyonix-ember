@@ -614,8 +614,12 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
                         .modifier(Modifier::new().size(H_CTL, H_CTL).hidden(true))
                         .content(|| super::shell::NavIcon(svg, p.text_2.to_argb(), 18.0));
                 }
+                // FR-L10.2 (#844): the pill draws the frame, so the field is bare (mockup
+                // `.cin input{border:0;background:none}`), 40 px tall inside the 50 px pill.
                 EmberField(FieldOptions {
                     weight: Some(1.0),
+                    bare: true,
+                    height: Some(H_BTN),
                     placeholder: "메시지 입력".to_string(),
                     enabled: Some(live.is_some()),
                     on_value_change: Some(Box::new({

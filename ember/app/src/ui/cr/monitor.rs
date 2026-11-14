@@ -114,7 +114,7 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
     }
     let feed = feed_state.get();
     let title = chip.map(|c| c.name.clone()).unwrap_or_else(|| "컴퓨터".to_string());
-    let window = compose_rust::runtime::current_window_size();
+    let window = crate::ui::window_size::current_window_size();
     let columns = mon_columns(window.width_dp);
     let body_height = super::components::sheet_body_max_height(window.width_dp, window.height_dp, true, 60.0).min(1200.0);
     let state = chip.map(|c| reach_pill(c.reachability));

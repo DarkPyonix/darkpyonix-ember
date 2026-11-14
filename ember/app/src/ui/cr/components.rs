@@ -444,6 +444,10 @@ pub struct FieldOptions {
     /// also counts towards the horizontal one. A framed field defaults to [`FIELD_INSET`]
     /// ([`FIELD_INSET_MULTILINE`] when multiline) and takes this in its place.
     pub inset: Option<(f32, f32)>,
+    /// A single-line field whose hint can be a long value (a remembered path or model): Ember
+    /// draws the hint itself on one line with an ellipsis, under the field while it is empty,
+    /// because the toolkit's placeholder always wraps (FR-L10.1, #878). Ignored when multiline.
+    pub one_line_hint: bool,
     pub height: Option<f32>,
     pub corner_radius: Option<f32>,
     pub background: Option<Paint>,
@@ -535,10 +539,48 @@ fn BareField(o: FieldOptions) {
             if side > 0.0 {
                 cu::Spacer().modifier(Modifier::new().width(side));
             }
-            FieldNode(o, inner);
+            if o.one_line_hint && !multiline {
+                OneLineHintField(o);
+            } else {
+                FieldNode(o, inner);
+            }
             if side > 0.0 {
                 cu::Spacer().modifier(Modifier::new().width(side));
             }
+        });
+}
+
+/// A single-line field with its hint drawn by Ember: a one-line `muted` label that ends in an
+/// ellipsis, under the field, while the field is empty (FR-L10.1, #878). The toolkit draws its
+/// placeholder with no line limit, so a long path wrapped onto a second line the 40 px field
+/// clipped. TODO(compose-rust): a placeholder line limit on `TextField` (no issue yet) lets the
+/// toolkit draw it again.
+fn OneLineHintField(o: FieldOptions) {
+    use compose_rust::runtime::{mutable_state_of, remember};
+    let mut o = o;
+    let p = ember_theme().palette;
+    let starts_empty = o.text.as_deref().map_or(true, str::is_empty);
+    let empty = remember(|| mutable_state_of(starts_empty));
+    let hint = std::mem::take(&mut o.placeholder);
+    let mut user = o.on_value_change.take();
+    let typed = empty.clone();
+    o.on_value_change = Some(Box::new(move |t: String| {
+        typed.set(t.is_empty());
+        if let Some(f) = user.as_mut() {
+            f(t);
+        }
+    }));
+    let show = empty.get();
+    cu::Box()
+        .alignment(Alignment::CenterStart)
+        .modifier(Modifier::new().weight(1.0))
+        .content(move || {
+            if show && !hint.is_empty() {
+                // `WrapLabel` so a path with no space ellipsises inside the box instead of
+                // asking for its whole width.
+                WrapLabel(&hint, FIELD_FONT, Weight::Regular, Some(paint(p.muted)), Some(1));
+            }
+            FieldNode(o, Modifier::new().fill_max_width());
         });
 }
 
@@ -1427,6 +1469,51 @@ mod tests {
         let centre = row_alignment(|| cu::Row().alignment(Alignment::CenterStart).content(|| {}));
         assert!(has_props(frame, &centre), "{:?} has {centre:?}", frame.props);
         assert_eq!(FIELD_INSET, (12.0, 0.0));
+    }
+
+    #[test]
+    fn fr_l10_1_one_line_hint_is_an_ellipsised_label_under_an_empty_field() {
+        // #878: the 새 세션 folder hint (a long path) wrapped onto a clipped second line.
+        let nodes = emitted_nodes(|| {
+            EmberField(FieldOptions {
+                fill_max_width: true,
+                one_line_hint: true,
+                placeholder: "/Users/someone/work/a-very-long-folder/with/many/parts".to_string(),
+                ..Default::default()
+            })
+        });
+        let field = the(&nodes, "TextField");
+        assert!(
+            !field.props.iter().any(|p| p.starts_with("Placeholder=") && p.contains("/Users")),
+            "the toolkit placeholder is not sent: {:?}",
+            field.props
+        );
+        let hint = nodes
+            .iter()
+            .find(|n| n.widget == "Text" && n.props.iter().any(|p| p.contains("/Users/someone")))
+            .expect("the hint label");
+        assert!(hint.props.iter().any(|p| p == "MaxLines=Integer(1)"), "{:?}", hint.props);
+        assert!(hint.props.iter().any(|p| p.starts_with("Overflow=")), "{:?}", hint.props);
+        // The hint and the field share one box, the hint first so the field is on top.
+        let stack = parent_of(&nodes, field);
+        assert_eq!(stack.widget, "Box");
+        assert_eq!(hint.parent, Some(stack.id));
+        assert!(hint.id < field.id, "the hint is under the field");
+        // A field that starts with text shows no hint.
+        let nodes = emitted_nodes(|| {
+            EmberField(FieldOptions { one_line_hint: true, placeholder: "힌트".into(), text: Some("값".into()), ..Default::default() })
+        });
+        assert!(!nodes.iter().any(|n| n.widget == "Text" && n.props.iter().any(|p| p.contains("힌트"))));
+    }
+
+    #[test]
+    fn fr_l10_1_new_session_long_hints_stay_on_one_line() {
+        let src = include_str!("new_session.rs");
+        for ph in ["\"/path/to/project\"", "\"에이전트 기본값\""] {
+            let at = src.find(ph).unwrap_or_else(|| panic!("{ph}"));
+            let opts = &src[src[..at].rfind("EmberField(FieldOptions {").expect("field")..at];
+            assert!(opts.contains("one_line_hint: true"), "{ph}: {opts}");
+        }
     }
 
     #[test]

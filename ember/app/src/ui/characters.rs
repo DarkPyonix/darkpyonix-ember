@@ -212,10 +212,12 @@ pub const CROWN_ID: &str = "id=\"crown\"";
 // Seed
 // ---------------------------------------------------------------------------------------------
 
-/// FNV-1a over the UTF-8 bytes.
+/// FNV-1a over the UTF-16 code units, as the mockup's `hash` (`chars.js`, `charCodeAt`): a
+/// Korean name then seeds the same drawing as in the mockup (review row CR2). ASCII names hash
+/// as they did over UTF-8 bytes.
 pub fn seed_hash(s: &str) -> u32 {
     let mut h: u32 = 2166136261;
-    for b in s.bytes() {
+    for b in s.encode_utf16() {
         h ^= u32::from(b);
         h = h.wrapping_mul(16777619);
     }
@@ -1057,6 +1059,43 @@ mod tests {
             dark: false,
             pin: None,
         }
+    }
+
+    #[test]
+    fn fr_l22_seed_hash_reads_utf16_code_units_as_the_mockup() {
+        // Values of `chars.js` `hash(name + "|" + harness)`.
+        assert_eq!(seed_hash("ember-리더|claude"), 0x8261_266f);
+        assert_eq!(seed_hash("core-구현|claude"), 0x410b_adc5);
+        assert_eq!(seed_hash("core-구현|codex"), 0x6223_b5ba);
+        assert_eq!(seed_hash("core-구현|gemini"), 0x45a5_ed90);
+        // ASCII is the same under both readings.
+        assert_eq!(seed_hash("ember|claude"), 0xb55a_4042);
+    }
+
+    #[test]
+    fn fr_l22_seed_draws_the_mockup_catalog_shapes() {
+        // Review row CR2, mockup `characters-default-1440-light.png`: the 포켓 row is a rabbit
+        // for "ember-리더", a cloud with a beret for Claude "core-구현", a rabbit for Codex and
+        // a cloud for Gemini; the Gemini 몽글 is a droplet and the Claude 몽글 is round.
+        const BUNNY: &str = "M38 46 C34 30";
+        const CLOUD: &str = "M30 80 C14 80";
+        const DROP: &str = "M50 20c9 13";
+        const ROUND: &str = "M50 24c16 0";
+        const EGG: &str = "M50 20c14 0";
+        const PILL: &str = "M26 46a24 24";
+        assert!(svg(&spec(CharStyle::Pocket, "ember-리더", "claude")).contains(BUNNY));
+        assert!(svg(&spec(CharStyle::Pocket, "core-구현", "claude")).contains(CLOUD));
+        assert!(svg(&spec(CharStyle::Pocket, "core-구현", "codex")).contains(BUNNY));
+        assert!(svg(&spec(CharStyle::Pocket, "core-구현", "gemini")).contains(CLOUD));
+        assert!(svg(&spec(CharStyle::Mongle, "ember-리더", "claude")).contains(EGG));
+        assert!(svg(&spec(CharStyle::Mongle, "core-구현", "claude")).contains(ROUND));
+        assert!(svg(&spec(CharStyle::Mongle, "core-구현", "codex")).contains(PILL));
+        assert!(svg(&spec(CharStyle::Mongle, "core-구현", "gemini")).contains(DROP));
+        // The Claude "core-구현" is the ochre end of the family (hue 33.5 of 20..34), not pink.
+        let hue = body_hue("core-구현", "claude");
+        assert!((hue - 33.5).abs() < 0.2, "{hue}");
+        let hue = body_hue("ember-리더", "claude");
+        assert!((hue - 23.2).abs() < 0.2, "{hue}");
     }
 
     // FR-L22: the same name always gives the same character.

@@ -185,6 +185,43 @@ impl From<rusqlite::Error> for ComputerError {
 /// other computer).
 pub const DUPLICATE_PEER: &str = "a computer with this peer id is already registered";
 
+/// Backfill `computers.peer_id` from `peer_json` during [`schema::PEER_ID_UNIQUE_MIGRATION`]
+/// (#640). Rows whose `peer_json` does not parse as a canonical `PeerAddr` (`FR-N6`) are skipped,
+/// and any pre-existing duplicate `peer_id` (possible on databases created before #637) is
+/// reported with a warning and left with `peer_id = NULL` rather than failing the migration.
+pub(crate) fn backfill_peer_ids(conn: &rusqlite::Connection) -> rusqlite::Result< Vec<(String, String)> > {
+    let mut stmt = conn.prepare(
+        "SELECT id, peer_json FROM computers WHERE peer_json IS NOT NULL ORDER BY created_at, id",
+    )?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut duplicates: Vec<(String, String)> = Vec::new();
+    for (id, peer_json) in rows {
+        let Ok(addr) = serde_json::from_str::<PeerAddr>(&peer_json) else {
+            continue;
+        };
+        let peer_id = addr.peer.to_string();
+        if let Some(first_id) = seen.get(&peer_id) {
+            tracing::warn!(
+                computer = %id,
+                first_computer = %first_id,
+                peer = %peer_id,
+                "existing computer row duplicates peer id of an earlier computer; leaving peer_id unset on the duplicate row"
+            );
+            duplicates.push((id, peer_id));
+            continue;
+        }
+        conn.execute(
+            "UPDATE computers SET peer_id = ?1 WHERE id = ?2",
+            params![peer_id, id],
+        )?;
+        seen.insert(peer_id, id);
+    }
+    Ok(duplicates)
+}
+
 /// Test hook (SPEC FR-C2c, mutation M8): called by `Registry::insert_with` with the peer id
 /// being inserted, after the duplicate check and before the INSERT, while the store connection
 /// is still held. Only the test `fr_c2_the_duplicate_check_and_the_insert_share_one_hold` sets
@@ -285,10 +322,21 @@ impl Registry {
                 if e.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
                 if msg.as_deref().is_some_and(|m| m.contains("peer_id")) {
-                    Err(ComputerError::BadRequest(DUPLICATE_PEER.into()))
-                } else {
-                    Err(ComputerError::BadRequest(format!("a computer named {name:?} already exists")))
+                    return Err(ComputerError::BadRequest(DUPLICATE_PEER.into()));
                 }
+                if let Some(ref pid) = peer_id {
+                    let dup: Option<i64> = conn
+                        .query_row(
+                            "SELECT 1 FROM computers WHERE peer_id = ?1 LIMIT 1",
+                            params![pid],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if dup.is_some() {
+                        return Err(ComputerError::BadRequest(DUPLICATE_PEER.into()));
+                    }
+                }
+                Err(ComputerError::BadRequest(format!("a computer named {name:?} already exists")))
             }
             Err(e) => Err(e.into()),
         }
@@ -1696,6 +1744,93 @@ mod tests {
             params![format!(r#"{{"peer":"{id}"}}"#), id.to_string()],
         );
         assert!(dup.is_err(), "partial UNIQUE index on computers(peer_id) must reject a second row");
+    }
+
+    #[test]
+    fn fr_c2_peer_id_migration_backfills_valid_rows_skips_unparsable_and_reports_existing_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ember.db");
+        let before = crate::store::migration_position(schema::PEER_ID_UNIQUE_MIGRATION).unwrap();
+        let peer_a = ember_transport::SecretKey::generate().peer_id();
+        let peer_b = ember_transport::SecretKey::generate().peer_id();
+        {
+            let mut conn = rusqlite::Connection::open(&path).unwrap();
+            crate::store::migrate_up_to(&mut conn, before).unwrap();
+            conn.execute(
+                "INSERT INTO computers (id, name, url, token, created_at, peer_json)
+                 VALUES ('url-only', 'url-only', 'http://10.0.0.2:8741', 't', 1, NULL)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO computers (id, name, url, token, created_at, peer_json)
+                 VALUES ('bad-json', 'bad-json', '', 't', 2, '{not json')",
+                [],
+            )
+            .unwrap();
+            // A weak/identity Ed25519 key is valid JSON with 64 hex chars, but FR-N6 refuses it.
+            conn.execute(
+                "INSERT INTO computers (id, name, url, token, created_at, peer_json)
+                 VALUES ('weak-key', 'weak-key', '', 't', 3, '{\"peer\":\"0100000000000000000000000000000000000000000000000000000000000000\"}')",
+                [],
+            )
+            .unwrap();
+            // Valid uppercase peer id is canonicalized to lowercase.
+            conn.execute(
+                "INSERT INTO computers (id, name, url, token, created_at, peer_json)
+                 VALUES ('good-a1', 'good-a1', '', 't', 4, ?1)",
+                params![format!(r#"{{"peer":"{}"}}"#, peer_a.to_string().to_uppercase())],
+            )
+            .unwrap();
+            // Pre-existing duplicate peer_a (possible before #637): must not abort migration.
+            conn.execute(
+                "INSERT INTO computers (id, name, url, token, created_at, peer_json)
+                 VALUES ('dup-a2', 'dup-a2', '', 't', 5, ?1)",
+                params![format!(r#"{{"peer":"{peer_a}"}}"#)],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO computers (id, name, url, token, created_at, peer_json)
+                 VALUES ('good-b', 'good-b', '', 't', 6, ?1)",
+                params![format!(r#"{{"peer":"{peer_b}"}}"#)],
+            )
+            .unwrap();
+        }
+
+        // Opening the store runs PEER_ID_UNIQUE_MIGRATION and all subsequent migrations without failing.
+        let store = Arc::new(Store::open(&path).unwrap());
+        let r = Registry::new(store.clone());
+
+        let row_peer_id = |id: &str| -> Option<String> {
+            store
+                .conn()
+                .query_row("SELECT peer_id FROM computers WHERE id = ?1", params![id], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(row_peer_id("url-only"), None);
+        assert_eq!(row_peer_id("bad-json"), None);
+        assert_eq!(row_peer_id("weak-key"), None);
+        assert_eq!(row_peer_id("good-a1").as_deref(), Some(peer_a.to_string().as_str()));
+        assert_eq!(row_peer_id("dup-a2"), None, "duplicate row keeps peer_id NULL so migration succeeds");
+        assert_eq!(row_peer_id("good-b").as_deref(), Some(peer_b.to_string().as_str()));
+
+        // Direct backfill call also reports the duplicate (id, peer_id) pair when run on a pre-backfill table.
+        store
+            .conn()
+            .execute("UPDATE computers SET peer_id = NULL", [])
+            .unwrap();
+        let dups = backfill_peer_ids(&store.conn()).unwrap();
+        assert_eq!(dups, vec![("dup-a2".to_string(), peer_a.to_string())]);
+
+        // Registry::insert_peer refuses both peer_a and peer_b with DUPLICATE_PEER.
+        match r.insert_peer("another-a", &PeerAddr::new(peer_a), "t") {
+            Err(ComputerError::BadRequest(m)) => assert_eq!(m, DUPLICATE_PEER),
+            other => panic!("{other:?}"),
+        }
+        match r.insert_peer("another-b", &PeerAddr::new(peer_b), "t") {
+            Err(ComputerError::BadRequest(m)) => assert_eq!(m, DUPLICATE_PEER),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -16,7 +16,7 @@ use ember_server::agents::proc::{
 };
 use ember_server::agents::{AgentAdapter, AgentKind, StartRequest};
 use ember_server::events::{AgentEvent, ApprovalDecision, SessionStatus, TurnOutcome};
-use ember_server::session::Sessions;
+use ember_server::session::{SessionError, Sessions};
 use ember_server::session_shim::{pid_alive, scan};
 use ember_server::store::Store;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -877,8 +877,12 @@ fn orphan_mid_turn(store: &Store, kind: AgentKind, cwd: &Path) -> String {
 /// state a crash leaves (the session still `running` in the store, nothing fixed up by hand) it
 /// reaches the drain. With the old order (every mid-turn session marked idle first) the drain
 /// never ran in the server binary, because it only looks at mid-turn sessions.
+///
+/// The drain runs in the background: `recover_after_restart` returns while the agent's turn is
+/// still running, so the listeners are not held back. Until the drain ends the session is
+/// guarded: a message to it is refused as busy and starts no second agent.
 #[tokio::test]
-async fn fr_s8_recovery_drains_a_running_acp_session_from_the_state_the_crash_left() {
+async fn fr_s8_recovery_drains_a_running_acp_session_in_the_background_and_guards_it() {
     let _g = LOCK.lock().await;
     std::env::remove_var("EMBER_SESSION_SHIM");
     let shims = tempfile::tempdir().unwrap();
@@ -915,9 +919,37 @@ async fn fr_s8_recovery_drains_a_running_acp_session_from_the_state_the_crash_le
         vec![Arc::new(AcpAdapter::new(acp_recovery_config()).unwrap()) as Arc<dyn AgentAdapter>],
     );
     let recovery = sessions.recover_after_restart(Some(&runtime(shims.path(), &store))).await.unwrap();
-    assert_eq!(recovery.drained, vec![id.clone()], "the interrupted turn was drained");
+    assert_eq!(recovery.draining, vec![id.clone()], "the interrupted turn is being drained");
     assert!(recovery.rejoined.is_empty(), "an ACP agent is drained, not rejoined");
-    assert_eq!(recovery.reset, 0, "the drained session ended its turn, it was not marked idle");
+    assert_eq!(recovery.reset, 0, "a draining session is not marked idle");
+    // The function returned while the turn still runs (about 4 s of ticks are left): nothing
+    // that follows it in the server start waits for the agent.
+    assert!(!ended(&store, &id), "recover_after_restart did not wait for the turn to end");
+    assert!(sessions.is_draining(&id));
+    assert_eq!(status_of(&store, &id), SessionStatus::Running, "the stored status stays true while it drains");
+    // A message to the draining session is refused as busy; it starts no second agent and
+    // stores nothing.
+    match sessions.send(&id, "are you there?").await {
+        Err(SessionError::Busy(busy)) => assert_eq!(busy, id),
+        other => panic!("a draining session must refuse a message as busy, got {other:?}"),
+    }
+    assert!(!sessions.is_live(&id).await, "no agent was started for the draining session");
+    let shims_of_session: Vec<_> = scan(shims.path()).into_iter().filter(|m| m.session == id).collect();
+    assert!(shims_of_session.iter().all(|m| m.agent_pid == pid), "no second agent: {}", shims_of_session.len());
+    assert!(
+        !events_of(&store, &id)
+            .iter()
+            .any(|e| matches!(e, AgentEvent::UserMessage { text } if text == "are you there?")),
+        "the refused message is not stored"
+    );
+    // The background drain ends on its own; the guard is released with it.
+    for _ in 0..1200 {
+        if !sessions.is_draining(&id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!sessions.is_draining(&id), "the drain ended within 60 s");
     let events = events_of(&store, &id);
     assert!(events.len() > before, "the rest of the turn was stored");
     assert!(
@@ -970,7 +1002,7 @@ async fn fr_s8_recovery_keeps_a_rejoined_session_mid_turn_and_marks_an_orphan_id
         Sessions::new(store.clone(), vec![Arc::new(ClaudeCodeAdapter::new(bin)) as Arc<dyn AgentAdapter>]);
     let recovery = sessions.recover_after_restart(Some(&runtime(shims.path(), &store))).await.unwrap();
     assert_eq!(recovery.rejoined, vec![id.clone()]);
-    assert!(recovery.drained.is_empty());
+    assert!(recovery.draining.is_empty());
     assert_eq!(recovery.reset, 1, "only the orphan is marked idle");
     assert_eq!(status_of(&store, &orphan), SessionStatus::Idle);
     assert_eq!(
@@ -1017,7 +1049,7 @@ async fn fr_s8_recovery_without_shims_marks_every_mid_turn_session_idle() {
     let sessions =
         Sessions::new(store.clone(), vec![Arc::new(ClaudeCodeAdapter::new(bin)) as Arc<dyn AgentAdapter>]);
     let recovery = sessions.recover_after_restart(None).await.unwrap();
-    assert!(recovery.rejoined.is_empty() && recovery.drained.is_empty());
+    assert!(recovery.rejoined.is_empty() && recovery.draining.is_empty());
     assert_eq!(recovery.reset, 2);
     assert_eq!(status_of(&store, &running), SessionStatus::Idle);
     assert_eq!(status_of(&store, &waiting), SessionStatus::Idle);

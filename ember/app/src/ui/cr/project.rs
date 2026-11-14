@@ -245,7 +245,7 @@ pub fn ProjectScreen() {
         (boxes, chips)
     });
     let st = remember(|| Ui::new(&boxes, &chips));
-    let window = compose_rust::runtime::current_window_size();
+    let window = crate::ui::window_size::current_window_size();
     let w = window.width_dp;
     let compact = w <= 560.0;
     let pad = if compact { SP[3] } else { SP[6] };
@@ -446,7 +446,7 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
         return;
     }
     let scroll = compose_rust::ui::remember_scroll_state();
-    let viewport = content_width(compose_rust::runtime::current_window_size().width_dp, SP[6]);
+    let viewport = content_width(crate::ui::window_size::current_window_size().width_dp, SP[6]);
     let (offset, max) = (scroll.offset(), scroll.max_offset());
     let arrows = strip_arrows_visible(max);
     cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(64.0)).content(|| {
@@ -1113,7 +1113,7 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
         // style rows at 390). When the window has not reported a size (390 can read 0x0) the
         // shared formula falls back to 240 dp. v0.0.7: #479 fixed (`with_report_size`);
         // fallback kept until checked on a display (the first composition still reads 0x0).
-        let new_window = compose_rust::runtime::current_window_size();
+        let new_window = crate::ui::window_size::current_window_size();
         let new_body_height =
             super::components::sheet_body_max_height(new_window.width_dp, new_window.height_dp, false, 60.0).min(900.0);
         EmberSheet("새 프로젝트", st.new_project.get(), request_close.clone(), None, || {
@@ -1450,7 +1450,7 @@ fn SettingsSheet(
     let errors = validate_settings(&d, &b.id);
     let patch = build_patch(&server, &d);
     let can_save = SETTINGS_SAVE_AVAILABLE && errors.is_empty() && !patch.is_empty() && !saving.get();
-    let window = compose_rust::runtime::current_window_size();
+    let window = crate::ui::window_size::current_window_size();
     let body_height = super::components::sheet_body_max_height(window.width_dp, window.height_dp, false, 60.0).min(900.0);
     // 취소, X and the backdrop: nothing while saving, a question when the draft has changes.
     let guard = SettingsGuard::new(saving.get(), patch.is_empty());

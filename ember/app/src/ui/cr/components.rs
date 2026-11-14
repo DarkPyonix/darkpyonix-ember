@@ -997,7 +997,7 @@ pub fn EmberSheetSized(
             content();
         });
     };
-    let window = compose_rust::runtime::current_window_size();
+    let window = crate::ui::window_size::current_window_size();
     let presentation = sheet_presentation(window.width_dp, monitor);
     if presentation == SheetPresentation::Bottom {
         // TODO(compose-rust#445): expose a maximum height constraint so short sheets can wrap

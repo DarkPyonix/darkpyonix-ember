@@ -588,10 +588,10 @@ pub fn Placeholder(menu: NavMenu) {
 
 /// The layout the window's width asks for. `current_window_size` is read through the
 /// composition's own state, so the shell recomposes when the renderer reports a new size
-/// class; `compose_rust::window_size()` is a plain read that never wakes anything, and reads
-/// zero (so: bottom tabs) until the first report.
+/// class. Before the first report a desktop window reads the size it was opened with, not
+/// zero, so it never starts in the bottom tabs (FR-L10.3).
 pub fn current_mode(collapsed: bool) -> ShellMode {
-    nav_mode(compose_rust::runtime::current_window_size().width_dp, collapsed)
+    nav_mode(crate::ui::window_size::current_window_size().width_dp, collapsed)
 }
 
 /// The root layout: navigation around the content area.
@@ -699,7 +699,7 @@ pub fn shell() {
                         mode == ShellMode::Rail,
                         active,
                         counts,
-                        move || c.set(toggled_collapse(compose_rust::window_size().width_dp, c.get_untracked())),
+                        move || c.set(toggled_collapse(crate::ui::window_size::window_size_untracked().width_dp, c.get_untracked())),
                         move || s.set(true),
                     );
                     content();
@@ -792,6 +792,11 @@ pub fn launch_parts(pref: ThemePref) -> (compose_rust::LaunchBuilder, fn()) {
     shared_ui().theme_pref.set(pref);
     let scheme = if pref == ThemePref::Dark { ColorScheme::Dark } else { ColorScheme::Light };
     let (w, h) = requested_size();
+    // Until the renderer reports the window's size, a desktop window lays out at this size, not
+    // at the phone layout (FR-L10.3). Android's window is the screen, so it records nothing.
+    if !cfg!(target_os = "android") {
+        crate::ui::window_size::record_opened(f32::from(w), f32::from(h));
+    }
     // `EMBER_CR_ROUTE` opens a screen directly, for review captures.
     let ui = shared_ui();
     let content: fn() = match std::env::var("EMBER_CR_ROUTE").ok().as_deref() {
@@ -924,6 +929,44 @@ mod tests {
         assert!(report(1440.0, WindowSizeClass::Expanded).contains("Sidebar"));
         assert!(report(1024.0, WindowSizeClass::Medium).contains("Rail"));
         assert!(report(390.0, WindowSizeClass::Compact).contains("BottomTabs"));
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l10_3_a_desktop_window_starts_at_its_opened_size_not_the_bottom_tabs() {
+        use compose_rust::protocol::{decode_batch, HostEvent};
+        use compose_rust::{EventPayload, Host, Recomposer, WindowHeightClass, WindowSizeClass};
+        compose_rust::window::reset_window_size();
+        // What `launch_parts` records for `EMBER_CR_SIZE=1440x900`.
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let mut host = Host::new(|| Box::new(Recomposer::new(mode_probe)));
+        let first = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        // Nothing reported yet: the sidebar of the opened 1440 window, not the phone layout.
+        assert!(has_text(&first, "Sidebar"));
+        assert!(!has_text(&first, "BottomTabs"));
+        let mut report = |width: f32, height: f32, class: WindowSizeClass| {
+            let event = HostEvent {
+                node_id: 0,
+                handler_id: 0,
+                payload: EventPayload::WindowSizeChanged {
+                    width_dp: width,
+                    height_dp: height,
+                    class,
+                    height_class: WindowHeightClass::Medium,
+                    safe_area_top: 0.0,
+                    safe_area_leading: 0.0,
+                    safe_area_trailing: 0.0,
+                },
+            };
+            let (bytes, _) = host.dispatch(event).expect("dispatch");
+            decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")).collect::<String>()
+        };
+        // A report still moves the layout.
+        assert!(report(390.0, 844.0, WindowSizeClass::Compact).contains("BottomTabs"));
+        assert!(report(1440.0, 900.0, WindowSizeClass::Expanded).contains("Sidebar"));
+        // A 0 x 0 report after a real one keeps the last real size.
+        assert!(!report(0.0, 0.0, WindowSizeClass::Compact).contains("BottomTabs"));
+        crate::ui::window_size::set_opened_for_test(None);
         compose_rust::window::reset_window_size();
     }
 

@@ -366,10 +366,44 @@ fn read_config_bytes(path: &Path) -> Result<Option<Vec<u8>>, &'static str> {
 /// Whether `bytes` contain [`CHANNEL_MCP_SERVER`] anywhere, ignoring ASCII case. Used for the
 /// configuration files of Codex (TOML) and Antigravity (JSON that may hold comments and trailing
 /// commas): a plain text search needs no parser and fails closed, since a comment that mentions
-/// the name counts as taken.
+/// the name counts as taken. The text is searched as written and again with its ASCII escapes
+/// decoded ([`unescape_ascii`]), because a quoted key may spell a character as an escape.
 fn mentions_channel_server(bytes: &[u8]) -> bool {
     let needle = CHANNEL_MCP_SERVER.as_bytes();
-    bytes.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
+    let found = |text: &[u8]| text.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle));
+    found(bytes) || found(&unescape_ascii(bytes))
+}
+
+/// `bytes` with every `\uXXXX`, `\UXXXXXXXX` and `\xHH` escape of an ASCII character replaced by
+/// that character. TOML and JSON accept such an escape in a quoted key, so
+/// `"ember-channels"` is the key `ember-channels`. Everything else is kept as it is, also a
+/// sequence that is no escape where it stands (a literal string, a path): decoding too much can
+/// only report a name that is not there, which fails closed.
+fn unescape_ascii(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            let digits = match bytes[i + 1] {
+                b'u' => 4,
+                b'U' => 8,
+                b'x' => 2,
+                _ => 0,
+            };
+            let end = i + 2 + digits;
+            if digits > 0 && end <= bytes.len() {
+                let code = std::str::from_utf8(&bytes[i + 2..end]).ok().and_then(|hex| u32::from_str_radix(hex, 16).ok());
+                if let Some(c) = code.filter(|c| *c < 0x80) {
+                    out.push(c as u8);
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
 }
 
 /// The first file of `files` that mentions the server name or cannot be checked decides.
@@ -2200,6 +2234,30 @@ mod channel_tool_tests {
             NameCheck::Taken { kind: "system config.toml" },
             "a comment that mentions the name counts: fail closed"
         );
+    }
+
+    /// A quoted key may spell a character as an escape: `"ember\u002dchannels"` is the key
+    /// `ember-channels` for TOML and for JSON, so the text search decodes ASCII escapes.
+    #[test]
+    fn fr_t12_name_check_sees_a_name_written_with_an_escape() {
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        for key in ["ember\\u002dchannels", "ember\\U0000002Dchannels", "\\x65mber-channels", "ember\\u002Dchannel\\u0073"] {
+            put(&cwd.join(".codex/config.toml"), &format!("[mcp_servers.\"{key}\"]\ncommand = \"y\"\n"));
+            assert_eq!(
+                codex_channel_name_taken(&cwd, None, &[]),
+                NameCheck::Taken { kind: "project .codex/config.toml" },
+                "{key}"
+            );
+        }
+        std::fs::remove_file(cwd.join(".codex/config.toml")).unwrap();
+        let home = d.path().join("home");
+        put(&home.join(".gemini/config/mcp_config.json"), &with_server("ember\\u002dchannels"));
+        assert_eq!(agy_channel_name_taken(&cwd, Some(home.as_path())), NameCheck::Taken { kind: "user mcp_config.json" });
+        // A Windows path in a literal string is no escape and no name.
+        assert!(!mentions_channel_server(b"notify = 'C:\\Users\\x\\update.exe'\n"));
+        assert_eq!(unescape_ascii(b"a\\u00e9\\u002d\\x4"), b"a\\u00e9-\\x4".to_vec());
     }
 
     #[cfg(unix)]

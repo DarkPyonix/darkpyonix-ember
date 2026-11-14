@@ -156,6 +156,8 @@ pub struct SharedUi {
     /// The claim prompt the user dismissed (`owner_claim::prompt_key`); a new attempt, a new
     /// pending claim or a 403 `owner_required` opens the sheet again.
     pub owner_claim_dismissed: MutableState<Option<String>>,
+    /// The update check (NFR-R2, #880), written by `self_update` from a worker.
+    pub self_update: MutableState<crate::self_update::UpdateState>,
     mirrors: Arc<OnceLock<DioxusMirrors>>,
 }
 
@@ -179,6 +181,7 @@ impl SharedUi {
             standalone_editor: mutable_state_of(false),
             owner_claim: mutable_state_of(Default::default()),
             owner_claim_dismissed: mutable_state_of(None),
+            self_update: mutable_state_of(crate::self_update::UpdateState::NotInstalled),
             mirrors: Arc::new(OnceLock::new()),
         }
     }

@@ -11,6 +11,7 @@
 //! - [`bridge`]: client changes → UI signals.
 //! - [`model`]: pure view models (tested).
 //! - [`owner_claim`]: the owner-presence claim at start (FR-S12, #842).
+//! - [`self_update`]: the Velopack startup hook and the update check (NFR-R2, #880).
 //! - [`ui`]: the screens.
 
 pub mod android;
@@ -24,6 +25,7 @@ pub mod ide;
 pub mod model;
 pub mod owner_claim;
 pub mod prefs;
+pub mod self_update;
 pub mod server;
 pub mod services;
 pub mod terminal_input;
@@ -226,6 +228,7 @@ fn open_window() {
         // shell. `EMBER_CR_SHELL` still overrides the initial theme preference when set.
         bridge::start_shared();
         start_owner_claim();
+        start_self_update();
         let pref = ui::cr::shell::requested().unwrap_or_else(|| services().initial_prefs.theme);
         ui::cr::shell::launch(pref);
     }
@@ -246,6 +249,18 @@ fn start_owner_claim() {
         let hooks = Arc::new(AppClaimHooks { api: api.clone(), server: s.server.clone() });
         owner_claim::install(owner_claim::spawn(s.rt.handle(), endpoint, hooks, owner_claim::Backoff::default()));
     }
+}
+
+/// The update check (NFR-R2, #880): once at start of the main shell process, on the
+/// runtime's blocking pool. The separate editor window (`--editor`) never checks. A build
+/// Velopack did not install shows that in 설정 and checks nothing.
+fn start_self_update() {
+    let feed = self_update::feed_from_env();
+    let backend = self_update::open_backend(&feed);
+    tracing::info!(?feed, installed = backend.is_some(), "self-update");
+    self_update::start(services().rt.handle(), backend, |state| {
+        ui::coexist::shared_ui().self_update.set(state.clone());
+    });
 }
 
 /// The claim's key goes to both HTTP clients of the app; its state goes to the screens.

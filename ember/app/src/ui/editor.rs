@@ -799,6 +799,15 @@ pub fn editor_page_size_style() -> &'static str {
     "width:100vw; height:100vh;"
 }
 
+/// The padding of the page's error message, which is drawn with no top bar above it. Under
+/// FullSize the window controls float over the page's top, so the message starts below the
+/// title strip the window reports (`strip_top`, 0 until the first report); otherwise the native
+/// title bar is outside the page and only the message's own 20px is kept.
+pub fn editor_error_padding(full_size: bool, strip_top: f32) -> String {
+    let top = if full_size { 20.0 + strip_top.max(0.0) } else { 20.0 };
+    format!("padding:20px; padding-top:{top}px;")
+}
+
 /// The top bar's left padding past the window controls: under FullSize the traffic lights float
 /// over its left end, so it starts after their footprint; otherwise nothing is added.
 pub fn editor_strip_padding(full_size: bool, leading: f32) -> String {

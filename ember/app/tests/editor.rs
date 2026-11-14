@@ -492,7 +492,7 @@ mod status {
 
 // FR-L31 (D38): the window opens FullSize on macOS, the top bar is the title strip.
 mod title_strip {
-    use ember_app::ui::editor::{editor_page_size_style, editor_strip_padding};
+    use ember_app::ui::editor::{editor_error_padding, editor_page_size_style, editor_strip_padding};
 
     // #301, #320: the page is the viewport on every system, with no title bar height taken out.
     #[test]
@@ -511,6 +511,13 @@ mod title_strip {
         assert!(compact.contains("top:52px;bottom:var(--sbh);"), "the left tool window overlay does not end at the status bar");
     }
 
+    // #301: the error message clears the title strip the window reports, not a fixed height.
+    #[test]
+    fn fr_l31_the_error_message_starts_below_the_reported_title_strip() {
+        assert_eq!(editor_error_padding(true, 28.0), "padding:20px; padding-top:48px;");
+        assert_eq!(editor_error_padding(true, 0.0), "padding:20px; padding-top:20px;");
+        assert_eq!(editor_error_padding(false, 28.0), "padding:20px; padding-top:20px;");
+    }
 
     #[test]
     fn fr_l31_top_bar_clears_the_traffic_lights_only_under_full_size() {

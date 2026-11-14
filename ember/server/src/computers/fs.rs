@@ -60,8 +60,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::extract::{DefaultBodyLimit, Path, Request, State};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -70,6 +71,7 @@ use ember_node::proto::{
     GlobRequest, GrepRequest, MkdirRequest, PathRequest, PwriteRequest, ReadRequest, RemoveRequest, RenameRequest,
     SetAttrRequest, SymlinkRequest, WriteRequest,
 };
+use http_body_util::BodyExt;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
@@ -83,6 +85,12 @@ pub const MAX_BODY: usize = 1024 * 1024;
 /// Largest request body the content write routes (`write`, `pwrite`, `setattr`) accept. The
 /// namespace routes carry only paths and keep [`MAX_BODY`].
 pub const MAX_WRITE_BODY: usize = 24 * 1024 * 1024;
+
+/// Most additional bytes drained from the request stream after [`MAX_BODY`] / [`MAX_WRITE_BODY`]
+/// is exceeded, so a client sending an oversized body on a single HTTP/1.1 connection receives the
+/// 413 response cleanly instead of racing a TCP `RST` while still writing.
+const OVER_LIMIT_DRAIN_CAP: usize = 64 * 1024 * 1024;
+const OVER_LIMIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The operations relayed with [`MAX_BODY`].
 const READ_OPS: &[&str] = &["stat", "lstat", "read", "list", "readlink", "glob", "grep"];
@@ -127,23 +135,25 @@ pub fn router_with(computers: Arc<Computers>, limits: FsLimits) -> Router {
         timeout: limits.timeout,
     };
     // The static write paths win over `{op}` in axum's router, so each body limit applies only
-    // to its own operations.
+    // to its own operations. `DefaultBodyLimit::disable()` lets `read_json_capped` read up to each
+    // route's limit and drain the remainder of a bounded oversized upload before answering 413, so
+    // hyper does not drop the unread request body mid-write and reset the client's socket.
     let writes = Router::new()
         .route("/api/computers/{id}/fs/write", post(write_op))
         .route("/api/computers/{id}/fs/pwrite", post(pwrite_op))
         .route("/api/computers/{id}/fs/setattr", post(setattr_op))
-        .layer(DefaultBodyLimit::max(MAX_WRITE_BODY))
+        .layer(DefaultBodyLimit::disable())
         .with_state(state.clone());
     let namespace = Router::new()
         .route("/api/computers/{id}/fs/mkdir", post(mkdir_op))
         .route("/api/computers/{id}/fs/remove", post(remove_op))
         .route("/api/computers/{id}/fs/rename", post(rename_op))
         .route("/api/computers/{id}/fs/symlink", post(symlink_op))
-        .layer(DefaultBodyLimit::max(MAX_BODY))
+        .layer(DefaultBodyLimit::disable())
         .with_state(state.clone());
     Router::new()
         .route("/api/computers/{id}/fs/{op}", post(relay))
-        .layer(DefaultBodyLimit::max(MAX_BODY))
+        .layer(DefaultBodyLimit::disable())
         .with_state(state)
         .merge(writes)
         .merge(namespace)
@@ -196,39 +206,118 @@ fn no_content(r: Result<(), ClientError>) -> Response {
     }
 }
 
-async fn write_op(State(r): State<Relay>, Path(id): Path<String>, Json(v): Json<Value>) -> Response {
-    run(r, id, "write", v).await
+async fn drain_discard(mut body: Body, max_drain: usize) {
+    let mut drained = 0usize;
+    let _ = tokio::time::timeout(OVER_LIMIT_DRAIN_TIMEOUT, async {
+        while let Some(Ok(frame)) = body.frame().await {
+            if let Ok(data) = frame.into_data() {
+                drained = drained.saturating_add(data.len());
+                if drained >= max_drain {
+                    break;
+                }
+            }
+        }
+    })
+    .await;
 }
 
-async fn pwrite_op(State(r): State<Relay>, Path(id): Path<String>, Json(v): Json<Value>) -> Response {
-    run(r, id, "pwrite", v).await
+/// Read and parse a JSON request body bounded by `max_bytes`. When the body exceeds `max_bytes`,
+/// drain and discard the remaining frames (up to [`OVER_LIMIT_DRAIN_CAP`]) without buffering them
+/// before answering `413 Payload Too Large` with `Connection: close`, so an HTTP/1.1 client that
+/// is still writing the request body reads `413` cleanly instead of seeing `ECONNRESET`.
+async fn read_json_capped(req: Request, max_bytes: usize) -> Result<Value, Response> {
+    let declared_len = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    let (_, mut body) = req.into_parts();
+    if let Some(len) = declared_len {
+        if len > max_bytes as u64 {
+            if len <= (max_bytes + OVER_LIMIT_DRAIN_CAP) as u64 {
+                drain_discard(body, max_bytes + OVER_LIMIT_DRAIN_CAP).await;
+            }
+            let mut res = plain(StatusCode::PAYLOAD_TOO_LARGE, "request body too large".into());
+            res.headers_mut().insert(header::CONNECTION, header::HeaderValue::from_static("close"));
+            return Err(res);
+        }
+    }
+
+    let mut buf = Vec::with_capacity(declared_len.unwrap_or(0).min(max_bytes as u64) as usize);
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|e| plain(StatusCode::BAD_REQUEST, format!("bad request body: {e}")))?;
+        if let Ok(data) = frame.into_data() {
+            if buf.len().saturating_add(data.len()) > max_bytes {
+                drop(buf);
+                drain_discard(body, OVER_LIMIT_DRAIN_CAP).await;
+                let mut res = plain(StatusCode::PAYLOAD_TOO_LARGE, "request body too large".into());
+                res.headers_mut().insert(header::CONNECTION, header::HeaderValue::from_static("close"));
+                return Err(res);
+            }
+            buf.extend_from_slice(&data);
+        }
+    }
+    serde_json::from_slice(&buf).map_err(|e| plain(StatusCode::BAD_REQUEST, format!("bad request body: {e}")))
 }
 
-async fn setattr_op(State(r): State<Relay>, Path(id): Path<String>, Json(v): Json<Value>) -> Response {
-    run(r, id, "setattr", v).await
+async fn write_op(State(r): State<Relay>, Path(id): Path<String>, req: Request) -> Response {
+    match read_json_capped(req, MAX_WRITE_BODY).await {
+        Ok(v) => run(r, id, "write", v).await,
+        Err(res) => res,
+    }
 }
 
-async fn mkdir_op(State(r): State<Relay>, Path(id): Path<String>, Json(v): Json<Value>) -> Response {
-    run(r, id, "mkdir", v).await
+async fn pwrite_op(State(r): State<Relay>, Path(id): Path<String>, req: Request) -> Response {
+    match read_json_capped(req, MAX_WRITE_BODY).await {
+        Ok(v) => run(r, id, "pwrite", v).await,
+        Err(res) => res,
+    }
 }
 
-async fn remove_op(State(r): State<Relay>, Path(id): Path<String>, Json(v): Json<Value>) -> Response {
-    run(r, id, "remove", v).await
+async fn setattr_op(State(r): State<Relay>, Path(id): Path<String>, req: Request) -> Response {
+    match read_json_capped(req, MAX_WRITE_BODY).await {
+        Ok(v) => run(r, id, "setattr", v).await,
+        Err(res) => res,
+    }
 }
 
-async fn rename_op(State(r): State<Relay>, Path(id): Path<String>, Json(v): Json<Value>) -> Response {
-    run(r, id, "rename", v).await
+async fn mkdir_op(State(r): State<Relay>, Path(id): Path<String>, req: Request) -> Response {
+    match read_json_capped(req, MAX_BODY).await {
+        Ok(v) => run(r, id, "mkdir", v).await,
+        Err(res) => res,
+    }
 }
 
-async fn symlink_op(State(r): State<Relay>, Path(id): Path<String>, Json(v): Json<Value>) -> Response {
-    run(r, id, "symlink", v).await
+async fn remove_op(State(r): State<Relay>, Path(id): Path<String>, req: Request) -> Response {
+    match read_json_capped(req, MAX_BODY).await {
+        Ok(v) => run(r, id, "remove", v).await,
+        Err(res) => res,
+    }
+}
+
+async fn rename_op(State(r): State<Relay>, Path(id): Path<String>, req: Request) -> Response {
+    match read_json_capped(req, MAX_BODY).await {
+        Ok(v) => run(r, id, "rename", v).await,
+        Err(res) => res,
+    }
+}
+
+async fn symlink_op(State(r): State<Relay>, Path(id): Path<String>, req: Request) -> Response {
+    match read_json_capped(req, MAX_BODY).await {
+        Ok(v) => run(r, id, "symlink", v).await,
+        Err(res) => res,
+    }
 }
 
 async fn relay(
     State(r): State<Relay>,
     Path((id, op)): Path<(String, String)>,
-    Json(v): Json<Value>,
+    req: Request,
 ) -> Response {
+    let v = match read_json_capped(req, MAX_BODY).await {
+        Ok(v) => v,
+        Err(res) => return res,
+    };
     // Only the read-only operations go through `{op}`; check the name before touching the
     // computer. A write or namespace op reaching here (it cannot, its static route wins) is
     // refused too.

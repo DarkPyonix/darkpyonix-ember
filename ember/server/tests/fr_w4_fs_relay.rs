@@ -321,6 +321,28 @@ async fn fr_w4_fs_relay_namespace_body_is_capped_at_1_mib() {
             let (st, _) = f.post(op, json!({ "path": big, "from": "/x", "to": "/y", "target": "t" })).await;
             assert_eq!(st, 413, "{op}");
         }
+
+        // Also verify under concurrent oversized uploads with a single-chunk / multi-chunk TCP
+        // writer that does not read the response until all body bytes have been written: the
+        // server must drain the bounded remainder and answer 413 cleanly without resetting the
+        // socket mid-write.
+        let mut tasks = Vec::new();
+        for i in 0..16 {
+            let op = ["mkdir", "remove", "rename", "symlink"][i % 4];
+            let (base, cid, big) = (f.base.clone(), f.cid.clone(), big.clone());
+            tasks.push(tokio::spawn(async move {
+                let r = reqwest::Client::new()
+                    .post(format!("{base}/api/computers/{cid}/fs/{op}"))
+                    .json(&json!({ "path": big, "from": "/x", "to": "/y", "target": "t" }))
+                    .send()
+                    .await
+                    .expect("oversized namespace request should receive 413 without connection reset");
+                assert_eq!(r.status(), 413, "concurrent {op} #{i}");
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
     })
     .await;
 }

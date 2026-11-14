@@ -881,7 +881,7 @@ pub mod page {
             div { class: "ed-menu", role: "dialog", "aria-label": "명령 팔레트",
                 style: "position:fixed; grid-row:1; grid-column:1; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);",
                 div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
-                    {icon("search")}
+                    {icon_tone("search", 16, "muted")}
                     input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
                         "aria-label": "{crate::ui::palette::search_label(mode)}", placeholder: "{hint_text}", value: "{raw_text}", autofocus: true,
                         oninput: move |event| {
@@ -1102,7 +1102,7 @@ pub mod page {
         rsx! {
             div { class: "ed-tsub", role: "search", "aria-label": "문서에서 찾기", style: "flex-wrap:wrap;",
                 div { class: "ed-find", style: "width:220px; height:28px;",
-                    {icon("search")}
+                    {icon_tone("search", 16, "muted")}
                     input {
                         key: "find-query-{focus_seq}",
                         style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
@@ -1556,8 +1556,7 @@ pub mod page {
     }
 
     /// A mockup icon as an image: the HTML path draws SVG through `img`, which cannot take
-    /// `currentColor`, so the stroke is the text colour of the light palette.
-    // TODO(editor-redesign step 4): tint per theme once the dark palette is switched on.
+    /// `currentColor`, so the stroke is the palette's `--text-2`, the colour of an icon button.
     pub(crate) fn icon(name: &str) -> Element {
         icon_px(name, 16)
     }
@@ -1566,6 +1565,16 @@ pub mod page {
     pub(crate) fn icon_px(name: &str, px: u32) -> Element {
         let dark = if super::ICON_DARK.with(|d| d.get()) { "@dark" } else { "" };
         rsx! { img { class: "i", src: "icon:{name}{dark}", width: "{px}", height: "{px}" } }
+    }
+
+    /// A mockup icon in the colour editor.css gives its place (`editor_icons::icon_stroke`):
+    /// `muted`, `green` or `text`. An empty tone is the plain icon.
+    pub(crate) fn icon_tone(name: &str, px: u32, tone: &str) -> Element {
+        if tone.is_empty() {
+            return icon_px(name, px);
+        }
+        let dark = if super::ICON_DARK.with(|d| d.get()) { "@dark" } else { "" };
+        rsx! { img { class: "i", src: "icon:{name}.{tone}{dark}", width: "{px}", height: "{px}" } }
     }
 
     fn top_bar(s: &Shared, branch: &str, keymap: Keymap, leading: f32) -> Element {
@@ -1587,17 +1596,17 @@ pub mod page {
         rsx! {
             header { class: "ed-top", style: "{strip_pad}",
                 img { class: "logo logo-img", src: "icon:mark", width: "28", height: "28", alt: "Ember" }
-                button { class: "ed-pj", title: "{project_tip}", "aria-label": "{project_tip}", onclick: move |_| stripes.write().toggle(ToolWindow::Project), "{name}" {icon_px("chev-dn", 12)} }
-                button { class: "ed-pj", title: "브랜치", "aria-label": "브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon("git")} "{branch}" {icon_px("chev-dn", 12)} }
+                button { class: "ed-pj", title: "{project_tip}", "aria-label": "{project_tip}", onclick: move |_| stripes.write().toggle(ToolWindow::Project), "{name}" {icon_tone("chev-dn", 12, "muted")} }
+                button { class: "ed-pj", title: "브랜치", "aria-label": "브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon_tone("git", 16, "text")} "{branch}" {icon_tone("chev-dn", 12, "muted")} }
                 div { class: "spacer" }
                 button { class: "ed-find", title: "{find}", "aria-label": "{find}", onclick: move |_| run_action(&find_s, Action::Find),
-                    {icon("search")}
+                    {icon_tone("search", 16, "muted")}
                     span { class: "hide-md", "{crate::ui::editor::FIND_PILL_LABEL}" }
                     kbd { class: "ed-sc", "{find_hint}" }
                 }
                 div { class: "ed-runcfg",
-                    button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| crate::ui::editor_tasks::view::open(&runcfg_s), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
-                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| { if let Some(blocked) = crate::ui::workspace_trust::view::blocked(&run_s, crate::ui::workspace_trust::Restricted::Run) { notice(blocked); } else { crate::ui::editor_tasks::view::run_default(&run_s); } }, {icon("play")} }
+                    button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| crate::ui::editor_tasks::view::open(&runcfg_s), {icon_tone("play", 16, "text")} "실행 구성" {icon_tone("chev-dn", 12, "muted")} }
+                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| { if let Some(blocked) = crate::ui::workspace_trust::view::blocked(&run_s, crate::ui::workspace_trust::Restricted::Run) { notice(blocked); } else { crate::ui::editor_tasks::view::run_default(&run_s); } }, {icon_tone("play", 16, "green")} }
                     button { class: "ed-ib", title: "중지", "aria-label": "중지", onclick: move |_| crate::ui::editor_tasks::view::stop(&stop_s), {icon("pause")} }
                 }
                 // The mockup's order (`editor.js:75-76`): run configuration, run, stop, ask agent, theme.
@@ -1712,7 +1721,7 @@ pub mod page {
                                         keymap_sig.set(k);
                                         crate::services::services().ui.update_prefs(|p| p.keymap = k);
                                     },
-                                        span { class: "ed-mchk", if selected { {icon_px("check", 14)} } }
+                                        span { class: "ed-mchk", if selected { {icon_tone("check", 14, "text")} } }
                                         span { class: "spacer", "{k.label()}" }
                                         span { class: "ed-msc", "{hint}" }
                                     }
@@ -1796,7 +1805,7 @@ pub mod page {
                 if w == ToolWindow::Notifications { crate::ui::editor_notifications::view::toggle_center(&center_s); }
                 else if w.side() == Side::Right { notice(crate::ui::editor_actions::tool_window_notice(w)); } else { stripes.write().toggle(w); }
                 if matches!(w, ToolWindow::Commit | ToolWindow::Git) && stripes.read().is_selected(w) { scm_s.scm.refresh(); }
-            }, {icon(icon_name(w))} }
+            }, {icon_tone(icon_name(w), 16, if selected { "text" } else { "" })} }
         }
     }
 
@@ -1980,7 +1989,7 @@ pub mod page {
                     let icon_name = crate::ui::editor::tree_prompt_icon(&other);
                     rsx! {
                         div { class: "ed-tn", style: "--d:0;",
-                            {icon_px(icon_name, 15)}
+                            {icon_tone(icon_name, 15, "muted")}
                             {field}
                         }
                     }
@@ -2330,7 +2339,7 @@ pub mod page {
                                 tree_drag_src.set(None);
                             }
                         },
-                        {icon_px("chev-dn", 12)} {icon_px("folder", 15)} span { class: "ellipsis", b { "{root_name}" } }
+                        {icon_tone("chev-dn", 12, "muted")} {icon_tone("folder", 15, "muted")} span { class: "ellipsis", b { "{root_name}" } }
                     }
                     if let Some(badge) = clip_badge {
                         div { class: "ed-tn", style: "--d:0; padding:0 var(--sp2); background:var(--surface-2);",
@@ -2498,8 +2507,8 @@ pub mod page {
                                     crate::ui::editor_tree_menu::open(crate::ui::editor_tree_menu::TreeMenuAt::Pointer { x: at.x, y: at.y });
                                     *ctx_revision.write() += 1;
                                 },
-                                if is_dir { if row.open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} } } else { span { class: "chev-sp" } }
-                                if is_dir { {icon_px("folder", 15)} } else { {icon_px("file", 15)} }
+                                if is_dir { if row.open { {icon_tone("chev-dn", 12, "muted")} } else { {icon_tone("chev", 12, "muted")} } } else { span { class: "chev-sp" } }
+                                if is_dir { {icon_tone("folder", 15, "muted")} } else { {icon_tone("file", 15, "muted")} }
                                 if rename_at == Some(row_idx) {
                                     {prompt_inline.take()}
                                 } else {
@@ -2851,7 +2860,7 @@ pub mod page {
         let last = segments.len().saturating_sub(1);
         rsx! { div { class: "ed-crumbs", role: "navigation", "aria-label": "경로",
             for (i, seg) in segments.iter().enumerate() {
-                if i > 0 { {icon_px("chev", 11)} }
+                if i > 0 { {icon_tone("chev", 11, "muted")} }
                 span { key: "{i}", class: if i == last { "cur" } else { "" }, "{seg}" }
             }
             {crate::ui::editor_language::view::symbol_crumbs(s, path)}
@@ -2998,7 +3007,7 @@ pub mod page {
                                             bump();
                                         }
                                     },
-                                    {icon_px("code", 14)} "{label}"
+                                    {icon_tone("code", 14, if on { "text" } else { "" })} "{label}"
                                     if on {
                                         span { class: "ed-ib", role: "button", title: "이름 바꾸기", "aria-label": "이름 바꾸기: {label}", tabindex: "-1",
                                             onclick: move |event| { event.stop_propagation(); terms::begin_rename(&pen); bump(); },

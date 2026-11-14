@@ -61,14 +61,28 @@ pub(crate) fn token(name: &str, dark: bool) -> Option<&'static str> {
     None
 }
 
-/// The shape and the stroke token of the icon `icon`. `<name>-w` is the icon on the ink pill (the
-/// active tab), which is `--ink-text` in both palettes; every other icon is `--text-2`, the colour
-/// the mockup gives an icon button (`.ed-ib`, `.ed-sb`, `.ed-tab`, `.ed-status`).
+/// The shape and the stroke token of the icon `icon`, written `<name>` or `<name>.<tone>`. The
+/// mockup strokes an icon in `currentColor`, so an icon takes the colour editor.css gives its place:
+/// * no tone: `--text-2`, an icon button, a tab or a status item (`.ed-ib`, `.ed-sb`, `.ed-tab`,
+///   `.ed-status`);
+/// * `muted`: `--muted`, a tree row's icons, a breadcrumb chevron, a pill's chevron and the find
+///   pill (`.ed-tn .chev`, `.ed-tn svg.i:not(.chev)`, `.ed-crumbs`, `.ed-pj .chev`, `.ed-find`);
+/// * `green`: `--c-green`, the run button (`.ed-ib.run`);
+/// * `text`: `--text`, a selected stripe button, the selected terminal tab, a menu item and a
+///   project pill (`.ed-sb.on`, `.ed-tsub>button.on`, `.ed-menu button`, `.ed-pj`);
+/// * `<name>-w`: `--ink-text`, the icon on the ink pill of the active tab (`.ed-tab.on`).
 pub(crate) fn icon_stroke(icon: &str) -> (&str, &'static str) {
-    match icon.strip_suffix("-w") {
-        Some(shape) => (shape, "--ink-text"),
-        None => (icon, "--text-2"),
+    let (name, tone) = icon.split_once('.').unwrap_or((icon, ""));
+    if let Some(shape) = name.strip_suffix("-w") {
+        return (shape, "--ink-text");
     }
+    let token = match tone {
+        "muted" => "--muted",
+        "green" => "--c-green",
+        "text" => "--text",
+        _ => "--text-2",
+    };
+    (name, token)
 }
 
 /// The colour of the token `name` in the palette asked for. A token the dark palette does not
@@ -92,8 +106,8 @@ fn svg(name: &str, color: &str) -> String {
     )
 }
 
-/// Answers the `src` of an icon `img` (`icon:<name>`, `icon:<name>@dark` in the dark palette) with
-/// an SVG asset registered with the renderer, one per icon and palette. The HTML path draws images
+/// Answers the `src` of an icon `img` (`icon:<name>` or `icon:<name>.<tone>`, with `@dark` after it
+/// in the dark palette) with an SVG asset registered with the renderer, one per icon, tone and palette. The HTML path draws images
 /// only through a resolver.
 #[derive(Default)]
 pub struct IconResolver {
@@ -155,6 +169,78 @@ mod tests {
         assert!(svg("file", stroke("--text-2", false)).contains("stroke='#56534d'"));
         assert!(svg("file", stroke("--ink-text", true)).contains("stroke='#151514'"));
         assert!(svg("chev-dn", stroke("--text-2", true)).contains("rotate(90 12 12)"));
+    }
+
+    // #477: an icon takes the colour editor.css gives its place, since an image has no currentColor.
+    #[test]
+    fn fr_l31_an_icon_tone_is_the_token_editor_css_gives_its_place() {
+        assert_eq!(icon_stroke("folder.muted"), ("folder", "--muted"));
+        assert_eq!(icon_stroke("chev-dn.muted"), ("chev-dn", "--muted"));
+        assert_eq!(icon_stroke("play.green"), ("play", "--c-green"));
+        assert_eq!(icon_stroke("folder.text"), ("folder", "--text"));
+        assert_eq!(icon_stroke("file-w.muted"), ("file", "--ink-text"));
+        assert_eq!(icon_stroke("file.unknown"), ("file", "--text-2"));
+        // The rules the tones stand for are the mockup's.
+        let css = include_str!("../../assets/editor/editor.css");
+        for rule in [
+            ".ed-ib.run{color:var(--c-green)}",
+            ".ed-pj .chev{transform:rotate(90deg);width:12px!important;height:12px!important;color:var(--muted)}",
+            ".ed-tn svg.i:not(.chev){color:var(--muted);width:15px;height:15px}",
+            ".ed-sb.on{background:var(--sel);color:var(--text)}",
+            ".ed-tsub>button.on{background:var(--surface-2);color:var(--text)}",
+        ] {
+            assert!(css.contains(rule), "editor.css no longer has {rule}");
+        }
+        assert!(svg("play", stroke("--c-green", false)).contains("stroke='#4f9a6c'"));
+        assert!(svg("play", stroke("--c-green", true)).contains("stroke='#6fb287'"));
+        assert!(svg("folder", stroke("--muted", false)).contains("stroke='#8f8b83'"));
+        assert!(svg("folder", stroke("--muted", true)).contains("stroke='#8b877f'"));
+    }
+
+    // #477: the page asks for the tone at each place the mockup colours.
+    #[test]
+    fn fr_l31_the_page_asks_for_the_mockup_tone_of_each_icon() {
+        let page = include_str!("editor_workbench.rs");
+        for call in [
+            // The top bar: pill chevrons, the find pill and the run button.
+            "\"{name}\" {icon_tone(\"chev-dn\", 12, \"muted\")}",
+            "{icon_tone(\"git\", 16, \"text\")} \"{branch}\" {icon_tone(\"chev-dn\", 12, \"muted\")}",
+            "{icon_tone(\"play\", 16, \"text\")} \"실행 구성\" {icon_tone(\"chev-dn\", 12, \"muted\")}",
+            "{icon_tone(\"search\", 16, \"muted\")}\n                    span { class: \"hide-md\"",
+            "{icon_tone(\"play\", 16, \"green\")} }",
+            // The stripes and the terminal tabs: the selected one is in the text colour.
+            "{icon_tone(icon_name(w), 16, if selected { \"text\" } else { \"\" })}",
+            "{icon_tone(\"code\", 14, if on { \"text\" } else { \"\" })}",
+            // The tree rows and the breadcrumbs.
+            "{icon_tone(\"chev-dn\", 12, \"muted\")} {icon_tone(\"folder\", 15, \"muted\")} span { class: \"ellipsis\", b { \"{root_name}\" } }",
+            "if is_dir { if row.open { {icon_tone(\"chev-dn\", 12, \"muted\")} } else { {icon_tone(\"chev\", 12, \"muted\")} } }",
+            "if is_dir { {icon_tone(\"folder\", 15, \"muted\")} } else { {icon_tone(\"file\", 15, \"muted\")} }",
+            "{icon_tone(icon_name, 15, \"muted\")}",
+            "if i > 0 { {icon_tone(\"chev\", 11, \"muted\")} }",
+            // The checked item of a menu.
+            "span { class: \"ed-mchk\", if selected { {icon_tone(\"check\", 14, \"text\")} } }",
+        ] {
+            assert!(page.contains(call), "the page lost {call}");
+        }
+        assert!(include_str!("editor_language.rs").contains("{icon_tone(\"chev\", 11, \"muted\")}"), "the symbol crumbs' chevrons are not muted");
+        assert!(include_str!("editor_states.rs").contains("{icon_tone(\"check\", 14, \"text\")}"), "the 자동 저장 submenu's check is not in the text colour");
+        assert!(include_str!("editor_tasks.rs").contains("{icon_tone(\"play\", 14, \"text\")}"), "the running task's tab icon is not in the text colour");
+        // The rows of the other tool windows are `.ed-tn` rows too, so the same rule colours them.
+        assert!(include_str!("editor_search.rs").contains("{icon_tone(\"file\", 15, \"muted\")}"), "a search result's file icon is not muted");
+        assert!(include_str!("editor_scm.rs").contains("{icon_tone(\"file\", 15, \"muted\")}"), "a change row's file icon is not muted");
+        assert!(include_str!("editor_extensions.rs").contains("{icon_tone(\"chev-dn\", 12, \"muted\")}"), "the built-in group's chevron is not muted");
+        // Every `.ed-find` pill has its icon on the line after it, and `.ed-find` is muted.
+        let pills = [page, include_str!("editor_extensions.rs"), include_str!("editor_settings.rs"), include_str!("editor_language.rs")];
+        for src in pills {
+            let lines: Vec<&str> = src.lines().collect();
+            for (at, line) in lines.iter().enumerate() {
+                let pill = line.contains("class: \"ed-find\"") && line.trim_start().starts_with("div {");
+                let next = lines.get(at + 1).map_or("", |l| l.trim_start());
+                if pill && next.starts_with("{icon") {
+                    assert!(next.starts_with("{icon_tone(") && next.ends_with("\"muted\")}"), "a find pill's icon is not muted: {next}");
+                }
+            }
+        }
     }
 
     // #477: no colour is written in the icon code; the palette lives in the stylesheet alone.

@@ -1480,7 +1480,7 @@ pub mod view {
     };
     use crate::editor_host::HostCommand;
     use crate::ui::editor::{base_name, Side, ToolWindow};
-    use crate::ui::editor_workbench::page::{icon, icon_px};
+    use crate::ui::editor_workbench::page::{icon, icon_px, icon_tone};
     use crate::ui::editor_workbench::Shared;
     use crate::ui::vcs::{ConflictChoice, ConflictLoad, ConflictStep, LineKind, RemoteAction};
 
@@ -1830,7 +1830,7 @@ pub mod view {
                 },
                 div { style: "display:flex; align-items:center; gap:3px; flex:1; min-width:0; align-self:stretch;",
                     onclick: move |_| open_row_diff(&diff_s, &diff_path),
-                    {icon_px("file", 15)}
+                    {icon_tone("file", 15, "muted")}
                     span { style: "overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; min-width:20px;", "{name}" }
                     if !dir.is_empty() { span { style: "color:var(--muted); font-size:var(--fs-2xs); overflow:hidden; text-overflow:ellipsis; flex:1 2 0px; min-width:0;", "{dir}" } }
                 }
@@ -1879,7 +1879,7 @@ pub mod view {
                             let pull_label = if status.behind > 0 { format!("Pull {}", status.behind) } else { "Pull".to_string() };
                             let push_label = if status.ahead > 0 { format!("Push {}", status.ahead) } else { "Push".to_string() };
                             rsx! {
-                                div { class: "ed-tn", style: "--d:0; cursor:default; font-weight:var(--fw-semibold);", {icon_px("git", 15)} "{branch_name(&status)}" }
+                                div { class: "ed-tn", style: "--d:0; cursor:default; font-weight:var(--fw-semibold);", {icon_tone("git", 15, "muted")} "{branch_name(&status)}" }
                                 {note(&upstream_text(&status))}
                                 div { style: "display:flex; gap:var(--sp1); padding:var(--sp1) var(--sp3);",
                                     button { class: "ed-pj", style: "flex:1; justify-content:center; border:1px solid var(--line); height:26px; font-size:var(--fs-xs);",
@@ -1931,7 +1931,7 @@ pub mod view {
                                             branch_key_s.scm.checkout(&b_key_str);
                                         }
                                     },
-                                    if current { {icon_px("check", 13)} } else { span { class: "chev-sp" } }
+                                    if current { {icon_tone("check", 13, "muted")} } else { span { class: "chev-sp" } }
                                     "{b}"
                                 } }
                             }

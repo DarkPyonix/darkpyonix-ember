@@ -437,7 +437,7 @@ pub mod view {
 
     use super::{rows, signature_parts, symbol_names, LangAction, LanguageState, Sheet};
     use crate::editor_host::HostCommand;
-    use crate::ui::editor_workbench::page::{icon, icon_px};
+    use crate::ui::editor_workbench::page::{icon, icon_tone};
     use crate::ui::editor_workbench::Shared;
     use crate::ui::find::Match;
 
@@ -576,7 +576,7 @@ pub mod view {
         };
         rsx! {
             for (i, name) in names.iter().enumerate() {
-                {icon_px("chev", 11)}
+                {icon_tone("chev", 11, "muted")}
                 span { key: "sym{i}", "{name}" }
             }
         }
@@ -713,7 +713,7 @@ pub mod view {
                 style: "position:fixed; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);",
                 div { style: "padding:var(--sp1) var(--sp3) 0; color:var(--muted); font-size:var(--fs-xs);", "{title}" }
                 div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
-                    {icon(if is_rename { "edit" } else { "search" })}
+                    {icon_tone(if is_rename { "edit" } else { "search" }, 16, "muted")}
                     input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
                         "aria-label": "{title}", placeholder: "{placeholder}", value: "{text}", autofocus: true,
                         oninput: move |event| { query.set(event.value()); sel.set(0); },

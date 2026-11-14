@@ -456,6 +456,7 @@ pub struct FieldOptions {
     pub type_role: Option<TypeRole>,
     pub on_value_change: Option<Box<dyn FnMut(String)>>,
     pub on_submit: Option<Box<dyn FnMut(String)>>,
+    pub on_focus_gained: Option<Box<dyn FnMut()>>,
     pub on_focus_lost: Option<Box<dyn FnMut()>>,
     pub on_key_down: Option<Box<dyn FnMut(KeyEvent)>>,
 }
@@ -490,11 +491,29 @@ pub fn EmberField(o: FieldOptions) {
         BareField(o);
         return;
     }
+    use compose_rust::runtime::{mutable_state_of, remember};
     let mut o = o;
     let theme = ember_theme();
     let p = theme.palette;
     let multiline = o.multiline;
     let height = o.height.or(if multiline { None } else { Some(H_BTN) });
+    // `.field:focus{border-color:var(--ink)}` (FR-L10.2, #878): the frame is this row, so the
+    // field's focus events redraw its border; the caller's own handlers still run.
+    let focused = remember(|| mutable_state_of(false));
+    let (gained, lost) = (focused.clone(), focused.clone());
+    let (mut user_gained, mut user_lost) = (o.on_focus_gained.take(), o.on_focus_lost.take());
+    o.on_focus_gained = Some(Box::new(move || {
+        gained.set(true);
+        if let Some(f) = user_gained.as_mut() {
+            f();
+        }
+    }));
+    o.on_focus_lost = Some(Box::new(move || {
+        lost.set(false);
+        if let Some(f) = user_lost.as_mut() {
+            f();
+        }
+    }));
     // compose-rust v0.0.5 (#376) honours a TextField's own Background, Border and Shape in place
     // of the design system's frame, which stays light in the dark scheme (#510). The frame row
     // names the token fill and line instead.
@@ -505,7 +524,7 @@ pub fn EmberField(o: FieldOptions) {
     // A zero-width border is not sent: the desktop renderer passes it to Compose's
     // `Modifier.border(0.dp)`, which is `Dp.Hairline` and draws a 1 px line (FR-L10.2, #844).
     let border_w = o.border_width.take().unwrap_or(1.0);
-    let border_color = o.border_color.take();
+    let border_color = if focused.get() { Some(paint(p.ink)) } else { o.border_color.take() };
     let frame = if border_w > 0.0 { frame.border(border_w, border_color.unwrap_or_else(|| paint(p.line))) } else { frame };
     let inset = o.inset.take().unwrap_or(if multiline { FIELD_INSET_MULTILINE } else { FIELD_INSET });
     let inner = FieldOptions { bare: true, inset: Some(inset), height, weight: None, fill_max_width: true, ..o };
@@ -631,6 +650,9 @@ fn FieldNode(o: FieldOptions, modifier: Modifier) {
     }
     if let Some(h) = o.on_submit {
         f = f.on_submit(h);
+    }
+    if let Some(h) = o.on_focus_gained {
+        f = f.on_focus_gained(h);
     }
     if let Some(h) = o.on_focus_lost {
         f = f.on_focus_lost(h);
@@ -1521,6 +1543,89 @@ mod tests {
         let centre = row_alignment(|| cu::Row().alignment(Alignment::CenterStart).content(|| {}));
         assert!(has_props(frame, &centre), "{:?} has {centre:?}", frame.props);
         assert_eq!(FIELD_INSET, (12.0, 0.0));
+    }
+
+    /// The `Border` modifiers of one batch, as debug text.
+    fn borders(batch: &[compose_rust::protocol::Mutation<'_>]) -> Vec<String> {
+        use compose_rust::protocol::Mutation;
+        batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { modifier, .. } if format!("{modifier:?}").starts_with("Border") => Some(format!("{modifier:?}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The node and handler of the first `property` handler in `batch`.
+    fn handler_of(batch: &[compose_rust::protocol::Mutation<'_>], property: compose_rust::PropertyKind) -> (u32, u64) {
+        use compose_rust::protocol::{Mutation, PropertyValue};
+        batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp { node_id, property: p, value: PropertyValue::Integer(h) } if *p == property => Some((*node_id, *h as u64)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no {property:?} handler"))
+    }
+
+    static FOCUS_LOST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    #[test]
+    fn fr_l10_2_focused_framed_field_turns_its_line_ink_and_back() {
+        // Review r5 (field-typed-1440): the field held the caret and its frame stayed #ebe9e4;
+        // style.css `.field:focus{border-color:var(--ink)}`.
+        use compose_rust::protocol::{decode_batch, HostEvent};
+        use compose_rust::{EventPayload, Host, PropertyKind, Recomposer};
+        use std::sync::atomic::Ordering;
+        let _guard = crate::services::test_guard();
+        FOCUS_LOST.store(0, Ordering::SeqCst);
+        // What the frame sends for an ink line and for the resting line, to compare with.
+        let ink = emitted_modifiers(|| {
+            EmberField(FieldOptions { border_color: Some(paint(ember_theme().palette.ink)), ..Default::default() })
+        });
+        let ink: Vec<String> = ink.into_iter().filter(|m| m.starts_with("Border")).collect();
+        let line = emitted_modifiers(|| {
+            EmberField(FieldOptions { border_color: Some(paint(ember_theme().palette.line)), ..Default::default() })
+        });
+        let line: Vec<String> = line.into_iter().filter(|m| m.starts_with("Border")).collect();
+        assert_eq!((ink.len(), line.len()), (1, 1), "{ink:?} {line:?}");
+        assert_ne!(ink, line);
+
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                EmberField(FieldOptions {
+                    fill_max_width: true,
+                    on_focus_lost: Some(Box::new(|| {
+                        FOCUS_LOST.fetch_add(1, Ordering::SeqCst);
+                    })),
+                    ..Default::default()
+                })
+            }))
+        });
+        let first = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        assert_eq!(borders(&first), line, "the resting frame is the line colour");
+        let (field, gained) = handler_of(&first, PropertyKind::OnFocusGained);
+        let (lost_node, lost) = handler_of(&first, PropertyKind::OnFocusLost);
+        assert_eq!(field, lost_node, "both focus events are the text field's");
+
+        let (bytes, _) = host.dispatch(HostEvent { node_id: field, handler_id: gained, payload: EventPayload::FocusGained }).expect("focus");
+        let focused = decode_batch(bytes).expect("decode");
+        assert_eq!(borders(&focused), ink, "focus redraws the frame in ink");
+
+        let (bytes, _) = host.dispatch(HostEvent { node_id: field, handler_id: lost, payload: EventPayload::FocusLost }).expect("blur");
+        let blurred = decode_batch(bytes).expect("decode");
+        assert_eq!(borders(&blurred), line, "losing focus puts the line back");
+        assert_eq!(FOCUS_LOST.load(Ordering::SeqCst), 1, "the caller's own on_focus_lost still runs");
+    }
+
+    #[test]
+    fn fr_l10_2_focused_framed_field_leaves_a_bare_field_unframed() {
+        // A bare field sends no border, focused or not: its container draws the frame.
+        let nodes = emitted_nodes(|| EmberField(FieldOptions { bare: true, ..Default::default() }));
+        for n in &nodes {
+            assert!(!n.mods.iter().any(|m| m.starts_with("Border")), "{} {:?}", n.widget, n.mods);
+        }
     }
 
     #[test]

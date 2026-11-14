@@ -4,7 +4,7 @@
 //! (`start_view_with`) and a writer (`attach_existing_with`) of an allowed device attach to a
 //! shell on the server's local node, the writer's `echo hi-<nonce>` comes back on the pane, a
 //! `chat_only` device gets the FR-N8 sentence, and the revoked device's pane ends with the
-//! device sentence. Written test first; not compiled by the author (sub-agents do not build).
+//! device sentence.
 
 use std::sync::Arc;
 use std::time::Duration;

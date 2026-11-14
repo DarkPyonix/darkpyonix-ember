@@ -36,13 +36,49 @@ fn path(name: &str) -> &'static str {
     }
 }
 
-/// The SVG document of an icon stroked in `color` (e.g. `#56534d`).
-fn svg(name: &str, color: &str) -> String {
-    // `<name>-w` is the icon in white, for a dark pill (the active tab).
-    // The ink pill is light in the dark palette, so its icon is the dark ink colour there.
-    if let Some(base) = name.strip_suffix("-w") {
-        return svg(base, if color == "#c3bfb7" { "#151514" } else { "#ffffff" });
+/// The mockup's shared stylesheet, where the palette's tokens are declared for both themes.
+const TOKENS: &str = include_str!("../../assets/editor/style.css");
+
+/// The value the shared stylesheet declares for the token `name` (e.g. `--text-2`) in the light
+/// palette (`:root`) or the dark one (`:root[data-theme=dark]`). An icon is drawn as an image,
+/// which cannot read a CSS variable, so its stroke is looked up here and no colour is written in
+/// this file.
+pub(crate) fn token(name: &str, dark: bool) -> Option<&'static str> {
+    let open = if dark { ":root[data-theme=dark]{" } else { ":root{" };
+    let mut rest = TOKENS;
+    while let Some(at) = rest.find(open) {
+        let block = &rest[at + open.len()..];
+        let end = block.find('}')?;
+        for declaration in block[..end].split(';') {
+            if let Some((key, value)) = declaration.split_once(':') {
+                if key.trim() == name {
+                    return Some(value.trim());
+                }
+            }
+        }
+        rest = &block[end..];
     }
+    None
+}
+
+/// The shape and the stroke token of the icon `icon`. `<name>-w` is the icon on the ink pill (the
+/// active tab), which is `--ink-text` in both palettes; every other icon is `--text-2`, the colour
+/// the mockup gives an icon button (`.ed-ib`, `.ed-sb`, `.ed-tab`, `.ed-status`).
+pub(crate) fn icon_stroke(icon: &str) -> (&str, &'static str) {
+    match icon.strip_suffix("-w") {
+        Some(shape) => (shape, "--ink-text"),
+        None => (icon, "--text-2"),
+    }
+}
+
+/// The colour of the token `name` in the palette asked for. A token the dark palette does not
+/// redefine keeps its light value, as the cascade gives it.
+fn stroke(name: &str, dark: bool) -> &'static str {
+    token(name, dark).or_else(|| token(name, false)).unwrap_or("currentColor")
+}
+
+/// The SVG document of the icon `name` stroked in `color`.
+fn svg(name: &str, color: &str) -> String {
     if name == "chev-dn" {
         // The mockup turns the right chevron a quarter turn for an open node.
         return format!(
@@ -56,9 +92,9 @@ fn svg(name: &str, color: &str) -> String {
     )
 }
 
-/// Answers the `src` of an icon `img` (`icon:<name>`) with an SVG asset registered with the
-/// renderer. The HTML path draws images only through a resolver.
-// TODO(editor-redesign step 4): one asset per theme colour once the dark palette is switched on.
+/// Answers the `src` of an icon `img` (`icon:<name>`, `icon:<name>@dark` in the dark palette) with
+/// an SVG asset registered with the renderer, one per icon and palette. The HTML path draws images
+/// only through a resolver.
 #[derive(Default)]
 pub struct IconResolver {
     ids: std::collections::HashMap<String, dioxus_compose::html::prelude::AssetId>,
@@ -76,10 +112,9 @@ impl dioxus_compose::html::prelude::ImageResolver for IconResolver {
         };
         let doc: String = if base == "mark" {
             include_str!("../../assets/brand/mark-sm.svg").to_string()
-        } else if dark {
-            svg(base, "#c3bfb7")
         } else {
-            svg(base, "#56534d")
+            let (shape, stroke_token) = icon_stroke(base);
+            svg(shape, stroke(stroke_token, dark))
         };
         let bytes: &'static [u8] = Box::leak(doc.into_boxed_str().into_boxed_bytes());
         let id = dioxus_compose::html::prelude::AssetId(compose_rust::asset(compose_rust::schema::AssetKind::Svg, bytes));
@@ -89,5 +124,51 @@ impl dioxus_compose::html::prelude::ImageResolver for IconResolver {
 
     fn size(&mut self, url: &str) -> Option<dioxus_compose::html::prelude::ImageSize> {
         url.starts_with("icon:").then(|| dioxus_compose::html::prelude::ImageSize::new(16, 16))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // #477: the icon strokes are the shared tokens of the stylesheet the page loads, in both palettes.
+    #[test]
+    fn fr_l31_icon_strokes_are_read_from_the_shared_tokens() {
+        assert_eq!(token("--text-2", false), Some("#56534d"));
+        assert_eq!(token("--text-2", true), Some("#c3bfb7"));
+        assert_eq!(token("--ink-text", false), Some("#ffffff"));
+        assert_eq!(token("--ink-text", true), Some("#151514"));
+        // A name is matched whole: `--text` is not `--text-2`, and `--c-green` is not `--c-green-soft`.
+        assert_eq!(token("--text", false), Some("#1c1b19"));
+        assert_eq!(token("--c-green", true), Some("#6fb287"));
+        assert_eq!(token("--no-such-token", false), None);
+        // A token only the light palette declares keeps its value in the dark one.
+        assert_eq!(token("--pill", true), None);
+        assert_eq!(stroke("--pill", true), "999px");
+    }
+
+    #[test]
+    fn fr_l31_an_icon_is_text_2_and_ink_text_on_the_active_pill() {
+        assert_eq!(icon_stroke("file"), ("file", "--text-2"));
+        assert_eq!(icon_stroke("chev-dn"), ("chev-dn", "--text-2"));
+        assert_eq!(icon_stroke("file-w"), ("file", "--ink-text"));
+        assert!(svg("file", stroke("--text-2", false)).contains("stroke='#56534d'"));
+        assert!(svg("file", stroke("--ink-text", true)).contains("stroke='#151514'"));
+        assert!(svg("chev-dn", stroke("--text-2", true)).contains("rotate(90 12 12)"));
+    }
+
+    // #477: no colour is written in the icon code; the palette lives in the stylesheet alone.
+    #[test]
+    fn fr_l31_the_icon_code_holds_no_colour_of_its_own() {
+        let src = include_str!("editor_icons.rs");
+        let code = src.split("#[cfg(test)]").next().unwrap();
+        for line in code.lines() {
+            let hex = line.match_indices('#').any(|(at, _)| {
+                let after = &line[at + 1..];
+                let digits = after.chars().take_while(|c| c.is_ascii_hexdigit()).count();
+                matches!(digits, 3 | 6 | 8) && after[digits..].starts_with(['"', '\''])
+            });
+            assert!(!hex, "a hard-coded colour in the icon code: {line}");
+        }
     }
 }

@@ -1507,6 +1507,20 @@ pub fn IconButton(icon: IconRole, small: bool, on_click: impl FnMut() + 'static)
         .on_click(on_click);
 }
 
+/// The phone's form of a primary button: a 40 px `ink` circle with the toolkit glyph in
+/// `ink_text` and no border (the mockup hides a primary button's label at 560 px and below,
+/// `.lbl{display:none}`). The files screen's 보내기 and the project screen's 새 팀원 use it; each
+/// built the same button by hand, outside [`pressable`] (FR-L34.5, #250).
+pub fn InkIconButton(icon: IconRole, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    cu::Button("")
+        .icon(icon)
+        .variant(ButtonVariant::Text)
+        .color(paint(p.ink_text))
+        .modifier(pressable(Modifier::new().size(H_BTN, H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full)))
+        .on_click(on_click);
+}
+
 /// The corner of [`BackButton`]: the mockup's `.icon-btn.sm.backbtn` is `border-radius:50%`
 /// with `corner-shape:squircle`, which renders as a rounded square (the 390 room and
 /// conversation renders show its straight edges); the toolkit draws plain arcs until the
@@ -2678,10 +2692,10 @@ mod tests {
         nodes.iter().find(|n| n.props.iter().any(|p| p.starts_with("OnClick="))).expect("a node with OnClick")
     }
 
-    /// Every shared pressable, composed alone: containers through `Clickable` and the three
+    /// Every shared pressable, composed alone: containers through `Clickable` and the four
     /// toolkit `Button`s.
     fn shared_pressables() -> Vec<(&'static str, fn())> {
-        let cases: [(&'static str, fn()); 11] = [
+        let cases: [(&'static str, fn()); 12] = [
             ("Clickable", || Clickable(Modifier::new().size(40.0, 40.0), Alignment::Center, || {}, || {})),
             ("NamedClickable", || {
                 NamedClickable(crate::ui::cr::a11y::CLOSE, Modifier::new().size(40.0, 40.0), Alignment::Center, || {}, || {})
@@ -2694,6 +2708,7 @@ mod tests {
             ("AppButton", || AppButton("저장", None, ButtonKind::Default, false, true, false, || {})),
             ("AppButton primary small", || AppButton("저장", None, ButtonKind::Primary, true, true, false, || {})),
             ("IconButton", || IconButton(IconRole::Close, false, || {})),
+            ("InkIconButton", || InkIconButton(IconRole::Add, || {})),
             ("PickChip", || PickChip("프로젝트", Some(IconRole::Close), false, false, || {})),
         ];
         cases.to_vec()
@@ -2725,6 +2740,50 @@ mod tests {
             ("files.rs", include_str!("files.rs")),
         ] {
             assert!(!src.contains(".press_feedback("), "{file} sets press values of its own");
+        }
+    }
+
+    #[test]
+    fn fr_l34_5_the_phone_primary_circle_is_one_shared_button_with_its_look_unchanged() {
+        // #250: files.rs (보내기) and project.rs (새 팀원) each built this button by hand, so it
+        // was outside `pressable`. What is sent is what they sent, plus the press values.
+        let _guard = crate::services::test_guard();
+        let theme = ember_theme();
+        let p = theme.palette;
+        assert_eq!(H_BTN, 40.0);
+        let nodes = emitted_nodes(|| InkIconButton(IconRole::Send, || {}));
+        assert!(!nodes.iter().any(|n| n.widget == "Box"), "one toolkit button and nothing round it");
+        let button = the(&nodes, "Button");
+        assert!(button.props.iter().any(|x| x.starts_with("OnClick=")), "{:?}", button.props);
+        let want = [
+            format!("{:?}", compose_rust::schema::Modifier::Width(40.0)),
+            format!("{:?}", compose_rust::schema::Modifier::Height(40.0)),
+            format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.ink))),
+            format!("{:?}", compose_rust::schema::Modifier::PressFeedback { scale: 0.975, tint_alpha: theme.press_alpha() }),
+        ];
+        for m in &want {
+            assert!(button.mods.contains(m), "{m}: {:?}", button.mods);
+        }
+        assert!(button.mods.iter().any(|m| m.starts_with("ShapeRole(Full")), "{:?}", button.mods);
+        assert!(!button.mods.iter().any(|m| m.starts_with("Border")), "no outline: {:?}", button.mods);
+        assert_eq!(button.mods.iter().filter(|m| m.starts_with("PressFeedback")).count(), 1, "{:?}", button.mods);
+        // The glyph is tinted `ink_text`, not the ringed button's `text-2`.
+        let ringed = emitted_nodes(|| IconButton(IconRole::Send, false, || {}));
+        assert_ne!(the(&ringed, "Button").props, button.props, "its colour differs from IconButton's");
+        // Both screens use it and have no button of their own left.
+        for (file, src, call) in [
+            ("files.rs", include_str!("files.rs"), "InkIconButton(IconRole::Send, open);"),
+            ("project.rs", include_str!("project.rs"), "InkIconButton(IconRole::Add, move || u.open_new_session(project.clone()));"),
+        ] {
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            assert!(production.contains(call), "{file}");
+            assert!(!production.contains("cu::Button("), "{file}");
+        }
+        // The two visible buttons that stay direct send the same press values through the helper.
+        for (file, src) in [("launcher.rs", include_str!("launcher.rs")), ("routines.rs", include_str!("routines.rs"))] {
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            assert_eq!(production.matches(".modifier(pressable(").count(), 1, "{file}");
+            assert!(!production.contains(".press_feedback("), "{file}");
         }
     }
 
@@ -3236,15 +3295,21 @@ mod tests {
             // Existing direct buttons are explicitly counted until their specialized controls
             // move into shared components. Any additional bypass must be reviewed.
             let allowed_buttons = match name {
-                // AppButton, IconButton and PickChip; ChoiceButton is Ember's clickable pill
-                // since review r5 (its 12 px label inset, FR-L10.2).
-                "components.rs" => 3,
-                // SegGroup moved onto ChoiceButton (#878).
+                // AppButton, IconButton, InkIconButton and PickChip; ChoiceButton is Ember's
+                // clickable pill since review r5 (its 12 px label inset, FR-L10.2).
+                "components.rs" => 4,
+                // SegGroup moved onto ChoiceButton (#878). The one left is the invisible
+                // overlay that names a painted row from data (FR-L34.5).
                 "agents.rs" => 1,
-                "files.rs" => 1,
+                // The phone's round 보내기 is InkIconButton (FR-L34.5, #250).
+                "files.rs" => 0,
                 "home.rs" => 0,
+                // The row's bare 더 보기 glyph: no shared helper draws a button without a ring.
                 "launcher.rs" => 1,
-                "project.rs" => 1,
+                // The phone's round 새 팀원 is InkIconButton (FR-L34.5, #250).
+                "project.rs" => 0,
+                // The wide 새 루틴 pill (toolkit label style and a fixed width, which AppButton
+                // would change) and the invisible overlay named from data.
                 "routines.rs" => 2,
                 // FocusOverlay and the StashPill accessible-name overlay (FR-G6, #350).
                 "vcs.rs" => 2,

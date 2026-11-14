@@ -46,7 +46,7 @@ use crate::ui::home::{
     model_catalog, modes_for, project_options, DEFAULT_PROJECT, Harness, Selection,
 };
 use super::components::{
-    pill_colors, pill_metrics, AppButton, BackButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
+    pill_colors, pill_metrics, pressable, AppButton, BackButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
     CloseButton, FieldOptions, Label, MonoLabel, NamedSelect, Pill, PillTone, SheetFooter,
 };
 use super::characters::{CharState, Character};
@@ -1122,14 +1122,17 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                     .icon(IconRole::Add)
                                     .variant(ButtonVariant::Text)
                                     .color(paint(p.ink_text))
-                                    .modifier(
+                                    // Not `AppButton`: that sets the 14/500 label and no
+                                    // width, which changes this pill; it still sends the
+                                    // shared press values (FR-L34.5, #250).
+                                    .modifier(pressable(
                                         Modifier::new()
                                             .width(btn_w)
                                             .height(40.0)
                                             .background(paint(p.ink))
                                             .border(1.0, paint(p.ink))
                                             .shape_role(ShapeRole::Full),
-                                    )
+                                    ))
                                     .on_click(move || rl_new(Leave::NewForm));
                             }
                         });

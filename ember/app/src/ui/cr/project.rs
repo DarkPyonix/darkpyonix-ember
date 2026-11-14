@@ -13,7 +13,7 @@
 use compose_rust::runtime::{mutable_state_of, remember, remember_with_key, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, IconRole, ShapeRole};
+use compose_rust::{Alignment, IconRole, ShapeRole};
 
 use ember_client::wire::Project;
 use ember_client::LauncherStatus;
@@ -29,7 +29,7 @@ use super::characters::{CharState, Character, StylePicker};
 use crate::ui::characters::CharStyle;
 use super::components::{
     AppButton, ButtonKind, Clickable, NamedClickable, EmberField, EmberSheet, FieldOptions, FilterChip,
-    IconButton, Label, Pill, PillTone, PopKind, PopMenu, PopoverMenu, SearchField, Select, SheetFooter,
+    IconButton, InkIconButton, Label, Pill, PillTone, PopKind, PopMenu, PopoverMenu, SearchField, Select, SheetFooter,
 };
 use super::home::{content_width, fit_label, ring_image, text_px, Cols, Part};
 use super::notice;
@@ -407,17 +407,11 @@ fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
 
 /// 새 팀원: a primary button; a 40 px ink circle on a phone.
 fn NewMemberButton(ui: &SharedUi, project: Option<String>, w: f32) {
-    let p = ember_theme().palette;
     let u = ui.clone();
     if w > 560.0 {
         AppButton("새 팀원", Some(IconRole::Add), ButtonKind::Primary, false, true, false, move || u.open_new_session(project.clone()));
     } else {
-        cu::Button("")
-            .icon(IconRole::Add)
-            .variant(ButtonVariant::Text)
-            .color(paint(p.ink_text))
-            .modifier(Modifier::new().size(H_BTN, H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full))
-            .on_click(move || u.open_new_session(project.clone()));
+        InkIconButton(IconRole::Add, move || u.open_new_session(project.clone()));
     }
 }
 

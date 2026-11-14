@@ -18,7 +18,7 @@ use std::rc::Rc;
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, IconRole, ShapeRole};
+use compose_rust::{Alignment, IconRole, ShapeRole};
 
 use ember_client::state::Computer;
 
@@ -34,7 +34,7 @@ use crate::ui::files::{choose_target, chip_avail, chip_label, chip_rows, chip_te
 use super::compat::Banner;
 use crate::model::Tone;
 use super::characters::{CharState, Character};
-use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, IconButton, Label, Pill, PillTone};
+use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, IconButton, InkIconButton, Label, Pill, PillTone};
 use super::home::{fit_label, text_px, Cols, Part};
 use super::notice;
 use super::project::{HeaderGap, ThemeButton};
@@ -438,13 +438,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                         let open = move || s.set(Some(SendDraft::default()));
                         if compact {
                             // A round ink button, icon only (`.lbl{display:none}`).
-                            let p = ember_theme().palette;
-                            cu::Button("")
-                                .icon(IconRole::Send)
-                                .variant(ButtonVariant::Text)
-                                .color(paint(p.ink_text))
-                                .modifier(Modifier::new().size(H_BTN, H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full))
-                                .on_click(open);
+                            InkIconButton(IconRole::Send, open);
                         } else {
                             AppButton("보내기", Some(IconRole::Send), ButtonKind::Primary, false, true, false, open);
                         }

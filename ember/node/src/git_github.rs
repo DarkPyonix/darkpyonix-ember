@@ -152,7 +152,7 @@ async fn run_gh(dir: &std::path::Path, args: &[&str]) -> Result<Call, GitError> 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let out = match exec_cmd(cmd, "gh", None, Some(Deadline::Network(network_timeout()))).await {
+    let out = match exec_cmd(cmd, "gh", None, Some(Deadline::Network(network_timeout())), None).await {
         Ok(o) => o,
         // A missing `gh` fails the request; a timeout is only this call's failure.
         Err(GitError::Timeout(m)) => return Ok(Call::Failed { text: clean_error(&m), signed_out: false }),

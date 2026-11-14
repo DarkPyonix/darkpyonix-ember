@@ -279,9 +279,19 @@ pub fn Header(title: &str, sub: &str, compact: bool, trailing: impl FnOnce()) {
 /// phone: the smaller title and the room for the menu button.
 pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32, trailing: impl FnOnce()) {
     let p = ember_theme().palette;
+    // On a phone only the title line leaves room for the menu button; the subtitle runs the
+    // whole width under it (#878: it wrapped at x 284 of a row that ends at x 374).
+    let menu_room = if stacked && compact { PHONE_MENU_ROOM } else { 0.0 };
     let titles = || {
         cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-            Label(title, if compact { Fs::Xl2 } else { Fs::Xl3 }, PAGE_TITLE_WEIGHT, None, Some(1));
+            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label(title, if compact { Fs::Xl2 } else { Fs::Xl3 }, PAGE_TITLE_WEIGHT, None, Some(1));
+                });
+                if menu_room > 0.0 {
+                    cu::Spacer().modifier(Modifier::new().width(menu_room));
+                }
+            });
             if !sub.is_empty() {
                 if gap > 0.0 {
                     cu::Spacer().modifier(Modifier::new().height(gap));
@@ -292,12 +302,7 @@ pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32,
     };
     if stacked {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-                titles();
-                if compact {
-                    cu::Spacer().modifier(Modifier::new().width(PHONE_MENU_ROOM));
-                }
-            });
+            cu::Row().modifier(Modifier::new().fill_max_width()).content(titles);
             cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(trailing);
         });
     } else {
@@ -2145,6 +2150,22 @@ mod design_review_tests {
         let src = source();
         assert!(src.contains("Modifier::new().size(COMPUTER_CHIP.0, COMPUTER_CHIP.1)"));
         assert!(src.contains("Label(&b.name, PROJECT_NAME.0, PROJECT_NAME.1, None, Some(1));"));
+    }
+
+    #[test]
+    fn fr_l28_phone_header_subtitle_runs_the_full_width() {
+        // #878: the menu room was beside the whole title column, so the subtitle wrapped at
+        // x 284 of a 390 row that ends at x 374.
+        let src = source();
+        let head = &src[src.find("pub fn HeaderGap(").unwrap()..];
+        let head = &head[..head.find("\n}\n").unwrap()];
+        assert!(head.contains("let menu_room = if stacked && compact { PHONE_MENU_ROOM } else { 0.0 };"));
+        // The spacer sits in the title's own row, before the subtitle.
+        let room = head.find("Modifier::new().width(menu_room)").expect("menu room spacer");
+        let sub = head.find("Label(sub, ").expect("subtitle");
+        assert!(room < sub);
+        assert!(head.contains("cu::Row().modifier(Modifier::new().fill_max_width()).content(titles);"));
+        assert!(!head.contains("width(PHONE_MENU_ROOM)"), "no spacer beside the whole column");
     }
 
     #[test]

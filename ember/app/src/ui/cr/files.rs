@@ -30,7 +30,9 @@ pub use crate::ui::files::{
     Transfer, TransferAction, TransferService, TransferState, FILE_PICKER_AVAILABLE, FILE_PICK_REASON,
     FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE, clean_member_name, demo_files, is_demo,
 };
-use crate::ui::files::{choose_target, chip_avail, chip_label, chip_rows, chip_text_max_for, chip_width_est, files_line, fit_chip_text, send_state};
+use crate::ui::files::{choose_target, chip_avail, chip_label, chip_rows, chip_text_max_for, chip_width_est, files_line, fit_chip_text, send_state_at, server_status, share_tap_at, tile_tap_notice};
+use super::compat::Banner;
+use crate::model::Tone;
 use super::characters::{CharState, Character};
 use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, IconButton, Label, Pill, PillTone};
 use super::home::{fit_label, text_px, Cols, Part};
@@ -331,7 +333,7 @@ pub fn sample_model() -> (FilesModel, Vec<Offer>) {
         HistoryEntry { name: "photo.heic".into(), device: "Pixel 10".into(), direction: Direction::Send, size: 4 << 20, result: HistoryResult::Declined, when: "어제 18:02".into() },
     ];
     let offers = vec![Offer { id: "o1".into(), from: "BREW의 iPhone".into(), files: vec!["IMG_2042.heic".into(), "IMG_2043.heic".into()], total: 9 << 20 }];
-    (FilesModel { devices, transfers, received, history, ready: true }, offers)
+    (FilesModel { devices, transfers, received, history, ready: true, lost: false }, offers)
 }
 
 /// The sample's system lines, last-seen times and received times.
@@ -447,6 +449,10 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                             AppButton("보내기", Some(IconRole::Send), ButtonKind::Primary, false, true, false, open);
                         }
                     });
+                    // The lost server, said on the screen and not only in the send sheet (FR-L27.9).
+                    if let Some(line) = server_status(&live_model) {
+                        Banner(&line, Tone::Error);
+                    }
                     Cols(
                         if w > 1279.0 { 4 } else { 2 },
                         SP[4],
@@ -476,10 +482,12 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
         if let Some(offer) = offers.first() {
             OfferCard(offer, &live_pending, &live_model.devices, &st, w);
         }
-        // The lists stay when the server is lost; only sending is blocked (FR-L27.8).
+        // The lists stay when the server is lost; only sending is blocked (FR-L27.8), and the
+        // sheets say it is the server (FR-L27.9).
         let can_send = ready && transfer_service().can_send();
-        SendSheet(&st, &live_model.devices, &members, can_send, w);
-        ShareSheet(&share_open, &live_model.devices, &members, can_send);
+        let lost = live_model.lost;
+        SendSheet(&st, &live_model.devices, &members, can_send, lost, w);
+        ShareSheet(&share_open, &live_model.devices, &members, can_send, lost);
     });
 }
 
@@ -707,12 +715,13 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                             let s = st.sheet.clone();
                             let d_id = d.id.clone();
                             let d_name = d.name.clone();
-                            let is_online = d.presence == Presence::Online;
+                            let presence = d.presence;
+                            let lost = model.lost;
                             let demo = is_demo();
                             Box::new(move || {
                                 DeviceTile(d, extras.devices.get(&d.id), move |_| {
-                                    if !is_online {
-                                        notice::post(format!("{d_name}은(는) 지금 연결되어 있지 않습니다."));
+                                    if let Some(why) = tile_tap_notice(lost, presence, &d_name) {
+                                        notice::post(why);
                                     } else {
                                         let initial_files = if demo {
                                             vec![demo_files()[0].to_string()]
@@ -1342,13 +1351,13 @@ pub fn target_chip_width(label: &str, glyph: f32) -> f32 {
 }
 
 /// The send sheet: pick the receiver (every device and every agent), then the files (FR-L27.5).
-fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool, w: f32) {
+fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool, lost: bool, w: f32) {
     let p = ember_theme().palette;
     let draft = st.sheet.get();
     let open = draft.is_some();
     let d = draft.unwrap_or_default();
     let demo = is_demo();
-    let (blocker, can_send) = send_state(&d, devices, FILE_PICKER_AVAILABLE || demo, ready);
+    let (blocker, can_send) = send_state_at(&d, devices, FILE_PICKER_AVAILABLE || demo, ready, lost);
     let target_device = match &d.target {
         Some(SendTarget::Device(id)) => Some(id.clone()),
         _ => None,
@@ -1516,7 +1525,7 @@ fn ShareTile(name: &str, caption: &str, dim: bool, on_click: impl FnMut() + 'sta
 /// (running agents), the sheet's own actions and a note. Nothing can be shared yet (no file
 /// picker, no transfer service, #487), so the file card and the actions say so and a tap on a
 /// receiver explains why nothing was sent instead of reporting success.
-fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMember], ready: bool) {
+fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMember], ready: bool, lost: bool) {
     let p = ember_theme().palette;
     let is_open = open.get();
     let close = {
@@ -1531,7 +1540,7 @@ fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMemb
     let (file_title, file_why) = share_file_card(&[], FILE_PICKER_AVAILABLE);
     let tap = {
         let (devices, o) = (devices.to_vec(), open.clone());
-        move |target: SendTarget| match share_tap(&target, &devices, &[], FILE_PICKER_AVAILABLE, ready) {
+        move |target: SendTarget| match share_tap_at(&target, &devices, &[], FILE_PICKER_AVAILABLE, ready, lost) {
             ShareTap::Blocked(why) => notice::post(why),
             ShareTap::Send(SendTarget::Device(id)) => match transfer_service().send(&id, Vec::new()) {
                 Ok(()) => o.set(false),
@@ -1896,6 +1905,39 @@ mod tests {
         })
         .expect("dispatch send click");
         assert_eq!(sent_to.lock().expect("lock").as_deref(), Some("demo-s1"));
+    }
+
+    /// The screen's texts for a model, rendered once at the default window size.
+    fn screen_texts(model: FilesModel) -> Vec<String> {
+        let mut host = Host::new(move || {
+            let model = model.clone();
+            Box::new(Recomposer::new(move || {
+                FilesScreenWith(&model, Vec::new(), Vec::new(), &Extras::default());
+            }))
+        });
+        texts(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"))
+    }
+
+    // FR-L27.9 (#786)
+    #[test]
+    fn fr_l27_9_the_screen_shows_a_lost_server_without_the_send_sheet() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let (model, _) = sample_model();
+        let line = format!("{}. {}", crate::ui::files::SERVER_LOST, crate::ui::files::SERVER_LOST_KEPT);
+
+        let lost = FilesModel { lost: true, ..model.clone() };
+        assert_eq!(crate::ui::files::server_status(&lost).as_deref(), Some(line.as_str()));
+        let all = screen_texts(lost);
+        assert!(all.iter().any(|t| t == &line), "missing the status line: {all:?}");
+        // The kept lists are still drawn under it (FR-L27.8).
+        assert!(all.iter().any(|t| t.contains("design-assets")), "the kept transfer: {all:?}");
+
+        // The server answers again: the line is gone.
+        let up = FilesModel { lost: false, ..model };
+        let all = screen_texts(up);
+        assert!(!all.iter().any(|t| t.contains(crate::ui::files::SERVER_LOST)), "a stale status line: {all:?}");
+        compose_rust::window::reset_window_size();
     }
 
     #[test]

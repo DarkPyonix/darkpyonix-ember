@@ -325,7 +325,14 @@ pub fn SheetFooter(content: impl FnOnce()) {
 /// a weighted row (compose-rust#427), so a token wider than its container still clips. Text that
 /// can hold a path, a URL or a long name uses [`WrapLabel`].
 pub fn Label(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines: Option<u32>) {
-    scale_text(text, fs, weight, color, max_lines, false);
+    scale_text(text, fs, weight, color, max_lines, false, None);
+}
+
+/// A [`Label`] centred on its own lines, for a name under a round tile whose second line would
+/// otherwise start at the left (the files share sheet's receivers, `.fl-share-tile`
+/// `text-align:center`).
+pub fn CentredLabel(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines: Option<u32>) {
+    scale_text(text, fs, weight, color, max_lines, false, Some(TextAlign::Center));
 }
 
 /// A [`Label`] whose token too long for its line breaks between its letters, the mockup's
@@ -333,7 +340,7 @@ pub fn Label(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines
 /// narrow as its widest letter in a weighted row, so use it where the text should wrap rather
 /// than widen its column.
 pub fn WrapLabel(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines: Option<u32>) {
-    scale_text(text, fs, weight, color, max_lines, true);
+    scale_text(text, fs, weight, color, max_lines, true, None);
 }
 
 fn scale_text(
@@ -343,6 +350,7 @@ fn scale_text(
     color: Option<Paint>,
     max_lines: Option<u32>,
     wrap_anywhere: bool,
+    align: Option<TextAlign>,
 ) {
     let theme = ember_theme();
     let color = color.unwrap_or_else(|| paint(theme.palette.text));
@@ -358,6 +366,9 @@ fn scale_text(
     }
     if let Some(n) = max_lines {
         t = t.max_lines(n).overflow(TextOverflow::Ellipsis);
+    }
+    if let Some(a) = align {
+        t = t.text_align(a);
     }
     drop(t);
 }

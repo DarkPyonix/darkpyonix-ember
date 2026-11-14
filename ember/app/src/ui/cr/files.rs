@@ -1514,7 +1514,7 @@ fn ShareTile(name: &str, caption: &str, dim: bool, on_click: impl FnMut() + 'sta
                 .alignment(Alignment::Center)
                 .content(glyph);
             // Two lines at most (an ellipsis after that), so two long names stay distinguishable.
-            Label(name, Fs::Xs2, Weight::Regular, None, Some(SHARE_NAME_LINES));
+            super::components::CentredLabel(name, Fs::Xs2, Weight::Regular, None, Some(SHARE_NAME_LINES));
             Label(&fit_label(caption, 72.0, Fs::Xs2.size()), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         });
     });
@@ -1790,6 +1790,18 @@ mod tests {
         let grab = |nodes: &[(String, Vec<String>, Vec<String>)]| nodes.iter().any(|n| n.2.windows(2).any(|w| w[0] == "Width(36.0)" && w[1] == "Height(5.0)"));
         assert!(grab(&share_nodes((1440.0, 900.0))));
         assert!(!grab(&share_nodes((390.0, 844.0))));
+        // Review r6: a receiver name on two lines (BREW의 / iPhone) started its second line at
+        // the left of the 72 px tile while the caption under it was centred.
+        let (model, _) = sample_model();
+        let names: Vec<String> = share_devices(&model.devices).iter().map(|d| format!("Text=String({:?})", d.name)).collect();
+        assert!(!names.is_empty());
+        for size in [(1440.0, 900.0), (390.0, 844.0)] {
+            let nodes = share_nodes(size);
+            for name in &names {
+                let node = nodes.iter().find(|n| n.1.iter().any(|p| p == name)).unwrap_or_else(|| panic!("{size:?}: no {name}"));
+                assert!(node.1.iter().any(|p| p.starts_with("TextAlign=")), "{size:?}: {name} is centred: {:?}", node.1);
+            }
+        }
     }
 
     use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};

@@ -40,7 +40,10 @@ html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font
 /* FR-L31.29 (#895, design review E4): quick open hangs under the find pill. The pill's box is the
    list's containing block; the list is as wide as the old sheet and ends at the pill's right edge.
    Its query row is a row with a line under it, so the popover has one frame. */
-.ed-findbox{position:relative;display:flex;min-width:0}
+/* The box carries the z-index itself: the HTML path paints a positioned box with `z-index:auto` as one
+   unit with its descendants, in tree order, so the list's own z-index alone left it under the editor
+   island, which is positioned and comes later in the tree. */
+.ed-findbox{position:relative;z-index:40;display:flex;min-width:0}
 @media (min-width:1101px){.ed-top .ed-findbox{flex:none}}
 .ed-menu.ed-pal{position:absolute;z-index:40;top:calc(100% + 6px);right:0;left:auto;width:min(560px,calc(100vw - 24px));min-width:0;padding:0;overflow:hidden}
 .ed-palq{display:flex;align-items:center;gap:var(--sp2);height:40px;padding:0 var(--sp3);border-bottom:1px solid var(--line);color:var(--muted);font-size:var(--fs-sm);box-sizing:border-box}
@@ -75,7 +78,9 @@ html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font
    button (`vcs.css:80-82`, `style.css:71-74`): at least `--h-btn` high, 14/500, the branch in mono. */
 .ed-pj.ed-scm-commit{justify-content:center;gap:var(--sp2);width:100%;min-width:0;height:auto;min-height:var(--h-btn);padding:8px 16px;background:var(--ink);color:var(--ink-text);font-size:var(--fs-md);font-weight:var(--fw-medium);line-height:var(--lh-md);white-space:normal;text-align:center;box-sizing:border-box}
 .ed-pj.ed-scm-commit:hover{background:var(--ink);opacity:.88}
-.ed-scm-commit>span{overflow-wrap:anywhere}
+/* The label is a wrapping row of two boxes, the mono branch and the words: as two runs of one line the
+   words were set over the branch's last letter. */
+.ed-scm-commit>span{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:center;min-width:0;overflow-wrap:anywhere}
 .ed-scm-commit b{font-family:var(--mono);font-size:var(--fs-sm);font-weight:var(--fw-medium)}
 /* FR-L31.34 (#895, design review E9): a tool window's notice ("문제가 없습니다", "출력이 없습니다", the
    terminal's and the run panel's notices) is prose: the UI face at `--fs-sm`, `muted`, in the terminal

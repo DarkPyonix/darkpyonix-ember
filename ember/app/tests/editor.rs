@@ -1961,7 +1961,9 @@ mod design_chrome {
         assert!(PAGE.contains("div { class: \"ed-menu ed-pal\", role: \"dialog\", \"aria-label\": \"명령 팔레트\","));
         let css = compact_css();
         assert!(css.contains(".ed-menu.ed-pal{position:absolute;z-index:40;top:calc(100%+6px);right:0;left:auto;"));
-        assert!(css.contains(".ed-findbox{position:relative;display:flex;min-width:0}"));
+        // The box itself is the stacking context above the islands (a positioned box with `z-index:auto`
+        // is painted as one unit in tree order, under the later editor island).
+        assert!(css.contains(".ed-findbox{position:relative;z-index:40;display:flex;min-width:0}"));
         assert!(ember_app::ui::editor_menu::menu_style().contains("grid-row:1; grid-column:1;"));
     }
 

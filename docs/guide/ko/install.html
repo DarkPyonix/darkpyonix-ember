@@ -232,6 +232,7 @@ cargo build --release --locked --features mount-fuse</code></pre>
           <tr><td><code>EMBER_TRANSPORT</code></td><td>꺼짐</td><td><code>1</code> 이면 P2P 전송을 엽니다. 피어 주소로 추가한 컴퓨터와 허브에 필요합니다.</td></tr>
           <tr><td><code>EMBER_HUB_URL</code></td><td><code>https://darkpyonix.dev</code></td><td>허브. <code>off</code> 면 끕니다. <code>EMBER_TRANSPORT=1</code> 일 때만 씁니다. 기본값은 허브 전용 서브도메인으로 바뀝니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>).</td></tr>
           <tr><td><code>EMBER_RELAY_URL</code></td><td>허브의 릴레이</td><td>전송에 쓸 릴레이 서버.</td></tr>
+          <tr><td><code>EMBER_TRANSPORT_LISTEN</code></td><td>임의의 포트</td><td>전송이 쓸 고정 <code>ip:port</code>(예: <code>0.0.0.0:7444</code>). 서버를 다시 시작해도 기기에 저장한 주소가 그대로 맞습니다. 이때 서버는 앱에 붙여 넣을 <code>ember server device address: &lt;peer id&gt;@&lt;host&gt;:&lt;port&gt;</code> 줄을 출력합니다. 허용된 기기 키만 들어오므로 <code>0.0.0.0</code> 이어도 됩니다. 값이 잘못되면 시작하지 않습니다. 아직 컴파일하지 않았습니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/863">#863</a>).</td></tr>
           <tr><td><code>EMBER_MOUNT</code></td><td><code>auto</code></td><td><code>nfs</code>, <code>fuse</code>, <code>off</code>. <code>auto</code> 는 빌드에 들어 있는 기능을 씁니다.</td></tr>
           <tr><td><code>EMBER_A2A</code></td><td>켜짐</td><td><code>0</code> 이면 에이전트 간 메시지를 끈 채로 시작합니다.</td></tr>
           <tr><td><code>EMBER_CHROME_BIN</code></td><td>기계에서 찾음</td><td><a href="browser.html">원격 브라우저</a>에 쓸 브라우저.</td></tr>

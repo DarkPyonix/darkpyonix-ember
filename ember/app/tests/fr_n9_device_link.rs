@@ -168,3 +168,75 @@ async fn fr_n9_app_device_link_over_loopback_letify() {
     stranger.dialer.transport().close().await;
     server_t.close().await;
 }
+
+/// A free TCP port on loopback (bound and released at once).
+fn free_tcp_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+/// The server's letify endpoint with `key` on the fixed `listen` address, set the way the
+/// server sets `EMBER_TRANSPORT_LISTEN` (`ember_server::transport::with_listen`).
+async fn letify_server_on(key: SecretKey, listen: std::net::SocketAddr) -> Transport {
+    let letify = LetifyConfig { connect_timeout: Duration::from_secs(2), ..LetifyConfig::default() };
+    let config = TransportConfig::new(key).backend(BackendKind::Letify).letify(letify);
+    let config = ember_server::transport::with_listen(config, Some(listen));
+    assert_eq!(config.bind_addr, Some(listen));
+    Transport::bind(config).await.unwrap()
+}
+
+/// #863: with a fixed transport port, the line the server prints is the device's saved setting,
+/// and it still reaches the server after the server's transport is bound again with the same key
+/// and port: through a fresh app bind (as after an app restart) and through the same live one.
+#[tokio::test(flavor = "multi_thread")]
+async fn fr_n9_a_device_keeps_the_server_on_a_fixed_port_after_a_restart() {
+    let server_key = SecretKey::generate();
+    let listen = std::net::SocketAddr::from(([127, 0, 0, 1], free_tcp_port()));
+    let server_t = letify_server_on(server_key.clone(), listen).await;
+    let devices = serve(&server_t);
+    let data = scratch();
+    let key = device_link::load_key(data.path()).unwrap();
+    devices.add(key.peer_id(), "phone").unwrap();
+
+    // The line the server prints at start, pasted as printed.
+    let id = server_t.peer_id();
+    let line = ember_server::transport::device_address_line(Some(listen), &server_t.local_addr()).unwrap();
+    assert_eq!(line, format!("ember server device address: {id}@{listen}"));
+    let setting = PeerSetting::parse(&line, Some("none")).unwrap();
+    assert_eq!(setting.addr.peer, id);
+    assert_eq!(setting.addr.direct, vec![listen]);
+
+    let link = letify_device(key.clone(), &setting).await;
+    let api = link.api();
+    assert_eq!(tokio::time::timeout(WAIT, device_link::check(&api)).await.unwrap(), Ok(()));
+    let server = ServerApi::over_transport(link.api()).unwrap();
+    assert!(tokio::time::timeout(WAIT, server.agent_defaults()).await.unwrap().is_ok());
+
+    // The server restarts: the same key on the same port.
+    server_t.close().await;
+    drop(server_t);
+    let server_t = letify_server_on(server_key, listen).await;
+    assert_eq!(server_t.peer_id(), id);
+    let devices = serve(&server_t);
+    devices.add(key.peer_id(), "phone").unwrap();
+
+    // A fresh bind of the app side with the unchanged setting, as after an app restart.
+    let again = letify_device(key, &setting).await;
+    assert_eq!(tokio::time::timeout(WAIT, device_link::check(&again.api())).await.unwrap(), Ok(()));
+
+    // The same live app transport: its session to the old server ended, and the next calls dial
+    // the same address again.
+    let mut live = Err(UNREACHABLE);
+    for _ in 0..20 {
+        live = tokio::time::timeout(WAIT, device_link::check(&api)).await.unwrap();
+        if live.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(live, Ok(()), "the live app transport reaches the restarted server");
+    assert!(tokio::time::timeout(WAIT, server.agent_defaults()).await.unwrap().is_ok());
+
+    link.dialer.transport().close().await;
+    again.dialer.transport().close().await;
+    server_t.close().await;
+}

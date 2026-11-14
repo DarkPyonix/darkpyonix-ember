@@ -344,10 +344,11 @@ pub fn AgentsScreenWith(
                         .modifier(Modifier::new().fill_max_width())
                         .content(|| {
                             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                                // `.head h1`: 32/400, 28 up to 900 px (review AG6).
                                 Label(
                                     "에이전트",
                                     if compact { Fs::Xl2 } else { Fs::Xl3 },
-                                    Weight::Semibold,
+                                    PAGE_TITLE_WEIGHT,
                                     None,
                                     Some(1),
                                 );
@@ -699,17 +700,89 @@ fn VendorDot(h: AgentHarness) {
     );
 }
 
-fn KpiItem(label: &str, value: &str, pill: Option<(&str, PillTone)>) {
+/// `"17 GB"` as `("17", Some("GB"))`: the mockup draws a unit as a small grey pill beside the
+/// number (`세션 메모리 한도 합 17 [GB]`); anything else is one value.
+pub fn kpi_split_unit(value: &str) -> (&str, Option<&str>) {
+    match value.split_once(' ') {
+        Some((n, u)) if n.parse::<f64>().is_ok() && matches!(u, "GB" | "MB") => (n, Some(u)),
+        _ => (value, None),
+    }
+}
+
+/// The type of a KPI value: a number is `.kpi .v`, 28/400 with -0.02em (18 at phone width,
+/// `style.css` `@media (max-width:560px) .kpi .v`); a word such as 방금 or 아직 정보가
+/// 없습니다 is `.v.ag-word`, 18/600 (`agents.css`). Review AG5 measured 18/600 for every value.
+pub fn kpi_value_type(value: &str, phone: bool) -> (Fs, Weight) {
+    if kpi_split_unit(value).0.parse::<f64>().is_err() {
+        (Fs::Xl, Weight::Semibold)
+    } else if phone {
+        (Fs::Xl, Weight::Regular)
+    } else {
+        (Fs::Xl2, Weight::Regular)
+    }
+}
+
+/// `.kpis`: four columns 24 apart; two columns 16 apart up to 1279 px and 12 apart up to 560 px
+/// (`style.css`). Returns (columns, gap).
+pub fn kpi_grid(width_dp: f32) -> (usize, f32) {
+    if width_dp <= 560.0 {
+        (2, SP[2])
+    } else if width_dp <= 1279.0 {
+        (2, SP[3])
+    } else {
+        (4, SP[5])
+    }
+}
+
+/// One KPI: the 13 px `text-2` label, then the value and its small pills (a unit, a total, 예시)
+/// 8 px apart (`.kpi .v{gap:var(--sp2)}`, `.kpi .v .pill` 20 px).
+fn KpiItem(label: &str, value: &str, pill: Option<(&str, PillTone)>, phone: bool) {
     let p = ember_theme().palette;
-    cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+    let (number, unit) = kpi_split_unit(value);
+    let (fs, weight) = kpi_value_type(value, phone);
+    cu::Column().content(|| {
         Label(label, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
         cu::Spacer().modifier(Modifier::new().height(SP[0]));
         cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-            Label(value, Fs::Xl, Weight::Semibold, None, Some(1));
+            Label(number, fs, weight, None, Some(1));
+            if let Some(u) = unit {
+                Pill(u, PillTone::Grey, true);
+            }
             if let Some((p_text, tone)) = pill {
                 Pill(p_text, tone, true);
             }
         });
+    });
+}
+
+/// The KPI strip as the `.kpis` grid for this width; a short last row keeps the cell width.
+fn KpiGrid(items: &[(&str, String, Option<(&str, PillTone)>)], width_dp: f32) {
+    let (cols, gap) = kpi_grid(width_dp);
+    let phone = width_dp <= 560.0;
+    FixedGrid(items, cols, gap, |(label, value, pill)| KpiItem(label, value, *pill, phone));
+}
+
+/// How many empty cells close a row of `len` items in a `cols`-column grid.
+pub fn grid_fillers(len: usize, cols: usize) -> usize {
+    cols.saturating_sub(len)
+}
+
+/// A grid of `cols` equal columns, `gap` apart both ways. A short last row keeps the cell width:
+/// empty weighted cells fill it, where weighted cells alone stretched two tiles to half the
+/// width each (review AG8; `agents.css` `.ag-accs`, `.ag-ctiles` are fixed column grids).
+fn FixedGrid<T>(items: &[T], cols: usize, gap: f32, cell: impl Fn(&T)) {
+    let cols = cols.max(1);
+    cu::Column().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
+        for chunk in items.chunks(cols) {
+            cu::Row().alignment(Alignment::TopStart).spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
+                for x in chunk {
+                    cu::Column().modifier(Modifier::new().weight(1.0)).content(|| cell(x));
+                }
+                for _ in 0..grid_fillers(chunk.len(), cols) {
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                }
+            });
+        }
     });
 }
 
@@ -942,24 +1015,21 @@ fn HarnessSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: 
     let example = live.sample || live.demo;
     let sample_pill = |on: bool| on.then_some(("예시", PillTone::Orange));
     let total = format!("전체 {}", AgentHarness::ALL.len());
-    cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-        KpiItem(
+    let kpis = [
+        (
             "설치된 하네스",
-            &crate::ui::agents::kpi_text(installed_count.map(|n| n.to_string())),
+            crate::ui::agents::kpi_text(installed_count.map(|n| n.to_string())),
             installed_count.map(|_| if example { ("예시", PillTone::Orange) } else { (total.as_str(), PillTone::Grey) }),
-        );
-        KpiItem(
+        ),
+        (
             "상주 shim",
-            &crate::ui::agents::kpi_text(shim_count.map(|n| n.to_string())),
+            crate::ui::agents::kpi_text(shim_count.map(|n| n.to_string())),
             sample_pill(example && shim_count.is_some()),
-        );
-        KpiItem(
-            "세션 메모리 한도 합",
-            &crate::ui::agents::kpi_text(mem_total),
-            None,
-        );
-        KpiItem("마지막 감지", &last_detect, sample_pill(example && checked.is_some() || live.sample));
-    });
+        ),
+        ("세션 메모리 한도 합", crate::ui::agents::kpi_text(mem_total), None),
+        ("마지막 감지", last_detect.clone(), sample_pill(example && checked.is_some() || live.sample)),
+    ];
+    KpiGrid(&kpis, crate::ui::window_size::current_window_size().width_dp);
 
     // The outcome of 다시 찾기, once, near the buttons; it goes back to nothing after a few seconds.
     if let Some(note) = crate::services::try_services()
@@ -2800,6 +2870,124 @@ mod tests {
             harness: h,
             ..auto_profile(&["a"])
         }
+    }
+
+    /// One node of a composition: widget, parent, modifiers (`"Weight(1.0)"`) and props
+    /// (`"FontSize=Float(28.0)"`).
+    struct Node {
+        id: u32,
+        widget: String,
+        parent: Option<u32>,
+        mods: Vec<String>,
+        props: Vec<String>,
+    }
+
+    fn nodes_of(content: fn()) -> Vec<Node> {
+        use compose_rust::protocol::{decode_batch, Mutation};
+        let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let mut nodes: Vec<Node> = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::Create { node_id, widget } => nodes.push(Node {
+                    id: *node_id,
+                    widget: format!("{widget:?}"),
+                    parent: None,
+                    mods: Vec::new(),
+                    props: Vec::new(),
+                }),
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.parent = Some(*parent_id);
+                    }
+                }
+                Mutation::SetModifier { node_id, modifier, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.mods.push(format!("{modifier:?}"));
+                    }
+                }
+                Mutation::SetProp { node_id, property, value } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.props.push(format!("{property:?}={value:?}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        nodes
+    }
+
+    fn text_node<'a>(nodes: &'a [Node], text: &str) -> &'a Node {
+        let want = format!("Text=String({text:?})");
+        nodes.iter().find(|n| n.props.contains(&want)).unwrap_or_else(|| panic!("no text {text}"))
+    }
+
+    fn children<'a>(nodes: &'a [Node], parent: &Node) -> Vec<&'a Node> {
+        nodes.iter().filter(|n| n.parent == Some(parent.id)).collect()
+    }
+
+    #[test]
+    fn fr_l20_kpi_numbers_are_28_regular_and_words_18_semibold() {
+        // Review AG5: every value drew about 18/600. `.kpi .v` is 28/400, 18 at phone width;
+        // `.v.ag-word` (방금) is 18/600; a unit is a small grey pill.
+        assert_eq!(kpi_value_type("4", false), (Fs::Xl2, Weight::Regular));
+        assert_eq!(kpi_value_type("17 GB", false), (Fs::Xl2, Weight::Regular));
+        assert_eq!(kpi_value_type("4", true), (Fs::Xl, Weight::Regular));
+        assert_eq!(kpi_value_type("방금", false), (Fs::Xl, Weight::Semibold));
+        assert_eq!(kpi_value_type("3분 전", false), (Fs::Xl, Weight::Semibold));
+        assert_eq!(kpi_value_type(crate::ui::agents::NO_INFO, false), (Fs::Xl, Weight::Semibold));
+        assert_eq!(kpi_split_unit("17 GB"), ("17", Some("GB")));
+        assert_eq!(kpi_split_unit("512 MB"), ("512", Some("MB")));
+        assert_eq!(kpi_split_unit("3분 전"), ("3분 전", None));
+        assert_eq!(kpi_split_unit("4"), ("4", None));
+        assert_eq!(Fs::Xl2.size(), 28.0);
+        assert!((Fs::Xl2.letter_spacing() - (-0.56)).abs() < 1e-6, "-0.02em");
+
+        let nodes = nodes_of(|| KpiItem("세션 메모리 한도 합", "17 GB", None, false));
+        let value = text_node(&nodes, "17");
+        assert!(value.props.iter().any(|p| p == "FontSize=Float(28.0)"), "{:?}", value.props);
+        assert!(value.props.iter().any(|p| p == "FontWeight=Integer(400)"), "{:?}", value.props);
+        let unit = text_node(&nodes, "GB");
+        let pill = nodes.iter().find(|n| Some(n.id) == unit.parent).expect("the unit pill");
+        assert!(pill.mods.iter().any(|m| m == "Height(20.0)"), "a small pill: {:?}", pill.mods);
+        let word = nodes_of(|| KpiItem("마지막 감지", "방금", Some(("예시", PillTone::Orange)), false));
+        let w = text_node(&word, "방금");
+        assert!(w.props.iter().any(|p| p == "FontSize=Float(18.0)"), "{:?}", w.props);
+        assert!(w.props.iter().any(|p| p == "FontWeight=Integer(600)"), "{:?}", w.props);
+    }
+
+    #[test]
+    fn fr_l20_kpis_are_four_columns_two_up_to_1279_and_a_short_row_keeps_its_cells() {
+        assert_eq!(kpi_grid(1440.0), (4, 24.0));
+        assert_eq!(kpi_grid(1280.0), (4, 24.0));
+        assert_eq!(kpi_grid(1279.0), (2, 16.0));
+        assert_eq!(kpi_grid(768.0), (2, 16.0));
+        assert_eq!(kpi_grid(390.0), (2, 12.0));
+        assert_eq!((grid_fillers(3, 3), grid_fillers(2, 3), grid_fillers(1, 3), grid_fillers(4, 3)), (0, 1, 2, 0));
+        let nodes = nodes_of(|| {
+            let items = ["a", "b", "c", "d", "e"];
+            FixedGrid(&items, 3, 12.0, |x| Label(x, Fs::Sm, Weight::Regular, None, None));
+        });
+        let rows: Vec<&Node> = nodes.iter().filter(|n| n.widget == "Row").collect();
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            let kids = children(&nodes, row);
+            assert_eq!(kids.len(), 3, "three cells in every row, the last one padded");
+            assert!(kids.iter().all(|k| k.mods.iter().any(|m| m == "Weight(1.0)")), "equal cells");
+        }
+        let last = children(&nodes, rows[1]);
+        assert_eq!(last.iter().filter(|k| k.widget == "Spacer").count(), 1);
+        let grid = nodes.iter().find(|n| n.widget == "Column" && Some(n.id) == rows[0].parent).expect("grid column");
+        assert!(grid.props.iter().any(|p| p.starts_with("Spacing=") && p.contains("12.0")), "{:?}", grid.props);
+    }
+
+    #[test]
+    fn fr_l20_page_title_is_the_book_weight() {
+        // Review AG6: `.head h1` is 32/400; the screen drew Semibold.
+        let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
+        let title = production.split("\"에이전트\",").nth(1).unwrap();
+        let title = &title[..title.find(");").unwrap()];
+        assert!(title.contains("PAGE_TITLE_WEIGHT"), "{title}");
     }
 
     fn text_of(content: fn()) -> String {

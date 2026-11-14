@@ -38,7 +38,7 @@ use crate::ui::shell::NavMenu;
 use crate::ui::Route;
 
 use super::components::{
-    AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRow, EmberCard, EmberField, EmberSheetSized, FieldOptions, InsetPanel, Label, MenuRow, OptionSheet,
+    AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRow, EmberCard, EmberField, EmberSheetSized, FieldOptions, InsetPanel, Label, OptionSheet,
     Clickable, Pill, PillTone, Txt,
 };
 use super::notice;
@@ -720,6 +720,184 @@ pub fn branch_menu_rows(branches: &[String], query: &str) -> Vec<usize> {
     branches.iter().enumerate().filter(|(_, b)| branch_matches(b, query)).map(|(i, _)| i).collect()
 }
 
+/// The branch popover's width (`.vcs-pop{width:min(380px,calc(100vw - 32px))}`). A window that
+/// has not reported its size (0) is not narrow.
+pub fn branch_pop_width(window_width_dp: f32) -> f32 {
+    if window_width_dp <= 0.0 { 380.0 } else { 380.0_f32.min((window_width_dp - 32.0).max(0.0)) }
+}
+
+/// A row of the branch popover is 40 high (`.vcs-poprow{height:40px}`).
+pub const BRANCH_POP_ROW_H: f32 = 40.0;
+/// The gap between the control and the box. The mockup hangs the box from the cell
+/// (`.vcs-pop{top:calc(100% - 4px)}`), under the 추적 line; a `Popover` has one anchor, the
+/// control, so the box sits 4 under the control and covers that line.
+pub const BRANCH_POP_OFFSET: f32 = 4.0;
+
+/// The height of the popover's list when it must scroll (`.vcs-poplist{max-height:300px}`):
+/// `None` while `rows` rows fit in 300, so the list is as tall as its rows. The toolkit has no
+/// maximum height (compose-rust#778), so the list takes a fixed 300 from the row count.
+pub fn branch_pop_list_height(rows: usize) -> Option<f32> {
+    (rows as f32 * BRANCH_POP_ROW_H > 300.0).then_some(300.0)
+}
+
+/// What the popover says when no branch matches the search (mockup `vcsPopList`).
+pub const BRANCH_POP_EMPTY: &str = "일치하는 브랜치가 없습니다";
+/// The new-branch field's placeholder and its button (mockup `.vcs-popfoot`).
+pub const BRANCH_POP_NEW: &str = "feat/새-브랜치";
+pub const BRANCH_POP_CREATE: &str = "만들기";
+
+/// One row of the branch popover (`.vcs-poprow`): 40 high, padded 10, the check on the current
+/// branch and the branch glyph on the others, the name in the mono face at 12; the current row
+/// on `sel`. A menu item to assistive technology that says whether it is the current one.
+fn BranchPopRow(name: &str, current: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let fill = if current { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
+    Clickable(
+        Modifier::new()
+            .fill_max_width()
+            .height(BRANCH_POP_ROW_H)
+            .background(fill)
+            .corner_radius(CORNER_SM)
+            .role(cu::Role::MenuItem)
+            .selected(current)
+            .click_action(true),
+        Alignment::CenterStart,
+        on_click,
+        || {
+            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(10.0));
+                NavIcon(if current { super::components::ICON_CHECK_SVG } else { ICON_GIT_SVG }, p.text.to_argb(), 16.0);
+                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                // Zero wide and weighted, so a long name is cut and does not widen the box.
+                cu::Box().alignment(Alignment::CenterStart).modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
+                    Txt(name, TypeRole::Mono, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+                });
+                cu::Spacer().modifier(Modifier::new().width(10.0));
+            });
+        },
+    );
+}
+
+/// The 현재 브랜치 control and its popover (FR-L10.4, #888, mockup `vcsPopHtml`, `vcs.css`
+/// 33-41): the toolkit `Popover` hung under the control, lined up with its start, 380 wide.
+/// A 브랜치 찾기 field (#513), the matching branches (the list scrolls past 300), then, under a
+/// line, a new-branch field with 만들기. A row switches to that branch and closes the box;
+/// Escape and a press outside close it. The content is composed only while the box is open.
+/// Not built: who made a branch and when on each row (the snapshot lists names only).
+fn BranchMenu(open: MutableState<bool>, text: &str, branches: &[String], current: Option<&str>, has: bool, actions: Option<Actions>) {
+    let theme = ember_theme();
+    let p = theme.palette;
+    let query = remember(|| mutable_state_of(String::new()));
+    let new_branch = remember(|| mutable_state_of(String::new()));
+    let generation = remember(|| mutable_state_of(0_u64));
+    let is_open = open.get();
+    let (dismiss, toggle) = (open.clone(), open.clone());
+    let width = branch_pop_width(current_window_size().width_dp);
+    let branches = branches.to_vec();
+    let current = current.map(str::to_string);
+    cu::Popover(is_open)
+        .placement(compose_rust::PopoverPlacement::Bottom)
+        .align(compose_rust::PopoverAlign::Start)
+        .offset(BRANCH_POP_OFFSET)
+        .on_dismiss(move || dismiss.set(false))
+        .modifier(
+            // `elevation(0)`: the box casts its own shadow (as `PopoverMenu`).
+            with_shadows(Modifier::new(), theme.shadow_lg())
+                .elevation(0.0)
+                .width(width)
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .corner_radius(CORNER_LG)
+                .role(cu::Role::Menu)
+                .label(super::a11y::BRANCH_PICKER),
+        )
+        .anchor(|| BranchSelector(text, move || toggle.set(!toggle.get_untracked())))
+        .content(move || {
+            if !is_open {
+                return;
+            }
+            cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+                // `.vcs-pophead{padding:10px}`.
+                cu::Box().modifier(Modifier::new().fill_max_width().padding(10.0)).content(|| {
+                    let q_state = query.clone();
+                    EmberField(FieldOptions {
+                        fill_max_width: true,
+                        height: Some(H_CTL),
+                        text: Some(query.get()),
+                        placeholder: BRANCH_MENU_SEARCH.to_string(),
+                        type_role: Some(VCS_FIELD_ROLE),
+                        on_value_change: Some(Box::new(move |v| q_state.set(v))),
+                        ..Default::default()
+                    });
+                });
+                // `.vcs-poplist{padding:0 6px 6px}`.
+                let shown = branch_menu_rows(&branches, &query.get());
+                let list_h = branch_pop_list_height(shown.len());
+                let list_actions = actions.clone();
+                let list_open = open.clone();
+                let rows = move || {
+                    if branches.is_empty() {
+                        Label(&soon_line("브랜치 목록"), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    } else if shown.is_empty() {
+                        cu::Box().modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+                            Label(BRANCH_POP_EMPTY, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                        });
+                    }
+                    for idx in shown.iter().copied() {
+                        let Some(name) = branches.get(idx).cloned() else { continue };
+                        let (close, row_actions, target) = (list_open.clone(), list_actions.clone(), name.clone());
+                        BranchPopRow(&name, current.as_deref() == Some(name.as_str()), move || {
+                            close.set(false);
+                            if let Some(a) = row_actions.as_ref() {
+                                a.branch(target.clone(), false, || {});
+                            }
+                        });
+                    }
+                };
+                cu::Row().modifier(Modifier::new().fill_max_width()).content(move || {
+                    cu::Spacer().modifier(Modifier::new().width(6.0));
+                    match list_h {
+                        Some(h) => {
+                            cu::ScrollColumn().modifier(Modifier::new().width(0.0).weight(1.0).height(h)).content(rows);
+                        }
+                        None => {
+                            cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(rows);
+                        }
+                    }
+                    cu::Spacer().modifier(Modifier::new().width(6.0));
+                });
+                cu::Spacer().modifier(Modifier::new().height(6.0));
+                // `.vcs-popfoot{border-top:1px solid var(--line);padding:10px;gap:8px}`.
+                cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(10.0)).content(move || {
+                    let value = new_branch.clone();
+                    key(generation.get(), || {
+                        EmberField(FieldOptions {
+                            weight: Some(1.0),
+                            height: Some(H_CTL),
+                            text: Some(new_branch.get()),
+                            placeholder: BRANCH_POP_NEW.to_string(),
+                            type_role: Some(VCS_FIELD_ROLE),
+                            on_value_change: Some(Box::new(move |v| value.set(v))),
+                            ..Default::default()
+                        });
+                    });
+                    let (create_actions, create_value, generation) = (actions.clone(), new_branch.clone(), generation.clone());
+                    AppButton(BRANCH_POP_CREATE, Some(IconRole::Add), ButtonKind::Default, true, has && branch_input(&new_branch.get()).is_some(), false, move || {
+                        if let (Some(actions), Some(name)) = (create_actions.as_ref(), branch_input(&create_value.get())) {
+                            let submitted = create_value.get();
+                            let (value, generation) = (create_value.clone(), generation.clone());
+                            actions.branch(name, true, move || {
+                                value.set(text_after_success(&value.get(), &submitted));
+                                generation.set(generation.get() + 1);
+                            });
+                        }
+                    });
+                });
+            });
+        });
+}
+
 /// The bar of three: repository, current branch, remote origin in ONE split card.
 pub fn RepoBar(
     projects: &[(String, String)],
@@ -737,10 +915,8 @@ fn RepoBarWithActions(
     mut on_pick: impl FnMut(String) + Clone + 'static, actions: Option<Actions>,
 ) {
     let project_menu = remember(|| mutable_state_of(false));
-    let branch_menu = remember(|| mutable_state_of(false));
-    let branch_query = remember(|| mutable_state_of(String::new()));
-    let new_branch = remember(|| mutable_state_of(String::new()));
-    let branch_generation = remember(|| mutable_state_of(0_u64));
+    // `EMBER_CR_VCS_MENU=branch` opens the branch popover at start, for captures.
+    let branch_menu = remember(|| mutable_state_of(std::env::var("EMBER_CR_VCS_MENU").as_deref() == Ok("branch")));
 
     let has = snap.is_some();
     let (ahead, behind) = snap.map_or((0, 0), |s| (s.ahead, s.behind));
@@ -762,22 +938,15 @@ fn RepoBarWithActions(
     let project_opts: Vec<String> = projects.iter().map(|(_, name)| name.clone()).collect();
     let chosen_proj = projects.iter().position(|(id, _)| id == &proj_id);
 
-    let branch_opts: Vec<String> = if branches.is_empty() {
-        vec![soon_line("브랜치 목록")]
-    } else {
-        branches.clone()
-    };
-    let chosen_br = current_branch.as_ref().and_then(|cb| branches.iter().position(|b| b == cb));
-
     let p_dismiss = project_menu.clone();
     let p_projects = projects.to_vec();
     let mut on_pick_proj = on_pick.clone();
-    let b_dismiss = branch_menu.clone();
 
     cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
         let (project_menu_c, branch_menu_c) = (project_menu.clone(), branch_menu.clone());
         let p = ember_theme().palette;
         let remote_actions = actions.clone();
+        let branch_actions = actions.clone();
         // `.vcs-cell{padding:var(--pad-card)}`: 16 beside each other, 12 in the phone's one column.
         let pad = if grid == RepoBarGrid::One { SP[2] } else { SP[3] };
         let repo_cell = move |m: Modifier| {
@@ -794,9 +963,11 @@ fn RepoBarWithActions(
             let b_open = branch_menu_c.clone();
             let b_text = branch_text.clone();
             let u_text = upstream.clone();
+            let (b_list, b_current, b_actions) = (branches.clone(), current_branch.clone(), branch_actions.clone());
             cu::Column().modifier(m.padding(pad)).spacing(SP[1]).content(move || {
                 SmallNote("현재 브랜치");
-                BranchSelector(&b_text, move || b_open.set(true));
+                // The popover hangs from the control (FR-L10.4, #888; it was a centred dialog).
+                BranchMenu(b_open, &b_text, &b_list, b_current.as_deref(), has, b_actions);
                 SmallNote(&u_text);
             });
         };
@@ -854,8 +1025,8 @@ fn RepoBarWithActions(
             }
         });
 
-        // OptionSheets for project and branch dialogs
-        // TODO(compose-rust#383): anchored popup placed below or beside anchor
+        // The 저장소 picker stays a centred sheet: the mockup's is a native `<select>` (`#vcsProj`),
+        // not one of its menus, so there is no menu to follow (FR-L10.4).
         OptionSheet(
             project_menu.get(),
             &project_opts,
@@ -868,66 +1039,6 @@ fn RepoBarWithActions(
                 }
             },
         );
-
-        cu::Dialog(branch_menu.get())
-            .modifier(Modifier::new().width(248.0).background(paint(p.surface))
-                .border(1.0, paint(p.line)).corner_radius(CORNER_MD).padding(SP[0]))
-            .on_dismiss(move || b_dismiss.set(false))
-            .content(|| {
-                cu::Column().modifier(Modifier::new().fill_max_width()).spacing(SP[1]).content(|| {
-                    // The mockup's popover opens with a 브랜치 찾기 field above the list (#513).
-                    let q_state = branch_query.clone();
-                    EmberField(FieldOptions {
-                        fill_max_width: true,
-                        text: Some(branch_query.get()),
-                        placeholder: BRANCH_MENU_SEARCH.to_string(),
-                        type_role: Some(VCS_FIELD_ROLE),
-                        on_value_change: Some(Box::new(move |v| q_state.set(v))),
-                        ..Default::default()
-                    });
-                    let shown = branch_menu_rows(&branches, &branch_query.get());
-                    if !branches.is_empty() && shown.is_empty() {
-                        Label("검색 결과가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-                    }
-                    for (idx, name) in branch_opts.iter().enumerate() {
-                        if !branches.is_empty() && !shown.contains(&idx) { continue; }
-                        let dismiss = branch_menu.clone();
-                        let select_actions = actions.clone();
-                        let selected_name = branches.get(idx).cloned();
-                        MenuRow(name, 240.0, chosen_br == Some(idx), move || {
-                            dismiss.set(false);
-                            if let (Some(actions), Some(name)) = (select_actions.as_ref(), selected_name.as_ref()) {
-                                actions.branch(name.clone(), false, || {});
-                            }
-                        });
-                    }
-                    let branch_value = new_branch.clone();
-                    key(branch_generation.get(), || {
-                        EmberField(FieldOptions {
-                            fill_max_width: true,
-                            text: Some(new_branch.get()),
-                            placeholder: "새 브랜치 이름".to_string(),
-                            type_role: Some(VCS_FIELD_ROLE),
-                            on_value_change: Some(Box::new(move |v| branch_value.set(v))),
-                            ..Default::default()
-                        });
-                    });
-                    let create_actions = actions.clone();
-                    let create_value = new_branch.clone();
-                    let generation = branch_generation.clone();
-                    AppButton("새 브랜치", None, ButtonKind::Primary, false, has && branch_input(&new_branch.get()).is_some(), true, move || {
-                        if let (Some(actions), Some(name)) = (create_actions.as_ref(), branch_input(&create_value.get())) {
-                            let submitted = create_value.get();
-                            let value = create_value.clone();
-                            let generation = generation.clone();
-                            actions.branch(name, true, move || {
-                                value.set(text_after_success(&value.get(), &submitted));
-                                generation.set(generation.get() + 1);
-                            });
-                        }
-                    });
-                });
-            });
     });
 }
 
@@ -5502,6 +5613,94 @@ mod tests {
         let projects = vec![(project.id.clone(), project.name.clone())];
         let snap = sample_snapshot();
         RepoBarWithActions(&projects, &project, Some(&snap), BAR_GRID.with(|g| g.get()), |_| {}, None);
+    }
+
+    fn branch_menu_sample(open: bool) {
+        let state = remember(|| mutable_state_of(open));
+        let branches = vec!["main".to_string(), "develop".to_string(), "feat/x".to_string()];
+        BranchMenu(state, "develop", &branches, Some("develop"), true, None);
+    }
+
+    fn branch_menu_open() {
+        branch_menu_sample(true);
+    }
+
+    fn branch_menu_closed() {
+        branch_menu_sample(false);
+    }
+
+    /// (widget, modifiers, props) of every node `content` emits.
+    fn branch_menu_nodes(content: fn()) -> Vec<(String, Vec<String>, Vec<String>)> {
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        crate::ui::window_size::set_opened_for_test(None);
+        let mut nodes: Vec<(u32, String, Vec<String>, Vec<String>)> = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::Create { node_id, widget } => nodes.push((*node_id, format!("{widget:?}"), Vec::new(), Vec::new())),
+                Mutation::SetModifier { node_id, modifier, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.0 == *node_id) {
+                        n.2.push(format!("{modifier:?}"));
+                    }
+                }
+                Mutation::SetProp { node_id, property, value } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.0 == *node_id) {
+                        n.3.push(format!("{property:?}={value:?}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        nodes.into_iter().map(|n| (n.1, n.2, n.3)).collect()
+    }
+
+    #[test]
+    fn fr_l10_4_branch_menu_is_a_popover_under_its_control() {
+        // Mockup `vcsPopHtml`, `vcs.css` 33-41. It was a centred `Dialog` 248 wide.
+        let _guard = crate::services::test_guard();
+        let nodes = branch_menu_nodes(branch_menu_open);
+        assert!(!nodes.iter().any(|n| n.0 == "Dialog" || n.0 == "Sheet"), "no centred dialog");
+        let pops: Vec<_> = nodes.iter().filter(|n| n.0 == "Popover").collect();
+        assert_eq!(pops.len(), 1);
+        let (_, mods, props) = pops[0];
+        // Below the control, 4 under it, lined up with its start (not its end, 3).
+        for want in ["Open=Bool(true)", "Placement=Integer(2)", "OffsetDp=Float(4.0)"] {
+            assert!(props.iter().any(|p| p == want), "{want} in {props:?}");
+        }
+        assert!(!props.iter().any(|p| p == "Align=Integer(3)"), "{props:?}");
+        assert!(mods.iter().any(|m| m == "Width(380.0)"), "{mods:?}");
+        assert!(mods.iter().any(|m| m == "Elevation(0.0)"), "{mods:?}");
+        assert!(mods.iter().any(|m| m.starts_with("Shape { top_start: 14.0")), "{mods:?}");
+        assert!(mods.iter().any(|m| m.starts_with("Semantics") && m.contains("Menu")), "{mods:?}");
+        let says = |t: &str| nodes.iter().any(|n| n.2.iter().any(|p| p.contains(t)));
+        for t in ["main", "develop", "feat/x", BRANCH_MENU_SEARCH, BRANCH_POP_NEW, BRANCH_POP_CREATE] {
+            assert!(says(t), "missing {t}");
+        }
+        // One 40 dp menu item per branch; the current one alone is on `sel`.
+        let items: Vec<_> = nodes.iter().filter(|n| n.1.iter().any(|m| m.starts_with("Semantics") && m.contains("MenuItem"))).collect();
+        assert_eq!(items.len(), 3);
+        assert!(items.iter().all(|n| n.1.iter().any(|m| m == "Height(40.0)")));
+        let sel = format!("{:?}", compose_rust::schema::Modifier::Background(paint(ember_theme().palette.sel)));
+        assert_eq!(items.iter().filter(|n| n.1.contains(&sel)).count(), 1);
+        // Closed, nothing of the box is composed.
+        let closed = branch_menu_nodes(branch_menu_closed);
+        let pop = closed.iter().find(|n| n.0 == "Popover").expect("the popover node");
+        assert!(pop.2.iter().any(|p| p == "Open=Bool(false)"), "{:?}", pop.2);
+        assert!(!closed.iter().any(|n| n.2.iter().any(|p| p.contains("feat/x") || p.contains(BRANCH_POP_NEW))));
+        assert!(closed.iter().any(|n| n.2.iter().any(|p| p.contains("develop"))), "the control stays");
+    }
+
+    #[test]
+    fn fr_l10_4_branch_menu_sizes() {
+        assert_eq!(branch_pop_width(1440.0), 380.0);
+        assert_eq!(branch_pop_width(390.0), 358.0);
+        assert_eq!(branch_pop_width(0.0), 380.0);
+        assert_eq!(branch_pop_list_height(7), None);
+        assert_eq!(branch_pop_list_height(8), Some(300.0));
+        assert_eq!((BRANCH_POP_ROW_H, BRANCH_POP_OFFSET), (40.0, 4.0));
+        let src = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!src.contains("cu::Dialog(branch_menu"), "the centred branch dialog is gone");
     }
 
     /// The vertical and the horizontal lines between the bar's cells.

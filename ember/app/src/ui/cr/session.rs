@@ -54,7 +54,7 @@ use super::compat::Spinner;
 use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
     AppButton, BackButton, ButtonKind, Clickable, CloseButton, NamedClickable, NameThenPill, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
-    FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu, SearchField, Select, SheetFooter, Txt,
+    FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, PopExtra, PopKind, PopMenu, PopRow, PopoverMenu, PopoverMenuWith, SearchField, Select, SheetFooter, Txt,
     SEARCH_FIELD_H_COMPACT,
 };
 use super::conversation::{ConversationView, ICON_SEND_SVG, ICON_TERMINAL_SVG, TranscriptRow, tail_start_index};
@@ -261,12 +261,28 @@ fn harness_dot_color(agent: &str, p: &Palette) -> Color {
     }
 }
 
-/// The model chip of a composer (`.pickchip.modelchip`).
+/// The one row of the session model chip's menu: a running session's model cannot change.
+pub fn model_chip_rows() -> Vec<PopRow> {
+    vec![PopRow {
+        icon: Some(ICON_SHIELD_SVG),
+        title: MODEL_LOCKED.to_string(),
+        badge: Some((SOON.to_string(), PillTone::Grey)),
+        ..Default::default()
+    }]
+}
+
+/// The model chip of a composer (`.pickchip.modelchip`). Its menu hangs from the chip (FR-L10.4,
+/// #888), in the permission picker's look with the harness and model as its head; at 560 and
+/// below it is the mockup's bottom sheet (`plain_sheet`). The mockup opens the model picker here
+/// (review SE20); a running session's model cannot change yet, so the menu holds one row saying
+/// so. `EMBER_CR_SESSION_MENU=model` opens it at start, for captures.
 pub fn ModelChip(session: &str, compact_label: bool) {
     let ui = shared_ui().clone();
     let p = ember_theme().palette;
     let sid = session.to_string();
-    let model_menu = remember_with_key(format!("{sid}:model"), || mutable_state_of(false));
+    let model_menu = remember_with_key(format!("{sid}:model"), || {
+        mutable_state_of(std::env::var("EMBER_CR_SESSION_MENU").as_deref() == Ok("model"))
+    });
 
     let info = {
         let _ = ui.live.launcher.get();
@@ -291,52 +307,58 @@ pub fn ModelChip(session: &str, compact_label: bool) {
     };
     let dot_col = harness_dot_color(&agent, p);
 
-    cu::Box().content(|| {
-        let mm = model_menu.clone();
-        Clickable(
-            Modifier::new()
-                .height(30.0)
-                .background(paint(p.surface_2))
-                .shape_role(ShapeRole::Full),
-            Alignment::Center,
-            move || mm.set(true),
-            move || {
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .spacing(6.0)
-                    .content(|| {
-                        cu::Spacer().modifier(Modifier::new().width(4.0));
-                        cu::Box().modifier(
-                            Modifier::new()
-                                .size(8.0, 8.0)
-                                .background(paint(dot_col))
-                                .corner_radius(4.0),
-                        );
-                        Label(
-                            &shown_text,
-                            Fs::Xs,
-                            Weight::Medium,
-                            Some(paint(p.text_2)),
-                            Some(1),
-                        );
-                        NavIcon(ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 12.0);
-                        cu::Spacer().modifier(Modifier::new().width(4.0));
-                    });
-            },
-        );
-
-        let model_opts = vec![format!("{MODEL_LOCKED} ({SOON})")];
-        let mm_d = model_menu.clone();
-        let mm_c = model_menu.clone();
-        OptionSheet(
-            model_menu.get(),
-            &model_opts,
-            None,
-            POPUP_W,
-            move || mm_d.set(false),
-            move |_| mm_c.set(false),
-        );
-    });
+    let rows = model_chip_rows();
+    let (mm, mm_d) = (model_menu.clone(), model_menu.clone());
+    let expanded = model_menu.get();
+    PopoverMenuWith(
+        model_menu.get(),
+        PopMenu {
+            name: super::a11y::MODEL_PICKER,
+            kind: PopKind::Mode,
+            head: &base_text,
+            sub: None,
+            rows: &rows,
+            align: compose_rust::PopoverAlign::Start,
+        },
+        PopExtra { plain_sheet: true, ..Default::default() },
+        move || mm_d.set(false),
+        |_| {},
+        move || {
+            Clickable(
+                Modifier::new()
+                    .height(30.0)
+                    .background(paint(p.surface_2))
+                    .shape_role(ShapeRole::Full)
+                    .expanded(expanded),
+                Alignment::Center,
+                move || mm.set(!mm.get_untracked()),
+                move || {
+                    cu::Row()
+                        .alignment(Alignment::CenterStart)
+                        .spacing(6.0)
+                        .content(|| {
+                            cu::Spacer().modifier(Modifier::new().width(4.0));
+                            cu::Box().modifier(
+                                Modifier::new()
+                                    .size(8.0, 8.0)
+                                    .background(paint(dot_col))
+                                    .corner_radius(4.0),
+                            );
+                            Label(
+                                &shown_text,
+                                Fs::Xs,
+                                Weight::Medium,
+                                Some(paint(p.text_2)),
+                                Some(1),
+                            );
+                            NavIcon(ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 12.0);
+                            cu::Spacer().modifier(Modifier::new().width(4.0));
+                        });
+                },
+            );
+        },
+        None,
+    );
 }
 
 /// The permission mode chip of a composer (`.pickchip.modechip`). It opens the permission
@@ -582,11 +604,14 @@ pub fn ide_pop_rows(choices: &[crate::ui::session::IdeChoice], remembered: Optio
         .collect()
 }
 
+/// The demo's own computer, as the mockup names it.
+pub(crate) const DEMO_COMPUTER: &str = "mac-mini";
+
 /// Reads the name of the session's computer into `into` (the demo's own computer in the demo),
 /// for the IDE menu's `computer:~/project` line. A failed read leaves it unset.
 pub(crate) fn load_session_computer(session: String, into: MutableState<Option<String>>) {
     if services().demo.is_some() {
-        into.set(Some("mac-mini".to_string()));
+        into.set(Some(DEMO_COMPUTER.to_string()));
         return;
     }
     run_shared(
@@ -4055,10 +4080,11 @@ pub const SESSION_HEADER_LABELS: bool = false;
 /// chevron (`.btn.sm` with `I("globe")` and `.chev`, review SE3), and under it, lined up with its
 /// end, "웹 페이지 열기" and one row per listening port: the address in the mono face, the process
 /// (and why a port cannot be opened) below, and a green 감지됨 pill on a port that opens. A tap
-/// opens the address in the browser or says why it cannot. Not built: the member character on a
-/// row (ports carry no member), the computer subtitle (the list is read without its name), the
-/// port field and the tunnel hint (no direct-port open).
-fn WebMenu(open: bool, load: &WebPagesLoad, on_dismiss: impl FnMut() + Clone + 'static, on_open: impl FnMut() + 'static) {
+/// opens the address in the browser or says why it cannot. `sub` is the line under the head,
+/// `computer · ip` ([`crate::ui::session::web_menu_subtitle`]), read with the ports. Not built:
+/// the member character on a row (ports carry no member), the port field and the tunnel hint
+/// (no direct-port open).
+fn WebMenu(open: bool, load: &WebPagesLoad, sub: Option<&str>, on_dismiss: impl FnMut() + Clone + 'static, on_open: impl FnMut() + 'static) {
     let items = crate::ui::session::web_menu_items(load);
     let rows: Vec<PopRow> = items
         .iter()
@@ -4077,7 +4103,7 @@ fn WebMenu(open: bool, load: &WebPagesLoad, on_dismiss: impl FnMut() + Clone + '
             name: super::a11y::WEB_MENU,
             kind: PopKind::Drop,
             head: crate::ui::session::WEB_MENU_HEAD,
-            sub: None,
+            sub,
             rows: &rows,
             align: compose_rust::PopoverAlign::End,
         },
@@ -4610,6 +4636,8 @@ pub fn SessionScreen(focus: Option<String>) {
     // opens it at start for captures.
     let vcs_open = remember(|| mutable_state_of(std::env::var("EMBER_CR_SESSION_VCS").as_deref() == Ok("1")));
     let web_pages = remember(|| mutable_state_of(WebPagesLoad::Loading));
+    // The 웹 페이지 menu's `computer · ip` line, read with the ports.
+    let web_sub = remember(|| mutable_state_of(None::<String>));
     // The detail flag value this screen last wrote or saw (FR-L28, #885).
     let detail_wrote = remember(|| mutable_state_of(false));
 
@@ -4667,13 +4695,16 @@ pub fn SessionScreen(focus: Option<String>) {
     let open_web_menu = {
         let web_menu = web_menu.clone();
         let web_pages = web_pages.clone();
+        let web_sub = web_sub.clone();
         let sid = target.clone().or_else(|| members.first().map(|m| m.session_id.clone()));
         move || {
             web_menu.set(true);
             web_pages.set(WebPagesLoad::Loading);
             let done = web_pages.clone();
+            let sub = web_sub.clone();
             if services().demo.is_some() {
                 let host = ComputerHost { local: false, host: Some(crate::demo::DEMO_HOST.to_string()) };
+                sub.set(crate::ui::session::web_menu_subtitle(Some(DEMO_COMPUTER), &host));
                 done.set(web_pages_from(Ok(crate::demo::ports()), &host));
                 return;
             }
@@ -4686,10 +4717,13 @@ pub fn SessionScreen(focus: Option<String>) {
                     let c = services().server.session_computer(&sid).await.map_err(|e| e.to_string())?;
                     let host = computer_host(c.computer.local, "", &services().config.server_url);
                     let ports = services().client.api().computer_ports(&c.computer.id).await.map_err(|e| e.to_string())?;
-                    Ok::<_, String>((ports, host))
+                    Ok::<_, String>((ports, host, c.computer.name))
                 },
-                move |r: Result<(ember_client::api::Ports, ComputerHost), String>| match r {
-                    Ok((ports, host)) => done.set(web_pages_from(Ok(ports), &host)),
+                move |r: Result<(ember_client::api::Ports, ComputerHost, String), String>| match r {
+                    Ok((ports, host, name)) => {
+                        sub.set(crate::ui::session::web_menu_subtitle(Some(&name), &host));
+                        done.set(web_pages_from(Ok(ports), &host));
+                    }
                     Err(e) => done.set(web_pages_from(Err(e), &ComputerHost::default())),
                 },
             );
@@ -4967,7 +5001,7 @@ pub fn SessionScreen(focus: Option<String>) {
                                         let wm = open_web_menu.clone();
                                         let wm_d = web_menu.clone();
                                         #[allow(clippy::redundant_closure)]
-                                        WebMenu(web_menu.get(), &web_pages.get(), move || wm_d.set(false), move || wm());
+                                        WebMenu(web_menu.get(), &web_pages.get(), web_sub.get().as_deref(), move || wm_d.set(false), move || wm());
                                     }
                                     if let Some(t) = target.clone() {
                                         IdeMenu(&t);
@@ -5230,9 +5264,21 @@ mod tests {
         assert!(ide.contains("IDE_MENU_HEAD") && ide.contains("ide_pop_rows(&choices, remembered)"));
         let web = body("WebMenu");
         assert!(web.contains("PopoverMenu(") && web.contains("WEB_MENU_HEAD") && web.contains("PillTone::Green"));
+        // The `computer · ip` line under the head is passed in and sent as the menu's subtitle.
+        assert!(web.contains("sub: Option<&str>") && web.contains("            sub,\n"), "{web}");
+        assert!(src.contains("sub.set(crate::ui::session::web_menu_subtitle(Some(&name), &host));"));
+        assert!(src.contains("web_sub.get().as_deref()"));
         // The globe is a named button that says whether its menu is open (review r8).
         assert!(web.contains("ToolbarBtn(ICON_GLOBE_SVG, \"웹 페이지\", SESSION_HEADER_LABELS, true, Some(open), on_open)"), "{web}");
-        for b in [&mode, &ide, &web] {
+        // The model chip's one line hangs from the chip too, with the mockup's own sheet on a phone.
+        let model = body("ModelChip");
+        assert!(model.contains("PopoverMenuWith(") && model.contains("PopKind::Mode") && model.contains("plain_sheet: true"));
+        assert!(model.contains(".expanded(expanded)") && model.contains("model_chip_rows()"));
+        let rows = super::model_chip_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "실행 중인 세션의 모델은 바꿀 수 없습니다");
+        assert_eq!(rows[0].badge, Some((crate::ui::session::SOON.to_string(), PillTone::Grey)));
+        for b in [&mode, &ide, &web, &model] {
             assert!(!b.contains("OptionSheet("), "no centred option sheet is left in {b:.40}");
         }
         assert!(!src.contains("// Web pages OptionSheet"));

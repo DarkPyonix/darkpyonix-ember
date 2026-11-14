@@ -241,7 +241,7 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
         }
         mutable_state_of(id)
     });
-    let window = compose_rust::runtime::current_window_size();
+    let window = crate::ui::window_size::current_window_size();
     let split = split_view(window.class);
     // Side by side with nothing open, the first listed room is shown (FR-L12, #509); the
     // compact layout keeps the list first.
@@ -587,7 +587,7 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
     let p = ember_theme().palette;
     // The room's own width is not known here, so it is the window less the sidebar's rail share,
     // the list panel and the margins, kept to 740 at most.
-    let window = compose_rust::runtime::current_window_size().width_dp;
+    let window = crate::ui::window_size::current_window_size().width_dp;
     let room_w = if window > 900.0 { window - list_width(window) - 1.0 - 234.0 } else { window };
     let width = (room_w - 32.0).clamp(240.0, 740.0);
     cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().padding(SP[3])).content(|| {

@@ -233,7 +233,7 @@ fn capture_env(name: &str) -> Option<String> {
 pub fn CharactersScreen() {
     let ui = shared_ui().clone();
     let p = ember_theme().palette;
-    let width = compose_rust::runtime::current_window_size().width_dp;
+    let width = crate::ui::window_size::current_window_size().width_dp;
     let compact = width <= 560.0;
     let wide = width > 1000.0;
     let cols = team_cols(width);

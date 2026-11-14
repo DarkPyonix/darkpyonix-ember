@@ -321,7 +321,7 @@ pub fn AgentsScreenWith(
             store.set(local_load());
         }
     }
-    let window = compose_rust::runtime::current_window_size();
+    let window = crate::ui::window_size::current_window_size();
     let compact = window.is_compact() || window.width_dp <= 900.0;
     let pad = if compact { SP[3] } else { SP[6] };
     let cur_sec = section.get();
@@ -1014,7 +1014,7 @@ fn HarnessSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: 
 
 /// The window width the harness grid decides from; a compact layout is always one column.
 fn compact_window_width(compact: bool) -> f32 {
-    if compact { 0.0 } else { compose_rust::runtime::current_window_size().width_dp }
+    if compact { 0.0 } else { crate::ui::window_size::current_window_size().width_dp }
 }
 
 /// Columns of the harness cards (FR-L20): two from 1280 dp, one below. At 1024 dp two columns
@@ -1367,7 +1367,7 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
     let hook = crate::ui::agents::sheet_hook();
     let pick_open = remember(move || mutable_state_of(hook == Some(crate::ui::agents::SheetHook::Harness)));
     let acct_open = remember(move || mutable_state_of(hook == Some(crate::ui::agents::SheetHook::Account)));
-    let stacked = crate::ui::agents::chips_stacked(compose_rust::runtime::current_window_size().width_dp);
+    let stacked = crate::ui::agents::chips_stacked(crate::ui::window_size::current_window_size().width_dp);
     let rows = crate::ui::agents::pick_rows(&crate::ui::agents::harness_options(&live.detected), model_pairs);
     let row_labels: Vec<String> = rows.iter().map(|r| r.label.clone()).collect();
     let row_chosen = rows

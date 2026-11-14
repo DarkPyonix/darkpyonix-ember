@@ -15,6 +15,8 @@ EMBER_SERVER_URL=http://127.0.0.1:8740 cargo run      # the main server (default
 | Variable | Default | Meaning |
 |---|---|---|
 | `EMBER_SERVER_URL` | `http://127.0.0.1:8740` | Main server base URL |
+| `EMBER_SERVER_PEER` | (none) | The main server over the transport for this run (FR-N9): its peer id, `<peer id>@<ip>:<port>`, or the address JSON it prints. Beats `EMBER_SERVER_URL` and the address saved in 설정 |
+| `EMBER_RELAY_URL` | (backend default) | The relay for that reach, `letify://<server peer id>@host:7443`. Beats the relay saved in 설정 |
 | `EMBER_DEMO_DATA` | off | `1` with no `EMBER_SERVER_URL`: the app serves demo data itself and contacts no server (demo only) |
 | `EMBER_DATA_DIR` | `<OS data dir>/ember` | Cache (`client-cache.json`), prefs (`prefs.json`), `exports/` |
 | `EMBER_LOG` | `warn,ember_app=info,ember_client=info` | `tracing` filter |
@@ -69,9 +71,44 @@ compose-rust writes no Activity over Ember's own, and with the Gradle daemon off
 The launch settings are the string extras `EMBER_DEMO_DATA`, `EMBER_SERVER_URL`,
 `EMBER_CR_SHELL` and `EMBER_CR_ROUTE`, read as the variables of the same names. Only a
 debuggable build reads them, and only when the process starts (stop the app first:
-`adb shell am force-stop dev.darkpyonix.ember`). A release build has no way to name a server
-yet (#770). The process is killed, not shut down, so prefs are written when they change and
+`adb shell am force-stop dev.darkpyonix.ember`). A release build names a remote server only
+through 설정 (below). The process is killed, not shut down, so prefs are written when they change and
 the cache by the client's own writer.
+
+### A phone or a second computer as a device (FR-N9, #856)
+
+A second device reaches the main server over the peer-to-peer transport, never by plain HTTP
+(the token is not sent to a remote host, FR-S11, and the server's TCP listener takes loopback
+only, D37). The device's key is its credential (FR-N7). Until a pairing flow exists, the owner
+copies the device's peer id to the server by hand:
+
+1. Start the server with the transport on. It prints its peer id and address:
+
+   ```sh
+   cd ember/server
+   EMBER_TRANSPORT=1 cargo run
+   # ember server peer id: 6f1c...
+   # ember server peer addr: {"peer":"6f1c...","relays":[...],"direct":["192.168.0.10:51234"]}
+   ```
+
+2. On the device, open 설정 and read "이 기기의 peer id" (복사 copies it). The key behind it is
+   `<data dir>/device.key`, made on first use with mode 0600.
+3. On the server's computer, allow the device:
+
+   ```sh
+   cd ember/server
+   cargo run -- owner devices add <peer id> phone
+   ```
+
+4. On the device, enter the server's address in 설정 > 이 기기 > 서버 주소 (the `peer addr` JSON
+   line, or `<peer id>@<ip>:<port>`), and the relay if the device is not on the server's network
+   (`letify://<server peer id>@<host>:7443`). Press 저장 and restart the app.
+
+A device the server does not admit shows "이 기기가 서버에 등록되어 있지 않거나 등록이
+해제되었습니다." at start and in 설정. The server's direct port changes when it restarts, so the
+JSON line is entered again after a restart until the address directory or pairing covers it.
+Clearing the address and saving goes back to the local server. Not over the transport yet: the
+terminal relay and the separate Ember 에디터 window, which still need an HTTP address.
 
 Not on Android yet: the Ember 에디터 window and VS Code Web (FR-W5), the share sheet (FR-F7),
 opening a URL in the system browser, a CI job for this build.

@@ -1107,7 +1107,7 @@ pub fn EmberSheetSized(
             content();
         });
     };
-    let window = compose_rust::runtime::current_window_size();
+    let window = crate::ui::window_size::current_window_size();
     let presentation = sheet_presentation(window.width_dp, monitor);
     if presentation == SheetPresentation::Bottom {
         // compose-rust#445 (v0.0.9): the sheet is as tall as its content up to 85 percent of the

@@ -8,10 +8,13 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use compose_rust::runtime::{current_window_size, launched_effect};
+use compose_rust::runtime::launched_effect;
 use compose_rust::{Message, MessageDuration, MessageHorizontal, MessagePlacement, MessageVertical};
 
 use crate::ui::coexist::shared_ui;
+// Ember's reading: a desktop window that has not reported its size yet reads its opened size
+// (FR-L10.3).
+use crate::ui::window_size::current_window_size;
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 

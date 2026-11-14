@@ -1,6 +1,6 @@
 //! compose-rust settings sheet (#220 phase 8): theme preference (FR-L28), editor keymap and
 //! shortcut reference (FR-L30), remembered default IDE target (FR-L7), archived-session
-//! visibility (FR-L9), and server/data paths.
+//! visibility (FR-L9), this device on the transport (FR-N9), and server/data paths.
 
 #![allow(non_snake_case)]
 
@@ -217,7 +217,16 @@ pub fn SettingsContent() {
 
             cu::Separator(Some(paint(p.line)));
 
-            // 5. Per-device scope (FR-N8, #817)
+            // 5. This device on the transport (FR-N9, #856)
+            SectionBlock(
+                super::this_device::TITLE,
+                super::this_device::SUBTITLE,
+                super::this_device::ThisDeviceSection,
+            );
+
+            cu::Separator(Some(paint(p.line)));
+
+            // 6. Per-device scope (FR-N8, #817)
             SectionBlock(
                 "기기 권한",
                 "서버에 등록된 기기마다 할 수 있는 작업을 정합니다.",
@@ -226,7 +235,7 @@ pub fn SettingsContent() {
 
             cu::Separator(Some(paint(p.line)));
 
-            // 6. Connection & local storage info
+            // 7. Connection & local storage info
             SectionBlock("연결 및 저장소", "현재 연결된 메인 서버 주소와 로컬 데이터 폴더입니다.", || {
                 InsetPanel(true, || {
                     cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -369,6 +378,11 @@ mod tests {
             "보관된 세션 표시",
             "꺼짐",
             "메인 서버",
+            "이 기기",
+            "이 기기의 peer id",
+            "서버 주소",
+            "릴레이 (선택)",
+            "저장",
             "닫기",
         ] {
             assert!(all.iter().any(|t| t == want), "missing {want}: {all:?}");

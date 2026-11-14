@@ -103,7 +103,7 @@ fn ModeSheet(
     on_dismiss: impl FnMut() + Clone + 'static,
     on_tap: impl FnMut(usize) + Clone + 'static,
 ) {
-    let width = (compose_rust::runtime::current_window_size().width_dp - 2.0 * SP[3]).max(240.0);
+    let width = (crate::ui::window_size::current_window_size().width_dp - 2.0 * SP[3]).max(240.0);
     EmberSheet(header, open, on_dismiss, None, || {
         cu::Box().modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| ModeBody("", rows, width - 2.0 * SP[1], on_tap));
     });
@@ -510,7 +510,7 @@ const EST_PROJ: f32 = 330.0;
 
 /// The Home screen: the chat-first top, then the dashboard.
 pub fn HomeScreen() {
-    let window = compose_rust::runtime::current_window_size();
+    let window = crate::ui::window_size::current_window_size();
     let l = layout(window.width_dp);
     let pad = if l.compact { SP[3] } else { SP[6] };
     let content_w = content_width(window.width_dp, pad);
@@ -731,7 +731,7 @@ impl Composer {
         }
         // Compact widths keep the modal; wider ones use the popover under the chip, drawn in
         // the composer card (`mode_popover`).
-        let compact = layout(compose_rust::runtime::current_window_size().width_dp).compact;
+        let compact = layout(crate::ui::window_size::current_window_size().width_dp).compact;
         if compact {
             let me = self.clone();
             let dismiss = self.dismiss_mode();
@@ -756,7 +756,7 @@ impl Composer {
         }
         // Compact widths keep the modal (a bottom sheet in the spec); wider ones use the popover
         // under the chip, drawn in the composer card.
-        let compact = layout(compose_rust::runtime::current_window_size().width_dp).compact;
+        let compact = layout(crate::ui::window_size::current_window_size().width_dp).compact;
         self.model_sheet(ui, &sel, compact && open == Some(Pick::Model), close);
     }
 
@@ -974,7 +974,7 @@ impl Composer {
             });
         };
         if rail {
-            let window = compose_rust::runtime::current_window_size();
+            let window = crate::ui::window_size::current_window_size();
             let surface = with_shadows(Modifier::new(), ember_theme().shadow_lg())
                 .width(popover_width(MODEL_POPOVER_WIDTH, window.width_dp))
                 .height(model_popover_height(window.height_dp))
@@ -1507,7 +1507,7 @@ fn IntegrationsArea() {
     let header_line = if is_sample { crate::ui::home::sample_header(&card.header_line) } else { card.header_line.clone() };
     let guidance = remember(|| mutable_state_of(false));
     let ui = shared_ui().clone();
-    let il = integrations_layout(compose_rust::runtime::current_window_size().width_dp);
+    let il = integrations_layout(crate::ui::window_size::current_window_size().width_dp);
     let github = || Tile(|| {
             cu::Row().spacing(10.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                 cu::Box()
@@ -1737,7 +1737,7 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
         list = list.circle(paint(p.surface), *x, *y, 6.0, 0.0).circle(paint(p.ink), *x, *y, 4.5, 3.0);
     }
     let commands = list.build();
-    let narrow = layout(compose_rust::runtime::current_window_size().width_dp).compact;
+    let narrow = layout(crate::ui::window_size::current_window_size().width_dp).compact;
     let legend = usage::cost_legend(
         usage::period_cost(&load, days.get()).is_some(),
         usage::window_total(&load, days.get()).is_some(),

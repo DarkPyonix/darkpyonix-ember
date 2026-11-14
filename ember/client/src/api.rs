@@ -1006,6 +1006,20 @@ impl Api {
         Self::check(self.send(Method::POST, path, Some(body)).await?)
     }
 
+    /// One request below `/api` (`path` may carry a query string), answered with the status and
+    /// the body as they came, whatever the status. For the app's calls this crate does not wrap
+    /// yet (`ember/app/src/server.rs`), so they take the same reach, over plain HTTP with the
+    /// token and owner key rules of every other call, or over the transport (SPEC `FR-N9`).
+    pub async fn raw_request(
+        &self,
+        method: Method,
+        path: &str,
+        json: Option<serde_json::Value>,
+    ) -> ApiResult<(u16, Vec<u8>)> {
+        let raw = self.send(method, path, json).await?;
+        Ok((raw.status.as_u16(), raw.body.to_vec()))
+    }
+
     /// Opens the push WebSocket (`/api/push`).
     pub async fn open_push(&self) -> ApiResult<PushSocket> {
         let url = self.push_url();

@@ -18,9 +18,12 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use compose_rust::runtime::{
-    MutableState, current_window_size, delay, disposable_effect, launched_effect, mutable_state_of,
-    on_dispose, remember, remember_with_key,
+    MutableState, delay, disposable_effect, launched_effect, mutable_state_of, on_dispose, remember,
+    remember_with_key,
 };
+// Ember's reading: a desktop window that has not reported its size yet reads its opened size
+// (FR-L10.3).
+use crate::ui::window_size::current_window_size;
 use compose_rust::ui::{self as cu, Modifier, Side};
 use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, Snap, SpaceRole, TypeRole};
 

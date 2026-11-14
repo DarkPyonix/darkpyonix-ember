@@ -980,7 +980,10 @@ mod tests {
         assert_eq!((archive.title, archive.button), ("프로젝트 보관", "보관"));
         assert_eq!(archive.note, "세션과 기록은 남고 목록에서 숨겨집니다.");
         assert_eq!((delete.title, delete.button), ("프로젝트 삭제", "삭제"));
-        assert_eq!(delete.note, "팀원 3명의 대화가 함께 지워집니다.");
+        // The server refuses a project that still holds records (#384), so the row never
+        // promises a cascade.
+        assert!(delete.note.contains("팀원 3명") && delete.note.contains("비어 있는 프로젝트만"), "{}", delete.note);
+        assert!(!delete.note.contains("함께 지워집니다"));
         let [_, d] = super::danger_rows(super::DEFAULT_PROJECT_ID, 3);
         assert_eq!(d.note, "기본 프로젝트는 지울 수 없습니다.");
     }
@@ -1324,7 +1327,7 @@ mod tests {
 
     // FR-L26: only what the server supports is enabled; the rest says the server cannot yet.
     #[test]
-    fn fr_l26_the_server_saves_metadata_and_profile_override_but_not_leader_archive_or_delete() {
+    fn fr_l26_the_server_saves_metadata_profile_override_archive_and_delete_but_not_the_leader() {
         for part in [
             SettingsPart::Computers,
             SettingsPart::Name,
@@ -1332,14 +1335,14 @@ mod tests {
             SettingsPart::CharacterStyle,
             SettingsPart::MemberDefaults,
             SettingsPart::ProfileOverride,
+            SettingsPart::Archive,
+            SettingsPart::Delete,
         ] {
             assert!(part_supported(part), "{part:?}");
         }
         for part in [
             SettingsPart::Leader,
             SettingsPart::Links,
-            SettingsPart::Archive,
-            SettingsPart::Delete,
         ] {
             assert!(!part_supported(part), "{part:?}");
         }
@@ -1664,5 +1667,123 @@ mod tests {
         assert_eq!(SettingsGuard::new(false, NewProjectDraft::default().is_blank()).on_close(), CloseAction::Close);
         assert_eq!(SettingsGuard::new(false, np_draft("x", "", "", "").is_blank()).on_close(), CloseAction::Confirm);
         assert_eq!(SettingsGuard::new(true, false).on_close(), CloseAction::Ignore);
+    }
+
+    // ---- archive and delete (FR-L26, #327) ---------------------------------------------------
+
+    #[test]
+    fn fr_l26_archive_and_delete_are_live_but_never_in_the_default_project() {
+        assert!(danger_allowed("ember", SettingsPart::Archive) && danger_allowed("ember", SettingsPart::Delete));
+        assert!(!danger_allowed(DEFAULT_PROJECT_ID, SettingsPart::Archive));
+        assert!(!danger_allowed(DEFAULT_PROJECT_NAME, SettingsPart::Delete));
+        assert!(!part_supported(SettingsPart::Leader), "the leader waits for an owner decision (#384)");
+        assert!(danger_hint("ember").contains("한 번 더"), "the hint says delete asks twice");
+        assert!(danger_hint(DEFAULT_PROJECT_ID).contains("기본 프로젝트"));
+    }
+
+    #[test]
+    fn fr_l26_archive_patch_flips_the_flag_and_sends_nothing_else() {
+        assert_eq!(archive_patch(false), ProjectPatch { archived: Some(true), ..Default::default() });
+        assert_eq!(archive_patch(true), ProjectPatch { archived: Some(false), ..Default::default() });
+        assert_eq!(serde_json::to_value(archive_patch(false)).unwrap(), serde_json::json!({ "archived": true }));
+    }
+
+    #[test]
+    fn fr_l26_an_archived_project_offers_restore() {
+        let [archive, _] = danger_rows_for("ember", 0, true, false);
+        assert_eq!((archive.title, archive.button), ("프로젝트 보관 해제", "보관 해제"));
+        assert!(archive.note.contains("다시 나타납니다"), "{}", archive.note);
+        let [archive, _] = danger_rows_for("ember", 0, false, false);
+        assert_eq!((archive.title, archive.button), ("프로젝트 보관", "보관"));
+    }
+
+    #[test]
+    fn fr_l26_delete_row_follows_the_server_rule_and_the_armed_state() {
+        let [_, d] = danger_rows_for("ember", 0, false, false);
+        assert_eq!(d.button, "삭제");
+        assert!(d.note.contains("비어 있는 프로젝트만"), "{}", d.note);
+        let [_, d] = danger_rows_for("ember", 2, false, false);
+        assert!(d.note.contains("팀원 2명"), "{}", d.note);
+        let [_, armed] = danger_rows_for("ember", 0, false, true);
+        assert_eq!(armed.button, "정말 삭제합니다");
+        assert!(armed.note.contains("되돌릴 수 없습니다"), "{}", armed.note);
+        // 기본 프로젝트 never shows the armed question.
+        let [_, d] = danger_rows_for(DEFAULT_PROJECT_ID, 0, false, true);
+        assert_eq!((d.button, d.note.as_str()), ("삭제", "기본 프로젝트는 지울 수 없습니다."));
+    }
+
+    #[test]
+    fn fr_l26_a_single_tap_never_deletes() {
+        const T0: i64 = 1_000_000;
+        // The first tap only arms.
+        assert_eq!(delete_step(None, T0), DeleteStep::Arm);
+        assert!(!delete_armed(None, T0));
+        // A double click: the second tap comes before the question could be read.
+        assert_eq!(delete_step(Some(T0), T0), DeleteStep::Wait);
+        assert_eq!(delete_step(Some(T0), T0 + 599), DeleteStep::Wait);
+        // The second tap counts from 600 ms to 4 s after the first.
+        assert_eq!(delete_step(Some(T0), T0 + 600), DeleteStep::Delete);
+        assert_eq!(delete_step(Some(T0), T0 + 3999), DeleteStep::Delete);
+        // Later the question is gone, so the tap arms again.
+        assert_eq!(delete_step(Some(T0), T0 + 4000), DeleteStep::Arm);
+        assert!(delete_armed(Some(T0), T0 + 100));
+        assert!(!delete_armed(Some(T0), T0 + 4000));
+        // Whatever the time of one tap from the unarmed state, nothing is deleted.
+        for now in [0, 1, T0, i64::MAX / 2] {
+            assert_ne!(delete_step(None, now), DeleteStep::Delete);
+        }
+    }
+
+    #[test]
+    fn fr_l26_delete_and_archive_failures_read_as_fixed_sentences() {
+        assert!(delete_error_message(Some(409), Some("project_not_empty")).contains("남아 있어 지울 수 없습니다"));
+        assert_eq!(delete_error_message(Some(403), Some("protected_project")), "기본 프로젝트는 지울 수 없습니다");
+        assert_eq!(delete_error_message(Some(404), Some("not_found")), "프로젝트를 찾지 못했습니다");
+        for (st, code) in [(Some(400), Some("not_yet")), (Some(405), None)] {
+            assert!(delete_error_message(st, code).contains("아직 지원하지 않습니다"), "{st:?} {code:?}");
+        }
+        for (st, code) in [(None, None), (Some(500), Some("internal"))] {
+            let m = delete_error_message(st, code);
+            assert!(m.starts_with("프로젝트를 지우지 못했습니다") && !m.contains("500"), "{m}");
+        }
+        let archive = archive_patch(false);
+        assert_eq!(patch_error_message(Some(403), Some("protected_project"), &archive), "기본 프로젝트는 보관할 수 없습니다");
+        assert!(patch_error_message(Some(400), Some("not_yet"), &archive).contains("아직 지원하지 않습니다"));
+        // A rename refusal keeps its own sentence.
+        assert_eq!(
+            patch_error_message(Some(403), Some("protected_project"), &ProjectPatch::default()),
+            "기본 프로젝트의 이름은 바꿀 수 없습니다"
+        );
+        // A missing owner key goes to the notice, which opens the owner sheet (FR-S12).
+        assert!(is_owner_refusal(Some(403), Some("owner_required")));
+        assert!(!is_owner_refusal(Some(403), Some("protected_project")));
+        assert!(!is_owner_refusal(Some(409), Some("owner_required")));
+    }
+
+    #[test]
+    fn fr_l26_an_archived_project_is_hidden_until_archived_items_are_shown() {
+        use ember_client::Input;
+        let mut state = State::default();
+        state.apply(Input::ProjectsLoaded(vec![
+            Project { name: "live".into(), ..Default::default() },
+            Project { name: "old".into(), archived: true, ..Default::default() },
+        ]));
+        let names = |show: bool| -> Vec<(String, String)> {
+            project_boxes_with_archived(&state, show).into_iter().map(|b| (b.id, b.name)).collect()
+        };
+        assert_eq!(names(false), [("live".to_string(), "live".to_string())]);
+        let shown = names(true);
+        assert_eq!(shown.len(), 2);
+        assert!(shown.contains(&("old".to_string(), "old (보관됨)".to_string())), "{shown:?}");
+        assert!(project_archived(&state, "old"));
+        assert!(!project_archived(&state, "live"));
+        assert!(!project_archived(&state, "missing"));
+    }
+
+    #[test]
+    fn fr_l26_the_open_view_closes_when_its_project_goes_away() {
+        assert_eq!(full_after_removal(Some("old"), "old"), None);
+        assert_eq!(full_after_removal(Some("live"), "old"), Some("live".to_string()));
+        assert_eq!(full_after_removal(None, "old"), None);
     }
 }

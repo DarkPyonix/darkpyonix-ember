@@ -2306,4 +2306,78 @@ mod tests {
         assert_eq!(weekday_bar_radius(24.0, 10.0), 5.0);
         assert_eq!(weekday_bar_radius(24.0, 0.0), 0.0);
     }
+
+    // ---- the project page's 루틴 tile (FR-L26, #327) ------------------------------------------
+
+    #[test]
+    fn fr_l26_routine_tile_says_loading_failed_and_empty() {
+        let now = at(2026, 10, 25, 8, 0);
+        assert_eq!(project_routine_tile(&TileLoad::Loading, "ember", now).lines(), [TILE_LOADING]);
+        assert_eq!(project_routine_tile(&TileLoad::Failed, "ember", now).lines(), [TILE_FAILED]);
+        assert_eq!(project_routine_tile(&TileLoad::Loaded(Vec::new()), "ember", now).lines(), [TILE_EMPTY]);
+        // Another project's routine is not this project's.
+        let other = entry(routine("1", "요약", "other", "0 9 * * *"), Vec::new());
+        let tile = project_routine_tile(&TileLoad::Loaded(vec![other]), "ember", now);
+        assert!(tile.rows.is_empty());
+        assert_eq!(tile.lines(), [TILE_EMPTY]);
+    }
+
+    #[test]
+    fn fr_l26_routine_tile_counts_and_lists_next_run_and_last_result() {
+        let now = at(2026, 10, 25, 8, 0);
+        let next = at(2026, 10, 25, 9, 0);
+        let done = vec![run(now - 180, RunStatus::Done)];
+        let mut daily = entry(routine("1", "아침 요약", "ember", "0 9 * * *"), done.clone());
+        daily.next_at = Some(next);
+        let mut off = entry(routine("2", "주간 정리", "ember", "0 9 * * 1"), Vec::new());
+        off.routine.enabled = false;
+        let mut waiting = routine("3", "CI 고치기", "ember", "o/r@main");
+        waiting.trigger = Trigger::Event;
+        let waiting = entry(waiting, vec![run(now - 5, RunStatus::Failed)]);
+
+        let tile = project_routine_tile(&TileLoad::Loaded(vec![daily, off, waiting]), "ember", now);
+        assert_eq!(tile.summary, "루틴 3개 · 켜짐 2개 · 최근 실패 1개");
+        assert_eq!(tile.rows.len(), 3);
+        assert_eq!(tile.rows[0].name, "아침 요약");
+        assert_eq!(tile.rows[0].when, format!("다음 실행 {}", format_next(next, now)));
+        assert_eq!(tile.rows[0].last, last_run_text(&done, now));
+        assert_eq!(tile.rows[1].when, "꺼져 있습니다");
+        assert_eq!(tile.rows[1].last, "실행 기록 없음");
+        assert_eq!(tile.rows[2].when, EVENT_WAITING, "an event routine has no next run, it waits");
+        assert!(tile.rows[2].last.starts_with("실패"), "{}", tile.rows[2].last);
+        assert_eq!(tile.more, None);
+        let lines = tile.lines();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], tile.summary);
+        assert_eq!(lines[1], format!("아침 요약 · {} · {}", tile.rows[0].when, tile.rows[0].last));
+    }
+
+    #[test]
+    fn fr_l26_routine_tile_without_a_failure_does_not_mention_one() {
+        let now = at(2026, 10, 25, 8, 0);
+        let one = entry(routine("1", "요약", "ember", "0 9 * * *"), vec![run(now - 60, RunStatus::Done)]);
+        let tile = project_routine_tile(&TileLoad::Loaded(vec![one]), "ember", now);
+        assert_eq!(tile.summary, "루틴 1개 · 켜짐 1개");
+    }
+
+    #[test]
+    fn fr_l26_routine_tile_shows_three_rows_and_counts_the_rest() {
+        let now = at(2026, 10, 25, 8, 0);
+        let all: Vec<Entry> = (1..=5)
+            .map(|n| entry(routine(&n.to_string(), &format!("루틴 {n}"), "ember", "0 9 * * *"), Vec::new()))
+            .collect();
+        let tile = project_routine_tile(&TileLoad::Loaded(all), "ember", now);
+        assert_eq!(tile.summary, "루틴 5개 · 켜짐 5개");
+        assert_eq!(tile.rows.len(), TILE_MAX_ROWS);
+        assert_eq!(tile.more.as_deref(), Some("외 2개"));
+        assert_eq!(tile.lines().len(), 1 + TILE_MAX_ROWS + 1);
+    }
+
+    #[test]
+    fn fr_l26_routine_tile_matches_the_default_project_by_id_or_name() {
+        let now = at(2026, 10, 25, 8, 0);
+        let one = entry(routine("1", "요약", DEFAULT_PROJECT, "0 9 * * *"), Vec::new());
+        let tile = project_routine_tile(&TileLoad::Loaded(vec![one]), crate::ui::project::DEFAULT_PROJECT_ID, now);
+        assert_eq!(tile.rows.len(), 1);
+    }
 }

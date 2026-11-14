@@ -479,7 +479,11 @@ pub fn PopoverMenu(
                 .offset(m.offset)
                 .on_dismiss(on_dismiss.clone())
                 .modifier(
+                    // `elevation(0)`: the box casts its own shadow, so the toolkit's menu
+                    // elevation is turned off. Without it the renderer casts a second shadow
+                    // from the inner surface, which shows through the box as a grey band.
                     with_shadows(Modifier::new(), theme.shadow_lg())
+                        .elevation(0.0)
                         .width(width)
                         .background(paint(p.surface))
                         .border(1.0, paint(p.line))
@@ -3060,6 +3064,9 @@ mod tests {
         // The box: 360 wide, `corner-lg`, padded 6, a menu to assistive technology.
         assert!(pop.mods.iter().any(|m| m == "Width(360.0)"), "{:?}", pop.mods);
         assert!(pop.mods.iter().any(|m| m == "Padding(6.0)"), "{:?}", pop.mods);
+        // Its own shadow only: the toolkit's menu elevation is off, or a second shadow shows
+        // through the box as a grey band inside the border.
+        assert!(pop.mods.iter().any(|m| m == "Elevation(0.0)"), "{:?}", pop.mods);
         assert!(pop.mods.iter().any(|m| m.starts_with("Shape { top_start: 14.0")), "{:?}", pop.mods);
         assert!(pop.mods.iter().any(|m| m.starts_with("Semantics") && m.contains("Menu")), "{:?}", pop.mods);
         // The control is the popover's first child; everything else is in the box.

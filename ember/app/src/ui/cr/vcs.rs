@@ -6658,7 +6658,9 @@ mod tests {
         let _guard = crate::services::test_guard();
         compose_rust::window::reset_window_size();
         let _ = vcs_sheet_window(1440.0, 900.0);
-        let text = text_of(open_vcs_sheet);
+        // The test services are installed, so `VcsSheet` would load a real (empty) project;
+        // mount the sheet's screen on the sample, as `VcsSheet` does without services.
+        let text = text_of(open_vcs_sheet_sample);
         let project = sample_project_box();
         assert!(text.contains(&vcs_sheet_title(&project.name)), "the header names the project");
         assert!(text.contains("전체 화면"), "the header's full screen button");
@@ -6734,6 +6736,13 @@ mod tests {
     #[compose_rust::runtime::Composable]
     fn open_vcs_sheet() {
         VcsSheet("ember", true, || {});
+    }
+
+    #[compose_rust::runtime::Composable]
+    fn open_vcs_sheet_sample() {
+        let reload = remember(|| mutable_state_of(0_u64));
+        let ctl = VcsSheetCtl { window_w: 1440.0, sheet_w: vcs_sheet_width(1440.0), on_close: std::rc::Rc::new(std::cell::RefCell::new(|| {})) };
+        VcsScreenWithLoad(Load::Ready(sample_snapshot()), sample_projects(), Some("ember".into()), reload, true, Some(ctl));
     }
 
     #[compose_rust::runtime::Composable]

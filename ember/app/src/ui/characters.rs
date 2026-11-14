@@ -914,6 +914,17 @@ pub fn state_label(s: CharState) -> &'static str {
     }
 }
 
+/// The page content's greatest width: `.wrapx{max-width:1180px}` less its 16 px sides.
+pub const PAGE_MAX_W: f32 = 1148.0;
+/// The lead paragraph's greatest width (`.lead{max-width:820px}`).
+pub const LEAD_MAX_W: f32 = 820.0;
+
+/// The page content's width in `room_dp` of room: all of it, up to [`PAGE_MAX_W`] (review row
+/// CR3: the cells stretched with the window).
+pub fn page_width(room_dp: f32) -> f32 {
+    room_dp.min(PAGE_MAX_W)
+}
+
 /// Columns of the team preview: 9, 5 up to 1000 dp, 3 up to 560 dp (mockup media queries).
 pub fn team_cols(width_dp: f32) -> usize {
     if width_dp <= 560.0 {
@@ -1431,6 +1442,16 @@ mod tests {
         assert!(seen.len() >= 4, "pins should give mostly different shapes, got {}", seen.len());
         a.pin = None;
         assert_eq!(auto, svg(&a));
+    }
+
+    #[test]
+    fn fr_l22_page_width_is_capped_at_the_mockup_wrap() {
+        assert_eq!(PAGE_MAX_W, 1180.0 - 2.0 * 16.0);
+        assert_eq!(LEAD_MAX_W, 820.0);
+        // A 1440 window with the sidebar leaves about 1166: capped. A narrow room is used whole.
+        assert_eq!(page_width(1166.0), 1148.0);
+        assert_eq!(page_width(1148.0), 1148.0);
+        assert_eq!(page_width(700.0), 700.0);
     }
 
     #[test]

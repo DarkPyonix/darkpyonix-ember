@@ -1614,13 +1614,15 @@ mod tests {
     #[test]
     fn fr_l10_2_bare_callers_name_the_mockup_inset() {
         // `.inputbar input` 0 14 (channels.css), the composer textarea's 2 px (home.css), and the
-        // session composer's 14 px less the 12 px card padding plus the textarea's 2 px.
+        // session composer's 14 px less its 12 px card padding (#844: the text sat 16 px in at
+        // 1440 and 390; `.composer` padding is 14 at every width).
         let channels = include_str!("channels.rs");
         let at = channels.find("placeholder: \"메시지 입력\"").expect("channel composer field");
         let opts = &channels[channels[..at].rfind("EmberField(FieldOptions {").expect("field")..at];
         assert!(opts.contains("inset: Some((14.0, 0.0))"), "{opts}");
         assert!(include_str!("home.rs").contains("inset: Some((2.0, 2.0))"));
-        assert!(include_str!("conversation.rs").contains("inset: Some((4.0, 0.0))"));
+        assert!(include_str!("conversation.rs").contains("inset: Some((2.0, 0.0))"));
+        assert!(!include_str!("conversation.rs").contains("inset: Some((4.0, 0.0))"));
     }
 
     #[test]

@@ -2087,7 +2087,7 @@ mod tests {
         let sheet = &src[src.find("pub fn AddComputerSheet(").unwrap()..];
         let sheet = &sheet[..sheet.find("\n}\n").unwrap()];
         assert!(sheet.contains("let wraps = super::components::sheet_wraps_content(w.width_dp);"));
-        let bottom = &sheet[sheet.find("if wraps {").unwrap()..];
+        let bottom = &sheet[sheet.find("if wraps || fits {").unwrap()..];
         let bottom = &bottom[..bottom.find("} else {").unwrap()];
         assert!(bottom.contains("cu::Column().modifier(Modifier::new().fill_max_width()).content("), "{bottom}");
         assert!(!bottom.contains(".height("), "{bottom}");
@@ -2113,8 +2113,8 @@ mod tests {
         use super::super::characters::style_picker_columns;
         use super::super::components::{sheet_body_max_height, SHEET_FOOTER_H, SHEET_HEADER_CHROME_H};
         let room = |w: f32, h: f32| sheet_body_max_height(w, h, false, SHEET_HEADER_CHROME_H + SHEET_FOOTER_H).min(900.0);
-        // 40 + 62 + 12 + 62 + 12 + 18 + 12 + the picker (two rows of 144 and 8), with the branch hint.
-        assert_eq!(new_project_body_estimate(3, 0), 40.0 + 62.0 + 12.0 + 62.0 + 12.0 + 18.0 + 12.0 + 296.0);
+        // 40 + 62 + 12 + 62 + 12 + 18 + 12 + the picker (two rows of 162 and 8), with the branch hint.
+        assert_eq!(new_project_body_estimate(3, 0), 40.0 + 62.0 + 12.0 + 62.0 + 12.0 + 18.0 + 12.0 + 332.0);
         assert_eq!(new_project_body_estimate(3, 1) - new_project_body_estimate(3, 0), 48.0);
         // 1440 x 900: three columns, the body fits with room for a few errors (#878: a fixed
         // body left about 170 px blank above the footer).

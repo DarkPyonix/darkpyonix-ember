@@ -325,7 +325,14 @@ pub fn SheetFooter(content: impl FnOnce()) {
 /// a weighted row (compose-rust#427), so a token wider than its container still clips. Text that
 /// can hold a path, a URL or a long name uses [`WrapLabel`].
 pub fn Label(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines: Option<u32>) {
-    scale_text(text, fs, weight, color, max_lines, false);
+    scale_text(text, fs, weight, color, max_lines, false, None);
+}
+
+/// A [`Label`] centred on its own lines, for a name under a round tile whose second line would
+/// otherwise start at the left (the files share sheet's receivers, `.fl-share-tile`
+/// `text-align:center`).
+pub fn CentredLabel(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines: Option<u32>) {
+    scale_text(text, fs, weight, color, max_lines, false, Some(TextAlign::Center));
 }
 
 /// A [`Label`] whose token too long for its line breaks between its letters, the mockup's
@@ -333,7 +340,7 @@ pub fn Label(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines
 /// narrow as its widest letter in a weighted row, so use it where the text should wrap rather
 /// than widen its column.
 pub fn WrapLabel(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines: Option<u32>) {
-    scale_text(text, fs, weight, color, max_lines, true);
+    scale_text(text, fs, weight, color, max_lines, true, None);
 }
 
 fn scale_text(
@@ -343,6 +350,7 @@ fn scale_text(
     color: Option<Paint>,
     max_lines: Option<u32>,
     wrap_anywhere: bool,
+    align: Option<TextAlign>,
 ) {
     let theme = ember_theme();
     let color = color.unwrap_or_else(|| paint(theme.palette.text));
@@ -358,6 +366,9 @@ fn scale_text(
     }
     if let Some(n) = max_lines {
         t = t.max_lines(n).overflow(TextOverflow::Ellipsis);
+    }
+    if let Some(a) = align {
+        t = t.text_align(a);
     }
     drop(t);
 }
@@ -456,6 +467,7 @@ pub struct FieldOptions {
     pub type_role: Option<TypeRole>,
     pub on_value_change: Option<Box<dyn FnMut(String)>>,
     pub on_submit: Option<Box<dyn FnMut(String)>>,
+    pub on_focus_gained: Option<Box<dyn FnMut()>>,
     pub on_focus_lost: Option<Box<dyn FnMut()>>,
     pub on_key_down: Option<Box<dyn FnMut(KeyEvent)>>,
 }
@@ -490,11 +502,29 @@ pub fn EmberField(o: FieldOptions) {
         BareField(o);
         return;
     }
+    use compose_rust::runtime::{mutable_state_of, remember};
     let mut o = o;
     let theme = ember_theme();
     let p = theme.palette;
     let multiline = o.multiline;
     let height = o.height.or(if multiline { None } else { Some(H_BTN) });
+    // `.field:focus{border-color:var(--ink)}` (FR-L10.2, #878): the frame is this row, so the
+    // field's focus events redraw its border; the caller's own handlers still run.
+    let focused = remember(|| mutable_state_of(false));
+    let (gained, lost) = (focused.clone(), focused.clone());
+    let (mut user_gained, mut user_lost) = (o.on_focus_gained.take(), o.on_focus_lost.take());
+    o.on_focus_gained = Some(Box::new(move || {
+        gained.set(true);
+        if let Some(f) = user_gained.as_mut() {
+            f();
+        }
+    }));
+    o.on_focus_lost = Some(Box::new(move || {
+        lost.set(false);
+        if let Some(f) = user_lost.as_mut() {
+            f();
+        }
+    }));
     // compose-rust v0.0.5 (#376) honours a TextField's own Background, Border and Shape in place
     // of the design system's frame, which stays light in the dark scheme (#510). The frame row
     // names the token fill and line instead.
@@ -505,7 +535,7 @@ pub fn EmberField(o: FieldOptions) {
     // A zero-width border is not sent: the desktop renderer passes it to Compose's
     // `Modifier.border(0.dp)`, which is `Dp.Hairline` and draws a 1 px line (FR-L10.2, #844).
     let border_w = o.border_width.take().unwrap_or(1.0);
-    let border_color = o.border_color.take();
+    let border_color = if focused.get() { Some(paint(p.ink)) } else { o.border_color.take() };
     let frame = if border_w > 0.0 { frame.border(border_w, border_color.unwrap_or_else(|| paint(p.line))) } else { frame };
     let inset = o.inset.take().unwrap_or(if multiline { FIELD_INSET_MULTILINE } else { FIELD_INSET });
     let inner = FieldOptions { bare: true, inset: Some(inset), height, weight: None, fill_max_width: true, ..o };
@@ -533,8 +563,13 @@ fn BareField(o: FieldOptions) {
     if iy > 0.0 {
         wrap = wrap.padding(iy);
     }
+    // A multiline field clips its text to itself: the toolkit's bare field clips only to a
+    // corner the node names (`HostTextField.kt`), so a line scrolled up showed in the top inset
+    // (review r5, field-typed-1440; FR-L10.2).
     let inner = if multiline && o.height.is_some() {
-        Modifier::new().weight(1.0).fill_max_height()
+        Modifier::new().weight(1.0).fill_max_height().clip(true)
+    } else if multiline {
+        Modifier::new().weight(1.0).clip(true)
     } else {
         Modifier::new().weight(1.0)
     };
@@ -631,6 +666,9 @@ fn FieldNode(o: FieldOptions, modifier: Modifier) {
     }
     if let Some(h) = o.on_submit {
         f = f.on_submit(h);
+    }
+    if let Some(h) = o.on_focus_gained {
+        f = f.on_focus_gained(h);
     }
     if let Some(h) = o.on_focus_lost {
         f = f.on_focus_lost(h);
@@ -836,10 +874,16 @@ pub fn AppButton(
     drop(b);
 }
 
-/// A pill button that is one choice of several: the chosen one is `Primary`, the others
-/// `Default`. To assistive technology a `Toggle` says it is pressed (`Modifier::selected`, the
-/// mockup's `aria-pressed`) and a `Radio` is a radio button that is checked or not; compose-rust
-/// v0.0.9 hands both to the platform (#473).
+/// A pill that is one choice of several, the mockup's `.seg button`: the chosen one is `ink`,
+/// the others `surface` on a `line` border ([`choice_style`]). To assistive technology a
+/// `Toggle` says it is pressed (`Modifier::selected`, the mockup's `aria-pressed`) and a `Radio`
+/// is a radio button that is checked or not; compose-rust v0.0.9 hands both to the platform
+/// (#473), and the visible label is its name, as a [`MenuRow`]'s is.
+///
+/// It is Ember's [`Clickable`] rather than the toolkit `Button`, because `.seg button` pads its
+/// label 12 px each side and the toolkit button pads it by the design system's 16 with no way to
+/// change it (review r5, FR-L10.2). A disabled choice takes no click and is drawn at 45 percent
+/// (`vcs.css` `.btn[disabled]{opacity:.45}`); a chosen one keeps [`button_style_for`]'s muted fill.
 pub fn ChoiceButton(
     text: &str,
     choice: Choice,
@@ -854,23 +898,51 @@ pub fn ChoiceButton(
         Choice::Toggle => Modifier::new().selected(chosen),
         Choice::Radio => Modifier::new().role(Role::RadioButton).checked(chosen),
     };
-    drop(
-        cu::Button(text)
-            .enabled(enabled)
-            .variant(ButtonVariant::Text)
-            .color(paint(s.text))
-            // The same 14/500 (13/500 small) label as AppButton (FR-L10.2, #844).
-            .font_size(s.fs.size())
-            .font_weight(s.weight.value())
-            .modifier(
-                state
-                    .height(s.height)
-                    .background(paint(s.fill))
-                    .border(1.0, paint(s.border))
-                    .shape_role(ShapeRole::Full),
-            )
-            .on_click(on_click),
-    );
+    let frame = state
+        .height(s.height)
+        .background(paint(s.fill))
+        .border(1.0, paint(s.border))
+        .shape_role(ShapeRole::Full);
+    // The same 14/500 (13/500 small) label as AppButton (FR-L10.2, #844), on one line.
+    let label = move || {
+        cu::Row().alignment(Alignment::CenterStart).content(|| {
+            cu::Spacer().modifier(Modifier::new().width(CHOICE_PAD_X));
+            Label(text, s.fs, s.weight, Some(paint(s.text)), Some(1));
+            cu::Spacer().modifier(Modifier::new().width(CHOICE_PAD_X));
+        });
+    };
+    if enabled {
+        Clickable(frame, Alignment::Center, on_click, label);
+    } else {
+        let frame = frame.disabled(true);
+        let frame = if chosen { frame } else { frame.alpha(CHOICE_DISABLED_ALPHA) };
+        cu::Box().modifier(frame).alignment(Alignment::Center).content(label);
+    }
+}
+
+/// A choice's label inset at each end (`.seg button` padding 0 `--sp3`).
+pub const CHOICE_PAD_X: f32 = 12.0;
+
+/// How a disabled, unchosen choice is faded (`.btn[disabled]{opacity:.45}`).
+pub const CHOICE_DISABLED_ALPHA: f32 = 0.45;
+
+/// A group of [`ChoiceButton`]s, the mockup's `.seg`: 8 px apart along a line and between lines,
+/// and a choice that does not fit starts the next line (`flex-wrap:wrap`, buttons `flex:none`)
+/// instead of being squeezed (settings-sheet-390, review r5). The toolkit's `FlowRow` measures
+/// each choice at its own width.
+pub fn ChoiceRow(content: impl FnOnce()) {
+    cu::FlowRow()
+        .horizontal_spacing(SP[1])
+        .vertical_spacing(SP[1])
+        .modifier(Modifier::new().fill_max_width())
+        .content(content);
+}
+
+/// A [`ChoiceRow`] as wide as its choices, for a group at the end of a setting row: a full-width
+/// one took the whole row and drew its choices over the setting's title and hint
+/// (agents-models, review r6). It still starts a new line when the choices do not fit.
+pub fn ChoiceRowFit(content: impl FnOnce()) {
+    cu::FlowRow().horizontal_spacing(SP[1]).vertical_spacing(SP[1]).content(content);
 }
 
 /// A [`ChoiceButton`]'s look, the mockup's `.seg button` (FR-L10.2, #878): the chosen one is
@@ -1203,10 +1275,14 @@ pub fn EmberSheetSized(
     // adds space around the frame and prevents a full-screen sheet.
     let modifier = with_shadows(Modifier::new().padding(0.0), theme.shadow_sm()).background(paint(theme.palette.surface));
     let dismiss = on_dismiss.clone();
+    // An empty title draws no header: the share sheet is the mockup's `.fl-share`, which has
+    // none and puts its close button in its first card (FR-L27.7).
     let body = move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
-            SheetHeader(title, dismiss, actions);
-            cu::Separator(Some(paint(theme.palette.line)));
+            if !title.is_empty() {
+                SheetHeader(title, dismiss, actions);
+                cu::Separator(Some(paint(theme.palette.line)));
+            }
             content();
         });
     };
@@ -1521,6 +1597,103 @@ mod tests {
         let centre = row_alignment(|| cu::Row().alignment(Alignment::CenterStart).content(|| {}));
         assert!(has_props(frame, &centre), "{:?} has {centre:?}", frame.props);
         assert_eq!(FIELD_INSET, (12.0, 0.0));
+    }
+
+    /// The `Border` modifiers of one batch, as debug text.
+    fn borders(batch: &[compose_rust::protocol::Mutation<'_>]) -> Vec<String> {
+        use compose_rust::protocol::Mutation;
+        batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { modifier, .. } if format!("{modifier:?}").starts_with("Border") => Some(format!("{modifier:?}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The node and handler of the first `property` handler in `batch`.
+    fn handler_of(batch: &[compose_rust::protocol::Mutation<'_>], property: compose_rust::PropertyKind) -> (u32, u64) {
+        use compose_rust::protocol::{Mutation, PropertyValue};
+        batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp { node_id, property: p, value: PropertyValue::Integer(h) } if *p == property => Some((*node_id, *h as u64)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no {property:?} handler"))
+    }
+
+    static FOCUS_LOST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    #[test]
+    fn fr_l10_2_focused_framed_field_turns_its_line_ink_and_back() {
+        // Review r5 (field-typed-1440): the field held the caret and its frame stayed #ebe9e4;
+        // style.css `.field:focus{border-color:var(--ink)}`.
+        use compose_rust::protocol::{decode_batch, HostEvent};
+        use compose_rust::{EventPayload, Host, PropertyKind, Recomposer};
+        use std::sync::atomic::Ordering;
+        let _guard = crate::services::test_guard();
+        FOCUS_LOST.store(0, Ordering::SeqCst);
+        // What the frame sends for an ink line and for the resting line, to compare with.
+        let ink = emitted_modifiers(|| {
+            EmberField(FieldOptions { border_color: Some(paint(ember_theme().palette.ink)), ..Default::default() })
+        });
+        let ink: Vec<String> = ink.into_iter().filter(|m| m.starts_with("Border")).collect();
+        let line = emitted_modifiers(|| {
+            EmberField(FieldOptions { border_color: Some(paint(ember_theme().palette.line)), ..Default::default() })
+        });
+        let line: Vec<String> = line.into_iter().filter(|m| m.starts_with("Border")).collect();
+        assert_eq!((ink.len(), line.len()), (1, 1), "{ink:?} {line:?}");
+        assert_ne!(ink, line);
+
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                EmberField(FieldOptions {
+                    fill_max_width: true,
+                    on_focus_lost: Some(Box::new(|| {
+                        FOCUS_LOST.fetch_add(1, Ordering::SeqCst);
+                    })),
+                    ..Default::default()
+                })
+            }))
+        });
+        let first = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        assert_eq!(borders(&first), line, "the resting frame is the line colour");
+        let (field, gained) = handler_of(&first, PropertyKind::OnFocusGained);
+        let (lost_node, lost) = handler_of(&first, PropertyKind::OnFocusLost);
+        assert_eq!(field, lost_node, "both focus events are the text field's");
+
+        let (bytes, _) = host.dispatch(HostEvent { node_id: field, handler_id: gained, payload: EventPayload::FocusGained }).expect("focus");
+        let focused = decode_batch(bytes).expect("decode");
+        assert_eq!(borders(&focused), ink, "focus redraws the frame in ink");
+
+        let (bytes, _) = host.dispatch(HostEvent { node_id: field, handler_id: lost, payload: EventPayload::FocusLost }).expect("blur");
+        let blurred = decode_batch(bytes).expect("decode");
+        assert_eq!(borders(&blurred), line, "losing focus puts the line back");
+        assert_eq!(FOCUS_LOST.load(Ordering::SeqCst), 1, "the caller's own on_focus_lost still runs");
+    }
+
+    #[test]
+    fn fr_l10_2_multiline_field_clips_its_scrolled_text() {
+        // field-typed-1440 (review r5): with four lines in a 64 px field the bottom of line 2
+        // showed in the 10 px top inset; the toolkit's bare field clips only to a named corner.
+        let nodes = emitted_nodes(|| {
+            EmberField(FieldOptions { fill_max_width: true, multiline: true, height: Some(64.0), ..Default::default() })
+        });
+        let field = the(&nodes, "TextField");
+        assert!(field.mods.iter().any(|m| m == "Clip(true)"), "{:?}", field.mods);
+        // A single-line field keeps its own (one line never scrolls up into the inset).
+        let single = emitted_nodes(|| EmberField(FieldOptions { fill_max_width: true, ..Default::default() }));
+        assert!(!the(&single, "TextField").mods.iter().any(|m| m == "Clip(true)"));
+    }
+
+    #[test]
+    fn fr_l10_2_focused_framed_field_leaves_a_bare_field_unframed() {
+        // A bare field sends no border, focused or not: its container draws the frame.
+        let nodes = emitted_nodes(|| EmberField(FieldOptions { bare: true, ..Default::default() }));
+        for n in &nodes {
+            assert!(!n.mods.iter().any(|m| m.starts_with("Border")), "{} {:?}", n.widget, n.mods);
+        }
     }
 
     #[test]
@@ -1896,6 +2069,82 @@ mod tests {
     }
 
     #[test]
+    fn fr_l10_2_choice_label_sits_12_from_each_end_of_its_pill() {
+        // Review r5: the toolkit button put the label 16 px in; `.seg button` padding 0 12.
+        let nodes = emitted_nodes(|| ChoiceButton("JetBrains", Choice::Radio, false, true, true, || {}));
+        assert!(!nodes.iter().any(|n| n.widget == "Button"), "the toolkit button pads by 16");
+        let text = the(&nodes, "Text");
+        assert!(text.props.iter().any(|p| p == "FontSize=Float(13.0)"), "{:?}", text.props);
+        assert!(text.props.iter().any(|p| p == "FontWeight=Integer(500)"), "{:?}", text.props);
+        assert!(text.props.iter().any(|p| p == "MaxLines=Integer(1)"), "{:?}", text.props);
+        let row = parent_of(&nodes, text);
+        let spacers: Vec<_> = nodes.iter().filter(|n| n.widget == "Spacer" && n.parent == Some(row.id)).collect();
+        assert_eq!(spacers.len(), 2, "one spacer each side of the label");
+        assert!(spacers.iter().all(|s| s.mods.iter().any(|m| m == "Width(12.0)")), "{:?}", spacers.iter().map(|s| &s.mods).collect::<Vec<_>>());
+        let pill = parent_of(&nodes, row);
+        assert!(pill.props.iter().any(|p| p.starts_with("OnClick=")), "the pill is the control: {:?}", pill.props);
+        assert!(pill.mods.iter().any(|m| m == "Height(32.0)"), "{:?}", pill.mods);
+        assert!(pill.mods.iter().any(|m| m.starts_with("Border")), "{:?}", pill.mods);
+        assert!(pill.mods.iter().any(|m| m.starts_with("Background")), "{:?}", pill.mods);
+        assert!(pill.mods.iter().any(|m| m.starts_with("ShapeRole") || m.starts_with("Shape")), "{:?}", pill.mods);
+        assert_eq!(CHOICE_PAD_X, 12.0);
+        // A disabled choice is not clickable and is faded.
+        let off = emitted_nodes(|| ChoiceButton("수동", Choice::Radio, false, true, false, || {}));
+        assert!(!off.iter().any(|n| n.props.iter().any(|p| p.starts_with("OnClick="))), "a disabled choice takes no click");
+        assert!(off.iter().any(|n| n.mods.iter().any(|m| m == "Alpha(0.45)")), "faded to 45 percent");
+    }
+
+    #[test]
+    fn fr_l10_2_choice_row_wraps_8_apart() {
+        // `.seg{display:flex;gap:var(--sp2);flex-wrap:wrap}`: settings-sheet-390 squeezed the
+        // fourth 기본 IDE button to 57 px instead of starting a second line.
+        let nodes = emitted_nodes(|| {
+            ChoiceRow(|| {
+                for label in ["Ember 에디터", "VS Code", "JetBrains Gateway", "매번 선택"] {
+                    ChoiceButton(label, Choice::Radio, false, true, true, || {});
+                }
+            })
+        });
+        let flow = the(&nodes, "FlowRow");
+        for prop in ["HorizontalSpacing", "VerticalSpacing"] {
+            assert!(flow.props.iter().any(|p| p.starts_with(&format!("{prop}=")) && p.contains("8.0")), "{prop}: {:?}", flow.props);
+        }
+        assert!(flow.mods.iter().any(|m| m == "FillMaxWidth"), "{:?}", flow.mods);
+        let pills = nodes.iter().filter(|n| n.parent == Some(flow.id)).count();
+        assert_eq!(pills, 4, "each choice is a child of the wrapping row");
+    }
+
+    #[test]
+    fn fr_l10_2_choice_row_at_the_end_of_a_row_is_as_wide_as_its_choices() {
+        // Review r6 (agents-models-1440): a full-width group in SettingRow's trailing slot left
+        // the title column a few pixels and drew 낮음 over the hint.
+        let nodes = emitted_nodes(|| {
+            ChoiceRowFit(|| {
+                for label in ["낮음", "보통", "높음"] {
+                    ChoiceButton(label, Choice::Radio, false, true, true, || {});
+                }
+            })
+        });
+        let flow = the(&nodes, "FlowRow");
+        for prop in ["HorizontalSpacing", "VerticalSpacing"] {
+            assert!(flow.props.iter().any(|p| p.starts_with(&format!("{prop}=")) && p.contains("8.0")), "{prop}: {:?}", flow.props);
+        }
+        assert!(!flow.mods.iter().any(|m| m == "FillMaxWidth"), "{:?}", flow.mods);
+        assert_eq!(nodes.iter().filter(|n| n.parent == Some(flow.id)).count(), 3);
+    }
+
+    #[test]
+    fn fr_l10_2_choice_groups_wrap_on_settings_and_agents() {
+        let settings = include_str!("settings.rs");
+        let settings = settings.split("#[cfg(test)]").next().unwrap();
+        assert!(settings.matches("ChoiceRow(").count() >= 3, "화면 테마, 에디터 단축키 and 기본 IDE wrap");
+        let agents = include_str!("agents.rs");
+        let seg = agents.split("fn SegGroup<").nth(1).unwrap();
+        let seg = &seg[..seg.find("\n}\n").unwrap()];
+        assert!(seg.contains("ChoiceRowFit("), "{seg}");
+    }
+
+    #[test]
     fn fr_l10_2_choice_call_sites_are_seg_buttons() {
         let settings = include_str!("settings.rs");
         let settings = settings.split("#[cfg(test)]").next().unwrap();
@@ -1911,7 +2160,7 @@ mod tests {
         let seg = agents.split("fn SegGroup<").nth(1).unwrap();
         let seg = &seg[..seg.find("\n}\n").unwrap()];
         assert!(seg.contains("ChoiceButton(label, Choice::Radio, selected, true, true,"), "{seg}");
-        assert!(seg.contains(".spacing(SP[1])"), "`.seg` gap 8: {seg}");
+        assert!(seg.contains("ChoiceRowFit(|| {"), "`.seg` gap 8, wrapping: {seg}");
         assert!(!seg.contains("cu::Button("), "{seg}");
     }
 
@@ -2076,6 +2325,19 @@ mod tests {
         let sheet = &production[production.find("pub fn EmberSheetSized").expect("sheet")..];
         let sheet = &sheet[..sheet.find("\n}\n").expect("end")];
         assert_eq!(sheet.matches(".scrim(Paint::Literal(MODAL_SCRIM))").count(), 3, "bottom sheet, full screen and dialog");
+    }
+
+    #[test]
+    fn fr_l32_sheet_without_a_title_draws_no_header() {
+        // files.html `.fl-share` has no `.sheet-h`: the share sheet passes an empty title.
+        let _guard = crate::services::test_guard();
+        let headed = emitted_nodes(|| EmberSheetSized("공유 시트", true, 400.0, false, || {}, None, || {}));
+        assert!(headed.iter().any(|n| n.props.iter().any(|p| p.starts_with("OnClick="))), "the header's close button");
+        assert!(headed.iter().any(|n| n.widget == "Separator" || n.widget == "Divider"), "the line under the header");
+        let bare = emitted_nodes(|| EmberSheetSized("", true, 400.0, false, || {}, None, || {}));
+        assert!(!bare.iter().any(|n| n.props.iter().any(|p| p.starts_with("OnClick="))), "no header close button");
+        assert!(!bare.iter().any(|n| n.widget == "Separator" || n.widget == "Divider"), "no header line");
+        assert!(bare.iter().any(|n| n.props.iter().any(|p| p.starts_with("OnDismiss="))), "Escape and the scrim still close it");
     }
 
     #[test]
@@ -2250,8 +2512,9 @@ mod tests {
             // Existing direct buttons are explicitly counted until their specialized controls
             // move into shared components. Any additional bypass must be reviewed.
             let allowed_buttons = match name {
-                // AppButton, IconButton, PickChip, and ChoiceButton (FR-L10, compose-rust#473).
-                "components.rs" => 4,
+                // AppButton, IconButton and PickChip; ChoiceButton is Ember's clickable pill
+                // since review r5 (its 12 px label inset, FR-L10.2).
+                "components.rs" => 3,
                 // SegGroup moved onto ChoiceButton (#878).
                 "agents.rs" => 1,
                 "files.rs" => 1,

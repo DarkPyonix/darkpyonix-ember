@@ -415,20 +415,21 @@ pub fn vcs_pill_width(text: &str) -> f32 {
     (super::home::text_px(text, VCS_CONTROL_FS.size()) + 28.0).max(64.0)
 }
 
-// TODO(compose-rust#500): toolkit `Button` and `PickChip` take no font size (v0.0.6 `ButtonScope`
-// has no `font_size`/`text_style`), so a chip is painted with a `Label` at the small step and an
-// invisible `FocusOverlay` button on top, as the stash pill does.
-/// A filter chip (`.chip`): 32 px pill, 13 px weight 500 text, `sel` fill when selected.
+/// A filter chip (`.chip`): 32 px pill, 13 px weight 500 text, `sel` fill when selected. The
+/// toolkit `PickChip` still takes no font size in v0.0.10 (only `Button` does, compose-rust#500),
+/// so the chip is a clickable container (`Clickable`, compose-rust#372) named by its text that
+/// says whether it is selected (#429), with no invisible button over it.
 fn VcsChip(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (height, fill) = super::components::pickchip_style(selected, p);
-    cu::Box()
-        .modifier(Modifier::new().width(vcs_pill_width(text)).height(height).background(paint(fill)).shape_role(ShapeRole::Full))
-        .alignment(Alignment::Center)
-        .content(move || {
+    super::components::Clickable(
+        Modifier::new().width(vcs_pill_width(text)).height(height).background(paint(fill)).shape_role(ShapeRole::Full).selected(selected),
+        Alignment::Center,
+        on_click,
+        move || {
             Label(text, VCS_CONTROL_FS, Weight::Medium, Some(paint(p.text_2)), Some(1));
-            FocusOverlay(text, on_click);
-        });
+        },
+    );
 }
 
 /// Card shown when a section's server data is not yet available.
@@ -2469,8 +2470,8 @@ fn CommitDetailBody(v: &CommitDetailView, ctl: &CommitCtl) {
             }
 
             if ctl.show_sha {
-                // TODO(compose-rust#471): no clipboard facility, so the full SHA is shown selectable
-                // (Cmd+C / Ctrl+C); replace with a real copy when the clipboard can be written.
+                // The toolkit clipboard refused the SHA (compose-rust#471 writes it on every system,
+                // v0.0.7), so the full SHA is shown selectable for Cmd+C / Ctrl+C.
                 Label("아래에서 선택해 복사해 주세요", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
                 key(v.sha.clone(), || {
                     EmberField(FieldOptions { fill_max_width: true, text: Some(v.sha.clone()), type_role: Some(TypeRole::Mono), ..Default::default() });
@@ -2715,7 +2716,8 @@ fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool, branch
             } else {
                 false
             };
-            show_sha.set(true);
+            // The selectable SHA is only the fallback for a copy the clipboard refused.
+            show_sha.set(!copied);
             if copied {
                 notice::post("SHA를 클립보드에 복사했습니다.".to_string());
             } else {
@@ -4750,7 +4752,7 @@ fn VcsScreenWithLoad(
             // phone (where the shell's menu button sits) do not (#495).
             if !sheet && !compact {
                 if let Some(s) = crate::services::try_services() {
-                    // TODO(compose-rust#460, #429): the icon-only theme button has no accessible name.
+                    // The icon-only theme button is named `a11y::THEME` (`NamedClickable`, compose-rust#460, #429).
                     super::project::ThemeButton(&s.ui);
                 }
             }
@@ -4944,6 +4946,22 @@ pub fn preview_vcs() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fr_673_stale_vcs_markers_are_gone() {
+        // compose-rust#471, #460/#429 and #500 (v0.0.10): the SHA is copied, the theme button is
+        // named, and a filter chip is a named, selectable container without an overlay button.
+        let src = include_str!("vcs.rs");
+        let production = &src[..src.find("#[cfg(test)]").expect("tests")];
+        for marker in [concat!("TODO(compose-rust#", "471)"), concat!("TODO(compose-rust#", "460, #429)"), concat!("TODO(compose-rust#", "500)")] {
+            assert!(!production.contains(marker), "{marker}");
+        }
+        let chip = &production[production.find("fn VcsChip(").expect("chip")..];
+        let chip = &chip[..chip.find("\n}\n").expect("end")];
+        assert!(chip.contains("super::components::Clickable(") && chip.contains(".selected(selected)"));
+        assert!(!chip.contains("FocusOverlay"));
+        assert!(production.contains("show_sha.set(!copied);"), "the selectable SHA is only the fallback");
+    }
+
     #[test]
     fn fr_l19_branch_popover_search_filters_ignoring_case() {
         let b: Vec<String> = ["main", "develop", "feat/Git-API", "feat/ui"].iter().map(|s| s.to_string()).collect();

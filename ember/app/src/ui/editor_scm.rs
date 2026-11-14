@@ -1872,7 +1872,9 @@ pub mod view {
                 } else {
                     span { class: "ed-scm-slot" }
                 }
-                if group == Group::Changes && e.letter == 'U' {
+                // A staged or conflicted row has no discard either: its slot keeps the open column in
+                // one place across the groups.
+                if group != Group::Changes || e.letter == 'U' {
                     span { class: "ed-scm-slot" }
                 }
                 if group == Group::Changes && e.letter != 'U' {
@@ -1890,6 +1892,8 @@ pub mod view {
                             event.stop_propagation();
                             if group == Group::Staged { op_s.scm.unstage(&op_entry) } else { op_s.scm.stage(&op_entry) }
                         }, {icon_px(op_icon, 13)} }
+                } else {
+                    span { class: "ed-scm-slot" }
                 }
                 span { class: "ed-scm-st {tone}", title: "{label}",
                     onclick: move |_| open_row_diff(&letter_s, &letter_path), "{e.letter}" }

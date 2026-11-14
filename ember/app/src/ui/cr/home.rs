@@ -25,7 +25,7 @@ pub use crate::ui::home::{
 use crate::ui::home::{model_active_row, model_enter, model_popover_height, model_row_detail, model_view, ModelEnter};
 use super::components::{
     AppButton, ButtonKind, Clickable, EmberField, EmberSheet, FieldOptions, FilterChip, Label,
-    OptionSheet, PickChip, Pill, PillTone,
+    PickChip, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu,
 };
 use super::notice;
 use super::shell::{self, NavIcon};
@@ -40,8 +40,6 @@ use crate::ui::shell::{NavMenu, ShellMode, DEMO_USER};
 
 pub type Part<'a> = Box<dyn FnOnce() + 'a>;
 
-/// The width of the option popups of the composer's chips.
-const POPUP_WIDTH: f32 = 280.0;
 /// The permission popover (mockup `.mp-pop.mp-mode`).
 const MODE_POPOVER_WIDTH: f32 = 340.0;
 /// The model popover: a rail of harnesses beside the search and the rows.
@@ -710,28 +708,21 @@ impl Composer {
 
     /// The four lists the chips open. One node, so the closed dialogs add no gap anywhere.
     fn lists(&self, ui: &SharedUi) {
-        let (projects, computers) = self.live(ui);
         let sel = self.selection.get();
         let open = self.open.get();
         let close = {
             let o = self.open.clone();
             move || o.set(None)
         };
-        let projects = project_options(&projects);
-        let chosen = projects.iter().position(|p| *p == sel.project);
-        {
-            let (selection, list) = (self.selection.clone(), projects.clone());
-            OptionSheet(open == Some(Pick::Project), &projects, chosen, POPUP_WIDTH, close.clone(), move |i| {
-                if let Some(p) = list.get(i) {
-                    let mut s = selection.get_untracked();
-                    s.project = p.clone();
-                    selection.set(s);
-                }
-            });
-        }
-        // Compact widths keep the modal; wider ones use the popover under the chip, drawn in
-        // the composer card (`mode_popover`).
+        // Wider than 560 the project, model, mode and computer lists are popovers under their
+        // chips, drawn in the composer card (`project_menu`, `model_popover`, `mode_popover`,
+        // `computer_menu`); at 560 and below they are bottom sheets, drawn here so a sheet does
+        // not wrap the chip that takes the rest of the row.
         let compact = layout(crate::ui::window_size::current_window_size().width_dp).compact;
+        if compact {
+            self.project_menu(ui, || {});
+            self.computer_menu(ui, || {});
+        }
         if compact {
             let me = self.clone();
             let dismiss = self.dismiss_mode();
@@ -743,21 +734,73 @@ impl Composer {
                 move |i| me.tap_mode(i),
             );
         }
+        self.model_sheet(ui, &sel, compact && self.open.get() == Some(Pick::Model), close);
+    }
+
+    /// Closing a chip's list: only the open one, so a late dismiss does not close another.
+    fn close_pick(&self, pick: Pick) -> impl FnMut() + Clone + 'static {
+        let o = self.open.clone();
+        move || {
+            if o.get_untracked() == Some(pick) {
+                o.set(None);
+            }
+        }
+    }
+
+    /// The project chip's list (FR-L10.4, #888, review K10): a popover under the chip, or a
+    /// bottom sheet at 560 and below; one row per project with the folder glyph and a check on
+    /// the chosen one.
+    fn project_menu(&self, ui: &SharedUi, anchor: impl FnOnce()) {
+        let (projects, _) = self.live(ui);
+        let sel = self.selection.get();
+        let options = project_options(&projects);
+        let rows: Vec<PopRow> = options
+            .iter()
+            .map(|p| PopRow { icon: Some(ICON_FOLDER), title: p.clone(), chosen: *p == sel.project, ..Default::default() })
+            .collect();
+        let (selection, list) = (self.selection.clone(), options.clone());
+        PopoverMenu(
+            self.open.get() == Some(Pick::Project),
+            PopMenu { name: super::a11y::PROJECT_PICKER, kind: PopKind::Mode, head: "", sub: None, rows: &rows, align: compose_rust::PopoverAlign::Start },
+            self.close_pick(Pick::Project),
+            move |i| {
+                if let Some(p) = list.get(i) {
+                    let mut s = selection.get_untracked();
+                    s.project = p.clone();
+                    selection.set(s);
+                }
+            },
+            anchor,
+            None,
+        );
+    }
+
+    /// The computer chip's list, as [`Composer::project_menu`]: this server's own computer first,
+    /// then the registered ones.
+    fn computer_menu(&self, ui: &SharedUi, anchor: impl FnOnce()) {
+        let (_, computers) = self.live(ui);
+        let sel = self.selection.get();
         let mut labels = vec![self.local_name(ui)];
         labels.extend(computers.iter().map(|(_, n)| n.clone()));
-        {
-            let (selection, list) = (self.selection.clone(), computers.clone());
-            let at = sel.computer.as_ref().and_then(|id| computers.iter().position(|(c, _)| c == id)).map(|i| i + 1).unwrap_or(0);
-            OptionSheet(open == Some(Pick::Computer), &labels, Some(at), POPUP_WIDTH, close.clone(), move |i| {
+        let at = sel.computer.as_ref().and_then(|id| computers.iter().position(|(c, _)| c == id)).map(|i| i + 1).unwrap_or(0);
+        let rows: Vec<PopRow> = labels
+            .iter()
+            .enumerate()
+            .map(|(i, n)| PopRow { icon: Some(ICON_PC), title: n.clone(), chosen: i == at, ..Default::default() })
+            .collect();
+        let (selection, list) = (self.selection.clone(), computers.clone());
+        PopoverMenu(
+            self.open.get() == Some(Pick::Computer),
+            PopMenu { name: super::a11y::COMPUTER_PICKER, kind: PopKind::Mode, head: "", sub: None, rows: &rows, align: compose_rust::PopoverAlign::Start },
+            self.close_pick(Pick::Computer),
+            move |i| {
                 let mut s = selection.get_untracked();
                 s.computer = if i == 0 { None } else { list.get(i - 1).map(|(id, _)| id.clone()) };
                 selection.set(s);
-            });
-        }
-        // Compact widths keep the modal (a bottom sheet in the spec); wider ones use the popover
-        // under the chip, drawn in the composer card.
-        let compact = layout(crate::ui::window_size::current_window_size().width_dp).compact;
-        self.model_sheet(ui, &sel, compact && open == Some(Pick::Model), close);
+            },
+            anchor,
+            None,
+        );
     }
 
     /// Closing the permission picker also withdraws a waiting bypass confirmation.
@@ -1344,7 +1387,13 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                     cu::Column().spacing(SP[0]).modifier(Modifier::new().weight(1.0).clip(true)).content(|| {
                         // Bypass draws the chip in the warning state (mockup `.mdpick.warn`).
                         let chip_at = |i: usize, text: &str| match i {
-                            0 => chip(text, ICON_FOLDER, Pick::Project, false),
+                            0 => {
+                                if l.compact {
+                                    chip(text, ICON_FOLDER, Pick::Project, false);
+                                } else {
+                                    c.project_menu(ui, || chip(text, ICON_FOLDER, Pick::Project, false));
+                                }
+                            }
                             1 => {
                                 let close = {
                                     let o = c.open.clone();
@@ -1372,7 +1421,13 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                                     c.mode_popover(&sel, one);
                                 }
                             }
-                            _ => chip(text, ICON_PC, Pick::Computer, false),
+                            _ => {
+                                if l.compact {
+                                    chip(text, ICON_PC, Pick::Computer, false);
+                                } else {
+                                    c.computer_menu(ui, || chip(text, ICON_PC, Pick::Computer, false));
+                                }
+                            }
                         };
                         let texts = [sel.project.clone(), model_text.clone(), mode_text.clone(), computer_text.clone()];
                         if l.compact {
@@ -2526,6 +2581,43 @@ mod tests {
             .expect("enter");
         assert_eq!(c.selection.get_untracked(), before);
         assert_eq!(c.open.get_untracked(), Some(Pick::Model));
+    }
+
+    #[test]
+    fn fr_l10_4_project_and_computer_chips_open_popovers_under_them() {
+        let src = include_str!("home.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(src.contains("c.project_menu(ui, || chip(text, ICON_FOLDER, Pick::Project, false));"));
+        assert!(src.contains("c.computer_menu(ui, || chip(text, ICON_PC, Pick::Computer, false));"));
+        // At 560 and below the same rows are a bottom sheet, drawn without wrapping the chip.
+        let lists = src.split("fn lists(").nth(1).unwrap().split("\n    fn ").next().unwrap();
+        assert!(lists.contains("self.project_menu(ui, || {});") && lists.contains("self.computer_menu(ui, || {});"));
+        assert!(!src.contains("OptionSheet("), "no centred option sheet is left on Home");
+    }
+
+    #[test]
+    fn fr_l10_4_project_popover_lists_the_projects_with_a_check_and_a_tap_chooses() {
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let c = remember(|| {
+                    let c = Composer::new();
+                    c.open.set(Some(Pick::Project));
+                    c
+                });
+                PICKER.with(|p| *p.borrow_mut() = Some(c.clone()));
+                ComposerCard(&c, shared_ui(), composer_width(1390.0), layout(1440.0));
+            }))
+        });
+        let mut tree = Tree::default();
+        tree.read(host.rebuild().expect("rebuild"));
+        let c = PICKER.with(|p| p.borrow().clone()).expect("composed");
+        let options = project_options(&c.live(shared_ui()).0);
+        let other = options.iter().find(|p| **p != c.selection.get_untracked().project).cloned();
+        if let Some(other) = other {
+            click(&mut host, &mut tree, &other);
+            assert_eq!(c.selection.get_untracked().project, other);
+            assert_eq!(c.open.get_untracked(), None, "choosing closes the list");
+        }
     }
 
     #[test]

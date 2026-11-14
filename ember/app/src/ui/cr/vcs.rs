@@ -423,7 +423,7 @@ fn VcsChip(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (height, fill) = super::components::pickchip_style(selected, p);
     super::components::Clickable(
-        Modifier::new().width(vcs_pill_width(text)).height(height).background(paint(fill)).shape_role(ShapeRole::Full).selected(selected),
+        Modifier::new().width(vcs_pill_width(text)).height(height).background(paint(fill)).shape_role(ShapeRole::Full).selected(selected).label(text).role(compose_rust::ui::Role::Button).click_action(true),
         Alignment::Center,
         on_click,
         move || {
@@ -4958,7 +4958,7 @@ mod tests {
         }
         let chip = &production[production.find("fn VcsChip(").expect("chip")..];
         let chip = &chip[..chip.find("\n}\n").expect("end")];
-        assert!(chip.contains("super::components::Clickable(") && chip.contains(".selected(selected)"));
+        assert!(chip.contains("super::components::Clickable(") && chip.contains(".selected(selected)") && chip.contains(".label(text).role(compose_rust::ui::Role::Button)"), "named by its text");
         assert!(!chip.contains("FocusOverlay"));
         assert!(production.contains("show_sha.set(!copied);"), "the selectable SHA is only the fallback");
     }
@@ -5510,7 +5510,7 @@ mod tests {
             fn scan(&mut self, batch: &[Mutation<'_>]) {
                 for m in batch {
                     match m {
-                        Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
                             self.texts.insert(*node_id, s.to_string());
                         }
                         Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
@@ -5586,13 +5586,17 @@ mod tests {
         let cp_text: String = cp_batch.iter().map(|m| format!("{m:?}")).collect();
         assert!(cp_text.contains("정말 가져옵니다"));
 
-        // 6. Click "SHA 복사" -> opens selectable SHA field and posts notice
+        // 6. Click "SHA 복사" -> copies the SHA and says so; only when the clipboard refuses it
+        // (a headless runner) is the selectable SHA field shown instead (compose-rust#471).
         let (node, handler) = tracker.find("SHA 복사");
         let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click SHA 복사");
         let sha_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&sha_batch);
         let sha_text: String = sha_batch.iter().map(|m| format!("{m:?}")).collect();
-        assert!(sha_text.contains("아래에서 선택해 복사해 주세요"));
+        let notice = crate::ui::coexist::shared_ui().notice.get().map(|(_, t)| t).unwrap_or_default();
+        let copied = notice.contains("SHA를 클립보드에 복사했습니다.");
+        assert!(copied || notice.contains("SHA를 아래에서 복사해 주세요"), "{notice}");
+        assert_eq!(sha_text.contains("아래에서 선택해 복사해 주세요"), !copied, "the selectable SHA is only the fallback");
     }
 
     #[test]
@@ -5839,7 +5843,7 @@ mod tests {
         fn absorb(&mut self, batch: &[Mutation<'_>]) {
             for m in batch {
                 match m {
-                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
                         self.texts.insert(*node_id, s.to_string());
                     }
                     Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {

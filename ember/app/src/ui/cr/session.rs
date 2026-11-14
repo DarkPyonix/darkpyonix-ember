@@ -4071,6 +4071,66 @@ fn ViewSeg(
         });
 }
 
+/// The head of the session project menu: what is chosen now.
+pub fn project_switch_head(current: &str) -> String {
+    format!("프로젝트 \u{b7} {}", display_name(current))
+}
+
+/// The session project menu's rows: one per project with the folder glyph, its name, its member
+/// count and a check on the current one.
+pub fn project_switch_rows(boxes: &[crate::ui::project::ProjectBox], current: &str) -> Vec<PopRow> {
+    boxes
+        .iter()
+        .map(|b| PopRow {
+            icon: Some(ICON_FOLDER_SVG),
+            title: display_name(&b.id),
+            description: Some(format!("팀원 {}명", b.members.len())),
+            chosen: b.id == current,
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// The session screen's project switcher menu (FR-L10.4, #888): the shared menu in the
+/// permission-mode look under `anchor`, lined up with its start; at 560 and below a bottom sheet
+/// with the menu's own head, for which the caller passes an empty `anchor` and draws the control
+/// itself. The mockup draws a native `<select>` (`.projsw`). A row switches the project and
+/// remembers it.
+fn ProjectSwitchMenu(
+    open: &MutableState<bool>,
+    boxes: &[crate::ui::project::ProjectBox],
+    current: &str,
+    project: &MutableState<Option<String>>,
+    ui: &SharedUi,
+    anchor: impl FnOnce(),
+) {
+    let rows = project_switch_rows(boxes, current);
+    let head = project_switch_head(current);
+    let ids: Vec<String> = boxes.iter().map(|b| b.id.clone()).collect();
+    let (dismiss, proj_st, ui_p) = (open.clone(), project.clone(), ui.clone());
+    PopoverMenuWith(
+        open.get(),
+        PopMenu {
+            name: super::a11y::PROJECT_PICKER,
+            kind: PopKind::Mode,
+            head: &head,
+            sub: None,
+            rows: &rows,
+            align: compose_rust::PopoverAlign::Start,
+        },
+        PopExtra { plain_sheet: true, ..Default::default() },
+        move || dismiss.set(false),
+        move |idx| {
+            if let Some(id) = ids.get(idx).cloned() {
+                proj_st.set(Some(id.clone()));
+                ui_p.update_prefs(|p| p.last_project = Some(id));
+            }
+        },
+        anchor,
+        None,
+    );
+}
+
 /// Pill-shaped toolbar action button (`.btn.sm` in `.sesshead`).
 /// Session header actions carry no text label (owner placement rule 2026-11-13, rule 6, design
 /// review B6); the label is the tooltip and the accessible name.
@@ -4630,7 +4690,8 @@ pub fn SessionScreen(focus: Option<String>) {
     let new_member_open = remember(|| {
         mutable_state_of(std::env::var("EMBER_CR_SESSION_NEW_MEMBER").as_deref() == Ok("1"))
     });
-    let project_menu = remember(|| mutable_state_of(false));
+    // `EMBER_CR_SESSION_MENU=project` opens the project menu at start, for captures.
+    let project_menu = remember(|| mutable_state_of(std::env::var("EMBER_CR_SESSION_MENU").as_deref() == Ok("project")));
     let web_menu = remember(|| mutable_state_of(false));
     // 버전 관리 opens as a sheet over the conversation (FR-L18, #495); `EMBER_CR_SESSION_VCS=1`
     // opens it at start for captures.
@@ -4945,10 +5006,13 @@ pub fn SessionScreen(focus: Option<String>) {
                                     if is_phone {
                                         proj_mod = proj_mod.weight(1.0);
                                     }
+                                    // The control says whether its menu is open; its text is its name.
+                                    let proj_open = project_menu.get();
+                                    let control = move || {
                                     Clickable(
-                                        proj_mod,
+                                        proj_mod.expanded(proj_open),
                                         Alignment::CenterStart,
-                                        move || pm.set(true),
+                                        move || pm.set(!pm.get_untracked()),
                                         move || {
                                             cu::Column()
                                                 .spacing(1.0)
@@ -4984,6 +5048,14 @@ pub fn SessionScreen(focus: Option<String>) {
                                                 });
                                         },
                                     );
+                                    };
+                                    if is_phone {
+                                        // The phone's bottom sheet is drawn apart from the control
+                                        // (below), so the control keeps its weight in this row.
+                                        control();
+                                    } else {
+                                        ProjectSwitchMenu(&project_menu, &boxes, &current, &project, &ui, control);
+                                    }
                                     if !is_phone {
                                         cu::Spacer().modifier(Modifier::new().weight(1.0));
                                     }
@@ -5151,27 +5223,10 @@ pub fn SessionScreen(focus: Option<String>) {
                 super::vcs::VcsSheet(&current, vcs_open.get(), move || vo_d.set(false));
             }
 
-            // Project picker OptionSheet
-            let proj_labels: Vec<String> = boxes.iter().map(|b| display_name(&b.id)).collect();
-            let chosen_proj = boxes.iter().position(|b| b.id == current);
-            let pm_d = project_menu.clone();
-            let boxes_c = boxes.clone();
-            let proj_st = project.clone();
-            let ui_p = ui.clone();
-            OptionSheet(
-                project_menu.get(),
-                &proj_labels,
-                chosen_proj,
-                POPUP_W,
-                move || pm_d.set(false),
-                move |idx| {
-                    if let Some(b) = boxes_c.get(idx) {
-                        let id = b.id.clone();
-                        proj_st.set(Some(id.clone()));
-                        ui_p.update_prefs(|p| p.last_project = Some(id));
-                    }
-                },
-            );
+            // The project menu's phone sheet (FR-L10.4): apart from the control in the bar.
+            if is_phone {
+                ProjectSwitchMenu(&project_menu, &boxes, &current, &project, &ui, || {});
+            }
 
         });
 }
@@ -5248,6 +5303,65 @@ mod tests {
         assert!(project.contains("crate::ui::cr::session::ide_pop_rows(&choices, remembered)"));
     }
 
+    fn project_switch_sample() {
+        let _ = services();
+        let open = remember(|| mutable_state_of(true));
+        let project = remember(|| mutable_state_of(None::<String>));
+        let boxes = services().client.read(|s| project_boxes(s));
+        let current = boxes.first().map(|b| b.id.clone()).unwrap_or_default();
+        ProjectSwitchMenu(&open, &boxes, &current, &project, shared_ui(), || {
+            Label("프로젝트 컨트롤", Fs::Lg, Weight::Semibold, None, Some(1));
+        });
+    }
+
+    #[test]
+    fn fr_l10_4_session_project_menu_is_the_shared_menu() {
+        use compose_rust::protocol::{decode_batch, Mutation};
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let mut host = compose_rust::Host::new(|| Box::new(compose_rust::Recomposer::new(project_switch_sample)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        crate::ui::window_size::set_opened_for_test(None);
+        let mut nodes: Vec<(u32, String, Vec<String>, Vec<String>)> = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::Create { node_id, widget } => nodes.push((*node_id, format!("{widget:?}"), Vec::new(), Vec::new())),
+                Mutation::SetModifier { node_id, modifier, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.0 == *node_id) {
+                        n.2.push(format!("{modifier:?}"));
+                    }
+                }
+                Mutation::SetProp { node_id, property, value } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.0 == *node_id) {
+                        n.3.push(format!("{property:?}={value:?}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(!nodes.iter().any(|n| n.1 == "Dialog" || n.1 == "Sheet"), "no centred dialog at 1440");
+        let pops: Vec<_> = nodes.iter().filter(|n| n.1 == "Popover").collect();
+        assert_eq!(pops.len(), 1);
+        for want in ["Open=Bool(true)", "Placement=Integer(2)", "OffsetDp=Float(8.0)"] {
+            assert!(pops[0].3.iter().any(|p| p == want), "{want} in {:?}", pops[0].3);
+        }
+        assert!(!pops[0].3.iter().any(|p| p == "Align=Integer(3)"));
+        assert!(pops[0].2.iter().any(|m| m == "Width(340.0)"), "{:?}", pops[0].2);
+        let boxes = services().client.read(|s| project_boxes(s));
+        let current = boxes.first().map(|b| b.id.clone()).unwrap_or_default();
+        let rows = project_switch_rows(&boxes, &current);
+        assert_eq!(rows.len(), boxes.len());
+        assert_eq!(rows.iter().filter(|r| r.chosen).count(), usize::from(!boxes.is_empty()));
+        assert!(rows.iter().all(|r| r.icon.is_some() && r.description.as_deref().is_some_and(|d| d.starts_with("팀원 "))));
+        let says = |t: &str| nodes.iter().any(|n| n.3.iter().any(|p| p.contains(t)));
+        assert!(says(&project_switch_head(&current)) && says("프로젝트 컨트롤"));
+        for r in &rows {
+            assert!(says(&r.title), "missing {}", r.title);
+        }
+        let items = nodes.iter().filter(|n| n.2.iter().any(|m| m.starts_with("Semantics") && m.contains("MenuItem"))).count();
+        assert_eq!(items, rows.len());
+    }
+
     #[test]
     fn fr_l10_4_session_pickers_hang_from_their_controls() {
         let src = include_str!("session.rs").split("mod tests {").next().unwrap();
@@ -5278,6 +5392,15 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].title, "실행 중인 세션의 모델은 바꿀 수 없습니다");
         assert_eq!(rows[0].badge, Some((crate::ui::session::SOON.to_string(), PillTone::Grey)));
+        // The project switcher (a native select in the mockup) is the shared menu too.
+        let switch = body("ProjectSwitchMenu");
+        assert!(switch.contains("PopoverMenuWith(") && switch.contains("PopKind::Mode") && switch.contains("plain_sheet: true"));
+        assert!(switch.contains("PopoverAlign::Start") && switch.contains("a11y::PROJECT_PICKER"));
+        assert!(src.contains("proj_mod.expanded(proj_open)"), "the control says whether the menu is open");
+        assert!(src.contains("ProjectSwitchMenu(&project_menu, &boxes, &current, &project, &ui, control);"));
+        assert!(src.contains("ProjectSwitchMenu(&project_menu, &boxes, &current, &project, &ui, || {});"), "the phone sheet");
+        assert!(src.contains("EMBER_CR_SESSION_MENU\").as_deref() == Ok(\"project\")"));
+        assert!(!src.contains("// Project picker OptionSheet"));
         for b in [&mode, &ide, &web, &model] {
             assert!(!b.contains("OptionSheet("), "no centred option sheet is left in {b:.40}");
         }

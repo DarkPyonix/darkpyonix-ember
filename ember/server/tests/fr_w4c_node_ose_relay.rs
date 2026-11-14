@@ -10,7 +10,12 @@
 //! listener that records and echoes (registered with `OseManager::register_launch_for_test`), or a
 //! shell script standing in for the binary. Not covered: a real Code-OSS runtime, a second
 //! computer, and a node reached over the transport (the bridge uses the same `NodeClient` either
-//! way).
+//! way), and a node that hangs while a bridged relay closes (both sockets are closed under one
+//! 2 s budget; no test makes a node hang).
+//!
+//! Unix only: the stand-in for the OSE binary is a shell script.
+
+#![cfg(unix)]
 
 mod common;
 
@@ -30,7 +35,9 @@ use ember_server::agents::{AgentAdapter, AgentKind};
 use ember_server::api::ide::{self, IdeConfig};
 use ember_server::api::ide_extensions;
 use ember_server::computers::{self, Computers, Registry};
-use ember_server::devices::Devices;
+use ember_server::channels::guest::guest_router;
+use ember_server::devices::{Devices, Scope};
+use ember_server::guest_door::GuestDoor;
 use ember_server::ose::{OseManager, LOCAL_COMPUTER};
 use ember_server::session::Sessions;
 use ember_server::store::Store;
@@ -52,6 +59,7 @@ const HEARTBEAT: Duration = Duration::from_secs(5);
 const WAIT: Duration = Duration::from_secs(20);
 
 type DeviceWs = WebSocketStream<BiStream>;
+type TcpWs = WebSocketStream<tokio::net::TcpStream>;
 
 /// What the fake OSE saw: every byte it received, and how many connections are open now.
 #[derive(Clone, Default)]
@@ -247,7 +255,10 @@ async fn device_ws(device: &Dialer, server: &Transport, path: &str) -> Result<De
 }
 
 /// Reads binary messages until `want` bytes arrived.
-async fn read_bytes(ws: &mut DeviceWs, want: usize) -> Vec<u8> {
+async fn read_bytes<S>(ws: &mut WebSocketStream<S>, want: usize) -> Vec<u8>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let mut out = Vec::new();
     while out.len() < want {
         match tokio::time::timeout(WAIT, ws.next()).await.expect("no echo in time") {
@@ -412,4 +423,268 @@ async fn fr_w4c_server_ide_extensions_forwards_to_node() {
     assert!(v["error"].as_str().unwrap().starts_with("node unreachable"), "{v}");
     let (status, _) = post_json(&s.app, "/api/computers/nope/ide/extensions", r#"{"id":"a.b"}"#).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ---- Review follow-ups (#896): the node's refusals, pings, scopes and the guest door ----------
+
+/// The server's routes on a loopback TCP port, as the local listener serves them (without the
+/// token layer, which is not what these tests are about).
+async fn serve_tcp(app: Router) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    addr
+}
+
+/// Opens the relay at `path` over TCP. Panics when the server refuses the upgrade.
+async fn tcp_ws(addr: SocketAddr, path: &str) -> TcpWs {
+    let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let url = format!("ws://{addr}{path}");
+    match tokio::time::timeout(WAIT, tokio_tungstenite::client_async(url, tcp)).await {
+        Ok(Ok((ws, _))) => ws,
+        Ok(Err(e)) => panic!("the relay {path} was refused: {e}"),
+        Err(_) => panic!("the relay {path} did not open in time"),
+    }
+}
+
+/// Asks for the WebSocket upgrade of `path` with a plain HTTP client and returns the status and
+/// JSON body of the answer. For refusals: an HTTP client reads the whole body of a refused
+/// upgrade, which a WebSocket client does not promise.
+async fn upgrade_answer(addr: SocketAddr, path: &str, origin: Option<&str>) -> (u16, Value) {
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    let mut req = http
+        .get(format!("http://{addr}{path}"))
+        .header("connection", "upgrade")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==");
+    if let Some(origin) = origin {
+        req = req.header("origin", origin);
+    }
+    let res = tokio::time::timeout(WAIT, req.send()).await.expect("no answer in time").unwrap();
+    let status = res.status().as_u16();
+    let bytes = res.bytes().await.unwrap_or_default();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+/// Waits for the relay to end and returns the close code, when a close frame carried one.
+async fn wait_closed<S>(ws: &mut WebSocketStream<S>, within: Duration) -> Option<u16>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let ended = tokio::time::timeout(within, async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Close(frame))) => break frame.map(|f| u16::from(f.code)),
+                Some(Err(_)) | None => break None,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+    ended.unwrap_or_else(|_| panic!("the relay stayed open for {within:?}"))
+}
+
+/// A loopback address nothing listens on.
+fn dead_address() -> SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap()
+}
+
+/// FR-W4c: a node that refuses the SERVER (a stale node token in the registry) is 502
+/// `node_auth_failed` on the relay and on the install, never the node's 401: that status would
+/// read as the caller's own credential being refused.
+#[tokio::test]
+async fn fr_w4c_stale_node_token_is_502_node_auth_failed_on_relay_and_install() {
+    const STALE: &str = "stale-node-token";
+    let node = start_node(no_binary).await;
+    let (ose_addr, fake) = start_fake_ose().await;
+    let conn = node.ose.register_launch_for_test(LOCAL_COMPUTER, &node.root, ose_addr, REAL_TOKEN);
+    let launch_id = launch_id_of(conn.relay.as_deref().unwrap());
+    let s = server();
+    let stale = s.computers.registry().insert("stale", &node.url, STALE).unwrap();
+    let good = s.computers.registry().insert("good", &node.url, NODE_TOKEN).unwrap();
+    let addr = serve_tcp(s.app.clone()).await;
+
+    let check = |what: &str, status: u16, v: &Value| {
+        assert_eq!(status, 502, "{what}: {v}");
+        assert_eq!(v["code"], "node_auth_failed", "{what}: {v}");
+        let message = v["error"].as_str().unwrap_or_else(|| panic!("{what}: no error text in {v}"));
+        assert!(message.contains("could not authenticate to computer"), "{what}: {message}");
+        assert!(message.contains(&stale.id), "{what}: {message}");
+        let text = v.to_string();
+        assert!(!text.contains(STALE) && !text.contains(NODE_TOKEN), "{what}: a token is in the answer: {text}");
+    };
+
+    // The relay: the node answers 401 to the server, the client gets 502.
+    let (status, v) =
+        upgrade_answer(addr, &format!("/api/computers/{}/ide/relay/{launch_id}", stale.id), None).await;
+    check("relay", status, &v);
+    assert_eq!(fake.live.load(Ordering::SeqCst), 0, "a refused relay dialed the OSE");
+
+    // The install: the same.
+    let (status, v) =
+        post_json(&s.app, &format!("/api/computers/{}/ide/extensions", stale.id), r#"{"id":"a.b"}"#).await;
+    check("install", status.as_u16(), &v);
+
+    // With the right node token every other node status still passes through: the 503 of a node
+    // without the binary, and an open relay.
+    let (status, v) =
+        post_json(&s.app, &format!("/api/computers/{}/ide/extensions", good.id), r#"{"id":"a.b"}"#).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    let mut ws = tcp_ws(addr, &format!("/api/computers/{}/ide/relay/{launch_id}", good.id)).await;
+    ws.send(Message::Binary(b"hello".to_vec().into())).await.unwrap();
+    assert_eq!(read_bytes(&mut ws, 5).await, b"hello");
+}
+
+/// FR-W4c: the bridge carries pings, so a client that keeps alive with WebSocket pings alone is
+/// not cut by the node's idle timeout, as on the local relay. Silence still ends the relay.
+#[tokio::test]
+async fn fr_w4c_pings_alone_keep_a_bridged_relay_alive_and_silence_ends_it() {
+    const IDLE: Duration = Duration::from_secs(1);
+    let node = start_node(|base| no_binary(base).with_relay_idle_timeout(IDLE)).await;
+    let (ose_addr, fake) = start_fake_ose().await;
+    let conn = node.ose.register_launch_for_test(LOCAL_COMPUTER, &node.root, ose_addr, REAL_TOKEN);
+    let launch_id = launch_id_of(conn.relay.as_deref().unwrap());
+    let s = server();
+    let computer = s.computers.registry().insert("box", &node.url, NODE_TOKEN).unwrap();
+    let addr = serve_tcp(s.app.clone()).await;
+    let mut ws = tcp_ws(addr, &format!("/api/computers/{}/ide/relay/{launch_id}", computer.id)).await;
+    wait_for("the OSE connection", WAIT, || fake.live.load(Ordering::SeqCst) == 1).await;
+
+    // Three idle timeouts of pings only, no data.
+    let started = Instant::now();
+    while started.elapsed() < IDLE * 3 {
+        ws.send(Message::Ping(b"keepalive".to_vec().into())).await.expect("the relay was cut while pinging");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(fake.live.load(Ordering::SeqCst), 1, "the node dropped the OSE connection while the client pinged");
+    ws.send(Message::Binary(b"alive".to_vec().into())).await.unwrap();
+    assert_eq!(read_bytes(&mut ws, 5).await, b"alive");
+
+    // Silence: the node's idle timeout ends the relay, and the bridge tells the client.
+    let quiet = Instant::now();
+    wait_closed(&mut ws, IDLE * 6).await;
+    assert!(quiet.elapsed() >= IDLE / 2, "the relay ended after {:?}, before the idle timeout", quiet.elapsed());
+    wait_for("the idle relay's OSE connection", WAIT, || fake.live.load(Ordering::SeqCst) == 0).await;
+}
+
+/// FR-W4c: what the relay route refuses or passes on. A foreign origin is 403 before anything is
+/// dialed, an unreachable node is 502, the node's relay limit is its 429, and a node that cannot
+/// reach its OSE closes with 1011, which the bridge passes to the client.
+#[tokio::test]
+async fn fr_w4c_relay_refusals_origin_unreachable_limit_and_ose_down() {
+    let node = start_node(|base| no_binary(base).with_relay_limits(1, 64)).await;
+    let (ose_addr, fake) = start_fake_ose().await;
+    let conn = node.ose.register_launch_for_test(LOCAL_COMPUTER, &node.root, ose_addr, REAL_TOKEN);
+    let launch_id = launch_id_of(conn.relay.as_deref().unwrap());
+    let s = server();
+    let computer = s.computers.registry().insert("box", &node.url, NODE_TOKEN).unwrap();
+    let relay = format!("/api/computers/{}/ide/relay/{launch_id}", computer.id);
+    let addr = serve_tcp(s.app.clone()).await;
+
+    // The origin check comes first.
+    let (status, v) = upgrade_answer(addr, &relay, Some("https://evil.example")).await;
+    assert_eq!(status, 403, "{v}");
+    assert_eq!(fake.live.load(Ordering::SeqCst), 0, "a refused origin dialed the OSE");
+
+    // A node that does not answer.
+    let gone = s.computers.registry().insert("gone", "http://127.0.0.1:1", "tok").unwrap();
+    let (status, v) =
+        upgrade_answer(addr, &format!("/api/computers/{}/ide/relay/{launch_id}", gone.id), None).await;
+    assert_eq!(status, 502, "{v}");
+    assert!(v["error"].as_str().unwrap_or_default().starts_with("node unreachable"), "{v}");
+    assert_ne!(v["code"], "node_auth_failed", "{v}");
+
+    // The node's relay limit (one per launch here) keeps its status.
+    let _held = tcp_ws(addr, &relay).await;
+    let (status, v) = upgrade_answer(addr, &relay, None).await;
+    assert_eq!(status, 429, "{v}");
+
+    // A launch whose OSE is gone: the upgrade succeeds, then the node's 1011 arrives.
+    let sub = node.root.join("down");
+    std::fs::create_dir_all(&sub).unwrap();
+    let down = node.ose.register_launch_for_test(LOCAL_COMPUTER, &sub, dead_address(), REAL_TOKEN);
+    let down_id = launch_id_of(down.relay.as_deref().unwrap());
+    let mut ws = tcp_ws(addr, &format!("/api/computers/{}/ide/relay/{down_id}", computer.id)).await;
+    assert_eq!(wait_closed(&mut ws, WAIT).await, Some(1011));
+}
+
+/// FR-W4c with FR-N8: the relay of a registered computer is an editor that runs code, so a
+/// `read_only` and a `chat_only` device are refused at the transport door and a `full` one is not.
+#[tokio::test]
+async fn fr_w4c_relay_of_a_registered_computer_needs_a_full_scope_device() {
+    let node = start_node(no_binary).await;
+    let (ose_addr, fake) = start_fake_ose().await;
+    let conn = node.ose.register_launch_for_test(LOCAL_COMPUTER, &node.root, ose_addr, REAL_TOKEN);
+    let launch_id = launch_id_of(conn.relay.as_deref().unwrap());
+    let s = server();
+    let computer = s.computers.registry().insert("box", &node.url, NODE_TOKEN).unwrap();
+    let relay = format!("/api/computers/{}/ide/relay/{launch_id}", computer.id);
+
+    // The transport door as `main.rs` serves it: with the device scopes.
+    let net = MemNetwork::new();
+    let devices = Devices::open(s.store.clone()).unwrap();
+    let server_t: Transport = net.transport();
+    tokio::spawn(server_transport::serve_scoped(&server_t, s.app.clone(), devices.clone()).unwrap());
+    let device = |name: &str, scope: Scope| {
+        let t = net.transport();
+        devices.add(t.peer_id(), name).unwrap();
+        devices.set_scope(&t.peer_id(), scope).unwrap();
+        Dialer::new(t)
+    };
+    let (reader, chatter, full) =
+        (device("reader", Scope::ReadOnly), device("chatter", Scope::ChatOnly), device("laptop", Scope::Full));
+
+    for (name, narrow) in [("read_only", &reader), ("chat_only", &chatter)] {
+        let refused = device_ws(narrow, &server_t, &relay).await.err();
+        let refused = refused.unwrap_or_else(|| panic!("a {name} device opened the relay"));
+        assert!(refused.contains("403"), "{name}: {refused}");
+    }
+    assert_eq!(fake.live.load(Ordering::SeqCst), 0, "a refused device's relay dialed the OSE");
+
+    let mut ws = device_ws(&full, &server_t, &relay).await.expect("a full-scope device opens the relay");
+    ws.send(Message::Binary(b"full".to_vec().into())).await.unwrap();
+    assert_eq!(read_bytes(&mut ws, 4).await, b"full");
+}
+
+/// FR-W4c with FR-T14: the guest door serves no IDE route of a registered computer.
+#[tokio::test]
+async fn fr_w4c_registered_computer_relay_is_404_on_the_guest_door() {
+    let s = server();
+    let computer = s.computers.registry().insert("box", "http://127.0.0.1:1", NODE_TOKEN).unwrap();
+    let sessions = Sessions::new(s.store.clone(), vec![Arc::new(ScriptedAdapter) as Arc<dyn AgentAdapter>]);
+    let door = GuestDoor::from_lookup(
+        |k| (k == "EMBER_GUEST_LISTEN").then(|| "127.0.0.1:9000".to_string()),
+        "127.0.0.1:8740".parse::<SocketAddr>().unwrap(),
+    )
+    .map_err(|e| e.to_string())
+    .unwrap()
+    .expect("the door is on");
+    let guest = door.wrap(guest_router(s.store.clone(), sessions));
+
+    let relay = format!("/api/computers/{}/ide/relay/0123456789abcdef0123456789abcdef", computer.id);
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(&relay)
+        .header("host", "127.0.0.1:9000")
+        .header("connection", "upgrade")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(guest.clone().oneshot(req).await.unwrap().status(), StatusCode::NOT_FOUND, "GET {relay}");
+
+    let install = format!("/api/computers/{}/ide/extensions", computer.id);
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(&install)
+        .header("host", "127.0.0.1:9000")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"id":"a.b"}"#))
+        .unwrap();
+    assert_eq!(guest.clone().oneshot(req).await.unwrap().status(), StatusCode::NOT_FOUND, "POST {install}");
 }

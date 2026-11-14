@@ -65,6 +65,28 @@ pub const NODE_OSE_START_TIMEOUT: Duration = Duration::from_secs(20);
 const NODE_RELAY_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Longest wait for a close handshake when a bridged relay ends.
 const NODE_RELAY_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+/// The `code` of the 502 that says the NODE refused this server's credential (SPEC FR-W4c).
+pub const NODE_AUTH_FAILED: &str = "node_auth_failed";
+
+/// True for a node status that means the node refused this server (its bearer token, or the
+/// peer allow-list), not the request.
+pub(crate) fn node_refused_server(status: u16) -> bool {
+    status == StatusCode::UNAUTHORIZED.as_u16() || status == StatusCode::FORBIDDEN.as_u16()
+}
+
+/// The answer when the node of `computer` refused this server's credential (a stale node token in
+/// the registry): 502, never the node's 401 or 403. Passed on unchanged, that status would read as
+/// the CALLER's credential being refused, and the app would drop its server token or open the
+/// owner sheet. The body names the computer and no token.
+pub(crate) fn node_auth_failed(computer: &str) -> Response {
+    let body = json!({
+        "code": NODE_AUTH_FAILED,
+        "error": format!(
+            "the server could not authenticate to computer {computer}: the computer refused the node token the server holds; enrol the computer again"
+        ),
+    });
+    (StatusCode::BAD_GATEWAY, Json(body)).into_response()
+}
 
 /// One computer's IDE endpoints.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -566,7 +588,8 @@ async fn node_ose_connection(computers: &Computers, id: &str, folder: &str) -> R
 
 /// The relay of a registered computer (SPEC FR-W4c). The node's relay socket is opened first, so
 /// its refusal (unknown launch 404, relay limit 429) and an unreachable node (502) are plain
-/// answers; only then is the client upgraded and the two sockets bridged.
+/// answers; only then is the client upgraded and the two sockets bridged. A node that refuses
+/// this server itself (401, 403) is [`node_auth_failed`], not its own status.
 async fn node_relay(computers: &Computers, computer: &str, launch_id: &str, ws: WebSocketUpgrade) -> Response {
     if !safe_launch_id(launch_id) {
         return error(StatusCode::NOT_FOUND, format!("unknown OSE launch: {launch_id}"));
@@ -577,6 +600,7 @@ async fn node_relay(computers: &Computers, computer: &str, launch_id: &str, ws: 
     };
     let upstream = match tokio::time::timeout(NODE_RELAY_OPEN_TIMEOUT, node.ide_ose_relay(launch_id)).await {
         Ok(Ok(u)) => u,
+        Ok(Err(ClientError::Api { status, .. })) if node_refused_server(status) => return node_auth_failed(computer),
         Ok(Err(ClientError::Api { status, body })) => {
             return error(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), body.error)
         }
@@ -601,6 +625,12 @@ enum BridgeEnd {
 /// too, so a revoked device's stream (the transport closes it within one heartbeat, `FR-N3`) takes
 /// the node's socket, and with it the node's TCP connection to the OSE, down with it. Nothing is
 /// rewritten here: the node replaces the placeholder token.
+///
+/// Pings are carried across, because the node's idle clock counts every frame of its client: the
+/// client's Ping and Pong go to the node, the node's Ping goes to the client. A client that keeps
+/// alive with WebSocket pings alone therefore stays inside the idle timeout, as on the local
+/// relay. The Pong that answers a Ping is still sent by each socket itself, so it is not
+/// forwarded a second time from the node.
 async fn bridge_node_relay(socket: WebSocket, upstream: OseRelayStream) {
     use tokio_tungstenite::tungstenite::Message as NodeMessage;
 
@@ -616,7 +646,16 @@ async fn bridge_node_relay(socket: WebSocket, upstream: OseRelayStream) {
                         }
                     }
                     Some(Ok(Message::Text(_))) => return BridgeEnd::ClientText,
-                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                    Some(Ok(Message::Ping(payload))) => {
+                        if node_tx.send(NodeMessage::Ping(payload.into())).await.is_err() {
+                            return BridgeEnd::Other;
+                        }
+                    }
+                    Some(Ok(Message::Pong(payload))) => {
+                        if node_tx.send(NodeMessage::Pong(payload.into())).await.is_err() {
+                            return BridgeEnd::Other;
+                        }
+                    }
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return BridgeEnd::Other,
                 }
             }
@@ -633,6 +672,11 @@ async fn bridge_node_relay(socket: WebSocket, upstream: OseRelayStream) {
                         return BridgeEnd::NodeClosed(
                             frame.map(|f| (u16::from(f.code), f.reason.as_str().to_string())),
                         )
+                    }
+                    Some(Ok(NodeMessage::Ping(payload))) => {
+                        if client_tx.send(Message::Ping(payload.into())).await.is_err() {
+                            return BridgeEnd::Other;
+                        }
                     }
                     Some(Ok(_)) => {}
                     Some(Err(_)) | None => return BridgeEnd::NodeClosed(None),
@@ -653,8 +697,8 @@ async fn bridge_node_relay(socket: WebSocket, upstream: OseRelayStream) {
             BridgeEnd::NodeClosed(Some((code, reason))) => Some(CloseFrame { code, reason: reason.as_str().into() }),
             BridgeEnd::NodeClosed(None) | BridgeEnd::Other => None,
         };
-        let _ = node_tx.close().await;
-        let _ = client_tx.send(Message::Close(frame)).await;
+        // Both at once: a node that hangs must not use up the budget before the client is told.
+        let _ = tokio::join!(node_tx.close(), client_tx.send(Message::Close(frame)));
     };
     // A peer that is gone never answers a close: do not wait for it.
     let _ = tokio::time::timeout(NODE_RELAY_CLOSE_TIMEOUT, close).await;
@@ -814,6 +858,25 @@ while True: s.accept()[0].close()' "$@"
         let value = serde_json::to_value(&first).unwrap();
         assert_eq!(value["targets"][0]["launch"]["ose"]["connection_token"], connection.connection_token);
         assert!(!format!("{first:?}").contains(&connection.connection_token));
+    }
+
+    /// FR-W4c (#896): a node that refuses this server is a 502 with its own code, and no 401.
+    #[tokio::test]
+    async fn fr_w4c_node_auth_failed_is_a_502_with_a_code_and_no_token() {
+        use http_body_util::BodyExt;
+
+        assert!(node_refused_server(401) && node_refused_server(403));
+        for passed in [200, 400, 404, 409, 429, 500, 502, 503] {
+            assert!(!node_refused_server(passed), "{passed}");
+        }
+        let res = node_auth_failed("0d0c7a52-box");
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["code"], NODE_AUTH_FAILED);
+        let message = v["error"].as_str().unwrap();
+        assert!(message.contains("could not authenticate to computer 0d0c7a52-box"), "{message}");
+        assert!(message.is_ascii(), "{message}");
     }
 
     #[test]

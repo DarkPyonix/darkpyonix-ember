@@ -9,7 +9,8 @@
 //!
 //! The local computer's OSE is this server's. A registered computer's OSE runs on its node (SPEC
 //! FR-W4c, #896): the install is forwarded to the node's `POST /ide/extensions` and the node's
-//! status and body come back unchanged (502 when the node does not answer). Uninstall is not
+//! status and body come back unchanged (502 when the node does not answer; a 401 or 403 of the
+//! node, which refuses this server and not the caller, is 502 `node_auth_failed`). Uninstall is not
 //! forwarded: for a registered computer it still answers 400. An unknown computer is 404. The id and version are
 //! checked against a strict pattern (`ose::extension_spec`): no VSIX paths, no URLs, nothing
 //! that starts with `-`. The OSE binary runs directly (no shell) with the computer's data dir;
@@ -291,6 +292,8 @@ async fn install_on_node(st: &St, computer: &str, body: &[u8]) -> Response {
         Err(e) => return error(StatusCode::BAD_GATEWAY, format!("node unreachable: {e:#}")),
     };
     match node.post_raw("/ide/extensions", &request).await {
+        // The node refused this server (a stale node token), not the caller: never its 401.
+        Ok((status, _)) if super::ide::node_refused_server(status) => super::ide::node_auth_failed(computer),
         Ok((status, bytes)) => (
             StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
             [(axum::http::header::CONTENT_TYPE, "application/json")],

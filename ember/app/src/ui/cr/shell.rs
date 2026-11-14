@@ -982,6 +982,56 @@ mod tests {
         compose_rust::window::reset_window_size();
     }
 
+    /// What the shell reserves for the traffic lights, read as the shell reads it: the toolkit's
+    /// safe area through the composition and the layout from the window's width. The platform is
+    /// named so the macOS table is checked on every system the tests run on.
+    #[Composable]
+    fn reservation_probe() {
+        use crate::ui::safe_area::{safe_area_for, toolkit_safe_area, top_reservation, Platform};
+        let r = top_reservation(safe_area_for(Platform::MacOs, toolkit_safe_area()), current_mode(false));
+        Label(&format!("inset {} strip {}", r.sidebar_inset, r.content_strip), Fs::Md, Weight::Regular, None, None);
+    }
+
+    #[test]
+    fn fr_l33_2_the_reservation_follows_a_safe_area_that_goes_to_zero_and_comes_back() {
+        // #409: entering macOS full screen hides the lights and the renderer reports a zero safe
+        // area; leaving it reports the footprint again. Each report changes what is composed.
+        use compose_rust::protocol::{decode_batch, HostEvent};
+        use compose_rust::{EventPayload, Host, Recomposer, WindowHeightClass, WindowSizeClass};
+        compose_rust::window::reset_window_size();
+        crate::ui::window_size::set_opened_for_test(None);
+        let mut host = Host::new(|| Box::new(Recomposer::new(reservation_probe)));
+        let first = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        assert!(has_text(&first, "inset 0 strip 0"), "nothing reported yet");
+        let mut report = |width: f32, top: f32, leading: f32| {
+            let event = HostEvent {
+                node_id: 0,
+                handler_id: 0,
+                payload: EventPayload::WindowSizeChanged {
+                    width_dp: width,
+                    height_dp: 900.0,
+                    class: WindowSizeClass::from_width_dp(width),
+                    height_class: WindowHeightClass::from_height_dp(900.0),
+                    safe_area_top: top,
+                    safe_area_leading: leading,
+                    safe_area_trailing: 0.0,
+                },
+            };
+            let (bytes, _) = host.dispatch(event).expect("dispatch");
+            decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")).collect::<String>()
+        };
+        // Windowed at 1440: the sidebar starts below the lights.
+        assert!(report(1440.0, 28.0, 78.0).contains("inset 28 strip 0"));
+        // Full screen: the same size class, a zero safe area alone.
+        assert!(report(1440.0, 0.0, 0.0).contains("inset 0 strip 0"));
+        // Back to a window.
+        assert!(report(1440.0, 28.0, 78.0).contains("inset 28 strip 0"));
+        // The bottom-tabs layout: a strip above the content, gone in full screen.
+        assert!(report(390.0, 28.0, 78.0).contains("inset 0 strip 28"));
+        assert!(report(390.0, 0.0, 0.0).contains("inset 0 strip 0"));
+        compose_rust::window::reset_window_size();
+    }
+
     #[test]
     fn fr_l12_the_shell_content_column_has_fill_max_width_in_the_bottom_tabs_layout() {
         // In the 390 bottom-tabs layout width is the cross axis of the content column, which a

@@ -52,6 +52,7 @@ pub mod shell;
 pub mod term_fit;
 pub mod term_pane;
 pub mod theme;
+pub mod tool_card;
 pub mod usage;
 pub mod vcs;
 pub mod workbench;

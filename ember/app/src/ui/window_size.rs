@@ -33,15 +33,14 @@ pub fn record_opened(width_dp: f32, height_dp: f32) {
     let _ = OPENED.set((width_dp, height_dp));
 }
 
+#[cfg(not(test))]
 fn opened() -> Option<(f32, f32)> {
-    #[cfg(test)]
-    {
-        TEST_OPENED.with(Cell::get)
-    }
-    #[cfg(not(test))]
-    {
-        OPENED.get().copied()
-    }
+    OPENED.get().copied()
+}
+
+#[cfg(test)]
+fn opened() -> Option<(f32, f32)> {
+    TEST_OPENED.with(Cell::get)
 }
 
 /// Whether the toolkit has a size from the renderer. Its default before any report is 0 x 0; no

@@ -1533,7 +1533,10 @@ fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMemb
         move || o.set(false)
     };
     let window = crate::ui::window_size::current_window_size();
-    let body_h = super::components::sheet_body_max_height(window.width_dp, window.height_dp, false, 60.0).min(640.0);
+    // FR-L32.1 (#878): the room under the header; the body takes its content height when that
+    // fits (and always in the bottom sheet, which scrolls taller content itself), so the last
+    // action row and the note are no longer cut. TODO(compose-rust#778): cap instead of estimate.
+    let room = super::components::sheet_body_max_height(window.width_dp, window.height_dp, false, super::components::SHEET_HEADER_CHROME_H);
     let inner = super::components::sheet_width(window.width_dp, SHARE_SHEET_WIDTH) - 2.0 * SP[4];
     let rows = share_devices(devices);
     let agents = share_agents(members);
@@ -1554,9 +1557,10 @@ fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMemb
     let dev_lines = super::project::wrap_lines(&dev_widths, SP[3], inner);
     let ag_widths: Vec<f32> = agents.iter().map(|_| 72.0).collect();
     let ag_lines = super::project::wrap_lines(&ag_widths, SP[3], inner);
+    let plain = super::components::sheet_wraps_content(window.width_dp) || share_body_estimate(dev_lines.len(), ag_lines.len()) <= room;
     // The sheet header's close button is named "닫기" (`CloseButton`, compose-rust v0.0.7, #460).
     EmberSheetSized("공유 시트", is_open, SHARE_SHEET_WIDTH, false, close, None, || {
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_h).background(paint(p.surface_2))).content(|| {
+        let body = || {
             cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
                 // The file being shared.
                 cu::Row()
@@ -1635,8 +1639,25 @@ fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMemb
                     });
                 });
             });
-        });
+        };
+        let surface = Modifier::new().fill_max_width().background(paint(p.surface_2));
+        if plain {
+            cu::Column().modifier(surface).content(body);
+        } else {
+            cu::ScrollColumn().modifier(surface.height(room)).content(body);
+        }
     });
+}
+
+/// How tall the share sheet's body is, from its rows (FR-L32.1): 20 px padding, the 76 px file
+/// card, the two 18 px section labels, the receivers in `device_lines` and `agent_lines` of
+/// 112 px tiles (a 20 px line when there are none), the two-line agents note, the three 54 px
+/// action rows with their separators and the three-line note, with 16 px between them.
+pub(crate) fn share_body_estimate(device_lines: usize, agent_lines: usize) -> f32 {
+    let tiles = |n: usize| if n == 0 { 20.0 } else { n as f32 * 112.0 };
+    let children = 2 + device_lines.max(1) + 2 + agent_lines.max(1) + 2;
+    let rows = 76.0 + 18.0 + tiles(device_lines) + 18.0 + 32.0 + tiles(agent_lines) + (3.0 * 54.0 + 2.0) + 54.0;
+    2.0 * SP[4] + rows + (children - 1) as f32 * SP[3]
 }
 
 /// The share sheet's width: the mockup's `min(400px, 100%)`.
@@ -1645,6 +1666,25 @@ pub const SHARE_SHEET_WIDTH: f32 = 400.0;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l32_1_share_sheet_estimate_and_plain_body() {
+        // #878: the 채널에 올리기 row was cut at 390 and 1440 by a body fixed at 640.
+        // 20 + 76 + 18 + 112 + 18 + 32 + 112 + 164 + 54 + 7 x 16 + 20.
+        assert_eq!(share_body_estimate(1, 1), 738.0);
+        assert_eq!(share_body_estimate(0, 0), 738.0 - 2.0 * 92.0);
+        assert_eq!(share_body_estimate(2, 1), 738.0 + 112.0 + 16.0);
+        // One line of each fits the 1440 x 900 dialog (868 less the 61 px header).
+        let room = super::super::components::sheet_body_max_height(1440.0, 900.0, false, super::super::components::SHEET_HEADER_CHROME_H);
+        assert!(share_body_estimate(1, 1) <= room, "{room}");
+        let src = include_str!("files.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        let sheet = &production[production.find("fn ShareSheet(").unwrap()..];
+        let sheet = &sheet[..sheet.find("\n}\n").unwrap()];
+        assert!(!sheet.contains(".min(640.0)"), "{sheet}");
+        assert!(sheet.contains("let plain = super::components::sheet_wraps_content(window.width_dp) || share_body_estimate(dev_lines.len(), ag_lines.len()) <= room;"));
+        assert!(sheet.contains("if plain {\n            cu::Column().modifier(surface).content(body);"));
+    }
     use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
     use compose_rust::{Host, Recomposer};
 

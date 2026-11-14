@@ -2087,7 +2087,7 @@ mod tests {
         let sheet = &src[src.find("pub fn AddComputerSheet(").unwrap()..];
         let sheet = &sheet[..sheet.find("\n}\n").unwrap()];
         assert!(sheet.contains("let wraps = super::components::sheet_wraps_content(w.width_dp);"));
-        let bottom = &sheet[sheet.find("if wraps {").unwrap()..];
+        let bottom = &sheet[sheet.find("if wraps || fits {").unwrap()..];
         let bottom = &bottom[..bottom.find("} else {").unwrap()];
         assert!(bottom.contains("cu::Column().modifier(Modifier::new().fill_max_width()).content("), "{bottom}");
         assert!(!bottom.contains(".height("), "{bottom}");

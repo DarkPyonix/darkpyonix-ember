@@ -268,6 +268,9 @@ struct Tracked {
     stamp: Stamp,
     /// Put back from the backup and not yet reported dirty by the session: kept while clean.
     awaiting_dirty: bool,
+    /// The session is opening it again after a reconnect: kept while its document shows the disk
+    /// text, until the buffer is back in it.
+    reopening: bool,
 }
 
 #[derive(Debug)]
@@ -360,11 +363,29 @@ impl Tracker {
             r.equals_disk = disk_text == r.entry.text;
             r.conflict = !r.equals_disk && r.entry.base.as_ref().is_some_and(|base| *base != BaseMark::of(disk_text));
         }
+        // After a reconnect the disk already has the buffer's text: the document stays clean.
+        if let Some(t) = self.tracked.iter_mut().find(|t| t.path == path) {
+            if t.text == disk_text {
+                t.reopening = false;
+            }
+        }
+    }
+
+    /// The session reconnected and the window puts its buffers back (`FR-L31.6`): each document shows
+    /// the disk text for a moment. The unsaved buffers stay in the backup through it, so a write in
+    /// that moment (the exit path) does not drop them.
+    pub fn reconnected(&mut self) {
+        for t in &mut self.tracked {
+            t.reopening = true;
+        }
     }
 
     /// The session could not open `path`. True when it is a buffer being put back, the first time:
     /// its entry stays in the backup and the window says so.
     pub fn open_failed(&mut self, path: &str) -> bool {
+        if let Some(t) = self.tracked.iter_mut().find(|t| t.path == path) {
+            t.reopening = false;
+        }
         match self.restoring.iter_mut().find(|r| r.entry.path == path) {
             Some(r) => !std::mem::replace(&mut r.failed, true),
             None => false,
@@ -398,6 +419,7 @@ impl Tracker {
                 base: r.entry.base.clone(),
                 stamp: stamp(doc),
                 awaiting_dirty: !doc.dirty,
+                reopening: false,
             });
             if !shown {
                 out.changed = true;
@@ -417,6 +439,7 @@ impl Tracker {
                     Some(i) => {
                         let tracked = &mut self.tracked[i];
                         tracked.awaiting_dirty = false;
+                        tracked.reopening = false;
                         if tracked.stamp != now {
                             tracked.text = doc.text.to_owned();
                             tracked.stamp = now;
@@ -425,7 +448,7 @@ impl Tracker {
                     }
                     None => {
                         let base = self.clean.get(doc.path).map(|(_, mark)| mark.clone());
-                        self.tracked.push(Tracked { path: doc.path.to_owned(), text: doc.text.to_owned(), base, stamp: now, awaiting_dirty: false });
+                        self.tracked.push(Tracked { path: doc.path.to_owned(), text: doc.text.to_owned(), base, stamp: now, awaiting_dirty: false, reopening: false });
                         out.changed = true;
                     }
                 }
@@ -434,6 +457,10 @@ impl Tracker {
             if let Some(i) = at {
                 // Just put back and the session's dirty mark has not arrived: still unsaved.
                 if self.tracked[i].awaiting_dirty && self.tracked[i].stamp == now {
+                    continue;
+                }
+                // Opened again after a reconnect and the buffer is not back in yet: still unsaved.
+                if self.tracked[i].reopening {
                     continue;
                 }
                 // Saved, or reverted to the disk version.
@@ -582,6 +609,8 @@ pub mod view {
     thread_local! {
         /// The backup of this window was looked for (once per process: one editor window each).
         static STARTED: Cell<bool> = const { Cell::new(false) };
+        /// The host's reconnect count the tracker was already told about.
+        static RECONNECTS_SEEN: Cell<u64> = const { Cell::new(0) };
     }
 
     fn notice(text: impl Into<String>) {
@@ -641,10 +670,18 @@ pub mod view {
     /// file changed, and start the debounced write when something changed.
     pub fn after_updates(s: &Shared) {
         start(s);
-        let connected = s.host.state.lock().unwrap().connected;
+        let (connected, reconnects) = {
+            let state = s.host.state.lock().unwrap();
+            (state.connected, state.reconnects)
+        };
+        let reconnected = RECONNECTS_SEEN.with(|c| c.replace(reconnects)) != reconnects;
         let plan = match live().as_mut() {
-            Some(live) if connected => live.tracker.take_restore_plan(),
-            Some(_) => Vec::new(),
+            Some(live) => {
+                if reconnected {
+                    live.tracker.reconnected();
+                }
+                if connected { live.tracker.take_restore_plan() } else { Vec::new() }
+            }
             None => return,
         };
         for step in plan {

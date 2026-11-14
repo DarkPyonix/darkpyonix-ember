@@ -341,6 +341,44 @@ fn fr_l31_hot_exit_closing_a_tab_without_saving_removes_its_backup() {
 }
 
 #[test]
+fn fr_l31_hot_exit_a_reconnect_keeps_the_unsaved_buffers_in_the_backup_while_they_are_put_back() {
+    let dir = scratch();
+    let mut tracker = Tracker::new(key(), None);
+    tracker.observe(&[doc("/w/a.rs", 1, 0, false, "a\n"), doc("/w/b.rs", 2, 0, false, "b\n")], None);
+    tracker.observe(&[doc("/w/a.rs", 1, 1, true, "a1\n"), doc("/w/b.rs", 2, 1, true, "b1\n")], None);
+    tracker.flush(dir.path(), NOW).unwrap();
+    let kept = vec![entry("/w/a.rs", "a1\n", "a\n"), entry("/w/b.rs", "b1\n", "b\n")];
+
+    // The session reconnected: each file is opened again (the disk text, clean) before its buffer is back.
+    tracker.reconnected();
+    tracker.opened("/w/a.rs", "a\n");
+    // b.rs was saved from elsewhere meanwhile: the disk has the buffer's text.
+    tracker.opened("/w/b.rs", "b1\n");
+    tracker.observe(&[doc("/w/a.rs", 3, 0, false, "a\n"), doc("/w/b.rs", 2, 1, true, "b1\n")], None);
+    // An exit in this moment writes both buffers, not a file without a.rs.
+    assert_eq!(tracker.snapshot(NOW + 1).unwrap().entries, kept);
+    tracker.flush(dir.path(), NOW + 1).unwrap();
+    assert_eq!(decode(&std::fs::read(backup_path(dir.path())).unwrap()).unwrap().entries, kept);
+
+    // The buffers are back: a.rs dirty again with its first base, b.rs clean and out of the backup.
+    let seen = tracker.observe(&[doc("/w/a.rs", 3, 1, true, "a1\n"), doc("/w/b.rs", 4, 0, false, "b1\n")], None);
+    assert!(seen.changed);
+    assert_eq!(tracker.snapshot(NOW + 2).unwrap().entries, [entry("/w/a.rs", "a1\n", "a\n")]);
+    // A save after the reconnect removes it as before.
+    tracker.observe(&[doc("/w/a.rs", 3, 1, false, "a1\n"), doc("/w/b.rs", 4, 0, false, "b1\n")], None);
+    assert_eq!(tracker.snapshot(NOW + 3), None);
+
+    // A reopen that fails ends the wait: the document the window still holds decides.
+    tracker.observe(&[doc("/w/a.rs", 3, 2, true, "a12\n")], None);
+    tracker.reconnected();
+    assert!(!tracker.open_failed("/w/a.rs"));
+    tracker.observe(&[doc("/w/a.rs", 3, 2, true, "a12\n")], None);
+    assert_eq!(tracker.snapshot(NOW + 4).unwrap().entries.len(), 1);
+    tracker.observe(&[], None);
+    assert_eq!(tracker.snapshot(NOW + 5), None);
+}
+
+#[test]
 fn fr_l31_hot_exit_a_failed_write_is_tried_again() {
     let dir = scratch();
     // The backup folder cannot be made: a file is in its place.

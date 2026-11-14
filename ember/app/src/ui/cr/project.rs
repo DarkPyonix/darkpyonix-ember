@@ -271,13 +271,15 @@ pub fn ProjectScreen() {
 /// The page header: the title and subtitle, and the actions at the right; on a phone the actions
 /// are a row below the title (and the title leaves room for the menu button at the top right).
 pub fn Header(title: &str, sub: &str, compact: bool, trailing: impl FnOnce()) {
-    HeaderGap(title, sub, compact, compact, 0.0, trailing)
+    HeaderGap(title, sub, compact, compact, 0.0, false, trailing)
 }
 
 /// [`Header`] with `gap` dp between the title and the subtitle, and the actions stacked below
 /// the title when `stacked` (a phone, or a tablet in the mockup's files header); `compact` is the
-/// phone: the smaller title and the room for the menu button.
-pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32, trailing: impl FnOnce()) {
+/// phone: the smaller title and the room for the menu button. `end` puts the stacked actions at
+/// the row's right end (the files header on a phone, review row F6: in the mockup the subtitle
+/// fills the line, so `.spacer{flex:1}` wraps with the buttons and pushes them right).
+pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32, end: bool, trailing: impl FnOnce()) {
     let p = ember_theme().palette;
     // On a phone only the title line leaves room for the menu button; the subtitle runs the
     // whole width under it (#878: it wrapped at x 284 of a row that ends at x 374).
@@ -303,7 +305,14 @@ pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32,
     if stacked {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().modifier(Modifier::new().fill_max_width()).content(titles);
-            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(trailing);
+            if end {
+                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    trailing();
+                });
+            } else {
+                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(trailing);
+            }
         });
     } else {
         cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -2267,6 +2276,55 @@ mod design_review_tests {
         assert!(room < sub);
         assert!(head.contains("cu::Row().modifier(Modifier::new().fill_max_width()).content(titles);"));
         assert!(!head.contains("width(PHONE_MENU_ROOM)"), "no spacer beside the whole column");
+    }
+
+    #[test]
+    fn fr_l27_7_phone_header_buttons_sit_at_the_right() {
+        // Review row F6: mockup x 213..374 of a 390 window, the app drew them at x 16..144.
+        let src = source();
+        let head = &src[src.find("pub fn HeaderGap(").unwrap()..];
+        let head = &head[..head.find("\n}\n").unwrap()];
+        let at_end = head.find("if end {").expect("the end branch");
+        let spacer = head[at_end..].find("cu::Spacer().modifier(Modifier::new().weight(1.0));").expect("a spacer before the actions");
+        let actions = head[at_end..].find("trailing();").expect("the actions");
+        assert!(spacer < actions, "the spacer comes first, so the actions end at the right edge");
+        // Only the files screen on a phone asks for it; `Header` keeps the left.
+        assert!(src.contains("HeaderGap(title, sub, compact, compact, 0.0, false, trailing)"));
+        let files = include_str!("files.rs");
+        assert!(files.contains("compact, w <= 900.0, 6.0, compact, || {"));
+    }
+
+    /// The right-aligned form composes and sends the same texts as the left one. Where the
+    /// actions land is a layout result, so a capture checks it (files, 390).
+    #[test]
+    fn fr_l27_7_end_header_still_sends_title_subtitle_and_actions() {
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+        use compose_rust::{Host, Recomposer};
+        let _guard = crate::services::test_guard();
+        let texts = |end: bool| -> Vec<String> {
+            let mut host = Host::new(move || {
+                Box::new(Recomposer::new(move || {
+                    HeaderGap("파일", "설명", true, true, 6.0, end, || {
+                        Label("ACTION", Fs::Sm, Weight::Medium, None, Some(1));
+                    });
+                }))
+            });
+            decode_batch(host.rebuild().expect("rebuild"))
+                .expect("decode")
+                .iter()
+                .filter_map(|m| match m {
+                    Mutation::SetProp { value: PropertyValue::String(s), .. } => Some(s.to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Both forms still send the title, the subtitle and the actions.
+        for end in [false, true] {
+            let all = texts(end);
+            for want in ["파일", "설명", "ACTION"] {
+                assert!(all.iter().any(|t| t == want), "end={end} lost {want}: {all:?}");
+            }
+        }
     }
 
     #[test]

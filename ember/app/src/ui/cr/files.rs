@@ -427,7 +427,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                     if compact {
                         cu::Spacer().modifier(Modifier::new().height(PHONE_MENU_ROW));
                     }
-                    HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, w <= 900.0, 6.0, || {
+                    HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, w <= 900.0, 6.0, compact, || {
                         // The share button is named "공유 시트 열기" (compose-rust v0.0.7, #460).
                         ShareButton(compact, {
                             let o = share_open.clone();

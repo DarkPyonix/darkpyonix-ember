@@ -1509,6 +1509,8 @@ mod tests {
         id: u32,
         widget: String,
         parent: Option<u32>,
+        /// The place among its parent's children (`Insert::index`).
+        index: u32,
         mods: Vec<String>,
         props: Vec<String>,
     }
@@ -1525,12 +1527,14 @@ mod tests {
                     id: *node_id,
                     widget: format!("{widget:?}"),
                     parent: None,
+                    index: 0,
                     mods: Vec::new(),
                     props: Vec::new(),
                 }),
-                Mutation::Insert { parent_id, node_id, .. } => {
+                Mutation::Insert { parent_id, node_id, index } => {
                     if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
                         n.parent = Some(*parent_id);
+                        n.index = *index;
                     }
                 }
                 Mutation::SetModifier { node_id, modifier, .. } => {
@@ -2672,6 +2676,190 @@ mod tests {
     use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
     use compose_rust::{Composable, EventPayload, Host, PropertyKind, Recomposer};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // ---- FR-L10.4: option menus hang from their control (#888) -------------------------------
+
+    fn pop_sample_rows() -> Vec<PopRow> {
+        vec![
+            PopRow { icon: Some(ICON_CHECK_SVG), title: "Ember 에디터".into(), description: Some("네이티브 창으로 엽니다".into()), ..Default::default() },
+            PopRow {
+                icon: Some(ICON_CHECK_SVG),
+                title: "VS Code".into(),
+                description: Some("웹 IDE로 엽니다".into()),
+                badge: Some(("OSE".into(), PillTone::Sky)),
+                chosen: true,
+                ..Default::default()
+            },
+            PopRow { title: "JetBrains Gateway".into(), danger: true, ..Default::default() },
+        ]
+    }
+
+    static POP_DISMISSED: AtomicUsize = AtomicUsize::new(0);
+    static POP_CHOSEN: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    fn pop_menu(kind: PopKind) {
+        let rows = pop_sample_rows();
+        PopoverMenu(
+            true,
+            PopMenu { name: "IDE 고르기", kind, head: "어느 IDE로 열까요", sub: Some("mini:~/ember"), rows: &rows, align: compose_rust::PopoverAlign::End },
+            || {
+                POP_DISMISSED.fetch_add(1, Ordering::SeqCst);
+            },
+            |i| POP_CHOSEN.store(i, Ordering::SeqCst),
+            || Label("IDE 버튼", Fs::Sm, Weight::Medium, None, Some(1)),
+            None,
+        );
+    }
+
+    fn drop_menu() {
+        pop_menu(PopKind::Drop);
+    }
+
+    fn mode_menu() {
+        pop_menu(PopKind::Mode);
+    }
+
+    fn text_node<'a>(nodes: &'a [EmittedNode], text: &str) -> &'a EmittedNode {
+        let want = format!("Text=String({text:?})");
+        nodes.iter().find(|n| n.props.contains(&want)).unwrap_or_else(|| panic!("no text {text}"))
+    }
+
+    fn is_under(nodes: &[EmittedNode], node: &EmittedNode, ancestor: u32) -> bool {
+        let mut at = node.parent;
+        while let Some(id) = at {
+            if id == ancestor {
+                return true;
+            }
+            at = nodes.iter().find(|n| n.id == id).and_then(|n| n.parent);
+        }
+        false
+    }
+
+    #[test]
+    fn fr_l10_4_drop_menu_is_a_popover_at_the_controls_end_with_head_rows_pill_and_check() {
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let nodes = emitted_nodes(drop_menu);
+        crate::ui::window_size::set_opened_for_test(None);
+        let pops: Vec<&EmittedNode> = nodes.iter().filter(|n| n.widget == "Popover").collect();
+        assert_eq!(pops.len(), 1, "one popover, no dialog: {:?}", nodes.iter().map(|n| &n.widget).collect::<Vec<_>>());
+        assert!(!nodes.iter().any(|n| n.widget == "Dialog" || n.widget == "Sheet"));
+        let pop = pops[0];
+        // `.sdrop{right:0;top:calc(100% + 6px)}`: below the control, lined up with its end.
+        for want in ["Open=Bool(true)", "Placement=Integer(2)", "Align=Integer(3)", "OffsetDp=Float(6.0)"] {
+            assert!(pop.props.iter().any(|p| p == want), "{want} in {:?}", pop.props);
+        }
+        // The box: 360 wide, `corner-lg`, padded 6, a menu to assistive technology.
+        assert!(pop.mods.iter().any(|m| m == "Width(360.0)"), "{:?}", pop.mods);
+        assert!(pop.mods.iter().any(|m| m == "Padding(6.0)"), "{:?}", pop.mods);
+        assert!(pop.mods.iter().any(|m| m.starts_with("Shape { top_start: 14.0")), "{:?}", pop.mods);
+        assert!(pop.mods.iter().any(|m| m.starts_with("Semantics") && m.contains("Menu")), "{:?}", pop.mods);
+        // The control is the popover's first child; everything else is in the box.
+        let anchor = nodes.iter().find(|n| n.parent == Some(pop.id) && n.index == 0).expect("anchor child");
+        let button = text_node(&nodes, "IDE 버튼");
+        assert!(button.id == anchor.id || is_under(&nodes, button, anchor.id), "the control is the anchor");
+        for t in ["어느 IDE로 열까요", "mini:~/ember", "Ember 에디터", "네이티브 창으로 엽니다", "VS Code", "OSE", "JetBrains Gateway"] {
+            let n = text_node(&nodes, t);
+            assert!(is_under(&nodes, n, pop.id), "{t} is inside the popover");
+            assert!(n.id != anchor.id && !is_under(&nodes, n, anchor.id), "{t} is not part of the control");
+        }
+        // One row per option, each a menu item; the current one alone says it is selected and
+        // alone carries the check (one more image than the other icon rows).
+        let rows: Vec<&EmittedNode> = nodes
+            .iter()
+            .filter(|n| is_under(&nodes, n, pop.id) && !is_under(&nodes, n, anchor.id) && n.props.iter().any(|p| p.starts_with("OnClick=")))
+            .collect();
+        assert_eq!(rows.len(), 3, "three rows");
+        let sem: Vec<String> = rows.iter().map(|r| r.mods.iter().find(|m| m.starts_with("Semantics")).cloned().expect("row semantics")).collect();
+        assert!(sem.iter().all(|m| m.contains("MenuItem")), "{sem:?}");
+        assert_ne!(sem[1], sem[0], "the current row says it is selected");
+        assert_eq!(sem[0], sem[2], "the others do not");
+        let images = |r: &EmittedNode| nodes.iter().filter(|n| n.widget == "Image" && is_under(&nodes, n, r.id)).count();
+        assert_eq!((images(rows[0]), images(rows[1]), images(rows[2])), (1, 2, 0), "icon, icon and check, neither");
+    }
+
+    #[test]
+    fn fr_l10_4_a_row_tap_dismisses_and_reports_its_index() {
+        let _guard = crate::services::test_guard();
+        POP_DISMISSED.store(0, Ordering::SeqCst);
+        POP_CHOSEN.store(usize::MAX, Ordering::SeqCst);
+        let mut host = Host::new(|| Box::new(Recomposer::new(drop_menu)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let mut text_of: std::collections::HashMap<u32, String> = Default::default();
+        let mut parent: std::collections::HashMap<u32, u32> = Default::default();
+        let mut click: Vec<(u32, u64)> = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(t) } => {
+                    text_of.insert(*node_id, t.to_string());
+                }
+                Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                    click.push((*node_id, *h as u64));
+                }
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    parent.insert(*node_id, *parent_id);
+                }
+                _ => {}
+            }
+        }
+        let mut node = *text_of.iter().find(|(_, t)| t.as_str() == "JetBrains Gateway").expect("row text").0;
+        let (node_id, handler_id) = loop {
+            if let Some(c) = click.iter().find(|(n, _)| *n == node) {
+                break *c;
+            }
+            node = *parent.get(&node).expect("a clickable ancestor");
+        };
+        host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click");
+        assert_eq!(POP_DISMISSED.load(Ordering::SeqCst), 1, "a tap closes the menu");
+        assert_eq!(POP_CHOSEN.load(Ordering::SeqCst), 2, "and reports the row");
+    }
+
+    #[test]
+    fn fr_l10_4_mode_menu_is_340_wide_8_below_and_lined_up_with_the_start_by_default() {
+        let m = pop_metrics(PopKind::Mode);
+        assert_eq!((m.width, m.box_pad, m.offset), (340.0, 0.0, 8.0));
+        assert_eq!((m.head_pad, m.list_pad), ((12.0, 16.0, 4.0), (4.0, 8.0, 8.0)));
+        assert_eq!((m.row_pad, m.row_gap, m.row_min_h, m.row_radius), ((8.0, 12.0), 12.0, 56.0, CORNER_SM));
+        let d = pop_metrics(PopKind::Drop);
+        assert_eq!((d.width, d.box_pad, d.offset), (360.0, 6.0, 6.0));
+        assert_eq!((d.head_pad, d.list_pad), ((8.0, 10.0, 8.0), (0.0, 0.0, 0.0)));
+        assert_eq!((d.row_pad, d.row_gap, d.row_min_h, d.row_radius), ((8.0, 10.0), 10.0, 0.0, CORNER_MD));
+        // `.md-row.on{background:var(--sel)}`, `.sdrop-i.on{background:var(--hover)}`.
+        assert_eq!(pop_chosen_fill(PopKind::Mode, &LIGHT), LIGHT.sel);
+        assert_eq!(pop_chosen_fill(PopKind::Drop, &DARK), DARK.hover);
+    }
+
+    #[test]
+    fn fr_l10_4_at_560_and_below_a_mode_menu_is_a_sheet_and_a_drop_menu_spans_the_window() {
+        assert_eq!(pop_presentation(PopKind::Mode, 390.0), PopPresentation::Sheet);
+        assert_eq!(pop_presentation(PopKind::Mode, 560.0), PopPresentation::Sheet);
+        assert_eq!(pop_presentation(PopKind::Mode, 561.0), PopPresentation::Popover);
+        // A window that has not reported its size yet is not a phone.
+        assert_eq!(pop_presentation(PopKind::Mode, 0.0), PopPresentation::Popover);
+        assert_eq!(pop_presentation(PopKind::Drop, 390.0), PopPresentation::Popover);
+        assert_eq!(pop_width(PopKind::Drop, 390.0), 366.0);
+        assert_eq!(pop_width(PopKind::Drop, 1440.0), 360.0);
+        assert_eq!(pop_width(PopKind::Drop, 370.0), 346.0);
+        assert_eq!(pop_width(PopKind::Mode, 1440.0), 340.0);
+        assert_eq!(pop_width(PopKind::Mode, 0.0), 340.0);
+    }
+
+    #[test]
+    fn fr_l10_4_mode_menu_at_390_sends_a_bottom_sheet_with_the_rows_and_no_popover() {
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+        let nodes = emitted_nodes(mode_menu);
+        let drop = emitted_nodes(drop_menu);
+        crate::ui::window_size::set_opened_for_test(None);
+        assert!(!nodes.iter().any(|n| n.widget == "Popover"));
+        let sheet = the(&nodes, "Sheet");
+        for t in ["어느 IDE로 열까요", "VS Code", "웹 IDE로 엽니다"] {
+            assert!(is_under(&nodes, text_node(&nodes, t), sheet.id), "{t} is in the sheet");
+        }
+        assert!(!is_under(&nodes, text_node(&nodes, "IDE 버튼"), sheet.id), "the control stays on the page");
+        let pop = the(&drop, "Popover");
+        assert!(pop.mods.iter().any(|m| m == "Width(366.0)"), "{:?}", pop.mods);
+    }
 
     static CLICKS: AtomicUsize = AtomicUsize::new(0);
 

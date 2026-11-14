@@ -476,6 +476,13 @@ pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(Botto
     });
 }
 
+/// Whether the phone layout draws its floating bottom bar. A detail view (an open conversation
+/// in the 싱글 view, an open room, a routine) is full screen, its composer at the bottom edge:
+/// `body.view-detail .side{display:none}` (`style.css`, FR-L28, #885, review SE13 and CH8).
+pub fn bottom_bar_shown(detail_open: bool) -> bool {
+    !detail_open
+}
+
 /// The phone's top-right tool menu (`.phonemenu`): a 32 px round button at top 10 / right 12 that
 /// opens a popover with the theme switch, settings, and (in demo mode) platform toggle and demo reset.
 pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: impl FnMut() + Clone + 'static) {
@@ -677,18 +684,21 @@ pub fn shell() {
         .modifier(Modifier::new().fill_max_width().fill_max_height().background(paint(theme.palette.bg)))
         .content(|| {
             if mode == ShellMode::BottomTabs {
+                let detail = ui.detail_open.get();
                 cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
                     content();
-                    let u = ui.clone();
-                    let more = more_open.clone();
-                    BottomBar(active, counts, move |tab: BottomTab| match tab {
-                        BottomTab::NavMenu(m) => choose(&u, m),
-                        BottomTab::More => more.set(true),
-                    });
+                    if bottom_bar_shown(detail) {
+                        let u = ui.clone();
+                        let more = more_open.clone();
+                        BottomBar(active, counts, move |tab: BottomTab| match tab {
+                            BottomTab::NavMenu(m) => choose(&u, m),
+                            BottomTab::More => more.set(true),
+                        });
+                    }
                 });
                 let s = settings_open.clone();
                 // The mockup hides the menu while a detail view (an open room) is shown.
-                if !ui.detail_open.get() {
+                if !detail {
                     PhoneMenu(phone_menu.clone(), move || s.set(true));
                 }
             } else {
@@ -1101,6 +1111,41 @@ mod tests {
         assert!(len_after_send > initial);
         assert!(s.reset_demo());
         assert_eq!(d.events_for("demo-s1").len(), initial);
+    }
+
+    fn count_text(batch: &[compose_rust::protocol::Mutation<'_>], want: &str) -> usize {
+        use compose_rust::protocol::{Mutation, PropertyValue};
+        batch
+            .iter()
+            .filter(|m| matches!(m, Mutation::SetProp { value: PropertyValue::String(t), .. } if *t == want))
+            .count()
+    }
+
+    #[test]
+    fn fr_l28_a_detail_view_hides_the_phone_bottom_bar() {
+        // Review SE13, CH8: inside a conversation and a room the mockup has no tab bar
+        // (`body.view-detail .side{display:none}`); the app kept it and put the composer above it.
+        use compose_rust::protocol::decode_batch;
+        use compose_rust::{Host, Recomposer};
+        assert!(bottom_bar_shown(false));
+        assert!(!bottom_bar_shown(true));
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        crate::ui::window_size::set_opened_for_test(None);
+        let ui = shared_ui();
+        let tab_labels = |detail: bool| {
+            ui.detail_open.set(detail);
+            let mut host = Host::new(|| Box::new(Recomposer::new(shell)));
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            // 더보기 is the bar's last tab; the closed 더보기 sheet sends no title.
+            (count_text(&batch, "더보기"), count_text(&batch, "채널"))
+        };
+        let (more_list, ch_list) = tab_labels(false);
+        let (more_detail, ch_detail) = tab_labels(true);
+        ui.detail_open.set(false);
+        assert!(more_list > more_detail, "the bar's 더보기 tab goes with the detail view: {more_list} {more_detail}");
+        assert!(ch_list > ch_detail, "the bar's 채널 tab goes with the detail view: {ch_list} {ch_detail}");
+        compose_rust::window::reset_window_size();
     }
 
     #[test]

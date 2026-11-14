@@ -4468,6 +4468,8 @@ pub fn SessionScreen(focus: Option<String>) {
     // opens it at start for captures.
     let vcs_open = remember(|| mutable_state_of(std::env::var("EMBER_CR_SESSION_VCS").as_deref() == Ok("1")));
     let web_pages = remember(|| mutable_state_of(WebPagesLoad::Loading));
+    // The detail flag value this screen last wrote or saw (FR-L28, #885).
+    let detail_wrote = remember(|| mutable_state_of(false));
 
     let show_archived = ui.show_archived.get();
     let boxes = {
@@ -4621,6 +4623,29 @@ pub fn SessionScreen(focus: Option<String>) {
 
     let project_name = display_name(&current);
     let view_now = view.get();
+
+    // A member's 싱글 view at phone width is a full-screen detail view: the shell hides its
+    // bottom bar and menu (`body.view-detail`, FR-L28, #885). The system back clears the shared
+    // flag (`BackStep::CloseDetail`), which takes this screen back to the 멀티 view.
+    {
+        let want = crate::ui::session::is_detail_view(window.width_dp, view_now, target.is_some());
+        let wrote = detail_wrote.clone();
+        match crate::ui::session::detail_sync(want, wrote.get_untracked(), ui.detail_open.get()) {
+            crate::ui::session::DetailSync::Keep => {
+                if wrote.get_untracked() != want {
+                    wrote.set(want);
+                }
+            }
+            crate::ui::session::DetailSync::Write(v) => {
+                wrote.set(v);
+                ui.detail_open.set(v);
+            }
+            crate::ui::session::DetailSync::Back => {
+                wrote.set(false);
+                set_view(SessionView::Multi);
+            }
+        }
+    }
     let total_m = members.len();
     let wait_m = members
         .iter()

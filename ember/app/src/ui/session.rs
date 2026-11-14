@@ -1395,8 +1395,66 @@ pub fn session_count_rows(members: &[Member]) -> Vec<String> {
     ]
 }
 
+/// Whether the session screen is a full-screen detail view: the 싱글 view of a member at phone
+/// width (`session.js` setView adds `view-detail` below 560 px), which hides the phone tab bar
+/// and the top-right menu (FR-L28, #885).
+pub fn is_detail_view(width_dp: f32, view: SessionView, has_member: bool) -> bool {
+    width_dp <= 560.0 && view == SessionView::Single && has_member
+}
+
+/// What the session screen does with the shell's shared detail flag on a composition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DetailSync {
+    /// The flag already says what the screen shows.
+    Keep,
+    /// Set the flag to this value (the screen entered or left its detail view).
+    Write(bool),
+    /// The screen had set the flag and something else cleared it (the system back, which
+    /// takes `BackStep::CloseDetail`): leave the 싱글 view, as the mockup's back does.
+    Back,
+}
+
+/// `want`: whether the screen shows its detail view now; `wrote`: the value the screen last
+/// wrote or saw; `now`: the flag's value.
+pub fn detail_sync(want: bool, wrote: bool, now: bool) -> DetailSync {
+    if now == want {
+        DetailSync::Keep
+    } else if want && wrote && !now {
+        DetailSync::Back
+    } else {
+        DetailSync::Write(want)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l28_session_single_view_at_phone_width_is_a_detail_view() {
+        use super::{is_detail_view, SessionView};
+        assert!(is_detail_view(390.0, SessionView::Single, true));
+        assert!(is_detail_view(560.0, SessionView::Single, true));
+        assert!(!is_detail_view(561.0, SessionView::Single, true));
+        assert!(!is_detail_view(1440.0, SessionView::Single, true));
+        assert!(!is_detail_view(390.0, SessionView::Multi, true));
+        assert!(!is_detail_view(390.0, SessionView::Status, true));
+        assert!(!is_detail_view(390.0, SessionView::Single, false), "no member: nothing to go back from");
+    }
+
+    #[test]
+    fn fr_l28_session_detail_flag_follows_the_view_and_the_system_back() {
+        use super::{detail_sync, DetailSync};
+        // Entering the 싱글 view at 390 sets the flag; leaving it clears it.
+        assert_eq!(detail_sync(true, false, false), DetailSync::Write(true));
+        assert_eq!(detail_sync(false, true, true), DetailSync::Write(false));
+        // Nothing to do when the flag already agrees.
+        assert_eq!(detail_sync(true, true, true), DetailSync::Keep);
+        assert_eq!(detail_sync(false, false, false), DetailSync::Keep);
+        // The system back cleared the flag the screen had set: go back to the list view.
+        assert_eq!(detail_sync(true, true, false), DetailSync::Back);
+        // A flag left by another screen (a room) is cleared, not taken as a back.
+        assert_eq!(detail_sync(false, false, true), DetailSync::Write(false));
+    }
+
     #[test]
     fn fr_l18_multi_layout_stacks_at_600_and_strips_only_at_phone_width() {
         let c = WindowSizeClass::Compact;

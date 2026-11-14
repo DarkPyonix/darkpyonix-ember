@@ -39,6 +39,12 @@ fn detail_state() -> Option<MutableState<bool>> {
     crate::services::try_services().map(|s| s.ui.detail_open.clone())
 }
 
+/// Whether an open room closes because the detail flag was cleared: only on a phone, where the
+/// room fills the screen while the flag is set (FR-L28, #885). `None`: no services (unit tests).
+pub fn room_closed_by_back(split: bool, room_open: bool, detail_open: Option<bool>) -> bool {
+    !split && room_open && detail_open == Some(false)
+}
+
 /// The list panel's width (`.split`): 340 above 1279 dp, 280 up to 1279, 260 up to 900.
 pub fn list_width(width_dp: f32) -> f32 {
     if width_dp > 1279.0 {
@@ -243,6 +249,11 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
     });
     let window = crate::ui::window_size::current_window_size();
     let split = split_view(window.class);
+    // The system back clears the shell's detail flag (`BackStep::CloseDetail`); on a phone the
+    // open room closes with it, so the list and the tab bar come back together (FR-L28, #885).
+    if room_closed_by_back(split, open.get().is_some(), detail_state().map(|d| d.get())) {
+        open.set(None);
+    }
     // Side by side with nothing open, the first listed room is shown (FR-L12, #509); the
     // compact layout keeps the list first.
     let order: Vec<String> = Vec::new();
@@ -897,6 +908,15 @@ mod tests {
             assert!(text.contains(want), "missing {want}");
         }
         assert!(!text.contains("채널, 메시지 검색"));
+    }
+
+    #[test]
+    fn fr_l28_the_system_back_closes_a_phone_room() {
+        assert!(room_closed_by_back(false, true, Some(false)));
+        assert!(!room_closed_by_back(false, true, Some(true)), "the room is still the detail view");
+        assert!(!room_closed_by_back(true, true, Some(false)), "side by side the room stays");
+        assert!(!room_closed_by_back(false, false, Some(false)));
+        assert!(!room_closed_by_back(false, true, None));
     }
 
     #[test]

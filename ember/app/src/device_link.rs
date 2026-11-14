@@ -7,6 +7,10 @@
 //! - **Server address**: the bare peer id, `<peer id>@<ip>:<port>[,<ip>:<port>...]`, or the
 //!   `PeerAddr` JSON the server prints at start (`ember server peer addr: {...}`), parsed by
 //!   [`parse_server_addr`]. The relay is what `EMBER_RELAY_URL` takes ([`parse_relay`]).
+//! - **Device line** (#863): the setting that survives a server restart is the peer id plus the
+//!   server's own relay on its fixed port. The server prints it as
+//!   `ember server device address: <peer id> relay letify://<peer id>@<host>:<port>`, and the
+//!   address field takes it in one paste ([`split_relay`], [`PeerSetting::parse`]).
 //! - **Connection**: [`DeviceLink::bind`] binds the transport with the device key and hands out
 //!   an [`Api`] over it ([`DeviceLink::api`]); the `Api` keeps the transport alive.
 //! - **Refusals**: [`refusal_text`] turns a refused or failed call into one Korean sentence.
@@ -38,6 +42,30 @@ pub const CONNECTED: &str = "서버에 연결되어 있습니다";
 /// A change in 설정 is read at start.
 pub const APPLIES_AFTER_RESTART: &str = "앱을 다시 시작하면 적용됩니다";
 
+/// The prefix of the line the server prints for a device at start (#863).
+pub const DEVICE_LINE_PREFIX: &str = "ember server device address:";
+/// The prefix of the server's JSON address line.
+pub const PEER_ADDR_PREFIX: &str = "ember server peer addr:";
+/// The word between the address and the relay in the device line.
+const RELAY_WORD: &str = " relay ";
+
+/// Splits a pasted server address into its address part and the relay it names:
+/// `<address> relay <relay URL>`, the device line the server prints (#863), with or without its
+/// prefix. Without ` relay `, the whole text is the address and there is no relay.
+pub fn split_relay(text: &str) -> (&str, Option<&str>) {
+    let mut t = text.trim();
+    for prefix in [DEVICE_LINE_PREFIX, PEER_ADDR_PREFIX] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            t = rest.trim();
+            break;
+        }
+    }
+    match t.split_once(RELAY_WORD) {
+        Some((addr, relay)) => (addr.trim(), Some(relay.trim()).filter(|r| !r.is_empty())),
+        None => (t, None),
+    }
+}
+
 /// Where the server is on the transport, and the relay to reach it through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerSetting {
@@ -48,10 +76,13 @@ pub struct PeerSetting {
 }
 
 impl PeerSetting {
-    /// Parses a saved or typed address and relay. An empty relay is `None`.
+    /// Parses a saved or typed address and relay. An empty relay is `None`. The address may be
+    /// the device line (`<address> relay <relay URL>`, [`split_relay`]); its relay applies when
+    /// `relay` is empty.
     pub fn parse(addr: &str, relay: Option<&str>) -> Result<PeerSetting, AddrError> {
+        let (addr, line_relay) = split_relay(addr);
         let addr = parse_server_addr(addr)?;
-        let relay = match relay.map(str::trim).filter(|r| !r.is_empty()) {
+        let relay = match relay.map(str::trim).filter(|r| !r.is_empty()).or(line_relay) {
             Some(r) => Some(parse_relay(r)?),
             None => None,
         };
@@ -135,7 +166,9 @@ pub fn parse_relay(text: &str) -> Result<RelayConfig, AddrError> {
             let (id, host) = rest.split_once('@').ok_or_else(bad)?;
             parse_peer(id).map_err(|_| bad())?;
             let (h, port) = host.rsplit_once(':').ok_or_else(bad)?;
-            if h.is_empty() || port.parse::<u16>().is_err() {
+            // `<host>` is the placeholder the server prints when it does not know its address.
+            let placeholder = h.contains(['<', '>']) || h.contains(char::is_whitespace);
+            if h.is_empty() || placeholder || port.parse::<u16>().is_err() {
                 return Err(bad());
             }
         }
@@ -325,6 +358,36 @@ mod tests {
         let s = PeerSetting::parse(&peer.to_string(), Some(&url)).unwrap();
         assert_eq!(s.relay, Some(RelayConfig::Custom(vec![url])));
         assert!(PeerSetting::parse(&peer.to_string(), Some("https://x")).is_err());
+    }
+
+    #[test]
+    fn fr_n9_the_device_line_sets_peer_and_relay_in_one_paste() {
+        let peer = id();
+        let url = format!("letify://{peer}@203.0.113.4:7443");
+        let bare = format!("{peer} relay {url}");
+        let line = format!("{DEVICE_LINE_PREFIX} {bare}");
+        for text in [bare.clone(), line.clone(), format!("  {line}\n")] {
+            assert_eq!(split_relay(&text), (peer.to_string().as_str(), Some(url.as_str())), "{text:?}");
+            let s = PeerSetting::parse(&text, None).unwrap();
+            assert_eq!(s.addr, PeerAddr::new(peer), "only the peer id, no direct address");
+            assert_eq!(s.relay, Some(RelayConfig::Custom(vec![url.clone()])));
+            assert_eq!(PeerSetting::parse(&text, Some("  ")).unwrap().relay, s.relay, "an empty relay field");
+        }
+        // A relay typed in the relay field beats the one in the line.
+        let other = format!("letify://{peer}@relay.example:7443");
+        assert_eq!(PeerSetting::parse(&line, Some(&other)).unwrap().relay, Some(RelayConfig::Custom(vec![other])));
+        // The other forms still parse, with their prefix or without.
+        assert_eq!(split_relay(&peer.to_string()), (peer.to_string().as_str(), None));
+        let json = serde_json::to_string(&PeerAddr::new(peer)).unwrap();
+        assert_eq!(PeerSetting::parse(&format!("{PEER_ADDR_PREFIX} {json}"), None).unwrap().addr, PeerAddr::new(peer));
+        let direct = PeerSetting::parse(&format!("{peer}@192.168.1.5:41234 relay {url}"), None).unwrap();
+        assert_eq!(direct.addr.direct, vec!["192.168.1.5:41234".parse().unwrap()]);
+        // The placeholder the server prints without a known address is refused until replaced.
+        let placeholder = format!("{peer} relay letify://{peer}@<host>:7443");
+        assert!(matches!(PeerSetting::parse(&placeholder, None), Err(AddrError::BadRelay(_))));
+        let noted = format!("{placeholder} (replace <host> with this computer's address or name)");
+        assert!(matches!(PeerSetting::parse(&noted, None), Err(AddrError::BadRelay(_))));
+        assert!(matches!(PeerSetting::parse(&format!("nothex relay {url}"), None), Err(AddrError::BadPeer(_))));
     }
 
     #[test]

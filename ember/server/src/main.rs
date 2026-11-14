@@ -239,8 +239,9 @@ async fn serve_main() -> anyhow::Result<()> {
             Some(h) if registered => h.registration().ok().flatten().and_then(|r| r.active_token()),
             _ => None,
         };
-        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), registered, token, device_token))
-            .await?;
+        let cfg = server_transport::config_with_hub(key, hub_config.as_ref(), registered, token, device_token);
+        let relay_role = server_transport::runs_relay_role(&cfg);
+        let t = Transport::bind(cfg).await?;
         if let Some(h) = &hub {
             h.attach_transport(t.clone());
             let _watch = h.spawn_watch(ember_server::hub::WATCH_PERIOD);
@@ -261,6 +262,10 @@ async fn serve_main() -> anyhow::Result<()> {
         // Printed (not only logged): the peer id goes into each node's allowed peers.
         println!("ember server peer id: {}", t.peer_id());
         println!("ember server peer addr: {}", serde_json::to_string(&t.local_addr())?);
+        // The setting a device keeps across restarts: peer id plus this server's relay (#863).
+        if let Some(line) = server_transport::device_address_line(relay_role, &t.local_addr()) {
+            println!("{line}");
+        }
         Some(ServerTransport::new(t))
     } else {
         None

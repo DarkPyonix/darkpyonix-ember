@@ -103,7 +103,8 @@ impl AppConfig {
 /// 4. Nothing: plain HTTP to the default, as before.
 ///
 /// The relay: `EMBER_RELAY_URL` when set (`env_relay_set`; `TransportConfig::from_env` reads
-/// it), otherwise the saved relay. `Ok(None)` is plain HTTP.
+/// it), otherwise the saved relay, or the relay in a device line (`<address> relay <URL>`,
+/// #863) when no relay is saved. `Ok(None)` is plain HTTP.
 pub fn server_choice(
     env_peer: Option<&str>,
     env_url_set: bool,
@@ -112,9 +113,16 @@ pub fn server_choice(
     saved_relay: Option<&str>,
 ) -> Result<Option<PeerSetting>, String> {
     let set = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
+    // `EMBER_RELAY_URL` beats any relay in the setting, the one in a device line too.
+    let env_relay = |mut s: PeerSetting| {
+        if env_relay_set {
+            s.relay = None;
+        }
+        s
+    };
     if let Some(peer) = set(env_peer) {
         return PeerSetting::parse(&peer, None)
-            .map(Some)
+            .map(|s| Some(env_relay(s)))
             .map_err(|e| format!("{}: {e}", crate::device_link::SERVER_PEER_ENV));
     }
     if env_url_set {
@@ -123,7 +131,7 @@ pub fn server_choice(
     let Some(peer) = set(saved_peer) else { return Ok(None) };
     let relay = if env_relay_set { None } else { set(saved_relay) };
     match PeerSetting::parse(&peer, relay.as_deref()) {
-        Ok(s) => Ok(Some(s)),
+        Ok(s) => Ok(Some(env_relay(s))),
         Err(e) => {
             tracing::warn!("ignoring the saved server address: {e}");
             Ok(None)
@@ -208,6 +216,20 @@ mod tests {
         assert!(server_choice(Some("nope"), false, false, None, None).unwrap_err().contains("EMBER_SERVER_PEER"));
         assert_eq!(server_choice(None, false, false, Some("nope"), None), Ok(None));
         assert_eq!(server_choice(None, false, false, Some(&saved), Some("https://x")), Ok(None));
+    }
+
+    #[test]
+    fn fr_n9_a_device_line_brings_its_relay_unless_ember_relay_url_is_set() {
+        let id = peer();
+        let url = format!("letify://{id}@203.0.113.4:7443");
+        let line = format!("ember server device address: {id} relay {url}");
+        let want = Some(ember_transport::RelayConfig::Custom(vec![url]));
+        let s = server_choice(Some(&line), false, false, None, None).unwrap().unwrap();
+        assert_eq!((s.addr.peer.to_string(), s.relay), (id.clone(), want.clone()));
+        assert_eq!(server_choice(Some(&line), false, true, None, None).unwrap().unwrap().relay, None);
+        let s = server_choice(None, false, false, Some(&line), None).unwrap().unwrap();
+        assert_eq!(s.relay, want);
+        assert_eq!(server_choice(None, false, true, Some(&line), None).unwrap().unwrap().relay, None);
     }
 
     #[test]

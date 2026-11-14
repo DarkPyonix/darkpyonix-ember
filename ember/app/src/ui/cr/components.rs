@@ -376,7 +376,8 @@ pub struct FieldOptions {
     pub multiline: bool,
     /// `None` keeps the field enabled.
     pub enabled: Option<bool>,
-    /// The field inside the composer or a row: no fill, no border.
+    /// The field inside the composer or a row: no fill, no border, and no toolkit frame
+    /// (`TextField::bare`, compose-rust v0.0.7).
     pub bare: bool,
     pub height: Option<f32>,
     pub corner_radius: Option<f32>,
@@ -389,6 +390,9 @@ pub struct FieldOptions {
     pub on_focus_lost: Option<Box<dyn FnMut()>>,
     pub on_key_down: Option<Box<dyn FnMut(KeyEvent)>>,
 }
+
+/// The type step of a field's text and placeholder when no role is named (style.css `.field`).
+pub const FIELD_FONT: Fs = Fs::Md;
 
 /// A text field drawn with the tokens instead of the toolkit's filled style, which stays light
 /// in the dark scheme. Not `bare`: a `surface` field on a `line` border with the
@@ -415,8 +419,16 @@ pub fn EmberField(o: FieldOptions) {
     if let Some(t) = o.text {
         f = f.text(t);
     }
-    if let Some(r) = o.type_role {
-        f = f.type_role(r);
+    // FR-L10.2 (#844): 14 px text and placeholder (style.css `.field`) unless the caller names a
+    // role; an explicit `font_size` would override the role's size, so it is sent only without one.
+    match o.type_role {
+        Some(r) => f = f.type_role(r),
+        None => f = f.font_size(FIELD_FONT.size()),
+    }
+    // The node's transparent fill and zero border alone still left the toolkit's frame drawn
+    // inside the composer (H2, SE10, CH1); `bare` drops it.
+    if o.bare {
+        f = f.bare();
     }
     if let Some(h) = o.on_value_change {
         f = f.on_value_change(h);
@@ -540,7 +552,10 @@ pub struct ButtonStyle {
     pub fill: Color,
     pub text: Color,
     pub border: Color,
+    /// The label's step on the type scale: 14 (`Fs::Md`), or 13 (`Fs::Sm`) when small.
     pub fs: Fs,
+    /// The label's weight: 500 for every kind (style.css `.btn`, FR-L10.2).
+    pub weight: Weight,
 }
 
 pub fn button_style(kind: ButtonKind, small: bool, p: &Palette) -> ButtonStyle {
@@ -556,6 +571,7 @@ pub fn button_style(kind: ButtonKind, small: bool, p: &Palette) -> ButtonStyle {
             text: p.text,
             border: p.line,
             fs,
+            weight: Weight::Medium,
         },
         ButtonKind::Primary => ButtonStyle {
             height,
@@ -563,6 +579,7 @@ pub fn button_style(kind: ButtonKind, small: bool, p: &Palette) -> ButtonStyle {
             text: p.ink_text,
             border: p.ink,
             fs,
+            weight: Weight::Medium,
         },
         ButtonKind::Destructive => ButtonStyle {
             height,
@@ -570,6 +587,7 @@ pub fn button_style(kind: ButtonKind, small: bool, p: &Palette) -> ButtonStyle {
             text: p.red.strong,
             border: p.red.soft,
             fs,
+            weight: Weight::Medium,
         },
     }
 }
@@ -603,6 +621,10 @@ pub fn AppButton(
         .enabled(enabled)
         .variant(ButtonVariant::Text)
         .color(paint(s.text))
+        // FR-L10.2 (#844): the mockup's `.btn` 14/500 (`.btn.sm` 13/500), not the toolkit's
+        // label style (about 17/600). compose-rust v0.0.7 sends both only when they are set.
+        .font_size(s.fs.size())
+        .font_weight(s.weight.value())
         .modifier(
             Modifier::new()
                 .fill_max_width_if(fill_max_width)
@@ -1255,6 +1277,69 @@ mod tests {
         assert!(field.iter().any(|m| m.starts_with("Shape")), "{field:?}");
         assert!(field.iter().any(|m| m.starts_with("Background")), "{field:?}");
         assert!(field.iter().any(|m| m.starts_with("Border")), "{field:?}");
+    }
+
+    /// Every `SetProp` of one composition as `"Property=Value"`, e.g. `"FontSize=Float(14.0)"`.
+    fn emitted_props(content: fn()) -> Vec<String> {
+        use compose_rust::protocol::{decode_batch, Mutation};
+        use compose_rust::{Host, Recomposer};
+        let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { property, value, .. } => Some(format!("{property:?}={value:?}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fr_l10_2_button_style_is_14_500_and_13_500_small() {
+        for p in [&LIGHT, &DARK] {
+            for kind in [ButtonKind::Default, ButtonKind::Primary, ButtonKind::Destructive] {
+                for enabled in [true, false] {
+                    let s = button_style_for(kind, false, enabled, p);
+                    assert_eq!((s.fs.size(), s.weight.value()), (14.0, 500), "{kind:?}");
+                    let s = button_style_for(kind, true, enabled, p);
+                    assert_eq!((s.fs.size(), s.weight.value()), (13.0, 500), "{kind:?} small");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fr_l10_2_app_button_sends_its_label_size_and_weight() {
+        let big = emitted_props(|| AppButton("저장", None, ButtonKind::Primary, false, true, false, || {}));
+        assert!(big.iter().any(|m| m == "FontSize=Float(14.0)"), "{big:?}");
+        assert!(big.iter().any(|m| m == "FontWeight=Integer(500)"), "{big:?}");
+        let small = emitted_props(|| AppButton("취소", None, ButtonKind::Default, true, false, false, || {}));
+        assert!(small.iter().any(|m| m == "FontSize=Float(13.0)"), "{small:?}");
+        assert!(small.iter().any(|m| m == "FontWeight=Integer(500)"), "{small:?}");
+    }
+
+    #[test]
+    fn fr_l10_2_field_text_is_14_and_bare_drops_the_toolkit_frame() {
+        let plain = emitted_props(|| EmberField(FieldOptions { ..Default::default() }));
+        assert!(plain.iter().any(|m| m == "FontSize=Float(14.0)"), "{plain:?}");
+        assert!(!plain.iter().any(|m| m.starts_with("Bare=")), "a framed field sends no Bare: {plain:?}");
+        let bare = emitted_props(|| EmberField(FieldOptions { bare: true, multiline: true, ..Default::default() }));
+        assert!(bare.iter().any(|m| m == "Bare=Bool(true)"), "{bare:?}");
+        assert!(bare.iter().any(|m| m == "FontSize=Float(14.0)"), "{bare:?}");
+        // A named role keeps its own size: no explicit FontSize overrides it.
+        let mono = emitted_props(|| EmberField(FieldOptions { type_role: Some(TypeRole::Mono), ..Default::default() }));
+        assert!(!mono.iter().any(|m| m.starts_with("FontSize=")), "{mono:?}");
+    }
+
+    #[test]
+    fn fr_l10_2_composers_inside_a_frame_pass_bare() {
+        let channels = include_str!("channels.rs");
+        let at = channels.find("placeholder: \"메시지 입력\"").expect("channel composer field");
+        let opts = &channels[channels[..at].rfind("EmberField(FieldOptions {").expect("field")..at];
+        assert!(opts.contains("bare: true"), "channel composer field is bare: {opts}");
+        // The home and conversation composers already pass it (H2, SE10).
+        assert!(include_str!("home.rs").contains("bare: true"));
+        assert!(include_str!("conversation.rs").contains("bare: true"));
     }
 
     #[test]

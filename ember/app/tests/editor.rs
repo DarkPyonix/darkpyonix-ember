@@ -195,7 +195,8 @@ fn closing_a_background_tab_keeps_the_current_one() {
 #[test]
 fn stripes_select_toggle_and_stay_on_their_side() {
     assert_eq!(ToolWindow::Project.side(), Side::Left);
-    assert_eq!(ToolWindow::Agent.side(), Side::Right);
+    assert_eq!(ToolWindow::Agent.side(), Side::Left);
+    assert_eq!(ToolWindow::Notifications.side(), Side::Right);
     assert_eq!(ToolWindow::Terminal.side(), Side::Bottom);
     let mut s = Stripes::default();
     assert!(s.is_selected(ToolWindow::Project));
@@ -545,7 +546,12 @@ mod problems {
 
 // FR-L31 (D38, #438): explorer edits: where a new item goes, the delete wording, which tabs go.
 mod explorer_edit {
-    use ember_app::ui::editor::{delete_click_allowed, delete_confirmation, edit_failure_text, is_at_or_below, new_item_parent, EditorTabs};
+    use std::collections::HashSet;
+    use ember_app::ui::editor::{
+        delete_click_allowed, delete_confirmation, edit_failure_text, evaluate_prompt_submit,
+        is_at_or_below, new_item_parent, prompt_key_action, remap_expanded_paths, tree_prompt_icon,
+        EditorTabs, PromptKeyOutcome, PromptSubmitOutcome, TreePrompt,
+    };
 
     #[test]
     fn fr_l31_delete_confirmation_warns_about_unsaved_changes_of_open_files() {
@@ -612,6 +618,104 @@ mod explorer_edit {
         assert!(is_at_or_below("/w/p/src/a.rs", "/w/p/src"));
         assert!(!is_at_or_below("/w/p/src2/a.rs", "/w/p/src"));
         assert!(!is_at_or_below("/w/p/a.rs", "/w/p/src"));
+    }
+
+    #[test]
+    fn fr_l31_new_folder_prompt_shows_folder_icon_and_file_prompt_shows_file_icon() {
+        assert_eq!(tree_prompt_icon(&TreePrompt::NewDir { parent: "/w/p".into() }), "folder");
+        assert_eq!(tree_prompt_icon(&TreePrompt::NewFile { parent: "/w/p".into() }), "file");
+        assert_eq!(tree_prompt_icon(&TreePrompt::Rename { path: "/w/p/a.rs".into() }), "file");
+    }
+
+    #[test]
+    fn fr_l31_prompt_keys_enter_submits_and_escape_cancels() {
+        let file_prompt = TreePrompt::NewFile { parent: "/w/p".into() };
+        assert_eq!(prompt_key_action(&file_prompt, "Enter"), PromptKeyOutcome::Submit);
+        assert_eq!(prompt_key_action(&file_prompt, "Escape"), PromptKeyOutcome::Cancel);
+        assert_eq!(prompt_key_action(&file_prompt, "a"), PromptKeyOutcome::Ignore);
+
+        let dir_prompt = TreePrompt::NewDir { parent: "/w/p".into() };
+        assert_eq!(prompt_key_action(&dir_prompt, "Enter"), PromptKeyOutcome::Submit);
+        assert_eq!(prompt_key_action(&dir_prompt, "Escape"), PromptKeyOutcome::Cancel);
+
+        let rename_prompt = TreePrompt::Rename { path: "/w/p/src".into() };
+        assert_eq!(prompt_key_action(&rename_prompt, "Enter"), PromptKeyOutcome::Submit);
+        assert_eq!(prompt_key_action(&rename_prompt, "Escape"), PromptKeyOutcome::Cancel);
+
+        // For delete confirmation, both Enter and Escape cancel to protect against accidental keypress
+        let delete_prompt = TreePrompt::Delete { path: "/w/p/a.rs".into(), is_dir: false };
+        assert_eq!(prompt_key_action(&delete_prompt, "Enter"), PromptKeyOutcome::Cancel);
+        assert_eq!(prompt_key_action(&delete_prompt, "Escape"), PromptKeyOutcome::Cancel);
+    }
+
+    #[test]
+    fn fr_l31_evaluate_prompt_submit_guards_against_unsaved_dirty_buffers() {
+        let unsaved = vec!["/w/p/src/main.rs".to_string(), "/w/p/other.rs".to_string()];
+
+        // Rename of a dirty file is refused
+        let rename_file = TreePrompt::Rename { path: "/w/p/src/main.rs".into() };
+        let res = evaluate_prompt_submit(&rename_file, "main2.rs", &unsaved);
+        assert_eq!(
+            res,
+            PromptSubmitOutcome::BlockedDirty {
+                path: "/w/p/src/main.rs".into(),
+                dirty_files: vec!["/w/p/src/main.rs".into()],
+            }
+        );
+
+        // Rename of a folder containing dirty files is refused
+        let rename_dir = TreePrompt::Rename { path: "/w/p/src".into() };
+        let res = evaluate_prompt_submit(&rename_dir, "lib", &unsaved);
+        assert_eq!(
+            res,
+            PromptSubmitOutcome::BlockedDirty {
+                path: "/w/p/src".into(),
+                dirty_files: vec!["/w/p/src/main.rs".into()],
+            }
+        );
+
+        // Rename of a clean file succeeds
+        let rename_clean = TreePrompt::Rename { path: "/w/p/clean.rs".into() };
+        assert_eq!(
+            evaluate_prompt_submit(&rename_clean, "clean2.rs", &unsaved),
+            PromptSubmitOutcome::Rename {
+                path: "/w/p/clean.rs".into(),
+                new_name: "clean2.rs".into(),
+            }
+        );
+
+        // Empty or whitespace name returns EmptyName
+        assert_eq!(evaluate_prompt_submit(&rename_clean, "   ", &unsaved), PromptSubmitOutcome::EmptyName);
+        assert_eq!(evaluate_prompt_submit(&TreePrompt::NewFile { parent: "/w/p".into() }, "", &unsaved), PromptSubmitOutcome::EmptyName);
+
+        // New file and new dir create outcomes
+        assert_eq!(
+            evaluate_prompt_submit(&TreePrompt::NewFile { parent: "/w/p".into() }, "foo.txt", &unsaved),
+            PromptSubmitOutcome::CreateFile { parent: "/w/p".into(), name: "foo.txt".into() }
+        );
+        assert_eq!(
+            evaluate_prompt_submit(&TreePrompt::NewDir { parent: "/w/p".into() }, "bar", &unsaved),
+            PromptSubmitOutcome::CreateDir { parent: "/w/p".into(), name: "bar".into() }
+        );
+    }
+
+    #[test]
+    fn fr_l31_remap_expanded_paths_updates_nested_folders_and_returns_reload_paths() {
+        let mut expanded = HashSet::new();
+        expanded.insert("/w/p/src".to_string());
+        expanded.insert("/w/p/src/nested".to_string());
+        expanded.insert("/w/p/other".to_string());
+
+        let (updated, remapped) = remap_expanded_paths(&expanded, "/w/p/src", "/w/p/lib");
+        assert!(updated.contains("/w/p/lib"));
+        assert!(updated.contains("/w/p/lib/nested"));
+        assert!(updated.contains("/w/p/other"));
+        assert!(!updated.contains("/w/p/src"));
+        assert!(!updated.contains("/w/p/src/nested"));
+
+        assert_eq!(remapped.len(), 2);
+        assert!(remapped.contains(&"/w/p/lib".to_string()));
+        assert!(remapped.contains(&"/w/p/lib/nested".to_string()));
     }
 }
 
@@ -1899,3 +2003,39 @@ mod design_placement {
         assert!(PAGE.contains("for b in ToolWindow::BOTTOM {"), "the bottom tabs are not drawn from the bottom windows");
     }
 }
+
+// FR-L31.25 (#766): editor agent tool window and 에이전트에게 묻기 (Action::Ask)
+#[test]
+fn fr_l31_25_action_ask_attaches_file_and_selection_context() {
+    use ember_app::ui::editor_agent::{format_context, format_file_context, format_selection_context, AgentState};
+
+    let file_ctx = format_file_context("/repo/src/lib.rs", "/repo");
+    assert_eq!(file_ctx, "#file:src/lib.rs");
+
+    let sel_ctx = format_selection_context("/repo/src/lib.rs", "/repo", 10, 25);
+    assert_eq!(sel_ctx, "#selection:src/lib.rs:10-25");
+
+    let auto_ctx_file = format_context("/repo/src/main.rs", "/repo", None);
+    assert_eq!(auto_ctx_file, "#file:src/main.rs");
+
+    let auto_ctx_sel = format_context("/repo/src/main.rs", "/repo", Some((1, 5)));
+    assert_eq!(auto_ctx_sel, "#selection:src/main.rs:1-5");
+
+    let mut state = AgentState::new("proj-1", "/repo");
+    assert!(!state.sessions.is_empty());
+    assert!(state.selected_session().is_some());
+
+    state.attach_context(sel_ctx.clone());
+    assert_eq!(state.attached_context.as_deref(), Some("#selection:src/lib.rs:10-25"));
+
+    state.send_prompt("이 함수 리팩터링해줘");
+    assert!(state.attached_context.is_none());
+
+    let session = state.selected_session().unwrap();
+    assert!(!session.turns.is_empty());
+    let last = session.turns.last().unwrap();
+    assert!(last.is_user);
+    assert!(last.text.contains("#selection:src/lib.rs:10-25"));
+    assert!(last.text.contains("이 함수 리팩터링해줘"));
+}
+

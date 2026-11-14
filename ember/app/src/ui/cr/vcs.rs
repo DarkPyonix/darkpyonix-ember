@@ -430,7 +430,7 @@ pub fn vcs_pill_width(text: &str) -> f32 {
 /// follow the app's one rule for a choice among a few values; the grey `pickchip` fill they had
 /// made them the only choices in the app without the white, bordered look (review r6 item 1f).
 /// `trailing` adds controls to the same row (the merge's 병합 후 브랜치 삭제 toggle).
-fn VcsRadioRow<T: Copy + PartialEq + 'static>(
+fn VcsRadioRow<T: Copy + PartialEq + Send + 'static>(
     options: &[T],
     label: fn(T) -> &'static str,
     current: T,
@@ -3521,7 +3521,6 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
                             height: Some(VCS_TEXTAREA_H),
                             inset: Some(VCS_TEXTAREA_INSET),
                             line_height: Some(VCS_TEXTAREA_LINE_H),
-                    line_height: Some(VCS_TEXTAREA_LINE_H),
                             type_role: Some(VCS_FIELD_ROLE),
                             multiline: true,
                             text: Some(f_body.get()),
@@ -5555,11 +5554,16 @@ mod tests {
         struct ButtonTracker {
             texts: std::collections::HashMap<u32, String>,
             handlers: std::collections::HashMap<u32, u64>,
+            parents: std::collections::HashMap<u32, u32>,
         }
 
         impl ButtonTracker {
             fn new() -> Self {
-                Self { texts: std::collections::HashMap::new(), handlers: std::collections::HashMap::new() }
+                Self {
+                    texts: std::collections::HashMap::new(),
+                    handlers: std::collections::HashMap::new(),
+                    parents: std::collections::HashMap::new(),
+                }
             }
 
             fn scan(&mut self, batch: &[Mutation<'_>]) {
@@ -5571,6 +5575,9 @@ mod tests {
                         Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
                             self.handlers.insert(*node_id, *h as u64);
                         }
+                        Mutation::Insert { parent_id, node_id, .. } => {
+                            self.parents.insert(*node_id, *parent_id);
+                        }
                         _ => {}
                     }
                 }
@@ -5579,8 +5586,17 @@ mod tests {
             fn find(&self, label: &str) -> (u32, u64) {
                 for (id, text) in &self.texts {
                     if text == label {
-                        if let Some(h) = self.handlers.get(id) {
-                            return (*id, *h);
+                        // A choice button's label is a Text inside the clickable pill
+                        // (`ChoiceButton`): take the nearest clickable ancestor.
+                        let mut at = *id;
+                        for _ in 0..4 {
+                            if let Some(h) = self.handlers.get(&at) {
+                                return (at, *h);
+                            }
+                            match self.parents.get(&at) {
+                                Some(p) => at = *p,
+                                None => break,
+                            }
                         }
                     }
                 }
@@ -5667,11 +5683,16 @@ mod tests {
         struct ButtonTracker {
             texts: std::collections::HashMap<u32, String>,
             handlers: std::collections::HashMap<u32, u64>,
+            parents: std::collections::HashMap<u32, u32>,
         }
 
         impl ButtonTracker {
             fn new() -> Self {
-                Self { texts: std::collections::HashMap::new(), handlers: std::collections::HashMap::new() }
+                Self {
+                    texts: std::collections::HashMap::new(),
+                    handlers: std::collections::HashMap::new(),
+                    parents: std::collections::HashMap::new(),
+                }
             }
 
             fn scan(&mut self, batch: &[Mutation<'_>]) {
@@ -5683,6 +5704,9 @@ mod tests {
                         Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
                             self.handlers.insert(*node_id, *h as u64);
                         }
+                        Mutation::Insert { parent_id, node_id, .. } => {
+                            self.parents.insert(*node_id, *parent_id);
+                        }
                         _ => {}
                     }
                 }
@@ -5691,8 +5715,17 @@ mod tests {
             fn find(&self, label: &str) -> (u32, u64) {
                 for (id, text) in &self.texts {
                     if text == label {
-                        if let Some(h) = self.handlers.get(id) {
-                            return (*id, *h);
+                        // A choice button's label is a Text inside the clickable pill
+                        // (`ChoiceButton`): take the nearest clickable ancestor.
+                        let mut at = *id;
+                        for _ in 0..4 {
+                            if let Some(h) = self.handlers.get(&at) {
+                                return (at, *h);
+                            }
+                            match self.parents.get(&at) {
+                                Some(p) => at = *p,
+                                None => break,
+                            }
                         }
                     }
                 }
@@ -5880,6 +5913,7 @@ mod tests {
         host: Host,
         texts: std::collections::HashMap<u32, String>,
         handlers: std::collections::HashMap<u32, u64>,
+        parents: std::collections::HashMap<u32, u32>,
     }
 
     impl PrHostDriver {
@@ -5890,6 +5924,7 @@ mod tests {
                 host,
                 texts: std::collections::HashMap::new(),
                 handlers: std::collections::HashMap::new(),
+                parents: std::collections::HashMap::new(),
             };
             driver.absorb(&decode_batch(&bytes).expect("decode"));
             driver
@@ -5904,6 +5939,9 @@ mod tests {
                     Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
                         self.handlers.insert(*node_id, *h as u64);
                     }
+                    Mutation::Insert { parent_id, node_id, .. } => {
+                        self.parents.insert(*node_id, *parent_id);
+                    }
                     _ => {}
                 }
             }
@@ -5911,11 +5949,18 @@ mod tests {
 
         fn click(&mut self, label: &str) -> String {
             let (node_id, handler_id) = self.texts.iter().find_map(|(id, text)| {
-                if text == label {
-                    self.handlers.get(id).map(|&h| (*id, h))
-                } else {
-                    None
+                if text != label {
+                    return None;
                 }
+                // A choice button's label is a Text inside the clickable pill (`ChoiceButton`).
+                let mut at = *id;
+                for _ in 0..4 {
+                    if let Some(&h) = self.handlers.get(&at) {
+                        return Some((at, h));
+                    }
+                    at = *self.parents.get(&at)?;
+                }
+                None
             }).unwrap_or_else(|| panic!("button '{label}' not found (known: {:?})", self.texts));
 
             let bytes = self.host.dispatch(HostEvent {

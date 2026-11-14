@@ -769,7 +769,7 @@ mod tests {
         use compose_rust::protocol::{Mutation, PropertyValue};
         use compose_rust::PropertyKind;
         let _guard = crate::services::test_guard();
-        let mut host = Host::new(|| Box::new(Recomposer::new(|| FanCard(None))));
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| FanCard(false))));
         let batch = compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode");
         let text: String = batch.iter().map(|m| format!("{m:?}")).collect();
         assert!(text.contains(FAN_MODE_REASON));

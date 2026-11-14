@@ -108,10 +108,7 @@ pub fn parse_proc_net_tcp(text: &str, v6: bool) -> Vec<ProcListener> {
 /// 127.0.0.0/8 and ::1 are `Loopback`, the unspecified address is `Any`, everything else `Lan`.
 /// An IPv4-mapped IPv6 address is classified as its IPv4 address.
 pub fn classify(ip: IpAddr) -> PortScope {
-    let ip = match ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
-        v4 => v4,
-    };
+    let ip = unmapped(ip);
     if ip.is_unspecified() {
         PortScope::Any
     } else if ip.is_loopback() {
@@ -119,6 +116,22 @@ pub fn classify(ip: IpAddr) -> PortScope {
     } else {
         PortScope::Lan
     }
+}
+
+/// An IPv4-mapped IPv6 address as its IPv4 address; any other address unchanged.
+fn unmapped(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
+        v4 => v4,
+    }
+}
+
+/// The address a socket is bound to, when it is one specific address: a port bound to it does
+/// not answer on any other address, loopback included (FR-L18, #519). `None` for the
+/// unspecified address, which answers on every address of the machine.
+pub fn bound_address(ip: IpAddr) -> Option<String> {
+    let ip = unmapped(ip);
+    (!ip.is_unspecified()).then(|| ip.to_string())
 }
 
 /// Keep only the listeners whose inode is held by an allowed pid (`inode_pid`: inode to pid).
@@ -209,8 +222,11 @@ pub fn owned_pids(
 }
 
 fn dedupe_sorted(mut v: Vec<ListeningPort>) -> Vec<ListeningPort> {
-    v.sort_by(|a, b| (a.port, a.scope as u8, &a.owner.id).cmp(&(b.port, b.scope as u8, &b.owner.id)));
-    v.dedup_by(|a, b| a.port == b.port && a.scope == b.scope && a.owner == b.owner);
+    v.sort_by(|a, b| {
+        (a.port, a.scope as u8, &a.address, &a.owner.id).cmp(&(b.port, b.scope as u8, &b.address, &b.owner.id))
+    });
+    // Two specific addresses on one port are two rows: each answers on its own address only.
+    v.dedup_by(|a, b| a.port == b.port && a.scope == b.scope && a.address == b.address && a.owner == b.owner);
     v
 }
 
@@ -227,6 +243,7 @@ fn from_proc(
                 scope: classify(l.ip),
                 process: o.name.clone(),
                 owner: o.owner.clone(),
+                address: bound_address(l.ip),
             })
         })
         .collect();
@@ -244,6 +261,7 @@ fn from_lsof(listeners: Vec<LsofListener>, owned: &HashMap<u32, Owned>) -> Vec<L
                 scope: l.ip.map(classify).unwrap_or(PortScope::Any),
                 process: if o.name.is_empty() { l.command.clone() } else { o.name.clone() },
                 owner: o.owner.clone(),
+                address: l.ip.and_then(bound_address),
             })
         })
         .collect();

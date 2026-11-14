@@ -54,7 +54,7 @@ use super::compat::Spinner;
 use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
     AppButton, BackButton, ButtonKind, Clickable, CloseButton, NamedClickable, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
-    FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, SearchField, Select, SheetFooter, Txt,
+    FieldOptions, IconButton, Label, LoadingOptionSheet, OptionSheet, PickChip, Pill, PillTone, SearchField, Select, SheetFooter, Txt,
     SEARCH_FIELD_H_COMPACT,
 };
 use super::conversation::{ConversationView, ICON_SEND_SVG, ICON_TERMINAL_SVG, TranscriptRow, tail_start_index};
@@ -95,10 +95,14 @@ const MODEL_LOCKED: &str = "실행 중인 세션의 모델은 바꿀 수 없습�
 const NO_SESSION: &str = "세션이 없습니다";
 const TIMELINE_TITLE: &str = "에이전트 간 통신";
 use crate::ui::session::{
-    ComputerHost, WebPagesLoad, WebTap, computer_host, timeline_summary, web_menu_lines, web_pages_from, web_tap,
+    ComputerHost, WebPagesLoad, WebTap, computer_host, timeline_summary, web_menu_lines, web_menu_loading,
+    web_pages_from, web_tap,
 };
 
 const POPUP_W: f32 = 280.0;
+/// The 웹 페이지 list: wide enough for an address, its process and the unverified mark on one
+/// line, and inside a 390 dp phone window (FR-L18, #519; not yet checked on a display).
+const WEB_SHEET_W: f32 = 360.0;
 
 fn ide_label(kind: IdeKind) -> &'static str {
     match kind {
@@ -4546,7 +4550,7 @@ pub fn SessionScreen(focus: Option<String>) {
             web_pages.set(WebPagesLoad::Loading);
             let done = web_pages.clone();
             if services().demo.is_some() {
-                let host = ComputerHost { local: false, host: Some(crate::demo::DEMO_HOST.to_string()) };
+                let host = ComputerHost { host: Some(crate::demo::DEMO_HOST.to_string()), ..Default::default() };
                 done.set(web_pages_from(Ok(crate::demo::ports()), &host));
                 return;
             }
@@ -4557,13 +4561,17 @@ pub fn SessionScreen(focus: Option<String>) {
             run_shared(
                 async move {
                     let c = services().server.session_computer(&sid).await.map_err(|e| e.to_string())?;
-                    let host = computer_host(c.computer.local, "", &services().config.server_url);
+                    let host = computer_host(&c.computer, &services().config.server_url);
                     let ports = services().client.api().computer_ports(&c.computer.id).await.map_err(|e| e.to_string())?;
                     Ok::<_, String>((ports, host))
                 },
                 move |r: Result<(ember_client::api::Ports, ComputerHost), String>| match r {
                     Ok((ports, host)) => done.set(web_pages_from(Ok(ports), &host)),
-                    Err(e) => done.set(web_pages_from(Err(e), &ComputerHost::default())),
+                    Err(e) => {
+                        // The list shows one fixed sentence; the cause goes to the log only.
+                        tracing::debug!("web page list: {e}");
+                        done.set(web_pages_from(Err(e), &ComputerHost::default()));
+                    }
                 },
             );
         }
@@ -4994,16 +5002,25 @@ pub fn SessionScreen(focus: Option<String>) {
                 let load_now = web_pages.get();
                 let web_opts = web_menu_lines(&load_now);
                 let wm_d = web_menu.clone();
-                OptionSheet(
+                LoadingOptionSheet(
                     web_menu.get(),
+                    web_menu_loading(&load_now),
                     &web_opts,
                     None,
-                    320.0,
+                    WEB_SHEET_W,
                     move || wm_d.set(false),
                     move |idx| match web_tap(&load_now, idx) {
                         WebTap::Open(url) => {
                             if crate::ide::open_external(&url).is_err() {
                                 notice::post("브라우저를 열지 못했습니다");
+                            }
+                        }
+                        // An address that is a guess: open it, and say it may not open.
+                        WebTap::OpenSaying(url, text) => {
+                            if crate::ide::open_external(&url).is_err() {
+                                notice::post("브라우저를 열지 못했습니다");
+                            } else {
+                                notice::post(text);
                             }
                         }
                         WebTap::Say(text) => notice::post(text),

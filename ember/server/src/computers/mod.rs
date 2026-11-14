@@ -97,31 +97,103 @@ pub struct Computer {
     pub created_at: i64,
 }
 
+/// Where a client can reach a computer's own ports (FR-L18, #519): the host of its node URL and
+/// nothing else of it. Never the port, path, user name, password or token.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComputerAddress {
+    /// Registered by URL: the host of that URL (a name or an IP address, IPv6 without brackets).
+    Host { host: String },
+    /// Registered by peer only: reached over the transport, so it has no host.
+    Peer,
+    /// [`LOCAL`]: the machine this server runs on. The client knows the server by its own
+    /// address; the server does not know which address that is.
+    Server,
+    /// A record that no longer resolves, or a stored URL with no host.
+    Unknown,
+}
+
+/// The authority of an `http(s)://` URL without its user name and password, and the rest of
+/// the URL up to the query or fragment.
+fn split_http_url(url: &str) -> Option<(&str, &str, &str)> {
+    let (scheme, rest) = if let Some(r) = url.strip_prefix("http://") {
+        ("http://", r)
+    } else if let Some(r) = url.strip_prefix("https://") {
+        ("https://", r)
+    } else {
+        return None;
+    };
+    let rest = rest.split(['?', '#']).next().unwrap_or("");
+    let (authority, path) = match rest.find('/') {
+        Some(i) => rest.split_at(i),
+        None => (rest, ""),
+    };
+    let authority = authority.rsplit('@').next().unwrap_or("");
+    Some((scheme, authority, path))
+}
+
+/// The host of a node URL: a name or an IP address, IPv6 without its brackets. `None` when the
+/// URL is not `http(s)://` or has no host.
+pub fn url_host(url: &str) -> Option<String> {
+    let (_, authority, _) = split_http_url(url)?;
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+/// A node URL as clients see it: without user name, password, query or fragment, which can hold
+/// credentials. Anything that is not `http(s)://` is shown as it is stored (it is empty for a
+/// peer-addressed computer).
+pub fn url_for_clients(url: &str) -> String {
+    match split_http_url(url) {
+        Some((scheme, authority, path)) => format!("{scheme}{authority}{path}"),
+        None => url.to_string(),
+    }
+}
+
 /// What clients see for a computer, including [`LOCAL`].
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ComputerView {
     pub id: String,
     pub name: String,
-    /// Empty for [`LOCAL`] and for peer-addressed computers.
+    /// Empty for [`LOCAL`] and for peer-addressed computers. Without user name, password,
+    /// query or fragment ([`url_for_clients`]).
     pub url: String,
     /// The node's peer id (hex), for a computer reached over the transport.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peer: Option<String>,
     pub local: bool,
+    /// Where the computer's own ports are reached (FR-L18, #519).
+    pub address: ComputerAddress,
 }
 
 impl ComputerView {
     pub fn local() -> Self {
-        ComputerView { id: LOCAL.into(), name: LOCAL_NAME.into(), url: String::new(), peer: None, local: true }
+        ComputerView {
+            id: LOCAL.into(),
+            name: LOCAL_NAME.into(),
+            url: String::new(),
+            peer: None,
+            local: true,
+            address: ComputerAddress::Server,
+        }
     }
 
     fn of(c: &Computer) -> Self {
+        let address = match (url_host(&c.url), &c.peer) {
+            (Some(host), _) => ComputerAddress::Host { host },
+            (None, Some(_)) => ComputerAddress::Peer,
+            (None, None) => ComputerAddress::Unknown,
+        };
         ComputerView {
             id: c.id.clone(),
             name: c.name.clone(),
-            url: c.url.clone(),
+            url: url_for_clients(&c.url),
             peer: c.peer.as_ref().map(|p| p.peer.to_string()),
             local: false,
+            address,
         }
     }
 }
@@ -1058,7 +1130,14 @@ impl Computers {
             Ok(Some(c)) => ComputerView::of(&c),
             _ if id == LOCAL => ComputerView::local(),
             // A record pointing at a removed computer cannot happen (remove refuses); show the id.
-            _ => ComputerView { id: id.into(), name: id.into(), url: String::new(), peer: None, local: false },
+            _ => ComputerView {
+                id: id.into(),
+                name: id.into(),
+                url: String::new(),
+                peer: None,
+                local: false,
+                address: ComputerAddress::Unknown,
+            },
         }
     }
 

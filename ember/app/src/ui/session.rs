@@ -56,6 +56,12 @@ const WEB_EMPTY: &str = "열려 있는 웹 포트가 없습니다";
 const WEB_UNSUPPORTED: &str = "이 컴퓨터는 포트 목록을 지원하지 않습니다";
 const WEB_LOOPBACK_ONLY: &str = "이 컴퓨터 안에서만 열 수 있습니다";
 const WEB_NO_HOST: &str = "주소를 알 수 없어 열 수 없습니다";
+const WEB_PEER_COMPUTER: &str = "피어로만 연결된 컴퓨터라 열 수 있는 주소가 없습니다";
+const WEB_PEER_SERVER: &str = "서버에 피어로 연결되어 있어 열 수 있는 주소가 없습니다";
+const WEB_UNVERIFIED: &str =
+    "확인되지 않은 주소입니다. 프록시나 터널 뒤에 있거나 다른 네트워크에 있으면 열리지 않습니다";
+const WEB_UNVERIFIED_MARK: &str = "추정 주소";
+const WEB_FAILED: &str = "포트 목록을 불러오지 못했습니다";
 const COMPUTER_LOADING: &str = "확인하는 중입니다";
 const NO_SESSION: &str = "세션이 없습니다";
 const PR_TITLE: &str = "PR과 CI";
@@ -171,6 +177,11 @@ pub const UI_STRINGS: &[&str] = &[
     WEB_UNSUPPORTED,
     WEB_LOOPBACK_ONLY,
     WEB_NO_HOST,
+    WEB_PEER_COMPUTER,
+    WEB_PEER_SERVER,
+    WEB_UNVERIFIED,
+    WEB_UNVERIFIED_MARK,
+    WEB_FAILED,
     COMPUTER_LOADING,
     NO_SESSION,
     NONE_YET,
@@ -181,21 +192,39 @@ pub const UI_STRINGS: &[&str] = &[
 // Web pages (FR-L18, FR-P7, #326)
 // ---------------------------------------------------------------------------------------------
 
+/// Why a computer has no host to open a port on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NoHost {
+    /// Nothing says where it is.
+    #[default]
+    Unknown,
+    /// The computer is registered by peer only (reached over the transport).
+    PeerComputer,
+    /// It is the server's own computer and the app reaches the server as a peer (FR-N9).
+    PeerServer,
+}
+
 /// Where a session's computer can be reached from this app: `local` when its loopback is this
-/// machine's loopback, otherwise the `host` its ports are served on (None when unknown).
+/// machine's loopback, otherwise the `host` its ports are served on. `unverified` marks a host
+/// that is a guess (a server address that may be a reverse proxy or a tunnel); `no_host` says
+/// why `host` is None on a computer that is not local.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ComputerHost {
     pub local: bool,
     pub host: Option<String>,
+    pub unverified: bool,
+    pub no_host: NoHost,
 }
 
 /// One row of the 웹 페이지 list. `url` is None when the page cannot be opened from here, and
-/// `note` then says why.
+/// `note` then says why. An `unverified` row has a `url` that may not open, a mark in its
+/// `label`, and a `note` that says why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebPage {
     pub label: String,
     pub url: Option<String>,
     pub note: Option<&'static str>,
+    pub unverified: bool,
 }
 
 /// The state of the 웹 페이지 list.
@@ -224,20 +253,74 @@ fn url_host(url: &str) -> Option<String> {
 }
 
 fn is_loopback_host(host: &str) -> bool {
-    host == "localhost" || host == "::1" || host.starts_with("127.")
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => host.eq_ignore_ascii_case("localhost"),
+    }
 }
 
-/// How to reach the session's computer. A local computer of a server on another machine is
-/// not this machine: its loopback ports stay closed and its LAN ports use the server's host.
-/// A remote computer uses the host of its own `url` (empty or a peer address: unknown).
-pub fn computer_host(local: bool, computer_url: &str, server_url: &str) -> ComputerHost {
-    if local {
-        return match url_host(server_url) {
-            Some(h) if !is_loopback_host(&h) => ComputerHost { local: false, host: Some(h) },
-            _ => ComputerHost { local: true, host: None },
-        };
+/// True when a server host can be taken as the machine's own address on a local network: a
+/// private, link-local or carrier-grade NAT (100.64.0.0/10, used by mesh VPNs) IPv4 address, a
+/// unique local or link-local IPv6 address, a name with no dot, or a name under `.local`,
+/// `.lan`, `.internal` or `.home.arpa`. Any other host (a public IP address, a public name) may
+/// be a reverse proxy or a tunnel in front of the server: the server does not know its own
+/// public address, so the app cannot tell and treats it as a guess (FR-L18, #519).
+fn is_lan_host(host: &str) -> bool {
+    use std::net::IpAddr;
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => {
+            let o = v4.octets();
+            v4.is_private() || v4.is_link_local() || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
+        Ok(IpAddr::V6(v6)) => {
+            let first = v6.segments()[0];
+            (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+        Err(_) => {
+            let name = host.trim_end_matches('.').to_ascii_lowercase();
+            !name.contains('.')
+                || [".local", ".lan", ".internal", ".home.arpa"].iter().any(|suffix| name.ends_with(suffix))
+        }
     }
-    ComputerHost { local: false, host: url_host(computer_url) }
+}
+
+/// The server machine as seen from this app, from the app's server address: this machine when
+/// the address is loopback, no host when the server is reached as a peer (`peer:<id>`, FR-N9),
+/// otherwise the address's host, marked unverified unless it is a local-network address.
+fn server_machine_host(server_url: &str) -> ComputerHost {
+    if server_url.starts_with("peer:") {
+        return ComputerHost { no_host: NoHost::PeerServer, ..Default::default() };
+    }
+    match url_host(server_url) {
+        Some(h) if is_loopback_host(&h) => ComputerHost { local: true, ..Default::default() },
+        Some(h) => ComputerHost { unverified: !is_lan_host(&h), host: Some(h), ..Default::default() },
+        None => ComputerHost::default(),
+    }
+}
+
+/// How to reach the session's computer. The server's own computer is the server machine
+/// ([`server_machine_host`]): on another machine its loopback ports stay closed and its other
+/// ports use the server's host. A registered computer uses the host the server reports (from
+/// `url` for an older server); a loopback host there is the server machine again, never this
+/// device. A computer registered by peer only has no host.
+pub fn computer_host(computer: &crate::server::ComputerView, server_url: &str) -> ComputerHost {
+    use crate::server::ComputerAddress;
+    if computer.local || computer.address == ComputerAddress::Server {
+        return server_machine_host(server_url);
+    }
+    let host = match &computer.address {
+        ComputerAddress::Host { host } if !host.is_empty() => Some(host.clone()),
+        ComputerAddress::Peer => None,
+        _ => url_host(&computer.url),
+    };
+    match host {
+        Some(h) if is_loopback_host(&h) => server_machine_host(server_url),
+        Some(h) => ComputerHost { host: Some(h), ..Default::default() },
+        None if computer.address == ComputerAddress::Peer || computer.peer.is_some() => {
+            ComputerHost { no_host: NoHost::PeerComputer, ..Default::default() }
+        }
+        None => ComputerHost::default(),
+    }
 }
 
 fn web_host_text(host: &str) -> String {
@@ -248,8 +331,21 @@ fn web_host_text(host: &str) -> String {
     }
 }
 
+/// The address a port is bound to, when the node reports one that can be opened as it is: an
+/// IP address that is not unspecified and not IPv6 link-local (that needs a zone this app does
+/// not have). Anything else, a name included, is ignored.
+fn usable_bound_address(address: Option<&str>) -> Option<String> {
+    use std::net::IpAddr;
+    let ip = address?.parse::<IpAddr>().ok()?;
+    let link_local_v6 = matches!(ip, IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80);
+    (!ip.is_unspecified() && !link_local_v6).then(|| ip.to_string())
+}
+
 /// The 웹 페이지 list from the node's listening ports: sorted by port, one row per
-/// (port, address). A loopback port opens only on the local computer.
+/// (port, address). A loopback port opens only on the local computer. A port bound to one
+/// specific address opens on that address, because it does not answer on loopback or on the
+/// computer's other addresses (#519). A row whose address is a guess is marked unverified.
+/// A failed load is one fixed sentence; the error text is not shown.
 pub fn web_pages_from(
     result: Result<ember_client::api::Ports, String>,
     computer: &ComputerHost,
@@ -257,26 +353,46 @@ pub fn web_pages_from(
     use ember_client::api::PortScope;
     let ports = match result {
         Ok(p) => p,
-        Err(e) => return WebPagesLoad::Failed(format!("포트 목록을 불러오지 못했습니다: {e}")),
+        Err(_) => return WebPagesLoad::Failed(WEB_FAILED.to_string()),
     };
     if !ports.supported {
         return WebPagesLoad::Unsupported;
     }
+    let no_host_note = match computer.no_host {
+        NoHost::Unknown => WEB_NO_HOST,
+        NoHost::PeerComputer => WEB_PEER_COMPUTER,
+        NoHost::PeerServer => WEB_PEER_SERVER,
+    };
+    // Nothing says this device can reach the computer's addresses when its own host is absent
+    // or a guess.
+    let host_is_a_guess = !computer.local && (computer.host.is_none() || computer.unverified);
     let mut rows: Vec<(u16, WebPage)> = Vec::new();
     for lp in &ports.ports {
         let port = lp.port;
-        let (url, note) = match lp.scope {
-            PortScope::Loopback if computer.local => (Some(format!("http://127.0.0.1:{port}")), None),
-            PortScope::Loopback => (None, Some(WEB_LOOPBACK_ONLY)),
-            _ => match (&computer.host, computer.local) {
-                (Some(h), _) => (Some(format!("http://{}:{port}", web_host_text(h))), None),
-                (None, true) => (Some(format!("http://127.0.0.1:{port}")), None),
-                (None, false) => (None, Some(WEB_NO_HOST)),
+        let bound = match lp.scope {
+            PortScope::Any => None,
+            _ => usable_bound_address(lp.address.as_deref()),
+        };
+        let at = |host: &str| Some(format!("http://{}:{port}", web_host_text(host)));
+        // (url, why it cannot open, whether the url is a guess)
+        let (url, note, unverified) = match (lp.scope, bound) {
+            (PortScope::Loopback, Some(b)) if computer.local => (at(&b), None, false),
+            (PortScope::Loopback, None) if computer.local => (at("127.0.0.1"), None, false),
+            (PortScope::Loopback, _) => (None, Some(WEB_LOOPBACK_ONLY), false),
+            (_, Some(b)) => (at(&b), None, host_is_a_guess),
+            (_, None) => match (&computer.host, computer.local) {
+                (Some(h), _) => (at(h), None, computer.unverified),
+                (None, true) => (at("127.0.0.1"), None, false),
+                (None, false) => (None, Some(no_host_note), false),
             },
         };
+        let note = if unverified { Some(WEB_UNVERIFIED) } else { note };
         let shown = url.clone().unwrap_or_else(|| format!(":{port}"));
-        let label = if lp.process.is_empty() { shown } else { format!("{shown} ({})", lp.process) };
-        rows.push((port, WebPage { label, url, note }));
+        let mut label = if lp.process.is_empty() { shown } else { format!("{shown} ({})", lp.process) };
+        if unverified {
+            label = format!("{label} · {WEB_UNVERIFIED_MARK}");
+        }
+        rows.push((port, WebPage { label, url, note, unverified }));
     }
     rows.sort_by(|a, b| (a.0, &a.1.url, &a.1.label).cmp(&(b.0, &b.1.url, &b.1.label)));
     rows.dedup_by(|b, a| a.0 == b.0 && a.1.url == b.1.url);
@@ -284,6 +400,11 @@ pub fn web_pages_from(
         return WebPagesLoad::Empty;
     }
     WebPagesLoad::Ready(rows.into_iter().map(|(_, w)| w).collect())
+}
+
+/// The sentence of the loading row, which is drawn with a spinner; None in every other state.
+pub fn web_menu_loading(load: &WebPagesLoad) -> Option<&'static str> {
+    matches!(load, WebPagesLoad::Loading).then_some(WEB_LOADING)
 }
 
 /// The OptionSheet lines of a load state: one per page, or the single state line.
@@ -297,10 +418,12 @@ pub fn web_menu_lines(load: &WebPagesLoad) -> Vec<String> {
     }
 }
 
-/// What a tap on line `idx` does: open a url, or post a text.
+/// What a tap on line `idx` does: open a url, open a url whose address is a guess and say so,
+/// or post a text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebTap {
     Open(String),
+    OpenSaying(String, String),
     Say(String),
     Nothing,
 }
@@ -308,6 +431,9 @@ pub enum WebTap {
 pub fn web_tap(load: &WebPagesLoad, idx: usize) -> WebTap {
     match load {
         WebPagesLoad::Ready(pages) => match pages.get(idx) {
+            Some(WebPage { url: Some(u), unverified: true, note: Some(n), .. }) => {
+                WebTap::OpenSaying(u.clone(), (*n).to_string())
+            }
             Some(WebPage { url: Some(u), .. }) => WebTap::Open(u.clone()),
             Some(WebPage { note: Some(n), .. }) => WebTap::Say((*n).to_string()),
             _ => WebTap::Nothing,

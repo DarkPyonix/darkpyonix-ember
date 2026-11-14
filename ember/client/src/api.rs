@@ -1855,6 +1855,11 @@ pub struct ListeningPort {
     pub process: String,
     #[serde(default)]
     pub owner: PortOwner,
+    /// The address the socket is bound to, when it is one specific address: the port answers
+    /// on that address only (FR-L18, #519). Absent for a port bound to every address and from
+    /// older nodes.
+    #[serde(default)]
+    pub address: Option<String>,
 }
 
 /// `GET /api/computers/{id}/ports` answer.

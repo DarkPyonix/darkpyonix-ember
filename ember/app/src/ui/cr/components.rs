@@ -194,6 +194,21 @@ pub fn OptionSheet(
     on_dismiss: impl FnMut() + Clone + 'static,
     on_choose: impl FnMut(usize) + Clone + 'static,
 ) {
+    LoadingOptionSheet(open, None, options, chosen, width, on_dismiss, on_choose);
+}
+
+/// An [`OptionSheet`] whose list may still be loading: with `loading` set it shows one row, the
+/// app's spinner beside that sentence, in place of the options (FR-L18, #519). The row is not
+/// clickable; the scrim still closes the sheet.
+pub fn LoadingOptionSheet(
+    open: bool,
+    loading: Option<&str>,
+    options: &[String],
+    chosen: Option<usize>,
+    width: f32,
+    on_dismiss: impl FnMut() + Clone + 'static,
+    on_choose: impl FnMut(usize) + Clone + 'static,
+) {
     let theme = ember_theme();
     let p = theme.palette;
     cu::Dialog(open)
@@ -208,12 +223,25 @@ pub fn OptionSheet(
         .on_dismiss(on_dismiss.clone())
         .content(|| {
             cu::Column().content(|| {
-                for (i, label) in options.iter().enumerate() {
-                    let (mut dismiss, mut choose) = (on_dismiss.clone(), on_choose.clone());
-                    MenuRow(label, width, chosen == Some(i), move || {
-                        dismiss();
-                        choose(i);
-                    });
+                if let Some(text) = loading {
+                    // The same 38 px row as `MenuRow`, with the spinner where a row's text starts.
+                    cu::Row()
+                        .alignment(Alignment::CenterStart)
+                        .modifier(Modifier::new().width(width).height(38.0))
+                        .content(|| {
+                            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                            super::compat::Spinner(12.0);
+                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                            Label(text, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        });
+                } else {
+                    for (i, label) in options.iter().enumerate() {
+                        let (mut dismiss, mut choose) = (on_dismiss.clone(), on_choose.clone());
+                        MenuRow(label, width, chosen == Some(i), move || {
+                            dismiss();
+                            choose(i);
+                        });
+                    }
                 }
             });
         });

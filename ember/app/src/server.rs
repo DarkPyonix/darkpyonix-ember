@@ -140,12 +140,40 @@ pub struct ComputerStatus {
     pub error: Option<String>,
 }
 
+/// Where a computer's own ports are reached, as the server reports it (FR-L18, #519).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComputerAddress {
+    /// Registered by URL: the host of its node URL.
+    Host {
+        #[serde(default)]
+        host: String,
+    },
+    /// Registered by peer only: it has no host.
+    Peer,
+    /// The server's own computer: its host is the host of the app's server address.
+    Server,
+    /// An older server (no `address`), a kind this app does not know, or a lost record.
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ComputerView {
     pub id: String,
     pub name: String,
     #[serde(default)]
     pub local: bool,
+    /// The node URL without credentials; empty for the server's own computer and for a
+    /// peer-addressed computer.
+    #[serde(default)]
+    pub url: String,
+    /// The node's transport peer id (hex), for a computer reached over the transport.
+    #[serde(default)]
+    pub peer: Option<String>,
+    #[serde(default)]
+    pub address: ComputerAddress,
 }
 
 /// `GET /api/sessions/{id}/computer`.

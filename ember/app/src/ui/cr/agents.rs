@@ -3320,7 +3320,8 @@ mod tests {
         }
         for f in ["fn ProfilesSection(", "fn NetworkSection("] {
             let body = production.split(f).nth(1).unwrap().split("\nfn ").next().unwrap();
-            assert!(body.contains("FixedGrid("), "{f}");
+            // The account tiles moved to `FixedGridRows` (one height a row, #886).
+            assert!(body.contains("FixedGrid(") || body.contains("FixedGridRows("), "{f}");
         }
     }
 

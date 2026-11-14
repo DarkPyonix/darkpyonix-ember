@@ -34,7 +34,7 @@ pub use crate::ui::routines::{
     describe_cron, filter_projects, format_next, group_by_project, kind_text, kpis,
     last_run_text, minutes_at, ms_to_minutes, name_from_prompt, new_schedule, next_run,
     overall_success, pane_mode, run_from_server, schedule_line, schedule_patch,
-    schedule_to_entry, schedule_to_routine, success_percent, weekday, weekday_bar_radius,
+    schedule_to_entry, schedule_to_routine, success_percent, weekday, weekday_bar_parts, weekday_bar_radius,
     weekday_bars, weekday_card_height, weekday_chart_size, DayBar,
     Entry, FormDraft, FormError, FormField, Leave, LeaveDecision, leave_decision, routine_form_dirty,
     ROUTINE_DISCARD_QUESTION, FormLayout, Group, FORM_FIELDS, form_layout, form_rows, form_two_columns,
@@ -1652,23 +1652,8 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
     let ring_cmd = ring.build();
 
     let (chart_w, chart_h, chart_gap) = weekday_chart_size(compact);
-    let totals: Vec<usize> = bars.iter().map(|b| b.ok + b.fail).collect();
-    let mut chart = DrawList::builder().rect(paint(p.line), 0.0, chart_h, chart_w, 1.0, 0.0);
-    for (b, (x, y, w, h)) in bars.iter().zip(bar_rects(&totals, chart_w, chart_h, chart_gap)) {
-        if h <= 0.0 {
-            continue;
-        }
-        let total = (b.ok + b.fail) as f32;
-        let fail_h = h * b.fail as f32 / total;
-        let r = weekday_bar_radius(w, h);
-        chart = chart.round_rect(paint(p.blue.strong), x, y + fail_h, w, h - fail_h, r, 0.0);
-        if fail_h > 0.0 {
-            chart = chart.round_rect(paint(p.orange.strong), x, y, w, fail_h, r, 0.0);
-        }
-    }
-    let chart_cmd = chart.build();
     let card_h = weekday_card_height(compact);
-    let busy = totals.iter().any(|t| *t > 0);
+    let busy = bars.iter().any(|b| b.ok + b.fail > 0);
 
     let kpis_content = move || {
         // The two KPI rows sit together at the top of the card (`.rt-topwrap .kpis` row gap
@@ -1689,7 +1674,7 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
     };
 
     let hero_content = move || {
-        HeroCardContent(&ring_cmd, rate, &chart_cmd, &bars, busy, chart_w, chart_h, card_h);
+        HeroCardContent(&ring_cmd, rate, &bars, busy, (chart_w, chart_h, chart_gap), card_h);
     };
 
     if width_dp > 1279.0 {
@@ -1708,14 +1693,13 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
 fn HeroCardContent(
     ring_cmd: &DrawList,
     rate: Option<u32>,
-    chart_cmd: &DrawList,
     bars: &[DayBar; 7],
     busy: bool,
-    chart_w: f32,
-    chart_h: f32,
+    chart: (f32, f32, f32),
     card_h: f32,
 ) {
     let p = ember_theme().palette;
+    let (chart_w, chart_h, chart_gap) = chart;
     cu::Row()
         .spacing(SP[3])
         .alignment(Alignment::CenterStart)
@@ -1756,7 +1740,7 @@ fn HeroCardContent(
             cu::Column().spacing(SP[0]).modifier(Modifier::new().width(chart_w)).content(|| {
                 Label("요일별 실행", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 cu::Spacer().modifier(Modifier::new().height(SP[0]));
-                cu::Canvas(chart_cmd.clone()).modifier(Modifier::new().size(chart_w, chart_h + 1.0));
+                WeekdayBars(bars, chart_w, chart_h, chart_gap);
                 cu::Row().modifier(Modifier::new().width(chart_w).height(24.0)).content(|| {
                     for b in bars {
                         cu::Column().modifier(Modifier::new().weight(1.0)).alignment(Alignment::Center).content(|| {
@@ -1772,6 +1756,55 @@ fn HeroCardContent(
                 });
             });
         });
+}
+
+/// The weekday bars as the mockup's `.bars2`: one pill per day clipped to its shape (`.bar
+/// { border-radius: pill; overflow: hidden }`), the failed part on top of the successful part
+/// 2 dp apart, so a day reads as one joined bar. A Canvas drew the two parts as separate pills,
+/// a failed part shorter than the bar's width as a dot (review r3, #848). A 1 dp `line`
+/// baseline closes the chart, as before.
+pub fn WeekdayBars(bars: &[DayBar; 7], chart_w: f32, chart_h: f32, chart_gap: f32) {
+    let p = ember_theme().palette;
+    let totals: Vec<usize> = bars.iter().map(|b| b.ok + b.fail).collect();
+    let rects = bar_rects(&totals, chart_w, chart_h, chart_gap);
+    cu::Column().modifier(Modifier::new().size(chart_w, chart_h + 1.0)).content(|| {
+        cu::Row().spacing(chart_gap).modifier(Modifier::new().size(chart_w, chart_h)).content(|| {
+            for (b, &(_, _, w, h)) in bars.iter().zip(rects.iter()) {
+                cu::Box()
+                    .modifier(Modifier::new().size(w, chart_h))
+                    .alignment(Alignment::BottomCenter)
+                    .content(|| {
+                        if h <= 0.0 {
+                            return;
+                        }
+                        let (fail_h, gap_h, ok_h) = weekday_bar_parts(h, b.ok, b.fail);
+                        cu::Column()
+                            .modifier(
+                                Modifier::new()
+                                    .size(w, h)
+                                    .corner_radius(weekday_bar_radius(w, h))
+                                    .clip(true),
+                            )
+                            .content(|| {
+                                if fail_h > 0.0 {
+                                    cu::Box().modifier(
+                                        Modifier::new().fill_max_width().height(fail_h).background(paint(p.orange.strong)),
+                                    );
+                                }
+                                if gap_h > 0.0 {
+                                    cu::Spacer().modifier(Modifier::new().height(gap_h));
+                                }
+                                if ok_h > 0.0 {
+                                    cu::Box().modifier(
+                                        Modifier::new().fill_max_width().height(ok_h).background(paint(p.blue.strong)),
+                                    );
+                                }
+                            });
+                    });
+            }
+        });
+        cu::Spacer().modifier(Modifier::new().width(chart_w).height(1.0).background(paint(p.line)));
+    });
 }
 
 /// A routine KPI number: `.kpi .v` 28/400 (`style.css:110`, `routines.css:64`), design review B5.
@@ -4791,6 +4824,97 @@ mod design_review_tests {
         assert_eq!(weekday_card_height(true) + 2.0 * PAD_CARD_V + 2.0, 173.0);
         assert!(source().contains("let card_h = weekday_card_height(compact);"));
         assert!(!source().contains(".max(174.0)"));
+    }
+
+    // ---- a node tree of what a composable sends, for the checks below ----------------------
+
+    use compose_rust::protocol::{decode_batch, Mutation};
+    use compose_rust::{Host, Recomposer};
+
+    #[derive(Debug)]
+    struct Node {
+        id: u32,
+        parent: Option<u32>,
+        mods: Vec<String>,
+        props: Vec<String>,
+    }
+
+    fn nodes_of(content: fn()) -> Vec<Node> {
+        let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let mut nodes: Vec<Node> = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::Create { node_id, .. } => {
+                    nodes.push(Node { id: *node_id, parent: None, mods: Vec::new(), props: Vec::new() })
+                }
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.parent = Some(*parent_id);
+                    }
+                }
+                Mutation::SetModifier { node_id, modifier, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.mods.push(format!("{modifier:?}"));
+                    }
+                }
+                Mutation::SetProp { node_id, property, value } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.props.push(format!("{property:?}={value:?}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        nodes
+    }
+
+    fn children<'a>(nodes: &'a [Node], parent: &Node) -> Vec<&'a Node> {
+        nodes.iter().filter(|n| n.parent == Some(parent.id)).collect()
+    }
+
+    fn has_mod(n: &Node, m: &str) -> bool {
+        n.mods.iter().any(|x| x == m)
+    }
+
+    fn day(ok: usize, fail: usize) -> DayBar {
+        DayBar { label: "월", ok, fail, today: false }
+    }
+
+    fn sample_weekday_bars() {
+        let bars = [day(3, 1), day(0, 0), day(4, 0), day(0, 2), day(1, 1), day(2, 0), day(1, 0)];
+        let (w, h, g) = weekday_chart_size(false);
+        WeekdayBars(&bars, w, h, g);
+    }
+
+    /// Review r3 (#848): a day's bar is one pill clipped to its shape, orange on top of blue
+    /// 2 dp apart, not two separately rounded pills drawn on a Canvas.
+    #[test]
+    fn design_r3_weekday_bars_are_joined_clipped_pills() {
+        let _guard = crate::services::test_guard();
+        let nodes = nodes_of(sample_weekday_bars);
+        let p = ember_theme().palette;
+        let orange = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.orange.strong)));
+        let blue = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.blue.strong)));
+        let bars: Vec<&Node> = nodes.iter().filter(|n| has_mod(n, "Clip(true)")).collect();
+        assert_eq!(bars.len(), 6, "one clipped bar per day with runs: {bars:?}");
+        let src = source();
+        let chart = src.split("pub fn WeekdayBars(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(!chart.contains("round_rect"), "no separately rounded parts");
+        assert!(chart.contains(".corner_radius(weekday_bar_radius(w, h))"));
+        // The 3-ok-1-fail day: orange part, the 2 dp gap, then the blue part, in that order.
+        let parts = children(&nodes, bars[0]);
+        assert_eq!(parts.len(), 3, "{parts:?}");
+        assert!(parts[0].mods.contains(&orange), "{:?}", parts[0]);
+        assert!(has_mod(parts[1], "Height(2.0)"), "{:?}", parts[1]);
+        assert!(parts[2].mods.contains(&blue), "{:?}", parts[2]);
+        // The all-success day has only a blue part, the all-failed day only an orange one.
+        let ok_only = children(&nodes, bars[1]);
+        assert_eq!(ok_only.len(), 1);
+        assert!(ok_only[0].mods.contains(&blue));
+        let fail_only = children(&nodes, bars[2]);
+        assert_eq!(fail_only.len(), 1);
+        assert!(fail_only[0].mods.contains(&orange));
     }
 
     /// R2: 편집 has a pencil and 지금 실행 a play glyph, 13/500, in every header layout.

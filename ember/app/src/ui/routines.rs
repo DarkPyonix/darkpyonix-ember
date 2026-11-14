@@ -355,6 +355,23 @@ pub fn weekday_bar_radius(w: f32, h: f32) -> f32 {
     (w / 2.0).min(h / 2.0).max(0.0)
 }
 
+/// The gap between a weekday bar's failed and successful parts (`.bar { gap: 2px }`).
+pub const WEEKDAY_BAR_GAP: f32 = 2.0;
+
+/// `(fail_h, gap, ok_h)` of one joined weekday bar `h` dp high (mockup `.bar`: one pill,
+/// `overflow: hidden`, the failed part on top of the successful part, 2 dp apart). The parts
+/// add up to `h`; the gap is there only when the day has both (FR-L25, #848).
+pub fn weekday_bar_parts(h: f32, ok: usize, fail: usize) -> (f32, f32, f32) {
+    let total = ok + fail;
+    if total == 0 || h <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let gap = if ok > 0 && fail > 0 { WEEKDAY_BAR_GAP.min(h) } else { 0.0 };
+    let room = (h - gap).max(0.0);
+    let fail_h = room * fail as f32 / total as f32;
+    (fail_h, gap, room - fail_h)
+}
+
 impl RunStatus {
     pub fn label(self) -> &'static str {
         match self {
@@ -2305,5 +2322,23 @@ mod tests {
         assert_eq!(weekday_bar_radius(24.0, 100.0), 12.0);
         assert_eq!(weekday_bar_radius(24.0, 10.0), 5.0);
         assert_eq!(weekday_bar_radius(24.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn fr_l25_weekday_bar_joins_failures_on_top_of_successes() {
+        // `.bar` stacks its parts with `gap: 2px` inside one pill (review r3: two separate
+        // pills with a dot on top).
+        assert_eq!(WEEKDAY_BAR_GAP, 2.0);
+        let (fail, gap, ok) = weekday_bar_parts(102.0, 3, 1);
+        assert_eq!(gap, 2.0);
+        assert_eq!(fail, 25.0);
+        assert_eq!(ok, 75.0);
+        assert_eq!(fail + gap + ok, 102.0, "the parts fill the bar exactly");
+        assert_eq!(weekday_bar_parts(50.0, 4, 0), (0.0, 0.0, 50.0), "no gap without failures");
+        assert_eq!(weekday_bar_parts(50.0, 0, 2), (50.0, 0.0, 0.0), "all failed is all orange");
+        assert_eq!(weekday_bar_parts(0.0, 1, 1), (0.0, 0.0, 0.0));
+        assert_eq!(weekday_bar_parts(40.0, 0, 0), (0.0, 0.0, 0.0));
+        let (f, g, o) = weekday_bar_parts(1.0, 1, 1);
+        assert!(f >= 0.0 && o >= 0.0 && f + g + o <= 1.0 + f32::EPSILON, "a tiny bar never overflows");
     }
 }

@@ -1155,7 +1155,8 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
             + if d.is_blank() { 0 } else { errors.len() }
             + usize::from(st.new_failure.get().is_some());
         let new_columns = super::characters::style_picker_columns(new_window.width_dp);
-        let new_body_fits = new_project_body_estimate(new_columns, notes) <= new_body_height;
+        let new_stacked = new_project_fields_stacked(new_window.width_dp);
+        let new_body_fits = new_project_body_estimate(new_columns, new_stacked, notes) <= new_body_height;
         let new_scroll = cu::remember_scroll_state();
         let review_end = new_sheet_review_end();
         // `.sheet-acts`: 취소 and 만들기 (small) before the close button, 4 apart, as the project
@@ -1200,11 +1201,13 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
                     };
                     let (s1, s2, s3) = (submit.clone(), submit.clone(), submit);
                     Section(NEW_SEC_BASIC.0, NEW_SEC_BASIC.1, true, || {
+                        // `.ps-grid`: 이름 across both columns, then 저장소 and 기본 브랜치 side by
+                        // side 16 apart; one column at 560 px and below. Rows are 12 apart.
                         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
                             FieldRow("이름", || {
                                 EmberField(FieldOptions {
                                     fill_max_width: true,
-                                    placeholder: "프로젝트 이름".to_string(),
+                                    placeholder: NEW_NAME_HINT.to_string(),
                                     on_value_change: Some(Box::new(move |v| {
                                         f1.set(None);
                                         d1.update(|s| s.name = v)
@@ -1213,36 +1216,43 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
                                     ..Default::default()
                                 });
                             });
-                            cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                                    FieldRow("저장소", || {
-                                        EmberField(FieldOptions {
-                                            fill_max_width: true,
-                                            placeholder: "github.com/...".to_string(),
-                                            on_value_change: Some(Box::new(move |v| {
-                                        f2.set(None);
-                                        d2.update(|s| s.repo = v)
-                                    })),
-                                    on_submit: Some(Box::new(s2)),
-                                            ..Default::default()
-                                        });
+                            let repo_field = move || {
+                                FieldRow("저장소", || {
+                                    EmberField(FieldOptions {
+                                        fill_max_width: true,
+                                        placeholder: "github.com/...".to_string(),
+                                        on_value_change: Some(Box::new(move |v| {
+                                            f2.set(None);
+                                            d2.update(|s| s.repo = v)
+                                        })),
+                                        on_submit: Some(Box::new(s2)),
+                                        ..Default::default()
                                     });
                                 });
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                                    FieldRow("기본 브랜치", || {
-                                        EmberField(FieldOptions {
-                                            fill_max_width: true,
-                                            placeholder: "develop".to_string(),
-                                            on_value_change: Some(Box::new(move |v| {
-                                        f3.set(None);
-                                        d3.update(|s| s.branch = v)
-                                    })),
-                                    on_submit: Some(Box::new(s3)),
-                                            ..Default::default()
-                                        });
+                            };
+                            let branch_field = move || {
+                                FieldRow("기본 브랜치", || {
+                                    EmberField(FieldOptions {
+                                        fill_max_width: true,
+                                        placeholder: "develop".to_string(),
+                                        on_value_change: Some(Box::new(move |v| {
+                                            f3.set(None);
+                                            d3.update(|s| s.branch = v)
+                                        })),
+                                        on_submit: Some(Box::new(s3)),
+                                        ..Default::default()
                                     });
                                 });
-                            });
+                            };
+                            if new_stacked {
+                                repo_field();
+                                branch_field();
+                            } else {
+                                cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+                                    cu::Column().modifier(Modifier::new().weight(1.0)).content(repo_field);
+                                    cu::Column().modifier(Modifier::new().weight(1.0)).content(branch_field);
+                                });
+                            }
                             if d.branch.trim().is_empty() {
                                 Label(&format!("비워 두면 {}을 씁니다", NewProjectDraft::DEFAULT_BRANCH), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                             }
@@ -1341,17 +1351,29 @@ pub const NEW_SEC_BASIC: (&str, &str) = ("기본", "프로젝트 이름과 저�
 pub const NEW_SEC_STYLE: (&str, &str) =
     ("팀 캐릭터", "이 프로젝트의 팀원이 모두 이 모양으로 보입니다. 나중에 설정에서 바꿀 수 있습니다");
 
+/// The 이름 field's hint (`project.js` projNew `placeholder`).
+pub const NEW_NAME_HINT: &str = "예: darkpyonix-docs";
+
+/// Whether 저장소 and 기본 브랜치 sit under each other: `.ps-grid` is one column at a window
+/// 560 dp wide or narrower (`@media (max-width:560px)`), two above. A window that has not
+/// reported its width counts as wide.
+pub fn new_project_fields_stacked(window_width_dp: f32) -> bool {
+    window_width_dp > 0.0 && window_width_dp <= 560.0
+}
+
 /// How tall the new-project body is, from its rows (FR-L26.1): 20 px padding top and bottom;
 /// the 기본 section (the 22 px title, the 18 px hint, then 이름 and the 저장소/기본 브랜치 row,
-/// each a 12/18 label, 4 and a 40 px field, 12 apart; 8 between the section's rows); 16; the
+/// or 저장소 and 기본 브랜치 as rows of their own when `stacked`, each a 12/18 label, 4 and a
+/// 40 px field, 12 apart; 8 between the section's rows); 16; the
 /// 팀 캐릭터 section (its rule, 8, the title, a two-line hint and the picker for `columns`, 8
 /// apart); each of `notes` (the branch hint, errors, the failure) at two lines and 16 above.
 /// An estimate, not a measurement: TODO(compose-rust#778) a body capped at the room would make
 /// it unnecessary.
-pub(crate) fn new_project_body_estimate(columns: usize, notes: usize) -> f32 {
+pub(crate) fn new_project_body_estimate(columns: usize, stacked: bool, notes: usize) -> f32 {
     let field_row = 18.0 + 4.0 + H_BTN;
     let note = SP[3] + 2.0 * 18.0;
-    let basic = 22.0 + SP[1] + 18.0 + SP[1] + field_row + SP[2] + field_row;
+    let field_rows = if stacked { 3.0 } else { 2.0 };
+    let basic = 22.0 + SP[1] + 18.0 + SP[1] + field_rows * field_row + (field_rows - 1.0) * SP[2];
     let style = 1.0 + SP[1] + SP[1] + SP[1] + 22.0 + SP[1] + 2.0 * 18.0 + SP[1] + super::characters::style_picker_height(columns);
     SP[4] * 2.0 + basic + SP[3] + style + notes as f32 * note
 }
@@ -2172,6 +2194,70 @@ mod tests {
         assert!(style < style_hint, "{texts:?}");
     }
 
+    /// The new-project sheet at a window size: each node's widget and parent, and each text's node.
+    fn new_project_tree(size: Option<(f32, f32)>) -> (std::collections::HashMap<u32, (String, Option<u32>)>, Vec<(String, u32)>) {
+        crate::ui::window_size::set_opened_for_test(size);
+        let mut host = Host::new(|| Box::new(Recomposer::new(new_project_sheet_open)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        crate::ui::window_size::set_opened_for_test(None);
+        let mut nodes = std::collections::HashMap::new();
+        let mut texts = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::Create { node_id, widget } => {
+                    nodes.insert(*node_id, (format!("{widget:?}"), None));
+                }
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    if let Some(n) = nodes.get_mut(node_id) {
+                        n.1 = Some(*parent_id);
+                    }
+                }
+                Mutation::SetProp { node_id, value: PropertyValue::String(t), .. } => texts.push((t.to_string(), *node_id)),
+                _ => {}
+            }
+        }
+        (nodes, texts)
+    }
+
+    /// The widget of the nearest node that holds both texts.
+    fn nearest_shared(nodes: &std::collections::HashMap<u32, (String, Option<u32>)>, texts: &[(String, u32)], a: &str, b: &str) -> String {
+        let chain = |want: &str| {
+            let mut at = texts.iter().find(|(t, _)| t == want).map(|(_, id)| *id);
+            assert!(at.is_some(), "no {want}: {texts:?}");
+            let mut out = Vec::new();
+            while let Some(id) = at {
+                out.push(id);
+                at = nodes.get(&id).and_then(|n| n.1);
+            }
+            out
+        };
+        let (ca, cb) = (chain(a), chain(b));
+        let shared = ca.iter().find(|id| cb.contains(id)).expect("one tree");
+        nodes[shared].0.clone()
+    }
+
+    #[test]
+    fn fr_l26_1_new_project_fields_stack_at_560_and_below() {
+        // `.ps-grid`: two columns, one at 560 px and below. At 390 the app kept 저장소 and
+        // 기본 브랜치 side by side (r7 capture `project-sheet-new-390`), the mockup stacks them.
+        assert!(!new_project_fields_stacked(1440.0));
+        assert!(!new_project_fields_stacked(561.0));
+        assert!(new_project_fields_stacked(560.0));
+        assert!(new_project_fields_stacked(390.0));
+        assert!(!new_project_fields_stacked(0.0), "an unreported width is not a phone");
+        let _guard = crate::services::test_guard();
+        let (nodes, texts) = new_project_tree(Some((1440.0, 900.0)));
+        assert_eq!(nearest_shared(&nodes, &texts, "저장소", "기본 브랜치"), "Row", "side by side at 1440");
+        assert_eq!(nearest_shared(&nodes, &texts, "이름", "저장소"), "Column");
+        assert!(texts.iter().any(|(t, _)| t == NEW_NAME_HINT), "the mockup's name hint: {texts:?}");
+        assert_eq!(NEW_NAME_HINT, "예: darkpyonix-docs");
+        let (nodes, texts) = new_project_tree(Some((390.0, 844.0)));
+        assert_eq!(nearest_shared(&nodes, &texts, "저장소", "기본 브랜치"), "Column", "stacked at 390");
+        for want in ["이름", "저장소", "기본 브랜치", "github.com/...", "develop"] {
+            assert!(texts.iter().any(|(t, _)| t == want), "{want}: {texts:?}");
+        }
+    }
+
     #[test]
     fn fr_l32_1_add_computer_takes_its_content_height_in_the_bottom_sheet() {
         // #876: at 390 the sheet started at y 127 with its content ending at y 465, because the
@@ -2205,17 +2291,19 @@ mod tests {
         let room = |w: f32, h: f32| sheet_body_max_height(w, h, false, SHEET_HEADER_CHROME_H).min(900.0);
         // 40; 기본: 22 + 8 + 18 + 8 + 62 + 12 + 62; 16; 팀 캐릭터: 1 + 8 + 8 + 8 + 22 + 8 + 36 + 8
         // and the picker (two rows of 162 and 8).
-        assert_eq!(new_project_body_estimate(3, 0), 40.0 + 192.0 + 16.0 + 99.0 + 332.0);
-        assert_eq!(new_project_body_estimate(3, 1) - new_project_body_estimate(3, 0), 52.0);
+        assert_eq!(new_project_body_estimate(3, false, 0), 40.0 + 192.0 + 16.0 + 99.0 + 332.0);
+        // Stacked: one more 62 px field row and its 12 px gap.
+        assert_eq!(new_project_body_estimate(3, true, 0) - new_project_body_estimate(3, false, 0), 74.0);
+        assert_eq!(new_project_body_estimate(3, false, 1) - new_project_body_estimate(3, false, 0), 52.0);
         // 1440 x 900: three columns, the body fits with room for two notes (#878: a fixed
         // body left about 170 px blank above the footer).
         assert_eq!(style_picker_columns(1440.0), 3);
         assert_eq!(room(1440.0, 900.0), 900.0 - 32.0 - 61.0);
-        assert!(new_project_body_estimate(3, 2) <= room(1440.0, 900.0));
+        assert!(new_project_body_estimate(3, false, 2) <= room(1440.0, 900.0));
         // 390 x 844: two columns of three rows do not fit the 85 percent sheet; it scrolls at a
         // fixed height so the footer stays on screen (FR-L32.1).
         assert_eq!(style_picker_columns(390.0), 2);
-        assert!(new_project_body_estimate(2, 1) > room(390.0, 844.0));
+        assert!(new_project_body_estimate(2, true, 1) > room(390.0, 844.0));
         let body = new_project_sheet_source();
         assert!(body.contains("if new_body_fits {\n                cu::Column().modifier(Modifier::new().fill_max_width()).content(new_body);"), "{body}");
     }

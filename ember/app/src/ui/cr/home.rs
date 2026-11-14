@@ -1324,6 +1324,7 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                     fill_max_width: true,
                     multiline: true,
                     bare: true,
+                    inset: Some((2.0, 2.0)),
                     height: Some(if l.compact { 64.0 } else { 84.0 }),
                     placeholder,
                     on_value_change: Some(Box::new(move |v| typed.set(v))),

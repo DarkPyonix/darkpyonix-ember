@@ -1484,6 +1484,9 @@ pub mod page {
                         } else {
                             {side_note(w, "ed-left")}
                         }
+                    } else {
+                        // FR-L31.26 (#874): an element that takes no grid cell, not a placeholder.
+                        div { class: "ed-none" }
                     }
                     section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
                         {crate::ui::workspace_trust::view::banner(&s)}
@@ -1535,13 +1538,21 @@ pub mod page {
                     {stripe_column(&s, sel, keymap, Strip::Right)}
                     if let Some(w) = sel.selected(Side::Bottom) {
                         {bottom_window(&s, w)}
+                    } else {
+                        div { class: "ed-none" }
                     }
-                    if em_shown { {menu(&s, keymap)} }
-                    if *s.palette_open.read() { {palette_sheet(&s, keymap)} }
-                    if let Some(request) = s.close_confirm.read().clone() { {close_confirm_sheet(&s, &request)} }
-                    {crate::ui::workspace_trust::view::prompt(&s)}
-                    {crate::ui::editor_notifications::view::layer(&s)}
-                    {crate::ui::editor_language::view::overlay(&s)}
+                    // FR-L31.26 (#874): the overlays are all `position:fixed`, but a closed one is a
+                    // placeholder (a comment node), which the HTML layout places as a grid item. Seven
+                    // of them made two implicit rows and 16 px of gaps under the status bar, so they sit
+                    // in one box that takes no room (`.ed-layers`); a fixed box is drawn from the root.
+                    div { class: "ed-layers",
+                        if em_shown { {menu(&s, keymap)} }
+                        if *s.palette_open.read() { {palette_sheet(&s, keymap)} }
+                        if let Some(request) = s.close_confirm.read().clone() { {close_confirm_sheet(&s, &request)} }
+                        {crate::ui::workspace_trust::view::prompt(&s)}
+                        {crate::ui::editor_notifications::view::layer(&s)}
+                        {crate::ui::editor_language::view::overlay(&s)}
+                    }
                     {status_bar(&s, &agent_state, &branch, current.as_deref().filter(|_| active.is_some()), line, col, active.as_ref().map_or(4, |d| d.tab_width))}
                 }
             }

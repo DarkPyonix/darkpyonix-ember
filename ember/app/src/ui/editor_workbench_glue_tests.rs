@@ -604,17 +604,36 @@ fn fr_l31_26_the_status_bar_is_32_high_and_flush_with_the_page_bottom() {
         .into_iter()
         .filter_map(|id| {
             let node = doc.get_node(id)?;
-            let tag = node.element_data().map(|e| e.name.local.to_string())?;
-            let class = page.attr(id, "class").unwrap_or_default();
             let rect = list.get(id).map(|e| format!("{:?}", e.rect)).unwrap_or_else(|| "no box".into());
-            Some(format!("{tag}.{class} {rect}"))
+            // A text or comment child is a grid item too (an anonymous one), so it is listed.
+            let tag = match node.element_data() {
+                Some(e) if node.is_anonymous() => format!("anonymous {}", e.name.local),
+                Some(e) => format!("{}.{}", e.name.local, page.attr(id, "class").unwrap_or_default()),
+                None if node.is_text_node() => format!("text {:?}", node.text_data().map(|t| t.content.clone()).unwrap_or_default()),
+                None => "comment or other".to_string(),
+            };
+            Some(format!("{tag} {rect}"))
         })
         .collect();
+    // The boxes the grid places (comments are not among them; anonymous blocks are).
+    let laid: Vec<String> = doc
+        .get_node(ed)
+        .and_then(|n| n.layout_children.borrow().clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| {
+            let node = doc.get_node(id)?;
+            let name = node.element_data().map(|e| format!("{}{}.{}", if node.is_anonymous() { "anonymous " } else { "" }, e.name.local, page.attr(id, "class").unwrap_or_default()));
+            let l = node.final_layout;
+            Some(format!("{} at {},{} {}x{}", name.unwrap_or_else(|| "text".into()), l.location.x, l.location.y, l.size.width, l.size.height))
+        })
+        .collect();
+    let items = format!("{items:#?}; grid items {laid:#?}");
     let close = |a: f32, b: f32| (a - b).abs() < 0.5;
-    assert!(close(bar_rect.height, 32.0), "bar {bar_rect:?}; items {items:#?}");
+    assert!(close(bar_rect.height, 32.0), "bar {bar_rect:?}; items {items}");
     assert!(
         close(bar_rect.y + bar_rect.height, ed_rect.y + ed_rect.height),
-        "the bar ends at {} but the page at {}; page {ed_rect:?}; items {items:#?}",
+        "the bar ends at {} but the page at {}; page {ed_rect:?}; items {items}",
         bar_rect.y + bar_rect.height,
         ed_rect.y + ed_rect.height,
     );

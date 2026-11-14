@@ -32,3 +32,7 @@ html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font
 /* A12: 300px wide, not shrunk by the spacer beside it (the mockup's max-width:1100px auto width and
    560px hide still apply below this). */
 @media (min-width:1101px){.ed-top .ed-find{flex:none;width:300px}}
+/* FR-L31.26 (#874): the overlays' box and a closed tool window's stand-in take no grid row, so the
+   status bar ends at the page's bottom. */
+.ed-layers{grid-row:1;grid-column:1;width:0;height:0;min-width:0;min-height:0}
+.ed-none{display:none}

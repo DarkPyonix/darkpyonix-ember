@@ -441,7 +441,8 @@ pub struct FieldOptions {
     /// The room inside a `bare` field, `(horizontal, vertical)` in dp; `None` is none. The
     /// toolkit's bare field has no padding of its own, so this is the mockup's inset (the
     /// textarea's 2 px, `.inputbar input` 14 px). A vertical inset is taken from both sides and
-    /// also counts towards the horizontal one. Ignored when not `bare`.
+    /// also counts towards the horizontal one. A framed field defaults to [`FIELD_INSET`]
+    /// ([`FIELD_INSET_MULTILINE`] when multiline) and takes this in its place.
     pub inset: Option<(f32, f32)>,
     pub height: Option<f32>,
     pub corner_radius: Option<f32>,
@@ -458,29 +459,50 @@ pub struct FieldOptions {
 /// The type step of a field's text and placeholder when no role is named (style.css `.field`).
 pub const FIELD_FONT: Fs = Fs::Md;
 
+/// The text inset of a framed single-line field, `(horizontal, vertical)`: style.css `.field`
+/// padding 0 12 (FR-L10.2, #878).
+pub const FIELD_INSET: (f32, f32) = (12.0, 0.0);
+/// The same for a multiline field: `textarea.field` padding 10 12.
+pub const FIELD_INSET_MULTILINE: (f32, f32) = (12.0, 10.0);
+
 /// A text field drawn with the tokens instead of the toolkit's filled style, which stays light
 /// in the dark scheme. Not `bare`: a `surface` field on a `line` border with the
-/// `corner-sm` radius and the 40 px control height (style.css `.field`). `bare`: see
-/// [`BareField`].
+/// `corner-sm` radius and the 40 px control height (style.css `.field`), its text 12 px from
+/// the frame. `bare`: see [`BareField`].
+///
+/// The frame is Ember's own row and the field inside it is bare (FR-L10.2, #878): the toolkit's
+/// framed field puts its text 8 px in, and a per-side inner padding would also have to keep a
+/// single line centred in the 40 px height, which `TextField` cannot do yet.
+/// TODO(compose-rust#771): move the frame and the 12 px inset onto the field once it takes
+/// per-side content padding; until then a click on the 12 px strip does not focus the field.
 pub fn EmberField(o: FieldOptions) {
     if o.bare {
         BareField(o);
         return;
     }
+    let mut o = o;
     let theme = ember_theme();
     let p = theme.palette;
+    let multiline = o.multiline;
+    let height = o.height.or(if multiline { None } else { Some(H_BTN) });
     // compose-rust v0.0.5 (#376) honours a TextField's own Background, Border and Shape in place
-    // of the design system's frame, which stays light in the dark scheme (#510). So every field
-    // names its frame: the token fill and line.
-    let modifier = with_height(with_weight(Modifier::new(), o.weight), o.height.or(if o.multiline { None } else { Some(H_BTN) }))
+    // of the design system's frame, which stays light in the dark scheme (#510). The frame row
+    // names the token fill and line instead.
+    let frame = with_height(with_weight(Modifier::new(), o.weight), height)
         .fill_max_width_if(o.fill_max_width)
-        .background(o.background.unwrap_or_else(|| paint(p.surface)))
-        .corner_radius(o.corner_radius.unwrap_or(CORNER_SM));
+        .background(o.background.take().unwrap_or_else(|| paint(p.surface)))
+        .corner_radius(o.corner_radius.take().unwrap_or(CORNER_SM));
     // A zero-width border is not sent: the desktop renderer passes it to Compose's
     // `Modifier.border(0.dp)`, which is `Dp.Hairline` and draws a 1 px line (FR-L10.2, #844).
-    let border_w = o.border_width.unwrap_or(1.0);
-    let modifier = if border_w > 0.0 { modifier.border(border_w, o.border_color.unwrap_or_else(|| paint(p.line))) } else { modifier };
-    FieldNode(o, modifier);
+    let border_w = o.border_width.take().unwrap_or(1.0);
+    let border_color = o.border_color.take();
+    let frame = if border_w > 0.0 { frame.border(border_w, border_color.unwrap_or_else(|| paint(p.line))) } else { frame };
+    let inset = o.inset.take().unwrap_or(if multiline { FIELD_INSET_MULTILINE } else { FIELD_INSET });
+    let inner = FieldOptions { bare: true, inset: Some(inset), height, weight: None, fill_max_width: true, ..o };
+    cu::Row()
+        .alignment(if multiline { Alignment::TopStart } else { Alignment::CenterStart })
+        .modifier(frame)
+        .content(move || BareField(inner));
 }
 
 /// A field inside a container that draws the frame (FR-L10.2, #844).
@@ -1371,9 +1393,59 @@ mod tests {
     #[test]
     fn fr_l10_2_framed_field_never_sends_a_zero_border() {
         let nodes = emitted_nodes(|| EmberField(FieldOptions { border_width: Some(0.0), ..Default::default() }));
+        for n in &nodes {
+            assert!(!n.mods.iter().any(|m| m.starts_with("Border")), "{} {:?}", n.widget, n.mods);
+        }
         let field = the(&nodes, "TextField");
-        assert!(!field.mods.iter().any(|m| m.starts_with("Border")), "{:?}", field.mods);
-        assert!(field.mods.iter().any(|m| m.starts_with("Background")), "{:?}", field.mods);
+        let frame = parent_of(&nodes, parent_of(&nodes, field));
+        assert!(frame.mods.iter().any(|m| m.starts_with("Background")), "{:?}", frame.mods);
+    }
+
+    #[test]
+    fn fr_l10_2_framed_field_draws_the_frame_and_insets_its_text_12() {
+        // style.css `.field`: 40 px, surface fill, 1 px line, corner-sm, padding 0 12 (#878: the
+        // toolkit's framed field put the text 8 px in).
+        let nodes = emitted_nodes(|| EmberField(FieldOptions { fill_max_width: true, ..Default::default() }));
+        let field = the(&nodes, "TextField");
+        assert!(field.props.iter().any(|p| p == "Bare=Bool(true)"), "{:?}", field.props);
+        for m in ["Border", "Background", "Shape", "Height"] {
+            assert!(!field.mods.iter().any(|x| x.starts_with(m)), "the field itself sends no {m}: {:?}", field.mods);
+        }
+        let inset_row = parent_of(&nodes, field);
+        assert_eq!(inset_row.widget, "Row");
+        assert!(inset_row.mods.iter().any(|m| m == "Height(40.0)"), "{:?}", inset_row.mods);
+        let spacers: Vec<_> = nodes.iter().filter(|n| n.widget == "Spacer" && n.parent == Some(inset_row.id)).collect();
+        assert_eq!(spacers.len(), 2, "12 px before and after the text");
+        assert!(spacers.iter().all(|s| s.mods.iter().any(|m| m == "Width(12.0)")));
+        let frame = parent_of(&nodes, inset_row);
+        assert_eq!(frame.widget, "Row");
+        assert!(frame.mods.iter().any(|m| m == "Height(40.0)"), "{:?}", frame.mods);
+        assert!(frame.mods.iter().any(|m| m == "FillMaxWidth"), "{:?}", frame.mods);
+        assert!(frame.mods.iter().any(|m| m.starts_with("Background")), "{:?}", frame.mods);
+        assert!(frame.mods.iter().any(|m| m.starts_with("Border")), "{:?}", frame.mods);
+        assert!(frame.mods.iter().any(|m| m.starts_with("Shape")), "{:?}", frame.mods);
+        let centre = row_alignment(|| cu::Row().alignment(Alignment::CenterStart).content(|| {}));
+        assert!(has_props(frame, &centre), "{:?} has {centre:?}", frame.props);
+        assert_eq!(FIELD_INSET, (12.0, 0.0));
+    }
+
+    #[test]
+    fn fr_l10_2_framed_multiline_field_insets_10_and_12() {
+        // style.css `textarea.field` padding 10 12: 10 all round, plus 2 more at each side.
+        let nodes = emitted_nodes(|| {
+            EmberField(FieldOptions { fill_max_width: true, multiline: true, height: Some(120.0), ..Default::default() })
+        });
+        let field = the(&nodes, "TextField");
+        assert!(field.mods.iter().any(|m| m == "FillMaxHeight"), "{:?}", field.mods);
+        let inset_row = parent_of(&nodes, field);
+        assert!(inset_row.mods.iter().any(|m| m == "Padding(10.0)"), "{:?}", inset_row.mods);
+        let spacers: Vec<_> = nodes.iter().filter(|n| n.widget == "Spacer" && n.parent == Some(inset_row.id)).collect();
+        assert!(spacers.len() == 2 && spacers.iter().all(|s| s.mods.iter().any(|m| m == "Width(2.0)")));
+        let frame = parent_of(&nodes, inset_row);
+        assert!(frame.mods.iter().any(|m| m == "Height(120.0)"), "{:?}", frame.mods);
+        let top = row_alignment(|| cu::Row().alignment(Alignment::TopStart).content(|| {}));
+        assert!(has_props(frame, &top), "{:?} has {top:?}", frame.props);
+        assert_eq!(FIELD_INSET_MULTILINE, (12.0, 10.0));
     }
 
     #[test]
@@ -1682,7 +1754,9 @@ mod tests {
     fn fr_l10_2_field_text_is_14_and_bare_drops_the_toolkit_frame() {
         let plain = emitted_props(|| EmberField(FieldOptions { ..Default::default() }));
         assert!(plain.iter().any(|m| m == "FontSize=Float(14.0)"), "{plain:?}");
-        assert!(!plain.iter().any(|m| m.starts_with("Bare=")), "a framed field sends no Bare: {plain:?}");
+        // #878: a framed field is a bare field inside Ember's own `.field` frame, so the toolkit
+        // frame (and its 8 px inset) is never drawn.
+        assert!(plain.iter().any(|m| m == "Bare=Bool(true)"), "{plain:?}");
         let bare = emitted_props(|| EmberField(FieldOptions { bare: true, multiline: true, ..Default::default() }));
         assert!(bare.iter().any(|m| m == "Bare=Bool(true)"), "{bare:?}");
         assert!(bare.iter().any(|m| m == "FontSize=Float(14.0)"), "{bare:?}");
@@ -1996,7 +2070,8 @@ mod tests {
         assert!(!production.contains(concat!("TODO(compose-rust#", "444)")));
         // Framed and bare fields both build their TextField in FieldNode (#844).
         let field = production.split("pub fn EmberField(").nth(1).unwrap();
-        assert!(field.contains("FieldNode(o, modifier)"));
+        let field = field.split("\nfn ").next().unwrap();
+        assert!(field.contains("BareField(inner)"), "a framed field is a bare one in Ember's frame (#878)");
         let bare = production.split("fn BareField(").nth(1).unwrap();
         assert!(bare.split("\nfn ").next().unwrap().contains("FieldNode(o, inner)"));
         let node = production.split("fn FieldNode(").nth(1).unwrap();

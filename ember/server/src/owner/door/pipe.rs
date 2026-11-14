@@ -257,7 +257,8 @@ pub fn pipe_exists(name: &str) -> bool {
         return true;
     }
     // SAFETY: no preconditions.
-    unsafe { GetLastError() } != ERROR_FILE_NOT_FOUND
+    let err = unsafe { GetLastError() };
+    err != ERROR_FILE_NOT_FOUND
 }
 
 /// The pipe's security descriptor: the current user only. Kept for the life of the door, as

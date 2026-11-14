@@ -697,6 +697,94 @@ fn fr_l31_29_quick_open_hangs_under_the_find_pill_in_one_frame() {
     assert!(near(query.2, list.2 - 2.0), "the query row spans the popover inside its border: query {query:?}, list {list:?}");
 }
 
+impl Page {
+    /// Every element in the page that `matches`, in document order.
+    fn all_where(&self, matches: impl Fn(NodeId) -> bool) -> Vec<NodeId> {
+        let mut found: Vec<NodeId> = self.connected().into_iter().filter(|&id| matches(id)).collect();
+        found.sort();
+        found
+    }
+}
+
+fn file_change(path: &str, index: char, worktree: char) -> ember_client::api::GitFile {
+    ember_client::api::GitFile { path: path.into(), old_path: None, index, worktree }
+}
+
+// FR-L31.32 (#895, design review E7): a row of the 커밋 window is as wide as the window, the status
+// letter is a 20px badge at the row's right end, and the action icons keep their columns whether a
+// row has one, two or three of them. The group's action sits over the rows' stage column.
+#[test]
+fn fr_l31_32_commit_rows_fill_the_window_and_their_columns_line_up() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    page.show_changes(
+        ROOT,
+        "",
+        vec![
+            // Modified: open, discard, stage. Deleted: no open. Untracked: no discard.
+            file_change("ember/server/src/api/vcs.rs", '.', 'M'),
+            file_change("ember/server/src/legacy.rs", '.', 'D'),
+            file_change("docs/GIT.md", '?', '?'),
+        ],
+    );
+    let list = page.find("aria-label", "변경된 파일").expect("the list");
+    let rows = page.all_where(|id| page.has_class(id, "ed-scm-row"));
+    let badges = page.all_where(|id| page.has_class(id, "ed-scm-st"));
+    let stages = page.all_where(|id| page.attr(id, "aria-label").is_some_and(|l| l.starts_with("스테이지: ")));
+    let opens = page.all_where(|id| page.attr(id, "aria-label").is_some_and(|l| l.starts_with("파일 열기: ")));
+    let discards = page.all_where(|id| page.attr(id, "aria-label").is_some_and(|l| l.starts_with("변경 사항 취소: ")));
+    let all = page.find("aria-label", "모두 스테이지").expect("the group's action");
+    assert_eq!((rows.len(), badges.len(), stages.len(), opens.len(), discards.len()), (3, 3, 3, 2, 2));
+
+    let named = |what: &'static str, ids: &[NodeId]| -> Vec<(&'static str, NodeId)> { ids.iter().map(|&id| (what, id)).collect() };
+    let list_box = page.boxes(&[("the list", list)])[0];
+    let row_boxes = page.boxes(&named("a row", &rows));
+    let badge_boxes = page.boxes(&named("a badge", &badges));
+    let stage_boxes = page.boxes(&named("a stage button", &stages));
+    let open_boxes = page.boxes(&named("an open button", &opens));
+    let discard_boxes = page.boxes(&named("a discard button", &discards));
+    let all_box = page.boxes(&[("the group's action", all)])[0];
+
+    // `.ed-tree` pads its rows by `--sp2` (8px) on each side.
+    for row in &row_boxes {
+        assert!(near(row.0, list_box.0 + 8.0) && near(row.2, list_box.2 - 16.0), "a row fills the list: row {row:?}, list {list_box:?}");
+    }
+    let right = row_boxes[0].0 + row_boxes[0].2;
+    for badge in &badge_boxes {
+        assert!(near(badge.2, 20.0) && near(badge.3, 20.0), "a 20px badge: {badge:?}");
+        assert!(near(badge.0 + badge.2, right - 8.0), "the badge ends 8px inside the row: badge {badge:?}, row right {right}");
+    }
+    for (what, column) in [("stage", &stage_boxes), ("open", &open_boxes), ("discard", &discard_boxes)] {
+        assert!(column.iter().all(|b| near(b.0, column[0].0) && near(b.2, 20.0)), "the {what} icons share one column: {column:?}");
+    }
+    // From the right: badge, stage, discard, open.
+    assert!(stage_boxes[0].0 < badge_boxes[0].0 && discard_boxes[0].0 < stage_boxes[0].0 && open_boxes[0].0 < discard_boxes[0].0);
+    assert!(near(all_box.0, stage_boxes[0].0), "the group's action is over the stage column: {all_box:?}, {stage_boxes:?}");
+}
+
+// FR-L31.32: a badge's tone is the soft pair of the letter's colour, and each tone has its rule.
+#[test]
+fn fr_l31_32_status_badges_take_the_soft_pair_of_the_letters_colour() {
+    use crate::ui::editor_scm::{letter_color, letter_tone};
+    let css = include_str!("../../assets/editor/page.css");
+    for letter in ['M', 'A', 'D', 'R', 'C', 'T', 'U', '!'] {
+        let tone = letter_tone(letter);
+        if tone == "grey" {
+            assert_eq!(letter_color(letter), "var(--muted)");
+            assert!(css.contains(".ed-scm-st.grey{background:var(--c-grey-soft);color:var(--text-2)}"));
+        } else {
+            assert_eq!(letter_color(letter), format!("var(--c-{tone})"), "{letter}");
+            assert!(css.contains(&format!(".ed-scm-st.{tone}{{background:var(--c-{tone}-soft);color:var(--c-{tone})}}")), "{letter}");
+        }
+    }
+    // The amend check is the mockup's square (`vcs.css:68-69`), not a native control.
+    assert!(css.contains(".ed-scm-cb{width:18px;height:18px;flex:none;border:1.5px solid var(--c-grey);border-radius:5px;"));
+    assert!(css.contains(".ed-scm-cb.on{background:var(--ink);border-color:var(--ink)}"));
+    let scm = include_str!("editor_scm.rs");
+    assert!(scm.contains(r#"role: "checkbox", "aria-checked": "{st.amend}", "aria-label": "이전 커밋 수정","#));
+    assert!(!scm.contains(r#"r#type: "checkbox""#));
+}
+
 #[compose_rust::runtime::Composable]
 fn toolkit_probe() {
     compose_rust::ui::Text("probe".to_string());

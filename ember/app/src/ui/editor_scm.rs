@@ -472,6 +472,19 @@ pub fn letter_color(letter: char) -> &'static str {
     }
 }
 
+/// The tone class of a status letter's badge (`.ed-scm-st`, FR-L31.32): the soft pair of the
+/// colour [`letter_color`] gives the letter, as the mockup's `.vcs-st` pairs them (`vcs.css:73-77`).
+pub fn letter_tone(letter: char) -> &'static str {
+    match letter {
+        'A' | 'U' => "green",
+        'D' => "red",
+        'R' | 'C' => "sky",
+        '!' => "orange",
+        'T' => "grey",
+        _ => "blue",
+    }
+}
+
 /// The set of absolute paths below `root` that `load` reports as modified, added, renamed, copied,
 /// untracked or conflicted in the index or working tree. Returns an empty set unless `load` is
 /// [`ScmLoad::Ready`]: without a real `git/status` answer no file is highlighted.Deleted-only files
@@ -1475,7 +1488,7 @@ pub mod view {
     use dioxus_compose::html::prelude::*;
 
     use super::{
-        branch_name, groups, letter_color, letter_label, side_by_side_rows, upstream_text, Entry, Group,
+        branch_name, groups, letter_label, letter_tone, side_by_side_rows, upstream_text, Entry, Group,
         DIFF_LINE_CAP, DiffView,
     };
     use crate::editor_host::HostCommand;
@@ -1718,10 +1731,10 @@ pub mod view {
                     }
                     div { style: "display:flex; align-items:center; gap:6px; font-size:var(--fs-xs); color:var(--text-2); cursor:pointer;",
                         onclick: move |_| amend_s.scm.toggle_amend(),
-                        input {
-                            r#type: "checkbox",
-                            checked: st.amend,
-                            "aria-label": "이전 커밋 수정",
+                        // FR-L31.32: the mockup's square check (`vcs.css:68-70`), ink when on. The row
+                        // around it takes the click, so the box has no handler of its own.
+                        button { class: if st.amend { "ed-scm-cb on" } else { "ed-scm-cb" }, role: "checkbox", "aria-checked": "{st.amend}", "aria-label": "이전 커밋 수정",
+                            if st.amend { {icon_px("check-w", 12)} }
                         }
                         span { "이전 커밋 수정 (amend)" }
                     }
@@ -1731,7 +1744,7 @@ pub mod view {
                         {icon_px("check", 14)} "{commit_btn_text}"
                     }
                 }
-                div { class: "ed-tree", role: "list", "aria-label": "변경된 파일",
+                div { class: "ed-tree ed-scm-list", role: "list", "aria-label": "변경된 파일",
                     if let Some(text) = st.load.note() { {note(&text)} }
                     if let Some(g) = g {
                         if g.is_empty() {
@@ -1757,13 +1770,13 @@ pub mod view {
             _ => ("모두 스테이지", "plus"),
         };
         rsx! {
-            div { key: "{group.title()}", role: "group", "aria-label": "{group.title()} {count}개",
-                div { class: "ed-tn", style: "--d:0; cursor:default; color:var(--text-2); font-size:var(--fs-xs); font-weight:var(--fw-semibold);",
+            div { key: "{group.title()}", class: "ed-scm-group", role: "group", "aria-label": "{group.title()} {count}개",
+                div { class: "ed-tn ed-scm-head", style: "--d:0; cursor:default; color:var(--text-2); font-size:var(--fs-xs); font-weight:var(--fw-semibold);",
                     "{group.title()}"
                     span { style: "margin-left:var(--sp1); padding:0 6px; border-radius:var(--pill); background:var(--surface-2); color:var(--text-2);", "{count}" }
                     div { class: "spacer" }
                     if count > 0 && group != Group::Conflicts {
-                        button { class: "ed-ib", style: "width:22px; height:22px;", title: "{all_title}", "aria-label": "{all_title}", disabled: busy,
+                        button { class: "ed-ib", style: "width:20px; height:20px; flex:none; margin-right:26px;", title: "{all_title}", "aria-label": "{all_title}", disabled: busy,
                             onclick: move |_| { if group == Group::Staged { all_s.scm.unstage(&all) } else { all_s.scm.stage(&all) } },
                             {icon_px(all_icon, 13)} }
                     }
@@ -1782,9 +1795,9 @@ pub mod view {
         let name = base_name(&e.path).to_string();
         let dir = dir_of(&e.path).to_string();
         let label = letter_label(e.letter);
-        let color = letter_color(e.letter);
+        let tone = letter_tone(e.letter);
         let row_label = if dir.is_empty() { format!("{name}, {label}") } else { format!("{name}, {label}, {dir}") };
-        let class = if selected { "ed-tn sel" } else { "ed-tn" };
+        let class = if selected { "ed-tn sel ed-scm-row" } else { "ed-tn ed-scm-row" };
         let group = e.group;
         let deleted = e.letter == 'D';
         let (diff_s, key_diff_s, open_s, op_s, discard_s) = (s.clone(), s.clone(), s.clone(), s.clone(), s.clone());
@@ -1820,7 +1833,10 @@ pub mod view {
         let (letter_s, letter_path) = (s.clone(), e.path.clone());
 
         rsx! {
-            div { key: "{group.title()}:{e.path}", class, role: "listitem", "aria-label": "{row_label}", title: "{tip}", tabindex: "0", style: "--d:1; gap:3px; padding-right:var(--sp2);",
+            // FR-L31.32: the row fills the window's width (`.ed-scm-row`), the name and folder take
+            // the room the fixed columns leave, and every column keeps its place down the list: a
+            // row without an action draws an empty slot where the action would be.
+            div { key: "{group.title()}:{e.path}", class, role: "listitem", "aria-label": "{row_label}", title: "{tip}", tabindex: "0", style: "--d:1;",
                 onkeydown: move |event| {
                     if matches!(event.key(), Key::Enter) || matches!(event.key(), Key::Character(ref c) if c == " ") {
                         event.stop_propagation();
@@ -1828,15 +1844,20 @@ pub mod view {
                         open_row_diff(&key_diff_s, &key_diff_path);
                     }
                 },
-                div { style: "display:flex; align-items:center; gap:3px; flex:1; min-width:0; align-self:stretch;",
+                div { class: "ed-scm-name",
                     onclick: move |_| open_row_diff(&diff_s, &diff_path),
                     {icon_px("file", 15)}
-                    span { style: "overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; min-width:20px;", "{name}" }
-                    if !dir.is_empty() { span { style: "color:var(--muted); font-size:var(--fs-2xs); overflow:hidden; text-overflow:ellipsis; flex:1 2 0px; min-width:0;", "{dir}" } }
+                    span { class: "fn", "{name}" }
+                    if !dir.is_empty() { span { class: "dir", "{dir}" } } else { span { class: "dir" } }
                 }
                 if !deleted {
                     button { class: "ed-ib", style: "width:20px; height:20px; flex:none;", title: "파일 열기: {name}", "aria-label": "파일 열기: {name}",
                         onclick: move |event| { event.stop_propagation(); open_file(&open_s, &open_path); }, {icon_px("file", 13)} }
+                } else {
+                    span { class: "ed-scm-slot" }
+                }
+                if group == Group::Changes && e.letter == 'U' {
+                    span { class: "ed-scm-slot" }
                 }
                 if group == Group::Changes && e.letter != 'U' {
                     button { class: "ed-ib", style: if is_armed { "width:20px; height:20px; flex:none; color:var(--c-red);" } else { "width:20px; height:20px; flex:none;" },
@@ -1854,7 +1875,7 @@ pub mod view {
                             if group == Group::Staged { op_s.scm.unstage(&op_entry) } else { op_s.scm.stage(&op_entry) }
                         }, {icon_px(op_icon, 13)} }
                 }
-                span { style: "width:14px; flex:none; text-align:center; font-family:var(--mono); font-size:var(--fs-xs); font-weight:var(--fw-semibold); color:{color}; align-self:stretch; display:flex; align-items:center; justify-content:center;", title: "{label}",
+                span { class: "ed-scm-st {tone}", title: "{label}",
                     onclick: move |_| open_row_diff(&letter_s, &letter_path), "{e.letter}" }
             }
         }

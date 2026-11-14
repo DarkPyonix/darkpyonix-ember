@@ -50,3 +50,24 @@ html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font
    against the window instead. */
 @media (max-width:900px){.ed-menu.ed-pal{position:fixed;top:48px;left:12px;right:12px;width:auto}}
 @media (max-width:560px){.ed-findbox{margin-left:calc(var(--sp2) * -1)}}
+/* FR-L31.32 (#895, design review E7): the 커밋 window's rows. The mockup has no editor 커밋 window,
+   so the rows take the nearest mockup rules: full-width rows (`vcs.css:59,64-66`), the 20px soft
+   status badge (`vcs.css:73-77`) and the 18px square check (`vcs.css:68-69`). The list and its
+   groups are columns whose items stretch, so a row is as wide as the window and not as its text. */
+.ed-scm-list{display:flex;flex-direction:column}
+.ed-scm-group{display:flex;flex-direction:column;flex:none;width:100%;min-width:0;box-sizing:border-box}
+.ed-scm-head{flex:none}
+.ed-tn.ed-scm-row{gap:3px;padding-right:var(--sp2);flex:none}
+.ed-scm-name{display:flex;align-items:center;gap:6px;flex:1 1 0;min-width:0;align-self:stretch}
+.ed-scm-name>.fn{flex:0 1 auto;min-width:20px;overflow:hidden;text-overflow:ellipsis}
+.ed-scm-name>.dir{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--muted);font-size:var(--fs-2xs)}
+.ed-scm-slot{width:20px;height:20px;flex:none}
+.ed-scm-st{display:grid;place-items:center;width:20px;height:20px;margin-left:3px;border-radius:5px;font:600 var(--fs-2xs) var(--mono);flex:none;cursor:pointer}
+.ed-scm-st.orange{background:var(--c-orange-soft);color:var(--c-orange)}
+.ed-scm-st.green{background:var(--c-green-soft);color:var(--c-green)}
+.ed-scm-st.red{background:var(--c-red-soft);color:var(--c-red)}
+.ed-scm-st.blue{background:var(--c-blue-soft);color:var(--c-blue)}
+.ed-scm-st.sky{background:var(--c-sky-soft);color:var(--c-sky)}
+.ed-scm-st.grey{background:var(--c-grey-soft);color:var(--text-2)}
+.ed-scm-cb{width:18px;height:18px;flex:none;border:1.5px solid var(--c-grey);border-radius:5px;background:var(--surface);cursor:pointer;padding:0;display:grid;place-items:center;box-sizing:border-box}
+.ed-scm-cb.on{background:var(--ink);border-color:var(--ink)}

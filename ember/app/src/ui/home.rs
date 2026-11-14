@@ -745,9 +745,19 @@ pub fn popover_width(want: f32, window_dp: f32) -> f32 {
 /// 16, and not below 240 so the search and a few rows always show. The height is fixed because
 /// the toolkit cannot size the popover to a scrolling list's content (see `cr/home.rs`
 /// `model_body`).
+///
+/// It is also no taller than the room under the composer card, so the toolkit does not move it
+/// up over the chips: with an empty prompt the card ends a tenth of the window plus 306 dp down
+/// (397 at 900 high, 386 at 800, captures of 2026-11-15), and the popover starts 8 below and
+/// stops 8 above the window's edge. At 800 high the full 480 covered the chip line.
 pub fn model_popover_height(window_h_dp: f32) -> f32 {
-    MODEL_POPOVER_HEIGHT.min(window_h_dp - 16.0).max(240.0)
+    let below = window_h_dp * 0.9 - MODEL_POPOVER_TOP_REST;
+    MODEL_POPOVER_HEIGHT.min(window_h_dp - 16.0).min(below).max(240.0)
 }
+
+/// What is above and below the model popover besides the hero's tenth of the window: the 306 dp
+/// to the composer card's bottom, the 8 dp gap and 8 dp to the window's edge.
+const MODEL_POPOVER_TOP_REST: f32 = 322.0;
 
 pub const MODEL_POPOVER_HEIGHT: f32 = 480.0;
 
@@ -839,8 +849,9 @@ pub fn composer_chip_fit(texts: &[String; CHIP_COUNT], composer_w: f32) -> [Stri
 pub enum ChipLine {
     /// The labels fit with room to spare: one line, every chip as wide as its content.
     Natural,
-    /// One line that the chips share in proportion to these weights (their estimated full
-    /// widths), each label cut with an ellipsis by the toolkit's own measure. This is the
+    /// One line that the chips share in proportion to these weights (each chip's frame plus
+    /// its label's part of the room the frames leave), each label cut with an ellipsis by the
+    /// toolkit's own measure. This is the
     /// mockup's row (`.hm-sel`, `.hm-pick`: `flex:0 1 auto;min-width:0`), where every chip
     /// shrinks in proportion to its width.
     Shared([f32; CHIP_COUNT]),
@@ -863,7 +874,14 @@ pub fn composer_chip_line(texts: &[String; CHIP_COUNT], composer_w: f32) -> Chip
     }
     let least: f32 = (0..CHIP_COUNT).map(|i| CHIP_FRAMES[i] + composer_text_px(&texts[i]).min(CHIP_TEXT_MINS[i])).sum();
     if least + gaps <= avail {
-        return ChipLine::Shared(full);
+        // Only the labels shrink: each chip keeps its frame (glyph, chevron, padding) and its
+        // label takes its part of what the frames leave. Sharing the whole width instead left
+        // the short computer label 14 dp at a 700 dp window, too little for one glyph and the
+        // ellipsis, so the chip was drawn empty (capture home-default-700, 2026-11-15).
+        let frames: f32 = CHIP_FRAMES.iter().sum();
+        let labels: f32 = (0..CHIP_COUNT).map(|i| full[i] - CHIP_FRAMES[i]).sum();
+        let k = ((avail - gaps - frames) / labels.max(1.0)).clamp(0.0, 1.0);
+        return ChipLine::Shared(std::array::from_fn(|i| CHIP_FRAMES[i] + (full[i] - CHIP_FRAMES[i]) * k));
     }
     ChipLine::Wrapped(composer_chip_rows(&full, composer_w))
 }
@@ -2447,9 +2465,18 @@ mod tests {
         let ChipLine::Shared(weights) = composer_chip_line(&fitted, 718.0) else {
             panic!("the demo labels need about 639 of 604 dp, so the line is shared");
         };
+        // Each chip keeps its frame and gives up part of its label only; together they take
+        // the line the chips have (604 less the three gaps).
         for i in 0..CHIP_COUNT {
-            assert_eq!(weights[i], composer_chip_width(i, &fitted[i]));
+            assert!(weights[i] > CHIP_FRAMES[i] && weights[i] < composer_chip_width(i, &fitted[i]), "{weights:?}");
         }
+        let sum: f32 = weights.iter().sum();
+        assert!((sum - (composer_chips_avail(718.0) - 3.0 * CHIP_GAP)).abs() < 0.5, "{sum}");
+        // At a 700 dp window the short computer label still has room for a glyph and the ellipsis.
+        let ChipLine::Shared(narrow) = composer_chip_line(&composer_chip_fit(&demo_chip_labels(), 564.0), 564.0) else {
+            panic!("564 is shared");
+        };
+        assert!(narrow[3] - CHIP_FRAMES[3] >= 21.0, "{narrow:?}");
         // The longest label has the largest share and the computer chip the smallest.
         assert!(weights[1] > weights[2] && weights[2] > weights[0] && weights[0] > weights[3], "{weights:?}");
     }
@@ -2565,7 +2592,8 @@ mod tests {
     fn fr_l15_model_popover_is_480_and_never_taller_than_the_window() {
         // #849: the popover has a fixed height so its list shows about seven rows.
         assert_eq!(model_popover_height(900.0), 480.0);
-        assert_eq!(model_popover_height(400.0), 384.0);
+        assert_eq!(model_popover_height(800.0), 398.0, "the room under the composer card");
+        assert_eq!(model_popover_height(400.0), 240.0);
         assert_eq!(model_popover_height(200.0), 240.0);
     }
 

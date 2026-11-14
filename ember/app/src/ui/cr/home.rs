@@ -16,13 +16,13 @@ use compose_rust::{Alignment, Color, DrawList, Paint, IconRole, ShapeRole};
 
 pub use crate::ui::home::{
     apply_suggestion, can_send, computers_line, default_mode, effective_message, filter_models,
-    harness_block, kpis, mode_after_harness_change, composer_chip_budget, composer_chip_rows, composer_chip_width, mode_header, mode_picker_rows_pending, mode_tap, popover_width, model_catalog, modes_for, needs_approve_all,
+    harness_block, kpis, mode_after_harness_change, composer_chip_rows, composer_chip_width, mode_header, mode_picker_rows_pending, mode_tap, popover_width, model_catalog, modes_for, needs_approve_all,
     project_options, project_tile_line, resolve_cwd, shortcut_label, split_chip_rows,
     success_percent, title_from_message, CrewMember, Dash, Harness, HarnessBar, Kpi, ModelOption,
     ModeRow, PermMode, ProjectTile, Selection, StatusCounts, ComposerAttachment, ATTACH_HINT, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
     EMPTY_CREW, EMPTY_HARNESS_USAGE, CiResult, GithubCard, GithubPill, GithubSampleKind, INTEGRATIONS_TITLE, LATER_INTEGRATIONS, integrations_layout, CI_RULE_WHEN, CI_RULE_THEN, CI_RULE_NOTE, CI_RULE_LINK, LATER_LINE, LATER_PILL, GITHUB_NAME, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
 };
-use crate::ui::home::{model_active_row, model_enter, model_row_detail, model_view, ModelEnter};
+use crate::ui::home::{model_active_row, model_enter, model_popover_height, model_row_detail, model_view, ModelEnter};
 use super::components::{
     AppButton, ButtonKind, Clickable, EmberField, EmberSheet, FieldOptions, FilterChip, Label,
     OptionSheet, PickChip, Pill, PillTone,
@@ -119,7 +119,10 @@ macro_rules! line_icon {
     };
 }
 
-const ICON_ARROW: &str = line_icon!("M5 12h14M13 6l6 6-6 6");
+/// `.hm-go`'s `I("arrow")`: the up-right arrow of the mockup (review 2026-11-14 H6, #849).
+const ICON_ARROW: &str = line_icon!("m4.5 19.5 15-15m0 0H8.25m11.25 0v11.25");
+/// `I("team")`, the group of three on the mockup's 팀원 상태 head (Heroicons user-group).
+const ICON_TEAM: &str = line_icon!("M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z");
 const ICON_SHIELD: &str = include_str!("../../../assets/nav/shield.svg");
 const ICON_FOLDER: &str = include_str!("../../../assets/nav/folder.svg");
 const ICON_PC: &str = include_str!("../../../assets/nav/pc.svg");
@@ -879,7 +882,8 @@ impl Composer {
         // that clears the query gives the field a new identity, which starts empty.
         let field_gen = remember(|| mutable_state_of(0u32));
         let list = || {
-            cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+            let col = if rail { Modifier::new().fill_max_width().fill_max_height() } else { Modifier::new().fill_max_width() };
+            cu::Column().spacing(SP[1]).modifier(col).content(|| {
                 let q = self.query.clone();
                 // Enter takes the active row (FR-L15): the chosen row, or the first match once
                 // something is typed. A blocked row says why and the picker stays open.
@@ -909,7 +913,10 @@ impl Composer {
                 if rows.is_empty() {
                     Label("일치하는 모델이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
                 }
-                cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(320.0)).content(|| {
+                // In the popover the list takes what the fixed-height card leaves under the
+                // search (`.mp-body{flex:1 1 auto}`); in the sheet it keeps its 320 dp.
+                let list_m = if rail { Modifier::new().fill_max_width().weight(1.0) } else { Modifier::new().fill_max_width().height(320.0) };
+                cu::ScrollColumn().modifier(list_m).content(|| {
                     cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
                         for (i, o) in rows.iter().copied().enumerate() {
                             let block = blocks[i];
@@ -947,9 +954,14 @@ impl Composer {
                                             });
                                         });
                                         cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                                        // `.mp-k`: the shortcut in a `surface-2` key cap, 52 dp at least
+                                        // (review 2026-11-14 K5, #849).
                                         cu::Row().modifier(Modifier::new().width(56.0)).content(|| {
                                             if let Some(k) = shortcut_label(i) {
-                                                Label(&k, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                                                cu::Box()
+                                                    .alignment(Alignment::Center)
+                                                    .modifier(Modifier::new().size(52.0, 20.0).background(paint(p.surface_2)).corner_radius(CORNER_2XS))
+                                                    .content(|| Label(&k, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1)));
                                             }
                                         });
                                         cu::Spacer().modifier(Modifier::new().width(SP[2]));
@@ -962,13 +974,19 @@ impl Composer {
             });
         };
         if rail {
+            let window = compose_rust::runtime::current_window_size();
             let surface = with_shadows(Modifier::new(), ember_theme().shadow_lg())
-                .width(popover_width(MODEL_POPOVER_WIDTH, compose_rust::runtime::current_window_size().width_dp))
+                .width(popover_width(MODEL_POPOVER_WIDTH, window.width_dp))
+                .height(model_popover_height(window.height_dp))
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
                 .corner_radius(CORNER_MD);
-            // `equal_height`: the rail's `surface-2` runs the popover's full height.
-            cu::Row().equal_height(true).modifier(surface).content(|| {
+            // A fixed height, not `equal_height` (#849, toolkit bug compose-rust#766): the toolkit sizes an `equal_height` row
+            // by its children's intrinsic heights and counts a child holding a scrolling list
+            // as 0 (renderer `RenderNode.kt` `WeightedStackPolicy.intrinsic`), so the row took
+            // the rail's height and the list showed one row. With a fixed height the rail's
+            // `fill_max_height` still runs the full height.
+            cu::Row().modifier(surface).content(|| {
                 // `.mp-rail`: `surface-2`, one entry per harness, the open one marked.
                 // v0.0.7: #460 fixed (`Modifier::label`); workaround kept until checked on a
                 // display (the icon-only 36 dp entries in a 52 dp rail of the mockup need a
@@ -988,7 +1006,7 @@ impl Composer {
                             });
                         }
                     });
-                cu::Box().modifier(Modifier::new().weight(1.0).padding(SP[2])).content(list);
+                cu::Box().modifier(Modifier::new().weight(1.0).fill_max_height().padding(SP[2])).content(list);
             });
         } else {
             cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[3])).content(|| {
@@ -1363,13 +1381,11 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                                 }
                             });
                         } else {
-                            let fitted: Vec<String> = texts
-                                .iter()
-                                .zip(composer_chip_budget(w))
-                                .map(|(t, b)| crate::ui::home::composer_fit_text(t, b))
-                                .collect();
+                            // One line as the mockup (#849, review H1): long labels give up room
+                            // and end in an ellipsis; the row wraps only when even the shortest
+                            // labels do not fit, rather than dropping a chip.
+                            let fitted = crate::ui::home::composer_chip_fit(&texts, w);
                             let widths: Vec<f32> = fitted.iter().map(|t| composer_chip_width(t)).collect();
-                            // A line per row of chips: a narrow card wraps rather than drops a chip.
                             for row in composer_chip_rows(&widths, w) {
                                 cu::Row().spacing(gap).alignment(Alignment::CenterStart).content(|| {
                                     for i in row {
@@ -1397,10 +1413,12 @@ fn suggestion_icon(i: usize) -> &'static str {
     [ICON_SPARK, ICON_GIT, ICON_CHART_NAV][i % 3]
 }
 
-/// `.sugg`: outlined chips, three a line (two up to 900 px), centred.
+/// `.sugg`: outlined chips, three a line (two up to 900 px). The block is centred under the
+/// composer and a short last line starts at its left edge, as the mockup's wrapped flex row
+/// (review 2026-11-14 H8, #849).
 fn Suggestions(c: &Composer, width_dp: f32) {
     let n = suggestion_cols(width_dp);
-    cu::Column().alignment(Alignment::Center).spacing(SP[1]).content(|| {
+    cu::Column().alignment(Alignment::TopStart).spacing(SP[1]).content(|| {
         for (row, line) in SUGGESTIONS.chunks(n).enumerate() {
             cu::Row().spacing(SP[1]).content(|| {
                 for (i, text) in line.iter().enumerate() {
@@ -1424,7 +1442,8 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
     cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
         if skip.show(EST_HEAD) {
             cu::Column().content(|| {
-                Label("오늘의 팀", if l.compact { Fs::Xl } else { Fs::Xl2 }, Weight::Semibold, None, Some(1));
+                // `.hm-sh h2` is 28/600 at every width (review 2026-11-14 H7, #849).
+                Label("오늘의 팀", Fs::Xl2, Weight::Semibold, None, Some(1));
                 cu::Spacer().modifier(Modifier::new().height(10.0));
                 Label(&format!("{} · 서버 기준", date_line(&crate::ui::home::today_utc())), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 cu::Spacer().modifier(Modifier::new().height(12.0));
@@ -1694,6 +1713,7 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
     const H: f32 = 160.0;
     let usize_values: Vec<usize> = values.iter().map(|v| *v as usize).collect();
     let rects = crate::ui::home::bar_rects(&usize_values, chart_w, H, 6.0);
+    let centers: Vec<f32> = rects.iter().map(|(x, _, w, _)| x + w / 2.0).collect();
     let now = rects.len().saturating_sub(1);
     let mut list = DrawList::builder().rect(paint(p.line), 0.0, H, chart_w, 1.0, 0.0);
     for (i, (x, y, w, h)) in rects.into_iter().enumerate() {
@@ -1705,41 +1725,57 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
             }
         }
     }
+    // `.hm-line` and `.hm-pt` (#849): the ink cost line over the bars and a ringed point on the
+    // last costed day, only for days the server sent a cost (none today, so no line is drawn).
+    // Not drawn: the 5 % ink area under the line (the toolkit `DrawList` has no filled path).
+    let points = usage::cost_line_points(&usage::trend_costs(&load, days.get()), &centers, H);
+    for pair in points.windows(2) {
+        list = list.line(paint(p.ink), pair[0].0, pair[0].1, pair[1].0, pair[1].1, 2.0);
+    }
+    if let Some((x, y)) = points.last() {
+        list = list.circle(paint(p.surface), *x, *y, 6.0, 0.0).circle(paint(p.ink), *x, *y, 4.5, 3.0);
+    }
     let commands = list.build();
+    let narrow = layout(compose_rust::runtime::current_window_size().width_dp).compact;
     let legend = usage::cost_legend(
         usage::period_cost(&load, days.get()).is_some(),
         usage::window_total(&load, days.get()).is_some(),
-        layout(compose_rust::runtime::current_window_size().width_dp).compact,
+        narrow,
     );
     let first = series.first().map(|(d, _)| d.clone()).unwrap_or_default();
     let last = series.last().map(|(d, _)| d.clone()).unwrap_or_default();
     Tile(|| {
-        CardHead(shell::ICON_GAUGE_SVG, "비용과 토큰 추이", || {
+        // `.hm-ico` is the bar chart (`I("chart")`), as on the mockup.
+        CardHead(ICON_CHART_NAV, "비용과 토큰 추이", || {
             for e in &legend {
-                DotOrHatch(e.hatched, p.grey.strong, p.text);
+                DotOrHatch(e.hatched, p.grey.strong, p.ink);
                 Label(e.label, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
                 cu::Spacer().modifier(Modifier::new().width(SP[2]));
             }
             for n in [7usize, 14] {
-                let d = days.clone();
-                // The mockup's toggle pill is 42 x 26.
-                let fill = if days.get() == n { p.sel } else { p.surface_2 };
-                let on = days.get() == n;
-                Clickable(
-                    Modifier::new().size(42.0, 26.0).background(paint(fill)).shape_role(ShapeRole::Full),
-                    Alignment::Center,
-                    move || d.set(n),
-                    || {
-                        Label(
-                            &format!("{n}일"),
-                            Fs::Xs,
-                            Weight::Medium,
-                            Some(paint(if on { p.text } else { p.text_2 })),
-                            Some(1),
-                        );
-                    },
-                );
+                RangeToggle(n, days.get() == n, {
+                    let d = days.clone();
+                    move || d.set(n)
+                });
                 cu::Spacer().modifier(Modifier::new().width(SP[0]));
+            }
+        });
+        // `.hm-sub`: the four stats above the plot, 28/600 values under small muted labels, 32
+        // apart; a missing one reads "데이터 없음". Cache hits stay without data: the usage
+        // event has no cache tokens (FR-U7). `.hide-sm` drops 캐시 적중 on a narrow card.
+        cu::Row().spacing(SP[6]).alignment(Alignment::TopStart).modifier(Modifier::new().fill_max_width()).content(|| {
+            for (i, (label, value)) in usage::cost_stats(&load, days.get()).into_iter().enumerate() {
+                if narrow && i == 3 {
+                    continue;
+                }
+                cu::Column().spacing(2.0).content(|| {
+                    Label(label, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    if value == usage::NO_DATA {
+                        Label(&value, Fs::Sm, Weight::Medium, Some(paint(p.muted)), Some(1));
+                    } else {
+                        Label(&value, Fs::Xl2, Weight::Semibold, None, Some(1));
+                    }
+                });
             }
         });
         cu::Canvas(commands).modifier(Modifier::new().size(chart_w, H + 1.0));
@@ -1748,20 +1784,32 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
             cu::Spacer().modifier(Modifier::new().weight(1.0));
             Label(&last, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         });
-        Label(&usage::trend_line(&load, days.get()), Fs::Sm, Weight::Regular, None, None);
-        // Four stats from the real data; a missing one reads "데이터 없음". Cache hits stay without
-        // data: the usage event has no cache tokens (FR-U7).
-        cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-            for (label, value) in usage::cost_stats(&load, days.get()) {
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    Label(label, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    Label(&value, Fs::Sm, Weight::Semibold, None, Some(1));
-                });
-            }
-        });
+        Label(&usage::trend_line(&load, days.get()), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
         // TODO(compose-rust): a tooltip or per-bar tap needs hover or a click on the Canvas; the
         // toolkit has neither, so no day is selectable.
     });
+}
+
+/// `.hm-seg button`: the 7일 / 14일 toggle, 28 dp pills (`.hm-seg button{height:28px}`) with a
+/// 1 dp `line` outline on `surface`; the chosen one is `ink` with `ink-text` (`.seg button.on`,
+/// review 2026-11-14 H4, #849). The pill keeps the 42 dp width of #509.
+fn RangeToggle(n: usize, on: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let (fill, edge, text) = range_toggle_colors(on, &p);
+    Clickable(
+        Modifier::new().size(42.0, 28.0).background(paint(fill)).border(1.0, paint(edge)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        on_click,
+        || {
+            Label(&format!("{n}일"), Fs::Xs, Weight::Medium, Some(paint(text)), Some(1));
+        },
+    );
+}
+
+/// The toggle's `(fill, outline, text)`: `ink` / `ink` / `ink-text` when chosen, else
+/// `surface` / `line` / `text-2`.
+fn range_toggle_colors(on: bool, p: &Palette) -> (Color, Color, Color) {
+    if on { (p.ink, p.ink, p.ink_text) } else { (p.surface, p.line, p.text_2) }
 }
 
 /// 팀원 상태 (`.hm-status`): the waiting alert, four coloured blocks sized by count, a legend.
@@ -1774,7 +1822,7 @@ fn StatusTile(c: &StatusCounts, ui: &SharedUi, tile_w: f32, compact: bool) {
         ("완료", c.done, p.grey.strong),
     ];
     Tile(|| {
-        CardHead(shell::ICON_USERS_SVG, "팀원 상태", || {
+        CardHead(ICON_TEAM, "팀원 상태", || {
             let u = ui.clone();
             GoButton(move || shell::choose(&u, NavMenu::Sessions));
         });
@@ -2612,5 +2660,32 @@ mod design_review_tests {
             assert!(tint.is_some());
         }
         assert_eq!(composer_chip_icon(Pick::Project, ICON_FOLDER, Harness::Codex), (ICON_FOLDER, None));
+    }
+
+    #[test]
+    fn fr_l15_model_popover_has_a_fixed_height_not_an_equal_height_row() {
+        // #849: an `equal_height` row counted the list (a scrolling child) as 0 high, so the
+        // popover took the rail's height and showed one row. The popover keeps a fixed height.
+        let src = include_str!("home.rs");
+        let body = &src[src.find("fn model_body").expect("model_body")..src.find("fn RailEntry").expect("RailEntry")];
+        assert!(!body.contains(concat!("equal_height", "(true)")));
+        assert!(body.contains("model_popover_height("));
+    }
+
+    #[test]
+    fn fr_l23_range_toggle_chosen_is_ink_and_the_other_outlined() {
+        let p = ember_theme().palette;
+        assert_eq!(range_toggle_colors(true, &p), (p.ink, p.ink, p.ink_text));
+        assert_eq!(range_toggle_colors(false, &p), (p.surface, p.line, p.text_2));
+    }
+
+    #[test]
+    fn fr_l23_trend_and_status_heads_use_the_mockup_icons() {
+        // Review 2026-11-14 H3 and H6 (#849): bar chart on the trend, the group on 팀원 상태, and
+        // the up-right arrow on the go button.
+        let src = include_str!("home.rs");
+        assert!(src.contains(concat!("CardHead(ICON_CHART_NAV, ", "\"비용과 토큰 추이\"")));
+        assert!(src.contains(concat!("CardHead(ICON_TEAM, ", "\"팀원 상태\"")));
+        assert!(ICON_ARROW.contains("m4.5 19.5 15-15"));
     }
 }

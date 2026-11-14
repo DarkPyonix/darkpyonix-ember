@@ -5008,6 +5008,41 @@ mod design_review_tests {
         assert!(!src.contains("cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {\n                                    KeyValue("));
     }
 
+    fn sample_sheet_form() {
+        let ctx = FormCtx {
+            field_w: NARROW_SHEET_FIELD_W,
+            draft: remember(|| mutable_state_of(FormDraft::new("ember"))),
+            tried: remember(|| mutable_state_of(false)),
+            initial: FormDraft::new("ember"),
+            editing: false,
+            computers: Vec::new(),
+            projects: vec!["ember".to_string(), "second-project".to_string()],
+            layout: FormLayout::Sheet,
+        };
+        FormFields(&ctx);
+    }
+
+    /// #596 (3), (4): the 390 sheet pairs 프로젝트 and 트리거 in one row, as the mockup's 390
+    /// form (`routines-edit-390-light`), instead of one field and wrapped chips per row.
+    #[test]
+    fn issue_596_phone_sheet_pairs_project_and_trigger() {
+        let _guard = crate::services::test_guard();
+        let nodes = nodes_of(sample_sheet_form);
+        let parent_of = |id: Option<u32>| id.and_then(|id| nodes.iter().find(|n| n.id == id)).and_then(|n| n.parent);
+        let label = |text: &str| -> Option<u32> {
+            let want = format!("Text=String({text:?})");
+            Some(nodes.iter().find(|n| n.props.contains(&want)).unwrap_or_else(|| panic!("no {text}")).id)
+        };
+        for (a, b) in [("프로젝트", "트리거"), ("일정 설명", "cron")] {
+            let (la, lb) = (label(a), label(b));
+            // Each field has a column of its own, and the two columns share one row.
+            assert_ne!(parent_of(la), parent_of(lb), "{a} and {b} sit in their own columns");
+            let (ra, rb) = (parent_of(parent_of(la)), parent_of(parent_of(lb)));
+            assert!(ra.is_some(), "{a} has a row");
+            assert_eq!(ra, rb, "{a} and {b} share a row");
+        }
+    }
+
     /// R2: 편집 has a pencil and 지금 실행 a play glyph, 13/500, in every header layout.
     #[test]
     fn design_r2_detail_buttons_carry_glyphs() {

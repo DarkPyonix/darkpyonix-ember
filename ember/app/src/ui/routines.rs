@@ -502,13 +502,15 @@ pub enum FormLayout {
     Sheet,
 }
 
-/// The inline form's fields go two to a row from this field width (mockup `.form`, a two-column
-/// grid), and one to a row below it (FR-L25, #848).
-pub const FORM_TWO_COLUMNS_FROM: f32 = 480.0;
+/// The form's fields go two to a row from this field width (mockup `.form`, a two-column grid
+/// at every width: about 133 per column at 390), and one to a row below it, so a column never
+/// gets narrower than about 122 (FR-L25, #848, #596).
+pub const FORM_TWO_COLUMNS_FROM: f32 = 260.0;
 
-/// Whether the form lays its fields out in two columns: inline and wide enough.
-pub fn form_two_columns(layout: FormLayout, field_w: f32) -> bool {
-    layout == FormLayout::Inline && field_w >= FORM_TWO_COLUMNS_FROM
+/// Whether the form lays its fields out in two columns: wide enough, inline or in the phone's
+/// sheet alike, as the mockup's 390 form pairs 프로젝트/트리거 in selects (#596).
+pub fn form_two_columns(_layout: FormLayout, field_w: f32) -> bool {
+    field_w >= FORM_TWO_COLUMNS_FROM
 }
 
 /// The form's rows, each one or two fields, in `FORM_FIELDS` order. In two columns the mockup's
@@ -2297,8 +2299,11 @@ mod tests {
     #[test]
     fn fr_l25_form_pairs_fields_in_two_columns_when_inline_and_wide() {
         assert!(form_two_columns(FormLayout::Inline, 686.0));
-        assert!(!form_two_columns(FormLayout::Inline, 400.0));
-        assert!(!form_two_columns(FormLayout::Sheet, 720.0));
+        assert!(form_two_columns(FormLayout::Inline, 400.0));
+        // The phone's sheet (390 less 20 on each side) pairs them too, as the mockup's 390 form.
+        assert!(form_two_columns(FormLayout::Sheet, 350.0));
+        assert!(!form_two_columns(FormLayout::Sheet, 240.0));
+        assert!(!form_two_columns(FormLayout::Inline, 250.0));
         let one: Vec<FormField> = form_rows(false).into_iter().flatten().collect();
         let two: Vec<FormField> = form_rows(true).into_iter().flatten().collect();
         assert_eq!(one, FORM_FIELDS.to_vec());

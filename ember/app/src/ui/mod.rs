@@ -57,6 +57,7 @@ pub mod theme;
 pub mod tool_card;
 pub mod usage;
 pub mod vcs;
+pub mod window_size;
 pub mod workbench;
 pub mod workspace_trust;
 

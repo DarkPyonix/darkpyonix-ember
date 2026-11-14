@@ -35,12 +35,14 @@ use std::collections::{HashMap, VecDeque};
 use ember_editor_conn::exthost::Call;
 use ember_editor_conn::rpc::Reply;
 use ember_editor_conn::uri::UriComponents;
-use ember_editor_conn::webview::{
-    self as wire, ContentOptions, CustomEditorCapabilities, IconPath, PanelOptions, PanelViewState, ShowOptions, ViewBadge, WebviewCall,
+pub use ember_editor_conn::webview::{
+    ContentOptions, CustomEditorCapabilities, IconPath, PanelOptions, PanelViewState, ShowOptions, ViewBadge, WebviewCall,
     WebviewHandle, WebviewMessage, SIDE_GROUP,
 };
+use ember_editor_conn::webview as wire;
 use serde_json::Value;
 
+pub use host::{PaneStatus, WebviewPane, WebviewPanes, WAITING_TEXT};
 pub use resource::ResourceResponse;
 
 /// What kind of place a webview has in the window.

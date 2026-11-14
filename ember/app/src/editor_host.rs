@@ -64,6 +64,8 @@ pub enum HostCommand {
     WriteSetting { scope: ember_editor::SettingsScope, key: String, value: Option<serde_json::Value> },
     /// Open a settings file as a document, making it first when it is not there (FR-L31.17).
     OpenSettingsFile(crate::ui::editor_settings::SettingsFile),
+    /// An event from an extension webview panel or view in the window (FR-E8).
+    Webview(ember_editor::webview::WebviewEvent),
 }
 
 #[derive(Default)]
@@ -534,8 +536,9 @@ impl EditorHost {
                                 shared.lock().unwrap().tasks = Some(crate::ui::editor_tasks::TasksLoad::from_read(read.map_err(|e| e.to_string())));
                                 *revision.write() += 1;
                             }
-                            // The settings view is a tab but not a document: the session never hears of it.
-                            Some(HostCommand::Open(path) | HostCommand::Close(path) | HostCommand::Focus(path)) if crate::ui::editor_settings::is_settings_tab(&path) => {}
+                            // The settings view and webview panels are tabs but not documents: the session never opens files for them.
+                            Some(HostCommand::Open(path) | HostCommand::Close(path) | HostCommand::Focus(path))
+                                if crate::ui::editor_settings::is_settings_tab(&path) || crate::ui::editor_workbench::is_webview_tab(&path) => {}
                             Some(HostCommand::Open(path)) => { let _ = session.open(session.document_uri(&path)); }
                             Some(HostCommand::Close(path)) => { let _ = session.close(session.document_uri(&path)); }
                             Some(HostCommand::Focus(path)) => { let _ = session.focus(session.document_uri(&path)); }
@@ -576,6 +579,9 @@ impl EditorHost {
                                 if let Err(error) = session.execute_command(id.clone(), Vec::new()) {
                                     shared.lock().unwrap().edit_errors.push(format!("명령 {id}을(를) 실행하지 못했습니다: {error}"));
                                 }
+                            }
+                            Some(HostCommand::Webview(event)) => {
+                                let _ = session.webview(event);
                             }
                             None => break,
                         },

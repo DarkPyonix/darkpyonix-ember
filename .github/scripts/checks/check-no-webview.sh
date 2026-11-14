@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # SPEC NFR-L2 (E1): the launcher and conversation UI never allocate a webview.
+# Per INTENT D44 Option A and SPEC FR-E8: only the editor window's webview host module
+# may interface with platform webviews for extension content.
 #
 # 1. Sources: no webview API is named in launcher-process code (ember/app/ and ember/client/).
 # 2. Manifests: no webview crate is declared there.
@@ -23,10 +25,11 @@ fi
 
 fail=0
 
-# 1. webview APIs in sources (tests excluded: they name what they forbid).
+# 1. webview APIs in sources (tests excluded: they name what they forbid; editor webview host module
+# is allowed per INTENT D44 Option A and SPEC FR-E8).
 api_re='WKWebView|WebView2|ICoreWebView2|android[./]webkit[./]WebView|webkit2gtk|WebKitGTK|wry::|tauri::|dioxus_desktop'
 hits="$(
-  find "${dirs[@]}" \( -path '*/target' -o -path '*/tests' \) -prune -o -type f -name '*.rs' -print0 \
+  find "${dirs[@]}" \( -path '*/target' -o -path '*/tests' -o -path '*/src/ui/editor_webview.rs' -o -path '*/src/ui/editor_webview/*' \) -prune -o -type f -name '*.rs' -print0 \
   | xargs -0 grep -n -E "$api_re" /dev/null 2>/dev/null || true
 )"
 if [ -n "$hits" ]; then

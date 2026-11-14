@@ -1602,4 +1602,83 @@ mod tests {
         assert_eq!(text_bytes("a\nb"), b"a\rb".to_vec());
     }
 
+    fn peer_api() -> (ember_transport::mem::MemNetwork, ember_client::api::Api) {
+        let net = ember_transport::mem::MemNetwork::new();
+        let (device, server) = (net.transport(), net.transport());
+        let api = ember_client::api::Api::over_transport(
+            ember_transport::Dialer::new(device),
+            ember_transport::PeerAddr::new(server.peer_id()),
+        );
+        (net, api)
+    }
+
+    #[tokio::test]
+    async fn fr_n9_the_pane_reaches_a_peer_server_through_the_api_not_a_url() {
+        let (_net, api) = peer_api();
+        let reach = TermReach::select(api.base_url(), &api);
+        assert!(matches!(reach, TermReach::Peer(_)), "{reach:?}");
+        assert!(reach.is_peer());
+        // Over the transport: paths below `/api` for the `Api`, never a URL built from `peer:<id>`.
+        assert_eq!(
+            list_target(&reach, "local", "/w", Some("agent"), true).unwrap(),
+            TermTarget::Api("/computers/local/terms?project=%2Fw&origin=agent&running=true".into())
+        );
+        assert_eq!(
+            attach_target(&reach, "c 1", "t/1").unwrap(),
+            TermTarget::Api("/computers/c%201/terms/t%2F1/attach".into())
+        );
+    }
+
+    #[test]
+    fn fr_n9_the_pane_keeps_the_http_path_and_never_reads_peer_as_a_url() {
+        let http = ember_client::api::Api::new("http://127.0.0.1:8740").unwrap();
+        let reach = TermReach::select("http://127.0.0.1:8740", &http);
+        assert!(matches!(&reach, TermReach::Http(u) if u == "http://127.0.0.1:8740"), "{reach:?}");
+        assert!(!reach.is_peer());
+        // Unchanged: the same URLs the HTTP path built before.
+        assert_eq!(
+            list_target(&reach, "local", "/w", Some("agent"), true).unwrap(),
+            TermTarget::Url(terms_list_url("http://127.0.0.1:8740", "local", "/w", Some("agent"), true))
+        );
+        assert_eq!(
+            attach_target(&reach, "local", "t1").unwrap(),
+            TermTarget::Url(attach_url("http://127.0.0.1:8740", "local", "t1"))
+        );
+        // `peer:<id>` with no transport `Api` is refused with the device sentence, not dialed.
+        let peerish = TermReach::Http("peer:abcd".into());
+        for r in [list_target(&peerish, "local", "/w", None, false), attach_target(&peerish, "local", "t1")] {
+            match r {
+                Err(ClientError::Refused(t)) => assert_eq!(t, crate::device_link::UNREACHABLE),
+                other => panic!("{other:?}"),
+            }
+        }
+        // A remote plain http server is still refused as before (FR-L31.19).
+        match attach_target(&TermReach::Http("http://192.0.2.1:8740".into()), "local", "t1") {
+            Err(ClientError::Refused(t)) => assert_eq!(t, RELAY_REFUSED),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn fr_n9_scope_and_device_refusals_read_as_their_sentences() {
+        use crate::device_link::{NOT_ALLOWED, UNREACHABLE};
+        use crate::ui::device_scope::SCOPE_DENIED;
+        let denied = br#"{"code":"scope_denied","error":"this device's scope (chat_only) does not allow this route"}"#;
+        assert_eq!(status_refusal(403, denied), Some(SCOPE_DENIED));
+        assert_eq!(status_refusal(403, br#"{"error":"x"}"#), None);
+        assert_eq!(status_refusal(502, b"bad gateway"), None);
+        for t in [NOT_ALLOWED, UNREACHABLE, SCOPE_DENIED] {
+            assert_eq!(known_refusal(t), Some(t));
+        }
+        assert_eq!(known_refusal("websocket: connection reset"), None);
+        // The pane shows the sentence, not the generic failure, and does not offer a retry loop.
+        let mut s = TerminalSession::new();
+        s.fail(ClientError::Refused(SCOPE_DENIED).to_string());
+        assert_eq!(crate::ui::term_pane::view_from_state(&s.state), crate::ui::term_pane::TermView::Failed(SCOPE_DENIED));
+        s.fail("websocket: connection reset");
+        assert_eq!(
+            crate::ui::term_pane::view_from_state(&s.state),
+            crate::ui::term_pane::TermView::Failed(crate::ui::term_pane::FAILED)
+        );
+    }
 }

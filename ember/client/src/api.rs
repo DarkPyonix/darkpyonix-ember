@@ -2386,6 +2386,31 @@ mod tests {
         assert_eq!(authority_addr("h"), ("h".to_string(), 80));
         assert_eq!(authority_addr("[::1]:8740"), ("::1".to_string(), 8740));
     }
+
+    #[test]
+    fn fr_n9_socket_urls_follow_the_reach() {
+        let api = Api::new("http://h:1/").unwrap();
+        assert_eq!(api.socket_url("/push"), api.push_url());
+        assert_eq!(api.socket_url("/computers/c/terms/t/attach"), "ws://h:1/api/computers/c/terms/t/attach");
+        let net = ember_transport::mem::MemNetwork::new();
+        let (device, server) = (net.transport(), net.transport());
+        let peer = Api::over_transport(Dialer::new(device), PeerAddr::new(server.peer_id()));
+        assert_eq!(peer.socket_url("/computers/c/terms/t/attach"), format!("ws://{PEER_HOST}/api/computers/c/terms/t/attach"));
+        // No token header on the transport (the device key is the credential).
+        assert!(peer.push_request(&peer.socket_url("/push")).unwrap().headers().get(header::AUTHORIZATION).is_none());
+    }
+
+    #[test]
+    fn fr_n9_a_refused_socket_upgrade_keeps_status_and_code() {
+        use tokio_tungstenite::tungstenite::Error as WsError;
+        let body = br#"{"code":"scope_denied","error":"no"}"#.to_vec();
+        let resp = http::Response::builder().status(403).body(Some(body)).unwrap();
+        let e = socket_error(WsError::Http(Box::new(resp)));
+        assert!(e.is_scope_denied(), "{e:?}");
+        let resp = http::Response::builder().status(502).body(None).unwrap();
+        assert_eq!(socket_error(WsError::Http(Box::new(resp))).status(), Some(502));
+        assert!(matches!(socket_error(WsError::ConnectionClosed), ApiError::Push(_)));
+    }
 }
 
 // ---- token usage summary (FR-U7, #332) ---------------------------------------------------------

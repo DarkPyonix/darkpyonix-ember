@@ -196,6 +196,47 @@ fn fr_l31_save_states_a_restored_buffer_opens_the_file_and_is_dirty_with_the_fil
     assert_eq!(String::from_utf8(bytes).unwrap(), "{\r\n  \"mine\": 1\r\n}\r\n");
 }
 
+/// FR-L31.6a (#744): hot exit puts a buffer back whose file was deleted while the window was closed.
+#[test]
+fn fr_l31_hot_exit_a_restored_buffer_whose_file_is_gone_opens_as_a_deleted_unsaved_buffer() {
+    let t0 = Instant::now();
+    let (mut c, mut bridge) = (core(t0), WidgetBridge::new());
+    let u = uri("/w/gone.json");
+    let fx = c.handle(t0, Input::Restore { uri: u.clone(), text: "{\n  \"mine\": 1\n}\n".into() });
+    assert_eq!(fx, vec![Effect::ReadFile { uri: u.clone(), purpose: ReadPurpose::Open }]);
+    let fx = c.handle(
+        t0,
+        Input::FileRead { uri: u.clone(), purpose: ReadPurpose::Open, result: Err("EntryNotFound (FileSystemError): /w/gone.json".into()) },
+    );
+    let ups = updates(&fx);
+    assert!(!ups.iter().any(|u| matches!(u, SessionUpdate::OpenFailed { .. })), "{ups:#?}");
+    assert!(ups.contains(&&SessionUpdate::Dirty { uri: u.clone(), dirty: true }));
+    assert!(ups.contains(&&SessionUpdate::ExternalChange { uri: u.clone(), change: ExternalChange::Deleted }));
+    apply(&mut bridge, &fx);
+    let doc = bridge.document(&u).expect("the buffer is open");
+    assert!(doc.dirty);
+    assert_eq!(doc.text, "{\n  \"mine\": 1\n}\n");
+    assert_eq!(doc.external_change, Some(ExternalChange::Deleted));
+    // A save writes the file again (the line ending of a new file is the session's default).
+    let (bytes, _) = save(&mut c, t0, &u, doc.generation);
+    assert_eq!(String::from_utf8(bytes).unwrap().replace("\r\n", "\n"), "{\n  \"mine\": 1\n}\n");
+}
+
+#[test]
+fn fr_l31_hot_exit_a_restore_that_fails_for_another_reason_is_an_open_failure() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+    let u = uri("/w/secret.json");
+    c.handle(t0, Input::Restore { uri: u.clone(), text: "{}\n".into() });
+    let fx = c.handle(t0, Input::FileRead { uri: u.clone(), purpose: ReadPurpose::Open, result: Err("NoPermissions (FileSystemError)".into()) });
+    assert!(updates(&fx).iter().any(|u| matches!(u, SessionUpdate::OpenFailed { .. })), "{fx:#?}");
+    // An open without a buffer to put back still fails on a missing file.
+    let u = uri("/w/none.json");
+    c.handle(t0, Input::Open { uri: u.clone() });
+    let fx = c.handle(t0, Input::FileRead { uri: u.clone(), purpose: ReadPurpose::Open, result: Err("EntryNotFound (FileSystemError)".into()) });
+    assert!(updates(&fx).iter().any(|u| matches!(u, SessionUpdate::OpenFailed { .. })), "{fx:#?}");
+}
+
 #[test]
 fn fr_l31_save_states_restoring_the_disk_text_leaves_the_document_clean() {
     let t0 = Instant::now();

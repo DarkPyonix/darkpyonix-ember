@@ -160,6 +160,12 @@ pub enum Effect {
     Ui(SessionUpdate),
 }
 
+/// Whether a read failed because the file is not there (the OSE's `EntryNotFound`, the OS's `ENOENT`).
+fn is_missing_file(error: &str) -> bool {
+    let e = error.to_lowercase();
+    e.contains("entrynotfound") || e.contains("enoent") || e.contains("not found") || e.contains("no such file")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalChange {
     /// The file changed on disk while the buffer has unsaved edits: the UI decides (reload or
@@ -1852,7 +1858,20 @@ impl SessionCore {
                 match result {
                     Ok(bytes) => self.finish_open(uri, bytes),
                     Err(error) => {
-                        self.restores.remove(&uri.key());
+                        let key = uri.key();
+                        // A buffer the window kept whose file is gone (hot exit, FR-L31.6a; a reconnect): it is
+                        // put back over an empty document marked deleted, so the edits stay and a save writes
+                        // the file again.
+                        if self.restores.contains_key(&key) && is_missing_file(&error) {
+                            self.finish_open(uri.clone(), Vec::new());
+                            if self.docs.contains_key(&key) {
+                                self.ui(SessionUpdate::ExternalChange { uri, change: ExternalChange::Deleted });
+                            } else {
+                                self.restores.remove(&key);
+                            }
+                            return;
+                        }
+                        self.restores.remove(&key);
                         self.ui(SessionUpdate::OpenFailed { uri, error })
                     }
                 }

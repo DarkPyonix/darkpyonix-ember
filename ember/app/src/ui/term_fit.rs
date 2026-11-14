@@ -133,6 +133,18 @@ impl PanelFit {
 mod tests {
     use super::*;
 
+    /// dioxus-compose#207: the panel follows its `onresize`, so no stand-in for a resize event is left.
+    #[test]
+    fn fr_l31_20_panel_refits_on_its_resize_event() {
+        let page = include_str!("editor_workbench.rs");
+        assert!(!page.contains(concat!("TODO(dioxus-compose#", "207)")));
+        let body = &page[page.find("fn terminal_body").expect("terminal body")..page.find("fn problems_body").expect("problems")];
+        let term = body.find(r#"div { class: "ed-term", role: "log", "aria-label": "터미널 출력", tabindex: "0""#).expect("panel");
+        let resize = body[term..].find("onresize:").expect("the panel listens for its resize") + term;
+        assert!(body[resize..].trim_start_matches("onresize:").contains("*revision.write() += 1;"), "a resize asks for a render");
+        assert!(body.contains("fit_terminal(s, &handle);"), "every render fits the PTY");
+    }
+
     #[test]
     fn fr_l31_20_cols_and_rows_from_panel_and_cell_size() {
         let cell = CellSize { width: 8.0, height: 20.0 };

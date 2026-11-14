@@ -2868,8 +2868,8 @@ pub mod page {
 
     /// Fits the PTY to the panel on every render (FR-L31.20, #334): the panel's size from the last
     /// layout, debounced, to [`TerminalHandle::resize`]. A held-back size asks for one more render.
-    // TODO(dioxus-compose#207): dioxus-compose sends no `onresize` (its `convert_resize_data` is "not sent"), so a size
-    // change is seen on the next render (panel drag, output, the wake below), not by an observer.
+    /// The panel's `onresize` (dioxus-compose#207) asks for a render when its box changes size, as
+    /// xterm's fit addon follows a `ResizeObserver`, so a window or sash resize is seen at once.
     fn fit_terminal(s: &Shared, handle: &TerminalHandle) {
         use futures_util::FutureExt;
         let rect = TERM_MOUNT.with(|m| {
@@ -3049,6 +3049,10 @@ pub mod page {
             {strip}
             div { class: "ed-term", role: "log", "aria-label": "터미널 출력", tabindex: "0", style: "outline:none;",
                 onmounted: move |event| TERM_MOUNT.with(|m| *m.borrow_mut() = Some(event.data())),
+                onresize: move |_| {
+                    let mut revision = revision;
+                    *revision.write() += 1;
+                },
                 // FR-L31.21: paste chord and IME composition (`crate::terminal_input`).
                 onkeydown: move |event| {
                     let m = event.modifiers();

@@ -2279,36 +2279,24 @@ fn DetailPane(
 
                     // Inset cards: 3 cards in one row on wide, 2x2 grid on narrow so the run
                     // history below stays visible above the fold on 390 dp phone screens.
+                    // Every tile in a row is as high as the tallest (`.rdetail` grid `stretch`;
+                    // review r3: uneven tiles at 390 and 1440).
                     if tile_cols < 3 {
                         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                            cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                    KeyValue("프로젝트", &project_name, "");
-                                });
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                    AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project);
-                                });
+                            TileRow(move || {
+                                TileCell(move || KeyValue("프로젝트", &project_name, ""));
+                                TileCell(move || AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project));
                             });
-                            cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                    KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다");
-                                });
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                    KeyValue("권한 모드", &mode_label, "");
-                                });
+                            TileRow(move || {
+                                TileCell(move || KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다"));
+                                TileCell(move || KeyValue("권한 모드", &mode_label, ""));
                             });
                         });
                     } else {
-                        cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                            cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                KeyValue("프로젝트", &project_name, "");
-                            });
-                            cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project);
-                            });
-                            cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다");
-                            });
+                        TileRow(move || {
+                            TileCell(move || KeyValue("프로젝트", &project_name, ""));
+                            TileCell(move || AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project));
+                            TileCell(move || KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다"));
                         });
                     }
                     // The inset pads 12 16 itself (`.inset`); no second padding inside it.
@@ -2345,13 +2333,47 @@ fn DetailPane(
     });
 }
 
+/// A row of detail tiles: each tile as high as the row's tallest (`equal_height`), the mockup's
+/// grid `align-items: stretch` (review r3, #848).
+fn TileRow(content: impl FnOnce()) {
+    cu::Row().spacing(SP[2]).equal_height(true).modifier(Modifier::new().fill_max_width()).content(content);
+}
+
+/// One cell of a `TileRow`: a share of the width and the row's whole height.
+fn TileCell(content: impl FnOnce()) {
+    cu::Box().modifier(Modifier::new().weight(1.0).fill_max_height()).content(content);
+}
+
+/// The detail tile's inset (`.inset`: `surface-2`, `corner-md`, 12 16 padding), filling the
+/// height its `TileCell` gives it. The shared `InsetPanel` keeps its content's height, so a
+/// short tile stood shorter than its neighbour.
+fn TileInset(content: impl FnOnce()) {
+    let p = ember_theme().palette;
+    cu::Box()
+        .modifier(
+            Modifier::new()
+                .fill_max_width()
+                .fill_max_height()
+                .background(paint(p.surface_2))
+                .corner_radius(CORNER_MD)
+                .padding(PAD_ROW_V),
+        )
+        .content(|| {
+            cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(content);
+                cu::Spacer().modifier(Modifier::new().width(SP[0]));
+            });
+        });
+}
+
 fn KeyValue(title: &str, value: &str, sub: &str) {
     let p = ember_theme().palette;
     let t = title.to_string();
     let v = value.to_string();
     let s = sub.to_string();
     // The inset pads 12 16 itself (`.inset`); a second padding inside doubled it (#494).
-    InsetPanel(true, move || {
+    TileInset(move || {
         cu::Column()
             .spacing(SP[0])
             .modifier(Modifier::new().fill_max_width())
@@ -2370,7 +2392,7 @@ fn KeyValue(title: &str, value: &str, sub: &str) {
 fn AgentKeyValue(agent: &'static str, label: &str, sub: &str, project: &str) {
     let p = ember_theme().palette;
     let (v, s, proj) = (label.to_string(), sub.to_string(), project.to_string());
-    InsetPanel(true, move || {
+    TileInset(move || {
         cu::Column()
             .spacing(SP[0])
             .modifier(Modifier::new().fill_max_width())
@@ -3528,7 +3550,7 @@ mod tests {
         let src = include_str!("routines.rs");
         let kv = src.split("fn KeyValue(").nth(1).unwrap().split("\n}\n").next().unwrap();
         let tile = src.split("fn RunTile(").nth(1).unwrap().split("\n}\n").next().unwrap();
-        assert!(kv.contains("InsetPanel(true"), "KeyValue sits in an inset");
+        assert!(kv.contains("TileInset(move ||"), "KeyValue sits in an inset");
         assert!(!kv.contains(".padding("), "KeyValue adds no padding inside the inset's own");
         // The run tile is the mockup's `.runtile`: 10 padding on `surface-2`, not an inset (#848).
         assert!(tile.contains(".height(RUN_TILE_H)"));
@@ -4957,6 +4979,33 @@ mod design_review_tests {
             "no bare 세션 line when the member is known"
         );
         assert_eq!(run_member_name("no-such-session"), None);
+    }
+
+    fn sample_tile_row() {
+        TileRow(|| {
+            TileCell(|| KeyValue("프로젝트", "ember", ""));
+            TileCell(|| KeyValue("컴퓨터 · 프로필", "이 서버", "프로필은 하네스를 따릅니다"));
+        });
+    }
+
+    /// Review r3 (#848): the detail tiles of a row are equally high (the mockup's grid
+    /// stretches them); at 390 프로젝트 stood shorter than 에이전트, 권한 모드 than 컴퓨터.
+    #[test]
+    fn design_r3_detail_tiles_in_a_row_are_equally_high() {
+        let _guard = crate::services::test_guard();
+        let nodes = nodes_of(sample_tile_row);
+        let rows: Vec<&Node> = nodes.iter().filter(|n| n.props.iter().any(|p| p == "Collapsible=Bool(true)")).collect();
+        assert_eq!(rows.len(), 1, "one equal-height row");
+        let cells = children(&nodes, rows[0]);
+        assert_eq!(cells.len(), 2);
+        for cell in &cells {
+            assert!(has_mod(cell, "Weight(1.0)") && has_mod(cell, "FillMaxHeight"), "{cell:?}");
+            let inset = children(&nodes, cell);
+            assert_eq!(inset.len(), 1);
+            assert!(has_mod(inset[0], "FillMaxHeight"), "the inset fills the cell: {:?}", inset[0]);
+        }
+        let src = source();
+        assert!(!src.contains("cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {\n                                    KeyValue("));
     }
 
     /// R2: 편집 has a pencil and 지금 실행 a play glyph, 13/500, in every header layout.

@@ -1,0 +1,423 @@
+//! SPEC FR-W4a and FR-W4b (#896): the OSE on a node.
+//!
+//! `POST /ide/ose {folder}` starts or reuses the OSE of a folder inside the node's allowed roots
+//! and answers the launch id with the placeholder token, `GET /ide/ose/{launch_id}/relay` is the
+//! binary WebSocket relay to the node's loopback OSE with the placeholder replaced by the real
+//! token, and `POST /ide/extensions` installs an extension. All three sit behind the node's token.
+//!
+//! The OSE is a fake here: a loopback TCP listener that records what it receives and echoes it
+//! (registered with `OseManager::register_launch_for_test`), or a shell script standing in for
+//! the `dpx-ose-server` binary. A real Code-OSS runtime is not covered.
+
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use ember_node::api::{self, Node};
+use ember_node::client::{ClientError, NodeClient};
+use ember_node::config::NodeConfig;
+use ember_node::ose::{OseManager, LOCAL_COMPUTER};
+use ember_node::ose_api::OseRelayStream;
+use ember_node::proto::ErrorCode;
+use futures::{SinkExt, StreamExt};
+use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_tungstenite::tungstenite::Message;
+
+#[cfg(unix)]
+mod common;
+
+const TOKEN: &str = "node-token";
+const REAL_TOKEN: &str = "1111111111111111222222222222222233333333333333334444444444444444";
+const WAIT: Duration = Duration::from_secs(20);
+
+struct Fx {
+    client: NodeClient,
+    base: String,
+    /// Allowed root (canonical).
+    root: PathBuf,
+    /// A sibling directory outside the root.
+    outside: PathBuf,
+    ose: Arc<OseManager>,
+    /// The OSE data root given to the manager.
+    data: PathBuf,
+    dir: tempfile::TempDir,
+}
+
+/// A node on a loopback port whose OSE manager is what `make` builds from `(temp dir, data root)`.
+async fn start(make: impl FnOnce(&Path, &Path) -> OseManager) -> Fx {
+    let dir = tempfile::tempdir().unwrap();
+    let base_dir = dir.path().canonicalize().unwrap();
+    let root = base_dir.join("root");
+    let outside = base_dir.join("outside");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let data = base_dir.join("ose-data");
+    let ose = Arc::new(make(&base_dir, &data));
+    let node = Node::with_ose(NodeConfig::new(TOKEN, vec![root.clone()]), ose.clone()).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(api::serve(listener, node));
+    Fx { client: NodeClient::new(&base, TOKEN).unwrap(), base, root, outside, ose, data, dir }
+}
+
+/// A manager with no OSE binary: launches exist only through `register_launch_for_test`.
+fn no_binary(_dir: &Path, data: &Path) -> OseManager {
+    OseManager::with_data_root(None, data.to_path_buf())
+}
+
+/// What the fake OSE saw: every byte it received, and how many connections are open now.
+#[derive(Clone, Default)]
+struct FakeOse {
+    received: Arc<Mutex<Vec<u8>>>,
+    live: Arc<AtomicUsize>,
+}
+
+/// A loopback TCP "OSE" that records what it receives and echoes it back.
+async fn start_fake_ose() -> (SocketAddr, FakeOse) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let fake = FakeOse::default();
+    let bg = fake.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let fake = bg.clone();
+            fake.live.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 32 * 1024];
+                loop {
+                    match s.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            fake.received.lock().unwrap().extend_from_slice(&buf[..n]);
+                            if s.write_all(&buf[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                fake.live.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    });
+    (addr, fake)
+}
+
+/// The launch id is the last segment of the relay path the manager builds.
+fn launch_id_of(relay: &str) -> String {
+    relay.rsplit('/').next().unwrap().to_string()
+}
+
+/// Reads binary messages until `want` bytes arrived.
+async fn read_bytes(ws: &mut OseRelayStream, want: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    while out.len() < want {
+        match tokio::time::timeout(WAIT, ws.next()).await.expect("no echo in time") {
+            Some(Ok(Message::Binary(b))) => out.extend_from_slice(&b),
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+            other => panic!("the relay ended after {} of {want} bytes: {other:?}", out.len()),
+        }
+    }
+    out
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+#[tokio::test]
+async fn fr_w4b_node_ide_ose_requires_node_token_and_returns_placeholder() {
+    let f = start(no_binary).await;
+    let (ose_addr, _) = start_fake_ose().await;
+    let conn = f.ose.register_launch_for_test(LOCAL_COMPUTER, &f.root, ose_addr, REAL_TOKEN);
+    let launch_id = launch_id_of(conn.relay.as_deref().unwrap());
+
+    // Every route refuses a wrong token and a missing one.
+    let bad = NodeClient::new(&f.base, "wrong").unwrap();
+    let e = bad.ide_ose(&f.root).await.unwrap_err();
+    assert!(matches!(&e, ClientError::Api { status: 401, .. }), "{e:?}");
+    let e = bad.ide_ose_relay(&launch_id).await.err().unwrap();
+    assert!(matches!(&e, ClientError::Api { status: 401, .. }), "{e:?}");
+    let (status, _) = bad.post_raw("/ide/extensions", &json!({ "id": "a.b" })).await.unwrap();
+    assert_eq!(status, 401);
+    let r = reqwest::Client::new()
+        .post(format!("{}/ide/ose", f.base))
+        .json(&json!({ "folder": f.root }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+
+    // With the token: the launch id and the placeholder, never the real token.
+    let launch = f.client.ide_ose(&f.root).await.unwrap();
+    assert_eq!(launch.launch_id, launch_id);
+    assert_eq!(launch.launch_id.len(), 32);
+    assert_eq!(launch.connection_token, conn.connection_token);
+    assert_eq!(launch.connection_token.len(), 64);
+    assert_ne!(launch.connection_token, REAL_TOKEN);
+    assert_eq!(launch.endpoint, format!("http://{ose_addr}"));
+    let (status, body) = f.client.post_raw("/ide/ose", &json!({ "folder": f.root })).await.unwrap();
+    assert_eq!(status, 200);
+    let text = String::from_utf8(body).unwrap();
+    assert!(!text.contains(REAL_TOKEN), "the real token is in the answer: {text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["connection_token"], conn.connection_token.as_str());
+
+    // The same folder is the same launch.
+    assert_eq!(f.client.ide_ose(&f.root).await.unwrap().launch_id, launch_id);
+}
+
+#[tokio::test]
+async fn fr_w4b_node_ide_relay_substitutes_placeholder_and_pumps_bytes() {
+    let f = start(no_binary).await;
+    let (ose_addr, fake) = start_fake_ose().await;
+    let conn = f.ose.register_launch_for_test(LOCAL_COMPUTER, &f.root, ose_addr, REAL_TOKEN);
+    let launch_id = launch_id_of(conn.relay.as_deref().unwrap());
+    let placeholder = conn.connection_token.clone();
+
+    // An unknown launch is refused before the upgrade.
+    let e = f.client.ide_ose_relay("0123456789abcdef0123456789abcdef").await.err().unwrap();
+    assert!(matches!(&e, ClientError::Api { status: 404, .. }), "{e:?}");
+    assert_eq!(fake.live.load(Ordering::SeqCst), 0, "an unknown launch must dial nothing");
+
+    let mut ws = f.client.ide_ose_relay(&launch_id).await.unwrap();
+
+    // First message: the placeholder inside the 8 KiB window is replaced by the real token.
+    let mut first = format!("GET /?tkn={placeholder} HTTP/1.1\r\n").into_bytes();
+    first.resize(9000, b'x');
+    ws.send(Message::Binary(first.clone().into())).await.unwrap();
+    let echo = read_bytes(&mut ws, first.len()).await;
+    let mut expected = format!("GET /?tkn={REAL_TOKEN} HTTP/1.1\r\n").into_bytes();
+    expected.resize(9000, b'x');
+    assert_eq!(echo, expected);
+
+    // Second message: past the window the bytes pass unchanged.
+    let second = format!("late:{placeholder}").into_bytes();
+    ws.send(Message::Binary(second.clone().into())).await.unwrap();
+    assert_eq!(read_bytes(&mut ws, second.len()).await, second);
+
+    let seen = fake.received.lock().unwrap().clone();
+    assert!(find(&seen[..9000], REAL_TOKEN.as_bytes()), "the OSE did not get the real token");
+    assert!(!find(&seen[..9000], placeholder.as_bytes()), "the placeholder reached the OSE inside the window");
+    assert_eq!(seen.len(), first.len() + second.len());
+
+    // Closing the client side drops the TCP connection to the OSE.
+    ws.close(None).await.unwrap();
+    let deadline = std::time::Instant::now() + WAIT;
+    while fake.live.load(Ordering::SeqCst) != 0 {
+        assert!(std::time::Instant::now() < deadline, "the OSE connection stayed open");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // A text frame closes the relay with 1003.
+    let mut ws = f.client.ide_ose_relay(&launch_id).await.unwrap();
+    ws.send(Message::text("not binary")).await.unwrap();
+    let code = loop {
+        match tokio::time::timeout(WAIT, ws.next()).await.expect("no close in time") {
+            Some(Ok(Message::Close(Some(frame)))) => break u16::from(frame.code),
+            Some(Ok(Message::Close(None))) | Some(Err(_)) | None => panic!("closed without the 1003 frame"),
+            Some(Ok(_)) => continue,
+        }
+    };
+    assert_eq!(code, 1003);
+}
+
+#[tokio::test]
+async fn fr_w4b_node_ide_relay_limit_is_429() {
+    let f = start(|_, data| OseManager::with_data_root(None, data.to_path_buf()).with_relay_limits(1, 64)).await;
+    let (ose_addr, _) = start_fake_ose().await;
+    let conn = f.ose.register_launch_for_test(LOCAL_COMPUTER, &f.root, ose_addr, REAL_TOKEN);
+    let launch_id = launch_id_of(conn.relay.as_deref().unwrap());
+
+    let _held = f.client.ide_ose_relay(&launch_id).await.unwrap();
+    let e = f.client.ide_ose_relay(&launch_id).await.err().unwrap();
+    assert!(matches!(&e, ClientError::Api { status: 429, .. }), "{e:?}");
+}
+
+#[tokio::test]
+async fn fr_w4a_node_ose_refuses_folder_outside_allowed_roots_with_403() {
+    let f = start(no_binary).await;
+
+    let e = f.client.ide_ose(&f.outside).await.unwrap_err();
+    assert!(matches!(&e, ClientError::Api { status: 403, .. }), "{e:?}");
+    assert_eq!(e.code(), Some(ErrorCode::ForbiddenPath));
+
+    let e = f.client.ide_ose(f.root.join("missing")).await.unwrap_err();
+    assert!(matches!(&e, ClientError::Api { status: 404, .. }), "{e:?}");
+    assert_eq!(e.code(), Some(ErrorCode::NotFound));
+
+    let e = f.client.ide_ose("relative/folder").await.unwrap_err();
+    assert!(matches!(&e, ClientError::Api { status: 400, .. }), "{e:?}");
+
+    let file = f.root.join("a-file");
+    std::fs::write(&file, b"x").unwrap();
+    let e = f.client.ide_ose(&file).await.unwrap_err();
+    assert!(matches!(&e, ClientError::Api { status: 400, .. }), "{e:?}");
+
+    // Inside the roots, but this node has no OSE binary: 503 with the reason.
+    let e = f.client.ide_ose(&f.root).await.unwrap_err();
+    match &e {
+        ClientError::Api { status: 503, body } => assert!(body.error.contains("not installed"), "{body:?}"),
+        other => panic!("{other:?}"),
+    }
+    let (status, body) = f.client.post_raw("/ide/extensions", &json!({ "id": "a.b" })).await.unwrap();
+    assert_eq!(status, 503, "{}", String::from_utf8_lossy(&body));
+    // Nothing was created for a refused launch.
+    assert!(!f.data.exists(), "a refused launch made the data dir");
+}
+
+/// A node built without an OSE manager (`Node::new`: the server's in-process local node, tests)
+/// has the routes and no binary.
+#[tokio::test]
+async fn fr_w4a_node_without_an_ose_manager_answers_503() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let node = Node::new(NodeConfig::new(TOKEN, vec![root.clone()])).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(api::serve(listener, node));
+    let e = NodeClient::new(&base, TOKEN).unwrap().ide_ose(&root).await.unwrap_err();
+    assert!(matches!(&e, ClientError::Api { status: 503, .. }), "{e:?}");
+}
+
+/// A stand-in for `dpx-ose-server`: writes its environment and arguments beside itself, then
+/// listens on `--port` like the real one.
+#[cfg(unix)]
+fn fake_ose_binary(dir: &Path, data: &Path) -> OseManager {
+    let script = dir.join("fake-ose");
+    common::write_exec_ready(
+        &script,
+        r##"#!/bin/sh
+env > "$0.env"
+printf '%s\n' "$@" > "$0.args"
+exec python3 -c 'import socket,sys; p=int(sys.argv[sys.argv.index("--port")+1]); s=socket.socket(); s.bind(("127.0.0.1",p)); s.listen();
+while True: s.accept()[0].close()' "$@"
+"##,
+    );
+    OseManager::with_data_root(Some(script), data.to_path_buf())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_w4a_node_ose_spawns_per_folder_under_allowed_roots_and_reuses_live_process() {
+    let f = start(fake_ose_binary).await;
+    let sub = f.root.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    let first = f.client.ide_ose(&f.root).await.unwrap();
+    let again = f.client.ide_ose(&f.root).await.unwrap();
+    assert_eq!(first.launch_id, again.launch_id, "a live OSE of the folder is reused");
+    assert_eq!(first.connection_token, again.connection_token);
+    assert_eq!(first.endpoint, again.endpoint);
+
+    let other = f.client.ide_ose(&sub).await.unwrap();
+    assert_ne!(other.launch_id, first.launch_id, "another folder is another OSE");
+    assert_ne!(other.endpoint, first.endpoint);
+
+    // The endpoint is a loopback listener of this node, and the relay reaches it.
+    let port: u16 = first.endpoint.rsplit(':').next().unwrap().parse().unwrap();
+    assert!(first.endpoint.starts_with("http://127.0.0.1:"), "{}", first.endpoint);
+    tokio::net::TcpStream::connect(("127.0.0.1", port)).await.expect("the OSE listens");
+    f.client.ide_ose_relay(&first.launch_id).await.expect("the relay opens");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_w4a_node_ose_writes_0600_token_file_and_clears_env() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = start(fake_ose_binary).await;
+    let launch = f.client.ide_ose(&f.root).await.unwrap();
+
+    let script = f.dir.path().canonicalize().unwrap().join("fake-ose");
+    let args = std::fs::read_to_string(format!("{}.args", script.display())).unwrap();
+    let args: Vec<&str> = args.lines().collect();
+    let at = args.iter().position(|a| *a == "--connection-token-file").expect("the token file flag");
+    let token_file = PathBuf::from(args[at + 1]);
+    assert!(token_file.starts_with(f.data.join(LOCAL_COMPUTER).join("tokens")), "{}", token_file.display());
+
+    let md = std::fs::metadata(&token_file).unwrap();
+    assert_eq!(md.permissions().mode() & 0o777, 0o600);
+    let real = std::fs::read_to_string(&token_file).unwrap();
+    assert_eq!(real.len(), 64, "64 hex, no trailing newline");
+    assert!(real.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_ne!(real, launch.connection_token, "the answer carries the placeholder, not the real token");
+    assert!(!args.iter().any(|a| a.contains(&real)), "the real token is on the command line");
+    let dir_at = args.iter().position(|a| *a == "--server-data-dir").expect("the data dir flag");
+    assert_eq!(Path::new(args[dir_at + 1]), f.data.join(LOCAL_COMPUTER));
+
+    // The child's environment is the allowlist: nothing of the test process's own variables
+    // (cargo sets `CARGO_*` for every test binary) and no token.
+    let env = std::fs::read_to_string(format!("{}.env", script.display())).unwrap();
+    let names: Vec<&str> = env.lines().filter_map(|l| l.split_once('=').map(|(k, _)| k)).collect();
+    assert!(std::env::vars().any(|(k, _)| k.starts_with("CARGO_")), "the test expects cargo's variables");
+    assert!(!names.iter().any(|n| n.starts_with("CARGO_")), "{names:?}");
+    assert!(!names.iter().any(|n| n.contains("TOKEN")), "{names:?}");
+    assert!(!env.contains(&real) && !env.contains(TOKEN), "a token is in the OSE environment");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_w4b_node_ide_extensions_installs_and_enforces_mutex_and_timeout() {
+    // `$1` is `--install-extension`, `$2` the extension spec.
+    let f = start(|dir, data| {
+        let script = dir.join("fake-ose");
+        common::write_exec_ready(
+            &script,
+            r##"#!/bin/sh
+case "$2" in
+  slow.ext) sleep 2; echo "installed $2" ;;
+  hang.ext) sleep 60 ;;
+  fail.ext) echo "no such extension" >&2; exit 3 ;;
+  *) echo "installed $2" ;;
+esac
+"##,
+        );
+        OseManager::with_data_root(Some(script), data.to_path_buf()).with_install_timeout(Duration::from_secs(5))
+    })
+    .await;
+    let post = |body: Value| {
+        let client = f.client.clone();
+        async move {
+            let (status, bytes) = client.post_raw("/ide/extensions", &body).await.unwrap();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
+        }
+    };
+
+    let (status, v) = post(json!({ "id": "good.ext", "version": "1.2.3" })).await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["installed"], true);
+    assert_eq!(v["id"], "good.ext");
+    assert!(v["output"].as_str().unwrap().contains("installed good.ext@1.2.3"), "{v}");
+
+    // The id pattern is the server's: no path, no flag, no unknown field.
+    for bad in [json!({ "id": "../x" }), json!({ "id": "-a.b" }), json!({ "id": "a.b", "path": "/x" })] {
+        let (status, v) = post(bad.clone()).await;
+        assert_eq!(status, 400, "{bad}: {v}");
+        assert!(v["error"].is_string(), "{v}");
+    }
+
+    // A failed run is 502 with what it printed.
+    let (status, v) = post(json!({ "id": "fail.ext" })).await;
+    assert_eq!(status, 502, "{v}");
+    assert_eq!(v["installed"], false);
+    assert!(v["output"].as_str().unwrap().contains("no such extension"), "{v}");
+
+    // One install at a time on the node.
+    let slow = tokio::spawn(post(json!({ "id": "slow.ext" })));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (status, v) = post(json!({ "id": "good.ext" })).await;
+    assert_eq!(status, 409, "{v}");
+    let (status, v) = slow.await.unwrap();
+    assert_eq!(status, 200, "{v}");
+
+    // A run past the timeout is killed and answered 502.
+    let started = std::time::Instant::now();
+    let (status, v) = post(json!({ "id": "hang.ext" })).await;
+    assert_eq!(status, 502, "{v}");
+    assert_eq!(v["installed"], false);
+    assert!(v["error"].as_str().unwrap().starts_with("install timed out"), "{v}");
+    assert!(started.elapsed() < Duration::from_secs(30), "took {:?}", started.elapsed());
+}

@@ -3272,3 +3272,19 @@ mod device_scope_tests {
         assert_eq!(d.scope, DeviceScope::Full);
     }
 }
+
+#[cfg(test)]
+mod github_event_routines_tests {
+    use super::GithubSummary;
+
+    #[test]
+    fn fr_l23_github_summary_decodes_event_routines() {
+        let old: GithubSummary = serde_json::from_str(r#"{"state":"on"}"#).unwrap();
+        assert!(old.event_routines.is_empty(), "an older server sends no list");
+        assert!(!old.runs_event("ci_failed"));
+        let new: GithubSummary =
+            serde_json::from_str(r#"{"state":"on","event_routines":["ci_failed","later"]}"#).unwrap();
+        assert!(new.runs_event("ci_failed"));
+        assert!(!new.runs_event("pr_opened"));
+    }
+}

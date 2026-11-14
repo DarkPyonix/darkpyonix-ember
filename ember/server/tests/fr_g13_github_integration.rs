@@ -292,3 +292,19 @@ async fn fr_g13_names_from_the_node_are_cleaned_again() {
     assert_eq!(body["repos"][0]["name_with_owner"], "o/[31mr");
     assert_eq!(body["repos"][0]["default_branch"].as_str().unwrap().chars().count(), 100);
 }
+
+/// FR-L23 (#759): the summary lists the events the server can start a routine on, so the app's
+/// 연동 row says the rule runs only when the server says so. Present whatever the GitHub state.
+#[tokio::test]
+async fn fr_l23_the_summary_reports_the_events_the_server_runs() {
+    let f = fixture().await;
+    f.project("alpha", "/w/a");
+    f.answer("/w/a", 200, summary("o/r", Some(3), Some(1), json!(["success"])));
+    let (status, body) = get(&f.app(LONG)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["event_routines"], json!(["ci_failed"]));
+
+    let none = fixture().await;
+    let (_, body) = get(&none.app(LONG)).await;
+    assert_eq!(body["event_routines"], json!(["ci_failed"]), "also without a project: {body}");
+}

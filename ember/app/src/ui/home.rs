@@ -2895,4 +2895,38 @@ mod tests {
             assert!(!s.contains('\u{2014}'));
         }
     }
+
+    // ---- the 연동 rule row (FR-L23, #759) ------------------------------------------------------
+
+    #[test]
+    fn fr_l23_ci_rule_note_follows_what_the_server_reports() {
+        assert_eq!(ci_rule_note(None), CI_RULE_UNKNOWN_NOTE, "nothing answered yet: not known");
+        let mut g = ready_github();
+        assert_eq!(ci_rule_note(Some(&g)), CI_RULE_NOTE, "a server that reports no event does not run the rule");
+        g.ci_routines = true;
+        assert_eq!(ci_rule_note(Some(&g)), CI_RULE_RUNS_NOTE);
+        assert!(!CI_RULE_RUNS_NOTE.contains("준비 중"));
+        for off in [GithubConn::Off, GithubConn::Warn] {
+            g.state = off;
+            assert_eq!(ci_rule_note(Some(&g)), CI_RULE_NEEDS_GITHUB_NOTE, "the server reads CI through gh");
+        }
+        for s in [CI_RULE_UNKNOWN_NOTE, CI_RULE_RUNS_NOTE, CI_RULE_NEEDS_GITHUB_NOTE] {
+            assert!(!s.contains('\u{2014}'));
+            assert!(s.ends_with("니다"), "{s}");
+        }
+    }
+
+    #[test]
+    fn fr_l23_ci_rule_capability_comes_from_the_summary() {
+        let mut s = summary();
+        assert!(!github_state_from(&s).ci_routines, "an older server sends no list");
+        s.event_routines = vec!["ci_failed".to_string()];
+        assert!(github_state_from(&s).ci_routines);
+        s.event_routines = vec!["something_else".to_string()];
+        assert!(!github_state_from(&s).ci_routines);
+        // The samples of the demo and the capture hook run nothing, so they never claim it.
+        for kind in [GithubSampleKind::Ok, GithubSampleKind::Warn, GithubSampleKind::Off] {
+            assert!(!sample_github_state(kind).ci_routines);
+        }
+    }
 }

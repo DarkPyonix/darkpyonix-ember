@@ -2507,4 +2507,120 @@ mod tests {
         let tile = project_routine_tile(&TileLoad::Loaded(vec![one]), crate::ui::project::DEFAULT_PROJECT_ID, now);
         assert_eq!(tile.rows.len(), 1);
     }
+
+    // ---- server event routines (FR-L23, FR-A8, #759) ------------------------------------------
+
+    fn event_kind(repo: &str, branch: Option<&str>) -> ScheduleKind {
+        ScheduleKind::Event {
+            on: wire::EventOn::CiFailed,
+            repository: repo.into(),
+            branch: branch.map(str::to_string),
+        }
+    }
+
+    fn event_draft(text: &str) -> FormDraft {
+        let mut d = FormDraft::new("ember").with_trigger(Trigger::Event);
+        d.name = "CI 고치기".into();
+        d.cron = text.into();
+        d.prompt = "실패한 CI를 고칩니다".into();
+        d
+    }
+
+    #[test]
+    fn fr_a8_event_text_names_a_repository_and_an_optional_branch() {
+        assert_eq!(parse_ci_event("o/r"), Some(("o/r".to_string(), None)));
+        assert_eq!(parse_ci_event(" Owner/Repo@main "), Some(("owner/repo".to_string(), Some("main".to_string()))));
+        assert_eq!(
+            parse_ci_event("https://github.com/o/r.git@feat/x"),
+            Some(("o/r".to_string(), Some("feat/x".to_string())))
+        );
+        assert_eq!(parse_ci_event("github.com/o/r"), Some(("o/r".to_string(), None)));
+        for bad in ["", "PR이 열릴 때", "pull_request.opened", "o/", "/r", "o/r/x", "o/r@", "o/r@a b", "o r/x"] {
+            assert_eq!(parse_ci_event(bad), None, "{bad}");
+        }
+        assert_eq!(ci_event_text("o/r", Some("main")), "o/r@main");
+        assert_eq!(ci_event_text("o/r", None), "o/r");
+        assert_eq!(parse_ci_event(&ci_event_text("o/r", Some("main"))), Some(("o/r".to_string(), Some("main".to_string()))));
+    }
+
+    #[test]
+    fn fr_a8_event_schedule_reads_as_an_event_routine_that_waits() {
+        let mut s = schedule(event_kind("o/r", Some("main")), false);
+        s.next_run_at = None;
+        let e = schedule_to_entry(&s, &[server_run(wire::RunStatus::Failed)]);
+        assert_eq!(e.routine.trigger, Trigger::Event);
+        assert_eq!(e.routine.cron, "o/r@main", "the form's event field holds repository and branch");
+        assert_eq!(schedule_line(&e.routine), "CI 실패 시 · o/r (main)");
+        assert_eq!(event_heading(&e.routine.cron), "CI 실패 시 · o/r (main)");
+        assert_eq!(e.next_at, None);
+        assert_eq!(routine_state_text(&e, 10), EVENT_WAITING);
+        assert!(event_state_line(&e.routine.cron).starts_with(EVENT_WAITING));
+        // The last run failed: the list and the tile say so.
+        assert_eq!(e.runs[0].status, RunStatus::Failed);
+        assert!(last_run_text(&e.runs, 10).starts_with("실패"));
+
+        let no_branch = schedule_to_routine(&schedule(event_kind("o/r", None), false));
+        assert_eq!(schedule_line(&no_branch), "CI 실패 시 · o/r");
+        let off = schedule_to_entry(&schedule(event_kind("o/r", None), true), &[]);
+        assert_eq!(routine_state_text(&off, 10), "꺼져 있습니다");
+    }
+
+    #[test]
+    fn fr_a8_event_text_without_a_repository_keeps_its_words_and_does_not_wait() {
+        let mut local = routine("1", "PR 확인", "p", "PR이 열릴 때");
+        local.trigger = Trigger::Event;
+        assert_eq!(schedule_line(&local), "PR이 열릴 때");
+        assert_eq!(event_heading("PR이 열릴 때"), "PR이 열릴 때");
+        assert!(!event_state_line("PR이 열릴 때").contains(EVENT_WAITING), "nothing runs it, so it does not wait");
+    }
+
+    #[test]
+    fn fr_a8_event_draft_with_a_repository_goes_to_the_server() {
+        let d = event_draft("o/r@develop");
+        assert!(server_can_store(&d));
+        let body = new_schedule(&d, "/w/ember");
+        assert_eq!(body.kind, event_kind("o/r", Some("develop")));
+        assert_eq!(body.target, ScheduleTarget::New { title: Some("CI 고치기".into()) });
+        assert_eq!(body.cwd.as_deref(), Some("/w/ember"));
+        assert_eq!(body.project, "ember");
+        assert_eq!(
+            serde_json::to_value(&body.kind).unwrap(),
+            serde_json::json!({ "type": "event", "on": "ci_failed", "repository": "o/r", "branch": "develop" })
+        );
+        // A time draft is the cron body it always was.
+        let t = FormDraft::new("ember");
+        assert!(server_can_store(&t));
+        assert_eq!(new_schedule(&t, "/w").kind, cron_kind("0 9 * * *"));
+    }
+
+    #[test]
+    fn fr_a8_event_draft_without_a_repository_stays_on_this_device() {
+        let d = event_draft("PR이 열릴 때");
+        assert_eq!(draft_kind(&d), None);
+        assert!(!server_can_store(&d));
+        assert!(d.errors().is_empty(), "the form still saves it, on this device");
+        assert!(LOCAL_NOTE.contains("owner/name"), "the note says what the server needs");
+        assert!(EVENT_PLACEHOLDER.contains("owner/name"));
+    }
+
+    #[test]
+    fn fr_a8_event_edit_patch_carries_the_repository_or_names_what_was_not_saved() {
+        let old = schedule_to_routine(&schedule(event_kind("o/r", Some("main")), false));
+        let mut d = FormDraft::from_routine(&old);
+        assert_eq!(d.trigger, Trigger::Event);
+        assert_eq!(changed_patch(&d, &old).kind, None, "an unchanged event sends no kind");
+        d.cron = "o/r@develop".into();
+        assert_eq!(changed_patch(&d, &old).kind, Some(event_kind("o/r", Some("develop"))));
+        assert!(!unsaved_fields(&d, &old).contains(&"이벤트"));
+        d.cron = "PR이 열릴 때".into();
+        assert_eq!(changed_patch(&d, &old).kind, None, "text that names no repository is not sent");
+        assert!(unsaved_fields(&d, &old).contains(&"이벤트"));
+
+        // A time routine turned into an event routine.
+        let time = schedule_to_routine(&schedule(cron_kind("0 9 * * *"), false));
+        let mut d = FormDraft::from_routine(&time).with_trigger(Trigger::Event);
+        d.cron = "o/r".into();
+        assert_eq!(changed_patch(&d, &time).kind, Some(event_kind("o/r", None)));
+        assert_eq!(schedule_patch(&d).kind, Some(event_kind("o/r", None)));
+    }
 }

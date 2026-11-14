@@ -1933,32 +1933,8 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
     let load = ui.live.usage_summary.get();
     let series = usage::trend_days(&load, days.get());
     let values: Vec<u64> = series.iter().map(|(_, t)| *t).collect();
-    const H: f32 = 160.0;
-    let usize_values: Vec<usize> = values.iter().map(|v| *v as usize).collect();
-    let rects = crate::ui::home::bar_rects(&usize_values, chart_w, H, 6.0);
-    let centers: Vec<f32> = rects.iter().map(|(x, _, w, _)| x + w / 2.0).collect();
-    let now = rects.len().saturating_sub(1);
-    let mut list = DrawList::builder().rect(paint(p.line), 0.0, H, chart_w, 1.0, 0.0);
-    for (i, (x, y, w, h)) in rects.into_iter().enumerate() {
-        if h > 0.0 {
-            let color = paint(if i == now { p.orange.strong } else { p.grey.strong });
-            list = list.round_rect(color, x, y, w, h, 3.0, 1.0);
-            for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(x, y, w, h, usage::legend_hatch_style().0) {
-                list = list.line(color, x1, y1, x2, y2, 1.0);
-            }
-        }
-    }
-    // `.hm-line` and `.hm-pt` (#849): the ink cost line over the bars and a ringed point on the
-    // last costed day, only for days the server sent a cost (none today, so no line is drawn).
-    // Not drawn: the 5 % ink area under the line (the toolkit `DrawList` has no filled path).
-    let points = usage::cost_line_points(&usage::trend_costs(&load, days.get()), &centers, H);
-    for pair in points.windows(2) {
-        list = list.line(paint(p.ink), pair[0].0, pair[0].1, pair[1].0, pair[1].1, 2.0);
-    }
-    if let Some((x, y)) = points.last() {
-        list = list.circle(paint(p.surface), *x, *y, 6.0, 0.0).circle(paint(p.ink), *x, *y, 4.5, 3.0);
-    }
-    let commands = list.build();
+    const H: f32 = TREND_PLOT_H;
+    let commands = trend_draw_list(&values, &usage::trend_costs(&load, days.get()), chart_w, p);
     let narrow = layout(crate::ui::window_size::current_window_size().width_dp).compact;
     let legend = usage::cost_legend(
         usage::period_cost(&load, days.get()).is_some(),
@@ -2011,6 +1987,49 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
         // TODO(compose-rust): a tooltip or per-bar tap needs hover or a click on the Canvas; the
         // toolkit has neither, so no day is selectable.
     });
+}
+
+/// The trend plot's height.
+const TREND_PLOT_H: f32 = 160.0;
+
+/// The paint of the area under the cost line: `ink` at 5 % (`.hm-area`).
+fn cost_area_paint(p: &Palette) -> Paint {
+    Paint::Literal(Color::argb((usage::COST_AREA_ALPHA << 24) | (p.ink.to_argb() & 0x00ff_ffff)))
+}
+
+/// What the trend plot draws, `chart_w` wide and [`TREND_PLOT_H`] high over a 1 dp baseline:
+/// one hatched bar per day (the last in orange), and over them the cost of the days the server
+/// priced (mockup `.hm-area`, `.hm-line`, `.hm-pt`, #849): the 5 % ink area under the line, the
+/// 2 dp ink line, and a ringed point on the last costed day. With no cost in the window (the
+/// server sends none today) only the bars are drawn, never a line at zero.
+fn trend_draw_list(values: &[u64], costs: &[Option<f64>], chart_w: f32, p: &Palette) -> DrawList {
+    const H: f32 = TREND_PLOT_H;
+    let usize_values: Vec<usize> = values.iter().map(|v| *v as usize).collect();
+    let rects = crate::ui::home::bar_rects(&usize_values, chart_w, H, 6.0);
+    let centers: Vec<f32> = rects.iter().map(|(x, _, w, _)| x + w / 2.0).collect();
+    let now = rects.len().saturating_sub(1);
+    let mut list = DrawList::builder().rect(paint(p.line), 0.0, H, chart_w, 1.0, 0.0);
+    for (i, (x, y, w, h)) in rects.into_iter().enumerate() {
+        if h > 0.0 {
+            let color = paint(if i == now { p.orange.strong } else { p.grey.strong });
+            list = list.round_rect(color, x, y, w, h, 3.0, 1.0);
+            for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(x, y, w, h, usage::legend_hatch_style().0) {
+                list = list.line(color, x1, y1, x2, y2, 1.0);
+            }
+        }
+    }
+    let points = usage::cost_line_points(costs, &centers, H);
+    // The toolkit's `DrawList` has no filled path, so the area is columns of the line's height.
+    for (x, y) in usage::cost_area_columns(&points, usage::COST_AREA_STEP) {
+        list = list.line(cost_area_paint(p), x, y, x, H, usage::COST_AREA_STEP);
+    }
+    for pair in points.windows(2) {
+        list = list.line(paint(p.ink), pair[0].0, pair[0].1, pair[1].0, pair[1].1, 2.0);
+    }
+    if let Some((x, y)) = points.last() {
+        list = list.circle(paint(p.surface), *x, *y, 6.0, 0.0).circle(paint(p.ink), *x, *y, 4.5, 3.0);
+    }
+    list.build()
 }
 
 /// `.hm-seg button`: the 7일 / 14일 toggle, 28 dp pills (`.hm-seg button{height:28px}`) with a
@@ -3089,6 +3108,34 @@ mod tests {
         let sel = c.selection.get_untracked();
         assert_eq!((sel.option.model, sel.option.effort), ("opus", Some("Low")), "the third row, Opus 5.5 (낮음)");
         assert_eq!(c.open.get_untracked(), None);
+    }
+
+    #[test]
+    fn fr_l23_the_trend_draws_the_cost_line_its_area_and_the_last_point_once_a_cost_arrives() {
+        // #849: what the plot hands the toolkit. Four days, three of them priced.
+        use compose_rust::DrawCommand;
+        let p = ember_theme().palette;
+        let values = [10_u64, 20, 30, 40];
+        let ink = |list: &DrawList| {
+            let cmds = list.decode().expect("decode");
+            let line = cmds.iter().filter(|c| matches!(c, DrawCommand::Line { paint: pt, stroke_width, .. } if *pt == paint(p.ink) && *stroke_width == 2.0)).count();
+            let area = cmds.iter().filter(|c| matches!(c, DrawCommand::Line { paint: pt, .. } if *pt == cost_area_paint(p))).count();
+            let ring = cmds.iter().filter(|c| matches!(c, DrawCommand::Circle { .. })).count();
+            (line, area, ring)
+        };
+        let none = trend_draw_list(&values, &[None, None, None, None], 400.0, p);
+        assert_eq!(ink(&none), (0, 0, 0), "no cost, no line");
+        let priced = trend_draw_list(&values, &[Some(1.0), None, Some(3.0), Some(2.0)], 400.0, p);
+        let (line, area, ring) = ink(&priced);
+        assert_eq!(line, 2, "one segment between each pair of costed days");
+        assert_eq!(ring, 2, "the surface disc and the ink ring of `.hm-pt`");
+        // The area spans the first to the last costed day, which are three bar pitches apart
+        // of the four that fill 400 dp, in 2 dp columns.
+        assert!((140..=160).contains(&area), "{area} columns");
+        // The area is `ink` at 5 %, not opaque.
+        assert_eq!(cost_area_paint(p), Paint::Literal(Color::argb(0x0D00_0000 | (p.ink.to_argb() & 0x00ff_ffff))));
+        let one = trend_draw_list(&values, &[None, Some(1.0), None, None], 400.0, p);
+        assert_eq!(ink(&one), (0, 0, 2), "a single costed day is a point");
     }
 
     #[test]

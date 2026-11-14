@@ -129,16 +129,25 @@ pub fn tree_verdict(pid: u32, table: &ProcTable, roots: &[u32]) -> TreeVerdict {
 /// has always exited, so the unix rule would refuse every app started from the desktop.
 ///
 /// This is the same exit as daemonising on unix (a process can leave its tree on purpose) and
-/// no weaker: check 2 is not a boundary on either platform. A reused pid can send the walk
-/// into an unrelated tree; it then refuses a claim that was outside or passes one whose real
-/// parent had already exited, which the rule above passes anyway.
+/// no weaker: check 2 is not a boundary on either platform.
+///
+/// Pids are reused, so the pid a process keeps for an exited parent can belong to a younger
+/// process, even to one of its own descendants. A walk that comes back to a pid it has seen
+/// has therefore crossed such a stale link (a real parent is never its own descendant): the
+/// real parent has exited, and the walk ends there like at a missing one. The Windows CI
+/// runner showed this: its test process met such a loop about every other run (#815). A
+/// reused pid can also send the walk into an unrelated tree; it then refuses a claim that was
+/// outside or passes one whose real parent had already exited, which the rule above passes
+/// anyway. The roots are checked at every step before any of this, so a claimant whose chain
+/// to a root is intact is still inside.
 pub fn tree_verdict_exited_parents(pid: u32, table: &ProcTable, roots: &[u32]) -> TreeVerdict {
     if roots.contains(&pid) {
         return TreeVerdict::Inside(pid);
     }
     let Some(me) = table.get(&pid) else { return TreeVerdict::Unknown };
+    let mut seen = vec![pid];
     let mut cur = me.ppid;
-    // A depth bound, so a parent loop (reused pids) cannot hang the claim.
+    // A depth bound on top of the loop check, so no table can hang the claim.
     for _ in 0..256 {
         if roots.contains(&cur) {
             return TreeVerdict::Inside(cur);
@@ -147,10 +156,11 @@ pub fn tree_verdict_exited_parents(pid: u32, table: &ProcTable, roots: &[u32]) -
         if cur == 0 {
             return TreeVerdict::Outside;
         }
-        // Back at the claimant: a loop through reused pids.
-        if cur == pid {
-            return TreeVerdict::Unknown;
+        // A pid seen before: a stale parent link through a reused pid.
+        if seen.contains(&cur) {
+            return TreeVerdict::Outside;
         }
+        seen.push(cur);
         match table.get(&cur) {
             Some(p) => cur = p.ppid,
             None => return TreeVerdict::Outside,
@@ -673,12 +683,17 @@ mod tests {
         assert_eq!(tree_verdict_exited_parents(910, &t, &[512]), TreeVerdict::Inside(512));
         // The claimant itself must be in the table.
         assert_eq!(tree_verdict_exited_parents(999, &t, &[600]), TreeVerdict::Unknown);
-        // A loop through reused pids ends as unknown.
+        // A loop through reused pids is a stale parent link: the real parent has exited.
         let l = table(&[(7, 8), (8, 9), (9, 8)]);
-        assert_eq!(tree_verdict_exited_parents(7, &l, &[5]), TreeVerdict::Unknown);
-        // So does a process that names itself as its parent.
+        assert_eq!(tree_verdict_exited_parents(7, &l, &[5]), TreeVerdict::Outside);
+        // So is a loop back to the claimant, and a process that names itself as its parent.
+        let b = table(&[(7, 8), (8, 7)]);
+        assert_eq!(tree_verdict_exited_parents(7, &b, &[5]), TreeVerdict::Outside);
         let s = table(&[(7, 7)]);
-        assert_eq!(tree_verdict_exited_parents(7, &s, &[5]), TreeVerdict::Unknown);
+        assert_eq!(tree_verdict_exited_parents(7, &s, &[5]), TreeVerdict::Outside);
+        // A root on the way is found before the loop.
+        let r = table(&[(7, 8), (8, 5), (5, 8)]);
+        assert_eq!(tree_verdict_exited_parents(7, &r, &[5]), TreeVerdict::Inside(5));
     }
 
     #[test]

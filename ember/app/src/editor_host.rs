@@ -28,6 +28,8 @@ pub enum HostCommand {
     Rename { path: String, new_name: String },
     /// List every file below the project folder for quick open.
     IndexFiles,
+    /// Cancel a running index walk.
+    CancelIndexFiles,
     Delete { path: String, is_dir: bool },
     DeleteMany { items: Vec<(String, bool)> },
     CopyPaths { sources: Vec<String>, dest_dir: String },
@@ -85,6 +87,8 @@ pub struct HostState {
     pub listings: std::collections::HashMap<String, Vec<(String, u32)>>,
     /// The files below the project folder as palette items (sorted), as far as the index has got.
     pub file_items: Arc<Vec<crate::ui::palette::Item>>,
+    /// Monotonically increasing generation number for index walks.
+    pub index_generation: u64,
     /// The index is still being built.
     pub index_running: bool,
     /// The index stopped at its cap: the list is not complete.
@@ -198,22 +202,28 @@ impl HostState {
 }
 
 /// How many files and directories the quick open index takes before it stops.
-const INDEX_MAX_FILES: usize = 20_000;
-const INDEX_MAX_DIRS: usize = 5_000;
+pub const INDEX_MAX_FILES: usize = 20_000;
+pub const INDEX_MAX_DIRS: usize = 5_000;
 /// The list is published to the window every this many directories while the walk goes on.
-const INDEX_PUBLISH_EVERY: usize = 200;
+pub const INDEX_PUBLISH_EVERY: usize = 200;
 
 /// Walks the project below `root`, breadth first, through the OSE file channel and keeps `shared`
 /// up to date: the files so far every few hundred directories and the finished list at the end.
 /// Directories the index does not enter are named by [`crate::ui::palette::skipped_directory`]; a
 /// symbolic link to a directory is not followed.
-async fn index_files(lister: ember_editor::DirLister, root: String, shared: Arc<Mutex<HostState>>, mut revision: SyncSignal<u64>) {
+async fn index_files(lister: ember_editor::DirLister, root: String, shared: Arc<Mutex<HostState>>, mut revision: SyncSignal<u64>, generation: u64) {
     use ember_editor_conn::remote_fs::file_type::{DIRECTORY, SYMBOLIC_LINK};
     let mut files: Vec<String> = Vec::new();
     let mut queue = std::collections::VecDeque::from([root.clone()]);
     let mut visited = 0usize;
     let mut capped = false;
     while let Some(dir) = queue.pop_front() {
+        {
+            let state = shared.lock().unwrap();
+            if state.index_generation != generation {
+                return;
+            }
+        }
         if files.len() >= INDEX_MAX_FILES || visited >= INDEX_MAX_DIRS {
             capped = true;
             break;
@@ -229,15 +239,30 @@ async fn index_files(lister: ember_editor::DirLister, root: String, shared: Arc<
                 }
             } else if name != ".DS_Store" {
                 files.push(path);
+                if files.len() >= INDEX_MAX_FILES {
+                    capped = true;
+                    break;
+                }
             }
         }
+        if capped {
+            break;
+        }
         if visited % INDEX_PUBLISH_EVERY == 0 {
-            shared.lock().unwrap().file_items = Arc::new(crate::ui::palette::file_items(&root, &files));
+            let mut state = shared.lock().unwrap();
+            if state.index_generation != generation {
+                return;
+            }
+            state.file_items = Arc::new(crate::ui::palette::file_items(&root, &files));
+            drop(state);
             *revision.write() += 1;
         }
     }
     {
         let mut state = shared.lock().unwrap();
+        if state.index_generation != generation {
+            return;
+        }
         state.file_items = Arc::new(crate::ui::palette::file_items(&root, &files));
         state.index_running = false;
         state.index_capped = capped;
@@ -460,14 +485,25 @@ impl EditorHost {
                                 // A fresh index replaces the last one and a running one is cancelled; the walk runs
                                 // in a task of its own so the session keeps answering while it goes.
                                 if let Some(task) = index_task.take() { task.abort(); }
-                                {
+                                let generation = {
                                     let mut state = shared.lock().unwrap();
+                                    state.index_generation += 1;
                                     state.file_items = Arc::new(Vec::new());
                                     state.index_running = true;
                                     state.index_capped = false;
+                                    state.index_generation
+                                };
+                                *revision.write() += 1;
+                                index_task = Some(tokio::spawn(index_files(session.lister(), root.clone(), shared.clone(), revision, generation)));
+                            }
+                            Some(HostCommand::CancelIndexFiles) => {
+                                if let Some(task) = index_task.take() { task.abort(); }
+                                {
+                                    let mut state = shared.lock().unwrap();
+                                    state.index_generation += 1;
+                                    state.index_running = false;
                                 }
                                 *revision.write() += 1;
-                                index_task = Some(tokio::spawn(index_files(session.lister(), root.clone(), shared.clone(), revision)));
                             }
                             Some(HostCommand::Search { id, request, debounce }) => {
                                 latest_search = id;

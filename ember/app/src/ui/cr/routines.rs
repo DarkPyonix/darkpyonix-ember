@@ -36,7 +36,7 @@ pub use crate::ui::routines::{
     schedule_to_entry, schedule_to_routine, success_percent, weekday, weekday_bar_radius,
     weekday_bars, weekday_card_height, weekday_chart_size, DayBar,
     Entry, FormDraft, FormError, FormField, Leave, LeaveDecision, leave_decision, routine_form_dirty,
-    ROUTINE_DISCARD_QUESTION, FormLayout, Group, FORM_FIELDS, form_layout,
+    ROUTINE_DISCARD_QUESTION, FormLayout, Group, FORM_FIELDS, form_layout, form_rows, form_two_columns,
     model_choices, schedule_description, when_big_max_lines, LocalStore, Minutes, PaneMode, Routine, RoutineKpi,
     RoutineStore, Run, RunStatus, StoreError, Trigger, LOCAL_NOTE, LOCAL_OFFSET_MIN, OFFLINE_NOTE,
 };
@@ -46,8 +46,9 @@ use crate::ui::home::{
 };
 use super::components::{
     pill_colors, pill_metrics, AppButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
-    FieldOptions, Label, Pill, PillTone, Select, SheetFooter,
+    CloseButton, FieldOptions, Label, MonoLabel, Pill, PillTone, Select, SheetFooter,
 };
+use super::characters::{CharState, Character};
 use super::compat::Spinner;
 use super::project::PHONE_MENU_ROOM;
 use super::shell::NavIcon;
@@ -548,8 +549,26 @@ pub fn detail_prompt_width(panel_w: f32, compact: bool) -> f32 {
 pub const DETAIL_HEADER_H: f32 = 56.0;
 /// The ring beside the big time.
 pub const DETAIL_RING: f32 = 76.0;
-/// One run row: the inset's 12 dp above and below a row as tall as the 32 dp 세션 열기 button.
-pub const RUN_TILE_H: f32 = PAD_ROW_V * 2.0 + H_CTL;
+/// A run tile's padding (`.runtile { padding: 10px }`).
+pub const RUN_TILE_PAD: f32 = 10.0;
+/// One run tile (`.runtile`): 10 above and below the time and the session line (#848).
+pub const RUN_TILE_H: f32 = 2.0 * RUN_TILE_PAD + 2.0 * Fs::Xs.line_height();
+/// The run tile's character (`bot(.., 30)`).
+pub const RUN_TILE_AVATAR: f32 = 30.0;
+/// The accessible name of a run tile: the whole tile opens the run's session.
+pub const OPEN_SESSION_LABEL: &str = "세션 열기";
+
+/// The run history's columns: two (`.runtiles`), one on a phone (560 px and below).
+pub fn run_tile_columns(compact: bool) -> usize {
+    if compact {
+        1
+    } else {
+        2
+    }
+}
+
+/// The schedule line's type step: `.rt-sched` 15/500 `text-2` (#848).
+pub const SCHED_FS: Fs = Fs::Lg;
 
 /// The detail body's padding: 14 on a wide panel, 12 on a phone.
 pub fn detail_body_pad(compact: bool) -> f32 {
@@ -591,7 +610,7 @@ pub fn detail_first_run_bottom(panel_w: f32, compact: bool, prompt_lines: u32, c
     };
     let when_col = detail_when_fs(compact).line_height()
         + SP[0]
-        + Fs::Sm.line_height()
+        + SCHED_FS.line_height()
         + SP[0]
         + Fs::Xs.line_height();
     let when = when_col.max(DETAIL_RING);
@@ -1144,7 +1163,9 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                         on_toggle.clone(),
                                     );
                                 });
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                                // Clipped to its column: the inline form never spreads over the
+                                // list beside it (design review R6, #848).
+                                cu::Column().modifier(Modifier::new().weight(1.0).clip(true)).content(|| {
                                     if let (true, Some((initial, editing))) = (inline_form, form_initial.as_ref()) {
                                         let rl_close = request_leave.clone();
                                         let save_cb = on_save.clone();
@@ -1383,8 +1404,83 @@ fn RunNowButton(busy: bool, on_click: impl FnMut() + 'static) {
             AppButton(RUN_NOW_BUSY_LABEL, None, ButtonKind::Primary, true, false, false, || {});
         });
     } else {
-        AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, on_click);
+        GlyphButton("지금 실행", ICON_PLAY_SVG, true, on_click);
     }
+}
+
+/// The glyph button's label step: `.btn.sm` 13/500.
+pub const GLYPH_BUTTON_FS: Fs = Fs::Sm;
+/// The glyph's size, the gap after it and the padding on each side (`.btn.sm`: 12, gap 8).
+pub const GLYPH_BUTTON_ICON: f32 = 16.0;
+pub const GLYPH_BUTTON_GAP: f32 = SP[1];
+pub const GLYPH_BUTTON_PAD: f32 = SP[2];
+
+/// A glyph button's width, erring wide: the padding, the glyph, the gap and the label (a Latin
+/// character at 0.62 em, a space at 0.3, a Hangul syllable at one em), 2 to spare.
+pub fn glyph_button_width(label: &str) -> f32 {
+    let em = GLYPH_BUTTON_FS.size();
+    let text: f32 = label
+        .chars()
+        .map(|c| if c == ' ' { 0.3 * em } else if c.is_ascii() { 0.62 * em } else { em })
+        .sum();
+    (2.0 * GLYPH_BUTTON_PAD + GLYPH_BUTTON_ICON + GLYPH_BUTTON_GAP + text + 2.0).ceil()
+}
+
+/// A 32 dp pill with a line glyph before its label (the mockup's 편집 with a pencil and 지금
+/// 실행 with a play glyph, design review R2, #848). `AppButton` takes only a toolkit
+/// `IconRole`, which has no pencil and no play, so the pill is drawn here with the mockup's SVG
+/// and one named overlay makes the whole pill the button.
+fn GlyphButton(label: &'static str, svg: &'static str, primary: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let (fill, border, text) = if primary { (p.ink, p.ink, p.ink_text) } else { (p.surface, p.line, p.text) };
+    cu::Box()
+        .modifier(
+            Modifier::new()
+                .size(glyph_button_width(label), H_CTL)
+                .background(paint(fill))
+                .border(1.0, paint(border))
+                .shape_role(ShapeRole::Full),
+        )
+        .alignment(Alignment::Center)
+        .content(move || {
+            cu::Row().alignment(Alignment::CenterStart).spacing(GLYPH_BUTTON_GAP).content(|| {
+                NavIcon(svg, text.to_argb(), GLYPH_BUTTON_ICON);
+                Label(label, GLYPH_BUTTON_FS, Weight::Medium, Some(paint(text)), Some(1));
+            });
+            FocusOverlay(label, on_click);
+        });
+}
+
+/// The detail's schedule line (`.rt-sched`, 15/500 `text-2`) with the cron in a mono chip after
+/// a middle dot (design review R4, #848).
+fn ScheduleLine(line: &str, cron: Option<&str>) {
+    let p = ember_theme().palette;
+    cu::Row().alignment(Alignment::CenterStart).spacing(SP[0]).content(|| {
+        Label(line, SCHED_FS, Weight::Medium, Some(paint(p.text_2)), Some(1));
+        if let Some(c) = cron {
+            Label("·", SCHED_FS, Weight::Medium, Some(paint(p.text_2)), Some(1));
+            CronChip(c);
+        }
+    });
+}
+
+/// The mockup's `.cron`: mono 12 `text-2` on `surface-2`, a 1 dp `line` border, `r-xs` corners
+/// and 4 dp on each side.
+fn CronChip(cron: &str) {
+    let p = ember_theme().palette;
+    cu::Row()
+        .alignment(Alignment::CenterStart)
+        .modifier(
+            Modifier::new()
+                .background(paint(p.surface_2))
+                .border(1.0, paint(p.line))
+                .corner_radius(CORNER_XS),
+        )
+        .content(|| {
+            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+            MonoLabel(cron, Fs::Xs, Weight::Regular, Some(paint(p.text_2)));
+            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+        });
 }
 
 /// A 36x20 toggle switch matching the mockup (`.switch.on` ink, off `track`, thumb `surface`).
@@ -1570,7 +1666,7 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
         }
     }
     let chart_cmd = chart.build();
-    let card_h = weekday_card_height(compact).max(174.0);
+    let card_h = weekday_card_height(compact);
     let busy = totals.iter().any(|t| *t > 0);
 
     let kpis_content = move || {
@@ -1943,6 +2039,9 @@ fn DetailPane(
     let routine_line = schedule_line(r);
     let project_name = r.sel.project.clone();
     let harness_label = r.sel.option.harness.label().to_string();
+    let harness_kind: &'static str = r.sel.option.harness.kind();
+    let agent_project = r.sel.project.clone();
+    let runs_project = r.sel.project.clone();
     let model_title = r.sel.option.row_title();
     let mode_label = r.sel.mode.label().to_string();
     let prompt_text = r.prompt.clone();
@@ -1982,11 +2081,9 @@ fn DetailPane(
         );
     }
     let ring_cmd = l.build();
-    let sched_text = if routine_trigger == Trigger::Time && cron_valid(&routine_cron) {
-        format!("{routine_line} · {routine_cron}")
-    } else {
-        routine_line
-    };
+    // The cron goes in a mono chip on the schedule line (`.rt-sched .cron`).
+    let cron_chip = (routine_trigger == Trigger::Time && cron_valid(&routine_cron)).then(|| routine_cron.clone());
+    let sched_text = routine_line;
 
     let on_toggle = std::sync::Arc::new(on_toggle);
     let on_edit = std::sync::Arc::new(on_edit);
@@ -2088,7 +2185,7 @@ fn DetailPane(
                         cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
                             RoutineSwitch(&routine_name, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
                             cu::Spacer().modifier(Modifier::new().weight(1.0));
-                            AppButton("편집", None, ButtonKind::Default, true, true, false, move || edit_fn(edit_id.clone()));
+                            GlyphButton("편집", ICON_EDIT_SVG, false, move || edit_fn(edit_id.clone()));
                             RunNowButton(busy, move || run_fn(run_id.clone()));
                         });
                     });
@@ -2111,7 +2208,7 @@ fn DetailPane(
                         });
                         TriggerPill(routine_trigger, true);
                         RoutineSwitch(&routine_name_w, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
-                        AppButton("편집", None, ButtonKind::Default, true, true, false, move || edit_fn(edit_id.clone()));
+                        GlyphButton("편집", ICON_EDIT_SVG, false, move || edit_fn(edit_id.clone()));
                         RunNowButton(busy, move || run_fn(run_id.clone()));
                         cu::Spacer().modifier(Modifier::new().width(SP[0]));
                     });
@@ -2127,8 +2224,8 @@ fn DetailPane(
                         cu::Column().modifier(Modifier::new().weight(1.0)).spacing(SP[0]).content(move || {
                             Label(&when_big, if routine_trigger == Trigger::Event { Fs::Xl2 } else { detail_when_fs(compact) }, Weight::Semibold, None, Some(when_big_max_lines(routine_trigger)));
                             // The cron sits on the schedule's line, as the mockup's `.rt-sched`
-                            // ("매일 오전 9시 · 0 9 * * *"), not on a line of its own.
-                            Label(&sched_text, Fs::Sm, Weight::Medium, None, Some(1));
+                            // ("매일 오전 9시 · 0 9 * * *"), in a mono chip (R4, #848).
+                            ScheduleLine(&sched_text, cron_chip.as_deref());
                             Label(&next, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                         });
                         cu::Box()
@@ -2155,7 +2252,7 @@ fn DetailPane(
                                     KeyValue("프로젝트", &project_name, "");
                                 });
                                 cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                    KeyValue("에이전트", &harness_label, &model_title);
+                                    AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project);
                                 });
                             });
                             cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
@@ -2173,7 +2270,7 @@ fn DetailPane(
                                 KeyValue("프로젝트", &project_name, "");
                             });
                             cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                KeyValue("에이전트", &harness_label, &model_title);
+                                AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project);
                             });
                             cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
                                 KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다");
@@ -2194,8 +2291,19 @@ fn DetailPane(
                         if entry.runs.is_empty() {
                             Label("아직 실행하지 않았습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
                         }
-                        for run in &entry.runs {
-                            RunTile(run, now, run_is_simulated(run, demo));
+                        // Tiles two to a row (`.runtiles`), one on a phone (R3, #848).
+                        let cols = run_tile_columns(compact);
+                        for pair in entry.runs.chunks(cols) {
+                            cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                                for run in pair {
+                                    cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                                        RunTile(run, now, run_is_simulated(run, demo), harness_kind, &runs_project);
+                                    });
+                                }
+                                for _ in pair.len()..cols {
+                                    cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {});
+                                }
+                            });
                         }
                     });
                 });
@@ -2224,35 +2332,81 @@ fn KeyValue(title: &str, value: &str, sub: &str) {
     });
 }
 
-fn RunTile(run: &Run, now: Minutes, simulated: bool) {
+/// The 에이전트 tile: the harness's character beside its name, the model below (R5, #848).
+fn AgentKeyValue(agent: &'static str, label: &str, sub: &str, project: &str) {
+    let p = ember_theme().palette;
+    let (v, s, proj) = (label.to_string(), sub.to_string(), project.to_string());
+    InsetPanel(true, move || {
+        cu::Column()
+            .spacing(SP[0])
+            .modifier(Modifier::new().fill_max_width())
+            .content(move || {
+                Label("에이전트", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                    Character(agent, false, 20.0, &v, &proj, CharState::Idle, None);
+                    Label(&v, Fs::Sm, Weight::Medium, None, Some(1));
+                });
+                if !s.is_empty() {
+                    Label(&s, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                }
+            });
+    });
+}
+
+/// The character's state for a run's status.
+pub fn run_char_state(s: RunStatus) -> CharState {
+    match s {
+        RunStatus::Done => CharState::Done,
+        RunStatus::Failed => CharState::Fail,
+        RunStatus::Running => CharState::Run,
+        RunStatus::Skipped | RunStatus::Missed => CharState::Idle,
+    }
+}
+
+/// One `.runtile` (R3, #848): the harness's character, the run's time over the session line,
+/// and the status pill, on `surface-2`. The whole tile opens the run's session (세션 열기).
+fn RunTile(run: &Run, now: Minutes, simulated: bool, agent: &'static str, project: &str) {
     let p = ember_theme().palette;
     let tone = status_tone(run.status);
     let session = run.session.clone();
     let row = run_row_text(run, now, simulated);
-    let (status_lbl, ago_lbl) = (row.status, row.ago);
-    // `RUN_TILE_H` high: the inset's own 12 above and below a row the button's height.
-    InsetPanel(true, move || {
-        cu::Row()
-            .alignment(Alignment::CenterStart)
-            .spacing(SP[2])
-            .modifier(Modifier::new().fill_max_width().height(H_CTL))
-            .content(move || {
-                Pill(status_lbl, tone, true);
-                if simulated {
-                    Pill(SAMPLE_FLAG, PillTone::Grey, true);
-                }
-                Label(&ago_lbl, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
-                if let Some(id) = session {
-                    AppButton("세션 열기", None, ButtonKind::Default, true, true, false, move || {
-                        if let Some(svc) = try_services() {
-                            let target = resolve_run_session_id(&id, demo_active());
-                            svc.ui.open_conversation(&target);
-                        }
+    let state = run_char_state(run.status);
+    let name = Harness::from_kind(agent).map(|h| h.label()).unwrap_or(agent);
+    let project = project.to_string();
+    cu::Box()
+        .modifier(
+            Modifier::new()
+                .fill_max_width()
+                .height(RUN_TILE_H)
+                .background(paint(p.surface_2))
+                .corner_radius(CORNER_MD),
+        )
+        .alignment(Alignment::CenterStart)
+        .content(move || {
+            cu::Row()
+                .alignment(Alignment::CenterStart)
+                .spacing(RUN_TILE_PAD)
+                .modifier(Modifier::new().fill_max_width().padding(RUN_TILE_PAD))
+                .content(|| {
+                    Character(agent, false, RUN_TILE_AVATAR, name, &project, state, None);
+                    cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                        Label(&row.when, Fs::Xs, Weight::Semibold, None, Some(1));
+                        Label(row.sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                     });
-                }
-            });
-    });
+                    Pill(row.status, tone, true);
+                    if let Some(flag) = row.flag {
+                        Pill(flag, PillTone::Grey, true);
+                    }
+                });
+            if let Some(id) = session {
+                FocusOverlay(OPEN_SESSION_LABEL, move || {
+                    if let Some(svc) = try_services() {
+                        let target = resolve_run_session_id(&id, demo_active());
+                        svc.ui.open_conversation(&target);
+                    }
+                });
+            }
+        });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2272,6 +2426,8 @@ struct FormCtx {
     editing: bool,
     computers: Vec<(String, String)>,
     projects: Vec<String>,
+    /// Inline or sheet: the inline form pairs fields in two columns when wide (#848).
+    layout: FormLayout,
 }
 
 /// The 저장 handler of either shell: validate, then hand the draft to the one save path.
@@ -2313,6 +2469,7 @@ fn RoutineForm(
         editing: editing.is_some(),
         computers: computers.to_vec(),
         projects: projects.to_vec(),
+        layout,
     };
     let title = if editing.is_some() {
         "루틴 편집"
@@ -2324,6 +2481,7 @@ fn RoutineForm(
         // The detail area: a card with the title, 취소 and 저장 in its header, then the fields
         // in the page's own scroll (mockup v8: the form replaces the detail panel).
         let (close, save) = (on_close.clone(), form_save_handler(ctx.draft.clone(), ctx.tried.clone(), on_save.clone()));
+        let mut close_x = on_close.clone();
         EmberCard(false, true, None, Some(0.0), None, move || {
             cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
                 cu::Row()
@@ -2337,6 +2495,8 @@ fn RoutineForm(
                         let mut close = close;
                         AppButton("취소", None, ButtonKind::Default, true, true, false, move || close());
                         AppButton("저장", None, ButtonKind::Primary, true, true, false, save);
+                        // The mockup's close button beside 취소 and 저장 (R7, #848).
+                        CloseButton(move || close_x());
                     });
                 cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                 // The first error also sits under the header buttons once a save was tried, so
@@ -2417,7 +2577,9 @@ fn FormFields(ctx: &FormCtx) {
             None,
         );
     }
-    for f in FORM_FIELDS {
+    // One field: its label and its control, `w` wide. `pick` turns the 프로젝트 and 트리거
+    // segments into the mockup's selects, as the two-column inline form has them (R7, #848).
+    let field = |f: FormField, w: f32, pick: bool| {
         match f {
             FormField::Name => {
                 FormLabel("이름");
@@ -2440,7 +2602,15 @@ fn FormFields(ctx: &FormCtx) {
                 FormLabel("프로젝트");
                 // Wrapped, never scrolled sideways, so the chosen one is always in view (#493).
                 let (sel_proj, names) = (draft.clone(), project_choices.clone());
-                SegChoices(&project_choices, field_w, |i| d.sel.project == project_choices[i], move |i| {
+                if pick {
+                    let at = project_choices.iter().position(|n| *n == d.sel.project).unwrap_or(0);
+                    Select(&project_choices[at], &project_choices, at, w, move |i| {
+                        let n = names[i].clone();
+                        sel_proj.update(|d| d.sel.project = n);
+                    });
+                    return;
+                }
+                SegChoices(&project_choices, w, |i| d.sel.project == project_choices[i], move |i| {
                     let n = names[i].clone();
                     sel_proj.update(|d| d.sel.project = n);
                 });
@@ -2449,7 +2619,15 @@ fn FormFields(ctx: &FormCtx) {
                 FormLabel("트리거");
                 let labels: Vec<String> = Trigger::ALL.iter().map(|t| t.label().to_string()).collect();
                 let sel_trig = draft.clone();
-                SegChoices(&labels, field_w, |i| d.trigger == Trigger::ALL[i], move |i| {
+                if pick {
+                    let at = Trigger::ALL.iter().position(|t| *t == d.trigger).unwrap_or(0);
+                    Select(&labels[at], &labels, at, w, move |i| {
+                        let t = Trigger::ALL[i];
+                        sel_trig.update(|d| *d = d.with_trigger(t));
+                    });
+                    return;
+                }
+                SegChoices(&labels, w, |i| d.trigger == Trigger::ALL[i], move |i| {
                     let t = Trigger::ALL[i];
                     sel_trig.update(|d| *d = d.with_trigger(t));
                 });
@@ -2509,7 +2687,7 @@ fn FormFields(ctx: &FormCtx) {
                     .chain(ctx.computers.iter().map(|(_, name)| name.clone()))
                     .collect();
                 let (sel_c, pick_ids) = (draft.clone(), ids.clone());
-                SegChoices(&labels, field_w, |i| d.sel.computer == ids[i], move |i| {
+                SegChoices(&labels, w, |i| d.sel.computer == ids[i], move |i| {
                     let c = pick_ids[i].clone();
                     sel_c.update(|d| d.sel.computer = c);
                 });
@@ -2534,6 +2712,22 @@ fn FormFields(ctx: &FormCtx) {
                 });
             }
         }
+    };
+    let two = form_two_columns(ctx.layout, field_w);
+    for row in form_rows(two) {
+        if let [a, b] = row[..] {
+            // The mockup's `.form` grid: 16 between the columns, 8 under each label.
+            let half = ((field_w - SP[3]) / 2.0).max(0.0);
+            cu::Row().spacing(SP[3]).alignment(Alignment::TopStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                for f in [a, b] {
+                    cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| field(f, half, true));
+                }
+            });
+        } else {
+            for f in row {
+                field(f, field_w, false);
+            }
+        }
     }
     if tried.get() {
         for e in errors {
@@ -2544,7 +2738,8 @@ fn FormFields(ctx: &FormCtx) {
 
 fn FormLabel(text: &str) {
     let p = ember_theme().palette;
-    Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
+    // `.form label`: 12 `text-2` (R7, #848).
+    Label(text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3271,7 +3466,7 @@ mod tests {
         }
         // The pieces the sum is made of are the mockup's.
         assert_eq!(DETAIL_HEADER_H, 56.0, "`.rt-dh` min-height");
-        assert_eq!(RUN_TILE_H, 56.0, "12 + 32 + 12");
+        assert_eq!(RUN_TILE_H, 56.0, "10 + 18 + 18 + 10");
         assert_eq!(detail_when_fs(false), Fs::Xl4);
         assert_eq!(detail_when_fs(true), Fs::Xl2, "28 px at 560 px and below");
     }
@@ -3281,11 +3476,13 @@ mod tests {
         let src = include_str!("routines.rs");
         let kv = src.split("fn KeyValue(").nth(1).unwrap().split("\n}\n").next().unwrap();
         let tile = src.split("fn RunTile(").nth(1).unwrap().split("\n}\n").next().unwrap();
-        for (name, body) in [("KeyValue", kv), ("RunTile", tile)] {
-            assert!(body.contains("InsetPanel(true"), "{name} sits in an inset");
-            assert!(!body.contains(".padding("), "{name} adds no padding inside the inset's own");
-        }
-        assert!(tile.contains(".height(H_CTL)"), "a run row is as tall as its button");
+        assert!(kv.contains("InsetPanel(true"), "KeyValue sits in an inset");
+        assert!(!kv.contains(".padding("), "KeyValue adds no padding inside the inset's own");
+        // The run tile is the mockup's `.runtile`: 10 padding on `surface-2`, not an inset (#848).
+        assert!(tile.contains(".height(RUN_TILE_H)"));
+        assert!(tile.contains(".padding(RUN_TILE_PAD)"));
+        assert!(tile.contains(".background(paint(p.surface_2))"));
+        assert!(!tile.contains("InsetPanel("));
     }
 
     #[test]
@@ -4276,6 +4473,9 @@ mod tests {
         texts: std::collections::HashMap<u32, String>,
         clickables: std::collections::HashMap<u32, u64>,
         enabled: std::collections::HashMap<u32, bool>,
+        /// Child to parent, so a removed node takes its whole subtree with it (a glyph button's
+        /// label is a child of the removed box, #848).
+        parents: std::collections::HashMap<u32, u32>,
     }
 
     impl Seen {
@@ -4291,14 +4491,37 @@ mod tests {
                     Mutation::SetProp { node_id, property: PropertyKind::Enabled, value: PropertyValue::Bool(b) } => {
                         self.enabled.insert(*node_id, *b);
                     }
+                    Mutation::Insert { parent_id, node_id, .. } | Mutation::Move { parent_id, node_id, .. } => {
+                        self.parents.insert(*node_id, *parent_id);
+                    }
                     Mutation::Remove { node_id } => {
-                        self.texts.remove(node_id);
-                        self.clickables.remove(node_id);
-                        self.enabled.remove(node_id);
+                        let gone: Vec<u32> = self
+                            .parents
+                            .keys()
+                            .copied()
+                            .filter(|n| self.descends_from(*n, *node_id))
+                            .chain(std::iter::once(*node_id))
+                            .collect();
+                        for n in gone {
+                            self.texts.remove(&n);
+                            self.clickables.remove(&n);
+                            self.enabled.remove(&n);
+                            self.parents.remove(&n);
+                        }
                     }
                     _ => {}
                 }
             }
+        }
+
+        fn descends_from(&self, mut node: u32, root: u32) -> bool {
+            while let Some(&up) = self.parents.get(&node) {
+                if up == root {
+                    return true;
+                }
+                node = up;
+            }
+            false
         }
     }
 
@@ -4557,5 +4780,83 @@ mod design_review_tests {
     #[test]
     fn design_b5_detail_title_is_15_600() {
         assert_eq!(ROUTINE_DETAIL_TITLE, (Fs::Lg, Weight::Semibold));
+    }
+
+    /// Design review 2026-11-14 R1: both top cards 205 at 1440 and 173 at 390; the KPI card no
+    /// longer takes a floor that made it taller than the chart card.
+    #[test]
+    fn design_r1_dashboard_cards_follow_the_chart_height() {
+        assert_eq!(weekday_card_height(false) + 2.0 * PAD_CARD_V + 2.0, 205.0);
+        assert_eq!(weekday_card_height(true) + 2.0 * PAD_CARD_V + 2.0, 173.0);
+        assert!(source().contains("let card_h = weekday_card_height(compact);"));
+        assert!(!source().contains(".max(174.0)"));
+    }
+
+    /// R2: 편집 has a pencil and 지금 실행 a play glyph, 13/500, in every header layout.
+    #[test]
+    fn design_r2_detail_buttons_carry_glyphs() {
+        let src = source();
+        assert_eq!(src.matches("GlyphButton(\"편집\", ICON_EDIT_SVG, false,").count(), 2);
+        assert_eq!(src.matches("GlyphButton(\"지금 실행\", ICON_PLAY_SVG, true,").count(), 1);
+        assert!(!src.contains("AppButton(\"편집\""));
+        assert!(!src.contains("AppButton(\"지금 실행\""));
+        assert_eq!((GLYPH_BUTTON_FS, GLYPH_BUTTON_ICON, GLYPH_BUTTON_GAP, GLYPH_BUTTON_PAD), (Fs::Sm, 16.0, 8.0, 12.0));
+        // The mockup's 편집 is about 74 wide (x 953..1027 in routines-list-default-1440-light).
+        let w = glyph_button_width("편집");
+        assert!((70.0..=80.0).contains(&w), "편집 is {w} wide");
+        assert!(glyph_button_width("지금 실행") > w);
+    }
+
+    /// R3: the run history is a two-column tile grid, one column on a phone.
+    #[test]
+    fn design_r3_run_history_is_a_tile_grid() {
+        assert_eq!(run_tile_columns(false), 2);
+        assert_eq!(run_tile_columns(true), 1);
+        assert_eq!(RUN_TILE_AVATAR, 30.0);
+        assert_eq!(run_char_state(RunStatus::Done), CharState::Done);
+        assert_eq!(run_char_state(RunStatus::Failed), CharState::Fail);
+        assert_eq!(run_char_state(RunStatus::Running), CharState::Run);
+        let src = source();
+        let tile = src.split("fn RunTile(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(tile.contains("Character("));
+        assert!(tile.contains("FocusOverlay(OPEN_SESSION_LABEL"));
+        assert!(!tile.contains("AppButton("), "no separate 세션 열기 button");
+        assert!(src.contains("for pair in entry.runs.chunks(cols)"));
+    }
+
+    /// R4: the schedule line is 15/500 `text-2` with the cron in a mono chip.
+    #[test]
+    fn design_r4_schedule_line_has_a_mono_cron_chip() {
+        assert_eq!(SCHED_FS, Fs::Lg);
+        let src = source();
+        assert!(src.contains("ScheduleLine(&sched_text, cron_chip.as_deref());"));
+        let chip = src.split("fn CronChip(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(chip.contains("MonoLabel(cron, Fs::Xs, Weight::Regular, Some(paint(p.text_2)))"));
+        assert!(chip.contains(".border(1.0, paint(p.line))"));
+        assert!(!src.contains("format!(\"{routine_line} · {routine_cron}\")"));
+    }
+
+    /// R5: the 에이전트 tile shows the harness's character.
+    #[test]
+    fn design_r5_agent_tile_has_the_character() {
+        let src = source();
+        assert_eq!(src.matches("AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project);").count(), 2);
+        let kv = src.split("fn AgentKeyValue(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(kv.contains("Character(agent, false, 20.0"));
+    }
+
+    /// R6, R7: the inline form is clipped to the detail column, pairs its fields in two columns
+    /// with selects for 프로젝트 and 트리거, labels them 12 `text-2`, and has a close button.
+    #[test]
+    fn design_r6_r7_inline_form_stays_in_its_column() {
+        let src = source();
+        assert!(src.contains("cu::Column().modifier(Modifier::new().weight(1.0).clip(true)).content(|| {\n                                    if let (true, Some((initial, editing))) = (inline_form"));
+        assert!(src.contains("CloseButton(move || close_x());"));
+        assert!(src.contains("let two = form_two_columns(ctx.layout, field_w);"));
+        let label = src.split("fn FormLabel(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(label.contains("Label(text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));"));
+        // At 1440 the inline fields are wide enough for two columns.
+        let wide = form_field_width(1440.0, 722.0, FormLayout::Inline);
+        assert!(form_two_columns(FormLayout::Inline, wide));
     }
 }

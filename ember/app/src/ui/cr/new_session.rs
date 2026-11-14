@@ -266,7 +266,7 @@ fn NewSessionForm(preset: &str) {
     // The mockup's sheet: a centered 560 px modal, a 60 px header with the title and a close
     // button, the form scrolling in between, and a footer with cancel and create.
     let body_height = {
-        let w = compose_rust::runtime::current_window_size();
+        let w = crate::ui::window_size::current_window_size();
         super::components::sheet_body_max_height(w.width_dp, w.height_dp, false, 60.0 + 65.0).min(900.0)
     };
     EmberSheet("새 세션", true, close.clone(), None, || {

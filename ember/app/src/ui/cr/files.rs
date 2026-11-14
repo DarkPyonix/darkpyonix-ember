@@ -408,7 +408,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
     };
     // `EMBER_CR_FILES_SHEET=share` opens the share sheet at the start, for review captures.
     let share_open = remember(|| mutable_state_of(std::env::var("EMBER_CR_FILES_SHEET").as_deref() == Ok("share")));
-    let window = compose_rust::runtime::current_window_size();
+    let window = crate::ui::window_size::current_window_size();
     let w = window.width_dp;
     let compact = w <= 560.0;
     let pad = page_pad(w);
@@ -1523,7 +1523,7 @@ fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMemb
         let o = open.clone();
         move || o.set(false)
     };
-    let window = compose_rust::runtime::current_window_size();
+    let window = crate::ui::window_size::current_window_size();
     let body_h = super::components::sheet_body_max_height(window.width_dp, window.height_dp, false, 60.0).min(640.0);
     let inner = super::components::sheet_width(window.width_dp, SHARE_SHEET_WIDTH) - 2.0 * SP[4];
     let rows = share_devices(devices);

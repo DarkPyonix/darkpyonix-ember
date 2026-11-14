@@ -412,7 +412,7 @@ pub fn hour_chip_rows(choices: &[u32], avail: f32) -> Vec<Vec<usize>> {
 
 /// The room the chips have: the sheet's width (bottom sheet: the window) less its padding.
 fn chip_avail() -> f32 {
-    let w = compose_rust::runtime::current_window_size().width_dp;
+    let w = crate::ui::window_size::current_window_size().width_dp;
     let sheet = if w > 0.0 { w.min(760.0) } else { 760.0 };
     sheet - 2.0 * SP[4]
 }

@@ -296,6 +296,314 @@ fn select_field(
     });
 }
 
+// ---------------------------------------------------------------------------------------------
+// Anchored popover menus (FR-L10.4, #888)
+// ---------------------------------------------------------------------------------------------
+
+/// The check on a menu's current row (`I("check")`).
+pub const ICON_CHECK_SVG: &str = include_str!("../../../assets/nav/check.svg");
+
+/// The mockup's two option popovers. `Mode` is the permission picker (`.mp-pop.mp-mode`,
+/// `core.js` `mdDraw`); `Drop` is the session top bar's IDE and web page menus (`.sdrop`,
+/// `session.css` 219-227).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopKind {
+    Mode,
+    Drop,
+}
+
+/// The measures of a [`PopKind`], all in dp.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PopMetrics {
+    /// The box's width before the window caps it.
+    pub width: f32,
+    /// The box's own padding (`.sdrop{padding:6px}`; the mode box has none).
+    pub box_pad: f32,
+    /// The head's top, side and bottom padding.
+    pub head_pad: (f32, f32, f32),
+    /// The list's top, side and bottom padding (`.mp-body{padding:4px 8px 8px}`).
+    pub list_pad: (f32, f32, f32),
+    /// A row's vertical and horizontal padding.
+    pub row_pad: (f32, f32),
+    /// The gap between a row's icon, text and check.
+    pub row_gap: f32,
+    /// The lowest a row is (`.md-row{min-height:56px}`; a drop row has no minimum).
+    pub row_min_h: f32,
+    pub row_radius: f32,
+    /// The gap between the control and the box.
+    pub offset: f32,
+}
+
+pub fn pop_metrics(kind: PopKind) -> PopMetrics {
+    match kind {
+        // `.mp-pop.mp-mode{width:340px}`, `.md-head{padding:12px 16px 4px}`,
+        // `.md-row{padding:8px 12px;gap:12px;border-radius:var(--r-sm)}`, 8 below the control.
+        PopKind::Mode => PopMetrics {
+            width: 340.0,
+            box_pad: 0.0,
+            head_pad: (12.0, 16.0, 4.0),
+            list_pad: (4.0, 8.0, 8.0),
+            row_pad: (8.0, 12.0),
+            row_gap: 12.0,
+            row_min_h: 56.0,
+            row_radius: CORNER_SM,
+            offset: 8.0,
+        },
+        // `.sdrop{width:360px;padding:6px;top:calc(100% + 6px)}`, `.sdrop-h{padding:8px 10px}`,
+        // `.sdrop-i{padding:8px 10px;gap:10px;border-radius:var(--r)}`.
+        PopKind::Drop => PopMetrics {
+            width: 360.0,
+            box_pad: 6.0,
+            head_pad: (8.0, 10.0, 8.0),
+            list_pad: (0.0, 0.0, 0.0),
+            row_pad: (8.0, 10.0),
+            row_gap: 10.0,
+            row_min_h: 0.0,
+            row_radius: CORNER_MD,
+            offset: 6.0,
+        },
+    }
+}
+
+/// The fill of the current row: `sel` in the mode picker (`.md-row.on`), `hover` in a drop menu
+/// (`.sdrop-i.on`).
+pub fn pop_chosen_fill(kind: PopKind, p: &Palette) -> Color {
+    match kind {
+        PopKind::Mode => p.sel,
+        PopKind::Drop => p.hover,
+    }
+}
+
+/// How a menu is shown at a window width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopPresentation {
+    Popover,
+    Sheet,
+}
+
+/// At 560 and below the mode picker is a bottom sheet (`style.css` `@media (max-width:560px)
+/// .mp-pop`); a drop menu stays a panel under the bar (`session.css` `.sdrop{position:fixed;
+/// left:12px;right:12px}`). A window that has not reported its size (0) is not a phone.
+pub fn pop_presentation(kind: PopKind, window_width_dp: f32) -> PopPresentation {
+    let phone = window_width_dp > 0.0 && window_width_dp <= 560.0;
+    if phone && kind == PopKind::Mode { PopPresentation::Sheet } else { PopPresentation::Popover }
+}
+
+/// The box's width: the kind's, never more than the window less 12 at each side
+/// (`.sdrop{max-width:calc(100vw - 24px)}`), and a drop menu takes all of that at 560 and below.
+pub fn pop_width(kind: PopKind, window_width_dp: f32) -> f32 {
+    let want = pop_metrics(kind).width;
+    if window_width_dp <= 0.0 {
+        return want;
+    }
+    let room = (window_width_dp - 24.0).max(0.0);
+    if kind == PopKind::Drop && window_width_dp <= 560.0 { room } else { want.min(room) }
+}
+
+/// One option of a [`PopoverMenu`]: an icon (in `tint`, else `text-2`, red on a danger row),
+/// the title, a description, a pill after the title, and whether it is the current one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PopRow {
+    pub icon: Option<&'static str>,
+    pub tint: Option<Color>,
+    pub title: String,
+    pub description: Option<String>,
+    pub badge: Option<(String, PillTone)>,
+    pub chosen: bool,
+    pub danger: bool,
+    /// The title is an address, set in the mono face at 12 (`.sdrop-i .mono`).
+    pub mono: bool,
+}
+
+/// What a [`PopoverMenu`] shows.
+pub struct PopMenu<'a> {
+    /// The box's name for assistive technology (the mockup's `aria-label`); also the sheet's
+    /// title when there is no head. `&'static str` for the reason [`NamedClickable`] gives.
+    pub name: &'static str,
+    pub kind: PopKind,
+    /// The head line; empty draws none.
+    pub head: &'a str,
+    pub sub: Option<&'a str>,
+    pub rows: &'a [PopRow],
+    /// The edge of the control the box lines up with.
+    pub align: compose_rust::PopoverAlign,
+}
+
+/// An option menu hanging from the control that opens it (FR-L10.4, #888): the toolkit
+/// `Popover` (compose-rust v0.0.10) with `anchor` as its first child, below the control and
+/// lined up with `menu.align`. Escape and a press outside call `on_dismiss`; the renderer moves
+/// the box inside the window and gives focus back to the control when it closes
+/// (`HostPopover.kt` `PopoverContent`). A row tap calls `on_dismiss` and then `on_choose(i)`.
+/// `footer` is drawn under a line below the rows (`.sdrop-f`). At 560 and below a mode menu is a
+/// bottom sheet with the same rows ([`pop_presentation`]).
+/// Not built: arrow keys between rows and focus on the current row when the menu opens
+/// (TODO(compose-rust#504): only Enter reaches the Host).
+pub fn PopoverMenu(
+    open: bool,
+    menu: PopMenu<'_>,
+    on_dismiss: impl FnMut() + Clone + 'static,
+    on_choose: impl FnMut(usize) + Clone + 'static,
+    anchor: impl FnOnce(),
+    footer: Option<&mut dyn FnMut()>,
+) {
+    let theme = ember_theme();
+    let p = theme.palette;
+    let window = crate::ui::window_size::current_window_size();
+    let m = pop_metrics(menu.kind);
+    match pop_presentation(menu.kind, window.width_dp) {
+        PopPresentation::Sheet => {
+            // One node, so the sheet is not a separate child that the caller's row spaces.
+            cu::Box().content(|| {
+                anchor();
+                let title = if menu.head.is_empty() { menu.name } else { menu.head };
+                EmberSheet(title, open, on_dismiss.clone(), None, || {
+                    cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| {
+                        if let Some(sub) = menu.sub {
+                            cu::Row().modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| {
+                                Label(sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            });
+                        }
+                        PopRows(&menu, &m, on_dismiss, on_choose);
+                        if let Some(f) = footer {
+                            PopFooter(f);
+                        }
+                    });
+                });
+            });
+        }
+        PopPresentation::Popover => {
+            let width = pop_width(menu.kind, window.width_dp);
+            cu::Popover(open)
+                .placement(compose_rust::PopoverPlacement::Bottom)
+                .align(menu.align)
+                .offset(m.offset)
+                .on_dismiss(on_dismiss.clone())
+                .modifier(
+                    with_shadows(Modifier::new(), theme.shadow_lg())
+                        .width(width)
+                        .background(paint(p.surface))
+                        .border(1.0, paint(p.line))
+                        .corner_radius(CORNER_LG)
+                        .padding(m.box_pad)
+                        .role(Role::Menu)
+                        .label(menu.name),
+                )
+                .anchor(anchor)
+                .content(|| {
+                    cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+                        if !menu.head.is_empty() {
+                            PopHead(menu.kind, menu.head, menu.sub, &m);
+                        }
+                        cu::Spacer().modifier(Modifier::new().height(m.list_pad.0));
+                        cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+                            cu::Spacer().modifier(Modifier::new().width(m.list_pad.1));
+                            cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
+                                PopRows(&menu, &m, on_dismiss, on_choose);
+                            });
+                            cu::Spacer().modifier(Modifier::new().width(m.list_pad.1));
+                        });
+                        cu::Spacer().modifier(Modifier::new().height(m.list_pad.2));
+                        if let Some(f) = footer {
+                            PopFooter(f);
+                        }
+                    });
+                });
+        }
+    }
+}
+
+/// The head: `.md-head` (12 `muted` 600) for the mode picker, `.sdrop-h` (a 14/600 title over a
+/// 12 `muted` subtitle) for a drop menu.
+fn PopHead(kind: PopKind, head: &str, sub: Option<&str>, m: &PopMetrics) {
+    let p = ember_theme().palette;
+    cu::Spacer().modifier(Modifier::new().height(m.head_pad.0));
+    cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+        cu::Spacer().modifier(Modifier::new().width(m.head_pad.1));
+        cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(|| match kind {
+            PopKind::Mode => Label(head, Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1)),
+            PopKind::Drop => {
+                Label(head, Fs::Md, Weight::Semibold, Some(paint(p.text)), Some(1));
+                if let Some(sub) = sub {
+                    Label(sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                }
+            }
+        });
+        cu::Spacer().modifier(Modifier::new().width(m.head_pad.1));
+    });
+    cu::Spacer().modifier(Modifier::new().height(m.head_pad.2));
+}
+
+fn PopRows(menu: &PopMenu<'_>, m: &PopMetrics, on_dismiss: impl FnMut() + Clone + 'static, on_choose: impl FnMut(usize) + Clone + 'static) {
+    for (i, r) in menu.rows.iter().enumerate() {
+        let (mut dismiss, mut choose) = (on_dismiss.clone(), on_choose.clone());
+        PopRowView(r, menu.kind, m, move || {
+            dismiss();
+            choose(i);
+        });
+    }
+}
+
+/// One row (`.md-row`, `.sdrop-i`): a menu item to assistive technology, named by its text,
+/// that says whether it is the current one.
+fn PopRowView(r: &PopRow, kind: PopKind, m: &PopMetrics, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let fill = if r.chosen { paint(pop_chosen_fill(kind, p)) } else { Paint::Literal(Color::argb(0)) };
+    let title_c = if r.danger { p.red.strong } else { p.text };
+    let icon_c = r.tint.unwrap_or(if r.danger { p.red.strong } else { p.text_2 });
+    Clickable(
+        Modifier::new()
+            .fill_max_width()
+            .background(fill)
+            .corner_radius(m.row_radius)
+            .role(Role::MenuItem)
+            .selected(r.chosen)
+            .click_action(true),
+        Alignment::CenterStart,
+        on_click,
+        || {
+            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                // The side padding, and the row's minimum height.
+                cu::Spacer().modifier(Modifier::new().width(m.row_pad.1).height(m.row_min_h));
+                if let Some(svg) = r.icon {
+                    super::shell::NavIcon(svg, icon_c.to_argb(), 16.0);
+                    cu::Spacer().modifier(Modifier::new().width(m.row_gap));
+                }
+                // Zero wide and weighted, so a long description wraps instead of widening the row.
+                cu::Column().spacing(2.0).modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
+                    cu::Spacer().modifier(Modifier::new().height(m.row_pad.0 - 2.0));
+                    cu::Row().spacing(6.0).alignment(Alignment::CenterStart).content(|| {
+                        if r.mono {
+                            MonoLabel(&r.title, Fs::Xs, Weight::Regular, Some(paint(title_c)));
+                        } else {
+                            Label(&r.title, Fs::Md, Weight::Semibold, Some(paint(title_c)), Some(1));
+                        }
+                        if let Some((text, tone)) = &r.badge {
+                            Pill(text, *tone, true);
+                        }
+                    });
+                    if let Some(d) = &r.description {
+                        Label(d, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                    }
+                    cu::Spacer().modifier(Modifier::new().height(m.row_pad.0 - 2.0));
+                });
+                if r.chosen {
+                    cu::Spacer().modifier(Modifier::new().width(m.row_gap));
+                    super::shell::NavIcon(ICON_CHECK_SVG, p.text.to_argb(), 16.0);
+                }
+                cu::Spacer().modifier(Modifier::new().width(m.row_pad.1));
+            });
+        },
+    );
+}
+
+/// `.sdrop-f`: 4 above, a line, then the caller's controls padded 10.
+fn PopFooter(footer: &mut dyn FnMut()) {
+    let p = ember_theme().palette;
+    cu::Spacer().modifier(Modifier::new().height(4.0));
+    cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(10.0)).content(|| footer());
+}
+
 /// The footer every sheet and dialog shares: a line, then actions right-aligned (`.snew-foot`).
 pub fn SheetFooter(content: impl FnOnce()) {
     let p = ember_theme().palette;

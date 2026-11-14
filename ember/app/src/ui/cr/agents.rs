@@ -1881,6 +1881,28 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, 
 // 3. 프로필 (Profiles)
 // ---------------------------------------------------------------------------------------------
 
+/// The plan an account's own label names (`Max`, `Plus`, `Pro`); a guessed "Pro" would be an
+/// invented fact, so a label without one gets no pill.
+pub fn account_plan(label: &str) -> Option<&'static str> {
+    ["Max", "Plus", "Pro"].into_iter().find(|n| label.contains(*n))
+}
+
+/// An account tile's first line (`.ag-acc-t .flex`): the harness dot, the name on one line with
+/// an ellipsis, then the plan pill whole. The name sits in a zero-width weighted column: the
+/// desktop renderer gives a one-line label its whole width first, which squeezed the pill after
+/// it to its two 4 px insets, an empty grey circle on "Claude Max (work)" (review AG16, r6).
+fn AccountNameLine(x: &AccountInfo) {
+    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+        VendorDot(x.harness);
+        cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
+            Label(&x.label, Fs::Md, Weight::Semibold, None, Some(1));
+        });
+        if let Some(plan) = account_plan(&x.label) {
+            Pill(plan, PillTone::Grey, true);
+        }
+    });
+}
+
 fn AccountTile(x: &AccountInfo, extra: Option<&str>, sample: bool) {
     let p = ember_theme().palette;
     InsetPanel(true, || {
@@ -1894,15 +1916,7 @@ fn AccountTile(x: &AccountInfo, extra: Option<&str>, sample: bool) {
                 }
             });
             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                    VendorDot(x.harness);
-                    Label(&x.label, Fs::Md, Weight::Semibold, None, Some(1));
-                    // A plan pill only when the account's own label names the plan; a guessed
-                    // "Pro" would be an invented fact.
-                    if let Some(plan) = ["Max", "Plus", "Pro"].into_iter().find(|n| x.label.contains(*n)) {
-                        Pill(plan, PillTone::Grey, true);
-                    }
-                });
+                AccountNameLine(x);
                 cu::Spacer().modifier(Modifier::new().height(SP[0]));
                 let reset_str = crate::ui::agents::account_reset_line(x.harness.label(), sample);
                 Label(&reset_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -3000,6 +3014,33 @@ mod tests {
             let body = production.split(f).nth(1).unwrap().split("\nfn ").next().unwrap();
             assert!(body.contains("FixedGrid("), "{f}");
         }
+    }
+
+    #[test]
+    fn fr_l20_the_plan_pill_keeps_its_text_beside_a_long_account_name() {
+        // Review AG16 and r6: "Claude Max (work)" drew its Max pill as an empty grey circle.
+        assert_eq!(account_plan("Claude Max (work)"), Some("Max"));
+        assert_eq!(account_plan("Codex Plus"), Some("Plus"));
+        assert_eq!(account_plan("ncmnd"), None);
+        let nodes = nodes_of(|| AccountNameLine(&AccountInfo {
+            id: "a".into(),
+            label: "Claude Max (work) 아주 긴 이름의 계정".into(),
+            harness: AgentHarness::ClaudeCode,
+            left_percent: Some(38),
+            limited: false,
+        }));
+        let name = text_node(&nodes, "Claude Max (work) 아주 긴 이름의 계정");
+        let holder = nodes.iter().find(|n| Some(n.id) == name.parent).unwrap();
+        assert_eq!(holder.widget, "Column");
+        assert!(holder.mods.iter().any(|m| m == "Weight(1.0)"), "{:?}", holder.mods);
+        assert!(holder.mods.iter().any(|m| m == "Width(0.0)"), "a zero-width weighted column: {:?}", holder.mods);
+        assert!(name.props.iter().any(|p| p == "MaxLines=Integer(1)"), "{:?}", name.props);
+        let plan = text_node(&nodes, "Max");
+        let pill = nodes.iter().find(|n| Some(n.id) == plan.parent).unwrap();
+        assert!(!pill.mods.iter().any(|m| m.starts_with("Weight")), "the pill keeps its own width");
+        let line = nodes.iter().find(|n| Some(n.id) == holder.parent).unwrap();
+        assert_eq!(Some(line.id), pill.parent, "name and pill share the line");
+        assert!(line.mods.iter().any(|m| m == "FillMaxWidth"), "{:?}", line.mods);
     }
 
     #[test]

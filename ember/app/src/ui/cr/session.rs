@@ -1747,6 +1747,69 @@ pub fn Pane(
             );
         });
 }
+/// The corners of a pane tab's click area (`[top_start, top_end, bottom_end, bottom_start]`),
+/// so the hover layer, the press tint and the keyboard focus ring follow the tab and not a
+/// square inside it (FR-L34.4, #251). Alone, the click area is the whole tab and takes its
+/// `CORNER_MD` at all four corners. With a close button after it, the click area ends where the
+/// close button starts, inside the tab's straight part, so it is rounded at the start only and
+/// square at that end.
+pub fn pane_tab_click_radii(closable: bool) -> [f32; 4] {
+    if closable {
+        [CORNER_MD, 0.0, 0.0, CORNER_MD]
+    } else {
+        [CORNER_MD; 4]
+    }
+}
+
+/// One tab of the multi view's tab strip (`.stab`): 34 dp high with the `CORNER_MD` corner, its
+/// name and pane count, and a 24 dp round close button when there is more than one tab. The
+/// current tab is `surface` inside a 1 dp `line` outline.
+fn PaneTabChip(
+    name: &str,
+    count: usize,
+    selected: bool,
+    closable: bool,
+    on_select: impl FnMut() + 'static,
+    on_close: impl FnMut() + 'static,
+) {
+    let p = ember_theme().palette;
+    let (bg, fg, wt) = if selected {
+        (paint(p.surface), p.text, Weight::Semibold)
+    } else {
+        (paint(Color::argb(0)), p.text_2, Weight::Medium)
+    };
+    let mut tab_mod = Modifier::new().height(34.0).background(bg).corner_radius(CORNER_MD);
+    if selected {
+        tab_mod = tab_mod.border(1.0, paint(p.line));
+    }
+    let tab_name = name.to_string();
+    cu::Row().alignment(Alignment::Center).modifier(tab_mod).content(move || {
+        Clickable(
+            Modifier::new().fill_max_height().corner_radii(pane_tab_click_radii(closable)),
+            Alignment::Center,
+            on_select,
+            move || {
+                cu::Row().alignment(Alignment::CenterStart).spacing(6.0).content(|| {
+                    cu::Spacer().modifier(Modifier::new().width(10.0));
+                    Label(&tab_name, Fs::Sm, wt, Some(paint(fg)), Some(1));
+                    cu::Box()
+                        .alignment(Alignment::Center)
+                        .modifier(Modifier::new().size(20.0, 18.0).background(paint(p.surface_2)).corner_radius(9.0))
+                        .content(|| {
+                            Label(&count.to_string(), Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(1));
+                        });
+                    cu::Spacer().modifier(Modifier::new().width(if closable { 2.0 } else { 10.0 }));
+                });
+            },
+        );
+        if closable {
+            Clickable(Modifier::new().size(24.0, 24.0).shape_role(ShapeRole::Full), Alignment::Center, on_close, || {
+                NavIcon(ICON_CLOSE_SVG, p.muted.to_argb(), 11.0)
+            });
+            cu::Spacer().modifier(Modifier::new().width(4.0));
+        }
+    });
+}
 
 /// Panes of the project's active tab, with the tab strip (FR-L18).
 pub fn MultiView(
@@ -1808,120 +1871,25 @@ pub fn MultiView(
                                                 let pg = page.clone();
                                                 let u = ui.clone();
                                                 let pr = proj_owned.clone();
-                                                let tab_vis = visible_panes(t, &all);
-                                                let tab_name = t.name.clone();
-                                                let tab_cnt = tab_vis.len();
-                                                let selected = i == panes.active;
-                                                let (bg, border_w, fg, wt) = if selected {
-                                                    (
-                                                        paint(p.surface),
-                                                        1.0,
-                                                        p.text,
-                                                        Weight::Semibold,
-                                                    )
-                                                } else {
-                                                    (
-                                                        paint(Color::argb(0)),
-                                                        0.0,
-                                                        p.text_2,
-                                                        Weight::Medium,
-                                                    )
-                                                };
-                                                let mut tab_mod = Modifier::new()
-                                                    .height(34.0)
-                                                    .background(bg)
-                                                    .corner_radius(CORNER_MD);
-                                                if border_w > 0.0 {
-                                                    tab_mod = tab_mod.border(border_w, paint(p.line));
-                                                }
-                                                cu::Row()
-                                                    .alignment(Alignment::Center)
-                                                    .modifier(tab_mod)
-                                                    .content(move || {
-                                                        let pg_s = pg.clone();
-                                                        let u_s = u.clone();
-                                                        let pr_s = pr.clone();
-                                                        Clickable(
-                                                            Modifier::new().fill_max_height(),
-                                                            Alignment::Center,
-                                                            move || {
-                                                                pg_s.set(0);
-                                                                edit_panes(&u_s, &pr_s, move |pp| {
-                                                                    pp.select(i)
-                                                                });
-                                                            },
-                                                            move || {
-                                                                cu::Row()
-                                                                    .alignment(Alignment::CenterStart)
-                                                                    .spacing(6.0)
-                                                                    .content(|| {
-                                                                        cu::Spacer().modifier(
-                                                                            Modifier::new().width(10.0),
-                                                                        );
-                                                                        Label(
-                                                                            &tab_name,
-                                                                            Fs::Sm,
-                                                                            wt,
-                                                                            Some(paint(fg)),
-                                                                            Some(1),
-                                                                        );
-                                                                        cu::Box()
-                                                                            .alignment(Alignment::Center)
-                                                                            .modifier(
-                                                                                Modifier::new()
-                                                                                    .size(20.0, 18.0)
-                                                                                    .background(paint(
-                                                                                        p.surface_2,
-                                                                                    ))
-                                                                                    .corner_radius(9.0),
-                                                                            )
-                                                                            .content(|| {
-                                                                                Label(
-                                                                                    &tab_cnt.to_string(),
-                                                                                    Fs::Xs2,
-                                                                                    Weight::Medium,
-                                                                                    Some(paint(p.muted)),
-                                                                                    Some(1),
-                                                                                );
-                                                                            });
-                                                                        cu::Spacer().modifier(
-                                                                            Modifier::new().width(
-                                                                                if multi_tabs {
-                                                                                    2.0
-                                                                                } else {
-                                                                                    10.0
-                                                                                },
-                                                                            ),
-                                                                        );
-                                                                    });
-                                                            },
-                                                        );
-                                                        if multi_tabs {
-                                                            let pg_x = pg.clone();
-                                                            let u_x = u.clone();
-                                                            let pr_x = pr.clone();
-                                                            Clickable(
-                                                                Modifier::new()
-                                                                    .size(24.0, 24.0)
-                                                                    .shape_role(ShapeRole::Full),
-                                                                Alignment::Center,
-                                                                move || {
-                                                                    pg_x.set(0);
-                                                                    edit_panes(&u_x, &pr_x, move |pp| {
-                                                                        pp.remove_tab(i)
-                                                                    });
-                                                                },
-                                                                || {
-                                                                    NavIcon(
-                                                                        ICON_CLOSE_SVG,
-                                                                        p.muted.to_argb(),
-                                                                        11.0,
-                                                                    )
-                                                                },
-                                                            );
-                                                            cu::Spacer().modifier(Modifier::new().width(4.0));
-                                                        }
-                                                    });
+                                                let (pg_s, u_s, pr_s) = (pg.clone(), u.clone(), pr.clone());
+                                                PaneTabChip(
+                                                    &t.name,
+                                                    visible_panes(t, &all).len(),
+                                                    i == panes.active,
+                                                    multi_tabs,
+                                                    move || {
+                                                        pg_s.set(0);
+                                                        edit_panes(&u_s, &pr_s, move |pp| {
+                                                            pp.select(i)
+                                                        });
+                                                    },
+                                                    move || {
+                                                        pg.set(0);
+                                                        edit_panes(&u, &pr, move |pp| {
+                                                            pp.remove_tab(i)
+                                                        });
+                                                    },
+                                                );
                                             }
                                             // Circular .stab-add "+" button (30x30)
                                             {
@@ -5416,6 +5384,90 @@ mod tests {
     fn host_ide_chevron_in_the_pill() {
         let open = remember(|| mutable_state_of(false));
         IdeChevron(open.clone(), true);
+    }
+
+    #[Composable]
+    fn host_pane_tab_alone() {
+        PaneTabChip("작업 1", 2, true, false, || {}, || {});
+    }
+
+    #[Composable]
+    fn host_pane_tab_with_close() {
+        PaneTabChip("작업 1", 2, true, true, || {}, || {});
+    }
+
+    /// What a composed pane tab sends: the nodes with a click handler in the order sent, every
+    /// node's parent and every node's modifiers as debug text.
+    struct PaneTabSent {
+        clicked: Vec<u32>,
+        parents: Vec<(u32, u32)>,
+        modifiers: Vec<(u32, String)>,
+    }
+
+    impl PaneTabSent {
+        fn of(content: fn()) -> Self {
+            let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let mut sent = PaneTabSent { clicked: Vec::new(), parents: Vec::new(), modifiers: Vec::new() };
+            for m in batch.iter() {
+                match m {
+                    Mutation::SetProp { node_id, property: compose_rust::PropertyKind::OnClick, .. } => sent.clicked.push(*node_id),
+                    Mutation::Insert { parent_id, node_id, .. } => sent.parents.push((*node_id, *parent_id)),
+                    Mutation::SetModifier { node_id, modifier, .. } => sent.modifiers.push((*node_id, format!("{modifier:?}"))),
+                    _ => {}
+                }
+            }
+            sent
+        }
+
+        fn mods(&self, id: u32) -> Vec<String> {
+            self.modifiers.iter().filter(|(n, _)| *n == id).map(|(_, m)| m.clone()).collect()
+        }
+
+        fn parent(&self, id: u32) -> Option<u32> {
+            self.parents.iter().find(|(n, _)| *n == id).map(|(_, p)| *p)
+        }
+    }
+
+    /// FR-L34.4, #251: a pane tab's click area carries the tab's corners, so hover, press and the
+    /// focus ring are not a square inside the 12 dp rounded tab. Alone it is the whole tab; with
+    /// a close button after it, it is rounded at the start only.
+    #[test]
+    fn fr_l34_4_a_pane_tab_click_area_carries_the_tab_corners() {
+        assert_eq!(CORNER_MD, 12.0);
+        assert_eq!(pane_tab_click_radii(false), [12.0, 12.0, 12.0, 12.0]);
+        assert_eq!(pane_tab_click_radii(true), [12.0, 0.0, 0.0, 12.0]);
+        let _guard = crate::services::test_guard();
+        let shape = |r: [f32; 4]| {
+            format!("{:?}", compose_rust::schema::Modifier::Shape { top_start: r[0], top_end: r[1], bottom_end: r[2], bottom_start: r[3] })
+        };
+        let tab_shape = shape([12.0; 4]);
+        // Alone: one click area, the whole tab, with the tab's four corners.
+        let alone = PaneTabSent::of(host_pane_tab_alone);
+        assert_eq!(alone.clicked.len(), 1, "{:?}", alone.clicked);
+        let mods = alone.mods(alone.clicked[0]);
+        assert!(mods.contains(&tab_shape), "{mods:?}");
+        assert!(mods.iter().any(|m| m == "FillMaxHeight"), "{mods:?}");
+        // Its parent is the tab itself: 34 high with the same corner.
+        let tab = alone.mods(alone.parent(alone.clicked[0]).expect("the tab"));
+        assert!(tab.iter().any(|m| m == "Height(34.0)") && tab.contains(&tab_shape), "{tab:?}");
+        // With a close button: the name's click area is rounded at the start and square where
+        // the close button follows; the close button keeps its circle.
+        let both = PaneTabSent::of(host_pane_tab_with_close);
+        assert_eq!(both.clicked.len(), 2, "{:?}", both.clicked);
+        let (name, close) = (both.mods(both.clicked[0]), both.mods(both.clicked[1]));
+        assert!(name.contains(&shape([12.0, 0.0, 0.0, 12.0])), "{name:?}");
+        assert!(!name.contains(&tab_shape), "{name:?}");
+        assert!(close.iter().any(|m| m.starts_with("ShapeRole(Full")), "{close:?}");
+        assert!(close.iter().any(|m| m == "Width(24.0)") && close.iter().any(|m| m == "Height(24.0)"), "{close:?}");
+        assert!(both.parent(both.clicked[0]).is_some());
+        assert_eq!(both.parent(both.clicked[0]), both.parent(both.clicked[1]), "both are children of the tab");
+        let tab = both.mods(both.parent(both.clicked[0]).expect("the tab"));
+        assert!(tab.contains(&tab_shape), "the tab keeps its own four corners: {tab:?}");
+        // The tab strip draws its tabs with it, and no tab is left with a bare click area.
+        let src = include_str!("session.rs").split("#[cfg(test)]").next().unwrap();
+        assert_eq!(src.matches("PaneTabChip(").count(), 2, "the definition and the tab strip");
+        assert!(src.contains("Modifier::new().fill_max_height().corner_radii(pane_tab_click_radii(closable))"));
     }
 
     /// FR-L34.2, #251: the two halves of the "IDE 열기" split pill take the pill's rounded ends,

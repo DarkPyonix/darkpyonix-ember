@@ -18,7 +18,7 @@ use std::io;
 use std::path::Path;
 
 use ember_transport::http::HttpListener;
-use ember_transport::{BackendKind, Dialer, PeerAddr, PeerGate, SecretKey, Transport, TransportConfig};
+use ember_transport::{BackendKind, Dialer, PeerGate, SecretKey, Transport, TransportConfig};
 
 /// Transport service name of the server API for clients.
 pub const SERVER_SERVICE: &str = "ember-server";
@@ -60,47 +60,6 @@ pub fn with_main_server_roles(mut cfg: TransportConfig, port: u16) -> TransportC
     cfg.letify.relay_listen.get_or_insert(any);
     cfg.letify.qad_listen.get_or_insert(any);
     cfg
-}
-
-/// Whether `cfg` makes this endpoint the fleet's relay: the letify backend with a relay address.
-pub fn runs_relay_role(cfg: &TransportConfig) -> bool {
-    cfg.backend == BackendKind::Letify && cfg.letify.relay_listen.is_some()
-}
-
-/// The start of the line the server prints for a device (SPEC `FR-N9`, #863).
-pub const DEVICE_ADDRESS_PREFIX: &str = "ember server device address: ";
-/// Stands for the server's address in the device line when the transport advertises none.
-pub const HOST_PLACEHOLDER: &str = "<host>";
-
-/// The line a person pastes into the app's address field (SPEC `FR-N9`, #863):
-/// `ember server device address: <peer id> relay letify://<peer id>@<host>:<relay port>`. It
-/// names the peer id and this server's own relay on its fixed port (`FR-N2`), not the direct
-/// port, which is random at every start. `<host>` is the first address the transport advertises
-/// (`EMBER_LETIFY_ADVERTISE`, or the observed public address); without one the line keeps
-/// [`HOST_PLACEHOLDER`] and says to replace it, since a server cannot know the name a device
-/// reaches it by. `None` unless `relay_role` ([`runs_relay_role`]) and `local` names a relay of
-/// this server.
-pub fn device_address_line(relay_role: bool, local: &PeerAddr) -> Option<String> {
-    if !relay_role {
-        return None;
-    }
-    let me = local.peer;
-    let own = format!("letify://{me}@");
-    let port = local.relays.iter().find_map(|url| {
-        let (_, port) = url.strip_prefix(&own)?.trim_end_matches('/').rsplit_once(':')?;
-        port.parse::<u16>().ok()
-    })?;
-    let host = local.direct.iter().map(|a| a.ip()).find(|ip| !ip.is_unspecified());
-    Some(match host {
-        Some(ip) => {
-            let relay = std::net::SocketAddr::new(ip, port);
-            format!("{DEVICE_ADDRESS_PREFIX}{me} relay letify://{me}@{relay}")
-        }
-        None => format!(
-            "{DEVICE_ADDRESS_PREFIX}{me} relay letify://{me}@{HOST_PLACEHOLDER}:{port} \
-             (replace {HOST_PLACEHOLDER} with this computer's address or name)"
-        ),
-    })
 }
 
 /// [`with_main_server_roles`] on the port from the environment, unless `EMBER_SERVER_RELAY=off`.
@@ -196,56 +155,4 @@ pub fn serve_scoped(
     let app = crate::devices::scope::enforce(app, devices)
         .into_make_service_with_connect_info::<ember_transport::PeerId>();
     Ok(async move { axum::serve(HttpListener::with_gate(listener, gate), app).await })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn me() -> ember_transport::PeerId {
-        SecretKey::from_bytes([11; 32]).peer_id()
-    }
-
-    #[test]
-    fn fr_n9_device_address_line_names_the_peer_id_and_the_own_relay() {
-        let me = me();
-        let local = PeerAddr {
-            peer: me,
-            relays: vec![format!("letify://{me}@203.0.113.4:7443")],
-            direct: vec!["203.0.113.4:51234".parse().unwrap()],
-        };
-        assert_eq!(
-            device_address_line(true, &local).unwrap(),
-            format!("ember server device address: {me} relay letify://{me}@203.0.113.4:7443"),
-            "the relay port, never the random direct port"
-        );
-        assert_eq!(device_address_line(false, &local), None, "only with the relay role on");
-        let v6 = PeerAddr { direct: vec!["[2001:db8::1]:5000".parse().unwrap()], ..local.clone() };
-        assert!(device_address_line(true, &v6).unwrap().ends_with(&format!("letify://{me}@[2001:db8::1]:7443")));
-    }
-
-    #[test]
-    fn fr_n9_device_address_line_without_an_advertised_address_keeps_a_placeholder() {
-        let me = me();
-        // A server bound on 0.0.0.0 with nothing advertised or observed: local_addr names its
-        // relay on 127.0.0.1 and no direct address.
-        let local = PeerAddr { peer: me, relays: vec![format!("letify://{me}@127.0.0.1:7443")], direct: vec![] };
-        let line = device_address_line(true, &local).unwrap();
-        assert!(line.starts_with(&format!("{DEVICE_ADDRESS_PREFIX}{me} relay letify://{me}@<host>:7443 ")), "{line}");
-        assert!(line.contains("replace <host>"), "{line}");
-        // Another relay (EMBER_RELAY_URL naming a different server) is not this server's.
-        let other = SecretKey::from_bytes([12; 32]).peer_id();
-        let elsewhere = PeerAddr { relays: vec![format!("letify://{other}@relay.example:7443")], ..local };
-        assert_eq!(device_address_line(true, &elsewhere), None);
-    }
-
-    #[test]
-    fn fr_n9_relay_role_follows_the_backend_and_the_relay_address() {
-        let cfg = TransportConfig::new(SecretKey::from_bytes([13; 32])).backend(BackendKind::Letify);
-        assert!(!runs_relay_role(&cfg));
-        let cfg = with_main_server_roles(cfg, 7443);
-        assert!(runs_relay_role(&cfg));
-        let iroh = with_main_server_roles(TransportConfig::new(SecretKey::from_bytes([13; 32])).backend(BackendKind::Iroh), 7443);
-        assert!(!runs_relay_role(&iroh), "other backends are left alone");
-    }
 }

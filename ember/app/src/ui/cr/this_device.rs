@@ -23,9 +23,7 @@ pub const SUBTITLE: &str = "다른 컴퓨터의 서버에 이 기기로 연결�
 pub const ADD_HINT: &str = "서버에서 ember-server owner devices add <peer id> <이름>을 실행하면 이 기기가 등록됩니다.";
 pub const PEER_ID_LABEL: &str = "이 기기의 peer id";
 pub const ADDR_LABEL: &str = "서버 주소";
-pub const ADDR_PLACEHOLDER: &str = "서버가 출력한 기기 주소 줄 (<서버 peer id> relay letify://...)";
-/// The line under the address field: the device line survives a server restart (#863).
-pub const ADDR_HINT: &str = "서버를 시작할 때 출력되는 ember server device address: 줄을 그대로 붙여 넣으면 서버 주소와 릴레이가 함께 저장됩니다. 서버를 다시 시작해도 바뀌지 않습니다.";
+pub const ADDR_PLACEHOLDER: &str = "<서버 peer id>@<IP>:<포트> 또는 서버가 출력한 주소";
 pub const RELAY_LABEL: &str = "릴레이 (선택)";
 pub const RELAY_PLACEHOLDER: &str = "letify://<서버 peer id>@<호스트>:7443";
 /// Plain HTTP to a remote host is not offered (FR-S11, D37).
@@ -34,18 +32,14 @@ pub const SAVE_LABEL: &str = "저장";
 pub const CHECKING: &str = "서버에 연결하는 중입니다";
 
 /// What 저장 does with the two fields: `Ok(None)` clears the reach (back to local HTTP),
-/// `Ok(Some((peer, relay)))` keeps both, `Err` is the Korean line to show. A device line pasted
-/// into the address field (`<peer id> relay <relay URL>`, #863) is saved as its two parts; a relay
-/// typed in the relay field beats the one in the line.
+/// `Ok(Some((peer, relay)))` keeps both as typed, `Err` is the Korean line to show.
 pub fn save_values(peer: &str, relay: &str) -> Result<Option<(String, Option<String>)>, &'static str> {
     let (peer, relay) = (peer.trim(), relay.trim());
     if peer.is_empty() {
         return Ok(None);
     }
-    let (addr, line_relay) = device_link::split_relay(peer);
-    let relay = if relay.is_empty() { line_relay.unwrap_or("") } else { relay };
-    PeerSetting::parse(addr, Some(relay)).map_err(|e| e.text_ko())?;
-    Ok(Some((addr.to_string(), (!relay.is_empty()).then(|| relay.to_string()))))
+    PeerSetting::parse(peer, Some(relay)).map_err(|e| e.text_ko())?;
+    Ok(Some((peer.to_string(), (!relay.is_empty()).then(|| relay.to_string()))))
 }
 
 /// The peer id in two halves of 32 characters, so it fits a phone's width without breaking.
@@ -125,7 +119,6 @@ pub fn ThisDeviceSection() {
             ..Default::default()
         });
     }
-    Label(ADDR_HINT, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(3));
     Label(RELAY_LABEL, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
     {
         let (t, e, s) = (typed_relay.clone(), error.clone(), saved.clone());
@@ -187,20 +180,6 @@ mod tests {
         assert_eq!(save_values("abc", ""), Err(device_link::AddrError::BadPeer(String::new()).text_ko()));
         assert_eq!(save_values(&peer, "https://x"), Err(device_link::AddrError::BadRelay(String::new()).text_ko()));
         assert!(save_values("http://192.0.2.1:8740", "").is_err(), "no plain HTTP to a remote host");
-    }
-
-    #[test]
-    fn fr_n9_a_pasted_device_line_saves_peer_and_relay_apart() {
-        let peer = ember_transport::SecretKey::from_bytes([5; 32]).peer_id().to_string();
-        let relay = format!("letify://{peer}@203.0.113.4:7443");
-        let line = format!("ember server device address: {peer} relay {relay}");
-        assert_eq!(save_values(&line, ""), Ok(Some((peer.clone(), Some(relay.clone())))));
-        assert_eq!(save_values(&format!("{peer} relay {relay}"), " "), Ok(Some((peer.clone(), Some(relay)))));
-        let typed = format!("letify://{peer}@relay.example:7443");
-        assert_eq!(save_values(&line, &typed), Ok(Some((peer.clone(), Some(typed)))), "the relay field wins");
-        let placeholder = format!("{peer} relay letify://{peer}@<host>:7443");
-        assert_eq!(save_values(&placeholder, ""), Err(device_link::AddrError::BadRelay(String::new()).text_ko()));
-        assert!(!ADDR_HINT.is_ascii() && !ADDR_PLACEHOLDER.is_ascii());
     }
 
     #[test]

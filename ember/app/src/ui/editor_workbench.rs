@@ -1679,7 +1679,7 @@ pub mod page {
         let (class, windows): (&str, &[ToolWindow]) = match strip {
             Strip::Left => ("ed-stripe ed-stripe-l", &ToolWindow::LEFT_STRIPE),
             Strip::Bottom => ("ed-stripe ed-stripe-b", &ToolWindow::BOTTOM_STRIPE),
-            Strip::Right => ("ed-stripe ed-stripe-r", &ToolWindow::RIGHT),
+            Strip::Right => ("ed-stripe ed-stripe-r", &ToolWindow::RIGHT_STRIPE),
         };
         rsx! {
             nav { class, "aria-label": "도구 창",

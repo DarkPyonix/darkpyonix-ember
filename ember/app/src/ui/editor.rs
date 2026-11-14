@@ -1541,7 +1541,9 @@ impl ToolWindow {
     ];
     pub const LEFT: [ToolWindow; 6] =
         [ToolWindow::Project, ToolWindow::Search, ToolWindow::Commit, ToolWindow::Git, ToolWindow::Extensions, ToolWindow::Agent];
-    pub const RIGHT: [ToolWindow; 2] = [ToolWindow::Agent, ToolWindow::Notifications];
+    pub const RIGHT: [ToolWindow; 1] = [ToolWindow::Notifications];
+    /// The buttons of the right stripe: 에이전트 (its window opens in the left slot, #766) and 알림.
+    pub const RIGHT_STRIPE: [ToolWindow; 2] = [ToolWindow::Agent, ToolWindow::Notifications];
     pub const BOTTOM: [ToolWindow; 4] =
         [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems, ToolWindow::Output];
 

@@ -90,6 +90,11 @@
 .ed-btabs button:hover{background:var(--hover)}
 .ed-btabs button.on{background:var(--ink);color:var(--ink-text)}
 .ed-tsub{display:flex;align-items:center;gap:var(--sp1);padding:var(--sp2) var(--sp3) 0;flex:none;overflow-x:auto;scrollbar-width:none}
+/* FR-L31.23 (#799): the terminal tabs scroll, the + beside them never does. */
+.ed-tstrip{display:flex;align-items:center;flex:none;min-width:0;padding-right:var(--sp3)}
+.ed-tstrip>.ed-tsub{flex:1 1 auto;min-width:0}
+.ed-tstrip>.ed-tsub>button,.ed-tstrip>.ed-tsub>input{flex:0 0 auto;max-width:240px}
+.ed-tstrip>.ed-tnew{flex:0 0 auto;margin-top:var(--sp2)}
 .ed-tsub>button:not(.ed-ib){display:flex;align-items:center;gap:6px;height:28px;padding:0 var(--sp3);border:1px solid var(--line);border-radius:var(--pill);background:none;font-size:var(--fs-xs);cursor:pointer;white-space:nowrap;color:var(--text-2)}
 .ed-tsub>button.on{background:var(--surface-2);color:var(--text)}
 /* FR-L31.23: the rename field takes the tab's place, the trash sits inside the tab. */

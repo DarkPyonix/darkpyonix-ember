@@ -19,6 +19,8 @@
 //! therefore open first and check the opened handle with [`PathPolicy::check_opened`]: the path is
 //! resolved again after the open and, on Unix, the opened file's device and inode must equal those
 //! of the resolved path. A handle that does not match is refused like a path outside the roots.
+//! The namespace operations (mkdir, remove, rename, symlink, stat, lstat, readlink, list) check
+//! a directory handle the same way and act relative to it (#456); see `crate::fs`.
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -203,6 +205,40 @@ impl PathPolicy {
         self.check(base.join(name), path)
     }
 
+    /// Check the target of a symbolic link about to be created in the directory `link_dir`
+    /// (canonical) (#456). A relative target is read relative to `link_dir`, as the system will
+    /// read it. The target may not exist yet: its longest existing prefix is canonicalised (so
+    /// `..` and links in it are resolved as the system resolves them) and the missing rest may
+    /// not contain `..`. The result must be inside the roots and outside every denied entry, so
+    /// the file API cannot plant a link that points out of the roots. Every refusal is
+    /// [`PolicyError::Outside`] naming the target. Returns the resolved target.
+    ///
+    /// This is a check at creation time: every later operation that follows the link resolves
+    /// it again, so a target that moves out afterwards is still refused there.
+    pub fn check_link_target(&self, link_dir: &Path, target: &Path) -> Result<PathBuf, PolicyError> {
+        let outside = || PolicyError::Outside(target.to_path_buf());
+        let full = if target.is_absolute() { target.to_path_buf() } else { link_dir.join(target) };
+        let comps: Vec<Component> = full.components().collect();
+        for i in (1..=comps.len()).rev() {
+            let prefix: PathBuf = comps[..i].iter().collect();
+            match std::fs::canonicalize(&prefix) {
+                Ok(mut c) => {
+                    let tail = &comps[i..];
+                    if tail.iter().any(|t| matches!(t, Component::ParentDir)) {
+                        return Err(outside());
+                    }
+                    for t in tail {
+                        c.push(t);
+                    }
+                    return self.check(c, target).map_err(|_| outside());
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => return Err(outside()),
+            }
+        }
+        Err(outside())
+    }
+
     /// Whether `canonical` is one of the roots themselves (which must not be removed or moved).
     pub fn is_root(&self, canonical: &Path) -> bool {
         self.roots.iter().any(|r| r == canonical)
@@ -337,6 +373,36 @@ mod tests {
         std::os::unix::fs::symlink(root.join("elsewhere"), root.join(".ember")).unwrap();
         assert!(matches!(p.resolve_existing(&root.join("elsewhere/secret")), Err(PolicyError::Outside(_))));
         assert!(matches!(p.resolve_existing(&root.join(".ember/secret")), Err(PolicyError::Outside(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_x1_link_targets_must_resolve_inside_the_roots() {
+        let t = tempfile::tempdir().unwrap();
+        let base = t.path().canonicalize().unwrap();
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(root.join(".ember")).unwrap();
+        std::fs::create_dir_all(base.join("out")).unwrap();
+        std::os::unix::fs::symlink(base.join("out"), root.join("link-out")).unwrap();
+        let p = PathPolicy::with_denied([root.clone()], [root.join(".ember")]).unwrap();
+        let dir = root.join("a");
+        // Inside: relative, absolute, missing yet, `..` that stays inside.
+        assert!(p.check_link_target(&dir, Path::new("f.txt")).is_ok());
+        assert!(p.check_link_target(&dir, &root.join("a/f.txt")).is_ok());
+        assert!(p.check_link_target(&dir, Path::new("../a/new")).is_ok());
+        // Outside: absolute, `..` out, through a link out, into a denied entry, `..` through a
+        // missing directory.
+        for bad in [
+            base.join("out/secret"),
+            PathBuf::from("../../out/secret"),
+            PathBuf::from("../link-out/secret"),
+            PathBuf::from("../.ember/server-token"),
+            PathBuf::from("missing/../../../out"),
+            PathBuf::from("/etc/hosts"),
+        ] {
+            assert!(matches!(p.check_link_target(&dir, &bad), Err(PolicyError::Outside(_))), "{bad:?}");
+        }
     }
 
     #[cfg(unix)]

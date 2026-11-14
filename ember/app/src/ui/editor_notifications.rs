@@ -15,7 +15,8 @@ pub fn severity_class(severity: MessageSeverity) -> &'static str {
 
 /// The overlay's distance from the page bottom: above the status bar, plus the 76px the page is
 /// shorter than the window when it is not FullSize (the same allowance as `editor_page_height`).
-// TODO(#320): drop the allowance with the fixed page height (compose-rust#467).
+// TODO(#320): drop the allowance with the fixed page height. v0.0.7: #467 fixed; workaround kept
+// until checked on a display (the editor page has to follow the reported window height).
 pub fn overlay_bottom(full_size: bool) -> &'static str {
     if full_size { "calc(var(--sbh) + 12px)" } else { "calc(var(--sbh) + 88px)" }
 }

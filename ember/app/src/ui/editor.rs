@@ -613,8 +613,7 @@ pub fn tab_menu_items(tabs: &EditorTabs, path: &str) -> Vec<(TabMenuItem, bool)>
 /// Two clicks on the same target within this many milliseconds are a double-click (FR-L31.5).
 pub const DOUBLE_CLICK_MS: u64 = 500;
 
-/// Tells a double-click from two clicks out of `onclick` alone. TODO(compose-rust#417): the renderer of
-/// compose-rust v0.0.6 sends no pointer events, so `ondoubleclick` never fires; remove this when it does.
+/// Tells a double-click from two clicks out of `onclick` alone. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DoubleClick {
     last: Option<(String, u64)>,
@@ -634,8 +633,7 @@ impl DoubleClick {
 }
 
 /// Whether a key on the focused tab strip opens the tab menu: Shift+F10 or the ContextMenu key, as in
-/// Code-OSS. TODO(compose-rust#417): the right-click menu does not open while the renderer sends no
-/// pointer events; the key and the ⋯ menu stand in.
+/// Code-OSS. The key and the ⋯ menu stand in for the right-click menu. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
 pub fn tab_menu_key(key: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool {
     match key {
         "F10" => shift && !ctrl && !alt && !meta,
@@ -805,6 +803,10 @@ pub fn editor_strip_padding(full_size: bool, leading: f32) -> String {
 pub fn editor_grid_style_maximized() -> String {
     "grid-template-rows:52px 0 minmax(0,1fr) var(--sbh);".to_string()
 }
+
+/// The label of the find pill in the top bar (`editor.js:74`), the same in both keymaps; the hover
+/// names the keymap's action (`Keymap::find_label`) and its shortcut.
+pub const FIND_PILL_LABEL: &str = "파일, 동작, 기호 찾기";
 
 /// The breadcrumb line: segments joined with a right-angle quote.
 pub fn breadcrumb_text(path: &str, folder: &str) -> String {
@@ -1427,6 +1429,14 @@ impl ToolWindow {
     pub const RIGHT: [ToolWindow; 2] = [ToolWindow::Agent, ToolWindow::Notifications];
     pub const BOTTOM: [ToolWindow; 4] =
         [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems, ToolWindow::Output];
+
+    /// The buttons of the left stripe, exactly the mockup's (`editor.js:51`): 프로젝트, 커밋, Git.
+    /// 검색 opens from the top find pill and ⇧⌘F, 확장 from its shortcut and the palette; their
+    /// windows still take the left side (owner placement rule, 2026-11-13, `docs/DESIGN.md` 6.3).
+    pub const LEFT_STRIPE: [ToolWindow; 3] = [ToolWindow::Project, ToolWindow::Commit, ToolWindow::Git];
+    /// The buttons of the bottom stripe, exactly the mockup's: 터미널, 실행, 문제. 출력 is a tab of
+    /// the bottom tool window beside 문제, not a stripe button.
+    pub const BOTTOM_STRIPE: [ToolWindow; 3] = [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems];
 
     pub fn label(self) -> &'static str {
         match self {

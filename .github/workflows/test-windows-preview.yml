@@ -16,8 +16,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
-  # Same tag as compose-rust in ember/app/Cargo.toml and Cargo.lock (dioxus-compose pins v0.0.6 too); bump all together.
-  COMPOSE_RUST_RENDERER_VERSION: v0.0.6
+  # Same tag as compose-rust in ember/app/Cargo.toml and Cargo.lock (dioxus-compose moves to v0.0.7 in the same change); bump all together.
+  COMPOSE_RUST_RENDERER_VERSION: v0.0.7
 
 jobs:
   preview:

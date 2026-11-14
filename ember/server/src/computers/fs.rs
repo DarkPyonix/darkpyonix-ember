@@ -12,17 +12,24 @@
 //! | POST   | `/api/computers/{id}/fs/write`    | `POST /fs/write` (412 on a failed `expect`) |
 //! | POST   | `/api/computers/{id}/fs/pwrite`   | `POST /fs/pwrite` |
 //! | POST   | `/api/computers/{id}/fs/setattr`  | `POST /fs/setattr` |
+//! | POST   | `/api/computers/{id}/fs/mkdir`    | `POST /fs/mkdir` |
+//! | POST   | `/api/computers/{id}/fs/remove`   | `POST /fs/remove` (204) |
+//! | POST   | `/api/computers/{id}/fs/rename`   | `POST /fs/rename` (204) |
+//! | POST   | `/api/computers/{id}/fs/symlink`  | `POST /fs/symlink` |
 //!
 //! The request body is the node's (`ember_node::proto`: `PathRequest`, `ReadRequest`,
-//! `GlobRequest`, `GrepRequest`) and the response is the node's, unchanged. A node error keeps
+//! `GlobRequest`, `GrepRequest`, `WriteRequest`, `MkdirRequest`, `RemoveRequest`,
+//! `RenameRequest`, `SymlinkRequest`, ...) and the response is the node's, unchanged (`remove`
+//! and `rename` answer 204 with no body, as the node does). A node error keeps
 //! its status and body; an unreachable node is 502; an unknown computer is 404; the local
 //! computer (this server) has no node client, so it answers 400.
 //!
-//! The write relay carries only the content operations `write`, `pwrite` and `setattr`, which
-//! the node opens first and checks by handle (INTENT D48). The namespace operations (`remove`,
-//! `rename`, `mkdir`, `symlink`) still act on paths on the node, so they are not routed: any
-//! other `{op}` is 404 until they get the same handle checks. **[provisional]** A failed
-//! `expect` precondition is the node's 412 with its `actual_sha256`, passed unchanged.
+//! The write relay carries the content operations `write`, `pwrite` and `setattr` and the
+//! namespace operations `mkdir`, `remove`, `rename` and `symlink`. On Unix the node opens the
+//! file, or the parent directory of a namespace operation, first and checks the handle against
+//! its roots before acting relative to it, and refuses a symlink whose target is outside the
+//! roots (INTENT D48, #456). Any other `{op}` is 404. **[provisional]** A failed `expect`
+//! precondition is the node's 412 with its `actual_sha256`, passed unchanged.
 //!
 //! The server adds no path check. The node resolves every path (symlinks and `..` included)
 //! against its allowed roots and refuses the rest, so a second check here could only disagree
@@ -59,7 +66,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use ember_node::client::ClientError;
-use ember_node::proto::{GlobRequest, GrepRequest, PathRequest, PwriteRequest, ReadRequest, SetAttrRequest, WriteRequest};
+use ember_node::proto::{
+    GlobRequest, GrepRequest, MkdirRequest, PathRequest, PwriteRequest, ReadRequest, RemoveRequest, RenameRequest,
+    SetAttrRequest, SymlinkRequest, WriteRequest,
+};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
@@ -70,13 +80,16 @@ use super::{ComputerError, Computers};
 /// Largest request body the read-only routes accept.
 pub const MAX_BODY: usize = 1024 * 1024;
 
-/// Largest request body the write routes (`write`, `pwrite`, `setattr`) accept.
+/// Largest request body the content write routes (`write`, `pwrite`, `setattr`) accept. The
+/// namespace routes carry only paths and keep [`MAX_BODY`].
 pub const MAX_WRITE_BODY: usize = 24 * 1024 * 1024;
 
 /// The operations relayed with [`MAX_BODY`].
 const READ_OPS: &[&str] = &["stat", "lstat", "read", "list", "readlink", "glob", "grep"];
-/// The operations relayed with [`MAX_WRITE_BODY`] (INTENT D48: content operations only).
+/// The operations relayed with [`MAX_WRITE_BODY`] (content writes, INTENT D48).
 const WRITE_OPS: &[&str] = &["write", "pwrite", "setattr"];
+/// The namespace operations, relayed on their own routes with [`MAX_BODY`] (INTENT D48, #456).
+const NAMESPACE_OPS: &[&str] = &["mkdir", "remove", "rename", "symlink"];
 
 /// Largest `limit` a relayed `glob` or `grep` may ask the node for.
 pub const MAX_SEARCH_LIMIT: usize = 1000;
@@ -121,11 +134,19 @@ pub fn router_with(computers: Arc<Computers>, limits: FsLimits) -> Router {
         .route("/api/computers/{id}/fs/setattr", post(setattr_op))
         .layer(DefaultBodyLimit::max(MAX_WRITE_BODY))
         .with_state(state.clone());
+    let namespace = Router::new()
+        .route("/api/computers/{id}/fs/mkdir", post(mkdir_op))
+        .route("/api/computers/{id}/fs/remove", post(remove_op))
+        .route("/api/computers/{id}/fs/rename", post(rename_op))
+        .route("/api/computers/{id}/fs/symlink", post(symlink_op))
+        .layer(DefaultBodyLimit::max(MAX_BODY))
+        .with_state(state.clone());
     Router::new()
         .route("/api/computers/{id}/fs/{op}", post(relay))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(state)
         .merge(writes)
+        .merge(namespace)
 }
 
 /// The `limit` actually sent to the node.
@@ -167,6 +188,14 @@ fn out<T: serde::Serialize>(r: Result<T, ClientError>) -> Response {
     }
 }
 
+/// A node answer with no body (204), passed as 204.
+fn no_content(r: Result<(), ClientError>) -> Response {
+    match r {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => client_error(e),
+    }
+}
+
 async fn write_op(State(r): State<Relay>, Path(id): Path<String>, Json(v): Json<Value>) -> Response {
     run(r, id, "write", v).await
 }
@@ -179,13 +208,30 @@ async fn setattr_op(State(r): State<Relay>, Path(id): Path<String>, Json(v): Jso
     run(r, id, "setattr", v).await
 }
 
+async fn mkdir_op(State(r): State<Relay>, Path(id): Path<String>, Json(v): Json<Value>) -> Response {
+    run(r, id, "mkdir", v).await
+}
+
+async fn remove_op(State(r): State<Relay>, Path(id): Path<String>, Json(v): Json<Value>) -> Response {
+    run(r, id, "remove", v).await
+}
+
+async fn rename_op(State(r): State<Relay>, Path(id): Path<String>, Json(v): Json<Value>) -> Response {
+    run(r, id, "rename", v).await
+}
+
+async fn symlink_op(State(r): State<Relay>, Path(id): Path<String>, Json(v): Json<Value>) -> Response {
+    run(r, id, "symlink", v).await
+}
+
 async fn relay(
     State(r): State<Relay>,
     Path((id, op)): Path<(String, String)>,
     Json(v): Json<Value>,
 ) -> Response {
     // Only the read-only operations go through `{op}`; check the name before touching the
-    // computer. A write op reaching here (it cannot, its static route wins) is refused too.
+    // computer. A write or namespace op reaching here (it cannot, its static route wins) is
+    // refused too.
     if !READ_OPS.contains(&op.as_str()) {
         return plain(StatusCode::NOT_FOUND, format!("no such file operation: {op}"));
     }
@@ -193,7 +239,7 @@ async fn relay(
 }
 
 async fn run(r: Relay, id: String, op: &str, v: Value) -> Response {
-    debug_assert!(READ_OPS.contains(&op) || WRITE_OPS.contains(&op));
+    debug_assert!(READ_OPS.contains(&op) || WRITE_OPS.contains(&op) || NAMESPACE_OPS.contains(&op));
     let node = match r.computers.client(&id) {
         Ok(n) => n,
         Err(e) => return computer_error(e),
@@ -259,6 +305,22 @@ async fn call(node: &ember_node::client::NodeClient, op: &str, v: Value) -> Resp
         },
         "setattr" => match body::<SetAttrRequest>(v) {
             Ok(r) => out(node.setattr(&r).await),
+            Err(e) => e,
+        },
+        "mkdir" => match body::<MkdirRequest>(v) {
+            Ok(r) => out(node.mkdir(&r).await),
+            Err(e) => e,
+        },
+        "remove" => match body::<RemoveRequest>(v) {
+            Ok(r) => no_content(node.remove(&r.path, r.recursive).await),
+            Err(e) => e,
+        },
+        "rename" => match body::<RenameRequest>(v) {
+            Ok(r) => no_content(node.rename(&r).await),
+            Err(e) => e,
+        },
+        "symlink" => match body::<SymlinkRequest>(v) {
+            Ok(r) => out(node.symlink(&r.path, &r.target).await),
             Err(e) => e,
         },
         _ => unreachable!("checked above"),

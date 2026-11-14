@@ -244,6 +244,8 @@ dioxus-compose를 구현하고 있는 이유일텐데?"]
   management and extension-host connections, the remote filesystem, and the per-category bridges
   (`docs/design/EDITOR-CONNECTION.md`).
 
+**Amendment** [user, 2026-11-13, D44: "확장 프로그램은 웹뷰 사용하는건데? 몰랐어?"]. The Ember 에디터 window may host platform webviews for extension content only: extension webview panels and webview views, custom editors, and notebook outputs that need HTML, JavaScript or widgets, each contained to its own panel (`FR-E5`, `FR-E8`). The workbench itself stays drawn by dioxus-compose with no JavaScript engine of its own, and the native code editor still replaces Monaco. The launcher and the conversation UI still never allocate a webview (`NFR-L2`, AGENTS.md rule 5).
+
 **Consequence.** M8 (the editor core) is in scope and dated (`PROJECT.md`). The official Node
 Extension Host is still never reimplemented (E4): the editor core speaks Code-OSS's own
 renderer ↔ extension-host protocol to it. That protocol is internal, so each OSE build pins one
@@ -630,6 +632,15 @@ radius, smoothing 0.6: "애플의 스퀘어클과 맞지 않는 구현이야"), 
 
 [user, 2026-10-25: "앱 기본 스타일에서 안쪽 코드 작성이랑 도구창이 오히려 jetbrains island라는 최신 디자인 컨셉에 더 맞아. 그래서 그쪽 디자인이 맞고, 다만 지금 좌우 메뉴바의 경우 jetbrains 느낌으로 하는게 맞을거 같아. 흰색 버튼 배경이 보기 싫네."] The editor and terminal use the app's own style: rounded island panels, tabs, tool windows and the code area, matching the JetBrains Islands concept. Only the left and right tool-window stripes take the JetBrains form: 40 px icon-only stripes, with no white background or shadow on the selected button, just a faint selection tint. Breadcrumbs stay under the tabs. [provisional] The owner did not decide this, so it is a leader decision. Every other screen keeps the mockup design unchanged, including the session panels, the status view and version control.
 
+[user, 2026-11-13: "엠버 디자인 추천대로 해"] *Note on placement.* Features beyond the mockup (Code-OSS
+parity, D38) live in surfaces the mockup already has rather than new buttons: the 프로젝트 header keeps
+its three actions plus one "+" menu, tree-row actions move to the context menu, file search to the
+find pill, 출력 becomes a bottom tab, the stripes and the top bar are exactly the mockup's, and the
+top bar's ⋯ items join the tab strip's ⋯ menu under a separator. The rule and its six parts are in
+`DESIGN.md` §6.3 ("Where features beyond the mockup go"). Rejected: one button per feature in the
+chrome (what the 2026-11-13 design review found), and dropping features to keep the mockup's chrome
+(breaks D38).
+
 **Why.** One product that a user moves between machines should look the same on all of them, and a
 per-OS widget set multiplies the work of every screen.
 
@@ -1000,15 +1011,18 @@ Anything a scope does not list is refused, so a route added later is closed to s
 
 **Status.** Deferred; #744 has the completion criteria.
 
-### D44: Webviews, custom editors and notebook outputs in the Ember 에디터: native for the common cases, VS Code for the rest
+### D44: Extension webviews, custom editors and notebook outputs run in a platform webview inside the Ember 에디터 window
 
-**Decision.** [provisional, #452, needs the owner's confirmation] The Ember 에디터 window hosts no webview, keeping D9a. Markdown preview, image files and notebook outputs that are text, stream, error or image mimes are drawn natively. Every other extension webview panel, webview view, custom editor and notebook output (HTML, JavaScript, widgets) shows a placeholder in its own panel, with the extension's name and `VS Code에서 열기`, which opens the project in the VS Code target (`ember/editor/src/fallback.rs`). FR-E5 ("Extension webview panels still work, contained to their panel") is met through that fallback, not inside the window (`FR-E8`).
+**Decision.** [user, 2026-11-13] Extension webview panels and webview views, custom editors, and notebook outputs that need HTML, JavaScript or widgets run in a platform webview inside the Ember 에디터 window, each contained to its own panel (`FR-E5`, `FR-E8`): WKWebView on macOS and iOS, WebView2 on Windows, WebKitGTK on Linux, Android WebView on Android. Each webview has its own secure origin and runs the extension's HTML under its own CSP; Ember bridges the VS Code webview API (`postMessage` both ways, `asWebviewUri` and local resources limited to `localResourceRoots`, state, `retainContextWhenHidden`). The window composes each webview into the editor layout at its panel's rect and z-order. The toolkit node that hosts a platform view is compose-rust's (p1A, `.scratch/leader/native-webview-plan.md`); Ember owns the bridge, the composition and the requirements (`docs/design/EDITOR-WEBVIEWS.md`). D9a is amended for this (extension content only); `NFR-L2` still holds for the launcher and the conversation UI.
 
-**Rejected** *[provisional]*. A platform webview region inside the Ember 에디터 window (E5 allows it, D9a does not; it needs a webview host per OS that does not exist (#30), a secure webview origin, a native view composited into dioxus-compose, and a JS engine in the editor window). Leaving these features out (D38 asks for function parity). The options and their costs are in `docs/design/EDITOR-PARITY.md`, "Webviews, custom editors and notebook outputs".
+**Rejected.**
+1. The #755 proposal (C+B): draw markdown, images and simple notebook outputs natively and send every other webview to "VS Code에서 열기". The owner: "확장 프로그램은 웹뷰 사용하는건데? 몰랐어?" and "VS Code에서 열기 >> 뭐래 확장은 웹뷰 쓰는거야". Extensions are written against the webview API; an editor that cannot run them does not have Code-OSS's function (D38), and a fallback to another IDE is not an answer.
+2. Leaving webviews out (D, also in #755): contradicts D38 and FR-E5.
+3. A webview for the whole workbench (VS Code Web inside the window): that is the VS Code target of D9a, not the Ember editor, and it would bring the JS engine into the workbench itself.
 
-**Why.** Extension webviews are extension programs written for a browser engine; they cannot be drawn without one. The cases users meet daily (reading markdown, looking at an image, a notebook's printed output and plots) need no extension code, so they can follow the mockup's design natively, and the rest still works one click away in VS Code Web, which already is the IDE window exception of E1.
+**Why.** Many extensions show their main UI in a webview (previews, dashboards, custom editors, notebook renderers). Code-OSS hosts them in sandboxed iframes with a per-webview origin; a platform webview per panel gives the same contract natively, while the workbench stays dioxus-compose.
 
-**Status.** Proposed, not built. Waits for the owner; if the owner wants option A, D9a changes first.
+**Status.** Decided by the owner; not built. Toolkit: compose-rust embedded native view (p1A; amending compose-rust INTENT C1 through an opt-in separate crate waits for the owner's OK). Ember: `FR-E8`.
 
 ### D45: Local secret files: swept at startup, redacted logs, a week of retention
 
@@ -1055,12 +1069,14 @@ What trust does not protect. Under D37 agents and terminals run with the full au
 
 **Status.** Built (`FR-L31.17`, Draft; issue #449): `ember/editor/src/settings.rs`, `ember/app/src/ui/editor_settings.rs`. Not built: editing the remote scope, multi-root folder settings, profiles, Settings Sync, policy, `when` clauses and two-stroke keys in `keybindings.json`, noticing a `.vscode/settings.json` changed by someone else while it is not open.
 
-### D48: Node file operations open first and check the handle; the write relay waits for the namespace operations
+### D48: Node file operations open first and check the handle; the write relay follows the covered operations
 
-**Decision.** [provisional, #468, 2026-11-13] The node's content file operations (read, pwrite, setattr, grep, and on Unix the atomic write) open first and check the opened handle against the path policy (resolve again, and on Unix compare device and inode), with `O_NOFOLLOW` on the final component and, for the atomic write, a checked directory handle (`openat`, `renameat`). Namespace operations (mkdir, remove, rename, symlink, stat, lstat, readlink, list, glob) keep acting on paths for now. The server write relay may relay only the covered content operations until those move to directory handles too.
+**Decision.** [provisional, #468, 2026-11-13] The node's content file operations (read, pwrite, setattr, grep, and on Unix the atomic write) open first and check the opened handle against the path policy (resolve again, and on Unix compare device and inode), with `O_NOFOLLOW` on the final component and, for the atomic write, a checked directory handle (`openat`, `renameat`). The server write relay may relay only operations covered this way.
 
-**Rejected** *[provisional]*. Accepting the race under D37 without code (an admitted device has full authority, but the local node and denied paths narrow the API on purpose, and a narrowing that a symlink swap defeats is not one). Resolving every component with `openat` from the root on every call (correct, but a rewrite of every operation; it is the next step for the namespace operations). Linux-only `openat2(RESOLVE_BENEATH)` (not on macOS or Windows).
+[provisional, #456, 2026-11-13] On Unix the namespace operations follow: mkdir, remove, rename, symlink, stat, lstat and readlink open the parent directory with `O_DIRECTORY | O_NOFOLLOW`, check it the same way, and act on the final name relative to it (`mkdirat`, `unlinkat`, `renameat` between two checked parents, `symlinkat`, `fstatat`, `readlinkat`); `mkdir -p` creates one level at a time and a recursive remove walks through `O_NOFOLLOW` directory handles. `list` opens and checks the directory itself and reads it from the handle. `glob` still walks by path and reads every match again with the checked `lstat`. `symlink` also checks its target: a target that resolves outside the roots or into a denied entry is refused. With that, the server relays `mkdir`, `remove`, `rename` and `symlink` like `write`. On Windows these stay path based with the parent resolved again right before the call (std has no directory-relative calls and no stable file id).
 
-**Why.** The check-then-open gap is reachable remotely through the server relay (#463). Checking the handle closes it for every operation that reads or writes content, with no change to the API.
+**Rejected** *[provisional]*. Accepting the race under D37 without code (an admitted device has full authority, but the local node and denied paths narrow the API on purpose, and a narrowing that a symlink swap defeats is not one). Resolving every component with `openat` from the root on every call (correct, but a rewrite of every operation; the parent check gives the same guarantee for one final name). Linux-only `openat2(RESOLVE_BENEATH)` (not on macOS or Windows). Allowing a symlink target outside the roots because later operations refuse to follow it (true for this API, but a planted link still points a terminal, an agent or another program that trusts the tree outside it).
 
-**Status.** Built (#803) (`ember/node/tests/fs_toctou.rs`). SPEC `FR-X1` (open, then check, #468).
+**Why.** The check-then-open gap is reachable remotely through the server relay (#463). Checking the handle closes it for every operation that reads or writes content; checking the parent handle closes it for the operations that create, remove, move or describe a name, with no change to the API.
+
+**Status.** Content operations built (#803) (`ember/node/tests/fs_toctou.rs`). Namespace operations and their server relay written (#456), not yet compiled or run (`fr_x1_*` in `ember/node/tests/fs_toctou.rs`, `fr_w4_fs_relay_namespace_*` in `ember/server/tests/fr_w4_fs_relay.rs`). Residual: the `glob` walk itself reads directories by path, so a name that exists outside and at the same place inside is not told apart; Windows is not covered by handle checks. SPEC `FR-X1` (open, then check, #468; namespace operations, #456), `FR-W4`.

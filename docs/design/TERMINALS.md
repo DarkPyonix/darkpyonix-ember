@@ -28,14 +28,39 @@ here is verified on two machines or on a real systemd or launchd.
 | FR-P6 survive an ember node restart (best effort) | Built | keeper + re-adoption (`mod.rs:133`), test `a_new_node_readopts_running_sessions_and_reports_lost_ones` (`terms.rs:405`); real systemd/launchd not verified |
 | NFR-P1 attach in 500 ms, 2 MB per idle session | Built on loopback | `ember/node/tests/term_nfr.rs`; LAN not measured |
 
-What the VS Code Web part still needs (outside this backend change): the companion and
-`ember-term` exist (§3) but have not run against a real `code serve-web`; the companion reaches
-the node through the proxy's `/__terms` with the node token from `~/.ember/node/local.json`, so
-on a server whose only node is the in-process local node it has no endpoint file to read. Either
-the proxy relays to `/api/computers/local/terms` with the server token, or the local node writes
-a `local.json` under its own state dir for the proxy (open, [provisional], #26). The setup
-command that writes `terminal.integrated.automationProfile` needs an `ember-term` on the PATH of
-the VS Code server, which the OSE build does not install yet.
+What the VS Code Web part still needs, and what #26 decided for it [provisional, 2026-11-13]:
+
+1. **Proxy endpoint with only the built-in node.** The proxy's `/__terms` first looks for an
+   ember node daemon (`DPX_EMBER_NODE_URL` + `DPX_EMBER_NODE_TOKEN`, else
+   `~/.ember/node/local.json`). When there is none, it relays to ember server's
+   `/api/computers/local/terms*` with the server token (`DPX_EMBER_SERVER_TOKEN`, else the
+   server's token file `$EMBER_DATA_DIR/server-token`, re-read on every request so a rotation is
+   followed; URL `DPX_EMBER_SERVER_URL`, default `http://127.0.0.1:8740`, empty turns it off).
+   Reason: the built-in node is persistent since FR-P6 and the server relay already speaks the
+   node's bodies, events and attach protocol, so one prefix is the whole change. Rejected: the
+   proxy reading the built-in node's own `local.json` directly, because that couples the proxy
+   to the server's data dir layout and skips the server's auth. Code
+   `ember/proxy/dpx/terms/node.py` (`discover_server`, `NodeEndpoint.prefix`); tests
+   `ember/proxy/tests/test_terms_relay.py` (`DiscoverServerTest`,
+   `test_server_relay_paths_carry_the_prefix`).
+2. **`ember-term` on the OSE's PATH.** The server finds `ember-term` (`EMBER_TERM_BIN`, else next
+   to `ember-server`; the release tarball of the server now carries it) and puts its folder first
+   on the OSE child's `PATH` (`ose::TerminalEnv`, `find_ember_term_dir`). For the local computer
+   it also sets `EMBER_NODE_STATE_DIR` to the built-in node's state dir, where that node now
+   writes `local.json` (0600) at start, and the server starts the node at boot when ember-term is
+   found, so the file names the running node. No token goes into the environment. Tests
+   `ose.rs` (`fr_p5_*`), `ember/server/tests/fr_p5_local_node_endpoint_file.rs`.
+3. **Setup command.** *Use Persistent Terminals for New Terminals and Tasks* writes
+   `defaultProfile.<os>` and, unless left empty, `automationProfile.<os>` = `{ path: "ember-term" }`
+   (the bare name, the new default; an absolute path still works). Pure part `setupSettings`,
+   tested in `ember/proxy/companion/test/extension.test.js`. The command is run by hand: nothing
+   applies these settings automatically.
+
+Still open: the companion is installed only next to the proxy's `code serve-web`; the OSE build
+does not stage it, so an OSE window has `ember-term` tasks but no "Ember (persistent)" profile.
+Not verified against a real VS Code: that `automationProfile.path` = a bare name is resolved on
+the server's PATH, that tasks run through it, and the whole relay against a real
+`code serve-web` (owner checklist).
 
 Terminals, tasks and other processes started from an IDE window must keep running when every
 window is closed, and must reappear (same scrollback, same screen, same running TUI) on any
@@ -240,7 +265,7 @@ Terminals for New Terminals and Tasks* (writes the settings below). Unit tests:
 
 The proxy side is `ember/proxy/dpx/terms/` (`/__terms/*`, see its docstring): same-origin with the
 workbench, so the session cookie authenticates both `fetch` and the WebSocket (which also checks
-`Origin`); the node token comes from `~/.ember/node/local.json` and never reaches the browser; a
+`Origin`); the token (the node's from `~/.ember/node/local.json`, or the server token when it relays to the built-in node, see §0) never reaches the browser; a
 browser may create only `ide-vscode` / `ide-ember` sessions. Unit tests:
 `cd ember/proxy && python3 -m unittest tests.test_terms_relay`.
 

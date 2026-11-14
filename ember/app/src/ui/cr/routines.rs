@@ -1285,8 +1285,8 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
 }
 
 /// A review window (`EMBER_CR_ROUTE=routines`): the routines screen with sample routines.
-#[compose_rust::runtime::composable]
-pub fn preview() {
+#[compose_rust::runtime::Composable]
+pub fn preview_routines() {
     let p = ember_theme().palette;
     cu::Box()
         .modifier(Modifier::new().fill_max_size().background(paint(p.bg)))
@@ -1344,8 +1344,10 @@ fn RoutineHeader(compact: bool, trailing: impl FnOnce()) {
     );
 }
 
-// TODO(compose-rust#425, #429): an invisible `Button(label)` over a painted row, only to get focus,
-// role and the accessible name. Remove when Button takes content or a semantics modifier exists.
+// v0.0.7: #425 and #429 fixed (`Button::content`, `Modifier::label`); workaround kept until
+// checked on a display (moving each painted row into a `Button` content slot changes its press
+// feedback and padding). The overlay names itself with `accessible_name` (owned), never
+// `Modifier::label`: a routine name is data, and the toolkit keeps every label for good (#455).
 /// An accessible invisible button overlay for a painted row or pill.
 /// Gives assistive tech the item's label and provides keyboard focus and click handling.
 fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
@@ -1355,6 +1357,7 @@ fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
 /// The one direct button behind both overlays: invisible text, the whole box to click.
 fn NamedOverlay(label: &str, enabled: bool, on_click: impl FnMut() + 'static) {
     cu::Button(label)
+        .accessible_name(label)
         .enabled(enabled)
         .variant(ButtonVariant::Text)
         .color(Paint::Literal(Color::argb(0)))
@@ -1384,32 +1387,24 @@ fn RunNowButton(busy: bool, on_click: impl FnMut() + 'static) {
     }
 }
 
-// TODO(compose-rust#426): the toolkit Switch cannot take the ink 36x20 style or an accessible name;
-// drawn on a Canvas under a named Button until it can.
-/// A 36x20 toggle switch matching the mockup (`.switch.on` ink, off `track`, knob `surface`).
-///
-/// TODO(compose-rust#372): the toolkit `Switch` draws 54x32 green (#2ec04f) and cannot be
-/// styled to the mockup's 36x20 ink track; built from a toolkit Button with a painted
-/// track and knob so keyboard focus and button semantics work.
-fn RoutineSwitch(routine_name: &str, checked: bool, mut on_change: impl FnMut(bool) + 'static) {
+/// A 36x20 toggle switch matching the mockup (`.switch.on` ink, off `track`, thumb `surface`).
+/// The toolkit `Switch` takes the size, the colours and the accessible name since compose-rust
+/// v0.0.7 (#426, #372). It announces its own on or off state, so its name is
+/// "<routine> 루틴", passed with `accessible_name` because a routine name is data (#455).
+fn RoutineSwitch(routine_name: &str, checked: bool, on_change: impl FnMut(bool) + 'static) {
     let p = ember_theme().palette;
     let track_color = if checked { p.ink } else { p.track };
-    let knob_x = if checked { 26.0 } else { 10.0 };
-    let list = DrawList::builder()
-        .round_rect(paint(track_color), 0.0, 0.0, 36.0, 20.0, 10.0, 0.0)
-        .circle(paint(p.surface), knob_x, 10.0, 8.0, 0.0)
-        .build();
-    let switch_label = if checked {
-        format!("{routine_name} 루틴 끄기")
-    } else {
-        format!("{routine_name} 루틴 켜기")
-    };
-    cu::Box()
-        .modifier(Modifier::new().size(36.0, 20.0))
-        .content(move || {
-            cu::Canvas(list).modifier(Modifier::new().size(36.0, 20.0));
-            FocusOverlay(&switch_label, move || on_change(!checked));
-        });
+    cu::Switch(checked)
+        .size(36.0, 20.0)
+        .track_color(paint(track_color))
+        .thumb_color(paint(p.surface))
+        .accessible_name(routine_switch_name(routine_name))
+        .on_change(on_change);
+}
+
+/// The accessible name of a routine's switch.
+pub fn routine_switch_name(routine_name: &str) -> String {
+    format!("{routine_name} 루틴")
 }
 
 /// The segment's type step: the mockup's `.seg button` is `--fs-sm` (13) at 500.
@@ -1442,8 +1437,9 @@ pub fn seg_line_room(avail: f32) -> f32 {
 
 /// The segments of a choice row packed into lines no wider than `avail`, as the mockup's `.seg`
 /// wraps (`flex-wrap: wrap`, `gap: 8px`), so every option and the chosen one stay in view.
-/// TODO(compose-rust#521): the toolkit has no wrapping row (`FlowRow`), so the packing is by
-/// estimated width; drop this once `FlowRow` lands. Each line
+/// v0.0.7: #521 fixed (`FlowRow`); workaround kept until checked on a display (the toolkit's
+/// line breaking must match the mockup's `gap: 8px` wrap at 390 and 1440), so the packing is by
+/// estimated width. Each line
 /// holds indices into `labels`, in order; a segment wider than `avail` gets a line of its own.
 pub fn seg_lines<S: AsRef<str>>(labels: &[S], avail: f32) -> Vec<Vec<usize>> {
     let avail = seg_line_room(avail);
@@ -1578,15 +1574,16 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
     let busy = totals.iter().any(|t| *t > 0);
 
     let kpis_content = move || {
+        // The two KPI rows sit together at the top of the card (`.rt-topwrap .kpis` row gap
+        // `--sp4`), not spread over the height the chart card beside it gives (design review B5).
         cu::Column()
-            .spacing(SP[2])
+            .spacing(ROUTINE_KPI_ROW_GAP)
             .modifier(Modifier::new().fill_max_width().height(card_h))
             .content(|| {
                 cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
                     RoutineKpiView(&k[0], 0);
                     RoutineKpiView(&k[1], 1);
                 });
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
                 cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
                     RoutineKpiView(&k[2], 2);
                     RoutineKpiView(&k[3], 3);
@@ -1680,6 +1677,13 @@ fn HeroCardContent(
         });
 }
 
+/// A routine KPI number: `.kpi .v` 28/400 (`style.css:110`, `routines.css:64`), design review B5.
+pub const ROUTINE_KPI_WEIGHT: Weight = Weight::Regular;
+/// The gap between the two KPI rows (`.rt-topwrap .kpis` gap `--sp4`).
+pub const ROUTINE_KPI_ROW_GAP: f32 = 16.0;
+/// The detail pane's title: 15/600 (`DESIGN.md` 6.5), design review B5.
+pub const ROUTINE_DETAIL_TITLE: (Fs, Weight) = (Fs::Lg, Weight::Semibold);
+
 // TODO(compose-rust#443): `Text` has no `overflow_wrap`, so a KPI label stays on one line with
 // `max_lines(Some(1))` instead of being allowed to wrap in a narrow column.
 fn RoutineKpiView(kpi: &RoutineKpi, index: usize) {
@@ -1688,7 +1692,7 @@ fn RoutineKpiView(kpi: &RoutineKpi, index: usize) {
         Label(kpi.label, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
         if index < 3 {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                Label(&kpi.value, Fs::Xl2, Weight::Semibold, None, Some(1));
+                Label(&kpi.value, Fs::Xl2, ROUTINE_KPI_WEIGHT, None, Some(1));
                 if let Some(note) = &kpi.note {
                     let tone = match index {
                         1 => PillTone::Blue,
@@ -1699,7 +1703,7 @@ fn RoutineKpiView(kpi: &RoutineKpi, index: usize) {
                 }
             });
         } else {
-            Label(&kpi.value, Fs::Xl2, Weight::Semibold, None, Some(1));
+            Label(&kpi.value, Fs::Xl2, ROUTINE_KPI_WEIGHT, None, Some(1));
             if let Some(note) = &kpi.note {
                 Label(note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             }
@@ -1735,7 +1739,9 @@ fn ListPane(
         )
         .content(|| {
             cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                // TODO(compose-rust#328): chip widths are measured too narrow, so the sixth filter chip clips at 1440 (it is reachable by scrolling).
+                // v0.0.7: #328 fixed (labels stay on one line, and a weighted child keeps its
+                // longest word, #427); workaround kept until checked on a display (whether the
+                // sixth filter chip still clips at 1440; it is reachable by scrolling).
                 cu::ScrollRow()
                     .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
                     .content(|| {
@@ -2101,7 +2107,7 @@ fn DetailPane(
                         // The title takes what the actions leave and ellipsizes, so the actions
                         // never leave the panel.
                         cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                            Label(&routine_name, Fs::Xl, Weight::Semibold, None, Some(1));
+                            Label(&routine_name, ROUTINE_DETAIL_TITLE.0, ROUTINE_DETAIL_TITLE.1, None, Some(1));
                         });
                         TriggerPill(routine_trigger, true);
                         RoutineSwitch(&routine_name_w, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
@@ -3100,7 +3106,7 @@ mod tests {
     #[test]
     fn fr_l25_form_routes_all_go_through_request_leave() {
         let src = include_str!("routines.rs");
-        let screen = src.split("pub fn RoutinesScreenWith").nth(1).unwrap().split("pub fn preview").next().unwrap();
+        let screen = src.split("pub fn RoutinesScreenWith").nth(1).unwrap().split("pub fn preview_routines").next().unwrap();
         for route in ["Leave::NewForm", "Leave::OpenRoutine", "Leave::Cancel", "Leave::EditForm"] {
             assert!(screen.contains(route), "{route}");
         }
@@ -3863,6 +3869,21 @@ mod tests {
         let mutations = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
         let buttons = extract_buttons(&mutations);
         let button_labels: Vec<&str> = buttons.iter().filter_map(|(_, t)| *t).collect();
+        let switches: Vec<u32> = mutations
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create { node_id, widget: WidgetKind::Switch } => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        let switch_names: Vec<&str> = mutations
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::AccessibleName, value: PropertyValue::String(s) }
+                    if switches.contains(node_id) => Some(*s),
+                _ => None,
+            })
+            .collect();
 
         for e in &entries {
             let name = &e.routine.name;
@@ -3872,10 +3893,12 @@ mod tests {
                 "expected routine row button with exact name '{name}', found labels: {button_labels:?}"
             );
 
-            let has_switch_button = button_labels.iter().any(|lbl| lbl.contains(name) && (lbl.contains("루틴 끄기") || lbl.contains("루틴 켜기")));
+            // compose-rust#426 (v0.0.7): the switch is the toolkit's, named "<routine> 루틴".
+            let want = routine_switch_name(name);
+            let has_switch = switch_names.iter().any(|n| *n == want);
             assert!(
-                has_switch_button,
-                "expected switch button containing routine name '{name}', found labels: {button_labels:?}"
+                has_switch,
+                "expected a Switch named '{want}', found switches: {switch_names:?}"
             );
         }
         compose_rust::window::reset_window_size();
@@ -4507,5 +4530,32 @@ mod tests {
         );
 
         with_remote(|r| *r = Remote::default());
+    }
+}
+
+/// Design review 2026-11-13 B5: the routine dashboard and detail against the mockup.
+#[cfg(test)]
+mod design_review_tests {
+    use super::*;
+
+    /// This file without this module, so a source check never finds its own literal.
+    fn source() -> &'static str {
+        let src = include_str!("routines.rs");
+        &src[..src.find("mod design_review_tests {").unwrap()]
+    }
+
+    #[test]
+    fn design_b5_kpi_numbers_are_28_400_and_the_rows_sit_together() {
+        assert_eq!(ROUTINE_KPI_WEIGHT, Weight::Regular);
+        assert_eq!(ROUTINE_KPI_ROW_GAP, 16.0);
+        let src = source();
+        assert_eq!(src.matches("Label(&kpi.value, Fs::Xl2, ROUTINE_KPI_WEIGHT, None, Some(1));").count(), 2);
+        let dash = &src[src.find("let kpis_content = move || {").unwrap()..src.find("let hero_content = move || {").unwrap()];
+        assert!(!dash.contains("weight(1.0)"), "the KPI rows are still spread over the card");
+    }
+
+    #[test]
+    fn design_b5_detail_title_is_15_600() {
+        assert_eq!(ROUTINE_DETAIL_TITLE, (Fs::Lg, Weight::Semibold));
     }
 }

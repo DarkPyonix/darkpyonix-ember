@@ -719,6 +719,44 @@ mod tests {
         assert!(ServerApi::with_token("http://127.0.0.1:1", None).is_ok());
     }
 
+    /// The app's own HTTP client sends the claimed owner key on owner routes only, keeps it for a
+    /// local server only, never prints it, and marks a 403 `owner_required` (FR-S12, #842).
+    #[test]
+    fn fr_s12_server_api_sends_the_owner_key_on_owner_routes_only() {
+        use ember_client::owner::OwnerKey;
+        use reqwest::Method;
+        let api = ServerApi::with_token("http://127.0.0.1:1", None).unwrap();
+        assert!(api.owner_header(&Method::POST, "/accounts").is_none(), "no key yet");
+        assert!(api.set_owner_key(Some(&OwnerKey::new("eok_app_key"))));
+        let clone = api.clone();
+        for (m, path) in [
+            (Method::POST, "/accounts"),
+            (Method::POST, "/accounts/a1/default"),
+            (Method::POST, "/accounts/a1/check"),
+            (Method::PUT, "/agents/codex/settings"),
+        ] {
+            let v = clone.owner_header(&m, path).unwrap_or_else(|| panic!("{m} {path}"));
+            assert_eq!(v, "eok_app_key");
+            assert!(v.is_sensitive());
+        }
+        for (m, path) in [(Method::GET, "/accounts"), (Method::POST, "/sessions"), (Method::GET, "/agents/settings")] {
+            assert!(api.owner_header(&m, path).is_none(), "{m} {path}");
+        }
+        assert!(!format!("{api:?}").contains("eok_app_key"));
+        assert!(api.set_owner_key(None));
+        assert!(clone.owner_header(&Method::POST, "/accounts").is_none(), "clones share the key");
+        // A server elsewhere never gets the key.
+        let remote = ServerApi::with_token("http://192.0.2.1:8740", None).unwrap();
+        assert!(!remote.set_owner_key(Some(&OwnerKey::new("eok_app_key"))));
+        assert!(remote.owner_header(&Method::POST, "/accounts").is_none());
+
+        let e = status_error(403, r#"{"code":"owner_required","error":"this route needs owner presence"}"#.into());
+        assert!(e.is_owner_required(), "{e:?}");
+        assert!(crate::owner_claim::text_is_owner_required(&e.to_string()), "{e}");
+        assert!(!status_error(403, r#"{"code":"scope_denied","error":"x"}"#.into()).is_owner_required());
+        assert!(!status_error(500, "boom".into()).is_owner_required());
+    }
+
     #[test]
     fn fr_s11_server_api_401_is_the_auth_error() {
         let e = status_error(401, r#"{"error":"unauthorized"}"#.into());

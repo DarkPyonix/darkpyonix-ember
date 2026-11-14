@@ -9,6 +9,7 @@
 //! - [`services`]: tokio runtime, `ember_client::Client`, extra server API, outbox.
 //! - [`bridge`]: client changes → UI signals.
 //! - [`model`]: pure view models (tested).
+//! - [`owner_claim`]: the owner-presence claim at start (FR-S12, #842).
 //! - [`ui`]: the screens.
 
 pub mod bridge;
@@ -18,6 +19,7 @@ pub mod export;
 pub mod editor_host;
 pub mod ide;
 pub mod model;
+pub mod owner_claim;
 pub mod prefs;
 pub mod server;
 pub mod services;

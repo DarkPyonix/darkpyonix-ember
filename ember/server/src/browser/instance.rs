@@ -393,6 +393,7 @@ impl BrowserInstance {
             .await;
         if tokio::time::timeout(Duration::from_secs(10), r.child.wait()).await.is_err() {
             let _ = r.child.kill().await;
+            let _ = r.child.wait().await;
         }
     }
 
@@ -519,18 +520,37 @@ impl BrowserInstance {
     /// Wait until a page is attached (after start or a restart).
     pub async fn wait_page(&self, timeout: Duration) -> anyhow::Result<()> {
         let mut st = self.state.subscribe();
-        tokio::time::timeout(timeout, async {
+        let waited = tokio::time::timeout(timeout, async {
             loop {
                 if self.page.lock().unwrap().is_some() {
-                    return;
+                    return Ok(());
                 }
                 if st.changed().await.is_err() {
-                    return;
+                    return Err(anyhow!("browser state channel closed while waiting for page"));
                 }
             }
         })
-        .await
-        .map_err(|_| anyhow!("no page attached within {timeout:?}"))
+        .await;
+        match waited {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => {
+                let err_detail = self
+                    .state
+                    .borrow()
+                    .error
+                    .as_deref()
+                    .map(|e| format!("; error: {e}"))
+                    .unwrap_or_default();
+                let stderr = chrome::stderr_tail(&self.profile_dir);
+                let stderr_detail = if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!("; stderr: {stderr}")
+                };
+                Err(anyhow!("no page attached within {timeout:?}{err_detail}{stderr_detail}"))
+            }
+        }
     }
 
     // ---- agents ----
@@ -614,8 +634,18 @@ fn tab_of(info: &Value) -> Option<Tab> {
 /// Keeps one page attached for streaming and input, follows new tabs, and runs the screencast
 /// while anyone watches. Ends when the connection closes or the instance is gone.
 async fn drive(me: Weak<BrowserInstance>, cdp: Arc<Cdp>) {
-    if let Err(e) = drive_inner(&me, &cdp).await {
-        tracing::warn!("browser driver ended: {e:#}");
+    loop {
+        match drive_inner(&me, &cdp).await {
+            Ok(()) => break,
+            Err(e) => {
+                if !cdp.is_open() || me.upgrade().is_none() {
+                    tracing::warn!("browser driver ended: {e:#}");
+                    break;
+                }
+                tracing::debug!("browser driver transient error, retrying: {e:#}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
     }
     if let Some(me) = me.upgrade() {
         *me.page.lock().unwrap() = None;

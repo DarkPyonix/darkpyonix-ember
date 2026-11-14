@@ -164,10 +164,29 @@ fn tempdir() -> tempfile::TempDir {
 /// Browser tests launch a real Chrome each; run them one at a time so they don't starve each
 /// other on small CI runners (seen on GitHub's 2-core Linux runner).
 static BROWSER_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static WARMED_UP: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+const PAGE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Launch and stop a throwaway headless Chrome once per test binary so OS dynamic-linker and font
+/// caches are warm before the real assertions run on a cold CI runner.
+async fn warm_up_once() {
+    WARMED_UP
+        .get_or_init(|| async {
+            let dir = tempdir();
+            let Some(m) = manager(dir.path()) else { return };
+            if let Ok(b) = m.open("warmup", None).await {
+                let _ = b.wait_page(PAGE_TIMEOUT).await;
+                b.stop().await;
+            }
+        })
+        .await;
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cookies_survive_egress_switch_and_clear_removes_them() {
     let _serial = BROWSER_TESTS.lock().await;
+    warm_up_once().await;
     let dir = tempdir();
     let Some(m) = manager(dir.path()) else { return };
     let site = Site::default();
@@ -177,7 +196,7 @@ async fn cookies_survive_egress_switch_and_clear_removes_them() {
     let base = format!("http://127.0.0.1:{}", addr.port());
 
     let b = m.open("egress", Some(Some(format!("socks5://{proxy_a}")))).await.unwrap();
-    b.wait_page(Duration::from_secs(30)).await.unwrap();
+    b.wait_page(PAGE_TIMEOUT).await.unwrap();
     goto(&b, &format!("{base}/set")).await;
     let target = format!("127.0.0.1:{}", addr.port());
     assert!(seen_a.lock().unwrap().contains(&target), "egress A not used: {:?}", seen_a.lock().unwrap());
@@ -186,7 +205,7 @@ async fn cookies_survive_egress_switch_and_clear_removes_them() {
     // Switch egress: restart on the same profile with proxy B.
     b.set_egress(Some(format!("socks5://{proxy_b}"))).await.unwrap();
     assert_eq!(b.egress().as_deref(), Some(format!("socks5://{proxy_b}").as_str()));
-    b.wait_page(Duration::from_secs(30)).await.unwrap();
+    b.wait_page(PAGE_TIMEOUT).await.unwrap();
     goto(&b, &format!("{base}/")).await;
     assert!(seen_b.lock().unwrap().contains(&target), "egress B not used");
     assert!(text_of_c(&b).await.contains("sid=abc123"), "cookie lost across egress switch");
@@ -194,7 +213,7 @@ async fn cookies_survive_egress_switch_and_clear_removes_them() {
 
     // Clear the profile (FR-R4): the cookie is gone, the browser keeps running on egress B.
     m.clear_data("egress").await.unwrap();
-    b.wait_page(Duration::from_secs(30)).await.unwrap();
+    b.wait_page(PAGE_TIMEOUT).await.unwrap();
     goto(&b, &format!("{base}/")).await;
     assert_eq!(text_of_c(&b).await, "");
     b.stop().await;
@@ -205,6 +224,7 @@ async fn cookies_survive_egress_switch_and_clear_removes_them() {
 #[tokio::test(flavor = "multi_thread")]
 async fn view_stream_frames_and_click() {
     let _serial = BROWSER_TESTS.lock().await;
+    warm_up_once().await;
     let dir = tempdir();
     let Some(m) = manager(dir.path()) else { return };
     let addr = serve_site(Site::default()).await;
@@ -224,7 +244,7 @@ async fn view_stream_frames_and_click() {
     assert_eq!(hello["type"], "hello");
 
     let b = m.get("view").await.unwrap();
-    b.wait_page(Duration::from_secs(30)).await.unwrap();
+    b.wait_page(PAGE_TIMEOUT).await.unwrap();
     let url = format!("http://127.0.0.1:{}/click", addr.port());
     let nav = json!({ "type": "navigate", "url": url }).to_string();
     ws.send(Message::Text(nav.into())).await.unwrap();
@@ -298,6 +318,7 @@ async fn view_stream_frames_and_click() {
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_relay_activity_and_takeover() {
     let _serial = BROWSER_TESTS.lock().await;
+    warm_up_once().await;
     let dir = tempdir();
     let Some(m) = manager(dir.path()) else { return };
     let api = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -387,6 +408,6 @@ async fn http_get(addr: SocketAddr, path: &str) -> String {
     let mut out = String::new();
     s.read_to_string(&mut out).await.unwrap();
     let (head, body) = out.split_once("\r\n\r\n").unwrap();
-    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}\n{body}");
     body.to_string()
 }

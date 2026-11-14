@@ -124,6 +124,11 @@ pub fn chrome_args(o: &LaunchOptions) -> Vec<String> {
     ];
     if o.headless {
         args.push("--headless=new".into());
+        args.push("--disable-gpu".into());
+        args.push("--disable-dev-shm-usage".into());
+    }
+    if should_disable_sandbox() {
+        args.push("--no-sandbox".into());
     }
     if let Some(p) = &o.proxy {
         args.push(format!("--proxy-server={p}"));
@@ -135,38 +140,126 @@ pub fn chrome_args(o: &LaunchOptions) -> Vec<String> {
     args
 }
 
+/// Default time to wait for Chrome to write `DevToolsActivePort` on launch.
+pub const DEFAULT_LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn should_disable_sandbox() -> bool {
+    if let Some(v) = std::env::var_os("EMBER_CHROME_NO_SANDBOX") {
+        let s = v.to_string_lossy();
+        return matches!(s.trim(), "1" | "true" | "yes");
+    }
+    cfg!(target_os = "linux") && std::env::var_os("CI").is_some()
+}
+
+/// Time to wait for Chrome to write `DevToolsActivePort` on launch.
+pub fn launch_timeout() -> Duration {
+    if let Some(ms) = std::env::var("EMBER_CHROME_LAUNCH_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+    {
+        return Duration::from_millis(ms);
+    }
+    if let Some(secs) = std::env::var("EMBER_CHROME_LAUNCH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+    {
+        return Duration::from_secs(secs);
+    }
+    DEFAULT_LAUNCH_TIMEOUT
+}
+
+/// Path to the captured Chrome stderr log inside `profile_dir`.
+pub fn stderr_log_path(profile_dir: &Path) -> PathBuf {
+    profile_dir.join("chrome-stderr.log")
+}
+
+/// Read the last lines of Chrome's captured stderr in `profile_dir`, if any.
+pub fn stderr_tail(profile_dir: &Path) -> String {
+    let Ok(text) = std::fs::read_to_string(stderr_log_path(profile_dir)) else {
+        return String::new();
+    };
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let start = lines.len().saturating_sub(20);
+    let mut joined = lines[start..].join("\n");
+    if joined.len() > 2048 {
+        let mut cut = joined.len() - 2048;
+        while !joined.is_char_boundary(cut) {
+            cut += 1;
+        }
+        joined = joined[cut..].to_string();
+    }
+    joined
+}
+
+fn format_stderr_suffix(profile_dir: &Path) -> String {
+    let tail = stderr_tail(profile_dir);
+    if tail.is_empty() {
+        String::new()
+    } else {
+        format!("; stderr: {tail}")
+    }
+}
+
 /// Launch Chrome and wait for its DevTools endpoint.
 pub async fn launch(o: &LaunchOptions) -> anyhow::Result<Launched> {
+    launch_with_timeout(o, launch_timeout()).await
+}
+
+/// Launch Chrome and wait up to `timeout` for its DevTools endpoint.
+pub async fn launch_with_timeout(o: &LaunchOptions, timeout: Duration) -> anyhow::Result<Launched> {
     std::fs::create_dir_all(&o.profile_dir)
         .with_context(|| format!("creating {}", o.profile_dir.display()))?;
     let port_file = o.profile_dir.join("DevToolsActivePort");
     let _ = std::fs::remove_file(&port_file);
+    let stderr = std::fs::File::create(stderr_log_path(&o.profile_dir))
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null());
     let mut child = Command::new(&o.chrome)
         .args(chrome_args(o))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(stderr)
         .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("starting {}", o.chrome.display()))?;
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if let Ok(text) = std::fs::read_to_string(&port_file) {
             let mut lines = text.lines();
             if let (Some(port), Some(path)) = (lines.next(), lines.next()) {
+                let path = path.trim();
                 if let Ok(port) = port.trim().parse::<u16>() {
-                    let ws_url = format!("ws://127.0.0.1:{port}{}", path.trim());
-                    return Ok(Launched { child, port, ws_url });
+                    if port > 0 && !path.is_empty() {
+                        let ws_url = format!("ws://127.0.0.1:{port}{path}");
+                        return Ok(Launched { child, port, ws_url });
+                    }
                 }
             }
         }
         if let Some(status) = child.try_wait()? {
-            bail!("browser exited during start ({status}); is the profile in use by another browser?");
+            let suffix = format_stderr_suffix(&o.profile_dir);
+            bail!(
+                "browser exited during start ({status}); is the profile in use by another browser?{suffix}"
+            );
         }
         if tokio::time::Instant::now() > deadline {
             let _ = child.kill().await;
-            bail!("browser did not open its DevTools port within 30 s");
+            let _ = child.wait().await;
+            let suffix = format_stderr_suffix(&o.profile_dir);
+            bail!(
+                "browser did not open its DevTools port within {:.0} s{suffix}",
+                timeout.as_secs_f64()
+            );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -198,5 +291,109 @@ mod tests {
         let a = chrome_args(&o);
         assert!(a.contains(&"--proxy-server=socks5://127.0.0.1:9".to_string()));
         assert!(a.contains(&"--proxy-bypass-list=<-loopback>".to_string()));
+        assert!(a.contains(&"--headless=new".to_string()));
+        assert!(a.contains(&"--disable-gpu".to_string()));
+        assert!(a.contains(&"--disable-dev-shm-usage".to_string()));
+    }
+
+    #[cfg(unix)]
+    fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn launch_waits_for_slow_devtools_port_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("profile");
+        let script = write_script(
+            dir.path(),
+            "fake-chrome.sh",
+            "#!/bin/sh\n\
+             for arg in \"$@\"; do\n\
+               case \"$arg\" in\n\
+                 --user-data-dir=*) dir=\"${arg#--user-data-dir=}\" ;;\n\
+               esac\n\
+             done\n\
+             sleep 0.15\n\
+             printf '43210\\n/devtools/browser/fake-id\\n' > \"$dir/DevToolsActivePort\"\n\
+             sleep 5\n",
+        );
+        let opts = LaunchOptions {
+            chrome: script,
+            profile_dir: profile,
+            proxy: None,
+            headless: true,
+            window: (800, 600),
+        };
+        let mut launched = launch_with_timeout(&opts, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(launched.port, 43210);
+        assert_eq!(launched.ws_url, "ws://127.0.0.1:43210/devtools/browser/fake-id");
+        let _ = launched.child.kill().await;
+        let _ = launched.child.wait().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn launch_reports_stderr_on_early_exit_and_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile_exit = dir.path().join("profile-exit");
+        let exit_script = write_script(
+            dir.path(),
+            "fail-chrome.sh",
+            "#!/bin/sh\n\
+             echo 'FATAL: profile SingletonLock held by pid 999' >&2\n\
+             exit 21\n",
+        );
+        let err = launch_with_timeout(
+            &LaunchOptions {
+                chrome: exit_script,
+                profile_dir: profile_exit,
+                proxy: None,
+                headless: true,
+                window: (800, 600),
+            },
+            Duration::from_secs(15),
+        )
+        .await
+        .err()
+        .expect("early exit should fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("browser exited during start"), "unexpected error: {msg}");
+        assert!(msg.contains("SingletonLock held by pid 999"), "missing stderr in error: {msg}");
+
+        let profile_timeout = dir.path().join("profile-timeout");
+        let hang_script = write_script(
+            dir.path(),
+            "hang-chrome.sh",
+            "#!/bin/sh\n\
+             echo 'ERROR: NSS initialization stalled in container' >&2\n\
+             sleep 30\n",
+        );
+        let err = launch_with_timeout(
+            &LaunchOptions {
+                chrome: hang_script,
+                profile_dir: profile_timeout,
+                proxy: None,
+                headless: true,
+                window: (800, 600),
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .err()
+        .expect("timeout should fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("did not open its DevTools port"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("NSS initialization stalled in container"),
+            "missing stderr in timeout error: {msg}"
+        );
     }
 }

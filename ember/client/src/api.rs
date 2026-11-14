@@ -191,6 +191,22 @@ fn peer_err(e: impl fmt::Display) -> ApiError {
     ApiError::Peer(e.to_string())
 }
 
+/// A failed WebSocket upgrade: an HTTP answer keeps its status, message and `code` (as
+/// [`Api`]'s other calls report them); anything else is [`ApiError::Push`].
+fn socket_error(e: tokio_tungstenite::tungstenite::Error) -> ApiError {
+    match e {
+        tokio_tungstenite::tungstenite::Error::Http(resp) => {
+            let status = resp.status();
+            let body = Bytes::from(resp.body().clone().unwrap_or_default());
+            match Api::check(Raw { status, body }) {
+                Err(e) => e,
+                Ok(_) => ApiError::Push(format!("the upgrade was answered with {status}")),
+            }
+        }
+        other => ApiError::Push(other.to_string()),
+    }
+}
+
 pub type ApiResult<T> = Result<T, ApiError>;
 
 // ---- git (FR-G4) ---------------------------------------------------------------------------
@@ -822,12 +838,18 @@ impl Api {
 
     /// The push WebSocket URL (`ws(s)://…/api/push`).
     pub fn push_url(&self) -> String {
+        self.socket_url("/push")
+    }
+
+    /// The WebSocket URL of `path` (below `/api`): `ws(s)://<base>/api<path>` over plain HTTP,
+    /// `ws://ember-server/api<path>` over the transport (the stream already names the peer).
+    fn socket_url(&self, path: &str) -> String {
         match &self.reach {
             Reach::Http(_) => {
                 let rest = self.base.strip_prefix("http").unwrap_or(&self.base);
-                format!("ws{rest}/api/push")
+                format!("ws{rest}/api{path}")
             }
-            Reach::Peer { .. } => format!("ws://{PEER_HOST}/api/push"),
+            Reach::Peer { .. } => format!("ws://{PEER_HOST}/api{path}"),
         }
     }
 
@@ -1040,6 +1062,22 @@ impl Api {
         };
         let request = self.push_request(&url)?;
         let (ws, _) = tokio_tungstenite::client_async(request, io).await.map_err(|e| ApiError::Push(e.to_string()))?;
+        Ok(ws)
+    }
+
+    /// Opens a WebSocket at `path` (below `/api`, e.g. a terminal's
+    /// `/computers/{id}/terms/{tid}/attach`) over the transport, on its own stream as the push
+    /// socket is (SPEC `FR-N9`, #867). No token or owner header goes with it: the device key is
+    /// the credential. A refused upgrade keeps the server's status and `code`, so a 403
+    /// `scope_denied` is [`ApiError::is_scope_denied`]; a failed dial is [`ApiError::Peer`]. Over
+    /// plain HTTP this is refused ([`ApiError::Push`]): the caller has its own TLS path there.
+    pub async fn open_peer_socket(&self, path: &str) -> ApiResult<PushSocket> {
+        let Reach::Peer { dialer, addr } = &self.reach else {
+            return Err(ApiError::Push(format!("{}: not reached over the transport", self.base)));
+        };
+        let io: Box<dyn PushIo> = Box::new(dialer.open_bi(addr, SERVER_SERVICE).await.map_err(peer_err)?);
+        let request = self.push_request(&self.socket_url(path))?;
+        let (ws, _) = tokio_tungstenite::client_async(request, io).await.map_err(socket_error)?;
         Ok(ws)
     }
 

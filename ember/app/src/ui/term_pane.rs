@@ -180,8 +180,10 @@ pub fn render_rows(lines: &[String], max: usize) -> Vec<(TermRole, String)> {
 
 /// Map the stream state to what the pane shows. The raw `error` text is dropped on purpose.
 pub fn view_from_state(state: &TerminalState) -> TermView {
-    if state.error.is_some() {
-        return TermView::Failed(FAILED);
+    if let Some(e) = &state.error {
+        // A device refusal over the transport (FR-N8, FR-N9) says what to do; anything else is
+        // the fixed sentence.
+        return TermView::Failed(crate::terminal_stream::known_refusal(e).unwrap_or(FAILED));
     }
     match state.status {
         TerminalStatus::Connecting if state.lines.is_empty() => TermView::Connecting,

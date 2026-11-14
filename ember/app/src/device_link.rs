@@ -6,7 +6,9 @@
 //!   (`FR-S13`).
 //! - **Server address**: the bare peer id, `<peer id>@<ip>:<port>[,<ip>:<port>...]`, or the
 //!   `PeerAddr` JSON the server prints at start (`ember server peer addr: {...}`), parsed by
-//!   [`parse_server_addr`]. The relay is what `EMBER_RELAY_URL` takes ([`parse_relay`]).
+//!   [`parse_server_addr`]. With a fixed transport port (`EMBER_TRANSPORT_LISTEN`, #863) the
+//!   server also prints `ember server device address: <peer id>@<host>:<port>`, which is taken
+//!   as printed and survives a server restart. The relay is what `EMBER_RELAY_URL` takes ([`parse_relay`]).
 //! - **Connection**: [`DeviceLink::bind`] binds the transport with the device key and hands out
 //!   an [`Api`] over it ([`DeviceLink::api`]); the `Api` keeps the transport alive.
 //! - **Refusals**: [`refusal_text`] turns a refused or failed call into one Korean sentence.
@@ -37,6 +39,11 @@ pub const CONNECTED: &str = "서버에 연결되어 있습니다";
 
 /// A change in 설정 is read at start.
 pub const APPLIES_AFTER_RESTART: &str = "앱을 다시 시작하면 적용됩니다";
+
+/// The start of the line the server prints with a fixed transport port (#863).
+pub const DEVICE_LINE_PREFIX: &str = "ember server device address:";
+/// The start of the server's JSON address line.
+pub const PEER_ADDR_PREFIX: &str = "ember server peer addr:";
 
 /// Where the server is on the transport, and the relay to reach it through.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,9 +100,18 @@ impl AddrError {
 }
 
 /// Parses the server's peer address: a bare peer id, `<peer id>@<ip>:<port>[,...]`, or the
-/// `PeerAddr` JSON `{peer, relays, direct}` the server prints at start.
+/// `PeerAddr` JSON `{peer, relays, direct}` the server prints at start. The server's line
+/// prefixes (`ember server device address:`, `ember server peer addr:`) are stripped, so a line
+/// is taken as printed; a `<host>` placeholder left in it is not an IP and is refused
+/// ([`AddrError::BadDirect`]).
 pub fn parse_server_addr(text: &str) -> Result<PeerAddr, AddrError> {
-    let text = text.trim();
+    let mut text = text.trim();
+    for prefix in [DEVICE_LINE_PREFIX, PEER_ADDR_PREFIX] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            text = rest.trim();
+            break;
+        }
+    }
     if text.is_empty() {
         return Err(AddrError::Empty);
     }
@@ -325,6 +341,26 @@ mod tests {
         let s = PeerSetting::parse(&peer.to_string(), Some(&url)).unwrap();
         assert_eq!(s.relay, Some(RelayConfig::Custom(vec![url])));
         assert!(PeerSetting::parse(&peer.to_string(), Some("https://x")).is_err());
+    }
+
+    #[test]
+    fn fr_n9_the_printed_device_line_parses_as_printed() {
+        let peer = id();
+        let line = format!("ember server device address: {peer}@192.168.0.10:7444");
+        for text in [line.clone(), format!("  {line}\n")] {
+            let a = parse_server_addr(&text).unwrap();
+            assert_eq!(a.peer, peer);
+            assert_eq!(a.direct, vec!["192.168.0.10:7444".parse().unwrap()]);
+        }
+        let json = serde_json::to_string(&PeerAddr::new(peer)).unwrap();
+        assert_eq!(parse_server_addr(&format!("ember server peer addr: {json}")).unwrap(), PeerAddr::new(peer));
+        assert_eq!(PeerSetting::parse(&line, None).unwrap().addr.direct.len(), 1);
+        // The placeholder the server prints without a known address is refused until replaced.
+        let placeholder = format!("ember server device address: {peer}@<host>:7444");
+        assert!(matches!(parse_server_addr(&placeholder), Err(AddrError::BadDirect(_))));
+        let noted = format!("{placeholder} (replace <host> with this computer's address or name)");
+        assert!(matches!(parse_server_addr(&noted), Err(AddrError::BadDirect(_))));
+        assert!(matches!(parse_server_addr("ember server device address: "), Err(AddrError::Empty)));
     }
 
     #[test]

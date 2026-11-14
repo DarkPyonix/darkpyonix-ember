@@ -896,10 +896,12 @@ fn LocalNote() {
 // Drawing helpers for charts, rings and donuts
 // ---------------------------------------------------------------------------------------------
 
+/// An account ring: the full `--track` circle (`#ecebe6`, dark `#2f2e2b`) under the arc. The
+/// track was `surface-2`, the tile's own fill, so only the arc showed (review AG7).
 fn draw_ring(percent: Option<u8>, size: f32, stroke_width: f32, p: &Palette) -> DrawList {
     let half = size / 2.0;
     let radius = half - stroke_width / 2.0;
-    let track_color = p.surface_2;
+    let track_color = p.track;
     let mut builder = DrawList::builder().circle(paint(track_color), half, half, radius, stroke_width);
     if let Some(pct) = percent {
         let fill_color = if pct < 15 {
@@ -1909,7 +1911,8 @@ fn AccountTile(x: &AccountInfo, extra: Option<&str>, sample: bool) {
                         Label("5h", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
                         let bar_color = if left < 20 { p.orange.strong } else { p.green.strong };
                         let bar_draw = DrawList::builder()
-                            .round_rect(paint(p.surface_2), 0.0, 0.0, 115.0, 6.0, 3.0, 0.0)
+                            // `.track`: the 6 px bar on `--track`, not the tile's fill.
+                            .round_rect(paint(p.track), 0.0, 0.0, 115.0, 6.0, 3.0, 0.0)
                             .round_rect(paint(bar_color), 0.0, 0.0, 115.0 * (left as f32) / 100.0, 6.0, 3.0, 0.0)
                             .build();
                         cu::Canvas(bar_draw).modifier(Modifier::new().size(115.0, 6.0));
@@ -2979,6 +2982,25 @@ mod tests {
         assert_eq!(last.iter().filter(|k| k.widget == "Spacer").count(), 1);
         let grid = nodes.iter().find(|n| n.widget == "Column" && Some(n.id) == rows[0].parent).expect("grid column");
         assert!(grid.props.iter().any(|p| p.starts_with("Spacing=") && p.contains("12.0")), "{:?}", grid.props);
+    }
+
+    #[test]
+    fn fr_l20_account_ring_and_bar_tracks_are_the_track_token() {
+        // Review AG7: the ring's track was `surface-2` on a `surface-2` tile, so it vanished.
+        for p in [&LIGHT, &DARK] {
+            let want = DrawList::builder()
+                .circle(paint(p.track), 36.0, 36.0, 33.0, 6.0)
+                .arc(paint(p.green.strong), 36.0, 36.0, 33.0, -90.0, 360.0 * 38.0 / 100.0, 6.0)
+                .build();
+            assert!(draw_ring(Some(38), 72.0, 6.0, p) == want, "the ring draws the track circle, then the arc");
+            let unknown = DrawList::builder().circle(paint(p.track), 36.0, 36.0, 33.0, 6.0).build();
+            assert!(draw_ring(None, 72.0, 6.0, p) == unknown, "an unknown share is the bare track");
+            assert_ne!(p.track, p.surface_2);
+        }
+        assert_eq!((LIGHT.track, DARK.track), (Color::rgb(0xecebe6), Color::rgb(0x2f2e2b)));
+        let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
+        let tile = production.split("fn AccountTile(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(tile.contains(".round_rect(paint(p.track), 0.0, 0.0, 115.0, 6.0, 3.0, 0.0)"), "{tile}");
     }
 
     #[test]

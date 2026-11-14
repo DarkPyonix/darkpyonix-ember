@@ -38,7 +38,7 @@ use crate::ui::shell::NavMenu;
 use crate::ui::Route;
 
 use super::components::{
-    AppButton, ButtonKind, EmberCard, EmberField, EmberSheetSized, FieldOptions, InsetPanel, Label, MenuRow, OptionSheet,
+    AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRow, EmberCard, EmberField, EmberSheetSized, FieldOptions, InsetPanel, Label, MenuRow, OptionSheet,
     PickChip, Pill, PillTone, Txt,
 };
 use super::notice;
@@ -408,6 +408,11 @@ pub const VCS_FIELD_ROLE: TypeRole = TypeRole::Label;
 pub const VCS_TEXTAREA_H: f32 = 64.0;
 /// Their text inset `(horizontal, vertical)`: `.vcs textarea.field` padding 8 12.
 pub const VCS_TEXTAREA_INSET: (f32, f32) = (12.0, 8.0);
+/// Their line pitch: `.field{font:var(--fs-md) var(--font)}` resets the line height to the
+/// font's `normal` (about 1.2 em, 16 px at 13 px), which `.vcs textarea.field` keeps. The 13 px
+/// step's own 20 px showed 2.4 lines in the 48 px text area, so an overflowing field cut a line
+/// in half; 16 shows three whole lines (review r6 item 3).
+pub const VCS_TEXTAREA_LINE_H: f32 = 16.0;
 /// Height of the 이 덩어리 전체 button: smaller than the 32 px control, with a 1 px border.
 pub const VCS_HUNK_BUTTON_H: f32 = 28.0;
 /// Height of the hunk header row (`.vcs-hh`): the 28 px action with 6 px above and below.
@@ -419,21 +424,26 @@ pub fn vcs_pill_width(text: &str) -> f32 {
     (super::home::text_px(text, VCS_CONTROL_FS.size()) + 28.0).max(64.0)
 }
 
-/// A filter chip (`.chip`): 32 px pill, 13 px weight 500 text, `sel` fill when selected. The
-/// toolkit `PickChip` still takes no font size in v0.0.10 (only `Button` does, compose-rust#500),
-/// so the chip is a clickable container (`Clickable`, compose-rust#372) named by its text that
-/// says whether it is selected (#429), with no invisible button over it.
-fn VcsChip(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
-    let p = ember_theme().palette;
-    let (height, fill) = super::components::pickchip_style(selected, p);
-    super::components::Clickable(
-        Modifier::new().width(vcs_pill_width(text)).height(height).background(paint(fill)).shape_role(ShapeRole::Full).selected(selected).label(text).role(compose_rust::ui::Role::Button).click_action(true),
-        Alignment::Center,
-        on_click,
-        move || {
-            Label(text, VCS_CONTROL_FS, Weight::Medium, Some(paint(p.text_2)), Some(1));
-        },
-    );
+/// A single choice among a few values (the history filter, the PR state filter, the merge
+/// method): the app's `.seg` buttons (`ChoiceButton`, FR-L10.2) in a wrapping row 8 px apart,
+/// each a radio button to assistive technology. The mockup draws none of these groups, so they
+/// follow the app's one rule for a choice among a few values; the grey `pickchip` fill they had
+/// made them the only choices in the app without the white, bordered look (review r6 item 1f).
+/// `trailing` adds controls to the same row (the merge's 병합 후 브랜치 삭제 toggle).
+fn VcsRadioRow<T: Copy + PartialEq + Send + 'static>(
+    options: &[T],
+    label: fn(T) -> &'static str,
+    current: T,
+    state: MutableState<T>,
+    trailing: impl FnOnce(),
+) {
+    ChoiceRow(|| {
+        for &o in options {
+            let st = state.clone();
+            ChoiceButton(label(o), Choice::Radio, o == current, true, true, move || st.set(o));
+        }
+        trailing();
+    });
 }
 
 /// Card shown when a section's server data is not yet available.
@@ -1486,6 +1496,7 @@ fn CommitBox(
                     fill_max_width: true,
                     height: Some(VCS_TEXTAREA_H),
                     inset: Some(VCS_TEXTAREA_INSET),
+                    line_height: Some(VCS_TEXTAREA_LINE_H),
                     text: Some(body_state.get()),
                     placeholder: "설명 (선택)".to_string(),
                     type_role: Some(VCS_FIELD_ROLE),
@@ -2773,12 +2784,7 @@ fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool, branch
             cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
                 let cur_filter = filter.get();
                 let filter_row = filter.clone();
-                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(move || {
-                    for f in HistoryFilter::ALL {
-                        let filter = filter_row.clone();
-                        VcsChip(f.label(), f == cur_filter, move || filter.set(f));
-                    }
-                });
+                VcsRadioRow(&HistoryFilter::ALL, HistoryFilter::label, cur_filter, filter_row, || {});
                 match current {
                     HistoryLoad::Loading => {
                         Label("히스토리를 불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
@@ -3180,6 +3186,7 @@ fn PrDetailActions<R: Fn(GitPrReviewAction) + Clone + 'static, M: Fn() + Clone +
                     fill_max_width: true,
                     height: Some(VCS_TEXTAREA_H),
                     inset: Some(VCS_TEXTAREA_INSET),
+                    line_height: Some(VCS_TEXTAREA_LINE_H),
                     type_role: Some(VCS_FIELD_ROLE),
                     multiline: true,
                     text: Some(text.get()),
@@ -3205,14 +3212,10 @@ fn PrDetailActions<R: Fn(GitPrReviewAction) + Clone + 'static, M: Fn() + Clone +
                 Label(reason, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
             }
 
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                for m in PR_MERGE_METHODS {
-                    let chip_method = ctl.merge_method.clone();
-                    let label = pr_merge_method_label(m);
-                    VcsChip(label, m == method, move || chip_method.set(m));
-                }
-                let del_flag = ctl.delete_branch.clone();
-                VcsChip(PR_DELETE_BRANCH_LABEL, del_branch, move || del_flag.set(!del_flag.get()));
+            let del_flag = ctl.delete_branch.clone();
+            VcsRadioRow(&PR_MERGE_METHODS, pr_merge_method_label, method, ctl.merge_method.clone(), || {
+                // An on or off choice beside the method: a pressed toggle, not a radio.
+                ChoiceButton(PR_DELETE_BRANCH_LABEL, Choice::Toggle, del_branch, true, true, move || del_flag.set(!del_flag.get_untracked()));
             });
 
             let on_merge = ctl.on_merge.clone();
@@ -3491,12 +3494,7 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
     let chips = {
         let filter = filter.clone();
         move || {
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(move || {
-                for f in PrFilter::ALL {
-                    let filter = filter.clone();
-                    VcsChip(f.label(), f == shown, move || filter.set(f));
-                }
-            });
+            VcsRadioRow(&PrFilter::ALL, PrFilter::label, shown, filter.clone(), || {});
         }
     };
     let open_count = if actions.is_some() { count.get() } else { Some(sample_pr_count()) };
@@ -3522,6 +3520,7 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
                             fill_max_width: true,
                             height: Some(VCS_TEXTAREA_H),
                             inset: Some(VCS_TEXTAREA_INSET),
+                            line_height: Some(VCS_TEXTAREA_LINE_H),
                             type_role: Some(VCS_FIELD_ROLE),
                             multiline: true,
                             text: Some(f_body.get()),
@@ -4965,10 +4964,7 @@ mod tests {
         for marker in [concat!("TODO(compose-rust#", "471)"), concat!("TODO(compose-rust#", "460, #429)"), concat!("TODO(compose-rust#", "500)"), concat!("TODO(compose-rust#", "328)")] {
             assert!(!production.contains(marker), "{marker}");
         }
-        let chip = &production[production.find("fn VcsChip(").expect("chip")..];
-        let chip = &chip[..chip.find("\n}\n").expect("end")];
-        assert!(chip.contains("super::components::Clickable(") && chip.contains(".selected(selected)") && chip.contains(".label(text).role(compose_rust::ui::Role::Button)"), "named by its text");
-        assert!(!chip.contains("FocusOverlay"));
+        assert!(!production.contains("fn VcsChip("), "the grey filter chip gave way to the choice buttons (#878)");
         assert!(production.contains("show_sha.set(!copied);"), "the selectable SHA is only the fallback");
     }
 
@@ -5399,6 +5395,55 @@ mod tests {
 
     // ---- Host rendering tests ----
 
+    #[compose_rust::runtime::Composable]
+    fn pr_filter_choices_sample() {
+        let st = remember(|| mutable_state_of(PrFilter::Open));
+        VcsRadioRow(&PrFilter::ALL, PrFilter::label, PrFilter::Open, st, || {});
+    }
+
+    #[test]
+    fn fr_l10_2_vcs_single_choices_are_the_seg_buttons() {
+        // Review r6 item 1f: the PR state filter, the merge method and the history filter kept
+        // the grey `pickchip` fill with no border while every other choice became `.seg`.
+        let mut host = Host::new(|| Box::new(Recomposer::new(pr_filter_choices_sample)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let widgets: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create { widget, .. } => Some(format!("{widget:?}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(widgets.iter().filter(|w| *w == "FlowRow").count(), 1, "one wrapping row: {widgets:?}");
+        let all: String = batch.iter().map(|m| format!("{m:?}")).collect();
+        for want in ["열림", "닫힘", "병합됨", "전체"] {
+            assert!(all.contains(want), "{want}");
+        }
+        let p = ember_theme().palette;
+        let grey = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.surface_2)));
+        let line = format!("{:?}", compose_rust::schema::Modifier::Border { width: 1.0, paint: paint(p.line) });
+        let ink = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.ink)));
+        let mods: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { modifier, .. } => Some(format!("{modifier:?}")),
+                _ => None,
+            })
+            .collect();
+        assert!(!mods.contains(&grey), "no grey chip fill");
+        assert_eq!(mods.iter().filter(|m| **m == line).count(), 3, "the three unchosen ones are bordered");
+        assert_eq!(mods.iter().filter(|m| **m == ink).count(), 1, "the chosen one is ink");
+        let production = &include_str!("vcs.rs")[..include_str!("vcs.rs").find("#[cfg(test)]").unwrap()];
+        for site in [
+            "VcsRadioRow(&HistoryFilter::ALL, HistoryFilter::label,",
+            "VcsRadioRow(&PrFilter::ALL, PrFilter::label,",
+            "VcsRadioRow(&PR_MERGE_METHODS, pr_merge_method_label,",
+            "ChoiceButton(PR_DELETE_BRANCH_LABEL, Choice::Toggle,",
+        ] {
+            assert!(production.contains(site), "{site}");
+        }
+    }
+
     fn text_of(content: fn()) -> String {
         let mut host = Host::new(move || Box::new(Recomposer::new(content)));
         let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
@@ -5509,11 +5554,16 @@ mod tests {
         struct ButtonTracker {
             texts: std::collections::HashMap<u32, String>,
             handlers: std::collections::HashMap<u32, u64>,
+            parents: std::collections::HashMap<u32, u32>,
         }
 
         impl ButtonTracker {
             fn new() -> Self {
-                Self { texts: std::collections::HashMap::new(), handlers: std::collections::HashMap::new() }
+                Self {
+                    texts: std::collections::HashMap::new(),
+                    handlers: std::collections::HashMap::new(),
+                    parents: std::collections::HashMap::new(),
+                }
             }
 
             fn scan(&mut self, batch: &[Mutation<'_>]) {
@@ -5525,6 +5575,9 @@ mod tests {
                         Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
                             self.handlers.insert(*node_id, *h as u64);
                         }
+                        Mutation::Insert { parent_id, node_id, .. } => {
+                            self.parents.insert(*node_id, *parent_id);
+                        }
                         _ => {}
                     }
                 }
@@ -5533,8 +5586,17 @@ mod tests {
             fn find(&self, label: &str) -> (u32, u64) {
                 for (id, text) in &self.texts {
                     if text == label {
-                        if let Some(h) = self.handlers.get(id) {
-                            return (*id, *h);
+                        // A choice button's label is a Text inside the clickable pill
+                        // (`ChoiceButton`): take the nearest clickable ancestor.
+                        let mut at = *id;
+                        for _ in 0..4 {
+                            if let Some(h) = self.handlers.get(&at) {
+                                return (at, *h);
+                            }
+                            match self.parents.get(&at) {
+                                Some(p) => at = *p,
+                                None => break,
+                            }
                         }
                     }
                 }
@@ -5621,11 +5683,16 @@ mod tests {
         struct ButtonTracker {
             texts: std::collections::HashMap<u32, String>,
             handlers: std::collections::HashMap<u32, u64>,
+            parents: std::collections::HashMap<u32, u32>,
         }
 
         impl ButtonTracker {
             fn new() -> Self {
-                Self { texts: std::collections::HashMap::new(), handlers: std::collections::HashMap::new() }
+                Self {
+                    texts: std::collections::HashMap::new(),
+                    handlers: std::collections::HashMap::new(),
+                    parents: std::collections::HashMap::new(),
+                }
             }
 
             fn scan(&mut self, batch: &[Mutation<'_>]) {
@@ -5637,6 +5704,9 @@ mod tests {
                         Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
                             self.handlers.insert(*node_id, *h as u64);
                         }
+                        Mutation::Insert { parent_id, node_id, .. } => {
+                            self.parents.insert(*node_id, *parent_id);
+                        }
                         _ => {}
                     }
                 }
@@ -5645,8 +5715,17 @@ mod tests {
             fn find(&self, label: &str) -> (u32, u64) {
                 for (id, text) in &self.texts {
                     if text == label {
-                        if let Some(h) = self.handlers.get(id) {
-                            return (*id, *h);
+                        // A choice button's label is a Text inside the clickable pill
+                        // (`ChoiceButton`): take the nearest clickable ancestor.
+                        let mut at = *id;
+                        for _ in 0..4 {
+                            if let Some(h) = self.handlers.get(&at) {
+                                return (at, *h);
+                            }
+                            match self.parents.get(&at) {
+                                Some(p) => at = *p,
+                                None => break,
+                            }
                         }
                     }
                 }
@@ -5834,6 +5913,7 @@ mod tests {
         host: Host,
         texts: std::collections::HashMap<u32, String>,
         handlers: std::collections::HashMap<u32, u64>,
+        parents: std::collections::HashMap<u32, u32>,
     }
 
     impl PrHostDriver {
@@ -5844,6 +5924,7 @@ mod tests {
                 host,
                 texts: std::collections::HashMap::new(),
                 handlers: std::collections::HashMap::new(),
+                parents: std::collections::HashMap::new(),
             };
             driver.absorb(&decode_batch(&bytes).expect("decode"));
             driver
@@ -5858,6 +5939,9 @@ mod tests {
                     Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
                         self.handlers.insert(*node_id, *h as u64);
                     }
+                    Mutation::Insert { parent_id, node_id, .. } => {
+                        self.parents.insert(*node_id, *parent_id);
+                    }
                     _ => {}
                 }
             }
@@ -5865,11 +5949,18 @@ mod tests {
 
         fn click(&mut self, label: &str) -> String {
             let (node_id, handler_id) = self.texts.iter().find_map(|(id, text)| {
-                if text == label {
-                    self.handlers.get(id).map(|&h| (*id, h))
-                } else {
-                    None
+                if text != label {
+                    return None;
                 }
+                // A choice button's label is a Text inside the clickable pill (`ChoiceButton`).
+                let mut at = *id;
+                for _ in 0..4 {
+                    if let Some(&h) = self.handlers.get(&at) {
+                        return Some((at, h));
+                    }
+                    at = *self.parents.get(&at)?;
+                }
+                None
             }).unwrap_or_else(|| panic!("button '{label}' not found (known: {:?})", self.texts));
 
             let bytes = self.host.dispatch(HostEvent {
@@ -6511,6 +6602,7 @@ mod tests {
             fill_max_width: true,
             height: Some(VCS_TEXTAREA_H),
             inset: Some(VCS_TEXTAREA_INSET),
+            line_height: Some(VCS_TEXTAREA_LINE_H),
             type_role: Some(VCS_FIELD_ROLE),
             multiline: true,
             ..Default::default()
@@ -6544,6 +6636,10 @@ mod tests {
         assert!(mods.iter().any(|m| m == "Padding(8.0)"), "{mods:?}");
         assert_eq!(mods.iter().filter(|m| *m == "Width(4.0)").count(), 2, "{mods:?}");
         assert!(props.iter().any(|p| p == "FontSize=Float(13.0)"), "{props:?}");
+        // Three whole 16 px lines in the 48 px text area, not 2.4 lines of 20 (review r6).
+        assert!(props.iter().any(|p| p.starts_with("LineHeight=") && p.contains("16.0")), "{props:?}");
+        assert!(!props.iter().any(|p| p.starts_with("LineHeight=") && p.contains("20.0")), "{props:?}");
+        assert_eq!((VCS_TEXTAREA_H - 2.0 * VCS_TEXTAREA_INSET.1) / VCS_TEXTAREA_LINE_H, 3.0);
         // Every vcs textarea takes these.
         let src = include_str!("vcs.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap()];
@@ -6552,7 +6648,7 @@ mod tests {
                 let start = production[..at].rfind("EmberField(FieldOptions {").expect("field");
                 let end = at + production[at..].find("});").expect("end");
                 let opts = &production[start..end];
-                for want in ["height: Some(VCS_TEXTAREA_H)", "inset: Some(VCS_TEXTAREA_INSET)", "type_role: Some(VCS_FIELD_ROLE)", "multiline: true"] {
+                for want in ["height: Some(VCS_TEXTAREA_H)", "inset: Some(VCS_TEXTAREA_INSET)", "line_height: Some(VCS_TEXTAREA_LINE_H)", "type_role: Some(VCS_FIELD_ROLE)", "multiline: true"] {
                     assert!(opts.contains(want), "{want} in {opts}");
                 }
             }

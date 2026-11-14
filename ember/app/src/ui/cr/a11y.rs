@@ -25,14 +25,16 @@ pub const SHARE: &str = "공유 시트 열기";
 pub const OTHER_IDE: &str = "다른 IDE 선택";
 pub const SESSION_MENU: &str = "세션 메뉴";
 pub const OPEN_SCREEN: &str = "화면 열기";
+/// The back button of a phone detail view (`.icon-btn.sm.backbtn`, #885).
+pub const BACK: &str = "뒤로";
 
 /// The reviewed Korean names of the icon-only controls outside the nav menus (those take
 /// `NavMenu::label`).
-pub fn rail_labels() -> [&'static str; 18] {
+pub fn rail_labels() -> [&'static str; 19] {
     [
         THEME, SETTINGS, PLATFORM, MENU, NEW_CHANNEL, MEMBERS, MORE, ATTACH, EMOJI,
         VERSION_CONTROL, PROJECT_SETTINGS, OPEN_SESSION, CLOSE, SEND, SHARE, OTHER_IDE,
-        SESSION_MENU, OPEN_SCREEN,
+        SESSION_MENU, OPEN_SCREEN, BACK,
     ]
 }
 

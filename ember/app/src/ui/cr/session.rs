@@ -53,7 +53,7 @@ use super::characters::{CharState, Character};
 use super::compat::Spinner;
 use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
-    AppButton, ButtonKind, Clickable, CloseButton, NamedClickable, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
+    AppButton, BackButton, ButtonKind, Clickable, CloseButton, NamedClickable, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
     FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, SearchField, Select, SheetFooter, Txt,
     SEARCH_FIELD_H_COMPACT,
 };
@@ -2456,20 +2456,27 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
                     cu::Column()
                         .modifier(Modifier::new().weight(1.0).fill_max_height())
                         .content(move || {
-                            // Compact 1-row .topbar header
+                            // `.topbar` in `.detail` (`grid-template-rows:56px`): 56 high, 20 in
+                            // from each side, nothing above or below. The 52 dp row with 12 dp
+                            // padding all round left 28 dp, so the 32 dp back square drew 32x28
+                            // at x 12 (review r7, conversation-single-390).
                             cu::Row()
                                 .alignment(Alignment::CenterStart)
-                                .space_role(SpaceRole::Sm)
                                 .modifier(
                                     Modifier::new()
                                         .fill_max_width()
-                                        .height(52.0)
-                                        .background(paint(p.surface))
-                                        .padding(SP[2]),
+                                        .height(super::theme::TOPBAR_H)
+                                        .background(paint(p.surface)),
                                 )
                                 .content(move || {
+                                    cu::Spacer().modifier(Modifier::new().width(super::theme::TOPBAR_PAD_X));
+                                    cu::Row()
+                                        .alignment(Alignment::CenterStart)
+                                        .space_role(SpaceRole::Sm)
+                                        .modifier(Modifier::new().weight(1.0))
+                                        .content(move || {
                                     let b_cb = back_cb.clone();
-                                    IconButton(IconRole::Back, true, move || b_cb());
+                                    BackButton(move || b_cb());
                                     if let Some((proj_id, m)) = m_opt {
                                         let (st_txt, st_tone) = status_pill(m.status);
                                         Character(
@@ -2481,16 +2488,22 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
                                             CharState::from_status(m.status),
                                             None,
                                         );
-                                        Label(
-                                            &m.accessible_name(),
-                                            Fs::Md,
-                                            Weight::Semibold,
-                                            Some(paint(p.text)),
-                                            Some(1),
-                                        );
+                                        // The name takes the room left with an ellipsis, so
+                                        // the status pill and the panel button keep theirs (a
+                                        // long name pushed the button past the edge at 390).
+                                        cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
+                                            Label(
+                                                &m.accessible_name(),
+                                                Fs::Md,
+                                                Weight::Semibold,
+                                                Some(paint(p.text)),
+                                                Some(1),
+                                            );
+                                        });
                                         Pill(st_txt, st_tone.into(), true);
+                                    } else {
+                                        cu::Spacer().modifier(Modifier::new().weight(1.0));
                                     }
-                                    cu::Spacer().modifier(Modifier::new().weight(1.0));
                                     let io = info_btn.clone();
                                     let pv = pv_btn.clone();
                                     IconButton(IconRole::Sidebar, true, move || {
@@ -2500,6 +2513,8 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
                                             io.set(true);
                                         }
                                     });
+                                        });
+                                    cu::Spacer().modifier(Modifier::new().width(super::theme::TOPBAR_PAD_X));
                                 });
                             cu::Separator(Some(paint(p.line)));
                             cu::Box()
@@ -4468,6 +4483,8 @@ pub fn SessionScreen(focus: Option<String>) {
     // opens it at start for captures.
     let vcs_open = remember(|| mutable_state_of(std::env::var("EMBER_CR_SESSION_VCS").as_deref() == Ok("1")));
     let web_pages = remember(|| mutable_state_of(WebPagesLoad::Loading));
+    // The detail flag value this screen last wrote or saw (FR-L28, #885).
+    let detail_wrote = remember(|| mutable_state_of(false));
 
     let show_archived = ui.show_archived.get();
     let boxes = {
@@ -4621,6 +4638,29 @@ pub fn SessionScreen(focus: Option<String>) {
 
     let project_name = display_name(&current);
     let view_now = view.get();
+
+    // A member's 싱글 view at phone width is a full-screen detail view: the shell hides its
+    // bottom bar and menu (`body.view-detail`, FR-L28, #885). The system back clears the shared
+    // flag (`BackStep::CloseDetail`), which takes this screen back to the 멀티 view.
+    {
+        let want = crate::ui::session::is_detail_view(window.width_dp, view_now, target.is_some());
+        let wrote = detail_wrote.clone();
+        match crate::ui::session::detail_sync(want, wrote.get_untracked(), ui.detail_open.get()) {
+            crate::ui::session::DetailSync::Keep => {
+                if wrote.get_untracked() != want {
+                    wrote.set(want);
+                }
+            }
+            crate::ui::session::DetailSync::Write(v) => {
+                wrote.set(v);
+                ui.detail_open.set(v);
+            }
+            crate::ui::session::DetailSync::Back => {
+                wrote.set(false);
+                set_view(SessionView::Multi);
+            }
+        }
+    }
     let total_m = members.len();
     let wait_m = members
         .iter()

@@ -1119,16 +1119,16 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
         // style rows at 390). When the window has not reported a size (390 can read 0x0) the
         // shared formula falls back to 240 dp. v0.0.7: #479 fixed (`with_report_size`);
         // fallback kept until checked on a display (the first composition still reads 0x0).
-        // FR-L32.1 (#876): the body leaves room for the header and the 취소/만들기 footer, so the
-        // footer stays inside the 85 percent bottom sheet at 390 (it was cut off below the body).
-        // TODO(compose-rust#778): cap the body at this height instead of fixing it, so a short
-        // body does not leave blank space above the footer.
+        // FR-L32.1 (#876, #878): 취소/만들기 sit in the header as the mockup's `.sheet-acts`
+        // (`project.js` projNew), so the body leaves room for the header only and the buttons
+        // never fall below a scrolling body at 390.
+        // TODO(compose-rust#778): cap the body at this height instead of fixing it.
         let new_window = crate::ui::window_size::current_window_size();
         let new_body_height = super::components::sheet_body_max_height(
             new_window.width_dp,
             new_window.height_dp,
             false,
-            super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H,
+            super::components::SHEET_HEADER_CHROME_H,
         )
         .min(900.0);
         // FR-L26.1 (#878): a body that fits is as tall as its content, so the 1440 dialog has no
@@ -1140,12 +1140,30 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
         let new_body_fits = new_project_body_estimate(new_columns, notes) <= new_body_height;
         let new_scroll = cu::remember_scroll_state();
         let review_end = new_sheet_review_end();
-        EmberSheet("새 프로젝트", st.new_project.get(), request_close.clone(), None, || {
+        // `.sheet-acts`: 취소 and 만들기 (small) before the close button, 4 apart, as the project
+        // settings sheet's 취소/저장.
+        let mut new_actions = {
+            let close = request_close.clone();
+            let (dr, saving_s, failure, leave) =
+                (st.new_draft.clone(), st.new_saving.clone(), st.new_failure.clone(), leave.clone());
+            move || {
+                AppButton("취소", None, ButtonKind::Default, true, true, false, close.clone());
+                cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                let (dr, saving_s, failure, leave) = (dr.clone(), saving_s.clone(), failure.clone(), leave.clone());
+                AppButton(if saving { "만드는 중" } else { "만들기" }, None, ButtonKind::Primary, true, can_create, false, move || {
+                    create_project(dr.get_untracked(), saving_s.clone(), failure.clone(), leave.clone())
+                });
+                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            }
+        };
+        EmberSheet("새 프로젝트", st.new_project.get(), request_close.clone(), Some(&mut new_actions), || {
             if review_end && !new_body_fits {
                 ScrollToEnd(new_scroll.clone());
             }
             let new_body = || {
-                cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+                // `.ps-form`: the 기본 and 팀 캐릭터 sections (`psSection`), each with its title
+                // and hint, as the project settings sheet draws them.
+                cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
                     // v0.0.7: #374 fixed (`TextField::text`); workaround kept until checked on a
                     // display (a controlled value must not move the caret while typing), so the
                     // fields are uncontrolled.
@@ -1163,55 +1181,60 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
                         }
                     };
                     let (s1, s2, s3) = (submit.clone(), submit.clone(), submit);
-                    FieldRow("이름", || {
-                        EmberField(FieldOptions {
-                            fill_max_width: true,
-                            placeholder: "프로젝트 이름".to_string(),
-                            on_value_change: Some(Box::new(move |v| {
-                                f1.set(None);
-                                d1.update(|s| s.name = v)
-                            })),
-                            on_submit: Some(Box::new(s1)),
-                            ..Default::default()
-                        });
-                    });
-                    cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                            FieldRow("저장소", || {
+                    Section(NEW_SEC_BASIC.0, NEW_SEC_BASIC.1, true, || {
+                        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                            FieldRow("이름", || {
                                 EmberField(FieldOptions {
                                     fill_max_width: true,
-                                    placeholder: "github.com/...".to_string(),
+                                    placeholder: "프로젝트 이름".to_string(),
                                     on_value_change: Some(Box::new(move |v| {
-                                f2.set(None);
-                                d2.update(|s| s.repo = v)
-                            })),
-                            on_submit: Some(Box::new(s2)),
+                                        f1.set(None);
+                                        d1.update(|s| s.name = v)
+                                    })),
+                                    on_submit: Some(Box::new(s1)),
                                     ..Default::default()
                                 });
                             });
-                        });
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                            FieldRow("기본 브랜치", || {
-                                EmberField(FieldOptions {
-                                    fill_max_width: true,
-                                    placeholder: "develop".to_string(),
-                                    on_value_change: Some(Box::new(move |v| {
-                                f3.set(None);
-                                d3.update(|s| s.branch = v)
-                            })),
-                            on_submit: Some(Box::new(s3)),
-                                    ..Default::default()
+                            cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                                    FieldRow("저장소", || {
+                                        EmberField(FieldOptions {
+                                            fill_max_width: true,
+                                            placeholder: "github.com/...".to_string(),
+                                            on_value_change: Some(Box::new(move |v| {
+                                        f2.set(None);
+                                        d2.update(|s| s.repo = v)
+                                    })),
+                                    on_submit: Some(Box::new(s2)),
+                                            ..Default::default()
+                                        });
+                                    });
+                                });
+                                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                                    FieldRow("기본 브랜치", || {
+                                        EmberField(FieldOptions {
+                                            fill_max_width: true,
+                                            placeholder: "develop".to_string(),
+                                            on_value_change: Some(Box::new(move |v| {
+                                        f3.set(None);
+                                        d3.update(|s| s.branch = v)
+                                    })),
+                                    on_submit: Some(Box::new(s3)),
+                                            ..Default::default()
+                                        });
+                                    });
                                 });
                             });
+                            if d.branch.trim().is_empty() {
+                                Label(&format!("비워 두면 {}을 씁니다", NewProjectDraft::DEFAULT_BRANCH), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            }
                         });
                     });
-                    if d.branch.trim().is_empty() {
-                        Label(&format!("비워 두면 {}을 씁니다", NewProjectDraft::DEFAULT_BRANCH), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    }
-                    Label("팀 캐릭터", Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
-                    let dr = st.new_draft.clone();
-                    let shown = effective_style(if d.style.is_empty() { None } else { Some(&d.style) }, None);
-                    StylePicker(&d.name, shown, move |c| dr.update(|s| s.style = c.id().to_string()));
+                    Section(NEW_SEC_STYLE.0, NEW_SEC_STYLE.1, false, || {
+                        let dr = st.new_draft.clone();
+                        let shown = effective_style(if d.style.is_empty() { None } else { Some(&d.style) }, None);
+                        StylePicker(&d.name, shown, move |c| dr.update(|s| s.style = c.id().to_string()));
+                    });
                     // Errors only once something was typed, so an empty sheet is not red.
                     if !d.is_blank() {
                         for e in errors.iter() {
@@ -1228,14 +1251,6 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
             } else {
                 cu::ScrollColumn().scroll_state(&new_scroll).modifier(Modifier::new().fill_max_width().height(new_body_height)).content(new_body);
             }
-            SheetFooter(|| {
-                AppButton("취소", None, ButtonKind::Default, true, true, false, request_close.clone());
-                let (dr, saving_s, failure, leave) =
-                    (st.new_draft.clone(), st.new_saving.clone(), st.new_failure.clone(), leave.clone());
-                AppButton(if saving { "만드는 중" } else { "만들기" }, None, ButtonKind::Primary, true, can_create, false, move || {
-                    create_project(dr.get_untracked(), saving_s.clone(), failure.clone(), leave.clone())
-                });
-            });
         });
         // The unsaved-changes question, as the settings sheet asks it.
         let keep = {
@@ -1303,23 +1318,24 @@ pub fn sheet_scroll_is_end(value: Option<&str>) -> bool {
     value == Some("end")
 }
 
+/// The new-project sheet's sections (`project.js` projNew `psSection`): title and hint.
+pub const NEW_SEC_BASIC: (&str, &str) = ("기본", "프로젝트 이름과 저장소");
+pub const NEW_SEC_STYLE: (&str, &str) =
+    ("팀 캐릭터", "이 프로젝트의 팀원이 모두 이 모양으로 보입니다. 나중에 설정에서 바꿀 수 있습니다");
+
 /// How tall the new-project body is, from its rows (FR-L26.1): 20 px padding top and bottom;
-/// 이름 and the 저장소/기본 브랜치 row (a 12/18 label, 4, a 40 px field); the 팀 캐릭터 label and
-/// the picker for `columns`; each of `notes` (the branch hint, errors, the failure) at two lines.
-/// Every row after the first adds the column's 12 px spacing. An estimate, not a measurement:
-/// TODO(compose-rust#778) a body capped at the room would make it unnecessary.
+/// the 기본 section (the 22 px title, the 18 px hint, then 이름 and the 저장소/기본 브랜치 row,
+/// each a 12/18 label, 4 and a 40 px field, 12 apart; 8 between the section's rows); 16; the
+/// 팀 캐릭터 section (its rule, 8, the title, a two-line hint and the picker for `columns`, 8
+/// apart); each of `notes` (the branch hint, errors, the failure) at two lines and 16 above.
+/// An estimate, not a measurement: TODO(compose-rust#778) a body capped at the room would make
+/// it unnecessary.
 pub(crate) fn new_project_body_estimate(columns: usize, notes: usize) -> f32 {
     let field_row = 18.0 + 4.0 + H_BTN;
-    let note = SP[2] + 2.0 * 18.0;
-    SP[4] * 2.0
-        + field_row
-        + SP[2]
-        + field_row
-        + SP[2]
-        + 18.0
-        + SP[2]
-        + super::characters::style_picker_height(columns)
-        + notes as f32 * note
+    let note = SP[3] + 2.0 * 18.0;
+    let basic = 22.0 + SP[1] + 18.0 + SP[1] + field_row + SP[2] + field_row;
+    let style = 1.0 + SP[1] + SP[1] + SP[1] + 22.0 + SP[1] + 2.0 * 18.0 + SP[1] + super::characters::style_picker_height(columns);
+    SP[4] * 2.0 + basic + SP[3] + style + notes as f32 * note
 }
 
 /// The new-project sheet's review setting: `EMBER_CR_SHEET_SCROLL=end` scrolls its body to the
@@ -2065,18 +2081,65 @@ mod tests {
         assert_eq!(sheet_scroll_dp(Some("end")), 1450.0);
     }
 
+    /// The new-project sheet's body, from its `EmberSheet` call to the unsaved-changes question.
+    fn new_project_sheet_source() -> &'static str {
+        let src = include_str!("project.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        let body = &production[production.find("EmberSheet(\"새 프로젝트\"").unwrap()..];
+        &body[..body.find("EmberSheet(\"변경 사항\"").unwrap()]
+    }
+
     #[test]
-    fn fr_l32_1_new_project_body_leaves_room_for_its_footer() {
-        // #876: at 390 the body took the whole 85 percent less the header, so 취소/만들기 fell
-        // below the sheet. The body now leaves room for the footer too.
+    fn fr_l32_1_new_project_buttons_are_in_the_header() {
+        // #876 put 취소/만들기 in a footer that fell below the body at 390; the mockup has them
+        // in the header (`project.js` projNew `.sheet-acts`), so the body leaves room for the
+        // header only and the buttons are always on screen (review r6 item 7).
         let src = include_str!("project.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap()];
         let sheet = &production[production.find("let new_body_height").unwrap()..production.find("EmberSheet(\"새 프로젝트\"").unwrap()];
-        assert!(sheet.contains("super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H"), "{sheet}");
+        assert!(sheet.contains("super::components::SHEET_HEADER_CHROME_H,\n        )"), "{sheet}");
+        assert!(!sheet.contains("SHEET_FOOTER_H"), "{sheet}");
         assert!(production.contains("TODO(compose-rust#778)"));
-        let body = &production[production.find("EmberSheet(\"새 프로젝트\"").unwrap()..];
-        let body = &body[..body.find("SheetFooter(").unwrap()];
+        let body = new_project_sheet_source();
+        assert!(body.starts_with("EmberSheet(\"새 프로젝트\", st.new_project.get(), request_close.clone(), Some(&mut new_actions),"), "{body}");
+        assert!(!body.contains("SheetFooter("), "{body}");
         assert!(body.contains(".scroll_state(&new_scroll).modifier(Modifier::new().fill_max_width().height(new_body_height))"));
+    }
+
+    #[compose_rust::runtime::Composable]
+    fn new_project_sheet_open() {
+        let st = remember(|| {
+            let u = Ui::new(&[], &[]);
+            u.new_project.set(true);
+            u
+        });
+        let ui = shared_ui().clone();
+        Sheets(&[], &[], &st, &ui);
+    }
+
+    #[test]
+    fn fr_l26_1_new_project_sheet_has_the_sections_and_header_buttons_of_the_mockup() {
+        // Review r6 item 7: no 기본 header, no character hint, and the buttons in a footer.
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(new_project_sheet_open)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let texts: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { value: PropertyValue::String(t), .. } => Some(t.to_string()),
+                _ => None,
+            })
+            .collect();
+        let at = |want: &str| texts.iter().position(|t| t == want).unwrap_or_else(|| panic!("no {want}: {texts:?}"));
+        assert_eq!(NEW_SEC_BASIC, ("기본", "프로젝트 이름과 저장소"));
+        assert_eq!(NEW_SEC_STYLE.0, "팀 캐릭터");
+        assert!(NEW_SEC_STYLE.1.contains("나중에 설정에서 바꿀 수 있습니다"));
+        let (title, cancel, create) = (at("새 프로젝트"), at("취소"), at("만들기"));
+        let (basic, basic_hint, style, style_hint) = (at("기본"), at(NEW_SEC_BASIC.1), at("팀 캐릭터"), at(NEW_SEC_STYLE.1));
+        assert!(title < cancel && cancel < create, "the header: title, 취소, 만들기");
+        assert!(create < basic, "the buttons come before the body, in the header");
+        assert!(basic < basic_hint && basic_hint < at("이름") && at("이름") < style, "{texts:?}");
+        assert!(style < style_hint, "{texts:?}");
     }
 
     #[test]
@@ -2101,33 +2164,29 @@ mod tests {
         assert!(sheet_scroll_is_end(Some("end")));
         assert!(!sheet_scroll_is_end(Some("120")));
         assert!(!sheet_scroll_is_end(None));
-        let src = include_str!("project.rs");
-        let production = &src[..src.find("#[cfg(test)]").unwrap()];
-        let body = &production[production.find("EmberSheet(\"새 프로젝트\"").unwrap()..];
-        let body = &body[..body.find("SheetFooter(").unwrap()];
+        let body = new_project_sheet_source();
         assert!(body.contains("if review_end && !new_body_fits {\n                ScrollToEnd(new_scroll.clone());"), "{body}");
     }
 
     #[test]
     fn fr_l26_1_new_project_body_is_content_height_when_it_fits() {
         use super::super::characters::style_picker_columns;
-        use super::super::components::{sheet_body_max_height, SHEET_FOOTER_H, SHEET_HEADER_CHROME_H};
-        let room = |w: f32, h: f32| sheet_body_max_height(w, h, false, SHEET_HEADER_CHROME_H + SHEET_FOOTER_H).min(900.0);
-        // 40 + 62 + 12 + 62 + 12 + 18 + 12 + the picker (two rows of 162 and 8), with the branch hint.
-        assert_eq!(new_project_body_estimate(3, 0), 40.0 + 62.0 + 12.0 + 62.0 + 12.0 + 18.0 + 12.0 + 332.0);
-        assert_eq!(new_project_body_estimate(3, 1) - new_project_body_estimate(3, 0), 48.0);
-        // 1440 x 900: three columns, the body fits with room for a few errors (#878: a fixed
+        use super::super::components::{sheet_body_max_height, SHEET_HEADER_CHROME_H};
+        let room = |w: f32, h: f32| sheet_body_max_height(w, h, false, SHEET_HEADER_CHROME_H).min(900.0);
+        // 40; 기본: 22 + 8 + 18 + 8 + 62 + 12 + 62; 16; 팀 캐릭터: 1 + 8 + 8 + 8 + 22 + 8 + 36 + 8
+        // and the picker (two rows of 162 and 8).
+        assert_eq!(new_project_body_estimate(3, 0), 40.0 + 192.0 + 16.0 + 99.0 + 332.0);
+        assert_eq!(new_project_body_estimate(3, 1) - new_project_body_estimate(3, 0), 52.0);
+        // 1440 x 900: three columns, the body fits with room for two notes (#878: a fixed
         // body left about 170 px blank above the footer).
         assert_eq!(style_picker_columns(1440.0), 3);
-        assert!(new_project_body_estimate(3, 3) <= room(1440.0, 900.0));
+        assert_eq!(room(1440.0, 900.0), 900.0 - 32.0 - 61.0);
+        assert!(new_project_body_estimate(3, 2) <= room(1440.0, 900.0));
         // 390 x 844: two columns of three rows do not fit the 85 percent sheet; it scrolls at a
         // fixed height so the footer stays on screen (FR-L32.1).
         assert_eq!(style_picker_columns(390.0), 2);
         assert!(new_project_body_estimate(2, 1) > room(390.0, 844.0));
-        let src = include_str!("project.rs");
-        let production = &src[..src.find("#[cfg(test)]").unwrap()];
-        let body = &production[production.find("EmberSheet(\"새 프로젝트\"").unwrap()..];
-        let body = &body[..body.find("SheetFooter(").unwrap()];
+        let body = new_project_sheet_source();
         assert!(body.contains("if new_body_fits {\n                cu::Column().modifier(Modifier::new().fill_max_width()).content(new_body);"), "{body}");
     }
 }

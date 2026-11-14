@@ -92,6 +92,15 @@ impl Page {
 
     /// The page opened on `folder`, with one file, `a.rs`, listed under it.
     fn open_at(folder: &str) -> Page {
+        Page::open_with(folder, None)
+    }
+
+    /// The page with the editor's own stylesheets (`page::config`), so it can be laid out.
+    fn open_styled() -> Page {
+        Page::open_with(ROOT, Some(super::page::config()))
+    }
+
+    fn open_with(folder: &str, config: Option<dioxus_compose::html::HtmlConfig>) -> Page {
         FOLDER.with(|f| *f.borrow_mut() = folder.to_string());
         let (host, commands) = EditorHost::fake();
         {
@@ -103,7 +112,10 @@ impl Page {
             );
         }
         FAKE.with(|f| *f.borrow_mut() = Some(host));
-        let mut dom = HtmlDom::new(app);
+        let mut dom = match config {
+            Some(config) => HtmlDom::with_config(app, config),
+            None => HtmlDom::new(app),
+        };
         dom.render();
         Page { dom, commands }
     }
@@ -563,4 +575,50 @@ fn fr_e8_extension_webview_panel_lifecycle_and_messaging() {
     assert!(page.find_where("the webview tab after close", |id| {
         page.attr(id, "title").as_deref() == Some("ember-webview:wv-md")
     }).is_none(), "webview tab removed after close");
+}
+
+// FR-L31.26 (#874): the status bar is --sbh (32 px) high and its bottom edge is the page's bottom
+// edge, as in the mockup (`editor.html`: the bar's top line at y 868 of a 900 px window). On
+// v0.0.10 the window showed 16 px of page under the bar. This lays the page out with its own
+// stylesheets and no renderer, so it tells the two possible causes apart: when it fails, the
+// grid itself leaves room under the bar (the message lists the page's grid items and their
+// boxes); when it passes and the window still shows the band, the page is laid out in a viewport
+// 16 px shorter than the window, which is the renderer's or dioxus-compose's island size.
+#[test]
+fn fr_l31_26_the_status_bar_is_32_high_and_flush_with_the_page_bottom() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    page.click_row();
+    page.deliver(opened(3));
+    let ed = page.find("class", "ed").expect("the page grid (.ed) with the tree and the bottom window open");
+    let bar = page.find("aria-label", "상태 표시줄").expect("the status bar");
+    let _ = page.dom.layout(1440.0, 900.0, 1.0);
+    let list = page.dom.display_list().expect("laid out");
+    let ed_rect = list.get(ed).expect("the page draws its background").rect;
+    let bar_rect = list.get(bar).expect("the status bar draws its line").rect;
+    let doc = page.dom.document();
+    let items: Vec<String> = doc
+        .get_node(ed)
+        .map(|n| n.children.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| {
+            let node = doc.get_node(id)?;
+            let tag = node.element_data().map(|e| e.name.local.to_string())?;
+            let class = page.attr(id, "class").unwrap_or_default();
+            let rect = list.get(id).map(|e| format!("{:?}", e.rect)).unwrap_or_else(|| "no box".into());
+            Some(format!("{tag}.{class} {rect}"))
+        })
+        .collect();
+    let close = |a: f32, b: f32| (a - b).abs() < 0.5;
+    assert!(close(bar_rect.height, 32.0), "bar {bar_rect:?}; items {items:#?}");
+    assert!(
+        close(bar_rect.y + bar_rect.height, ed_rect.y + ed_rect.height),
+        "the bar ends at {} but the page at {}; page {ed_rect:?}; items {items:#?}",
+        bar_rect.y + bar_rect.height,
+        ed_rect.y + ed_rect.height,
+    );
+    if cfg!(target_os = "macos") {
+        assert!(close(ed_rect.y + ed_rect.height, 900.0), "the FullSize page fills the window: {ed_rect:?}");
+    }
 }

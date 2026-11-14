@@ -31,31 +31,27 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use futures::{SinkExt, StreamExt};
+use ember_node::ose_api::pump_ose_relay;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::computers::{Computer, Computers, LOCAL, LOCAL_NAME};
-use crate::ose::{valid_computer_id, OseManager, RelayLookupError, RelayTarget};
+use crate::ose::{valid_computer_id, OseManager, RelayLookupError};
 use crate::session::Sessions;
 use crate::store::SessionRecord;
 
-/// Byte window at the start of the client-to-OSE stream in which the C2 placeholder is replaced
-/// with the real OSE connection token (`FR-W4`, `#458`, `#461`).
-pub const RELAY_SUBSTITUTION_WINDOW: usize = 8 * 1024;
-/// Timeout for opening the loopback TCP connection to the local OSE process.
-const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-/// Maximum chunk size read from the OSE TCP socket per WebSocket binary frame.
-const RELAY_READ_CHUNK: usize = 32 * 1024;
+/// The relay of the local OSE and its placeholder substitution are `ember_node::ose_api`: the
+/// node runs the same relay for the OSE of its own projects (SPEC FR-W4b, #896).
+pub use ember_node::ose_api::RELAY_SUBSTITUTION_WINDOW;
+/// The connection of one OSE launch, defined beside the manager that builds it.
+pub use crate::ose::EmberOseConnection;
 
 /// One computer's IDE endpoints.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -160,24 +156,6 @@ pub struct EmberLaunch {
     /// Connection details when an OSE endpoint is reachable by the editor.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ose: Option<EmberOseConnection>,
-}
-
-#[derive(Clone, Serialize, PartialEq)]
-pub struct EmberOseConnection {
-    pub endpoint: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub relay: Option<String>,
-    pub connection_token: String,
-}
-
-impl std::fmt::Debug for EmberOseConnection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EmberOseConnection")
-            .field("endpoint", &self.endpoint)
-            .field("relay", &self.relay)
-            .field("connection_token", &"[REDACTED]")
-            .finish()
-    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -491,62 +469,6 @@ fn build(
         })
 }
 
-/// C2 placeholder-to-real-token substitution for the first `window` bytes of the
-/// client-to-OSE byte stream (`FR-W4`, `#458`, `#461`).
-///
-/// Substitution works within one client WebSocket message: every placeholder that starts inside
-/// the window and lies whole in the message is replaced. Each client message goes to the OSE as
-/// exactly one write, never split, held or merged with another (#776). A placeholder split across
-/// two messages is not replaced; Code-OSS and `ember-editor-conn` write each protocol message
-/// (header and body, including the `auth` control message) as one WebSocket message, so the token
-/// never straddles messages. Placeholder and real token have the same length, so byte offsets
-/// do not shift.
-struct TokenSubstituter {
-    placeholder: Vec<u8>,
-    real_token: Vec<u8>,
-    window: usize,
-    seen: usize,
-}
-
-impl TokenSubstituter {
-    fn new(placeholder: &str, real_token: &str, window: usize) -> Self {
-        Self {
-            placeholder: placeholder.as_bytes().to_vec(),
-            real_token: real_token.as_bytes().to_vec(),
-            window,
-            seen: 0,
-        }
-    }
-
-    fn enabled(&self) -> bool {
-        !self.placeholder.is_empty()
-            && self.placeholder.len() == self.real_token.len()
-            && self.placeholder != self.real_token
-    }
-
-    /// One client message in, the same message (same length) out.
-    fn feed(&mut self, msg: &[u8]) -> Vec<u8> {
-        let start = self.seen;
-        self.seen = self.seen.saturating_add(msg.len());
-        if !self.enabled() || start >= self.window {
-            return msg.to_vec();
-        }
-        let in_win = (self.window - start).min(msg.len());
-        let pat_len = self.placeholder.len();
-        let mut out = msg.to_vec();
-        let mut i = 0;
-        while i < in_win && i + pat_len <= msg.len() {
-            if msg[i..i + pat_len] == self.placeholder[..] {
-                out[i..i + pat_len].copy_from_slice(&self.real_token);
-                i += pat_len;
-            } else {
-                i += 1;
-            }
-        }
-        out
-    }
-}
-
 async fn ide_relay(
     State(st): State<IdeState>,
     Path((computer, launch_id)): Path<(String, String)>,
@@ -582,131 +504,6 @@ async fn ide_relay(
         }
     };
     ws.on_upgrade(move |socket| pump_ose_relay(socket, target)).into_response()
-}
-
-async fn pump_ose_relay(socket: WebSocket, target: RelayTarget) {
-    let tcp = match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, tokio::net::TcpStream::connect(target.address)).await {
-        Ok(Ok(s)) => {
-            let _ = s.set_nodelay(true);
-            s
-        }
-        _ => {
-            let mut socket = socket;
-            let _ = socket
-                .send(Message::Close(Some(CloseFrame {
-                    code: 1011,
-                    reason: "cannot connect to OSE server".into(),
-                })))
-                .await;
-            return;
-        }
-    };
-    let (mut tcp_read, mut tcp_write) = tcp.into_split();
-    let (mut ws_out, mut ws_in) = socket.split();
-    let mut sub = TokenSubstituter::new(&target.placeholder, &target.real_token, RELAY_SUBSTITUTION_WINDOW);
-    let idle = target.idle_timeout;
-    let last_activity_ns = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let started = std::time::Instant::now();
-    let touch = {
-        let last = last_activity_ns.clone();
-        move || {
-            last.store(
-                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-        }
-    };
-
-    // Bounded channel (capacity 4) for control frames (Pong / 1003 Close) from the reader side so
-    // `ws_in` and `ws_out` never block each other across `tokio::select!`.
-    let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::channel::<Message>(4);
-
-    let touch_in = touch.clone();
-    let c2s = async move {
-        while let Some(msg) = ws_in.next().await {
-            touch_in();
-            match msg {
-                Ok(Message::Binary(bytes)) => {
-                    let out = sub.feed(&bytes);
-                    if !out.is_empty() && tcp_write.write_all(&out).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(Message::Text(_)) => {
-                    let _ = ctrl_tx
-                        .send(Message::Close(Some(CloseFrame {
-                            code: 1003,
-                            reason: "text frames are not allowed on the OSE binary relay".into(),
-                        })))
-                        .await;
-                    let _ = tcp_write.shutdown().await;
-                    break;
-                }
-                Ok(Message::Ping(p)) => {
-                    if ctrl_tx.send(Message::Pong(p)).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(Message::Pong(_)) => {}
-                Ok(Message::Close(_)) | Err(_) => break,
-            }
-        }
-        let _ = tcp_write.shutdown().await;
-    };
-
-    let s2c = async move {
-        let mut read_buf = vec![0u8; RELAY_READ_CHUNK];
-        loop {
-            tokio::select! {
-                biased;
-                ctrl = ctrl_rx.recv(), if !ctrl_rx.is_closed() => {
-                    if let Some(frame) = ctrl {
-                        let is_close = matches!(frame, Message::Close(_));
-                        if ws_out.send(frame).await.is_err() || is_close {
-                            break;
-                        }
-                    }
-                }
-                n = tcp_read.read(&mut read_buf) => {
-                    match n {
-                        Ok(0) | Err(_) => {
-                            if let Ok(frame) = ctrl_rx.try_recv() {
-                                let _ = ws_out.send(frame).await;
-                            } else {
-                                let _ = ws_out.close().await;
-                            }
-                            break;
-                        }
-                        Ok(n) => {
-                            touch();
-                            if ws_out.send(Message::Binary(read_buf[..n].to_vec().into())).await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    };
-
-    let idle_watchdog = async {
-        let check_step = (idle / 4).clamp(Duration::from_millis(20), Duration::from_secs(5));
-        loop {
-            tokio::time::sleep(check_step).await;
-            let last = Duration::from_nanos(last_activity_ns.load(std::sync::atomic::Ordering::Relaxed));
-            if started.elapsed().saturating_sub(last) >= idle {
-                break;
-            }
-        }
-    };
-
-    let both = async {
-        tokio::join!(c2s, s2c);
-    };
-    tokio::select! {
-        _ = both => {}
-        _ = idle_watchdog => {}
-    }
 }
 
 #[derive(Deserialize)]

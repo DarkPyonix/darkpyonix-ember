@@ -376,7 +376,6 @@ fn deny(ui: AddUi, run: Run) {
 }
 
 pub fn AddComputerSheet(ui: &AddUi) {
-    let p = ember_theme().palette;
     let close = {
         let u = ui.clone();
         move || u.leave()
@@ -415,29 +414,42 @@ pub fn AddComputerSheet(ui: &AddUi) {
         });
     }
     let w = crate::ui::window_size::current_window_size();
-    let body_h = super::components::sheet_body_max_height(w.width_dp, w.height_dp, false, 60.0).min(700.0);
+    let chrome = super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H;
+    let body_h = super::components::sheet_body_max_height(w.width_dp, w.height_dp, false, chrome).min(700.0);
+    // FR-L32.1 (#876): the bottom sheet (below 560 dp) is as tall as its content, like 새 채널,
+    // and the toolkit sheet scrolls content taller than 85 percent of the window itself. The
+    // dialog keeps a fixed scrolling body. TODO(compose-rust#778): one capped body for both.
+    let wraps = super::components::sheet_wraps_content(w.width_dp);
     EmberSheet("컴퓨터 추가", ui.open.get(), close.clone(), None, || {
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_h)).content(|| {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
-                let muted = Some(paint(p.muted));
-                if sample {
-                    Label(flow::DEMO_LINE, Fs::Xs, Weight::Regular, muted, None);
-                }
-                match ui.view.get() {
-                    None => ListBody(ui, sample),
-                    Some(EnrolView::Naming) => NamingBody(ui),
-                    Some(EnrolView::WaitingForNode { code, expires_ms }) => WaitingBody(ui, &code, expires_ms, sample),
-                    Some(EnrolView::AwaitingConfirm { rows }) => ConfirmBody(ui, &rows),
-                    Some(EnrolView::Joined) => Outcome(ui, flow::JOINED_LINE, false),
-                    Some(EnrolView::Denied) => Outcome(ui, flow::DENIED_LINE, false),
-                    Some(EnrolView::Expired) => Outcome(ui, flow::EXPIRED_LINE, true),
-                    Some(EnrolView::Failed(m)) => Outcome(ui, &m, true),
-                }
-            });
-        });
+        if wraps {
+            cu::Column().modifier(Modifier::new().fill_max_width()).content(|| AddBody(ui, sample));
+        } else {
+            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_h)).content(|| AddBody(ui, sample));
+        }
         SheetFooter(|| {
             AppButton("닫기", None, ButtonKind::Default, true, true, false, close.clone());
         });
+    });
+}
+
+/// The add-computer sheet's body for the current step.
+fn AddBody(ui: &AddUi, sample: bool) {
+    let p = ember_theme().palette;
+    cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+        let muted = Some(paint(p.muted));
+        if sample {
+            Label(flow::DEMO_LINE, Fs::Xs, Weight::Regular, muted, None);
+        }
+        match ui.view.get() {
+            None => ListBody(ui, sample),
+            Some(EnrolView::Naming) => NamingBody(ui),
+            Some(EnrolView::WaitingForNode { code, expires_ms }) => WaitingBody(ui, &code, expires_ms, sample),
+            Some(EnrolView::AwaitingConfirm { rows }) => ConfirmBody(ui, &rows),
+            Some(EnrolView::Joined) => Outcome(ui, flow::JOINED_LINE, false),
+            Some(EnrolView::Denied) => Outcome(ui, flow::DENIED_LINE, false),
+            Some(EnrolView::Expired) => Outcome(ui, flow::EXPIRED_LINE, true),
+            Some(EnrolView::Failed(m)) => Outcome(ui, &m, true),
+        }
     });
 }
 

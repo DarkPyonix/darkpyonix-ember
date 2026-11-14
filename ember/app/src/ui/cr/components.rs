@@ -990,6 +990,18 @@ fn sheet_presentation(window_width_dp: f32, monitor: bool) -> SheetPresentation 
     }
 }
 
+/// Whether a (non-monitor) sheet is a bottom sheet at this width, which is as tall as its
+/// content up to [`SHEET_BOTTOM_MAX_FRACTION`] and scrolls taller content itself (FR-L32.1).
+pub(crate) fn sheet_wraps_content(window_width_dp: f32) -> bool {
+    sheet_presentation(window_width_dp, false) == SheetPresentation::Bottom
+}
+
+/// The sheet header and the separator under it (`SheetHeader` and `cu::Separator`), FR-L32.1.
+pub(crate) const SHEET_HEADER_CHROME_H: f32 = SHEET_HEADER_H + 1.0;
+
+/// [`SheetFooter`]: its 1 dp line, 12 above the buttons, the 32 dp buttons and 20 below (FR-L32.1).
+pub(crate) const SHEET_FOOTER_H: f32 = 1.0 + SP[2] + H_CTL + SP[4];
+
 /// The tallest a bottom sheet grows, as a share of the window (`.sheet` `max-height:85vh`).
 pub(crate) const SHEET_BOTTOM_MAX_FRACTION: f32 = 0.85;
 
@@ -1815,6 +1827,27 @@ mod tests {
         // The monitor fills the screen at 390; a dialog keeps 32 dp of margin.
         assert_eq!(sheet_body_max_height(390.0, 844.0, true, 60.0), 784.0);
         assert_eq!(sheet_body_max_height(900.0, 900.0, false, 60.0), 808.0);
+    }
+
+    #[test]
+    fn fr_l32_1_sheet_chrome_heights_match_the_header_and_footer() {
+        // SheetHeader is SHEET_HEADER_H high and EmberSheetSized puts a 1 dp separator under it;
+        // SheetFooter is a 1 dp line, SP[2], an H_CTL row and SP[4].
+        assert_eq!(SHEET_HEADER_CHROME_H, 61.0);
+        assert_eq!(SHEET_FOOTER_H, 65.0);
+        let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        let footer = production.split("pub fn SheetFooter(").nth(1).unwrap();
+        let footer = &footer[..footer.find("\n}\n").unwrap()];
+        assert!(footer.contains("height(1.0)") && footer.contains("height(SP[2])"));
+        assert!(footer.contains("height(H_CTL)") && footer.contains("height(SP[4])"));
+        assert!(sheet_wraps_content(390.0));
+        assert!(!sheet_wraps_content(560.0));
+        assert!(!sheet_wraps_content(1440.0));
+        // A body sized with both chrome heights leaves the footer inside the sheet.
+        for (w, h) in [(390.0, 844.0), (390.0, 640.0), (1440.0, 900.0)] {
+            let body = sheet_body_max_height(w, h, false, SHEET_HEADER_CHROME_H + SHEET_FOOTER_H);
+            assert!(body + SHEET_HEADER_CHROME_H + SHEET_FOOTER_H <= sheet_max_height(w, h, false) + 0.01, "{w}x{h}");
+        }
     }
 
     #[test]

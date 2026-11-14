@@ -5,6 +5,15 @@ if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
 echo "$@" > args.log
 read -r line; echo "$line" >> stdin.log
 echo '{"type":"system","subtype":"init","session_id":"fake-session"}'
+if [ "$FAKE_CLAUDE_MODE" = "cancel" ]; then
+  echo '{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"a","content":"x"}}}'
+  echo '{"type":"control_cancel_request","request_id":"c1"}'
+  echo '{"type":"control_request","request_id":"q1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","requires_user_interaction":true,"input":{"questions":[{"question":"Which?","header":"Pick","options":[{"label":"A"},{"label":"B"}],"multiSelect":false}]}}}'
+  echo '{"type":"control_cancel_request","request_id":"q1"}'
+  echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":1,"output_tokens":1}}'
+  cat >> stdin.log
+  exit 0
+fi
 echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Write","input":{"file_path":"a","content":"x"}}]}}'
 echo '{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"a","content":"x"}}}'
 read -r line; echo "$line" >> stdin.log

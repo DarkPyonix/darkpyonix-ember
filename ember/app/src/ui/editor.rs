@@ -790,10 +790,22 @@ pub fn editor_grid_style(has_left: bool, has_bottom: bool) -> String {
     style
 }
 
-/// The page's height rule: macOS opens the window FullSize, so the page is the window's height;
-/// elsewhere the native chrome stays and the page keeps its 76px allowance.
-pub fn editor_page_height(full_size: bool) -> &'static str {
-    if full_size { "100vh" } else { "calc(100vh - 76px)" }
+/// The page's size rule, the same on every system: the page is the viewport. The viewport is the
+/// box the window gives its content (the whole window under FullSize on macOS, the area below the
+/// native title bar elsewhere), and the HTML runtime lays the page out again on every dp change
+/// of that box, so the page follows the window both when it grows and when it shrinks (#301,
+/// #320). No title bar height is taken out here: the viewport already excludes it.
+pub fn editor_page_size_style() -> &'static str {
+    "width:100vw; height:100vh;"
+}
+
+/// The padding of the page's error message, which is drawn with no top bar above it. Under
+/// FullSize the window controls float over the page's top, so the message starts below the
+/// title strip the window reports (`strip_top`, 0 until the first report); otherwise the native
+/// title bar is outside the page and only the message's own 20px is kept.
+pub fn editor_error_padding(full_size: bool, strip_top: f32) -> String {
+    let top = if full_size { 20.0 + strip_top.max(0.0) } else { 20.0 };
+    format!("padding:20px; padding-top:{top}px;")
 }
 
 /// The top bar's left padding past the window controls: under FullSize the traffic lights float

@@ -539,14 +539,16 @@ impl Sessions {
 
     /// Record and push one event.
     fn record(&self, session_id: &str, event: &AgentEvent) -> anyhow::Result<()> {
-        let (stored, status) = self.store.append(session_id, event)?;
-        // The question is answered or withdrawn: the double-answer guard has no use for its key.
+        let res = self.store.append(session_id, event);
+        // The question is answered or withdrawn (or its append failed, #683): release the
+        // double-answer guard's key so a failed append never leaves it held until the turn ends.
         match event {
             AgentEvent::QuestionAnswered { question_id, .. } => self.release_questions(session_id, Some(question_id.as_str())),
             AgentEvent::PromptWithdrawn { prompt_id } => self.release_questions(session_id, Some(prompt_id.as_str())),
             AgentEvent::TurnEnded { .. } => self.release_questions(session_id, None),
             _ => {}
         }
+        let (stored, status) = res?;
         self.touch(session_id);
         let hooks = self.event_hooks.lock().unwrap().clone();
         for hook in hooks {
@@ -1183,8 +1185,28 @@ mod pending_tests {
             r#"{"kind":"approval_requested","approval_id":"o1","tool":"Bash","input":{}}"#,
         )
         .unwrap();
-        let pending = pending_approvals_of(vec![old]);
-        assert_eq!(pending.len(), 1);
-        assert!(!pending[0].3);
+        let p = pending_approvals_of(vec![old]);
+        assert_eq!(p.len(), 1);
+        assert!(!p[0].3);
+    }
+
+    /// FR-A5 (#683): a failed `store.append` in `Sessions::record` still releases the question's
+    /// double-answer key, so it does not stay held until the turn ends.
+    #[test]
+    fn fr_a5_a_failed_store_append_in_record_releases_the_question_key() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let s = Sessions::new(store, Vec::new());
+        s.questions_taken.lock().unwrap().insert(("no-such-session".into(), "q1".into()));
+        s.questions_taken.lock().unwrap().insert(("no-such-session".into(), "q2".into()));
+        assert_eq!(s.questions_taken_len(), 2);
+
+        let err = s
+            .record_event("no-such-session", &AgentEvent::QuestionAnswered { question_id: "q1".into(), answers: vec![] })
+            .unwrap_err();
+        assert!(!err.to_string().is_empty());
+        assert_eq!(s.questions_taken_len(), 1, "q1 key was released even though store.append failed");
+
+        let _ = s.record_event("no-such-session", &AgentEvent::PromptWithdrawn { prompt_id: "q2".into() }).unwrap_err();
+        assert_eq!(s.questions_taken_len(), 0, "q2 key was released even though store.append failed");
     }
 }

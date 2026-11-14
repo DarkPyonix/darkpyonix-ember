@@ -645,7 +645,9 @@ mod tests {
             Grid(1, &chip(), &live_feed(), true);
         }
         let text = composed_text(ui);
-        for want in ["25.0%", "50.0%", "스왑 1.0 GB / 4.0 GB", "60.0%", "2.0 KB/s", "GPU를 읽을 수 없습니다", "프로세스 321개 실행 중입니다", "준비 중입니다"] {
+        // The big value is split into the number and its unit, a percent as a whole number
+        // (`hero_parts`, review M1), so each is its own quoted text.
+        for want in ["\"25\"", "\"50\"", "스왑 1.0 GB / 4.0 GB", "\"60\"", "\"2.0\"", "KB/s", "GPU를 읽을 수 없습니다", "프로세스 321개 실행 중입니다", "준비 중입니다"] {
             assert!(text.contains(want), "missing {want}");
         }
     }

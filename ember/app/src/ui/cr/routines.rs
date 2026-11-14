@@ -5104,7 +5104,8 @@ mod design_review_tests {
     #[test]
     fn design_r5_agent_tile_has_the_character() {
         let src = source();
-        assert_eq!(src.matches("AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project);").count(), 2);
+        // Each call sits in a `TileCell` since the tiles in a row share one height (#848).
+        assert_eq!(src.matches("TileCell(move || AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project));").count(), 2);
         let kv = src.split("fn AgentKeyValue(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(kv.contains("Character(agent, false, 20.0"));
     }

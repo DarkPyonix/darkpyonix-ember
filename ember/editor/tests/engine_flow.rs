@@ -669,3 +669,55 @@ fn output_service_and_message_service_flow() {
     let fx = c.handle(t0, Input::AnswerMessage { id, handle: None });
     assert!(fx.contains(&Effect::Respond { req: 5, result: Ok(Reply::Empty) }));
 }
+
+#[test]
+fn engine_is_any_dirty_at_or_below_tracks_dirty_documents() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+    let u = uri("/w/src/main.rs");
+    let fx = c.handle(t0, Input::Open { uri: u.clone() });
+    let req = fx.iter().find_map(|e| match e {
+        Effect::ReadFile { uri, purpose } => Some((uri.clone(), purpose.clone())),
+        _ => None,
+    }).unwrap();
+    let initial_bytes = b"fn main() {}\n".to_vec();
+    let fx = c.handle(t0, Input::FileRead { uri: req.0, purpose: req.1, result: Ok(initial_bytes) });
+    let generation = updates(&fx).into_iter().find_map(|u| match u {
+        SessionUpdate::Opened { generation, .. } => Some(*generation),
+        _ => None,
+    }).unwrap();
+
+    // Initially clean
+    assert!(!c.is_any_dirty_at_or_below("/w/src"));
+    assert!(!c.is_any_dirty_at_or_below("/w/src/main.rs"));
+
+    // Modify document: becomes dirty
+    c.handle(
+        t0,
+        Input::Widget {
+            uri: u.clone(),
+            generation,
+            event: WidgetEvent::CodeChanged {
+                version: 1,
+                range: WidgetRange::empty(WidgetPos::new(0, 11)),
+                text: " println!();".into(),
+            },
+        },
+    );
+
+    assert!(c.is_any_dirty_at_or_below("/w/src"));
+    assert!(c.is_any_dirty_at_or_below("/w/src/main.rs"));
+    assert!(c.is_any_dirty_at_or_below("/w"));
+    assert!(!c.is_any_dirty_at_or_below("/w/other"));
+    assert!(!c.is_any_dirty_at_or_below("/w/src2"));
+
+    // Save requested: FileWritten Ok -> clean again
+    let fx = c.handle(t0, Input::Widget { uri: u.clone(), generation, event: WidgetEvent::CodeSaveRequested { version: 1 } });
+    let token = fx.iter().find_map(|e| match e {
+        Effect::WriteFile { token, .. } => Some(*token),
+        _ => None,
+    }).unwrap();
+    c.handle(t0, Input::FileWritten { uri: u.clone(), token, result: Ok(()) });
+
+    assert!(!c.is_any_dirty_at_or_below("/w/src"));
+}

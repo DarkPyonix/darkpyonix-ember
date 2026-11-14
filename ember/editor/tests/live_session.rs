@@ -348,7 +348,7 @@ async fn live_session_explorer_create_rename_delete() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     let config = SessionConfig::new(addr.clone(), ws_str.clone());
-    let (session, _rx) = tokio::time::timeout(Duration::from_secs(120), EditorSession::connect_tcp(config))
+    let (session, mut rx) = tokio::time::timeout(Duration::from_secs(120), EditorSession::connect_tcp(config))
         .await
         .expect("connect timed out")
         .unwrap_or_else(|e| panic!("connect: {e}"));
@@ -397,6 +397,44 @@ async fn live_session_explorer_create_rename_delete() {
     session.delete_path(&moved, true).await.expect("delete the link");
     assert!(std::fs::symlink_metadata(ws.join("link2")).is_err(), "the link is gone");
     assert_eq!(std::fs::read_to_string(outside.join("precious.txt")).unwrap(), "do not touch", "what the link pointed at is untouched");
+
+    // Symbolic link in the middle of a path:
+    let mid_dir = ws.join("mid_parent");
+    std::fs::create_dir_all(&mid_dir).unwrap();
+    let mid_link = mid_dir.join("mid_link");
+    std::os::unix::fs::symlink(&outside, &mid_link).unwrap();
+    let mid_path = format!("{ws_str}/mid_parent/mid_link/nested");
+    assert!(
+        matches!(session.create_file(&mid_path, "escape.txt").await, Err(ember_editor::Error::Path(ember_editor::paths::PathError::Symlink))),
+        "symlink in the middle of a path is refused"
+    );
+
+    // Open file rename: dirty document is refused, clean document succeeds
+    let open_file = session.create_file(&ws_str, "open.txt").await.expect("create open.txt");
+    let open_uri = session.uri(&open_file);
+    session.open(open_uri.clone()).unwrap();
+    let generation = wait_for("Opened open.txt", 30, &mut rx, |u| match u {
+        SessionUpdate::Opened { uri, generation, .. } if uri.path == open_uri.path => Some(*generation),
+        _ => None,
+    }).await;
+    session.widget_event(open_uri.clone(), generation, WidgetEvent::CodeChanged {
+        version: 1,
+        range: WidgetRange::empty(WidgetPos::new(0, 0)),
+        text: "dirty text".into(),
+    }).unwrap();
+    assert!(
+        matches!(session.rename_path(&open_file, "open2.txt").await, Err(ember_editor::Error::Path(ember_editor::paths::PathError::Dirty))),
+        "rename of an open dirty file is refused"
+    );
+    session.widget_event(open_uri.clone(), generation, WidgetEvent::CodeSaveRequested { version: 1 }).unwrap();
+    wait_for("Saved open.txt", 30, &mut rx, |u| match u {
+        SessionUpdate::Saved { uri } if uri.path == open_uri.path => Some(()),
+        _ => None,
+    }).await;
+    let open_renamed = session.rename_path(&open_file, "open2.txt").await.expect("rename clean file");
+    assert_eq!(open_renamed, format!("{ws_str}/open2.txt"));
+    assert!(!ws.join("open.txt").exists() && ws.join("open2.txt").is_file());
+    session.close(open_uri).unwrap();
 
     // Paths the explorer must not touch are refused before anything is sent.
     use ember_editor::paths::PathError;

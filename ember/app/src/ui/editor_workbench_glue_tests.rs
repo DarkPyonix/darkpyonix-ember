@@ -890,6 +890,34 @@ fn fr_l31_35_output_channels_are_30px_pills() {
     assert!(entry.background.is_some() && entry.radii.is_some(), "the shown channel is a filled pill");
 }
 
+// FR-L31.36 (#895, design review E11): with no tab open the editor panel has no tab strip (and no
+// ⋯ button or divider), and the empty state starts at the panel's top; the strip is back with the
+// first tab.
+#[test]
+fn fr_l31_36_the_editor_has_no_tab_strip_while_no_tab_is_open() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    // A trusted folder, so no restricted-mode banner sits above the empty state.
+    page.host().state.lock().unwrap().trust = crate::ui::workspace_trust::TrustState { trusted: true, prompt: false, banner_dismissed: false };
+    page.redraw();
+    assert!(page.find("aria-label", "열린 파일").is_none(), "no tab strip");
+    assert!(page.find("title", "탭 메뉴").is_none(), "no ⋯ button");
+    assert!(page.text().contains("열린 파일이 없습니다"));
+    let main = page.find("aria-label", "편집기").expect("the editor panel");
+    let empty = page.find("class", "ed-empty").expect("the empty state");
+    let b = page.boxes(&[("the editor panel", main), ("the empty state", empty)]);
+    // The panel has a 1px border; the empty state fills what is inside it.
+    assert!(near(b[1].1, b[0].1 + 1.0), "the empty state starts at the panel's top: {b:?}");
+    assert!(near(b[1].3, b[0].3 - 2.0), "and fills the panel: {b:?}");
+
+    page.click_row();
+    page.deliver(opened(1));
+    let strip = page.find("aria-label", "열린 파일").expect("the tab strip, with a tab open");
+    assert_eq!(page.attr(strip, "role").as_deref(), Some("tablist"));
+    assert!(page.find("title", "탭 메뉴").is_some(), "the ⋯ button is back");
+    assert!(page.current_tab_is(FILE));
+}
+
 #[compose_rust::runtime::Composable]
 fn toolkit_probe() {
     compose_rust::ui::Text("probe".to_string());

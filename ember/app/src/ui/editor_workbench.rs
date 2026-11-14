@@ -1366,7 +1366,12 @@ pub mod page {
             let mut menu_open = s.menu_open;
             menu_open.set(false);
         }
-        let em_shown = crate::ui::editor_menu::menu_shown(*s.menu_open.read(), modal);
+        // FR-L31.36: the ⋯ menu belongs to the tab strip, so it closes with the last tab.
+        if paths.is_empty() && *s.menu_open.peek() {
+            let mut menu_open = s.menu_open;
+            menu_open.set(false);
+        }
+        let em_shown = !paths.is_empty() && crate::ui::editor_menu::menu_shown(*s.menu_open.read(), modal);
         let palette_scrim_s = s.clone();
         let (agent_state, project_branch) = project_status(&s.project);
         // The branch git/status returned; the project row's until the first answer.
@@ -1493,7 +1498,10 @@ pub mod page {
                     }
                     section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
                         {crate::ui::workspace_trust::view::banner(&s)}
-                        {tab_strip(&s, &paths, &dirty, current.as_deref())}
+                        // FR-L31.36: no tab strip while no tab is open, as the mockup's empty editor
+                        // (`editor.js:81`), so the empty state takes the whole panel. The ⋯ of the strip
+                        // goes with it; its commands stay in quick open.
+                        if paths.is_empty() { div { class: "ed-none" } } else { {tab_strip(&s, &paths, &dirty, current.as_deref())} }
                         if let Some((menu_path, x, y)) = s.tab_menu.read().clone() { {tab_context_menu(&s, &menu_path, x, y)} }
                         if let Some(path) = current.as_deref().filter(|p| !settings_shown && !is_webview_tab(p)) {
                             {breadcrumbs(&s, path)}

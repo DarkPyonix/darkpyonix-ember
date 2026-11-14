@@ -1424,8 +1424,8 @@ impl ToolWindow {
         ToolWindow::Problems,
         ToolWindow::Output,
     ];
-    pub const LEFT: [ToolWindow; 5] =
-        [ToolWindow::Project, ToolWindow::Search, ToolWindow::Commit, ToolWindow::Git, ToolWindow::Extensions];
+    pub const LEFT: [ToolWindow; 6] =
+        [ToolWindow::Project, ToolWindow::Search, ToolWindow::Commit, ToolWindow::Git, ToolWindow::Extensions, ToolWindow::Agent];
     pub const RIGHT: [ToolWindow; 2] = [ToolWindow::Agent, ToolWindow::Notifications];
     pub const BOTTOM: [ToolWindow; 4] =
         [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems, ToolWindow::Output];
@@ -1456,8 +1456,13 @@ impl ToolWindow {
 
     pub fn side(self) -> Side {
         match self {
-            ToolWindow::Project | ToolWindow::Search | ToolWindow::Commit | ToolWindow::Git | ToolWindow::Extensions => Side::Left,
-            ToolWindow::Agent | ToolWindow::Notifications => Side::Right,
+            ToolWindow::Project
+            | ToolWindow::Search
+            | ToolWindow::Commit
+            | ToolWindow::Git
+            | ToolWindow::Extensions
+            | ToolWindow::Agent => Side::Left,
+            ToolWindow::Notifications => Side::Right,
             ToolWindow::Terminal | ToolWindow::Run | ToolWindow::Problems | ToolWindow::Output => Side::Bottom,
         }
     }
@@ -1565,7 +1570,7 @@ impl Stripes {
 /// Whether the editor does something for `action` today ([`apply_action`] returns true for it
 /// when it can act). The palette shows the others as not ready instead of as live commands.
 pub fn is_implemented(action: Action) -> bool {
-    // The right tool windows (agent, notifications) have no panel in the window yet: toggling one shows nothing.
+    // The notification tool window has no panel in the window yet: toggling it shows nothing.
     ToolWindow::from_action(action).is_some_and(|w| w.side() != Side::Right)
         || matches!(
             action,

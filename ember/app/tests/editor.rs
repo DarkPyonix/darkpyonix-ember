@@ -195,7 +195,8 @@ fn closing_a_background_tab_keeps_the_current_one() {
 #[test]
 fn stripes_select_toggle_and_stay_on_their_side() {
     assert_eq!(ToolWindow::Project.side(), Side::Left);
-    assert_eq!(ToolWindow::Agent.side(), Side::Right);
+    assert_eq!(ToolWindow::Agent.side(), Side::Left);
+    assert_eq!(ToolWindow::Notifications.side(), Side::Right);
     assert_eq!(ToolWindow::Terminal.side(), Side::Bottom);
     let mut s = Stripes::default();
     assert!(s.is_selected(ToolWindow::Project));
@@ -1899,3 +1900,39 @@ mod design_placement {
         assert!(PAGE.contains("for b in ToolWindow::BOTTOM {"), "the bottom tabs are not drawn from the bottom windows");
     }
 }
+
+// FR-L31.25 (#766): editor agent tool window and 에이전트에게 묻기 (Action::Ask)
+#[test]
+fn fr_l31_25_action_ask_attaches_file_and_selection_context() {
+    use ember_app::ui::editor_agent::{format_context, format_file_context, format_selection_context, AgentState};
+
+    let file_ctx = format_file_context("/repo/src/lib.rs", "/repo");
+    assert_eq!(file_ctx, "#file:src/lib.rs");
+
+    let sel_ctx = format_selection_context("/repo/src/lib.rs", "/repo", 10, 25);
+    assert_eq!(sel_ctx, "#selection:src/lib.rs:10-25");
+
+    let auto_ctx_file = format_context("/repo/src/main.rs", "/repo", None);
+    assert_eq!(auto_ctx_file, "#file:src/main.rs");
+
+    let auto_ctx_sel = format_context("/repo/src/main.rs", "/repo", Some((1, 5)));
+    assert_eq!(auto_ctx_sel, "#selection:src/main.rs:1-5");
+
+    let mut state = AgentState::new("proj-1", "/repo");
+    assert!(!state.sessions.is_empty());
+    assert!(state.selected_session().is_some());
+
+    state.attach_context(sel_ctx.clone());
+    assert_eq!(state.attached_context.as_deref(), Some("#selection:src/lib.rs:10-25"));
+
+    state.send_prompt("이 함수 리팩터링해줘");
+    assert!(state.attached_context.is_none());
+
+    let session = state.selected_session().unwrap();
+    assert!(!session.turns.is_empty());
+    let last = session.turns.last().unwrap();
+    assert!(last.is_user);
+    assert!(last.text.contains("#selection:src/lib.rs:10-25"));
+    assert!(last.text.contains("이 함수 리팩터링해줘"));
+}
+

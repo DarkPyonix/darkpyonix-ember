@@ -26,13 +26,13 @@ use crate::ui::project::{display_name, CloseAction, SettingsGuard, DISCARD_QUEST
 #[derive(Clone)]
 pub struct NewChannelState {
     pub open: MutableState<bool>,
-    draft: MutableState<NewChannelDraft>,
+    pub(super) draft: MutableState<NewChannelDraft>,
     /// Bumped to draw a fresh name field (the field is uncontrolled).
     generation: MutableState<u64>,
     busy: MutableState<bool>,
     /// The last failure, a fixed sentence.
     failure: MutableState<Option<String>>,
-    confirm: MutableState<bool>,
+    pub(super) confirm: MutableState<bool>,
     /// A review window (debug builds, `EMBER_CR_NEWCHANNEL=1`): sample choices, 만들기 never sends.
     review: bool,
 }
@@ -62,7 +62,7 @@ impl NewChannelState {
     }
 
     /// Starts an empty draft on the filtered project, else the first.
-    fn start(&self, filter: Option<&str>) {
+    pub(super) fn start(&self, filter: Option<&str>) {
         let projects = project_names();
         self.draft.set(NewChannelDraft::new(&default_new_project(filter, &projects)));
         self.generation.set(self.generation.get_untracked() + 1);

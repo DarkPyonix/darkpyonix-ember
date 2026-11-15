@@ -360,8 +360,8 @@ pub fn sample_extras() -> Extras {
 
 /// `EMBER_CR_FILES_SHEET=send` opens the send sheet at the start, for review captures.
 #[derive(Clone)]
-struct State {
-    sheet: MutableState<Option<SendDraft>>,
+pub(super) struct State {
+    pub(super) sheet: MutableState<Option<SendDraft>>,
     answered: MutableState<Vec<String>>,
     filter: MutableState<HistoryFilter>,
     /// The history's device filter: 0 is every device, then the devices in the history.
@@ -370,7 +370,7 @@ struct State {
 }
 
 impl State {
-    fn new() -> State {
+    pub(super) fn new() -> State {
         State {
             sheet: mutable_state_of((std::env::var("EMBER_CR_FILES_SHEET").as_deref() == Ok("send")).then(SendDraft::default)),
             answered: mutable_state_of(Vec::new()),
@@ -1371,7 +1371,7 @@ pub fn target_chip_width(label: &str, glyph: f32) -> f32 {
 }
 
 /// The send sheet: pick the receiver (every device and every agent), then the files (FR-L27.5).
-fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool, lost: bool, w: f32) {
+pub(super) fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool, lost: bool, w: f32) {
     let p = ember_theme().palette;
     let draft = st.sheet.get();
     let open = draft.is_some();
@@ -1588,7 +1588,7 @@ fn ShareTile(
 /// Laid out as `.fl-share` (FR-L27.7, #878): no title bar, the close button at the end of the
 /// file card, padding 12 16 20 and 12 between rows, and each section's receivers in one row that
 /// scrolls sideways (`.fl-share-row`).
-fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMember], ready: bool, lost: bool) {
+pub(super) fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMember], ready: bool, lost: bool) {
     let p = ember_theme().palette;
     let is_open = open.get();
     let close = {

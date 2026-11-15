@@ -8,7 +8,8 @@
 #
 # Live checks (SPEC FR-W4 acceptance step 4, NFR-W1; #83, #84): the archive this run built is
 # downloaded, verified and unpacked, the Ember editor session's live tests run against it, and
-# the extension regression installs the pinned list and reads the extension host log.
+# the extension regression installs the pinned list and reads the extension host log, then
+# its deep run opens a webview and (once built) a debug session through the same client (#929).
 name: OSE build
 
 on:
@@ -223,12 +224,24 @@ jobs:
           OSE_REGRESS_CLIENT: cargo test --locked --manifest-path ember/editor/Cargo.toml --test nfr_w1_extension_regression -- --ignored --nocapture
         run: ember/ose/regress.sh "${{ steps.ose.outputs.dir }}"
 
+      - name: Extension deep checks (NFR-W1)
+        # The webview and debug checks of #929 through the same client. Not a gate until its first
+        # green run; the debug check reports not-run until the client has a debug service (#445).
+        continue-on-error: true
+        env:
+          OSE_REGRESS_MODE: deep
+          OSE_REGRESS_OUT: ${{ runner.temp }}/regress-deep-out
+          OSE_REGRESS_CLIENT: cargo test --locked --manifest-path ember/editor/Cargo.toml --test nfr_w1_extension_regression -- --ignored --nocapture
+        run: ember/ose/regress.sh "${{ steps.ose.outputs.dir }}"
+
       - name: Keep the regression results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: ose-regress-${{ matrix.target }}
-          path: ${{ runner.temp }}/regress-out
+          path: |
+            ${{ runner.temp }}/regress-out
+            ${{ runner.temp }}/regress-deep-out
           if-no-files-found: ignore
           retention-days: 14
 

@@ -182,10 +182,16 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Compress-Archive ember/app/target/release/ember-app.exe "dist/ember-app-${{ needs.version.outputs.tag }}-${{ matrix.target }}.zip"
-          # MSIX stays unsigned (FR-22.6 criterion 4); the install guide explains how to trust it.
-          # One line: this step is PowerShell, where a trailing backslash does not continue a line.
-          cargo run --release --manifest-path compose-rust/scripts/packager-windows/Cargo.toml -- --project ember/app --exe ember/app/target/release/ember-app.exe --version "${{ needs.version.outputs.tag }}" --out dist
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The .msix is the Store channel (P2): the packager needs the identity Partner Center
+          # assigns ([windows.msix] identity_name and publisher in Dioxus.toml). Until that exists
+          # the release has no .msix; Setup.exe from the Velopack step is the Windows installer.
+          if (Select-String -Path ember/app/Dioxus.toml -Pattern '^\s*identity_name\s*=' -Quiet) {
+            # One line: this step is PowerShell, where a trailing backslash does not continue a line.
+            cargo run --release --manifest-path compose-rust/scripts/packager-windows/Cargo.toml -- --project ember/app --exe ember/app/target/release/ember-app.exe --version "${{ needs.version.outputs.tag }}" --out dist
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            Write-Host "No [windows.msix] identity in ember/app/Dioxus.toml: the .msix is skipped."
+          }
       - name: Package the client (Linux .AppImage)
         if: runner.os == 'Linux'
         env:
@@ -289,7 +295,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "Ember ${TAG#v}" \
-            --notes "ember-server and ember-node for macOS arm64, Linux x86_64 and Linux aarch64, and the client app when built, by run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. macOS builds are ad hoc signed, not notarized: clear quarantine with xattr -dr com.apple.quarantine. The MSIX and Setup.exe are unsigned. Installed with Setup.exe, the Velopack .dmg or the Velopack .AppImage, the app updates itself from this feed. See the install guide."
+            --notes "ember-server and ember-node for macOS arm64, Linux x86_64 and Linux aarch64, and the client app when built, by run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. macOS builds are ad hoc signed, not notarized: clear quarantine with xattr -dr com.apple.quarantine. Setup.exe is unsigned. Installed with Setup.exe, the Velopack .dmg or the Velopack .AppImage, the app updates itself from this feed. See the install guide."
 
   dry-run:
     # Lists every packed file with size and sha256 and fails when a target or channel lacks one a

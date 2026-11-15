@@ -296,6 +296,442 @@ fn select_field(
     });
 }
 
+// ---------------------------------------------------------------------------------------------
+// Anchored popover menus (FR-L10.4, #888)
+// ---------------------------------------------------------------------------------------------
+
+/// The check on a menu's current row (`I("check")`).
+pub const ICON_CHECK_SVG: &str = include_str!("../../../assets/nav/check.svg");
+
+/// The mockup's two option popovers. `Mode` is the permission picker (`.mp-pop.mp-mode`,
+/// `core.js` `mdDraw`); `Drop` is the session top bar's IDE and web page menus (`.sdrop`,
+/// `session.css` 219-227).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopKind {
+    Mode,
+    Drop,
+}
+
+/// The measures of a [`PopKind`], all in dp.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PopMetrics {
+    /// The box's width before the window caps it.
+    pub width: f32,
+    /// The box's own padding (`.sdrop{padding:6px}`; the mode box has none).
+    pub box_pad: f32,
+    /// The head's top, side and bottom padding.
+    pub head_pad: (f32, f32, f32),
+    /// The list's top, side and bottom padding (`.mp-body{padding:4px 8px 8px}`).
+    pub list_pad: (f32, f32, f32),
+    /// A row's vertical and horizontal padding.
+    pub row_pad: (f32, f32),
+    /// The gap between a row's icon, text and check.
+    pub row_gap: f32,
+    /// The lowest a row is (`.md-row{min-height:56px}`; a drop row has no minimum).
+    pub row_min_h: f32,
+    pub row_radius: f32,
+    /// The gap between the control and the box.
+    pub offset: f32,
+}
+
+pub fn pop_metrics(kind: PopKind) -> PopMetrics {
+    match kind {
+        // `.mp-pop.mp-mode{width:340px}`, `.md-head{padding:12px 16px 4px}`,
+        // `.md-row{padding:8px 12px;gap:12px;border-radius:var(--r-sm)}`, 8 below the control.
+        PopKind::Mode => PopMetrics {
+            width: 340.0,
+            box_pad: 0.0,
+            head_pad: (12.0, 16.0, 4.0),
+            list_pad: (4.0, 8.0, 8.0),
+            row_pad: (8.0, 12.0),
+            row_gap: 12.0,
+            row_min_h: 56.0,
+            row_radius: CORNER_SM,
+            offset: 8.0,
+        },
+        // `.sdrop{width:360px;padding:6px;top:calc(100% + 6px)}`, `.sdrop-h{padding:8px 10px}`,
+        // `.sdrop-i{padding:8px 10px;gap:10px;border-radius:var(--r)}`. A row has no minimum in
+        // the CSS, but its title (`b`, 14 at the body's 1.5 line height, 21) over the 12
+        // `.small` line (18) with 8 above and below is 55 high (review r8: ours drew 50).
+        PopKind::Drop => PopMetrics {
+            width: 360.0,
+            box_pad: 6.0,
+            head_pad: (8.0, 10.0, 8.0),
+            list_pad: (0.0, 0.0, 0.0),
+            row_pad: (8.0, 10.0),
+            row_gap: 10.0,
+            row_min_h: DROP_ROW_MIN_H,
+            row_radius: CORNER_MD,
+            offset: 6.0,
+        },
+    }
+}
+
+/// The fill of the current row: `sel` in the mode picker (`.md-row.on`), `hover` in a drop menu
+/// (`.sdrop-i.on`).
+pub fn pop_chosen_fill(kind: PopKind, p: &Palette) -> Color {
+    match kind {
+        PopKind::Mode => p.sel,
+        PopKind::Drop => p.hover,
+    }
+}
+
+/// The height of a drop menu row with a title and a description line (`.sdrop-i`: 8 + 21 + 18 + 8).
+pub const DROP_ROW_MIN_H: f32 = 55.0;
+
+/// How far the toolkit keeps a popover from the window's edges: `popoverWindowMargin`, the
+/// theme's `SpaceRole.Sm` (compose-rust `renderer/desktop/src/renderer/HostPopover.kt`
+/// `popoverWindowMargin`, `shiftInside`).
+pub const TOOLKIT_POPOVER_MARGIN: f32 = 8.0;
+
+/// The phone drop panel's side gap (`.sdrop{left:12px;right:12px}` at 560 and below).
+pub const DROP_PHONE_SIDE: f32 = 12.0;
+
+/// The sideways shift a drop menu takes at 560 and below, so the panel sits 12 from each side.
+///
+/// The toolkit places a popover by its anchor and then slides it inside the window, never
+/// nearer than its own 8 dp margin (`HostPopover.kt` `shiftInside`: `x.coerceAtMost(window -
+/// margin - width).coerceAtLeast(margin)`), and the Host cannot name a margin or a coordinate.
+/// The panel is the window less 24 wide and lined up with the end of a control that ends at
+/// least 16 from the window's right edge (every drop menu's control does), so the toolkit puts
+/// its start at 8. `Modifier::offset` then draws it 4 further right, at 12..window-12, without
+/// moving where the toolkit placed it. The 4 dp strip at the right of the drawn box is outside
+/// the popup's own bounds, so a press there counts as a press outside (it is inside the box's 6
+/// dp padding, where nothing is pressable). Wider windows need none: the panel stays on the
+/// control's end, well inside the margin.
+pub fn pop_phone_shift(kind: PopKind, window_width_dp: f32) -> f32 {
+    let phone = window_width_dp > 0.0 && window_width_dp <= 560.0;
+    if kind == PopKind::Drop && phone { DROP_PHONE_SIDE - TOOLKIT_POPOVER_MARGIN } else { 0.0 }
+}
+
+/// How a menu is shown at a window width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopPresentation {
+    Popover,
+    Sheet,
+}
+
+/// At 560 and below the mode picker is a bottom sheet (`style.css` `@media (max-width:560px)
+/// .mp-pop`); a drop menu stays a panel under the bar (`session.css` `.sdrop{position:fixed;
+/// left:12px;right:12px}`). A window that has not reported its size (0) is not a phone.
+pub fn pop_presentation(kind: PopKind, window_width_dp: f32) -> PopPresentation {
+    let phone = window_width_dp > 0.0 && window_width_dp <= 560.0;
+    if phone && kind == PopKind::Mode { PopPresentation::Sheet } else { PopPresentation::Popover }
+}
+
+/// The box's width: the kind's, never more than the window less 12 at each side
+/// (`.sdrop{max-width:calc(100vw - 24px)}`), and a drop menu takes all of that at 560 and below.
+pub fn pop_width(kind: PopKind, window_width_dp: f32) -> f32 {
+    let want = pop_metrics(kind).width;
+    if window_width_dp <= 0.0 {
+        return want;
+    }
+    let room = (window_width_dp - 24.0).max(0.0);
+    if kind == PopKind::Drop && window_width_dp <= 560.0 { room } else { want.min(room) }
+}
+
+/// One option of a [`PopoverMenu`]: an icon (in `tint`, else `text-2`, red on a danger row),
+/// the title, a description, a pill after the title, and whether it is the current one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PopRow {
+    pub icon: Option<&'static str>,
+    pub tint: Option<Color>,
+    pub title: String,
+    pub description: Option<String>,
+    pub badge: Option<(String, PillTone)>,
+    pub chosen: bool,
+    pub danger: bool,
+    /// The title is an address, set in the mono face at 12 (`.sdrop-i .mono`).
+    pub mono: bool,
+}
+
+/// What a [`PopoverMenu`] shows.
+pub struct PopMenu<'a> {
+    /// The box's name for assistive technology (the mockup's `aria-label`); also the sheet's
+    /// title when there is no head. `&'static str` for the reason [`NamedClickable`] gives.
+    pub name: &'static str,
+    pub kind: PopKind,
+    /// The head line; empty draws none.
+    pub head: &'a str,
+    pub sub: Option<&'a str>,
+    pub rows: &'a [PopRow],
+    /// The edge of the control the box lines up with.
+    pub align: compose_rust::PopoverAlign,
+}
+
+/// An option menu hanging from the control that opens it (FR-L10.4, #888): the toolkit
+/// `Popover` (compose-rust v0.0.10) with `anchor` as its first child, below the control and
+/// lined up with `menu.align`. Escape and a press outside call `on_dismiss`; the renderer moves
+/// the box inside the window and gives focus back to the control when it closes
+/// (`HostPopover.kt` `PopoverContent`). A row tap calls `on_dismiss` and then `on_choose(i)`.
+/// `footer` is drawn under a line below the rows (`.sdrop-f`). At 560 and below a mode menu is a
+/// bottom sheet with the same rows ([`pop_presentation`]).
+/// Not built: arrow keys between rows and focus on the current row when the menu opens
+/// (TODO(compose-rust#504): only Enter reaches the Host).
+pub fn PopoverMenu(
+    open: bool,
+    menu: PopMenu<'_>,
+    on_dismiss: impl FnMut() + Clone + 'static,
+    on_choose: impl FnMut(usize) + Clone + 'static,
+    anchor: impl FnOnce(),
+    footer: Option<&mut dyn FnMut()>,
+) {
+    PopoverMenuWith(open, menu, PopExtra::default(), on_dismiss, on_choose, anchor, footer);
+}
+
+/// What a caller may ask of a [`PopoverMenu`] beyond its rows. The Home composer's pickers use
+/// these (#573, #574, #849, review r8); the default asks for nothing, which is [`PopoverMenu`].
+#[derive(Clone, Default)]
+pub struct PopExtra {
+    /// The gap between the control and the box when it is not the kind's own: a chip inside a
+    /// composer opens its menu 8 from the composer, not from the chip (`core.js` `place()`).
+    pub offset: Option<f32>,
+    /// A row tap only reports the row and the caller closes the menu. The permission picker
+    /// needs it: the first tap on 바이패스 arms the row and the menu stays open (FR-L16).
+    pub keep_open: bool,
+    /// At 560 and below the sheet has the menu's own head (`.md-head`, 12/600 `muted`) and no
+    /// title bar or close button, as the mockup's `.mp-pop` bottom sheet.
+    pub plain_sheet: bool,
+    /// The pointer came over row `i`.
+    pub on_hover: Option<std::rc::Rc<dyn Fn(usize)>>,
+    /// The weight the control takes in its row. A weight is read from the row's direct child,
+    /// which is the popover node, and the renderer hands it to the anchor (`HostPopover.kt`
+    /// `parentModifier`), so a control that shares a row by weight says it here.
+    pub anchor_weight: Option<f32>,
+}
+
+/// [`PopoverMenu`] with the options of [`PopExtra`].
+pub fn PopoverMenuWith(
+    open: bool,
+    menu: PopMenu<'_>,
+    extra: PopExtra,
+    on_dismiss: impl FnMut() + Clone + 'static,
+    on_choose: impl FnMut(usize) + Clone + 'static,
+    anchor: impl FnOnce(),
+    footer: Option<&mut dyn FnMut()>,
+) {
+    let theme = ember_theme();
+    let p = theme.palette;
+    let window = crate::ui::window_size::current_window_size();
+    let m = pop_metrics(menu.kind);
+    match pop_presentation(menu.kind, window.width_dp) {
+        PopPresentation::Sheet => {
+            // One node, so the sheet is not a separate child that the caller's row spaces.
+            cu::Box().content(|| {
+                anchor();
+                let title = if extra.plain_sheet { "" } else if menu.head.is_empty() { menu.name } else { menu.head };
+                EmberSheet(title, open, on_dismiss.clone(), None, || {
+                    if extra.plain_sheet {
+                        PopPlainSheetBody(&menu, &m, &extra, on_dismiss, on_choose);
+                        return;
+                    }
+                    cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| {
+                        if let Some(sub) = menu.sub {
+                            cu::Row().modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| {
+                                Label(sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            });
+                        }
+                        PopRows(&menu, &m, &extra, on_dismiss, on_choose);
+                        if let Some(f) = footer {
+                            PopFooter(f);
+                        }
+                    });
+                });
+            });
+        }
+        PopPresentation::Popover => {
+            let width = pop_width(menu.kind, window.width_dp);
+            let shift = pop_phone_shift(menu.kind, window.width_dp);
+            let placed = if shift != 0.0 { Modifier::new().offset(shift, 0.0) } else { Modifier::new() };
+            cu::Popover(open)
+                .placement(compose_rust::PopoverPlacement::Bottom)
+                .align(menu.align)
+                .offset(extra.offset.unwrap_or(m.offset))
+                .on_dismiss(on_dismiss.clone())
+                .modifier(pop_anchor_weight(extra.anchor_weight,
+                    // `elevation(0)`: the box casts its own shadow, so the toolkit's menu
+                    // elevation is turned off. Without it the renderer casts a second shadow
+                    // from the inner surface, which shows through the box as a grey band.
+                    with_shadows(placed, theme.shadow_lg())
+                        .elevation(0.0)
+                        .width(width)
+                        .background(paint(p.surface))
+                        .border(1.0, paint(p.line))
+                        .corner_radius(CORNER_LG)
+                        .padding(m.box_pad)
+                        .role(Role::Menu)
+                        .label(menu.name),
+                ))
+                .anchor(anchor)
+                .content(|| {
+                    cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+                        if !menu.head.is_empty() {
+                            PopHead(menu.kind, menu.head, menu.sub, &m);
+                        }
+                        cu::Spacer().modifier(Modifier::new().height(m.list_pad.0));
+                        cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+                            cu::Spacer().modifier(Modifier::new().width(m.list_pad.1));
+                            cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
+                                PopRows(&menu, &m, &extra, on_dismiss, on_choose);
+                            });
+                            cu::Spacer().modifier(Modifier::new().width(m.list_pad.1));
+                        });
+                        cu::Spacer().modifier(Modifier::new().height(m.list_pad.2));
+                        if let Some(f) = footer {
+                            PopFooter(f);
+                        }
+                    });
+                });
+        }
+    }
+}
+
+/// The head: `.md-head` (12 `muted` 600) for the mode picker, `.sdrop-h` (a 14/600 title over a
+/// 12 `muted` subtitle) for a drop menu.
+fn PopHead(kind: PopKind, head: &str, sub: Option<&str>, m: &PopMetrics) {
+    let p = ember_theme().palette;
+    cu::Spacer().modifier(Modifier::new().height(m.head_pad.0));
+    cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+        cu::Spacer().modifier(Modifier::new().width(m.head_pad.1));
+        cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(|| match kind {
+            PopKind::Mode => Label(head, Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1)),
+            PopKind::Drop => {
+                Label(head, Fs::Md, Weight::Semibold, Some(paint(p.text)), Some(1));
+                if let Some(sub) = sub {
+                    Label(sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                }
+            }
+        });
+        cu::Spacer().modifier(Modifier::new().width(m.head_pad.1));
+    });
+    cu::Spacer().modifier(Modifier::new().height(m.head_pad.2));
+}
+
+fn PopRows(
+    menu: &PopMenu<'_>,
+    m: &PopMetrics,
+    extra: &PopExtra,
+    on_dismiss: impl FnMut() + Clone + 'static,
+    on_choose: impl FnMut(usize) + Clone + 'static,
+) {
+    for (i, r) in menu.rows.iter().enumerate() {
+        let (mut dismiss, mut choose) = (on_dismiss.clone(), on_choose.clone());
+        let keep_open = extra.keep_open;
+        let row = || {
+            PopRowView(r, menu.kind, m, move || {
+                if !keep_open {
+                    dismiss();
+                }
+                choose(i);
+            })
+        };
+        match extra.on_hover.clone() {
+            // The row's own box is a button; the pointer subscription sits on a box around it,
+            // which hears the pointer come over the row and takes nothing from the press.
+            Some(hover) => cu::Box()
+                .modifier(Modifier::new().fill_max_width())
+                .on_pointer(compose_rust::PointerKinds::ENTER, move |_| hover(i))
+                .content(row),
+            None => row(),
+        }
+    }
+}
+
+/// `modifier` with the weight of [`PopExtra::anchor_weight`]. The weight is read by the row
+/// the control is in and handed to the anchor; the floating box itself takes none.
+pub fn pop_anchor_weight(weight: Option<f32>, modifier: Modifier) -> Modifier {
+    match weight {
+        Some(w) => modifier.weight(w),
+        None => modifier,
+    }
+}
+
+/// The body of a [`PopExtra::plain_sheet`]: the head and the padded rows of the popover box,
+/// named as the box is, with no title bar above it.
+fn PopPlainSheetBody(
+    menu: &PopMenu<'_>,
+    m: &PopMetrics,
+    extra: &PopExtra,
+    on_dismiss: impl FnMut() + Clone + 'static,
+    on_choose: impl FnMut(usize) + Clone + 'static,
+) {
+    cu::Column().modifier(Modifier::new().fill_max_width().role(Role::Menu).label(menu.name)).content(|| {
+        if !menu.head.is_empty() {
+            PopHead(menu.kind, menu.head, menu.sub, m);
+        }
+        cu::Spacer().modifier(Modifier::new().height(m.list_pad.0));
+        cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Spacer().modifier(Modifier::new().width(m.list_pad.1));
+            cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
+                PopRows(menu, m, extra, on_dismiss, on_choose);
+            });
+            cu::Spacer().modifier(Modifier::new().width(m.list_pad.1));
+        });
+        cu::Spacer().modifier(Modifier::new().height(m.list_pad.2));
+    });
+}
+
+/// One row (`.md-row`, `.sdrop-i`): a menu item to assistive technology, named by its text,
+/// that says whether it is the current one.
+fn PopRowView(r: &PopRow, kind: PopKind, m: &PopMetrics, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let fill = if r.chosen { paint(pop_chosen_fill(kind, p)) } else { Paint::Literal(Color::argb(0)) };
+    let title_c = if r.danger { p.red.strong } else { p.text };
+    let icon_c = r.tint.unwrap_or(if r.danger { p.red.strong } else { p.text_2 });
+    Clickable(
+        Modifier::new()
+            .fill_max_width()
+            .background(fill)
+            .corner_radius(m.row_radius)
+            .role(Role::MenuItem)
+            .selected(r.chosen)
+            .click_action(true),
+        Alignment::CenterStart,
+        on_click,
+        || {
+            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                // The side padding, and the row's minimum height.
+                cu::Spacer().modifier(Modifier::new().width(m.row_pad.1).height(m.row_min_h));
+                if let Some(svg) = r.icon {
+                    super::shell::NavIcon(svg, icon_c.to_argb(), 16.0);
+                    cu::Spacer().modifier(Modifier::new().width(m.row_gap));
+                }
+                // Zero wide and weighted, so a long description wraps instead of widening the row.
+                cu::Column().spacing(2.0).modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
+                    cu::Spacer().modifier(Modifier::new().height(m.row_pad.0 - 2.0));
+                    cu::Row().spacing(6.0).alignment(Alignment::CenterStart).content(|| {
+                        if r.mono {
+                            MonoLabel(&r.title, Fs::Xs, Weight::Regular, Some(paint(title_c)));
+                        } else {
+                            Label(&r.title, Fs::Md, Weight::Semibold, Some(paint(title_c)), Some(1));
+                        }
+                        if let Some((text, tone)) = &r.badge {
+                            Pill(text, *tone, true);
+                        }
+                    });
+                    if let Some(d) = &r.description {
+                        Label(d, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                    }
+                    cu::Spacer().modifier(Modifier::new().height(m.row_pad.0 - 2.0));
+                });
+                if r.chosen {
+                    cu::Spacer().modifier(Modifier::new().width(m.row_gap));
+                    super::shell::NavIcon(ICON_CHECK_SVG, p.text.to_argb(), 16.0);
+                }
+                cu::Spacer().modifier(Modifier::new().width(m.row_pad.1));
+            });
+        },
+    );
+}
+
+/// `.sdrop-f`: 4 above, a line, then the caller's controls padded 10.
+fn PopFooter(footer: &mut dyn FnMut()) {
+    let p = ember_theme().palette;
+    cu::Spacer().modifier(Modifier::new().height(4.0));
+    cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(10.0)).content(|| footer());
+}
+
 /// The footer every sheet and dialog shares: a line, then actions right-aligned (`.snew-foot`).
 pub fn SheetFooter(content: impl FnOnce()) {
     let p = ember_theme().palette;
@@ -735,6 +1171,88 @@ pub fn pill_metrics(small: bool) -> (f32, Fs, Weight) {
     }
 }
 
+/// The fixed width of the name in [`NameThenPill`]: its own width (one dp more, since the
+/// toolkit reports sizes rounded to whole dp) when the name, the gap and the pill (one dp more,
+/// for the same rounding) all fit in the room. `None` when they do not fit, or until the
+/// renderer has measured all three: the name then takes what the pill leaves.
+///
+/// The name never gets a fixed width that leaves the pill less than its own: a row measures its
+/// unweighted children in order and the last one gets what is left, so a pill behind a name one
+/// gap too wide was cut, reported its cut width, and the name grew by that much on the next
+/// pass until the pill was an empty blob (review r8 fix round, item 5).
+pub fn name_then_pill_width(room: f32, natural: f32, pill: f32, gap: f32) -> Option<f32> {
+    if room <= 0.0 || natural <= 0.0 || pill <= 0.0 {
+        return None;
+    }
+    let own = natural + 1.0;
+    (own + gap + pill + 1.0 <= room).then_some(own)
+}
+
+/// A one-line name with a pill right after it, taking the rest of a row (`weight(1)`): a short
+/// name keeps its own width and the pill follows it, a long one is cut with an ellipsis so the
+/// pill and whatever follows the row stay on screen (CSS `flex:0 1 auto;min-width:0` on the
+/// name and `flex:none` on the pill; `.detail .topbar` in the mockup). The pill never shrinks.
+///
+/// The toolkit has no weight that leaves a child its own size (Compose `weight(fill = false)`)
+/// and no maximum width: a weighted child fills its share, and unweighted ones are measured
+/// first, in order, each with what the ones before it left (compose-rust
+/// `renderer/desktop/src/renderer/RenderNode.kt` `WeightedStackPolicy`). So the row measures:
+/// the room, the pill and the name's own width (a copy in clear ink, left out of the
+/// accessibility tree) are reported by the renderer (`observe_size_every_dp`), and
+/// [`name_then_pill_width`] picks one of two rows. When everything fits, the name has its own
+/// width and a weighted spacer after the pill takes the rest. When it does not (or before the
+/// first report), the name is the weighted child, so the unweighted pill is measured first at
+/// its own width and the name is cut to the remainder. The gap is a spacer of its own, not row
+/// spacing, so the trailing spacer costs no second gap.
+pub fn NameThenPill(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, gap: f32, pill: impl FnOnce()) {
+    let room = compose_rust::runtime::remember_node_size();
+    let natural = compose_rust::runtime::remember_node_size();
+    let pill_size = compose_rust::runtime::remember_node_size();
+    let width = name_then_pill_width(
+        room.measured().width_dp,
+        natural.measured().width_dp,
+        pill_size.measured().width_dp,
+        gap,
+    );
+    cu::Box()
+        .alignment(Alignment::CenterStart)
+        .modifier(Modifier::new().weight(1.0).width(0.0).observe_size_every_dp(room.token()))
+        .content(|| {
+            cu::Row().content(|| {
+                cu::Box().modifier(Modifier::new().observe_size_every_dp(natural.token())).content(|| {
+                    // The measuring copy: the name's own font, clear ink, out of the
+                    // accessibility tree (a `hidden` container still exposes its text).
+                    drop(
+                        cu::Text(name)
+                            .word_break(WordBreak::KeepAll)
+                            .font_size(fs.size())
+                            .line_height(fs.line_height())
+                            .font_weight(weight.value())
+                            .letter_spacing(fs.letter_spacing())
+                            .color(Paint::Literal(Color::argb(0)))
+                            .max_lines(1)
+                            .modifier(Modifier::new().hidden(true)),
+                    );
+                });
+            });
+            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                let name_box = match width {
+                    Some(w) => Modifier::new().width(w),
+                    None => Modifier::new().weight(1.0).width(0.0),
+                };
+                cu::Box().alignment(Alignment::CenterStart).modifier(name_box).content(|| {
+                    Label(name, fs, weight, color, Some(1));
+                });
+                cu::Spacer().modifier(Modifier::new().width(gap));
+                // No weight and no width: the pill is as wide as its content, always.
+                cu::Box().modifier(Modifier::new().observe_size_every_dp(pill_size.token())).content(pill);
+                if width.is_some() {
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                }
+            });
+        });
+}
+
 /// A status or count pill. Pills carry status and counts, never actions.
 pub fn Pill(text: &str, tone: PillTone, small: bool) {
     let theme = ember_theme();
@@ -1119,16 +1637,22 @@ pub fn EmberCardSized(
 
 /// The inset panel one level below a card: `surface-2`, `corner-md`.
 pub fn InsetPanel(fill_max_width: bool, content: impl FnOnce()) {
+    InsetPanelSized(fill_max_width, false, content);
+}
+
+/// [`InsetPanel`] that can also fill the height its parent gives it, with its content centred
+/// in that height (`.ag-acc{align-items:center}`): a tile in an `equal_height` row is as tall as
+/// the tallest tile of the row, as a CSS grid stretches its cells (FR-L20a, #886).
+pub fn InsetPanelSized(fill_max_width: bool, fill_max_height: bool, content: impl FnOnce()) {
     let theme = ember_theme();
+    let mut m = Modifier::new().fill_max_width_if(fill_max_width);
+    if fill_max_height {
+        m = m.fill_max_height();
+    }
     // TODO(compose-rust): the mockup's 12/16 padding is asymmetric; 12 on all sides for now.
-    cu::Box()
-        .modifier(
-            Modifier::new()
-                .fill_max_width_if(fill_max_width)
-                .background(paint(theme.palette.surface_2))
-                .corner_radius(CORNER_MD)
-                .padding(PAD_ROW_V),
-        )
+    let panel = cu::Box().modifier(m.background(paint(theme.palette.surface_2)).corner_radius(CORNER_MD).padding(PAD_ROW_V));
+    let panel = if fill_max_height { panel.alignment(Alignment::CenterStart) } else { panel };
+    panel
         .content(|| {
             // 4 dp more on each side makes the mockup's 12 16 (`.inset`).
             // The Row and the Column take the panel's width (a Column with no weight shrinks to
@@ -1187,6 +1711,27 @@ pub(crate) fn sheet_wraps_content(window_width_dp: f32) -> bool {
     sheet_presentation(window_width_dp, false) == SheetPresentation::Bottom
 }
 
+/// Whether a sheet is the whole window at this width (FR-L32.1, FR-L33): the one boundary every
+/// full-screen geometry asks, so a sheet's own width, height and strip agree with its presentation.
+pub(crate) fn sheet_is_full_screen(window_width_dp: f32, monitor: bool) -> bool {
+    sheet_presentation(window_width_dp, monitor) == SheetPresentation::FullScreen
+}
+
+/// The strip a full-screen sheet leaves above its header for the window's own buttons (FR-L33):
+/// where the sheet is the whole window (the monitor presentation at 560 and below) it starts at
+/// the window's top edge, under the macOS traffic lights, so it reserves the height they cover,
+/// as the bottom-tab shell does above every screen (`safe_area::title_strip_height`). A bottom
+/// sheet or a dialog sits clear of them and reserves nothing, and so does a zero report (macOS
+/// full screen, FR-L33.2). [`EmberSheetSized`] sends it before the shared header; a sheet with no
+/// shared title draws its own header and reserves the same strip through it (`vcs_sheet_top_inset`).
+pub(crate) fn full_screen_sheet_top_inset(window_width_dp: f32, monitor: bool, area: crate::ui::safe_area::SafeArea) -> f32 {
+    if sheet_is_full_screen(window_width_dp, monitor) {
+        crate::ui::safe_area::title_strip_height(area, true)
+    } else {
+        0.0
+    }
+}
+
 /// The sheet header and the separator under it (`SheetHeader` and `cu::Separator`), FR-L32.1.
 pub(crate) const SHEET_HEADER_CHROME_H: f32 = SHEET_HEADER_H + 1.0;
 
@@ -1197,14 +1742,24 @@ pub(crate) const SHEET_FOOTER_H: f32 = 1.0 + SP[2] + H_CTL + SP[4];
 pub(crate) const SHEET_BOTTOM_MAX_FRACTION: f32 = 0.85;
 
 /// The tallest a sheet may be (`.sheet` in the mockup): 85 percent of the window for a bottom
-/// sheet, the whole window for the full-screen monitor, and the window less 32 dp for a dialog.
+/// sheet, the whole window for the full-screen monitor, and for a dialog the window less 32 dp,
+/// or less the traffic lights' strip above and below where there is one ([`dialog_max_height`]).
 pub(crate) fn sheet_max_height(window_width_dp: f32, window_height_dp: f32, monitor: bool) -> f32 {
     let h = window_height_dp.max(0.0);
     match sheet_presentation(window_width_dp, monitor) {
         SheetPresentation::Bottom => h * SHEET_BOTTOM_MAX_FRACTION,
         SheetPresentation::FullScreen => h,
-        SheetPresentation::Dialog => (h - 32.0).max(0.0),
+        SheetPresentation::Dialog => dialog_max_height(h, crate::ui::safe_area::safe_area()),
     }
+}
+
+/// The tallest a centred dialog may be (FR-L33): the window less 16 dp above and below, and,
+/// where the window's own buttons cover a top strip (the macOS traffic lights), less that strip
+/// above and below, so the dialog's top edge and its header stay below the strip (review sf: the
+/// monitor dialog at 561 and 1440 put "이 컴퓨터" under the lights). A zero report changes nothing.
+pub(crate) fn dialog_max_height(window_height_dp: f32, area: crate::ui::safe_area::SafeArea) -> f32 {
+    let margin = crate::ui::safe_area::title_strip_height(area, true).max(16.0);
+    (window_height_dp.max(0.0) - 2.0 * margin).max(0.0)
 }
 
 /// The body height used while the window height is unknown (not yet reported).
@@ -1302,25 +1857,35 @@ pub fn EmberSheetSized(
     // Explicit zero padding suppresses the renderer dialog's theme padding, which otherwise
     // adds space around the frame and prevents a full-screen sheet.
     let modifier = with_shadows(Modifier::new().padding(0.0), theme.shadow_sm()).background(paint(theme.palette.surface));
+    // `.sheet.card` (FR-L32, #583): the 1 px `line` border is what separates a dark sheet from
+    // the dimmed page. The full-screen monitor has none (`border:0` at 560 px and below).
+    let framed = modifier.border(1.0, paint(theme.palette.line));
     let dismiss = on_dismiss.clone();
+    let window = crate::ui::window_size::current_window_size();
+    let presentation = sheet_presentation(window.width_dp, monitor);
+    let top_inset = full_screen_sheet_top_inset(window.width_dp, monitor, crate::ui::safe_area::safe_area());
+    let strip_bg = theme.palette.surface;
     // An empty title draws no header: the share sheet is the mockup's `.fl-share`, which has
     // none and puts its close button in its first card (FR-L27.7).
     let body = move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
             if !title.is_empty() {
+                if top_inset > 0.0 {
+                    // FR-L33: the full-screen sheet's header starts below the traffic lights
+                    // (review ba D: "이 컴퓨터" sat under them at 390).
+                    cu::Spacer().modifier(Modifier::new().fill_max_width().height(top_inset).background(paint(strip_bg)));
+                }
                 SheetHeader(title, dismiss, actions);
                 cu::Separator(Some(paint(theme.palette.line)));
             }
             content();
         });
     };
-    let window = crate::ui::window_size::current_window_size();
-    let presentation = sheet_presentation(window.width_dp, monitor);
     if presentation == SheetPresentation::Bottom {
         // compose-rust#445 (v0.0.9): the sheet is as tall as its content up to 85 percent of the
         // window, and taller content scrolls inside it, so a short sheet wraps its content.
         cu::Sheet(open)
-            .modifier(modifier.fill_max_width().corner_radii([CORNER_XL, CORNER_XL, 0.0, 0.0]))
+            .modifier(framed.fill_max_width().corner_radii([CORNER_XL, CORNER_XL, 0.0, 0.0]))
             .max_height_fraction(SHEET_BOTTOM_MAX_FRACTION)
             .scrim(Paint::Literal(MODAL_SCRIM))
             .on_dismiss(on_dismiss)
@@ -1333,7 +1898,7 @@ pub fn EmberSheetSized(
             .content(body);
     } else {
         cu::Dialog(open)
-            .modifier(modifier.corner_radius(CORNER_XL).width(sheet_width(window.width_dp, width)))
+            .modifier(framed.corner_radius(CORNER_XL).width(sheet_width(window.width_dp, width)))
             .scrim(Paint::Literal(MODAL_SCRIM))
             .on_dismiss(on_dismiss)
             .content(body);
@@ -1509,6 +2074,8 @@ mod tests {
         id: u32,
         widget: String,
         parent: Option<u32>,
+        /// The place among its parent's children (`Insert::index`).
+        index: u32,
         mods: Vec<String>,
         props: Vec<String>,
     }
@@ -1525,12 +2092,14 @@ mod tests {
                     id: *node_id,
                     widget: format!("{widget:?}"),
                     parent: None,
+                    index: 0,
                     mods: Vec::new(),
                     props: Vec::new(),
                 }),
-                Mutation::Insert { parent_id, node_id, .. } => {
+                Mutation::Insert { parent_id, node_id, index } => {
                     if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
                         n.parent = Some(*parent_id);
+                        n.index = *index;
                     }
                 }
                 Mutation::SetModifier { node_id, modifier, .. } => {
@@ -2192,8 +2761,10 @@ mod tests {
         assert!(header.contains(".height(super::theme::TOPBAR_H)"), "{header}");
         assert!(!header.contains(".padding(SP[2])") && !header.contains(".height(52.0)"), "{header}");
         assert_eq!(header.matches("Modifier::new().width(super::theme::TOPBAR_PAD_X)").count(), 2, "both sides");
-        // The member name shrinks with an ellipsis so the panel button stays inside the bar.
-        assert!(header.contains("cu::Column().modifier(Modifier::new().weight(1.0).width(0.0))"), "{header}");
+        // The member name shrinks with an ellipsis so the panel button stays inside the bar,
+        // and the status pill follows the name rather than the far end (review r8).
+        assert!(header.contains("NameThenPill("), "{header}");
+        assert!(header.contains("|| Pill(st_txt, st_tone.into(), true)"), "{header}");
         let routines = include_str!("routines.rs").split("#[cfg(test)]").next().unwrap();
         let icons = routines.split("if layout == DetailHeader::Icons {").nth(1).unwrap().split("} else if layout == DetailHeader::Stacked").next().unwrap();
         assert!(icons.contains("BackButton(") && !icons.contains(".padding(PAD_ROW_V)"), "{icons}");
@@ -2411,6 +2982,34 @@ mod tests {
         let sheet = &production[production.find("pub fn EmberSheetSized").expect("sheet")..];
         let sheet = &sheet[..sheet.find("\n}\n").expect("end")];
         assert_eq!(sheet.matches(".scrim(Paint::Literal(MODAL_SCRIM))").count(), 3, "bottom sheet, full screen and dialog");
+    }
+
+    #[test]
+    fn fr_l32_a_sheet_is_framed_with_a_line_on_its_surface() {
+        // #583: the dark sheet (`#20201d`) met the dimmed page (`#0f0f0e`) with no edge; the
+        // mockup's `.sheet.card` has a 1 px `line` border between them.
+        let _guard = crate::services::test_guard();
+        let p = ember_theme().palette;
+        let border = format!("{:?}", compose_rust::schema::Modifier::Border { width: 1.0, paint: paint(p.line) });
+        let fill = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.surface)));
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let dialog = emitted_nodes(|| EmberSheet("시트", true, || {}, None, || {}));
+        crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+        let bottom = emitted_nodes(|| EmberSheet("시트", true, || {}, None, || {}));
+        let full = emitted_nodes(|| EmberSheetSized("시트", true, SHEET_WIDTH_MONITOR, true, || {}, None, || {}));
+        crate::ui::window_size::set_opened_for_test(None);
+        for (name, node) in [("dialog", the(&dialog, "Dialog")), ("bottom sheet", the(&bottom, "Sheet"))] {
+            assert!(node.mods.contains(&border), "{name}: {:?}", node.mods);
+            assert!(node.mods.contains(&fill), "{name}: {:?}", node.mods);
+            assert_eq!(node.mods.iter().filter(|m| m.starts_with("Border")).count(), 1, "{name}: one 1 px line");
+            assert!(node.props.iter().any(|x| x.starts_with("Scrim=")), "{name}: {:?}", node.props);
+        }
+        assert!(the(&dialog, "Dialog").mods.iter().any(|m| m.starts_with("Shape { top_start: 24.0")), "{:?}", the(&dialog, "Dialog").mods);
+        let full = the(&full, "Dialog");
+        assert!(full.mods.contains(&fill), "{:?}", full.mods);
+        assert!(!full.mods.iter().any(|m| m.starts_with("Border")), "the full screen has no frame: {:?}", full.mods);
+        // The scrim stays the mockup's black at 0.3 (measured equal in both renders).
+        assert_eq!(MODAL_SCRIM, Color::argb(0x4D00_0000));
     }
 
     #[test]
@@ -2672,6 +3271,345 @@ mod tests {
     use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
     use compose_rust::{Composable, EventPayload, Host, PropertyKind, Recomposer};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // ---- FR-L10.4: option menus hang from their control (#888) -------------------------------
+
+    fn pop_sample_rows() -> Vec<PopRow> {
+        vec![
+            PopRow { icon: Some(ICON_CHECK_SVG), title: "Ember 에디터".into(), description: Some("네이티브 창으로 엽니다".into()), ..Default::default() },
+            PopRow {
+                icon: Some(ICON_CHECK_SVG),
+                title: "VS Code".into(),
+                description: Some("웹 IDE로 엽니다".into()),
+                badge: Some(("OSE".into(), PillTone::Sky)),
+                chosen: true,
+                ..Default::default()
+            },
+            PopRow { title: "JetBrains Gateway".into(), danger: true, ..Default::default() },
+        ]
+    }
+
+    static POP_DISMISSED: AtomicUsize = AtomicUsize::new(0);
+    static POP_CHOSEN: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    fn pop_menu(kind: PopKind) {
+        let rows = pop_sample_rows();
+        PopoverMenu(
+            true,
+            PopMenu { name: "IDE 고르기", kind, head: "어느 IDE로 열까요", sub: Some("mini:~/ember"), rows: &rows, align: compose_rust::PopoverAlign::End },
+            || {
+                POP_DISMISSED.fetch_add(1, Ordering::SeqCst);
+            },
+            |i| POP_CHOSEN.store(i, Ordering::SeqCst),
+            || Label("IDE 버튼", Fs::Sm, Weight::Medium, None, Some(1)),
+            None,
+        );
+    }
+
+    fn drop_menu() {
+        pop_menu(PopKind::Drop);
+    }
+
+    fn mode_menu() {
+        pop_menu(PopKind::Mode);
+    }
+
+    fn text_node<'a>(nodes: &'a [EmittedNode], text: &str) -> &'a EmittedNode {
+        let want = format!("Text=String({text:?})");
+        nodes.iter().find(|n| n.props.contains(&want)).unwrap_or_else(|| panic!("no text {text}"))
+    }
+
+    fn is_under(nodes: &[EmittedNode], node: &EmittedNode, ancestor: u32) -> bool {
+        let mut at = node.parent;
+        while let Some(id) = at {
+            if id == ancestor {
+                return true;
+            }
+            at = nodes.iter().find(|n| n.id == id).and_then(|n| n.parent);
+        }
+        false
+    }
+
+    #[test]
+    fn fr_l10_4_drop_menu_is_a_popover_at_the_controls_end_with_head_rows_pill_and_check() {
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let nodes = emitted_nodes(drop_menu);
+        crate::ui::window_size::set_opened_for_test(None);
+        let pops: Vec<&EmittedNode> = nodes.iter().filter(|n| n.widget == "Popover").collect();
+        assert_eq!(pops.len(), 1, "one popover, no dialog: {:?}", nodes.iter().map(|n| &n.widget).collect::<Vec<_>>());
+        assert!(!nodes.iter().any(|n| n.widget == "Dialog" || n.widget == "Sheet"));
+        let pop = pops[0];
+        // `.sdrop{right:0;top:calc(100% + 6px)}`: below the control, lined up with its end.
+        for want in ["Open=Bool(true)", "Placement=Integer(2)", "Align=Integer(3)", "OffsetDp=Float(6.0)"] {
+            assert!(pop.props.iter().any(|p| p == want), "{want} in {:?}", pop.props);
+        }
+        // The box: 360 wide, `corner-lg`, padded 6, a menu to assistive technology.
+        assert!(pop.mods.iter().any(|m| m == "Width(360.0)"), "{:?}", pop.mods);
+        assert!(pop.mods.iter().any(|m| m == "Padding(6.0)"), "{:?}", pop.mods);
+        // Its own shadow only: the toolkit's menu elevation is off, or a second shadow shows
+        // through the box as a grey band inside the border.
+        assert!(pop.mods.iter().any(|m| m == "Elevation(0.0)"), "{:?}", pop.mods);
+        assert!(pop.mods.iter().any(|m| m.starts_with("Shape { top_start: 14.0")), "{:?}", pop.mods);
+        assert!(pop.mods.iter().any(|m| m.starts_with("Semantics") && m.contains("Menu")), "{:?}", pop.mods);
+        // The control is the popover's first child; everything else is in the box.
+        let anchor = nodes.iter().find(|n| n.parent == Some(pop.id) && n.index == 0).expect("anchor child");
+        let button = text_node(&nodes, "IDE 버튼");
+        assert!(button.id == anchor.id || is_under(&nodes, button, anchor.id), "the control is the anchor");
+        for t in ["어느 IDE로 열까요", "mini:~/ember", "Ember 에디터", "네이티브 창으로 엽니다", "VS Code", "OSE", "JetBrains Gateway"] {
+            let n = text_node(&nodes, t);
+            assert!(is_under(&nodes, n, pop.id), "{t} is inside the popover");
+            assert!(n.id != anchor.id && !is_under(&nodes, n, anchor.id), "{t} is not part of the control");
+        }
+        // One row per option, each a menu item; the current one alone says it is selected and
+        // alone carries the check (one more image than the other icon rows).
+        let rows: Vec<&EmittedNode> = nodes
+            .iter()
+            .filter(|n| is_under(&nodes, n, pop.id) && !is_under(&nodes, n, anchor.id) && n.props.iter().any(|p| p.starts_with("OnClick=")))
+            .collect();
+        assert_eq!(rows.len(), 3, "three rows");
+        let sem: Vec<String> = rows.iter().map(|r| r.mods.iter().find(|m| m.starts_with("Semantics")).cloned().expect("row semantics")).collect();
+        assert!(sem.iter().all(|m| m.contains("MenuItem")), "{sem:?}");
+        assert_ne!(sem[1], sem[0], "the current row says it is selected");
+        assert_eq!(sem[0], sem[2], "the others do not");
+        let images = |r: &EmittedNode| nodes.iter().filter(|n| n.widget == "Image" && is_under(&nodes, n, r.id)).count();
+        assert_eq!((images(rows[0]), images(rows[1]), images(rows[2])), (1, 2, 0), "icon, icon and check, neither");
+    }
+
+    #[test]
+    fn fr_l10_4_a_row_tap_dismisses_and_reports_its_index() {
+        let _guard = crate::services::test_guard();
+        POP_DISMISSED.store(0, Ordering::SeqCst);
+        POP_CHOSEN.store(usize::MAX, Ordering::SeqCst);
+        let mut host = Host::new(|| Box::new(Recomposer::new(drop_menu)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let mut text_of: std::collections::HashMap<u32, String> = Default::default();
+        let mut parent: std::collections::HashMap<u32, u32> = Default::default();
+        let mut click: Vec<(u32, u64)> = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(t) } => {
+                    text_of.insert(*node_id, t.to_string());
+                }
+                Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                    click.push((*node_id, *h as u64));
+                }
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    parent.insert(*node_id, *parent_id);
+                }
+                _ => {}
+            }
+        }
+        let mut node = *text_of.iter().find(|(_, t)| t.as_str() == "JetBrains Gateway").expect("row text").0;
+        let (node_id, handler_id) = loop {
+            if let Some(c) = click.iter().find(|(n, _)| *n == node) {
+                break *c;
+            }
+            node = *parent.get(&node).expect("a clickable ancestor");
+        };
+        host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click");
+        assert_eq!(POP_DISMISSED.load(Ordering::SeqCst), 1, "a tap closes the menu");
+        assert_eq!(POP_CHOSEN.load(Ordering::SeqCst), 2, "and reports the row");
+    }
+
+    #[test]
+    fn fr_l10_4_mode_menu_is_340_wide_8_below_and_lined_up_with_the_start_by_default() {
+        let m = pop_metrics(PopKind::Mode);
+        assert_eq!((m.width, m.box_pad, m.offset), (340.0, 0.0, 8.0));
+        assert_eq!((m.head_pad, m.list_pad), ((12.0, 16.0, 4.0), (4.0, 8.0, 8.0)));
+        assert_eq!((m.row_pad, m.row_gap, m.row_min_h, m.row_radius), ((8.0, 12.0), 12.0, 56.0, CORNER_SM));
+        let d = pop_metrics(PopKind::Drop);
+        assert_eq!((d.width, d.box_pad, d.offset), (360.0, 6.0, 6.0));
+        assert_eq!((d.head_pad, d.list_pad), ((8.0, 10.0, 8.0), (0.0, 0.0, 0.0)));
+        // `.sdrop-i`: 8 + 21 (14 at 1.5) + 18 (`.small`) + 8 = 55 with a description.
+        assert_eq!((d.row_pad, d.row_gap, d.row_min_h, d.row_radius), ((8.0, 10.0), 10.0, 55.0, CORNER_MD));
+        // `.md-row.on{background:var(--sel)}`, `.sdrop-i.on{background:var(--hover)}`.
+        assert_eq!(pop_chosen_fill(PopKind::Mode, &LIGHT), LIGHT.sel);
+        assert_eq!(pop_chosen_fill(PopKind::Drop, &DARK), DARK.hover);
+    }
+
+    #[test]
+    fn fr_l10_4_at_560_and_below_a_mode_menu_is_a_sheet_and_a_drop_menu_spans_the_window() {
+        assert_eq!(pop_presentation(PopKind::Mode, 390.0), PopPresentation::Sheet);
+        assert_eq!(pop_presentation(PopKind::Mode, 560.0), PopPresentation::Sheet);
+        assert_eq!(pop_presentation(PopKind::Mode, 561.0), PopPresentation::Popover);
+        // A window that has not reported its size yet is not a phone.
+        assert_eq!(pop_presentation(PopKind::Mode, 0.0), PopPresentation::Popover);
+        assert_eq!(pop_presentation(PopKind::Drop, 390.0), PopPresentation::Popover);
+        assert_eq!(pop_width(PopKind::Drop, 390.0), 366.0);
+        assert_eq!(pop_width(PopKind::Drop, 1440.0), 360.0);
+        assert_eq!(pop_width(PopKind::Drop, 370.0), 346.0);
+        assert_eq!(pop_width(PopKind::Mode, 1440.0), 340.0);
+        assert_eq!(pop_width(PopKind::Mode, 0.0), 340.0);
+    }
+
+    #[test]
+    fn fr_l10_4_mode_menu_at_390_sends_a_bottom_sheet_with_the_rows_and_no_popover() {
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+        let nodes = emitted_nodes(mode_menu);
+        let drop = emitted_nodes(drop_menu);
+        crate::ui::window_size::set_opened_for_test(None);
+        assert!(!nodes.iter().any(|n| n.widget == "Popover"));
+        let sheet = the(&nodes, "Sheet");
+        for t in ["어느 IDE로 열까요", "VS Code", "웹 IDE로 엽니다"] {
+            assert!(is_under(&nodes, text_node(&nodes, t), sheet.id), "{t} is in the sheet");
+        }
+        assert!(!is_under(&nodes, text_node(&nodes, "IDE 버튼"), sheet.id), "the control stays on the page");
+        let pop = the(&drop, "Popover");
+        assert!(pop.mods.iter().any(|m| m == "Width(366.0)"), "{:?}", pop.mods);
+    }
+
+    #[test]
+    fn fr_l28_a_name_keeps_its_width_with_the_pill_after_it_and_a_long_one_gives_way() {
+        // Unmeasured: the name takes the room (the pill at the end) until the renderer reports.
+        assert_eq!(name_then_pill_width(0.0, 120.0, 60.0, 8.0), None);
+        assert_eq!(name_then_pill_width(300.0, 0.0, 60.0, 8.0), None);
+        // A short name keeps its own width (plus the dp lost to rounding); the pill follows it.
+        assert_eq!(name_then_pill_width(300.0, 120.0, 60.0, 8.0), Some(121.0));
+        assert_eq!(name_then_pill_width(300.0, 230.0, 60.0, 8.0), Some(231.0));
+        // A long one has no fixed width: the name takes what the pill leaves and is cut with an
+        // ellipsis. One dp short of fitting is already too long, so the pill is never the one
+        // that gives way (review r8 fix round: the pill read "승인…" beside a name in full).
+        assert_eq!(name_then_pill_width(300.0, 231.0, 60.0, 8.0), None);
+        assert_eq!(name_then_pill_width(300.0, 400.0, 60.0, 8.0), None);
+        assert_eq!(name_then_pill_width(50.0, 400.0, 60.0, 8.0), None);
+    }
+
+    fn name_then_pill() {
+        NameThenPill("demo-project 세션", Fs::Md, Weight::Semibold, None, 8.0, || Pill("승인 대기", PillTone::Orange, true));
+    }
+
+    #[test]
+    fn fr_l28_name_then_pill_measures_the_room_the_name_and_the_pill() {
+        let _guard = crate::services::test_guard();
+        let nodes = emitted_nodes(name_then_pill);
+        let observed = nodes.iter().filter(|n| n.mods.iter().any(|m| m.starts_with("ObserveSize") && m.contains("every_dp: true"))).count();
+        assert_eq!(observed, 3, "the room, the name's own width and the pill");
+        // The measuring copy is invisible and out of the accessibility tree.
+        let copies: Vec<&EmittedNode> = nodes.iter().filter(|n| n.props.iter().any(|p| p == "Text=String(\"demo-project 세션\")")).collect();
+        assert_eq!(copies.len(), 2);
+        assert!(copies[0].mods.iter().any(|m| m.starts_with("Semantics")), "the copy is hidden: {:?}", copies[0].mods);
+        // Before a report the visible name fills the room, so a long name never pushes past it.
+        let name_box = parent_of(&nodes, copies[1]);
+        assert!(name_box.mods.iter().any(|m| m == "Weight(1.0)"), "{:?}", name_box.mods);
+    }
+
+    #[test]
+    fn fr_l18_a_team_card_row_cuts_the_name_and_keeps_its_buttons() {
+        // Review r8 fix round (single-long-390): the member name was an unweighted label, the
+        // first child measured, so with a long name 열기 and 종료 got size 0 and the agent text
+        // was drawn over the name. The name is now the row's only weighted part.
+        let conv = include_str!("conversation.rs").split("#[cfg(test)]").next().unwrap();
+        let row = conv.split("for r in rows.iter().cloned() {").nth(1).expect("the team rows").split("\"종료\",").next().unwrap();
+        assert!(row.contains("NameThenPill(\n                                    &name_label,"), "{row}");
+        assert!(!row.contains("Label(\n                                    &name_label,"), "{row}");
+        assert_eq!(row.matches(".weight(").count(), 0, "nothing else in the row is weighted: {row}");
+        assert!(row.contains("\"열기\","), "{row}");
+    }
+
+    /// What `NameThenPill` sends after the renderer reports the room, the name's own width and
+    /// the pill's width, in that order.
+    fn name_then_pill_after_reports(sizes: [f32; 3]) -> String {
+        use compose_rust::{WindowHeightClass, WindowSizeClass};
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| Box::new(Recomposer::new(name_then_pill)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let observed: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { node_id, modifier, .. } if format!("{modifier:?}").starts_with("ObserveSize") => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(observed.len(), 3, "the room, the name and the pill");
+        let mut sent = Vec::new();
+        for (node_id, w) in observed.iter().zip(sizes) {
+            let payload = EventPayload::WindowSizeChanged {
+                width_dp: w,
+                height_dp: 22.0,
+                class: WindowSizeClass::Compact,
+                height_class: WindowHeightClass::Compact,
+                safe_area_top: 0.0,
+                safe_area_leading: 0.0,
+                safe_area_trailing: 0.0,
+            };
+            let (bytes, _) = host.dispatch(HostEvent { node_id: *node_id, handler_id: 0, payload }).expect("dispatch");
+            sent.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
+        }
+        compose_rust::window::reset_window_size();
+        sent.join("\n")
+    }
+
+    #[test]
+    fn fr_l28_name_then_pill_gives_the_name_its_measured_width() {
+        let _guard = crate::services::test_guard();
+        // The renderer reports the room (300), the name's own width (120) and the pill (60).
+        let sent = name_then_pill_after_reports([300.0, 120.0, 60.0]);
+        assert!(sent.contains("Width(121.0)"), "the name keeps its own width: {sent}");
+    }
+
+    #[test]
+    fn fr_l28_name_then_pill_never_sizes_the_pill() {
+        let _guard = crate::services::test_guard();
+        // What the toolkit gets for the pill: a box with the size observer and nothing else (no
+        // weight, no width), after a gap spacer of its own; the row has no spacing, so the
+        // spacer that follows a short name costs no second gap. An unweighted child is measured
+        // before the weighted name, so the pill is as wide as its text (review r8 fix round,
+        // item 5: the pill read "승인…", then "실…", then nothing, beside a name in full).
+        let nodes = emitted_nodes(name_then_pill);
+        let pill_text = nodes.iter().find(|n| n.props.iter().any(|p| p == "Text=String(\"승인 대기\")")).expect("the pill text");
+        let mut up = parent_of(&nodes, pill_text);
+        while !up.mods.iter().any(|m| m.starts_with("ObserveSize")) {
+            up = parent_of(&nodes, up);
+        }
+        let pill_box = up;
+        let set = |n: &EmittedNode| n.mods.iter().filter(|m| *m != "Empty").cloned().collect::<Vec<String>>();
+        assert_eq!(set(pill_box).len(), 1, "only the size observer: {:?}", pill_box.mods);
+        let row = parent_of(&nodes, pill_box);
+        assert_eq!(row.widget, "Row");
+        assert!(!row.props.iter().chain(row.mods.iter()).any(|p| p.contains("Spac")), "no row spacing: {:?} {:?}", row.props, row.mods);
+        let mut kids: Vec<&EmittedNode> = nodes.iter().filter(|n| n.parent == Some(row.id)).collect();
+        kids.sort_by_key(|n| n.index);
+        assert_eq!(kids.len(), 3, "the name, the gap and the pill");
+        assert!(kids[0].mods.iter().any(|m| m == "Weight(1.0)"), "the name takes the rest: {:?}", kids[0].mods);
+        assert_eq!((kids[1].widget.as_str(), set(kids[1])), ("Spacer", vec!["Width(8.0)".to_string()]));
+        assert_eq!(kids[2].id, pill_box.id);
+
+        // A name too long for the room (400 in 300 beside a pill of 60) gets no fixed width: it
+        // stays the weighted child, so nothing is re-sent and the pill keeps its 60.
+        let long = name_then_pill_after_reports([300.0, 400.0, 60.0]);
+        assert!(!long.contains("Width(") && !long.contains("Weight("), "{long}");
+        // Nor does a short name size the pill: the name gets its width, a weighted spacer is
+        // added after the pill, and no modifier goes to the pill's box.
+        let short = name_then_pill_after_reports([300.0, 120.0, 60.0]);
+        let on_pill = format!("node_id: {}, modifier: W", pill_box.id);
+        assert!(short.contains("Width(121.0)") && short.contains("Weight(1.0)"), "{short}");
+        assert!(!short.contains(&on_pill), "{short}");
+    }
+
+    #[test]
+    fn fr_l10_4_a_phone_drop_panel_is_drawn_12_from_each_side() {
+        // The toolkit keeps a popover 8 from the window's edges and puts a window-less-24 panel
+        // on the end of a control that ends 16 or more from the right edge at x 8; the 4 dp
+        // shift draws it at 12..378 in a 390 window (`.sdrop{left:12px;right:12px}`, review r8).
+        assert_eq!(TOOLKIT_POPOVER_MARGIN + pop_phone_shift(PopKind::Drop, 390.0), 12.0);
+        assert_eq!(TOOLKIT_POPOVER_MARGIN + pop_phone_shift(PopKind::Drop, 390.0) + pop_width(PopKind::Drop, 390.0), 390.0 - 12.0);
+        assert_eq!(pop_phone_shift(PopKind::Drop, 560.0), 4.0);
+        assert_eq!(pop_phone_shift(PopKind::Drop, 561.0), 0.0);
+        assert_eq!(pop_phone_shift(PopKind::Drop, 0.0), 0.0, "no size reported yet");
+        assert_eq!(pop_phone_shift(PopKind::Mode, 390.0), 0.0, "a mode menu is a sheet there");
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+        let phone = emitted_nodes(drop_menu);
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let wide = emitted_nodes(drop_menu);
+        crate::ui::window_size::set_opened_for_test(None);
+        let pop = the(&phone, "Popover");
+        assert!(pop.mods.iter().any(|m| m == "Offset { x: 4.0, y: 0.0 }"), "{:?}", pop.mods);
+        let pop = the(&wide, "Popover");
+        assert!(!pop.mods.iter().any(|m| m.starts_with("Offset")), "{:?}", pop.mods);
+    }
 
     static CLICKS: AtomicUsize = AtomicUsize::new(0);
 

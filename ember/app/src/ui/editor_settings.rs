@@ -544,7 +544,7 @@ pub mod view {
 
     use super::{file_tab_path, parse_input, row_value, scope_error_banners, scope_label, value_text, SettingsFile, SETTINGS_PAGE, SETTINGS_TAB};
     use crate::editor_host::HostCommand;
-    use crate::ui::editor_workbench::page::icon_px;
+    use crate::ui::editor_workbench::page::{icon_px, icon_tone};
     use crate::ui::editor_workbench::Shared;
 
     #[derive(Clone, Copy)]
@@ -759,7 +759,7 @@ pub mod view {
             section { "aria-label": "설정", style: "flex:1; min-width:0; min-height:0; display:flex; flex-direction:column;",
                 div { style: "display:flex; flex-wrap:wrap; align-items:center; gap:var(--sp2); padding:var(--sp3) var(--sp4); border-bottom:1px solid var(--line); flex:none;",
                     div { class: "ed-find", role: "search", style: "flex:1 1 240px; min-width:0; width:auto; height:30px; cursor:text;",
-                        {icon_px("search", 14)}
+                        {icon_tone("search", 14, "muted")}
                         input { key: "settings-query-{focus_seq}", style: "{FIELD}", "aria-label": "설정 검색", placeholder: "설정 검색", value: "{q}", autofocus: true,
                             oninput: move |event| { query.set(event.value()); limit.set(SETTINGS_PAGE); },
                             onkeydown: move |event| {

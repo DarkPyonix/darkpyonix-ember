@@ -201,6 +201,20 @@ Server flags used here (from upstream `src/vs/server/node/serverEnvironmentServi
 `--server-base-path`, `--socket-path`, `--telemetry-level off|crash|error|all`,
 `--default-folder`, `--install-extension`, `--extensions-dir`.
 
+## Known limits when `ember-server` or `ember-node` runs it
+
+The OSE manager (`ember/node/src/ose.rs`, SPEC FR-W4a) starts one `dpx-ose-server` per project
+folder. Two limits are known and not fixed (#896):
+
+- **OSE children are killed only on a graceful stop.** The manager kills them when it is dropped.
+  After a crash or a SIGKILL of the node or the server they keep running, because the units use
+  `KillMode=process` (systemd) and `AbandonProcessGroup` (launchd) so that terminal keepers
+  survive the daemon. This was already true of the server's own OSE. The next start does not
+  reuse them: it removes the stale token files and starts a new OSE per folder, so a leftover
+  process has to be stopped by hand.
+- **Windows token files get no ACL hardening.** The 0600 mode and the 0700 directories of the
+  connection token file are Unix only. On Windows the file has the permissions of its directory.
+
 ## What `product.overrides.json` changes, and why
 
 - **Names.** `nameShort`/`nameLong` "DarkPyonix OSE", `applicationName` `dpx-ose`,

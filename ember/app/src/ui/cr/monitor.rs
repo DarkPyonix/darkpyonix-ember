@@ -21,7 +21,8 @@ pub use crate::ui::monitor::{
     SortState,
 };
 use crate::ui::monitor::{
-    bar_fraction, bar_max, card_view, meter_fraction, empty_text, health_score, process_footer, ram_badge, score_tone,
+    bar_fraction, bar_max, card_view, hero_parts, meter_fraction, empty_text, health_score, process_footer, ram_badge, score_tone,
+    CORE_BARS_GAP, CORE_BARS_H, CORE_BAR_ALPHA, CORE_BAR_RADIUS,
     score_word, status_line, storage_line, CardView, FanMode, FeedStatus, FAN_MODE_AVAILABLE, FAN_MODE_REASON, POLL_SECS,
     TOP_PROCESSES,
 };
@@ -117,7 +118,9 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
     let title = chip.map(|c| c.name.clone()).unwrap_or_else(|| "컴퓨터".to_string());
     let window = crate::ui::window_size::current_window_size();
     let columns = mon_columns(window.width_dp);
-    let body_height = super::components::sheet_body_max_height(window.width_dp, window.height_dp, true, 60.0).min(1200.0);
+    // The header (60) and, where the sheet is the whole window, the strip above it (FR-L33).
+    let top_inset = super::components::full_screen_sheet_top_inset(window.width_dp, true, crate::ui::safe_area::safe_area());
+    let body_height = super::components::sheet_body_max_height(window.width_dp, window.height_dp, true, 60.0 + top_inset).min(1200.0);
     let state = chip.map(|c| reach_pill(c.reachability));
 
     // The state pill sits in the header, beside the close button (`.mon-state`).
@@ -366,25 +369,40 @@ fn MetricCard(metric: Metric, view: Option<CardView>, empty: &str, meter: Option
     let p = ember_theme().palette;
     MonCard(metric_icon(metric), metric.title(), None, fill, || match view.as_ref() {
         Some(v) => {
-            Label(&v.headline, Fs::Xl4, Weight::Semibold, None, Some(1));
-            for line in v.lines.iter().take(4) {
-                Label(line, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
-            }
+            HeroValue(&v.headline);
             Bars(metric, &v.bars);
             if let Some(f) = meter {
                 Meter(f);
+            }
+            // `.mon-f`: the card's footer lines, 12 `muted`, under the chart (review M2).
+            for line in v.lines.iter().take(4) {
+                Label(line, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             }
         }
         None => Label(empty, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(3)),
     });
 }
 
-/// One value against a track: the track in surface-2, the fill in the accent, both rounded.
+/// `.mon-big`: the number at 40/600 and its unit at 15/500 `muted` beside it, bottoms aligned,
+/// 4 apart; whole numbers for a percent or a temperature (`hero_parts`, review M1).
+fn HeroValue(headline: &str) {
+    let p = ember_theme().palette;
+    let (number, unit) = hero_parts(headline);
+    cu::Row().alignment(Alignment::BottomStart).spacing(SP[0]).content(|| {
+        Label(&number, Fs::Xl4, Weight::Semibold, None, Some(1));
+        if !unit.is_empty() {
+            Label(&unit, Fs::Lg, Weight::Medium, Some(paint(p.muted)), Some(1));
+        }
+    });
+}
+
+/// One value against a track (`.mon-bar`): the track in `track`, the fill in the accent, both
+/// rounded.
 fn Meter(fraction: f32) {
     let p = ember_theme().palette;
     let f = bar_fraction(fraction, 1.0);
     cu::Row()
-        .modifier(Modifier::new().fill_max_width().height(8.0).background(paint(p.surface_2)).corner_radius(4.0).clip(true))
+        .modifier(Modifier::new().fill_max_width().height(8.0).background(paint(p.track)).corner_radius(4.0).clip(true))
         .content(move || {
             if f > 0.0 {
                 cu::Spacer().modifier(Modifier::new().weight(f).height(8.0).background(paint(p.blue.strong)).corner_radius(4.0));
@@ -395,18 +413,27 @@ fn Meter(fraction: f32) {
         });
 }
 
-/// A row of thin bars, one per core (CPU) or per recent sample, drawn from the bottom.
+/// A row of thin bars drawn from the bottom: the CPU's cores as the mockup's `.mon-cores` (44
+/// high, 3 apart, green with 2 dp top corners at 85 percent; review M2), the recent samples of
+/// the other cards 32 high in blue.
 fn Bars(metric: Metric, bars: &[f32]) {
     if bars.is_empty() {
         return;
     }
     let p = ember_theme().palette;
     let max = bar_max(metric, bars);
-    const H: f32 = 32.0;
-    cu::Row().alignment(Alignment::BottomStart).spacing(2.0).modifier(Modifier::new().fill_max_width().height(H)).content(|| {
+    let cores = metric == Metric::Cpu;
+    let (h_all, gap, tone) = if cores { (CORE_BARS_H, CORE_BARS_GAP, p.green.strong) } else { (32.0, 2.0, p.blue.strong) };
+    cu::Row().alignment(Alignment::BottomStart).spacing(gap).modifier(Modifier::new().fill_max_width().height(h_all)).content(|| {
         for v in bars.iter().copied() {
-            let h = (bar_fraction(v, max) * H).max(1.0);
-            cu::Spacer().modifier(Modifier::new().weight(1.0).height(h).background(paint(p.blue.strong)));
+            let h = (bar_fraction(v, max) * h_all).max(1.0);
+            let bar = Modifier::new().weight(1.0).height(h).background(paint(tone));
+            let bar = if cores {
+                bar.corner_radii([CORE_BAR_RADIUS, CORE_BAR_RADIUS, 0.0, 0.0]).alpha(CORE_BAR_ALPHA)
+            } else {
+                bar
+            };
+            cu::Spacer().modifier(bar);
         }
     });
 }
@@ -577,6 +604,96 @@ mod tests {
         }
     }
 
+    /// What the monitor sheet sends before its title after a window report at `width` with the
+    /// safe area `top` x `leading`.
+    fn monitor_head_after_report(width: f32, top: f32, leading: f32) -> String {
+        let text = monitor_after_report(width, 844.0, top, leading);
+        // The delta may not resend the title node; what precedes it, when it is resent.
+        match text.find("이 컴퓨터") {
+            Some(title) => text[..title].to_string(),
+            None => text,
+        }
+    }
+
+    /// Everything the monitor sheet sends after a window report of `width` x `height` with the
+    /// safe area `top` x `leading`.
+    fn monitor_after_report(width: f32, height: f32, top: f32, leading: f32) -> String {
+        use compose_rust::protocol::HostEvent;
+        use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
+        compose_rust::window::reset_window_size();
+        let c = ComputerChip { name: "이 컴퓨터".into(), ..chip() };
+        let mut host = Host::new(move || {
+            let c = c.clone();
+            Box::new(Recomposer::new(move || MonitorSheet(Some(&c), &[], || {})))
+        });
+        host.rebuild().expect("rebuild");
+        let payload = EventPayload::WindowSizeChanged {
+            width_dp: width,
+            height_dp: height,
+            class: WindowSizeClass::from_width_dp(width),
+            height_class: WindowHeightClass::from_height_dp(height),
+            safe_area_top: top,
+            safe_area_leading: leading,
+            safe_area_trailing: 0.0,
+        };
+        let (bytes, _) = host.dispatch(HostEvent { node_id: 0, handler_id: 0, payload }).expect("dispatch");
+        let text: String = compose_rust::protocol::decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")).collect();
+        compose_rust::window::reset_window_size();
+        text
+    }
+
+    #[test]
+    fn fr_l33_the_monitor_dialog_starts_below_the_window_buttons() {
+        // Review sf: from 561 up (and at 1440) the monitor dialog filled the window less 16 above
+        // and below, so its header sat under the traffic lights. A dialog now leaves the lights'
+        // strip above and below; centred, its top edge is below the strip.
+        use crate::ui::safe_area::{current_platform, safe_area_for, Platform, SafeArea};
+        use super::super::components::dialog_max_height;
+        let lights = safe_area_for(Platform::MacOs, SafeArea { top: 66.0, leading: 98.0, trailing: 0.0 });
+        assert_eq!(dialog_max_height(900.0, lights), 768.0, "66 above and below");
+        assert_eq!(dialog_max_height(900.0, SafeArea::default()), 868.0, "16 above and below with no report");
+        assert_eq!(dialog_max_height(844.0, SafeArea { top: 8.0, leading: 40.0, trailing: 0.0 }), 812.0, "never under 16");
+        assert_eq!(dialog_max_height(844.0, SafeArea { top: 32.0, leading: 0.0, trailing: 138.0 }), 812.0, "a trailing caption covers no leading strip");
+        let _guard = crate::services::test_guard();
+        // The body is the dialog less its 60 header: 900 - 2 x 66 - 60 = 708 with the lights,
+        // 900 - 32 - 60 = 808 with a zero report.
+        for width in [561.0, 1440.0] {
+            let sent = monitor_after_report(width, 900.0, 66.0, 98.0);
+            if current_platform() == Platform::MacOs {
+                assert!(sent.contains("Height(708.0)") && !sent.contains("Height(808.0)"), "the dialog below the lights at {width}: {sent}");
+            }
+            let sent = monitor_after_report(width, 900.0, 0.0, 0.0);
+            assert!(sent.contains("Height(808.0)") && !sent.contains("Height(708.0)"), "no change with a zero safe area at {width}: {sent}");
+        }
+    }
+
+    #[test]
+    fn fr_l33_the_full_screen_monitor_header_starts_below_the_window_buttons() {
+        // Review ba D: at 390 the computer monitor (and the project screen's computer sheet,
+        // the same `MonitorSheet`) put "이 컴퓨터" under the macOS traffic lights.
+        use crate::ui::safe_area::{current_platform, safe_area_for, Platform, SafeArea};
+        use super::super::components::full_screen_sheet_top_inset;
+        // The pure rule names macOS, so it holds on every OS CI runs (as `cr/shell.rs` does).
+        let lights = safe_area_for(Platform::MacOs, SafeArea { top: 28.0, leading: 72.0, trailing: 0.0 });
+        assert_eq!(full_screen_sheet_top_inset(390.0, true, lights), 28.0);
+        assert_eq!(full_screen_sheet_top_inset(560.0, true, lights), 28.0, "full screen up to 560");
+        assert_eq!(full_screen_sheet_top_inset(561.0, true, lights), 0.0, "a dialog from 561");
+        assert_eq!(full_screen_sheet_top_inset(390.0, false, lights), 0.0, "a bottom sheet clears them");
+        assert_eq!(full_screen_sheet_top_inset(390.0, true, SafeArea::default()), 0.0, "nothing to clear");
+        let _guard = crate::services::test_guard();
+        // An odd footprint (31) so no other height in the sheet can stand in for the strip.
+        // The composed sheet reads this platform's safe area: macOS passes the report through,
+        // Linux and Windows have no lights at the leading edge and reserve nothing.
+        let head = monitor_head_after_report(390.0, 31.0, 72.0);
+        if current_platform() == Platform::MacOs {
+            assert!(head.contains("Height(31.0)"), "the 31 strip before the title: {head}");
+        } else {
+            assert!(!head.contains("Height(31.0)"), "no strip off macOS: {head}");
+        }
+        let head = monitor_head_after_report(390.0, 0.0, 0.0);
+        assert!(!head.contains("Height(31.0)") && !head.contains("Height(28.0)"), "no strip with a zero safe area: {head}");
+    }
+
     #[test]
     fn fr_l21_a_missing_computer_says_so() {
         let _guard = crate::services::test_guard();
@@ -620,7 +737,9 @@ mod tests {
             Grid(1, &chip(), &live_feed(), true);
         }
         let text = composed_text(ui);
-        for want in ["25.0%", "50.0%", "스왑 1.0 GB / 4.0 GB", "60.0%", "2.0 KB/s", "GPU를 읽을 수 없습니다", "프로세스 321개 실행 중입니다", "준비 중입니다"] {
+        // The big value is split into the number and its unit, a percent as a whole number
+        // (`hero_parts`, review M1), so each is its own quoted text.
+        for want in ["\"25\"", "\"50\"", "스왑 1.0 GB / 4.0 GB", "\"60\"", "\"2.0\"", "KB/s", "GPU를 읽을 수 없습니다", "프로세스 321개 실행 중입니다", "준비 중입니다"] {
             assert!(text.contains(want), "missing {want}");
         }
     }
@@ -762,6 +881,59 @@ mod tests {
         let card = production.split("fn MonCard(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(card.contains("EmberCardSized(false, true, fill,"), "{card}");
         assert!(!card.contains(".height(h)"), "{card}");
+    }
+
+    fn cpu_card() {
+        let view = CardView { headline: "23.1%".into(), lines: vec!["코어 8개".into()], bars: vec![50.0, 100.0] };
+        MetricCard(Metric::Cpu, Some(view), "", None, false);
+    }
+
+    /// Review M1, M2: the big value is the whole number with its unit beside it in a smaller
+    /// muted label, and the cores are green bars with rounded tops, 44 high.
+    #[test]
+    fn m1_m2_cpu_card_splits_the_number_and_draws_green_core_bars() {
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+        use compose_rust::PropertyKind;
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(cpu_card)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let texts: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { property: PropertyKind::Text, value: PropertyValue::String(s), .. } => Some(s.to_string()),
+                Mutation::SetText { text, .. } => Some(text.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&"23".to_string()), "{texts:?}");
+        assert!(texts.contains(&"%".to_string()), "{texts:?}");
+        assert!(!texts.contains(&"23.1%".to_string()), "no one-label value with a decimal");
+        let p = ember_theme().palette;
+        let green = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.green.strong)));
+        let mods_of = |id: u32| -> Vec<String> {
+            batch
+                .iter()
+                .filter_map(|m| match m {
+                    Mutation::SetModifier { node_id, modifier, .. } if *node_id == id => Some(format!("{modifier:?}")),
+                    _ => None,
+                })
+                .collect()
+        };
+        let bars: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { node_id, modifier, .. } if format!("{modifier:?}") == green => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bars.len(), 2, "one green bar per core");
+        for id in bars {
+            let mods = mods_of(id);
+            assert!(mods.iter().any(|m| m == "Alpha(0.85)"), "{mods:?}");
+            assert!(mods.iter().any(|m| m.starts_with("CornerEach") || m.starts_with("Shape")), "rounded top: {mods:?}");
+        }
+        let all: String = batch.iter().map(|m| format!("{m:?}")).collect();
+        assert!(all.contains("Height(44.0)"), "the core row is 44 high");
     }
 
     #[test]

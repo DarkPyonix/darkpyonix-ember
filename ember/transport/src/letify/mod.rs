@@ -13,6 +13,11 @@
 //! - **Relay** (`FR-N2`): the main server runs the relay role (`LetifyConfig::relay_listen`);
 //!   every other endpoint registers it as `letify://<server peer id>@host:port`. Two endpoints
 //!   agree on a pairing token through the rendezvous ([`pkarr`]) and both dial the relay.
+//! - **Standing request** (`FR-N9`, #898): the endpoint that runs the relay role keeps one request
+//!   waiting at its own relay for every peer it was told to allow, under [`STANDING_TOKEN`]. A
+//!   dialer with no rendezvous that dials the relay's own peer id asks the relay for it under the
+//!   same token, so a device that knows only `letify://<server peer id>@host:port` reaches the
+//!   server. letify-link's relay only pairs two requests; it never hands one to a local acceptor.
 //! - **Address observation**: the main server runs a `QadResponder`; other endpoints ask it for
 //!   their public address and publish it in their record.
 //! - **Revocation** (`FR-N3`): [`crate::PeerGate`] calls `revoke_peer`, which revokes the key in
@@ -29,12 +34,12 @@ mod link;
 mod pkarr;
 mod relay_url;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use letify_link::observe::{QadObserver, QadResponder, Reachability};
@@ -71,6 +76,41 @@ pub const LETIFY_TRANSPORT_ID: &str = record::DEFAULT_TRANSPORT;
 const MAX_MEETINGS: usize = 8;
 /// At most this many candidate TCP addresses are dialed for one peer.
 const MAX_TCP_CANDIDATES: usize = 8;
+
+/// The pairing token of a standing request (SPEC `FR-N9`, #898): the main server waits at its own
+/// relay for each allowed device under this token, and a device with no rendezvous asks the relay
+/// for the server under it. It is public and fixed. It only matches the two requests: the relay
+/// authenticates both ends by their node keys and pairs them only when each names the other, and
+/// the session on the splice runs its own handshake.
+const STANDING_TOKEN: [u8; 16] = *b"ember-standing-1";
+/// At most this many standing requests are kept, one for each allowed peer: devices and
+/// registered computers alike. letify-link's relay lets one client hold 64 waiting requests
+/// (`max_pending`); the rest is left for the server's own relay offers. A peer allowed beyond
+/// the cap is queued and gets a slot when one frees. `LetifyConfig::standing_requests` lowers it.
+pub(crate) const MAX_STANDING: usize = 48;
+/// After this many failures in a row to post one peer's standing request, one warning is logged.
+const STANDING_WARN_AFTER: u32 = 5;
+/// A standing dial still pending after this long has its request waiting at the relay: the
+/// relay's handshake and request share a 4 s deadline.
+const STANDING_POSTED_AFTER: Duration = Duration::from_secs(5);
+/// How long a dial whose only path is the standing request waits for the pairing, and then for
+/// the session on it, when the connect timeout is not shorter (`FR-N9`, provisional).
+const STANDING_PAIR_WAIT: Duration = Duration::from_secs(8);
+/// How long the failure of such a dial is kept for the calls that were waiting behind it.
+const DIAL_FAILURE_SHARE: Duration = Duration::from_secs(2);
+/// A relay that ends the connection before pairing is asked this many times, this far apart,
+/// before the dial fails: the relay closes a peer it does not admit with no reply, and it closes
+/// a connection over its budget of unauthenticated connections the same way.
+const RELAY_CLOSED_TRIES: u32 = 3;
+const RELAY_CLOSED_PAUSE: Duration = Duration::from_millis(300);
+/// The pause after a refusal the relay states (a request of ours from an earlier dial still
+/// waits there, too many waiting requests).
+const RELAY_REFUSED_PAUSE: Duration = Duration::from_millis(500);
+/// At most this many standing requests start their relay handshake at once, each for this long.
+/// The relay holds at most four unauthenticated connections from one address
+/// (`max_preauth_per_ip`), and every standing request comes from loopback.
+const STANDING_STARTS: usize = 2;
+const STANDING_HEAD_START: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Via {
@@ -109,6 +149,67 @@ impl Rendezvous for SignalAdapter {
     }
 }
 
+/// The standing requests of an endpoint with the relay role (`FR-N9`, #898).
+#[derive(Default)]
+struct Standing {
+    /// The running requests, by the canonical id of the peer each waits for.
+    running: HashMap<NodeId, JoinHandle<()>>,
+    /// Allowed peers with no slot yet, in the order they were allowed.
+    queued: VecDeque<(NodeId, PeerId)>,
+}
+
+/// Failures in a row to post one standing request, and whether they were warned about.
+#[derive(Default)]
+struct Streak {
+    failures: u32,
+    warned: bool,
+}
+
+impl Streak {
+    /// Counts one failure. True when it is the one to warn about: once per streak.
+    fn failed(&mut self) -> bool {
+        self.failures += 1;
+        if self.failures >= STANDING_WARN_AFTER && !self.warned {
+            self.warned = true;
+            return true;
+        }
+        false
+    }
+
+    /// Ends the streak. True when it was warned about, so the recovery is worth a line.
+    fn recovered(&mut self) -> bool {
+        self.failures = 0;
+        std::mem::take(&mut self.warned)
+    }
+}
+
+/// Why one request at the relay did not end in a pairing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RelayFailure {
+    /// The relay's address did not take the connection (refused, no route, no such name).
+    Unreachable,
+    /// The relay ended the connection before it paired: during the handshake or with no reply.
+    Closed,
+    /// The relay answered with a refusal.
+    Refused,
+    /// The relay held the request and nobody came.
+    NoAnswer,
+}
+
+fn relay_failure(e: &io::Error) -> RelayFailure {
+    use io::ErrorKind as K;
+    // A handshake error comes wrapped (`From<letify_link::Error> for io::Error`).
+    if letify_link::Error::from_io(e).is_some() {
+        return RelayFailure::Closed;
+    }
+    match e.kind() {
+        K::PermissionDenied => RelayFailure::Refused,
+        K::TimedOut => RelayFailure::NoAnswer,
+        K::UnexpectedEof | K::ConnectionReset | K::ConnectionAborted | K::BrokenPipe => RelayFailure::Closed,
+        _ => RelayFailure::Unreachable,
+    }
+}
+
 struct Inner {
     me: PeerId,
     secret: SecretKey,
@@ -140,6 +241,13 @@ struct Inner {
     version: Mutex<u32>,
     power: Mutex<PowerState>,
     meetings: Arc<Semaphore>,
+    /// The standing requests at our own relay (`FR-N9`, #898). Empty unless this endpoint runs
+    /// the relay role.
+    standing: Mutex<Standing>,
+    /// The last failure of a dial whose only path was the standing request, by peer: calls that
+    /// waited behind that dial get it for [`DIAL_FAILURE_SHARE`] and do not dial in turn.
+    dial_failures: Mutex<HashMap<PeerId, (Instant, String)>>,
+    standing_starts: Arc<Semaphore>,
     closed: AtomicBool,
     bg: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -154,6 +262,13 @@ impl Drop for LetifyBackend {
         self.inner.closed.store(true, Ordering::SeqCst);
         for h in self.inner.bg.lock().unwrap().drain(..) {
             h.abort();
+        }
+        {
+            let mut standing = self.inner.standing.lock().unwrap();
+            standing.queued.clear();
+            for (_, h) in standing.running.drain() {
+                h.abort();
+            }
         }
         for list in self.inner.links.lock().unwrap().values() {
             for l in list {
@@ -204,7 +319,15 @@ impl LetifyBackend {
             let bound = relay.local_addr();
             relay.allow(identity.node_id());
             relay_handle = Some(relay.handle());
-            let local = SocketAddr::from(([127, 0, 0, 1], bound.port()));
+            // This endpoint dials its own relay where the relay listens: on loopback when it is
+            // bound to every address, else on the one address it is bound to (a relay bound to a
+            // LAN address does not answer on 127.0.0.1, and the standing requests would never
+            // be posted, FR-N9).
+            let local = match bound.ip() {
+                ip if !ip.is_unspecified() => bound,
+                std::net::IpAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, bound.port())),
+                std::net::IpAddr::V4(_) => SocketAddr::from(([127, 0, 0, 1], bound.port())),
+            };
             own_relay = Some(RelayTarget {
                 addr: local.to_string(),
                 node: identity.node_id(),
@@ -262,6 +385,9 @@ impl LetifyBackend {
             version: Mutex::new(record::unix_now()),
             power: Mutex::new(PowerState::Foreground),
             meetings: Arc::new(Semaphore::new(MAX_MEETINGS)),
+            standing: Mutex::new(Standing::default()),
+            dial_failures: Mutex::new(HashMap::new()),
+            standing_starts: Arc::new(Semaphore::new(STANDING_STARTS)),
             closed: AtomicBool::new(false),
             bg: Mutex::new(Vec::new()),
         });
@@ -539,16 +665,52 @@ impl Inner {
         if let Some(l) = self.live_link(addr.peer) {
             return Ok(l);
         }
+        let arrived = Instant::now();
         let gate = self.dial_lock(addr.peer);
         let _guard = gate.lock().await;
         if let Some(l) = self.live_link(addr.peer) {
             return Ok(l);
         }
+        if let Some(reason) = self.shared_failure(addr.peer, arrived) {
+            return Err(TransportError::Connect { peer: addr.peer, reason });
+        }
         self.dial(addr).await
     }
 
-    /// Establishes a session with `addr.peer` over every path we know.
+    /// The failure of the dial this call waited behind, when that dial had only the standing
+    /// request to try and failed less than [`DIAL_FAILURE_SHARE`] ago. A call that arrived after
+    /// the failure dials for itself.
+    fn shared_failure(&self, peer: PeerId, arrived: Instant) -> Option<String> {
+        let mut failures = self.dial_failures.lock().unwrap();
+        let (at, reason) = failures.get(&peer).map(|(at, reason)| (*at, reason.clone()))?;
+        if at.elapsed() >= DIAL_FAILURE_SHARE {
+            failures.remove(&peer);
+            return None;
+        }
+        (arrived <= at).then_some(reason)
+    }
+
+    /// Establishes a session with `addr.peer` over every path we know. The failure of a dial
+    /// that had only the standing request is kept for the calls waiting behind it.
     async fn dial(self: &Arc<Self>, addr: &PeerAddr) -> Result<Arc<PeerLink>> {
+        let mut relay_only = false;
+        let out = self.dial_paths(addr, &mut relay_only).await;
+        if relay_only {
+            let mut failures = self.dial_failures.lock().unwrap();
+            match &out {
+                Err(TransportError::Connect { reason, .. }) => {
+                    failures.insert(addr.peer, (Instant::now(), reason.clone()));
+                }
+                _ => {
+                    failures.remove(&addr.peer);
+                }
+            }
+        }
+        out
+    }
+
+    /// `relay_only` is set when the standing request at the peer's own relay is the only path.
+    async fn dial_paths(self: &Arc<Self>, addr: &PeerAddr, relay_only: &mut bool) -> Result<Arc<PeerLink>> {
         let peer = addr.peer;
         let fail = |reason: String| TransportError::Connect { peer, reason };
         let node = NodeId::try_from_bytes(*peer.as_bytes()).map_err(|e| fail(e.to_string()))?;
@@ -596,14 +758,23 @@ impl Inner {
         let signal = self.signal();
 
         let mut candidates: Vec<Candidate> = tcp.iter().map(|a| Candidate::tcp(format!("tcp:{a}"), *a)).collect();
+        let mut standing: Option<(RelayDialer, String)> = None;
         let relayed = match (&relay, &signal) {
+            // The peer is the relay itself (the main server) and there is no rendezvous to agree
+            // on a token through: the server keeps a request for every peer it allows waiting
+            // at its own relay under the standing token (FR-N9, #898). Its candidate is added
+            // below.
+            (Some(relay), None) if relay.node.canonical() == node.canonical() => {
+                standing = Some((RelayDialer::new(relay.addr.clone(), relay.node, self.identity.clone()), relay.addr.clone()));
+                true
+            }
             (Some(relay), Some(signal)) => {
                 candidates.push(relay_candidate(self.identity.clone(), relay, signal.clone(), node));
                 true
             }
             _ => false,
         };
-        if candidates.is_empty() {
+        if candidates.is_empty() && standing.is_none() {
             return Err(fail(if relay.is_some() {
                 "no address is known for the peer and there is no rendezvous to reach it through the relay".into()
             } else {
@@ -614,11 +785,27 @@ impl Inner {
             return Err(fail("every known address refused the connection".into()));
         }
 
-        let manager_cfg = ManagerConfig {
+        let mut manager_cfg = ManagerConfig {
             dial_timeout: self.cfg.dial_timeout,
             start_timeout: self.cfg.connect_timeout,
             ..ManagerConfig::default()
         };
+        if let Some((dialer, relay_addr)) = standing {
+            // With no direct address that could answer, the standing request is the only path.
+            // The path manager redials a failing candidate until the connect timeout, so the
+            // first request is made here, where a relay that cannot be reached or that turns
+            // this endpoint away ends the dial at once, and the wait for the server is bounded
+            // (FR-N9). With a direct address in play the dial runs as before.
+            *relay_only = tcp.is_empty() || refused_by_all(&tcp).await;
+            let first = if *relay_only {
+                let wait = self.cfg.connect_timeout.min(STANDING_PAIR_WAIT);
+                manager_cfg.start_timeout = wait;
+                Some(standing_first(&dialer, &relay_addr, node, wait).await.map_err(&fail)?)
+            } else {
+                None
+            };
+            candidates.push(standing_candidate(dialer, &relay_addr, node, first));
+        }
         let pm = PathManager::start(self.identity.clone(), node, candidates, self.link_cfg.clone(), manager_cfg)
             .await
             .map_err(|e| fail(e.to_string()))?;
@@ -660,12 +847,24 @@ impl Inner {
         for h in bg {
             let _ = h.await;
         }
+        let standing: Vec<JoinHandle<()>> = {
+            let mut standing = self.standing.lock().unwrap();
+            standing.queued.clear();
+            let handles: Vec<JoinHandle<()>> = standing.running.drain().map(|(_, h)| h).collect();
+            handles
+        };
+        for h in &standing {
+            h.abort();
+        }
+        for h in standing {
+            let _ = h.await;
+        }
         let links = self.all_links();
         futures::future::join_all(links.iter().map(|l| l.close_local(None))).await;
         *self.pkarr.lock().unwrap() = None;
     }
 
-    fn revoke(&self, peer: PeerId) {
+    fn revoke(self: &Arc<Self>, peer: PeerId) {
         let node = node_of(peer);
         if let Some(set) = self.admitted.lock().unwrap().as_mut() {
             set.remove(&node.canonical());
@@ -675,6 +874,7 @@ impl Inner {
         if let Some(h) = &self.relay_handle {
             h.revoke(node);
         }
+        self.release_standing(node);
         // Sessions we started to that peer (or to an alias of its key): close, and do not redial.
         let class = node.canonical();
         let Ok(handle) = tokio::runtime::Handle::try_current() else { return };
@@ -685,7 +885,7 @@ impl Inner {
         }
     }
 
-    fn allow(&self, peer: PeerId) {
+    fn allow(self: &Arc<Self>, peer: PeerId) {
         let node = node_of(peer);
         self.admitted.lock().unwrap().get_or_insert_with(Default::default).insert(node.canonical());
         self.acceptor.reinstate(node);
@@ -693,6 +893,226 @@ impl Inner {
             h.allow(node);
         }
         self.watch(&[peer]);
+        self.start_standing(node, peer);
+    }
+
+    /// The most standing requests this endpoint keeps.
+    fn standing_cap(&self) -> usize {
+        self.cfg.standing_requests.min(MAX_STANDING)
+    }
+
+    /// Keeps a request for `node` waiting at this endpoint's own relay (the main server only), so
+    /// a peer that has the relay URL and no rendezvous is paired with us (`FR-N9`, #898). When
+    /// every slot is in use the peer is queued and gets one when another peer is revoked. Does
+    /// nothing without the relay role, outside a runtime, for ourselves, or when the peer has a
+    /// request or a place in the queue already.
+    fn start_standing(self: &Arc<Self>, node: NodeId, peer: PeerId) {
+        if self.own_relay.is_none() || tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let class = node.canonical();
+        if self.closed.load(Ordering::SeqCst) || class == self.identity.node_id().canonical() {
+            return;
+        }
+        let mut standing = self.standing.lock().unwrap();
+        standing.running.retain(|_, h| !h.is_finished());
+        if standing.running.contains_key(&class) || standing.queued.iter().any(|(q, _)| q.canonical() == class) {
+            return;
+        }
+        standing.queued.push_back((node, peer));
+        self.fill_standing(&mut standing);
+        if standing.queued.iter().any(|(q, _)| q.canonical() == class) {
+            let cap = self.standing_cap();
+            tracing::warn!(
+                %peer,
+                "peer {peer} is allowed, but all {cap} standing requests at this server's relay are in use (every allowed device and registered computer takes one), so it cannot reach this server through the relay alone yet. It is queued and gets a slot when another peer is removed: remove one that is no longer used (ember-server owner devices rm <peer id>, or remove a computer). Until then it reaches this server by a direct address (EMBER_TRANSPORT_LISTEN) or through the hub"
+            );
+        }
+    }
+
+    /// Ends the standing request for `node` (or its place in the queue) and gives the freed slot
+    /// to the peer that has waited longest.
+    fn release_standing(self: &Arc<Self>, node: NodeId) {
+        let class = node.canonical();
+        let mut standing = self.standing.lock().unwrap();
+        if let Some(h) = standing.running.remove(&class) {
+            h.abort();
+        }
+        standing.queued.retain(|(q, _)| q.canonical() != class);
+        for peer in self.fill_standing(&mut standing) {
+            tracing::info!(%peer, "a standing request slot is free: peer {peer} now waits at this server's relay and can reach it through the relay alone");
+        }
+    }
+
+    /// Starts standing requests for queued peers while slots are free. Returns the peers started.
+    fn fill_standing(self: &Arc<Self>, standing: &mut Standing) -> Vec<PeerId> {
+        let mut started = Vec::new();
+        let Some(own) = self.own_relay.clone() else { return started };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else { return started };
+        if self.closed.load(Ordering::SeqCst) {
+            return started;
+        }
+        standing.running.retain(|_, h| !h.is_finished());
+        while standing.running.len() < self.standing_cap() {
+            let Some((node, peer)) = standing.queued.pop_front() else { break };
+            let task = handle.spawn(standing_loop(Arc::downgrade(self), own.clone(), node, self.standing_starts.clone()));
+            standing.running.insert(node.canonical(), task);
+            started.push(peer);
+        }
+        started
+    }
+}
+
+/// The first request of a dial whose only path is the standing request: the transport the relay
+/// paired with the server, or why there is none. It fails at once when the relay cannot be
+/// reached, after [`RELAY_CLOSED_TRIES`] tries when the relay ends the connection before pairing,
+/// and after `wait` when the server never comes. The reasons name no close code and do not say
+/// "not allowed" or "revoked": the relay does not tell which it is, and the app reads those words
+/// as the server's own refusal.
+async fn standing_first(
+    dialer: &RelayDialer,
+    relay: &str,
+    peer: NodeId,
+    wait: Duration,
+) -> std::result::Result<TcpStream, String> {
+    let deadline = tokio::time::Instant::now() + wait;
+    let no_answer = || {
+        format!(
+            "the server did not answer at its relay {relay} within {} s (it is not waiting there for this peer id, or it is not running behind that address)",
+            wait.as_secs_f32()
+        )
+    };
+    let mut closed = 0u32;
+    loop {
+        let e = match tokio::time::timeout_at(deadline, dialer.connect(peer, STANDING_TOKEN)).await {
+            Ok(Ok(tcp)) => return Ok(tcp),
+            Ok(Err(e)) => e,
+            Err(_) => return Err(no_answer()),
+        };
+        let pause = match relay_failure(&e) {
+            RelayFailure::Unreachable => return Err(format!("the relay at {relay} cannot be reached: {e}")),
+            RelayFailure::NoAnswer => return Err(no_answer()),
+            RelayFailure::Closed => {
+                closed += 1;
+                tracing::debug!(%relay, error = %e, "the relay ended the connection before pairing");
+                if closed >= RELAY_CLOSED_TRIES {
+                    return Err(format!(
+                        "the relay at {relay} ended the connection before pairing: the server does not admit this peer id, or the relay is busy"
+                    ));
+                }
+                RELAY_CLOSED_PAUSE
+            }
+            RelayFailure::Refused => RELAY_REFUSED_PAUSE,
+        };
+        if tokio::time::Instant::now() + pause >= deadline {
+            return Err(format!("no pairing at the relay {relay} in time: {e}"));
+        }
+        tokio::time::sleep(pause).await;
+    }
+}
+
+/// The path to the relay's own peer with no rendezvous: ask the relay for it under the standing
+/// token, where the peer (the main server) keeps a request waiting for each peer it allows.
+/// `first` is a transport the relay already paired; the first dial hands it over, later ones ask
+/// the relay again.
+fn standing_candidate(dialer: RelayDialer, relay: &str, peer: NodeId, first: Option<TcpStream>) -> Candidate {
+    let first = Arc::new(Mutex::new(first));
+    Candidate::new(format!("relay:{relay}"), move || {
+        let dialer = dialer.clone();
+        let ready = first.lock().unwrap().take();
+        async move {
+            match ready {
+                Some(tcp) => Ok(tcp),
+                None => dialer.connect(peer, STANDING_TOKEN).await,
+            }
+        }
+    })
+    .with_kind(PathKind::Relay)
+}
+
+/// One standing request, posted again after every pairing and every refusal (the relay refuses a
+/// request whose counterpart did not arrive within its pair timeout, 30 s). A request left at the
+/// relay by a device that gave up is paired with ours and fails in the acceptor, which also
+/// clears it. Ends when the transport is dropped or closed; `revoke` aborts it. The abort closes
+/// our end only: letify-link's relay has no call that withdraws a waiting request, so the entry
+/// stays there until it is paired or times out (SPEC `FR-N9`, the re-allow limit).
+///
+/// Failures to post are logged at debug level, with one warning after [`STANDING_WARN_AFTER`] in
+/// a row and one info line when a request is posted again.
+async fn standing_loop(inner: Weak<Inner>, relay: RelayTarget, peer: NodeId, starts: Arc<Semaphore>) {
+    let dialer = match inner.upgrade() {
+        Some(i) => RelayDialer::new(relay.addr.clone(), relay.node, i.identity.clone()),
+        None => return,
+    };
+    let peer_id = peer_of(peer).map(|p| p.to_string()).unwrap_or_default();
+    let mut streak = Streak::default();
+    let posted_again = |streak: &mut Streak| {
+        if streak.recovered() {
+            tracing::info!(relay = %relay.addr, peer = %peer_id, "the standing request at this server's own relay is posted again");
+        }
+    };
+    loop {
+        match inner.upgrade() {
+            Some(i) if !i.closed.load(Ordering::SeqCst) => {}
+            _ => return,
+        }
+        let dial = dialer.connect(peer, STANDING_TOKEN);
+        tokio::pin!(dial);
+        // The handshake's share of the dial runs under a permit; the wait for the device does not.
+        let early = {
+            let _permit = starts.acquire().await;
+            tokio::time::timeout(STANDING_HEAD_START, &mut dial).await.ok()
+        };
+        let paired = match early {
+            Some(done) => done,
+            None => match tokio::time::timeout(STANDING_POSTED_AFTER, &mut dial).await {
+                Ok(done) => done,
+                // Still pending: the request waits at the relay.
+                Err(_) => {
+                    posted_again(&mut streak);
+                    dial.await
+                }
+            },
+        };
+        match paired {
+            Ok(tcp) => {
+                posted_again(&mut streak);
+                let Some(inner) = inner.upgrade() else { return };
+                tokio::spawn(async move {
+                    match inner.acceptor.accept(tcp).await {
+                        Ok(accepted) => inner.on_accepted(accepted, Via::Relay),
+                        Err(e) => tracing::debug!(error = %e, "a connection paired at our own relay was refused"),
+                    }
+                });
+            }
+            // The relay's own refusal because nobody came within its pair timeout: ask again at
+            // once.
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && e.to_string().contains("no counterpart") => {
+                posted_again(&mut streak);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            // A request of ours for this peer still waits at the relay: the one a revoke left
+            // there. It is gone within the relay's pair timeout, so this is not a failure to
+            // warn about.
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && e.to_string().contains("already waiting") => {
+                tracing::debug!(error = %e, "an earlier standing request still waits at our own relay");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            // Everything else (the relay does not answer, it ends the connection, it holds too
+            // many waiting requests) lasts for a while: retry slowly.
+            Err(e) => {
+                tracing::debug!(error = %e, "waiting at our own relay failed");
+                if streak.failed() {
+                    tracing::warn!(
+                        relay = %relay.addr,
+                        peer = %peer_id,
+                        error = %e,
+                        "the standing request at this server's own relay failed {STANDING_WARN_AFTER} times in a row; the peer cannot reach this server through the relay alone until it is posted again (retrying every second)"
+                    );
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
     }
 }
 
@@ -939,6 +1359,45 @@ impl TransportBackend for LetifyBackend {
 mod tests {
     use super::*;
     use crate::{BackendKind, MemoryPkarrStore, Transport};
+
+    /// `FR-N9`: one warning per streak of failures to post a standing request, after five in a
+    /// row, and the recovery is worth a line only after a warning.
+    #[test]
+    fn fr_n9_a_failure_streak_warns_once_and_reports_its_recovery_once() {
+        let mut s = Streak::default();
+        for n in 1..STANDING_WARN_AFTER {
+            assert!(!s.failed(), "failure {n} is not warned about");
+        }
+        assert!(s.failed(), "failure {STANDING_WARN_AFTER} is");
+        for _ in 0..20 {
+            assert!(!s.failed(), "one warning per streak");
+        }
+        assert!(s.recovered());
+        assert!(!s.recovered(), "one recovery line");
+        // A short streak is never mentioned, and a new long one warns again.
+        assert!(!s.failed());
+        assert!(!s.recovered());
+        assert!((0..STANDING_WARN_AFTER).map(|_| s.failed()).any(|w| w));
+    }
+
+    /// `FR-N9`: what ends a relay-only dial at once, what is tried again, and what waits.
+    #[test]
+    fn fr_n9_relay_failures_are_told_apart() {
+        use io::ErrorKind as K;
+        assert_eq!(relay_failure(&io::Error::from(K::ConnectionRefused)), RelayFailure::Unreachable);
+        assert_eq!(relay_failure(&io::Error::other("failed to lookup address information")), RelayFailure::Unreachable);
+        // The relay closes a peer it does not admit during the handshake, or after the request.
+        let handshake = io::Error::from(letify_link::Error::Handshake("the peer closed the transport".into()));
+        assert_eq!(relay_failure(&handshake), RelayFailure::Closed);
+        let eof = io::Error::from(letify_link::Error::Io(io::Error::from(K::UnexpectedEof)));
+        assert_eq!(relay_failure(&eof), RelayFailure::Closed);
+        assert_eq!(relay_failure(&io::Error::from(K::UnexpectedEof)), RelayFailure::Closed);
+        assert_eq!(relay_failure(&io::Error::from(K::ConnectionReset)), RelayFailure::Closed);
+        let refused = io::Error::new(K::PermissionDenied, "the relay refused: too many waiting requests");
+        assert_eq!(relay_failure(&refused), RelayFailure::Refused);
+        let late = io::Error::new(K::TimedOut, "the relay did not pair in time");
+        assert_eq!(relay_failure(&late), RelayFailure::NoAnswer);
+    }
 
     /// `FR-N5`: a peer whose record does not list `letify-link/1` is refused with both lists
     /// named, before any dial.

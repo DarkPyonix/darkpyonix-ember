@@ -406,11 +406,18 @@ pub const VCS_HUNK_BUTTON_H: f32 = 28.0;
 /// Height of the hunk header row (`.vcs-hh`): the 28 px action with 6 px above and below.
 pub const VCS_HUNK_HEADER_H: f32 = VCS_HUNK_BUTTON_H + 12.0;
 
-/// Width of a painted small pill or chip: the text at [`VCS_CONTROL_FS`] plus 14 px each side,
-/// at least 64. It is fixed from when a Box in a Row took the remaining width
-/// (TODO(compose-rust#427, in v0.0.10): the estimate goes after a display check).
-pub fn vcs_pill_width(text: &str) -> f32 {
-    (super::home::text_px(text, VCS_CONTROL_FS.size()) + 28.0).max(64.0)
+/// The space at each side of the label of a painted small pill (the stash pill, the hunk
+/// button). The pill takes the width of its label and these two; its width was a `text_px`
+/// estimate, at least 64, from when a Box in a Row took the remaining width (compose-rust#427).
+pub const VCS_PILL_PAD_X: f32 = 14.0;
+
+/// The label of a painted small pill between its two side spaces, on one line.
+fn PillLabel(text: &str, fs: Fs, ink: Color) {
+    cu::Row().alignment(Alignment::CenterStart).content(|| {
+        cu::Spacer().modifier(Modifier::new().width(VCS_PILL_PAD_X));
+        Label(text, fs, Weight::Medium, Some(paint(ink)), Some(1));
+        cu::Spacer().modifier(Modifier::new().width(VCS_PILL_PAD_X));
+    });
 }
 
 /// A single choice among a few values (the history filter, the PR state filter, the merge
@@ -1367,7 +1374,6 @@ fn DiffViewAtWidth(file: &FileDiff, staging: &MutableState<Staging>, pane_width:
                 NamedClickable(
                     "이 덩어리 전체",
                     Modifier::new()
-                        .width(vcs_pill_width("이 덩어리 전체"))
                         .height(VCS_HUNK_BUTTON_H)
                         .border(1.0, paint(p.line))
                         .background(paint(p.surface))
@@ -1379,7 +1385,7 @@ fn DiffViewAtWidth(file: &FileDiff, staging: &MutableState<Staging>, pane_width:
                         st_hunk.set(s);
                     },
                     move || {
-                        Label("이 덩어리 전체", VCS_CONTROL_FS, Weight::Medium, Some(paint(p.text)), Some(1));
+                        PillLabel("이 덩어리 전체", VCS_CONTROL_FS, p.text);
                     });
                 cu::Spacer().modifier(Modifier::new().width(SP[2]));
             });
@@ -4979,17 +4985,14 @@ fn StashRow(e: &StashEntry, layout: PaneLayout, busy: bool, dirty: bool, armed: 
 
 // The pill is painted and its accessible name is built from data (the stash's index and message),
 // so the clear button of `components::DataNamedOverlay` carries it (the gap is filed there).
-// TODO(compose-rust#427, in v0.0.10): the width is estimated and fixed, from when a Box in a Row
-// took the remaining width. The estimate goes after the same display check.
-/// A small pill whose visible text is `text` and whose accessible name is `access`.
+/// A small pill whose visible text is `text` and whose accessible name is `access`. It is as wide
+/// as its label and [`VCS_PILL_PAD_X`] at each side.
 fn StashPill(text: &str, access: &str, kind: ButtonKind, enabled: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let s = super::components::button_style_for(kind, true, enabled, p);
-    let width = vcs_pill_width(text);
     cu::Box()
         .modifier(
             Modifier::new()
-                .width(width)
                 .height(s.height)
                 .background(paint(s.fill))
                 .border(1.0, paint(s.border))
@@ -4997,7 +5000,7 @@ fn StashPill(text: &str, access: &str, kind: ButtonKind, enabled: bool, on_click
         )
         .alignment(Alignment::Center)
         .content(move || {
-            Label(text, s.fs, Weight::Medium, Some(paint(s.text)), Some(1));
+            PillLabel(text, s.fs, s.text);
             DataNamedOverlay(access, enabled, None, on_click);
         });
 }
@@ -7954,13 +7957,30 @@ mod tests {
         assert_eq!(VCS_CONTROL_FS, Fs::Sm);
         assert_eq!(VCS_CONTROL_FS.size(), 13.0);
         assert_eq!(super::super::components::type_role_style(VCS_FIELD_ROLE).0, VCS_CONTROL_FS);
-        // The stash pill, the chip and the hunk button estimate their width with that size.
-        for text in ["적용", "꺼내기", "삭제", "정말 삭제합니다", "이 덩어리 전체", "병합됨"] {
-            let want = (super::super::home::text_px(text, 13.0) + 28.0).max(64.0);
-            assert_eq!(vcs_pill_width(text), want, "{text}");
-        }
-        assert!(vcs_pill_width("정말 삭제합니다") < (super::super::home::text_px("정말 삭제합니다", 16.0) + 28.0));
         assert!(VCS_HUNK_BUTTON_H < H_CTL);
+    }
+
+    #[test]
+    fn a_small_pill_takes_the_width_of_its_label_and_14_at_each_side() {
+        // compose-rust#427 (#673): the `text_px` estimate with its 64 minimum is gone. The pill
+        // sends a height and no width, and its label sits between two 14 dp spaces.
+        let _guard = crate::services::test_guard();
+        assert_eq!(VCS_PILL_PAD_X, 14.0);
+        let nodes = nodes_of(|| StashPill("적용", "스태시 1 적용", ButtonKind::Default, true, || {}));
+        let over = nodes.iter().find(|n| n.widget == "Button").expect("the pill's button");
+        assert!(over.props.iter().any(|x| x == "AccessibleName=String(\"스태시 1 적용\")"), "{:?}", over.props);
+        let pill = nodes.iter().find(|n| Some(n.id) == over.parent).expect("the pill");
+        assert!(pill.mods.iter().any(|m| *m == format!("Height({H_CTL:?})")), "{:?}", pill.mods);
+        assert!(!pill.mods.iter().any(|m| m.starts_with("Width(") || m.starts_with("Size(") || m.starts_with("FillMax")), "{:?}", pill.mods);
+        let label = with_text(&nodes, "적용");
+        let row = nodes.iter().find(|n| Some(n.id) == label.parent).expect("the label's row");
+        let parts = kids(&nodes, row.id);
+        assert_eq!(parts.len(), 3, "a side, the label, a side");
+        for side in [parts[0], parts[2]] {
+            assert!(side.widget == "Spacer" && side.mods.iter().any(|m| m == "Width(14.0)"), "{:?}", side.mods);
+        }
+        let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains(&["vcs_pill", "_width"].concat()), "the estimate is gone");
     }
 
     #[test]

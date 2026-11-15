@@ -559,17 +559,16 @@ fn ModelRadio(label: &str, selected: bool, mut on_click: impl FnMut() + 'static)
         });
 }
 
-// TODO(compose-rust#431, in v0.0.10): the width was fixed when the button over the chip was
-// `fill_max_size`, which made a chip without a width take the rest of the row. The button is
-// `match_parent_size` now (`components::DataNamedOverlay`): drop the width.
-/// A selectable chip matching the mockup's .field.ag-sel: wide enough for the label,
-/// with a 1-line label. Its name can be data (a profile), so the button over it carries it.
+/// A selectable chip matching the mockup's .field.ag-sel: as wide as its one-line label and the
+/// 14 px at each side. It had a fixed 200 while the button over it was `fill_max_size`, which made
+/// a chip without a width take the rest of the row; the button takes the chip's bounds now
+/// (`match_parent_size`, compose-rust#431). Its name can be data (a profile), so that button
+/// carries it.
 fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     cu::Box()
         .modifier(
             Modifier::new()
-                .width(200.0)
                 .height(H_CTL)
                 .background(paint(p.surface_2))
                 .shape_role(ShapeRole::Full),
@@ -585,10 +584,9 @@ fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
         });
 }
 
-// TODO(compose-rust#431, in v0.0.10): as for `SelectChip`, the width is estimated with `text_px`
-// and fixed from when the button over the pill was `fill_max_size`. The estimate goes with
-// `SelectChip`'s width.
-/// A picker pill matching mockup's .pickchip: full pill shape, icon + label, sized to its content.
+/// A picker pill matching mockup's .pickchip: full pill shape, icon + label, sized by its content
+/// (12 px, the icon and 8, the label, 12). Its width was a `text_px` estimate for the reason
+/// [`SelectChip`] gives, and goes with it (compose-rust#431).
 fn ModelPickerPill(text: &str, svg: Option<&'static str>, on_click: impl FnMut() + 'static) {
     MenuPickerPill(text, svg, None, on_click);
 }
@@ -596,15 +594,9 @@ fn ModelPickerPill(text: &str, svg: Option<&'static str>, on_click: impl FnMut()
 /// [`ModelPickerPill`] as the control of a [`PopoverMenu`], saying whether the menu is open.
 fn MenuPickerPill(text: &str, svg: Option<&'static str>, expanded: Option<bool>, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    let width = 12.0
-        + if svg.is_some() { 16.0 + 8.0 } else { 0.0 }
-        + super::home::text_px(text, Fs::Sm.size())
-        + 12.0
-        + 8.0;
     cu::Box()
         .modifier(
             Modifier::new()
-                .width(width.max(72.0))
                 .height(H_CTL)
                 .background(paint(p.surface_2))
                 .shape_role(ShapeRole::Full),
@@ -3584,6 +3576,29 @@ mod tests {
         let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
         assert!(!production.contains(&["Focus", "Overlay"].concat()), "no overlay function of its own");
         assert!(!production.contains(&["cu::", "Button("].concat()), "no direct toolkit button");
+    }
+
+    #[test]
+    fn chips_and_picker_pills_send_no_width_of_their_own() {
+        // compose-rust#431 (#673): the fixed 200 and the `text_px` estimate are gone; the box
+        // sends a height and takes the width of its row of spacers and label.
+        let _guard = crate::services::test_guard();
+        for nodes in [
+            nodes_of(|| SelectChip("자동", || {})),
+            nodes_of(|| ModelPickerPill("아직 정하지 않았습니다", Some(ICON_USER_SVG), || {})),
+            nodes_of(|| ModelPickerPill("+ 계정", None, || {})),
+        ] {
+            let over = nodes.iter().find(|n| n.widget == "Button").expect("the chip's button");
+            let chip = nodes.iter().find(|n| Some(n.id) == over.parent).expect("the chip");
+            assert!(chip.mods.iter().any(|m| *m == format!("Height({H_CTL:?})")), "{:?}", chip.mods);
+            assert!(!chip.mods.iter().any(|m| m.starts_with("Width(") || m.starts_with("Size(") || m.starts_with("FillMax")), "{:?}", chip.mods);
+            assert!(over.mods.iter().any(|m| m == "MatchParentSize"), "{:?}", over.mods);
+        }
+        let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
+        for f in ["fn SelectChip(", "fn MenuPickerPill("] {
+            let body = production.split(f).nth(1).unwrap().split("\nfn ").next().unwrap();
+            assert!(!body.contains(".width(200.0)") && !body.contains("text_px("), "{f}");
+        }
     }
 
     #[test]

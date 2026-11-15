@@ -4,10 +4,10 @@
 //!
 //! On macOS the window opens with `Chrome::FullSize` (compose-rust v0.0.6, #345): content starts
 //! at the top and the traffic lights float over it. The toolkit reports their footprint as
-//! `WindowSafeArea { top, leading, trailing }`, and [`safe_area`] returns it. On Windows and
-//! Linux the window keeps the system's own caption (`Chrome::System`, see [`chrome_for`]), so the
-//! real caption buttons sit outside the content and there is nothing to clear. Everything but
-//! [`safe_area`] is pure.
+//! `WindowSafeArea { top, leading, trailing }`, and [`safe_area`] returns it. On Windows the
+//! toolkit draws the caption buttons in the scene (46x32 each at the trailing edge) and Ember
+//! reserves their 138 dp itself, never a leading inset. On Linux Ember takes what the toolkit
+//! reports. Everything but [`safe_area`] is pure.
 
 use crate::ui::shell::{caption_reserved_width, ShellMode, WINDOWS_CAPTION_HEIGHT_DP};
 
@@ -46,35 +46,33 @@ pub fn current_platform() -> Platform {
 /// toolkit's default. The UI is the same on every system except this strip.
 ///
 /// - macOS: `FullSize`, content under the system's own traffic lights.
-/// - Windows and Linux: `System`, the system's own caption with its real buttons (Snap Layouts
-///   on Windows). In compose-rust v0.0.10 any other value makes the renderer draw the caption
-///   buttons in the scene in the theme's design system (`ComponentRules.caption`), and Ember's
-///   theme is Cupertino, so they came out as fake traffic lights at the left.
+/// - Windows and Linux: the toolkit default (`Modern`), where the renderer draws the caption
+///   buttons in the scene. In compose-rust v0.0.10 their style follows the theme's design system
+///   (`ComponentRules.caption`), so Ember's Cupertino theme shows fake traffic lights; the
+///   toolkit change for v0.0.11 draws the platform's own buttons whatever the design system,
+///   so Ember asks for nothing different here.
 /// - Mobile: nothing.
 pub fn chrome_for(platform: Platform) -> Option<compose_rust::schema::Chrome> {
     use compose_rust::schema::Chrome;
     match platform {
         Platform::MacOs => Some(Chrome::FullSize),
-        Platform::Windows | Platform::Linux => Some(Chrome::System),
-        Platform::Other => None,
+        Platform::Windows | Platform::Linux | Platform::Other => None,
     }
 }
 
 /// Whether the scene itself draws the caption buttons on `platform`, so content must keep their
-/// strip clear. True only for a chrome other than `System` off macOS.
+/// strip clear: Windows and Linux under any chrome but `System`.
 pub fn scene_draws_caption(platform: Platform) -> bool {
-    use compose_rust::schema::Chrome;
     matches!(platform, Platform::Windows | Platform::Linux)
-        && matches!(chrome_for(platform), Some(Chrome::Modern) | Some(Chrome::FullSize))
+        && chrome_for(platform) != Some(compose_rust::schema::Chrome::System)
 }
 
 /// The safe area for `platform`, given what the toolkit reported (`toolkit`). macOS takes the
 /// toolkit's value (traffic-light group width and strip height) as it is: since compose-rust
 /// v0.0.7 (#468) the renderer measures it again after the window is shown, so a compact
 /// FullSize window gets its first report and Ember keeps no measured fallback. On Windows the
-/// caption buttons sit at the right: under `System` chrome they are outside the content and
-/// nothing is reserved; if the scene drew them it would keep their width at the trailing edge
-/// and never a leading inset. Linux and mobile have nothing to clear.
+/// scene's caption group (46x32 x3) is kept clear at the trailing edge, never a leading inset,
+/// whatever the report says. Linux takes the toolkit's report as it is; mobile has nothing.
 pub fn safe_area_for(platform: Platform, toolkit: SafeArea) -> SafeArea {
     match platform {
         Platform::MacOs => toolkit,
@@ -83,6 +81,7 @@ pub fn safe_area_for(platform: Platform, toolkit: SafeArea) -> SafeArea {
             leading: 0.0,
             trailing: caption_reserved_width(true),
         },
+        Platform::Linux if scene_draws_caption(platform) => toolkit,
         Platform::Windows | Platform::Linux | Platform::Other => SafeArea::default(),
     }
 }
@@ -105,7 +104,11 @@ pub fn safe_area() -> SafeArea {
 /// (FR-L33.1, #875); a compose-rust screen reads it through [`safe_area`].
 pub fn safe_area_from_toolkit(top: f32, leading: f32, trailing: f32) -> SafeArea {
     let platform = current_platform();
-    let toolkit = if platform == Platform::MacOs { SafeArea { top, leading, trailing } } else { SafeArea::default() };
+    let toolkit = if matches!(platform, Platform::MacOs | Platform::Linux) {
+        SafeArea { top, leading, trailing }
+    } else {
+        SafeArea::default()
+    };
     safe_area_for(platform, toolkit)
 }
 
@@ -149,26 +152,26 @@ mod tests {
     const LIGHTS: SafeArea = SafeArea { top: 28.0, leading: 72.0, trailing: 0.0 };
 
     #[test]
-    fn fr_l33_windows_and_linux_keep_the_systems_own_caption() {
+    fn fr_l33_each_system_gets_its_chrome_from_one_helper() {
         use compose_rust::schema::Chrome;
         assert_eq!(chrome_for(Platform::MacOs), Some(Chrome::FullSize));
-        assert_eq!(chrome_for(Platform::Windows), Some(Chrome::System));
-        assert_eq!(chrome_for(Platform::Linux), Some(Chrome::System));
+        assert_eq!(chrome_for(Platform::Windows), None, "toolkit default: Modern");
+        assert_eq!(chrome_for(Platform::Linux), None, "toolkit default: Modern");
         assert_eq!(chrome_for(Platform::Other), None);
-        assert!(!scene_draws_caption(Platform::Windows));
-        assert!(!scene_draws_caption(Platform::Linux));
+        assert!(scene_draws_caption(Platform::Windows));
+        assert!(scene_draws_caption(Platform::Linux));
         assert!(!scene_draws_caption(Platform::MacOs));
+        assert!(!scene_draws_caption(Platform::Other));
     }
 
     #[test]
-    fn fr_l33_windows_reserves_nothing_and_never_a_leading_inset() {
-        // The real caption sits above the content under `System`; even a report carrying a
-        // leading footprint (lights) gives no leading inset on Windows.
-        let a = safe_area_for(Platform::Windows, LIGHTS);
-        assert_eq!(a, SafeArea::default());
+    fn fr_l33_windows_reserves_the_trailing_caption_group_and_never_a_leading_inset() {
+        // Even a report carrying a leading footprint (the v0.0.10 lights) gives the 138x32
+        // trailing group and no leading inset on Windows.
         let caption = SafeArea { top: 32.0, leading: 0.0, trailing: 138.0 };
-        let b = safe_area_for(Platform::Windows, caption);
-        assert_eq!(b.leading, 0.0);
+        assert_eq!(safe_area_for(Platform::Windows, LIGHTS), caption);
+        let b = safe_area_for(Platform::Windows, SafeArea::default());
+        assert_eq!(b, caption);
         for mode in [ShellMode::Sidebar, ShellMode::Rail, ShellMode::BottomTabs] {
             assert_eq!(top_reservation(b, mode), TopReservation::default(), "{mode:?}");
         }
@@ -192,9 +195,16 @@ mod tests {
     }
 
     #[test]
-    fn fr_l33_linux_and_mobile_have_no_safe_area() {
+    fn fr_l33_mobile_has_no_safe_area() {
         assert_eq!(safe_area_for(Platform::Other, LIGHTS), SafeArea::default());
-        assert_eq!(safe_area_for(Platform::Linux, LIGHTS), SafeArea::default());
+    }
+
+    #[test]
+    fn fr_l33_linux_takes_the_toolkits_report() {
+        let end = SafeArea { top: 36.0, leading: 0.0, trailing: 120.0 };
+        assert_eq!(safe_area_for(Platform::Linux, end), end);
+        assert_eq!(safe_area_for(Platform::Linux, LIGHTS), LIGHTS);
+        assert_eq!(top_reservation(end, ShellMode::BottomTabs), TopReservation::default());
     }
 
     #[test]

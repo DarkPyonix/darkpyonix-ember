@@ -631,9 +631,10 @@ pub fn shell() {
 
     let content = || {
         cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width().fill_max_height()).content(|| {
-            if crate::ui::safe_area::scene_draws_caption(crate::ui::safe_area::current_platform()) {
-                // Caption strip, only where the scene draws the caption buttons: an empty drag
-                // region, then the width they cover. Under `System` the caption is the OS's.
+            let platform = crate::ui::safe_area::current_platform();
+            if platform == crate::ui::safe_area::Platform::Windows && crate::ui::safe_area::scene_draws_caption(platform) {
+                // Windows caption strip, where the scene draws the caption buttons: an empty drag
+                // region, then the 138 dp they cover at the trailing edge.
                 cu::Row()
                     .modifier(Modifier::new().fill_max_width().height(WINDOWS_CAPTION_HEIGHT_DP))
                     .content(|| {

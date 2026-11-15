@@ -3126,11 +3126,12 @@ pub mod page {
                     if crate::terminal_input::is_paste_chord(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META)) {
                         event.stop_propagation();
                         event.prevent_default();
-                        // v0.0.7: #546 fixed (`compose_rust::clipboard::read_text`); workaround kept
-                        // until checked on a display (the read has to answer inside the dioxus-compose
-                        // window). Then read the clipboard, ask with `needs_multiline_warning` and send
-                        // `paste_bytes(text, state.bracketed_paste)`. Until then the chord only says why
-                        // nothing is pasted.
+                        // TODO(#673): `compose_rust::clipboard::read_text` (compose-rust#546) is in the pin
+                        // and answers on the HTML path (dioxus-compose's own Cmd+V uses it), but a
+                        // multi-line paste must first ask (`needs_multiline_warning`, Code-OSS's
+                        // dialog) and the window has no confirmation for it yet. Then read the
+                        // clipboard and send `paste_bytes(text, state.bracketed_paste)`; until then the
+                        // chord only says why nothing is pasted.
                         notice(crate::terminal_input::PASTE_UNAVAILABLE);
                         return;
                     }

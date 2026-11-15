@@ -1,0 +1,9 @@
+# Sample project the NFR-W1 extension regression opens. Never built.
+[package]
+name = "regress-sample"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Its own workspace root, so cargo never attaches it to another one.
+[workspace]

@@ -106,8 +106,9 @@ pub fn open_external(url: &str) -> std::io::Result<()> {
 }
 
 /// CLI flag that launches this binary directly into the editor, which runs as its own HTML-mode window (FR-L31).
-/// TODO(dioxus-compose#152): once the `window` element on a shared host lands, open the editor
-/// window on the same host instead of spawning a second process.
+/// TODO(dioxus-compose#161): open the editor window on the shell's host instead of spawning a
+/// second process. The `Window` element (dioxus-compose#152) is in the pin; an HTML page under a
+/// Compose root is what is missing.
 pub const EDITOR_ARG: &str = "--editor";
 
 /// Parse `--editor <project> [folder]` from an argument list (`std::env::args()`).
@@ -163,7 +164,8 @@ where
 }
 
 /// The `(executable, args)` pair that spawns a separate Ember editor window (FR-L31).
-/// TODO(dioxus-compose#152): replace with an in-process `window` node once #152 lands.
+/// TODO(dioxus-compose#161): replace with an in-process `Window` node (dioxus-compose#152, in
+/// the pin) once an HTML page can sit under the shell's Compose root.
 pub fn editor_command(exe: &Path, project: &str, folder: &str, endpoint: &str) -> (PathBuf, Vec<String>) {
     (
         exe.to_path_buf(),

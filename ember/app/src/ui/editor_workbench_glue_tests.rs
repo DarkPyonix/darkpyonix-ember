@@ -309,8 +309,8 @@ fn fr_l31_leaving_an_empty_new_name_field_closes_it_and_a_typed_name_stays() {
 
 // FR-L31 (#832, #827 rule 2): Shift+F10 or the context-menu key on a focused tree row opens the
 // tree's context menu with the row's items, as in Code-OSS. This pins Ember's side of the key
-// path; on the v0.0.6 pin the renderer sends only Enter (compose-rust#100), so a real run does not
-// reach this handler yet.
+// path; compose-rust#100 and #717 are in the v0.0.10 pin, and a real run reaching this handler is
+// not yet checked on a display.
 #[test]
 fn fr_l31_shift_f10_and_the_context_menu_key_on_a_tree_row_open_its_context_menu() {
     let _guard = crate::services::test_guard();

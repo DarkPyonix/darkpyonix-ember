@@ -1994,8 +1994,8 @@ mod design_placement {
         }
         assert!(tree.contains("oncontextmenu: move |event| {"), "rows do not open the context menu");
         assert!(tree.contains("TreeMenuAt::Pointer { x: at.x, y: at.y }"));
-        // Stand-in openers until dioxus-compose forwards right-click (compose-rust#417 is fixed in
-        // v0.0.7; the editor window waits for dioxus-compose).
+        // Stand-in openers until right-click is checked on a display (compose-rust#417 is fixed in
+        // v0.0.7 and dioxus-compose f0e5b9f5 forwards it).
         assert!(tree.contains("TreeMenuAt::Keyboard"), "no Shift+F10 opener");
         assert!(tree.contains("v0.0.7: #417 fixed; workaround kept until checked on a display"));
     }

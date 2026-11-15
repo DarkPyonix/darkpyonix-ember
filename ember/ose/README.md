@@ -16,7 +16,7 @@ Behaviour changes for the IDE window come from `ember/proxy/`.
 | `product.overrides.json` | Deep-merged into upstream `product.json`: DarkPyonix names, Open VSX gallery, telemetry off. |
 | `build.sh` | Fetch tag → apply overrides → `npm ci` → gulp `core-ci` + Copilot extension → gulp `vscode-reh-web-<target>-min-ci` → `tar.gz` + `.sha256`. CI only; see [Build notes](#build-notes). |
 | `check-product.sh` | Fails if a `product.json` is not on Open VSX, has telemetry on, or names a Microsoft marketplace/update/telemetry endpoint. |
-| `regress.sh` | Extension regression (NFR-W1, #84): installs `regression/extensions.json` from Open VSX, parses extension host logs, compares with `regression/expected.json`. Activation needs a client (`OSE_REGRESS_CLIENT`, not built); `--self-test` runs offline. The list is provisional until the owner confirms it. |
+| `regress.sh` | Extension regression (NFR-W1, #84): installs `regression/extensions.json` from Open VSX at the pinned versions, parses extension host logs, compares with `regression/expected.json`. Activation needs a client (`OSE_REGRESS_CLIENT`); `--self-test` runs offline. See [Extension regression](#extension-regression). |
 | `smoke.sh` | Starts a packaged build and checks: workbench served, Open VSX search, extension install. |
 
 Builds run in GitHub Actions (`.github/workflows/test-ose.yml`), never on a developer machine:
@@ -40,8 +40,96 @@ rebuild) runs the matrix in `test-ose.yml`. When that run succeeds, `publish-ose
 that run's archives, checks them against their checksums and publishes a GitHub release with all
 archives and `SHA256SUMS`, so the release holds exactly the files the build produced.
 
+After the build, the **Live checks** job runs once per target on the same runner type
+(`docs/SPEC.md`, FR-W4 acceptance step 4). It downloads the archive the run built, verifies the
+checksum, unpacks it, and runs the Ember editor session's live tests against it
+(`ember/editor-conn/tests/live_ose.rs`, `ember/editor/tests/live_session.rs`,
+`ember/editor/tests/fr_l31_14_live_extensions.rs`), then the extension regression. A failing live
+test fails the run, so `publish-ose.yml` publishes nothing from it. This job is written and has
+not run in CI yet.
+
+There is no Windows target. `build.sh`, `smoke.sh` and the live tests are written for Linux and
+macOS, and whether a Windows computer hosts an OSE is not decided (#83).
+
 To move to a new Code-OSS release: change `VERSION`, open a PR (the `product` job checks the new
 upstream `product.json` against the overrides in seconds), then run the workflow manually or tag.
+
+## Extension regression
+
+`regress.sh` answers one question for a list of extensions: does each one install from Open VSX
+into this OSE build and activate in its extension host without an error (NFR-W1, #84).
+
+- `regression/extensions.json` is the list. Each entry is `{id, version, open}`. `version` is the
+  exact Open VSX version that is installed, so two runs test the same extension code. `null`
+  installs the newest version the OSE accepts; the run prints the installed folders, and the
+  version is pinned from that. `open` is a file of `regression/workspace/` whose language
+  triggers the extension, or `null` for an extension that activates at startup.
+- `regression/expected.json` records the expected result of each: `pass`, or `known-fail` with a
+  `reason`. A `pass` that does not activate fails the run. A `known-fail` that activates prints a
+  warning, so the record is corrected.
+- `regression/workspace/` is a small project (YAML, JavaScript, Python, Go, Rust, TOML, Java). It
+  is copied for each run and never built.
+
+The extension host starts only when a client connects, so the run needs one. The client is
+Ember's own editor session, `ember/editor/tests/nfr_w1_extension_regression.rs`: it connects, opens
+every `open` file and stays connected for `OSE_REGRESS_SETTLE` seconds (default 30).
+
+```sh
+export EMBER_OSE_SERVER="$(ember/editor-conn/scripts/fetch-ose-artifact.sh)"
+export OSE_REGRESS_CLIENT='cargo test --locked --manifest-path ember/editor/Cargo.toml --test nfr_w1_extension_regression -- --ignored --nocapture'
+OSE_REGRESS_OUT=.scratch/regress ember/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
+```
+
+`OSE_REGRESS_OUT` keeps `results.json` (the status of every listed extension), `installed.txt` and
+the extension host logs. In CI the Live checks job runs this per target and uploads the folder as
+`ose-regress-<target>`.
+
+Status today: the harness, the client and the data are written. No run against a real OSE has
+happened, so every `expected.json` entry is an unverified `pass`, and the step does not fail the
+job yet. `rust-lang.rust-analyzer` and `eamodio.gitlens` have no pinned version: Open VSX lists
+mostly pre-release builds for them, and the first run shows which version the OSE takes.
+`vscodevim.vim` declares `extensionKind` `ui`, which Code-OSS runs beside the window, not on the
+server; whether it activates in the server's extension host is unknown until the first run. The
+list itself awaits the owner's confirmation.
+
+What the run does not show: behaviour after activation (a language server answering, a formatter
+formatting), an activation that starts and never finishes, and a comparison with the same
+extensions under Microsoft's build.
+
+## Release check on a Raspberry Pi and a Mac
+
+`docs/SPEC.md` FR-W4 acceptance step 5 asks for one manual check per release on a Raspberry Pi
+(64-bit OS) and a Mac, because CI runners are not those machines and nobody looks at the window
+there. Run it on the machine itself, in a checkout of this repository, with `gh` signed in.
+
+```sh
+tag=ose-v1.139.1    # the release to check
+
+# 1. Download the published archive for this machine, check it against the release's SHA256SUMS,
+#    unpack it into .scratch/ose. Prints the launcher path.
+server="$(OSE_RELEASE=$tag ember/editor-conn/scripts/fetch-ose-artifact.sh)"
+
+# 2. The automated part: product.json, start, Open VSX search, install.
+ember/ose/smoke.sh "$(dirname "$(dirname "$server")")"
+
+# 3. The part that needs a person. Open the printed URL in a browser.
+export DPX_OSE_SERVER="$server"
+cd ember/proxy && python -m dpx.serve --root ~/work
+```
+
+In the IDE window, check three things:
+
+1. The window opens and shows the folder.
+2. The Extensions view finds an extension by name (Open VSX) and installs it.
+3. Help → About shows "DarkPyonix OSE" and the Code-OSS version of the tag.
+
+Then add a row below, in the pull request or commit that follows the release.
+
+| Release | Machine and OS | Date | Steps 1 to 3 of the script | Window checks 1 to 3 | By |
+| ------- | -------------- | ---- | -------------------------- | -------------------- | -- |
+| (none yet) | | | | | |
+
+No release has been checked this way yet.
 
 ## Build notes
 

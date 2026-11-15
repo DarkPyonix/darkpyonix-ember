@@ -460,15 +460,16 @@ pub fn letter_label(letter: char) -> &'static str {
     }
 }
 
-/// The colour token of a status letter.
+/// The colour token of a status letter, the mockup's map (`vcs.js:19` `VCS_ST`, FR-L31.39):
+/// modified orange, added green, deleted red, renamed blue. Untracked joins added, copied joins
+/// renamed, a conflict and any other change take the modified orange, and a type change is grey.
 pub fn letter_color(letter: char) -> &'static str {
     match letter {
         'A' | 'U' => "var(--c-green)",
         'D' => "var(--c-red)",
-        'R' | 'C' => "var(--c-sky)",
-        '!' => "var(--c-orange)",
+        'R' | 'C' => "var(--c-blue)",
         'T' => "var(--muted)",
-        _ => "var(--c-blue)",
+        _ => "var(--c-orange)",
     }
 }
 
@@ -478,10 +479,9 @@ pub fn letter_tone(letter: char) -> &'static str {
     match letter {
         'A' | 'U' => "green",
         'D' => "red",
-        'R' | 'C' => "sky",
-        '!' => "orange",
+        'R' | 'C' => "blue",
         'T' => "grey",
-        _ => "blue",
+        _ => "orange",
     }
 }
 

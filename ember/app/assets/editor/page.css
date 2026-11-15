@@ -66,7 +66,6 @@ html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font
 .ed-scm-st.green{background:var(--c-green-soft);color:var(--c-green)}
 .ed-scm-st.red{background:var(--c-red-soft);color:var(--c-red)}
 .ed-scm-st.blue{background:var(--c-blue-soft);color:var(--c-blue)}
-.ed-scm-st.sky{background:var(--c-sky-soft);color:var(--c-sky)}
 .ed-scm-st.grey{background:var(--c-grey-soft);color:var(--text-2)}
 .ed-scm-cb{width:18px;height:18px;flex:none;border:1.5px solid var(--c-grey);border-radius:5px;background:var(--surface);cursor:pointer;padding:0;display:grid;place-items:center;box-sizing:border-box}
 .ed-scm-cb.on{background:var(--ink);border-color:var(--ink)}

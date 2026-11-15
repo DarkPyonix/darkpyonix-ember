@@ -196,6 +196,10 @@ pub struct WebPage {
     pub label: String,
     pub url: Option<String>,
     pub note: Option<&'static str>,
+    /// The address shown (`url`, or `:port` when it cannot be opened).
+    pub address: String,
+    /// The listening process, empty when the node did not name it.
+    pub process: String,
 }
 
 /// The state of the 웹 페이지 list.
@@ -275,8 +279,8 @@ pub fn web_pages_from(
             },
         };
         let shown = url.clone().unwrap_or_else(|| format!(":{port}"));
-        let label = if lp.process.is_empty() { shown } else { format!("{shown} ({})", lp.process) };
-        rows.push((port, WebPage { label, url, note }));
+        let label = if lp.process.is_empty() { shown.clone() } else { format!("{shown} ({})", lp.process) };
+        rows.push((port, WebPage { label, url, note, address: shown, process: lp.process.clone() }));
     }
     rows.sort_by(|a, b| (a.0, &a.1.url, &a.1.label).cmp(&(b.0, &b.1.url, &b.1.label)));
     rows.dedup_by(|b, a| a.0 == b.0 && a.1.url == b.1.url);
@@ -294,6 +298,41 @@ pub fn web_menu_lines(load: &WebPagesLoad) -> Vec<String> {
         WebPagesLoad::Empty => vec![WEB_EMPTY.to_string()],
         WebPagesLoad::Unsupported => vec![WEB_UNSUPPORTED.to_string()],
         WebPagesLoad::Failed(e) => vec![e.clone()],
+    }
+}
+
+/// The head of the 웹 페이지 menu (mockup `webMenu` `.sdrop-h b`).
+pub const WEB_MENU_HEAD: &str = "웹 페이지 열기";
+
+/// One row of the 웹 페이지 menu (FR-L10.4, #888): the address in the mono face, the process and
+/// why it cannot be opened below it, and whether it opens (the green 감지됨 pill).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebMenuItem {
+    pub title: String,
+    pub detail: Option<String>,
+    pub detected: bool,
+    pub mono: bool,
+}
+
+/// The menu's rows, in the order of [`web_menu_lines`], so [`web_tap`] answers for row `idx`.
+pub fn web_menu_items(load: &WebPagesLoad) -> Vec<WebMenuItem> {
+    match load {
+        WebPagesLoad::Ready(pages) => pages
+            .iter()
+            .map(|w| {
+                let parts: Vec<&str> = [w.process.as_str(), w.note.unwrap_or("")].into_iter().filter(|t| !t.is_empty()).collect();
+                WebMenuItem {
+                    title: w.address.clone(),
+                    detail: (!parts.is_empty()).then(|| parts.join(" \u{b7} ")),
+                    detected: w.url.is_some(),
+                    mono: true,
+                }
+            })
+            .collect(),
+        other => web_menu_lines(other)
+            .into_iter()
+            .map(|title| WebMenuItem { title, detail: None, detected: false, mono: false })
+            .collect(),
     }
 }
 
@@ -675,6 +714,28 @@ fn ide_label(kind: IdeKind) -> &'static str {
         IdeKind::VsCode => "VS Code",
         IdeKind::Gateway => "JetBrains Gateway",
     }
+}
+
+/// The head of the IDE menu (mockup `ideMenu` `.sdrop-h b`).
+pub const IDE_MENU_HEAD: &str = "어느 IDE로 열까요";
+
+/// The line under an IDE's name in the menu: what this client does with it (FR-L7, FR-L10.4).
+/// The mockup's wording is kept where the client does the same: the Ember editor opens its own
+/// window, VS Code opens the server's web IDE address in the browser, and Gateway gets a
+/// `jetbrains-gateway://` link through the OS (`crate::ide::plan`).
+pub fn ide_description(kind: IdeKind) -> &'static str {
+    match kind {
+        IdeKind::Ember => "Ember 자체 에디터 창으로 엽니다",
+        IdeKind::VsCode => "그 컴퓨터의 웹 IDE를 브라우저로 엽니다",
+        IdeKind::Gateway => "JetBrains Gateway에 열기 링크를 보냅니다",
+    }
+}
+
+/// The IDE the menu marks as current: the remembered one, else Ember's own editor, which the
+/// mockup names on the button and checks in the menu before anything is chosen (`ideMenu`,
+/// `on = s.ide || "ember"`; review r8: a fresh profile showed no current row).
+pub fn current_ide(remembered: Option<IdeKind>) -> IdeKind {
+    remembered.unwrap_or(IdeKind::Ember)
 }
 
 /// Exactly the three IDEs of D32, the remembered one first.
@@ -1820,6 +1881,17 @@ mod tests {
         assert!(kinds.contains(&IdeKind::Ember) && kinds.contains(&IdeKind::VsCode));
     }
 
+    #[test]
+    fn fr_l10_4_ide_menu_head_and_one_honest_line_per_ide() {
+        assert_eq!(IDE_MENU_HEAD, "어느 IDE로 열까요");
+        for k in IdeKind::ALL {
+            assert!(!ide_description(k).is_empty(), "{k:?}");
+        }
+        // What each one does in this client, not the mockup's wording where the client differs.
+        assert_eq!(ide_description(IdeKind::VsCode), "그 컴퓨터의 웹 IDE를 브라우저로 엽니다");
+        assert_eq!(ide_description(IdeKind::Gateway), "JetBrains Gateway에 열기 링크를 보냅니다");
+    }
+
     // ---- FR-L18: panes, tabs and the reorder menu --------------------------------------------
 
     #[test]
@@ -2167,6 +2239,25 @@ mod tests {
             web_menu_lines(&WebPagesLoad::Unsupported),
             ["이 컴퓨터는 포트 목록을 지원하지 않습니다"]
         );
+    }
+
+    #[test]
+    fn fr_l10_4_web_menu_rows_split_the_address_from_the_process_and_mark_detected_ones() {
+        use ember_client::api::PortScope::*;
+        assert_eq!(WEB_MENU_HEAD, "웹 페이지 열기");
+        let load = web_pages_from(Ok(ports_of(vec![lp(3000, Lan, "node"), lp(5173, Loopback, "vite")])), &remote("h"));
+        let rows = web_menu_items(&load);
+        assert_eq!(rows[0], WebMenuItem { title: "http://h:3000".into(), detail: Some("node".into()), detected: true, mono: true });
+        assert_eq!(
+            rows[1],
+            WebMenuItem { title: ":5173".into(), detail: Some("vite \u{b7} 이 컴퓨터 안에서만 열 수 있습니다".into()), detected: false, mono: true }
+        );
+        // A state line is one plain row, so a tap still says it.
+        assert_eq!(
+            web_menu_items(&WebPagesLoad::Empty),
+            [WebMenuItem { title: "열려 있는 웹 포트가 없습니다".into(), detail: None, detected: false, mono: false }]
+        );
+        assert_eq!(web_menu_items(&WebPagesLoad::Loading).len(), web_menu_lines(&WebPagesLoad::Loading).len());
     }
 
     #[test]

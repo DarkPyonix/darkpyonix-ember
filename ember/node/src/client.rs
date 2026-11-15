@@ -6,7 +6,7 @@
 //! - **Transport** ([`NodeClient::over_transport`]): the peer-to-peer transport (SPEC `FR-N1`,
 //!   `FR-N5`), dialing the node by its [`PeerAddr`] for service [`NODE_SERVICE`]. Each HTTP
 //!   request runs on a fresh stream of one cached connection ([`Dialer`]); each WebSocket
-//!   (exec, events, exec-server, terminal attach) gets its own stream.
+//!   (exec, events, exec-server, terminal attach, OSE relay) gets its own stream.
 //!
 //! [`NodeClient::with_deadline`] bounds every HTTP request the same way on both reaches (for the
 //! transport: stream open, HTTP handshake, request and the whole response body). WebSockets are
@@ -332,7 +332,7 @@ impl NodeClient {
         serde_json::to_vec(body).expect("serialisable")
     }
 
-    async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+    pub(crate) async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
         Self::decode(self.send(Method::POST, path, Some(Self::json(body)), true).await?)
     }
 

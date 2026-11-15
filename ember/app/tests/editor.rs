@@ -492,12 +492,31 @@ mod status {
 
 // FR-L31 (D38): the window opens FullSize on macOS, the top bar is the title strip.
 mod title_strip {
-    use ember_app::ui::editor::{editor_page_height, editor_strip_padding};
+    use ember_app::ui::editor::{editor_error_padding, editor_page_size_style, editor_strip_padding};
 
+    // #301, #320: the page is the viewport on every system, with no title bar height taken out.
     #[test]
-    fn fr_l31_full_size_page_is_the_window_height_and_other_chrome_keeps_its_allowance() {
-        assert_eq!(editor_page_height(true), "100vh");
-        assert_eq!(editor_page_height(false), "calc(100vh - 76px)");
+    fn fr_l31_37_the_page_is_the_viewport_with_no_title_bar_allowance() {
+        assert_eq!(editor_page_size_style(), "width:100vw; height:100vh;");
+    }
+
+    // #301: no stylesheet of the page keeps the 76px title bar allowance.
+    #[test]
+    fn fr_l31_37_the_stylesheets_keep_no_title_bar_allowance() {
+        let css = ember_app::ui::editor_workbench::page::config().stylesheets.join("\n");
+        let compact: String = css.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(!compact.contains("100vh-76px"), "a stylesheet still takes 76px out of the viewport height");
+        assert!(!compact.contains("var(--sbh)+76px"), "a stylesheet still adds 76px above the status bar");
+        // The mockup's own rule places the overlaid left tool window down to the status bar.
+        assert!(compact.contains("top:52px;bottom:var(--sbh);"), "the left tool window overlay does not end at the status bar");
+    }
+
+    // #301: the error message clears the title strip the window reports, not a fixed height.
+    #[test]
+    fn fr_l31_37_the_error_message_starts_below_the_reported_title_strip() {
+        assert_eq!(editor_error_padding(true, 28.0), "padding:20px; padding-top:48px;");
+        assert_eq!(editor_error_padding(true, 0.0), "padding:20px; padding-top:20px;");
+        assert_eq!(editor_error_padding(false, 28.0), "padding:20px; padding-top:20px;");
     }
 
     #[test]
@@ -524,6 +543,15 @@ mod title_strip {
         let given = ember_app::ui::cr::shell::window_chrome(Window::new()).chrome;
         let plain = Window::new().chrome;
         assert_eq!(given, if cfg!(target_os = "macos") { Chrome::FullSize } else { plain });
+    }
+
+    // #320: the window asks for a size report on every dp change, so the title strip's safe area
+    // and the window size the page's hooks read follow a resize that crosses no size class.
+    #[test]
+    fn fr_l31_37_editor_window_asks_for_a_size_report_on_every_dp_change() {
+        use compose_rust::schema::Window;
+        assert!(!Window::new().report_size, "the toolkit's default reports on size class changes only");
+        assert!(ember_app::ui::cr::shell::window_chrome(Window::new()).report_size);
     }
 }
 
@@ -1940,10 +1968,30 @@ mod design_chrome {
         assert!(PAGE.contains("span { class: \"hide-md\", \"{crate::ui::editor::FIND_PILL_LABEL}\" }"));
     }
 
+    /// FR-L31.30 (#895, design review E5): a preview tab's label is upright, as every tab's in the
+    /// mockup (`editor.css:54-56`), and no rule of the page sets a tab label in italics.
+    #[test]
+    fn fr_l31_30_a_preview_tab_keeps_the_mockups_upright_label() {
+        let css = compact_css();
+        assert!(css.contains(".ed-tab{position:relative;display:flex;align-items:center;gap:6px;height:30px;"));
+        assert!(!css.contains(".ed-tab.preview>.ellipsis{font-style:italic}"));
+        let tab_rules: Vec<&str> = css.split('}').filter(|rule| rule.contains(".ed-tab") && rule.contains("font-style")).collect();
+        assert!(tab_rules.is_empty(), "{tab_rules:?}");
+        // The class stays, so the tab is still told apart in the markup.
+        assert_eq!(ember_app::ui::editor::tab_class_with(true, false, false, true), "ed-tab on preview");
+    }
+
     #[test]
     fn design_a6_palette_overlay_takes_no_grid_row() {
-        assert!(PAGE.contains("style: \"position:fixed; grid-row:1; grid-column:1; left:0; top:0; right:0; bottom:0; z-index:39;\""));
-        assert!(PAGE.contains("style: \"position:fixed; grid-row:1; grid-column:1; z-index:40; top:60px;"));
+        // FR-L31.26 put the overlays in `.ed-layers`, so the palette's scrim needs no grid placement,
+        // and FR-L31.29 hangs its list under the find pill (`.ed-pal`), outside the page grid.
+        assert!(PAGE.contains("style: \"position:fixed; left:0; top:0; right:0; bottom:0; z-index:39;\", \"data-ed\": \"palette-scrim\","));
+        assert!(PAGE.contains("div { class: \"ed-menu ed-pal\", role: \"dialog\", \"aria-label\": \"명령 팔레트\","));
+        let css = compact_css();
+        assert!(css.contains(".ed-menu.ed-pal{position:absolute;z-index:40;top:calc(100%+6px);right:0;left:auto;"));
+        // The box itself is the stacking context above the islands (a positioned box with `z-index:auto`
+        // is painted as one unit in tree order, under the later editor island).
+        assert!(css.contains(".ed-findbox{position:relative;z-index:40;display:flex;min-width:0}"));
         assert!(ember_app::ui::editor_menu::menu_style().contains("grid-row:1; grid-column:1;"));
     }
 

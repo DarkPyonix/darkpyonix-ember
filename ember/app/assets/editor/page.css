@@ -1,16 +1,12 @@
 /* Ember-owned additions to the mockup's editor styles. */
 html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font)}
-@media (max-width:900px){
- /* The page is 76px shorter than the window (see TODO(#320) in the page), so the overlay's bottom edge follows it. */
- .ed-left{bottom:calc(var(--sbh) + 76px)}
-}
 .ed{color:var(--text);font-family:var(--font)}
 /* The top bar is the window's title strip under FullSize: a drag region, with its controls cut out. */
 .ed-top{-webkit-app-region:drag}
 .ed-top button,.ed-top .ed-menu{-webkit-app-region:no-drag}
 /* FR-L31.5 tabs: the mockup draws no preview or pinned tab, so these follow Code-OSS on the mockup's tokens.
-   A preview tab sets its name in italics; a pinned tab keeps its pin button visible where the close button is. */
-.ed-tab.preview>.ellipsis{font-style:italic}
+   A pinned tab keeps its pin button visible where the close button is. A preview tab keeps the mockup's
+   upright label (FR-L31.30): set in italics, as Code-OSS does, its last letter was cut ("README.ma"). */
 .ed-tab.pinned .ed-tx{opacity:1}
 /* The tab context menu opens where the pointer is, over a transparent scrim that closes it. */
 .ed-scrim{position:fixed;inset:0;z-index:19;background:transparent}
@@ -37,3 +33,52 @@ html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font
    grid items; drop .ed-layers and .ed-none once they make no box. */
 .ed-layers{grid-row:1;grid-column:1;width:0;height:0;min-width:0;min-height:0}
 .ed-none{display:none}
+/* FR-L31.29 (#895, design review E4): quick open hangs under the find pill. The pill's box is the
+   list's containing block; the list is as wide as the old sheet and ends at the pill's right edge.
+   Its query row is a row with a line under it, so the popover has one frame. */
+/* The box carries the z-index itself: the HTML path paints a positioned box with `z-index:auto` as one
+   unit with its descendants, in tree order, so the list's own z-index alone left it under the editor
+   island, which is positioned and comes later in the tree. */
+.ed-findbox{position:relative;z-index:40;display:flex;min-width:0}
+@media (min-width:1101px){.ed-top .ed-findbox{flex:none}}
+.ed-menu.ed-pal{position:absolute;z-index:40;top:calc(100% + 6px);right:0;left:auto;width:min(560px,calc(100vw - 24px));min-width:0;padding:0;overflow:hidden}
+.ed-palq{display:flex;align-items:center;gap:var(--sp2);height:40px;padding:0 var(--sp3);border-bottom:1px solid var(--line);color:var(--muted);font-size:var(--fs-sm);box-sizing:border-box}
+.ed-palq input{flex:1;min-width:0;border:0;background:none;outline:none;color:var(--text);font:inherit;padding:0}
+.ed-pall{max-height:320px;overflow:auto;padding:var(--sp1)}
+/* Below 900px the pill shrinks or is hidden (`editor.css` responsive rules), so the list is placed
+   against the window instead. */
+@media (max-width:900px){.ed-menu.ed-pal{position:fixed;top:48px;left:12px;right:12px;width:auto}}
+@media (max-width:560px){.ed-findbox{margin-left:calc(var(--sp2) * -1)}}
+/* FR-L31.32 (#895, design review E7): the 커밋 window's rows. The mockup has no editor 커밋 window,
+   so the rows take the nearest mockup rules: full-width rows (`vcs.css:59,64-66`), the 20px soft
+   status badge (`vcs.css:73-77`) and the 18px square check (`vcs.css:68-69`). The list and its
+   groups are columns whose items stretch, so a row is as wide as the window and not as its text. */
+.ed-scm-list{display:flex;flex-direction:column}
+.ed-scm-group{display:flex;flex-direction:column;flex:none;width:100%;min-width:0;box-sizing:border-box}
+.ed-scm-head{flex:none}
+.ed-tn.ed-scm-row{gap:3px;padding-right:var(--sp2);flex:none}
+.ed-scm-name{display:flex;align-items:center;gap:6px;flex:1 1 0;min-width:0;align-self:stretch}
+.ed-scm-name>.fn{flex:0 1 auto;min-width:20px;overflow:hidden;text-overflow:ellipsis}
+.ed-scm-name>.dir{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--muted);font-size:var(--fs-2xs)}
+.ed-scm-slot{width:20px;height:20px;flex:none}
+.ed-scm-st{display:grid;place-items:center;width:20px;height:20px;margin-left:3px;border-radius:5px;font:600 var(--fs-2xs) var(--mono);flex:none;cursor:pointer}
+.ed-scm-st.orange{background:var(--c-orange-soft);color:var(--c-orange)}
+.ed-scm-st.green{background:var(--c-green-soft);color:var(--c-green)}
+.ed-scm-st.red{background:var(--c-red-soft);color:var(--c-red)}
+.ed-scm-st.blue{background:var(--c-blue-soft);color:var(--c-blue)}
+.ed-scm-st.sky{background:var(--c-sky-soft);color:var(--c-sky)}
+.ed-scm-st.grey{background:var(--c-grey-soft);color:var(--text-2)}
+.ed-scm-cb{width:18px;height:18px;flex:none;border:1.5px solid var(--c-grey);border-radius:5px;background:var(--surface);cursor:pointer;padding:0;display:grid;place-items:center;box-sizing:border-box}
+.ed-scm-cb.on{background:var(--ink);border-color:var(--ink)}
+/* FR-L31.33 (#895, design review E8): the commit button, as the mockup's `.vcs-cbtn` on the primary
+   button (`vcs.css:80-82`, `style.css:71-74`): at least `--h-btn` high, 14/500, the branch in mono. */
+.ed-pj.ed-scm-commit{justify-content:center;gap:var(--sp2);width:100%;min-width:0;height:auto;min-height:var(--h-btn);padding:8px 16px;background:var(--ink);color:var(--ink-text);font-size:var(--fs-md);font-weight:var(--fw-medium);line-height:var(--lh-md);white-space:normal;text-align:center;box-sizing:border-box}
+.ed-pj.ed-scm-commit:hover{background:var(--ink);opacity:.88}
+/* The label is a wrapping row of two boxes, the mono branch and the words: as two runs of one line the
+   words were set over the branch's last letter. */
+.ed-scm-commit>span{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:center;min-width:0;overflow-wrap:anywhere}
+.ed-scm-commit b{font-family:var(--mono);font-size:var(--fs-sm);font-weight:var(--fw-medium)}
+/* FR-L31.34 (#895, design review E9): a tool window's notice ("문제가 없습니다", "출력이 없습니다", the
+   terminal's and the run panel's notices) is prose: the UI face at `--fs-sm`, `muted`, in the terminal
+   body's padding (`editor.css:103` `.ed-term`), which stays mono for output only. */
+.ed-note{flex:1;overflow:auto;min-height:0;padding:var(--sp3) var(--sp4);font:var(--fw-regular) var(--fs-sm)/var(--lh-sm) var(--font);color:var(--muted)}

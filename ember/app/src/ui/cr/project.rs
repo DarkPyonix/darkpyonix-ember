@@ -608,17 +608,8 @@ fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
         .content(|| {
             cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
                 cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
-                    cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                        TeamDonut(&b.members, 60.0);
-                        let (full, id) = (st.full.clone(), b.id.clone());
-                        // The name opens the full view (the container's `on_click`, compose-rust#372).
-                        Clickable(Modifier::new().weight(1.0), Alignment::CenterStart, move || full.set(Some(id.clone())), || {
-                            cu::Column().content(|| {
-                                Label(&b.name, PROJECT_NAME.0, PROJECT_NAME.1, None, Some(1));
-                                Label(&b.repo_line(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                            });
-                        });
-                        // `.pbox-act`: version control, settings, and the primary "세션 열기".
+                    // `.pbox-act`: version control, settings, and the primary "세션 열기".
+                    let actions = || {
                         cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
                             let (u, id) = (ui.clone(), b.id.clone());
                             IconAction(super::session::ICON_GIT_SVG, super::a11y::VERSION_CONTROL, move || {
@@ -629,8 +620,35 @@ fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
                             IconAction(shell::ICON_GEAR_SVG, super::a11y::PROJECT_SETTINGS, move || settings.set(Some(id.clone())));
                             OpenSessionButton(b, ui, true);
                         });
+                    };
+                    let below = box_actions_below(w);
+                    cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                        TeamDonut(&b.members, 60.0);
+                        let (full, id) = (st.full.clone(), b.id.clone());
+                        // The name opens the full view (the container's `on_click`, compose-rust#372).
+                        Clickable(Modifier::new().weight(1.0), Alignment::CenterStart, move || full.set(Some(id.clone())), || {
+                            cu::Column().content(|| {
+                                Label(&b.name, PROJECT_NAME.0, PROJECT_NAME.1, None, Some(1));
+                                Label(&b.repo_line(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            });
+                        });
+                        if !below {
+                            actions();
+                        }
                     });
-                    Stats(b, inner);
+                    if below {
+                        // The mockup's `.pbox-h` areas "t t" / "s a" (`project.css`): the stats,
+                        // then the actions at the end of the same row, so the name keeps the
+                        // title row (FR-L28.7, Flip 4 review 2.2).
+                        cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                                Stats(b, (inner - BOX_ACTIONS_W - SP[2]).max(0.0));
+                            });
+                            actions();
+                        });
+                    } else {
+                        Stats(b, inner);
+                    }
                 });
                 cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                 cu::Box()
@@ -669,6 +687,16 @@ fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
             });
         });
 }
+
+/// Whether a project box puts its actions beside the stats instead of beside the name: at 560
+/// and below, where three 32 dp buttons beside the 60 dp ring left the name about 85 dp at 360
+/// (FR-L28.7). An unreported width (0) is not a phone.
+pub fn box_actions_below(width_dp: f32) -> bool {
+    width_dp > 0.0 && width_dp <= 560.0
+}
+
+/// The width of `.pbox-act`: three 32 dp buttons 4 apart.
+pub const BOX_ACTIONS_W: f32 = 3.0 * H_CTL + 2.0 * SP[0];
 
 /// The deck: overlapped avatars of the first hidden members, `외 N명` and the first three names.
 /// Clicking it expands the box (the container's `on_click`, compose-rust#372).
@@ -2534,6 +2562,51 @@ mod tests {
         let (ca, cb) = (chain(a), chain(b));
         let shared = ca.iter().find(|id| cb.contains(id)).expect("one tree");
         nodes[shared].0.clone()
+    }
+
+    fn project_grid_tree(size: (f32, f32)) -> (std::collections::HashMap<u32, (String, Option<u32>)>, Vec<(String, u32)>) {
+        crate::ui::window_size::set_opened_for_test(Some(size));
+        let mut host = Host::new(|| Box::new(Recomposer::new(ProjectScreen)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        crate::ui::window_size::set_opened_for_test(None);
+        let mut nodes = std::collections::HashMap::new();
+        let mut texts = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::Create { node_id, widget } => {
+                    nodes.insert(*node_id, (format!("{widget:?}"), None));
+                }
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    if let Some(n) = nodes.get_mut(node_id) {
+                        n.1 = Some(*parent_id);
+                    }
+                }
+                Mutation::SetProp { node_id, value: PropertyValue::String(t), .. } => texts.push((t.to_string(), *node_id)),
+                _ => {}
+            }
+        }
+        (nodes, texts)
+    }
+
+    #[test]
+    fn fr_l28_7_project_box_actions_leave_the_title_row_at_360() {
+        // Flip 4 review 2.2: at 360 the name was cut to about 85 dp beside the ring and the three
+        // buttons. At 560 and below the buttons go to the stats row, as the mockup's "s a" area.
+        assert!(box_actions_below(360.0));
+        assert!(box_actions_below(560.0));
+        assert!(!box_actions_below(561.0));
+        assert!(!box_actions_below(0.0));
+        assert_eq!(BOX_ACTIONS_W, 104.0);
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        // The demo's first project (the Flip 4 capture's "demo-pr...").
+        let name = "demo-project".to_string();
+        let (nodes, texts) = project_grid_tree((360.0, 880.0));
+        assert_eq!(nearest_shared(&nodes, &texts, &name, super::super::a11y::VERSION_CONTROL), "Column", "not on the title row at 360");
+        assert_eq!(nearest_shared(&nodes, &texts, super::super::a11y::VERSION_CONTROL, "컴퓨터"), "Row", "beside the stats");
+        let (nodes, texts) = project_grid_tree((1440.0, 900.0));
+        assert_eq!(nearest_shared(&nodes, &texts, &name, super::super::a11y::VERSION_CONTROL), "Row", "beside the name on a desktop");
+        compose_rust::window::reset_window_size();
     }
 
     #[test]

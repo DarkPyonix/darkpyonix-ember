@@ -442,9 +442,10 @@ pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(Botto
                                 Alignment::Center,
                                 move || choose_tab(tab),
                                 || {
-                                  // The pill is the tab's content width, not the whole cell.
+                                  // The pill fills its cell (`.nav.tab{flex:1 1 0;min-width:0}` at 560
+                                  // and below): a fixed 70 dp pill overflowed a 360 window (FR-L28.1).
                                   cu::Box()
-                                    .modifier(Modifier::new().width(70.0).height(52.0).background(bg).corner_radius(20.0))
+                                    .modifier(Modifier::new().fill_max_width().height(52.0).background(bg).corner_radius(20.0))
                                     .alignment(Alignment::Center)
                                     .content(|| {
                                     cu::Box().modifier(Modifier::new().fill_max_width().fill_max_height()).alignment(Alignment::Center).content(|| {
@@ -1300,6 +1301,38 @@ mod tests {
         assert!(len_after_send > initial);
         assert!(s.reset_demo());
         assert_eq!(d.events_for("demo-s1").len(), initial);
+    }
+
+    /// Every `SetModifier` one composition sends, as debug text.
+    fn sent_modifiers(content: fn()) -> Vec<String> {
+        use compose_rust::protocol::{decode_batch, Mutation};
+        use compose_rust::{Host, Recomposer};
+        let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { modifier, .. } => Some(format!("{modifier:?}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fr_l28_1_the_tab_bar_fits_a_360_window_with_12_on_both_sides() {
+        // Flip 4 review 3.1: five fixed 70 dp pills (350) plus the 4 dp insides and the 12 dp
+        // sides (32) asked for 382 dp in a 360 window, so the card ran to the right edge. The
+        // mockup's tab is `flex:1 1 0; min-width:0` (`style.css`), so the pill takes its cell.
+        crate::ui::window_size::set_opened_for_test(Some((360.0, 880.0)));
+        let mods = sent_modifiers(|| BottomBar(NavMenu::Home, NavCounts::default(), |_| {}));
+        crate::ui::window_size::set_opened_for_test(None);
+        let fixed: f32 = mods
+            .iter()
+            .filter_map(|m| m.strip_prefix("Width(").and_then(|r| r.strip_suffix(')')).and_then(|v| v.parse::<f32>().ok()))
+            .sum();
+        assert!(fixed <= 360.0 - 2.0 * TABBAR_SIDE_GAP, "fixed widths {fixed} dp leave no room at 360: {mods:?}");
+        assert_eq!(mods.iter().filter(|m| *m == "Width(12.0)").count(), 2, "12 dp on both sides: {mods:?}");
+        assert!(!mods.iter().any(|m| m == "Width(70.0)"), "no fixed 70 dp pill: {mods:?}");
     }
 
     fn count_text(batch: &[compose_rust::protocol::Mutation<'_>], want: &str) -> usize {

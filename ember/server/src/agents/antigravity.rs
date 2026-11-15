@@ -685,6 +685,14 @@ impl HookCall {
     }
 }
 
+/// Whether `call` is the `channel_post` call of Ember's `ember-channels` server (FR-T12). agy keys
+/// approvals by the tool name `call_mcp_tool`, so an "allow always" for it would allow every MCP
+/// tool of the run: this call is allowed once at a time and never remembered.
+fn is_channel_post(call: &HookCall) -> bool {
+    call.tool == "call_mcp_tool"
+        && call.input["ServerName"].as_str().is_some_and(|s| s.eq_ignore_ascii_case(crate::a2a::CHANNEL_MCP_SERVER))
+}
+
 /// `<conversation id>:<step index>`: both the tool call id and the approval id.
 pub fn call_id(conversation: &str, step: u64) -> String {
     format!("{conversation}:{step}")
@@ -771,8 +779,9 @@ struct ApprovalState {
     open: bool,
     policy: Policy,
     timeout: Duration,
-    /// approval_id -> (tool, answer channel)
-    pending: HashMap<String, (String, oneshot::Sender<ApprovalDecision>)>,
+    /// approval_id -> (the tool an "allow always" may remember, `None` for an allow-once-only
+    /// call, answer channel)
+    pending: HashMap<String, (Option<String>, oneshot::Sender<ApprovalDecision>)>,
     always_allowed: HashSet<String>,
 }
 
@@ -820,9 +829,12 @@ impl RunApprovals {
 
     async fn decide(&self, payload: &Value) -> Value {
         let call = HookCall::from_payload(payload);
+        let once_only = is_channel_post(&call);
         let (open, policy, timeout, always) = {
             let st = self.state.lock().unwrap();
-            (st.open, st.policy, st.timeout, approval_policy(&call.tool, false).remember_always && st.always_allowed.contains(&call.tool))
+            let remembered = approval_policy(&call.tool, false).remember_always && st.always_allowed.contains(&call.tool);
+            // A rule for `call_mcp_tool` remembered for another server does not cover the channel call.
+            (st.open, st.policy, st.timeout, remembered && !once_only)
         };
         if !open {
             return deny_reply("No Ember turn is running for this Antigravity session.");
@@ -868,13 +880,21 @@ impl RunApprovals {
             return allow_reply();
         }
         let (tx, rx) = oneshot::channel();
-        self.state.lock().unwrap().pending.insert(call.approval_id.clone(), (call.tool.clone(), tx));
+        let remember = (!once_only).then(|| call.tool.clone());
+        self.state.lock().unwrap().pending.insert(call.approval_id.clone(), (remember, tx));
+        let mut input = call.input.clone();
+        if once_only {
+            if let Some(map) = input.as_object_mut() {
+                // The app hides the always button for this card (FR-T12).
+                map.insert("allow_always".into(), Value::Bool(false));
+            }
+        }
         let asked = self
             .events
             .send(AgentEvent::ApprovalRequested {
                 approval_id: call.approval_id.clone(),
                 tool: call.tool.clone(),
-                input: call.input.clone(),
+                input,
                 needs_person: false,
             })
             .await;
@@ -918,7 +938,8 @@ impl RunApprovals {
             .pending
             .remove(approval_id)
             .ok_or_else(|| anyhow::anyhow!("unknown approval {approval_id}"))?;
-        if decision == ApprovalDecision::AllowAlways && approval_policy(&tool, false).remember_always {
+        // An allow-once-only call (`tool` is `None`) stores no rule: always counts as once.
+        if let Some(tool) = tool.filter(|t| decision == ApprovalDecision::AllowAlways && approval_policy(t, false).remember_always) {
             st.always_allowed.insert(tool);
         }
         // The hook may have given up already; nothing to do then.
@@ -2115,5 +2136,61 @@ mod tests {
         );
         assert_eq!(broker.handle("t", &post).await.unwrap()["decision"], "deny");
         assert!(rx.try_recv().is_err(), "nobody is asked");
+    }
+
+    /// agy keys approvals by `call_mcp_tool`, so remembering an "allow always" for the channel
+    /// call would allow every MCP tool of the run: the card offers allow once only, an
+    /// `AllowAlways` answer counts as allow once, and the next call asks again.
+    #[tokio::test]
+    async fn fr_t12_agy_channel_post_offers_allow_once_only() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let broker = HookBroker::new();
+        let run = gated(tx, Duration::from_secs(30));
+        broker.register("t", run.clone());
+        let post = |step| call("call_mcp_tool", step, json!({ "ServerName": "ember-channels", "ToolName": "channel_post" }));
+        for step in [1, 2] {
+            let b = broker.clone();
+            let p = post(step);
+            let waiting = tokio::spawn(async move { b.handle("t", &p).await });
+            let Some(AgentEvent::ApprovalRequested { approval_id, tool, input, needs_person }) = rx.recv().await else {
+                panic!("step {step}: the second call asks again");
+            };
+            assert_eq!(tool, "call_mcp_tool");
+            assert_eq!(input["allow_always"], json!(false), "the card hides the always button");
+            assert_eq!(input["ServerName"], "ember-channels");
+            assert!(!needs_person, "approve-everything may still answer it");
+            run.answer(&approval_id, ApprovalDecision::AllowAlways).unwrap();
+            assert_eq!(waiting.await.unwrap(), Some(allow_reply()));
+            assert!(run.state.lock().unwrap().always_allowed.is_empty(), "no rule is stored");
+        }
+    }
+
+    /// An "allow always" for another tool is remembered as before, and one for another server's
+    /// `call_mcp_tool` does not let the channel call through without a card.
+    #[tokio::test]
+    async fn fr_t12_agy_channel_post_other_tools_keep_allow_always() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let broker = HookBroker::new();
+        let run = gated(tx, Duration::from_secs(30));
+        broker.register("t", run.clone());
+        let other = call("call_mcp_tool", 1, json!({ "ServerName": "browser", "ToolName": "open" }));
+        let b = broker.clone();
+        let p = other.clone();
+        let waiting = tokio::spawn(async move { b.handle("t", &p).await });
+        let Some(AgentEvent::ApprovalRequested { approval_id, input, .. }) = rx.recv().await else { panic!() };
+        assert!(input.get("allow_always").is_none(), "another server's card is unchanged");
+        run.answer(&approval_id, ApprovalDecision::AllowAlways).unwrap();
+        assert_eq!(waiting.await.unwrap(), Some(allow_reply()));
+        assert_eq!(broker.handle("t", &other).await, Some(allow_reply()), "remembered as before");
+        assert!(rx.try_recv().is_err());
+
+        let post = call("call_mcp_tool", 2, json!({ "ServerName": "Ember-Channels", "ToolName": "channel_post" }));
+        let b = broker.clone();
+        let waiting = tokio::spawn(async move { b.handle("t", &post).await });
+        let Some(AgentEvent::ApprovalRequested { approval_id, .. }) = rx.recv().await else {
+            panic!("the channel call still asks");
+        };
+        run.answer(&approval_id, ApprovalDecision::Deny).unwrap();
+        assert_eq!(waiting.await.unwrap().unwrap()["decision"], "deny");
     }
 }

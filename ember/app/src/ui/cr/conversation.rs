@@ -1747,6 +1747,7 @@ pub fn TranscriptRow(
             let in_flight = answering.get().contains(&approval_id);
             // The command (or file, or a one-line summary) only, never raw JSON (#536).
             let words = tool_card::approval_text(computer, &tool, &input);
+            let offer_always = tool_card::offers_allow_always(&input);
             let (title, body) = (words.title.clone(), words.body.clone());
             let answer = {
                 let sid = sid.clone();
@@ -1848,7 +1849,7 @@ pub fn TranscriptRow(
                                                     },
                                                 );
                                                 let f2 = a2.clone();
-                                                Clickable(
+                                                if offer_always { Clickable(
                                                     Modifier::new()
                                                         .height(32.0)
                                                         .background(paint(p.surface))
@@ -1875,7 +1876,7 @@ pub fn TranscriptRow(
                                                                 cu::Spacer().modifier(Modifier::new().width(12.0));
                                                             });
                                                     },
-                                                );
+                                                ); }
                                                 let f3 = a3.clone();
                                                 Clickable(
                                                     Modifier::new()

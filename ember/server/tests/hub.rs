@@ -169,6 +169,9 @@ async fn register_then_add_a_computer_from_the_hub_device_list() {
     assert_eq!(st, StatusCode::CREATED, "{c}");
     assert_eq!(c["name"], "gpu box");
     assert_eq!(c["peer"]["peer"], node_id);
+    // FR-L18 (#519): the answer is a `Computer` whose `url` is serialised through
+    // `url_for_clients`; a peer-only computer has none to strip.
+    assert_eq!(c["url"], "");
     let cid = c["id"].as_str().unwrap().to_string();
 
     // It is reachable over the transport by peer id alone.

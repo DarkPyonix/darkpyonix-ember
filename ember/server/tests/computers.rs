@@ -590,6 +590,46 @@ async fn http_register_list_and_switch() {
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
+/// FR-L18 (#519, leader 2026-11-15): no answer echoes a node URL's user name, password, query
+/// or fragment, while the stored record keeps the whole URL for node calls.
+#[tokio::test]
+async fn fr_l18_echoed_computer_url_has_no_credentials() {
+    let f = fixture();
+    let app = ember_server::api::router(f.sessions.clone())
+        .merge(computers::api::router(f.computers.clone(), f.sessions.clone()));
+    let raw = "http://user:pass@host:8741/?q=1#frag";
+    let clean = |v: &Value| {
+        let text = v.to_string();
+        for bad in ["user", "pass", "q=1", "frag"] {
+            assert!(!text.contains(bad), "{bad} echoed: {text}");
+        }
+    };
+
+    let (st, created) = call(&app, Method::POST, "/api/computers", Some(json!({ "name": "box", "url": raw, "token": "tok" }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{created}");
+    clean(&created);
+    assert_eq!(created["url"], "http://host:8741/");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let (_, list) = call(&app, Method::GET, "/api/computers", None).await;
+    clean(&list);
+    let (_, one) = call(&app, Method::GET, &format!("/api/computers/{id}"), None).await;
+    clean(&one);
+
+    let sid = new_session(&f.sessions);
+    let (st, out) = call(&app, Method::PUT, &format!("/api/sessions/{sid}/computer"), Some(json!({ "computer_id": id }))).await;
+    assert_eq!(st, StatusCode::OK, "{out}");
+    clean(&out);
+    let (_, cur) = call(&app, Method::GET, &format!("/api/sessions/{sid}/computer"), None).await;
+    clean(&cur);
+
+    // The record the server reaches the node with is unchanged, and serialising it (as the
+    // hub's add-computer answer does) is stripped too.
+    let stored = f.computers.registry().get(&id).unwrap().unwrap();
+    assert_eq!(stored.url, raw);
+    clean(&serde_json::to_value(&stored).unwrap());
+}
+
 // ---------------------------------------------------------------------------------------------
 // Fallback to the main server (FR-X3, FR-S7, INTENT D20)
 

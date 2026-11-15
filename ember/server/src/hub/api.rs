@@ -94,7 +94,9 @@ impl IntoResponse for ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };
-        (code, Json(json!({ "error": format!("{:#}", self.0) }))).into_response()
+        // FR-L18 (#519): a transport error may quote the node URL it failed on.
+        let error = crate::computers::strip_urls_in_text(&format!("{:#}", self.0));
+        (code, Json(json!({ "error": error }))).into_response()
     }
 }
 

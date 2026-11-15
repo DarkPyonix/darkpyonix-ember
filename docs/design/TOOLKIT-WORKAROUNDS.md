@@ -78,6 +78,15 @@ column. A row moves out of this table when its capture is judged.
 | `src/ui/cr/project.rs` (`ProjectBoxView`) | The team area was a box rounded at all four corners over the card's bottom. | compose-rust#392 | `corner_radii([0, 0, 24, 24])`: square under the rule, the card's radius at the bottom. Test `the_team_area_is_square_under_the_rule_and_round_at_the_cards_bottom`. | The project list at 1440 and 390, light and dark: the `surface-2` team area meets the rule with square corners and follows the card's bottom corners with no `surface` sliver showing inside the border. |
 | `src/ui/cr/project.rs` (`ListActions`, the search button at 900 dp and below) | The button took a toolkit glyph, with no name and no open state. | compose-rust#428, #429 | Ember's search SVG in the 40 px ring, named 팀원 검색 열기 (`a11y::OPEN_MEMBER_SEARCH`) with `Modifier::expanded`. Test `fr_l26_the_header_search_button_is_named_and_says_whether_its_row_is_open`. | The project list at 900 and 390: a 40 px ring with the 1.5 px line search glyph at 18 px in `text-2`, the same size and place as the other header buttons. By hand: VoiceOver reads 팀원 검색 열기 and whether it is expanded. |
 
+### Removed on `feat/673-editor-in-pin`, to be confirmed by capture
+
+Branch `feat/673-editor-in-pin` removes the editor window's workarounds below. None of it is
+compiled or seen on a display yet, for the same reason as the table above.
+
+| Place | Workaround | Toolkit issue | What replaced it | Capture or hand check that proves it |
+|---|---|---|---|---|
+| `src/ui/editor_scm.rs` (`diff_editor_view::diff_editor`), `src/ui/editor.rs` (`diff_line_tints`, `with_diff_line_tints`) | A change in the editable diff showed as gutter bars only. | compose-rust#542 | Each run of added or changed lines gets a `Decoration::line_background` in `DiffAdded` or `DiffModified`, after the document's own decorations; a removed line keeps its gutter dot. Tests `fr_l31_10_added_and_changed_lines_are_tinted_in_runs` (`editor.rs`), `fr_l31_10_the_editable_diff_sends_the_line_tints` (`editor_scm.rs`). | The editor window with a changed file's working diff open, light and dark: added lines tinted green, changed lines in the modified role, the full width and past each line's end, the gutter bars as before. By hand with the keyboard: type on a tinted line and the tint follows it. |
+
 ### Closed after the pin
 
 | Place | Workaround | Toolkit issue | State | Action at the next pin |
@@ -117,7 +126,6 @@ behaves, so a capture or a run decides it.
 | `src/ui/cr/vcs.rs` (`ChangesPane`, `PaneLayout::Two`), `home.rs:328` (`ROW_TILE_H`) | Panes scroll on their own; tiles take a fixed height. | compose-rust#389 | In the pin (`Row::equal_height`, confirmed in `ui/widgets.rs`). Kept on `feat/673-drop-in-pin`: an `equal_height` row is sized by intrinsic heights, which is wrong for wrapped text and counts a scrolling child as 0 (compose-rust#766, open), and the diff pane holds wrapped code. | A capture of the two panes in one page scroll with `equal_height` must show the files card as tall as the diff and still in view while the diff scrolls. For the home tiles: the three tiles of the success row at 1440 and 1024 must be equally tall with `EmberCardSized` and no `ROW_TILE_H`. |
 | `src/ui/home.rs:1313` (`CHIP_WRAP_WIDTH`) | The Home composer puts its mode and computer chips and the send button on a second line below 1100 dp, by window width. | compose-rust#521 | In the pin (`FlowRow`, already used by `components::ChoiceRow`). Kept on `feat/673-drop-in-pin`: the split also moves the send button, which a `FlowRow` would wrap with the chips instead of keeping at the row's end. | A capture of the composer at 1440, 1100, 1024 and 390 with the chips in a `FlowRow` must show the send button at the end of the last line at every width. |
 | `src/terminal_input.rs:145`, `src/ui/editor_workbench.rs:3070` | A paste chord in the editor terminal shows a notice. | compose-rust#546 | In the pin (`compose_rust::clipboard::read_text(callback)`, confirmed in `clipboard.rs`). Not touched on `feat/673-drop-in-pin`: the chord is handled in the editor window's files. | Read the clipboard on the chord and check it in the editor window. |
-| `src/ui/editor_scm.rs:2227` | A change shows as gutter bars only. | compose-rust#542 | In the pin (`Decoration::line_background`, forwarded by dioxus-compose) | Tint the added and changed lines. |
 | `src/ui/editor_scm.rs:1629`, `editor_scm.rs:1643` | Removed lines are a red rule with a hover list. | compose-rust#543 | In the pin (`CodeEditor` `view_zones`) | Give removed lines rows of their own. |
 | `src/ui/editor_scm.rs:1596`, `editor_scm.rs:2274` | The diff's base side follows whole lines and assumes 20 px rows. | compose-rust#544 | In the pin (`on_code_metrics`, `on_code_scrolled`, `set_scroll_offset`) | Sync by pixels. |
 | `src/ui/editor_language.rs:20`, `:645`, `:679` | Lists and hints are a sheet and a bottom strip, not popups at the caret. | compose-rust#553 | In the pin (`on_caret_rect`, `query_position_rect`) | Anchor them at the caret. |
@@ -234,6 +242,15 @@ API는 핀에 있다.
 | `src/ui/cr/project.rs`(`ProjectBoxView`) | 팀 영역이 카드 아래쪽 위에 네 모서리가 모두 둥근 상자였다. | compose-rust#392 | `corner_radii([0, 0, 24, 24])`: 구분선 아래는 각지고 아래쪽은 카드 반지름이다. 테스트 `the_team_area_is_square_under_the_rule_and_round_at_the_cards_bottom`. | 프로젝트 목록을 1440과 390, 라이트와 다크로: `surface-2` 팀 영역이 구분선과 각진 모서리로 만나고, 카드 아래 모서리를 따르며, 테두리 안쪽에 `surface` 틈이 보이지 않는다. |
 | `src/ui/cr/project.rs`(`ListActions`, 900 dp 이하의 검색 버튼) | 버튼이 툴킷 글리프를 썼고 이름과 열림 상태가 없었다. | compose-rust#428, #429 | 40 px 고리 안에 Ember의 검색 SVG를 그리고, 이름은 팀원 검색 열기(`a11y::OPEN_MEMBER_SEARCH`), 상태는 `Modifier::expanded`다. 테스트 `fr_l26_the_header_search_button_is_named_and_says_whether_its_row_is_open`. | 프로젝트 목록을 900과 390으로: 40 px 고리에 1.5 px 선 검색 글리프가 18 px, `text-2`로 있고, 다른 헤더 버튼과 크기와 자리가 같다. 직접: VoiceOver가 팀원 검색 열기와 펼침 여부를 읽는다. |
 
+### `feat/673-editor-in-pin`에서 지움, 캡처로 확인할 것
+
+`feat/673-editor-in-pin` 브랜치가 아래 에디터 창 우회 코드를 지운다. 위 표와 같은 이유로 아직
+컴파일하지 않았고 화면에서 보지도 않았다.
+
+| 위치 | 우회 코드 | 툴킷 이슈 | 대신 쓰는 것 | 확인할 캡처나 직접 확인 |
+|---|---|---|---|---|
+| `src/ui/editor_scm.rs`(`diff_editor_view::diff_editor`), `src/ui/editor.rs`(`diff_line_tints`, `with_diff_line_tints`) | 편집 가능한 diff에서 변경이 여백 막대로만 보였다. | compose-rust#542 | 추가되거나 바뀐 줄이 이어진 덩어리마다 `DiffAdded`나 `DiffModified`의 `Decoration::line_background`를 문서 자체 장식 뒤에 둔다. 지운 줄은 여백 점을 그대로 쓴다. 테스트 `fr_l31_10_added_and_changed_lines_are_tinted_in_runs`(`editor.rs`), `fr_l31_10_the_editable_diff_sends_the_line_tints`(`editor_scm.rs`). | 바뀐 파일의 작업 diff를 연 에디터 창을 라이트와 다크로: 추가된 줄은 초록, 바뀐 줄은 수정 역할 색으로 폭 전체와 줄 끝 너머까지 물들고 여백 막대는 전과 같다. 키보드로 직접: 물든 줄에 입력하면 색이 그 줄을 따라간다. |
+
 ### 핀 뒤에 닫힘
 
 | 위치 | 우회 코드 | 툴킷 이슈 | 상태 | 다음 핀에서 할 일 |
@@ -272,7 +289,6 @@ API는 핀에 있다.
 | `src/ui/cr/vcs.rs`(`ChangesPane`의 `PaneLayout::Two`), `home.rs:328`(`ROW_TILE_H`) | 두 칸이 따로 스크롤된다. 타일 높이가 고정이다. | compose-rust#389 | 핀에 있음(`Row::equal_height`, `ui/widgets.rs`에서 확인). `feat/673-drop-in-pin`에서도 그대로 둔다. `equal_height` 행은 고유 높이로 크기를 정하는데, 줄바꿈되는 글에서는 틀리고 스크롤되는 자식은 0으로 센다(compose-rust#766, 열림). diff 칸은 줄바꿈되는 코드를 담는다. | 두 칸을 페이지 스크롤 하나에 넣고 `equal_height`를 쓴 캡처에서 파일 카드가 diff만큼 높고, diff를 스크롤하는 동안에도 보여야 한다. 홈 타일은 1440과 1024에서 성공 행의 세 타일이 `EmberCardSized`로 같은 높이여야 하고 `ROW_TILE_H`가 없어야 한다. |
 | `src/ui/home.rs:1313`(`CHIP_WRAP_WIDTH`) | 홈 입력창이 1100 dp 아래에서 모드 칩, 컴퓨터 칩, 보내기 버튼을 창 폭을 보고 둘째 줄에 둔다. | compose-rust#521 | 핀에 있음(`FlowRow`, `components::ChoiceRow`가 이미 쓴다). `feat/673-drop-in-pin`에서도 그대로 둔다. 이 나눔은 보내기 버튼도 옮기는데, `FlowRow`는 버튼을 줄 끝에 두지 않고 칩과 함께 줄바꿈한다. | 칩을 `FlowRow`에 넣은 입력창을 1440, 1100, 1024, 390으로 찍어 모든 폭에서 보내기 버튼이 마지막 줄 끝에 있어야 한다. |
 | `src/terminal_input.rs:145`, `src/ui/editor_workbench.rs:3070` | 에디터 터미널에서 붙여넣기 단축키를 누르면 안내만 뜬다. | compose-rust#546 | 핀에 있음(`compose_rust::clipboard::read_text(callback)`, `clipboard.rs`에서 확인). `feat/673-drop-in-pin`에서는 건드리지 않았다. 단축키는 에디터 창 파일에서 처리한다. | 단축키에서 클립보드를 읽고 에디터 창에서 확인한다. |
-| `src/ui/editor_scm.rs:2227` | 변경이 여백 막대로만 보인다. | compose-rust#542 | 핀에 있음(`Decoration::line_background`, dioxus-compose가 전달) | 추가되고 바뀐 줄에 바탕색을 준다. |
 | `src/ui/editor_scm.rs:1629`, `editor_scm.rs:1643` | 지운 줄이 빨간 선과 호버 목록이다. | compose-rust#543 | 핀에 있음(`CodeEditor`의 `view_zones`) | 지운 줄에 제 행을 준다. |
 | `src/ui/editor_scm.rs:1596`, `editor_scm.rs:2274` | diff의 기준 쪽이 줄 단위로 따라가고 행 높이를 20 px로 가정한다. | compose-rust#544 | 핀에 있음(`on_code_metrics`, `on_code_scrolled`, `set_scroll_offset`) | 픽셀 단위로 맞춘다. |
 | `src/ui/editor_language.rs:20`, `:645`, `:679` | 목록과 힌트가 캐럿 옆 팝업이 아니라 시트와 아래 띠다. | compose-rust#553 | 핀에 있음(`on_caret_rect`, `query_position_rect`) | 캐럿에 붙인다. |

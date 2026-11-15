@@ -2265,12 +2265,18 @@ pub mod diff_editor_view {
             *current = (*current).max(doc.version);
             *current
         };
-        // TODO(compose-rust#542, in v0.0.10): the change shows as gutter bars only; tint the added
-        // and changed lines with `Decoration::line_background`, after a display check.
-        let gutter_decorations = match s.scm.diff_base(&doc.text, doc.dirty) {
-            Some(base) => crate::ui::editor::diff_gutter_decorations(version, &super::diff_editor_model(&base, &doc.text).markers),
-            None => compose_rust::code::GutterDecorations::default(),
+        // compose-rust#542: the added and changed lines are tinted with `Decoration::line_background`
+        // beside their gutter bars.
+        let markers = match s.scm.diff_base(&doc.text, doc.dirty) {
+            Some(base) => super::diff_editor_model(&base, &doc.text).markers,
+            None => Vec::new(),
         };
+        let gutter_decorations = if markers.is_empty() {
+            compose_rust::code::GutterDecorations::default()
+        } else {
+            crate::ui::editor::diff_gutter_decorations(version, &markers)
+        };
+        let decorations = crate::ui::editor::with_diff_line_tints(compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), version, &markers);
         let change_s = s.clone();
         let change_uri = uri.clone();
         let save_s = s.clone();
@@ -2284,7 +2290,7 @@ pub mod diff_editor_view {
         let range_s = s.clone();
         rsx! { CodeEditor {
             key: "diff-{generation}", width: Some(box_w), height: Some(box_h), handle,
-            text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), tab_width: Some(doc.tab_width),
+            text: doc.text, decorations, syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), tab_width: Some(doc.tab_width),
             gutter_decorations,
             // FR-L31.27: the same code type, row pitch and line number column as the file's editor.
             font_size: Some(crate::ui::fonts::CODE_FONT_SIZE), line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT),
@@ -2838,5 +2844,14 @@ mod tests {
         bridge.apply(SessionUpdate::Opened { uri: uri.clone(), generation: 5, text: "x".into(), language_id: "rust".into(), tab_width: 4 });
         let (u, generation, event) = bridge.on_save_requested(&uri, 4).unwrap();
         assert_eq!((u, generation, event), (uri, 5, WidgetEvent::CodeSaveRequested { version: 4 }));
+    }
+
+    #[test]
+    fn fr_l31_10_the_editable_diff_sends_the_line_tints() {
+        let source = include_str!("editor_scm.rs");
+        let view = &source[source.find("pub mod diff_editor_view").unwrap()..source.find("#[cfg(test)]\nmod tests").unwrap()];
+        assert!(view.contains("with_diff_line_tints("), "compose-rust#542: added and changed lines are tinted");
+        assert!(view.contains("decorations, syntax_spans"), "the tinted list is the one the editor gets");
+        assert!(!view.contains(concat!("TODO(compose-rust#", "542")), "the gutter-only stand-in is gone");
     }
 }

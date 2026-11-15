@@ -1989,6 +1989,36 @@ pub fn diff_gutter_decorations(version: u32, markers: &[DiffLineMarker]) -> comp
     compose_rust::code::GutterDecorations::new(list)
 }
 
+/// The tints over a diff's added and changed lines (FR-L31.10, compose-rust#542): one
+/// `Decoration::line_background` per run of neighbouring lines of the same kind. A removed line has
+/// no line of its own in the working text, so it keeps its gutter dot and gets no tint.
+pub fn diff_line_tints(version: u32, markers: &[DiffLineMarker]) -> Vec<compose_rust::code::Decoration> {
+    use compose_rust::code::Decoration;
+    use compose_rust::ColorRole;
+    let mut runs: Vec<(u32, u32, DiffLineKind)> = Vec::new();
+    for m in markers.iter().filter(|m| m.kind != DiffLineKind::Deleted) {
+        match runs.last_mut() {
+            Some((_, end, kind)) if *kind == m.kind && *end + 1 == m.line => *end = m.line,
+            _ => runs.push((m.line, m.line, m.kind)),
+        }
+    }
+    runs.into_iter()
+        .map(|(start, end, kind)| {
+            let role = if kind == DiffLineKind::Added { ColorRole::DiffAdded } else { ColorRole::DiffModified };
+            Decoration::line_background(version, start, end, role)
+        })
+        .collect()
+}
+
+/// The document's own decorations with the diff's line tints after them.
+pub fn with_diff_line_tints(decorations: compose_rust::code::Decorations, version: u32, markers: &[DiffLineMarker]) -> compose_rust::code::Decorations {
+    let tints = diff_line_tints(version, markers);
+    if tints.is_empty() {
+        return decorations;
+    }
+    compose_rust::code::Decorations::new(decorations.decorations().into_iter().chain(tints))
+}
+
 /// The 0-indexed line number of the first change between old and new text.
 pub fn first_diff_line(old_text: &str, new_text: &str) -> Option<u32> {
     compute_line_diffs(old_text, new_text).first().map(|m| m.line)
@@ -2282,5 +2312,30 @@ mod tests {
 
         let empty = diff_gutter_decorations(1, &[]);
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn fr_l31_10_added_and_changed_lines_are_tinted_in_runs() {
+        use compose_rust::{ColorRole, DecorationKind};
+
+        let markers = vec![
+            DiffLineMarker { line: 0, kind: DiffLineKind::Added },
+            DiffLineMarker { line: 1, kind: DiffLineKind::Added },
+            DiffLineMarker { line: 2, kind: DiffLineKind::Modified },
+            DiffLineMarker { line: 4, kind: DiffLineKind::Deleted },
+            DiffLineMarker { line: 6, kind: DiffLineKind::Modified },
+        ];
+        let tints = diff_line_tints(3, &markers);
+        assert_eq!(tints.len(), 3, "two added lines are one run, the removed line has no tint");
+        assert!(tints.iter().all(|t| t.kind == DecorationKind::LineBackground && t.version == 3));
+        assert_eq!((tints[0].range.start.line, tints[0].range.end.line, tints[0].color), (0, 1, Some(ColorRole::DiffAdded)));
+        assert_eq!((tints[1].range.start.line, tints[1].range.end.line, tints[1].color), (2, 2, Some(ColorRole::DiffModified)));
+        assert_eq!((tints[2].range.start.line, tints[2].range.end.line, tints[2].color), (6, 6, Some(ColorRole::DiffModified)));
+
+        let own = compose_rust::code::Decorations::new([compose_rust::code::Decoration::line_background(3, 9, 9, ColorRole::DiffRemoved)]);
+        let merged = with_diff_line_tints(own.clone(), 3, &markers).decorations();
+        assert_eq!(merged.len(), 4, "the document's own decorations stay first");
+        assert_eq!(merged[0].range.start.line, 9);
+        assert_eq!(with_diff_line_tints(own.clone(), 3, &[]), own, "no change sends the same list");
     }
 }

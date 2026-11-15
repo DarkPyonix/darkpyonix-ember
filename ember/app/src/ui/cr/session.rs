@@ -4763,6 +4763,9 @@ pub fn SessionScreen(focus: Option<String>) {
             web_pages.set(WebPagesLoad::Loading);
             let done = web_pages.clone();
             let sub = web_sub.clone();
+            // The line of the last open is not shown while another session's ports load, or
+            // after a read that fails.
+            sub.set(None);
             if services().demo.is_some() {
                 let host = ComputerHost { local: false, host: Some(crate::demo::DEMO_HOST.to_string()) };
                 sub.set(crate::ui::session::web_menu_subtitle(Some(DEMO_COMPUTER), &host));

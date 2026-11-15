@@ -378,7 +378,7 @@ pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bo
     // the whole window, so the one-line body without a server filled it. Without a server, and in
     // the bottom sheet (which scrolls taller content itself), the body is a plain column; with a
     // server the dialog's body scrolls at the room left by the header and footer.
-    // TODO(compose-rust#778): cap that body instead of fixing it.
+    // TODO(compose-rust#778, after v0.0.10): cap that body instead of fixing it.
     let w = crate::ui::window_size::current_window_size();
     let plain = !live || super::components::sheet_wraps_content(w.width_dp);
     let body_h = super::components::sheet_body_max_height(

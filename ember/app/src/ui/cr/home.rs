@@ -1984,8 +1984,9 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
             Label(&last, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         });
         Label(&usage::trend_line(&load, days.get()), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-        // TODO(compose-rust): a tooltip or per-bar tap needs hover or a click on the Canvas; the
-        // toolkit has neither, so no day is selectable.
+        // TODO(compose-rust#417, in v0.0.10): no day is selectable. A tooltip or a per-bar tap can
+        // take `on_pointer` on a Box around the Canvas (the position comes in dp); it needs a
+        // display check.
     });
 }
 

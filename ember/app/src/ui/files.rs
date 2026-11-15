@@ -47,8 +47,9 @@ pub const AGENT_SEND_UNSUPPORTED: &str = "agent로 보내기는 아직 지원되
 /// Shown beside an offline device chip.
 pub const OFFLINE_TAG: &str = "오프라인";
 
-/// TODO(compose-rust#483): flip when the toolkit has a file dialog API,
-/// then fill [`SendDraft::files`] from it. Dropped files stay with compose-rust#485.
+/// TODO(compose-rust#483, in v0.0.10): flip once the send sheet opens
+/// `compose_rust::FileDialog::open_files()` and fills [`SendDraft::files`] from its result; it
+/// needs a display check. Dropped files stay with compose-rust#485.
 pub const FILE_PICKER_AVAILABLE: bool = false;
 
 // ---------------------------------------------------------------------------------------------

@@ -479,7 +479,8 @@ pub struct PopMenu<'a> {
 /// `footer` is drawn under a line below the rows (`.sdrop-f`). At 560 and below a mode menu is a
 /// bottom sheet with the same rows ([`pop_presentation`]).
 /// Not built: arrow keys between rows and focus on the current row when the menu opens
-/// (TODO(compose-rust#504): only Enter reaches the Host).
+/// (TODO(compose-rust#810): a `Popover` moves no focus between its rows; compose-rust#504 did
+/// it for the toolkit `Menu` only. Add the keys when #810 is in the pin).
 pub fn PopoverMenu(
     open: bool,
     menu: PopMenu<'_>,
@@ -1045,8 +1046,8 @@ fn BareField(o: FieldOptions) {
 /// A single-line field with its hint drawn by Ember: a one-line `muted` label that ends in an
 /// ellipsis, under the field, while the field is empty (FR-L10.1, #878). The toolkit draws its
 /// placeholder with no line limit, so a long path wrapped onto a second line the 40 px field
-/// clipped. TODO(compose-rust): a placeholder line limit on `TextField` (no issue yet) lets the
-/// toolkit draw it again.
+/// clipped. TODO(compose-rust#786, after v0.0.10): a one-line placeholder with an ellipsis on
+/// `TextField` lets the toolkit draw it again; this function goes then.
 fn OneLineHintField(o: FieldOptions) {
     use compose_rust::runtime::{mutable_state_of, remember};
     let mut o = o;
@@ -1668,8 +1669,9 @@ pub fn EmberCardSized(
         .border(1.0, paint(border))
         .corner_radius(CORNER_LG);
     // A Box rather than `Card`, whose design-system shape ignores `corner_radius`.
-    // TODO(compose-rust): the mockup's 16/20 padding is asymmetric; `Modifier.padding` is
-    // uniform, so 16 is used on all sides unless the caller passes one.
+    // TODO(compose-rust, unfiled: Modifier has no per-side padding): the mockup's 16/20 padding
+    // is asymmetric and `Modifier::padding` is uniform, so 16 is used on all sides unless the
+    // caller passes one. The side spacers go when the toolkit takes a padding per side.
     // The 4 dp spacers raise the uniform 16 to the mockup's 20 on the sides (`--pad-card`).
     let side = if padding.is_some() { 0.0 } else { PAD_CARD_H - PAD_CARD_V };
     cu::Box().modifier(m.padding(padding.unwrap_or(PAD_CARD_V))).content(|| {
@@ -1696,7 +1698,8 @@ pub fn InsetPanelSized(fill_max_width: bool, fill_max_height: bool, content: imp
     if fill_max_height {
         m = m.fill_max_height();
     }
-    // TODO(compose-rust): the mockup's 12/16 padding is asymmetric; 12 on all sides for now.
+    // TODO(compose-rust, unfiled: Modifier has no per-side padding): the mockup's 12/16 padding
+    // is asymmetric; 12 on all sides and the 4 dp spacers below until the toolkit takes one per side.
     let panel = cu::Box().modifier(m.background(paint(theme.palette.surface_2)).corner_radius(CORNER_MD).padding(PAD_ROW_V));
     let panel = if fill_max_height { panel.alignment(Alignment::CenterStart) } else { panel };
     panel

@@ -1581,7 +1581,7 @@ fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMemb
     let bottom = super::components::sheet_wraps_content(window.width_dp);
     // FR-L32.1 (#878): with no title bar the room is the whole sheet. The body takes its content
     // height when that fits, and always in the bottom sheet, which scrolls taller content itself.
-    // TODO(compose-rust#778): cap instead of estimate.
+    // TODO(compose-rust#778, after v0.0.10): cap instead of estimate.
     let room = super::components::sheet_body_max_height(window.width_dp, window.height_dp, false, 0.0);
     let rows = share_devices(devices);
     let agents = share_agents(members);

@@ -588,10 +588,11 @@ fn FocusOverlayWith(label: &str, enabled: bool, expanded: Option<bool>, on_click
         .on_click(on_click);
 }
 
-// TODO(compose-rust#431): the FocusOverlay is a `fill_max_size` Button, and the toolkit has no
-// parent-sized modifier for an overlay, so a chip without a width takes the rest of the row and
-// squeezes the hint beside it to one word per line. compose-rust v0.0.7 (#427) stops the
-// squeeze at a word, not at the overlay: checked on a display 2026-11-13, so the width stays fixed.
+// TODO(compose-rust#431, in v0.0.10): the FocusOverlay is a `fill_max_size` Button, so a chip
+// without a width takes the rest of the row and squeezes the hint beside it to one word per line.
+// compose-rust v0.0.7 (#427) stops the squeeze at a word, not at the overlay: checked on a display
+// 2026-11-13, so the width stays fixed. `Modifier::match_parent_size` (#431) is in the pin: give
+// the overlay that, drop the width, and check the chip on a display.
 /// A selectable chip matching the mockup's .field.ag-sel: wide enough for the label,
 /// with a 1-line label and an accessible FocusOverlay.
 fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
@@ -615,8 +616,9 @@ fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
         });
 }
 
-// TODO(compose-rust#431): as for `SelectChip`, the `fill_max_size` overlay makes a pill without
-// a width take the rest of the row, so the width is estimated with `text_px` and fixed.
+// TODO(compose-rust#431, in v0.0.10): as for `SelectChip`, the `fill_max_size` overlay makes a
+// pill without a width take the rest of the row, so the width is estimated with `text_px` and
+// fixed. The estimate goes with `SelectChip`'s width, after the same display check.
 /// A picker pill matching mockup's .pickchip: full pill shape, icon + label, sized to its content.
 fn ModelPickerPill(text: &str, svg: Option<&'static str>, on_click: impl FnMut() + 'static) {
     MenuPickerPill(text, svg, None, on_click);
@@ -849,7 +851,7 @@ fn HeadedCard(head: impl FnOnce(), body: impl FnOnce()) {
             cu::Spacer().modifier(Modifier::new().height(PAD_CARD_V));
             cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                 cu::Spacer().modifier(Modifier::new().width(PAD_CARD_H));
-                // A strut: the toolkit has no minimum height (TODO(compose-rust#778)).
+                // A strut: TODO(compose-rust, unfiled: Modifier has no minimum height; #778 caps a height).
                 cu::Spacer().modifier(Modifier::new().height(CARD_HEAD_CONTENT_MIN_H));
                 cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().weight(1.0)).content(head);
                 cu::Spacer().modifier(Modifier::new().width(PAD_CARD_H));

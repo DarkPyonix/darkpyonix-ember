@@ -421,8 +421,8 @@ fn Grid(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi, w:
     let shown: Vec<&ProjectBox> = boxes.iter().filter(|b| box_matches(b, &query)).collect();
     Header("프로젝트", "프로젝트를 누르면 세션으로 들어가 팀원들의 대화를 함께 봅니다.", w <= 560.0, || ListActions(st, ui, w));
     if w <= 900.0 && search_field_visible(w, st.search_open.get()) {
-        // TODO: focus the field on open (compose-rust#410 `FocusHandle` and
-        // `Batch::request_focus`, in v0.0.7; not wired yet).
+        // TODO(compose-rust#410, in v0.0.10): focus the field on open with `FocusHandle` and
+        // `Batch::request_focus`; not wired yet, and it needs a display check.
         let q = st.query.clone();
         cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
             SearchField("팀원 검색", H_BTN, move |v| q.set(v));
@@ -1154,7 +1154,7 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
         // FR-L32.1 (#876, #878): 취소/만들기 sit in the header as the mockup's `.sheet-acts`
         // (`project.js` projNew), so the body leaves room for the header only and the buttons
         // never fall below a scrolling body at 390.
-        // TODO(compose-rust#778): cap the body at this height instead of fixing it.
+        // TODO(compose-rust#778, after v0.0.10): cap the body at this height instead of fixing it.
         let new_window = crate::ui::window_size::current_window_size();
         let new_body_height = super::components::sheet_body_max_height(
             new_window.width_dp,
@@ -1381,7 +1381,7 @@ pub fn new_project_fields_stacked(window_width_dp: f32) -> bool {
 /// 40 px field, 12 apart; 8 between the section's rows); 16; the
 /// 팀 캐릭터 section (its rule, 8, the title, a two-line hint and the picker for `columns`, 8
 /// apart); each of `notes` (the branch hint, errors, the failure) at two lines and 16 above.
-/// An estimate, not a measurement: TODO(compose-rust#778) a body capped at the room would make
+/// An estimate, not a measurement: TODO(compose-rust#778, after v0.0.10) a body capped at the room would make
 /// it unnecessary.
 pub(crate) fn new_project_body_estimate(columns: usize, stacked: bool, notes: usize) -> f32 {
     let field_row = 18.0 + 4.0 + H_BTN;
@@ -1867,7 +1867,8 @@ fn LeaderOption(m: &Member) {
         .alignment(Alignment::CenterStart)
         .modifier(Modifier::new().fill_max_width().padding(10.0).border(1.0, paint(if m.leader { p.ink } else { p.line })).corner_radius(CORNER_MD))
         .content(|| {
-            // TODO(compose-rust#545): no RadioButton; a ring with a filled centre stands in.
+            // TODO(compose-rust#545, in v0.0.10): a ring with a filled centre stands in for the
+            // toolkit `RadioButton` (`ring_color`, `dot_color`, `size`); swap it after a display check.
             cu::Box().alignment(Alignment::Center).modifier(Modifier::new().size(16.0, 16.0).border(1.5, paint(p.text_2)).shape_role(ShapeRole::Full)).content(|| {
                 if m.leader {
                     cu::Spacer().modifier(Modifier::new().size(8.0, 8.0).background(paint(p.ink)).shape_role(ShapeRole::Full));
@@ -2199,7 +2200,7 @@ mod tests {
         let sheet = &production[production.find("let new_body_height").unwrap()..production.find("EmberSheet(\"새 프로젝트\"").unwrap()];
         assert!(sheet.contains("super::components::SHEET_HEADER_CHROME_H,\n        )"), "{sheet}");
         assert!(!sheet.contains("SHEET_FOOTER_H"), "{sheet}");
-        assert!(production.contains("TODO(compose-rust#778)"));
+        assert!(production.contains("TODO(compose-rust#778, after v0.0.10)"));
         let body = new_project_sheet_source();
         assert!(body.starts_with("EmberSheet(\"새 프로젝트\", st.new_project.get(), request_close.clone(), Some(&mut new_actions),"), "{body}");
         assert!(!body.contains("SheetFooter("), "{body}");
@@ -2320,7 +2321,7 @@ mod tests {
         assert!(!bottom.contains(".height("), "{bottom}");
         assert!(!bottom.contains("ScrollColumn"), "{bottom}");
         assert!(sheet.contains("super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H"));
-        assert!(sheet.contains("TODO(compose-rust#778)"));
+        assert!(sheet.contains("TODO(compose-rust#778, after v0.0.10)"));
     }
 
     #[test]

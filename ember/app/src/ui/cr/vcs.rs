@@ -287,8 +287,10 @@ fn SmallNote(text: &str) {
     Label(text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
 }
 
-// TODO(compose-rust#425, #429): an invisible `Button(label)` over a painted row, only to get focus,
-// role and the accessible name. Remove when Button takes content or a semantics modifier exists.
+// TODO(compose-rust#425, #429, in v0.0.10): an invisible `Button(label)` over a painted row, only
+// to get focus, role and the accessible name. `Button::content` and `Modifier::label` are in the
+// pin: move each caller onto them (or onto `components::NamedClickable`), check its row on a
+// display, then remove this.
 /// An accessible invisible button overlay for a painted row or pill.
 /// Gives assistive tech the item's label and provides keyboard focus and click handling.
 fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
@@ -419,7 +421,8 @@ pub const VCS_HUNK_BUTTON_H: f32 = 28.0;
 pub const VCS_HUNK_HEADER_H: f32 = VCS_HUNK_BUTTON_H + 12.0;
 
 /// Width of a painted small pill or chip: the text at [`VCS_CONTROL_FS`] plus 14 px each side,
-/// at least 64. A Box in a Row takes the remaining width (compose-rust#427), so it is fixed.
+/// at least 64. It is fixed from when a Box in a Row took the remaining width
+/// (TODO(compose-rust#427, in v0.0.10): the estimate goes after a display check).
 pub fn vcs_pill_width(text: &str) -> f32 {
     (super::home::text_px(text, VCS_CONTROL_FS.size()) + 28.0).max(64.0)
 }
@@ -501,7 +504,8 @@ pub fn remote_button_labels() -> [&'static str; 4] {
 /// A 32 px circle icon button in a 44 dp box that takes the press, named for assistive tech via
 /// `FocusOverlay`. The box asks for 44 by 44 and takes what its row gives: a row with a height
 /// (the 원격 cell's 36, the files header's 52) keeps that height, and the box is then as tall as
-/// the row at most (FR-L19.1, #415; a press area larger than the row waits for compose-rust#472).
+/// the row at most (FR-L19.1, #415; a press area larger than the row is
+/// TODO(compose-rust#472, after v0.0.10): a 44 by 44 hit area that does not grow the node).
 fn CircleIconButton(
     icon: &'static str,
     label: &str,
@@ -794,7 +798,8 @@ pub const BRANCH_POP_OFFSET: f32 = 4.0;
 
 /// The height of the popover's list when it must scroll (`.vcs-poplist{max-height:300px}`):
 /// `None` while `rows` rows fit in 300, so the list is as tall as its rows. The toolkit has no
-/// maximum height (compose-rust#778), so the list takes a fixed 300 from the row count.
+/// maximum height (TODO(compose-rust#778, after v0.0.10): cap the list at 300 instead), so the
+/// list takes a fixed 300 from the row count.
 pub fn branch_pop_list_height(rows: usize) -> Option<f32> {
     (rows as f32 * BRANCH_POP_ROW_H > 300.0).then_some(300.0)
 }
@@ -1526,7 +1531,7 @@ pub fn tree_height(rows: usize) -> f32 {
 /// (`.vcs-tree{max-height:360px;overflow:auto}`; review r8: at 1440 the commit button was below
 /// the fold). `pane_h` is the height the two panes have when it is known (the sheet): the tree
 /// then also leaves room for the header and the commit box, down to three rows. The toolkit has
-/// no maximum height (TODO(compose-rust#778)), so a taller tree is given this height and scrolls.
+/// no maximum height (TODO(compose-rust#778, after v0.0.10)), so a taller tree is given this height and scrolls.
 pub fn tree_cap(max: f32, pane_h: Option<f32>) -> f32 {
     match pane_h {
         Some(h) => (h - VCS_FILES_HEAD_H - VCS_COMMIT_BOX_EST_H).clamp(VCS_TREE_MIN_H, max),
@@ -1925,7 +1930,9 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
     match layout {
         PaneLayout::Two => {
             // The panes scroll on their own inside a bounded row. A row in an unbounded
-            // scroll centres its shorter children vertically (TODO(compose-rust#389)).
+            // scroll centres its shorter children vertically (TODO(compose-rust#389, in v0.0.10):
+            // `Row::equal_height` is in the pin; whether it lets the panes share the page's scroll
+            // needs a display check).
             let d_files = diffs.clone();
             let st_files = staging.clone();
             let fold_files = folded.clone();
@@ -4988,9 +4995,11 @@ fn StashRow(e: &StashEntry, layout: PaneLayout, busy: bool, dirty: bool, armed: 
     }
 }
 
-// TODO(compose-rust#425, #429): the pill is painted and an invisible `Button` over it carries the
-// accessible name, because `Button` takes only its visible text as the name.
-// TODO(compose-rust#427): a Box in a Row takes the remaining width, so the width is estimated and fixed.
+// TODO(compose-rust#425, #429, in v0.0.10): the pill is painted and an invisible `Button` over it
+// carries the accessible name. `Button::accessible_name` is in the pin: use it and check the pill
+// on a display.
+// TODO(compose-rust#427, in v0.0.10): the width is estimated and fixed, from when a Box in a Row
+// took the remaining width. The estimate goes after the same display check.
 /// A small pill whose visible text is `text` and whose accessible name is `access`.
 fn StashPill(text: &str, access: &str, kind: ButtonKind, enabled: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
@@ -7287,7 +7296,7 @@ mod tests {
         let two = production.split("PaneLayout::Two => {").nth(1).unwrap().split("PaneLayout::Stacked => {").next().unwrap();
         assert_eq!(two.matches("VcsCard(").count(), 1, "one card for the tree and the commit box: {two}");
         assert!(two.contains("FilesTreeCapped(&d_files, &st_files, &fold_files, &sel_files, on_tab_files, tree_cap(VCS_TREE_MAX_H, pane_h));"));
-        assert!(production.contains("TODO(compose-rust#778)"));
+        assert!(production.contains("TODO(compose-rust#778, after v0.0.10)"));
     }
 
     /// The children of `parent`, in the order they were inserted.

@@ -420,7 +420,7 @@ pub fn AddComputerSheet(ui: &AddUi) {
     // and the toolkit sheet scrolls content taller than 85 percent of the window itself. The
     // dialog is as tall as its content when the step's estimate fits (#878: the list at 1440 left
     // about 500 px blank); the code and confirm steps keep a fixed scrolling body.
-    // TODO(compose-rust#778): one capped body for both.
+    // TODO(compose-rust#778, after v0.0.10): one capped body for both.
     let wraps = super::components::sheet_wraps_content(w.width_dp);
     let fits = add_body_estimate(ui.view.get().as_ref(), &ui.devices.get(), sample).is_some_and(|h| h <= body_h);
     EmberSheet("컴퓨터 추가", ui.open.get(), close.clone(), None, || {

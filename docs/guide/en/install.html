@@ -287,6 +287,13 @@ cargo build --release --locked --features mount-fuse</code></pre>
       then has no path to the server. Put the server on a network with a public address (IPv6
       counts when the phone has IPv6 too) or reach it over a VPN of your own.
     </p>
+    <p>
+      <strong>Known limit:</strong> the relay accepts a small number of connections that have not
+      yet proved who they are (64 in total, 4 per address). Someone who keeps opening connections
+      from about 16 addresses can fill it, and a device that reaches the server only through the
+      relay cannot connect while that lasts. Devices on your own network and devices with a direct
+      address are not affected. A stricter limit per source is planned (issue #920).
+    </p>
 
     <h3 id="server-data">What it stores</h3>
     <div class="tablewrap">

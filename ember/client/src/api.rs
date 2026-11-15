@@ -1081,6 +1081,34 @@ impl Api {
         Ok(ws)
     }
 
+    /// Opens the file watch socket of `computer` (`GET /api/computers/{id}/fs/watch`, SPEC
+    /// `FR-W4d`, #460), over plain HTTP with the server token or over the transport.
+    pub async fn watch_fs(&self, computer: &str) -> ApiResult<crate::fs_watch::FsWatch> {
+        let path = format!("/computers/{}/fs/watch", seg(computer));
+        let socket = match &self.reach {
+            Reach::Peer { .. } => self.open_peer_socket(&path).await?,
+            Reach::Http(_) => self.open_http_socket(&path).await?,
+        };
+        Ok(crate::fs_watch::FsWatch::new(socket))
+    }
+
+    /// A WebSocket at `path` (below `/api`) over plain HTTP, with the token rules of
+    /// [`Api::open_push`]. A refused upgrade keeps the server's status and `code`.
+    async fn open_http_socket(&self, path: &str) -> ApiResult<PushSocket> {
+        let url = self.socket_url(path);
+        let rest = url
+            .strip_prefix("ws://")
+            .ok_or_else(|| ApiError::Push(format!("{url}: only plain ws:// is supported")))?;
+        let authority = rest.split('/').next().unwrap_or_default();
+        let (host, port) = authority_addr(authority);
+        let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await.map_err(|e| ApiError::Push(e.to_string()))?;
+        let _ = tcp.set_nodelay(true);
+        let io: Box<dyn PushIo> = Box::new(tcp);
+        let request = self.push_request(&url)?;
+        let (ws, _) = tokio_tungstenite::client_async(request, io).await.map_err(socket_error)?;
+        Ok(ws)
+    }
+
     /// The WebSocket upgrade request for `url`, carrying `Authorization: Bearer` on the plain
     /// HTTP reach when a token exists (FR-S11).
     fn push_request(&self, url: &str) -> ApiResult<http::Request<()>> {

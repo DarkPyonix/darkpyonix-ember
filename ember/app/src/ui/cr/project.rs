@@ -5,8 +5,9 @@
 //! The decisions (boxes, members, ordering, filters, deck, settings rules) are `ui::project`'s
 //! plain functions, used as they are. The settings sheet saves name, repository, default
 //! branch, new member defaults, character style and profile override per harness with
-//! `PATCH /api/projects/{name}` (FR-L26, #327). Leader, archive and delete stay disabled: the server does not
-//! support them yet (TODO(#384)).
+//! `PATCH /api/projects/{name}` (FR-L26, #327). The danger zone archives and restores with the
+//! same PATCH and deletes with `DELETE /api/projects/{name}` after a second tap; the leader stays
+//! disabled (owner decision, #384). The full view's 루틴 tile lists the project's server routines.
 
 #![allow(non_snake_case)]
 
@@ -39,6 +40,7 @@ use crate::model::status_rank;
 use crate::ide::{open_external, plan, IdeAction, IdeKind};
 use crate::server::IdeLaunch;
 use crate::services::{run_shared, services};
+use crate::ui::project::{archive_patch, danger_hint, danger_rows_for, delete_armed, delete_error_message, delete_step, full_after_removal, is_owner_refusal, project_routine_tile, DeleteStep, TileLoad};
 use crate::ui::coexist::{shared_ui, SharedUi};
 use crate::ui::shell::NavMenu;
 
@@ -833,14 +835,31 @@ fn FullProject(b: &ProjectBox, chips: &[ComputerChip], st: &Ui, ui: &SharedUi, w
         ComputerStrip(&assigned, st);
     }
     KpiStrip(b, ui, w);
+    // The project's routines from the server (FR-L26, #327); the demo lists its samples.
+    let routines = remember_with_key(b.id.clone(), || {
+        mutable_state_of(if services().demo.is_some() { TileLoad::Loaded(super::routines::sample_entries()) } else { TileLoad::Loading })
+    });
+    if services().demo.is_none() {
+        let (slot, id) = (routines.clone(), b.id.clone());
+        compose_rust::runtime::launched_effect(b.id.clone(), move || async move {
+            run_shared(async move { crate::ui::project::load_project_tile(services().client.api(), &id).await }, move |l| slot.set(l));
+        });
+    }
+    let routine_lines = project_routine_tile(&routines.get(), &b.id, super::routines::now_local()).lines();
     let members = || MembersCard(b, st, ui);
     let side = || {
         cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
-            // TODO(routines, channels screens, phase 7): they list the project's items here.
+            // TODO(channels screen, phase 7): the channel tile lists the project's channels here.
             for (icon, title, empty) in [(shell::ICON_GAUGE_SVG, "루틴", "루틴이 없습니다"), (shell::ICON_HASH_SVG, "채널", "채널이 없습니다")] {
                 super::home::Tile(|| {
                     super::home::CardHead(icon, title, || {});
-                    Label(&format!("{empty}. {SOON}"), Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
+                    if title == "루틴" {
+                        for line in &routine_lines {
+                            Label(line, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
+                        }
+                    } else {
+                        Label(&format!("{empty}. {SOON}"), Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
+                    }
                 });
             }
         });
@@ -1535,7 +1554,8 @@ fn create_project(
 /// failure (FR-L26). After a rename the selected project and the open project view follow the new
 /// name, and this device's remembered style moves with it. The character style is also kept in
 /// this device's prefs, but only as the fallback the tiles read when the server has none.
-/// TODO(#384): leader, archive and delete are not sent (server `not_yet`).
+/// The 보관 and 보관 해제 buttons send their one-field patch through here too (#327).
+/// TODO(#384): the leader is not sent (server `not_yet`).
 fn save_settings(
     project: String,
     patch: ember_client::wire::ProjectPatch,
@@ -1568,9 +1588,44 @@ fn save_settings(
                     if let (true, Some(st)) = (style_changed, style) {
                         ui.update_prefs(|pr| pr.set_character_style(&saved_as, st));
                     }
+                    // An archived project leaves the list, so its open view closes with it (#327).
+                    if sent.archived == Some(true) && !ui.show_archived.get_untracked() {
+                        full.set(full_after_removal(full.get_untracked().as_deref(), &saved_as));
+                    }
                     closed.set(None);
                 }
+                Err(e) if is_owner_refusal(e.status(), e.code()) => notice::post(e.to_string()),
                 Err(e) => failure.set(Some(patch_error_message(e.status(), e.code(), &sent).to_string())),
+            }
+        },
+    );
+}
+
+/// Delete the project on the main server (FR-L26, #327), after the second tap. The settings
+/// sheet and the project's open view close; a refusal reads its fixed sentence in the sheet.
+fn delete_project_now(
+    project: String,
+    closed: MutableState<Option<String>>,
+    full: MutableState<Option<String>>,
+    saving: MutableState<bool>,
+    failure: MutableState<Option<String>>,
+) {
+    saving.set(true);
+    failure.set(None);
+    let ui = shared_ui().clone();
+    let name = project.clone();
+    run_shared(
+        async move { services().client.delete_project(&project).await },
+        move |r| {
+            saving.set(false);
+            match r {
+                Ok(()) => {
+                    ui.set_selected_project(full_after_removal(ui.selected_project.get_untracked().as_deref(), &name));
+                    full.set(full_after_removal(full.get_untracked().as_deref(), &name));
+                    closed.set(None);
+                }
+                Err(e) if is_owner_refusal(e.status(), e.code()) => notice::post(e.to_string()),
+                Err(e) => failure.set(Some(delete_error_message(e.status(), e.code()).to_string())),
             }
         },
     );
@@ -1810,10 +1865,29 @@ fn SettingsSheet(
                         shell::choose(&u, NavMenu::VersionControl);
                     });
                 });
-                SkipSection(&sheet_skip, EST_SEC_DANGER, "위험 영역", if default_project { "되돌리기 어려운 작업입니다. 기본 프로젝트는 보관하거나 지울 수 없습니다" } else { "되돌리기 어려운 작업입니다. 보관과 삭제는 서버가 아직 지원하지 않습니다" }, false, || {
+                SkipSection(&sheet_skip, EST_SEC_DANGER, "위험 영역", danger_hint(&b.id), false, || {
                     cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        for row in danger_rows(&b.id, b.members.len()) {
-                            DangerRowView(&row, danger_allowed(&b.id, row.part));
+                        // 보관 is one tap (it can be undone); 삭제 asks twice (`delete_step`).
+                        let armed = remember_with_key(b.id.clone(), || mutable_state_of(None::<i64>));
+                        let (archived, now) = (server.archived, crate::demo::now_ms());
+                        for row in danger_rows_for(&b.id, b.members.len(), archived, delete_armed(armed.get(), now)) {
+                            let (project, closed, full, saving, failure, armed) = (b.id.clone(), closed.clone(), full.clone(), saving.clone(), failure.clone(), armed.clone());
+                            let part = row.part;
+                            DangerRowView(&row, danger_allowed(&b.id, part) && !saving.get(), move || {
+                                if part == SettingsPart::Archive {
+                                    save_settings(project.clone(), archive_patch(archived), None, closed.clone(), full.clone(), saving.clone(), failure.clone());
+                                    return;
+                                }
+                                let now = crate::demo::now_ms();
+                                match delete_step(armed.get_untracked(), now) {
+                                    DeleteStep::Arm => armed.set(Some(now)),
+                                    DeleteStep::Wait => {}
+                                    DeleteStep::Delete => {
+                                        armed.set(None);
+                                        delete_project_now(project.clone(), closed.clone(), full.clone(), saving.clone(), failure.clone());
+                                    }
+                                }
+                            });
                         }
                     });
                 });
@@ -1887,7 +1961,7 @@ fn LeaderOption(m: &Member) {
 }
 
 /// `.ps-danger`: the title and what it does at the left, the destructive button at the right.
-fn DangerRowView(row: &crate::ui::project::DangerRow, enabled: bool) {
+fn DangerRowView(row: &crate::ui::project::DangerRow, enabled: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     cu::Row()
         .spacing(SP[2])
@@ -1898,7 +1972,7 @@ fn DangerRowView(row: &crate::ui::project::DangerRow, enabled: bool) {
                 Label(row.title, Fs::Sm, Weight::Semibold, None, Some(1));
                 Label(&row.note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
             });
-            AppButton(row.button, None, ButtonKind::Destructive, true, enabled, false, || {});
+            AppButton(row.button, None, ButtonKind::Destructive, true, enabled, false, on_click);
         });
 }
 

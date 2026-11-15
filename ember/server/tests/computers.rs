@@ -600,7 +600,7 @@ async fn fr_l18_echoed_computer_url_has_no_credentials() {
     let raw = "http://user:pass@host:8741/?q=1#frag";
     let clean = |v: &Value| {
         let text = v.to_string();
-        for bad in ["user", "pass", "q=1", "frag"] {
+        for bad in ["user:", "pass@", "q=1", "frag"] {
             assert!(!text.contains(bad), "{bad} echoed: {text}");
         }
     };

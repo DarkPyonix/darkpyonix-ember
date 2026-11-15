@@ -164,6 +164,25 @@ fn serialize_url_for_clients<S: serde::Serializer>(url: &str, s: S) -> Result<S:
 /// for error texts and log lines that may quote a node URL (a transport error names the URL
 /// it failed on).
 pub fn strip_urls_in_text(text: &str) -> String {
+    rewrite_urls_in_text(text, url_for_clients)
+}
+
+/// `text` with the user name and password removed from every `http(s)://` or `ws(s)://` URL
+/// in it, query and fragment kept. For hub errors: they quote hub pages the user must open,
+/// such as `/link?code=...`, whose query carries no credential but is needed (FR-L18, #519).
+pub fn strip_userinfo_in_text(text: &str) -> String {
+    rewrite_urls_in_text(text, |url| match url.find("://") {
+        Some(i) => {
+            let (scheme, rest) = url.split_at(i + 3);
+            let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            let authority = rest[..end].rsplit('@').next().unwrap_or("");
+            format!("{scheme}{authority}{}", &rest[end..])
+        }
+        None => url.to_string(),
+    })
+}
+
+fn rewrite_urls_in_text(text: &str, clean: impl Fn(&str) -> String) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(i) = ["http://", "https://", "ws://", "wss://"]
@@ -183,11 +202,11 @@ pub fn strip_urls_in_text(text: &str) -> String {
             out.push_str(token);
         } else if let Some(ws) = token.strip_prefix("ws") {
             // Strip as http(s) and put the ws scheme back.
-            let cleaned = url_for_clients(&format!("http{ws}"));
+            let cleaned = clean(&format!("http{ws}"));
             out.push_str("ws");
             out.push_str(cleaned.strip_prefix("http").unwrap_or(&cleaned));
         } else {
-            out.push_str(&url_for_clients(token));
+            out.push_str(&clean(token));
         }
         rest = &tail[end..];
     }
@@ -1642,6 +1661,10 @@ mod tests {
             "error sending request for url (http://host:8741/): refused; ws://h:1/events"
         );
         assert_eq!(strip_urls_in_text("no url here"), "no url here");
+        assert_eq!(
+            strip_userinfo_in_text("open http://u:p@hub:1/link?code=AB#x"),
+            "open http://hub:1/link?code=AB#x"
+        );
     }
 
     use super::*;

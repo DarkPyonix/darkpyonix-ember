@@ -1207,6 +1207,38 @@ fn SectionPillsAtWidth(active: Section, width: f32, on_pick: impl FnMut(Section)
     SectionPillsWithCounts(active, width, &|_| None, on_pick);
 }
 
+/// The width a section pill is drawn at, estimated from its text (13 dp Hangul, 7.5 dp digits at
+/// the 12 dp count): 12 dp sides, an 18 dp icon, and 12 dp between icon, name and count, the
+/// conflicts count on a pill 7 dp wider each side. Used only to scroll the current pill into view.
+pub fn section_pill_width(sec: Section, count: Option<usize>) -> f32 {
+    let text = |s: &str, glyph: f32, narrow: f32| -> f32 { s.chars().map(|c| if c.is_ascii() { narrow } else { glyph }).sum() };
+    let mut w = SP[2] + 18.0 + SP[2] + text(sec.label(), 13.0, 3.5) + SP[2];
+    if let Some(n) = count.filter(|n| *n > 0) {
+        w += text(&n.to_string(), 7.5, 7.5) + SP[2];
+        if sec == Section::Conflicts {
+            w += 14.0;
+        }
+    }
+    w
+}
+
+/// Where the scrolling pill row is moved to so the current pill is whole on screen: 0 while it
+/// ends inside the row's `width`, else the distance that puts its end 6 dp inside the right edge
+/// (the Renderer clamps it to the row's scroll range). `counts` are in `Section::ALL` order.
+pub fn section_pills_reveal(active: Section, width: f32, counts: &[Option<usize>]) -> f32 {
+    let gap = SP[0] + 2.0;
+    let mut start = 0.0;
+    for (i, sec) in Section::ALL.iter().enumerate() {
+        let w = section_pill_width(*sec, counts.get(i).copied().flatten());
+        if *sec == active {
+            let end = start + w + gap;
+            return if end <= width { 0.0 } else { end - width };
+        }
+        start += w + gap;
+    }
+    0.0
+}
+
 /// The height of a section pill (`.vcs-navi{height:36px}` at 900 px and below).
 pub const SECTION_PILL_H: f32 = 36.0;
 
@@ -1267,7 +1299,20 @@ fn SectionPillsWithCounts(active: Section, width: f32, count_of: &dyn Fn(Section
     };
     if section_pills_scroll(width) {
         // One row that scrolls sideways (`.vcs-nav{flex-direction:row;overflow-x:auto;gap:6px}`).
-        cu::ScrollRow().modifier(Modifier::new().fill_max_width()).content(pills);
+        // The current pill is scrolled into view when it changes (#878: at 800 the row ends inside
+        // 충돌, so picking it, or opening the page on it, left it cut at the edge).
+        let counts: Vec<Option<usize>> = Section::ALL.iter().map(|s| count_of(*s)).collect();
+        let to = section_pills_reveal(active, width, &counts);
+        let scroll = cu::remember_scroll_state();
+        let seen = remember(|| mutable_state_of(None::<Section>));
+        if seen.get_untracked() != Some(active) {
+            let target = scroll.clone();
+            compose_rust::runtime::side_effect(move || {
+                seen.set(Some(active));
+                target.scroll_to(to);
+            });
+        }
+        cu::ScrollRow().scroll_state(&scroll).modifier(Modifier::new().fill_max_width()).content(pills);
     } else {
         pills();
     }
@@ -7719,6 +7764,28 @@ mod tests {
         let p = super::super::theme::LIGHT;
         assert_eq!(pane_tab_look(true, &p), (p.ink, p.ink, p.ink_text));
         assert_eq!(pane_tab_look(false, &p), (p.surface, p.line, p.text_2));
+    }
+
+    #[test]
+    fn fr_l19_the_current_section_pill_is_scrolled_into_view() {
+        // The page at 800: the pills get the content width (800 less the 72 rail, less 2 x 32).
+        let width = 800.0 - 72.0 - 64.0;
+        let counts = [Some(5), None, Some(9), Some(3), Some(2), Some(1), Some(3)];
+        assert_eq!(section_pills_reveal(Section::Changes, width, &counts), 0.0, "the first pill is in view at 0");
+        assert_eq!(section_pills_reveal(Section::Stash, width, &counts), 0.0);
+        let conflicts = section_pills_reveal(Section::Conflicts, width, &counts);
+        let team = section_pills_reveal(Section::Team, width, &counts);
+        assert!(conflicts > 0.0, "충돌 ends past the edge at 800 (r10 capture): {conflicts}");
+        assert!(team > conflicts, "팀 작업 is further right");
+        // The count adds its width, the conflicts count its orange pill too.
+        assert!(section_pill_width(Section::Conflicts, Some(1)) > section_pill_width(Section::Conflicts, None) + 14.0);
+        assert_eq!(section_pill_width(Section::Stash, Some(0)), section_pill_width(Section::Stash, None), "no count at 0");
+        // The scrolling row is moved with the toolkit's scroll state, once per change of section.
+        let src = include_str!("vcs.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(production.contains("let to = section_pills_reveal(active, width, &counts);"));
+        assert!(production.contains("target.scroll_to(to);"));
+        assert!(production.contains("cu::ScrollRow().scroll_state(&scroll).modifier(Modifier::new().fill_max_width()).content(pills);"));
     }
 
     #[compose_rust::runtime::Composable]

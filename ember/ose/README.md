@@ -32,6 +32,7 @@ checks the result, so it is safe anywhere.
 | `linux-arm64` | `ubuntu-22.04-arm` | Raspberry Pi 4/5 on a **64-bit** OS (Raspberry Pi OS Bookworm, glibc 2.36) |
 | `darwin-arm64` | `macos-15` | Apple silicon |
 | `darwin-x64` | `macos-15-intel` | Intel Mac |
+| `windows-x64` | `windows-2022` | Windows 10 and later, x64; launcher `bin/dpx-ose-server.cmd` (#83, written, not yet run in CI) |
 
 Each build produces `dpx-ose-<tag>-<target>.tar.gz` and its `.sha256`. The archive is
 self-contained: it bundles the Node runtime pinned in upstream `remote/.npmrc`, so the host does
@@ -48,8 +49,36 @@ checksum, unpacks it, and runs the Ember editor session's live tests against it
 test fails the run, so `publish-ose.yml` publishes nothing from it. This job is written and has
 not run in CI yet.
 
-There is no Windows target. `build.sh`, `smoke.sh` and the live tests are written for Linux and
-macOS, and whether a Windows computer hosts an OSE is not decided (#83).
+### Windows
+
+`windows-x64` is built natively on a `windows-2022` runner (`docs/INTENT.md` D49, provisional,
+#83). The same `build.sh` runs under Git Bash and calls Code-OSS's
+`vscode-reh-web-win32-x64-min-ci` task, the task upstream's own Windows pipeline uses
+([product-build-win32-compile.yml](https://github.com/microsoft/vscode/blob/1.139.1/build/azure-pipelines/win32/steps/product-build-win32-compile.yml)).
+Native modules need the Visual Studio 2022 C++ build tools and Python, which the runner image has
+([VS Code: How to Contribute](https://github.com/microsoft/vscode/wiki/How-to-Contribute)). It is
+not cross-compiled, because native modules are built for the build host.
+
+The archive has the same shape as the others, `dpx-ose-<tag>-windows-x64.tar.gz` and `.sha256`,
+so the fetch script, the jobs and the release handle one format; Windows 10 and later read it
+with their own `tar.exe` (`tar -xzf dpx-ose-<tag>-windows-x64.tar.gz`).
+
+The launcher is `bin/dpx-ose-server.cmd`, which runs `node.exe out\server-main.js` from the
+build root ([code-server.cmd](https://github.com/microsoft/vscode/blob/1.139.1/resources/server/bin/code-server.cmd)).
+`EMBER_OSE_SERVER` names the `.cmd`, but `ember-node` and `smoke.sh` start those two directly,
+so stopping the child stops the server and no `cmd.exe` re-quotes the arguments. Without
+`EMBER_OSE_SERVER`, `ember-node` looks for `%LOCALAPPDATA%\dpx-ose-*\bin\dpx-ose-server.cmd`.
+
+Known limits on Windows (not built):
+
+- The live tests (`live_ose.rs`, `live_session.rs`, `fr_l31_14_live_extensions.rs`) are
+  `#![cfg(unix)]`: they stop the server with process groups and `pkill`. The **Smoke
+  (windows-x64)** job runs `smoke.sh` on the downloaded archive instead (start, `/version`, Open
+  VSX search and install).
+- Stopping an OSE kills `node.exe` only; the extension host and other children it started are
+  not killed with it (no job object).
+- The token files keep the default ACL: any process of the same user and an administrator can
+  read them.
 
 To move to a new Code-OSS release: change `VERSION`, open a PR (the `product` job checks the new
 upstream `product.json` against the overrides in seconds), then run the workflow manually or tag.

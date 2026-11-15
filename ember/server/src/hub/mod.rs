@@ -593,12 +593,14 @@ impl ServerHub {
         if let Err(e) = ensure_resolve_token(&mut reg).await {
             tracing::warn!("could not get a hub resolve token: {e}");
         }
-        // Discover the hub's relay, directory and long-poll support before saving the registration,
-        // so status() never shows `registered: true` with stale discovery state (#538).
-        let config = self.discover().await;
+        // Persist the registration and its device token before `discover()` calls the hub over the
+        // network, so a stop or hang during discovery cannot leave the hub with a registered main
+        // server while this server has no stored token.
         self.save_registration(&reg)?;
         tracing::info!(name = %reg.device.name, hub = %reg.hub_url, "registered with the hub as main server");
         self.publish_app().await;
+        // Now that the server is registered, discover the hub's relay, directory and long-poll support.
+        let config = self.discover().await;
         if let Some(t) = self.transport.get() {
             t.enable_hub(config.directory_with_watch(reg.directory_token(), reg.active_token()))
                 .map_err(|e| anyhow::anyhow!("enabling the hub directory: {e}"))?;

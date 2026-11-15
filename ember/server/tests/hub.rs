@@ -103,10 +103,7 @@ async fn register_server(f: &Fixture) {
     let deadline = approved + Duration::from_secs(10);
     loop {
         let (_, status) = call(&f.app, Method::GET, "/api/hub", None).await;
-        if status["registered"] == true {
-            // `ServerHub::complete` discovers `/config` before saving the registration, so
-            // `long_poll` is already set the first moment `registered` turns true (#538).
-            assert_eq!(status["long_poll"], true, "{status}");
+        if status["registered"] == true && status["long_poll"] == true {
             assert_eq!(status["device"]["role"], "main_server");
             assert_eq!(status["device"]["name"], "home server");
             assert!(status["pending"].is_null());

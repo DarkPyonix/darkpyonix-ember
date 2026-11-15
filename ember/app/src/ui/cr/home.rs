@@ -1817,8 +1817,9 @@ fn IntegrationsArea() {
     });
 }
 
-/// `.int-rule`: CI 실패 -> 루틴, with the honest note and a link to 루틴 (FR-L23, #498). The
-/// server has no field that ties a CI failure to a routine, so nothing runs from here.
+/// `.int-rule`: CI 실패 -> 루틴, with the note and a link to 루틴 (FR-L23, #498, #759). This row
+/// only opens the 루틴 screen; the server's CI watcher runs event routines only when connected to a
+/// server (never in demo mode or while offline).
 fn CiRuleRow(ui: &SharedUi) {
     let p = ember_theme().palette;
     cu::Column()

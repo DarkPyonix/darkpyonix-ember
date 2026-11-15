@@ -765,13 +765,28 @@ pub mod page {
                 pos_sig.set((line, column.unwrap_or(1)));
             }
             crate::ui::palette::Payload::ExtensionCommand(id) => {
-                s.host.send(HostCommand::ExecuteCommand(id));
+                // The ⋯ menu's own rows (FR-L31.38) are the window's, not an extension's.
+                if let Some(cmd) = crate::ui::editor_menu::MenuCommand::from_id(&id) { run_menu_command(s, cmd); } else { s.host.send(HostCommand::ExecuteCommand(id)); }
             }
             payload @ (crate::ui::palette::Payload::SetEol(_)
             | crate::ui::palette::Payload::EncodingAction(_)
             | crate::ui::palette::Payload::SetEncoding { .. }
             | crate::ui::palette::Payload::SetLanguage(_)
             | crate::ui::palette::Payload::Cancel) => choose_format_item(s, payload),
+        }
+    }
+
+    /// Does a ⋯ menu row chosen in the palette, as the menu's own item does (FR-L31.38).
+    fn run_menu_command(s: &Shared, cmd: crate::ui::editor_menu::MenuCommand) {
+        use crate::ui::editor_menu::MenuCommand;
+        match cmd {
+            MenuCommand::Keymap(k) => {
+                let mut keymap_sig = s.keymap;
+                keymap_sig.set(k);
+                crate::services::services().ui.update_prefs(|p| p.keymap = k);
+            }
+            MenuCommand::AutoSave(mode) => crate::ui::editor_states::view::set_auto_save(mode),
+            MenuCommand::CloseEditor => crate::services::services().ui.close_editor(),
         }
     }
 
@@ -848,7 +863,10 @@ pub mod page {
                 let ranked = rank(&effective_query, &items);
                 (std::borrow::Cow::Owned(items), ranked, None)
             } else {
-                let items = items_for_workbench(mode, keymap, Os::current(), &s.folder, &files, &ext_commands, &recent);
+                let mut items = items_for_workbench(mode, keymap, Os::current(), &s.folder, &files, &ext_commands, &recent);
+                if matches!(mode, crate::ui::palette::Mode::Commands | crate::ui::palette::Mode::Everything) {
+                    items.to_mut().extend(crate::ui::editor_menu::palette_items(keymap, crate::ui::editor_states::view::auto_save()));
+                }
                 let ranked = rank(file_q, &items);
                 (items, ranked, suffix)
             }

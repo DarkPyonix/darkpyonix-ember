@@ -191,9 +191,11 @@ pub struct StartRequest {
     /// (`EMBER_SESSION_MEM_LIMIT_MB`), else no limit. Set by `Sessions::ensure_live` from
     /// `Sessions::set_mem_limit_mb`; a start-config hook may override it.
     pub mem_limit_mb: Option<u64>,
-    /// Tools the harness may call without asking, each one exact tool name (never a pattern).
-    /// Claude Code only, passed as `--allowedTools`: without the rule a call to an MCP tool is
-    /// denied in `-p` mode (measured, FR-T12). Other adapters ignore it.
+    /// Tools the harness may call without asking, each one exact tool name (never a pattern), in
+    /// the form `mcp__<server>__<tool>`. Claude Code gets them as `--allowedTools`: without the
+    /// rule a call to an MCP tool is denied in `-p` mode (measured, FR-T12). Codex gets
+    /// `mcp_servers.<server>.tools.<tool>.approval_mode="approve"` for a server this request
+    /// registers. Other adapters ignore it: their approval flow asks the person.
     pub allowed_tools: Vec<String>,
 }
 

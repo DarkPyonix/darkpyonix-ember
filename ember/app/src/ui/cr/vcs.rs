@@ -5105,13 +5105,13 @@ pub fn vcs_sheet_frame(sheet_w: f32, window_w: f32) -> VcsSheetFrame {
     VcsSheetFrame { pad, rail, layout, files_w: 260.0 }
 }
 
-/// The strip the full-screen sheet leaves above its header for the window's own buttons: on a
-/// phone-wide window (below 560, where the sheet is the whole window) the height the macOS
-/// traffic lights cover, as the shell's bottom-tab layout leaves above every screen
-/// (`safe_area::title_strip_height`, FR-L33); none on a wider window, where the sheet floats in
-/// the middle, clear of them.
+/// The strip the full-screen sheet leaves above its header for the window's own buttons: the
+/// shared rule for every full-screen sheet (`full_screen_sheet_top_inset`, FR-L33). The sheet is
+/// a monitor-presented `EmberSheetSized`, the whole window up to 560 inclusive, so it reserves
+/// the height the macOS traffic lights cover there and none on a wider window, where the sheet
+/// floats in the middle, clear of them.
 pub fn vcs_sheet_top_inset(window_w: f32, area: crate::ui::safe_area::SafeArea) -> f32 {
-    if window_w < VCS_SHEET_PHONE_DP { crate::ui::safe_area::title_strip_height(area, true) } else { 0.0 }
+    super::components::full_screen_sheet_top_inset(window_w, true, area)
 }
 
 /// The sheet header's title (`.vcs-mhead b`).
@@ -7220,7 +7220,8 @@ mod tests {
         let lights = SafeArea { top: 28.0, leading: 72.0, trailing: 0.0 };
         assert_eq!(vcs_sheet_top_inset(390.0, lights), 28.0);
         assert_eq!(vcs_sheet_top_inset(559.0, lights), 28.0);
-        assert_eq!(vcs_sheet_top_inset(560.0, lights), 0.0, "the sheet floats from 560");
+        assert_eq!(vcs_sheet_top_inset(560.0, lights), 28.0, "the whole window up to 560, as `sheet_presentation`");
+        assert_eq!(vcs_sheet_top_inset(561.0, lights), 0.0, "the sheet floats from 561");
         assert_eq!(vcs_sheet_top_inset(1440.0, lights), 0.0);
         assert_eq!(vcs_sheet_top_inset(390.0, SafeArea::default()), 0.0, "nothing to clear");
         let _guard = crate::services::test_guard();

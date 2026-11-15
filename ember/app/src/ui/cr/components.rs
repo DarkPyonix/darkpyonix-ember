@@ -1717,7 +1717,7 @@ pub(crate) fn sheet_wraps_content(window_width_dp: f32) -> bool {
 /// as the bottom-tab shell does above every screen (`safe_area::title_strip_height`). A bottom
 /// sheet or a dialog sits clear of them and reserves nothing, and so does a zero report (macOS
 /// full screen, FR-L33.2). [`EmberSheetSized`] sends it before the shared header; a sheet with no
-/// shared title draws its own header and its own strip (`vcs_sheet_top_inset`).
+/// shared title draws its own header and reserves the same strip through it (`vcs_sheet_top_inset`).
 pub(crate) fn full_screen_sheet_top_inset(window_width_dp: f32, monitor: bool, area: crate::ui::safe_area::SafeArea) -> f32 {
     if sheet_presentation(window_width_dp, monitor) == SheetPresentation::FullScreen {
         crate::ui::safe_area::title_strip_height(area, true)

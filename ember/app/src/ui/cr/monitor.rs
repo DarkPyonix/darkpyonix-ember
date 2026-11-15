@@ -639,9 +639,10 @@ mod tests {
     fn fr_l33_the_full_screen_monitor_header_starts_below_the_window_buttons() {
         // Review ba D: at 390 the computer monitor (and the project screen's computer sheet,
         // the same `MonitorSheet`) put "이 컴퓨터" under the macOS traffic lights.
-        use crate::ui::safe_area::SafeArea;
+        use crate::ui::safe_area::{current_platform, safe_area_for, Platform, SafeArea};
         use super::super::components::full_screen_sheet_top_inset;
-        let lights = SafeArea { top: 28.0, leading: 72.0, trailing: 0.0 };
+        // The pure rule names macOS, so it holds on every OS CI runs (as `cr/shell.rs` does).
+        let lights = safe_area_for(Platform::MacOs, SafeArea { top: 28.0, leading: 72.0, trailing: 0.0 });
         assert_eq!(full_screen_sheet_top_inset(390.0, true, lights), 28.0);
         assert_eq!(full_screen_sheet_top_inset(560.0, true, lights), 28.0, "full screen up to 560");
         assert_eq!(full_screen_sheet_top_inset(561.0, true, lights), 0.0, "a dialog from 561");
@@ -649,8 +650,14 @@ mod tests {
         assert_eq!(full_screen_sheet_top_inset(390.0, true, SafeArea::default()), 0.0, "nothing to clear");
         let _guard = crate::services::test_guard();
         // An odd footprint (31) so no other height in the sheet can stand in for the strip.
+        // The composed sheet reads this platform's safe area: macOS passes the report through,
+        // Linux and Windows have no lights at the leading edge and reserve nothing.
         let head = monitor_head_after_report(390.0, 31.0, 72.0);
-        assert!(head.contains("Height(31.0)"), "the 31 strip before the title: {head}");
+        if current_platform() == Platform::MacOs {
+            assert!(head.contains("Height(31.0)"), "the 31 strip before the title: {head}");
+        } else {
+            assert!(!head.contains("Height(31.0)"), "no strip off macOS: {head}");
+        }
         let head = monitor_head_after_report(390.0, 0.0, 0.0);
         assert!(!head.contains("Height(31.0)") && !head.contains("Height(28.0)"), "no strip with a zero safe area: {head}");
     }

@@ -236,6 +236,11 @@ pub struct ListeningPort {
     /// Executable name only.
     pub process: String,
     pub owner: PortOwner,
+    /// The address the socket is bound to, when it is one specific address (scope `loopback`
+    /// or `lan`): such a port answers on that address only (FR-L18, #519). Absent for scope
+    /// `any` and from older nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
 }
 
 /// `GET /ports`.

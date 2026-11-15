@@ -1226,6 +1226,11 @@ pub fn section_pill_width(sec: Section, count: Option<usize>) -> f32 {
 /// ends inside the row's `width`, else the distance that puts its end 6 dp inside the right edge
 /// (the Renderer clamps it to the row's scroll range). `counts` are in `Section::ALL` order.
 pub fn section_pills_reveal(active: Section, width: f32, counts: &[Option<usize>]) -> f32 {
+    // A row whose width is not known yet (the window reads 0 x 0 on Android until the first
+    // report) is not a zero-wide row: moving it would hide the first pill (FR-L28.5).
+    if width <= 0.0 {
+        return 0.0;
+    }
     let gap = SP[0] + 2.0;
     let mut start = 0.0;
     for (i, sec) in Section::ALL.iter().enumerate() {
@@ -1307,11 +1312,15 @@ fn SectionPillsWithCounts(active: Section, width: f32, view_w: f32, count_of: &d
         // Sent again when the row's scroll range changes: the Renderer clamps to the range it
         // knows, and on the first frame the row is not measured yet (r12 capture: 충돌 cut at 800).
         let range = scroll.max_offset().round() as i32;
-        let seen = remember(|| mutable_state_of(None::<(Section, i32)>));
-        if seen.get_untracked() != Some((active, range)) {
+        // And again when the target itself moves: on Android the row is measured before the
+        // window's width is reported, so the first target was computed for a 0 dp row and kept
+        // 변경 사항 scrolled away at 360 (FR-L28.5, Flip 4 review 3.6).
+        let to_key = to.round() as i32;
+        let seen = remember(|| mutable_state_of(None::<(Section, i32, i32)>));
+        if seen.get_untracked() != Some((active, range, to_key)) {
             let target = scroll.clone();
             compose_rust::runtime::side_effect(move || {
-                seen.set(Some((active, range)));
+                seen.set(Some((active, range, to_key)));
                 target.scroll_to(to);
             });
         }
@@ -7828,8 +7837,26 @@ mod tests {
         assert!(production.contains("let to = section_pills_reveal(active, view_w, &counts);"));
         assert!(production.contains("(section_width - nav).max(0.0),"), "the row's width leaves out the shell's navigation");
         assert!(production.contains("target.scroll_to(to);"));
-        assert!(production.contains("seen.set(Some((active, range)));"), "sent again once the row's range is measured");
+        assert!(production.contains("seen.set(Some((active, range, to_key)));"), "sent again once the row's range is measured");
         assert!(production.contains("cu::ScrollRow().scroll_state(&scroll).modifier(Modifier::new().fill_max_width()).content(pills);"));
+    }
+
+    #[test]
+    fn fr_l28_5_the_section_pills_start_at_0_with_the_current_pill_at_360() {
+        // Flip 4 review 3.6: the row opened on 히스토리 with 변경 사항 (selected) scrolled away.
+        // Before the window's width is reported the row's width reads 0, and the target was the
+        // whole first pill; once the width arrived the target was not sent again.
+        let counts = [Some(5), None, Some(9), Some(3), Some(2), Some(1), Some(3)];
+        assert_eq!(section_pills_reveal(Section::Changes, 0.0, &counts), 0.0, "an unknown width moves nothing");
+        assert_eq!(section_pills_reveal(Section::History, 0.0, &counts), 0.0);
+        // The phone page at 360: the row is the window less the page's two sides.
+        let width = 360.0 - 2.0 * vcs_page_pad(true);
+        assert_eq!(section_pills_reveal(Section::Changes, width, &counts), 0.0);
+        assert_eq!(section_pills_reveal(Section::History, width, &counts), 0.0);
+        // A later target is sent even when the measured range stays the same.
+        let src = include_str!("vcs.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(production.contains("if seen.get_untracked() != Some((active, range, to_key)) {"));
     }
 
     #[compose_rust::runtime::Composable]

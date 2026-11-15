@@ -1167,9 +1167,18 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                                         )
                                                     },
                                                 );
-                                                super::session::ModeChip(&sid, is_phone);
-                                                cu::Spacer().modifier(Modifier::new().weight(1.0));
-                                                super::session::ModelChip(&sid, is_phone);
+                                                // The chips share what the row leaves after the
+                                                // attach and send buttons and shorten their labels
+                                                // (ellipsis) in it, so the send or stop button keeps
+                                                // its size at 360 dp (FR-L28.3, Flip 4 review 3.5).
+                                                cu::Box()
+                                                    .alignment(Alignment::CenterStart)
+                                                    .modifier(Modifier::new().weight(1.0))
+                                                    .content(|| super::session::ModeChip(&sid, is_phone));
+                                                cu::Box()
+                                                    .alignment(Alignment::CenterEnd)
+                                                    .modifier(Modifier::new().weight(1.0))
+                                                    .content(|| super::session::ModelChip(&sid, is_phone));
                                                 if busy {
                                                     let sid_int = sid.clone();
                                                     super::session::StopCircleButton(move || {
@@ -2353,6 +2362,28 @@ mod tests {
     #[Composable]
     fn host_conversation_s1() {
         ConversationView("demo-s1", false);
+    }
+
+    #[test]
+    fn fr_l28_3_the_composer_chips_shrink_and_the_send_button_keeps_its_size_at_360() {
+        // Flip 4 review 3.5: the two chips kept their full width (116 and 120 dp) and pushed the
+        // stop button to a 6 dp sliver. Each chip now sits in an equal weighted share of the row.
+        // The demo test services hold no session record, so the chips do not render here and the
+        // composer row is checked in the source.
+        let src = include_str!("conversation.rs").split("mod tests {").next().unwrap();
+        let row = src
+            .split("|| notice::post(\"파일 첨부는 준비 중입니다\")")
+            .nth(1)
+            .and_then(|r| r.split("StopCircleButton(").next())
+            .expect("the composer row");
+        let shares = row.matches(".modifier(Modifier::new().weight(1.0))").count();
+        assert_eq!(shares, 2, "one weighted share per chip, no weighted spacer");
+        assert!(!row.contains("cu::Spacer()"), "no spacer pushes the send button");
+        let mode = row.find("ModeChip(&sid, is_phone)").expect("the mode chip is in the row");
+        let model = row.find("ModelChip(&sid, is_phone)").expect("the model chip is in the row");
+        let first = row.find(".weight(1.0)").unwrap();
+        let second = row.rfind(".weight(1.0)").unwrap();
+        assert!(first < mode && mode < second && second < model, "each chip is in its own share");
     }
 
     #[test]

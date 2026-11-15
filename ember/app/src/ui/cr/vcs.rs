@@ -7458,7 +7458,8 @@ mod tests {
             assert!(side.widget == "Spacer" && has(side, "Width(16.0)"), "{:?}", side.mods);
         }
         assert!(parts[1].widget == "Row" && has(parts[1], "Weight(1.0)"), "{:?}", parts[1].mods);
-        let hit = nodes.iter().find(|n| Some(n.id) == stash.parent).unwrap();
+        // The named box is the 44 by 44 control itself (compose-rust#429, #673).
+        let hit = if has(stash, "Width(44.0)") { stash } else { nodes.iter().find(|n| Some(n.id) == stash.parent).unwrap() };
         assert!(has(hit, "Width(44.0)") && has(hit, "Height(44.0)"), "{:?}", hit.mods);
         assert_eq!(hit.parent, Some(parts[1].id), "the box is a child of the header's content row");
         let note = with_text(&nodes, STASH_NOW_NOTE);
@@ -8250,6 +8251,10 @@ mod tests {
                 for m in batch {
                     match m {
                         Mutation::Create { node_id, widget: WidgetKind::Button } => {
+                            tab_nodes.insert(*node_id);
+                        }
+                        // A painted control that takes its own name is a clickable box (compose-rust#429, #673).
+                        Mutation::SetProp { node_id, property: PropertyKind::OnClick, .. } => {
                             tab_nodes.insert(*node_id);
                         }
                         Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {

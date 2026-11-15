@@ -4005,7 +4005,8 @@ mod tests {
 
         let production = include_str!("routines.rs").split("#[cfg(test)]").next().unwrap().to_string();
         for gone in [["Focus", "Overlay("].concat(), ["Named", "Overlay("].concat(), ["Disabled", "Overlay("].concat()] {
-            assert!(!production.contains(&gone), "{gone} is gone");
+            // `DataNamedOverlay(` (compose-rust#831) is the kept overlay, not the old one.
+            assert!(!production.replace("DataNamedOverlay(", "").contains(&gone), "{gone} is gone");
         }
         assert!(production.contains("NamedDisabled(RUN_NOW_BUSY_LABEL, run_box"), "the busy square is named and disabled, with no click");
         compose_rust::window::reset_window_size();

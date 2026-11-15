@@ -719,6 +719,48 @@ fn ide_label(kind: IdeKind) -> &'static str {
 /// The head of the IDE menu (mockup `ideMenu` `.sdrop-h b`).
 pub const IDE_MENU_HEAD: &str = "어느 IDE로 열까요";
 
+/// A session folder as the IDE menu shows it: a folder under a home directory (`/Users/<name>/`,
+/// `/home/<name>/`, `/root/`, `C:\Users\<name>\`) starts at `~`, as the mockup's `~/project`;
+/// any other absolute folder is cut to its last part after an ellipsis, so the line does not
+/// spend its width on mount points. The home is recognised by its form, because the client does
+/// not know the home directory of the session's computer.
+pub fn ide_menu_folder(cwd: &str) -> String {
+    let path = cwd.trim().replace('\\', "/");
+    let path = path.trim_end_matches('/');
+    if path.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    let under_home = |skip: usize| {
+        let rest = parts[skip..].join("/");
+        if rest.is_empty() { "~".to_string() } else { format!("~/{rest}") }
+    };
+    match parts.as_slice() {
+        ["", "Users" | "home", _, ..] => under_home(3),
+        ["", "root", ..] => under_home(2),
+        [drive, "Users", _, ..] if drive.ends_with(':') => under_home(3),
+        _ => match parts.last() {
+            Some(last) if parts.len() > 2 => format!("\u{2026}/{last}"),
+            _ => path.to_string(),
+        },
+    }
+}
+
+/// The line under the IDE menu's head (mockup `ideMenu` `.sdrop-h span`, `computer:~/project`):
+/// the session's computer and its folder. Without a computer name (not read yet) the folder
+/// alone; without a folder nothing. Review r8 found the raw folder
+/// (`/Volumes/macMini/darkpyonix/darkpyonix-ember/.scrat...`) there.
+pub fn ide_menu_subtitle(computer: Option<&str>, cwd: &str) -> Option<String> {
+    let folder = ide_menu_folder(cwd);
+    if folder.is_empty() {
+        return None;
+    }
+    Some(match computer.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(c) => format!("{c}:{folder}"),
+        None => folder,
+    })
+}
+
 /// The line under an IDE's name in the menu: what this client does with it (FR-L7, FR-L10.4).
 /// The mockup's wording is kept where the client does the same: the Ember editor opens its own
 /// window, VS Code opens the server's web IDE address in the browser, and Gateway gets a
@@ -1879,6 +1921,33 @@ mod tests {
         assert_eq!(c[0].kind, IdeKind::Gateway);
         let kinds: Vec<_> = c.iter().map(|x| x.kind).collect();
         assert!(kinds.contains(&IdeKind::Ember) && kinds.contains(&IdeKind::VsCode));
+    }
+
+    #[test]
+    fn fr_l10_4_ide_menu_subtitle_is_the_computer_and_the_folder_from_home() {
+        // Review r8: the raw folder stood under the head, where the mockup has `computer:~/project`.
+        assert_eq!(ide_menu_folder("/Users/brew/work/ember"), "~/work/ember");
+        assert_eq!(ide_menu_folder("/home/dev/ember/"), "~/ember");
+        assert_eq!(ide_menu_folder("/Users/brew"), "~");
+        assert_eq!(ide_menu_folder("/root/ember"), "~/ember");
+        assert_eq!(ide_menu_folder("C:\\Users\\dev\\ember"), "~/ember");
+        // Outside a home the last part only, never the mount points.
+        assert_eq!(ide_menu_folder("/Volumes/macMini/darkpyonix/darkpyonix-ember/.scratch/demo-project"), "\u{2026}/demo-project");
+        assert_eq!(ide_menu_folder("/srv"), "/srv");
+        assert_eq!(ide_menu_folder("project"), "project");
+        assert_eq!(ide_menu_folder("  "), "");
+        assert_eq!(ide_menu_subtitle(Some("mac-mini"), "/Users/brew/ember").as_deref(), Some("mac-mini:~/ember"));
+        assert_eq!(ide_menu_subtitle(Some("gpu-box"), "/data/repos/ember").as_deref(), Some("gpu-box:\u{2026}/ember"));
+        // The computer's name is read from the server; until it arrives the folder stands alone.
+        assert_eq!(ide_menu_subtitle(None, "/Users/brew/ember").as_deref(), Some("~/ember"));
+        assert_eq!(ide_menu_subtitle(Some(" "), "/Users/brew/ember").as_deref(), Some("~/ember"));
+        assert_eq!(ide_menu_subtitle(Some("mac-mini"), ""), None);
+        for (file, src) in [("cr/session.rs", include_str!("cr/session.rs")), ("cr/project.rs", include_str!("cr/project.rs"))] {
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            assert!(production.contains("sub: ide_sub.as_deref(),"), "{file}");
+            assert!(!production.contains("sub: (!cwd.is_empty()).then_some(cwd.as_str()),"), "{file}: the raw folder");
+            assert!(production.contains("load_session_computer("), "{file}");
+        }
     }
 
     #[test]

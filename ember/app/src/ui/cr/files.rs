@@ -25,7 +25,7 @@ use ember_client::state::Computer;
 pub use crate::ui::files::{
     answer_offer, build_model, share_agents, share_devices, share_file_card, share_tap, ShareTap, SHARE_ACTIONS, SHARE_AGENTS_LABEL, SHARE_NAME_LINES, ShareDot, SHARE_NOTE, connected_count, empty_text, format_bytes, grid, kpis, offer_line,
     path_label, percent, progress_line, send_blocker, sendable_devices, transfer_service,
-    user_actions, visible_offers, Answer, Device, DeviceKind, Direction, FilesKpi, FilesModel,
+    offer_card_shown, user_actions, visible_offers, Answer, Device, DeviceKind, Direction, FilesKpi, FilesModel,
     HistoryEntry, HistoryResult, Offer, PathKind, Presence, ReceivedFile, SendDraft, SendTarget,
     Transfer, TransferAction, TransferService, TransferState, FILE_PICKER_AVAILABLE, FILE_PICK_REASON,
     FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE, clean_member_name, demo_files, is_demo,
@@ -427,7 +427,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                     if compact {
                         cu::Spacer().modifier(Modifier::new().height(PHONE_MENU_ROW));
                     }
-                    HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, w <= 900.0, 6.0, || {
+                    HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, w <= 900.0, 6.0, compact, || {
                         // The share button is named "공유 시트 열기" (compose-rust v0.0.7, #460).
                         ShareButton(compact, {
                             let o = share_open.clone();
@@ -456,7 +456,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                     Cols(
                         if w > 1279.0 { 4 } else { 2 },
                         SP[4],
-                        cells.iter().map(|c| -> Part { Box::new(move || KpiView(c)) }).collect(),
+                        cells.iter().map(|c| -> Part { Box::new(move || KpiView(c, compact)) }).collect(),
                     );
                 }
                 Stage(&live_model, &members, extras, &st, &ui, w, &skip);
@@ -478,8 +478,10 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                 }
             });
         });
-        // The incoming offer floats over the page, at the top right (above the tab bar on a phone).
-        if let Some(offer) = offers.first() {
+        // The incoming offer floats over the page, at the top right (above the tab bar on a phone),
+        // and waits while a sheet is open: drawn above the sheet's scrim it stayed bright (F8).
+        let sheet_open = st.sheet.get().is_some();
+        if let Some(offer) = offers.first().filter(|_| offer_card_shown(true, sheet_open, share_open.get())) {
             OfferCard(offer, &live_pending, &live_model.devices, &st, w);
         }
         // The lists stay when the server is lost; only sending is blocked (FR-L27.8), and the
@@ -652,15 +654,21 @@ fn TileGrid<'a>(cols: usize, gap: f32, avail: f32, span_last: bool, tiles: Vec<P
     });
 }
 
+/// A KPI number's type step: 28 (`--fs-2xl`), 18 on a phone (`.kpi .v{font-size:var(--fs-xl)}`
+/// at 560 px and below, review F5).
+pub fn kpi_value_fs(compact: bool) -> Fs {
+    if compact { Fs::Xl } else { Fs::Xl2 }
+}
+
 /// A KPI: the label, the number with its small unit and pill, and the green meter.
-fn KpiView(c: &KpiCell) {
+fn KpiView(c: &KpiCell, compact: bool) {
     let p = ember_theme().palette;
     cu::Column().spacing(0.0).modifier(Modifier::new().fill_max_width()).content(|| {
         Label(c.label, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
         if c.available {
             cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
                 cu::Row().alignment(Alignment::CenterStart).content(|| {
-                    Label(&c.value, Fs::Xl2, Weight::Regular, None, Some(1));
+                    Label(&c.value, kpi_value_fs(compact), Weight::Regular, None, Some(1));
                     if !c.unit.is_empty() {
                         Label(c.unit, Fs::Md, Weight::Medium, Some(paint(p.muted)), Some(1));
                     }
@@ -2251,5 +2259,55 @@ mod tests {
             clean_member_name("core-repo", "codex", "테스트"),
             "core-codex"
         );
+    }
+
+    fn phone_kpi() {
+        let cell = KpiCell { label: "연결된 장비", value: "4".into(), unit: "", pill: None, meter: None, available: true };
+        KpiView(&cell, true);
+    }
+
+    fn wide_kpi() {
+        let cell = KpiCell { label: "연결된 장비", value: "4".into(), unit: "", pill: None, meter: None, available: true };
+        KpiView(&cell, false);
+    }
+
+    /// The size the KPI's value text is sent with.
+    fn value_size(content: fn()) -> f32 {
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+        use compose_rust::{Host, PropertyKind, Recomposer};
+        let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let node = batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } if *s == "4" => Some(*node_id),
+                _ => None,
+            })
+            .expect("the value text");
+        batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::FontSize, value: PropertyValue::Float(f) } if *node_id == node => Some(*f),
+                _ => None,
+            })
+            .expect("the value's size")
+    }
+
+    /// Review F5: a KPI value is 18 on a phone (`.kpi .v` at 560 px and below), 28 above.
+    #[test]
+    fn f5_phone_kpi_values_are_18() {
+        let _guard = crate::services::test_guard();
+        assert_eq!(value_size(phone_kpi), 18.0);
+        assert_eq!(value_size(wide_kpi), 28.0);
+    }
+
+    /// Review F8: the offer card is left out while the send or the share sheet is open, so it
+    /// is not drawn bright above the scrim.
+    #[test]
+    fn f8_offer_card_waits_under_a_sheet() {
+        let src = include_str!("files.rs");
+        let screen = src.split("pub fn FilesScreenWith(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(screen.contains("offers.first().filter(|_| offer_card_shown(true, sheet_open, share_open.get()))"));
+        assert!(!screen.contains("if let Some(offer) = offers.first() {"));
     }
 }

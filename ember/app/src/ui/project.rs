@@ -129,6 +129,17 @@ pub fn strip_scroll_target(offset: f32, viewport: f32, content: f32, dir: f32) -
     (offset + dir * 0.8 * viewport).clamp(0.0, (content - viewport).max(0.0))
 }
 
+/// Whether the strip arrow pointing in `dir` (-1 or 1) has anywhere to go: the left one is inert
+/// at the start, the right one at the end. Half a dp of slack, because the Renderer reports
+/// fractional offsets.
+pub fn strip_arrow_enabled(offset: f32, max_offset: f32, dir: f32) -> bool {
+    if dir < 0.0 {
+        offset > 0.5
+    } else {
+        offset < max_offset - 0.5
+    }
+}
+
 /// Cells that fill the last row of a grid so every card keeps the same width.
 pub fn row_padding(items: usize, columns: usize) -> usize {
     if columns == 0 || items % columns == 0 {
@@ -1134,6 +1145,23 @@ mod tests {
     fn fr_l26_strip_scroll_clamps() {
         assert_eq!(strip_scroll_target(100.0, 500.0, 2000.0, -1.0), 0.0);
         assert_eq!(strip_scroll_target(1400.0, 500.0, 2000.0, 1.0), 1500.0);
+    }
+
+    #[test]
+    fn fr_l26_strip_arrow_is_inert_at_the_end_it_points_to() {
+        // #671: left at the start, right at the end, both live in between.
+        assert!(!strip_arrow_enabled(0.0, 300.0, -1.0));
+        assert!(strip_arrow_enabled(0.0, 300.0, 1.0));
+        assert!(strip_arrow_enabled(120.0, 300.0, -1.0));
+        assert!(strip_arrow_enabled(120.0, 300.0, 1.0));
+        assert!(strip_arrow_enabled(300.0, 300.0, -1.0));
+        assert!(!strip_arrow_enabled(300.0, 300.0, 1.0));
+        // A fractional rest position still counts as the end.
+        assert!(!strip_arrow_enabled(299.8, 300.0, 1.0));
+        assert!(!strip_arrow_enabled(0.2, 300.0, -1.0));
+        // Content that fits: neither arrow moves anything.
+        assert!(!strip_arrow_enabled(0.0, 0.0, -1.0));
+        assert!(!strip_arrow_enabled(0.0, 0.0, 1.0));
     }
 
     #[test]

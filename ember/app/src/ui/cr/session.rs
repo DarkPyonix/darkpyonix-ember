@@ -567,6 +567,23 @@ pub fn ide_pop_rows(choices: &[crate::ui::session::IdeChoice], remembered: Optio
         .collect()
 }
 
+/// Reads the name of the session's computer into `into` (the demo's own computer in the demo),
+/// for the IDE menu's `computer:~/project` line. A failed read leaves it unset.
+pub(crate) fn load_session_computer(session: String, into: MutableState<Option<String>>) {
+    if services().demo.is_some() {
+        into.set(Some("mac-mini".to_string()));
+        return;
+    }
+    run_shared(
+        async move { services().server.session_computer(&session).await.map_err(|e| e.to_string()) },
+        move |r: Result<CurrentComputer, String>| {
+            if let Ok(c) = r {
+                into.set(Some(c.computer.name));
+            }
+        },
+    );
+}
+
 /// "IDE 열기" split button with the three-entry chooser (`.idesplit`, FR-L7), a menu under the
 /// split button (FR-L10.4, #888, mockup `ideMenu`): "어느 IDE로 열까요" over the session's folder,
 /// one row per IDE with the code glyph, its name, what it does and a check on the remembered one.
@@ -587,10 +604,13 @@ pub fn IdeMenu(session: &str) {
     let is_phone = window.width_dp <= 560.0;
     let show_cur = window.width_dp >= 1280.0;
 
+    let computer = remember_with_key(sid.clone(), || mutable_state_of(None::<String>));
     {
         let sid_load = sid.clone();
         let ide_load = ide.clone();
+        let computer_load = computer.clone();
         launched_effect(sid.clone(), move || async move {
+            load_session_computer(sid_load.clone(), computer_load);
             if services().demo.is_some() {
                 let (project, cwd) = services()
                     .client
@@ -630,6 +650,8 @@ pub fn IdeMenu(session: &str) {
         .client
         .read(|s| s.session(&sid).map(|v| v.record.cwd.clone()))
         .unwrap_or_default();
+    // `computer:~/project` (mockup `ideMenu`), not the raw folder (review r8).
+    let ide_sub = crate::ui::session::ide_menu_subtitle(computer.get().as_deref(), &cwd);
     let rows = ide_pop_rows(&choices, remembered);
     let o_d = open.clone();
     let choices_c = choices.clone();
@@ -642,7 +664,7 @@ pub fn IdeMenu(session: &str) {
             name: super::a11y::IDE_PICKER,
             kind: PopKind::Drop,
             head: crate::ui::session::IDE_MENU_HEAD,
-            sub: (!cwd.is_empty()).then_some(cwd.as_str()),
+            sub: ide_sub.as_deref(),
             rows: &rows,
             align: compose_rust::PopoverAlign::End,
         },

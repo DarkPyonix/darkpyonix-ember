@@ -476,6 +476,40 @@ pub fn PopoverMenu(
     anchor: impl FnOnce(),
     footer: Option<&mut dyn FnMut()>,
 ) {
+    PopoverMenuWith(open, menu, PopExtra::default(), on_dismiss, on_choose, anchor, footer);
+}
+
+/// What a caller may ask of a [`PopoverMenu`] beyond its rows. The Home composer's pickers use
+/// these (#573, #574, #849, review r8); the default asks for nothing, which is [`PopoverMenu`].
+#[derive(Clone, Default)]
+pub struct PopExtra {
+    /// The gap between the control and the box when it is not the kind's own: a chip inside a
+    /// composer opens its menu 8 from the composer, not from the chip (`core.js` `place()`).
+    pub offset: Option<f32>,
+    /// A row tap only reports the row and the caller closes the menu. The permission picker
+    /// needs it: the first tap on 바이패스 arms the row and the menu stays open (FR-L16).
+    pub keep_open: bool,
+    /// At 560 and below the sheet has the menu's own head (`.md-head`, 12/600 `muted`) and no
+    /// title bar or close button, as the mockup's `.mp-pop` bottom sheet.
+    pub plain_sheet: bool,
+    /// The pointer came over row `i`.
+    pub on_hover: Option<std::rc::Rc<dyn Fn(usize)>>,
+    /// The weight the control takes in its row. A weight is read from the row's direct child,
+    /// which is the popover node, and the renderer hands it to the anchor (`HostPopover.kt`
+    /// `parentModifier`), so a control that shares a row by weight says it here.
+    pub anchor_weight: Option<f32>,
+}
+
+/// [`PopoverMenu`] with the options of [`PopExtra`].
+pub fn PopoverMenuWith(
+    open: bool,
+    menu: PopMenu<'_>,
+    extra: PopExtra,
+    on_dismiss: impl FnMut() + Clone + 'static,
+    on_choose: impl FnMut(usize) + Clone + 'static,
+    anchor: impl FnOnce(),
+    footer: Option<&mut dyn FnMut()>,
+) {
     let theme = ember_theme();
     let p = theme.palette;
     let window = crate::ui::window_size::current_window_size();
@@ -485,15 +519,19 @@ pub fn PopoverMenu(
             // One node, so the sheet is not a separate child that the caller's row spaces.
             cu::Box().content(|| {
                 anchor();
-                let title = if menu.head.is_empty() { menu.name } else { menu.head };
+                let title = if extra.plain_sheet { "" } else if menu.head.is_empty() { menu.name } else { menu.head };
                 EmberSheet(title, open, on_dismiss.clone(), None, || {
+                    if extra.plain_sheet {
+                        PopPlainSheetBody(&menu, &m, &extra, on_dismiss, on_choose);
+                        return;
+                    }
                     cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| {
                         if let Some(sub) = menu.sub {
                             cu::Row().modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| {
                                 Label(sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                             });
                         }
-                        PopRows(&menu, &m, on_dismiss, on_choose);
+                        PopRows(&menu, &m, &extra, on_dismiss, on_choose);
                         if let Some(f) = footer {
                             PopFooter(f);
                         }
@@ -508,9 +546,9 @@ pub fn PopoverMenu(
             cu::Popover(open)
                 .placement(compose_rust::PopoverPlacement::Bottom)
                 .align(menu.align)
-                .offset(m.offset)
+                .offset(extra.offset.unwrap_or(m.offset))
                 .on_dismiss(on_dismiss.clone())
-                .modifier(
+                .modifier(pop_anchor_weight(extra.anchor_weight,
                     // `elevation(0)`: the box casts its own shadow, so the toolkit's menu
                     // elevation is turned off. Without it the renderer casts a second shadow
                     // from the inner surface, which shows through the box as a grey band.
@@ -523,7 +561,7 @@ pub fn PopoverMenu(
                         .padding(m.box_pad)
                         .role(Role::Menu)
                         .label(menu.name),
-                )
+                ))
                 .anchor(anchor)
                 .content(|| {
                     cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
@@ -534,7 +572,7 @@ pub fn PopoverMenu(
                         cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
                             cu::Spacer().modifier(Modifier::new().width(m.list_pad.1));
                             cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
-                                PopRows(&menu, &m, on_dismiss, on_choose);
+                                PopRows(&menu, &m, &extra, on_dismiss, on_choose);
                             });
                             cu::Spacer().modifier(Modifier::new().width(m.list_pad.1));
                         });
@@ -569,14 +607,68 @@ fn PopHead(kind: PopKind, head: &str, sub: Option<&str>, m: &PopMetrics) {
     cu::Spacer().modifier(Modifier::new().height(m.head_pad.2));
 }
 
-fn PopRows(menu: &PopMenu<'_>, m: &PopMetrics, on_dismiss: impl FnMut() + Clone + 'static, on_choose: impl FnMut(usize) + Clone + 'static) {
+fn PopRows(
+    menu: &PopMenu<'_>,
+    m: &PopMetrics,
+    extra: &PopExtra,
+    on_dismiss: impl FnMut() + Clone + 'static,
+    on_choose: impl FnMut(usize) + Clone + 'static,
+) {
     for (i, r) in menu.rows.iter().enumerate() {
         let (mut dismiss, mut choose) = (on_dismiss.clone(), on_choose.clone());
-        PopRowView(r, menu.kind, m, move || {
-            dismiss();
-            choose(i);
-        });
+        let keep_open = extra.keep_open;
+        let row = || {
+            PopRowView(r, menu.kind, m, move || {
+                if !keep_open {
+                    dismiss();
+                }
+                choose(i);
+            })
+        };
+        match extra.on_hover.clone() {
+            // The row's own box is a button; the pointer subscription sits on a box around it,
+            // which hears the pointer come over the row and takes nothing from the press.
+            Some(hover) => cu::Box()
+                .modifier(Modifier::new().fill_max_width())
+                .on_pointer(compose_rust::PointerKinds::ENTER, move |_| hover(i))
+                .content(row),
+            None => row(),
+        }
     }
+}
+
+/// `modifier` with the weight of [`PopExtra::anchor_weight`]. The weight is read by the row
+/// the control is in and handed to the anchor; the floating box itself takes none.
+pub fn pop_anchor_weight(weight: Option<f32>, modifier: Modifier) -> Modifier {
+    match weight {
+        Some(w) => modifier.weight(w),
+        None => modifier,
+    }
+}
+
+/// The body of a [`PopExtra::plain_sheet`]: the head and the padded rows of the popover box,
+/// named as the box is, with no title bar above it.
+fn PopPlainSheetBody(
+    menu: &PopMenu<'_>,
+    m: &PopMetrics,
+    extra: &PopExtra,
+    on_dismiss: impl FnMut() + Clone + 'static,
+    on_choose: impl FnMut(usize) + Clone + 'static,
+) {
+    cu::Column().modifier(Modifier::new().fill_max_width().role(Role::Menu).label(menu.name)).content(|| {
+        if !menu.head.is_empty() {
+            PopHead(menu.kind, menu.head, menu.sub, m);
+        }
+        cu::Spacer().modifier(Modifier::new().height(m.list_pad.0));
+        cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Spacer().modifier(Modifier::new().width(m.list_pad.1));
+            cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
+                PopRows(menu, m, extra, on_dismiss, on_choose);
+            });
+            cu::Spacer().modifier(Modifier::new().width(m.list_pad.1));
+        });
+        cu::Spacer().modifier(Modifier::new().height(m.list_pad.2));
+    });
 }
 
 /// One row (`.md-row`, `.sdrop-i`): a menu item to assistive technology, named by its text,
@@ -1545,16 +1637,22 @@ pub fn EmberCardSized(
 
 /// The inset panel one level below a card: `surface-2`, `corner-md`.
 pub fn InsetPanel(fill_max_width: bool, content: impl FnOnce()) {
+    InsetPanelSized(fill_max_width, false, content);
+}
+
+/// [`InsetPanel`] that can also fill the height its parent gives it, with its content centred
+/// in that height (`.ag-acc{align-items:center}`): a tile in an `equal_height` row is as tall as
+/// the tallest tile of the row, as a CSS grid stretches its cells (FR-L20a, #886).
+pub fn InsetPanelSized(fill_max_width: bool, fill_max_height: bool, content: impl FnOnce()) {
     let theme = ember_theme();
+    let mut m = Modifier::new().fill_max_width_if(fill_max_width);
+    if fill_max_height {
+        m = m.fill_max_height();
+    }
     // TODO(compose-rust): the mockup's 12/16 padding is asymmetric; 12 on all sides for now.
-    cu::Box()
-        .modifier(
-            Modifier::new()
-                .fill_max_width_if(fill_max_width)
-                .background(paint(theme.palette.surface_2))
-                .corner_radius(CORNER_MD)
-                .padding(PAD_ROW_V),
-        )
+    let panel = cu::Box().modifier(m.background(paint(theme.palette.surface_2)).corner_radius(CORNER_MD).padding(PAD_ROW_V));
+    let panel = if fill_max_height { panel.alignment(Alignment::CenterStart) } else { panel };
+    panel
         .content(|| {
             // 4 dp more on each side makes the mockup's 12 16 (`.inset`).
             // The Row and the Column take the panel's width (a Column with no weight shrinks to
@@ -1728,6 +1826,9 @@ pub fn EmberSheetSized(
     // Explicit zero padding suppresses the renderer dialog's theme padding, which otherwise
     // adds space around the frame and prevents a full-screen sheet.
     let modifier = with_shadows(Modifier::new().padding(0.0), theme.shadow_sm()).background(paint(theme.palette.surface));
+    // `.sheet.card` (FR-L32, #583): the 1 px `line` border is what separates a dark sheet from
+    // the dimmed page. The full-screen monitor has none (`border:0` at 560 px and below).
+    let framed = modifier.border(1.0, paint(theme.palette.line));
     let dismiss = on_dismiss.clone();
     // An empty title draws no header: the share sheet is the mockup's `.fl-share`, which has
     // none and puts its close button in its first card (FR-L27.7).
@@ -1746,7 +1847,7 @@ pub fn EmberSheetSized(
         // compose-rust#445 (v0.0.9): the sheet is as tall as its content up to 85 percent of the
         // window, and taller content scrolls inside it, so a short sheet wraps its content.
         cu::Sheet(open)
-            .modifier(modifier.fill_max_width().corner_radii([CORNER_XL, CORNER_XL, 0.0, 0.0]))
+            .modifier(framed.fill_max_width().corner_radii([CORNER_XL, CORNER_XL, 0.0, 0.0]))
             .max_height_fraction(SHEET_BOTTOM_MAX_FRACTION)
             .scrim(Paint::Literal(MODAL_SCRIM))
             .on_dismiss(on_dismiss)
@@ -1759,7 +1860,7 @@ pub fn EmberSheetSized(
             .content(body);
     } else {
         cu::Dialog(open)
-            .modifier(modifier.corner_radius(CORNER_XL).width(sheet_width(window.width_dp, width)))
+            .modifier(framed.corner_radius(CORNER_XL).width(sheet_width(window.width_dp, width)))
             .scrim(Paint::Literal(MODAL_SCRIM))
             .on_dismiss(on_dismiss)
             .content(body);
@@ -2843,6 +2944,34 @@ mod tests {
         let sheet = &production[production.find("pub fn EmberSheetSized").expect("sheet")..];
         let sheet = &sheet[..sheet.find("\n}\n").expect("end")];
         assert_eq!(sheet.matches(".scrim(Paint::Literal(MODAL_SCRIM))").count(), 3, "bottom sheet, full screen and dialog");
+    }
+
+    #[test]
+    fn fr_l32_a_sheet_is_framed_with_a_line_on_its_surface() {
+        // #583: the dark sheet (`#20201d`) met the dimmed page (`#0f0f0e`) with no edge; the
+        // mockup's `.sheet.card` has a 1 px `line` border between them.
+        let _guard = crate::services::test_guard();
+        let p = ember_theme().palette;
+        let border = format!("{:?}", compose_rust::schema::Modifier::Border { width: 1.0, paint: paint(p.line) });
+        let fill = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.surface)));
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let dialog = emitted_nodes(|| EmberSheet("시트", true, || {}, None, || {}));
+        crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+        let bottom = emitted_nodes(|| EmberSheet("시트", true, || {}, None, || {}));
+        let full = emitted_nodes(|| EmberSheetSized("시트", true, SHEET_WIDTH_MONITOR, true, || {}, None, || {}));
+        crate::ui::window_size::set_opened_for_test(None);
+        for (name, node) in [("dialog", the(&dialog, "Dialog")), ("bottom sheet", the(&bottom, "Sheet"))] {
+            assert!(node.mods.contains(&border), "{name}: {:?}", node.mods);
+            assert!(node.mods.contains(&fill), "{name}: {:?}", node.mods);
+            assert_eq!(node.mods.iter().filter(|m| m.starts_with("Border")).count(), 1, "{name}: one 1 px line");
+            assert!(node.props.iter().any(|x| x.starts_with("Scrim=")), "{name}: {:?}", node.props);
+        }
+        assert!(the(&dialog, "Dialog").mods.iter().any(|m| m.starts_with("Shape { top_start: 24.0")), "{:?}", the(&dialog, "Dialog").mods);
+        let full = the(&full, "Dialog");
+        assert!(full.mods.contains(&fill), "{:?}", full.mods);
+        assert!(!full.mods.iter().any(|m| m.starts_with("Border")), "the full screen has no frame: {:?}", full.mods);
+        // The scrim stays the mockup's black at 0.3 (measured equal in both renders).
+        assert_eq!(MODAL_SCRIM, Color::argb(0x4D00_0000));
     }
 
     #[test]

@@ -721,7 +721,9 @@ mod tests {
         let wide = monitor_after_report(1440.0, 900.0, 0.0, 0.0);
         assert!(wide.contains("Height(807.0)") && wide.contains("Padding(20.0)"), "{wide}");
         let phone = monitor_after_report(390.0, 844.0, 0.0, 0.0);
-        assert!(phone.contains("Padding(16.0)"), "{phone}");
+        // The report only sends what changed: the phone keeps the 16 it started with, so no
+        // Padding(20.0) is sent, and the body is the window less the 61 dp chrome.
+        assert!(phone.contains("Height(783.0)") && !phone.contains("Padding(20.0)"), "{phone}");
     }
 
     #[test]

@@ -525,6 +525,20 @@ pub fn list_reveals_caret(sheet: &Sheet, caret: Option<compose_rust::code::CodeR
     }
 }
 
+/// The room the page leaves above the code editor's box inside the pane (`--sp2`, FR-L31.27).
+pub const CODE_TOP_ROOM: f32 = 8.0;
+
+/// Whether a caret the reader just moved (#301, FR-L31.40) has to be scrolled into view: its line
+/// is not whole between the top of the code editor's box (the pane less `CODE_TOP_ROOM`) and the
+/// pane's bottom edge. The toolkit's own scroll on an arrow key keeps the caret about a line
+/// short of the bottom (compose-rust v0.0.10, measured: line 31 at y 603.92 to 625.92 in a box
+/// that ends at 591), so the window asks the editor for the nearest reveal, as Code-OSS reveals
+/// the cursor after every move. Only the vertical extent counts: the reveal scrolls rows.
+pub fn moved_caret_needs_reveal(caret: compose_rust::code::CodeRect, pane: PaneBox) -> bool {
+    const SLACK: f32 = 0.5;
+    caret.y < pane.y + CODE_TOP_ROOM - SLACK || caret.bottom() > pane.y + pane.height + SLACK
+}
+
 /// The range the editor is asked to reveal for the caret at `(line, col)`, both 1-based as the
 /// window keeps them: the empty range at that place, in the editor's 0-based positions.
 pub fn caret_reveal_range(line: usize, col: usize) -> compose_rust::code::CodeRange {
@@ -588,6 +602,15 @@ pub mod view {
         /// The last sheet that asked for a reveal: each sheet asks once, so a caret that stays
         /// out of view after it falls back to the sheet over the window.
         static REVEALED_FOR: Cell<Option<u64>> = const { Cell::new(None) };
+        /// The reader moved the caret since its rectangle was last reported (#301, FR-L31.40). A
+        /// rectangle that changes with no move (the reader scrolled) never brings the caret back.
+        static CARET_MOVED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// The code editor's selection changed: the next caret rectangle it reports is checked against
+    /// the pane, and a caret left out of view is revealed (#301, FR-L31.40).
+    pub fn caret_moved() {
+        CARET_MOVED.with(|cell| cell.set(true));
     }
 
     /// The code editor's `on_caret_rect`: kept for the next list to open under it. Nothing is
@@ -595,6 +618,10 @@ pub mod view {
     /// asked to be revealed (#895): then the window draws again and the list opens at it.
     pub fn set_caret_rect(s: &Shared, rect: compose_rust::code::CodeRect) {
         CARET_RECT.with(|cell| cell.set(Some(rect)));
+        if CARET_MOVED.with(|cell| cell.replace(false)) && pane_box().is_some_and(|pane| super::moved_caret_needs_reveal(rect, pane)) {
+            REVEAL_CARET.with(|cell| cell.set(true));
+            redraw(s);
+        }
         if AWAIT_CARET.with(|cell| cell.take()).is_some() {
             redraw(s);
         }
@@ -1335,5 +1362,27 @@ mod tests {
         let production = &src[..src.find("#[cfg(test)]").unwrap()];
         assert!(production.contains("if super::list_reveals_caret(&sheet, caret_rect, pane) && REVEALED_FOR.with(|cell| cell.get()) != Some(seq) {"));
         assert!(production.contains("if AWAIT_CARET.with(|cell| cell.take()).is_some() {"), "the caret's new rectangle opens the list");
+    }
+
+    #[test]
+    fn fr_l31_40_a_moved_caret_left_out_of_view_is_revealed() {
+        use compose_rust::code::CodeRect;
+        // The window's numbers at 1440x900: pane 1054x456 at 337,135, the code editor's box from 143.
+        let pane = PaneBox { x: 337.0, y: 135.0, width: 1054.0, height: 456.0 };
+        let line = |y: f32| CodeRect::new(393.0, y, 2.0, 22.0);
+        assert!(!moved_caret_needs_reveal(line(142.92), pane), "the first line, at the box's top");
+        assert!(!moved_caret_needs_reveal(line(568.92), pane), "a line that ends at the pane's bottom");
+        assert!(moved_caret_needs_reveal(line(582.92), pane), "line 21, cut at the bottom");
+        assert!(moved_caret_needs_reveal(line(603.92), pane), "the caret under the bottom panel");
+        assert!(moved_caret_needs_reveal(line(130.0), pane), "a line cut at the top");
+        assert!(!moved_caret_needs_reveal(CodeRect::new(2000.0, 300.0, 2.0, 22.0), pane), "only rows are revealed");
+        // Wired: a selection change marks the move, and the next caret rectangle outside the pane
+        // has the editor pane reveal the caret (the nearest scroll of FR-L31.13's reveal).
+        let page = include_str!("editor_workbench.rs");
+        let editor = &page[page.find("fn editor_pane()").unwrap()..page.find("pub mod page {").unwrap()];
+        assert!(editor.contains("crate::ui::editor_language::view::caret_moved();"));
+        let src = include_str!("editor_language.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(production.contains("if CARET_MOVED.with(|cell| cell.replace(false)) && pane_box().is_some_and(|pane| super::moved_caret_needs_reveal(rect, pane)) {"));
     }
 }

@@ -221,11 +221,11 @@ fn ResolvedApprovalRow(body: &str, decision: ApprovalDecision) {
         .modifier(Modifier::new().fill_max_width().height(CMD_ROW_H))
         .content(|| {
             NavIcon(ICON_SHIELD_SVG, p.text_2.to_argb(), 16.0);
-            // Zero wide and weighted, so a long command is cut and the pill keeps its room.
-            cu::Box().alignment(Alignment::CenterStart).modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
-                Txt(body, TypeRole::Mono, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+            // The pill right after the command (review st B, mockup `.cmd`); a long command is
+            // cut and the pill keeps its own width.
+            super::components::NameThenPillFace(body, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), true, CMD_ROW_GAP, || {
+                Pill(txt, if ok { PillTone::Green } else { PillTone::Red }, false);
             });
-            Pill(txt, if ok { PillTone::Green } else { PillTone::Red }, false);
         });
 }
 
@@ -2565,6 +2565,37 @@ mod tests {
         let row = ancestors(&nodes, text_of(&nodes, "허용함")).into_iter().find(|n| n.widget == "Row" && n.mods.iter().any(|m| m == "Height(30.0)"));
         assert!(row.is_some(), "one 30 dp row");
         assert_eq!(estimate_item_height(&approval_item(ApprovalState::Resolved(ApprovalDecision::Deny)), false), 30.0);
+    }
+
+    #[test]
+    fn fr_l5_the_resolved_pill_follows_the_command() {
+        // Review st B: the mockup (`conv-multi-approved-1440`) puts the pill right after the
+        // command; the app pushed it to the row's end. The command is now the name of
+        // `NameThenPill`: a measuring copy and the visible text, both in the mono face, and the
+        // pill in the measured box after it.
+        let _guard = crate::services::test_guard();
+        let nodes = emitted(resolved_row);
+        let want = format!("Text=String({:?})", "cargo test --locked");
+        let copies: Vec<&Emitted> = nodes.iter().filter(|n| n.props.contains(&want)).collect();
+        assert_eq!(copies.len(), 2, "the measuring copy and the visible command");
+        // The prop the mono face adds to a text, read from a mono and a plain reference text.
+        // Caption is the same 12/400 step in the body face, so the props differ by the face only.
+        let plain = emitted(|| Txt("ref", TypeRole::Caption, Some(Paint::Literal(compose_rust::Color::argb(0))), Some(1), None, None, None));
+        let mono = emitted(|| Txt("ref", TypeRole::Mono, Some(Paint::Literal(compose_rust::Color::argb(0))), Some(1), None, None, None));
+        let mono_text = text_of(&mono, "ref");
+        let plain_text = text_of(&plain, "ref");
+        let face: Vec<&String> = mono_text.props.iter().filter(|p| !plain_text.props.contains(p)).collect();
+        assert!(!face.is_empty(), "the mono face sends a prop: {:?}", mono_text.props);
+        for c in &copies {
+            for f in &face {
+                assert!(c.props.contains(f), "mono face {f} on {:?}", c.props);
+            }
+        }
+        let pill = text_of(&nodes, "허용함");
+        assert!(
+            ancestors(&nodes, pill).iter().any(|n| n.mods.iter().any(|m| m.starts_with("ObserveSize"))),
+            "the pill is measured by NameThenPill"
+        );
     }
 
     #[test]

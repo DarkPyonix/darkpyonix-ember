@@ -31,6 +31,9 @@ make_tree() { # dir
         l="$d/dpx-ember-app-linux-${p%%:*}"
         touch "$l/releases.${p#*:}.json" "$l/Ember-0.2.0-${p#*:}-full.nupkg" "$l/Ember.AppImage"
     done
+    a="$d/dpx-ember-app-android-arm64"
+    mkdir -p "$a"
+    touch "$a/ember-app-$t-android-arm64.apk" "$a/ember-app-$t-android-arm64.apk.sha256"
 }
 
 make_tree "$work/full"
@@ -47,6 +50,18 @@ make_tree "$work/nosetup"
 rm "$work/nosetup/dpx-ember-app-windows-x86_64/Ember-win-x64-Setup.exe"
 if bash "$script" "$work/nosetup" "$t" true >/dev/null 2>&1; then fail "missing Setup.exe accepted"; fi
 ok "a missing installer fails"
+
+make_tree "$work/noapk"
+rm "$work/noapk/dpx-ember-app-android-arm64/ember-app-$t-android-arm64.apk"
+if bash "$script" "$work/noapk" "$t" true >/dev/null 2>"$work/err"; then fail "missing APK accepted"; fi
+grep -q "ember-app-$t-android-arm64.apk" "$work/err" || fail "message does not name the APK: $(cat "$work/err")"
+ok "a missing Android APK fails, naming the file"
+
+make_tree "$work/noapksum"
+rm "$work/noapksum/dpx-ember-app-android-arm64/ember-app-$t-android-arm64.apk.sha256"
+if bash "$script" "$work/noapksum" "$t" true >/dev/null 2>"$work/err"; then fail "missing APK checksum accepted"; fi
+grep -q "ember-app-$t-android-arm64.apk.sha256" "$work/err" || fail "message does not name the APK checksum: $(cat "$work/err")"
+ok "a missing APK checksum fails, naming the file"
 
 make_tree "$work/notar"
 rm "$work/notar/dpx-ember-linux-aarch64/ember-node-$t-linux-aarch64.tar.gz"

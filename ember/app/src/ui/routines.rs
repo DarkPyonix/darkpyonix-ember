@@ -783,14 +783,26 @@ impl FormDraft {
 
     /// The problems that block saving, in field order. Empty: the draft can be saved.
     pub fn errors(&self) -> Vec<FormError> {
+        self.errors_with_initial(None)
+    }
+
+    /// The problems that block saving when editing `initial` (if `Some`), in field order.
+    /// Leaving an existing non-empty event schedule unchanged does not block saving a name or
+    /// prompt edit even if its stored repository string is not `owner/name` (#759).
+    pub fn errors_with_initial(&self, initial: Option<&FormDraft>) -> Vec<FormError> {
         let mut out = Vec::new();
         if self.name.trim().is_empty() {
             out.push(FormError::NameEmpty);
         }
+        let unchanged_event = initial.is_some_and(|i| {
+            i.trigger == Trigger::Event
+                && self.trigger == Trigger::Event
+                && i.cron.trim() == self.cron.trim()
+        });
         match self.trigger {
             Trigger::Time if !cron_valid(self.cron.trim()) => out.push(FormError::ScheduleInvalid),
             Trigger::Event if self.cron.trim().is_empty() => out.push(FormError::EventEmpty),
-            Trigger::Event if parse_ci_event(&self.cron).is_none() => {
+            Trigger::Event if !unchanged_event && parse_ci_event(&self.cron).is_none() => {
                 out.push(FormError::EventInvalid)
             }
             _ => {}
@@ -1183,9 +1195,9 @@ pub fn changes_frozen_fields(d: &FormDraft, old: &Routine) -> bool {
 /// Shown while the server cannot be reached.
 pub const OFFLINE_NOTE: &str =
     "서버에 연결되지 않아 루틴이 이 앱을 실행하는 동안만 이 기기에 보관됩니다";
-/// Shown when routines that only this device keeps are listed beside the server's.
+/// Shown when routines that only this device keeps are listed beside the server's (or in sample mode).
 pub const LOCAL_NOTE: &str =
-    "오프라인일 때 만든 루틴은 이 앱을 실행하는 동안만 이 기기에 보관됩니다";
+    "이 기기에만 있는 루틴은 이 앱을 실행하는 동안만 보관됩니다";
 pub const RUN_NOTICE: &str = "서버에 연결되지 않아 지금 실행할 수 없습니다";
 pub const NO_CWD_NOTICE: &str =
     "이 프로젝트의 작업 폴더를 알 수 없습니다. 프로젝트에서 세션을 한 번 시작하셔야 합니다";
@@ -1198,7 +1210,9 @@ pub fn changed_patch(d: &FormDraft, old: &Routine) -> SchedulePatch {
     let name = d.name.trim();
     let prompt = d.prompt.trim();
     let kind = draft_schedule_kind(d);
-    let schedule_changed = d.trigger != old.trigger || kind_text(&kind) != old.cron.trim();
+    let initial_cron = FormDraft::from_routine(old).cron;
+    let schedule_changed = d.trigger != old.trigger
+        || (d.cron.trim() != initial_cron.trim() && kind_text(&kind) != old.cron.trim());
     let cont = old.continue_session.is_some();
     SchedulePatch {
         project: (!cont && d.sel.project != old.sel.project).then(|| d.sel.project.clone()),
@@ -2493,5 +2507,51 @@ mod tests {
             FormDraft::from_routine(&stored).cron,
             "DarkPyonix/darkpyonix-ember"
         );
+    }
+
+    #[test]
+    fn fr_l25_existing_event_routine_with_non_repo_schedule_allows_name_only_edit() {
+        let mut s = schedule(
+            ScheduleKind::Event {
+                on: EventOn::CiFailed,
+                repository: "legacy-repo".into(),
+                branch: None,
+            },
+            false,
+        );
+        s.target = ScheduleTarget::New {
+            title: Some("PR 리뷰".into()),
+        };
+        s.next_run_at = None;
+        let r = schedule_to_routine(&s);
+        let initial = FormDraft::from_routine(&r);
+        assert_eq!(initial.cron, "legacy-repo");
+        assert_eq!(initial.errors(), vec![FormError::EventInvalid]);
+        assert!(
+            initial.errors_with_initial(Some(&initial)).is_empty(),
+            "unchanged event schedule from an existing routine does not block saving"
+        );
+
+        let mut edited = initial.clone();
+        edited.name = "PR 리뷰 2".into();
+        assert!(edited.errors_with_initial(Some(&initial)).is_empty());
+        let p = changed_patch(&edited, &r);
+        assert_eq!(
+            p.target,
+            Some(ScheduleTarget::New {
+                title: Some("PR 리뷰 2".into())
+            })
+        );
+        assert_eq!(p.kind, None, "unchanged event schedule is omitted from PATCH");
+
+        // Changing the event field to another invalid value still requires owner/name.
+        edited.cron = "still-bad".into();
+        assert_eq!(
+            edited.errors_with_initial(Some(&initial)),
+            vec![FormError::EventInvalid]
+        );
+
+        // LOCAL_NOTE does not claim a sample-mode device routine was made offline.
+        assert!(!LOCAL_NOTE.contains("오프라인"));
     }
 }

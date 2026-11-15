@@ -27,7 +27,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use ember_editor::{EditorSession, SessionConfig, SessionUpdate};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 fn regression_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../ose/regression")
@@ -45,6 +45,8 @@ struct Entry {
     id: String,
     version: Option<String>,
     open: Option<String>,
+    /// The deeper check of the deep run (#929): `{check: webview, ...}` or `{check: debug, ...}`.
+    deep: Option<Value>,
 }
 
 fn entries() -> Vec<Entry> {
@@ -58,7 +60,8 @@ fn entries() -> Vec<Entry> {
                 Some(Value::String(s)) => Some(s.clone()),
                 Some(other) => panic!("`{key}` is a string or null: {other}"),
             };
-            Entry { id: text("id").unwrap_or_else(|| panic!("an entry has no id: {e}")), version: text("version"), open: text("open") }
+            let deep = obj.get("deep").filter(|d| !d.is_null()).cloned();
+            Entry { id: text("id").unwrap_or_else(|| panic!("an entry has no id: {e}")), version: text("version"), open: text("open"), deep }
         })
         .collect()
 }
@@ -115,6 +118,62 @@ fn nfr_w1_regression_data_is_consistent() {
             other => panic!("{id}: expect is \"pass\" or \"known-fail\", got {other:?}"),
         }
     }
+
+    // Deep checks (#929): the same ids carry a check in extensions.json and an expectation here.
+    let listed_deep: BTreeSet<String> = entries.iter().filter(|e| e.deep.is_some()).map(|e| e.id.to_lowercase()).collect();
+    let expected_deep: BTreeSet<String> = results.iter().filter(|(_, v)| v.get("deep").is_some()).map(|(k, _)| k.to_lowercase()).collect();
+    assert_eq!(listed_deep, expected_deep, "extensions.json `deep` and expected.json `deep` name the same ids");
+    for e in &entries {
+        if let Some(deep) = &e.deep {
+            if let Err(problem) = DeepCheck::from_json(deep) {
+                panic!("{}: {problem}", e.id);
+            }
+            if let Ok(DeepCheck::Debug { program, .. }) = DeepCheck::from_json(deep) {
+                assert!(regression_dir().join("workspace").join(&program).is_file(), "{}: debug program {program} does not exist", e.id);
+            }
+        }
+    }
+    for (id, spec) in results {
+        let Some(deep) = spec.get("deep") else { continue };
+        match deep.get("expect").and_then(Value::as_str) {
+            Some("pass") => {}
+            Some("known-fail" | "not-built") => {
+                let reason = deep.get("reason").and_then(Value::as_str).unwrap_or_default();
+                assert!(!reason.trim().is_empty(), "{id}: a deep known-fail or not-built entry says why");
+            }
+            other => panic!("{id}: deep.expect is pass, known-fail or not-built, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn nfr_w1_deep_check_shapes() {
+    let web = json!({"check": "webview", "command": "git-graph.view", "send": {"command": "loadRepos", "check": false}, "reply": "loadRepos"});
+    assert_eq!(
+        DeepCheck::from_json(&web),
+        Ok(DeepCheck::Webview { command: "git-graph.view".into(), send: json!({"command": "loadRepos", "check": false}), reply: "loadRepos".into() })
+    );
+    assert_eq!(
+        DeepCheck::from_json(&json!({"check": "debug", "program": "sample.py", "line": 2})),
+        Ok(DeepCheck::Debug { program: "sample.py".into(), line: 2 })
+    );
+    for bad in [
+        json!({"check": "other"}),
+        json!({"check": "webview", "command": "a.b", "reply": "x"}),
+        json!({"check": "webview", "command": "", "send": {}, "reply": "x"}),
+        json!({"check": "debug", "program": "sample.py", "line": 0}),
+        json!({"check": "debug", "program": "../x.py", "line": 1}),
+    ] {
+        assert!(DeepCheck::from_json(&bad).is_err(), "{bad} is refused");
+    }
+    // A reply matches on its `command` field only.
+    assert!(reply_matches(r#"{"command":"loadRepos","repos":{}}"#, "loadRepos"));
+    assert!(!reply_matches(r#"{"command":"refresh"}"#, "loadRepos"));
+    assert!(!reply_matches("not json", "loadRepos"));
+    // The result file the harness reads.
+    assert_eq!(DeepResult::fail("no html").to_json(), json!({"deep": "fail", "reason": "no html"}));
+    assert_eq!(DeepResult::pass("12 KB of HTML").to_json(), json!({"deep": "pass", "reason": "12 KB of HTML"}));
+    assert_eq!(DeepResult::not_run("no python3").to_json(), json!({"deep": "not-run", "reason": "no python3"}));
 }
 
 #[test]

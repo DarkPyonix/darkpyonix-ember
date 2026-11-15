@@ -108,12 +108,43 @@ def self_test():
     # Entries: objects or bare ids; a pinned version becomes id@version.
     es = entries({"extensions": ["a.b", {"id": "c.d", "version": "1.2.3", "open": "f.txt"}, {"id": "e.f", "version": None}]})
     assert [spec(e) for e in es] == ["a.b", "c.d@1.2.3", "e.f"], es
-    assert es[1]["open"] == "f.txt" and es[0]["open"] is None
+    assert es[1]["open"] == "f.txt" and es[0]["open"] is None and es[0]["deep"] is None
+    # Deep checks (#929): only a fail where pass is expected fails; not-run and surprises warn.
+    dexp = {"a.web": {"deep": {"expect": "pass"}}, "b.dbg": {"deep": {"expect": "not-built", "reason": "r"}},
+            "c.kf": {"deep": {"expect": "known-fail", "reason": "r"}}, "d.none": {"expect": "pass"},
+            "e.miss": {"deep": {"expect": "pass"}}, "f.inst": {"deep": {"expect": "pass"}}}
+    dgot = {"a.web": {"deep": "fail", "reason": "no html"}, "b.dbg": {"deep": "not-run", "reason": "no python3"},
+            "c.kf": {"deep": "pass", "reason": ""}}
+    fails, warns, final = compare_deep(dexp, dgot, ["F.Inst"])
+    assert fails == ["a.web: deep check expected to pass, got fail: no html",
+                     "f.inst: deep check expected to pass, got fail: not installed"], fails
+    assert warns == ["b.dbg: deep check not-run: no python3",
+                     "c.kf: deep check is known-fail but passes; update expected.json",
+                     "e.miss: deep check not-run: the client wrote no result"], warns
+    assert set(final) == {"a.web", "b.dbg", "c.kf", "e.miss", "f.inst"}, final
+    assert final["e.miss"] == {"deep": "not-run", "reason": "the client wrote no result"}, final
+    _, warns, _ = compare_deep({"b.dbg": {"deep": {"expect": "not-built", "reason": "r"}}}, {"b.dbg": {"deep": "pass"}})
+    assert warns == ["b.dbg: deep check is not-built but passes; update expected.json"], warns
+    for bad in ({"check": "other"}, {"check": "webview", "command": "x"}, {"check": "debug", "program": "p.py", "line": 0}):
+        assert deep_problem(bad, lambda _: True), bad
+    assert deep_problem({"check": "debug", "program": "gone.py", "line": 1}, lambda _: False)
+    assert not deep_problem({"check": "webview", "command": "a.b", "send": {"command": "x"}, "reply": "x"}, lambda _: True)
     # The real data: same ids in both files, and every `open` file exists in workspace/.
     with open(os.path.join(here, "extensions.json")) as f:
         real = entries(json.load(f))
     with open(os.path.join(here, "expected.json")) as f:
-        exp_ids = {k.lower() for k in json.load(f)["results"]}
+        exp_doc = json.load(f)["results"]
+        exp_ids = {k.lower() for k in exp_doc}
+    in_ws = lambda rel: os.path.isfile(os.path.join(here, "workspace", rel))
+    exp_deep = {k.lower(): v["deep"] for k, v in exp_doc.items() if "deep" in v}
+    assert {e["id"].lower() for e in real if e["deep"]} == set(exp_deep), "deep checks differ between the two files"
+    for e in real:
+        if e["deep"]:
+            problem = deep_problem(e["deep"], in_ws)
+            assert not problem, f"{e['id']}: {problem}"
+    for k, v in exp_deep.items():
+        assert v.get("expect") in DEEP_EXPECT, f"{k}: deep.expect {v.get('expect')!r}"
+        assert v["expect"] == "pass" or v.get("reason", "").strip(), f"{k}: deep.expect {v['expect']} needs a reason"
     ids = [e["id"].lower() for e in real]
     assert len(ids) == len(set(ids)), "an extension is listed twice"
     assert set(ids) == exp_ids, "extensions.json and expected.json differ"

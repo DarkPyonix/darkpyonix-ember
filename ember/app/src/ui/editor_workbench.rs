@@ -336,6 +336,12 @@ fn editor_pane() -> Element {
             }
         }
     }
+    // #895: a completion or code actions list asked for with the caret scrolled away has the
+    // editor reveal the caret first (Code-OSS's `revealPosition`), then opens at its new rectangle.
+    if crate::ui::editor_language::view::take_caret_reveal() {
+        let (line, col) = *s.position.peek();
+        handle.reveal(version, crate::ui::editor_language::caret_reveal_range(line, col), compose_rust::schema::RevealAlign::Nearest);
+    }
     // Edits the session asks for (an accepted completion, formatting, a rename, a code action) go to
     // the widget, which applies them as the reader's own and reports them back as changes.
     for command in s.bridge.borrow_mut().take_pending_edits(&doc.uri) {
@@ -358,7 +364,7 @@ fn editor_pane() -> Element {
     let click_s = s.clone(); let click_uri = uri.clone();
     let fold_s = s.clone(); let fold_uri = uri.clone();
     let selection_s = s.clone(); let selection_uri = uri;
-    let key_s = s.clone(); let pointer_s = s.clone();
+    let key_s = s.clone(); let pointer_s = s.clone(); let caret_s = s.clone();
     rsx! { CodeEditor {
         key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
         text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), folds: crate::ui::editor::folds(&doc.folds), tab_width: Some(doc.tab_width),
@@ -372,7 +378,7 @@ fn editor_pane() -> Element {
         on_key_preview: move |e: compose_rust::KeyEvent| crate::ui::editor_language::view::code_key(&key_s, &e),
         pointer_kinds: Some(compose_rust::PointerKinds::DOWN),
         on_code_pointer: move |e: compose_rust::code::CodePointer| crate::ui::editor_language::view::code_pointer(&pointer_s, &e),
-        on_caret_rect: move |e: compose_rust::code::CaretRect| crate::ui::editor_language::view::set_caret_rect(e.rect),
+        on_caret_rect: move |e: compose_rust::code::CaretRect| crate::ui::editor_language::view::set_caret_rect(&caret_s, e.rect),
         on_change: move |e: compose_rust::code::CodeChange| { keep_edited_tab(&change_s, &change_uri.path); change_s.editor_versions.borrow_mut().insert(generation, e.version); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); crate::ui::editor_states::view::edited(&change_s, &change_uri.path); },
         on_save: move |e: compose_rust::code::SaveRequest| { if !crate::ui::editor_states::view::manual_save_allowed(&save_s, &save_uri.path) { return; } let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },

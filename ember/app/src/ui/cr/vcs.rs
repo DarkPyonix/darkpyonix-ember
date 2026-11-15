@@ -1204,7 +1204,39 @@ pub fn section_pills_scroll(width_dp: f32) -> bool {
 }
 
 fn SectionPillsAtWidth(active: Section, width: f32, on_pick: impl FnMut(Section) + Clone + 'static) {
-    SectionPillsWithCounts(active, width, &|_| None, on_pick);
+    SectionPillsWithCounts(active, width, width, &|_| None, on_pick);
+}
+
+/// The width a section pill is drawn at, estimated from its text (13 dp Hangul, 7.5 dp digits at
+/// the 12 dp count): 12 dp sides, an 18 dp icon, and 12 dp between icon, name and count, the
+/// conflicts count on a pill 7 dp wider each side. Used only to scroll the current pill into view.
+pub fn section_pill_width(sec: Section, count: Option<usize>) -> f32 {
+    let text = |s: &str, glyph: f32, narrow: f32| -> f32 { s.chars().map(|c| if c.is_ascii() { narrow } else { glyph }).sum() };
+    let mut w = SP[2] + 18.0 + SP[2] + text(sec.label(), 13.0, 3.5) + SP[2];
+    if let Some(n) = count.filter(|n| *n > 0) {
+        w += text(&n.to_string(), 7.5, 7.5) + SP[2];
+        if sec == Section::Conflicts {
+            w += 14.0;
+        }
+    }
+    w
+}
+
+/// Where the scrolling pill row is moved to so the current pill is whole on screen: 0 while it
+/// ends inside the row's `width`, else the distance that puts its end 6 dp inside the right edge
+/// (the Renderer clamps it to the row's scroll range). `counts` are in `Section::ALL` order.
+pub fn section_pills_reveal(active: Section, width: f32, counts: &[Option<usize>]) -> f32 {
+    let gap = SP[0] + 2.0;
+    let mut start = 0.0;
+    for (i, sec) in Section::ALL.iter().enumerate() {
+        let w = section_pill_width(*sec, counts.get(i).copied().flatten());
+        if *sec == active {
+            let end = start + w + gap;
+            return if end <= width { 0.0 } else { end - width };
+        }
+        start += w + gap;
+    }
+    0.0
 }
 
 /// The height of a section pill (`.vcs-navi{height:36px}` at 900 px and below).
@@ -1256,7 +1288,7 @@ fn SectionPill(sec: Section, on: bool, count: Option<usize>, on_click: impl FnMu
 /// The section pills with each section's count (FR-L19): the mockup's `.vcs-navi` as a row of
 /// pills, each with its icon and count, the current one white under a shadow. They were the
 /// composer's grey `PickChip`s with a name only (reviews r7 and r8, #878).
-fn SectionPillsWithCounts(active: Section, width: f32, count_of: &dyn Fn(Section) -> Option<usize>, on_pick: impl FnMut(Section) + Clone + 'static) {
+fn SectionPillsWithCounts(active: Section, width: f32, view_w: f32, count_of: &dyn Fn(Section) -> Option<usize>, on_pick: impl FnMut(Section) + Clone + 'static) {
     let pills = || {
         cu::Row().spacing(SP[0] + 2.0).alignment(Alignment::CenterStart).content(|| {
             for sec in Section::ALL {
@@ -1267,7 +1299,23 @@ fn SectionPillsWithCounts(active: Section, width: f32, count_of: &dyn Fn(Section
     };
     if section_pills_scroll(width) {
         // One row that scrolls sideways (`.vcs-nav{flex-direction:row;overflow-x:auto;gap:6px}`).
-        cu::ScrollRow().modifier(Modifier::new().fill_max_width()).content(pills);
+        // The current pill is scrolled into view when it changes (#878: at 800 the row ends inside
+        // 충돌, so picking it, or opening the page on it, left it cut at the edge).
+        let counts: Vec<Option<usize>> = Section::ALL.iter().map(|s| count_of(*s)).collect();
+        let to = section_pills_reveal(active, view_w, &counts);
+        let scroll = cu::remember_scroll_state();
+        // Sent again when the row's scroll range changes: the Renderer clamps to the range it
+        // knows, and on the first frame the row is not measured yet (r12 capture: 충돌 cut at 800).
+        let range = scroll.max_offset().round() as i32;
+        let seen = remember(|| mutable_state_of(None::<(Section, i32)>));
+        if seen.get_untracked() != Some((active, range)) {
+            let target = scroll.clone();
+            compose_rust::runtime::side_effect(move || {
+                seen.set(Some((active, range)));
+                target.scroll_to(to);
+            });
+        }
+        cu::ScrollRow().scroll_state(&scroll).modifier(Modifier::new().fill_max_width()).content(pills);
     } else {
         pills();
     }
@@ -2190,7 +2238,7 @@ fn sample_conflict() -> ConflictFile {
     let block = |ours: &str, theirs: &str| GitConflictBlock::Conflict {
         ours: ours.into(),
         theirs: theirs.into(),
-        ours_label: "HEAD (feat/git-api)".into(),
+        ours_label: "HEAD (feat/session-shim)".into(),
         theirs_label: "origin/main".into(),
     };
     let c = GitConflict {
@@ -4132,6 +4180,8 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
 }
 
 /// Branches for the review captures (`EMBER_CR_ROUTE=vcs`) and for a screen without a server.
+/// The sample 브랜치 list: its current branch is the sample snapshot's (#878, review r10: the page
+/// header said `feat/session-shim` while this list marked `feat/git-api` current).
 fn sample_branches() -> BranchLoad {
     let e = |name: &str, current: bool, default: bool, upstream: Option<&str>, ahead: u32, behind: u32, last: &str, worktree: Option<&str>| BranchEntry {
         name: name.to_string(),
@@ -4145,7 +4195,7 @@ fn sample_branches() -> BranchLoad {
         worktree: worktree.map(String::from),
     };
     BranchLoad::Ready(vec![
-        e("feat/git-api", true, false, Some("origin/feat/git-api"), 2, 1, "a1b2c3d \u{00b7} Feat: Git log API and history list \u{00b7} 12분 전", Some("/Users/demo/darkpyonix-ember")),
+        e("feat/session-shim", true, false, Some("origin/feat/session-shim"), 2, 1, "a1b2c3d \u{00b7} Feat: attach the session shim before routing \u{00b7} 12분 전", Some("/Users/demo/darkpyonix-ember")),
         e("main", false, true, Some("origin/main"), 0, 0, "7f6e5d4 \u{00b7} Merge pull request #398 \u{00b7} 1일 전", None),
         e("develop", false, false, Some("origin/develop"), 0, 3, "3c2b1a0 \u{00b7} Docs: describe the commit message rules \u{00b7} 5시간 전", None),
         e("feat/ui-phase-6", false, false, None, 0, 0, "9e8d7c6 \u{00b7} Feat: screen 6 layout \u{00b7} 1일 전", Some("/Users/demo/worktrees/ui-phase-6")),
@@ -5347,9 +5397,19 @@ fn VcsScreenWithLoad(
                             let sec_for_pills = sec_state.clone();
                             let (stashes, prs, branches, team) = (stash_count.get(), pr_count.get(), branch_count.get(), team_count.get());
                             let pill_snap = snap.as_ref();
+                            // The row is as wide as the page less the shell's navigation, which
+                            // `section_width` leaves in (r12 capture: 충돌 cut at 800, 664 dp row).
+                            let nav = if sheet { 0.0 } else {
+                                match super::shell::current_mode(false) {
+                                    crate::ui::shell::ShellMode::BottomTabs => 0.0,
+                                    crate::ui::shell::ShellMode::Rail => super::theme::RAIL_W,
+                                    crate::ui::shell::ShellMode::Sidebar => crate::ui::theme::SIDE_W,
+                                }
+                            };
                             SectionPillsWithCounts(
                                 sec,
                                 section_width,
+                                (section_width - nav).max(0.0),
                                 &|s| shown_section_count(s, pill_snap, sample, stashes, prs, branches, team),
                                 move |s| sec_for_pills.set(s),
                             );
@@ -7368,7 +7428,7 @@ mod tests {
             Section::Stash => Some(0),
             _ => None,
         };
-        SectionPillsWithCounts(Section::Changes, 358.0, &count, |_| {});
+        SectionPillsWithCounts(Section::Changes, 358.0, 358.0, &count, |_| {});
     }
 
     #[test]
@@ -7721,6 +7781,57 @@ mod tests {
         assert_eq!(pane_tab_look(false, &p), (p.surface, p.line, p.text_2));
     }
 
+    #[test]
+    fn fr_l19_the_sample_sources_name_one_current_branch() {
+        // #878: the header, the bar's picker, the 브랜치 list, the merge banner and the conflict
+        // editor's ours side all read the same current branch on the sample screen.
+        let snap = sample_snapshot();
+        let BranchLoad::Ready(list) = sample_branches() else { panic!("sample branches") };
+        let current: Vec<_> = list.iter().filter(|b| b.current).collect();
+        assert_eq!(current.len(), 1, "one current branch");
+        assert_eq!(current[0].name, snap.branch);
+        assert_eq!(current[0].upstream_text, snap.upstream.clone().unwrap());
+        assert_eq!((current[0].ahead, current[0].behind), (snap.ahead, snap.behind));
+        assert_eq!(snap.branches.first(), Some(&snap.branch), "the picker lists it first");
+        assert_eq!(sample_project_box().branch.as_deref(), Some(snap.branch.as_str()));
+        let MergeLoad::Ready(Some(merge)) = sample_merge() else { panic!("sample merge") };
+        assert_eq!(merge.into, snap.branch);
+        let src = include_str!("vcs.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        let conflict = &production[production.find("fn sample_conflict()").unwrap()..];
+        let conflict = &conflict[..conflict.find("\n}\n").unwrap()];
+        assert!(conflict.contains(&format!("\"HEAD ({})\"", snap.branch)), "the ours side names the current branch");
+        for sample in ["fn sample_branches()", "fn sample_conflict()"] {
+            let body = &production[production.find(sample).unwrap()..];
+            let body = &body[..body.find("\n}\n").unwrap()];
+            assert!(!body.contains("feat/git-api"), "{sample} names another current branch");
+        }
+    }
+
+    #[test]
+    fn fr_l19_the_current_section_pill_is_scrolled_into_view() {
+        // The page at 800: the pills get the content width (800 less the 72 rail, less 2 x 32).
+        let width = 800.0 - 72.0 - 64.0;
+        let counts = [Some(5), None, Some(9), Some(3), Some(2), Some(1), Some(3)];
+        assert_eq!(section_pills_reveal(Section::Changes, width, &counts), 0.0, "the first pill is in view at 0");
+        assert_eq!(section_pills_reveal(Section::Stash, width, &counts), 0.0);
+        let conflicts = section_pills_reveal(Section::Conflicts, width, &counts);
+        let team = section_pills_reveal(Section::Team, width, &counts);
+        assert!(conflicts > 0.0, "충돌 ends past the edge at 800 (r10 capture): {conflicts}");
+        assert!(team > conflicts, "팀 작업 is further right");
+        // The count adds its width, the conflicts count its orange pill too.
+        assert!(section_pill_width(Section::Conflicts, Some(1)) > section_pill_width(Section::Conflicts, None) + 14.0);
+        assert_eq!(section_pill_width(Section::Stash, Some(0)), section_pill_width(Section::Stash, None), "no count at 0");
+        // The scrolling row is moved with the toolkit's scroll state, once per change of section.
+        let src = include_str!("vcs.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(production.contains("let to = section_pills_reveal(active, view_w, &counts);"));
+        assert!(production.contains("(section_width - nav).max(0.0),"), "the row's width leaves out the shell's navigation");
+        assert!(production.contains("target.scroll_to(to);"));
+        assert!(production.contains("seen.set(Some((active, range)));"), "sent again once the row's range is measured");
+        assert!(production.contains("cu::ScrollRow().scroll_state(&scroll).modifier(Modifier::new().fill_max_width()).content(pills);"));
+    }
+
     #[compose_rust::runtime::Composable]
     fn compact_pills_sample() {
         SectionPillsAtWidth(Section::Changes, 358.0, |_| {});
@@ -7821,7 +7932,7 @@ mod tests {
             assert!(text.contains("현재 브랜치에서 만듭니다"));
             assert!(text.contains("기본 브랜치"));
             assert!(text.contains("작업 브랜치"));
-            assert!(text.contains("feat/git-api"));
+            assert!(text.contains("feat/session-shim"));
             assert!(text.contains("현재"));
             assert!(text.contains(branch_bar_text(2, 1).as_str()));
             assert!(text.contains("원격과 같음"));

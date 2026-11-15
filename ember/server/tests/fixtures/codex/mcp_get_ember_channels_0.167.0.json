@@ -1,0 +1,22 @@
+{
+  "name": "ember-channels",
+  "enabled": true,
+  "disabled_reason": null,
+  "transport": {
+    "type": "stdio",
+    "command": "/opt/ember/ember-a2a",
+    "args": [
+      "mcp"
+    ],
+    "env": null,
+    "env_vars": [
+      "EMBER_URL",
+      "EMBER_RUNTIME_TOKEN"
+    ],
+    "cwd": null
+  },
+  "enabled_tools": null,
+  "disabled_tools": null,
+  "startup_timeout_sec": 10.0,
+  "tool_timeout_sec": null
+}

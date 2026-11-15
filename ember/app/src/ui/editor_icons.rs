@@ -145,6 +145,22 @@ impl dioxus_compose::html::prelude::ImageResolver for IconResolver {
 mod tests {
     use super::*;
 
+    /// FR-L31.31 (#895, design review E6): the run button's icon takes `c-green`, the colour the
+    /// mockup's `.ed-ib.run` rule gives it, in both palettes; the stop button beside it does not.
+    #[test]
+    fn fr_l31_31_the_run_icon_is_c_green() {
+        assert!(include_str!("../../assets/editor/editor.css").contains(".ed-ib.run{color:var(--c-green)}"));
+        assert_eq!(icon_stroke("play.green"), ("play", "--c-green"));
+        assert_eq!(icon_stroke("pause"), ("pause", "--text-2"));
+        for dark in [false, true] {
+            assert!(token("--c-green", dark).is_some_and(|green| Some(green) != token("--text-2", dark)));
+        }
+        let page = include_str!("editor_workbench.rs");
+        let run = &page[page.find(r#"button { class: "ed-ib run", title: "실행", "aria-label": "실행","#).expect("the run button")..];
+        let run = &run[..run.find('\n').unwrap()];
+        assert!(run.ends_with(r#"{icon_tone("play", 16, "green")} }"#), "{run}");
+    }
+
     // #477: the icon strokes are the shared tokens of the stylesheet the page loads, in both palettes.
     #[test]
     fn fr_l31_icon_strokes_are_read_from_the_shared_tokens() {

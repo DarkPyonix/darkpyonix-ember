@@ -364,6 +364,10 @@ fn editor_pane() -> Element {
         key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
         text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), folds: crate::ui::editor::folds(&doc.folds), tab_width: Some(doc.tab_width),
         gutter_decorations,
+        // FR-L31.27: the mockup's code type, row pitch and line number column (`editor.css:2`, `:71`).
+        font_size: Some(crate::ui::fonts::CODE_FONT_SIZE), line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT),
+        gutter_min_width: Some(crate::ui::fonts::CODE_GUTTER_MIN_WIDTH), gutter_padding: Some(crate::ui::fonts::CODE_GUTTER_PADDING), text_inset: Some(crate::ui::fonts::CODE_TEXT_INSET),
+        colors: crate::ui::fonts::CODE_EDITOR_COLORS,
         on_change: move |e: compose_rust::code::CodeChange| { keep_edited_tab(&change_s, &change_uri.path); change_s.editor_versions.borrow_mut().insert(generation, e.version); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); crate::ui::editor_states::view::edited(&change_s, &change_uri.path); },
         on_save: move |e: compose_rust::code::SaveRequest| { if !crate::ui::editor_states::view::manual_save_allowed(&save_s, &save_uri.path) { return; } let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
@@ -872,17 +876,15 @@ pub mod page {
             .filter(|r| items[r.index].enabled)
             .map(|r| apply_line_suffix(items[r.index].payload.clone(), line_suffix));
         let count = shown.len();
-        let backdrop_s = s.clone();
         let key_s = s.clone();
         rsx! {
-            // `grid-row` and `grid-column` keep both in the top bar's cell: placed automatically they
-            // took an implicit row of the page grid and pushed the page down one gap (design review A6).
-            div { style: "position:fixed; grid-row:1; grid-column:1; left:0; top:0; right:0; bottom:0; z-index:39;", onclick: move |_| close_palette(&backdrop_s) }
-            div { class: "ed-menu", role: "dialog", "aria-label": "명령 팔레트",
-                style: "position:fixed; grid-row:1; grid-column:1; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);",
-                div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
+            // FR-L31.29: the list hangs under the find pill (`.ed-findbox` in the top bar is its
+            // containing block, `.ed-pal` in page.css places it), and the query row is a row of the
+            // popover with a line under it, not a second framed field inside the frame.
+            div { class: "ed-menu ed-pal", role: "dialog", "aria-label": "명령 팔레트",
+                div { class: "ed-palq",
                     {icon_tone("search", 16, "muted")}
-                    input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
+                    input {
                         "aria-label": "{crate::ui::palette::search_label(mode)}", placeholder: "{hint_text}", value: "{raw_text}", autofocus: true,
                         oninput: move |event| {
                             // Only a changed query moves the highlight back to the top, so an input event that
@@ -913,7 +915,7 @@ pub mod page {
                 if crate::ui::palette::lists_files(mode) && index_capped {
                     div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일이 많아 일부만 표시합니다." }
                 }
-                div { style: "max-height:320px; overflow:auto;", role: "listbox",
+                div { class: "ed-pall", role: "listbox",
                     if shown.is_empty() { div { style: "padding:var(--sp3); color:var(--muted);", "{crate::ui::palette::empty_text(mode, index_running)}" } }
                     if win_start > 0 {
                         div { class: "ed-tn", role: "option", "aria-label": "위 항목 더 보기", style: "--d:0; height:34px; color:var(--muted);",
@@ -1368,7 +1370,13 @@ pub mod page {
             let mut menu_open = s.menu_open;
             menu_open.set(false);
         }
-        let em_shown = crate::ui::editor_menu::menu_shown(*s.menu_open.read(), modal);
+        // FR-L31.36: the ⋯ menu belongs to the tab strip, so it closes with the last tab.
+        if paths.is_empty() && *s.menu_open.peek() {
+            let mut menu_open = s.menu_open;
+            menu_open.set(false);
+        }
+        let em_shown = !paths.is_empty() && crate::ui::editor_menu::menu_shown(*s.menu_open.read(), modal);
+        let palette_scrim_s = s.clone();
         let (agent_state, project_branch) = project_status(&s.project);
         // The branch git/status returned; the project row's until the first answer.
         let branch = s.scm.branch_line().unwrap_or(project_branch);
@@ -1490,7 +1498,10 @@ pub mod page {
                     }
                     section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
                         {crate::ui::workspace_trust::view::banner(&s)}
-                        {tab_strip(&s, &paths, &dirty, current.as_deref())}
+                        // FR-L31.36: no tab strip while no tab is open, as the mockup's empty editor
+                        // (`editor.js:81`), so the empty state takes the whole panel. The ⋯ of the strip
+                        // goes with it; its commands stay in quick open.
+                        if paths.is_empty() { div { class: "ed-none" } } else { {tab_strip(&s, &paths, &dirty, current.as_deref())} }
                         if let Some((menu_path, x, y)) = s.tab_menu.read().clone() { {tab_context_menu(&s, &menu_path, x, y)} }
                         if let Some(path) = current.as_deref().filter(|p| !settings_shown && !is_webview_tab(p)) {
                             {breadcrumbs(&s, path)}
@@ -1505,7 +1516,9 @@ pub mod page {
                             else if let Some(pane) = current.as_deref().and_then(|p| webview_pane_for_tab(&s, p)) {
                                 {webview_pane_view(&s, &pane)}
                             }
-                            else if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
+                            // FR-L31.27: the mockup's 8px above the first line (`editor.css:68`). The code editor has no
+                            // content padding, so the room is left above its box, in the panel's own `surface`.
+                            else if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:calc(100% - {crate::ui::fonts::CODE_TOP_PADDING_CSS}); margin-top:{crate::ui::fonts::CODE_TOP_PADDING_CSS};" } }
                             else if let Some(error) = current.as_ref().and_then(|p| open_error.clone().map(|e| (p.clone(), e))) {
                                 div { class: "ed-empty", role: "alert",
                                     b { "{crate::ui::editor::display_name(base_name(&error.0))} 파일을 열 수 없습니다" }
@@ -1547,7 +1560,12 @@ pub mod page {
                     // in one box that takes no room (`.ed-layers`); a fixed box is drawn from the root.
                     div { class: "ed-layers",
                         if em_shown { {menu(&s, keymap)} }
-                        if *s.palette_open.read() { {palette_sheet(&s, keymap)} }
+                        // FR-L31.29: the palette's scrim. A click outside the list closes it; the list
+                        // itself is drawn under the find pill, from the top bar.
+                        if *s.palette_open.read() {
+                            div { style: "position:fixed; left:0; top:0; right:0; bottom:0; z-index:39;", "data-ed": "palette-scrim",
+                                onclick: move |_| close_palette(&palette_scrim_s) }
+                        }
                         if let Some(request) = s.close_confirm.read().clone() { {close_confirm_sheet(&s, &request)} }
                         {crate::ui::workspace_trust::view::prompt(&s)}
                         {crate::ui::editor_notifications::view::layer(&s)}
@@ -1603,10 +1621,16 @@ pub mod page {
                 button { class: "ed-pj", title: "{project_tip}", "aria-label": "{project_tip}", onclick: move |_| stripes.write().toggle(ToolWindow::Project), "{name}" {icon_tone("chev-dn", 12, "muted")} }
                 button { class: "ed-pj", title: "브랜치", "aria-label": "브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon_tone("git", 16, "text")} "{branch}" {icon_tone("chev-dn", 12, "muted")} }
                 div { class: "spacer" }
+                // FR-L31.29: the pill and the quick open list it opens share one box, so the list is
+                // placed against the pill. The conditional child sits inside the box, where its
+                // placeholder takes no room (dioxus-compose#266: in the bar it would be a flex item).
+                div { class: "ed-findbox",
                 button { class: "ed-find", title: "{find}", "aria-label": "{find}", onclick: move |_| run_action(&find_s, Action::Find),
                     {icon_tone("search", 16, "muted")}
                     span { class: "hide-md", "{crate::ui::editor::FIND_PILL_LABEL}" }
                     kbd { class: "ed-sc", "{find_hint}" }
+                }
+                    if *s.palette_open.read() { {palette_sheet(s, keymap)} } else { div { class: "ed-none" } }
                 }
                 div { class: "ed-runcfg",
                     button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| crate::ui::editor_tasks::view::open(&runcfg_s), {icon_tone("play", 16, "text")} "실행 구성" {icon_tone("chev-dn", 12, "muted")} }
@@ -3038,7 +3062,8 @@ pub mod page {
 
     fn terminal_body(s: &Shared) -> Element {
         if !can_attach(&s.server_url, &s.computer) {
-            return rsx! { div { class: "ed-term", role: "log", "aria-label": "터미널 출력", style: "color:var(--muted);", "터미널은 서버에 연결했을 때만 사용할 수 있습니다. 이 창에는 서버 주소나 컴퓨터가 없습니다." } };
+            // FR-L31.34: a notice is prose in the UI face (`.ed-note`); only terminal output is mono.
+            return rsx! { div { class: "ed-note", role: "log", "aria-label": "터미널 출력", "터미널은 서버에 연결했을 때만 사용할 수 있습니다. 이 창에는 서버 주소나 컴퓨터가 없습니다." } };
         }
         let handle = terminal_handle(s);
         let strip = terminal_strip(s);
@@ -3048,7 +3073,7 @@ pub mod page {
                 Some(terms::Load::Ready) => "열린 터미널이 없습니다. +를 눌러 새 터미널을 엽니다.".to_string(),
                 _ => "터미널 목록을 불러오는 중입니다.".to_string(),
             };
-            return rsx! { {strip} div { class: "ed-term", role: "log", "aria-label": "터미널 출력", style: "color:var(--muted);", "{text}" } };
+            return rsx! { {strip} div { class: "ed-note", role: "log", "aria-label": "터미널 출력", "{text}" } };
         };
         fit_terminal(s, &handle);
         let view = panel_view(&handle.snapshot());
@@ -3136,7 +3161,7 @@ pub mod page {
         use ember_editor::widget::Severity;
         let mut tabs = s.tabs;
         if rows.is_empty() {
-            return rsx! { div { class: "ed-term", style: "color:var(--muted);", "문제가 없습니다." } };
+            return rsx! { div { class: "ed-note", role: "status", "문제가 없습니다." } };
         }
         let limit = *s.problems_limit.read();
         let (visible_rows, overflow) = crate::ui::editor::paginate_problems(&rows, limit);
@@ -3238,7 +3263,9 @@ pub mod page {
 
         rsx! {
             div { class: "ed-tsub", style: "display:flex; align-items:center; gap:var(--sp2); padding:var(--sp1) var(--sp2);",
-                div { role: "group", "aria-label": "출력 채널", style: "display:flex; gap:var(--sp1); align-items:center; overflow-x:auto;",
+                // FR-L31.35: the channels are the mockup's 30px pills (`.ed-btabs button`, `editor.css:89-91`),
+                // the shown one on the `ink` fill, as the tabs of the window above them.
+                div { class: "ed-btabs", role: "group", "aria-label": "출력 채널",
                     for (id, label) in all_channels {
                         {
                             let is_on = id == active_id;
@@ -3248,7 +3275,7 @@ pub mod page {
                             rsx! {
                                 button {
                                     key: "{id}",
-                                    class: if is_on { "ed-pj on" } else { "ed-pj" },
+                                    class: if is_on { "on" } else { "" },
                                     "aria-pressed": "{is_on}",
                                     onclick: move |_| {
                                         sel.set(cid.clone());
@@ -3278,10 +3305,13 @@ pub mod page {
                     "지우기"
                 }
             }
-            div { class: "ed-term", role: "log", "aria-label": "출력 로그", style: "flex:1; overflow-y:auto; padding:var(--sp2); font-family:var(--font-mono); white-space:pre-wrap; outline:none;",
-                if text.trim().is_empty() {
-                    div { style: "color:var(--muted);", "출력이 없습니다." }
-                } else {
+            // FR-L31.34: the empty note is prose (`.ed-note`); a channel's text is a log in the mono
+            // face of `.ed-term` (the old inline `var(--font-mono)` named no token, so the log fell
+            // back to the UI face).
+            if text.trim().is_empty() {
+                div { class: "ed-note", role: "log", "aria-label": "출력 로그", "출력이 없습니다." }
+            } else {
+                div { class: "ed-term", role: "log", "aria-label": "출력 로그", style: "white-space:pre-wrap; outline:none;",
                     for (i, line) in text.lines().enumerate() {
                         div { key: "{i}", class: "tl", "{line}" }
                     }
@@ -3341,7 +3371,7 @@ pub mod page {
                 } else if w == ToolWindow::Run {
                     {crate::ui::editor_tasks::view::body(s)}
                 } else {
-                    div { class: "ed-term", style: "color:var(--muted);", "{body}" }
+                    div { class: "ed-note", role: "status", "{body}" }
                 }
             }
         }

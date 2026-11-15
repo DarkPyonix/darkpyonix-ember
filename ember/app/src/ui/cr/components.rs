@@ -1711,6 +1711,21 @@ pub(crate) fn sheet_wraps_content(window_width_dp: f32) -> bool {
     sheet_presentation(window_width_dp, false) == SheetPresentation::Bottom
 }
 
+/// The strip a full-screen sheet leaves above its header for the window's own buttons (FR-L33):
+/// where the sheet is the whole window (the monitor presentation at 560 and below) it starts at
+/// the window's top edge, under the macOS traffic lights, so it reserves the height they cover,
+/// as the bottom-tab shell does above every screen (`safe_area::title_strip_height`). A bottom
+/// sheet or a dialog sits clear of them and reserves nothing, and so does a zero report (macOS
+/// full screen, FR-L33.2). [`EmberSheetSized`] sends it before the shared header; a sheet with no
+/// shared title draws its own header and its own strip (`vcs_sheet_top_inset`).
+pub(crate) fn full_screen_sheet_top_inset(window_width_dp: f32, monitor: bool, area: crate::ui::safe_area::SafeArea) -> f32 {
+    if sheet_presentation(window_width_dp, monitor) == SheetPresentation::FullScreen {
+        crate::ui::safe_area::title_strip_height(area, true)
+    } else {
+        0.0
+    }
+}
+
 /// The sheet header and the separator under it (`SheetHeader` and `cu::Separator`), FR-L32.1.
 pub(crate) const SHEET_HEADER_CHROME_H: f32 = SHEET_HEADER_H + 1.0;
 
@@ -1830,19 +1845,26 @@ pub fn EmberSheetSized(
     // the dimmed page. The full-screen monitor has none (`border:0` at 560 px and below).
     let framed = modifier.border(1.0, paint(theme.palette.line));
     let dismiss = on_dismiss.clone();
+    let window = crate::ui::window_size::current_window_size();
+    let presentation = sheet_presentation(window.width_dp, monitor);
+    let top_inset = full_screen_sheet_top_inset(window.width_dp, monitor, crate::ui::safe_area::safe_area());
+    let strip_bg = theme.palette.surface;
     // An empty title draws no header: the share sheet is the mockup's `.fl-share`, which has
     // none and puts its close button in its first card (FR-L27.7).
     let body = move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
             if !title.is_empty() {
+                if top_inset > 0.0 {
+                    // FR-L33: the full-screen sheet's header starts below the traffic lights
+                    // (review ba D: "이 컴퓨터" sat under them at 390).
+                    cu::Spacer().modifier(Modifier::new().fill_max_width().height(top_inset).background(paint(strip_bg)));
+                }
                 SheetHeader(title, dismiss, actions);
                 cu::Separator(Some(paint(theme.palette.line)));
             }
             content();
         });
     };
-    let window = crate::ui::window_size::current_window_size();
-    let presentation = sheet_presentation(window.width_dp, monitor);
     if presentation == SheetPresentation::Bottom {
         // compose-rust#445 (v0.0.9): the sheet is as tall as its content up to 85 percent of the
         // window, and taller content scrolls inside it, so a short sheet wraps its content.

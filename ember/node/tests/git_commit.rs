@@ -387,14 +387,92 @@ async fn fr_g15_user_hooks_do_not_run() {
     let (dir, repo, base, client) = setup().await;
     commit(&repo, "a", "base\n", "base");
     let last = commit(&repo, "a", "changed\n", "change");
+    git(&repo, &["checkout", "-q", "-b", "other"]);
+    let picked = commit(&repo, "b", "from other\n", "add b");
+    git(&repo, &["checkout", "-q", "main"]);
     let marker = dir.path().join("hook-ran");
-    let hook = repo.join(".git/hooks/post-commit");
-    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for name in ["post-commit", "commit-msg", "prepare-commit-msg", "pre-commit"] {
+        let hook = repo.join(".git/hooks").join(name);
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let (status, v) = call(&client, &base, "revert", json!({"repo": repo, "sha": last, "confirm": true})).await;
     assert_eq!(status, 200, "{v}");
-    assert!(!marker.exists(), "post-commit hook ran through the API");
+    assert!(!marker.exists(), "hook ran on revert through the API");
+    let (status, v) = call(&client, &base, "cherry-pick", json!({"repo": repo, "sha": picked, "confirm": true})).await;
+    assert_eq!(status, 200, "{v}");
+    assert!(!marker.exists(), "hook ran on cherry-pick through the API");
+}
+
+#[tokio::test]
+async fn fr_g15_linked_worktree_revert_cherry_pick_and_paused_operation_refusal() {
+    let (dir, repo, base, client) = setup().await;
+    commit(&repo, "a", "base\n", "base");
+    git(&repo, &["checkout", "-q", "-b", "other"]);
+    let picked = commit(&repo, "b", "from other\n", "add b");
+    git(&repo, &["checkout", "-q", "main"]);
+    commit(&repo, "c", "main only\n", "add c");
+
+    let wt = dir.path().join("linked");
+    git(&repo, &["worktree", "add", "-q", "-b", "wt-branch", wt.to_str().unwrap(), "main"]);
+    let wt = wt.canonicalize().unwrap();
+
+    // Cherry-pick and revert inside the linked worktree.
+    let (status, v) = call(&client, &base, "cherry-pick", json!({"repo": wt, "sha": picked, "confirm": true})).await;
+    assert_eq!(status, 200, "{v}");
+    let picked_head = v["new_sha"].as_str().unwrap().to_owned();
+    assert_eq!(std::fs::read_to_string(wt.join("b")).unwrap(), "from other\n");
+
+    let (status, v) = call(&client, &base, "revert", json!({"repo": wt, "sha": picked_head, "confirm": true})).await;
+    assert_eq!(status, 200, "{v}");
+    assert!(!wt.join("b").exists());
+
+    // A conflicting cherry-pick in the linked worktree is detected and aborted cleanly.
+    git(&repo, &["checkout", "-q", "other"]);
+    let conflict = commit(&repo, "c", "other c\n", "conflict c");
+    git(&repo, &["checkout", "-q", "main"]);
+    let wt_head = git(&wt, &["rev-parse", "HEAD"]);
+    let (status, v) = call(&client, &base, "cherry-pick", json!({"repo": wt, "sha": conflict, "confirm": true})).await;
+    assert_eq!(status, 409, "{v}");
+    assert_eq!(v["error"], "충돌이 발생해 취소했습니다.");
+    assert_eq!(git(&wt, &["status", "--porcelain"]), "");
+    assert_eq!(git(&wt, &["rev-parse", "HEAD"]), wt_head);
+
+    // A paused operation marker in the linked worktree's gitdir is refused and left alone.
+    let wt_marker = PathBuf::from(git(&wt, &["rev-parse", "--git-path", "CHERRY_PICK_HEAD"]));
+    let wt_marker = if wt_marker.is_relative() { wt.join(wt_marker) } else { wt_marker };
+    std::fs::write(&wt_marker, &wt_head).unwrap();
+    let (status, v) = call(&client, &base, "revert", json!({"repo": wt, "sha": wt_head, "confirm": true})).await;
+    assert_eq!(status, 409, "{v}");
+    assert_eq!(v["error"], "진행 중인 git 작업이 있습니다. 먼저 끝내거나 중단하세요.");
+    assert!(wt_marker.exists(), "linked worktree marker was removed");
+    std::fs::remove_file(&wt_marker).unwrap();
+}
+
+#[tokio::test]
+async fn fr_g15_real_failing_abort_answers_honest_could_not_cancel() {
+    let (_dir, repo, base, client) = setup().await;
+    commit(&repo, "a", "base\n", "base");
+    git(&repo, &["checkout", "-q", "-b", "other"]);
+    let picked = commit(&repo, "a", "other side\n", "other edit");
+    git(&repo, &["checkout", "-q", "main"]);
+    commit(&repo, "a", "main side\n", "main edit");
+    // A required smudge filter on `a` succeeds during `git cherry-pick` (before `CHERRY_PICK_HEAD`
+    // is written after the merge conflict), and fails when `git cherry-pick --abort` restores `a`
+    // from `HEAD` while `.git/CHERRY_PICK_HEAD` exists, making the real `--abort` exit 128.
+    git(&repo, &["config", "filter.f.required", "true"]);
+    git(&repo, &["config", "filter.f.clean", "cat"]);
+    git(&repo, &["config", "filter.f.smudge", "sh -c 'if [ -f .git/CHERRY_PICK_HEAD ]; then exit 1; else cat; fi'"]);
+    std::fs::write(repo.join(".git/info/attributes"), "a filter=f\n").unwrap();
+
+    let (status, v) = call(&client, &base, "cherry-pick", json!({"repo": repo, "sha": picked, "confirm": true})).await;
+    assert_eq!(status, 409, "{v}");
+    assert_eq!(
+        v["error"],
+        "되돌리기를 취소하지 못했습니다. 저장소에 진행 중인 작업이 남아 있을 수 있으니 터미널에서 git status를 확인하세요."
+    );
+    no_english_git_text(&v);
 }
 
 #[tokio::test]

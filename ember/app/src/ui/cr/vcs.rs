@@ -2235,7 +2235,7 @@ fn sample_conflict() -> ConflictFile {
     let block = |ours: &str, theirs: &str| GitConflictBlock::Conflict {
         ours: ours.into(),
         theirs: theirs.into(),
-        ours_label: "HEAD (feat/git-api)".into(),
+        ours_label: "HEAD (feat/session-shim)".into(),
         theirs_label: "origin/main".into(),
     };
     let c = GitConflict {
@@ -4177,6 +4177,8 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
 }
 
 /// Branches for the review captures (`EMBER_CR_ROUTE=vcs`) and for a screen without a server.
+/// The sample 브랜치 list: its current branch is the sample snapshot's (#878, review r10: the page
+/// header said `feat/session-shim` while this list marked `feat/git-api` current).
 fn sample_branches() -> BranchLoad {
     let e = |name: &str, current: bool, default: bool, upstream: Option<&str>, ahead: u32, behind: u32, last: &str, worktree: Option<&str>| BranchEntry {
         name: name.to_string(),
@@ -4190,7 +4192,7 @@ fn sample_branches() -> BranchLoad {
         worktree: worktree.map(String::from),
     };
     BranchLoad::Ready(vec![
-        e("feat/git-api", true, false, Some("origin/feat/git-api"), 2, 1, "a1b2c3d \u{00b7} Feat: Git log API and history list \u{00b7} 12분 전", Some("/Users/demo/darkpyonix-ember")),
+        e("feat/session-shim", true, false, Some("origin/feat/session-shim"), 2, 1, "a1b2c3d \u{00b7} Feat: attach the session shim before routing \u{00b7} 12분 전", Some("/Users/demo/darkpyonix-ember")),
         e("main", false, true, Some("origin/main"), 0, 0, "7f6e5d4 \u{00b7} Merge pull request #398 \u{00b7} 1일 전", None),
         e("develop", false, false, Some("origin/develop"), 0, 3, "3c2b1a0 \u{00b7} Docs: describe the commit message rules \u{00b7} 5시간 전", None),
         e("feat/ui-phase-6", false, false, None, 0, 0, "9e8d7c6 \u{00b7} Feat: screen 6 layout \u{00b7} 1일 전", Some("/Users/demo/worktrees/ui-phase-6")),
@@ -7767,6 +7769,33 @@ mod tests {
     }
 
     #[test]
+    fn fr_l19_the_sample_sources_name_one_current_branch() {
+        // #878: the header, the bar's picker, the 브랜치 list, the merge banner and the conflict
+        // editor's ours side all read the same current branch on the sample screen.
+        let snap = sample_snapshot();
+        let BranchLoad::Ready(list) = sample_branches() else { panic!("sample branches") };
+        let current: Vec<_> = list.iter().filter(|b| b.current).collect();
+        assert_eq!(current.len(), 1, "one current branch");
+        assert_eq!(current[0].name, snap.branch);
+        assert_eq!(current[0].upstream_text, snap.upstream.clone().unwrap());
+        assert_eq!((current[0].ahead, current[0].behind), (snap.ahead, snap.behind));
+        assert_eq!(snap.branches.first(), Some(&snap.branch), "the picker lists it first");
+        assert_eq!(sample_project_box().branch.as_deref(), Some(snap.branch.as_str()));
+        let MergeLoad::Ready(Some(merge)) = sample_merge() else { panic!("sample merge") };
+        assert_eq!(merge.into, snap.branch);
+        let src = include_str!("vcs.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        let conflict = &production[production.find("fn sample_conflict()").unwrap()..];
+        let conflict = &conflict[..conflict.find("\n}\n").unwrap()];
+        assert!(conflict.contains(&format!("\"HEAD ({})\"", snap.branch)), "the ours side names the current branch");
+        for sample in ["fn sample_branches()", "fn sample_conflict()"] {
+            let body = &production[production.find(sample).unwrap()..];
+            let body = &body[..body.find("\n}\n").unwrap()];
+            assert!(!body.contains("feat/git-api"), "{sample} names another current branch");
+        }
+    }
+
+    #[test]
     fn fr_l19_the_current_section_pill_is_scrolled_into_view() {
         // The page at 800: the pills get the content width (800 less the 72 rail, less 2 x 32).
         let width = 800.0 - 72.0 - 64.0;
@@ -7888,7 +7917,7 @@ mod tests {
             assert!(text.contains("현재 브랜치에서 만듭니다"));
             assert!(text.contains("기본 브랜치"));
             assert!(text.contains("작업 브랜치"));
-            assert!(text.contains("feat/git-api"));
+            assert!(text.contains("feat/session-shim"));
             assert!(text.contains("현재"));
             assert!(text.contains(branch_bar_text(2, 1).as_str()));
             assert!(text.contains("원격과 같음"));

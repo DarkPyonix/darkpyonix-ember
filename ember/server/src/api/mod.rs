@@ -119,7 +119,7 @@ impl From<SessionError> for ApiError {
         let code = match &e {
             SessionError::NotFound(_) => StatusCode::NOT_FOUND,
             SessionError::AgentUnavailable(_) => StatusCode::BAD_REQUEST,
-            SessionError::Account(_) => StatusCode::CONFLICT,
+            SessionError::Account(_) | SessionError::Busy(_) => StatusCode::CONFLICT,
             SessionError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError(code, format!("{e:#}"))

@@ -13,17 +13,19 @@
 //! and is filtered by typing in its own field.
 //!
 //! The stand-ins and the toolkit issue each waits for. compose-rust v0.0.9 has #553, #554 and #555,
-//! and dioxus-compose's v0.0.9 move forwards them (`CodeEditor` `on_caret_rect`, `on_key_preview`,
-//! `on_code_pointer` with `pointer_kinds`, and `CodeEditorHandle::query_position_rect`). Moving
-//! onto them is a change of its own once Ember pins that dioxus-compose (#673):
-//! * TODO(compose-rust#553): sheets and a bottom strip instead of popups at the caret (`on_caret_rect`
+//! v0.0.10 has #556, and the pinned dioxus-compose (f0e5b9f5) forwards them (`CodeEditor`
+//! `on_caret_rect`, `on_key_preview`, `on_code_pointer` with `pointer_kinds`,
+//! `CodeEditorHandle::query_position_rect` and `insert_snippet`). Moving onto them is a change of
+//! its own that needs a display check (#673):
+//! * TODO(compose-rust#553, in v0.0.10): sheets and a bottom strip instead of popups at the caret (`on_caret_rect`
 //!   and `query_position_rect` place them).
-//! * TODO(compose-rust#554): the editor menu carries every command, because a chord pressed while
+//! * TODO(compose-rust#554, in v0.0.10): the editor menu carries every command, because a chord pressed while
 //!   the code has the focus may not reach the page, and a list cannot take Up, Down, Enter, Tab and
 //!   Escape from the editor (`on_key_preview` takes them; related compose-rust#100).
-//! * TODO(compose-rust#555): no Cmd/Ctrl+click to a definition (`on_code_pointer` gives the press
+//! * TODO(compose-rust#555, in v0.0.10): no Cmd/Ctrl+click to a definition (`on_code_pointer` gives the press
 //!   with its modifiers and the position under it; also compose-rust#417).
-//! * TODO(compose-rust#556): a snippet is inserted as plain text (no snippet session).
+//! * TODO(compose-rust#556, in v0.0.10): a snippet is inserted as plain text
+//!   (`CodeEditorHandle::insert_snippet` opens its tab stops).
 
 use std::collections::HashMap;
 
@@ -48,7 +50,7 @@ pub enum LangAction {
 /// The Code-OSS chord for a language feature, the same on every system: F12 definition, Shift+F12
 /// references, F2 rename, Ctrl+Space suggestions, Ctrl+Shift+Space (or Cmd+Shift+Space) parameter
 /// hints, Ctrl+. (or Cmd+.) quick fix. Format document is in the keymap table (`Action::Format`).
-// TODO(compose-rust#554): these reach the page only when the key is not kept by the focused code.
+// TODO(compose-rust#554, in v0.0.10): these reach the page only when the key is not kept by the focused code.
 pub fn action_for_key(key: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> Option<LangAction> {
     let primary = ctrl != meta;
     match key {
@@ -498,7 +500,7 @@ pub mod view {
     }
 
     /// Start a language feature at the caret of the active file.
-    // TODO(compose-rust#555): Cmd/Ctrl+click on a name should start `Definition` at the pointer.
+    // TODO(compose-rust#555, in v0.0.10): Cmd/Ctrl+click on a name should start `Definition` at the pointer.
     pub fn run(s: &Shared, action: LangAction) {
         let Some(uri) = current(s) else {
             notice("열린 파일이 없습니다");
@@ -641,7 +643,7 @@ pub mod view {
 
     /// The parameter hint: the signature with the parameter being typed set off. It sits at the
     /// bottom of the editor area because the widget does not say where the caret is on screen.
-    // TODO(compose-rust#553): anchor the hint above the caret.
+    // TODO(compose-rust#553, in v0.0.10): anchor the hint above the caret.
     fn hint(s: &Shared, help: &ember_editor::language::SignatureHelp) -> Element {
         use super::hint_box;
         let Some((before, active, after)) = signature_parts(help) else { return rsx! {} };
@@ -675,8 +677,8 @@ pub mod view {
     }
 
     /// The sheet over the window, when there is one to show.
-    // TODO(compose-rust#553): draw the lists as popups at the caret.
-    // TODO(compose-rust#554): keep the focus in the code and take the list's keys from the editor,
+    // TODO(compose-rust#553, in v0.0.10): draw the lists as popups at the caret.
+    // TODO(compose-rust#554, in v0.0.10): keep the focus in the code and take the list's keys from the editor,
     // so the lists can open while typing.
     pub fn overlay(s: &Shared) -> Element {
         capture_hook(s);

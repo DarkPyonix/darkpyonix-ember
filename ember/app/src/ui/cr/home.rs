@@ -1944,6 +1944,15 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
     );
     let first = series.first().map(|(d, _)| d.clone()).unwrap_or_default();
     let last = series.last().map(|(d, _)| d.clone()).unwrap_or_default();
+    // The day under the pointer (FR-L23.1, compose-rust#417): the plot's box takes pointer input
+    // and the line under the plot reads that day. Leaving the plot shows the window's total again.
+    let picked = remember(|| mutable_state_of(None::<usize>));
+    let day_line = picked
+        .get()
+        .and_then(|i| series.get(i))
+        .map(|(day, tokens)| usage::trend_day_line(day, *tokens))
+        .unwrap_or_else(|| usage::trend_line(&load, days.get()));
+    let day_count = series.len();
     Tile(|| {
         // `.hm-ico` is the bar chart (`I("chart")`), as on the mockup.
         CardHead(ICON_CHART_NAV, "비용과 토큰 추이", || {
@@ -1978,20 +1987,41 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
                 });
             }
         });
-        cu::Canvas(commands).modifier(Modifier::new().size(chart_w, H + 1.0));
+        let pick = picked.clone();
+        cu::Box()
+            .modifier(Modifier::new().size(chart_w, H + 1.0))
+            .on_pointer(TREND_POINTER_KINDS, move |e| {
+                let day = match e.kind() {
+                    compose_rust::PointerKind::Leave | compose_rust::PointerKind::Cancel => None,
+                    _ => usage::trend_day_at(e.x(), day_count, chart_w, TREND_BAR_GAP),
+                };
+                if pick.get_untracked() != day {
+                    pick.set(day);
+                }
+            })
+            .content(|| {
+                cu::Canvas(commands).modifier(Modifier::new().size(chart_w, H + 1.0));
+            });
         cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
             Label(&first, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
             cu::Spacer().modifier(Modifier::new().weight(1.0));
             Label(&last, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         });
-        Label(&usage::trend_line(&load, days.get()), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-        // TODO(compose-rust): a tooltip or per-bar tap needs hover or a click on the Canvas; the
-        // toolkit has neither, so no day is selectable.
+        Label(&day_line, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
     });
 }
 
 /// The trend plot's height.
 const TREND_PLOT_H: f32 = 160.0;
+
+/// The gap between two bars of the trend plot.
+const TREND_BAR_GAP: f32 = 6.0;
+
+/// The pointer input the trend plot asks for: a press or a move names the day, leaving clears it.
+const TREND_POINTER_KINDS: compose_rust::PointerKinds = compose_rust::PointerKinds::DOWN
+    .union(compose_rust::PointerKinds::MOVE)
+    .union(compose_rust::PointerKinds::LEAVE)
+    .union(compose_rust::PointerKinds::CANCEL);
 
 /// The paint of the area under the cost line: `ink` at 5 % (`.hm-area`).
 fn cost_area_paint(p: &Palette) -> Paint {
@@ -2006,7 +2036,7 @@ fn cost_area_paint(p: &Palette) -> Paint {
 fn trend_draw_list(values: &[u64], costs: &[Option<f64>], chart_w: f32, p: &Palette) -> DrawList {
     const H: f32 = TREND_PLOT_H;
     let usize_values: Vec<usize> = values.iter().map(|v| *v as usize).collect();
-    let rects = crate::ui::home::bar_rects(&usize_values, chart_w, H, 6.0);
+    let rects = crate::ui::home::bar_rects(&usize_values, chart_w, H, TREND_BAR_GAP);
     let centers: Vec<f32> = rects.iter().map(|(x, _, w, _)| x + w / 2.0).collect();
     let now = rects.len().saturating_sub(1);
     let mut list = DrawList::builder().rect(paint(p.line), 0.0, H, chart_w, 1.0, 0.0);
@@ -2533,6 +2563,30 @@ mod tests {
         // `select.pickchip`, which has none (#573).
         assert!(chip_has_chevron(Pick::Model) && chip_has_chevron(Pick::Mode));
         assert!(!chip_has_chevron(Pick::Project) && !chip_has_chevron(Pick::Computer));
+    }
+
+    #[test]
+    fn fr_l23_1_the_trend_plot_takes_the_pointer_and_reads_the_day_under_it() {
+        // compose-rust#417 (#673): `on_pointer` on the plot's box; the model picks the day
+        // (`usage::trend_day_at`, tested there) and the line under the plot reads it.
+        let production = include_str!("home.rs").split("#[cfg(test)]").next().unwrap();
+        let tile = production.split("fn TokenTrendTile(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(tile.contains(".on_pointer(TREND_POINTER_KINDS, move |e| {"));
+        assert!(tile.contains("usage::trend_day_at(e.x(), day_count, chart_w, TREND_BAR_GAP)"));
+        assert!(tile.contains("compose_rust::PointerKind::Leave | compose_rust::PointerKind::Cancel => None"));
+        assert!(tile.contains("Label(&day_line, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);"));
+        assert!(!tile.contains("TODO(compose-rust#417"));
+        // The plot and the model agree on the bars: the same gap lays them out and finds them.
+        assert_eq!(TREND_BAR_GAP, 6.0);
+        assert!(production.contains("bar_rects(&usize_values, chart_w, H, TREND_BAR_GAP)"));
+        let rects = crate::ui::home::bar_rects(&[1, 2, 3, 4, 5, 6, 7], 400.0, TREND_PLOT_H, TREND_BAR_GAP);
+        for (i, (x, _, w, _)) in rects.iter().enumerate() {
+            assert_eq!(usage::trend_day_at(x + w / 2.0, 7, 400.0, TREND_BAR_GAP), Some(i), "the middle of bar {i}");
+        }
+        for kind in [compose_rust::PointerKind::Down, compose_rust::PointerKind::Move, compose_rust::PointerKind::Leave, compose_rust::PointerKind::Cancel] {
+            assert!(TREND_POINTER_KINDS.contains(kind), "{kind:?}");
+        }
+        assert!(!TREND_POINTER_KINDS.contains(compose_rust::PointerKind::Wheel), "the page still scrolls over the plot");
     }
 
     #[test]

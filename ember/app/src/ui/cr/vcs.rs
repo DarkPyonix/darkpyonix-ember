@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{
-    Alignment, ButtonVariant, Color, IconRole, Paint, ShapeRole, TextOverflow, TypeRole,
+    Alignment, Color, IconRole, Paint, ShapeRole, TextOverflow, TypeRole,
     WindowSizeClass,
 };
 
@@ -38,8 +38,8 @@ use crate::ui::shell::NavMenu;
 use crate::ui::Route;
 
 use super::components::{
-    AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRow, EmberCard, EmberField, EmberSheetSized, FieldOptions, InsetPanel, Label, MenuRow, OptionSheet,
-    Clickable, Pill, PillTone, Txt,
+    AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRow, EmberCard, EmberField, EmberSheetSized, FieldOptions, InsetPanel, Label, PopExtra, PopKind, PopMenu, PopRow, PopoverMenuWith,
+    Clickable, DataNamedOverlay, NamedClickable, Pill, PillTone, Txt,
 };
 use super::notice;
 use super::shell::NavIcon;
@@ -53,7 +53,7 @@ pub fn open_for_project_cr(ui: &SharedUi, project: &str) {
 }
 
 #[derive(Clone)]
-struct Actions {
+pub(super) struct Actions {
     project: String,
     reload: MutableState<u64>,
 }
@@ -287,18 +287,6 @@ fn SmallNote(text: &str) {
     Label(text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
 }
 
-// TODO(compose-rust#425, #429): an invisible `Button(label)` over a painted row, only to get focus,
-// role and the accessible name. Remove when Button takes content or a semantics modifier exists.
-/// An accessible invisible button overlay for a painted row or pill.
-/// Gives assistive tech the item's label and provides keyboard focus and click handling.
-fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
-    cu::Button(label)
-        .variant(ButtonVariant::Text)
-        .color(Paint::Literal(Color::argb(0)))
-        .modifier(Modifier::new().fill_max_size())
-        .on_click(on_click);
-}
-
 /// Side of a stage check on the header, a file row and the form boxes (`vcs.css:68`).
 pub const STAGE_CHECK_SIDE: f32 = 18.0;
 /// Side of the check on a diff line (the mockup's 14 px line variant).
@@ -393,7 +381,7 @@ fn ConflictFileRow(path: &str, on_click: impl FnMut() + 'static) {
                 });
                 Txt(&shown, TypeRole::Mono, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), Some(1.0), None);
             });
-            FocusOverlay(&shown, on_click);
+            DataNamedOverlay(&shown, true, None, on_click);
         });
 }
 
@@ -418,10 +406,18 @@ pub const VCS_HUNK_BUTTON_H: f32 = 28.0;
 /// Height of the hunk header row (`.vcs-hh`): the 28 px action with 6 px above and below.
 pub const VCS_HUNK_HEADER_H: f32 = VCS_HUNK_BUTTON_H + 12.0;
 
-/// Width of a painted small pill or chip: the text at [`VCS_CONTROL_FS`] plus 14 px each side,
-/// at least 64. A Box in a Row takes the remaining width (compose-rust#427), so it is fixed.
-pub fn vcs_pill_width(text: &str) -> f32 {
-    (super::home::text_px(text, VCS_CONTROL_FS.size()) + 28.0).max(64.0)
+/// The space at each side of the label of a painted small pill (the stash pill, the hunk
+/// button). The pill takes the width of its label and these two; its width was a `text_px`
+/// estimate, at least 64, from when a Box in a Row took the remaining width (compose-rust#427).
+pub const VCS_PILL_PAD_X: f32 = 14.0;
+
+/// The label of a painted small pill between its two side spaces, on one line.
+fn PillLabel(text: &str, fs: Fs, ink: Color) {
+    cu::Row().alignment(Alignment::CenterStart).content(|| {
+        cu::Spacer().modifier(Modifier::new().width(VCS_PILL_PAD_X));
+        Label(text, fs, Weight::Medium, Some(paint(ink)), Some(1));
+        cu::Spacer().modifier(Modifier::new().width(VCS_PILL_PAD_X));
+    });
 }
 
 /// A single choice among a few values (the history filter, the PR state filter, the merge
@@ -498,17 +494,24 @@ pub fn remote_button_labels() -> [&'static str; 4] {
     ["가져오기", "내려받기", "올리기", "스태시"]
 }
 
-/// A 32 px circle icon button with a 44 dp hit target, named for assistive tech via `FocusOverlay`.
+/// A 32 px circle icon button in a 44 dp box that takes the press. The box is the control: a
+/// named, clickable container (`NamedClickable`, compose-rust#429), round so the press tint and
+/// the focus ring are circles. It asks for 44 by 44 and takes what its row gives: a row with a
+/// height (the 원격 cell's 36, the files header's 52) keeps that height, and the box is then as
+/// tall as the row at most (FR-L19.1, #415; a press area larger than the row is
+/// TODO(compose-rust#472, after v0.0.10): a 44 by 44 hit area that does not grow the node).
 fn CircleIconButton(
     icon: &'static str,
-    label: &str,
+    label: &'static str,
     on_click: impl FnMut() + 'static,
 ) {
     let p = ember_theme().palette;
-    cu::Box()
-        .modifier(Modifier::new().size(ICON_TOUCH_TARGET, ICON_TOUCH_TARGET))
-        .alignment(Alignment::Center)
-        .content(move || {
+    NamedClickable(
+        label,
+        Modifier::new().size(ICON_TOUCH_TARGET, ICON_TOUCH_TARGET).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        on_click,
+        move || {
             cu::Box()
                 .modifier(
                     Modifier::new()
@@ -521,8 +524,8 @@ fn CircleIconButton(
                 .content(move || {
                     NavIcon(icon, p.text_2.to_argb(), 16.0);
                 });
-            FocusOverlay(label, on_click);
-        });
+        },
+    );
 }
 
 /// The height of the bar's two pickers (`.vcs-sel{height:36px}`). Both take it, so the value
@@ -531,7 +534,7 @@ fn CircleIconButton(
 pub const VCS_SEL_H: f32 = 36.0;
 
 /// One picker of the repository bar: its icon, the value and a chevron on one line.
-fn BarSelector(icon: &'static str, name: &str, on_click: impl FnMut() + 'static) {
+fn BarSelector(icon: &'static str, name: &str, expanded: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     cu::Box()
         .modifier(Modifier::new().fill_max_width().height(VCS_SEL_H))
@@ -546,18 +549,73 @@ fn BarSelector(icon: &'static str, name: &str, on_click: impl FnMut() + 'static)
                     cu::Spacer().modifier(Modifier::new().width(6.0));
                     NavIcon(ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 16.0);
                 });
-            FocusOverlay(name, on_click);
+            // The clear button over the row is the control: named by the value it shows (a
+            // repository or a branch, so data), and it says whether its menu is open (FR-L10.4).
+            DataNamedOverlay(name, true, Some(expanded), on_click);
         });
 }
 
 /// Selector row for repository in the bar.
-fn RepoSelector(name: &str, on_click: impl FnMut() + 'static) {
-    BarSelector(ICON_FOLDER_SVG, name, on_click);
+fn RepoSelector(name: &str, expanded: bool, on_click: impl FnMut() + 'static) {
+    BarSelector(ICON_FOLDER_SVG, name, expanded, on_click);
 }
 
 /// Selector row for current branch in the bar.
-fn BranchSelector(name: &str, on_click: impl FnMut() + 'static) {
-    BarSelector(ICON_GIT_SVG, name, on_click);
+fn BranchSelector(name: &str, expanded: bool, on_click: impl FnMut() + 'static) {
+    BarSelector(ICON_GIT_SVG, name, expanded, on_click);
+}
+
+/// The head of the 저장소 menu: what is chosen now.
+pub fn repo_menu_head(name: &str) -> String {
+    format!("저장소 \u{b7} {name}")
+}
+
+/// The 저장소 menu's rows: one per project with the folder glyph and a check on the chosen one.
+/// A project whose id is not its shown name carries the id as its description.
+pub fn repo_menu_rows(projects: &[(String, String)], chosen: Option<usize>) -> Vec<PopRow> {
+    projects
+        .iter()
+        .enumerate()
+        .map(|(i, (id, name))| PopRow {
+            icon: Some(ICON_FOLDER_SVG),
+            title: name.clone(),
+            description: (id != name).then(|| id.clone()),
+            chosen: chosen == Some(i),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// The 저장소 control and its menu (FR-L10.4, #888): the shared menu in the permission-mode
+/// look, under the control and lined up with its start, a bottom sheet with the menu's own head
+/// at 560 and below. The mockup draws a native `<select>` here (`#vcsProj`), which looks
+/// different on every OS; Ember shows one look everywhere, as the Home project chip does.
+pub(super) fn RepoMenu(open: MutableState<bool>, name: &str, projects: &[(String, String)], chosen: Option<usize>, mut on_pick: impl FnMut(String) + Clone + 'static) {
+    let rows = repo_menu_rows(projects, chosen);
+    let head = repo_menu_head(name);
+    let is_open = open.get();
+    let (dismiss, toggle) = (open.clone(), open.clone());
+    let list = projects.to_vec();
+    PopoverMenuWith(
+        is_open,
+        PopMenu {
+            name: super::a11y::REPO_PICKER,
+            kind: PopKind::Mode,
+            head: &head,
+            sub: None,
+            rows: &rows,
+            align: compose_rust::PopoverAlign::Start,
+        },
+        PopExtra { plain_sheet: true, ..Default::default() },
+        move || dismiss.set(false),
+        move |idx| {
+            if let Some((id, _)) = list.get(idx) {
+                on_pick(id.clone());
+            }
+        },
+        || RepoSelector(name, is_open, move || toggle.set(!toggle.get_untracked())),
+        None,
+    );
 }
 
 /// Main remote action button (Pull with down arrow and count pill, Push, Fetch).
@@ -618,7 +676,7 @@ fn RemoteMainButton(
                     }
                     cu::Spacer().modifier(Modifier::new().width(SP[0]));
                 });
-            FocusOverlay(&label, on_click);
+            DataNamedOverlay(&label, true, None, on_click);
         });
 }
 
@@ -717,6 +775,188 @@ pub fn branch_menu_rows(branches: &[String], query: &str) -> Vec<usize> {
     branches.iter().enumerate().filter(|(_, b)| branch_matches(b, query)).map(|(i, _)| i).collect()
 }
 
+/// The branch popover's width (`.vcs-pop{width:min(380px,calc(100vw - 32px))}`). A window that
+/// has not reported its size (0) is not narrow.
+pub fn branch_pop_width(window_width_dp: f32) -> f32 {
+    if window_width_dp <= 0.0 { 380.0 } else { 380.0_f32.min((window_width_dp - 32.0).max(0.0)) }
+}
+
+/// A row of the branch popover is 40 high (`.vcs-poprow{height:40px}`).
+pub const BRANCH_POP_ROW_H: f32 = 40.0;
+/// The gap between the control and the box. The mockup hangs the box from the cell
+/// (`.vcs-pop{top:calc(100% - 4px)}`), under the 추적 line; a `Popover` has one anchor, the
+/// control, so the box sits 4 under the control and covers that line.
+pub const BRANCH_POP_OFFSET: f32 = 4.0;
+
+/// The height of the popover's list when it must scroll (`.vcs-poplist{max-height:300px}`):
+/// `None` while `rows` rows fit in 300, so the list is as tall as its rows. The toolkit has no
+/// maximum height (TODO(compose-rust#778, after v0.0.10): cap the list at 300 instead), so the
+/// list takes a fixed 300 from the row count.
+pub fn branch_pop_list_height(rows: usize) -> Option<f32> {
+    (rows as f32 * BRANCH_POP_ROW_H > 300.0).then_some(300.0)
+}
+
+/// What the popover says when no branch matches the search (mockup `vcsPopList`).
+pub const BRANCH_POP_EMPTY: &str = "일치하는 브랜치가 없습니다";
+/// The new-branch field's placeholder and its button (mockup `.vcs-popfoot`).
+pub const BRANCH_POP_NEW: &str = "feat/새-브랜치";
+pub const BRANCH_POP_CREATE: &str = "만들기";
+/// The new-branch field's name for assistive technology; its placeholder is an example.
+pub const BRANCH_POP_NEW_NAME: &str = "새 브랜치 이름";
+
+/// One row of the branch popover (`.vcs-poprow`): 40 high, padded 10, the check on the current
+/// branch and the branch glyph on the others, the name in the mono face at 12; the current row
+/// on `sel`. A menu item to assistive technology that says whether it is the current one.
+fn BranchPopRow(name: &str, current: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let fill = if current { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
+    Clickable(
+        Modifier::new()
+            .fill_max_width()
+            .height(BRANCH_POP_ROW_H)
+            .background(fill)
+            .corner_radius(CORNER_SM)
+            .role(cu::Role::MenuItem)
+            .selected(current)
+            .click_action(true),
+        Alignment::CenterStart,
+        on_click,
+        || {
+            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(10.0));
+                NavIcon(if current { super::components::ICON_CHECK_SVG } else { ICON_GIT_SVG }, p.text.to_argb(), 16.0);
+                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                // Zero wide and weighted, so a long name is cut and does not widen the box.
+                cu::Box().alignment(Alignment::CenterStart).modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
+                    Txt(name, TypeRole::Mono, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+                });
+                cu::Spacer().modifier(Modifier::new().width(10.0));
+            });
+        },
+    );
+}
+
+/// The 현재 브랜치 control and its popover (FR-L10.4, #888, mockup `vcsPopHtml`, `vcs.css`
+/// 33-41): the toolkit `Popover` hung under the control, lined up with its start, 380 wide.
+/// A 브랜치 찾기 field (#513), the matching branches (the list scrolls past 300), then, under a
+/// line, a new-branch field with 만들기. A row switches to that branch and closes the box;
+/// Escape and a press outside close it. The content is composed only while the box is open.
+/// Not built: who made a branch and when on each row (the snapshot lists names only).
+pub(super) fn BranchMenu(open: MutableState<bool>, text: &str, branches: &[String], current: Option<&str>, has: bool, actions: Option<Actions>) {
+    let theme = ember_theme();
+    let p = theme.palette;
+    let query = remember(|| mutable_state_of(String::new()));
+    let new_branch = remember(|| mutable_state_of(String::new()));
+    let generation = remember(|| mutable_state_of(0_u64));
+    let is_open = open.get();
+    let (dismiss, toggle) = (open.clone(), open.clone());
+    let width = branch_pop_width(current_window_size().width_dp);
+    let branches = branches.to_vec();
+    let current = current.map(str::to_string);
+    cu::Popover(is_open)
+        .placement(compose_rust::PopoverPlacement::Bottom)
+        .align(compose_rust::PopoverAlign::Start)
+        .offset(BRANCH_POP_OFFSET)
+        .on_dismiss(move || dismiss.set(false))
+        .modifier(
+            // `elevation(0)`: the box casts its own shadow (as `PopoverMenu`).
+            with_shadows(Modifier::new(), theme.shadow_lg())
+                .elevation(0.0)
+                .width(width)
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .corner_radius(CORNER_LG)
+                .role(cu::Role::Menu)
+                .label(super::a11y::BRANCH_PICKER),
+        )
+        .anchor(|| BranchSelector(text, is_open, move || toggle.set(!toggle.get_untracked())))
+        .content(move || {
+            if !is_open {
+                return;
+            }
+            cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+                // `.vcs-pophead{padding:10px}`.
+                cu::Box().modifier(Modifier::new().fill_max_width().padding(10.0)).content(|| {
+                    let q_state = query.clone();
+                    EmberField(FieldOptions {
+                        fill_max_width: true,
+                        height: Some(H_CTL),
+                        text: Some(query.get()),
+                        placeholder: BRANCH_MENU_SEARCH.to_string(),
+                        type_role: Some(VCS_FIELD_ROLE),
+                        on_value_change: Some(Box::new(move |v| q_state.set(v))),
+                        ..Default::default()
+                    });
+                });
+                // `.vcs-poplist{padding:0 6px 6px}`.
+                let shown = branch_menu_rows(&branches, &query.get());
+                let list_h = branch_pop_list_height(shown.len());
+                let list_actions = actions.clone();
+                let list_open = open.clone();
+                let rows = move || {
+                    if branches.is_empty() {
+                        Label(&soon_line("브랜치 목록"), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    } else if shown.is_empty() {
+                        cu::Box().modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+                            Label(BRANCH_POP_EMPTY, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                        });
+                    }
+                    for idx in shown.iter().copied() {
+                        let Some(name) = branches.get(idx).cloned() else { continue };
+                        let (close, row_actions, target) = (list_open.clone(), list_actions.clone(), name.clone());
+                        BranchPopRow(&name, current.as_deref() == Some(name.as_str()), move || {
+                            close.set(false);
+                            if let Some(a) = row_actions.as_ref() {
+                                a.branch(target.clone(), false, || {});
+                            }
+                        });
+                    }
+                };
+                cu::Row().modifier(Modifier::new().fill_max_width()).content(move || {
+                    cu::Spacer().modifier(Modifier::new().width(6.0));
+                    match list_h {
+                        Some(h) => {
+                            cu::ScrollColumn().modifier(Modifier::new().width(0.0).weight(1.0).height(h)).content(rows);
+                        }
+                        None => {
+                            cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(rows);
+                        }
+                    }
+                    cu::Spacer().modifier(Modifier::new().width(6.0));
+                });
+                cu::Spacer().modifier(Modifier::new().height(6.0));
+                // `.vcs-popfoot{border-top:1px solid var(--line);padding:10px;gap:8px}`.
+                cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(10.0)).content(move || {
+                    let value = new_branch.clone();
+                    key(generation.get(), || {
+                        EmberField(FieldOptions {
+                            weight: Some(1.0),
+                            height: Some(H_CTL),
+                            text: Some(new_branch.get()),
+                            placeholder: BRANCH_POP_NEW.to_string(),
+                            type_role: Some(VCS_FIELD_ROLE),
+                            label: Some(BRANCH_POP_NEW_NAME),
+                            on_value_change: Some(Box::new(move |v| value.set(v))),
+                            ..Default::default()
+                        });
+                    });
+                    let (create_actions, create_value, generation) = (actions.clone(), new_branch.clone(), generation.clone());
+                    AppButton(BRANCH_POP_CREATE, Some(IconRole::Add), ButtonKind::Default, true, has && branch_input(&new_branch.get()).is_some(), false, move || {
+                        if let (Some(actions), Some(name)) = (create_actions.as_ref(), branch_input(&create_value.get())) {
+                            let submitted = create_value.get();
+                            let (value, generation) = (create_value.clone(), generation.clone());
+                            actions.branch(name, true, move || {
+                                value.set(text_after_success(&value.get(), &submitted));
+                                generation.set(generation.get() + 1);
+                            });
+                        }
+                    });
+                });
+            });
+        });
+}
+
 /// The bar of three: repository, current branch, remote origin in ONE split card.
 pub fn RepoBar(
     projects: &[(String, String)],
@@ -733,11 +973,10 @@ fn RepoBarWithActions(
     projects: &[(String, String)], project: &ProjectBox, snap: Option<&RepoSnapshot>, grid: RepoBarGrid,
     mut on_pick: impl FnMut(String) + Clone + 'static, actions: Option<Actions>,
 ) {
-    let project_menu = remember(|| mutable_state_of(false));
-    let branch_menu = remember(|| mutable_state_of(false));
-    let branch_query = remember(|| mutable_state_of(String::new()));
-    let new_branch = remember(|| mutable_state_of(String::new()));
-    let branch_generation = remember(|| mutable_state_of(0_u64));
+    // `EMBER_CR_VCS_MENU=project` opens the 저장소 menu at start, for captures.
+    let project_menu = remember(|| mutable_state_of(std::env::var("EMBER_CR_VCS_MENU").as_deref() == Ok("project")));
+    // `EMBER_CR_VCS_MENU=branch` opens the branch popover at start, for captures.
+    let branch_menu = remember(|| mutable_state_of(std::env::var("EMBER_CR_VCS_MENU").as_deref() == Ok("branch")));
 
     let has = snap.is_some();
     let (ahead, behind) = snap.map_or((0, 0), |s| (s.ahead, s.behind));
@@ -756,34 +995,26 @@ fn RepoBarWithActions(
     let proj_id = project.id.clone();
     let proj_name = display_name(&project.id);
     let repo_line = crate::ui::vcs::repo_card_line(project, snap);
-    let project_opts: Vec<String> = projects.iter().map(|(_, name)| name.clone()).collect();
     let chosen_proj = projects.iter().position(|(id, _)| id == &proj_id);
 
-    let branch_opts: Vec<String> = if branches.is_empty() {
-        vec![soon_line("브랜치 목록")]
-    } else {
-        branches.clone()
-    };
-    let chosen_br = current_branch.as_ref().and_then(|cb| branches.iter().position(|b| b == cb));
-
-    let p_dismiss = project_menu.clone();
     let p_projects = projects.to_vec();
-    let mut on_pick_proj = on_pick.clone();
-    let b_dismiss = branch_menu.clone();
+    let on_pick_proj = on_pick.clone();
 
     cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
         let (project_menu_c, branch_menu_c) = (project_menu.clone(), branch_menu.clone());
         let p = ember_theme().palette;
         let remote_actions = actions.clone();
+        let branch_actions = actions.clone();
         // `.vcs-cell{padding:var(--pad-card)}`: 16 beside each other, 12 in the phone's one column.
         let pad = if grid == RepoBarGrid::One { SP[2] } else { SP[3] };
         let repo_cell = move |m: Modifier| {
             let p_open = project_menu_c.clone();
             let p_name = proj_name.clone();
             let r_line = repo_line.clone();
+            let (p_list, p_pick) = (p_projects.clone(), on_pick_proj.clone());
             cu::Column().modifier(m.padding(pad)).spacing(SP[1]).content(move || {
                 SmallNote("저장소");
-                RepoSelector(&p_name, move || p_open.set(true));
+                RepoMenu(p_open, &p_name, &p_list, chosen_proj, p_pick);
                 SmallNote(&r_line);
             });
         };
@@ -791,9 +1022,11 @@ fn RepoBarWithActions(
             let b_open = branch_menu_c.clone();
             let b_text = branch_text.clone();
             let u_text = upstream.clone();
+            let (b_list, b_current, b_actions) = (branches.clone(), current_branch.clone(), branch_actions.clone());
             cu::Column().modifier(m.padding(pad)).spacing(SP[1]).content(move || {
                 SmallNote("현재 브랜치");
-                BranchSelector(&b_text, move || b_open.set(true));
+                // The popover hangs from the control (FR-L10.4, #888; it was a centred dialog).
+                BranchMenu(b_open, &b_text, &b_list, b_current.as_deref(), has, b_actions);
                 SmallNote(&u_text);
             });
         };
@@ -801,7 +1034,9 @@ fn RepoBarWithActions(
             let remote_actions = remote_actions.clone();
             cu::Column().modifier(m.padding(pad)).spacing(SP[1]).content(move || {
                 SmallNote("원격 origin");
-                cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(10.0).content(move || {
+                // The pickers' height (FR-L19.1, #415): the 44 dp boxes of the round buttons do not
+                // make this cell's value line taller than the other two.
+                cu::Row().modifier(Modifier::new().fill_max_width().height(VCS_SEL_H)).alignment(Alignment::CenterStart).spacing(10.0).content(move || {
                     RemoteControls(action, has, remote_actions.clone());
                 });
                 RemoteSubNote(snap);
@@ -848,81 +1083,6 @@ fn RepoBarWithActions(
                 });
             }
         });
-
-        // OptionSheets for project and branch dialogs
-        // TODO(compose-rust#383): anchored popup placed below or beside anchor
-        OptionSheet(
-            project_menu.get(),
-            &project_opts,
-            chosen_proj,
-            240.0,
-            move || p_dismiss.set(false),
-            move |idx| {
-                if let Some((id, _)) = p_projects.get(idx) {
-                    on_pick_proj(id.clone());
-                }
-            },
-        );
-
-        cu::Dialog(branch_menu.get())
-            .modifier(Modifier::new().width(248.0).background(paint(p.surface))
-                .border(1.0, paint(p.line)).corner_radius(CORNER_MD).padding(SP[0]))
-            .on_dismiss(move || b_dismiss.set(false))
-            .content(|| {
-                cu::Column().modifier(Modifier::new().fill_max_width()).spacing(SP[1]).content(|| {
-                    // The mockup's popover opens with a 브랜치 찾기 field above the list (#513).
-                    let q_state = branch_query.clone();
-                    EmberField(FieldOptions {
-                        fill_max_width: true,
-                        text: Some(branch_query.get()),
-                        placeholder: BRANCH_MENU_SEARCH.to_string(),
-                        type_role: Some(VCS_FIELD_ROLE),
-                        on_value_change: Some(Box::new(move |v| q_state.set(v))),
-                        ..Default::default()
-                    });
-                    let shown = branch_menu_rows(&branches, &branch_query.get());
-                    if !branches.is_empty() && shown.is_empty() {
-                        Label("검색 결과가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-                    }
-                    for (idx, name) in branch_opts.iter().enumerate() {
-                        if !branches.is_empty() && !shown.contains(&idx) { continue; }
-                        let dismiss = branch_menu.clone();
-                        let select_actions = actions.clone();
-                        let selected_name = branches.get(idx).cloned();
-                        MenuRow(name, 240.0, chosen_br == Some(idx), move || {
-                            dismiss.set(false);
-                            if let (Some(actions), Some(name)) = (select_actions.as_ref(), selected_name.as_ref()) {
-                                actions.branch(name.clone(), false, || {});
-                            }
-                        });
-                    }
-                    let branch_value = new_branch.clone();
-                    key(branch_generation.get(), || {
-                        EmberField(FieldOptions {
-                            fill_max_width: true,
-                            text: Some(new_branch.get()),
-                            placeholder: "새 브랜치 이름".to_string(),
-                            type_role: Some(VCS_FIELD_ROLE),
-                            on_value_change: Some(Box::new(move |v| branch_value.set(v))),
-                            ..Default::default()
-                        });
-                    });
-                    let create_actions = actions.clone();
-                    let create_value = new_branch.clone();
-                    let generation = branch_generation.clone();
-                    AppButton("새 브랜치", None, ButtonKind::Primary, false, has && branch_input(&new_branch.get()).is_some(), true, move || {
-                        if let (Some(actions), Some(name)) = (create_actions.as_ref(), branch_input(&create_value.get())) {
-                            let submitted = create_value.get();
-                            let value = create_value.clone();
-                            let generation = generation.clone();
-                            actions.branch(name, true, move || {
-                                value.set(text_after_success(&value.get(), &submitted));
-                                generation.set(generation.get() + 1);
-                            });
-                        }
-                    });
-                });
-            });
     });
 }
 
@@ -981,9 +1141,7 @@ fn SectionListWithSample(
                 m = with_shadows(m.border(1.0, paint(p.line)), ember_theme().shadow_sm());
             }
 
-            cu::Box()
-                .modifier(m)
-                .content(move || {
+            NamedClickable(sec.label(), m, Alignment::TopStart, move || pick(sec), move || {
                     cu::Row()
                         .alignment(Alignment::CenterStart)
                         .modifier(Modifier::new().fill_max_size())
@@ -1025,8 +1183,7 @@ fn SectionListWithSample(
                             }
                             cu::Spacer().modifier(Modifier::new().width(SP[2]));
                         });
-                    FocusOverlay(sec.label(), move || pick(sec));
-                });
+            });
         }
     });
 }
@@ -1121,16 +1278,17 @@ pub fn pane_tab_look(on: bool, p: &Palette) -> (Color, Color, Color) {
 }
 
 /// One equal segment of the pane tabs: a `H_CTL` pill that takes its share of the row.
-fn PaneTabSegment(text: &str, on: bool, on_click: impl FnMut() + 'static) {
+/// The pill is the control: a named, clickable container (`NamedClickable`, compose-rust#429).
+fn PaneTabSegment(text: &'static str, on: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (fill, border, ink) = pane_tab_look(on, &p);
-    cu::Box()
-        .modifier(Modifier::new().weight(1.0).height(H_CTL).background(paint(fill)).border(1.0, paint(border)).shape_role(ShapeRole::Full))
-        .alignment(Alignment::Center)
-        .content(move || {
-            Label(text, VCS_CONTROL_FS, Weight::Medium, Some(paint(ink)), Some(1));
-            FocusOverlay(text, on_click);
-        });
+    NamedClickable(
+        text,
+        Modifier::new().weight(1.0).height(H_CTL).background(paint(fill)).border(1.0, paint(border)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        on_click,
+        move || Label(text, VCS_CONTROL_FS, Weight::Medium, Some(paint(ink)), Some(1)),
+    );
 }
 
 /// Tabs within a section on compact windows.
@@ -1216,23 +1374,21 @@ fn DiffViewAtWidth(file: &FileDiff, staging: &MutableState<Staging>, pane_width:
                 Txt(&h.header, TypeRole::Mono, Some(paint(p.muted)), Some(1), Some(TextOverflow::Ellipsis), Some(1.0), None);
                 let st_hunk = staging.clone();
                 let f_hunk = file.clone();
-                cu::Box()
-                    .modifier(
-                        Modifier::new()
-                            .width(vcs_pill_width("이 덩어리 전체"))
-                            .height(VCS_HUNK_BUTTON_H)
-                            .border(1.0, paint(p.line))
-                            .background(paint(p.surface))
-                            .shape_role(ShapeRole::Full),
-                    )
-                    .alignment(Alignment::Center)
-                    .content(move || {
-                        Label("이 덩어리 전체", VCS_CONTROL_FS, Weight::Medium, Some(paint(p.text)), Some(1));
-                        FocusOverlay("이 덩어리 전체", move || {
-                            let mut s = st_hunk.get();
-                            s.file_mut(&f_hunk.path).toggle_hunk(&f_hunk, hi);
-                            st_hunk.set(s);
-                        });
+                NamedClickable(
+                    "이 덩어리 전체",
+                    Modifier::new()
+                        .height(VCS_HUNK_BUTTON_H)
+                        .border(1.0, paint(p.line))
+                        .background(paint(p.surface))
+                        .shape_role(ShapeRole::Full),
+                    Alignment::Center,
+                    move || {
+                        let mut s = st_hunk.get();
+                        s.file_mut(&f_hunk.path).toggle_hunk(&f_hunk, hi);
+                        st_hunk.set(s);
+                    },
+                    move || {
+                        PillLabel("이 덩어리 전체", VCS_CONTROL_FS, p.text);
                     });
                 cu::Spacer().modifier(Modifier::new().width(SP[2]));
             });
@@ -1308,22 +1464,32 @@ fn FilesHeader(
     let st_toggle = staging.clone();
     let d_toggle = diffs.to_vec();
     let all = folder_check(all_checks);
-    cu::Row().modifier(Modifier::new().fill_max_width().height(48.0).padding(SP[2])).alignment(Alignment::CenterStart).spacing(SP[1]).content(move || {
-        StageCheck(all, STAGE_CHECK_SIDE, 24.0, move || {
-            let mut s = st_toggle.get();
-            s.toggle_all(&d_toggle);
-            st_toggle.set(s);
+    // `.vcs-ph{min-height:52px;padding:10px var(--sp4)}`: 52 high with 16 at the sides and no
+    // padding above or below, so the stash button's 44 dp box fits whole (FR-L19.1, #415: at 48
+    // with 12 all round the row had 24 for it).
+    cu::Row().modifier(Modifier::new().fill_max_width().height(VCS_FILES_HEAD_ROW_H)).alignment(Alignment::CenterStart).content(move || {
+        cu::Spacer().modifier(Modifier::new().width(VCS_FILES_HEAD_PAD_X));
+        cu::Row().modifier(Modifier::new().weight(1.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(move || {
+            StageCheck(all, STAGE_CHECK_SIDE, 24.0, move || {
+                let mut s = st_toggle.get();
+                s.toggle_all(&d_toggle);
+                st_toggle.set(s);
+            });
+            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+            Label(&format!("변경 파일 {}", diffs_len), Fs::Sm, Weight::Semibold, Some(paint(p.text)), Some(1));
+            // The note takes the room that is left and no more, so the button after it keeps
+            // its width (unweighted, the note took the row and the button was not drawn).
+            cu::Box().modifier(Modifier::new().weight(1.0)).alignment(Alignment::CenterEnd).content(|| {
+                Label(STASH_NOW_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
+            });
+            CircleIconButton(ICON_STASH_SVG, remote_button_labels()[3], move || {
+                match &stash {
+                    Some(a) => a.stash_now(diffs_len),
+                    None => notice::post(soon_line("스태시")),
+                }
+            });
         });
-        cu::Spacer().modifier(Modifier::new().width(SP[0]));
-        Label(&format!("변경 파일 {}", diffs_len), Fs::Sm, Weight::Semibold, Some(paint(p.text)), Some(1));
-        cu::Spacer().modifier(Modifier::new().weight(1.0));
-        Label(STASH_NOW_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
-        CircleIconButton(ICON_STASH_SVG, remote_button_labels()[3], move || {
-            match &stash {
-                Some(a) => a.stash_now(diffs_len),
-                None => notice::post(soon_line("스태시")),
-            }
-        });
+        cu::Spacer().modifier(Modifier::new().width(VCS_FILES_HEAD_PAD_X));
     });
 }
 
@@ -1335,8 +1501,11 @@ pub const VCS_TREE_MAX_H: f32 = 360.0;
 pub const VCS_TREE_MAX_H_STACKED: f32 = 260.0;
 /// The least the tree keeps when the pane is short: three rows.
 pub const VCS_TREE_MIN_H: f32 = 3.0 * VCS_TREE_ROW_H + 2.0 * VCS_TREE_PAD;
+/// The files header's row (`.vcs-ph{min-height:52px}`) and its side padding (`var(--sp4)`).
+pub const VCS_FILES_HEAD_ROW_H: f32 = 52.0;
+pub const VCS_FILES_HEAD_PAD_X: f32 = 16.0;
 /// The files header (`FilesHeader`) and the two 1 px rules of the changes card.
-pub const VCS_FILES_HEAD_H: f32 = 48.0 + 2.0;
+pub const VCS_FILES_HEAD_H: f32 = VCS_FILES_HEAD_ROW_H + 2.0;
 /// The commit box as drawn: 12 px padding, the 40 px summary, the 64 px description, the 32 px
 /// amend row, the 40 px button and the 18 px note, 8 apart. An estimate for the tree's height
 /// only: an amend warning adds lines the outer scroll still reaches.
@@ -1353,7 +1522,7 @@ pub fn tree_height(rows: usize) -> f32 {
 /// (`.vcs-tree{max-height:360px;overflow:auto}`; review r8: at 1440 the commit button was below
 /// the fold). `pane_h` is the height the two panes have when it is known (the sheet): the tree
 /// then also leaves room for the header and the commit box, down to three rows. The toolkit has
-/// no maximum height (TODO(compose-rust#778)), so a taller tree is given this height and scrolls.
+/// no maximum height (TODO(compose-rust#778, after v0.0.10)), so a taller tree is given this height and scrolls.
 pub fn tree_cap(max: f32, pane_h: Option<f32>) -> f32 {
     match pane_h {
         Some(h) => (h - VCS_FILES_HEAD_H - VCS_COMMIT_BOX_EST_H).clamp(VCS_TREE_MIN_H, max),
@@ -1451,7 +1620,7 @@ fn FilesTree(
                                             Some(1),
                                         );
                                     });
-                                FocusOverlay(&label, move || {
+                                DataNamedOverlay(&label, true, None, move || {
                                     let mut f = f_state.get();
                                     if !f.remove(&pth) {
                                         f.insert(pth.clone());
@@ -1532,7 +1701,7 @@ fn FilesTree(
                                                     });
                                                 cu::Spacer().modifier(Modifier::new().width(SP[1]));
                                             });
-                                        FocusOverlay(&file_name, move || {
+                                        DataNamedOverlay(&file_name, true, None, move || {
                                             sel_state.set(index);
                                             on_tab_file(tab_after_select(PaneTab::Files));
                                         });
@@ -1844,7 +2013,15 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
     match layout {
         PaneLayout::Two => {
             // The panes scroll on their own inside a bounded row. A row in an unbounded
-            // scroll centres its shorter children vertically (TODO(compose-rust#389)).
+            // scroll centres its shorter children vertically (TODO(compose-rust#389, in v0.0.10):
+            // `Row::equal_height(true)` with `fill_max_height` children is in the pin and sizes
+            // the row to its tallest child. It is not used here yet for two reasons. The diff
+            // pane holds wrapped code, and the toolkit sizes an `equal_height` row by intrinsic
+            // heights, which is wrong for wrapped text and counts a scrolling child as 0
+            // (compose-rust#766, open). And one page scroll would take the files card out of
+            // view while a long diff is read, which the mockup's sticky `.vcs-files` avoids. A
+            // capture of this layout with `equal_height` in a page scroll must show the files
+            // card as tall as the diff and still in view before this changes).
             let d_files = diffs.clone();
             let st_files = staging.clone();
             let fold_files = folded.clone();
@@ -1920,10 +2097,7 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
                 PaneTabs(Section::Changes, tab, move |t| on_tab_pick(t));
                 match tab.unwrap_or(PaneTab::Files) {
                     PaneTab::Diff => DiffPane(&diffs, sel, &staging, diff_width),
-                    PaneTab::Commit => {
-                        CommitPane(&snap.branch, staged_files, &summary, &body, &amend, commit.clone(), false);
-                        cu::Spacer().modifier(Modifier::new().height(super::routines::compact_bottom_clearance()));
-                    }
+                    PaneTab::Commit => CommitPane(&snap.branch, staged_files, &summary, &body, &amend, commit.clone(), false),
                     _ => {
                         VcsCard(move || {
                             cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
@@ -1934,6 +2108,9 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
                         });
                     }
                 }
+                // Every tab ends clear of the floating tab bar, not only 커밋: the last tree row
+                // and the last diff line scroll above it (FR-L19.1, #415).
+                cu::Spacer().modifier(Modifier::new().height(super::routines::compact_bottom_clearance()));
             });
         }
     }
@@ -2531,7 +2708,7 @@ fn HistoryRow(e: &HistoryEntry, layout: PaneLayout, selected: bool, on_select: i
                 }
             });
         });
-        FocusOverlay(&format!("커밋 {} {}", e.short, e.subject), on_select);
+        DataNamedOverlay(&format!("커밋 {} {}", e.short, e.subject), true, None, on_select);
     });
 }
 
@@ -3208,7 +3385,7 @@ fn PullRequestRow(e: &PrEntry, selected: bool, on_select: impl FnMut() + 'static
             let gate = if e.can_merge { paint(p.green.strong) } else { paint(p.text_2) };
             Label(&e.gate_text, Fs::Sm, Weight::Regular, Some(gate), None);
         });
-        FocusOverlay(&format!("풀 리퀘스트 #{} {}", e.number, e.title), on_select);
+        DataNamedOverlay(&format!("풀 리퀘스트 #{} {}", e.number, e.title), true, None, on_select);
     });
 }
 
@@ -4024,6 +4201,47 @@ fn BranchRow(e: &BranchEntry, busy: bool, on_switch: impl FnMut() + 'static) {
     });
 }
 
+/// The 기준 menu's rows: one per branch with the branch glyph, the name and a check on the
+/// chosen base.
+pub fn base_menu_rows(names: &[String], chosen: Option<usize>) -> Vec<PopRow> {
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| PopRow { icon: Some(ICON_GIT_SVG), title: n.clone(), chosen: chosen == Some(i), ..Default::default() })
+        .collect()
+}
+
+/// The 기준 button of 새 브랜치 and its menu (FR-L10.4, #888): the shared menu in the
+/// permission-mode look under the button, lined up with its start, headed by what is chosen
+/// (`기준: branch`); a bottom sheet with that head at 560 and below. The mockup draws a native
+/// `<select>` (`#vcsBase`). The button keeps its full width, is disabled without branches and
+/// says whether the menu is open.
+pub(super) fn BaseMenu(open: MutableState<bool>, text: &str, names: &[String], chosen: Option<usize>, base: MutableState<Option<String>>) {
+    let rows = base_menu_rows(names, chosen);
+    let is_open = open.get();
+    let (dismiss, toggle) = (open.clone(), open.clone());
+    let list = names.to_vec();
+    let enabled = !names.is_empty();
+    PopoverMenuWith(
+        is_open,
+        PopMenu {
+            name: super::a11y::BASE_PICKER,
+            kind: PopKind::Mode,
+            head: text,
+            sub: None,
+            rows: &rows,
+            align: compose_rust::PopoverAlign::Start,
+        },
+        PopExtra { plain_sheet: true, ..Default::default() },
+        move || dismiss.set(false),
+        move |idx| base.set(list.get(idx).cloned()),
+        || {
+            super::components::AppMenuButton(text, ButtonKind::Default, false, enabled, true, is_open, move || toggle.set(!toggle.get_untracked()));
+        },
+        None,
+    );
+}
+
 /// 브랜치: create a branch from a base and switch to it, then the 기본 브랜치 row and the 작업
 /// 브랜치 rows (the node's order: current, default, newest). `actions` is the project and the
 /// screen's reload counter; `None` shows sample branches. `count` is written for the section list.
@@ -4035,7 +4253,8 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
     let name = remember(|| mutable_state_of(String::new()));
     let generation = remember(|| mutable_state_of(0_u64));
     let base = remember(|| mutable_state_of(None::<String>));
-    let base_menu = remember(|| mutable_state_of(false));
+    // `EMBER_CR_VCS_MENU=base` opens the 기준 menu at start, for captures.
+    let base_menu = remember(|| mutable_state_of(std::env::var("EMBER_CR_VCS_MENU").as_deref() == Ok("base")));
     let query = remember_with_key(key_project.clone(), || mutable_state_of(String::new()));
     let switch_busy = remember_with_key(key_project.clone(), || mutable_state_of(false));
     let switch_last = remember_with_key(key_project.clone(), || mutable_state_of(None::<i64>));
@@ -4081,8 +4300,7 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
                             ..Default::default()
                         });
                     });
-                    let open = base_menu.clone();
-                    AppButton(&base_text, None, ButtonKind::Default, false, !names.is_empty(), true, move || open.set(true));
+                    BaseMenu(base_menu.clone(), &base_text, &names, chosen_base, base.clone());
                     SmallNote(if base.get().is_some() { "고른 브랜치에서 만듭니다" } else { "현재 브랜치에서 만듭니다" });
                     Label(BRANCH_CREATE_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
                     let (act, nm, gn, bs) = (actions.clone(), name.clone(), generation.clone(), base.clone());
@@ -4180,17 +4398,7 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
             }
         });
     };
-    let (dismiss, pick_base) = (base_menu.clone(), base.clone());
-    let sheet_menu = base_menu.clone();
-    let content = move || {
-        list();
-        let (d, b, m) = (dismiss.clone(), pick_base.clone(), sheet_menu.clone());
-        let picked = names.clone();
-        OptionSheet(sheet_menu.get(), &names, chosen_base, 240.0, move || d.set(false), move |idx| {
-            b.set(picked.get(idx).cloned());
-            m.set(false);
-        });
-    };
+    let content = list;
     if layout == PaneLayout::Two {
         cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(content);
     } else {
@@ -4435,7 +4643,7 @@ fn TeamRowView(
                                 let on_pr_click = on_pr.clone();
                                 cu::Box().modifier(Modifier::new().shape_role(ShapeRole::Full)).content(move || {
                                     Pill(label, tone, true);
-                                    FocusOverlay(label, move || on_pr_click(pr_num));
+                                    DataNamedOverlay(label, true, None, move || on_pr_click(pr_num));
                                 });
                             }
                         }
@@ -4883,18 +5091,16 @@ fn StashRow(e: &StashEntry, layout: PaneLayout, busy: bool, dirty: bool, armed: 
     }
 }
 
-// TODO(compose-rust#425, #429): the pill is painted and an invisible `Button` over it carries the
-// accessible name, because `Button` takes only its visible text as the name.
-// TODO(compose-rust#427): a Box in a Row takes the remaining width, so the width is estimated and fixed.
-/// A small pill whose visible text is `text` and whose accessible name is `access`.
+// The pill is painted and its accessible name is built from data (the stash's index and message),
+// so the clear button of `components::DataNamedOverlay` carries it (the gap is filed there).
+/// A small pill whose visible text is `text` and whose accessible name is `access`. It is as wide
+/// as its label and [`VCS_PILL_PAD_X`] at each side.
 fn StashPill(text: &str, access: &str, kind: ButtonKind, enabled: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let s = super::components::button_style_for(kind, true, enabled, p);
-    let width = vcs_pill_width(text);
     cu::Box()
         .modifier(
             Modifier::new()
-                .width(width)
                 .height(s.height)
                 .background(paint(s.fill))
                 .border(1.0, paint(s.border))
@@ -4902,13 +5108,8 @@ fn StashPill(text: &str, access: &str, kind: ButtonKind, enabled: bool, on_click
         )
         .alignment(Alignment::Center)
         .content(move || {
-            Label(text, s.fs, Weight::Medium, Some(paint(s.text)), Some(1));
-            cu::Button(access)
-                .enabled(enabled)
-                .variant(ButtonVariant::Text)
-                .color(Paint::Literal(Color::argb(0)))
-                .modifier(Modifier::new().fill_max_size())
-                .on_click(on_click);
+            PillLabel(text, s.fs, s.text);
+            DataNamedOverlay(access, enabled, None, on_click);
         });
 }
 
@@ -5322,7 +5523,7 @@ fn SectionRail(
                 m = with_shadows(m.border(1.0, paint(p.line)), ember_theme().shadow_sm());
             }
             let mut pick = on_pick.clone();
-            cu::Box().alignment(Alignment::TopEnd).modifier(m).content(move || {
+            NamedClickable(sec.label(), m, Alignment::TopEnd, move || pick(sec), move || {
                 cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_size()).content(|| {
                     NavIcon(section_svg(sec), (if on { p.text } else { p.text_2 }).to_argb(), 18.0);
                 });
@@ -5338,7 +5539,6 @@ fn SectionRail(
                             cu::Spacer().modifier(Modifier::new().width(5.0));
                         });
                 }
-                FocusOverlay(sec.label(), move || pick(sec));
             });
         }
     });
@@ -5618,6 +5818,190 @@ mod tests {
         let projects = vec![(project.id.clone(), project.name.clone())];
         let snap = sample_snapshot();
         RepoBarWithActions(&projects, &project, Some(&snap), BAR_GRID.with(|g| g.get()), |_| {}, None);
+    }
+
+    fn branch_menu_sample(open: bool) {
+        let state = remember(|| mutable_state_of(open));
+        let branches = vec!["main".to_string(), "develop".to_string(), "feat/x".to_string()];
+        BranchMenu(state, "develop", &branches, Some("develop"), true, None);
+    }
+
+    fn branch_menu_open() {
+        branch_menu_sample(true);
+    }
+
+    fn branch_menu_closed() {
+        branch_menu_sample(false);
+    }
+
+    /// (widget, modifiers, props) of every node `content` emits.
+    fn branch_menu_nodes(content: fn()) -> Vec<(String, Vec<String>, Vec<String>)> {
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        crate::ui::window_size::set_opened_for_test(None);
+        let mut nodes: Vec<(u32, String, Vec<String>, Vec<String>)> = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::Create { node_id, widget } => nodes.push((*node_id, format!("{widget:?}"), Vec::new(), Vec::new())),
+                Mutation::SetModifier { node_id, modifier, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.0 == *node_id) {
+                        n.2.push(format!("{modifier:?}"));
+                    }
+                }
+                Mutation::SetProp { node_id, property, value } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.0 == *node_id) {
+                        n.3.push(format!("{property:?}={value:?}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        nodes.into_iter().map(|n| (n.1, n.2, n.3)).collect()
+    }
+
+    #[test]
+    fn fr_l10_4_branch_menu_is_a_popover_under_its_control() {
+        // Mockup `vcsPopHtml`, `vcs.css` 33-41. It was a centred `Dialog` 248 wide.
+        let _guard = crate::services::test_guard();
+        let nodes = branch_menu_nodes(branch_menu_open);
+        assert!(!nodes.iter().any(|n| n.0 == "Dialog" || n.0 == "Sheet"), "no centred dialog");
+        let pops: Vec<_> = nodes.iter().filter(|n| n.0 == "Popover").collect();
+        assert_eq!(pops.len(), 1);
+        let (_, mods, props) = pops[0];
+        // Below the control, 4 under it, lined up with its start (not its end, 3).
+        for want in ["Open=Bool(true)", "Placement=Integer(2)", "OffsetDp=Float(4.0)"] {
+            assert!(props.iter().any(|p| p == want), "{want} in {props:?}");
+        }
+        assert!(!props.iter().any(|p| p == "Align=Integer(3)"), "{props:?}");
+        assert!(mods.iter().any(|m| m == "Width(380.0)"), "{mods:?}");
+        assert!(mods.iter().any(|m| m == "Elevation(0.0)"), "{mods:?}");
+        assert!(mods.iter().any(|m| m.starts_with("Shape { top_start: 14.0")), "{mods:?}");
+        assert!(mods.iter().any(|m| m.starts_with("Semantics") && m.contains("Menu")), "{mods:?}");
+        let says = |t: &str| nodes.iter().any(|n| n.2.iter().any(|p| p.contains(t)));
+        for t in ["main", "develop", "feat/x", BRANCH_MENU_SEARCH, BRANCH_POP_NEW, BRANCH_POP_CREATE] {
+            assert!(says(t), "missing {t}");
+        }
+        // One 40 dp menu item per branch; the current one alone is on `sel`.
+        let items: Vec<_> = nodes.iter().filter(|n| n.1.iter().any(|m| m.starts_with("Semantics") && m.contains("MenuItem"))).collect();
+        assert_eq!(items.len(), 3);
+        assert!(items.iter().all(|n| n.1.iter().any(|m| m == "Height(40.0)")));
+        let sel = format!("{:?}", compose_rust::schema::Modifier::Background(paint(ember_theme().palette.sel)));
+        assert_eq!(items.iter().filter(|n| n.1.contains(&sel)).count(), 1);
+        // Closed, nothing of the box is composed.
+        let closed = branch_menu_nodes(branch_menu_closed);
+        let pop = closed.iter().find(|n| n.0 == "Popover").expect("the popover node");
+        assert!(pop.2.iter().any(|p| p == "Open=Bool(false)"), "{:?}", pop.2);
+        assert!(!closed.iter().any(|n| n.2.iter().any(|p| p.contains("feat/x") || p.contains(BRANCH_POP_NEW))));
+        assert!(closed.iter().any(|n| n.2.iter().any(|p| p.contains("develop"))), "the control stays");
+    }
+
+    static REPO_PICKED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+    fn repo_menu_open() {
+        let state = remember(|| mutable_state_of(true));
+        let projects = vec![("ember".to_string(), "ember".to_string()), ("p-2".to_string(), "core".to_string())];
+        RepoMenu(state, "core", &projects, Some(1), |id| *REPO_PICKED.lock().unwrap() = Some(id));
+    }
+
+    #[test]
+    fn fr_l10_4_repo_menu_is_the_shared_menu_under_its_control() {
+        // The mockup's `#vcsProj` is a native select; it was a centred `OptionSheet`.
+        let _guard = crate::services::test_guard();
+        let nodes = branch_menu_nodes(repo_menu_open);
+        assert!(!nodes.iter().any(|n| n.0 == "Dialog" || n.0 == "Sheet"), "no centred dialog at 1440");
+        let pops: Vec<_> = nodes.iter().filter(|n| n.0 == "Popover").collect();
+        assert_eq!(pops.len(), 1);
+        let (_, mods, props) = pops[0];
+        // The permission-mode look: 340 wide, 8 under the control, not lined up with its end.
+        for want in ["Open=Bool(true)", "Placement=Integer(2)", "OffsetDp=Float(8.0)"] {
+            assert!(props.iter().any(|p| p == want), "{want} in {props:?}");
+        }
+        assert!(!props.iter().any(|p| p == "Align=Integer(3)"), "{props:?}");
+        assert!(mods.iter().any(|m| m == "Width(340.0)"), "{mods:?}");
+        let says = |t: &str| nodes.iter().any(|n| n.2.iter().any(|p| p.contains(t)));
+        for t in ["저장소 \u{b7} core", "ember", "p-2"] {
+            assert!(says(t), "missing {t}");
+        }
+        let items: Vec<_> = nodes.iter().filter(|n| n.1.iter().any(|m| m.starts_with("Semantics") && m.contains("MenuItem"))).collect();
+        assert_eq!(items.len(), 2);
+        let sel = format!("{:?}", compose_rust::schema::Modifier::Background(paint(ember_theme().palette.sel)));
+        assert_eq!(items.iter().filter(|n| n.1.contains(&sel)).count(), 1, "the chosen row is on sel");
+        // The control is a button named by the shown project that says the menu is open.
+        let control = nodes
+            .iter()
+            .find(|n| n.0 == "Button" && n.2.iter().any(|p| p.contains("core")) && n.1.iter().any(|m| m == "MatchParentSize"))
+            .expect("the control");
+        let state: u32 = control
+            .1
+            .iter()
+            .find_map(|m| m.strip_prefix("Semantics")?.split("state: ").nth(1)?.trim_end_matches([' ', '}']).parse().ok())
+            .expect("a semantics state");
+        assert_eq!((state >> compose_rust::schema::SEMANTICS_EXPANDED_SHIFT) & 3, 2, "{:?}", control.1);
+        let rows = repo_menu_rows(&[("a".into(), "a".into()), ("p-2".into(), "core".into())], Some(0));
+        assert_eq!((rows[0].chosen, rows[0].description.clone()), (true, None));
+        assert_eq!((rows[1].chosen, rows[1].description.as_deref()), (false, Some("p-2")));
+        assert_eq!(repo_menu_head("core"), "저장소 \u{b7} core");
+        let src = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        let bar = src.split("fn RepoBarWithActions(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(!bar.contains("OptionSheet("), "the centred sheet is gone from the bar");
+        assert!(bar.contains("EMBER_CR_VCS_MENU\").as_deref() == Ok(\"project\")"));
+    }
+
+    fn base_menu_open() {
+        let state = remember(|| mutable_state_of(true));
+        let base = remember(|| mutable_state_of(Some("develop".to_string())));
+        let names = vec!["main".to_string(), "develop".to_string()];
+        BaseMenu(state, "기준: develop", &names, Some(1), base);
+    }
+
+    #[test]
+    fn fr_l10_4_base_menu_is_the_shared_menu_under_its_button() {
+        // The mockup's `#vcsBase` is a native select; it was a centred `OptionSheet`.
+        let _guard = crate::services::test_guard();
+        let nodes = branch_menu_nodes(base_menu_open);
+        assert!(!nodes.iter().any(|n| n.0 == "Dialog" || n.0 == "Sheet"), "no centred dialog at 1440");
+        let pops: Vec<_> = nodes.iter().filter(|n| n.0 == "Popover").collect();
+        assert_eq!(pops.len(), 1);
+        let (_, mods, props) = pops[0];
+        for want in ["Open=Bool(true)", "Placement=Integer(2)", "OffsetDp=Float(8.0)"] {
+            assert!(props.iter().any(|p| p == want), "{want} in {props:?}");
+        }
+        assert!(!props.iter().any(|p| p == "Align=Integer(3)"), "{props:?}");
+        assert!(mods.iter().any(|m| m == "Width(340.0)"), "{mods:?}");
+        // The head and the button both read what is chosen; the rows are the branches.
+        let head = nodes.iter().filter(|n| n.2.iter().any(|p| p.contains("기준: develop"))).count();
+        assert_eq!(head, 2, "the button and the menu head");
+        let items: Vec<_> = nodes.iter().filter(|n| n.1.iter().any(|m| m.starts_with("Semantics") && m.contains("MenuItem"))).collect();
+        assert_eq!(items.len(), 2);
+        let sel = format!("{:?}", compose_rust::schema::Modifier::Background(paint(ember_theme().palette.sel)));
+        assert_eq!(items.iter().filter(|n| n.1.contains(&sel)).count(), 1);
+        // The button fills its line, as before, and says the menu is open.
+        let button = nodes.iter().find(|n| n.0 == "Button" && n.2.iter().any(|p| p.contains("기준: develop"))).expect("the button");
+        assert!(button.1.iter().any(|m| m == "FillMaxWidth"), "{:?}", button.1);
+        let state: u32 = button
+            .1
+            .iter()
+            .find_map(|m| m.strip_prefix("Semantics")?.split("state: ").nth(1)?.trim_end_matches([' ', '}']).parse().ok())
+            .expect("a semantics state");
+        assert_eq!((state >> compose_rust::schema::SEMANTICS_EXPANDED_SHIFT) & 3, 2, "{:?}", button.1);
+        let rows = base_menu_rows(&["main".into(), "develop".into()], None);
+        assert!(rows.iter().all(|r| !r.chosen) && rows[1].title == "develop");
+        let src = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!src.contains("OptionSheet("), "no centred option sheet is left in 버전 관리");
+        assert!(src.contains("EMBER_CR_VCS_MENU\").as_deref() == Ok(\"base\")"));
+    }
+
+    #[test]
+    fn fr_l10_4_branch_menu_sizes() {
+        assert_eq!(branch_pop_width(1440.0), 380.0);
+        assert_eq!(branch_pop_width(390.0), 358.0);
+        assert_eq!(branch_pop_width(0.0), 380.0);
+        assert_eq!(branch_pop_list_height(7), None);
+        assert_eq!(branch_pop_list_height(8), Some(300.0));
+        assert_eq!((BRANCH_POP_ROW_H, BRANCH_POP_OFFSET), (40.0, 4.0));
+        let src = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!src.contains("cu::Dialog(branch_menu"), "the centred branch dialog is gone");
     }
 
     /// The vertical and the horizontal lines between the bar's cells.
@@ -6849,6 +7233,8 @@ mod tests {
         id: u32,
         widget: String,
         parent: Option<u32>,
+        /// Its place among its parent's children, as inserted.
+        at: u32,
         mods: Vec<String>,
         props: Vec<String>,
     }
@@ -6860,11 +7246,12 @@ mod tests {
         for m in batch.iter() {
             match m {
                 Mutation::Create { node_id, widget } => {
-                    nodes.push(N { id: *node_id, widget: format!("{widget:?}"), parent: None, mods: Vec::new(), props: Vec::new() })
+                    nodes.push(N { id: *node_id, widget: format!("{widget:?}"), parent: None, at: 0, mods: Vec::new(), props: Vec::new() })
                 }
-                Mutation::Insert { parent_id, node_id, .. } => {
+                Mutation::Insert { parent_id, node_id, index } => {
                     if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
                         n.parent = Some(*parent_id);
+                        n.at = *index;
                     }
                 }
                 Mutation::SetModifier { node_id, modifier, .. } => {
@@ -6915,7 +7302,7 @@ mod tests {
         // Review r8 fix round: 저장소 was 44 high and 현재 브랜치 36 (`.vcs-sel{height:36px}`), so
         // the two cells sat 4 px apart on the value line and 8 on the note under it.
         assert_eq!(VCS_SEL_H, 36.0);
-        for nodes in [nodes_of(|| RepoSelector("ember", || {})), nodes_of(|| BranchSelector("feat/session-shim", || {}))] {
+        for nodes in [nodes_of(|| RepoSelector("ember", false, || {})), nodes_of(|| BranchSelector("feat/session-shim", false, || {}))] {
             let frame = nodes.iter().find(|n| n.widget == "Box").expect("the picker");
             assert!(frame.mods.iter().any(|m| m == "Height(36.0)"), "{:?}", frame.mods);
             assert!(frame.mods.iter().any(|m| m == "FillMaxWidth"), "{:?}", frame.mods);
@@ -6992,13 +7379,13 @@ mod tests {
         assert_eq!(tree_cap(VCS_TREE_MAX_H, None), 360.0, "the mockup's cap on the page");
         assert_eq!(tree_cap(VCS_TREE_MAX_H_STACKED, None), 260.0, "stacked panes, 900 and below");
         assert_eq!(VCS_COMMIT_BOX_EST_H, 250.0);
-        // The sheet at 1440 x 900: 749 under the header, 585 for the panes; the header (50)
-        // and the commit box (250) leave the tree 285, so the card ends with the pane.
+        // The sheet at 1440 x 900: 749 under the header, 585 for the panes; the header (54)
+        // and the commit box (250) leave the tree 281, so the card ends with the pane.
         assert!((vcs_sheet_body_height(1440.0, 900.0) - 749.0).abs() < 0.01);
         assert_eq!(sheet_pane_height(749.0, 16.0), 585.0);
-        assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(585.0)), 285.0);
-        assert!(tree_height(10) > 285.0, "the r8 sample's ten rows scroll inside the cap");
-        assert_eq!(VCS_FILES_HEAD_H + 285.0 + VCS_COMMIT_BOX_EST_H, 585.0);
+        assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(585.0)), 281.0);
+        assert!(tree_height(10) > 281.0, "the r8 sample's ten rows scroll inside the cap");
+        assert_eq!(VCS_FILES_HEAD_H + 281.0 + VCS_COMMIT_BOX_EST_H, 585.0);
         // A tall pane keeps the mockup's 360; a short one keeps three rows.
         assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(900.0)), 360.0);
         assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(300.0)), VCS_TREE_MIN_H);
@@ -7020,9 +7407,9 @@ mod tests {
         // Rows keep the height the cap counts with.
         let rows = build_tree(&sample_snapshot().changes.iter().map(|d| d.path.clone()).collect::<Vec<_>>(), &BTreeSet::new()).len();
         assert!(nodes.iter().filter(|n| n.mods.iter().any(|m| m == "Height(34.0)")).count() >= rows);
-        if tree_height(rows) > 285.0 {
+        if tree_height(rows) > 281.0 {
             assert!(
-                nodes.iter().any(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m.starts_with("Height(285.0") || m.starts_with("Height(284.99"))),
+                nodes.iter().any(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m.starts_with("Height(281.0") || m.starts_with("Height(280.99"))),
                 "the tree scrolls inside its cap"
             );
         }
@@ -7030,7 +7417,193 @@ mod tests {
         let two = production.split("PaneLayout::Two => {").nth(1).unwrap().split("PaneLayout::Stacked => {").next().unwrap();
         assert_eq!(two.matches("VcsCard(").count(), 1, "one card for the tree and the commit box: {two}");
         assert!(two.contains("FilesTreeCapped(&d_files, &st_files, &fold_files, &sel_files, on_tab_files, tree_cap(VCS_TREE_MAX_H, pane_h));"));
-        assert!(production.contains("TODO(compose-rust#778)"));
+        assert!(production.contains("TODO(compose-rust#778, after v0.0.10)"));
+    }
+
+    /// The children of `parent`, in the order they were inserted.
+    fn kids<'a>(nodes: &'a [N], parent: u32) -> Vec<&'a N> {
+        let mut v: Vec<&N> = nodes.iter().filter(|n| n.parent == Some(parent)).collect();
+        v.sort_by_key(|n| n.at);
+        v
+    }
+
+    /// The child of `top` that is `n` or holds it.
+    fn branch_of<'a>(nodes: &'a [N], top: u32, n: &'a N) -> &'a N {
+        if n.parent == Some(top) {
+            return n;
+        }
+        let ups = up(nodes, n);
+        nodes.iter().find(|x| x.parent == Some(top) && ups.contains(&x.id)).expect("under the node")
+    }
+
+    /// A snapshot whose tree (fifteen rows) is taller than any cap.
+    fn long_snapshot() -> RepoSnapshot {
+        let mut snap = sample_snapshot();
+        snap.changes = (0..14)
+            .map(|i| {
+                let mut d = a_diff();
+                d.path = format!("src/f{i}.rs");
+                d
+            })
+            .collect();
+        snap
+    }
+
+    #[compose_rust::runtime::Composable]
+    fn changes_two_pane_probe() {
+        ChangesPaneWithActions(&long_snapshot(), PaneLayout::Two, None, |_| {}, None, 600.0, 320.0, Some(585.0), None, false);
+    }
+
+    #[test]
+    fn fr_l19_1_the_commit_box_follows_the_scrolling_tree_inside_the_changes_card() {
+        // #415 (1): the earlier check only found the commit button's text. Since #878 the box is
+        // not pinned under a scroll area; it is the last part of the changes card, and only the
+        // tree above it scrolls.
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let nodes = nodes_of(changes_two_pane_probe);
+        let p = ember_theme().palette;
+        assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(585.0)), 281.0);
+        let tree = nodes
+            .iter()
+            .find(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m == "Height(281.0)"))
+            .expect("the tree scrolls inside its cap");
+        let row = with_text(&nodes, "f13.rs");
+        assert!(up(&nodes, row).contains(&tree.id), "the last file row is inside the scrolling tree");
+        let summary = nodes.iter().find(|n| n.props.iter().any(|x| x.contains("요약 (필수) 예: Feat: Wire shim"))).expect("the summary field");
+        assert!(!up(&nodes, summary).contains(&tree.id), "the commit box does not scroll with the tree");
+        // One column holds the header, a rule, the tree, a rule and the commit box, in that order.
+        let column = tree.parent.expect("the card's column");
+        let parts = kids(&nodes, column);
+        assert_eq!(parts.len(), 5, "{:?}", parts.iter().map(|n| (&n.widget, &n.mods)).collect::<Vec<_>>());
+        let header = with_text(&nodes, "변경 파일 14");
+        assert_eq!(branch_of(&nodes, column, header).id, parts[0].id, "the files header is first");
+        assert_eq!(parts[2].id, tree.id, "the tree is under the header's rule");
+        let commit = branch_of(&nodes, column, summary);
+        assert_eq!(commit.id, parts[4].id, "the commit box is last, after the tree");
+        assert!(commit.at > tree.at);
+        for rule in [parts[1], parts[3]] {
+            assert!(rule.mods.iter().any(|m| m == "Height(1.0)") && rule.mods.iter().any(|m| m == "FillMaxWidth"), "{:?}", rule.mods);
+        }
+        let fill = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.surface_2)));
+        assert!(commit.mods.contains(&fill), "on surface-2: {:?}", commit.mods);
+        assert!(commit.widget == "Column" && !commit.mods.iter().any(|m| m.starts_with("Height(")), "as tall as its fields: {:?}", commit.mods);
+        // The commit button is in that box too.
+        let button = nodes.iter().find(|n| n.widget == "Button" && under(&nodes, commit).iter().any(|x| x.id == n.id)).expect("the commit button");
+        assert!(!up(&nodes, button).contains(&tree.id));
+        // The column is inside one bordered card.
+        let ups = up(&nodes, tree);
+        assert!(nodes.iter().any(|n| ups.contains(&n.id) && n.mods.iter().any(|m| m.starts_with("Border")) && n.mods.iter().any(|m| m.starts_with("Shape { top_start: 14.0"))));
+    }
+
+    #[compose_rust::runtime::Composable]
+    fn phone_files_tab_probe() {
+        ChangesPane(&long_snapshot(), PaneLayout::Tabs, Some(PaneTab::Files), |_| {});
+    }
+
+    #[compose_rust::runtime::Composable]
+    fn phone_diff_tab_probe() {
+        ChangesPane(&long_snapshot(), PaneLayout::Tabs, Some(PaneTab::Diff), |_| {});
+    }
+
+    #[compose_rust::runtime::Composable]
+    fn phone_commit_tab_probe() {
+        ChangesPane(&long_snapshot(), PaneLayout::Tabs, Some(PaneTab::Commit), |_| {});
+    }
+
+    #[test]
+    fn fr_l19_1_every_phone_tab_ends_with_the_floating_bar_clearance() {
+        // #415 (2): only 커밋 ended with the clearance, so the last tree row and the last diff
+        // line stayed under the floating tab bar.
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let clearance = crate::ui::cr::routines::compact_bottom_clearance();
+        assert_eq!(clearance, 90.0);
+        let want = format!("{:?}", compose_rust::schema::Modifier::Height(clearance));
+        let cases: [(&str, fn(), &str); 3] = [
+            ("파일", phone_files_tab_probe, "f13.rs"),
+            ("차이", phone_diff_tab_probe, "이 덩어리 전체"),
+            ("커밋", phone_commit_tab_probe, "마지막 커밋 수정 (amend)"),
+        ];
+        for (name, probe, inside) in cases {
+            let nodes = nodes_of(probe);
+            let spacers: Vec<&N> = nodes.iter().filter(|n| n.widget == "Spacer" && n.mods.contains(&want)).collect();
+            assert_eq!(spacers.len(), 1, "{name}: one clearance");
+            let spacer = spacers[0];
+            let column = spacer.parent.expect("the pane's column");
+            let parts = kids(&nodes, column);
+            assert_eq!(parts.last().map(|n| n.id), Some(spacer.id), "{name}: the clearance is the last thing in the pane");
+            // The tab's own content is in the same column, above the clearance.
+            let content = branch_of(&nodes, column, with_text(&nodes, inside));
+            assert!(content.at < spacer.at, "{name}");
+        }
+    }
+
+    #[test]
+    fn fr_l19_1_the_icon_buttons_do_not_set_the_row_heights() {
+        // #415 (3): the 44 dp box of a round button made the 원격 cell's row 44 beside the 36 dp
+        // pickers, and in the files header (48 with 12 all round) it had 24.
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        assert_eq!((ICON_TOUCH_TARGET, VCS_SEL_H), (44.0, 36.0));
+        assert_eq!((VCS_FILES_HEAD_ROW_H, VCS_FILES_HEAD_PAD_X, VCS_FILES_HEAD_H), (52.0, 16.0, 54.0));
+        let has = |n: &N, m: &str| n.mods.iter().any(|x| x == m);
+        // The nearest row with a height above a node.
+        let row_over = |nodes: &[N], n: &N| -> Vec<String> {
+            let ups = up(nodes, n);
+            let row = ups
+                .iter()
+                .filter_map(|id| nodes.iter().find(|x| x.id == *id))
+                .find(|x| x.widget == "Row" && x.mods.iter().any(|m| m.starts_with("Height(")))
+                .expect("a row with a height");
+            row.mods.clone()
+        };
+        for grid in [RepoBarGrid::Three, RepoBarGrid::TwoRemoteBelow, RepoBarGrid::One] {
+            BAR_GRID.with(|g| g.set(grid));
+            let nodes = nodes_of(repo_bar_sample);
+            for label in ["Pull 1", "가져오기", "내려받기", "올리기"] {
+                let control = nodes.iter().find(|n| n.props.iter().any(|x| *x == format!("AccessibleName=String({label:?})"))).unwrap_or_else(|| panic!("{label}"));
+                let mods = row_over(&nodes, control);
+                assert!(mods.iter().any(|m| m == "Height(36.0)") && mods.iter().any(|m| m == "FillMaxWidth"), "{grid:?} {label}: {mods:?}");
+            }
+            // The round buttons still ask for the 44 dp box and draw the 32 dp circle.
+            // The 44 dp box is the control itself (compose-rust#429): it has the name and the click.
+            let hit = nodes.iter().find(|n| n.props.iter().any(|x| x == "AccessibleName=String(\"가져오기\")")).unwrap();
+            assert!(hit.widget == "Box" && hit.props.iter().any(|x| x.starts_with("OnClick=")), "{:?}", hit.props);
+            assert!(has(hit, "Width(44.0)") && has(hit, "Height(44.0)"), "{:?}", hit.mods);
+            let circle = kids(&nodes, hit.id)[0];
+            assert!(has(circle, "Width(32.0)") && has(circle, "Height(32.0)"), "{:?}", circle.mods);
+            // The two pickers have the same height as the row.
+            assert_eq!(nodes.iter().filter(|n| n.widget == "Box" && has(n, "Height(36.0)") && has(n, "FillMaxWidth")).count(), 2, "{grid:?}");
+        }
+        BAR_GRID.with(|g| g.set(RepoBarGrid::Three));
+        // The files header: 52 high, no padding of its own, 16 at each side, and the stash
+        // button after a note that takes only the room left.
+        let nodes = nodes_of(changes_two_pane_probe);
+        let stash = nodes.iter().find(|n| n.props.iter().any(|x| x == "AccessibleName=String(\"스태시\")")).expect("the stash button");
+        let ups = up(&nodes, stash);
+        let head = ups
+            .iter()
+            .filter_map(|id| nodes.iter().find(|x| x.id == *id))
+            .find(|x| x.widget == "Row" && x.mods.iter().any(|m| m.starts_with("Height(")))
+            .expect("the header row");
+        assert!(has(head, "Height(52.0)") && has(head, "FillMaxWidth"), "{:?}", head.mods);
+        assert!(!head.mods.iter().any(|m| m.starts_with("Padding")), "no padding to take the box's height: {:?}", head.mods);
+        let parts = kids(&nodes, head.id);
+        assert_eq!(parts.len(), 3, "a side, the content, a side");
+        for side in [parts[0], parts[2]] {
+            assert!(side.widget == "Spacer" && has(side, "Width(16.0)"), "{:?}", side.mods);
+        }
+        assert!(parts[1].widget == "Row" && has(parts[1], "Weight(1.0)"), "{:?}", parts[1].mods);
+        // The named box is the 44 by 44 control itself (compose-rust#429, #673).
+        let hit = if has(stash, "Width(44.0)") { stash } else { nodes.iter().find(|n| Some(n.id) == stash.parent).unwrap() };
+        assert!(has(hit, "Width(44.0)") && has(hit, "Height(44.0)"), "{:?}", hit.mods);
+        assert_eq!(hit.parent, Some(parts[1].id), "the box is a child of the header's content row");
+        let note = with_text(&nodes, STASH_NOW_NOTE);
+        let holder = nodes.iter().find(|n| Some(n.id) == note.parent).unwrap();
+        assert!(holder.widget == "Box" && has(holder, "Weight(1.0)"), "the note gives way: {:?}", holder.mods);
+        assert!(holder.at < hit.at, "the button follows the note");
+        assert!(!kids(&nodes, parts[1].id).iter().any(|n| n.widget == "Spacer" && has(n, "Weight(1.0)")), "the note's box is the only thing that grows");
     }
 
     fn pr_detail_probe() {
@@ -7409,8 +7982,10 @@ mod tests {
         // Review ba follow-up: at 1024 x 800 the page's 360 tree put the commit button below
         // the fold. The panes start 246 down and end 32 above the window's bottom.
         assert_eq!(page_pane_height(800.0, 32.0), 522.0);
-        assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(page_pane_height(800.0, 32.0))), 222.0);
-        assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(page_pane_height(900.0, 32.0))), 322.0);
+        // The files header row is 52 with the stash button and its note (FR-L10.4, #888), 4 more
+        // than the 48 this was first written for.
+        assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(page_pane_height(800.0, 32.0))), 218.0);
+        assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(page_pane_height(900.0, 32.0))), 318.0);
         let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
         assert!(production.contains("None => (wide && window.height_dp > 100.0).then(|| page_pane_height(window.height_dp, pad)),"));
     }
@@ -7604,13 +8179,30 @@ mod tests {
         assert_eq!(VCS_CONTROL_FS, Fs::Sm);
         assert_eq!(VCS_CONTROL_FS.size(), 13.0);
         assert_eq!(super::super::components::type_role_style(VCS_FIELD_ROLE).0, VCS_CONTROL_FS);
-        // The stash pill, the chip and the hunk button estimate their width with that size.
-        for text in ["적용", "꺼내기", "삭제", "정말 삭제합니다", "이 덩어리 전체", "병합됨"] {
-            let want = (super::super::home::text_px(text, 13.0) + 28.0).max(64.0);
-            assert_eq!(vcs_pill_width(text), want, "{text}");
-        }
-        assert!(vcs_pill_width("정말 삭제합니다") < (super::super::home::text_px("정말 삭제합니다", 16.0) + 28.0));
         assert!(VCS_HUNK_BUTTON_H < H_CTL);
+    }
+
+    #[test]
+    fn a_small_pill_takes_the_width_of_its_label_and_14_at_each_side() {
+        // compose-rust#427 (#673): the `text_px` estimate with its 64 minimum is gone. The pill
+        // sends a height and no width, and its label sits between two 14 dp spaces.
+        let _guard = crate::services::test_guard();
+        assert_eq!(VCS_PILL_PAD_X, 14.0);
+        let nodes = nodes_of(|| StashPill("적용", "스태시 1 적용", ButtonKind::Default, true, || {}));
+        let over = nodes.iter().find(|n| n.widget == "Button").expect("the pill's button");
+        assert!(over.props.iter().any(|x| x == "AccessibleName=String(\"스태시 1 적용\")"), "{:?}", over.props);
+        let pill = nodes.iter().find(|n| Some(n.id) == over.parent).expect("the pill");
+        assert!(pill.mods.iter().any(|m| *m == format!("Height({H_CTL:?})")), "{:?}", pill.mods);
+        assert!(!pill.mods.iter().any(|m| m.starts_with("Width(") || m.starts_with("Size(") || m.starts_with("FillMax")), "{:?}", pill.mods);
+        let label = with_text(&nodes, "적용");
+        let row = nodes.iter().find(|n| Some(n.id) == label.parent).expect("the label's row");
+        let parts = kids(&nodes, row.id);
+        assert_eq!(parts.len(), 3, "a side, the label, a side");
+        for side in [parts[0], parts[2]] {
+            assert!(side.widget == "Spacer" && side.mods.iter().any(|m| m == "Width(14.0)"), "{:?}", side.mods);
+        }
+        let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains(&["vcs_pill", "_width"].concat()), "the estimate is gone");
     }
 
     #[test]
@@ -7644,54 +8236,54 @@ mod tests {
     }
 
     #[test]
-    fn focus_overlay_emits_button_with_text_and_fill_max_size() {
+    fn a_fixed_name_sits_on_the_painted_box_and_a_data_name_on_a_matched_button() {
+        // compose-rust#429, #431 (#673): the three `FocusOverlay` functions are gone. A control
+        // whose name is one of a fixed set is the painted box itself; one named from data keeps a
+        // clear button that takes its box's bounds (`components::DataNamedOverlay`).
         let _guard = crate::services::test_guard();
         compose_rust::window::reset_window_size();
-        let mut host = Host::new(|| {
-            Box::new(Recomposer::new(|| {
-                cu::Box().content(|| {
-                    FocusOverlay("테스트 행", || {});
-                });
-            }))
-        });
-        let mutations = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
-        let has_button = mutations.iter().any(|m| match m {
-            Mutation::Create {
-                widget: WidgetKind::Button,
-                ..
-            } => true,
-            _ => false,
-        });
-        assert!(has_button, "expected Button widget");
+        let named = |nodes: &[N], name: &str| -> usize {
+            let want = format!("AccessibleName=String({name:?})");
+            nodes.iter().position(|n| n.props.contains(&want)).unwrap_or_else(|| panic!("no control named {name}"))
+        };
+        let press = |n: &N| n.mods.iter().filter(|m| m.starts_with("PressFeedback")).count();
+        let button_role = |n: &N| n.mods.iter().any(|m| m.starts_with("Semantics") && m.contains("Button"));
 
-        let has_text = mutations.iter().any(|m| match m {
-            Mutation::SetProp {
-                property,
-                value: PropertyValue::String(s),
-                ..
-            } => *property == PropertyKind::Text && *s == "테스트 행",
-            _ => false,
-        });
-        assert!(has_text, "expected text prop matching label");
+        // A pane tab: the pill has the fill, the name, the role, the click and the press.
+        let nodes = nodes_of(|| cu::Row().content(|| PaneTabSegment("파일", true, || {})));
+        assert!(!nodes.iter().any(|n| n.widget == "Button"), "no button over the pill");
+        let tab = &nodes[named(&nodes, "파일")];
+        assert_eq!(tab.widget, "Box");
+        assert!(tab.props.iter().any(|x| x.starts_with("OnClick=")), "{:?}", tab.props);
+        assert!(button_role(tab) && press(tab) == 1, "{:?}", tab.mods);
+        let fill = format!("{:?}", compose_rust::schema::Modifier::Background(paint(ember_theme().palette.ink)));
+        assert!(tab.mods.contains(&fill) && tab.mods.iter().any(|m| *m == format!("Height({H_CTL:?})")), "{:?}", tab.mods);
 
-        let has_fill_width = mutations.iter().any(|m| match m {
-            Mutation::SetModifier {
-                modifier: compose_rust::Modifier::FillMaxWidth,
-                ..
-            } => true,
-            _ => false,
-        });
-        let has_fill_height = mutations.iter().any(|m| match m {
-            Mutation::SetModifier {
-                modifier: compose_rust::Modifier::FillMaxHeight,
-                ..
-            } => true,
-            _ => false,
-        });
-        assert!(
-            has_fill_width && has_fill_height,
-            "expected fill_max_size modifier"
-        );
+        // A round icon button: the 44 dp box is the control and is round, the 32 dp circle is drawn in it.
+        let nodes = nodes_of(|| CircleIconButton(ICON_FETCH_SVG, "가져오기", || {}));
+        assert!(!nodes.iter().any(|n| n.widget == "Button"));
+        let hit = &nodes[named(&nodes, "가져오기")];
+        assert!(hit.props.iter().any(|x| x.starts_with("OnClick=")) && button_role(hit) && press(hit) == 1, "{:?}", hit.mods);
+        assert!(hit.mods.iter().any(|m| m == "Width(44.0)") && hit.mods.iter().any(|m| m.starts_with("ShapeRole(Full")), "{:?}", hit.mods);
+
+        // A row named by a path: one clear button with the path as text and name, exactly over
+        // its box, which keeps its own size.
+        let nodes = nodes_of(|| ConflictFileRow("docs/SPEC.md", || {}));
+        let buttons: Vec<&N> = nodes.iter().filter(|n| n.widget == "Button").collect();
+        assert_eq!(buttons.len(), 1);
+        let over = buttons[0];
+        assert!(over.props.iter().any(|x| x == "Text=String(\"docs/SPEC.md\")"), "{:?}", over.props);
+        assert!(over.props.iter().any(|x| x == "AccessibleName=String(\"docs/SPEC.md\")"), "{:?}", over.props);
+        assert!(over.props.iter().any(|x| x.starts_with("OnClick=")), "{:?}", over.props);
+        assert!(over.mods.iter().any(|m| m == "MatchParentSize"), "{:?}", over.mods);
+        assert!(!over.mods.iter().any(|m| m.starts_with("FillMax")), "it does not widen its box: {:?}", over.mods);
+        let row = nodes.iter().find(|n| Some(n.id) == over.parent).expect("its box");
+        assert!(row.widget == "Box" && row.mods.iter().any(|m| *m == format!("Height({CONFLICT_ROW_H:?})")), "{:?}", row.mods);
+        assert!(!row.props.iter().any(|x| x.starts_with("OnClick=")), "one tap target, not two");
+
+        let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains(&["Focus", "Overlay("].concat()), "the per-screen overlay is gone");
+        assert!(!production.contains(&["cu::", "Button("].concat()), "no direct toolkit button is left");
         compose_rust::window::reset_window_size();
     }
 
@@ -7708,7 +8300,7 @@ mod tests {
                     Mutation::Create { node_id, widget: WidgetKind::Button } => {
                         button_nodes.insert(*node_id);
                     }
-                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
                         button_texts.insert(*node_id, s.to_string());
                     }
                     _ => {}
@@ -7789,7 +8381,7 @@ mod tests {
                     Mutation::Create { node_id, widget: WidgetKind::Button } => {
                         button_nodes.insert(*node_id);
                     }
-                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
                         button_texts.insert(*node_id, s.to_string());
                     }
                     _ => {}
@@ -7876,7 +8468,11 @@ mod tests {
                         Mutation::Create { node_id, widget: WidgetKind::Button } => {
                             tab_nodes.insert(*node_id);
                         }
-                        Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        // A painted control that takes its own name is a clickable box (compose-rust#429, #673).
+                        Mutation::SetProp { node_id, property: PropertyKind::OnClick, .. } => {
+                            tab_nodes.insert(*node_id);
+                        }
+                        Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
                             tab_texts.insert(*node_id, s.to_string());
                         }
                         _ => {}

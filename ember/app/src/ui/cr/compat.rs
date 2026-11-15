@@ -1,9 +1,11 @@
 //! compose-rust version of `ui::compat`: small widgets the screens share (badge, dot, spinner,
-//! status indicator, message and code text, split pane, banner).
+//! status indicator, message and code text, banner).
 //!
-//! compose-rust has `Badge`, `SplitPane` and a text selection container of its own, but their
-//! looks do not match the mockup tokens yet, so these stay Ember widgets built from the same
-//! primitives as the Dioxus ones. Each says what would replace it.
+//! compose-rust has `Badge` and a text selection container of its own, but their looks do not
+//! match the mockup tokens yet, so these stay Ember widgets built from the same primitives as
+//! the Dioxus ones. Each says what would replace it. A split pane is the toolkit's
+//! `compose_rust::ui::SplitPane` (compose-rust#27, in the v0.0.10 pin); the fixed two-column
+//! stand-in that was here had no caller and is gone (#673).
 
 #![allow(non_snake_case)]
 
@@ -141,8 +143,9 @@ pub fn MessageText(text: &str, ink: Option<ColorRole>) {
 
 /// Code or tool output in a monospace face.
 ///
-/// TODO(markdown): syntax highlighting. TODO(compose-rust): horizontal scroll for long lines;
-/// long lines wrap until then. TODO(FR-38): read-only editor view for large outputs.
+/// TODO(markdown): syntax highlighting. TODO(#673): put the text in a toolkit `ScrollRow` so a
+/// long line scrolls (it needs a display check); long lines wrap until then. TODO(FR-38):
+/// read-only editor view for large outputs.
 pub fn CodeText(text: &str, max_lines: Option<u32>, error: bool) {
     let theme = ember_theme();
     cu::Box()
@@ -167,24 +170,6 @@ pub fn CodeText(text: &str, max_lines: Option<u32>, error: bool) {
                     None,
                 );
             });
-        });
-}
-
-/// Two panes side by side, the first taking `start_weight` of the width.
-///
-/// TODO(compose-rust#27): replace with `SplitPane` (draggable divider) once it matches the mockup.
-pub fn SplitPane(start_weight: f32, start: impl FnOnce(), end: impl FnOnce()) {
-    cu::Row()
-        .space_role(SpaceRole::Md)
-        .modifier(Modifier::new().fill_max_width().fill_max_height())
-        .content(|| {
-            cu::Column()
-                .modifier(Modifier::new().weight(start_weight).fill_max_height())
-                .content(start);
-            cu::Spacer().modifier(Modifier::new().width(1.0).fill_max_height().background(paint(ember_theme().palette.line)));
-            cu::Column()
-                .modifier(Modifier::new().weight(1.0 - start_weight).fill_max_height())
-                .content(end);
         });
 }
 
@@ -224,7 +209,8 @@ mod tests {
             Box::new(Recomposer::new(|| {
                 StatusIndicator(LauncherStatus::WaitingForApproval);
                 CodeText("cargo test", Some(3), false);
-                SplitPane(0.4, || Banner("hi", Tone::Accent), || Dot(Tone::Neutral));
+                Banner("hi", Tone::Accent);
+                Dot(Tone::Neutral);
             }))
         });
         let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
@@ -235,6 +221,17 @@ mod tests {
             })
         };
         assert!(has(&want) && has("cargo test") && has("hi"), "{batch:?}");
+    }
+
+    #[test]
+    fn no_stand_in_split_pane_is_left() {
+        // compose-rust#27 (#673): the toolkit `SplitPane` is in the v0.0.10 pin and nothing called
+        // the fixed two-column stand-in, so it is gone. A screen that needs a divider takes
+        // `compose_rust::ui::SplitPane`.
+        let src = include_str!("compat.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(!production.contains(concat!("fn Split", "Pane(")));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "27)")));
     }
 
     #[test]

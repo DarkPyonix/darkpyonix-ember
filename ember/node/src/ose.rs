@@ -488,6 +488,47 @@ fn secure_token_dir(path: &Path) -> std::io::Result<()> {
 /// be needed. More names come only from [`PASSTHROUGH_VAR`] (#471).
 const ENV_ALLOWLIST: [&str; 6] = ["HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "USER"];
 
+/// Added on Windows (#83, D49): Node needs `SystemRoot` for sockets and crypto, and the user and
+/// temp folders come from these instead of `HOME` and `TMPDIR`.
+const WINDOWS_ENV_ALLOWLIST: [&str; 9] =
+    ["SystemRoot", "SystemDrive", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "PATHEXT", "COMSPEC"];
+
+/// The variables an OSE child keeps from the parent, before any passthrough.
+pub fn env_allowlist(windows: bool) -> Vec<&'static str> {
+    let mut names = ENV_ALLOWLIST.to_vec();
+    if windows {
+        names.extend(WINDOWS_ENV_ALLOWLIST);
+    }
+    names
+}
+
+/// The launcher's file name in `bin/`: `dpx-ose-server`, or `dpx-ose-server.cmd` on Windows.
+pub fn launcher_name(windows: bool) -> &'static str {
+    if windows { "dpx-ose-server.cmd" } else { "dpx-ose-server" }
+}
+
+/// The launcher of the unpacked build at `root`.
+pub fn launcher_in(root: &Path, windows: bool) -> PathBuf {
+    root.join("bin").join(launcher_name(windows))
+}
+
+/// The program and leading arguments that run `binary`. A `.cmd` or `.bat` launcher (Windows,
+/// #83, D49) is replaced by what it runs, `<root>/node.exe <root>/out/server-main.js`, so no
+/// `cmd.exe` sits between the node and the server: killing the child kills the server, and the
+/// arguments are not re-quoted by `cmd.exe`. Any other launcher runs as is. Pure: no file is read.
+pub fn launch_program(binary: &Path) -> (PathBuf, Vec<std::ffi::OsString>) {
+    let is_batch = binary
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+    match binary.parent().and_then(Path::parent) {
+        Some(root) if is_batch => {
+            (root.join("node.exe"), vec![root.join("out").join("server-main.js").into_os_string()])
+        }
+        _ => (binary.to_path_buf(), Vec::new()),
+    }
+}
+
 /// Owner configuration (server environment, never a request field): a comma-separated list of
 /// extra variable NAMES passed to the OSE children, default empty, for example
 /// `HTTPS_PROXY,NO_PROXY,SSL_CERT_FILE` (FR-W4, #471). **[provisional]**
@@ -532,7 +573,7 @@ pub fn ose_env(
     passthrough: Option<&str>,
     lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
 ) -> Vec<(String, std::ffi::OsString)> {
-    let mut names: Vec<String> = ENV_ALLOWLIST.iter().map(|s| s.to_string()).collect();
+    let mut names: Vec<String> = env_allowlist(cfg!(windows)).iter().map(|s| s.to_string()).collect();
     if let Some(raw) = passthrough {
         let (ok, bad) = parse_passthrough(raw);
         for name in bad {
@@ -558,7 +599,9 @@ fn ose_command_with(
     passthrough: Option<&str>,
     lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
 ) -> Command {
-    let mut cmd = Command::new(binary);
+    let (program, leading) = launch_program(binary);
+    let mut cmd = Command::new(program);
+    cmd.args(leading);
     cmd.env_clear();
     for (key, value) in ose_env(passthrough, lookup) {
         cmd.env(key, value);
@@ -567,7 +610,9 @@ fn ose_command_with(
 }
 
 /// Kills a child and everything in its process group (the child leads its own group, see
-/// `process_group(0)` at the spawn), then reaps it.
+/// `process_group(0)` at the spawn), then reaps it. On Windows only the child itself is killed
+/// (`node.exe`, see [`launch_program`]); its own children, such as the extension host, are not
+/// (no job object yet, #83).
 fn kill_tree(child: &mut Child) {
     #[cfg(unix)]
     {
@@ -1066,10 +1111,15 @@ fn server_binary() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("EMBER_OSE_SERVER").filter(|v| !v.is_empty()) {
         return Some(path.into());
     }
-    let share = PathBuf::from(std::env::var_os("HOME")?).join(".local/share");
+    // Windows (#83): unpacked builds live under %LOCALAPPDATA%, as ~/.local/share elsewhere.
+    let share = if cfg!(windows) {
+        PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+    } else {
+        PathBuf::from(std::env::var_os("HOME")?).join(".local/share")
+    };
     let mut candidates: Vec<_> = std::fs::read_dir(share).ok()?.flatten()
         .filter(|e| e.file_name().to_string_lossy().starts_with("dpx-ose-"))
-        .map(|e| e.path().join("bin/dpx-ose-server")).filter(|p| p.is_file()).collect();
+        .map(|e| launcher_in(&e.path(), cfg!(windows))).filter(|p| p.is_file()).collect();
     candidates.sort();
     candidates.pop()
 }

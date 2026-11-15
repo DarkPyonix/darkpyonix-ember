@@ -141,7 +141,7 @@ pub fn NamedDisabled(label: &'static str, modifier: Modifier, alignment: Alignme
     cu::Box().modifier(modifier.label(label).role(Role::Button).disabled(true)).alignment(alignment).content(content);
 }
 
-// TODO(compose-rust, unfiled: an owned accessible name on a clickable container): a container
+// TODO(compose-rust#831): a container
 // takes its name from `Modifier::label` only, which keeps every distinct name for the life of the
 // program and drops names past 4096 (`compose-rust/src/ui/mod.rs`, `MAX_LABELS`), and a `Button`
 // with content insets its children by the design system's 16 dp with no way to change it

@@ -2509,11 +2509,12 @@ struct FormCtx {
 fn form_save_handler(
     draft: MutableState<FormDraft>,
     tried: MutableState<bool>,
+    initial: Option<FormDraft>,
     mut on_save: impl FnMut(FormDraft) + 'static,
 ) -> impl FnMut() + 'static {
     move || {
         let cur = draft.get();
-        if cur.errors().is_empty() {
+        if cur.errors_with_initial(initial.as_ref()).is_empty() {
             on_save(cur);
         } else {
             tried.set(true);
@@ -2555,7 +2556,15 @@ fn RoutineForm(
     if layout == FormLayout::Inline {
         // The detail area: a card with the title, 취소 and 저장 in its header, then the fields
         // in the page's own scroll (mockup v8: the form replaces the detail panel).
-        let (close, save) = (on_close.clone(), form_save_handler(ctx.draft.clone(), ctx.tried.clone(), on_save.clone()));
+        let (close, save) = (
+            on_close.clone(),
+            form_save_handler(
+                ctx.draft.clone(),
+                ctx.tried.clone(),
+                ctx.editing.then(|| ctx.initial.clone()),
+                on_save.clone(),
+            ),
+        );
         let mut close_x = on_close.clone();
         EmberCard(false, true, None, Some(0.0), None, move || {
             cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
@@ -2577,7 +2586,7 @@ fn RoutineForm(
                 // The first error also sits under the header buttons once a save was tried, so
                 // it is seen without scrolling to the end of the form.
                 if ctx.tried.get() {
-                    if let Some(e) = ctx.draft.get().errors().first() {
+                    if let Some(e) = ctx.draft.get().errors_with_initial(ctx.editing.then_some(&ctx.initial)).first() {
                         cu::Column().modifier(Modifier::new().fill_max_width().padding(16.0)).content(|| {
                             Label(e.message(), Fs::Sm, Weight::Medium, Some(paint(p.red.strong)), Some(2));
                         });
@@ -2612,7 +2621,20 @@ fn RoutineForm(
         SheetFooter(move || {
             let mut close = on_close.clone();
             AppButton("취소", None, ButtonKind::Default, true, true, false, move || close());
-            AppButton("저장", None, ButtonKind::Primary, true, true, false, form_save_handler(ctx.draft.clone(), ctx.tried.clone(), on_save.clone()));
+            AppButton(
+                "저장",
+                None,
+                ButtonKind::Primary,
+                true,
+                true,
+                false,
+                form_save_handler(
+                    ctx.draft.clone(),
+                    ctx.tried.clone(),
+                    ctx.editing.then(|| ctx.initial.clone()),
+                    on_save.clone(),
+                ),
+            );
         });
     });
 }
@@ -2625,7 +2647,7 @@ fn FormFields(ctx: &FormCtx) {
     let editing = ctx.editing;
     let agents = live_agents();
     let d = draft.get();
-    let errors = d.errors();
+    let errors = d.errors_with_initial(editing.then_some(initial));
     let mut project_choices = project_options(&ctx.projects);
     if !project_choices.contains(&d.sel.project) {
         project_choices.push(d.sel.project.clone());

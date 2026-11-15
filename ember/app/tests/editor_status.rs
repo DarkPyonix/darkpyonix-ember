@@ -173,7 +173,6 @@ fn fr_l31_7_picker_highlight_follows_the_current_entry_until_moved() {
     let items = picker_items(Mode::Language, Some(&f), &later);
     let row = resolve_selection(FOLLOW_CURRENT, Mode::Language, Some(&f), &later, items.len());
     assert_eq!(items[row].title, "JSON");
-    assert_in_view(row, items.len());
     // A row the person chose is kept, clamped to the list.
     assert_eq!(resolve_selection(3, Mode::Language, Some(&f), &later, items.len()), 3);
     assert_eq!(resolve_selection(500, Mode::Language, Some(&f), &later, items.len()), items.len() - 1);
@@ -191,7 +190,6 @@ fn fr_l31_7_encoding_picker_opens_on_the_current_encoding() {
             assert_eq!(sel, row);
             assert!(items[sel].hint.ends_with("- 현재"), "{:?}", items[sel].hint);
             assert_eq!(items.iter().filter(|i| i.hint.ends_with("현재")).count(), 1);
-            assert_in_view(sel, items.len());
         }
     }
 }

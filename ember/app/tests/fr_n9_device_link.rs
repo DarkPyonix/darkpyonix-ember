@@ -240,3 +240,105 @@ async fn fr_n9_a_device_keeps_the_server_on_a_fixed_port_after_a_restart() {
     again.dialer.transport().close().await;
     server_t.close().await;
 }
+
+/// The main server's letify endpoint on loopback with its relay role on `relay_port`, as
+/// `ember_server::transport::with_main_server_roles` sets it up (the address observer on a free
+/// loopback UDP port, so it does not need the relay's port free on UDP too). Its direct port is
+/// random.
+async fn letify_main_server(key: SecretKey, relay_port: u16) -> Transport {
+    let letify = LetifyConfig {
+        connect_timeout: Duration::from_secs(2),
+        relay_listen: Some(std::net::SocketAddr::from(([127, 0, 0, 1], relay_port))),
+        qad_listen: Some("127.0.0.1:0".parse().unwrap()),
+        ..LetifyConfig::default()
+    };
+    let config = TransportConfig::new(key)
+        .backend(BackendKind::Letify)
+        .letify(letify)
+        .bind_addr("127.0.0.1:0".parse().unwrap());
+    let config = ember_server::transport::with_main_server_roles(config, relay_port);
+    assert!(ember_server::transport::runs_relay_role(&config));
+    Transport::bind(config).await.unwrap()
+}
+
+/// #898: a device whose whole setting is the server's peer id and the server's own relay (the
+/// line the server prints, pasted as printed) reaches `/api/health` with no direct address, no
+/// hub and no rendezvous, and again after the server's transport is bound again with the same key
+/// and relay port and a new direct port. An unregistered device and a wrong relay port read as
+/// the refusal sentences.
+///
+/// What this models: real TCP on loopback and the real relay. Not modelled: a NAT or a router
+/// between the device and the relay port, and a phone.
+#[tokio::test(flavor = "multi_thread")]
+async fn fr_n9_a_device_with_only_the_relay_line_reaches_the_server() {
+    let server_key = SecretKey::generate();
+    let relay_port = free_tcp_port();
+    let server_t = letify_main_server(server_key.clone(), relay_port).await;
+    let devices = serve(&server_t);
+    let data = scratch();
+    let key = device_link::load_key(data.path()).unwrap();
+    devices.add(key.peer_id(), "phone").unwrap();
+
+    // The line the server prints at start (no fixed transport port), pasted in one go.
+    let id = server_t.peer_id();
+    let line = ember_server::transport::device_line(None, true, &server_t.local_addr()).expect("relay role on");
+    assert_eq!(line, format!("ember server device address: {id} relay letify://{id}@127.0.0.1:{relay_port}"));
+    let setting = PeerSetting::parse(&line, None).unwrap();
+    assert_eq!(setting.addr.peer, id);
+    assert!(setting.addr.direct.is_empty(), "no direct address is saved: {setting:?}");
+    assert!(setting.addr.relays.is_empty());
+    assert_eq!(
+        setting.relay,
+        Some(ember_transport::RelayConfig::Custom(vec![format!("letify://{id}@127.0.0.1:{relay_port}")]))
+    );
+
+    let link = letify_device(key.clone(), &setting).await;
+    let api = link.api();
+    assert!(tokio::time::timeout(WAIT, api.health()).await.unwrap().unwrap().ok);
+    assert_eq!(tokio::time::timeout(WAIT, device_link::check(&api)).await.unwrap(), Ok(()));
+    let server = ServerApi::over_transport(link.api()).unwrap();
+    assert!(tokio::time::timeout(WAIT, server.agent_defaults()).await.unwrap().is_ok());
+
+    // A device whose key is not on the list: refused as before.
+    let other = scratch();
+    let stranger = letify_device(device_link::load_key(other.path()).unwrap(), &setting).await;
+    let text = tokio::time::timeout(WAIT, device_link::check(&stranger.api())).await.unwrap().unwrap_err();
+    assert!(is_refusal_sentence(text), "{text}");
+
+    // The right peer id with a relay port where nothing listens: the server cannot be reached.
+    let wrong_line = format!("{id} relay letify://{id}@127.0.0.1:{}", free_tcp_port());
+    let wrong = PeerSetting::parse(&wrong_line, None).unwrap();
+    let lost = letify_device(key.clone(), &wrong).await;
+    assert_eq!(tokio::time::timeout(WAIT, device_link::check(&lost.api())).await.unwrap(), Err(UNREACHABLE));
+
+    // The server restarts: same key, same relay port, a new direct port.
+    let old_direct = server_t.local_addr().direct.clone();
+    server_t.close().await;
+    drop(server_t);
+    let server_t = letify_main_server(server_key, relay_port).await;
+    assert_eq!(server_t.peer_id(), id);
+    assert_ne!(server_t.local_addr().direct, old_direct, "a new direct port");
+    let devices = serve(&server_t);
+    devices.add(key.peer_id(), "phone").unwrap();
+
+    // A fresh bind of the app side with the unchanged setting, as after an app restart.
+    let again = letify_device(key, &setting).await;
+    assert_eq!(tokio::time::timeout(WAIT, device_link::check(&again.api())).await.unwrap(), Ok(()));
+    // The same live app transport: its session to the old server ended, and the next calls dial
+    // the relay again.
+    let mut live = Err(UNREACHABLE);
+    for _ in 0..20 {
+        live = tokio::time::timeout(WAIT, device_link::check(&api)).await.unwrap();
+        if live.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(live, Ok(()), "the live app transport reaches the restarted server through its relay");
+
+    link.dialer.transport().close().await;
+    again.dialer.transport().close().await;
+    stranger.dialer.transport().close().await;
+    lost.dialer.transport().close().await;
+    server_t.close().await;
+}

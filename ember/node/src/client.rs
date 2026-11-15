@@ -56,6 +56,9 @@ pub type NodeIo = Box<dyn NodeStream>;
 
 type Ws = WebSocketStream<NodeIo>;
 
+/// The node's file watch WebSocket (`FR-W4d`).
+pub type FsWatchSocket = WebSocketStream<NodeIo>;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     /// The daemon answered with an error body.
@@ -570,6 +573,13 @@ impl NodeClient {
     /// Subscribe to node events with `seq > after` (0 for everything still in history).
     pub async fn events(&self, after: u64) -> Result<EventStream> {
         Ok(EventStream { ws: self.websocket(&format!("/events?after={after}")).await? })
+    }
+
+    /// Open the file watch socket (`GET /fs/watch`, SPEC `FR-W4d`, #460). The frames are the
+    /// JSON text frames of [`crate::fs_watch`]; the server relays them unchanged, so this hands
+    /// out the raw socket.
+    pub async fn fs_watch_socket(&self) -> Result<FsWatchSocket> {
+        self.websocket("/fs/watch").await
     }
 
     // -----------------------------------------------------------------------------------------

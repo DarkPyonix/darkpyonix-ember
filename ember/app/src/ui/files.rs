@@ -11,9 +11,10 @@
 //! and [`UNAVAILABLE`] for sending, receiving and history. Nothing is invented.
 //!
 //! #166 workarounds (revert when upstream lands):
-//! - No drag and drop (dioxus-compose and compose-rust are frozen): a send sheet picks the
-//!   receiver, then the files. The toolkit has no file picker, so the files step says
-//!   [`FILE_PICK_UNAVAILABLE`] (see [`FILE_PICKER_AVAILABLE`]).
+//! - No drag and drop: a send sheet picks the receiver, then the files. 파일 고르기 opens the
+//!   platform's file dialog (compose-rust#483) where the toolkit has one, which is macOS in
+//!   the v0.0.10 pin (see [`FILE_PICKER_AVAILABLE`]); elsewhere the files step says
+//!   [`FILE_PICK_UNAVAILABLE`]. File drop (compose-rust#485) is in the pin and not wired yet.
 //! - No OS share sheet (FR-F7) and no live push of transfer progress: the screen re-reads the
 //!   service whenever the launcher state changes.
 //! - Tiles are not clickable containers (pG), so each tile carries a small button.
@@ -47,9 +48,37 @@ pub const AGENT_SEND_UNSUPPORTED: &str = "agent로 보내기는 아직 지원되
 /// Shown beside an offline device chip.
 pub const OFFLINE_TAG: &str = "오프라인";
 
-/// TODO(compose-rust#483): flip when the toolkit has a file dialog API,
-/// then fill [`SendDraft::files`] from it. Dropped files stay with compose-rust#485.
-pub const FILE_PICKER_AVAILABLE: bool = false;
+/// Whether 파일 고르기 can open the platform's file dialog (`compose_rust::FileDialog`,
+/// compose-rust#483). In the v0.0.10 pin only macOS shows one; Windows, Linux, iOS, Android and
+/// the web answer "unavailable" (TODO(compose-rust#483): the other platforms' dialogs; the issue
+/// is closed with macOS alone). Dropped files stay with compose-rust#485.
+pub const FILE_PICKER_AVAILABLE: bool = cfg!(target_os = "macos");
+
+/// The title of the file dialog 파일 고르기 opens.
+pub const FILE_DIALOG_TITLE: &str = "보낼 파일 선택";
+
+/// What a file dialog's answer does to the send sheet (FR-L27.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickOutcome {
+    /// Open the send sheet with these files and no receiver yet.
+    Draft(SendDraft),
+    /// The user closed the dialog: nothing changes.
+    Nothing,
+    /// This run has no dialog: say so.
+    Say(&'static str),
+}
+
+/// The outcome of a file dialog: `chosen` is the paths the user picked, `None` when the dialog
+/// was closed, and `available` is false when the platform had no dialog to show.
+pub fn pick_outcome(chosen: Option<Vec<String>>, available: bool) -> PickOutcome {
+    if !available {
+        return PickOutcome::Say(FILE_PICK_UNAVAILABLE);
+    }
+    match chosen {
+        Some(files) if !files.is_empty() => PickOutcome::Draft(SendDraft { target: None, files }),
+        _ => PickOutcome::Nothing,
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Devices (FR-F1)
@@ -2165,8 +2194,20 @@ mod tests {
     }
 
     #[test]
-    fn the_toolkit_has_no_file_picker_yet() {
-        assert!(!FILE_PICKER_AVAILABLE);
+    fn fr_l27_5_the_file_picker_follows_the_platform_and_its_answer_fills_the_draft() {
+        // compose-rust#483 (#673): macOS has the dialog in the pin, the others answer
+        // "unavailable".
+        assert_eq!(FILE_PICKER_AVAILABLE, cfg!(target_os = "macos"));
+        let paths = vec!["/tmp/a.txt".to_string(), "/tmp/b.png".to_string()];
+        assert_eq!(
+            pick_outcome(Some(paths.clone()), true),
+            PickOutcome::Draft(SendDraft { target: None, files: paths.clone() })
+        );
+        assert_eq!(pick_outcome(None, true), PickOutcome::Nothing, "a closed dialog changes nothing");
+        assert_eq!(pick_outcome(Some(Vec::new()), true), PickOutcome::Nothing);
+        assert_eq!(pick_outcome(None, false), PickOutcome::Say(FILE_PICK_UNAVAILABLE));
+        assert_eq!(pick_outcome(Some(paths), false), PickOutcome::Say(FILE_PICK_UNAVAILABLE));
+        assert!(FILE_DIALOG_TITLE.ends_with("선택"), "a noun label, not a sentence");
     }
 
     // NFR-L4 / FR-L27.6

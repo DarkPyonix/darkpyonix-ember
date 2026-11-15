@@ -378,7 +378,7 @@ pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bo
     // the whole window, so the one-line body without a server filled it. Without a server, and in
     // the bottom sheet (which scrolls taller content itself), the body is a plain column; with a
     // server the dialog's body scrolls at the room left by the header and footer.
-    // TODO(compose-rust#778): cap that body instead of fixing it.
+    // TODO(compose-rust#778, after v0.0.10): cap that body instead of fixing it.
     let w = crate::ui::window_size::current_window_size();
     let plain = !live || super::components::sheet_wraps_content(w.width_dp);
     let body_h = super::components::sheet_body_max_height(
@@ -464,8 +464,8 @@ fn InviteSection(channel: &str, st: &OwnerState) {
     }
     if let Some(c) = created.filter(|_| status.can_copy()) {
         // A read-only look: the field starts with the link, enabled so it can be selected and
-        // copied with Cmd+C / Ctrl+C. The toolkit has no read_only flag, so typing into it changes
-        // only what is drawn, never the link. 복사 puts the link on the clipboard through the
+        // copied with Cmd+C / Ctrl+C. TODO(compose-rust, unfiled: TextField has no read-only flag):
+        // typing into it changes only what is drawn, never the link. 복사 puts the link on the clipboard through the
         // toolkit (compose-rust v0.0.7, #471); the link is never logged.
         EmberField(FieldOptions { fill_max_width: true, text: Some(c.link.clone()), ..Default::default() });
         let link = c.link.clone();

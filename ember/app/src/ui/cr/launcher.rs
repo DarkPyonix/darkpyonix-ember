@@ -16,7 +16,7 @@ use compose_rust::{Alignment, ButtonVariant, SpaceRole};
 use ember_client::wire::SessionPatch;
 
 use super::compat::{Badge, StatusDot, StatusPill};
-use super::components::{AppButton, ButtonKind, Clickable, EmberCard, EmberField, EmberSheet, FieldOptions, Label, OptionSheet, SheetFooter};
+use super::components::{pressable, AppButton, ButtonKind, Clickable, EmberCard, EmberField, EmberSheet, FieldOptions, Label, OptionSheet, SheetFooter};
 use super::notice;
 use super::theme::*;
 use crate::model::{self, SessionRow, Tone};
@@ -141,7 +141,9 @@ pub fn SessionRowWith(row: &SessionRow, menu_start_open: bool) {
                 .icon(compose_rust::IconRole::More)
                 .variant(ButtonVariant::Text)
                 .color(paint(p.text_2))
-                .modifier(Modifier::new().size(H_CTL, H_CTL))
+                // A bare glyph with no ring, which no shared button draws; it still sends the
+                // shared press values (FR-L34.5, #250).
+                .modifier(pressable(Modifier::new().size(H_CTL, H_CTL)))
                 .on_click(move || open.set(true));
         });
     });

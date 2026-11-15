@@ -59,10 +59,8 @@ where
     F: std::future::Future<Output = T> + Send + 'static,
 {
     let project = project.to_string();
-    guard_with(call, reloads, move || call_started(&project), {
-        let project = project.clone();
-        move |r| call_ended(&project, r)
-    })
+    let ended = project.clone();
+    guard_with(call, reloads, move || call_started(&project), move |r| call_ended(&ended, r))
 }
 
 /// [`guarded`] for a call whose success reloads the view (the usual case).

@@ -244,7 +244,7 @@ pub async fn launch_with_timeout(o: &LaunchOptions, timeout: Duration) -> anyhow
     let stderr = open_stderr_log(&o.profile_dir)
         .map(Stdio::from)
         .unwrap_or_else(|_| Stdio::null());
-    let mut child = Command::new(&o.chrome)
+    let child = Command::new(&o.chrome)
         .args(chrome_args(o))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -253,6 +253,15 @@ pub async fn launch_with_timeout(o: &LaunchOptions, timeout: Duration) -> anyhow
         .spawn()
         .with_context(|| format!("starting {}", o.chrome.display()))?;
 
+    wait_for_devtools_port(child, &o.profile_dir, timeout).await
+}
+
+async fn wait_for_devtools_port(
+    mut child: tokio::process::Child,
+    profile_dir: &Path,
+    timeout: Duration,
+) -> anyhow::Result<Launched> {
+    let port_file = profile_dir.join("DevToolsActivePort");
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if let Ok(text) = std::fs::read_to_string(&port_file) {
@@ -268,7 +277,7 @@ pub async fn launch_with_timeout(o: &LaunchOptions, timeout: Duration) -> anyhow
             }
         }
         if let Some(status) = child.try_wait()? {
-            let suffix = format_stderr_suffix(&o.profile_dir);
+            let suffix = format_stderr_suffix(profile_dir);
             bail!(
                 "browser exited during start ({status}); is the profile in use by another browser?{suffix}"
             );
@@ -276,7 +285,7 @@ pub async fn launch_with_timeout(o: &LaunchOptions, timeout: Duration) -> anyhow
         if tokio::time::Instant::now() > deadline {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            let suffix = format_stderr_suffix(&o.profile_dir);
+            let suffix = format_stderr_suffix(profile_dir);
             bail!(
                 "browser did not open its DevTools port within {:.0} s{suffix}",
                 timeout.as_secs_f64()
@@ -353,7 +362,7 @@ mod tests {
             headless: true,
             window: (800, 600),
         };
-        let mut launched = launch_with_timeout(&opts, Duration::from_secs(5)).await.unwrap();
+        let mut launched = launch_with_timeout(&opts, Duration::from_secs(60)).await.unwrap();
         assert_eq!(launched.port, 43210);
         assert_eq!(launched.ws_url, "ws://127.0.0.1:43210/devtools/browser/fake-id");
         let _ = launched.child.kill().await;
@@ -380,7 +389,7 @@ mod tests {
                 headless: true,
                 window: (800, 600),
             },
-            Duration::from_secs(15),
+            Duration::from_secs(60),
         )
         .await
         .err()
@@ -394,27 +403,39 @@ mod tests {
             assert_eq!(mode, 0o600, "chrome-stderr.log must be 0600, got {mode:04o}");
         }
 
+        // Timeout case without racing a child shell script against a short wall-clock window:
+        // spawn the hanging script, wait on the event itself (`stderr_tail` becoming non-empty)
+        // with a generous 60 s ceiling, and only then invoke `wait_for_devtools_port` with a
+        // zero timeout so the timeout error and its captured stderr tail are asserted
+        // deterministically regardless of machine load.
         let profile_timeout = dir.path().join("profile-timeout");
+        std::fs::create_dir_all(&profile_timeout).unwrap();
         let hang_script = write_script(
             dir.path(),
             "hang-chrome.sh",
             "#!/bin/sh\n\
              echo 'ERROR: NSS initialization stalled in container' >&2\n\
-             sleep 30\n",
+             sleep 60\n",
         );
-        let err = launch_with_timeout(
-            &LaunchOptions {
-                chrome: hang_script,
-                profile_dir: profile_timeout,
-                proxy: None,
-                headless: true,
-                window: (800, 600),
-            },
-            Duration::from_secs(2),
-        )
+        let stderr = open_stderr_log(&profile_timeout).map(Stdio::from).unwrap();
+        let child = Command::new(&hang_script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(stderr)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while stderr_tail(&profile_timeout).is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
         .await
-        .err()
-        .expect("timeout should fail");
+        .expect("hang script should flush stderr line");
+        let err = wait_for_devtools_port(child, &profile_timeout, Duration::ZERO)
+            .await
+            .err()
+            .expect("timeout should fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("did not open its DevTools port"), "unexpected error: {msg}");
         assert!(

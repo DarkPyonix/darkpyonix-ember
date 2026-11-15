@@ -525,6 +525,9 @@ impl BrowserInstance {
                 if self.page.lock().unwrap().is_some() {
                     return Ok(());
                 }
+                if let Some(err) = self.state.borrow().error.clone() {
+                    return Err(anyhow!("browser page failed to attach: {err}"));
+                }
                 if st.changed().await.is_err() {
                     return Err(anyhow!("browser state channel closed while waiting for page"));
                 }
@@ -631,9 +634,31 @@ fn tab_of(info: &Value) -> Option<Tab> {
     })
 }
 
+/// Maximum number of consecutive `drive_inner` retry attempts before giving up.
+const DRIVE_MAX_RETRIES: u32 = 5;
+/// Maximum total wall-clock time spent retrying `drive_inner`.
+const DRIVE_RETRY_WINDOW: Duration = Duration::from_secs(5);
+/// Base backoff delay between `drive_inner` retry attempts (doubles up to 800 ms).
+const DRIVE_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
+
 /// Keeps one page attached for streaming and input, follows new tabs, and runs the screencast
-/// while anyone watches. Ends when the connection closes or the instance is gone.
+/// while anyone watches. Ends when the connection closes, the instance is gone, or retries are
+/// exhausted (recording the failure in `state.error` so `wait_page` reports it instead of hanging).
 async fn drive(me: Weak<BrowserInstance>, cdp: Arc<Cdp>) {
+    drive_with_limits(me, cdp, DRIVE_MAX_RETRIES, DRIVE_RETRY_WINDOW, DRIVE_INITIAL_BACKOFF).await
+}
+
+async fn drive_with_limits(
+    me: Weak<BrowserInstance>,
+    cdp: Arc<Cdp>,
+    max_retries: u32,
+    retry_window: Duration,
+    initial_backoff: Duration,
+) {
+    let mut retries = 0u32;
+    let mut window_start: Option<Instant> = None;
+    let mut gave_up_err: Option<String> = None;
+
     loop {
         match drive_inner(&me, &cdp).await {
             Ok(()) => break,
@@ -642,14 +667,37 @@ async fn drive(me: Weak<BrowserInstance>, cdp: Arc<Cdp>) {
                     tracing::warn!("browser driver ended: {e:#}");
                     break;
                 }
-                tracing::debug!("browser driver transient error, retrying: {e:#}");
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                let start = *window_start.get_or_insert_with(Instant::now);
+                retries += 1;
+                if retries > max_retries || start.elapsed() >= retry_window {
+                    let msg = format!(
+                        "browser driver gave up after {retries} attempts ({:.1} s): {e:#}",
+                        start.elapsed().as_secs_f64()
+                    );
+                    tracing::warn!("{msg}");
+                    gave_up_err = Some(msg);
+                    break;
+                }
+                let shift = (retries - 1).min(4);
+                let delay = (initial_backoff * (1u32 << shift)).min(Duration::from_millis(800));
+                tracing::debug!(
+                    attempt = retries,
+                    max_retries = max_retries,
+                    "browser driver transient error, retrying in {delay:?}: {e:#}"
+                );
+                tokio::time::sleep(delay).await;
             }
         }
     }
     if let Some(me) = me.upgrade() {
         *me.page.lock().unwrap() = None;
-        if !cdp.is_open() {
+        if let Some(err) = gave_up_err {
+            me.state.send_modify(|s| {
+                s.running = false;
+                s.target_id = None;
+                s.error = Some(err);
+            });
+        } else if !cdp.is_open() {
             me.state.send_modify(|s| {
                 s.running = false;
                 s.target_id = None;
@@ -821,5 +869,83 @@ async fn drive_inner(me: &Weak<BrowserInstance>, cdp: &Arc<Cdp>) -> anyhow::Resu
         if switch {
             cdp.call("Target.detachFromTarget", json!({ "sessionId": session_id }), None).await.ok();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use futures::{SinkExt, StreamExt};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::Message;
+
+    #[tokio::test]
+    async fn drive_retry_loop_is_bounded_and_reports_failure_to_wait_page() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_srv = calls.clone();
+
+        // Fake CDP WebSocket server that stays open and returns a CDP error for every request.
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut sink, mut rx) = ws.split();
+            while let Some(Ok(msg)) = rx.next().await {
+                if let Message::Text(text) = msg {
+                    if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                        if let Some(id) = v.get("id").and_then(Value::as_u64) {
+                            calls_srv.fetch_add(1, Ordering::SeqCst);
+                            let reply = json!({
+                                "id": id,
+                                "error": { "code": -32000, "message": "persistent target discovery failure" }
+                            });
+                            let _ = sink.send(Message::Text(reply.to_string().into())).await;
+                        }
+                    }
+                }
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = BrowserConfig {
+            root: dir.path().to_path_buf(),
+            chrome: Some(PathBuf::from("/bin/true")),
+            headless: true,
+            window: (800, 600),
+            screencast: ScreencastOptions::default(),
+        };
+        let inst = BrowserInstance::new("p", dir.path().to_path_buf(), &cfg, Egress::Direct, None);
+        inst.state.send_modify(|s| s.running = true);
+
+        let ws_url = format!("ws://{addr}/devtools/browser/fake");
+        let cdp = Cdp::connect(&ws_url).await.unwrap();
+        let driver = tokio::spawn(drive_with_limits(
+            Arc::downgrade(&inst),
+            cdp.clone(),
+            3,
+            Duration::from_secs(60),
+            Duration::from_millis(1),
+        ));
+
+        // `wait_page` waits on `state.changed()` and exits as soon as `drive_with_limits` gives up
+        // and records `state.error` (no fixed sleep race).
+        let err = inst
+            .wait_page(Duration::from_secs(60))
+            .await
+            .err()
+            .expect("wait_page should fail when driver gives up");
+        driver.await.unwrap();
+        server.abort();
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("browser driver gave up after 4 attempts"), "unexpected error: {msg}");
+        assert!(msg.contains("persistent target discovery failure"), "missing CDP error: {msg}");
+        assert_eq!(calls.load(Ordering::SeqCst), 4, "1 initial call + 3 retries");
+        let state = inst.state.borrow().clone();
+        assert!(!state.running, "instance must mark running=false after driver gives up");
+        assert!(state.error.as_deref().unwrap_or_default().contains("gave up after 4 attempts"));
+        assert!(cdp.is_open(), "CDP stayed open; bound stopped the retry loop");
     }
 }

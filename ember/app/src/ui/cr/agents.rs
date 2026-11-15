@@ -33,7 +33,7 @@ pub use crate::ui::agents::{
 };
 use super::components::{
     AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRowFit, EmberCard, EmberField, FieldOptions, InsetPanel,
-    Label, OptionSheet, Pill, PillTone,
+    Label, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu,
 };
 use super::theme::*;
 use crate::server::{Account, ChatGptAccount};
@@ -569,12 +569,22 @@ fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
 }
 
 fn FocusOverlayEnabled(label: &str, enabled: bool, on_click: impl FnMut() + 'static) {
+    FocusOverlayWith(label, enabled, None, on_click);
+}
+
+/// The overlay button; `expanded` says whether the menu it opens is open (FR-L10.4).
+fn FocusOverlayWith(label: &str, enabled: bool, expanded: Option<bool>, on_click: impl FnMut() + 'static) {
+    let m = Modifier::new().fill_max_size();
+    let m = match expanded {
+        Some(open) => m.expanded(open),
+        None => m,
+    };
     cu::Button(label)
         .accessible_name(label)
         .enabled(enabled)
         .variant(ButtonVariant::Text)
         .color(compose_rust::Paint::Literal(Color::argb(0)))
-        .modifier(Modifier::new().fill_max_size())
+        .modifier(m)
         .on_click(on_click);
 }
 
@@ -609,6 +619,11 @@ fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
 // a width take the rest of the row, so the width is estimated with `text_px` and fixed.
 /// A picker pill matching mockup's .pickchip: full pill shape, icon + label, sized to its content.
 fn ModelPickerPill(text: &str, svg: Option<&'static str>, on_click: impl FnMut() + 'static) {
+    MenuPickerPill(text, svg, None, on_click);
+}
+
+/// [`ModelPickerPill`] as the control of a [`PopoverMenu`], saying whether the menu is open.
+fn MenuPickerPill(text: &str, svg: Option<&'static str>, expanded: Option<bool>, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let width = 12.0
         + if svg.is_some() { 16.0 + 8.0 } else { 0.0 }
@@ -634,7 +649,7 @@ fn ModelPickerPill(text: &str, svg: Option<&'static str>, on_click: impl FnMut()
                 Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
                 cu::Spacer().modifier(Modifier::new().width(12.0));
             });
-            FocusOverlay(text, on_click);
+            FocusOverlayWith(text, true, expanded, on_click);
         });
 }
 
@@ -1530,7 +1545,10 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
     // The chips show what is stored: the harness and model the owner chose on this device
     // and the account the server marks default; with none, they say so (FR-L20).
     let example = live.sample || live.demo;
+    // The demo's account pick stays on this screen (no server call), like its harness pick.
+    let local_account = remember(|| mutable_state_of(None::<String>));
     let chips = crate::ui::agents::default_chips(&live.accounts, &live.default_ids, &store.get());
+    let chips = if example { crate::ui::agents::with_local_account(chips, local_account.get()) } else { chips };
     let harness_pill = crate::ui::agents::harness_chip_text(&chips, model_name, example);
     let account_pill = crate::ui::agents::account_chip_text(&chips, live.accounts.len(), example);
     let hook = crate::ui::agents::sheet_hook();
@@ -1538,7 +1556,6 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
     let acct_open = remember(move || mutable_state_of(hook == Some(crate::ui::agents::SheetHook::Account)));
     let stacked = crate::ui::agents::chips_stacked(crate::ui::window_size::current_window_size().width_dp);
     let rows = crate::ui::agents::pick_rows(&crate::ui::agents::harness_options(&live.detected), model_pairs);
-    let row_labels: Vec<String> = rows.iter().map(|r| r.label.clone()).collect();
     let row_chosen = rows
         .iter()
         .position(|r| r.enabled && Some(r.harness) == chips.harness && r.model == chips.model);
@@ -1562,19 +1579,33 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
                 None,
                 None,
             );
+            // Each chip opens its list as a popover under it (FR-L10.4, #888, review AG14), the
+            // mockup's `.mp-pop` (a bottom sheet at 560 and below). Not built: the harness rail,
+            // search and shortcuts of the shared model picker (FR-L15) in this card.
             let chips_body = || {
+                let pick_rows: Vec<PopRow> = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| PopRow {
+                        icon: Some(ICON_SPARK_SVG),
+                        title: r.label.clone(),
+                        tint: (!r.enabled).then_some(ember_theme().palette.muted),
+                        chosen: row_chosen == Some(i),
+                        ..Default::default()
+                    })
+                    .collect();
+                let close = {
+                    let o = pick_open.clone();
+                    move || o.set(false)
+                };
+                let (st, list) = (store.clone(), rows.clone());
                 let po = pick_open.clone();
-                ModelPickerPill(&harness_pill, Some(ICON_SPARK_SVG), move || po.set(true));
-                let ao = acct_open.clone();
-                ModelPickerPill(&account_pill, Some(ICON_USER_SVG), move || ao.set(true));
-                // One node holds both sheets, so the closed dialogs add no gap.
-                cu::Box().content(|| {
-                    let close = {
-                        let o = pick_open.clone();
-                        move || o.set(false)
-                    };
-                    let (st, list) = (store.clone(), rows.clone());
-                    OptionSheet(pick_open.get(), &row_labels, row_chosen, 320.0, close, move |i| {
+                let pick_is_open = pick_open.get();
+                PopoverMenu(
+                    pick_is_open,
+                    PopMenu { name: super::a11y::MODEL_PICKER, kind: PopKind::Mode, head: "", sub: None, rows: &pick_rows, align: compose_rust::PopoverAlign::Start },
+                    close,
+                    move |i| {
                         if let Some(r) = list.get(i) {
                             let mut payload = None;
                             edit(&st, |s| {
@@ -1593,21 +1624,45 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
                                 }
                             }
                         }
-                    });
-                    let close = {
-                        let o = acct_open.clone();
-                        move || o.set(false)
-                    };
-                    let list = options.clone();
-                    OptionSheet(acct_open.get(), &acct_rows, None, 320.0, close, move |i| {
+                    },
+                    || MenuPickerPill(&harness_pill, Some(ICON_SPARK_SVG), Some(pick_is_open), move || po.set(true)),
+                    None,
+                );
+                let acct_pop: Vec<PopRow> = acct_rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, label)| PopRow {
+                        icon: Some(ICON_USER_SVG),
+                        title: label.clone(),
+                        chosen: live.accounts.get(i).is_some_and(|a| Some(&a.label) == chips.account.as_ref()),
+                        ..Default::default()
+                    })
+                    .collect();
+                let close = {
+                    let o = acct_open.clone();
+                    move || o.set(false)
+                };
+                let list = options.clone();
+                let labels: Vec<String> = live.accounts.iter().map(|a| a.label.clone()).collect();
+                let picked = local_account.clone();
+                let ao = acct_open.clone();
+                let acct_is_open = acct_open.get();
+                PopoverMenu(
+                    acct_is_open,
+                    PopMenu { name: super::a11y::ACCOUNT_PICKER, kind: PopKind::Mode, head: "", sub: None, rows: &acct_pop, align: compose_rust::PopoverAlign::Start },
+                    close,
+                    move |i| {
                         let Some(o) = list.get(i) else { return };
                         if example {
+                            picked.set(labels.get(i).cloned());
                             post_notice(crate::ui::agents::DEMO_CHOICE_NOTE);
                         } else {
                             set_default_account(o.id.clone());
                         }
-                    });
-                });
+                    },
+                    || MenuPickerPill(&account_pill, Some(ICON_USER_SVG), Some(acct_is_open), move || ao.set(true)),
+                    None,
+                );
             };
             // Below 560 dp the chips stack so each keeps its full text.
             if stacked {
@@ -3217,6 +3272,31 @@ mod tests {
         assert!(usage.contains("card_inner_width(width_dp, pair_cols)"));
         let kinds = production.split("fn TokenKindsCard(").nth(1).unwrap().split("\nfn ").next().unwrap();
         assert!(!kinds.contains("409.0") && !kinds.contains("326.0"), "no fixed bar width");
+    }
+
+    #[test]
+    fn fr_l10_4_a_default_chip_says_whether_its_menu_is_open() {
+        let _guard = crate::services::test_guard();
+        let sem = |nodes: Vec<Node>| -> String {
+            let button = nodes.iter().find(|n| n.widget == "Button").expect("the chip's button");
+            button.mods.iter().find(|m| m.starts_with("Semantics")).cloned().unwrap_or_default()
+        };
+        let open = sem(nodes_of(|| MenuPickerPill("아직 정하지 않았습니다", Some(ICON_USER_SVG), Some(true), || {})));
+        let closed = sem(nodes_of(|| MenuPickerPill("아직 정하지 않았습니다", Some(ICON_USER_SVG), Some(false), || {})));
+        let plain = sem(nodes_of(|| ModelPickerPill("아직 정하지 않았습니다", Some(ICON_USER_SVG), || {})));
+        assert!(!open.is_empty() && !closed.is_empty(), "{open} {closed}");
+        assert_ne!(open, closed);
+        assert_ne!(closed, plain, "a chip that opens no menu says neither");
+    }
+
+    #[test]
+    fn fr_l10_4_new_member_default_chips_open_popovers_under_them() {
+        let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
+        let body = production.split("fn ModelsSection(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert_eq!(body.matches("PopoverMenu(").count(), 2, "the harness and the account chip");
+        assert!(body.contains("MODEL_PICKER") && body.contains("ACCOUNT_PICKER"));
+        assert!(body.contains("|| MenuPickerPill(&harness_pill, Some(ICON_SPARK_SVG), Some(pick_is_open)") && body.contains("|| MenuPickerPill(&account_pill, Some(ICON_USER_SVG), Some(acct_is_open)"), "each chip is its menu's anchor and says whether it is open");
+        assert!(!production.contains("OptionSheet("));
     }
 
     #[test]

@@ -129,7 +129,9 @@ pub mod view {
         let label = super::card_label(m.severity, m.source.as_deref());
         let count = buttons.len();
         rsx! {
-            div { style: "position:fixed; left:0; top:0; right:0; bottom:0; z-index:45; background:rgba(0,0,0,.25); display:flex; align-items:center; justify-content:center;",
+            // The scrim is the shared `.modal` of the stylesheet, as the unsaved-changes sheet and the
+            // trust prompt use it, so no colour is written here.
+            div { class: "modal", role: "presentation",
                 div { role: "alertdialog", "aria-modal": "true", "aria-label": "{label}",
                     style: "width:min(440px, calc(100vw - 32px)); background:var(--surface); border:1px solid var(--line); border-radius:var(--r-lg); box-shadow:var(--shadow-lg); padding:var(--sp4); display:flex; flex-direction:column; gap:var(--sp3);",
                     div { style: "display:flex; align-items:flex-start; gap:var(--sp2);",
@@ -227,5 +229,16 @@ mod tests {
     fn fr_l31_16_toasts_and_center_hide_while_a_modal_waits() {
         assert!(!overlay_shown(true), "nothing above the modal's scrim");
         assert!(overlay_shown(false), "toasts come back once the modal closes");
+    }
+
+    // #477: the window writes no colour of its own. The modal's scrim is the stylesheet's `.modal`.
+    #[test]
+    fn fr_l31_16_the_modal_scrim_is_the_shared_modal_class() {
+        let src = include_str!("editor_notifications.rs");
+        let production = &src[..src.find("#[cfg(test)]").expect("tests")];
+        assert!(production.contains("div { class: \"modal\", role: \"presentation\","), "the modal message lost the shared scrim");
+        assert!(!production.contains("rgba(") && !production.contains("background:#"), "a hard-coded colour in the notifications");
+        let css = include_str!("../../assets/editor/style.css");
+        assert!(css.contains(".modal{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.3);display:grid;place-items:center;padding:var(--sp4)}"), "style.css no longer has the .modal scrim");
     }
 }

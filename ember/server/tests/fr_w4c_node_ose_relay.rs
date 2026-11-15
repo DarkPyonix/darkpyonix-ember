@@ -666,6 +666,11 @@ async fn fr_w4c_registered_computer_relay_is_404_on_the_guest_door() {
     let guest = door.wrap(guest_router(s.store.clone(), sessions));
 
     let relay = format!("/api/computers/{}/ide/relay/0123456789abcdef0123456789abcdef", computer.id);
+    let req =
+        Request::builder().method(Method::GET).uri(&relay).header("host", "127.0.0.1:9000").body(Body::empty()).unwrap();
+    assert_eq!(guest.clone().oneshot(req).await.unwrap().status(), StatusCode::NOT_FOUND, "GET {relay}");
+    // The door refuses every upgrade before routing (400 `bad_request`, FR-T14), so the relay
+    // cannot be opened there either.
     let req = Request::builder()
         .method(Method::GET)
         .uri(&relay)
@@ -676,7 +681,7 @@ async fn fr_w4c_registered_computer_relay_is_404_on_the_guest_door() {
         .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
         .body(Body::empty())
         .unwrap();
-    assert_eq!(guest.clone().oneshot(req).await.unwrap().status(), StatusCode::NOT_FOUND, "GET {relay}");
+    assert_eq!(guest.clone().oneshot(req).await.unwrap().status(), StatusCode::BAD_REQUEST, "upgrade GET {relay}");
 
     let install = format!("/api/computers/{}/ide/extensions", computer.id);
     let req = Request::builder()

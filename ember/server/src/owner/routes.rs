@@ -332,6 +332,21 @@ mod tests {
         }
     }
 
+    /// Project edit (archive included) and delete are owner routes (leader, 2026-11-15, #384);
+    /// create, read, computer assign and git stay on the token.
+    #[test]
+    fn fr_s12_project_patch_and_delete_are_owner_routes() {
+        assert!(owner_route(&Method::PATCH, "/api/projects/acme"));
+        assert!(owner_route(&Method::DELETE, "/api/projects/acme"));
+        assert!(owner_route(&Method::PATCH, "/api/projects/my%20app"));
+        assert!(!owner_route(&Method::GET, "/api/projects/acme"));
+        assert!(!owner_route(&Method::GET, "/api/projects"));
+        assert!(!owner_route(&Method::POST, "/api/projects"));
+        assert!(!owner_route(&Method::PUT, "/api/projects/acme/computers/c1"));
+        assert!(!owner_route(&Method::DELETE, "/api/projects/acme/computers/c1"));
+        assert!(!owner_route(&Method::POST, "/api/projects/acme/git/status"));
+    }
+
     #[test]
     fn fr_s12_a_path_no_route_serves_has_no_class() {
         assert_eq!(classify(&Method::GET, "/api/no-such-route"), None);

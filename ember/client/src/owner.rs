@@ -418,6 +418,20 @@ mod tests {
         assert!(!owner_route(&Method::POST, "/api/sessions//approvals/a1"));
     }
 
+    /// Project edit (archive included) and delete carry the key (leader, 2026-11-15, #384).
+    #[test]
+    fn fr_s12_project_patch_and_delete_carry_the_key() {
+        for name in ["acme", "my%20app", "%ED%95%9C%EA%B8%80"] {
+            let path = format!("/api/projects/{name}");
+            assert!(owner_route(&Method::PATCH, &path), "PATCH {path}");
+            assert!(owner_route(&Method::DELETE, &path), "DELETE {path}");
+            assert!(!owner_route(&Method::GET, &path), "GET {path}");
+        }
+        assert!(!owner_route(&Method::GET, "/api/projects"));
+        assert!(!owner_route(&Method::POST, "/api/projects"));
+        assert!(!owner_route(&Method::PUT, "/api/projects/acme/computers/c1"));
+    }
+
     #[test]
     fn fr_s12_the_socket_is_in_the_servers_data_folder() {
         use std::path::Path;

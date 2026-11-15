@@ -72,6 +72,8 @@ pub const OWNER_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/mcp"),
     ("DELETE", "/api/mcp/{id}"),
     ("PATCH", "/api/mcp/{id}"),
+    ("DELETE", "/api/projects/{name}"),
+    ("PATCH", "/api/projects/{name}"),
     ("POST", "/api/providers"),
     ("DELETE", "/api/providers/{id}"),
     ("POST", "/api/server-token/rotate"),

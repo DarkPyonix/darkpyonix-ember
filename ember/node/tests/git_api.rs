@@ -930,7 +930,7 @@ struct SshdServer {
     known_hosts: PathBuf,
     authorized_keys: PathBuf,
     user: String,
-    sshd_path_dir: String,
+    log_file: PathBuf,
 }
 
 #[cfg(unix)]
@@ -957,7 +957,7 @@ fn start_sshd(dir: &Path) -> Option<SshdServer> {
     use std::os::unix::fs::PermissionsExt;
 
     let Some(sshd_bin) = find_sshd() else {
-        eprintln!("skipping fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd: sshd binary not found");
+        eprintln!("skipping fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd: sshd binary not found in /usr/sbin, /sbin, /usr/local/sbin, or /opt/homebrew/sbin");
         return None;
     };
     std::fs::create_dir_all(dir).unwrap();
@@ -969,17 +969,16 @@ fn start_sshd(dir: &Path) -> Option<SshdServer> {
     };
 
     let host_key = dir.join("host_ed25519");
-    let Ok(st) = Command::new("ssh-keygen")
+    let keygen = Command::new("ssh-keygen")
         .args(["-q", "-t", "ed25519", "-N", "", "-f", &s(&host_key)])
-        .status()
-    else {
-        eprintln!("skipping fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd: ssh-keygen not found");
-        return None;
-    };
-    if !st.success() {
-        eprintln!("skipping fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd: ssh-keygen exited with {st}");
-        return None;
-    }
+        .output()
+        .expect("ssh-keygen must be installed alongside sshd");
+    assert!(
+        keygen.status.success(),
+        "ssh-keygen failed ({}): {}",
+        keygen.status,
+        String::from_utf8_lossy(&keygen.stderr)
+    );
 
     let host_pub = std::fs::read_to_string(dir.join("host_ed25519.pub")).unwrap();
     let known_hosts = dir.join("known_hosts");
@@ -998,13 +997,42 @@ fn start_sshd(dir: &Path) -> Option<SshdServer> {
             String::from_utf8_lossy(&o.stdout).trim().to_string()
         });
 
+    // Build a compact, whitespace-free PATH for sshd's `SetEnv`. OpenSSH's `SetEnv` splits on
+    // whitespace, so inheriting a caller PATH that contains spaces (for example
+    // `/Users/.../Application Support/...` on macOS) makes sshd reject `sshd_config` with
+    // `Invalid environment.` and exit 255.
     let git_out = Command::new("git").arg("--exec-path").output().unwrap();
     let git_exec = String::from_utf8_lossy(&git_out.stdout).trim().to_string();
-    let env_path = std::env::var("PATH").unwrap_or_default();
-    let sshd_path_dir = format!("{git_exec}:{env_path}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+    let which_git = Command::new("which").arg("git").output().ok();
+    let git_bin_dir = which_git
+        .as_ref()
+        .and_then(|o| std::str::from_utf8(&o.stdout).ok())
+        .and_then(|p| Path::new(p.trim()).parent())
+        .and_then(|p| p.to_str())
+        .unwrap_or("/usr/bin");
+    let mut path_entries = Vec::new();
+    for entry in [
+        git_exec.as_str(),
+        git_bin_dir,
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
+        if !entry.is_empty()
+            && !entry.chars().any(char::is_whitespace)
+            && !path_entries.contains(&entry)
+        {
+            path_entries.push(entry);
+        }
+    }
+    let sshd_path_dir = path_entries.join(":");
 
     let cfg = dir.join("sshd_config");
     let pid_file = dir.join("sshd.pid");
+    let log_file = dir.join("sshd.log");
     std::fs::write(
         &cfg,
         format!(
@@ -1025,22 +1053,25 @@ fn start_sshd(dir: &Path) -> Option<SshdServer> {
     )
     .unwrap();
 
-    let Ok(mut child) = Command::new(sshd_bin)
+    let log_out = std::fs::File::create(&log_file).unwrap();
+    let log_err = log_out.try_clone().unwrap();
+    let mut child = Command::new(&sshd_bin)
         .args(["-D", "-e", "-f", &s(&cfg)])
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log_out))
+        .stderr(std::process::Stdio::from(log_err))
         .spawn()
-    else {
-        eprintln!("skipping fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd: failed to spawn sshd");
-        return None;
-    };
+        .unwrap_or_else(|e| panic!("failed to spawn {}: {e}", sshd_bin.display()));
 
     let mut ready = false;
-    for _ in 0..50 {
+    for _ in 0..100 {
         if let Ok(Some(st)) = child.try_wait() {
-            eprintln!("skipping fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd: sshd exited early ({st})");
-            return None;
+            let log = std::fs::read_to_string(&log_file).unwrap_or_default();
+            panic!(
+                "sshd ({}) exited early with {st}.\nsshd_config:\n{}\nsshd log:\n{log}",
+                sshd_bin.display(),
+                std::fs::read_to_string(&cfg).unwrap_or_default()
+            );
         }
         if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
             ready = true;
@@ -1051,11 +1082,14 @@ fn start_sshd(dir: &Path) -> Option<SshdServer> {
     if !ready {
         let _ = child.kill();
         let _ = child.wait();
-        eprintln!("skipping fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd: sshd did not listen in time");
-        return None;
+        let log = std::fs::read_to_string(&log_file).unwrap_or_default();
+        panic!(
+            "sshd ({}) did not listen on 127.0.0.1:{port} within 5s.\nsshd log:\n{log}",
+            sshd_bin.display()
+        );
     }
 
-    Some(SshdServer { child, port, known_hosts, authorized_keys, user, sshd_path_dir })
+    Some(SshdServer { child, port, known_hosts, authorized_keys, user, log_file })
 }
 
 #[cfg(unix)]
@@ -1077,7 +1111,7 @@ fn gen_ssh_key(dir: &Path, name: &str) -> (PathBuf, String) {
 fn write_ssh_config(path: &Path, srv: &SshdServer, alias: &str, identity: &Path) {
     use std::os::unix::fs::PermissionsExt;
 
-    let _ = &srv.sshd_path_dir;
+    let _ = &srv.log_file;
     std::fs::write(
         path,
         format!(
@@ -1174,6 +1208,16 @@ async fn fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd() {
         );
     }
     assert!(t.elapsed() < std::time::Duration::from_secs(30), "unexpectedly slow: {:?}", t.elapsed());
+    let sshd_log = std::fs::read_to_string(&srv.log_file).unwrap_or_default();
+    assert!(
+        sshd_log.contains("Accepted publickey"),
+        "expected sshd log to record Accepted publickey, got:\n{sshd_log}"
+    );
+    eprintln!(
+        "fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd ran against sshd on 127.0.0.1:{} ({} log bytes)",
+        srv.port,
+        sshd_log.len()
+    );
 }
 
 #[cfg(unix)]

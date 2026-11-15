@@ -1167,9 +1167,18 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                                         )
                                                     },
                                                 );
-                                                super::session::ModeChip(&sid, is_phone);
-                                                cu::Spacer().modifier(Modifier::new().weight(1.0));
-                                                super::session::ModelChip(&sid, is_phone);
+                                                // The chips share what the row leaves after the
+                                                // attach and send buttons and shorten their labels
+                                                // (ellipsis) in it, so the send or stop button keeps
+                                                // its size at 360 dp (FR-L28.3, Flip 4 review 3.5).
+                                                cu::Box()
+                                                    .alignment(Alignment::CenterStart)
+                                                    .modifier(Modifier::new().weight(1.0))
+                                                    .content(|| super::session::ModeChip(&sid, is_phone));
+                                                cu::Box()
+                                                    .alignment(Alignment::CenterEnd)
+                                                    .modifier(Modifier::new().weight(1.0))
+                                                    .content(|| super::session::ModelChip(&sid, is_phone));
                                                 if busy {
                                                     let sid_int = sid.clone();
                                                     super::session::StopCircleButton(move || {
@@ -2353,6 +2362,53 @@ mod tests {
     #[Composable]
     fn host_conversation_s1() {
         ConversationView("demo-s1", false);
+    }
+
+    #[test]
+    fn fr_l28_3_the_composer_chips_shrink_and_the_send_button_keeps_its_size_at_360() {
+        // Flip 4 review 3.5: the two chips kept their full width (116 and 120 dp) and pushed the
+        // stop button to a 6 dp sliver. Each chip now sits in an equal weighted share of the row.
+        let _guard = crate::services::test_guard();
+        services().open_session("demo-s1");
+        compose_rust::window::reset_window_size();
+        crate::ui::window_size::set_opened_for_test(Some((360.0, 880.0)));
+        let mut host = Host::new(|| Box::new(Recomposer::new(host_conversation_s1)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        crate::ui::window_size::set_opened_for_test(None);
+        let mut parents = std::collections::HashMap::new();
+        let mut strings = Vec::new();
+        let mut mods: Vec<(u32, String)> = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    parents.insert(*node_id, *parent_id);
+                }
+                Mutation::SetProp { node_id, value: PropertyValue::String(v), .. } => strings.push((*node_id, v.to_string())),
+                Mutation::SetModifier { node_id, modifier, .. } => mods.push((*node_id, format!("{modifier:?}"))),
+                _ => {}
+            }
+        }
+        let up = |mut id: u32| {
+            let mut out = vec![id];
+            while let Some(p) = parents.get(&id) {
+                out.push(*p);
+                id = *p;
+            }
+            out
+        };
+        let node = |t: &str| strings.iter().rev().find(|(_, s)| s == t).map(|(n, _)| *n).unwrap_or_else(|| panic!("no {t}: {strings:?}"));
+        let mode = up(node(crate::ui::session::mode_chip_label(false)));
+        let model = up(node("Claude Code"));
+        let row = *mode.iter().find(|n| model.contains(n)).expect("one row");
+        let weighted: Vec<u32> = mods
+            .iter()
+            .filter(|(n, m)| parents.get(n) == Some(&row) && m == "Weight(1.0)")
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(weighted.len(), 2, "one weighted share per chip, no weighted spacer");
+        assert!(weighted.iter().any(|w| mode.contains(w)), "the mode chip is in a share");
+        assert!(weighted.iter().any(|w| model.contains(w)), "the model chip is in a share");
+        compose_rust::window::reset_window_size();
     }
 
     #[test]

@@ -39,23 +39,54 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use ember_node::client::ClientError;
+use ember_node::ose_api::{pump_ose_relay, OseRelayStream};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::computers::{Computer, Computers, LOCAL, LOCAL_NAME};
-use crate::ose::{valid_computer_id, OseManager, RelayLookupError, RelayTarget};
+use crate::ose::{valid_computer_id, OseManager, RelayLookupError};
 use crate::session::Sessions;
 use crate::store::SessionRecord;
 
-/// Byte window at the start of the client-to-OSE stream in which the C2 placeholder is replaced
-/// with the real OSE connection token (`FR-W4`, `#458`, `#461`).
-pub const RELAY_SUBSTITUTION_WINDOW: usize = 8 * 1024;
-/// Timeout for opening the loopback TCP connection to the local OSE process.
-const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-/// Maximum chunk size read from the OSE TCP socket per WebSocket binary frame.
-const RELAY_READ_CHUNK: usize = 32 * 1024;
+/// The relay of the local OSE and its placeholder substitution are `ember_node::ose_api`: the
+/// node runs the same relay for the OSE of its own projects (SPEC FR-W4b, #896).
+pub use ember_node::ose_api::RELAY_SUBSTITUTION_WINDOW;
+/// The connection of one OSE launch, defined beside the manager that builds it.
+pub use crate::ose::EmberOseConnection;
+
+/// Why a computer that is neither local nor registered has no Ember target.
+const LOCAL_ONLY: &str = "OSE server is only available on the local computer";
+/// Longest wait for a node's `POST /ide/ose` (SPEC FR-W4c): a new OSE takes up to 10 s to listen
+/// on the node, and a node that never answers must not hold the launch request open.
+pub const NODE_OSE_START_TIMEOUT: Duration = Duration::from_secs(20);
+/// Longest wait for the node's relay socket to open, before the client's upgrade is answered.
+const NODE_RELAY_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Longest wait for a close handshake when a bridged relay ends.
+const NODE_RELAY_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+/// The `code` of the 502 that says the NODE refused this server's credential (SPEC FR-W4c).
+pub const NODE_AUTH_FAILED: &str = "node_auth_failed";
+
+/// True for a node status that means the node refused this server (its bearer token, or the
+/// peer allow-list), not the request.
+pub(crate) fn node_refused_server(status: u16) -> bool {
+    status == StatusCode::UNAUTHORIZED.as_u16() || status == StatusCode::FORBIDDEN.as_u16()
+}
+
+/// The answer when the node of `computer` refused this server's credential (a stale node token in
+/// the registry): 502, never the node's 401 or 403. Passed on unchanged, that status would read as
+/// the CALLER's credential being refused, and the app would drop its server token or open the
+/// owner sheet. The body names the computer and no token.
+pub(crate) fn node_auth_failed(computer: &str) -> Response {
+    let body = json!({
+        "code": NODE_AUTH_FAILED,
+        "error": format!(
+            "the server could not authenticate to computer {computer}: the computer refused the node token the server holds; enrol the computer again"
+        ),
+    });
+    (StatusCode::BAD_GATEWAY, Json(body)).into_response()
+}
 
 /// One computer's IDE endpoints.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -160,24 +191,6 @@ pub struct EmberLaunch {
     /// Connection details when an OSE endpoint is reachable by the editor.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ose: Option<EmberOseConnection>,
-}
-
-#[derive(Clone, Serialize, PartialEq)]
-pub struct EmberOseConnection {
-    pub endpoint: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub relay: Option<String>,
-    pub connection_token: String,
-}
-
-impl std::fmt::Debug for EmberOseConnection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EmberOseConnection")
-            .field("endpoint", &self.endpoint)
-            .field("relay", &self.relay)
-            .field("connection_token", &"[REDACTED]")
-            .finish()
-    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -364,23 +377,35 @@ pub fn launch_targets(
     launch_targets_for(rec, &c, server_url, ose)
 }
 
-/// The launch targets for one session on one resolved computer.
+/// The launch targets for one session on one resolved computer, with the OSE of this server for
+/// a local computer. A registered computer's OSE runs on its node: the route asks the node and
+/// calls [`launch_targets_with`] (SPEC FR-W4c).
 pub fn launch_targets_for(
     rec: &SessionRecord,
     target: &IdeComputer,
     server_url: Option<&str>,
     ose: &OseManager,
 ) -> IdeLaunch {
+    let connection = if target.ide.local {
+        ose.connection(std::path::Path::new(&rec.cwd))
+    } else {
+        Err(LOCAL_ONLY.into())
+    };
+    launch_targets_with(rec, target, server_url, connection)
+}
+
+/// The launch targets for one session on one resolved computer, given the OSE connection of the
+/// Ember target (or why there is none).
+pub fn launch_targets_with(
+    rec: &SessionRecord,
+    target: &IdeComputer,
+    server_url: Option<&str>,
+    connection: Result<EmberOseConnection, String>,
+) -> IdeLaunch {
     let computer_name = target.id.as_str();
     let computer = &target.ide;
     let display = target.named.then(|| target.name.clone());
     let folder = rec.cwd.clone();
-
-    let connection = if computer.local {
-        ose.connection(std::path::Path::new(&folder))
-    } else {
-        Err("OSE server is only available on the local computer".into())
-    };
     let ember = Target {
         kind: "ember",
         available: connection.is_ok(),
@@ -491,62 +516,6 @@ fn build(
         })
 }
 
-/// C2 placeholder-to-real-token substitution for the first `window` bytes of the
-/// client-to-OSE byte stream (`FR-W4`, `#458`, `#461`).
-///
-/// Substitution works within one client WebSocket message: every placeholder that starts inside
-/// the window and lies whole in the message is replaced. Each client message goes to the OSE as
-/// exactly one write, never split, held or merged with another (#776). A placeholder split across
-/// two messages is not replaced; Code-OSS and `ember-editor-conn` write each protocol message
-/// (header and body, including the `auth` control message) as one WebSocket message, so the token
-/// never straddles messages. Placeholder and real token have the same length, so byte offsets
-/// do not shift.
-struct TokenSubstituter {
-    placeholder: Vec<u8>,
-    real_token: Vec<u8>,
-    window: usize,
-    seen: usize,
-}
-
-impl TokenSubstituter {
-    fn new(placeholder: &str, real_token: &str, window: usize) -> Self {
-        Self {
-            placeholder: placeholder.as_bytes().to_vec(),
-            real_token: real_token.as_bytes().to_vec(),
-            window,
-            seen: 0,
-        }
-    }
-
-    fn enabled(&self) -> bool {
-        !self.placeholder.is_empty()
-            && self.placeholder.len() == self.real_token.len()
-            && self.placeholder != self.real_token
-    }
-
-    /// One client message in, the same message (same length) out.
-    fn feed(&mut self, msg: &[u8]) -> Vec<u8> {
-        let start = self.seen;
-        self.seen = self.seen.saturating_add(msg.len());
-        if !self.enabled() || start >= self.window {
-            return msg.to_vec();
-        }
-        let in_win = (self.window - start).min(msg.len());
-        let pat_len = self.placeholder.len();
-        let mut out = msg.to_vec();
-        let mut i = 0;
-        while i < in_win && i + pat_len <= msg.len() {
-            if msg[i..i + pat_len] == self.placeholder[..] {
-                out[i..i + pat_len].copy_from_slice(&self.real_token);
-                i += pat_len;
-            } else {
-                i += 1;
-            }
-        }
-        out
-    }
-}
-
 async fn ide_relay(
     State(st): State<IdeState>,
     Path((computer, launch_id)): Path<(String, String)>,
@@ -560,19 +529,28 @@ async fn ide_relay(
         return error(StatusCode::BAD_REQUEST, "invalid computer id".into());
     }
     if computer != LOCAL {
-        if let Some(c) = &st.computers {
-            match c.registry().get(&computer) {
-                Ok(Some(_)) => {
-                    return error(StatusCode::BAD_REQUEST, "OSE server is only available on the local computer".into())
-                }
-                Ok(None) => return error(StatusCode::NOT_FOUND, format!("unknown computer: {computer}")),
-                Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
-            }
-        } else {
+        let Some(c) = &st.computers else {
+            return error(StatusCode::NOT_FOUND, format!("unknown computer: {computer}"));
+        };
+        // The registry answer is not kept across the await below.
+        let registered = match c.registry().get(&computer) {
+            Ok(found) => found.is_some(),
+            Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        };
+        if !registered {
             return error(StatusCode::NOT_FOUND, format!("unknown computer: {computer}"));
         }
+        // FR-W4c: the OSE of a registered computer runs on its node.
+        return node_relay(c, &computer, &launch_id, ws).await;
     }
-    let target = match st.ose.open_relay(&computer, &launch_id) {
+    // The lookup takes the manager's lock, which a starting OSE holds for up to 10 s: wait for it
+    // off the async workers.
+    let (ose, id) = (st.ose.clone(), launch_id.clone());
+    let found = match tokio::task::spawn_blocking(move || ose.open_relay(LOCAL, &id)).await {
+        Ok(found) => found,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("relay lookup task failed: {e}")),
+    };
+    let target = match found {
         Ok(t) => t,
         Err(RelayLookupError::NotFound) => {
             return error(StatusCode::NOT_FOUND, format!("unknown OSE launch: {launch_id}"))
@@ -584,129 +562,146 @@ async fn ide_relay(
     ws.on_upgrade(move |socket| pump_ose_relay(socket, target)).into_response()
 }
 
-async fn pump_ose_relay(socket: WebSocket, target: RelayTarget) {
-    let tcp = match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, tokio::net::TcpStream::connect(target.address)).await {
-        Ok(Ok(s)) => {
-            let _ = s.set_nodelay(true);
-            s
-        }
-        _ => {
-            let mut socket = socket;
-            let _ = socket
-                .send(Message::Close(Some(CloseFrame {
-                    code: 1011,
-                    reason: "cannot connect to OSE server".into(),
-                })))
-                .await;
-            return;
-        }
-    };
-    let (mut tcp_read, mut tcp_write) = tcp.into_split();
-    let (mut ws_out, mut ws_in) = socket.split();
-    let mut sub = TokenSubstituter::new(&target.placeholder, &target.real_token, RELAY_SUBSTITUTION_WINDOW);
-    let idle = target.idle_timeout;
-    let last_activity_ns = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let started = std::time::Instant::now();
-    let touch = {
-        let last = last_activity_ns.clone();
-        move || {
-            last.store(
-                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-        }
-    };
+/// True for an id this server may put into a node path: the manager's 32 hex characters, and in
+/// any case nothing but ASCII letters and digits.
+fn safe_launch_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric())
+}
 
-    // Bounded channel (capacity 4) for control frames (Pong / 1003 Close) from the reader side so
-    // `ws_in` and `ws_out` never block each other across `tokio::select!`.
-    let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::channel::<Message>(4);
-
-    let touch_in = touch.clone();
-    let c2s = async move {
-        while let Some(msg) = ws_in.next().await {
-            touch_in();
-            match msg {
-                Ok(Message::Binary(bytes)) => {
-                    let out = sub.feed(&bytes);
-                    if !out.is_empty() && tcp_write.write_all(&out).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(Message::Text(_)) => {
-                    let _ = ctrl_tx
-                        .send(Message::Close(Some(CloseFrame {
-                            code: 1003,
-                            reason: "text frames are not allowed on the OSE binary relay".into(),
-                        })))
-                        .await;
-                    let _ = tcp_write.shutdown().await;
-                    break;
-                }
-                Ok(Message::Ping(p)) => {
-                    if ctrl_tx.send(Message::Pong(p)).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(Message::Pong(_)) => {}
-                Ok(Message::Close(_)) | Err(_) => break,
-            }
-        }
-        let _ = tcp_write.shutdown().await;
-    };
-
-    let s2c = async move {
-        let mut read_buf = vec![0u8; RELAY_READ_CHUNK];
-        loop {
-            tokio::select! {
-                biased;
-                ctrl = ctrl_rx.recv(), if !ctrl_rx.is_closed() => {
-                    if let Some(frame) = ctrl {
-                        let is_close = matches!(frame, Message::Close(_));
-                        if ws_out.send(frame).await.is_err() || is_close {
-                            break;
-                        }
-                    }
-                }
-                n = tcp_read.read(&mut read_buf) => {
-                    match n {
-                        Ok(0) | Err(_) => {
-                            if let Ok(frame) = ctrl_rx.try_recv() {
-                                let _ = ws_out.send(frame).await;
-                            } else {
-                                let _ = ws_out.close().await;
-                            }
-                            break;
-                        }
-                        Ok(n) => {
-                            touch();
-                            if ws_out.send(Message::Binary(read_buf[..n].to_vec().into())).await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    };
-
-    let idle_watchdog = async {
-        let check_step = (idle / 4).clamp(Duration::from_millis(20), Duration::from_secs(5));
-        loop {
-            tokio::time::sleep(check_step).await;
-            let last = Duration::from_nanos(last_activity_ns.load(std::sync::atomic::Ordering::Relaxed));
-            if started.elapsed().saturating_sub(last) >= idle {
-                break;
-            }
-        }
-    };
-
-    let both = async {
-        tokio::join!(c2s, s2c);
-    };
-    tokio::select! {
-        _ = both => {}
-        _ = idle_watchdog => {}
+/// The OSE of `folder` on the node of the registered computer `id` (SPEC FR-W4c): the node starts
+/// or reuses it, and the answer is turned into this server's relay path. The token in it is the
+/// node's placeholder; the real one stays on the node. An error is the reason the Ember target is
+/// unavailable.
+async fn node_ose_connection(computers: &Computers, id: &str, folder: &str) -> Result<EmberOseConnection, String> {
+    let node = computers.client(id).map_err(|e| format!("{e:#}"))?.with_deadline(NODE_OSE_START_TIMEOUT);
+    match node.ide_ose(folder).await {
+        Ok(launch) if safe_launch_id(&launch.launch_id) => Ok(EmberOseConnection {
+            endpoint: launch.endpoint,
+            relay: Some(format!("/api/computers/{id}/ide/relay/{}", launch.launch_id)),
+            connection_token: launch.connection_token,
+        }),
+        Ok(_) => Err("the node answered an invalid OSE launch id".into()),
+        Err(ClientError::Api { body, .. }) => Err(body.error),
+        Err(e) => Err(format!("node unreachable: {e}")),
     }
+}
+
+/// The relay of a registered computer (SPEC FR-W4c). The node's relay socket is opened first, so
+/// its refusal (unknown launch 404, relay limit 429) and an unreachable node (502) are plain
+/// answers; only then is the client upgraded and the two sockets bridged. A node that refuses
+/// this server itself (401, 403) is [`node_auth_failed`], not its own status.
+async fn node_relay(computers: &Computers, computer: &str, launch_id: &str, ws: WebSocketUpgrade) -> Response {
+    if !safe_launch_id(launch_id) {
+        return error(StatusCode::NOT_FOUND, format!("unknown OSE launch: {launch_id}"));
+    }
+    let node = match computers.client(computer) {
+        Ok(n) => n,
+        Err(e) => return error(StatusCode::BAD_GATEWAY, format!("node unreachable: {e:#}")),
+    };
+    let upstream = match tokio::time::timeout(NODE_RELAY_OPEN_TIMEOUT, node.ide_ose_relay(launch_id)).await {
+        Ok(Ok(u)) => u,
+        Ok(Err(ClientError::Api { status, .. })) if node_refused_server(status) => return node_auth_failed(computer),
+        Ok(Err(ClientError::Api { status, body })) => {
+            return error(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), body.error)
+        }
+        Ok(Err(e)) => return error(StatusCode::BAD_GATEWAY, format!("node unreachable: {e}")),
+        Err(_) => return error(StatusCode::BAD_GATEWAY, "node unreachable: the relay did not open in time".into()),
+    };
+    ws.on_upgrade(move |socket| bridge_node_relay(socket, upstream)).into_response()
+}
+
+/// How a bridged relay ended.
+enum BridgeEnd {
+    /// The client sent a text frame: it is told 1003, as on the local relay.
+    ClientText,
+    /// The node closed, with its close code and reason when it sent one (1011: no OSE to dial).
+    NodeClosed(Option<(u16, String)>),
+    /// The client closed or was cut off (a revoked device, `FR-N3`), or a send failed.
+    Other,
+}
+
+/// Bridges one client relay socket to the node's relay socket, binary frames both ways. The two
+/// directions run under one `tokio::select!`: when either side ends, the other socket is closed
+/// too, so a revoked device's stream (the transport closes it within one heartbeat, `FR-N3`) takes
+/// the node's socket, and with it the node's TCP connection to the OSE, down with it. Nothing is
+/// rewritten here: the node replaces the placeholder token.
+///
+/// Pings are carried across, because the node's idle clock counts every frame of its client: the
+/// client's Ping and Pong go to the node, the node's Ping goes to the client. A client that keeps
+/// alive with WebSocket pings alone therefore stays inside the idle timeout, as on the local
+/// relay. The Pong that answers a Ping is still sent by each socket itself, so it is not
+/// forwarded a second time from the node.
+async fn bridge_node_relay(socket: WebSocket, upstream: OseRelayStream) {
+    use tokio_tungstenite::tungstenite::Message as NodeMessage;
+
+    let (mut client_tx, mut client_rx) = socket.split();
+    let (mut node_tx, mut node_rx) = upstream.split();
+    let end = {
+        let up = async {
+            loop {
+                match client_rx.next().await {
+                    Some(Ok(Message::Binary(bytes))) => {
+                        if node_tx.send(NodeMessage::Binary(bytes.into())).await.is_err() {
+                            return BridgeEnd::Other;
+                        }
+                    }
+                    Some(Ok(Message::Text(_))) => return BridgeEnd::ClientText,
+                    Some(Ok(Message::Ping(payload))) => {
+                        if node_tx.send(NodeMessage::Ping(payload.into())).await.is_err() {
+                            return BridgeEnd::Other;
+                        }
+                    }
+                    Some(Ok(Message::Pong(payload))) => {
+                        if node_tx.send(NodeMessage::Pong(payload.into())).await.is_err() {
+                            return BridgeEnd::Other;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return BridgeEnd::Other,
+                }
+            }
+        };
+        let down = async {
+            loop {
+                match node_rx.next().await {
+                    Some(Ok(NodeMessage::Binary(bytes))) => {
+                        if client_tx.send(Message::Binary(bytes.into())).await.is_err() {
+                            return BridgeEnd::Other;
+                        }
+                    }
+                    Some(Ok(NodeMessage::Close(frame))) => {
+                        return BridgeEnd::NodeClosed(
+                            frame.map(|f| (u16::from(f.code), f.reason.as_str().to_string())),
+                        )
+                    }
+                    Some(Ok(NodeMessage::Ping(payload))) => {
+                        if client_tx.send(Message::Ping(payload.into())).await.is_err() {
+                            return BridgeEnd::Other;
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) | None => return BridgeEnd::NodeClosed(None),
+                }
+            }
+        };
+        tokio::select! {
+            end = up => end,
+            end = down => end,
+        }
+    };
+    let close = async {
+        let frame = match end {
+            BridgeEnd::ClientText => Some(CloseFrame {
+                code: 1003,
+                reason: "text frames are not allowed on the OSE binary relay".into(),
+            }),
+            BridgeEnd::NodeClosed(Some((code, reason))) => Some(CloseFrame { code, reason: reason.as_str().into() }),
+            BridgeEnd::NodeClosed(None) | BridgeEnd::Other => None,
+        };
+        // Both at once: a node that hangs must not use up the budget before the client is told.
+        let _ = tokio::join!(node_tx.close(), client_tx.send(Message::Close(frame)));
+    };
+    // A peer that is gone never answers a close: do not wait for it.
+    let _ = tokio::time::timeout(NODE_RELAY_CLOSE_TIMEOUT, close).await;
 }
 
 #[derive(Deserialize)]
@@ -775,7 +770,30 @@ async fn ide_targets(
             .and_then(|h| h.to_str().ok())
             .map(|h| format!("http://{h}"))
     });
-    Json(launch_targets_for(&rec, computer, server_url.as_deref(), &st.ose)).into_response()
+    // FR-W4c: a registered computer's OSE runs on its node. A computer marked local in
+    // `EMBER_IDE_COMPUTERS`, or known only from it, keeps the answer of this server's own manager.
+    let on_node = !computer.ide.local
+        && computer.id != LOCAL
+        && registered.as_deref().is_some_and(|l| l.iter().any(|c| c.id == computer.id));
+    let launch = match &st.computers {
+        Some(computers) if on_node => {
+            let connection = node_ose_connection(computers, &computer.id, &rec.cwd).await;
+            launch_targets_with(&rec, computer, server_url.as_deref(), connection)
+        }
+        _ => {
+            // A new OSE takes up to 10 s to listen: keep the wait off the async workers.
+            let (ose, target) = (st.ose.clone(), computer.clone());
+            let started = tokio::task::spawn_blocking(move || {
+                launch_targets_for(&rec, &target, server_url.as_deref(), &ose)
+            })
+            .await;
+            match started {
+                Ok(launch) => launch,
+                Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("OSE launch task failed: {e}")),
+            }
+        }
+    };
+    Json(launch).into_response()
 }
 
 #[cfg(test)]
@@ -840,6 +858,25 @@ while True: s.accept()[0].close()' "$@"
         let value = serde_json::to_value(&first).unwrap();
         assert_eq!(value["targets"][0]["launch"]["ose"]["connection_token"], connection.connection_token);
         assert!(!format!("{first:?}").contains(&connection.connection_token));
+    }
+
+    /// FR-W4c (#896): a node that refuses this server is a 502 with its own code, and no 401.
+    #[tokio::test]
+    async fn fr_w4c_node_auth_failed_is_a_502_with_a_code_and_no_token() {
+        use http_body_util::BodyExt;
+
+        assert!(node_refused_server(401) && node_refused_server(403));
+        for passed in [200, 400, 404, 409, 429, 500, 502, 503] {
+            assert!(!node_refused_server(passed), "{passed}");
+        }
+        let res = node_auth_failed("0d0c7a52-box");
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["code"], NODE_AUTH_FAILED);
+        let message = v["error"].as_str().unwrap();
+        assert!(message.contains("could not authenticate to computer 0d0c7a52-box"), "{message}");
+        assert!(message.is_ascii(), "{message}");
     }
 
     #[test]

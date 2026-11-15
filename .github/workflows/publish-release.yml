@@ -54,7 +54,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
-      fail-fast: true
+      # A dry run shows every target's failure at once; a tag stops at the first.
+      fail-fast: ${{ github.event_name != 'workflow_dispatch' }}
       matrix:
         include:
           - { os: macos-14, target: macos-arm64 }

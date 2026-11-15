@@ -1532,7 +1532,9 @@ pub mod page {
                         }
                         {crate::ui::editor_states::view::banners(&s, current.as_deref())}
                         if *s.find.open.read() && active.is_some() && !diff_shown && !conflict_shown && !compare_shown { {find_bar(&s)} }
+                        // FR-L31.13: the editor pane's box, which a list at the caret is kept inside.
                         div { style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
+                            onmounted: move |event| crate::ui::editor_language::view::set_pane_mount(event.data()),
                             if conflict_shown { {crate::ui::editor_scm::view::conflict_pane(&s)} }
                             else if diff_shown { {crate::ui::editor_scm::view::diff_pane(&s)} }
                             else if compare_shown { {crate::ui::editor_states::view::compare_pane(&s)} }

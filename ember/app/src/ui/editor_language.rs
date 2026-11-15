@@ -8,8 +8,8 @@
 //!
 //! The pinned toolkit (compose-rust v0.0.10, dioxus-compose f0e5b9f5) gives the code editor what
 //! these need, and the window uses it:
-//! * compose-rust#553: a list opens under the caret the editor reports (`on_caret_rect`,
-//!   [`view::set_caret_rect`]), and falls back to the sheet over the window, like the command
+//! * compose-rust#553: a list opens at the caret the editor reports (`on_caret_rect`,
+//!   [`view::set_caret_rect`]) inside the editor pane ([`popup_placement`]), and falls back to the sheet over the window, like the command
 //!   palette, until the editor has reported one.
 //! * compose-rust#554: the chords are taken from the focused code (`on_key_preview`,
 //!   [`code_key_action`]) and consumed, so F12, F2, Ctrl+Space and the rest work while typing.
@@ -442,15 +442,68 @@ impl LanguageState {
 /// The list as a sheet over the window, like the command palette: before the editor reported a caret.
 pub const SHEET_STYLE: &str = "position:fixed; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);";
 
-/// Where a list opens (compose-rust#553): 2 px under the caret the code editor reported, in the
-/// window's dp, which is the page's px. It keeps 12 px from the window's right edge and room for its
-/// rows above the bottom; with no caret yet it is the sheet.
-pub fn popup_style(caret: Option<compose_rust::code::CodeRect>) -> String {
-    let Some(rect) = caret else { return SHEET_STYLE.to_string() };
-    let (x, y) = (rect.x.max(0.0), (rect.bottom() + 2.0).max(0.0));
-    format!(
-        "position:fixed; z-index:40; left:max(12px, min({x:.0}px, calc(100vw - min(440px, calc(100vw - 24px)) - 12px))); top:max(12px, min({y:.0}px, calc(100vh - 380px))); width:min(440px, calc(100vw - 24px)); right:auto; padding:var(--sp1);"
-    )
+/// The editor pane's box in the window's px (its left, top, width and height), as the page laid it
+/// out: the room a list that belongs to the caret is kept inside.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaneBox {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// A list's width and the most its rows take, as `popup` draws them.
+const LIST_WIDTH: f32 = 440.0;
+const LIST_ROWS_MAX: f32 = 320.0;
+/// One row's height, and what the title and the query row above the rows take.
+const LIST_ROW: f32 = 34.0;
+const LIST_CHROME: f32 = 76.0;
+/// The gap between the caret line and the list, and the list and the pane's edge.
+const LIST_GAP: f32 = 2.0;
+const PANE_MARGIN: f32 = 4.0;
+
+/// Where a list opens and how tall its rows may grow.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Placement {
+    pub style: String,
+    pub rows_max: f32,
+}
+
+/// Where a list opens (compose-rust#553), as Code-OSS's suggest widget does: under the caret line
+/// when it fits inside the editor pane, else above it, else on the side with more room with its rows
+/// cut to that room, so it never covers the bottom panel. The caret and the pane are in the window's
+/// px. With no caret, no pane, or a caret outside the pane (scrolled away), it is the sheet, because
+/// a list placed from a caret nobody sees floats unattached. `rows` is how many rows it shows.
+pub fn popup_placement(caret: Option<compose_rust::code::CodeRect>, pane: Option<PaneBox>, rows: usize) -> Placement {
+    let sheet = Placement { style: SHEET_STYLE.to_string(), rows_max: LIST_ROWS_MAX };
+    let (Some(caret), Some(pane)) = (caret, pane) else { return sheet };
+    let (top, bottom) = (pane.y, pane.y + pane.height);
+    let visible = caret.y >= top && caret.bottom() <= bottom && caret.x >= pane.x && caret.x <= pane.x + pane.width;
+    if !visible || pane.width <= 0.0 || pane.height <= 0.0 {
+        return sheet;
+    }
+    let rows_h = (rows.max(1) as f32 * LIST_ROW).min(LIST_ROWS_MAX);
+    let height = LIST_CHROME + rows_h;
+    let below = bottom - PANE_MARGIN - (caret.bottom() + LIST_GAP);
+    let above = (caret.y - LIST_GAP) - (top + PANE_MARGIN);
+    let width = LIST_WIDTH.min(pane.width - 2.0 * PANE_MARGIN).max(0.0);
+    let left = caret.x.min(pane.x + pane.width - PANE_MARGIN - width).max(pane.x + PANE_MARGIN);
+    let frame = format!("position:fixed; z-index:40; left:{left:.0}px; width:{width:.0}px; right:auto; padding:var(--sp1);");
+    let (open_below, room) = if below >= height {
+        (true, height)
+    } else if above >= height {
+        (false, height)
+    } else {
+        (below >= above, below.max(above))
+    };
+    let rows_max = (rows_h - (height - room)).clamp(0.0, LIST_ROWS_MAX);
+    let style = if open_below {
+        format!("{frame} top:{:.0}px; bottom:auto;", caret.bottom() + LIST_GAP)
+    } else {
+        // Anchored by its bottom edge, so a shorter list still sits right above the caret line.
+        format!("{frame} top:auto; bottom:calc(100vh - {:.0}px);", caret.y - LIST_GAP)
+    };
+    Placement { style, rows_max }
 }
 
 pub mod hint_box {
@@ -499,12 +552,29 @@ pub mod view {
         static SAMPLE_SHOWN: Cell<bool> = const { Cell::new(false) };
         /// Where the code editor last drew its caret, in the window's dp (compose-rust#553).
         static CARET_RECT: Cell<Option<compose_rust::code::CodeRect>> = const { Cell::new(None) };
+        /// The element the editor pane is drawn in, whose box a list is kept inside.
+        static PANE_MOUNT: RefCell<Option<std::rc::Rc<dioxus_elements::MountedData>>> = const { RefCell::new(None) };
     }
 
     /// The code editor's `on_caret_rect`: kept for the next list to open under it. Nothing is
     /// redrawn, because a list is placed when it opens.
     pub fn set_caret_rect(rect: compose_rust::code::CodeRect) {
         CARET_RECT.with(|cell| cell.set(Some(rect)));
+    }
+
+    /// The editor pane's element (its `onmounted`): a list is kept inside the box it was last laid out in.
+    pub fn set_pane_mount(mounted: std::rc::Rc<dioxus_elements::MountedData>) {
+        PANE_MOUNT.with(|cell| *cell.borrow_mut() = Some(mounted));
+    }
+
+    /// The editor pane's box from the last layout, or None before it was laid out.
+    fn pane_box() -> Option<super::PaneBox> {
+        use futures_util::FutureExt;
+        PANE_MOUNT.with(|cell| {
+            let r = cell.borrow().as_ref()?.get_client_rect().now_or_never()?.ok()?;
+            let pane = super::PaneBox { x: r.origin.x as f32, y: r.origin.y as f32, width: r.size.width as f32, height: r.size.height as f32 };
+            (pane.width > 0.0 && pane.height > 0.0).then_some(pane)
+        })
     }
 
     /// The code editor's `on_key_preview` (compose-rust#554): a language chord runs its feature and
@@ -778,10 +848,12 @@ pub mod view {
         let count = shown.len();
         let (title, placeholder, loading) = (sheet.title(), sheet.placeholder(), sheet.loading());
         let (scrim_s, key_s) = (s.clone(), s.clone());
+        let rows_drawn = if is_rename { 0 } else if loading { count + 1 } else { count.max(1) };
+        let placement = super::popup_placement(CARET_RECT.with(|cell| cell.get()), pane_box(), rows_drawn);
         rsx! {
             div { style: "position:fixed; left:0; top:0; right:0; bottom:0; z-index:39;", onclick: move |_| cancel(&scrim_s) }
             div { class: "ed-menu", role: "dialog", "aria-label": "{title}",
-                style: "{super::popup_style(CARET_RECT.with(|cell| cell.get()))}",
+                style: "{placement.style}",
                 div { style: "padding:var(--sp1) var(--sp3) 0; color:var(--muted); font-size:var(--fs-xs);", "{title}" }
                 // FR-L31.29: the query row is a row of the popover, not a framed field inside the frame.
                 div { class: "ed-palq", style: "margin:var(--sp1) calc(var(--sp1) * -1) var(--sp1);",
@@ -812,7 +884,7 @@ pub mod view {
                 if is_rename {
                     div { style: "padding:var(--sp1) var(--sp3) var(--sp2); color:var(--muted); font-size:var(--fs-xs);", "Enter로 바꾸고 Esc로 취소합니다. 열려 있지 않은 파일은 바로 저장됩니다." }
                 } else {
-                    div { style: "max-height:320px; overflow:auto;", role: "listbox",
+                    div { style: "max-height:{placement.rows_max:.0}px; overflow:auto;", role: "listbox",
                         if shown.is_empty() && !loading { div { style: "padding:var(--sp3); color:var(--muted);", "일치하는 항목이 없습니다" } }
                         for (row_at, row) in shown.iter().enumerate() {
                             {
@@ -1119,12 +1191,37 @@ mod tests {
     #[test]
     fn fr_l31_13_a_list_opens_under_the_caret() {
         use compose_rust::code::CodeRect;
-        assert_eq!(popup_style(None), SHEET_STYLE, "before the editor reports a caret, the sheet");
-        let style = popup_style(Some(CodeRect::new(300.0, 120.0, 2.0, 22.0)));
-        assert!(style.contains("position:fixed;") && style.contains("min(300px,") && style.contains("min(144px,"), "{style}");
-        assert!(style.contains("calc(100vw - min(440px, calc(100vw - 24px)) - 12px)"), "kept inside the window: {style}");
-        let off = popup_style(Some(CodeRect::new(-40.0, -30.0, 2.0, 22.0)));
-        assert!(off.contains("min(0px,") && off.contains("max(12px,"), "{off}");
+        // The editor pane: 800 x 600 at (200, 100), so its bottom is at 700.
+        let pane = Some(PaneBox { x: 200.0, y: 100.0, width: 800.0, height: 600.0 });
+        let sheet = Placement { style: SHEET_STYLE.to_string(), rows_max: 320.0 };
+        assert_eq!(popup_placement(None, pane, 5), sheet, "before the editor reports a caret, the sheet");
+        assert_eq!(popup_placement(Some(CodeRect::new(300.0, 120.0, 2.0, 22.0)), None, 5), sheet, "no pane box, the sheet");
+
+        // Below: 5 rows (76 + 170 = 246 px) fit under a caret on the first lines.
+        let below = popup_placement(Some(CodeRect::new(300.0, 120.0, 2.0, 22.0)), pane, 5);
+        assert!(below.style.contains("top:144px;") && below.style.contains("left:300px;") && below.style.contains("width:440px;"), "{below:?}");
+        assert_eq!(below.rows_max, 170.0);
+
+        // Above: the caret line ends at 680, 16 px over the pane's bottom; the list ends 2 px over the line.
+        let above = popup_placement(Some(CodeRect::new(900.0, 658.0, 2.0, 22.0)), pane, 5);
+        assert!(above.style.contains("top:auto;") && above.style.contains("bottom:calc(100vh - 656px);"), "{above:?}");
+        assert!(above.style.contains("left:556px;"), "kept inside the pane's right edge: {above:?}");
+        assert_eq!(above.rows_max, 170.0);
+
+        // Clamped: a 200 px pane fits neither side; the side with more room, with the rows cut to it.
+        let short = Some(PaneBox { x: 200.0, y: 100.0, width: 800.0, height: 200.0 });
+        let clamped = popup_placement(Some(CodeRect::new(300.0, 130.0, 2.0, 22.0)), short, 20);
+        let room = 300.0 - 4.0 - 154.0; // the pane's bottom less the margin, less the line's bottom and gap
+        assert!(clamped.style.contains("top:154px;"), "{clamped:?}");
+        assert_eq!(clamped.rows_max, room - 76.0, "the list ends inside the pane, not over the bottom panel");
+        let high = popup_placement(Some(CodeRect::new(300.0, 250.0, 2.0, 22.0)), short, 20);
+        assert!(high.style.contains("bottom:calc(100vh - 248px);"), "{high:?}");
+        assert_eq!(high.rows_max, (248.0 - 104.0) - 76.0);
+
+        // Caret off screen: scrolled above the pane, below it, or out to the side.
+        for caret in [CodeRect::new(300.0, 60.0, 2.0, 22.0), CodeRect::new(300.0, 690.0, 2.0, 22.0), CodeRect::new(-40.0, 300.0, 2.0, 22.0)] {
+            assert_eq!(popup_placement(Some(caret), pane, 5), sheet, "{caret:?}");
+        }
     }
 
     #[test]
@@ -1136,7 +1233,8 @@ mod tests {
         assert!(pane.contains("on_caret_rect:") && pane.contains("editor_language::view::set_caret_rect("), "compose-rust#553");
         let src = include_str!("editor_language.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap()];
-        assert!(production.contains("popup_style(CARET_RECT"), "the list is placed from the caret");
+        assert!(production.contains("popup_placement(CARET_RECT.with(|cell| cell.get()), pane_box()"), "the list is placed from the caret and the pane");
+        assert!(page.contains("editor_language::view::set_pane_mount("), "the pane's box is known");
         for issue in ["553", "554", "555"] {
             assert!(!production.contains(&format!("TODO(compose-rust#{issue}")), "#{issue} is in use");
             assert!(!page.contains(&format!("TODO(compose-rust#{issue}")), "#{issue} is in use");

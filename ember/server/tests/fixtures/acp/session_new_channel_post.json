@@ -1,0 +1,27 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "session/new",
+  "params": {
+    "cwd": "/work/proj",
+    "mcpServers": [
+      {
+        "name": "ember-channels",
+        "command": "/opt/ember/ember-a2a",
+        "args": [
+          "mcp"
+        ],
+        "env": [
+          {
+            "name": "EMBER_URL",
+            "value": "http://127.0.0.1:8740"
+          },
+          {
+            "name": "EMBER_RUNTIME_TOKEN",
+            "value": "<runtime token>"
+          }
+        ]
+      }
+    ]
+  }
+}

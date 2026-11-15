@@ -312,6 +312,23 @@ pub fn trend_days(load: &Load<UsageSummary>, window: usize) -> Vec<(String, u64)
     s.days[start..].iter().map(|d| (d.day.clone(), d.total_tokens)).collect()
 }
 
+/// The day of the trend plot under a pointer at `x` dp from the plot's left edge: the plot is
+/// `width` wide and holds `days` bars side by side with `gap` between, as `home::bar_rects` lays
+/// them out. A pointer over the gap after a bar counts for that bar, so the choice does not
+/// flicker between bars; one outside the plot, or a plot with no day, gives none (FR-L23.1).
+pub fn trend_day_at(x: f32, days: usize, width: f32, gap: f32) -> Option<usize> {
+    if days == 0 || !(0.0..=width).contains(&x) || width <= 0.0 {
+        return None;
+    }
+    let bar_w = ((width - gap * (days as f32 - 1.0)) / days as f32).max(1.0);
+    Some(((x / (bar_w + gap)).floor() as usize).min(days - 1))
+}
+
+/// The line under the plot for the day the pointer is over: its date and its tokens (FR-L23.1).
+pub fn trend_day_line(day: &str, tokens: u64) -> String {
+    format!("{day} 토큰 {} ({UTC_NOTE})", format_compact(tokens))
+}
+
 /// Each day's `cost_usd` in the window, oldest first, aligned with [`trend_days`]; `None` where
 /// the server sent no cost.
 pub fn trend_costs(load: &Load<UsageSummary>, window: usize) -> Vec<Option<f64>> {
@@ -333,6 +350,36 @@ pub fn cost_line_points(costs: &[Option<f64>], centers: &[f32], h: f32) -> Vec<(
         .zip(centers)
         .filter_map(|(c, x)| c.map(|c| (*x, h - (c / top) as f32 * h)))
         .collect()
+}
+
+/// The width in dp of one column of the area under the cost line ([`cost_area_columns`]).
+pub const COST_AREA_STEP: f32 = 2.0;
+/// The area's strength (mockup `.hm-area{fill:var(--ink);opacity:.05}`), as an alpha byte.
+pub const COST_AREA_ALPHA: u32 = 0x0D;
+
+/// The area under the cost line (mockup `.hm-area`, #849) as columns `step` dp wide: the
+/// toolkit's `DrawList` has no filled path, so the area is drawn as vertical strokes from the
+/// line down to the baseline. Each entry is a column's centre `x` and the line's `y` there, from
+/// the first costed day to the last (the mockup's path runs along the line and back along the
+/// baseline). Empty for fewer than two points: one costed day has a point and no area.
+pub fn cost_area_columns(points: &[(f32, f32)], step: f32) -> Vec<(f32, f32)> {
+    let mut out = Vec::new();
+    if step <= 0.0 {
+        return out;
+    }
+    for pair in points.windows(2) {
+        let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
+        if x1 <= x0 {
+            continue;
+        }
+        // Column centres half a step in, so the columns tile the span between the two points.
+        let mut x = x0 + step / 2.0;
+        while x < x1 {
+            out.push((x, y0 + (y1 - y0) * (x - x0) / (x1 - x0)));
+            x += step;
+        }
+    }
+    out
 }
 
 /// The line under the Home trend: the window total, or why there is none.
@@ -549,6 +596,24 @@ mod tests {
         // The highest cost sits at 1/1.15 of the height, measured from the bottom.
         assert!((pts[1].1 - 15.0).abs() < 0.01, "{pts:?}");
         assert!(pts[0].1 > pts[1].1);
+    }
+
+    #[test]
+    fn fr_l23_cost_area_fills_under_the_line_between_the_costed_days() {
+        // #849: `.hm-area`. Two points 10 apart at a step of 2 give five columns that tile the
+        // span, each as high as the line is there.
+        let cols = cost_area_columns(&[(10.0, 100.0), (20.0, 50.0)], 2.0);
+        assert_eq!(cols.iter().map(|c| c.0).collect::<Vec<_>>(), vec![11.0, 13.0, 15.0, 17.0, 19.0]);
+        assert!((cols[0].1 - 95.0).abs() < 0.01 && (cols[4].1 - 55.0).abs() < 0.01, "{cols:?}");
+        assert!(cols.windows(2).all(|w| w[1].1 < w[0].1), "the line rises, so the columns grow");
+        // One costed day is a point without an area, and no cost is nothing at all.
+        assert!(cost_area_columns(&[(10.0, 100.0)], 2.0).is_empty());
+        assert!(cost_area_columns(&[], 2.0).is_empty());
+        assert!(cost_area_columns(&[(10.0, 1.0), (20.0, 2.0)], 0.0).is_empty());
+        // A gap between costed days is bridged, as the line itself is.
+        let three = cost_area_columns(&[(0.0, 10.0), (4.0, 10.0), (8.0, 10.0)], 2.0);
+        assert_eq!(three.iter().map(|c| c.0).collect::<Vec<_>>(), vec![1.0, 3.0, 5.0, 7.0]);
+        assert_eq!((COST_AREA_STEP, COST_AREA_ALPHA), (2.0, 0x0D));
     }
 
     #[test]
@@ -803,5 +868,21 @@ mod tests {
     fn fr_u7_legend_dot_matches_the_bar_hatch() {
         // The dot and the bars read the same step and alpha (FR-L23, #509 review).
         assert_eq!(legend_hatch_style(), (5.0, 0xff));
+    }
+    #[test]
+    fn fr_l23_1_the_trend_plot_names_the_day_under_the_pointer() {
+        // 7 bars in 400 dp, 6 apart: each bar is (400 - 36) / 7 = 52 wide, a step of 58.
+        assert_eq!(trend_day_at(0.0, 7, 400.0, 6.0), Some(0));
+        assert_eq!(trend_day_at(51.9, 7, 400.0, 6.0), Some(0));
+        assert_eq!(trend_day_at(55.0, 7, 400.0, 6.0), Some(0), "the gap after a bar is that bar's");
+        assert_eq!(trend_day_at(58.0, 7, 400.0, 6.0), Some(1));
+        assert_eq!(trend_day_at(399.0, 7, 400.0, 6.0), Some(6));
+        assert_eq!(trend_day_at(400.0, 7, 400.0, 6.0), Some(6), "the right edge is the last day");
+        assert_eq!(trend_day_at(-1.0, 7, 400.0, 6.0), None);
+        assert_eq!(trend_day_at(401.0, 7, 400.0, 6.0), None);
+        assert_eq!(trend_day_at(10.0, 0, 400.0, 6.0), None);
+        assert_eq!(trend_day_at(10.0, 7, 0.0, 6.0), None);
+        assert_eq!(trend_day_line("11-14", 1_234), format!("11-14 토큰 {} ({UTC_NOTE})", format_compact(1_234)));
+        assert!(trend_day_line("11-14", 0).ends_with("니다") || trend_day_line("11-14", 0).contains(UTC_NOTE));
     }
 }

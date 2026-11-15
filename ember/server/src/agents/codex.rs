@@ -40,7 +40,9 @@
 //! Server → client requests mapped to `ApprovalRequested` and answered by [`AgentRun::answer`]:
 //! `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`,
 //! `item/permissions/requestApproval`, and the legacy `execCommandApproval` / `applyPatchApproval`.
-//! Any other server request gets a JSON-RPC error so Codex never waits on us.
+//! A `mcpServer/elicitation/request` from `ember-channels` with no fields to fill (the approval of
+//! a `channel_post` call, FR-T12) becomes an allow-once card; its shape is from the 0.155.1 schema,
+//! not recorded on 0.167.0. Any other server request gets a JSON-RPC error so Codex never waits on us.
 //!
 //! # Extra MCP servers
 //!
@@ -51,6 +53,14 @@
 //! user's `config.toml`, so the user's own servers stay. (`thread/start`/`thread/resume` also take
 //! a `config` map, but whether it can add MCP servers to an already-running app-server is
 //! unverified, so the process-level overrides are used.)
+//!
+//! An exact allow rule for a tool of such a server ([`StartRequest::allowed_tools`], FR-T12: the
+//! `channel_post` tool of `ember-channels`) becomes
+//! `-c mcp_servers.<name>.tools.<tool>.approval_mode="approve"`. Measured on codex-cli 0.167.0
+//! without a model turn: the overrides resolve to one stdio server whose `env` is null, the child
+//! started at `thread/start` receives the variables named in `env_vars` and no unlisted one, and
+//! `--strict-config` accepts the approval key (fixtures `tests/fixtures/codex/mcp_*_0.167.0.json`).
+//! A real turn calling the tool is not measured.
 //!
 //! Codex's own settings (approval policy, sandbox, model, config.toml) apply as they do natively
 //! (FR-A4); the adapter only overrides what the session asks for (model, cwd) or what it was built
@@ -227,7 +237,7 @@ impl AgentAdapter for CodexAdapter {
             stdin: tokio::sync::Mutex::new(Some(stdin)),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicI64::new(0),
-            mapper: Mutex::new(Mapper::default()),
+            mapper: Mutex::new(Mapper { channel_unverified: channel_post_unverified(&req), ..Mapper::default() }),
             closing: AtomicBool::new(false),
         });
 
@@ -322,7 +332,14 @@ pub fn proxy_config_args(base_url: &str) -> Vec<String> {
 /// possibly secrets) is never written here: only its variable names, as
 /// `mcp_servers.<name>.env_vars=[…]`, which makes Codex forward those variables from its own
 /// process environment ([`mcp_process_env`]) to the MCP server.
-fn app_server_args(req: &StartRequest) -> Vec<String> {
+///
+/// An allow rule in [`StartRequest::allowed_tools`] (FR-T12) becomes
+/// `mcp_servers.<name>.tools.<tool>.approval_mode="approve"` ([`approved_mcp_tools`]). The key and
+/// its values `auto`, `prompt`, `writes`, `approve` are from the configuration reference and were
+/// accepted by `codex app-server --strict-config --print-startup-config` on codex-cli 0.167.0;
+/// that a real turn then calls the tool without an `mcpServer/elicitation/request` is not
+/// measured.
+pub(crate) fn app_server_args(req: &StartRequest) -> Vec<String> {
     let mut args = vec!["app-server".to_string()];
     if let Some((_, base)) = req.env.iter().find(|(k, _)| k == PROXY_BASE_ENV) {
         args.extend(proxy_config_args(base));
@@ -345,13 +362,43 @@ fn app_server_args(req: &StartRequest) -> Vec<String> {
             args.push(format!("{key}.env_vars=[{names}]"));
         }
     }
+    for (server, tool) in approved_mcp_tools(req, &skipped) {
+        args.push("-c".into());
+        args.push(format!("mcp_servers.{server}.tools.{tool}.approval_mode=\"approve\""));
+    }
     args
+}
+
+/// The `(server, tool)` pairs Codex may call without asking: every entry of
+/// [`StartRequest::allowed_tools`] of the form `mcp__<server>__<tool>` whose server is one this
+/// request registers (and did not skip). A rule for any other server is dropped, so the request
+/// can never loosen a server from the user's own `config.toml`, and there is no server-wide
+/// default. Both names must be TOML bare keys (letters, digits, `-`, `_`), because they are
+/// written into a dotted key.
+fn approved_mcp_tools<'a>(req: &'a StartRequest, skipped: &[String]) -> Vec<(&'a str, &'a str)> {
+    fn bare(s: &str) -> bool {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    }
+    let mut out: Vec<(&'a str, &'a str)> = Vec::new();
+    for rule in &req.allowed_tools {
+        let Some(rest) = rule.strip_prefix("mcp__") else { continue };
+        for m in req.mcp_servers.iter().filter(|m| !skipped.contains(&m.name)) {
+            let Some(tool) = rest.strip_prefix(m.name.as_str()).and_then(|t| t.strip_prefix("__")) else {
+                continue;
+            };
+            let pair = (m.name.as_str(), tool);
+            if bare(pair.0) && bare(pair.1) && !out.contains(&pair) {
+                out.push(pair);
+            }
+        }
+    }
+    out
 }
 
 /// The app-server process environment carrying the MCP servers' variables, and the names of
 /// servers left out because one of their variables is already set to a different value by an
 /// earlier server (one process environment cannot hold both).
-fn mcp_process_env(req: &StartRequest) -> (Vec<(String, String)>, Vec<String>) {
+pub(crate) fn mcp_process_env(req: &StartRequest) -> (Vec<(String, String)>, Vec<String>) {
     let mut env: Vec<(String, String)> = Vec::new();
     let mut skipped = Vec::new();
     for m in &req.mcp_servers {
@@ -652,6 +699,23 @@ enum ApprovalKind {
     Permissions,
     /// Legacy `execCommandApproval` / `applyPatchApproval` (answered with `ReviewDecision`).
     Legacy,
+    /// `mcpServer/elicitation/request` of the `ember-channels` server asking to run
+    /// `channel_post` (FR-T12), answered `{action, content}`.
+    Elicitation,
+}
+
+/// The card note of a `channel_post` call Codex asks about because a configuration layer the name
+/// check does not read is present (FR-T12).
+pub const CHANNEL_UNVERIFIED_NOTE: &str =
+    "서버 이름을 확인하지 못했습니다. 이 요청이 Ember 채널 도구에서 온 것인지 확인한 뒤 허용해 주세요.";
+/// The same in English, in the event input for logs.
+pub const CHANNEL_UNVERIFIED_REASON: &str = "unverified server name: a Codex configuration layer the name check does not read is present, so channel_post was not auto-approved";
+
+/// Whether `req` registers `ember-channels` without the `channel_post` allow rule: the A2A hook
+/// left the rule out because the server name is unverified (FR-T12), so Codex asks.
+fn channel_post_unverified(req: &StartRequest) -> bool {
+    req.mcp_servers.iter().any(|m| m.name == crate::a2a::CHANNEL_MCP_SERVER)
+        && !req.allowed_tools.iter().any(|t| t == crate::a2a::CHANNEL_POST_TOOL)
 }
 
 #[derive(Debug, Clone)]
@@ -682,6 +746,9 @@ struct Mapper {
     /// `RateLimited` was already emitted for the current exhaustion.
     limit_resets: Vec<i64>,
     limit_reported: bool,
+    /// The session's `channel_post` call is not auto-approved because its server name is
+    /// unverified ([`channel_post_unverified`]): its card carries [`CHANNEL_UNVERIFIED_NOTE`].
+    channel_unverified: bool,
 }
 
 impl Mapper {
@@ -888,6 +955,41 @@ impl Mapper {
                 add_reason(&mut input, p);
                 (ApprovalKind::Legacy, id, "file_change".to_string(), input)
             }
+            // Only the channel tool's approval (an elicitation with no fields to fill) becomes a
+            // card; any other elicitation is refused as before.
+            "mcpServer/elicitation/request"
+                if str_at(p, "/serverName") == Some(crate::a2a::CHANNEL_MCP_SERVER)
+                    && p.pointer("/requestedSchema/properties")
+                        .and_then(Value::as_object)
+                        .is_some_and(|m| m.is_empty()) =>
+            {
+                let mut input = json!({
+                    "server": crate::a2a::CHANNEL_MCP_SERVER,
+                    "message": str_at(p, "/message").unwrap_or_default(),
+                    // No per-session answer exists, and the call must not be remembered.
+                    "allow_always": false,
+                });
+                if self.channel_unverified {
+                    input["note"] = json!(CHANNEL_UNVERIFIED_NOTE);
+                    input["log_reason"] = json!(CHANNEL_UNVERIFIED_REASON);
+                }
+                let mut approval_id = format!("elicitation#{rpc_id}");
+                if self.approvals.contains_key(&approval_id) {
+                    approval_id = format!("{approval_id}#{}", self.approvals.len());
+                }
+                self.approvals.insert(
+                    approval_id.clone(),
+                    PendingApproval { rpc_id, kind: ApprovalKind::Elicitation, params: p.clone() },
+                );
+                // `needs_person`: approve-everything does not answer it, since Codex asks only when
+                // the auto-approval was left out (the server name is unverified).
+                return Ok(vec![AgentEvent::ApprovalRequested {
+                    approval_id,
+                    tool: crate::a2a::CHANNEL_POST_TOOL.to_string(),
+                    input,
+                    needs_person: true,
+                }]);
+            }
             other => return Err(format!("ember does not handle {other}")),
         };
         let mut approval_id = approval_id.to_string();
@@ -934,6 +1036,11 @@ fn approval_response(a: &PendingApproval, decision: ApprovalDecision) -> Value {
                 let scope = if allow == ApprovalDecision::AllowAlways { "session" } else { "turn" };
                 json!({ "permissions": strip_nulls(&a.params["permissions"]), "scope": scope })
             }
+        },
+        // Elicitation has no per-session answer: always counts as once.
+        ApprovalKind::Elicitation => match decision {
+            ApprovalDecision::AllowOnce | ApprovalDecision::AllowAlways => json!({ "action": "accept", "content": {} }),
+            ApprovalDecision::Deny => json!({ "action": "decline" }),
         },
         ApprovalKind::Legacy => match decision {
             ApprovalDecision::AllowOnce => json!({ "decision": "approved" }),
@@ -1449,5 +1556,188 @@ mod tests {
     fn version_is_parsed() {
         assert_eq!(parse_version("codex-cli 0.155.1\n").as_deref(), Some("0.155.1"));
         assert_eq!(parse_version(""), None);
+    }
+
+    // ---- FR-T12 (#380 c): the `channel_post` MCP tool for a Codex session ----
+
+    /// The request as the A2A start-config hook leaves it for a Codex session.
+    fn channel_request() -> StartRequest {
+        StartRequest {
+            mcp_servers: vec![crate::agents::McpServer {
+                name: "ember-channels".into(),
+                command: "/opt/ember/ember-a2a".into(),
+                args: vec!["mcp".into()],
+                startup_timeout_secs: Some(10),
+                env: vec![
+                    ("EMBER_URL".into(), "http://127.0.0.1:8740".into()),
+                    ("EMBER_RUNTIME_TOKEN".into(), "tok-SECRET".into()),
+                ],
+            }],
+            allowed_tools: vec!["mcp__ember-channels__channel_post".into()],
+            ..Default::default()
+        }
+    }
+
+    fn approvals(req: &StartRequest) -> Vec<String> {
+        app_server_args(req).into_iter().filter(|a| a.contains("approval_mode")).collect()
+    }
+
+    /// Recorded on codex-cli 0.167.0 in an isolated `CODEX_HOME`, without a model turn:
+    /// `codex -c … mcp get ember-channels --json` with exactly the overrides below.
+    const MCP_GET: &str = include_str!("../../tests/fixtures/codex/mcp_get_ember_channels_0.167.0.json");
+    /// Recorded on codex-cli 0.167.0: the reply to `mcpServerStatus/list` after `thread/start`,
+    /// with a stand-in MCP server that lists the tool `channel_post`.
+    const MCP_STATUS: &str = include_str!("../../tests/fixtures/codex/mcp_server_status_0.167.0.json");
+
+    #[test]
+    fn fr_t12_codex_overrides_are_the_ones_the_recorded_cli_resolved_to_one_stdio_server() {
+        let recorded: Value = serde_json::from_str(MCP_GET).unwrap();
+        let t = &recorded["transport"];
+        assert_eq!(recorded["name"], "ember-channels");
+        assert_eq!(recorded["enabled"], true);
+        assert_eq!(t["type"], "stdio");
+        assert!(t["env"].is_null(), "the configuration holds no value, only the names in env_vars");
+        let args = app_server_args(&channel_request());
+        let has = |a: String| assert!(args.contains(&a), "{a} not in {args:?}");
+        // `Value`'s display of a string is the quoted form, which is also the TOML basic string here.
+        has(format!("mcp_servers.ember-channels.command={}", t["command"]));
+        has(format!("mcp_servers.ember-channels.args={}", t["args"]));
+        let names: Vec<String> = t["env_vars"].as_array().unwrap().iter().map(Value::to_string).collect();
+        assert_eq!(names, ["\"EMBER_URL\"", "\"EMBER_RUNTIME_TOKEN\""]);
+        has(format!("mcp_servers.ember-channels.env_vars=[{}]", names.join(", ")));
+        assert_eq!(recorded["startup_timeout_sec"], 10.0);
+        has("mcp_servers.ember-channels.startup_timeout_sec=10".to_string());
+    }
+
+    #[test]
+    fn fr_t12_codex_token_is_in_the_process_environment_and_never_an_argument() {
+        let req = channel_request();
+        let args = app_server_args(&req);
+        assert!(!args.join("\n").contains("SECRET"), "{args:?}");
+        assert!(!args.join("\n").contains("127.0.0.1"), "values stay out of the arguments: {args:?}");
+        let (env, skipped) = mcp_process_env(&req);
+        assert!(skipped.is_empty());
+        assert_eq!(
+            env,
+            [
+                ("EMBER_URL".to_string(), "http://127.0.0.1:8740".to_string()),
+                ("EMBER_RUNTIME_TOKEN".to_string(), "tok-SECRET".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn fr_t12_codex_approval_override_names_the_one_tool_the_recorded_server_lists() {
+        let recorded: Value = serde_json::from_str(MCP_STATUS).unwrap();
+        let server = &recorded["result"]["data"][0];
+        let tools: Vec<&str> = server["tools"].as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(tools, ["channel_post"]);
+        let rule = format!("mcp__{}__{}", server["name"].as_str().unwrap(), tools[0]);
+        assert_eq!(rule, crate::a2a::CHANNEL_POST_TOOL);
+        assert_eq!(
+            approvals(&channel_request()),
+            [format!(
+                "mcp_servers.{}.tools.{}.approval_mode=\"approve\"",
+                server["name"].as_str().unwrap(),
+                tools[0]
+            )]
+        );
+    }
+
+    #[test]
+    fn fr_t12_codex_allow_rule_is_one_exact_tool_of_a_server_this_request_registers() {
+        let mut req = channel_request();
+        assert_eq!(approvals(&req), ["mcp_servers.ember-channels.tools.channel_post.approval_mode=\"approve\""]);
+        // Never a server-wide default.
+        assert!(!app_server_args(&req).iter().any(|a| a.contains("default_tools_approval_mode")));
+        // No rule, no override.
+        req.allowed_tools.clear();
+        assert!(approvals(&req).is_empty());
+        for bad in [
+            "mcp__other__channel_post",
+            "mcp__ember-channels__*",
+            "mcp__ember-channels__",
+            "mcp__ember-channels__a b",
+            "mcp__ember-channels__a.b",
+            "mcp__ember-channels__a\"b",
+            "mcp__ember-channels",
+            "ember-channels__channel_post",
+            "mcp__*",
+            "Bash",
+        ] {
+            req.allowed_tools = vec![bad.to_string()];
+            assert!(approvals(&req).is_empty(), "{bad}");
+        }
+        // The same rule twice is one override.
+        req.allowed_tools = vec!["mcp__ember-channels__channel_post".to_string(); 2];
+        assert_eq!(approvals(&req).len(), 1);
+        // A server left out (its variable clashes with an earlier server's) gets none either.
+        let mut clash = channel_request();
+        let mut first = clash.mcp_servers[0].clone();
+        first.name = "first".into();
+        first.env = vec![("EMBER_URL".into(), "http://other".into())];
+        clash.mcp_servers.insert(0, first);
+        assert!(approvals(&clash).is_empty());
+        assert!(!app_server_args(&clash).iter().any(|a| a.starts_with("mcp_servers.ember-channels.")));
+    }
+
+    /// The elicitation Codex sends for an MCP tool call it was not told to approve, in the shape
+    /// of `McpServerElicitationRequestParams` (codex-cli 0.155.1 schema; not recorded on 0.167.0).
+    fn channel_elicitation(server: &str) -> Value {
+        json!({
+            "threadId": "th", "turnId": "tu", "serverName": server,
+            "mode": "form", "message": "Allow the ember-channels MCP server to run tool \"channel_post\"?",
+            "requestedSchema": { "type": "object", "properties": {} },
+            "_meta": { "codex_approval_kind": "mcp_tool_call" },
+        })
+    }
+
+    #[test]
+    fn fr_t12_codex_layer_session_is_marked_unverified_only_without_the_rule() {
+        let mut req = channel_request();
+        assert!(!channel_post_unverified(&req), "the rule is there: Codex does not ask");
+        req.allowed_tools.clear();
+        assert!(channel_post_unverified(&req));
+        assert!(approvals(&req).is_empty(), "no auto-approve argument");
+        req.mcp_servers.clear();
+        assert!(!channel_post_unverified(&req), "no server, nothing to ask about");
+    }
+
+    #[test]
+    fn fr_t12_codex_layer_channel_elicitation_becomes_an_allow_once_card_with_the_note() {
+        let mut m = Mapper { channel_unverified: true, ..Mapper::default() };
+        let out = m.on_server_request(json!(7), "mcpServer/elicitation/request", &channel_elicitation("ember-channels")).unwrap();
+        let [AgentEvent::ApprovalRequested { approval_id, tool, input, needs_person }] = out.as_slice() else {
+            panic!("{out:?}");
+        };
+        assert_eq!(tool, crate::a2a::CHANNEL_POST_TOOL);
+        assert!(*needs_person, "approve-everything does not answer it");
+        assert_eq!(input["allow_always"], json!(false));
+        assert_eq!(input["note"], json!(CHANNEL_UNVERIFIED_NOTE));
+        assert_eq!(input["log_reason"], json!(CHANNEL_UNVERIFIED_REASON));
+        assert_eq!(input["server"], json!("ember-channels"));
+        let pending = m.approvals.get(approval_id.as_str()).unwrap().clone();
+        assert_eq!(pending.kind, ApprovalKind::Elicitation);
+        assert_eq!(approval_response(&pending, ApprovalDecision::AllowOnce), json!({"action": "accept", "content": {}}));
+        assert_eq!(
+            approval_response(&pending, ApprovalDecision::AllowAlways),
+            json!({"action": "accept", "content": {}}),
+            "there is no per-session answer: allow once"
+        );
+        assert_eq!(approval_response(&pending, ApprovalDecision::Deny), json!({"action": "decline"}));
+
+        // A session with the rule that is asked anyway gets the card without the note.
+        let mut m = Mapper::default();
+        let out = m.on_server_request(json!(8), "mcpServer/elicitation/request", &channel_elicitation("ember-channels")).unwrap();
+        let [AgentEvent::ApprovalRequested { input, .. }] = out.as_slice() else { panic!() };
+        assert!(input.get("note").is_none());
+        assert_eq!(input["allow_always"], json!(false));
+        // Another server's elicitation is still refused.
+        assert!(m.on_server_request(json!(9), "mcpServer/elicitation/request", &channel_elicitation("other")).is_err());
+        // A form that asks for values is not an approval.
+        let mut form = channel_elicitation("ember-channels");
+        form["requestedSchema"]["properties"] = json!({ "x": { "type": "string" } });
+        assert!(m.on_server_request(json!(10), "mcpServer/elicitation/request", &form).is_err());
+        assert!(!CHANNEL_UNVERIFIED_NOTE.contains('\u{2014}'));
     }
 }

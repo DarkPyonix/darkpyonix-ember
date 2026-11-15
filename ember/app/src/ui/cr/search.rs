@@ -19,7 +19,7 @@ use compose_rust::{Alignment, ColorRole, IconRole, Paint, SpaceRole, TextOverflo
 
 use ember_client::wire::SearchHit;
 
-use super::components::{AppButton, ButtonKind, EmberField, FieldOptions, Label, Txt};
+use super::components::{AppButton, ButtonKind, Label, SearchField, Txt};
 use super::theme::*;
 use super::launcher::{ConnectionBanner, SessionRowView};
 use crate::model::{self, SearchResult};
@@ -154,12 +154,8 @@ pub fn SearchScreen() {
                     );
                     Label("전체 검색", Fs::Lg, Weight::Semibold, None, Some(1));
                 });
-            EmberField(FieldOptions {
-                fill_max_width: true,
-                placeholder: "세션 검색".to_string(),
-                on_value_change: Some(Box::new(on_change)),
-                ..Default::default()
-            });
+            // `.searchbox` (FR-L10.1, #878): the pill with the magnifier and the 16 px inset.
+            SearchField("세션 검색", H_BTN, on_change);
             if let Some(e) = &error_text {
                 Txt(
                     &format!("메시지 검색에 실패했습니다: {e}. 제목 일치만 보여줍니다."),
@@ -240,6 +236,14 @@ mod tests {
     fn fr_l9_an_answer_for_an_older_keystroke_is_superseded() {
         assert!(superseded(3, 2));
         assert!(!superseded(3, 3));
+    }
+
+    #[test]
+    fn fr_l10_1_search_screen_uses_the_search_pill() {
+        let src = include_str!("search.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(production.contains("SearchField(\"세션 검색\", H_BTN, on_change);"));
+        assert!(!production.contains("EmberField("), "no plain field on the search screen");
     }
 
     #[test]

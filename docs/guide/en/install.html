@@ -82,6 +82,15 @@ tar -xzf ember-server-v0.1.0-macos-arm64.tar.gz</code></pre>
     <p>Each archive holds the programs described below (<code>ember-server</code>, <code>ember-exec</code> and <code>ember-a2a</code>; <code>ember-node</code> and <code>ember-term</code>); keep each set in one directory. macOS binaries and apps are ad hoc signed only (no Apple account, no notarization), so Gatekeeper blocks the first launch. Clear the quarantine flag with <code>xattr -d com.apple.quarantine</code> on the extracted files. For the <code>.app</code>, run <code>xattr -dr com.apple.quarantine Ember.app</code>, or right-click and choose Open. The Windows <code>.msix</code> is unsigned: enable developer mode or re-sign it with a certificate you trust.</p>
     <p>The client job in the release workflow packages macOS <code>.app</code> and <code>.dmg</code>, Windows <code>.zip</code> and <code>.msix</code>, and Linux <code>.AppImage</code> once enabled (<code>EMBER_CLIENT_RELEASE=true</code>); until the first tag is published, build the client from source as shown in <a href="#client">The client</a>.</p>
 
+    <h3 id="client-update">Installing and updating the client</h3>
+    <p>Installer packages that update themselves <span class="pill planned">Planned</span> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/880">#880</a>): the release job packs the client with Velopack, but no release carries these packages yet. Once one does, install it once per computer; after that the app checks for a new version by itself.</p>
+    <ul>
+      <li><strong>macOS (Apple silicon).</strong> Open <code>Ember-&lt;version&gt;.dmg</code> and drag Ember to Applications. The app is ad hoc signed and not notarized, so the first launch is blocked: right-click Ember and choose Open, or run <code>xattr -dr com.apple.quarantine /Applications/Ember.app</code>.</li>
+      <li><strong>Windows (x64).</strong> Run <code>dev.darkpyonix.ember-win-x64-Setup.exe</code>. It is unsigned, so SmartScreen asks first: choose More info, then Run anyway. It installs for the current user without administrator rights.</li>
+      <li><strong>Linux (x86_64, aarch64).</strong> Download <code>dev.darkpyonix.ember-linux-x64.AppImage</code> (or <code>-linux-arm64</code>), run <code>chmod +x</code> on it and start it. Keep it where you can write: the update replaces this file.</li>
+    </ul>
+    <p>At each start the app looks for a newer release on GitHub Releases and downloads it in the background. <strong>설정 → 업데이트</strong> shows the running version and where the check stands, with 업데이트 확인 to check again. When a download is ready, 업데이트 후 다시 시작 saves your preferences, applies the update and starts the new version; nothing is applied without that click. A client built with cargo, the Windows <code>.msix</code> and the older <code>.app.zip</code>, <code>.zip</code> and <code>.AppImage</code> files are not Velopack installs: 설정 says so, and they update only by installing a newer file by hand. <code>EMBER_UPDATE_FEED</code> points the check at another URL or a local folder that holds a feed.</p>
+
     <h2 id="checkout">Get the code</h2>
     <p>
       Work lands on the <code>develop</code> branch; <code>main</code> does not carry the code yet.
@@ -239,6 +248,7 @@ cargo build --release --locked --features mount-fuse</code></pre>
           <tr><td><code>EMBER_HUB_URL</code></td><td><code>https://darkpyonix.dev</code></td><td>The hub; <code>off</code> disables it. Used only with <code>EMBER_TRANSPORT=1</code>. The default moves to the hub's own subdomain (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>).</td></tr>
           <tr><td><code>EMBER_RELAY_URL</code></td><td>the hub's relay</td><td>Relay server(s) for the transport.</td></tr>
           <tr><td><code>EMBER_TRANSPORT_LISTEN</code></td><td>a random port</td><td>A fixed <code>ip:port</code> for the transport, for example <code>0.0.0.0:7444</code>, so a device's saved address survives a server restart. The server then prints <code>ember server device address: &lt;peer id&gt;@&lt;host&gt;:&lt;port&gt;</code> to paste into the app. Only allowed device keys get in, so <code>0.0.0.0</code> is fine. A bad value stops the start. Not yet compiled (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/863">#863</a>).</td></tr>
+          <tr><td><code>EMBER_SERVER_RELAY_PORT</code></td><td><code>7443</code></td><td>The port of the server's own relay (TCP) and address observer (UDP), on with <code>EMBER_TRANSPORT=1</code>. It is the one port to forward for a device outside your network: see <a href="#server-outside">A device outside your network</a>. <code>EMBER_SERVER_RELAY=off</code> turns both off.</td></tr>
           <tr><td><code>EMBER_MOUNT</code></td><td><code>auto</code></td><td><code>nfs</code>, <code>fuse</code> or <code>off</code>; <code>auto</code> uses whichever feature the build has.</td></tr>
           <tr><td><code>EMBER_A2A</code></td><td>on</td><td><code>0</code> starts agent-to-agent messaging switched off.</td></tr>
           <tr><td><code>EMBER_CHROME_BIN</code></td><td>found on the machine</td><td>The browser for <a href="browser.html">remote browsing</a>.</td></tr>
@@ -249,6 +259,40 @@ cargo build --release --locked --features mount-fuse</code></pre>
     <p>
       The full list, with every variable the server reads, is the comment at the top of
       <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/ember/server/src/main.rs"><code>ember/server/src/main.rs</code></a>.
+    </p>
+
+    <h3 id="server-outside">A device outside your network</h3>
+    <p>
+      A phone on mobile data reaches the server through the server's own relay. No hosted relay is
+      involved, so the server's computer must be reachable on one TCP port. This is not yet
+      compiled or run on a real phone (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/898">#898</a>).
+    </p>
+    <ol>
+      <li>Start the server with <code>EMBER_TRANSPORT=1</code>. It prints
+        <code>ember server device address: &lt;peer id&gt; relay letify://&lt;peer id&gt;@&lt;host&gt;:7443</code>.</li>
+      <li>If the server is behind a router, forward <strong>TCP 7443</strong> to the server's computer.
+        That is the only port to forward. <code>EMBER_TRANSPORT_LISTEN</code> is not needed for this.</li>
+      <li>Where the line shows <code>&lt;host&gt;</code>, replace it with the address the phone can
+        reach: your public IP address or a DNS name that points to it. The server cannot know that name.</li>
+      <li>Allow the phone on the server with <code>ember-server owner devices add &lt;peer id of the phone&gt; phone</code>,
+        then paste the line into the app's server address field and restart the app.</li>
+    </ol>
+    <p>
+      Only device keys you allowed get through the relay; anything else is closed without an answer.
+      The server keeps a waiting place at the relay for up to 48 allowed devices.
+    </p>
+    <p>
+      <strong>Not solved:</strong> a server whose network gives it no port you can forward, for
+      example a mobile or shared connection behind carrier-grade NAT. A device outside that network
+      then has no path to the server. Put the server on a network with a public address (IPv6
+      counts when the phone has IPv6 too) or reach it over a VPN of your own.
+    </p>
+    <p>
+      <strong>Known limit:</strong> the relay accepts a small number of connections that have not
+      yet proved who they are (64 in total, 4 per address). Someone who keeps opening connections
+      from about 16 addresses can fill it, and a device that reaches the server only through the
+      relay cannot connect while that lasts. Devices on your own network and devices with a direct
+      address are not affected. A stricter limit per source is planned (issue #920).
     </p>
 
     <h3 id="server-data">What it stores</h3>

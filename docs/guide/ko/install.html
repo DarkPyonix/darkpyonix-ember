@@ -83,6 +83,15 @@ tar -xzf ember-server-v0.1.0-macos-arm64.tar.gz</code></pre>
     <p>각 압축 파일에는 아래에서 설명하는 프로그램(<code>ember-server</code>, <code>ember-exec</code>, <code>ember-a2a</code>와 <code>ember-node</code>, <code>ember-term</code>)이 들어 있습니다. 한 묶음은 한 디렉터리에 두십시오. macOS 바이너리와 앱은 임시(ad hoc) 서명만 되어 있고 공증은 하지 않으므로(Apple 계정 없음) Gatekeeper가 첫 실행을 막습니다. 풀어낸 파일에는 <code>xattr -d com.apple.quarantine</code>을, <code>.app</code>에는 <code>xattr -dr com.apple.quarantine Ember.app</code>을 실행해 격리 표시를 지우거나, 우클릭 후 열기를 고릅니다. Windows <code>.msix</code>는 서명되어 있지 않으므로 개발자 모드를 켜거나 신뢰하는 인증서로 다시 서명합니다.</p>
     <p>릴리스 워크플로의 클라이언트 작업은 활성화되면(<code>EMBER_CLIENT_RELEASE=true</code>) macOS <code>.app</code>과 <code>.dmg</code>, Windows <code>.zip</code>과 <code>.msix</code>, Linux <code>.AppImage</code>를 함께 묶습니다. 첫 태그 릴리스가 올라오기 전까지는 <a href="#client">클라이언트</a>에 나온 대로 소스에서 빌드하십시오.</p>
 
+    <h3 id="client-update">클라이언트 설치와 업데이트</h3>
+    <p>스스로 업데이트하는 설치 패키지 <span class="pill planned">계획</span> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/880">#880</a>): 릴리스 작업이 Velopack으로 클라이언트를 묶지만, 아직 이 패키지를 담은 릴리스는 없습니다. 릴리스가 나오면 컴퓨터마다 한 번 설치하고, 그 뒤로는 앱이 새 버전을 스스로 확인합니다.</p>
+    <ul>
+      <li><strong>macOS (Apple silicon).</strong> <code>Ember-&lt;버전&gt;.dmg</code>를 열고 Ember를 응용 프로그램 폴더로 끌어 놓습니다. 앱은 임시(ad hoc) 서명만 되어 있고 공증되지 않았으므로 첫 실행이 막힙니다. Ember를 우클릭해 열기를 고르거나 <code>xattr -dr com.apple.quarantine /Applications/Ember.app</code>을 실행합니다.</li>
+      <li><strong>Windows (x64).</strong> <code>dev.darkpyonix.ember-win-x64-Setup.exe</code>를 실행합니다. 서명되어 있지 않아 SmartScreen이 먼저 묻습니다. 추가 정보를 누른 뒤 실행을 고릅니다. 관리자 권한 없이 현재 사용자에게 설치됩니다.</li>
+      <li><strong>Linux (x86_64, aarch64).</strong> <code>dev.darkpyonix.ember-linux-x64.AppImage</code>(또는 <code>-linux-arm64</code>)를 받아 <code>chmod +x</code>로 실행 권한을 주고 실행합니다. 업데이트가 이 파일을 바꾸므로 쓰기 권한이 있는 곳에 둡니다.</li>
+    </ul>
+    <p>앱은 시작할 때마다 GitHub Releases에서 새 릴리스를 찾고, 있으면 백그라운드에서 내려받습니다. <strong>설정 → 업데이트</strong>에 현재 버전과 확인 상태가 나오고, 업데이트 확인으로 다시 확인할 수 있습니다. 내려받기가 끝나면 업데이트 후 다시 시작이 설정을 저장하고 업데이트를 적용한 뒤 새 버전을 시작합니다. 이 버튼을 누르기 전에는 아무것도 적용하지 않습니다. cargo로 빌드한 클라이언트, Windows <code>.msix</code>, 기존 <code>.app.zip</code>, <code>.zip</code>, <code>.AppImage</code> 파일은 Velopack 설치가 아니므로 설정에 그렇게 표시되고, 새 파일을 직접 설치해야만 업데이트됩니다. <code>EMBER_UPDATE_FEED</code>로 다른 URL이나 피드가 든 로컬 폴더를 확인 대상으로 지정할 수 있습니다.</p>
+
     <h2 id="checkout">코드 받기</h2>
     <p>
       작업은 <code>develop</code> 브랜치에 들어갑니다. <code>main</code> 에는 아직 코드가 없습니다.
@@ -233,6 +242,7 @@ cargo build --release --locked --features mount-fuse</code></pre>
           <tr><td><code>EMBER_HUB_URL</code></td><td><code>https://darkpyonix.dev</code></td><td>허브. <code>off</code> 면 끕니다. <code>EMBER_TRANSPORT=1</code> 일 때만 씁니다. 기본값은 허브 전용 서브도메인으로 바뀝니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>).</td></tr>
           <tr><td><code>EMBER_RELAY_URL</code></td><td>허브의 릴레이</td><td>전송에 쓸 릴레이 서버.</td></tr>
           <tr><td><code>EMBER_TRANSPORT_LISTEN</code></td><td>임의의 포트</td><td>전송이 쓸 고정 <code>ip:port</code>(예: <code>0.0.0.0:7444</code>). 서버를 다시 시작해도 기기에 저장한 주소가 그대로 맞습니다. 이때 서버는 앱에 붙여 넣을 <code>ember server device address: &lt;peer id&gt;@&lt;host&gt;:&lt;port&gt;</code> 줄을 출력합니다. 허용된 기기 키만 들어오므로 <code>0.0.0.0</code> 이어도 됩니다. 값이 잘못되면 시작하지 않습니다. 아직 컴파일하지 않았습니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/863">#863</a>).</td></tr>
+          <tr><td><code>EMBER_SERVER_RELAY_PORT</code></td><td><code>7443</code></td><td>서버 자신의 릴레이(TCP)와 주소 관측기(UDP)의 포트. <code>EMBER_TRANSPORT=1</code> 이면 켜집니다. 네트워크 밖의 기기를 위해 포워딩할 포트는 이것 하나입니다. <a href="#server-outside">네트워크 밖의 기기</a>를 보세요. <code>EMBER_SERVER_RELAY=off</code> 로 둘 다 끕니다.</td></tr>
           <tr><td><code>EMBER_MOUNT</code></td><td><code>auto</code></td><td><code>nfs</code>, <code>fuse</code>, <code>off</code>. <code>auto</code> 는 빌드에 들어 있는 기능을 씁니다.</td></tr>
           <tr><td><code>EMBER_A2A</code></td><td>켜짐</td><td><code>0</code> 이면 에이전트 간 메시지를 끈 채로 시작합니다.</td></tr>
           <tr><td><code>EMBER_CHROME_BIN</code></td><td>기계에서 찾음</td><td><a href="browser.html">원격 브라우저</a>에 쓸 브라우저.</td></tr>
@@ -244,6 +254,40 @@ cargo build --release --locked --features mount-fuse</code></pre>
       서버가 읽는 모든 변수의 목록은
       <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/ember/server/src/main.rs"><code>ember/server/src/main.rs</code></a>
       맨 위의 주석에 있습니다.
+    </p>
+
+    <h3 id="server-outside">네트워크 밖의 기기</h3>
+    <p>
+      모바일 데이터를 쓰는 휴대폰은 서버 자신의 릴레이를 거쳐 서버에 연결합니다. 호스팅된 릴레이를
+      쓰지 않으므로, 서버 컴퓨터가 TCP 포트 하나로 닿아야 합니다. 아직 컴파일하지 않았고 실제
+      휴대폰에서 실행해 보지 않았습니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/898">#898</a>).
+    </p>
+    <ol>
+      <li><code>EMBER_TRANSPORT=1</code> 로 서버를 시작합니다. 서버가
+        <code>ember server device address: &lt;peer id&gt; relay letify://&lt;peer id&gt;@&lt;host&gt;:7443</code> 줄을 출력합니다.</li>
+      <li>서버가 공유기 뒤에 있으면 <strong>TCP 7443</strong> 을 서버 컴퓨터로 포워딩합니다.
+        포워딩할 포트는 이것 하나입니다. 이 경로에는 <code>EMBER_TRANSPORT_LISTEN</code> 이 필요 없습니다.</li>
+      <li>줄에 <code>&lt;host&gt;</code> 가 있으면 휴대폰이 닿을 수 있는 주소로 바꿉니다. 공인 IP 주소나
+        그 주소를 가리키는 DNS 이름입니다. 서버는 그 이름을 알 수 없습니다.</li>
+      <li>서버에서 <code>ember-server owner devices add &lt;휴대폰의 peer id&gt; phone</code> 으로 휴대폰을 허용한 뒤,
+        그 줄을 앱의 서버 주소 칸에 붙여 넣고 앱을 다시 시작합니다.</li>
+    </ol>
+    <p>
+      허용한 기기 키만 릴레이를 통과합니다. 그 밖의 연결은 응답 없이 닫힙니다. 서버는 허용된 기기
+      48대까지 릴레이에 대기 자리를 둡니다.
+    </p>
+    <p>
+      <strong>해결되지 않은 경우:</strong> 포워딩할 포트를 주지 않는 네트워크에 있는 서버입니다.
+      통신사 NAT(CGNAT) 뒤의 모바일 회선이나 공용 회선이 그렇습니다. 그 네트워크 밖의 기기는 서버로
+      가는 경로가 없습니다. 서버를 공인 주소가 있는 네트워크에 두거나(휴대폰도 IPv6 를 쓰면 IPv6
+      주소도 됩니다) 직접 운영하는 VPN 으로 연결합니다.
+    </p>
+    <p>
+      <strong>알려진 한계:</strong> 릴레이는 아직 신원을 증명하지 않은 연결을 적은 수만 받습니다
+      (전체 64개, 주소당 4개). 약 16개 주소에서 연결을 계속 여는 사람이 있으면 이 자리가 가득 차고,
+      릴레이로만 서버에 닿는 기기는 그동안 연결하지 못합니다. 같은 네트워크의 기기와 직접 주소가
+      있는 기기는 영향을 받지 않습니다. 출발지별 제한을 더 엄격하게 하는 작업이 예정되어 있습니다
+      (이슈 #920).
     </p>
 
     <h3 id="server-data">저장하는 것</h3>

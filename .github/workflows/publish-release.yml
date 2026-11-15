@@ -3,11 +3,20 @@
 # signing only (no Apple account, no notarization); the client app ships in every format
 # compose-rust packages. The client job runs only when the repository variable
 # EMBER_CLIENT_RELEASE is "true" (see the TODOs on that job).
+# A manual dispatch is a dry run (#880, leader 2026-11-15): it builds and packs everything a tag
+# would, at ember/app/Cargo.toml's version, keeps the files as workflow artifacts for 3 days and
+# checks them in "Dry run summary". Only a v* tag push runs the publish job.
 name: Publish to GitHub release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      client:
+        description: Include the client app (packed even when EMBER_CLIENT_RELEASE is not set)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -17,15 +26,39 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  version:
+    # The app shows ember/app's crate version and its Velopack package carries the tag's, so a
+    # tag that differs fails here, before anything builds (NFR-R1, #880).
+    name: Tag matches the client version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      # v<version>: the pushed tag, or on a dry run the version in ember/app/Cargo.toml.
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: tag
+        shell: bash
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="v$(sed -n '/^\[package\]/,/^\[/s/^version *= *"\([^"]*\)".*/\1/p' ember/app/Cargo.toml | head -n 1)"
+          fi
+          bash .github/scripts/release/check-tag-version.sh "$tag" ember/app/Cargo.toml
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build (${{ matrix.target }})
+    needs: version
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
-      fail-fast: true
+      # A dry run shows every target's failure at once; a tag stops at the first.
+      fail-fast: ${{ github.event_name != 'workflow_dispatch' }}
       matrix:
         include:
-          - { os: macos-14, target: macos-arm64 }
+          - { os: macos-15, target: macos-arm64 }
           - { os: ubuntu-24.04, target: linux-x86_64 }
           - { os: ubuntu-24.04-arm, target: linux-aarch64 }
     env:
@@ -55,7 +88,7 @@ jobs:
           done
       - name: Package
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.version.outputs.tag }}
           TARGET: ${{ matrix.target }}
         run: |
           mkdir -p dist
@@ -77,6 +110,8 @@ jobs:
         with:
           name: dpx-ember-${{ matrix.target }}
           path: dist/*
+          # 0 keeps the repository default for a tag run; a dry run's files go after 3 days.
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && '3' || '' }}
 
   client:
     # TODO(compose-rust): the packagers live in compose-rust #505 (#115 macOS .app/.dmg in
@@ -84,26 +119,36 @@ jobs:
     # scripts/packager-linux/appimage.sh and #116 Windows .msix in
     # scripts/packager-windows/Cargo.toml); the Velopack formats (Setup.exe, .msi, .pkg, .deb,
     # .rpm, Flatpak) are spec only (FR-22.6).
-    # Set COMPOSE_RUST_REF to a pinned commit and the variable EMBER_CLIENT_RELEASE to "true"
-    # once #505 lands on compose-rust develop ([OWNER ACTION REQUIRED] for tag push and
-    # external distribution).
+    # Velopack (NFR-R1, NFR-R2, #880): .github/scripts/release/pack-velopack.sh calls
+    # compose-rust's scripts/package-velopack.py (on compose-rust develop since
+    # DarkPyonix/compose-rust#777) for Setup.exe, the Velopack .dmg and .AppImage, the .nupkg
+    # files and releases.<channel>.json, one channel per OS and architecture.
+    # COMPOSE_RUST_REF is pinned to the commit that landed the Velopack packager; move it when a
+    # newer packager is needed. The job runs once the variable EMBER_CLIENT_RELEASE is "true"
+    # ([OWNER ACTION REQUIRED] for that variable, the tag push and external distribution).
     name: Client app (${{ matrix.target }})
-    if: vars.EMBER_CLIENT_RELEASE == 'true'
+    needs: version
+    # A dry run packs the client unless its `client` input is off, so the first tag finds no surprise.
+    if: vars.EMBER_CLIENT_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.client)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
-      fail-fast: true
+      # A dry run shows every target's failure at once; a tag stops at the first.
+      fail-fast: ${{ github.event_name != 'workflow_dispatch' }}
       matrix:
         include:
-          - { os: macos-14, target: macos-arm64, formats: "app dmg" }
-          - { os: windows-2022, target: windows-x86_64, formats: "zip msix" }
-          - { os: ubuntu-24.04, target: linux-x86_64, formats: "AppImage" }
-          - { os: ubuntu-24.04-arm, target: linux-aarch64, formats: "AppImage" }
+          - { os: macos-15, target: macos-arm64, formats: "app dmg", channel: osx-arm64 }
+          - { os: windows-2022, target: windows-x86_64, formats: "zip msix", channel: win-x64 }
+          - { os: ubuntu-24.04, target: linux-x86_64, formats: "AppImage", channel: linux-x64 }
+          - { os: ubuntu-24.04-arm, target: linux-aarch64, formats: "AppImage", channel: linux-arm64 }
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
-      COMPOSE_RUST_REF: develop
+      # compose-rust develop at the merge of DarkPyonix/compose-rust#777 (Velopack packager).
+      COMPOSE_RUST_REF: 10590ba75945dd3ed24c06cab4dba75b55699e09
+      # Matches the velopack crate in ember/app/Cargo.toml.
+      VPK_VERSION: "1.2.161"
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -129,26 +174,79 @@ jobs:
             --out stage
           codesign --force --deep -s - stage/*.app
           codesign --verify --deep --verbose stage/*.app
-          python3 compose-rust/scripts/packager-macos/package-macos dmg --app stage/*.app --out "dist/ember-app-${{ github.ref_name }}-${{ matrix.target }}.dmg"
-          ditto -c -k --keepParent stage/*.app "dist/ember-app-${{ github.ref_name }}-${{ matrix.target }}.app.zip"
+          python3 compose-rust/scripts/packager-macos/package-macos dmg --app stage/*.app --out "dist/ember-app-${{ needs.version.outputs.tag }}-${{ matrix.target }}.dmg"
+          ditto -c -k --keepParent stage/*.app "dist/ember-app-${{ needs.version.outputs.tag }}-${{ matrix.target }}.app.zip"
       - name: Package the client (Windows .zip and .msix)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive ember/app/target/release/ember-app.exe "dist/ember-app-${{ github.ref_name }}-${{ matrix.target }}.zip"
-          # MSIX stays unsigned (FR-22.6 criterion 4); the install guide explains how to trust it.
-          cargo run --release --manifest-path compose-rust/scripts/packager-windows/Cargo.toml -- \
-            --project ember/app --exe ember/app/target/release/ember-app.exe \
-            --version "${{ github.ref_name }}" --out dist
+          Compress-Archive ember/app/target/release/ember-app.exe "dist/ember-app-${{ needs.version.outputs.tag }}-${{ matrix.target }}.zip"
+          # The .msix is the Store channel (P2): the packager needs the identity Partner Center
+          # assigns ([windows.msix] identity_name and publisher in Dioxus.toml). Until that exists
+          # the release has no .msix; Setup.exe from the Velopack step is the Windows installer.
+          if (Select-String -Path ember/app/Dioxus.toml -Pattern '^\s*identity_name\s*=' -Quiet) {
+            # One line: this step is PowerShell, where a trailing backslash does not continue a line.
+            cargo run --release --manifest-path compose-rust/scripts/packager-windows/Cargo.toml -- --project ember/app --exe ember/app/target/release/ember-app.exe --version "${{ needs.version.outputs.tag }}" --out dist
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            Write-Host "No [windows.msix] identity in ember/app/Dioxus.toml: the .msix is skipped."
+          }
       - name: Package the client (Linux .AppImage)
         if: runner.os == 'Linux'
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
           mkdir -p dist
           compose-rust/scripts/packager-linux/appimage.sh \
             --dioxus-toml ember/app/Dioxus.toml --exec ember-app \
             --payload ember/app/target/release/ember-app \
-            --version "${GITHUB_REF_NAME#v}" --out-dir dist
+            --icon ember/app/assets/brand/app-icon.svg \
+            --version "${TAG#v}" --out-dir dist
+      # Velopack (NFR-R2, #880). vpk is a .NET tool; package-velopack.py needs Python 3.11+.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Install vpk
+        shell: bash
+        run: |
+          dotnet tool install --tool-path "$RUNNER_TEMP/vpk" vpk --version "$VPK_VERSION"
+          echo "$RUNNER_TEMP/vpk" >> "$GITHUB_PATH"
+      # The icon from assets/brand/app-icon.svg: an .icns on macOS, a PNG on Linux. Windows gets
+      # vpk's default icon until the repository has an .ico (Dioxus.toml has no icon yet).
+      - name: App icon (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install librsvg
+          mkdir -p icon/Ember.iconset
+          rsvg-convert -w 1024 -h 1024 ember/app/assets/brand/app-icon.svg -o icon/ember.png
+          for pt in 16 32 128 256 512; do
+            sips -z "$pt" "$pt" icon/ember.png --out "icon/Ember.iconset/icon_${pt}x${pt}.png" >/dev/null
+            sips -z "$((pt * 2))" "$((pt * 2))" icon/ember.png --out "icon/Ember.iconset/icon_${pt}x${pt}@2x.png" >/dev/null
+          done
+          iconutil -c icns icon/Ember.iconset -o icon/Ember.icns
+          echo "ICON=icon/Ember.icns" >> "$GITHUB_ENV"
+      - name: App icon (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y librsvg2-bin
+          mkdir -p icon
+          rsvg-convert -w 512 -h 512 ember/app/assets/brand/app-icon.svg -o icon/ember.png
+          echo "ICON=icon/ember.png" >> "$GITHUB_ENV"
+      - name: Package the client with Velopack
+        shell: bash
+        env:
+          # gh release download reads the previous feed; no release yet is not an error there.
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          CHANNEL: ${{ matrix.channel }}
+          COMPOSE_RUST_DIR: compose-rust
+          EXECUTABLE: ember/app/target/release/ember-app${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: |
+          PACK_VERSION="${TAG#v}" bash .github/scripts/release/pack-velopack.sh
       - name: Checksums
         shell: bash
         run: |
@@ -162,11 +260,14 @@ jobs:
         with:
           name: dpx-ember-app-${{ matrix.target }}
           path: dist/*
+          # 0 keeps the repository default for a tag run; a dry run's files go after 3 days.
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && '3' || '' }}
 
   publish:
     name: Publish the release
-    needs: [build, client]
-    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.client.result == 'success' || needs.client.result == 'skipped') }}
+    needs: [version, build, client]
+    # Only a v* tag push publishes; a manual dispatch is a dry run and never reaches this job.
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !cancelled() && needs.build.result == 'success' && (needs.client.result == 'success' || needs.client.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -185,10 +286,30 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
-          gh release create "$TAG" dist/*.tar.gz dist/*.dmg dist/*.zip dist/*.msix dist/*.AppImage dist/SHA256SUMS \
+          # The client files are absent when the client job was skipped.
+          shopt -s nullglob
+          files=(dist/*.tar.gz dist/*.dmg dist/*.zip dist/*.msix dist/*.AppImage dist/*-Setup.exe dist/*.nupkg dist/releases.*.json dist/SHA256SUMS)
+          gh release create "$TAG" "${files[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "Ember ${TAG#v}" \
-            --notes "ember-server and ember-node for macOS arm64, Linux x86_64 and Linux aarch64, and the client app when built, by run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. macOS builds are ad hoc signed, not notarized: clear quarantine with xattr -dr com.apple.quarantine. The MSIX is unsigned. See the install guide."
+            --notes "ember-server and ember-node for macOS arm64, Linux x86_64 and Linux aarch64, and the client app when built, by run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. macOS builds are ad hoc signed, not notarized: clear quarantine with xattr -dr com.apple.quarantine. Setup.exe is unsigned. Installed with Setup.exe, the Velopack .dmg or the Velopack .AppImage, the app updates itself from this feed. See the install guide."
+
+  dry-run:
+    # Lists every packed file with size and sha256 and fails when a target or channel lacks one a
+    # tag release would upload (NFR-R1, #880). No write permission: the workflow default is read.
+    name: Dry run summary
+    needs: [version, build, client]
+    if: ${{ github.event_name == 'workflow_dispatch' && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: dpx-ember-*
+          path: artifacts
+      - name: List and check the packed files
+        run: bash .github/scripts/release/dry-run-summary.sh artifacts "${{ needs.version.outputs.tag }}" "${{ inputs.client && 'true' || 'false' }}"

@@ -11,9 +11,10 @@
 //! and [`UNAVAILABLE`] for sending, receiving and history. Nothing is invented.
 //!
 //! #166 workarounds (revert when upstream lands):
-//! - No drag and drop (dioxus-compose and compose-rust are frozen): a send sheet picks the
-//!   receiver, then the files. The toolkit has no file picker, so the files step says
-//!   [`FILE_PICK_UNAVAILABLE`] (see [`FILE_PICKER_AVAILABLE`]).
+//! - No drag and drop: a send sheet picks the receiver, then the files. 파일 고르기 opens the
+//!   platform's file dialog (compose-rust#483) where the toolkit has one, which is macOS in
+//!   the v0.0.10 pin (see [`FILE_PICKER_AVAILABLE`]); elsewhere the files step says
+//!   [`FILE_PICK_UNAVAILABLE`]. File drop (compose-rust#485) is in the pin and not wired yet.
 //! - No OS share sheet (FR-F7) and no live push of transfer progress: the screen re-reads the
 //!   service whenever the launcher state changes.
 //! - Tiles are not clickable containers (pG), so each tile carries a small button.
@@ -47,9 +48,37 @@ pub const AGENT_SEND_UNSUPPORTED: &str = "agent로 보내기는 아직 지원되
 /// Shown beside an offline device chip.
 pub const OFFLINE_TAG: &str = "오프라인";
 
-/// TODO(compose-rust#483): flip when the toolkit has a file dialog API,
-/// then fill [`SendDraft::files`] from it. Dropped files stay with compose-rust#485.
-pub const FILE_PICKER_AVAILABLE: bool = false;
+/// Whether 파일 고르기 can open the platform's file dialog (`compose_rust::FileDialog`,
+/// compose-rust#483). In the v0.0.10 pin only macOS shows one; Windows, Linux, iOS, Android and
+/// the web answer "unavailable" (TODO(compose-rust#483): the other platforms' dialogs; the issue
+/// is closed with macOS alone). Dropped files stay with compose-rust#485.
+pub const FILE_PICKER_AVAILABLE: bool = cfg!(target_os = "macos");
+
+/// The title of the file dialog 파일 고르기 opens.
+pub const FILE_DIALOG_TITLE: &str = "보낼 파일 선택";
+
+/// What a file dialog's answer does to the send sheet (FR-L27.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickOutcome {
+    /// Open the send sheet with these files and no receiver yet.
+    Draft(SendDraft),
+    /// The user closed the dialog: nothing changes.
+    Nothing,
+    /// This run has no dialog: say so.
+    Say(&'static str),
+}
+
+/// The outcome of a file dialog: `chosen` is the paths the user picked, `None` when the dialog
+/// was closed, and `available` is false when the platform had no dialog to show.
+pub fn pick_outcome(chosen: Option<Vec<String>>, available: bool) -> PickOutcome {
+    if !available {
+        return PickOutcome::Say(FILE_PICK_UNAVAILABLE);
+    }
+    match chosen {
+        Some(files) if !files.is_empty() => PickOutcome::Draft(SendDraft { target: None, files }),
+        _ => PickOutcome::Nothing,
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Devices (FR-F1)
@@ -581,6 +610,13 @@ pub fn visible_offers(pending: &[Offer], answered: &[String]) -> Vec<Offer> {
         .filter(|o| !answered.contains(&o.id))
         .cloned()
         .collect()
+}
+
+/// Whether the incoming-offer card floats over the page. A sheet's scrim dims everything
+/// behind it, but the card was drawn bright above the scrim (review F8, r7 `files-share`), so
+/// while the send or the share sheet is open the card waits and comes back when it closes.
+pub fn offer_card_shown(has_offer: bool, send_sheet_open: bool, share_sheet_open: bool) -> bool {
+    has_offer && !send_sheet_open && !share_sheet_open
 }
 
 /// Answer an offer: tell the service and remember it as answered. `false` (and nothing sent)
@@ -1162,11 +1198,34 @@ pub const SHARE_NO_FILE: &str = "공유할 파일이 없습니다";
 pub const SHARE_NOTE: &str =
     "파일 전송 서비스(#487)가 준비되면 휴대폰에서 공유 버튼을 눌러 이 시트로 보낼 수 있습니다. 받는 장비에서 수락하면 전송이 시작됩니다.";
 
-/// Under "에이전트에게": agents work in the folder of one of the user's own computers (D24).
-pub const SHARE_AGENTS_NOTE: &str = "에이전트가 일하는 내 컴퓨터의 작업 폴더로 보냅니다";
+/// The label of the agents' row: the mockup's `팀원에게` (`files.js`), with no hint line under
+/// it (review r6 found "에이전트에게" and a hint).
+pub const SHARE_AGENTS_LABEL: &str = "팀원에게";
 
-/// A tile name wraps to this many lines before it is cut with an ellipsis.
-pub const SHARE_NAME_LINES: u32 = 2;
+/// A tile name is one line, cut with an ellipsis (`.fl-sh-dev .ellipsis{max-width:72px}`);
+/// review r6 found names on two lines ("BREW의 / iPhone").
+pub const SHARE_NAME_LINES: u32 = 1;
+
+/// The presence dot on a reachable device's avatar (`.fl-sh-av i`): green for a nearby path,
+/// blue for a direct one, the grey family otherwise; none when the device is not online.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareDot {
+    Green,
+    Blue,
+    Grey,
+}
+
+/// The dot for a device that is `online` over `path` (`FL_PATH` near green, p2p blue).
+pub fn share_dot(online: bool, path: Option<PathKind>) -> Option<ShareDot> {
+    if !online {
+        return None;
+    }
+    Some(match path {
+        Some(PathKind::Nearby) => ShareDot::Green,
+        Some(PathKind::Direct) => ShareDot::Blue,
+        _ => ShareDot::Grey,
+    })
+}
 
 /// The sheet's own actions (the mockup's list); none of them exists without the transfer
 /// service, so each says [`UNAVAILABLE`].
@@ -1175,7 +1234,7 @@ pub const SHARE_ACTIONS: [&str; 3] = ["파일에 저장", "채널에 올리기",
 /// What the sheet says when the chosen device is not connected.
 pub const SHARE_OFFLINE: &str = "이 장비는 지금 연결되어 있지 않습니다";
 
-/// The mockup shows at most three agents under "에이전트에게".
+/// The mockup shows at most three agents under "팀원에게".
 pub const SHARE_AGENTS_MAX: usize = 3;
 
 /// A device in the sheet's "Ember로 보내기" row.
@@ -1187,6 +1246,8 @@ pub struct ShareDevice {
     pub online: bool,
     /// The small line under the name: the path when known, else the kind; "꺼짐" when not online.
     pub caption: String,
+    /// The presence dot on the avatar; `None` when not online.
+    pub dot: Option<ShareDot>,
 }
 
 /// Every device for the row, online ones first (then by name), so the reachable ones are
@@ -1214,12 +1275,13 @@ pub fn share_devices(devices: &[Device]) -> Vec<ShareDevice> {
                 kind: d.kind,
                 online,
                 caption,
+                dot: share_dot(online, d.path),
             }
         })
         .collect()
 }
 
-/// The agents shown under "에이전트에게": the first [`SHARE_AGENTS_MAX`], in the order given.
+/// The agents shown under "팀원에게": the first [`SHARE_AGENTS_MAX`], in the order given.
 pub fn share_agents<T: Clone>(agents: &[T]) -> Vec<T> {
     agents.iter().take(SHARE_AGENTS_MAX).cloned().collect()
 }
@@ -1467,6 +1529,14 @@ pub fn chip_text_max(glyph: f32) -> f32 {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn fr_l27_offer_card_waits_while_a_sheet_is_open() {
+        assert!(offer_card_shown(true, false, false));
+        assert!(!offer_card_shown(true, true, false), "under the send sheet's scrim");
+        assert!(!offer_card_shown(true, false, true), "under the share sheet's scrim");
+        assert!(!offer_card_shown(false, false, false));
+    }
 
     fn dev(id: &str, name: &str, presence: Presence) -> Device {
         Device {
@@ -2124,8 +2194,20 @@ mod tests {
     }
 
     #[test]
-    fn the_toolkit_has_no_file_picker_yet() {
-        assert!(!FILE_PICKER_AVAILABLE);
+    fn fr_l27_5_the_file_picker_follows_the_platform_and_its_answer_fills_the_draft() {
+        // compose-rust#483 (#673): macOS has the dialog in the pin, the others answer
+        // "unavailable".
+        assert_eq!(FILE_PICKER_AVAILABLE, cfg!(target_os = "macos"));
+        let paths = vec!["/tmp/a.txt".to_string(), "/tmp/b.png".to_string()];
+        assert_eq!(
+            pick_outcome(Some(paths.clone()), true),
+            PickOutcome::Draft(SendDraft { target: None, files: paths.clone() })
+        );
+        assert_eq!(pick_outcome(None, true), PickOutcome::Nothing, "a closed dialog changes nothing");
+        assert_eq!(pick_outcome(Some(Vec::new()), true), PickOutcome::Nothing);
+        assert_eq!(pick_outcome(None, false), PickOutcome::Say(FILE_PICK_UNAVAILABLE));
+        assert_eq!(pick_outcome(Some(paths), false), PickOutcome::Say(FILE_PICK_UNAVAILABLE));
+        assert!(FILE_DIALOG_TITLE.ends_with("선택"), "a noun label, not a sentence");
     }
 
     // NFR-L4 / FR-L27.6
@@ -2222,13 +2304,22 @@ mod tests {
     fn fr_l27_7_the_note_does_not_state_unbuilt_behaviour_as_fact() {
         assert!(SHARE_NOTE.contains("#487"), "names the service it depends on");
         assert!(SHARE_NOTE.contains("준비되면"), "says it is not ready");
-        assert_eq!(SHARE_NAME_LINES, 2);
-        assert!(SHARE_AGENTS_NOTE.contains("내 컴퓨터"));
+        assert_eq!(SHARE_NAME_LINES, 1, "one line with an ellipsis");
+        assert_eq!(SHARE_AGENTS_LABEL, "팀원에게");
+    }
+
+    #[test]
+    fn fr_l27_7_a_reachable_device_shows_its_path_dot() {
+        assert_eq!(share_dot(true, Some(PathKind::Nearby)), Some(ShareDot::Green));
+        assert_eq!(share_dot(true, Some(PathKind::Direct)), Some(ShareDot::Blue));
+        assert_eq!(share_dot(true, Some(PathKind::Relay)), Some(ShareDot::Grey));
+        assert_eq!(share_dot(true, None), Some(ShareDot::Grey));
+        assert_eq!(share_dot(false, Some(PathKind::Nearby)), None, "an offline device has no dot");
     }
 
     #[test]
     fn fr_l27_7_the_share_texts_are_polite_and_have_no_em_dash() {
-        let mut all: Vec<&str> = vec![SHARE_NO_FILE, SHARE_NOTE, SHARE_OFFLINE, SHARE_AGENTS_NOTE];
+        let mut all: Vec<&str> = vec![SHARE_NO_FILE, SHARE_NOTE, SHARE_OFFLINE];
         all.extend(SHARE_ACTIONS);
         for t in all {
             assert!(!t.ends_with('다') || t.ends_with("니다"), "plain ending: {t}");

@@ -1081,6 +1081,34 @@ impl Api {
         Ok(ws)
     }
 
+    /// Opens the file watch socket of `computer` (`GET /api/computers/{id}/fs/watch`, SPEC
+    /// `FR-W4d`, #460), over plain HTTP with the server token or over the transport.
+    pub async fn watch_fs(&self, computer: &str) -> ApiResult<crate::fs_watch::FsWatch> {
+        let path = format!("/computers/{}/fs/watch", seg(computer));
+        let socket = match &self.reach {
+            Reach::Peer { .. } => self.open_peer_socket(&path).await?,
+            Reach::Http(_) => self.open_http_socket(&path).await?,
+        };
+        Ok(crate::fs_watch::FsWatch::new(socket))
+    }
+
+    /// A WebSocket at `path` (below `/api`) over plain HTTP, with the token rules of
+    /// [`Api::open_push`]. A refused upgrade keeps the server's status and `code`.
+    async fn open_http_socket(&self, path: &str) -> ApiResult<PushSocket> {
+        let url = self.socket_url(path);
+        let rest = url
+            .strip_prefix("ws://")
+            .ok_or_else(|| ApiError::Push(format!("{url}: only plain ws:// is supported")))?;
+        let authority = rest.split('/').next().unwrap_or_default();
+        let (host, port) = authority_addr(authority);
+        let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await.map_err(|e| ApiError::Push(e.to_string()))?;
+        let _ = tcp.set_nodelay(true);
+        let io: Box<dyn PushIo> = Box::new(tcp);
+        let request = self.push_request(&url)?;
+        let (ws, _) = tokio_tungstenite::client_async(request, io).await.map_err(socket_error)?;
+        Ok(ws)
+    }
+
     /// The WebSocket upgrade request for `url`, carrying `Authorization: Bearer` on the plain
     /// HTTP reach when a token exists (FR-S11).
     fn push_request(&self, url: &str) -> ApiResult<http::Request<()>> {
@@ -1855,6 +1883,11 @@ pub struct ListeningPort {
     pub process: String,
     #[serde(default)]
     pub owner: PortOwner,
+    /// The address the socket is bound to, when it is one specific address: the port answers
+    /// on that address only (FR-L18, #519). Absent for a port bound to every address and from
+    /// older nodes.
+    #[serde(default)]
+    pub address: Option<String>,
 }
 
 /// `GET /api/computers/{id}/ports` answer.
@@ -2055,6 +2088,21 @@ mod ports_tests {
         assert_eq!(serde_json::from_value::<Ports>(json!({})).unwrap(), Ports::default());
         let off: Ports = serde_json::from_value(json!({"ports": [], "supported": false})).unwrap();
         assert!(!off.supported);
+    }
+
+    /// FR-L18 (#519): the bound address of a port, absent from an older node and for a port
+    /// bound to every address.
+    #[test]
+    fn fr_p7_bound_address_reads_when_present() {
+        let p: Ports = serde_json::from_value(json!({
+            "ports": [
+                {"port": 3000, "scope": "lan", "process": "node", "owner": {"kind": "job", "id": "j1"}, "address": "192.168.0.10"},
+                {"port": 8080, "scope": "any", "process": "python3", "owner": {"kind": "term", "id": "t1"}}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(p.ports[0].address.as_deref(), Some("192.168.0.10"));
+        assert_eq!(p.ports[1].address, None);
     }
 }
 

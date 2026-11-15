@@ -6,13 +6,10 @@
 //! inline icons: cut, copy, paste, rename (F2), delete, closing the file's tab and select all are
 //! in the tree's context menu, in Code-OSS's explorer order.
 //!
-//! v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward
-//! compose-rust's pointer events as oncontextmenu and ondoubleclick).
-//! Until right-click reaches the editor window, two stand-ins open the same items: the "선택한
-//! 항목" section of the header "+" menu and Shift+F10 (or the context-menu key) on the focused
-//! tree. Remove both once right-click works there.
-//! compose-rust#100: v0.0.6 sent only Enter as a key event (#832); recheck on v0.0.7 whether
-//! Shift+F10 reaches the tree.
+//! The context menu opens on right-click (`oncontextmenu`, compose-rust#417; dioxus-compose
+//! f0e5b9f5 sends `contextmenu` on the HTML path) and, as in Code-OSS, on Shift+F10 or the
+//! context-menu key on the focused tree (compose-rust#100 and #717, #832). The "+" menu holds only
+//! 새 파일 and 새 폴더; its "선택한 항목" stand-in section is gone.
 
 use std::cell::Cell;
 
@@ -68,8 +65,6 @@ impl TreeMenuItem {
 pub enum TreeMenuEntry {
     Item(TreeMenuItem, bool),
     Sep,
-    /// A section heading (`.ed-mlab`).
-    Heading(&'static str),
 }
 
 /// What the menus can do now.
@@ -109,23 +104,11 @@ pub fn context_entries(st: TreeMenuState) -> Vec<TreeMenuEntry> {
     out
 }
 
-/// The header "+" menu: new file and folder; until right-click works, a "선택한 항목" section with
-/// the context menu's selection items (the stand-in opener).
-pub fn plus_entries(st: TreeMenuState) -> Vec<TreeMenuEntry> {
-    use TreeMenuEntry::{Heading, Item, Sep};
-    let mut out = vec![Item(TreeMenuItem::NewFile, true), Item(TreeMenuItem::NewFolder, true)];
-    if PLUS_MENU_HOLDS_SELECTION {
-        out.extend([Sep, Heading(SELECTION_HEADING)]);
-        out.extend(selection_entries(st));
-    }
-    out
+/// The header "+" menu: new file and folder (design rule 1). The selection's items are in the
+/// context menu only.
+pub fn plus_entries(_st: TreeMenuState) -> Vec<TreeMenuEntry> {
+    vec![TreeMenuEntry::Item(TreeMenuItem::NewFile, true), TreeMenuEntry::Item(TreeMenuItem::NewFolder, true)]
 }
-
-/// v0.0.7: #417 fixed; workaround kept until checked on a display (false once right-click opens
-/// the context menu in the dioxus-compose window).
-pub const PLUS_MENU_HOLDS_SELECTION: bool = true;
-/// The heading of the stand-in section of the "+" menu.
-pub const SELECTION_HEADING: &str = "선택한 항목";
 
 /// The mockup's header actions, in order, beside the one "+" button that comes first.
 pub const HEADER_ACTIONS: [&str; 4] = ["추가", "모두 접기", "열린 파일 찾기", "숨기기"];
@@ -186,7 +169,7 @@ pub fn close() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use TreeMenuEntry::{Heading, Item, Sep};
+    use TreeMenuEntry::{Item, Sep};
     use TreeMenuItem::*;
 
     const SELECTED: TreeMenuState = TreeMenuState { has_selection: true, has_clipboard: false, tab_open: true };
@@ -208,12 +191,13 @@ mod tests {
     }
 
     #[test]
-    fn design_rule1_plus_menu_is_new_file_and_folder_then_the_stand_in_section() {
-        let entries = plus_entries(SELECTED);
-        assert_eq!(&entries[..2], &[Item(NewFile, true), Item(NewFolder, true)]);
-        assert_eq!(&entries[2..4], &[Sep, Heading("선택한 항목")]);
-        assert!(entries.contains(&Item(Rename, true)) && entries.contains(&Item(Delete, true)) && entries.contains(&Item(CloseTab, true)));
-        const { assert!(PLUS_MENU_HOLDS_SELECTION, "the stand-in goes once dioxus-compose forwards right-click (compose-rust#417), not before") };
+    fn design_rule1_plus_menu_is_new_file_and_folder_only() {
+        // compose-rust#417: right-click opens the context menu, so the "선택한 항목" stand-in section is gone.
+        assert_eq!(plus_entries(SELECTED), vec![Item(NewFile, true), Item(NewFolder, true)]);
+        assert_eq!(plus_entries(TreeMenuState::default()), plus_entries(SELECTED));
+        let src = include_str!("editor_tree_menu.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(!production.contains(concat!("PLUS_MENU_HOLDS", "_SELECTION")) && !production.contains(concat!("SELECTION", "_HEADING")));
     }
 
     #[test]

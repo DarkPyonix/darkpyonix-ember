@@ -64,6 +64,8 @@ fn demo_ose_from_env() -> Option<ember_client::wire::EmberOseConnection> {
     let raw = raw.trim();
     (!raw.is_empty()).then(|| ember_client::wire::EmberOseConnection {
         endpoint: format!("http://{raw}"),
+        // The demo's OSE is dialed directly: there is no server relay in demo mode.
+        relay: None,
         connection_token: String::new(),
     })
 }
@@ -258,6 +260,12 @@ pub fn usage_summary(now: i64) -> ember_client::api::UsageSummary {
     }
 }
 
+/// A demo member's name; with `EMBER_CR_DEMO_LONG_NAMES=1` (review captures of a header that
+/// has to cut a long name) it carries a long role after it.
+pub fn demo_member_name(name: &str, long: bool) -> String {
+    if long { format!("{name} \u{b7} 결제 모듈 리팩터링과 통합 테스트 정리, 배포 전 회귀 확인 담당") } else { name.to_string() }
+}
+
 /// The second project's team: every demo member has its own name, so the box's deck card reads
 /// `김하늘, 이서연` and not the repeated `second-project-codex`. Demo data only; ids stay stable.
 pub fn second_team() -> ember_client::wire::TeamView {
@@ -271,6 +279,7 @@ pub fn second_team() -> ember_client::wire::TeamView {
         ("demo-s8", "이서연", "claude-code"),
         ("demo-s9", "오준서", "codex"),
     ];
+    let long = std::env::var("EMBER_CR_DEMO_LONG_NAMES").as_deref() == Ok("1");
     TeamView {
         id: "demo-team-second".into(),
         project: "second-project".into(),
@@ -280,7 +289,7 @@ pub fn second_team() -> ember_client::wire::TeamView {
             .iter()
             .map(|(id, name, agent)| TeamMember {
                 session_id: (*id).into(),
-                name: (*name).into(),
+                name: demo_member_name(name, long),
                 role: if *id == "demo-s3" { TeamRole::Leader } else { TeamRole::Teammate },
                 joined_at: 0,
                 ended_at: None,
@@ -2174,10 +2183,18 @@ fn demo_pr_details(now: i64) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn fr_l28_demo_long_member_names_are_only_for_captures() {
+        assert_eq!(super::demo_member_name("박도윤", false), "박도윤");
+        let long = super::demo_member_name("박도윤", true);
+        assert!(long.starts_with("박도윤 \u{b7} ") && long.chars().count() > 30, "{long}");
+    }
+
     #[test]
     fn fr_l18_demo_ports_show_open_and_note_only_rows() {
         use crate::ui::session::{web_pages_from, ComputerHost, WebPagesLoad};
-        let host = ComputerHost { local: false, host: Some(crate::demo::DEMO_HOST.into()) };
+        let host = ComputerHost { host: Some(crate::demo::DEMO_HOST.into()), ..Default::default() };
         let WebPagesLoad::Ready(pages) = web_pages_from(Ok(crate::demo::ports()), &host) else {
             panic!("demo ports are ready");
         };
@@ -2193,6 +2210,7 @@ mod tests {
     fn fr_l31_demo_ember_target_carries_the_given_ose_connection() {
         let ose = ember_client::wire::EmberOseConnection {
             endpoint: "http://127.0.0.1:18765".into(),
+            relay: None,
             connection_token: String::new(),
         };
         let l = ide_launch_with("s", "p", "/w", Some(ose));

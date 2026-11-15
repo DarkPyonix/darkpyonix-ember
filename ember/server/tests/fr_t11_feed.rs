@@ -369,6 +369,9 @@ impl ember_server::agents::AgentRun for AskerRun {
         question_id: &str,
         answers: &[ember_server::events::QuestionAnswer],
     ) -> anyhow::Result<()> {
+        if question_id == "fail-500" {
+            anyhow::bail!("secret adapter detail: /tmp/private/socket broke");
+        }
         let a: Vec<String> = answers.iter().map(|a| format!("{}={}", a.question_id, a.values.join("|"))).collect();
         self.log.lock().unwrap().push(format!("q:{question_id}:{}", a.join(";")));
         Ok(())
@@ -606,6 +609,62 @@ async fn fr_t11_a_question_whose_agent_is_not_running_is_409() {
     let (st, body) = call(&f.app, "POST", &qurl("default-core", "r1"), Some(red())).await;
     assert_eq!(st, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "conflict");
+    assert!(log.lock().unwrap().is_empty());
+    assert_eq!(question_items(&f, "default-core").await, 1);
+}
+
+#[tokio::test]
+async fn fr_t11_colliding_question_ids_across_member_sessions_are_409_unless_session_id_is_given() {
+    let (f, log) = fx_asker();
+    let a = session(&f.store, "core", "alpha");
+    let b = session(&f.store, "core", "beta");
+    ask_live(&f, &a, "same-q").await;
+    ask_live(&f, &b, "same-q").await;
+    assert_eq!(question_items(&f, "default-core").await, 2);
+
+    // Without session_id, an ambiguous question_id across two member sessions is refused with 409.
+    let (st, body) = call(&f.app, "POST", &qurl("default-core", "same-q"), Some(red())).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "conflict");
+    assert!(log.lock().unwrap().is_empty(), "neither agent was answered on conflict");
+    assert_eq!(answered_count(&f, &a), 0);
+    assert_eq!(answered_count(&f, &b), 0);
+
+    // A session_id that does not hold the question in this channel is 404.
+    let (st, body) = call(&f.app, "POST", &format!("{}?session_id=no-such-session", qurl("default-core", "same-q")), Some(red())).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "not_found");
+
+    // Keying by (session_id, question_id) answers the second session (`b`) specifically, leaving `a` pending.
+    let blue = json!({"answers": [{"question_id": "q0", "values": ["Blue"]}]});
+    let (st, body) = call(&f.app, "POST", &format!("{}?session_id={b}", qurl("default-core", "same-q")), Some(blue)).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"status": "answered"}));
+    wait_until("QuestionAnswered stored on b", || answered_count(&f, &b) == 1).await;
+    assert_eq!(answered_count(&f, &a), 0, "session a was untouched");
+    assert_eq!(f.sessions.pending_questions(&a).unwrap().len(), 1);
+    assert!(f.sessions.pending_questions(&b).unwrap().is_empty());
+    assert_eq!(question_items(&f, "default-core").await, 1);
+
+    // Now only `a` holds `same-q`, so answering without session_id (or with session_id=a) succeeds on `a`.
+    let (st, body) = call(&f.app, "POST", &qurl("default-core", "same-q"), Some(red())).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"status": "answered"}));
+    wait_until("QuestionAnswered stored on a", || answered_count(&f, &a) == 1).await;
+    assert_eq!(question_items(&f, "default-core").await, 0);
+    assert_eq!(*log.lock().unwrap(), vec!["q:same-q:q0=Blue".to_string(), "q:same-q:q0=Red".to_string()]);
+}
+
+#[tokio::test]
+async fn fr_t11_a_500_on_the_channel_question_route_has_a_fixed_error_message() {
+    let (f, log) = fx_asker();
+    let a = session(&f.store, "core", "alpha");
+    ask_live(&f, &a, "fail-500").await;
+    let (st, body) = call(&f.app, "POST", &qurl("default-core", "fail-500"), Some(red())).await;
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["code"], "internal");
+    assert_eq!(body["error"], "failed to answer question");
+    assert!(!body.to_string().contains("secret adapter detail"));
     assert!(log.lock().unwrap().is_empty());
     assert_eq!(question_items(&f, "default-core").await, 1);
 }

@@ -6,7 +6,7 @@
 //! - **Transport** ([`NodeClient::over_transport`]): the peer-to-peer transport (SPEC `FR-N1`,
 //!   `FR-N5`), dialing the node by its [`PeerAddr`] for service [`NODE_SERVICE`]. Each HTTP
 //!   request runs on a fresh stream of one cached connection ([`Dialer`]); each WebSocket
-//!   (exec, events, exec-server, terminal attach) gets its own stream.
+//!   (exec, events, exec-server, terminal attach, OSE relay) gets its own stream.
 //!
 //! [`NodeClient::with_deadline`] bounds every HTTP request the same way on both reaches (for the
 //! transport: stream open, HTTP handshake, request and the whole response body). WebSockets are
@@ -55,6 +55,9 @@ impl<T: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static> NodeStream for T
 pub type NodeIo = Box<dyn NodeStream>;
 
 type Ws = WebSocketStream<NodeIo>;
+
+/// The node's file watch WebSocket (`FR-W4d`).
+pub type FsWatchSocket = WebSocketStream<NodeIo>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -332,7 +335,7 @@ impl NodeClient {
         serde_json::to_vec(body).expect("serialisable")
     }
 
-    async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+    pub(crate) async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
         Self::decode(self.send(Method::POST, path, Some(Self::json(body)), true).await?)
     }
 
@@ -570,6 +573,13 @@ impl NodeClient {
     /// Subscribe to node events with `seq > after` (0 for everything still in history).
     pub async fn events(&self, after: u64) -> Result<EventStream> {
         Ok(EventStream { ws: self.websocket(&format!("/events?after={after}")).await? })
+    }
+
+    /// Open the file watch socket (`GET /fs/watch`, SPEC `FR-W4d`, #460). The frames are the
+    /// JSON text frames of [`crate::fs_watch`]; the server relays them unchanged, so this hands
+    /// out the raw socket.
+    pub async fn fs_watch_socket(&self) -> Result<FsWatchSocket> {
+        self.websocket("/fs/watch").await
     }
 
     // -----------------------------------------------------------------------------------------

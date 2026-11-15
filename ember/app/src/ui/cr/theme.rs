@@ -10,9 +10,8 @@
 //! compose-rust can register an app palette per colour role (`compose_rust::Palette`), but
 //! the Ember tokens (surface-2, hover, sel, the soft accents) have no role, so the tokens stay
 //! plain constants passed as `Paint::Literal`.
-//! v0.0.7: #374 fixed (`Text::font` and `TextField::font` take a `FontRefs` stack); workaround
-//! kept until checked on a display (the Inter and Pretendard files of #216 are not bundled yet,
-//! so the theme still sets one face per `TypeRole`).
+//! The fonts are the toolkit theme's: `ui::fonts::app_theme` sets the bundled Inter and
+//! Pretendard stack for the prose roles and JetBrains Mono for `Mono` (compose-rust#374, #216).
 //! Layered card and sheet shadow tokens follow the mockup (#214).
 
 use compose_rust::{Color, Paint};
@@ -22,13 +21,14 @@ use compose_rust::ui::{Modifier, Shadow};
 // Dioxus module's definitions are the single source until phase 8 moves them here.
 pub use crate::ui::theme::{Scheme, ThemePref};
 
-/// The scheme the OS reports.
-///
-/// TODO(compose-rust#97): the toolkit resolves `FollowSystem` inside the renderer and exposes no
-/// hook to read the result, so System draws the light palette until one exists. An explicit
-/// Light or Dark choice is exact.
+/// The scheme the OS reports (`compose_rust::system_color_scheme`, compose-rust#97, v0.0.10), and
+/// light before the renderer's first report. The read is not a subscription: a change of the
+/// system appearance shows at the next recomposition.
 pub fn system_scheme() -> Scheme {
-    Scheme::Light
+    match compose_rust::system_color_scheme() {
+        Some(compose_rust::SystemColorScheme::Dark) => Scheme::Dark,
+        _ => Scheme::Light,
+    }
 }
 
 /// One colour and its soft background pair (the data palette).
@@ -136,6 +136,16 @@ impl EmberTheme {
         match self.scheme {
             Scheme::Light => Color::argb(0x12_000000),
             Scheme::Dark => Color::argb(0x1a_000000),
+        }
+    }
+
+    /// The opacity of the press tint as the toolkit takes it (`Modifier::press_feedback`):
+    /// 0.07 in light and 0.10 in dark (`style.css` `.ripple-clip.in{opacity:.07}` and its dark
+    /// rule `opacity:.1`). The toolkit lays the tint in the pressed element's ink.
+    pub fn press_alpha(&self) -> f32 {
+        match self.scheme {
+            Scheme::Light => 0.07,
+            Scheme::Dark => 0.10,
         }
     }
 
@@ -303,6 +313,10 @@ pub const H_CTL: f32 = 32.0;
 pub const H_PILL: f32 = 24.0;
 pub const H_PILL_SM: f32 = 20.0;
 pub const H_NAV_ITEM: f32 = 38.0;
+/// A detail view's top bar (`.detail{grid-template-rows:56px ...}`), its controls centred in it.
+pub const TOPBAR_H: f32 = 56.0;
+/// The top bar's sides (`.topbar{padding:0 var(--sp5)}`).
+pub const TOPBAR_PAD_X: f32 = 20.0;
 pub const SIDE_W: f32 = 234.0;
 pub const RAIL_W: f32 = 72.0;
 pub const TABBAR_H: f32 = 64.0;
@@ -560,6 +574,9 @@ mod tests {
             EmberTheme::new(Scheme::Dark).press_tint().to_argb(),
             0x1a_000000
         );
+        // FR-L34.1: the opacity sent to the toolkit, `.ripple-clip.in` light and dark.
+        assert_eq!(EmberTheme::new(Scheme::Light).press_alpha(), 0.07);
+        assert_eq!(EmberTheme::new(Scheme::Dark).press_alpha(), 0.10);
     }
 
     #[test]
@@ -615,6 +632,13 @@ mod tests {
         assert_eq!(ember_theme().scheme, Scheme::Light);
         assert_eq!(EmberTheme::select(ThemePref::Dark, system_scheme()).scheme, Scheme::Dark);
         assert_eq!(EmberTheme::select(ThemePref::System, system_scheme()).scheme, Scheme::Light);
+        // compose-rust#97: System follows the reported appearance; no stand-in marker is left.
+        let src = include_str!("theme.rs");
+        assert!(!src[..src.find("#[cfg(test)]").unwrap()].contains(concat!("TODO(compose-rust#", "97)")));
+        // The toolkit's own widgets follow the system with it, not a light stand-in.
+        assert_eq!(ThemePref::System.color_scheme(), compose_rust::ColorScheme::FollowSystem);
+        let shell = include_str!("shell.rs");
+        assert!(shell.contains("let scheme = pref.color_scheme();"), "the shell launches with the preference's scheme");
     }
 
     /// The tokens are the mockup's `--shadow` and `--shadow-lg`, light and dark.

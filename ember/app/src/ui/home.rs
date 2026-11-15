@@ -66,12 +66,13 @@ pub fn integrations_layout(width_dp: f32) -> IntegrationsLayout {
 }
 
 /// The GitHub card's rule row (mockup `.int-rule`, data `develop CI 실패 -> 루틴 'CI 고치기'`).
-/// The server has no field that ties a CI failure to a routine and no event trigger runs a
-/// routine yet, so the row names the rule, says honestly that it does not run, and links to 루틴
-/// where an event routine is set up (FR-L23, #498).
+/// Event routines (`ScheduleKind::Event { on: EventOn::CiFailed, repository, branch }`) run on a
+/// connected server when a GitHub workflow run fails for the configured repository and branch (not
+/// in demo mode or while offline), and the row links to 루틴 where an event routine is set up
+/// (FR-L23, #498, #759).
 pub const CI_RULE_WHEN: &str = "CI 실패";
 pub const CI_RULE_THEN: &str = "루틴이 받아 팀원에게 맡깁니다";
-pub const CI_RULE_NOTE: &str = "CI 실패로 루틴을 실행하는 기능은 아직 준비 중입니다";
+pub const CI_RULE_NOTE: &str = "서버에 연결된 상태에서 루틴의 이벤트 트리거로 저장소와 브랜치를 지정하면 CI 실패 시 실행됩니다";
 pub const CI_RULE_LINK: &str = "루틴 보기";
 
 /// `GET /api/integrations/github` `state` (INTENT D41, FR-L35).
@@ -745,29 +746,64 @@ pub fn popover_width(want: f32, window_dp: f32) -> f32 {
 /// 16, and not below 240 so the search and a few rows always show. The height is fixed because
 /// the toolkit cannot size the popover to a scrolling list's content (see `cr/home.rs`
 /// `model_body`).
+///
+/// It is also no taller than the room under the composer card, so the toolkit does not move it
+/// up over the chips: with an empty prompt the card ends a tenth of the window plus 306 dp down
+/// (397 at 900 high, 386 at 800, captures of 2026-11-15), and the popover starts 8 below and
+/// stops 8 above the window's edge. At 800 high the full 480 covered the chip line.
 pub fn model_popover_height(window_h_dp: f32) -> f32 {
-    MODEL_POPOVER_HEIGHT.min(window_h_dp - 16.0).max(240.0)
+    let below = window_h_dp * 0.9 - MODEL_POPOVER_TOP_REST;
+    MODEL_POPOVER_HEIGHT.min(window_h_dp - 16.0).min(below).max(240.0)
 }
+
+/// What is above and below the model popover besides the hero's tenth of the window: the 306 dp
+/// to the composer card's bottom, the 8 dp gap and 8 dp to the window's edge.
+const MODEL_POPOVER_TOP_REST: f32 = 322.0;
 
 pub const MODEL_POPOVER_HEIGHT: f32 = 480.0;
 
 /// The composer's chips in order: project, model, mode, computer.
 pub const CHIP_COUNT: usize = 4;
 /// The most text (composer pixels, [`composer_text_px`]) each chip shows: project 170, model 240
-/// ("Claude Code · Opus 5.5 · 높음" measures about 215), mode 140, computer 150.
+/// ("Claude Code · Opus 5.5 · 높음" measures about 184), mode 140, computer 150.
 pub const CHIP_TEXT_CAPS: [f32; CHIP_COUNT] = [170.0, 240.0, 140.0, 150.0];
 /// The least text each chip keeps when a line is very narrow: project and computer four Korean
-/// glyphs (4 x 13.5), model and mode enough for "Claud...".
+/// glyphs and an ellipsis, model and mode enough for "Claud...".
 pub const CHIP_TEXT_MINS: [f32; CHIP_COUNT] = [54.0, 40.0, 40.0, 54.0];
-/// Padding 8, icon 14, gap 4, chevron 12 with its gap 4 and padding 8 around the text (13 dp chips, cr/home.rs ComposerChip).
-const CHIP_FRAME: f32 = 50.0;
+/// What each chip is wide besides its text (mockup `.pickchip`: padding 12, a 16 glyph and the
+/// 8 gap, padding 12; the model and mode pickers add an 8 gap and the 14 chevron). The project
+/// and computer chips are the mockup's `select.pickchip`, which has no chevron (#573). The
+/// earlier single estimate of 50 was 20 short for a chevron chip, so a line that "fitted" ran
+/// under the send button.
+pub const CHIP_FRAMES: [f32; CHIP_COUNT] = [48.0, 70.0, 70.0, 48.0];
 const CHIP_GAP: f32 = 6.0;
+/// How much wider than the estimate a line of chips may really be (#573): the chips keep their
+/// own widths only when the estimate fits with this to spare. Past it the toolkit shares the
+/// line and cuts the labels by their measured widths ([`ChipLine::Shared`]), so an estimate that
+/// is a little off costs a few dp of slack inside a chip, never a clipped chip.
+pub const CHIP_ESTIMATE_SLACK: f32 = 1.04;
 
-/// A label's width at the composer's chip font (13 dp, weight 500; measured on the PR #629 captures): about 13.5 dp per Korean glyph and 6.8 per ASCII
-/// character or middle dot. The send sheet's estimate (`files::chip_text_px`, 16 and 9) is
-/// deliberately more pessimistic and stays as it is.
+/// A label's width at the composer's chip font (13 dp, weight 500), measured on the 1440
+/// captures of 2026-11-14 (`.scratch/ui-audit-r8/app/home-default-1440-light.png`: "기본 프로…"
+/// 59 dp, "명령마다 …" 59, "Claude Code · Opus 5.5…" 157, "이 컴…" 37): a Korean glyph 12, a space
+/// 3.5, a capital 9, a small letter 7.3, a digit 8, the middle dot 5, other ASCII punctuation
+/// 4.5 and the ellipsis 9. The estimate before #573 counted 13.5 for a Korean glyph and for the
+/// ellipsis and 6.8 for a space, about 25 % over for a Korean label, which cut labels that had
+/// room. The send sheet's estimate (`files::chip_text_px`, 16 and 9) is deliberately more
+/// pessimistic and stays as it is.
 pub fn composer_text_px(text: &str) -> f32 {
-    text.chars().map(|c| if c.is_ascii() || c == '\u{b7}' { 6.8 } else { 13.5 }).sum()
+    text.chars()
+        .map(|c| match c {
+            ' ' => 3.5,
+            '\u{b7}' => 5.0,
+            '\u{2026}' => 9.0,
+            c if c.is_ascii_digit() => 8.0,
+            c if c.is_ascii_uppercase() => 9.0,
+            c if c.is_ascii_lowercase() => 7.3,
+            c if c.is_ascii() => 4.5,
+            _ => 12.0,
+        })
+        .sum()
 }
 
 /// `text` cut with an ellipsis so [`composer_text_px`] stays within `max_px`.
@@ -794,35 +830,61 @@ pub fn composer_chips_avail(composer_w: f32) -> f32 {
 }
 
 /// The text width each chip may use (project, model, mode, computer): its cap, or what a whole
-/// line leaves if that is less, never below the minimum. A label is cut only at its cap; when
-/// the chips do not fit one line the row wraps ([`composer_chip_rows`]) rather than cutting
-/// labels that have room or dropping a chip.
+/// line leaves beside the chip's own frame if that is less, never below the minimum.
 pub fn composer_chip_budget(composer_w: f32) -> [f32; CHIP_COUNT] {
-    let line = composer_chips_avail(composer_w) - CHIP_FRAME;
-    let mut out = CHIP_TEXT_CAPS;
-    for (o, m) in out.iter_mut().zip(CHIP_TEXT_MINS) {
-        *o = o.min(line).max(m);
-    }
-    out
+    let avail = composer_chips_avail(composer_w);
+    std::array::from_fn(|i| CHIP_TEXT_CAPS[i].min(avail - CHIP_FRAMES[i]).max(CHIP_TEXT_MINS[i]))
 }
 
-/// The chip labels as drawn on a composer card `composer_w` wide (#849, review H1): each label
-/// up to its cap, and when the four chips would not fit one line the labels with room above
-/// their minimum give it up in proportion, each cut with an ellipsis, so the chips stay on one
-/// line as in the mockup (`.quick .chip{max-width}` with `text-overflow:ellipsis`). Only when
-/// even the minimums do not fit does the row wrap ([`composer_chip_rows`]).
+/// The chip labels as handed to the toolkit on a composer card `composer_w` wide: each label up
+/// to its cap ([`composer_chip_budget`], the mockup's `max-width` on a chip), cut by the
+/// estimate. Nothing else is cut here: when the four chips do not fit one line the toolkit
+/// shares the line and cuts by the measured widths ([`composer_chip_line`], #573).
 pub fn composer_chip_fit(texts: &[String; CHIP_COUNT], composer_w: f32) -> [String; CHIP_COUNT] {
     let budget = composer_chip_budget(composer_w);
-    let want: Vec<f32> = texts.iter().zip(budget).map(|(t, b)| composer_text_px(t).min(b)).collect();
-    let floor: Vec<f32> = want.iter().zip(CHIP_TEXT_MINS).map(|(w, m)| w.min(m)).collect();
-    let line = composer_chips_avail(composer_w) - CHIP_COUNT as f32 * CHIP_FRAME - (CHIP_COUNT as f32 - 1.0) * CHIP_GAP;
-    let total: f32 = want.iter().sum();
-    let slack: f32 = want.iter().zip(&floor).map(|(w, f)| w - f).sum();
-    let ratio = if total <= line || slack <= 0.0 { 0.0 } else { ((total - line) / slack).min(1.0) };
-    std::array::from_fn(|i| {
-        let max = want[i] - (want[i] - floor[i]) * ratio;
-        composer_fit_text(&texts[i], max)
-    })
+    std::array::from_fn(|i| composer_fit_text(&texts[i], budget[i]))
+}
+
+/// How the four composer chips share a card wider than 560 dp (#573).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChipLine {
+    /// The labels fit with room to spare: one line, every chip as wide as its content.
+    Natural,
+    /// One line that the chips share in proportion to these weights (each chip's frame plus
+    /// its label's part of the room the frames leave), each label cut with an ellipsis by the
+    /// toolkit's own measure. This is the
+    /// mockup's row (`.hm-sel`, `.hm-pick`: `flex:0 1 auto;min-width:0`), where every chip
+    /// shrinks in proportion to its width.
+    Shared([f32; CHIP_COUNT]),
+    /// Not even the minimums fit one line: the chips by index per line.
+    Wrapped(Vec<Vec<usize>>),
+}
+
+/// The line the chips with these (already capped) labels take on a card `composer_w` wide.
+///
+/// The estimate only chooses between the three shapes. It no longer cuts a label that the line
+/// has room for, which is what #573 reported: at 1440 the card is 718 dp, the chips have 604,
+/// and the whole demo labels need about 639, so the line is shared and each label loses a glyph
+/// or two to the ellipsis, as the mockup's own render does.
+pub fn composer_chip_line(texts: &[String; CHIP_COUNT], composer_w: f32) -> ChipLine {
+    let avail = composer_chips_avail(composer_w);
+    let gaps = (CHIP_COUNT as f32 - 1.0) * CHIP_GAP;
+    let full: [f32; CHIP_COUNT] = std::array::from_fn(|i| composer_chip_width(i, &texts[i]));
+    if (full.iter().sum::<f32>() + gaps) * CHIP_ESTIMATE_SLACK <= avail {
+        return ChipLine::Natural;
+    }
+    let least: f32 = (0..CHIP_COUNT).map(|i| CHIP_FRAMES[i] + composer_text_px(&texts[i]).min(CHIP_TEXT_MINS[i])).sum();
+    if least + gaps <= avail {
+        // Only the labels shrink: each chip keeps its frame (glyph, chevron, padding) and its
+        // label takes its part of what the frames leave. Sharing the whole width instead left
+        // the short computer label 14 dp at a 700 dp window, too little for one glyph and the
+        // ellipsis, so the chip was drawn empty (capture home-default-700, 2026-11-15).
+        let frames: f32 = CHIP_FRAMES.iter().sum();
+        let labels: f32 = (0..CHIP_COUNT).map(|i| full[i] - CHIP_FRAMES[i]).sum();
+        let k = ((avail - gaps - frames) / labels.max(1.0)).clamp(0.0, 1.0);
+        return ChipLine::Shared(std::array::from_fn(|i| CHIP_FRAMES[i] + (full[i] - CHIP_FRAMES[i]) * k));
+    }
+    ChipLine::Wrapped(composer_chip_rows(&full, composer_w))
 }
 
 /// The chips (by index) per line, `widths` being each chip's full width: a line breaks when the
@@ -831,9 +893,9 @@ pub fn composer_chip_rows(widths: &[f32], composer_w: f32) -> Vec<Vec<usize>> {
     crate::ui::files::chip_rows(widths, CHIP_GAP, composer_chips_avail(composer_w))
 }
 
-/// A chip's full width for `text` (icon, padding and the text).
-pub fn composer_chip_width(text: &str) -> f32 {
-    CHIP_FRAME + composer_text_px(text)
+/// Chip `i`'s full width for `text` (its frame and the text).
+pub fn composer_chip_width(i: usize, text: &str) -> f32 {
+    CHIP_FRAMES[i] + composer_text_px(text)
 }
 
 pub fn default_mode(_h: Harness) -> PermMode {
@@ -1070,6 +1132,73 @@ pub fn model_enter(
     }
 }
 
+/// Choosing row `i` of the model picker by a tap, Enter or `Ctrl+number`: the row, or why its
+/// harness cannot be used (`block`, as [`harness_block`]), or nothing when there is no such row.
+pub fn model_pick(rows: &[ModelOption], i: usize, block: impl Fn(Harness) -> Option<&'static str>) -> ModelEnter {
+    match rows.get(i) {
+        None => ModelEnter::Nothing,
+        Some(o) => match block(o.harness) {
+            Some(reason) => ModelEnter::Blocked(reason),
+            None => ModelEnter::Choose(*o),
+        },
+    }
+}
+
+/// What a key pressed in the model picker's search does (FR-L15, mockup `core.js` `onKey`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelKey {
+    /// The active row (`.mp-row.act`) moves here.
+    Move(usize),
+    /// This row is chosen, as a tap on it.
+    Pick(usize),
+    /// The key is the field's own.
+    Nothing,
+}
+
+/// A key in the model search (#574): the arrows move the active row and stop at the ends, Home
+/// and End jump to them while nothing is typed (with a query they stay the text's), and
+/// `Ctrl+1` to `Ctrl+9` choose the row whose key cap says so. `key` is the DOM key name and
+/// `code` the USB HID usage, which names the digit when Ctrl changed the key's text.
+pub fn model_key(key: &str, code: u32, ctrl: bool, rows: usize, active: Option<usize>, query_empty: bool) -> ModelKey {
+    if rows == 0 {
+        return ModelKey::Nothing;
+    }
+    if ctrl {
+        let by_text = match key.as_bytes() {
+            [d @ b'1'..=b'9'] => Some((d - b'1') as usize),
+            _ => None,
+        };
+        // HID 0x1E is the 1 key and 0x26 the 9 key.
+        let by_code = (0x1E..=0x26).contains(&code).then(|| (code - 0x1E) as usize);
+        return match by_text.or(by_code) {
+            Some(i) if i < rows => ModelKey::Pick(i),
+            _ => ModelKey::Nothing,
+        };
+    }
+    let last = rows - 1;
+    let at = active.unwrap_or(0).min(last);
+    match key {
+        "ArrowDown" => ModelKey::Move((at + 1).min(last)),
+        "ArrowUp" => ModelKey::Move(at.saturating_sub(1)),
+        "Home" if query_empty => ModelKey::Move(0),
+        "End" if query_empty => ModelKey::Move(last),
+        _ => ModelKey::Nothing,
+    }
+}
+
+/// The model sheet's height at 560 and below (mockup `.mp-pop{max-height:80vh}`): the popover's
+/// 480, never more than four fifths of the window and not below 240.
+pub fn model_sheet_height(window_h_dp: f32) -> f32 {
+    MODEL_POPOVER_HEIGHT.min(window_h_dp * 0.8).max(240.0)
+}
+
+/// How far below its chip a composer picker opens so that it sits 8 dp below the composer card
+/// (review r8, mockup `core.js` `place()`: `ar.bottom+8` of the enclosing `.bigcomposer`): the 8,
+/// the card's bottom padding and the 2 dp a 32 dp chip ends above the bottom of its 36 dp row.
+pub fn composer_pop_offset(card_pad: f32) -> f32 {
+    8.0 + card_pad + (36.0 - crate::ui::theme::H_CTL) / 2.0
+}
+
 /// The second line of a model row (mockup `.mp-h`): the harness, then the reason the row cannot
 /// be chosen. No profile name: profiles (FR-L17) are not built, so none is shown or invented.
 pub fn model_row_detail(o: &ModelOption, block: Option<&str>) -> String {
@@ -1199,7 +1328,8 @@ pub fn apply_suggestion(_draft: &str, suggestion: &str) -> String {
 }
 
 /// Window width (dp) under which the Home composer puts the mode and computer chips and the send
-/// button on a second line. The toolkit has no wrapping row (`FlowRow`), so the split is by width.
+/// button on a second line. The split is by width from before the toolkit had a wrapping row
+/// (TODO(compose-rust#521, in v0.0.10): `FlowRow` replaces it after a display check).
 pub const CHIP_WRAP_WIDTH: f32 = 1100.0;
 
 pub fn split_chip_rows(width_dp: f32) -> bool {
@@ -2033,10 +2163,13 @@ mod tests {
     }
 
     #[test]
-    fn fr_l23_ci_rule_links_to_routines_and_says_it_does_not_run() {
+    fn fr_l23_ci_rule_links_to_routines_and_states_it_runs_on_ci_failure() {
         assert_eq!(CI_RULE_WHEN, "CI 실패");
         assert_eq!(CI_RULE_LINK, "루틴 보기");
-        assert!(CI_RULE_NOTE.contains("준비 중"));
+        assert!(CI_RULE_NOTE.contains("CI 실패"));
+        assert!(CI_RULE_NOTE.contains("루틴"));
+        assert!(CI_RULE_NOTE.contains("서버에 연결된"));
+        assert!(!CI_RULE_NOTE.contains("준비 중"));
         for s in [CI_RULE_WHEN, CI_RULE_THEN, CI_RULE_NOTE, CI_RULE_LINK] {
             assert!(!s.contains('\u{2014}'));
         }
@@ -2287,6 +2420,30 @@ mod tests {
         assert!(crate::ui::files::chip_text_px("가나다") > composer_text_px("가나다"));
     }
 
+    #[test]
+    fn fr_l11_chip_estimate_matches_the_1440_capture() {
+        // #573: the widths read off `.scratch/ui-audit-r8/app/home-default-1440-light.png`
+        // (chip width less its frame), each within 3 dp.
+        for (text, measured) in [
+            ("기본 프로\u{2026}", 59.0_f32),
+            ("명령마다 \u{2026}", 59.0),
+            ("Claude Code \u{b7} Opus 5.5\u{2026}", 157.0),
+            ("이 컴\u{2026}", 37.0),
+        ] {
+            let est = composer_text_px(text);
+            assert!((est - measured).abs() <= 3.0, "{text}: {est} against {measured}");
+        }
+        // The estimate before #573 gave a Korean label about a quarter more than it takes.
+        assert_eq!(composer_text_px("기본 프로젝트"), 75.5);
+    }
+
+    #[test]
+    fn fr_l11_chip_frames_follow_the_mockup_pickchip() {
+        // `.pickchip{padding:0 12px;gap:8px}` with a 16 glyph; the pickers add the 14 chevron.
+        assert_eq!(CHIP_FRAMES, [12.0 + 16.0 + 8.0 + 12.0, 70.0, 70.0, 48.0]);
+        assert_eq!(CHIP_FRAMES[1], CHIP_FRAMES[0] + 8.0 + 14.0);
+    }
+
     /// The demo labels of the composer chips.
     fn demo_chip_labels() -> [String; CHIP_COUNT] {
         [
@@ -2301,26 +2458,69 @@ mod tests {
     fn fr_l11_default_demo_labels_are_whole_on_a_wide_card() {
         let fitted = composer_chip_fit(&demo_chip_labels(), 900.0);
         assert_eq!(fitted, demo_chip_labels());
+        assert_eq!(composer_chip_line(&fitted, 900.0), ChipLine::Natural);
     }
 
     #[test]
-    fn fr_l11_composer_chips_stay_on_one_line_at_1440_and_cut_with_an_ellipsis() {
-        // Review 2026-11-14 H1 (#849): at 1440 the card is about 718 dp and the mockup keeps the
-        // four chips on one line, cutting long labels, where the app wrapped 이 컴퓨터 to a
-        // second line.
-        let rows = |w: f32| {
-            let widths: Vec<f32> = composer_chip_fit(&demo_chip_labels(), w).iter().map(|t| composer_chip_width(t)).collect();
-            composer_chip_rows(&widths, w).len()
-        };
-        for w in [900.0_f32, 718.0, 700.0, 640.0, 600.0] {
-            assert_eq!(rows(w), 1, "{w}");
-        }
+    fn fr_l11_the_estimate_no_longer_cuts_the_demo_labels_at_1440() {
+        // #573: the labels go to the toolkit whole at 718 (they were "기본 프로...", "Claude
+        // Co...", "명령마다..." by the estimate), and the line is shared by measured widths.
         let fitted = composer_chip_fit(&demo_chip_labels(), 718.0);
-        assert!(fitted.iter().any(|t| t.ends_with('\u{2026}')), "something is cut at 718: {fitted:?}");
-        for (f, t) in fitted.iter().zip(demo_chip_labels()) {
-            let kept = f.trim_end_matches('\u{2026}');
-            assert!(t.starts_with(kept) && !kept.is_empty(), "{f} is a prefix of {t}");
+        assert_eq!(fitted, demo_chip_labels());
+        let ChipLine::Shared(weights) = composer_chip_line(&fitted, 718.0) else {
+            panic!("the demo labels need about 639 of 604 dp, so the line is shared");
+        };
+        // Each chip keeps its frame and gives up part of its label only; together they take
+        // the line the chips have (604 less the three gaps).
+        for i in 0..CHIP_COUNT {
+            assert!(weights[i] > CHIP_FRAMES[i] && weights[i] < composer_chip_width(i, &fitted[i]), "{weights:?}");
         }
+        let sum: f32 = weights.iter().sum();
+        assert!((sum - (composer_chips_avail(718.0) - 3.0 * CHIP_GAP)).abs() < 0.5, "{sum}");
+        // At a 700 dp window the short computer label still has room for a glyph and the ellipsis.
+        let ChipLine::Shared(narrow) = composer_chip_line(&composer_chip_fit(&demo_chip_labels(), 564.0), 564.0) else {
+            panic!("564 is shared");
+        };
+        assert!(narrow[3] - CHIP_FRAMES[3] >= 21.0, "{narrow:?}");
+        // The longest label has the largest share and the computer chip the smallest.
+        assert!(weights[1] > weights[2] && weights[2] > weights[0] && weights[0] > weights[3], "{weights:?}");
+    }
+
+    #[test]
+    fn fr_l11_short_labels_keep_their_own_widths() {
+        // A line with room is not stretched: every chip is as wide as its content.
+        let short = ["ember".to_string(), "Codex \u{b7} GPT-5".to_string(), "계획 모드".to_string(), "mini".to_string()];
+        assert_eq!(composer_chip_line(&composer_chip_fit(&short, 718.0), 718.0), ChipLine::Natural);
+    }
+
+    #[test]
+    fn fr_l11_composer_chips_stay_on_one_line_at_1440_and_at_700() {
+        // Review 2026-11-14 H1 (#849): the mockup keeps the four chips on one line. 718 is the
+        // card at 1440, 564 the card at a 700 dp window (rail 72, page padding 32 either side).
+        for w in [718.0_f32, 700.0, 640.0, 600.0, 564.0] {
+            let line = composer_chip_line(&composer_chip_fit(&demo_chip_labels(), w), w);
+            assert!(matches!(line, ChipLine::Shared(_)), "{w}: {line:?}");
+        }
+    }
+
+    #[test]
+    fn fr_l11_chips_wrap_only_when_the_minimums_do_not_fit() {
+        let fitted = composer_chip_fit(&demo_chip_labels(), 540.0);
+        let ChipLine::Wrapped(rows) = composer_chip_line(&fitted, 540.0) else { panic!("540 is too narrow for one line") };
+        let mut all: Vec<usize> = rows.iter().flatten().copied().collect();
+        all.sort();
+        assert_eq!(all, vec![0, 1, 2, 3], "no chip is dropped: {rows:?}");
+        assert!(rows.len() > 1);
+    }
+
+    #[test]
+    fn fr_l11_a_long_label_is_cut_at_its_cap() {
+        let mut labels = demo_chip_labels();
+        labels[0] = "아주 긴 프로젝트 이름".repeat(8);
+        let fitted = composer_chip_fit(&labels, 718.0);
+        assert!(fitted[0].ends_with('\u{2026}'));
+        assert!(composer_text_px(&fitted[0]) <= CHIP_TEXT_CAPS[0]);
+        assert_eq!(fitted[1..], labels[1..]);
     }
 
     #[test]
@@ -2329,16 +2529,76 @@ mod tests {
             let fitted = composer_chip_fit(&demo_chip_labels(), w);
             for (i, f) in fitted.iter().enumerate() {
                 let t = &demo_chip_labels()[i];
-                assert!(composer_text_px(f) >= composer_text_px(t).min(CHIP_TEXT_MINS[i]) - 13.5, "{w} {i} {f}");
+                assert!(composer_text_px(f) >= composer_text_px(t).min(CHIP_TEXT_MINS[i]) - 12.0, "{w} {i} {f}");
             }
         }
+    }
+
+    #[test]
+    fn fr_l15_arrows_move_the_active_row_and_stop_at_the_ends() {
+        assert_eq!(model_key("ArrowDown", 0x51, false, 9, Some(0), true), ModelKey::Move(1));
+        assert_eq!(model_key("ArrowDown", 0x51, false, 9, Some(8), true), ModelKey::Move(8));
+        assert_eq!(model_key("ArrowUp", 0x52, false, 9, Some(0), true), ModelKey::Move(0));
+        assert_eq!(model_key("ArrowUp", 0x52, false, 9, Some(3), false), ModelKey::Move(2));
+        // No active row yet counts as the first; a stale one is held inside the list.
+        assert_eq!(model_key("ArrowDown", 0x51, false, 3, None, true), ModelKey::Move(1));
+        assert_eq!(model_key("ArrowUp", 0x52, false, 3, Some(40), true), ModelKey::Move(1));
+        assert_eq!(model_key("ArrowDown", 0x51, false, 0, None, true), ModelKey::Nothing);
+    }
+
+    #[test]
+    fn fr_l15_home_and_end_jump_only_while_nothing_is_typed() {
+        assert_eq!(model_key("Home", 0x4A, false, 9, Some(4), true), ModelKey::Move(0));
+        assert_eq!(model_key("End", 0x4D, false, 9, Some(4), true), ModelKey::Move(8));
+        assert_eq!(model_key("Home", 0x4A, false, 9, Some(4), false), ModelKey::Nothing);
+        assert_eq!(model_key("End", 0x4D, false, 9, Some(4), false), ModelKey::Nothing);
+        assert_eq!(model_key("a", 0x04, false, 9, Some(4), true), ModelKey::Nothing);
+    }
+
+    #[test]
+    fn fr_l15_ctrl_number_chooses_the_row_its_key_cap_names() {
+        assert_eq!(model_key("1", 0x1E, true, 9, None, true), ModelKey::Pick(0));
+        assert_eq!(model_key("9", 0x26, true, 9, None, false), ModelKey::Pick(8));
+        // Ctrl may change the key's text; the physical key still names the digit.
+        assert_eq!(model_key("", 0x20, true, 9, None, true), ModelKey::Pick(2));
+        // No such row, the 0 key, and a digit without Ctrl do nothing.
+        assert_eq!(model_key("5", 0x22, true, 3, None, true), ModelKey::Nothing);
+        assert_eq!(model_key("0", 0x27, true, 9, None, true), ModelKey::Nothing);
+        assert_eq!(model_key("1", 0x1E, false, 9, None, true), ModelKey::Nothing);
+        for i in 0..9 {
+            assert_eq!(shortcut_label(i), Some(format!("Ctrl+{}", i + 1)));
+            assert_eq!(model_key(&format!("{}", i + 1), 0, true, 9, None, true), ModelKey::Pick(i));
+        }
+    }
+
+    #[test]
+    fn fr_l15_picking_a_row_chooses_it_or_says_why_not() {
+        let rows = filter_models(&model_catalog(), Some(Harness::ClaudeCode), "");
+        assert_eq!(model_pick(&rows, 1, |_| None), ModelEnter::Choose(rows[1]));
+        assert_eq!(model_pick(&rows, 1, |_| Some("준비 중입니다")), ModelEnter::Blocked("준비 중입니다"));
+        assert_eq!(model_pick(&rows, rows.len(), |_| None), ModelEnter::Nothing);
+    }
+
+    #[test]
+    fn fr_l15_model_sheet_is_four_fifths_of_a_phone_and_480_at_most() {
+        assert_eq!(model_sheet_height(844.0), 480.0);
+        assert_eq!(model_sheet_height(500.0), 400.0);
+        assert_eq!(model_sheet_height(200.0), 240.0);
+    }
+
+    #[test]
+    fn fr_l10_4_composer_pickers_open_8_below_the_composer_card() {
+        // The card's padding is 16; a 32 chip ends 2 above the bottom of the 36 row.
+        assert_eq!(composer_pop_offset(16.0), 26.0);
+        assert_eq!(composer_pop_offset(12.0), 22.0);
     }
 
     #[test]
     fn fr_l15_model_popover_is_480_and_never_taller_than_the_window() {
         // #849: the popover has a fixed height so its list shows about seven rows.
         assert_eq!(model_popover_height(900.0), 480.0);
-        assert_eq!(model_popover_height(400.0), 384.0);
+        assert_eq!(model_popover_height(800.0), 398.0, "the room under the composer card");
+        assert_eq!(model_popover_height(400.0), 240.0);
         assert_eq!(model_popover_height(200.0), 240.0);
     }
 
@@ -2353,9 +2613,9 @@ mod tests {
 
     #[test]
     fn fr_l15_fit_text_cuts_with_an_ellipsis_only_over_the_budget() {
-        // The ellipsis counts like a Korean glyph (13.5): two glyphs plus it would be 40.5 > 40.
-        assert_eq!(composer_fit_text("가나다라마바사", 40.0), "가\u{2026}");
-        assert_eq!(composer_fit_text("가나다라마바사", 41.0), "가나\u{2026}");
+        // A Korean glyph is 12 and the ellipsis 9: two glyphs and it are 33.
+        assert_eq!(composer_fit_text("가나다라마바사", 32.0), "가\u{2026}");
+        assert_eq!(composer_fit_text("가나다라마바사", 33.0), "가나\u{2026}");
         assert_eq!(composer_fit_text("abc", 100.0), "abc");
     }
 
@@ -2363,7 +2623,7 @@ mod tests {
     fn fr_l15_chip_rows_wrap_instead_of_dropping_a_chip() {
         for w in [300.0_f32, 340.0, 400.0, 480.0, 560.0, 720.0] {
             let b = composer_chip_budget(w);
-            let widths: Vec<f32> = b.iter().map(|t| CHIP_FRAME + t).collect();
+            let widths: Vec<f32> = b.iter().zip(CHIP_FRAMES).map(|(t, f)| f + t).collect();
             let rows = composer_chip_rows(&widths, w);
             let mut all: Vec<usize> = rows.iter().flatten().copied().collect();
             all.sort();
@@ -2371,14 +2631,14 @@ mod tests {
         }
         // 300 dp is too narrow for four chips in one line.
         let b = composer_chip_budget(300.0);
-        let widths: Vec<f32> = b.iter().map(|t| CHIP_FRAME + t).collect();
+        let widths: Vec<f32> = b.iter().zip(CHIP_FRAMES).map(|(t, f)| f + t).collect();
         assert!(composer_chip_rows(&widths, 300.0).len() > 1);
     }
 
     #[test]
     fn fr_l15_chip_width_counts_the_frame_and_the_text() {
-        assert_eq!(composer_chip_width(""), CHIP_FRAME);
-        assert_eq!(composer_chip_width("가나"), CHIP_FRAME + 27.0);
+        assert_eq!(composer_chip_width(0, ""), 48.0);
+        assert_eq!(composer_chip_width(1, "가나"), 70.0 + 24.0);
     }
 
     #[test]

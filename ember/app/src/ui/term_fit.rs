@@ -16,10 +16,11 @@ pub struct CellSize {
     pub height: f32,
 }
 
-/// The `.ed-term` cell: `--code-fs` 13 px in `--mono` (JetBrains Mono and the system monospace
-/// fallbacks advance 0.6 em) on `--code-lh` 22 px lines (`assets/editor/editor.css`).
-// TODO(dioxus-compose#196): a fixed 0.6 em is a stand-in. The renderer can drop the font family
-// and reports no text metrics; measure the advance from the font actually used once it does.
+/// The `.ed-term` cell: `--code-fs` 13 px in `--mono` on `--code-lh` 22 px lines
+/// (`assets/editor/editor.css`). The panel's text is drawn in `--mono` (dioxus-compose#196, #241
+/// fixed in the pinned rev), whose first face is JetBrains Mono, bundled with Ember (`ui::fonts`)
+/// and 0.6 em wide. The advance is that and is not measured; a fallback face of another width
+/// (Consolas is 0.55 em) would be off until the page can read text metrics.
 pub const PANEL_CELL: CellSize = CellSize { width: 13.0 * 0.6, height: 22.0 };
 
 /// The `.ed-term` padding, `var(--sp3) var(--sp4)`: (left plus right, top plus bottom).
@@ -132,6 +133,38 @@ impl PanelFit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// dioxus-compose#196: the cell width is the `--mono` advance, not a stand-in for a dropped font.
+    #[test]
+    fn fr_l31_20_cell_is_the_mono_advance() {
+        let src = include_str!("term_fit.rs");
+        assert!(!src.contains(concat!("TODO(dioxus-compose#", "196)")));
+        assert!(!include_str!("components.rs").contains(concat!("TODO(dioxus-compose#", "196)")));
+        assert_eq!(PANEL_CELL, CellSize { width: 13.0 * 0.6, height: 22.0 });
+    }
+
+    /// dioxus-compose#175 (fcc16f8): a button directly under the block-level panel draws every
+    /// glyph, so 다시 연결 sits in the panel without a flex row of its own.
+    #[test]
+    fn fr_l31_20_reconnect_button_sits_in_the_panel() {
+        let page = include_str!("editor_workbench.rs");
+        assert!(!page.contains(concat!("TODO(dioxus-compose#", "175)")));
+        let body = &page[page.find("fn terminal_body").expect("terminal body")..page.find("fn problems_body").expect("problems")];
+        let at = body.find("if offer_reconnect {").expect("reconnect");
+        assert!(body[at..].trim_start_matches("if offer_reconnect {").trim_start().starts_with(r#"button { class: "ed-pj""#), "no wrapper row");
+    }
+
+    /// dioxus-compose#207: the panel follows its `onresize`, so no stand-in for a resize event is left.
+    #[test]
+    fn fr_l31_20_panel_refits_on_its_resize_event() {
+        let page = include_str!("editor_workbench.rs");
+        assert!(!page.contains(concat!("TODO(dioxus-compose#", "207)")));
+        let body = &page[page.find("fn terminal_body").expect("terminal body")..page.find("fn problems_body").expect("problems")];
+        let term = body.find(r#"div { class: "ed-term", role: "log", "aria-label": "터미널 출력", tabindex: "0""#).expect("panel");
+        let resize = body[term..].find("onresize:").expect("the panel listens for its resize") + term;
+        assert!(body[resize..].trim_start_matches("onresize:").contains("*revision.write() += 1;"), "a resize asks for a render");
+        assert!(body.contains("fit_terminal(s, &handle);"), "every render fits the PTY");
+    }
 
     #[test]
     fn fr_l31_20_cols_and_rows_from_panel_and_cell_size() {

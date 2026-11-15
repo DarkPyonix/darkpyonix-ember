@@ -5,21 +5,22 @@
 //! The decisions (boxes, members, ordering, filters, deck, settings rules) are `ui::project`'s
 //! plain functions, used as they are. The settings sheet saves name, repository, default
 //! branch, new member defaults, character style and profile override per harness with
-//! `PATCH /api/projects/{name}` (FR-L26, #327). Leader, archive and delete stay disabled: the server does not
-//! support them yet (TODO(#384)).
+//! `PATCH /api/projects/{name}` (FR-L26, #327). The danger zone archives and restores with the
+//! same PATCH and deletes with `DELETE /api/projects/{name}` after a second tap; the leader stays
+//! disabled (owner decision, #384). The full view's 루틴 tile lists the project's server routines.
 
 #![allow(non_snake_case)]
 
-use compose_rust::runtime::{mutable_state_of, remember, remember_with_key, MutableState};
+use compose_rust::runtime::{launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, IconRole, ShapeRole};
+use compose_rust::{Alignment, IconRole, ShapeRole};
 
 use ember_client::wire::Project;
 use ember_client::LauncherStatus;
 
 pub use crate::ui::project::{
-    agent_options, build_patch, deck_avatars, deck_names, DECK_AVATARS, DECK_NAMES, strip_arrows_visible, strip_scroll_target, chip_line, computer_chips, danger_allowed, danger_rows, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
+    agent_options, build_patch, deck_avatars, deck_names, DECK_AVATARS, DECK_NAMES, strip_arrow_enabled, strip_arrows_visible, strip_scroll_target, chip_line, computer_chips, danger_allowed, danger_rows, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
     is_default_project, leader_choice_visible, part_supported, project_boxes, project_boxes_with_archived,
     reach_pill, status_pill, validate_settings, visible_tiles, ComputerChip, Member, MemberFilter,
     effective_style, follow_rename, override_harnesses, override_label, override_options, pick_override, AccountsState, CloseAction, SettingsGuard, DISCARD_QUESTION,
@@ -29,7 +30,7 @@ use super::characters::{CharState, Character, StylePicker};
 use crate::ui::characters::CharStyle;
 use super::components::{
     AppButton, ButtonKind, Clickable, NamedClickable, EmberField, EmberSheet, FieldOptions, FilterChip,
-    IconButton, Label, OptionSheet, Pill, PillTone, SearchField, Select, SheetFooter,
+    IconButton, InkIconButton, Label, Pill, PillTone, PopKind, PopMenu, PopoverMenu, SearchField, SearchFieldFocus, Select, SheetFooter,
 };
 use super::home::{content_width, fit_label, ring_image, text_px, Cols, Part};
 use super::notice;
@@ -39,6 +40,7 @@ use crate::model::status_rank;
 use crate::ide::{open_external, plan, IdeAction, IdeKind};
 use crate::server::IdeLaunch;
 use crate::services::{run_shared, services};
+use crate::ui::project::{archive_patch, danger_hint, danger_rows_for, delete_armed, delete_error_message, delete_step, full_after_removal, is_owner_refusal, project_routine_tile, DeleteStep, TileLoad};
 use crate::ui::coexist::{shared_ui, SharedUi};
 use crate::ui::shell::NavMenu;
 
@@ -159,16 +161,16 @@ pub fn chip_sub(c: &ComputerChip) -> String {
 /// project's full view (`EMBER_CR_PROJECT=<id>` another), `EMBER_CR_PROJECT_SHEET=settings|
 /// computer|new|add-computer` a sheet, `EMBER_CR_PROJECT_EXPAND=1` expands every box's deck.
 #[derive(Clone)]
-struct Ui {
-    full: MutableState<Option<String>>,
-    settings: MutableState<Option<String>>,
-    computer: MutableState<Option<String>>,
-    new_project: MutableState<bool>,
-    new_draft: MutableState<NewProjectDraft>,
-    new_saving: MutableState<bool>,
-    new_failure: MutableState<Option<String>>,
-    new_confirm: MutableState<bool>,
-    add: super::add_computer::AddUi,
+pub(super) struct Ui {
+    pub(super) full: MutableState<Option<String>>,
+    pub(super) settings: MutableState<Option<String>>,
+    pub(super) computer: MutableState<Option<String>>,
+    pub(super) new_project: MutableState<bool>,
+    pub(super) new_draft: MutableState<NewProjectDraft>,
+    pub(super) new_saving: MutableState<bool>,
+    pub(super) new_failure: MutableState<Option<String>>,
+    pub(super) new_confirm: MutableState<bool>,
+    pub(super) add: super::add_computer::AddUi,
     query: MutableState<String>,
     expanded: MutableState<Vec<String>>,
     filter: MutableState<MemberFilter>,
@@ -183,7 +185,7 @@ fn search_hook_open(debug: bool, value: Option<&str>) -> bool {
 }
 
 impl Ui {
-    fn new(boxes: &[ProjectBox], chips: &[ComputerChip]) -> Ui {
+    pub(super) fn new(boxes: &[ProjectBox], chips: &[ComputerChip]) -> Ui {
         let first = boxes.first().map(|b| b.id.clone());
         let full = match std::env::var("EMBER_CR_PROJECT").ok() {
             Some(id) if !id.is_empty() => Some(id),
@@ -271,17 +273,29 @@ pub fn ProjectScreen() {
 /// The page header: the title and subtitle, and the actions at the right; on a phone the actions
 /// are a row below the title (and the title leaves room for the menu button at the top right).
 pub fn Header(title: &str, sub: &str, compact: bool, trailing: impl FnOnce()) {
-    HeaderGap(title, sub, compact, compact, 0.0, trailing)
+    HeaderGap(title, sub, compact, compact, 0.0, false, trailing)
 }
 
 /// [`Header`] with `gap` dp between the title and the subtitle, and the actions stacked below
 /// the title when `stacked` (a phone, or a tablet in the mockup's files header); `compact` is the
-/// phone: the smaller title and the room for the menu button.
-pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32, trailing: impl FnOnce()) {
+/// phone: the smaller title and the room for the menu button. `end` puts the stacked actions at
+/// the row's right end (the files header on a phone, review row F6: in the mockup the subtitle
+/// fills the line, so `.spacer{flex:1}` wraps with the buttons and pushes them right).
+pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32, end: bool, trailing: impl FnOnce()) {
     let p = ember_theme().palette;
+    // On a phone only the title line leaves room for the menu button; the subtitle runs the
+    // whole width under it (#878: it wrapped at x 284 of a row that ends at x 374).
+    let menu_room = if stacked && compact { PHONE_MENU_ROOM } else { 0.0 };
     let titles = || {
         cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-            Label(title, if compact { Fs::Xl2 } else { Fs::Xl3 }, PAGE_TITLE_WEIGHT, None, Some(1));
+            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label(title, if compact { Fs::Xl2 } else { Fs::Xl3 }, PAGE_TITLE_WEIGHT, None, Some(1));
+                });
+                if menu_room > 0.0 {
+                    cu::Spacer().modifier(Modifier::new().width(menu_room));
+                }
+            });
             if !sub.is_empty() {
                 if gap > 0.0 {
                     cu::Spacer().modifier(Modifier::new().height(gap));
@@ -292,13 +306,15 @@ pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32,
     };
     if stacked {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-                titles();
-                if compact {
-                    cu::Spacer().modifier(Modifier::new().width(PHONE_MENU_ROOM));
-                }
-            });
-            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(trailing);
+            cu::Row().modifier(Modifier::new().fill_max_width()).content(titles);
+            if end {
+                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    trailing();
+                });
+            } else {
+                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(trailing);
+            }
         });
     } else {
         cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -343,6 +359,9 @@ pub fn search_field_visible(w: f32, open: bool) -> bool {
     w > 900.0 || open
 }
 
+/// The side of the header's search glyph (the mockup's 18 px icon in a 40 px `.icon-btn`).
+pub const SEARCH_GLYPH: f32 = 18.0;
+
 /// Whether the search icon button is drawn: only at 900 dp and below (the mockup hides it above).
 pub fn search_icon_visible(w: f32) -> bool {
     w <= 900.0
@@ -363,14 +382,26 @@ fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
     if search_icon_visible(w) {
         let o = st.search_open.clone();
         let q = st.query.clone();
-        // v0.0.7: #428 and #429 fixed (`accessible_name`, `Modifier::expanded`); workaround kept
-        // until checked on a display (`IconButton` takes a toolkit glyph and no name yet, see
-        // components.rs), so the name "팀원 검색 열기" and the expanded state are not set.
-        IconButton(IconRole::Search, false, move || {
-            let (open, query) = toggle_search(o.get_untracked(), &q.get_untracked());
-            o.set(open);
-            q.set(query);
-        });
+        // The app's own search glyph in the 40 px ring (`.icon-btn`), named 팀원 검색 열기, and
+        // it says whether the search row it opens is open (compose-rust#428, #429). It was the
+        // toolkit glyph with no name and no state.
+        let p = ember_theme().palette;
+        NamedClickable(
+            super::a11y::OPEN_MEMBER_SEARCH,
+            Modifier::new()
+                .size(H_BTN, H_BTN)
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .shape_role(ShapeRole::Full)
+                .expanded(st.search_open.get()),
+            Alignment::Center,
+            move || {
+                let (open, query) = toggle_search(o.get_untracked(), &q.get_untracked());
+                o.set(open);
+                q.set(query);
+            },
+            move || NavIcon(shell::ICON_SEARCH_SVG, p.text_2.to_argb(), SEARCH_GLYPH),
+        );
     }
     let n = st.new_project.clone();
     // Enabled in the demo only: it makes a local project there (#218).
@@ -393,17 +424,11 @@ fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
 
 /// 새 팀원: a primary button; a 40 px ink circle on a phone.
 fn NewMemberButton(ui: &SharedUi, project: Option<String>, w: f32) {
-    let p = ember_theme().palette;
     let u = ui.clone();
     if w > 560.0 {
         AppButton("새 팀원", Some(IconRole::Add), ButtonKind::Primary, false, true, false, move || u.open_new_session(project.clone()));
     } else {
-        cu::Button("")
-            .icon(IconRole::Add)
-            .variant(ButtonVariant::Text)
-            .color(paint(p.ink_text))
-            .modifier(Modifier::new().size(H_BTN, H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full))
-            .on_click(move || u.open_new_session(project.clone()));
+        InkIconButton(IconRole::Add, move || u.open_new_session(project.clone()));
     }
 }
 
@@ -413,12 +438,16 @@ fn Grid(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi, w:
     let shown: Vec<&ProjectBox> = boxes.iter().filter(|b| box_matches(b, &query)).collect();
     Header("프로젝트", "프로젝트를 누르면 세션으로 들어가 팀원들의 대화를 함께 봅니다.", w <= 560.0, || ListActions(st, ui, w));
     if w <= 900.0 && search_field_visible(w, st.search_open.get()) {
-        // TODO: focus the field on open (compose-rust#410 `FocusHandle` and
-        // `Batch::request_focus`, in v0.0.7; not wired yet).
+        // The row is drawn only while the search icon has it open, so composing it is the
+        // opening: the field takes the focus then (compose-rust#410). The request runs as an
+        // effect, after the batch that creates the field's node; one made earlier is dropped.
         let q = st.query.clone();
-        cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
-            SearchField("팀원 검색", H_BTN, move |v| q.set(v));
+        let focus = cu::use_focus_handle();
+        let field = focus.clone();
+        cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+            SearchFieldFocus("팀원 검색", H_BTN, Some(field), move |v| q.set(v));
         });
+        launched_effect((), move || async move { focus.request() });
     }
     ComputerStrip(chips, st);
     if shown.is_empty() {
@@ -446,13 +475,14 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
         return;
     }
     let scroll = compose_rust::ui::remember_scroll_state();
+    // TODO(compose-rust#818): `ScrollState` has no viewport size, so the step is taken from the
+    // window's content width, which is wider than the strip between its arrows.
     let viewport = content_width(crate::ui::window_size::current_window_size().width_dp, SP[6]);
-    let (offset, max) = (scroll.offset(), scroll.max_offset());
-    let arrows = strip_arrows_visible(max);
+    // Only the overflow is read here; each arrow reads the offset itself (#671).
+    let arrows = strip_arrows_visible(scroll.max_offset());
     cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(64.0)).content(|| {
         if arrows {
-            let s = scroll.clone();
-            StripArrow(ICON_ARROW_LEFT_SVG, offset > 0.0, move || s.animate_scroll_to(strip_scroll_target(offset, viewport, max + viewport, -1.0)));
+            StripArrow(ICON_ARROW_LEFT_SVG, super::a11y::SCROLL_LEFT, -1.0, &scroll, viewport);
         }
         cu::ScrollRow().scroll_state(&scroll).modifier(Modifier::new().weight(1.0).height(64.0)).content(|| {
             for c in chips {
@@ -461,7 +491,8 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
                 cu::Spacer().modifier(Modifier::new().width(SP[1]));
             }
             // The hub's devices, registered with the node's token (FR-X7, #490).
-            // TODO(compose-rust, #671): no dashed border or stroke-dash API, so the add chip keeps a solid 1 px border.
+            // TODO(compose-rust#817): `Modifier::border` has no stroke dash, so the add chip keeps a
+            // solid 1 px border (`.cchip.add{border-style:dashed}`).
             let add = Modifier::new().height(56.0).border(1.0, paint(p.line)).corner_radius(CORNER_MD);
             let ui = st.add.clone();
             Clickable(add, Alignment::CenterStart, move || ui.show(), || {
@@ -474,8 +505,7 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
             });
         });
         if arrows {
-            let s = scroll.clone();
-            StripArrow(ICON_ARROW_RIGHT_SVG, offset < max, move || s.animate_scroll_to(strip_scroll_target(offset, viewport, max + viewport, 1.0)));
+            StripArrow(ICON_ARROW_RIGHT_SVG, super::a11y::SCROLL_RIGHT, 1.0, &scroll, viewport);
         }
     });
 }
@@ -483,17 +513,23 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
 const ICON_ARROW_LEFT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>"#;
 const ICON_ARROW_RIGHT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>"#;
 
-/// A scroll arrow of the computer strip. Dimmed and inert at the end it points to.
-/// TODO(compose-rust, #671): no label modifier for icon-only controls, so this control has no accessible name.
-fn StripArrow(svg: &'static str, enabled: bool, mut on_click: impl FnMut() + 'static) {
+/// A scroll arrow of the computer strip, pointing in `dir` (-1 or 1) and named `label` for
+/// assistive technology (`Modifier::label`, #671). Dimmed, inert and reported disabled at the end
+/// it points to: it reads the strip's `ScrollState` here, so a scroll composes it again, and a
+/// press reads the offset again and never a value kept from composition.
+fn StripArrow(svg: &'static str, label: &'static str, dir: f32, scroll: &cu::ScrollState, viewport: f32) {
     let p = ember_theme().palette;
+    let enabled = strip_arrow_enabled(scroll.offset(), scroll.max_offset(), dir);
     let color = if enabled { p.text_2 } else { p.line };
-    Clickable(
-        Modifier::new().size(H_CTL, H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
+    let s = scroll.clone();
+    NamedClickable(
+        label,
+        Modifier::new().size(H_CTL, H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full).disabled(!enabled),
         Alignment::Center,
         move || {
-            if enabled {
-                on_click()
+            let (offset, max) = (s.offset(), s.max_offset());
+            if strip_arrow_enabled(offset, max, dir) {
+                s.animate_scroll_to(strip_scroll_target(offset, viewport, max + viewport, dir));
             }
         },
         move || {
@@ -559,9 +595,8 @@ fn TeamDonut(members: &[Member], size: f32) {
 
 /// `.pbox`: the header (ring, name and repository, actions, stats) and, below a rule, the
 /// full-width `surface-2` team area.
-/// v0.0.7: #392 fixed (`Modifier::corner_radii` and `clip`); workaround kept until checked on a
-/// display (the team area is a rounded box over the card's bottom corners, so its top corners are
-/// rounded too, until the card clips it).
+/// The team area is square at the top, under the rule, and takes the card's radius at the bottom
+/// (`Modifier::corner_radii`, compose-rust#392); it was a box rounded at all four corners.
 fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
     let p = ember_theme().palette;
     let expanded = st.expanded.get().contains(&b.id);
@@ -599,7 +634,7 @@ fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
                 });
                 cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                 cu::Box()
-                    .modifier(Modifier::new().fill_max_width().background(paint(p.surface_2)).corner_radius(CORNER_XL).padding(SP[3]))
+                    .modifier(Modifier::new().fill_max_width().background(paint(p.surface_2)).corner_radii([0.0, 0.0, CORNER_XL, CORNER_XL]).padding(SP[3]))
                     .content(|| {
                         cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                             if total == 0 {
@@ -812,14 +847,31 @@ fn FullProject(b: &ProjectBox, chips: &[ComputerChip], st: &Ui, ui: &SharedUi, w
         ComputerStrip(&assigned, st);
     }
     KpiStrip(b, ui, w);
+    // The project's routines from the server (FR-L26, #327); the demo lists its samples.
+    let routines = remember_with_key(b.id.clone(), || {
+        mutable_state_of(if services().demo.is_some() { TileLoad::Loaded(super::routines::sample_entries()) } else { TileLoad::Loading })
+    });
+    if services().demo.is_none() {
+        let (slot, id) = (routines.clone(), b.id.clone());
+        compose_rust::runtime::launched_effect(b.id.clone(), move || async move {
+            run_shared(async move { crate::ui::project::load_project_tile(services().client.api(), &id).await }, move |l| slot.set(l));
+        });
+    }
+    let routine_lines = project_routine_tile(&routines.get(), &b.id, super::routines::now_local()).lines();
     let members = || MembersCard(b, st, ui);
     let side = || {
         cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
-            // TODO(routines, channels screens, phase 7): they list the project's items here.
+            // TODO(channels screen, phase 7): the channel tile lists the project's channels here.
             for (icon, title, empty) in [(shell::ICON_GAUGE_SVG, "루틴", "루틴이 없습니다"), (shell::ICON_HASH_SVG, "채널", "채널이 없습니다")] {
                 super::home::Tile(|| {
                     super::home::CardHead(icon, title, || {});
-                    Label(&format!("{empty}. {SOON}"), Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
+                    if title == "루틴" {
+                        for line in &routine_lines {
+                            Label(line, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
+                        }
+                    } else {
+                        Label(&format!("{empty}. {SOON}"), Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
+                    }
                 });
             }
         });
@@ -878,11 +930,12 @@ fn launch_ide(ui: &SharedUi, kind: IdeKind, launch: Option<Result<IdeLaunch, Str
         ),
         IdeAction::EmberPlaceholder => {
             let c = IdeLaunch::editor_connection(launch.as_ref());
-            if c.endpoint.as_deref().map_or(true, str::is_empty) {
+            // The relay route alone is enough to reach the OSE (FR-N9.1).
+            if c.endpoint.as_deref().map_or(true, str::is_empty) && c.relay.as_deref().map_or(true, str::is_empty) {
                 notice::post("Ember 에디터: 서버가 OSE 런타임을 시작하지 못했습니다");
                 return;
             }
-            ui.open_editor_connection(c.project, c.folder, c.endpoint, c.token, c.server_url, c.computer);
+            ui.open_editor_connection(c.project, c.folder, c.endpoint, c.token, c.server_url, c.computer, c.relay);
         }
         IdeAction::Unavailable(why) => notice::post(format!("{label}: 사용할 수 없습니다: {why}")),
     }
@@ -897,9 +950,11 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
     // `EMBER_CR_IDE_MENU=1` opens the chooser at the start, for review captures.
     let open = remember_with_key(key.clone(), || mutable_state_of(std::env::var("EMBER_CR_IDE_MENU").as_deref() == Ok("1")));
     let ide = remember_with_key(key.clone(), || mutable_state_of(None::<Result<IdeLaunch, String>>));
+    let computer = remember_with_key(key.clone(), || mutable_state_of(None::<String>));
     let started = remember_with_key(key, || mutable_state_of(false));
     if let (Some(sid), false) = (session.clone(), started.get_untracked()) {
         started.set(true);
+        crate::ui::cr::session::load_session_computer(sid.clone(), computer.clone());
         if services().demo.is_some() {
             let (project, cwd) = services()
                 .client
@@ -916,31 +971,51 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
     }
     let remembered = ui.prefs.get().ide_target.as_deref().and_then(IdeKind::from_key);
     let choices = crate::ui::session::ide_choices(remembered);
-    let labels: Vec<String> = choices.iter().map(|c| c.label.to_string()).collect();
     let has_session = session.is_some();
-    cu::Box().content(|| {
-        cu::Row().alignment(Alignment::Center).spacing(4.0).content(|| {
-            let (o, ui_btn, ide_btn) = (open.clone(), ui.clone(), ide.clone());
-            AppButton(if compact { "IDE" } else { "IDE 열기" }, Some(IconRole::Forward), ButtonKind::Default, false, true, false, move || {
-                if !has_session {
-                    notice::post("세션이 없어 IDE를 열 수 없습니다");
-                } else {
-                    crate::ui::cr::session::ide_main_click(remembered, &o, |kind| {
-                        launch_ide(&ui_btn, kind, ide_btn.get_untracked())
-                    });
-                }
-            });
-            if has_session {
-                crate::ui::cr::session::IdeChevron(open.clone(), false);
-            }
-        });
-        let (close, ui2, ide2) = (open.clone(), ui.clone(), ide.clone());
-        OptionSheet(open.get(), &labels, None, 220.0, move || close.set(false), move |i| {
+    let cwd = session
+        .as_ref()
+        .and_then(|sid| services().client.read(|s| s.session(sid).map(|v| v.record.cwd.clone())))
+        .unwrap_or_default();
+    // `computer:~/project` (mockup `ideMenu`), not the raw folder (review r8).
+    let ide_sub = crate::ui::session::ide_menu_subtitle(computer.get().as_deref(), &cwd);
+    let rows = crate::ui::cr::session::ide_pop_rows(&choices, remembered);
+    let (close, ui2, ide2) = (open.clone(), ui.clone(), ide.clone());
+    // The chooser hangs from the IDE button, lined up with its end (FR-L10.4, #888, review P10).
+    PopoverMenu(
+        open.get(),
+        PopMenu {
+            name: super::a11y::IDE_PICKER,
+            kind: PopKind::Drop,
+            head: crate::ui::session::IDE_MENU_HEAD,
+            sub: ide_sub.as_deref(),
+            rows: &rows,
+            align: compose_rust::PopoverAlign::End,
+        },
+        move || close.set(false),
+        move |i| {
             if let Some(c) = choices.get(i) {
                 launch_ide(&ui2, c.kind, ide2.get_untracked());
             }
-        });
-    });
+        },
+        || {
+            cu::Row().alignment(Alignment::Center).spacing(4.0).content(|| {
+                let (o, ui_btn, ide_btn) = (open.clone(), ui.clone(), ide.clone());
+                AppButton(if compact { "IDE" } else { "IDE 열기" }, Some(IconRole::Forward), ButtonKind::Default, false, true, false, move || {
+                    if !has_session {
+                        notice::post("세션이 없어 IDE를 열 수 없습니다");
+                    } else {
+                        crate::ui::cr::session::ide_main_click(remembered, &o, |kind| {
+                            launch_ide(&ui_btn, kind, ide_btn.get_untracked())
+                        });
+                    }
+                });
+                if has_session {
+                    crate::ui::cr::session::IdeChevronSized(open.clone(), false, H_BTN);
+                }
+            });
+        },
+        None,
+    );
 }
 
 /// `.strip`: members, waiting, running and the week's tokens, with the pinned sessions as chips.
@@ -1081,7 +1156,7 @@ fn MemberRow(m: &Member, project_id: &str, ui: &SharedUi, rule: bool) {
 // Sheets
 // ---------------------------------------------------------------------------------------------
 
-fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) {
+pub(super) fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) {
     // New project (FR-L26, FR-L1): name, repository, default branch and team character. Creating
     // takes only the name; the other fields go in a second PATCH.
     {
@@ -1113,12 +1188,52 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
         // style rows at 390). When the window has not reported a size (390 can read 0x0) the
         // shared formula falls back to 240 dp. v0.0.7: #479 fixed (`with_report_size`);
         // fallback kept until checked on a display (the first composition still reads 0x0).
+        // FR-L32.1 (#876, #878): 취소/만들기 sit in the header as the mockup's `.sheet-acts`
+        // (`project.js` projNew), so the body leaves room for the header only and the buttons
+        // never fall below a scrolling body at 390.
+        // TODO(compose-rust#778, after v0.0.10): cap the body at this height instead of fixing it.
         let new_window = crate::ui::window_size::current_window_size();
-        let new_body_height =
-            super::components::sheet_body_max_height(new_window.width_dp, new_window.height_dp, false, 60.0).min(900.0);
-        EmberSheet("새 프로젝트", st.new_project.get(), request_close.clone(), None, || {
-            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(new_body_height)).content(|| {
-                cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+        let new_body_height = super::components::sheet_body_max_height(
+            new_window.width_dp,
+            new_window.height_dp,
+            false,
+            super::components::SHEET_HEADER_CHROME_H,
+        )
+        .min(900.0);
+        // FR-L26.1 (#878): a body that fits is as tall as its content, so the 1440 dialog has no
+        // blank band above 취소/만들기; only a body taller than the room scrolls at a fixed height.
+        let notes = usize::from(d.branch.trim().is_empty())
+            + if d.is_blank() { 0 } else { errors.len() }
+            + usize::from(st.new_failure.get().is_some());
+        let new_columns = super::characters::style_picker_columns(new_window.width_dp);
+        let new_stacked = new_project_fields_stacked(new_window.width_dp);
+        let new_body_fits = new_project_body_estimate(new_columns, new_stacked, notes) <= new_body_height;
+        let new_scroll = cu::remember_scroll_state();
+        let review_end = new_sheet_review_end();
+        // `.sheet-acts`: 취소 and 만들기 (small) before the close button, 4 apart, as the project
+        // settings sheet's 취소/저장.
+        let mut new_actions = {
+            let close = request_close.clone();
+            let (dr, saving_s, failure, leave) =
+                (st.new_draft.clone(), st.new_saving.clone(), st.new_failure.clone(), leave.clone());
+            move || {
+                AppButton("취소", None, ButtonKind::Default, true, true, false, close.clone());
+                cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                let (dr, saving_s, failure, leave) = (dr.clone(), saving_s.clone(), failure.clone(), leave.clone());
+                AppButton(if saving { "만드는 중" } else { "만들기" }, None, ButtonKind::Primary, true, can_create, false, move || {
+                    create_project(dr.get_untracked(), saving_s.clone(), failure.clone(), leave.clone())
+                });
+                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            }
+        };
+        EmberSheet("새 프로젝트", st.new_project.get(), request_close.clone(), Some(&mut new_actions), || {
+            if review_end && !new_body_fits {
+                ScrollToEnd(new_scroll.clone());
+            }
+            let new_body = || {
+                // `.ps-form`: the 기본 and 팀 캐릭터 sections (`psSection`), each with its title
+                // and hint, as the project settings sheet draws them.
+                cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
                     // v0.0.7: #374 fixed (`TextField::text`); workaround kept until checked on a
                     // display (a controlled value must not move the caret while typing), so the
                     // fields are uncontrolled.
@@ -1136,55 +1251,69 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
                         }
                     };
                     let (s1, s2, s3) = (submit.clone(), submit.clone(), submit);
-                    FieldRow("이름", || {
-                        EmberField(FieldOptions {
-                            fill_max_width: true,
-                            placeholder: "프로젝트 이름".to_string(),
-                            on_value_change: Some(Box::new(move |v| {
-                                f1.set(None);
-                                d1.update(|s| s.name = v)
-                            })),
-                            on_submit: Some(Box::new(s1)),
-                            ..Default::default()
-                        });
-                    });
-                    cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                            FieldRow("저장소", || {
+                    Section(NEW_SEC_BASIC.0, NEW_SEC_BASIC.1, true, || {
+                        // `.ps-grid`: 이름 across both columns, then 저장소 and 기본 브랜치 side by
+                        // side 16 apart; one column at 560 px and below. Rows are 12 apart.
+                        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                            FieldRow("이름", || {
                                 EmberField(FieldOptions {
                                     fill_max_width: true,
-                                    placeholder: "github.com/...".to_string(),
+                                    placeholder: NEW_NAME_HINT.to_string(),
                                     on_value_change: Some(Box::new(move |v| {
-                                f2.set(None);
-                                d2.update(|s| s.repo = v)
-                            })),
-                            on_submit: Some(Box::new(s2)),
+                                        f1.set(None);
+                                        d1.update(|s| s.name = v)
+                                    })),
+                                    on_submit: Some(Box::new(s1)),
                                     ..Default::default()
                                 });
                             });
-                        });
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                            FieldRow("기본 브랜치", || {
-                                EmberField(FieldOptions {
-                                    fill_max_width: true,
-                                    placeholder: "develop".to_string(),
-                                    on_value_change: Some(Box::new(move |v| {
-                                f3.set(None);
-                                d3.update(|s| s.branch = v)
-                            })),
-                            on_submit: Some(Box::new(s3)),
-                                    ..Default::default()
+                            let repo_field = move || {
+                                FieldRow("저장소", || {
+                                    EmberField(FieldOptions {
+                                        fill_max_width: true,
+                                        placeholder: "github.com/...".to_string(),
+                                        on_value_change: Some(Box::new(move |v| {
+                                            f2.set(None);
+                                            d2.update(|s| s.repo = v)
+                                        })),
+                                        on_submit: Some(Box::new(s2)),
+                                        ..Default::default()
+                                    });
                                 });
-                            });
+                            };
+                            let branch_field = move || {
+                                FieldRow("기본 브랜치", || {
+                                    EmberField(FieldOptions {
+                                        fill_max_width: true,
+                                        placeholder: "develop".to_string(),
+                                        on_value_change: Some(Box::new(move |v| {
+                                            f3.set(None);
+                                            d3.update(|s| s.branch = v)
+                                        })),
+                                        on_submit: Some(Box::new(s3)),
+                                        ..Default::default()
+                                    });
+                                });
+                            };
+                            if new_stacked {
+                                repo_field();
+                                branch_field();
+                            } else {
+                                cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+                                    cu::Column().modifier(Modifier::new().weight(1.0)).content(repo_field);
+                                    cu::Column().modifier(Modifier::new().weight(1.0)).content(branch_field);
+                                });
+                            }
+                            if d.branch.trim().is_empty() {
+                                Label(&format!("비워 두면 {}을 씁니다", NewProjectDraft::DEFAULT_BRANCH), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            }
                         });
                     });
-                    if d.branch.trim().is_empty() {
-                        Label(&format!("비워 두면 {}을 씁니다", NewProjectDraft::DEFAULT_BRANCH), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    }
-                    Label("팀 캐릭터", Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
-                    let dr = st.new_draft.clone();
-                    let shown = effective_style(if d.style.is_empty() { None } else { Some(&d.style) }, None);
-                    StylePicker(&d.name, shown, move |c| dr.update(|s| s.style = c.id().to_string()));
+                    Section(NEW_SEC_STYLE.0, NEW_SEC_STYLE.1, false, || {
+                        let dr = st.new_draft.clone();
+                        let shown = effective_style(if d.style.is_empty() { None } else { Some(&d.style) }, None);
+                        StylePicker(&d.name, shown, move |c| dr.update(|s| s.style = c.id().to_string()));
+                    });
                     // Errors only once something was typed, so an empty sheet is not red.
                     if !d.is_blank() {
                         for e in errors.iter() {
@@ -1195,15 +1324,12 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
                         Label(&m, Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
                     }
                 });
-            });
-            SheetFooter(|| {
-                AppButton("취소", None, ButtonKind::Default, true, true, false, request_close.clone());
-                let (dr, saving_s, failure, leave) =
-                    (st.new_draft.clone(), st.new_saving.clone(), st.new_failure.clone(), leave.clone());
-                AppButton(if saving { "만드는 중" } else { "만들기" }, None, ButtonKind::Primary, true, can_create, false, move || {
-                    create_project(dr.get_untracked(), saving_s.clone(), failure.clone(), leave.clone())
-                });
-            });
+            };
+            if new_body_fits {
+                cu::Column().modifier(Modifier::new().fill_max_width()).content(new_body);
+            } else {
+                cu::ScrollColumn().scroll_state(&new_scroll).modifier(Modifier::new().fill_max_width().height(new_body_height)).content(new_body);
+            }
         });
         // The unsaved-changes question, as the settings sheet asks it.
         let keep = {
@@ -1263,6 +1389,61 @@ pub fn sheet_scroll_dp(value: Option<&str>) -> f32 {
         Some("end") => EST_SEC_BASIC + EST_SEC_COMPUTERS + EST_SEC_DEFAULTS + EST_SEC_PROFILE + EST_SEC_STYLE,
         Some(n) => n.parse::<f32>().unwrap_or(0.0).max(0.0),
         None => 0.0,
+    }
+}
+
+/// Whether `EMBER_CR_SHEET_SCROLL` asks for a sheet's end state (`end`), FR-L32.1.
+pub fn sheet_scroll_is_end(value: Option<&str>) -> bool {
+    value == Some("end")
+}
+
+/// The new-project sheet's sections (`project.js` projNew `psSection`): title and hint.
+pub const NEW_SEC_BASIC: (&str, &str) = ("기본", "프로젝트 이름과 저장소");
+pub const NEW_SEC_STYLE: (&str, &str) =
+    ("팀 캐릭터", "이 프로젝트의 팀원이 모두 이 모양으로 보입니다. 나중에 설정에서 바꿀 수 있습니다");
+
+/// The 이름 field's hint (`project.js` projNew `placeholder`).
+pub const NEW_NAME_HINT: &str = "예: darkpyonix-docs";
+
+/// Whether 저장소 and 기본 브랜치 sit under each other: `.ps-grid` is one column at a window
+/// 560 dp wide or narrower (`@media (max-width:560px)`), two above. A window that has not
+/// reported its width counts as wide.
+pub fn new_project_fields_stacked(window_width_dp: f32) -> bool {
+    window_width_dp > 0.0 && window_width_dp <= 560.0
+}
+
+/// How tall the new-project body is, from its rows (FR-L26.1): 20 px padding top and bottom;
+/// the 기본 section (the 22 px title, the 18 px hint, then 이름 and the 저장소/기본 브랜치 row,
+/// or 저장소 and 기본 브랜치 as rows of their own when `stacked`, each a 12/18 label, 4 and a
+/// 40 px field, 12 apart; 8 between the section's rows); 16; the
+/// 팀 캐릭터 section (its rule, 8, the title, a two-line hint and the picker for `columns`, 8
+/// apart); each of `notes` (the branch hint, errors, the failure) at two lines and 16 above.
+/// An estimate, not a measurement: TODO(compose-rust#778, after v0.0.10) a body capped at the room would make
+/// it unnecessary.
+pub(crate) fn new_project_body_estimate(columns: usize, stacked: bool, notes: usize) -> f32 {
+    let field_row = 18.0 + 4.0 + H_BTN;
+    let note = SP[3] + 2.0 * 18.0;
+    let field_rows = if stacked { 3.0 } else { 2.0 };
+    let basic = 22.0 + SP[1] + 18.0 + SP[1] + field_rows * field_row + (field_rows - 1.0) * SP[2];
+    let style = 1.0 + SP[1] + SP[1] + SP[1] + 22.0 + SP[1] + 2.0 * 18.0 + SP[1] + super::characters::style_picker_height(columns);
+    SP[4] * 2.0 + basic + SP[3] + style + notes as f32 * note
+}
+
+/// The new-project sheet's review setting: `EMBER_CR_SHEET_SCROLL=end` scrolls its body to the
+/// end (debug builds only), so the end state can be captured as the settings sheet's can.
+fn new_sheet_review_end() -> bool {
+    let value = if cfg!(debug_assertions) { std::env::var("EMBER_CR_SHEET_SCROLL").ok() } else { None };
+    sheet_scroll_is_end(value.as_deref())
+}
+
+/// Keeps `scroll` at its end once the content is measured (review captures, FR-L32.1). It draws
+/// nothing; it is a composable of its own so reading the distance runs only this function again.
+#[compose_rust::runtime::Composable]
+fn ScrollToEnd(scroll: cu::ScrollState) {
+    // Only the distance is read, so the user can still scroll back up after the jump.
+    let max = scroll.max_offset();
+    if max > 0.0 {
+        compose_rust::runtime::side_effect(move || scroll.scroll_to(max));
     }
 }
 
@@ -1385,7 +1566,8 @@ fn create_project(
 /// failure (FR-L26). After a rename the selected project and the open project view follow the new
 /// name, and this device's remembered style moves with it. The character style is also kept in
 /// this device's prefs, but only as the fallback the tiles read when the server has none.
-/// TODO(#384): leader, archive and delete are not sent (server `not_yet`).
+/// The 보관 and 보관 해제 buttons send their one-field patch through here too (#327).
+/// TODO(#384): the leader is not sent (server `not_yet`).
 fn save_settings(
     project: String,
     patch: ember_client::wire::ProjectPatch,
@@ -1418,16 +1600,51 @@ fn save_settings(
                     if let (true, Some(st)) = (style_changed, style) {
                         ui.update_prefs(|pr| pr.set_character_style(&saved_as, st));
                     }
+                    // An archived project leaves the list, so its open view closes with it (#327).
+                    if sent.archived == Some(true) && !ui.show_archived.get_untracked() {
+                        full.set(full_after_removal(full.get_untracked().as_deref(), &saved_as));
+                    }
                     closed.set(None);
                 }
+                Err(e) if is_owner_refusal(e.status(), e.code()) => notice::post(e.to_string()),
                 Err(e) => failure.set(Some(patch_error_message(e.status(), e.code(), &sent).to_string())),
             }
         },
     );
 }
 
+/// Delete the project on the main server (FR-L26, #327), after the second tap. The settings
+/// sheet and the project's open view close; a refusal reads its fixed sentence in the sheet.
+fn delete_project_now(
+    project: String,
+    closed: MutableState<Option<String>>,
+    full: MutableState<Option<String>>,
+    saving: MutableState<bool>,
+    failure: MutableState<Option<String>>,
+) {
+    saving.set(true);
+    failure.set(None);
+    let ui = shared_ui().clone();
+    let name = project.clone();
+    run_shared(
+        async move { services().client.delete_project(&project).await },
+        move |r| {
+            saving.set(false);
+            match r {
+                Ok(()) => {
+                    ui.set_selected_project(full_after_removal(ui.selected_project.get_untracked().as_deref(), &name));
+                    full.set(full_after_removal(full.get_untracked().as_deref(), &name));
+                    closed.set(None);
+                }
+                Err(e) if is_owner_refusal(e.status(), e.code()) => notice::post(e.to_string()),
+                Err(e) => failure.set(Some(delete_error_message(e.status(), e.code()).to_string())),
+            }
+        },
+    );
+}
+
 /// The settings sheet has 취소 and 저장 in the header beside the close button.
-fn SettingsSheet(
+pub(super) fn SettingsSheet(
     b: &ProjectBox,
     chips: &[ComputerChip],
     closed: MutableState<Option<String>>,
@@ -1532,18 +1749,12 @@ fn SettingsSheet(
                     // `.ps-chips` of `.ps-check`: a check box, the computer's icon, its name and
                     // the status dot, wrapping. Ticking assigns at once (FR-L4), as before.
                     // TODO(FR-X7): one icon for every kind, because node does not report the kind.
-                    // v0.0.7: #521 fixed (`FlowRow`); workaround kept until checked on a display
-                    // (the toolkit's wrap must match the mockup), so lines are cut by estimated width.
-                    let avail = window.width_dp.min(760.0) - 2.0 * SP[4];
-                    let widths: Vec<f32> = chips.iter().map(|c| crate::ui::project::computer_check_width(&c.name) + 26.0).collect();
-                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        for line in wrap_lines(&widths, SP[1], avail) {
-                            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
-                                for k in line {
-                                    let c = &chips[k];
-                                    ComputerCheck(c, b.computers.contains(&c.id), b.id.clone());
-                                }
-                            });
+                    // The toolkit's `FlowRow` breaks the lines at each chip's real width, 8 apart
+                    // along a line and between lines (compose-rust#521); they were cut by an
+                    // estimated width.
+                    cu::FlowRow().horizontal_spacing(SP[1]).vertical_spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        for c in chips.iter() {
+                            ComputerCheck(c, b.computers.contains(&c.id), b.id.clone());
                         }
                     });
                 });
@@ -1633,11 +1844,14 @@ fn SettingsSheet(
                             Label("팀원이 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1));
                         }
                         let cols = crate::ui::project::leader_cols(window.width_dp);
+                        let review = if cfg!(debug_assertions) { std::env::var("EMBER_CR_LEADER").ok() } else { None };
                         cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                             for row in b.members.chunks(cols) {
                                 cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                                     for m in row {
-                                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| LeaderOption(m));
+                                        let mut m = m.clone();
+                                        m.leader = review_leader(review.as_deref(), &b.members, &m);
+                                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| LeaderOption(&m, &b.id));
                                     }
                                     for _ in row.len()..cols {
                                         cu::Spacer().modifier(Modifier::new().weight(1.0));
@@ -1660,10 +1874,29 @@ fn SettingsSheet(
                         shell::choose(&u, NavMenu::VersionControl);
                     });
                 });
-                SkipSection(&sheet_skip, EST_SEC_DANGER, "위험 영역", if default_project { "되돌리기 어려운 작업입니다. 기본 프로젝트는 보관하거나 지울 수 없습니다" } else { "되돌리기 어려운 작업입니다. 보관과 삭제는 서버가 아직 지원하지 않습니다" }, false, || {
+                SkipSection(&sheet_skip, EST_SEC_DANGER, "위험 영역", danger_hint(&b.id), false, || {
                     cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        for row in danger_rows(&b.id, b.members.len()) {
-                            DangerRowView(&row, danger_allowed(&b.id, row.part));
+                        // 보관 is one tap (it can be undone); 삭제 asks twice (`delete_step`).
+                        let armed = remember_with_key(b.id.clone(), || mutable_state_of(None::<i64>));
+                        let (archived, now) = (server.archived, crate::demo::now_ms());
+                        for row in danger_rows_for(&b.id, b.members.len(), archived, delete_armed(armed.get(), now)) {
+                            let (project, closed, full, saving, failure, armed) = (b.id.clone(), closed.clone(), full.clone(), saving.clone(), failure.clone(), armed.clone());
+                            let part = row.part;
+                            DangerRowView(&row, danger_allowed(&b.id, part) && !saving.get(), move || {
+                                if part == SettingsPart::Archive {
+                                    save_settings(project.clone(), archive_patch(archived), None, closed.clone(), full.clone(), saving.clone(), failure.clone());
+                                    return;
+                                }
+                                let now = crate::demo::now_ms();
+                                match delete_step(armed.get_untracked(), now) {
+                                    DeleteStep::Arm => armed.set(Some(now)),
+                                    DeleteStep::Wait => {}
+                                    DeleteStep::Delete => {
+                                        armed.set(None);
+                                        delete_project_now(project.clone(), closed.clone(), full.clone(), saving.clone(), failure.clone());
+                                    }
+                                }
+                            });
                         }
                     });
                 });
@@ -1714,21 +1947,38 @@ fn ComputerCheck(c: &ComputerChip, on: bool, project: String) {
         });
 }
 
+/// Review captures only (`EMBER_CR_LEADER`, debug builds): which card shows as chosen. Unset
+/// keeps the server's leader; `first` marks the first member; any other value marks the member of
+/// that name. It proves the chosen card's `sel` background, which the demo (no leader) never shows.
+fn review_leader(value: Option<&str>, members: &[Member], m: &Member) -> bool {
+    match value {
+        None | Some("") => m.leader,
+        Some("first") => members.first().map_or(false, |f| f.session_id == m.session_id),
+        Some(name) => m.name == name,
+    }
+}
+
 /// `.ps-lead`: a radio mark, the member's name and task. Read only: the server does not take a
 /// leader yet (TODO(#384)), so the mark shows the current leader and does not react.
-fn LeaderOption(m: &Member) {
+/// The member's character on a leader card (`bot(s,30)` in the mockup's `.ps-lead`).
+pub const LEADER_AVATAR: f32 = 30.0;
+
+fn LeaderOption(m: &Member, project_id: &str) {
     let p = ember_theme().palette;
+    // `.ps-lead:has(input:checked)`: the chosen card is on `sel` with an `ink` border.
+    let card = Modifier::new().fill_max_width().padding(10.0).border(1.0, paint(if m.leader { p.ink } else { p.line })).corner_radius(CORNER_MD);
+    let card = if m.leader { card.background(paint(p.sel)) } else { card };
     cu::Row()
         .spacing(10.0)
         .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().fill_max_width().padding(10.0).border(1.0, paint(if m.leader { p.ink } else { p.line })).corner_radius(CORNER_MD))
+        .modifier(card)
         .content(|| {
-            // TODO(compose-rust#545): no RadioButton; a ring with a filled centre stands in.
-            cu::Box().alignment(Alignment::Center).modifier(Modifier::new().size(16.0, 16.0).border(1.5, paint(p.text_2)).shape_role(ShapeRole::Full)).content(|| {
-                if m.leader {
-                    cu::Spacer().modifier(Modifier::new().size(8.0, 8.0).background(paint(p.ink)).shape_role(ShapeRole::Full));
-                }
-            });
+            // The toolkit's radio button in the mockup's colours and size (compose-rust#545),
+            // named by its member. It takes no `on_change`: the Host owns the value, so a press
+            // changes nothing until the server takes a leader (TODO(#384)).
+            cu::RadioButton(m.leader).ring_color(paint(p.text_2)).dot_color(paint(p.ink)).size(16.0).accessible_name(m.name.as_str());
+            // The member's character, 30 dp, between the mark and the name (review st F).
+            Character(&m.agent, m.leader, LEADER_AVATAR, &m.name, project_id, CharState::from_status(m.status), None);
             cu::Column().spacing(2.0).modifier(Modifier::new().weight(1.0)).content(|| {
                 Label(&m.name, Fs::Sm, Weight::Semibold, None, Some(1));
                 Label(&m.task, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
@@ -1737,7 +1987,7 @@ fn LeaderOption(m: &Member) {
 }
 
 /// `.ps-danger`: the title and what it does at the left, the destructive button at the right.
-fn DangerRowView(row: &crate::ui::project::DangerRow, enabled: bool) {
+fn DangerRowView(row: &crate::ui::project::DangerRow, enabled: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     cu::Row()
         .spacing(SP[2])
@@ -1748,13 +1998,25 @@ fn DangerRowView(row: &crate::ui::project::DangerRow, enabled: bool) {
                 Label(row.title, Fs::Sm, Weight::Semibold, None, Some(1));
                 Label(&row.note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
             });
-            AppButton(row.button, None, ButtonKind::Destructive, true, enabled, false, || {});
+            AppButton(row.button, None, ButtonKind::Destructive, true, enabled, false, on_click);
         });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l10_4_project_ide_chooser_hangs_from_the_ide_button() {
+        let src = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        let ide = src.split("fn IdeMenu(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(ide.contains("PopoverMenu(") && ide.contains("PopKind::Drop") && ide.contains("PopoverAlign::End"));
+        assert!(ide.contains("IDE_MENU_HEAD") && ide.contains("ide_pop_rows(&choices, remembered)"));
+        // The chevron stands as high as the 40 dp button, so the menu hangs 6 below both.
+        assert!(ide.contains("IdeChevronSized(open.clone(), false, H_BTN)"));
+        assert_eq!(H_BTN, 40.0);
+        assert!(!src.contains("OptionSheet("), "no centred option sheet is left on the project screen");
+    }
     use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
     use compose_rust::{Host, Recomposer};
 
@@ -1781,6 +2043,134 @@ mod tests {
             leader: false,
             updated_at: 0,
         }
+    }
+
+    #[test]
+    fn fr_l26_a_leader_card_carries_the_member_character() {
+        // Review st F: the mockup's `.ps-lead` cards draw the member (`bot(s,30)`) between the
+        // radio and the name; ours had none. The chosen card is on `sel`.
+        let _guard = crate::services::test_guard();
+        // (widget, node id, modifiers), the widget as its debug name.
+        let sent = |leader: bool| -> Vec<(String, u32, Vec<String>)> {
+            let mut host = Host::new(move || {
+                Box::new(Recomposer::new(move || {
+                    let mut m = member("a", LauncherStatus::Running);
+                    m.leader = leader;
+                    LeaderOption(&m, "p");
+                }))
+            });
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let mut nodes: Vec<(String, u32, Vec<String>)> = Vec::new();
+            for m in batch.iter() {
+                match m {
+                    Mutation::Create { node_id, widget } => nodes.push((format!("{widget:?}"), *node_id, Vec::new())),
+                    Mutation::SetModifier { node_id, modifier, .. } => {
+                        if let Some(n) = nodes.iter_mut().find(|n| n.1 == *node_id) {
+                            n.2.push(format!("{modifier:?}"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            nodes
+        };
+        let p = ember_theme().palette;
+        let sel = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.sel)));
+        for leader in [true, false] {
+            let nodes = sent(leader);
+            let radio = nodes.iter().position(|n| n.0 == "RadioButton").expect("radio");
+            let image = nodes.iter().position(|n| n.0 == "Image").expect("the member's character");
+            assert!(image > radio, "the character follows the radio");
+            assert!(nodes[image].2.iter().any(|m| m.contains("30.0")), "30 dp: {:?}", nodes[image].2);
+            let card_on_sel = nodes.iter().any(|n| n.0 == "Row" && n.2.contains(&sel));
+            assert_eq!(card_on_sel, leader, "only the chosen card is on sel");
+        }
+        assert_eq!(LEADER_AVATAR, 30.0);
+    }
+
+    #[test]
+    fn fr_l26_2_review_env_picks_the_chosen_leader_card() {
+        let mut a = member("a", LauncherStatus::Running);
+        a.leader = true;
+        let b = member("b", LauncherStatus::Running);
+        let all = vec![a.clone(), b.clone()];
+        assert!(review_leader(None, &all, &a) && !review_leader(None, &all, &b), "unset keeps the server's leader");
+        assert!(review_leader(Some("first"), &all, &a) && !review_leader(Some("first"), &all, &b));
+        assert!(!review_leader(Some("m-b"), &all, &a) && review_leader(Some("m-b"), &all, &b), "by name");
+        let production = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("if cfg!(debug_assertions) { std::env::var(\"EMBER_CR_LEADER\")"), "debug builds only");
+    }
+
+    #[test]
+    fn the_leader_mark_is_the_toolkit_radio_and_the_opened_search_row_asks_for_focus() {
+        // compose-rust#545 (#673): `.ps-lead` draws the toolkit `RadioButton` in the mockup's
+        // colours and size, in place of a ring with a filled centre. The Host owns its value.
+        let _guard = crate::services::test_guard();
+        let sent = |leader: bool| -> Vec<String> {
+            let mut host = Host::new(move || {
+                Box::new(Recomposer::new(move || {
+                    let mut m = member("a", LauncherStatus::Running);
+                    m.leader = leader;
+                    LeaderOption(&m, "p");
+                }))
+            });
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let radio = batch
+                .iter()
+                .find_map(|m| match m {
+                    Mutation::Create { node_id, widget: compose_rust::WidgetKind::RadioButton } => Some(*node_id),
+                    _ => None,
+                })
+                .expect("a toolkit radio button");
+            batch
+                .iter()
+                .filter_map(|m| match m {
+                    Mutation::SetProp { node_id, property, value } if *node_id == radio => Some(format!("{property:?}={value:?}")),
+                    _ => None,
+                })
+                .collect()
+        };
+        let (on, off) = (sent(true), sent(false));
+        assert!(on.iter().any(|p| p == "Checked=Bool(true)"), "{on:?}");
+        assert!(off.iter().any(|p| p == "Checked=Bool(false)"), "{off:?}");
+        for props in [&on, &off] {
+            assert!(props.iter().any(|p| p == "AccessibleName=String(\"m-a\")"), "named by its member: {props:?}");
+            assert!(props.iter().any(|p| p.starts_with("ContainerColor=")), "the ring colour: {props:?}");
+            assert!(props.iter().any(|p| p.starts_with("CheckColor=")), "the dot colour: {props:?}");
+            assert!(props.iter().any(|p| p.starts_with("ControlSize=")), "16 dp: {props:?}");
+        }
+        let production = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        let lead = production.split("fn LeaderOption(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(lead.contains("cu::RadioButton(m.leader).ring_color(paint(p.text_2)).dot_color(paint(p.ink)).size(16.0)"));
+        assert!(!lead.contains(".border(1.5") && !lead.contains(".on_change("), "no drawn ring is left, and the mark is read only");
+
+        // compose-rust#410 (#673): the search row that the icon opens binds its field to a focus
+        // handle and asks for the focus from an effect, once the field's node exists.
+        let grid = production.split("fn Grid(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(grid.contains("let focus = cu::use_focus_handle();"));
+        assert!(grid.contains("SearchFieldFocus(\"팀원 검색\", H_BTN, Some(field), move |v| q.set(v));"));
+        assert!(grid.contains("launched_effect((), move || async move { focus.request() });"));
+        let field = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(field.contains("f = f.focus_handle(h);"), "EmberField hands the handle to the toolkit field");
+    }
+
+    #[test]
+    fn the_settings_sheet_wraps_its_computer_checks_in_a_flow_row() {
+        // compose-rust#521 (#673): no estimated chip width packs the lines.
+        let production = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("cu::FlowRow().horizontal_spacing(SP[1]).vertical_spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {\n                        for c in chips.iter() {\n                            ComputerCheck(c, b.computers.contains(&c.id), b.id.clone());"));
+        assert!(!production.contains(&["computer_check", "_width"].concat()));
+        assert!(!include_str!("../project.rs").contains(&["fn computer_check", "_width"].concat()), "the estimate is gone from the model too");
+    }
+
+    #[test]
+    fn the_team_area_is_square_under_the_rule_and_round_at_the_cards_bottom() {
+        // compose-rust#392 (#673): per-corner radii, `[top_start, top_end, bottom_end, bottom_start]`.
+        let production = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        let view = production.split("fn ProjectBoxView(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(view.contains(".background(paint(p.surface_2)).corner_radii([0.0, 0.0, CORNER_XL, CORNER_XL]).padding(SP[3])"));
+        assert!(!view.contains(".background(paint(p.surface_2)).corner_radius(CORNER_XL)"));
+        assert_eq!(CORNER_XL, 24.0);
     }
 
     #[test]
@@ -1843,6 +2233,40 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn fr_l26_strip_arrows_are_named_for_assistive_technology() {
+        // #671: `Modifier::label` sends the name as the node's accessible name.
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let scroll = cu::remember_scroll_state();
+                StripArrow(ICON_ARROW_LEFT_SVG, crate::ui::cr::a11y::SCROLL_LEFT, -1.0, &scroll, 500.0);
+                StripArrow(ICON_ARROW_RIGHT_SVG, crate::ui::cr::a11y::SCROLL_RIGHT, 1.0, &scroll, 500.0);
+            }))
+        });
+        let all = texts(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+        for want in ["왼쪽으로 스크롤", "오른쪽으로 스크롤"] {
+            assert!(all.iter().any(|t| t == want), "missing the name {want}: {all:?}");
+        }
+    }
+
+    #[test]
+    fn fr_l26_strip_arrow_state_comes_from_the_scroll_state() {
+        let src = include_str!("project.rs");
+        let src = &src[..src.find("#[cfg(test)]").unwrap()];
+        let arrow = &src[src.find("fn StripArrow(").unwrap()..];
+        let arrow = &arrow[..arrow.find("\n}\n").unwrap()];
+        // The arrow reads the state itself, at composition and again at the press.
+        assert!(arrow.contains("let enabled = strip_arrow_enabled(scroll.offset(), scroll.max_offset(), dir);"));
+        assert!(arrow.contains("let (offset, max) = (s.offset(), s.max_offset());"));
+        assert!(arrow.contains(".disabled(!enabled)"));
+        let strip = &src[src.find("fn ComputerStrip(").unwrap()..src.find("fn StripArrow(").unwrap()];
+        assert!(!strip.contains("scroll.offset()"), "the strip keeps no offset from composition");
+        // The open toolkit gaps cite their compose-rust issues.
+        assert!(strip.contains("TODO(compose-rust#817)") && strip.contains("TODO(compose-rust#818)"));
+        assert!(!strip.contains("TODO(compose-rust, #671)") && !arrow.contains("TODO("));
     }
 
     #[test]
@@ -1950,6 +2374,10 @@ mod tests {
         });
         assert!(has_placeholder, "expected inline filter field at 1440dp");
         assert!(!has_search_icon, "no search icon button above 900dp");
+        let has_search_button = batch.iter().any(|m| {
+            matches!(m, Mutation::SetProp { value: PropertyValue::String(s), .. } if *s == crate::ui::cr::a11y::OPEN_MEMBER_SEARCH)
+        });
+        assert!(!has_search_button, "no named search button above 900dp");
         compose_rust::window::reset_window_size();
     }
 
@@ -1960,6 +2388,20 @@ mod tests {
         assert!(!search_field_visible(800.0, false));
         assert!(search_field_visible(800.0, true));
         assert!(search_field_visible(1440.0, false));
+    }
+
+    #[test]
+    fn fr_l26_the_header_search_button_is_named_and_says_whether_its_row_is_open() {
+        // compose-rust#428, #429 (#673): Ember's SVG in the ring, a fixed Korean name and the
+        // expanded state, in place of the unnamed toolkit glyph.
+        let production = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        let actions = production.split("fn ListActions(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(actions.contains("super::a11y::OPEN_MEMBER_SEARCH,"));
+        assert!(actions.contains(".expanded(st.search_open.get()),"));
+        assert!(actions.contains("NavIcon(shell::ICON_SEARCH_SVG, p.text_2.to_argb(), SEARCH_GLYPH)"));
+        assert!(!actions.contains("IconRole::Search"), "no toolkit glyph is left");
+        assert_eq!(crate::ui::cr::a11y::OPEN_MEMBER_SEARCH, "팀원 검색 열기");
+        assert_eq!((H_BTN, SEARCH_GLYPH), (40.0, 18.0));
     }
 
     #[test]
@@ -1990,6 +2432,181 @@ mod tests {
         assert_eq!(sheet_scroll_dp(Some("junk")), 0.0);
         assert_eq!(sheet_scroll_dp(Some("end")), 1450.0);
     }
+
+    /// The new-project sheet's body, from its `EmberSheet` call to the unsaved-changes question.
+    fn new_project_sheet_source() -> &'static str {
+        let src = include_str!("project.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        let body = &production[production.find("EmberSheet(\"새 프로젝트\"").unwrap()..];
+        &body[..body.find("EmberSheet(\"변경 사항\"").unwrap()]
+    }
+
+    #[test]
+    fn fr_l32_1_new_project_buttons_are_in_the_header() {
+        // #876 put 취소/만들기 in a footer that fell below the body at 390; the mockup has them
+        // in the header (`project.js` projNew `.sheet-acts`), so the body leaves room for the
+        // header only and the buttons are always on screen (review r6 item 7).
+        let src = include_str!("project.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        let sheet = &production[production.find("let new_body_height").unwrap()..production.find("EmberSheet(\"새 프로젝트\"").unwrap()];
+        assert!(sheet.contains("super::components::SHEET_HEADER_CHROME_H,\n        )"), "{sheet}");
+        assert!(!sheet.contains("SHEET_FOOTER_H"), "{sheet}");
+        assert!(production.contains("TODO(compose-rust#778, after v0.0.10)"));
+        let body = new_project_sheet_source();
+        assert!(body.starts_with("EmberSheet(\"새 프로젝트\", st.new_project.get(), request_close.clone(), Some(&mut new_actions),"), "{body}");
+        assert!(!body.contains("SheetFooter("), "{body}");
+        assert!(body.contains(".scroll_state(&new_scroll).modifier(Modifier::new().fill_max_width().height(new_body_height))"));
+    }
+
+    #[compose_rust::runtime::Composable]
+    fn new_project_sheet_open() {
+        let st = remember(|| {
+            let u = Ui::new(&[], &[]);
+            u.new_project.set(true);
+            u
+        });
+        let ui = shared_ui().clone();
+        Sheets(&[], &[], &st, &ui);
+    }
+
+    #[test]
+    fn fr_l26_1_new_project_sheet_has_the_sections_and_header_buttons_of_the_mockup() {
+        // Review r6 item 7: no 기본 header, no character hint, and the buttons in a footer.
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(new_project_sheet_open)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let texts: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { value: PropertyValue::String(t), .. } => Some(t.to_string()),
+                _ => None,
+            })
+            .collect();
+        let at = |want: &str| texts.iter().position(|t| t == want).unwrap_or_else(|| panic!("no {want}: {texts:?}"));
+        assert_eq!(NEW_SEC_BASIC, ("기본", "프로젝트 이름과 저장소"));
+        assert_eq!(NEW_SEC_STYLE.0, "팀 캐릭터");
+        assert!(NEW_SEC_STYLE.1.contains("나중에 설정에서 바꿀 수 있습니다"));
+        let (title, cancel, create) = (at("새 프로젝트"), at("취소"), at("만들기"));
+        let (basic, basic_hint, style, style_hint) = (at("기본"), at(NEW_SEC_BASIC.1), at("팀 캐릭터"), at(NEW_SEC_STYLE.1));
+        assert!(title < cancel && cancel < create, "the header: title, 취소, 만들기");
+        assert!(create < basic, "the buttons come before the body, in the header");
+        assert!(basic < basic_hint && basic_hint < at("이름") && at("이름") < style, "{texts:?}");
+        assert!(style < style_hint, "{texts:?}");
+    }
+
+    /// The new-project sheet at a window size: each node's widget and parent, and each text's node.
+    fn new_project_tree(size: Option<(f32, f32)>) -> (std::collections::HashMap<u32, (String, Option<u32>)>, Vec<(String, u32)>) {
+        crate::ui::window_size::set_opened_for_test(size);
+        let mut host = Host::new(|| Box::new(Recomposer::new(new_project_sheet_open)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        crate::ui::window_size::set_opened_for_test(None);
+        let mut nodes = std::collections::HashMap::new();
+        let mut texts = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::Create { node_id, widget } => {
+                    nodes.insert(*node_id, (format!("{widget:?}"), None));
+                }
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    if let Some(n) = nodes.get_mut(node_id) {
+                        n.1 = Some(*parent_id);
+                    }
+                }
+                Mutation::SetProp { node_id, value: PropertyValue::String(t), .. } => texts.push((t.to_string(), *node_id)),
+                _ => {}
+            }
+        }
+        (nodes, texts)
+    }
+
+    /// The widget of the nearest node that holds both texts.
+    fn nearest_shared(nodes: &std::collections::HashMap<u32, (String, Option<u32>)>, texts: &[(String, u32)], a: &str, b: &str) -> String {
+        let chain = |want: &str| {
+            let mut at = texts.iter().find(|(t, _)| t == want).map(|(_, id)| *id);
+            assert!(at.is_some(), "no {want}: {texts:?}");
+            let mut out = Vec::new();
+            while let Some(id) = at {
+                out.push(id);
+                at = nodes.get(&id).and_then(|n| n.1);
+            }
+            out
+        };
+        let (ca, cb) = (chain(a), chain(b));
+        let shared = ca.iter().find(|id| cb.contains(id)).expect("one tree");
+        nodes[shared].0.clone()
+    }
+
+    #[test]
+    fn fr_l26_1_new_project_fields_stack_at_560_and_below() {
+        // `.ps-grid`: two columns, one at 560 px and below. At 390 the app kept 저장소 and
+        // 기본 브랜치 side by side (r7 capture `project-sheet-new-390`), the mockup stacks them.
+        assert!(!new_project_fields_stacked(1440.0));
+        assert!(!new_project_fields_stacked(561.0));
+        assert!(new_project_fields_stacked(560.0));
+        assert!(new_project_fields_stacked(390.0));
+        assert!(!new_project_fields_stacked(0.0), "an unreported width is not a phone");
+        let _guard = crate::services::test_guard();
+        let (nodes, texts) = new_project_tree(Some((1440.0, 900.0)));
+        assert_eq!(nearest_shared(&nodes, &texts, "저장소", "기본 브랜치"), "Row", "side by side at 1440");
+        assert_eq!(nearest_shared(&nodes, &texts, "이름", "저장소"), "Column");
+        assert!(texts.iter().any(|(t, _)| t == NEW_NAME_HINT), "the mockup's name hint: {texts:?}");
+        assert_eq!(NEW_NAME_HINT, "예: darkpyonix-docs");
+        let (nodes, texts) = new_project_tree(Some((390.0, 844.0)));
+        assert_eq!(nearest_shared(&nodes, &texts, "저장소", "기본 브랜치"), "Column", "stacked at 390");
+        for want in ["이름", "저장소", "기본 브랜치", "github.com/...", "develop"] {
+            assert!(texts.iter().any(|(t, _)| t == want), "{want}: {texts:?}");
+        }
+    }
+
+    #[test]
+    fn fr_l32_1_add_computer_takes_its_content_height_in_the_bottom_sheet() {
+        // #876: at 390 the sheet started at y 127 with its content ending at y 465, because the
+        // body was fixed at 85 percent less the header. Below 560 dp the body now wraps.
+        let src = include_str!("add_computer.rs");
+        let sheet = &src[src.find("pub fn AddComputerSheet(").unwrap()..];
+        let sheet = &sheet[..sheet.find("\n}\n").unwrap()];
+        assert!(sheet.contains("let wraps = super::components::sheet_wraps_content(w.width_dp);"));
+        let bottom = &sheet[sheet.find("if wraps || fits {").unwrap()..];
+        let bottom = &bottom[..bottom.find("} else {").unwrap()];
+        assert!(bottom.contains("cu::Column().modifier(Modifier::new().fill_max_width()).content("), "{bottom}");
+        assert!(!bottom.contains(".height("), "{bottom}");
+        assert!(!bottom.contains("ScrollColumn"), "{bottom}");
+        assert!(sheet.contains("super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H"));
+        assert!(sheet.contains("TODO(compose-rust#778, after v0.0.10)"));
+    }
+
+    #[test]
+    fn fr_l32_1_sheet_scroll_end_reaches_the_new_project_sheet() {
+        assert!(sheet_scroll_is_end(Some("end")));
+        assert!(!sheet_scroll_is_end(Some("120")));
+        assert!(!sheet_scroll_is_end(None));
+        let body = new_project_sheet_source();
+        assert!(body.contains("if review_end && !new_body_fits {\n                ScrollToEnd(new_scroll.clone());"), "{body}");
+    }
+
+    #[test]
+    fn fr_l26_1_new_project_body_is_content_height_when_it_fits() {
+        use super::super::characters::style_picker_columns;
+        use super::super::components::{sheet_body_max_height, SHEET_HEADER_CHROME_H};
+        let room = |w: f32, h: f32| sheet_body_max_height(w, h, false, SHEET_HEADER_CHROME_H).min(900.0);
+        // 40; 기본: 22 + 8 + 18 + 8 + 62 + 12 + 62; 16; 팀 캐릭터: 1 + 8 + 8 + 8 + 22 + 8 + 36 + 8
+        // and the picker (two rows of 162 and 8).
+        assert_eq!(new_project_body_estimate(3, false, 0), 40.0 + 192.0 + 16.0 + 99.0 + 332.0);
+        // Stacked: one more 62 px field row and its 12 px gap.
+        assert_eq!(new_project_body_estimate(3, true, 0) - new_project_body_estimate(3, false, 0), 74.0);
+        assert_eq!(new_project_body_estimate(3, false, 1) - new_project_body_estimate(3, false, 0), 52.0);
+        // 1440 x 900: three columns, the body fits with room for two notes (#878: a fixed
+        // body left about 170 px blank above the footer).
+        assert_eq!(style_picker_columns(1440.0), 3);
+        assert_eq!(room(1440.0, 900.0), 900.0 - 32.0 - 61.0);
+        assert!(new_project_body_estimate(3, false, 2) <= room(1440.0, 900.0));
+        // 390 x 844: two columns of three rows do not fit the 85 percent sheet; it scrolls at a
+        // fixed height so the footer stays on screen (FR-L32.1).
+        assert_eq!(style_picker_columns(390.0), 2);
+        assert!(new_project_body_estimate(2, true, 1) > room(390.0, 844.0));
+        let body = new_project_sheet_source();
+        assert!(body.contains("if new_body_fits {\n                cu::Column().modifier(Modifier::new().fill_max_width()).content(new_body);"), "{body}");
+    }
 }
 
 /// Design review 2026-11-13 (B7, B8): the project screen against the mockup.
@@ -2011,6 +2628,71 @@ mod design_review_tests {
         let src = source();
         assert!(src.contains("Modifier::new().size(COMPUTER_CHIP.0, COMPUTER_CHIP.1)"));
         assert!(src.contains("Label(&b.name, PROJECT_NAME.0, PROJECT_NAME.1, None, Some(1));"));
+    }
+
+    #[test]
+    fn fr_l28_phone_header_subtitle_runs_the_full_width() {
+        // #878: the menu room was beside the whole title column, so the subtitle wrapped at
+        // x 284 of a 390 row that ends at x 374.
+        let src = source();
+        let head = &src[src.find("pub fn HeaderGap(").unwrap()..];
+        let head = &head[..head.find("\n}\n").unwrap()];
+        assert!(head.contains("let menu_room = if stacked && compact { PHONE_MENU_ROOM } else { 0.0 };"));
+        // The spacer sits in the title's own row, before the subtitle.
+        let room = head.find("Modifier::new().width(menu_room)").expect("menu room spacer");
+        let sub = head.find("Label(sub, ").expect("subtitle");
+        assert!(room < sub);
+        assert!(head.contains("cu::Row().modifier(Modifier::new().fill_max_width()).content(titles);"));
+        assert!(!head.contains("width(PHONE_MENU_ROOM)"), "no spacer beside the whole column");
+    }
+
+    #[test]
+    fn fr_l27_7_phone_header_buttons_sit_at_the_right() {
+        // Review row F6: mockup x 213..374 of a 390 window, the app drew them at x 16..144.
+        let src = source();
+        let head = &src[src.find("pub fn HeaderGap(").unwrap()..];
+        let head = &head[..head.find("\n}\n").unwrap()];
+        let at_end = head.find("if end {").expect("the end branch");
+        let spacer = head[at_end..].find("cu::Spacer().modifier(Modifier::new().weight(1.0));").expect("a spacer before the actions");
+        let actions = head[at_end..].find("trailing();").expect("the actions");
+        assert!(spacer < actions, "the spacer comes first, so the actions end at the right edge");
+        // Only the files screen on a phone asks for it; `Header` keeps the left.
+        assert!(src.contains("HeaderGap(title, sub, compact, compact, 0.0, false, trailing)"));
+        let files = include_str!("files.rs");
+        assert!(files.contains("compact, w <= 900.0, 6.0, compact, || {"));
+    }
+
+    /// The right-aligned form composes and sends the same texts as the left one. Where the
+    /// actions land is a layout result, so a capture checks it (files, 390).
+    #[test]
+    fn fr_l27_7_end_header_still_sends_title_subtitle_and_actions() {
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+        use compose_rust::{Host, Recomposer};
+        let _guard = crate::services::test_guard();
+        let texts = |end: bool| -> Vec<String> {
+            let mut host = Host::new(move || {
+                Box::new(Recomposer::new(move || {
+                    HeaderGap("파일", "설명", true, true, 6.0, end, || {
+                        Label("ACTION", Fs::Sm, Weight::Medium, None, Some(1));
+                    });
+                }))
+            });
+            decode_batch(host.rebuild().expect("rebuild"))
+                .expect("decode")
+                .iter()
+                .filter_map(|m| match m {
+                    Mutation::SetProp { value: PropertyValue::String(s), .. } => Some(s.to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Both forms still send the title, the subtitle and the actions.
+        for end in [false, true] {
+            let all = texts(end);
+            for want in ["파일", "설명", "ACTION"] {
+                assert!(all.iter().any(|t| t == want), "end={end} lost {want}: {all:?}");
+            }
+        }
     }
 
     #[test]

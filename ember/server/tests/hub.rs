@@ -103,10 +103,6 @@ async fn register_server(f: &Fixture) {
     let deadline = approved + Duration::from_secs(10);
     loop {
         let (_, status) = call(&f.app, Method::GET, "/api/hub", None).await;
-        // `registered` turns true when the registration is saved; the server then asks the hub's
-        // /config (`ServerHub::complete`), and only after that does the status carry what the hub
-        // advertised (`long_poll`, issue #538). Wait for both, so a test that reads the status
-        // right after registering never sees the gap between the two.
         if status["registered"] == true && status["long_poll"] == true {
             assert_eq!(status["device"]["role"], "main_server");
             assert_eq!(status["device"]["name"], "home server");
@@ -116,7 +112,7 @@ async fn register_server(f: &Fixture) {
         assert!(status["last_error"].is_null(), "after {:?}: {status}", approved.elapsed());
         assert!(
             std::time::Instant::now() < deadline,
-            "registration (registered and long_poll) not complete {:?} after approval: {status}",
+            "registration not complete {:?} after approval: {status}",
             approved.elapsed()
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -173,6 +169,9 @@ async fn register_then_add_a_computer_from_the_hub_device_list() {
     assert_eq!(st, StatusCode::CREATED, "{c}");
     assert_eq!(c["name"], "gpu box");
     assert_eq!(c["peer"]["peer"], node_id);
+    // FR-L18 (#519): the answer is a `Computer` whose `url` is serialised through
+    // `url_for_clients`; a peer-only computer has none to strip.
+    assert_eq!(c["url"], "");
     let cid = c["id"].as_str().unwrap().to_string();
 
     // It is reachable over the transport by peer id alone.
@@ -298,8 +297,22 @@ async fn long_poll_watcher_sees_removal_at_once_and_syncs_devices() {
     assert_eq!(status["relay_source"], "derived");
 
     f.server_hub.set_sync_devices(true);
+    let requests_before = f.hub.device_list_requests();
     // A one-minute period: only the long-poll can be this quick.
     let task = f.server_hub.spawn_watch(Duration::from_secs(60));
+    // Wait for the watcher's first unheld `GET /devices` and its first held `?wait=` request to
+    // reach the hub, so registering `node` wakes the held long-poll rather than racing with the
+    // initial snapshot.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while f.hub.device_list_requests() < requests_before + 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "initial held long-poll request did not reach the hub (device_list_requests = {})",
+            f.hub.device_list_requests()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
     let node = SecretKey::generate().peer_id();
     f.hub.register(node, "gpu box", Role::Computer);
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
@@ -308,8 +321,17 @@ async fn long_poll_watcher_sees_removal_at_once_and_syncs_devices() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    // Let the next held request reach the hub, then remove this server there.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait until the next held `?wait=` request reaches the hub after syncing `node`, then remove
+    // this server there.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while f.hub.device_list_requests() < requests_before + 3 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "held long-poll request did not reach the hub (device_list_requests = {})",
+            f.hub.device_list_requests()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let t0 = std::time::Instant::now();
     assert!(f.hub.remove(&f.server_t.peer_id()));
     tokio::time::timeout(Duration::from_secs(2), task).await.expect("watcher stops on removal").unwrap();

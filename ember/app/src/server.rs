@@ -140,12 +140,40 @@ pub struct ComputerStatus {
     pub error: Option<String>,
 }
 
+/// Where a computer's own ports are reached, as the server reports it (FR-L18, #519).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComputerAddress {
+    /// Registered by URL: the host of its node URL.
+    Host {
+        #[serde(default)]
+        host: String,
+    },
+    /// Registered by peer only: it has no host.
+    Peer,
+    /// The server's own computer: its host is the host of the app's server address.
+    Server,
+    /// An older server (no `address`), a kind this app does not know, or a lost record.
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ComputerView {
     pub id: String,
     pub name: String,
     #[serde(default)]
     pub local: bool,
+    /// The node URL without credentials; empty for the server's own computer and for a
+    /// peer-addressed computer.
+    #[serde(default)]
+    pub url: String,
+    /// The node's transport peer id (hex), for a computer reached over the transport.
+    #[serde(default)]
+    pub peer: Option<String>,
+    #[serde(default)]
+    pub address: ComputerAddress,
 }
 
 /// `GET /api/sessions/{id}/computer`.
@@ -233,6 +261,7 @@ impl IdeLaunch {
             folder: l.folder.clone(),
             endpoint: ose.map(|o| host_port(&o.endpoint)),
             token: ose.map(|o| o.connection_token.clone()),
+            relay: ose.and_then(|o| o.relay.clone()).filter(|r| !r.is_empty()),
             // The relay path takes the computer's registry id. The display name (`l.computer.name`) is not
             // an id, and writing it into `/api/computers/{id}/terminal` asked for a computer that does not exist.
             computer: ember.map(|e| e.computer.clone()).filter(|c| !c.is_empty()),
@@ -251,6 +280,9 @@ pub struct EditorConnection {
     pub folder: String,
     pub endpoint: Option<String>,
     pub token: Option<String>,
+    /// The server's relay route to the OSE (`/api/computers/{id}/ide/relay/{launch}`, FR-W4),
+    /// which the editor dials instead of `endpoint` when it is set (FR-N9.1).
+    pub relay: Option<String>,
     /// The computer's id for the terminal relay.
     pub computer: Option<String>,
     /// The ember server's base URL for the terminal relay.
@@ -268,6 +300,10 @@ mod editor_connection_tests {
     use super::*;
 
     fn launch(ose: Option<(&str, &str)>) -> Result<IdeLaunch, String> {
+        launch_with_relay(ose, None)
+    }
+
+    fn launch_with_relay(ose: Option<(&str, &str)>, relay: Option<&str>) -> Result<IdeLaunch, String> {
         Ok(IdeLaunch {
             session: "s".into(),
             project: "p".into(),
@@ -286,6 +322,7 @@ mod editor_connection_tests {
                     server_url: Some("http://srv:7".into()),
                     ose: ose.map(|(e, t)| ember_client::wire::EmberOseConnection {
                         endpoint: e.into(),
+                        relay: relay.map(str::to_owned),
                         connection_token: t.into(),
                     }),
                 }),
@@ -302,6 +339,19 @@ mod editor_connection_tests {
         assert_eq!((c.project.as_str(), c.folder.as_str()), ("p", "/w"));
         assert_eq!(c.computer.as_deref(), Some("c"));
         assert_eq!(c.server_url.as_deref(), Some("http://srv:7"));
+    }
+
+    #[test]
+    fn fr_n9_editor_connection_carries_the_relay_path() {
+        let relay = "/api/computers/local/ide/relay/abc";
+        let c = IdeLaunch::editor_connection(Some(&launch_with_relay(Some(("http://127.0.0.1:9000/", "ph")), Some(relay))));
+        assert_eq!(c.relay.as_deref(), Some(relay));
+        assert_eq!(c.endpoint.as_deref(), Some("127.0.0.1:9000"));
+        assert_eq!(c.token.as_deref(), Some("ph"));
+        // An older server sends no relay; an empty one is no relay either.
+        assert_eq!(IdeLaunch::editor_connection(Some(&launch(Some(("http://127.0.0.1:9000/", "t"))))).relay, None);
+        let empty = IdeLaunch::editor_connection(Some(&launch_with_relay(Some(("http://127.0.0.1:9000/", "t")), Some(""))));
+        assert_eq!(empty.relay, None);
     }
 
     #[test]
@@ -733,6 +783,36 @@ fn seg(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FR-L18 (#519): the address the server reports for a session's computer.
+    #[test]
+    fn fr_l18_computer_address_reads_every_kind_and_defaults_to_unknown() {
+        let read = |computer: serde_json::Value| -> ComputerView {
+            let c: CurrentComputer =
+                serde_json::from_value(json!({ "session_id": "s1", "computer": computer })).unwrap();
+            c.computer
+        };
+        let by_url = read(json!({
+            "id": "c1", "name": "box", "url": "http://192.168.0.20:8740", "local": false,
+            "address": { "kind": "host", "host": "192.168.0.20" }
+        }));
+        assert_eq!(by_url.address, ComputerAddress::Host { host: "192.168.0.20".into() });
+        assert_eq!(by_url.url, "http://192.168.0.20:8740");
+        let by_peer = read(json!({
+            "id": "c2", "name": "gpu", "url": "", "peer": "abcd", "local": false, "address": { "kind": "peer" }
+        }));
+        assert_eq!(by_peer.address, ComputerAddress::Peer);
+        assert_eq!(by_peer.peer.as_deref(), Some("abcd"));
+        let server = read(json!({ "id": "local", "name": "this server", "url": "", "local": true, "address": { "kind": "server" } }));
+        assert_eq!(server.address, ComputerAddress::Server);
+        // A kind this app does not know, and an older server with no address at all.
+        let later = read(json!({ "id": "c3", "name": "x", "address": { "kind": "relay", "via": "r1" } }));
+        assert_eq!(later.address, ComputerAddress::Unknown);
+        let older = read(json!({ "id": "c4", "name": "y", "local": false }));
+        assert_eq!(older.address, ComputerAddress::Unknown);
+        assert_eq!(older.url, "");
+        assert_eq!(older.peer, None);
+    }
 
     #[test]
     fn fr_l31_14_extension_paths_and_answers() {

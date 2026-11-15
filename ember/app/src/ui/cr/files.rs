@@ -18,23 +18,27 @@ use std::rc::Rc;
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, IconRole, ShapeRole};
+use compose_rust::{Alignment, IconRole, ShapeRole};
 
 use ember_client::state::Computer;
 
 pub use crate::ui::files::{
-    answer_offer, build_model, share_agents, share_devices, share_file_card, share_tap, ShareTap, SHARE_ACTIONS, SHARE_AGENTS_NOTE, SHARE_NAME_LINES, SHARE_NOTE, connected_count, empty_text, format_bytes, grid, kpis, offer_line,
+    answer_offer, build_model, share_agents, share_devices, share_file_card, share_tap, ShareTap, SHARE_ACTIONS, SHARE_AGENTS_LABEL, SHARE_NAME_LINES, ShareDot, SHARE_NOTE, connected_count, empty_text, format_bytes, grid, kpis, offer_line,
     path_label, percent, progress_line, send_blocker, sendable_devices, transfer_service,
-    user_actions, visible_offers, Answer, Device, DeviceKind, Direction, FilesKpi, FilesModel,
+    offer_card_shown, user_actions, visible_offers, Answer, Device, DeviceKind, Direction, FilesKpi, FilesModel,
     HistoryEntry, HistoryResult, Offer, PathKind, Presence, ReceivedFile, SendDraft, SendTarget,
-    Transfer, TransferAction, TransferService, TransferState, FILE_PICKER_AVAILABLE, FILE_PICK_REASON,
+    Transfer, TransferAction, TransferService, TransferState, FILE_DIALOG_TITLE, FILE_PICKER_AVAILABLE, FILE_PICK_REASON, PickOutcome, pick_outcome,
     FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE, clean_member_name, demo_files, is_demo,
 };
+/// Whether the share sheet picks files itself. It does not yet: its file card only says what is
+/// chosen, and the tray's 파일 고르기 opens the dialog.
+const SHARE_SHEET_PICKS_FILES: bool = false;
+
 use crate::ui::files::{choose_target, chip_avail, chip_label, chip_rows, chip_text_max_for, chip_width_est, files_line, fit_chip_text, send_state_at, server_status, share_tap_at, tile_tap_notice};
 use super::compat::Banner;
 use crate::model::Tone;
 use super::characters::{CharState, Character};
-use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, IconButton, Label, Pill, PillTone};
+use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, IconButton, InkIconButton, Label, Pill, PillTone};
 use super::home::{fit_label, text_px, Cols, Part};
 use super::notice;
 use super::project::{HeaderGap, ThemeButton};
@@ -356,8 +360,8 @@ pub fn sample_extras() -> Extras {
 
 /// `EMBER_CR_FILES_SHEET=send` opens the send sheet at the start, for review captures.
 #[derive(Clone)]
-struct State {
-    sheet: MutableState<Option<SendDraft>>,
+pub(super) struct State {
+    pub(super) sheet: MutableState<Option<SendDraft>>,
     answered: MutableState<Vec<String>>,
     filter: MutableState<HistoryFilter>,
     /// The history's device filter: 0 is every device, then the devices in the history.
@@ -366,7 +370,7 @@ struct State {
 }
 
 impl State {
-    fn new() -> State {
+    pub(super) fn new() -> State {
         State {
             sheet: mutable_state_of((std::env::var("EMBER_CR_FILES_SHEET").as_deref() == Ok("send")).then(SendDraft::default)),
             answered: mutable_state_of(Vec::new()),
@@ -427,7 +431,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                     if compact {
                         cu::Spacer().modifier(Modifier::new().height(PHONE_MENU_ROW));
                     }
-                    HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, w <= 900.0, 6.0, || {
+                    HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, w <= 900.0, 6.0, compact, || {
                         // The share button is named "공유 시트 열기" (compose-rust v0.0.7, #460).
                         ShareButton(compact, {
                             let o = share_open.clone();
@@ -438,13 +442,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                         let open = move || s.set(Some(SendDraft::default()));
                         if compact {
                             // A round ink button, icon only (`.lbl{display:none}`).
-                            let p = ember_theme().palette;
-                            cu::Button("")
-                                .icon(IconRole::Send)
-                                .variant(ButtonVariant::Text)
-                                .color(paint(p.ink_text))
-                                .modifier(Modifier::new().size(H_BTN, H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full))
-                                .on_click(open);
+                            InkIconButton(IconRole::Send, open);
                         } else {
                             AppButton("보내기", Some(IconRole::Send), ButtonKind::Primary, false, true, false, open);
                         }
@@ -456,7 +454,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                     Cols(
                         if w > 1279.0 { 4 } else { 2 },
                         SP[4],
-                        cells.iter().map(|c| -> Part { Box::new(move || KpiView(c)) }).collect(),
+                        cells.iter().map(|c| -> Part { Box::new(move || KpiView(c, compact)) }).collect(),
                     );
                 }
                 Stage(&live_model, &members, extras, &st, &ui, w, &skip);
@@ -478,8 +476,10 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                 }
             });
         });
-        // The incoming offer floats over the page, at the top right (above the tab bar on a phone).
-        if let Some(offer) = offers.first() {
+        // The incoming offer floats over the page, at the top right (above the tab bar on a phone),
+        // and waits while a sheet is open: drawn above the sheet's scrim it stayed bright (F8).
+        let sheet_open = st.sheet.get().is_some();
+        if let Some(offer) = offers.first().filter(|_| offer_card_shown(true, sheet_open, share_open.get())) {
             OfferCard(offer, &live_pending, &live_model.devices, &st, w);
         }
         // The lists stay when the server is lost; only sending is blocked (FR-L27.8), and the
@@ -652,15 +652,21 @@ fn TileGrid<'a>(cols: usize, gap: f32, avail: f32, span_last: bool, tiles: Vec<P
     });
 }
 
+/// A KPI number's type step: 28 (`--fs-2xl`), 18 on a phone (`.kpi .v{font-size:var(--fs-xl)}`
+/// at 560 px and below, review F5).
+pub fn kpi_value_fs(compact: bool) -> Fs {
+    if compact { Fs::Xl } else { Fs::Xl2 }
+}
+
 /// A KPI: the label, the number with its small unit and pill, and the green meter.
-fn KpiView(c: &KpiCell) {
+fn KpiView(c: &KpiCell, compact: bool) {
     let p = ember_theme().palette;
     cu::Column().spacing(0.0).modifier(Modifier::new().fill_max_width()).content(|| {
         Label(c.label, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
         if c.available {
             cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
                 cu::Row().alignment(Alignment::CenterStart).content(|| {
-                    Label(&c.value, Fs::Xl2, Weight::Regular, None, Some(1));
+                    Label(&c.value, kpi_value_fs(compact), Weight::Regular, None, Some(1));
                     if !c.unit.is_empty() {
                         Label(c.unit, Fs::Md, Weight::Medium, Some(paint(p.muted)), Some(1));
                     }
@@ -800,7 +806,21 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                                 files: vec![demo_files()[0].to_string()],
                             }));
                         } else {
-                            notice::post(FILE_PICK_UNAVAILABLE);
+                            // The platform's own dialog (compose-rust#483). Its one answer
+                            // arrives later on the UI thread and decides what the sheet does.
+                            let s = s.clone();
+                            compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show(move |result| {
+                                let outcome = match result {
+                                    compose_rust::FileDialogResult::Chosen { paths, .. } => pick_outcome(Some(paths), true),
+                                    compose_rust::FileDialogResult::Cancelled => pick_outcome(None, true),
+                                    compose_rust::FileDialogResult::Unavailable => pick_outcome(None, false),
+                                };
+                                match outcome {
+                                    PickOutcome::Draft(draft) => s.set(Some(draft)),
+                                    PickOutcome::Nothing => {}
+                                    PickOutcome::Say(why) => notice::post(why),
+                                }
+                            });
                         }
                     });
                     if !can_pick {
@@ -1351,7 +1371,7 @@ pub fn target_chip_width(label: &str, glyph: f32) -> f32 {
 }
 
 /// The send sheet: pick the receiver (every device and every agent), then the files (FR-L27.5).
-fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool, lost: bool, w: f32) {
+pub(super) fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool, lost: bool, w: f32) {
     let p = ember_theme().palette;
     let draft = st.sheet.get();
     let open = draft.is_some();
@@ -1502,30 +1522,73 @@ fn ShareButton(compact: bool, on_click: impl FnMut() + 'static) {
     });
 }
 
-/// One receiver of the share sheet (`.fl-sh-dev`): a 60 px round glyph, the name and a small
-/// line (72 px wide). A device that is not connected is dimmed.
-fn ShareTile(name: &str, caption: &str, dim: bool, on_click: impl FnMut() + 'static, glyph: impl FnOnce()) {
+/// The colour of a share tile's presence dot (`.fl-sh-near` green, `.fl-sh-p2p` blue, else
+/// `--c-grey`).
+pub fn share_dot_color(dot: ShareDot, p: &Palette) -> compose_rust::Color {
+    match dot {
+        ShareDot::Green => p.green.strong,
+        ShareDot::Blue => p.blue.strong,
+        ShareDot::Grey => p.grey.strong,
+    }
+}
+
+/// One receiver of the share sheet (`.fl-sh-dev`): a 60 px round glyph, the name on one line
+/// with an ellipsis and a small line (72 px wide). A device's avatar has a 1 px `line` border
+/// and, when it is online, a 12 px presence dot 2 px in from its bottom right with a 2 px
+/// `surface-2` ring (`.fl-sh-av i`); an agent's has no border (`.fl-sh-av.bot`). A device that
+/// is not connected is dimmed.
+fn ShareTile(
+    name: &str,
+    caption: &str,
+    dim: bool,
+    bordered: bool,
+    dot: Option<ShareDot>,
+    on_click: impl FnMut() + 'static,
+    glyph: impl FnOnce(),
+) {
     let p = ember_theme().palette;
     let m = Modifier::new().width(72.0);
     Clickable(if dim { m.alpha(0.5) } else { m }, Alignment::TopCenter, on_click, || {
         cu::Column().spacing(2.0).alignment(Alignment::Center).modifier(Modifier::new().width(72.0)).content(|| {
-            cu::Box()
-                .modifier(Modifier::new().size(60.0, 60.0).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full))
-                .alignment(Alignment::Center)
-                .content(glyph);
-            // Two lines at most (an ellipsis after that), so two long names stay distinguishable.
-            Label(name, Fs::Xs2, Weight::Regular, None, Some(SHARE_NAME_LINES));
+            cu::Box().modifier(Modifier::new().size(60.0, 60.0)).alignment(Alignment::BottomEnd).content(|| {
+                let avatar = Modifier::new().size(60.0, 60.0).background(paint(p.surface)).shape_role(ShapeRole::Full);
+                cu::Box()
+                    .modifier(if bordered { avatar.border(1.0, paint(p.line)) } else { avatar })
+                    .alignment(Alignment::Center)
+                    .content(glyph);
+                if let Some(d) = dot {
+                    cu::Row().content(|| {
+                        cu::Column().content(|| {
+                            cu::Spacer().modifier(
+                                Modifier::new()
+                                    .size(12.0, 12.0)
+                                    .background(paint(share_dot_color(d, p)))
+                                    .border(2.0, paint(p.surface_2))
+                                    .shape_role(ShapeRole::Full),
+                            );
+                            cu::Spacer().modifier(Modifier::new().height(2.0));
+                        });
+                        cu::Spacer().modifier(Modifier::new().width(2.0));
+                    });
+                }
+            });
+            // One line, cut with an ellipsis to the 72 px tile (`.fl-sh-dev .ellipsis`).
+            super::components::CentredLabel(&fit_label(name, 72.0, Fs::Xs2.size()), Fs::Xs2, Weight::Regular, None, Some(SHARE_NAME_LINES));
             Label(&fit_label(caption, 72.0, Fs::Xs2.size()), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         });
     });
 }
 
 /// The share sheet, a preview of the phone's share sheet (mockup state `files-sharesheet`): the
-/// file being shared, "Ember로 보내기" (the real devices, connected ones first), "에이전트에게"
+/// file being shared, "Ember로 보내기" (the real devices, connected ones first), "팀원에게"
 /// (running agents), the sheet's own actions and a note. Nothing can be shared yet (no file
 /// picker, no transfer service, #487), so the file card and the actions say so and a tap on a
 /// receiver explains why nothing was sent instead of reporting success.
-fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMember], ready: bool, lost: bool) {
+///
+/// Laid out as `.fl-share` (FR-L27.7, #878): no title bar, the close button at the end of the
+/// file card, padding 12 16 20 and 12 between rows, and each section's receivers in one row that
+/// scrolls sideways (`.fl-share-row`).
+pub(super) fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMember], ready: bool, lost: bool) {
     let p = ember_theme().palette;
     let is_open = open.get();
     let close = {
@@ -1533,14 +1596,19 @@ fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMemb
         move || o.set(false)
     };
     let window = crate::ui::window_size::current_window_size();
-    let body_h = super::components::sheet_body_max_height(window.width_dp, window.height_dp, false, 60.0).min(640.0);
-    let inner = super::components::sheet_width(window.width_dp, SHARE_SHEET_WIDTH) - 2.0 * SP[4];
+    let bottom = super::components::sheet_wraps_content(window.width_dp);
+    // FR-L32.1 (#878): with no title bar the room is the whole sheet. The body takes its content
+    // height when that fits, and always in the bottom sheet, which scrolls taller content itself.
+    // TODO(compose-rust#778, after v0.0.10): cap instead of estimate.
+    let room = super::components::sheet_body_max_height(window.width_dp, window.height_dp, false, 0.0);
     let rows = share_devices(devices);
     let agents = share_agents(members);
-    let (file_title, file_why) = share_file_card(&[], FILE_PICKER_AVAILABLE);
+    // The share sheet has no file step of its own (TODO(#673): open the file dialog from its file
+    // card), so it reads as it did before the tray's 파일 고르기 took the dialog.
+    let (file_title, file_why) = share_file_card(&[], SHARE_SHEET_PICKS_FILES);
     let tap = {
         let (devices, o) = (devices.to_vec(), open.clone());
-        move |target: SendTarget| match share_tap_at(&target, &devices, &[], FILE_PICKER_AVAILABLE, ready, lost) {
+        move |target: SendTarget| match share_tap_at(&target, &devices, &[], SHARE_SHEET_PICKS_FILES, ready, lost) {
             ShareTap::Blocked(why) => notice::post(why),
             ShareTap::Send(SendTarget::Device(id)) => match transfer_service().send(&id, Vec::new()) {
                 Ok(()) => o.set(false),
@@ -1550,93 +1618,150 @@ fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMemb
             ShareTap::Send(SendTarget::Agent(_)) => notice::post(UNAVAILABLE),
         }
     };
-    let dev_widths: Vec<f32> = rows.iter().map(|_| 72.0).collect();
-    let dev_lines = super::project::wrap_lines(&dev_widths, SP[3], inner);
-    let ag_widths: Vec<f32> = agents.iter().map(|_| 72.0).collect();
-    let ag_lines = super::project::wrap_lines(&ag_widths, SP[3], inner);
-    // The sheet header's close button is named "닫기" (`CloseButton`, compose-rust v0.0.7, #460).
-    EmberSheetSized("공유 시트", is_open, SHARE_SHEET_WIDTH, false, close, None, || {
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_h).background(paint(p.surface_2))).content(|| {
-            cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
-                // The file being shared.
-                cu::Row()
-                    .spacing(SP[3])
-                    .alignment(Alignment::CenterStart)
-                    .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).corner_radius(CORNER_LG).padding(SP[3]))
-                    .content(|| {
-                        cu::Box()
-                            .modifier(Modifier::new().size(44.0, 44.0).background(paint(p.surface_2)).corner_radius(CORNER_LG))
-                            .alignment(Alignment::Center)
-                            .content(|| NavIcon(ICON_DOC, p.text_2.to_argb(), 22.0));
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                            Label(&file_title, Fs::Md, Weight::Semibold, None, Some(1));
-                            if let Some(why) = file_why {
-                                Label(why, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                            }
+    // The dialog draws the mockup's grab bar; the bottom sheet has the toolkit's own.
+    let grab = !bottom;
+    let plain = bottom || share_body_estimate(!rows.is_empty(), !agents.is_empty(), grab) <= room;
+    // An empty title: `.fl-share` has no header. Escape and the scrim still close it.
+    EmberSheetSized("", is_open, SHARE_SHEET_WIDTH, false, close.clone(), None, || {
+        let body = || {
+            // `.fl-share` padding `--sp3 --sp4 --sp5`: 12 above, 16 at the sides, 20 below.
+            cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Spacer().modifier(Modifier::new().height(SP[2]));
+                cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+                    cu::Spacer().modifier(Modifier::new().width(SP[3]));
+                    cu::Column().spacing(SP[2]).modifier(Modifier::new().weight(1.0)).content(|| {
+                        if grab {
+                            // `.fl-share-grab`: 36 x 5, `--c-grey`, centred.
+                            cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width()).content(|| {
+                                cu::Spacer().modifier(Modifier::new().size(36.0, 5.0).background(paint(p.grey.strong)).shape_role(ShapeRole::Full));
+                            });
+                        }
+                        // The file being shared, with the sheet's close button (`.fl-share-file`).
+                        cu::Row()
+                            .spacing(SP[2])
+                            .alignment(Alignment::CenterStart)
+                            .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).corner_radius(CORNER_MD).padding(SP[2]))
+                            .content(|| {
+                                cu::Box()
+                                    .modifier(Modifier::new().size(44.0, 44.0).background(paint(p.surface_2)).corner_radius(CORNER_LG))
+                                    .alignment(Alignment::Center)
+                                    .content(|| NavIcon(ICON_DOC, p.text_2.to_argb(), 22.0));
+                                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                                    Label(&file_title, Fs::Md, Weight::Semibold, None, Some(1));
+                                    if let Some(why) = file_why {
+                                        Label(why, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                                    }
+                                });
+                                super::components::CloseButton(close.clone());
+                            });
+                        ShareSectionLabel("Ember로 보내기");
+                        if rows.is_empty() {
+                            Label("보낼 수 있는 장비가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        } else {
+                            ShareRow(|| {
+                                for d in rows.iter() {
+                                    let (t, id) = (tap.clone(), d.id.clone());
+                                    ShareTile(&d.name, &d.caption, !d.online, true, d.dot, move || t(SendTarget::Device(id.clone())), || {
+                                        NavIcon(kind_icon(d.kind), p.text_2.to_argb(), 26.0)
+                                    });
+                                }
+                            });
+                        }
+                        // `팀원에게`, with no hint under it (review r6).
+                        ShareSectionLabel(SHARE_AGENTS_LABEL);
+                        if agents.is_empty() {
+                            Label("일하는 팀원이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        } else {
+                            ShareRow(|| {
+                                for m in agents.iter() {
+                                    let name = clean_member_name(&m.project, &m.agent, &m.title);
+                                    let (t, id) = (tap.clone(), m.id.clone());
+                                    let host = agent_host(&m.project);
+                                    ShareTile(&name, &host, false, false, None, move || t(SendTarget::Agent(id.clone())), || {
+                                        Character(&m.agent, false, 30.0, &name, &m.project, if m.waiting { CharState::Wait } else { CharState::Run }, None);
+                                    });
+                                }
+                            });
+                        }
+                        // The sheet's own actions (`.fl-share-acts`, rows `--pad-row` 12 16): not
+                        // built, so each says so.
+                        cu::Column()
+                            .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).corner_radius(CORNER_MD))
+                            .content(|| {
+                                for (i, label) in SHARE_ACTIONS.iter().enumerate() {
+                                    if i > 0 {
+                                        cu::Separator(Some(paint(p.line)));
+                                    }
+                                    cu::Row()
+                                        .spacing(SP[2])
+                                        .alignment(Alignment::CenterStart)
+                                        .modifier(Modifier::new().fill_max_width().padding(SP[2]).alpha(0.6))
+                                        .content(|| {
+                                            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                                            NavIcon([ICON_DOC, ICON_CHAT, ICON_FOLDER][i], p.text_2.to_argb(), 18.0);
+                                            Label(label, Fs::Md, Weight::Regular, None, Some(1));
+                                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                            Label(UNAVAILABLE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                                            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                                        });
+                                }
+                            });
+                        cu::Row().spacing(SP[1]).alignment(Alignment::TopStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                            NavIcon(ICON_LOCK, p.muted.to_argb(), 14.0);
+                            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                                Label(SHARE_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(3));
+                            });
                         });
                     });
-                Label("Ember로 보내기", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                if rows.is_empty() {
-                    Label("보낼 수 있는 장비가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-                }
-                for line in dev_lines.iter() {
-                    cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        for &i in line {
-                            let d = &rows[i];
-                            let (t, id) = (tap.clone(), d.id.clone());
-                            ShareTile(&d.name, &d.caption, !d.online, move || t(SendTarget::Device(id.clone())), || {
-                                NavIcon(kind_icon(d.kind), p.text_2.to_argb(), 26.0)
-                            });
-                        }
-                    });
-                }
-                Label("에이전트에게", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                Label(SHARE_AGENTS_NOTE, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(2));
-                if agents.is_empty() {
-                    Label("일하는 팀원이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-                }
-                for line in ag_lines.iter() {
-                    cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        for &i in line {
-                            let m = &agents[i];
-                            let name = clean_member_name(&m.project, &m.agent, &m.title);
-                            let (t, id) = (tap.clone(), m.id.clone());
-                            let host = agent_host(&m.project);
-                            ShareTile(&name, &host, false, move || t(SendTarget::Agent(id.clone())), || {
-                                Character(&m.agent, false, 30.0, &name, &m.project, if m.waiting { CharState::Wait } else { CharState::Run }, None);
-                            });
-                        }
-                    });
-                }
-                // The sheet's own actions: not built, so each says so.
-                cu::Column()
-                    .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).corner_radius(CORNER_LG))
-                    .content(|| {
-                        for (i, label) in SHARE_ACTIONS.iter().enumerate() {
-                            if i > 0 {
-                                cu::Separator(Some(paint(p.line)));
-                            }
-                            cu::Row()
-                                .spacing(SP[3])
-                                .alignment(Alignment::CenterStart)
-                                .modifier(Modifier::new().fill_max_width().padding(SP[3]).alpha(0.6))
-                                .content(|| {
-                                    NavIcon([ICON_DOC, ICON_CHAT, ICON_FOLDER][i], p.text_2.to_argb(), 18.0);
-                                    Label(label, Fs::Md, Weight::Regular, None, Some(1));
-                                    cu::Spacer().modifier(Modifier::new().weight(1.0));
-                                    Label(UNAVAILABLE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                                });
-                        }
-                    });
-                cu::Row().spacing(SP[2]).alignment(Alignment::TopStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                    NavIcon(ICON_LOCK, p.muted.to_argb(), 14.0);
-                    cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                        Label(SHARE_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(3));
-                    });
+                    cu::Spacer().modifier(Modifier::new().width(SP[3]));
                 });
+                cu::Spacer().modifier(Modifier::new().height(SP[4]));
             });
-        });
+        };
+        let surface = Modifier::new().fill_max_width().background(paint(p.surface_2));
+        if plain {
+            cu::Column().modifier(surface).content(body);
+        } else {
+            cu::ScrollColumn().modifier(surface.height(room)).content(body);
+        }
     });
+}
+
+/// A share section's label (`.fl-share-l small muted`, padding 0 4).
+fn ShareSectionLabel(text: &str) {
+    let p = ember_theme().palette;
+    cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+        cu::Spacer().modifier(Modifier::new().width(SP[0]));
+        Label(text, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+    });
+}
+
+/// One section's receivers in a row that scrolls sideways (`.fl-share-row`: 12 apart, the
+/// tiles `flex:none`), so a long list does not make the sheet taller.
+fn ShareRow(tiles: impl FnOnce()) {
+    cu::ScrollRow().modifier(Modifier::new().fill_max_width()).content(|| {
+        cu::Row().spacing(SP[2]).alignment(Alignment::TopStart).content(tiles);
+    });
+}
+
+/// How tall the share sheet's body is (FR-L32.1): 12 above and 20 below, the dialog's 5 px grab
+/// bar when `grab`, the 68 px file card, the two 18 px section labels, each section's one row of
+/// 112 px tiles (a 20 px line when it has none), the three 46 px action rows with their
+/// separators and the three-line note, with 12 px between rows.
+pub(crate) fn share_body_estimate(devices: bool, agents: bool, grab: bool) -> f32 {
+    let tiles = |any: bool| if any { 112.0 } else { 20.0 };
+    let rows = [
+        if grab { Some(5.0) } else { None },
+        Some(68.0),
+        Some(18.0),
+        Some(tiles(devices)),
+        Some(18.0),
+        Some(tiles(agents)),
+        Some(3.0 * 46.0 + 2.0),
+        Some(54.0),
+    ];
+    let rows: Vec<f32> = rows.into_iter().flatten().collect();
+    SP[2] + rows.iter().sum::<f32>() + (rows.len() - 1) as f32 * SP[2] + SP[4]
 }
 
 /// The share sheet's width: the mockup's `min(400px, 100%)`.
@@ -1645,6 +1770,118 @@ pub const SHARE_SHEET_WIDTH: f32 = 400.0;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l32_1_share_sheet_estimate_and_plain_body() {
+        // #878: the 채널에 올리기 row was cut at 390 and 1440 by a body fixed at 640; review r5
+        // found the last row and the note below the window edge at 390.
+        // 12 + 5 + 68 + 18 + 112 + 18 + 112 + 140 + 54 + 7 x 12 + 20 (the agents hint line is
+        // gone, review r6).
+        assert_eq!(share_body_estimate(true, true, true), 643.0);
+        assert_eq!(share_body_estimate(true, true, false), 643.0 - 5.0 - 12.0);
+        assert_eq!(share_body_estimate(false, false, true), 643.0 - 2.0 * 92.0);
+        // With no title bar the whole sheet is the room: the dialog at 1440 x 900 and the bottom
+        // sheet at 390 x 844 both hold the body at its content height.
+        let room = |w: f32, h: f32| super::super::components::sheet_body_max_height(w, h, false, 0.0);
+        assert!(share_body_estimate(true, true, true) <= room(1440.0, 900.0), "{}", room(1440.0, 900.0));
+        assert!(share_body_estimate(true, true, false) <= room(390.0, 844.0), "{}", room(390.0, 844.0));
+        let src = include_str!("files.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        let sheet = &production[production.find("fn ShareSheet(").unwrap()..];
+        let sheet = &sheet[..sheet.find("\n}\n").unwrap()];
+        assert!(!sheet.contains(".min(640.0)"), "{sheet}");
+        assert!(sheet.contains("let plain = bottom || share_body_estimate(!rows.is_empty(), !agents.is_empty(), grab) <= room;"));
+        assert!(sheet.contains("if plain {\n            cu::Column().modifier(surface).content(body);"));
+        assert!(!sheet.contains("wrap_lines"), "the receivers no longer wrap into lines");
+    }
+
+    /// The share sheet's nodes at `size`, open, with the sample devices and no agents.
+    fn share_nodes(size: (f32, f32)) -> Vec<(String, Vec<String>, Vec<String>)> {
+        use compose_rust::runtime::{mutable_state_of, remember};
+        crate::ui::window_size::set_opened_for_test(Some(size));
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let open = remember(|| mutable_state_of(true));
+                let (model, _) = sample_model();
+                ShareSheet(&open, &model.devices, &[], true, false);
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let mut nodes: Vec<(u32, String, Vec<String>, Vec<String>)> = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::Create { node_id, widget } => nodes.push((*node_id, format!("{widget:?}"), Vec::new(), Vec::new())),
+                Mutation::SetProp { node_id, property, value } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.0 == *node_id) {
+                        n.2.push(format!("{property:?}={value:?}"));
+                    }
+                }
+                Mutation::SetModifier { node_id, modifier, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.0 == *node_id) {
+                        n.3.push(format!("{modifier:?}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        crate::ui::window_size::set_opened_for_test(None);
+        compose_rust::window::reset_window_size();
+        nodes.into_iter().map(|(_, w, p, m)| (w, p, m)).collect()
+    }
+
+    #[test]
+    fn fr_l27_7_share_sheet_has_no_title_bar_and_scrolls_receivers_sideways() {
+        let _guard = crate::services::test_guard();
+        for size in [(1440.0, 900.0), (390.0, 844.0)] {
+            let nodes = share_nodes(size);
+            let texts: Vec<&String> = nodes.iter().flat_map(|n| n.1.iter()).filter(|p| p.starts_with("Text=")).collect();
+            assert!(!texts.iter().any(|t| t.contains("\"공유 시트\"")), "{size:?}: no title bar: {texts:?}");
+            assert!(texts.iter().any(|t| t.contains("Ember로 보내기")), "{size:?}: {texts:?}");
+            // Only the lines between the three actions: no line under a header.
+            assert_eq!(nodes.iter().filter(|n| n.0 == "Divider").count(), 2, "{size:?}");
+            // One sideways row for the devices; no agents, so their line says so.
+            assert_eq!(nodes.iter().filter(|n| n.0 == "ScrollRow").count(), 1, "{size:?}");
+            // The content fits: no fixed-height scrolling body.
+            assert_eq!(nodes.iter().filter(|n| n.0 == "ScrollColumn").count(), 0, "{size:?}");
+            // The sheet's close button (32 px, clickable) is still there, in the file card.
+            let close = nodes.iter().any(|n| n.1.iter().any(|p| p.starts_with("OnClick=")) && n.2.windows(2).any(|w| w[0] == "Width(32.0)" && w[1] == "Height(32.0)"));
+            assert!(close, "{size:?}: close button");
+        }
+        // The dialog draws the mockup's 36 x 5 grab bar; the bottom sheet leaves it to the toolkit.
+        let grab = |nodes: &[(String, Vec<String>, Vec<String>)]| nodes.iter().any(|n| n.2.windows(2).any(|w| w[0] == "Width(36.0)" && w[1] == "Height(5.0)"));
+        assert!(grab(&share_nodes((1440.0, 900.0))));
+        assert!(!grab(&share_nodes((390.0, 844.0))));
+        // Review r6: a receiver name on two lines (BREW의 / iPhone) started its second line at
+        // the left of the 72 px tile while the caption under it was centred.
+        // Review r6 again: names wrapped to two lines; the mockup keeps one with an ellipsis.
+        let (model, _) = sample_model();
+        let names: Vec<String> = share_devices(&model.devices)
+            .iter()
+            .map(|d| format!("Text=String({:?})", fit_label(&d.name, 72.0, Fs::Xs2.size())))
+            .collect();
+        assert!(!names.is_empty());
+        assert!(names.iter().any(|n| n.contains('\u{2026}')), "a long sample name is cut: {names:?}");
+        for size in [(1440.0, 900.0), (390.0, 844.0)] {
+            let nodes = share_nodes(size);
+            for name in &names {
+                let node = nodes.iter().find(|n| n.1.iter().any(|p| p == name)).unwrap_or_else(|| panic!("{size:?}: no {name}"));
+                assert!(node.1.iter().any(|p| p.starts_with("TextAlign=")), "{size:?}: {name} is centred: {:?}", node.1);
+                assert!(node.1.iter().any(|p| p == "MaxLines=Integer(1)"), "{size:?}: {name} on one line: {:?}", node.1);
+            }
+            // `.fl-sh-av i`: a 12 px dot with a 2 px `surface-2` ring on each online device.
+            let p = ember_theme().palette;
+            let ring = format!("{:?}", compose_rust::schema::Modifier::Border { width: 2.0, paint: paint(p.surface_2) });
+            let dots = nodes.iter().filter(|n| n.2.contains(&ring) && n.2.windows(2).any(|w| w[0] == "Width(12.0)" && w[1] == "Height(12.0)")).count();
+            let online = share_devices(&model.devices).iter().filter(|d| d.online).count();
+            assert_eq!(dots, online, "{size:?}");
+            let green = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.green.strong)));
+            assert!(nodes.iter().any(|n| n.2.contains(&green) && n.2.contains(&ring)), "a nearby device is green");
+            let texts: Vec<&String> = nodes.iter().flat_map(|n| n.1.iter()).filter(|p| p.starts_with("Text=")).collect();
+            assert!(texts.iter().any(|t| t.contains("\"팀원에게\"")), "{size:?}: {texts:?}");
+            assert!(!texts.iter().any(|t| t.contains("에이전트에게")), "{size:?}");
+        }
+    }
+
     use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
     use compose_rust::{Host, Recomposer};
 
@@ -1948,6 +2185,25 @@ mod tests {
     }
 
     #[test]
+    fn fr_l27_5_the_tray_button_opens_the_platform_file_dialog() {
+        // compose-rust#483 (#673): outside the demo 파일 고르기 asks for the platform's dialog and
+        // its one answer goes through `pick_outcome` (tested in `ui/files.rs`).
+        let production = include_str!("files.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show(move |result| {"));
+        for arm in [
+            "compose_rust::FileDialogResult::Chosen { paths, .. } => pick_outcome(Some(paths), true),",
+            "compose_rust::FileDialogResult::Cancelled => pick_outcome(None, true),",
+            "compose_rust::FileDialogResult::Unavailable => pick_outcome(None, false),",
+            "PickOutcome::Draft(draft) => s.set(Some(draft)),",
+            "PickOutcome::Say(why) => notice::post(why),",
+        ] {
+            assert!(production.contains(arm), "{arm}");
+        }
+        assert!(production.contains("let can_pick = FILE_PICKER_AVAILABLE || demo;"), "the button is off where there is no dialog");
+        assert!(!SHARE_SHEET_PICKS_FILES);
+    }
+
+    #[test]
     fn fr_l27_5_offline_device_target_selection_is_prevented_and_notified() {
         let (model, _) = sample_model();
         let draft = SendDraft::default();
@@ -2036,5 +2292,55 @@ mod tests {
             clean_member_name("core-repo", "codex", "테스트"),
             "core-codex"
         );
+    }
+
+    fn phone_kpi() {
+        let cell = KpiCell { label: "연결된 장비", value: "4".into(), unit: "", pill: None, meter: None, available: true };
+        KpiView(&cell, true);
+    }
+
+    fn wide_kpi() {
+        let cell = KpiCell { label: "연결된 장비", value: "4".into(), unit: "", pill: None, meter: None, available: true };
+        KpiView(&cell, false);
+    }
+
+    /// The size the KPI's value text is sent with.
+    fn value_size(content: fn()) -> f32 {
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+        use compose_rust::{Host, PropertyKind, Recomposer};
+        let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let node = batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } if *s == "4" => Some(*node_id),
+                _ => None,
+            })
+            .expect("the value text");
+        batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::FontSize, value: PropertyValue::Float(f) } if *node_id == node => Some(*f),
+                _ => None,
+            })
+            .expect("the value's size")
+    }
+
+    /// Review F5: a KPI value is 18 on a phone (`.kpi .v` at 560 px and below), 28 above.
+    #[test]
+    fn f5_phone_kpi_values_are_18() {
+        let _guard = crate::services::test_guard();
+        assert_eq!(value_size(phone_kpi), 18.0);
+        assert_eq!(value_size(wide_kpi), 28.0);
+    }
+
+    /// Review F8: the offer card is left out while the send or the share sheet is open, so it
+    /// is not drawn bright above the scrim.
+    #[test]
+    fn f8_offer_card_waits_under_a_sheet() {
+        let src = include_str!("files.rs");
+        let screen = src.split("pub fn FilesScreenWith(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(screen.contains("offers.first().filter(|_| offer_card_shown(true, sheet_open, share_open.get()))"));
+        assert!(!screen.contains("if let Some(offer) = offers.first() {"));
     }
 }

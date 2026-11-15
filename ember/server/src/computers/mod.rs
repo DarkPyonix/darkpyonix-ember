@@ -57,6 +57,7 @@ pub mod bridge;
 pub mod egress;
 pub mod enrol;
 pub mod fs;
+pub mod fs_watch;
 pub mod local_node;
 pub mod metrics;
 pub mod mount;
@@ -87,6 +88,9 @@ pub struct Computer {
     pub id: String,
     pub name: String,
     /// `http://host:port` of the node API; empty when the node is addressed by [`Computer::peer`].
+    /// Kept whole in memory and on disk for node calls; serialised through [`url_for_clients`]
+    /// (FR-L18, #519), so no answer or event that carries a `Computer` echoes credentials.
+    #[serde(serialize_with = "serialize_url_for_clients")]
     pub url: String,
     /// The node's transport address, for a node reached over the transport (`FR-N1`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -97,31 +101,161 @@ pub struct Computer {
     pub created_at: i64,
 }
 
+/// Where a client can reach a computer's own ports (FR-L18, #519): the host of its node URL and
+/// nothing else of it. Never the port, path, user name, password or token.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComputerAddress {
+    /// Registered by URL: the host of that URL (a name or an IP address, IPv6 without brackets).
+    Host { host: String },
+    /// Registered by peer only: reached over the transport, so it has no host.
+    Peer,
+    /// [`LOCAL`]: the machine this server runs on. The client knows the server by its own
+    /// address; the server does not know which address that is.
+    Server,
+    /// A record that no longer resolves, or a stored URL with no host.
+    Unknown,
+}
+
+/// The authority of an `http(s)://` URL without its user name and password, and the rest of
+/// the URL up to the query or fragment.
+fn split_http_url(url: &str) -> Option<(&str, &str, &str)> {
+    let (scheme, rest) = if let Some(r) = url.strip_prefix("http://") {
+        ("http://", r)
+    } else if let Some(r) = url.strip_prefix("https://") {
+        ("https://", r)
+    } else {
+        return None;
+    };
+    let rest = rest.split(['?', '#']).next().unwrap_or("");
+    let (authority, path) = match rest.find('/') {
+        Some(i) => rest.split_at(i),
+        None => (rest, ""),
+    };
+    let authority = authority.rsplit('@').next().unwrap_or("");
+    Some((scheme, authority, path))
+}
+
+/// The host of a node URL: a name or an IP address, IPv6 without its brackets. `None` when the
+/// URL is not `http(s)://` or has no host.
+pub fn url_host(url: &str) -> Option<String> {
+    let (_, authority, _) = split_http_url(url)?;
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+/// A node URL as clients see it: without user name, password, query or fragment, which can hold
+/// credentials. Anything that is not `http(s)://` is shown as it is stored (it is empty for a
+/// peer-addressed computer).
+pub fn url_for_clients(url: &str) -> String {
+    match split_http_url(url) {
+        Some((scheme, authority, path)) => format!("{scheme}{authority}{path}"),
+        None => url.to_string(),
+    }
+}
+
+fn serialize_url_for_clients<S: serde::Serializer>(url: &str, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&url_for_clients(url))
+}
+
+/// `text` with every `http(s)://` or `ws(s)://` URL in it passed through [`url_for_clients`],
+/// for error texts and log lines that may quote a node URL (a transport error names the URL
+/// it failed on).
+pub fn strip_urls_in_text(text: &str) -> String {
+    rewrite_urls_in_text(text, url_for_clients)
+}
+
+/// `text` with the user name and password removed from every `http(s)://` or `ws(s)://` URL
+/// in it, query and fragment kept. For hub errors: they quote hub pages the user must open,
+/// such as `/link?code=...`, whose query carries no credential but is needed (FR-L18, #519).
+pub fn strip_userinfo_in_text(text: &str) -> String {
+    rewrite_urls_in_text(text, |url| match url.find("://") {
+        Some(i) => {
+            let (scheme, rest) = url.split_at(i + 3);
+            let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            let authority = rest[..end].rsplit('@').next().unwrap_or("");
+            format!("{scheme}{authority}{}", &rest[end..])
+        }
+        None => url.to_string(),
+    })
+}
+
+fn rewrite_urls_in_text(text: &str, clean: impl Fn(&str) -> String) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = ["http://", "https://", "ws://", "wss://"]
+        .iter()
+        .filter_map(|p| rest.find(p))
+        .min()
+    {
+        // A scheme that is the tail of a longer word (`xhttp://`) is left alone.
+        let starts_word = rest[..i].chars().next_back().map_or(true, |c| !c.is_ascii_alphanumeric());
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, ')' | '"' | '\'' | '>' | ',' | ';'))
+            .unwrap_or(tail.len());
+        let token = &tail[..end];
+        if !starts_word {
+            out.push_str(token);
+        } else if let Some(ws) = token.strip_prefix("ws") {
+            // Strip as http(s) and put the ws scheme back.
+            let cleaned = clean(&format!("http{ws}"));
+            out.push_str("ws");
+            out.push_str(cleaned.strip_prefix("http").unwrap_or(&cleaned));
+        } else {
+            out.push_str(&clean(token));
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// What clients see for a computer, including [`LOCAL`].
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ComputerView {
     pub id: String,
     pub name: String,
-    /// Empty for [`LOCAL`] and for peer-addressed computers.
+    /// Empty for [`LOCAL`] and for peer-addressed computers. Without user name, password,
+    /// query or fragment ([`url_for_clients`]).
     pub url: String,
     /// The node's peer id (hex), for a computer reached over the transport.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peer: Option<String>,
     pub local: bool,
+    /// Where the computer's own ports are reached (FR-L18, #519).
+    pub address: ComputerAddress,
 }
 
 impl ComputerView {
     pub fn local() -> Self {
-        ComputerView { id: LOCAL.into(), name: LOCAL_NAME.into(), url: String::new(), peer: None, local: true }
+        ComputerView {
+            id: LOCAL.into(),
+            name: LOCAL_NAME.into(),
+            url: String::new(),
+            peer: None,
+            local: true,
+            address: ComputerAddress::Server,
+        }
     }
 
     fn of(c: &Computer) -> Self {
+        let address = match (url_host(&c.url), &c.peer) {
+            (Some(host), _) => ComputerAddress::Host { host },
+            (None, Some(_)) => ComputerAddress::Peer,
+            (None, None) => ComputerAddress::Unknown,
+        };
         ComputerView {
             id: c.id.clone(),
             name: c.name.clone(),
-            url: c.url.clone(),
+            url: url_for_clients(&c.url),
             peer: c.peer.as_ref().map(|p| p.peer.to_string()),
             local: false,
+            address,
         }
     }
 }
@@ -184,6 +318,43 @@ impl From<rusqlite::Error> for ComputerError {
 /// The fixed refusal text for a second computer with an already registered peer id (names no
 /// other computer).
 pub const DUPLICATE_PEER: &str = "a computer with this peer id is already registered";
+
+/// Backfill `computers.peer_id` from `peer_json` during [`schema::PEER_ID_UNIQUE_MIGRATION`]
+/// (#640). Rows whose `peer_json` does not parse as a canonical `PeerAddr` (`FR-N6`) are skipped,
+/// and any pre-existing duplicate `peer_id` (possible on databases created before #637) is
+/// reported with a warning and left with `peer_id = NULL` rather than failing the migration.
+pub(crate) fn backfill_peer_ids(conn: &rusqlite::Connection) -> rusqlite::Result< Vec<(String, String)> > {
+    let mut stmt = conn.prepare(
+        "SELECT id, peer_json FROM computers WHERE peer_json IS NOT NULL ORDER BY created_at, id",
+    )?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut duplicates: Vec<(String, String)> = Vec::new();
+    for (id, peer_json) in rows {
+        let Ok(addr) = serde_json::from_str::<PeerAddr>(&peer_json) else {
+            continue;
+        };
+        let peer_id = addr.peer.to_string();
+        if let Some(first_id) = seen.get(&peer_id) {
+            tracing::warn!(
+                computer = %id,
+                first_computer = %first_id,
+                peer = %peer_id,
+                "existing computer row duplicates peer id of an earlier computer; leaving peer_id unset on the duplicate row"
+            );
+            duplicates.push((id, peer_id));
+            continue;
+        }
+        conn.execute(
+            "UPDATE computers SET peer_id = ?1 WHERE id = ?2",
+            params![peer_id, id],
+        )?;
+        seen.insert(peer_id, id);
+    }
+    Ok(duplicates)
+}
 
 /// Test hook (SPEC FR-C2c, mutation M8): called by `Registry::insert_with` with the peer id
 /// being inserted, after the duplicate check and before the INSERT, while the store connection
@@ -285,10 +456,21 @@ impl Registry {
                 if e.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
                 if msg.as_deref().is_some_and(|m| m.contains("peer_id")) {
-                    Err(ComputerError::BadRequest(DUPLICATE_PEER.into()))
-                } else {
-                    Err(ComputerError::BadRequest(format!("a computer named {name:?} already exists")))
+                    return Err(ComputerError::BadRequest(DUPLICATE_PEER.into()));
                 }
+                if let Some(ref pid) = peer_id {
+                    let dup: Option<i64> = conn
+                        .query_row(
+                            "SELECT 1 FROM computers WHERE peer_id = ?1 LIMIT 1",
+                            params![pid],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if dup.is_some() {
+                        return Err(ComputerError::BadRequest(DUPLICATE_PEER.into()));
+                    }
+                }
+                Err(ComputerError::BadRequest(format!("a computer named {name:?} already exists")))
             }
             Err(e) => Err(e.into()),
         }
@@ -1010,7 +1192,14 @@ impl Computers {
             Ok(Some(c)) => ComputerView::of(&c),
             _ if id == LOCAL => ComputerView::local(),
             // A record pointing at a removed computer cannot happen (remove refuses); show the id.
-            _ => ComputerView { id: id.into(), name: id.into(), url: String::new(), peer: None, local: false },
+            _ => ComputerView {
+                id: id.into(),
+                name: id.into(),
+                url: String::new(),
+                peer: None,
+                local: false,
+                address: ComputerAddress::Unknown,
+            },
         }
     }
 
@@ -1039,7 +1228,7 @@ impl Computers {
         if with_env {
             match tokio::time::timeout(ENV_TIMEOUT, api.env()).await {
                 Ok(Ok(env)) => status.env = Some(env),
-                Ok(Err(e)) => status.error = Some(format!("env: {e:#}")),
+                Ok(Err(e)) => status.error = Some(strip_urls_in_text(&format!("env: {e:#}"))),
                 Err(_) => status.error = Some("env timed out".into()),
             }
         }
@@ -1438,6 +1627,7 @@ impl crate::browser::EgressResolver for Computers {
 }
 
 fn unreachable_status(computer: ComputerView, error: String) -> ComputerStatus {
+    let error = strip_urls_in_text(&error);
     ComputerStatus { computer, reachable: Some(false), error: Some(error), version: None, env: None }
 }
 
@@ -1457,6 +1647,27 @@ pub fn find_shim() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l18_serialised_computer_and_error_texts_carry_no_url_credentials() {
+        let raw = "http://user:pass@host:8741/?q=1#frag";
+        let c = Computer { id: "c".into(), name: "n".into(), url: raw.into(), token: "t".into(), created_at: 0, peer: None };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"url\":\"http://host:8741/\""), "{json}");
+        for bad in ["user", "pass", "q=1", "frag"] {
+            assert!(!json.contains(bad), "{bad}: {json}");
+        }
+        assert_eq!(c.url, raw, "the record keeps the whole URL");
+        assert_eq!(
+            strip_urls_in_text(&format!("error sending request for url ({raw}): refused; ws://u:p@h:1/events?after=3")),
+            "error sending request for url (http://host:8741/): refused; ws://h:1/events"
+        );
+        assert_eq!(strip_urls_in_text("no url here"), "no url here");
+        assert_eq!(
+            strip_userinfo_in_text("open http://u:p@hub:1/link?code=AB#x"),
+            "open http://hub:1/link?code=AB#x"
+        );
+    }
+
     use super::*;
     use std::collections::BTreeMap;
 
@@ -1539,6 +1750,60 @@ mod tests {
         assert_eq!(view["peer"], peer.to_string());
         // Without a transport, a peer computer cannot be reached.
         assert!(node_client(&back, None).is_err());
+        // FR-L18 (#519): registered by peer only, so it has no host, and says so.
+        assert_eq!(view["address"], serde_json::json!({ "kind": "peer" }));
+        assert_eq!(view["url"], "");
+        assert!(!view.to_string().contains("192.0.2.1"), "the peer's direct addresses are not shown: {view}");
+    }
+
+    // ---- The address clients see (FR-L18, #519) ----------------------------------------------
+
+    fn url_computer(url: &str) -> Computer {
+        Computer {
+            id: "c1".into(),
+            name: "box".into(),
+            url: url.into(),
+            peer: None,
+            token: "node-secret-token".into(),
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn fr_l18_computer_address_is_the_host_of_the_node_url() {
+        let host = |url: &str| serde_json::to_value(ComputerView::of(&url_computer(url))).unwrap()["address"].clone();
+        assert_eq!(host("http://192.168.0.20:8740"), serde_json::json!({ "kind": "host", "host": "192.168.0.20" }));
+        assert_eq!(host("https://gpu.example.com"), serde_json::json!({ "kind": "host", "host": "gpu.example.com" }));
+        assert_eq!(host("http://[fd00::2]:8740/base"), serde_json::json!({ "kind": "host", "host": "fd00::2" }));
+        // A stored address with no host (it cannot be registered, but a row may be old).
+        assert_eq!(host("http://"), serde_json::json!({ "kind": "unknown" }));
+        assert_eq!(host(""), serde_json::json!({ "kind": "unknown" }));
+    }
+
+    #[test]
+    fn fr_l18_computer_address_never_carries_credentials_or_the_token() {
+        let view = ComputerView::of(&url_computer("http://admin:hunter2@192.168.0.20:8740/x?key=abc#f"));
+        let v = serde_json::to_value(&view).unwrap();
+        assert_eq!(v["address"], serde_json::json!({ "kind": "host", "host": "192.168.0.20" }));
+        assert_eq!(v["url"], "http://192.168.0.20:8740/x", "user name, password, query and fragment are removed");
+        let text = v.to_string();
+        for secret in ["admin", "hunter2", "node-secret-token", "key=abc", "token"] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+        // Every wrapper a client reads carries the same view, so the same holds for them.
+        let status = serde_json::to_value(not_probed(view)).unwrap();
+        assert_eq!(status["address"]["host"], "192.168.0.20", "ComputerStatus flattens the view");
+        assert!(!status.to_string().contains("hunter2"));
+    }
+
+    #[test]
+    fn fr_l18_computer_address_of_the_server_itself_and_of_a_lost_record() {
+        let local = serde_json::to_value(ComputerView::local()).unwrap();
+        assert_eq!(local["address"], serde_json::json!({ "kind": "server" }));
+        let computers = Computers::new(Registry::open_in_memory().unwrap(), default_connector());
+        let lost = serde_json::to_value(computers.view("gone")).unwrap();
+        assert_eq!(lost["address"], serde_json::json!({ "kind": "unknown" }));
+        assert_eq!(serde_json::to_value(computers.view(LOCAL)).unwrap()["address"]["kind"], "server");
     }
 
     #[test]
@@ -1696,6 +1961,93 @@ mod tests {
             params![format!(r#"{{"peer":"{id}"}}"#), id.to_string()],
         );
         assert!(dup.is_err(), "partial UNIQUE index on computers(peer_id) must reject a second row");
+    }
+
+    #[test]
+    fn fr_c2_peer_id_migration_backfills_valid_rows_skips_unparsable_and_reports_existing_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ember.db");
+        let before = crate::store::migration_position(schema::PEER_ID_UNIQUE_MIGRATION).unwrap();
+        let peer_a = ember_transport::SecretKey::generate().peer_id();
+        let peer_b = ember_transport::SecretKey::generate().peer_id();
+        {
+            let mut conn = rusqlite::Connection::open(&path).unwrap();
+            crate::store::migrate_up_to(&mut conn, before).unwrap();
+            conn.execute(
+                "INSERT INTO computers (id, name, url, token, created_at, peer_json)
+                 VALUES ('url-only', 'url-only', 'http://10.0.0.2:8741', 't', 1, NULL)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO computers (id, name, url, token, created_at, peer_json)
+                 VALUES ('bad-json', 'bad-json', '', 't', 2, '{not json')",
+                [],
+            )
+            .unwrap();
+            // A weak/identity Ed25519 key is valid JSON with 64 hex chars, but FR-N6 refuses it.
+            conn.execute(
+                "INSERT INTO computers (id, name, url, token, created_at, peer_json)
+                 VALUES ('weak-key', 'weak-key', '', 't', 3, '{\"peer\":\"0100000000000000000000000000000000000000000000000000000000000000\"}')",
+                [],
+            )
+            .unwrap();
+            // Valid uppercase peer id is canonicalized to lowercase.
+            conn.execute(
+                "INSERT INTO computers (id, name, url, token, created_at, peer_json)
+                 VALUES ('good-a1', 'good-a1', '', 't', 4, ?1)",
+                params![format!(r#"{{"peer":"{}"}}"#, peer_a.to_string().to_uppercase())],
+            )
+            .unwrap();
+            // Pre-existing duplicate peer_a (possible before #637): must not abort migration.
+            conn.execute(
+                "INSERT INTO computers (id, name, url, token, created_at, peer_json)
+                 VALUES ('dup-a2', 'dup-a2', '', 't', 5, ?1)",
+                params![format!(r#"{{"peer":"{peer_a}"}}"#)],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO computers (id, name, url, token, created_at, peer_json)
+                 VALUES ('good-b', 'good-b', '', 't', 6, ?1)",
+                params![format!(r#"{{"peer":"{peer_b}"}}"#)],
+            )
+            .unwrap();
+        }
+
+        // Opening the store runs PEER_ID_UNIQUE_MIGRATION and all subsequent migrations without failing.
+        let store = Arc::new(Store::open(&path).unwrap());
+        let r = Registry::new(store.clone());
+
+        let row_peer_id = |id: &str| -> Option<String> {
+            store
+                .conn()
+                .query_row("SELECT peer_id FROM computers WHERE id = ?1", params![id], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(row_peer_id("url-only"), None);
+        assert_eq!(row_peer_id("bad-json"), None);
+        assert_eq!(row_peer_id("weak-key"), None);
+        assert_eq!(row_peer_id("good-a1").as_deref(), Some(peer_a.to_string().as_str()));
+        assert_eq!(row_peer_id("dup-a2"), None, "duplicate row keeps peer_id NULL so migration succeeds");
+        assert_eq!(row_peer_id("good-b").as_deref(), Some(peer_b.to_string().as_str()));
+
+        // Direct backfill call also reports the duplicate (id, peer_id) pair when run on a pre-backfill table.
+        store
+            .conn()
+            .execute("UPDATE computers SET peer_id = NULL", [])
+            .unwrap();
+        let dups = backfill_peer_ids(&store.conn()).unwrap();
+        assert_eq!(dups, vec![("dup-a2".to_string(), peer_a.to_string())]);
+
+        // Registry::insert_peer refuses both peer_a and peer_b with DUPLICATE_PEER.
+        match r.insert_peer("another-a", &PeerAddr::new(peer_a), "t") {
+            Err(ComputerError::BadRequest(m)) => assert_eq!(m, DUPLICATE_PEER),
+            other => panic!("{other:?}"),
+        }
+        match r.insert_peer("another-b", &PeerAddr::new(peer_b), "t") {
+            Err(ComputerError::BadRequest(m)) => assert_eq!(m, DUPLICATE_PEER),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

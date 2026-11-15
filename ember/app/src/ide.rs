@@ -106,8 +106,9 @@ pub fn open_external(url: &str) -> std::io::Result<()> {
 }
 
 /// CLI flag that launches this binary directly into the editor, which runs as its own HTML-mode window (FR-L31).
-/// TODO(dioxus-compose#152): once the `window` element on a shared host lands, open the editor
-/// window on the same host instead of spawning a second process.
+/// TODO(dioxus-compose#161): open the editor window on the shell's host instead of spawning a
+/// second process. The `Window` element (dioxus-compose#152) is in the pin; an HTML page under a
+/// Compose root is what is missing.
 pub const EDITOR_ARG: &str = "--editor";
 
 /// Parse `--editor <project> [folder]` from an argument list (`std::env::args()`).
@@ -117,7 +118,13 @@ where
     S: AsRef<str>,
 {
     let var = |name: &str| std::env::var(name).unwrap_or_default();
-    parse_editor_args_with_env(args, var(EDITOR_TOKEN_ENV), var(EDITOR_SERVER_ENV), var(EDITOR_COMPUTER_ENV))
+    parse_editor_args_with_env(
+        args,
+        var(EDITOR_TOKEN_ENV),
+        var(EDITOR_SERVER_ENV),
+        var(EDITOR_COMPUTER_ENV),
+        var(EDITOR_RELAY_ENV),
+    )
 }
 
 /// Environment variable carrying the editor connection token (never argv).
@@ -126,8 +133,17 @@ pub const EDITOR_TOKEN_ENV: &str = "EMBER_EDITOR_TOKEN";
 pub const EDITOR_SERVER_ENV: &str = "EMBER_EDITOR_SERVER";
 /// Environment variable carrying the computer id for the terminal relay.
 pub const EDITOR_COMPUTER_ENV: &str = "EMBER_EDITOR_COMPUTER";
+/// Environment variable carrying the server's relay route to the OSE (FR-N9.1), which the
+/// editor dials instead of the endpoint when it is set.
+pub const EDITOR_RELAY_ENV: &str = "EMBER_EDITOR_RELAY";
 
-fn parse_editor_args_with_env<I, S>(args: I, token: String, server_url: String, computer: String) -> Option<EditorTarget>
+fn parse_editor_args_with_env<I, S>(
+    args: I,
+    token: String,
+    server_url: String,
+    computer: String,
+    relay: String,
+) -> Option<EditorTarget>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -141,14 +157,15 @@ where
                 .map(|s| s.as_ref().to_string())
                 .unwrap_or_default();
             let endpoint = it.next().map(|s| s.as_ref().to_string()).unwrap_or_default();
-            return Some(EditorTarget { project, folder, endpoint, token, server_url, computer });
+            return Some(EditorTarget { project, folder, endpoint, token, server_url, computer, relay });
         }
     }
     None
 }
 
 /// The `(executable, args)` pair that spawns a separate Ember editor window (FR-L31).
-/// TODO(dioxus-compose#152): replace with an in-process `window` node once #152 lands.
+/// TODO(dioxus-compose#161): replace with an in-process `Window` node (dioxus-compose#152, in
+/// the pin) once an HTML page can sit under the shell's Compose root.
 pub fn editor_command(exe: &Path, project: &str, folder: &str, endpoint: &str) -> (PathBuf, Vec<String>) {
     (
         exe.to_path_buf(),
@@ -174,6 +191,7 @@ pub fn spawn_editor_target(exe: &Path, target: &EditorTarget) -> std::io::Result
         .env(EDITOR_TOKEN_ENV, &target.token)
         .env(EDITOR_SERVER_ENV, &target.server_url)
         .env(EDITOR_COMPUTER_ENV, &target.computer)
+        .env(EDITOR_RELAY_ENV, &target.relay)
         .spawn()
 }
 
@@ -294,11 +312,31 @@ mod tests {
             "secret".into(),
             "http://srv:1".into(),
             "node-a".into(),
+            String::new(),
         )
         .unwrap();
         assert_eq!(target.endpoint, "localhost:8000");
         assert_eq!(target.token, "secret");
         assert_eq!(target.server_url, "http://srv:1");
         assert_eq!(target.computer, "node-a");
+        assert_eq!(target.relay, "");
+    }
+
+    #[test]
+    fn fr_n9_editor_args_carry_the_relay_path_in_the_environment() {
+        let relay = "/api/computers/local/ide/relay/abc";
+        let (_, args) = editor_command(Path::new("ember"), "project", "/work", "127.0.0.1:9000");
+        assert!(!args.iter().any(|arg| arg.contains("/ide/relay/")), "the relay path is not in argv");
+        let target = parse_editor_args_with_env(
+            std::iter::once("ember".to_owned()).chain(args),
+            "placeholder".into(),
+            "peer:abc".into(),
+            "local".into(),
+            relay.into(),
+        )
+        .unwrap();
+        assert_eq!(target.relay, relay);
+        assert_eq!(target.endpoint, "127.0.0.1:9000");
+        assert_eq!(EDITOR_RELAY_ENV, "EMBER_EDITOR_RELAY");
     }
 }

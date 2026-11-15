@@ -17,13 +17,15 @@ use compose_rust::ui::Modifier;
 use compose_rust::{Alignment, IconRole};
 
 use super::characters::{draw, CharSpec, CharState, CharStyle};
-use super::components::{AppButton, ButtonKind, EmberField, FieldOptions, Label, Pill, PillTone, Select};
+use super::components::{
+    AppButton, ButtonKind, Choice, ChoiceButton, EmberField, FieldOptions, Label, NamedSelect, Pill, PillTone,
+};
 use super::theme::*;
 use crate::services::{run_shared, services};
 use crate::ui::characters::{
     apply_character_override, build_character_override, characters_project, editor_save_needed, effective_character_overrides,
-    harness_label, state_label, style_apply_needed, supports_pin, team_cols, team_preview, updated_character_overrides,
-    with_topic, EDITOR_HARNESSES, EDITOR_ROLES, SILHOUETTES,
+    harness_label, page_width, state_label, style_apply_needed, supports_pin, team_cols, team_preview, updated_character_overrides,
+    with_topic, EDITOR_HARNESSES, EDITOR_ROLES, LEAD_MAX_W, PAGE_MAX_W, SILHOUETTES,
 };
 use crate::ui::coexist::shared_ui;
 use crate::ui::project::{effective_style, patch_error_message};
@@ -316,8 +318,13 @@ pub fn CharactersScreen() {
         }
     }
 
+    // `.wrapx`: the content is at most 1148 dp wide and centred; a narrower room is used whole.
+    let room = super::home::content_width(width, SP[4]);
+    let page_w = page_width(room);
+    let page = if room > PAGE_MAX_W { Modifier::new().width(page_w) } else { Modifier::new().fill_max_width() };
     cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-        cu::Column().spacing(SP[5]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+        cu::Column().alignment(Alignment::TopCenter).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+        cu::Column().spacing(SP[5]).modifier(page).content(|| {
             if start == CaptureStart::Top {
                 // Back to where it was opened from; no sidebar entry (D26).
                 cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -330,7 +337,10 @@ pub fn CharactersScreen() {
                 });
                 cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                     Label("팀 캐릭터", if compact { Fs::Xl } else { Fs::Xl2 }, Weight::Regular, None, Some(1));
-                    Label(LEAD, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                    // `.lead{max-width:820px}`.
+                    cu::Column().modifier(Modifier::new().width(LEAD_MAX_W.min(page_w))).content(|| {
+                        Label(LEAD, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                    });
                     let sub = match &project {
                         Some(n) => format!("{n} 프로젝트의 스타일은 {}입니다.", current.label()),
                         None => "프로젝트가 아직 없어 기본 스타일로 보여 드립니다.".to_string(),
@@ -358,9 +368,8 @@ pub fn CharactersScreen() {
                         cu::Row().spacing(6.0).alignment(Alignment::CenterStart).content(|| {
                             for &s in line {
                                 let (c, m) = (chosen.clone(), message.clone());
-                                // TODO(compose-rust#473): no pressed state for a screen reader (aria-pressed).
-                                let kind = if s == style { ButtonKind::Primary } else { ButtonKind::Default };
-                                AppButton(s.label(), None, kind, true, true, false, move || {
+                                // The chosen style says it is pressed (aria-pressed, compose-rust#473).
+                                ChoiceButton(s.label(), Choice::Toggle, s == style, true, true, move || {
                                     c.set(Some(s));
                                     m.set(None);
                                 });
@@ -461,14 +470,14 @@ pub fn CharactersScreen() {
                         });
                     });
                 };
-                // TODO(compose-rust#473): the Select trigger is a Clickable with no accessible
-                // name; the visible label above it names it for sighted users only.
+                // Each select is named by its field's label, so a screen reader says which field
+                // it is (`NamedSelect`, compose-rust#473).
                 let harness_field = || {
                     FieldRow("하네스", || {
                         let labels: Vec<String> = EDITOR_HARNESSES.iter().map(|(_, l)| l.to_string()).collect();
                         let at = ed_harness.get().min(labels.len() - 1);
                         let (h, m) = (ed_harness.clone(), ed_message.clone());
-                        Select(&labels[at], &labels, at, 260.0, move |i| {
+                        NamedSelect("하네스", &labels[at], &labels, at, 260.0, move |i| {
                             h.set(i);
                             m.set(None);
                         });
@@ -479,7 +488,7 @@ pub fn CharactersScreen() {
                         let labels: Vec<String> = EDITOR_ROLES.iter().map(|r| r.to_string()).collect();
                         let at = ed_role.get().min(labels.len() - 1);
                         let (r, m) = (ed_role.clone(), ed_message.clone());
-                        Select(&labels[at], &labels, at, 260.0, move |i| {
+                        NamedSelect("역할", &labels[at], &labels, at, 260.0, move |i| {
                             r.set(i);
                             m.set(None);
                         });
@@ -490,7 +499,7 @@ pub fn CharactersScreen() {
                         let labels: Vec<String> = CharStyle::ALL.iter().map(|s| s.label().to_string()).collect();
                         let at = CharStyle::ALL.iter().position(|&s| s == ed_v).unwrap_or(0);
                         let (v, m) = (ed_style.clone(), ed_message.clone());
-                        Select(&labels[at], &labels, at, 260.0, move |i| {
+                        NamedSelect("스타일", &labels[at], &labels, at, 260.0, move |i| {
                             v.set(CharStyle::ALL.get(i).copied());
                             m.set(None);
                         });
@@ -503,7 +512,7 @@ pub fn CharactersScreen() {
                             labels.extend(SILHOUETTES.iter().map(|s| s.to_string()));
                             let at = pin.map(|i| i + 1).unwrap_or(0);
                             let (pn, m) = (ed_pin.clone(), ed_message.clone());
-                            Select(&labels[at], &labels, at, 260.0, move |i| {
+                            NamedSelect("실루엣 고정", &labels[at], &labels, at, 260.0, move |i| {
                                 pn.set(i.checked_sub(1));
                                 m.set(None);
                             });
@@ -519,8 +528,7 @@ pub fn CharactersScreen() {
                             cu::Row().spacing(6.0).content(|| {
                                 for &s in line {
                                     let (st, m) = (ed_state.clone(), ed_message.clone());
-                                    let kind = if ed_state.get() == s { ButtonKind::Primary } else { ButtonKind::Default };
-                                    AppButton(state_label(s), None, kind, true, true, false, move || {
+                                    ChoiceButton(state_label(s), Choice::Toggle, ed_state.get() == s, true, true, move || {
                                         st.set(s);
                                         m.set(None);
                                     });
@@ -626,6 +634,7 @@ pub fn CharactersScreen() {
                     });
                 }
             });
+        });
         });
     });
 }
@@ -745,6 +754,7 @@ mod tests {
     struct Nodes {
         text: std::collections::HashMap<u32, String>,
         click: std::collections::HashMap<u32, u64>,
+        parent: std::collections::HashMap<u32, u32>,
     }
 
     impl Nodes {
@@ -755,18 +765,37 @@ mod tests {
                 self.text.insert(n, t.to_string());
             }
             for m in batch {
-                if let Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } = m {
-                    self.click.insert(*node_id, *h as u64);
+                match m {
+                    Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                        self.click.insert(*node_id, *h as u64);
+                    }
+                    Mutation::Insert { parent_id, node_id, .. } => {
+                        self.parent.insert(*node_id, *parent_id);
+                    }
+                    _ => {}
                 }
             }
         }
 
+        /// The control named `name`: a node with a click handler whose own text is the name (a
+        /// toolkit button) or that holds a text with the name (a `ChoiceButton` pill, FR-L10.2).
         fn button(&self, name: &str) -> (u32, u64) {
-            self.click
-                .iter()
-                .find(|(n, _)| self.text.get(n).is_some_and(|t| t == name))
-                .map(|(n, h)| (*n, *h))
-                .unwrap_or_else(|| panic!("no {name} button with a click handler"))
+            let mut found: Vec<(u32, u64)> = Vec::new();
+            for (n, _) in self.text.iter().filter(|(_, t)| t.as_str() == name) {
+                let mut cur = *n;
+                loop {
+                    if let Some(h) = self.click.get(&cur) {
+                        found.push((cur, *h));
+                        break;
+                    }
+                    match self.parent.get(&cur) {
+                        Some(p) => cur = *p,
+                        None => break,
+                    }
+                }
+            }
+            found.sort();
+            found.into_iter().next().unwrap_or_else(|| panic!("no {name} button with a click handler"))
         }
     }
 
@@ -790,6 +819,21 @@ mod tests {
         }
         // The editor's style select follows the team style until it is picked on its own.
         assert!(last.iter().any(|(_, t)| t == "포켓"), "the editor style did not change to 포켓: {last:?}");
+    }
+
+    #[test]
+    fn fr_l22_page_width_caps_the_content_and_the_lead() {
+        // Review row CR3: `.wrapx` and `.lead` of `characters.html`.
+        let src = include_str!("characters_screen.rs");
+        let src = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(src.contains("let page_w = page_width(room);"));
+        assert!(src.contains("let page = if room > PAGE_MAX_W { Modifier::new().width(page_w) } else { Modifier::new().fill_max_width() };"));
+        assert!(src.contains("cu::Column().alignment(Alignment::TopCenter).modifier(Modifier::new().fill_max_width().padding(SP[4]))"));
+        assert!(src.contains("cu::Column().spacing(SP[5]).modifier(page).content(|| {"));
+        assert!(src.contains("Modifier::new().width(LEAD_MAX_W.min(page_w))"));
+        // The screen still composes with the cap in place.
+        let _guard = crate::services::test_guard();
+        assert!(rendered().contains("팀 캐릭터"));
     }
 
     #[test]

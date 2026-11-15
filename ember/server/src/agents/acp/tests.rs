@@ -597,6 +597,169 @@ fn fr_s8_drained_acp_error_response_fails_the_turn() {
     );
 }
 
+/// A `session/update` line carrying `update`, as drained from a surviving agent.
+fn update_line(update: Value) -> String {
+    json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":update}}).to_string()
+}
+
+fn text_content(text: &str) -> Value {
+    json!([{ "type": "content", "content": { "type": "text", "text": text } }])
+}
+
+fn stored_call(id: &str) -> AgentEvent {
+    AgentEvent::ToolCall {
+        call_id: id.into(),
+        name: "execute".into(),
+        input: json!({ "title": "build", "kind": "execute" }),
+    }
+}
+
+const PROMPT_DONE: &str = r#"{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}"#;
+
+/// #310: the call was announced and stored before the crash; its updates are drained. The fresh
+/// mapper must not announce it a second time, and the final update becomes its result.
+#[test]
+fn fr_s8_drain_applies_an_update_to_a_stored_tool_call_without_repeating_it() {
+    let stored = vec![AgentEvent::UserMessage { text: "go".into() }, stored_call("t1")];
+    let lines = vec![
+        update_line(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "in_progress" })),
+        update_line(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed",
+            "content": text_content("done") })),
+        PROMPT_DONE.to_string(),
+    ];
+    assert_eq!(
+        translate_drained_lines_after(&lines, &stored),
+        vec![
+            AgentEvent::ToolResult { call_id: "t1".into(), output: "done".into(), is_error: false },
+            AgentEvent::TurnEnded { outcome: TurnOutcome::Completed },
+        ]
+    );
+}
+
+/// #310: a failed final status reaches the stored call as an error result.
+#[test]
+fn fr_s8_drain_applies_a_failed_status_to_a_stored_tool_call() {
+    let stored = vec![stored_call("t1")];
+    let lines = vec![update_line(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+        "status": "failed", "content": text_content("exit 1") }))];
+    assert_eq!(
+        translate_drained_lines_after(&lines, &stored),
+        vec![AgentEvent::ToolResult { call_id: "t1".into(), output: "exit 1".into(), is_error: true }]
+    );
+}
+
+/// #310: the line that finished the call was stored but not acknowledged, so the shim replays it
+/// (or the agent repeats the announcement). Nothing of it is stored again.
+#[test]
+fn fr_s8_drain_drops_a_repeated_announcement_and_a_repeated_result() {
+    let stored = vec![
+        stored_call("t1"),
+        AgentEvent::ToolResult { call_id: "t1".into(), output: "done".into(), is_error: false },
+    ];
+    let lines = vec![
+        update_line(json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "build",
+            "kind": "execute", "status": "pending" })),
+        update_line(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed",
+            "content": text_content("done") })),
+    ];
+    assert_eq!(translate_drained_lines_after(&lines, &stored), Vec::<AgentEvent>::new());
+}
+
+/// #310: a call that starts during the drain is stored once, beside a stored one.
+#[test]
+fn fr_s8_drain_stores_a_new_tool_call_once() {
+    let stored = vec![stored_call("t1")];
+    let lines = vec![
+        update_line(json!({ "sessionUpdate": "tool_call", "toolCallId": "t2", "title": "list",
+            "kind": "read", "status": "pending" })),
+        update_line(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t2", "status": "in_progress" })),
+        update_line(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t2", "status": "completed",
+            "content": text_content("two") })),
+    ];
+    assert_eq!(
+        translate_drained_lines_after(&lines, &stored),
+        vec![
+            AgentEvent::ToolCall {
+                call_id: "t2".into(),
+                name: "read".into(),
+                input: json!({ "title": "list", "kind": "read" }),
+            },
+            AgentEvent::ToolResult { call_id: "t2".into(), output: "two".into(), is_error: false },
+        ]
+    );
+}
+
+/// #310: the agent announced the call before the crash but the announcement was never stored.
+/// Whether the drain sees the replayed `tool_call` or only an update, the call is stored once.
+#[test]
+fn fr_s8_drain_stores_a_call_whose_announcement_was_not_stored() {
+    let expected = vec![
+        AgentEvent::ToolCall {
+            call_id: "t3".into(),
+            name: "execute".into(),
+            input: json!({ "title": "build", "kind": "execute" }),
+        },
+        AgentEvent::ToolResult { call_id: "t3".into(), output: "three".into(), is_error: false },
+    ];
+    let replayed = vec![
+        update_line(json!({ "sessionUpdate": "tool_call", "toolCallId": "t3", "title": "build",
+            "kind": "execute", "status": "pending" })),
+        update_line(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t3", "status": "completed",
+            "content": text_content("three") })),
+    ];
+    assert_eq!(translate_drained_lines_after(&replayed, &[]), expected);
+    let update_only = vec![update_line(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t3",
+        "title": "build", "kind": "execute", "status": "completed", "content": text_content("three") }))];
+    assert_eq!(translate_drained_lines_after(&update_only, &[]), expected);
+}
+
+/// #310: ids are compared within the turn in flight. A call of an earlier, ended turn with the
+/// same id (an agent that restarts its ids each turn) does not swallow the new call.
+#[test]
+fn fr_s8_drain_compares_tool_call_ids_within_the_turn_in_flight() {
+    let stored = vec![
+        stored_call("t1"),
+        AgentEvent::ToolResult { call_id: "t1".into(), output: "first".into(), is_error: false },
+        AgentEvent::TurnEnded { outcome: TurnOutcome::Completed },
+        AgentEvent::UserMessage { text: "again".into() },
+    ];
+    let lines = vec![update_line(json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "build",
+        "kind": "execute", "status": "completed", "content": text_content("second") }))];
+    assert_eq!(
+        translate_drained_lines_after(&lines, &stored),
+        vec![
+            stored_call("t1"),
+            AgentEvent::ToolResult { call_id: "t1".into(), output: "second".into(), is_error: false },
+        ]
+    );
+}
+
+/// #310: plan calls get ids from a counter. It continues after the stored plans of the turn, so
+/// a plan drained later is a new call and not the stored `acp-plan-1`.
+#[test]
+fn fr_s8_drain_numbers_a_plan_after_the_stored_plans() {
+    let stored = vec![
+        AgentEvent::ToolCall { call_id: "acp-plan-1".into(), name: "Plan".into(), input: json!({ "entries": [] }) },
+        AgentEvent::ToolResult { call_id: "acp-plan-1".into(), output: String::new(), is_error: false },
+    ];
+    let lines = vec![update_line(json!({ "sessionUpdate": "plan",
+        "entries": [{ "content": "ship", "status": "pending", "priority": "high" }] }))];
+    let out = translate_drained_lines_after(&lines, &stored);
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert!(matches!(&out[0], AgentEvent::ToolCall { call_id, name, .. } if call_id == "acp-plan-2" && name == "Plan"), "{out:?}");
+    assert_eq!(
+        out[1],
+        AgentEvent::ToolResult { call_id: "acp-plan-2".into(), output: "[pending] ship".into(), is_error: false }
+    );
+}
+
+/// Without stored events the drain maps as before (#284).
+#[test]
+fn fr_s8_drain_without_stored_events_maps_like_the_plain_translation() {
+    let lines = vec![chunk("tick 1 "), PROMPT_DONE.to_string()];
+    assert_eq!(translate_drained_lines_after(&lines, &[]), translate_drained_lines(&lines));
+}
+
 #[test]
 fn fr_s8_acp_adapter_drains_a_surviving_agent_and_does_not_rejoin_it() {
     let adapter = AcpAdapter::new(AcpConfig::preset("omp", None).unwrap()).unwrap();
@@ -1071,4 +1234,51 @@ async fn fr_a10_probe_a_missing_command_is_spawn_failed_quickly_and_never_still_
         "expected SpawnFailed(NotFound), got {outcome:?}"
     );
     assert!(began.elapsed() < Duration::from_secs(1), "no window wait and no busy retry: {:?}", began.elapsed());
+}
+
+// ---- FR-T12 (#380 c): the `channel_post` MCP tool for an ACP session ----
+
+/// The `session/new` request of the Agent Client Protocol with the channel server, written from
+/// the protocol (https://agentclientprotocol.com/protocol/session-setup): `McpServerStdio` is
+/// `{name, command, args, env: [{name, value}]}`.
+const SESSION_NEW_CHANNEL: &str = include_str!("../../../tests/fixtures/acp/session_new_channel_post.json");
+
+fn channel_server(token: &str) -> McpServer {
+    McpServer {
+        name: "ember-channels".into(),
+        command: "/opt/ember/ember-a2a".into(),
+        args: vec!["mcp".into()],
+        startup_timeout_secs: Some(10),
+        env: vec![
+            ("EMBER_URL".into(), "http://127.0.0.1:8740".into()),
+            ("EMBER_RUNTIME_TOKEN".into(), token.into()),
+        ],
+    }
+}
+
+#[test]
+fn fr_t12_acp_mcp_servers_param_is_the_protocol_shape_with_the_session_credentials_only() {
+    let fixture: Value = serde_json::from_str(SESSION_NEW_CHANNEL).unwrap();
+    assert_eq!(fixture["method"], "session/new");
+    let want = &fixture["params"]["mcpServers"];
+    assert_eq!(&mcp_servers_param(&[channel_server("<runtime token>")]), want);
+    // Exactly the protocol's four fields and the two variables: no timeout, no extra key.
+    let entry = want[0].as_object().unwrap();
+    let mut keys: Vec<&str> = entry.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["args", "command", "env", "name"]);
+    assert_eq!(want[0]["env"].as_array().unwrap().len(), 2);
+    assert_eq!(mcp_servers_param(&[]), json!([]));
+}
+
+#[tokio::test]
+async fn fr_t12_acp_channel_server_reaches_session_new() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = setup(dir.path());
+    s.mcp_servers = vec![channel_server("tok-SECRET")];
+    let (mut run, mut rx) = start(FakeOptions::default(), s).await.unwrap();
+    next(&mut rx).await;
+    let events = turn(&mut run, &mut rx, "mcp?", ApprovalDecision::AllowOnce).await;
+    assert_eq!(last_message(&events), "mcp=ember-channels");
+    run.shutdown().await.unwrap();
 }

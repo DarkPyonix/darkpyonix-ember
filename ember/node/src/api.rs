@@ -59,6 +59,9 @@
 //! | POST | `/terms/{id}/control` | [`TermControlRequest`] → 204 |
 //! | POST | `/terms/{id}/kill` | [`KillRequest`] → 204 (default SIGHUP, then SIGKILL) |
 //! | DELETE | `/terms/{id}` | → 204 (409 while running) |
+//! | POST | `/ide/ose` | [`crate::ose_api::OseLaunchRequest`] → [`crate::ose_api::OseLaunchResponse`] (FR-W4b: start or reuse the folder's OSE; the token in the answer is a placeholder; 403 outside the roots, 404 for a missing folder, 503 without an OSE binary) |
+//! | GET (WS) | `/ide/ose/{launch_id}/relay` | raw byte relay to the launch's loopback OSE, the placeholder replaced by the real token ([`crate::ose_api`]; 404 for an unknown launch, 429 at the relay limit) |
+//! | POST | `/ide/extensions` | `{id, version?}` → `{installed, id, output}` (FR-W4b: 400 for a bad id, 409 while another install runs, 502 for a failed run, 503 without an OSE binary) |
 //! | GET, POST | `/transfers`, `/transfers/offers`, `/transfers/offers/{id}/accept`, `/transfers/offers/{id}/decline`, `/transfers/{id}/chunks`, `/transfers/{id}/resume-offset/{file}`, `/transfers/{id}/complete`, `/pause`, `/resume`, `/cancel`, `/transfers/history` (GET, DELETE) | the file receiver ([`crate::transfers`], FR-F13): the server's `/api/transfers*` bodies; 507 `no_space` (FR-F16); 409 without a state folder |
 //!
 //! Closing the `/exec` socket kills the command's process group; jobs are unaffected by any
@@ -95,6 +98,7 @@ use crate::git::git_merge;
 use crate::git::git_stash::{self, GitStashEntry, GitStashIndexRequest, GitStashOperation, GitStashPushRequest};
 use crate::git_conflict::{self, GitConflict, GitConflictRequest, GitResolveRequest};
 use crate::jobs::{Jobs, Removal};
+use crate::ose::OseManager;
 use crate::policy::{PathPolicy, PolicyError};
 use crate::proto::*;
 use crate::term::Terms;
@@ -107,9 +111,16 @@ struct Inner {
     egress: Arc<crate::egress::EgressPolicy>,
     /// The file receiver (`FR-F13`).
     transfers: Arc<crate::transfers::Receiver>,
+    /// The OSE of this computer's projects (`FR-W4a`); [`OseManager::disabled`] unless the
+    /// node was built with [`Node::with_ose`].
+    ose: Arc<OseManager>,
     /// Serialises writes so a hash precondition and the rename that follows it are atomic with
     /// respect to other writes through this daemon.
     write_lock: tokio::sync::Mutex<()>,
+    /// Bounds of `GET /fs/watch` (`FR-W4d`).
+    watch_limits: crate::fs_watch::WatchLimits,
+    /// Watches held by all watch sockets together.
+    watch_total: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Daemon state; cheap to clone.
@@ -117,7 +128,15 @@ struct Inner {
 pub struct Node(Arc<Inner>);
 
 impl Node {
+    /// A node without an OSE: its `/ide` routes answer 503 (the server's in-process local node,
+    /// whose OSE the server manages itself, and tests).
     pub fn new(config: NodeConfig) -> anyhow::Result<Self> {
+        Self::with_ose(config, Arc::new(OseManager::disabled()))
+    }
+
+    /// A node that runs the OSE of its projects through `ose` (SPEC FR-W4a): what the `ember-node`
+    /// daemon builds, with [`OseManager::for_node`].
+    pub fn with_ose(config: NodeConfig, ose: Arc<OseManager>) -> anyhow::Result<Self> {
         anyhow::ensure!(!config.token.is_empty(), "token must not be empty");
         let jobs = Jobs::new();
         let terms = Terms::new(config.state_dir.as_deref(), config.pty_keeper.clone(), jobs.clone());
@@ -133,8 +152,16 @@ impl Node {
             terms,
             egress: Arc::new(config.egress),
             transfers,
+            ose,
             write_lock: tokio::sync::Mutex::new(()),
+            watch_limits: crate::fs_watch::WatchLimits::default(),
+            watch_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })))
+    }
+
+    /// The OSE manager of this node (`FR-W4a`).
+    pub fn ose(&self) -> &Arc<OseManager> {
+        &self.0.ose
     }
 
     pub fn jobs(&self) -> &Arc<Jobs> {
@@ -151,6 +178,20 @@ impl Node {
 
     pub fn transfers(&self) -> &Arc<crate::transfers::Receiver> {
         &self.0.transfers
+    }
+
+    /// The same node with other watch bounds (`FR-W4d`). Call it before the node is cloned.
+    pub fn with_watch_limits(mut self, limits: crate::fs_watch::WatchLimits) -> Self {
+        Arc::get_mut(&mut self.0).expect("with_watch_limits before the node is shared").watch_limits = limits;
+        self
+    }
+
+    pub fn watch_limits(&self) -> &crate::fs_watch::WatchLimits {
+        &self.0.watch_limits
+    }
+
+    pub(crate) fn watch_total(&self) -> &Arc<std::sync::atomic::AtomicUsize> {
+        &self.0.watch_total
     }
 
     pub fn egress_policy(&self) -> &Arc<crate::egress::EgressPolicy> {
@@ -185,6 +226,8 @@ pub fn router(node: Node) -> Router {
         .route("/fs/pwrite", post(pwrite))
         .route("/fs/glob", post(glob))
         .route("/fs/grep", post(grep))
+        // FR-W4d: file watching as a WebSocket.
+        .route("/fs/watch", get(crate::fs_watch::ws))
         // FR-G5: history route.
         .route("/git/log", post(git_log_handler))
         .route("/git/blame", post(git_blame_handler))
@@ -242,6 +285,8 @@ pub fn router(node: Node) -> Router {
         .route("/terms/{id}/control", post(term_control))
         .route("/terms/{id}/kill", post(kill_term))
         .merge(transfer_routes())
+        // FR-W4b: the OSE of this computer's projects.
+        .merge(crate::ose_api::routes())
         .route_layer(middleware::from_fn_with_state(node.clone(), auth));
     Router::new()
         .route("/health", get(health))
@@ -273,10 +318,10 @@ async fn auth(State(node): State<Node>, req: Request, next: Next) -> Response {
 // ---------------------------------------------------------------------------------------------
 // Errors
 
-struct ApiError(StatusCode, ErrorBody);
+pub(crate) struct ApiError(StatusCode, ErrorBody);
 
 impl ApiError {
-    fn new(status: StatusCode, code: ErrorCode, msg: impl Into<String>) -> Self {
+    pub(crate) fn new(status: StatusCode, code: ErrorCode, msg: impl Into<String>) -> Self {
         ApiError(status, ErrorBody { code, error: msg.into(), actual_sha256: None, errno: None })
     }
 

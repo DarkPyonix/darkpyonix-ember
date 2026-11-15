@@ -87,13 +87,19 @@ fn fr_l31_23_plus_never_scrolls_with_the_tabs() {
     );
 }
 
-/// #799: an inactive tab keeps its label's width (it collapsed to its padding before), the active
-/// one adds the pencil, and a long name stops at 240 px.
+/// #799: a tab is as wide as its label, pencil and trash from the stylesheet alone
+/// (`.ed-tsub>button{flex:0 0 auto;max-width:240px}`). The inline width estimated from the label
+/// went once dioxus-compose sized a `flex:none` row item by its contributions (dioxus-compose#227,
+/// b2b5ef5 `fr34_flex_shrink_zero_icon_with_a_negative_margin_keeps_the_tab_wide`).
 #[test]
-fn fr_l31_23_tab_width_fits_the_label() {
-    let w = super::page::tab_width;
-    assert_eq!(w("zsh", false), 2 + 24 + 14 + 6 + 21 + 18);
-    assert_eq!(w("zsh", true), w("zsh", false) + 24);
-    assert!(w("빌드", false) > w("ab", false));
-    assert_eq!(w(&"x".repeat(80), true), 240);
+fn fr_l31_23_tab_width_comes_from_the_stylesheet() {
+    let src = include_str!("editor_workbench.rs");
+    let strip = &src[src.find("pub(super) fn strip_of").expect("strip_of")..src.find("fn terminal_body").expect("terminal_body")];
+    assert!(!strip.contains(concat!("TODO(dioxus-compose#", "227)")), "the tab width workaround is gone");
+    assert!(!strip.contains("width:{"), "no tab width is set inline");
+    assert!(!src.contains(concat!("fn tab", "_width(")), "no width is estimated from the label");
+    let dom = render(Some(view(2, false)));
+    for tab in find(&dom, "role", "tab") {
+        assert_eq!(attr(&dom, tab, "style"), None, "a tab carries no inline style");
+    }
 }

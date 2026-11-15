@@ -65,6 +65,10 @@ pub struct Prefs {
     /// as off, Code-OSS's default.
     #[serde(default)]
     pub auto_save: crate::ui::editor_states::AutoSave,
+    /// How many days the editor keeps a hot exit backup of unsaved buffers (FR-L31.6a); an older
+    /// one is removed when an editor window opens. Older files have none, which reads as 30.
+    #[serde(default = "hot_exit_backup_days_default")]
+    pub hot_exit_backup_days: u32,
     /// The editor window's zoom level, Code-OSS's `window.zoomLevel` (FR-L31.15). Older files
     /// have none, which reads as 0 (the system's size).
     #[serde(default)]
@@ -93,6 +97,10 @@ fn format_default() -> u32 {
     PREFS_FORMAT
 }
 
+fn hot_exit_backup_days_default() -> u32 {
+    crate::editor_backup::DEFAULT_BACKUP_DAYS
+}
+
 impl Default for Prefs {
     fn default() -> Self {
         Prefs {
@@ -107,6 +115,7 @@ impl Default for Prefs {
             character_overrides: BTreeMap::new(),
             keymap: crate::ui::keymap::Keymap::default(),
             auto_save: crate::ui::editor_states::AutoSave::default(),
+            hot_exit_backup_days: hot_exit_backup_days_default(),
             editor_zoom_level: 0,
             workspace_trust: BTreeMap::new(),
             disabled_extensions: BTreeMap::new(),

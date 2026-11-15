@@ -11,10 +11,10 @@
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, Color, ShapeRole};
+use compose_rust::{Alignment, ShapeRole};
 
 use super::channels::Feed;
-use super::components::{AppButton, ButtonKind, EmberField, EmberSheet, FieldOptions, FilterChip, Label, SheetFooter};
+use super::components::{AppButton, ButtonKind, EmberField, EmberSheet, FieldOptions, FilterChip, Label, NamedClickable, SheetFooter};
 use super::notice;
 use super::theme::*;
 use crate::ui::channels::{
@@ -26,13 +26,13 @@ use crate::ui::project::{display_name, CloseAction, SettingsGuard, DISCARD_QUEST
 #[derive(Clone)]
 pub struct NewChannelState {
     pub open: MutableState<bool>,
-    draft: MutableState<NewChannelDraft>,
+    pub(super) draft: MutableState<NewChannelDraft>,
     /// Bumped to draw a fresh name field (the field is uncontrolled).
     generation: MutableState<u64>,
     busy: MutableState<bool>,
     /// The last failure, a fixed sentence.
     failure: MutableState<Option<String>>,
-    confirm: MutableState<bool>,
+    pub(super) confirm: MutableState<bool>,
     /// A review window (debug builds, `EMBER_CR_NEWCHANNEL=1`): sample choices, 만들기 never sends.
     review: bool,
 }
@@ -62,7 +62,7 @@ impl NewChannelState {
     }
 
     /// Starts an empty draft on the filtered project, else the first.
-    fn start(&self, filter: Option<&str>) {
+    pub(super) fn start(&self, filter: Option<&str>) {
         let projects = project_names();
         self.draft.set(NewChannelDraft::new(&default_new_project(filter, &projects)));
         self.generation.set(self.generation.get_untracked() + 1);
@@ -124,41 +124,42 @@ fn all_sessions() -> Vec<ember_client::wire::SessionRecord> {
         .unwrap_or_default()
 }
 
+/// The demo name of the list header's `+`: 새 채널 and [`DEMO_NO_CREATE`], written out because a
+/// name on a container is one of a fixed set (`components::NamedClickable`). A test keeps the
+/// two in step.
+pub const NEW_CHANNEL_DEMO_LABEL: &str = "새 채널, 데모에서는 채널을 만들 수 없습니다";
+
 /// The round `+` of the list header. `live` is false in demo mode and for review captures: a tap
-/// then says why nothing is created. The overlay button gives it the accessible name and focus,
-/// set with `accessible_name` (compose-rust v0.0.7, #429). v0.0.7: #425 fixed
-/// (`Button::content`); workaround kept until checked on a display (the `+` glyph inside a
-/// `Button` content slot must keep the 32 px ring and the demo dimming).
+/// then says why nothing is created. The ring itself is the control: a clickable container named
+/// with `Modifier::label` (compose-rust#429, `components::NamedClickable`), so the press and the
+/// focus ring follow the 32 px circle.
+///
+/// The button is the mockup's `.icon-btn.sm` at full opacity in every mode (review row CH6,
+/// #894): it is never disabled, so it is not dimmed; in demo mode the toast and the accessible
+/// name say why nothing is created.
 pub fn NewChannelButton(st: &NewChannelState, live: bool, filter: Option<String>) {
     let p = ember_theme().palette;
     let st = st.clone();
-    let label = if live { "새 채널".to_string() } else { format!("새 채널, {DEMO_NO_CREATE}") };
-    let alpha = if live { 1.0 } else { 0.4 };
-    cu::Box()
-        .alignment(Alignment::Center)
-        .modifier(
-            Modifier::new()
-                .size(H_CTL, H_CTL)
-                .background(paint(p.surface))
-                .border(1.0, paint(p.line))
-                .shape_role(ShapeRole::Full)
-                .alpha(alpha),
-        )
-        .content(|| {
+    let label = if live { "새 채널" } else { NEW_CHANNEL_DEMO_LABEL };
+    NamedClickable(
+        label,
+        Modifier::new()
+            .size(H_CTL, H_CTL)
+            .background(paint(p.surface))
+            .border(1.0, paint(p.line))
+            .shape_role(ShapeRole::Full),
+        Alignment::Center,
+        move || {
+            if live {
+                st.start(filter.as_deref());
+            } else {
+                notice::post(DEMO_NO_CREATE);
+            }
+        },
+        move || {
             super::shell::NavIcon(super::shell::ICON_PLUS_SVG, p.text_2.to_argb(), 16.0);
-            cu::Button(&label)
-                .accessible_name(&label)
-                .variant(ButtonVariant::Text)
-                .color(compose_rust::Paint::Literal(Color::argb(0)))
-                .modifier(Modifier::new().fill_max_size())
-                .on_click(move || {
-                    if live {
-                        st.start(filter.as_deref());
-                    } else {
-                        notice::post(DEMO_NO_CREATE);
-                    }
-                });
-        });
+        },
+    );
 }
 
 /// Sends the draft. On success the list is read again, the new room opens and the sheet closes;
@@ -332,5 +333,73 @@ pub fn NewChannelSheet(st: &NewChannelState, rooms: &[Room], feed: Option<Feed>,
                 AppButton("닫기", None, ButtonKind::Primary, true, true, false, move || s.close());
             });
         });
+    }
+}
+
+/// Review row CH6 (#894): what the list header's "+" sends to the toolkit.
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use compose_rust::protocol::{decode_batch, Mutation};
+    use compose_rust::{Host, Recomposer};
+
+    /// Every modifier and property the button sends, as debug text.
+    fn sent(live: bool) -> (Vec<String>, Vec<String>) {
+        let mut host = Host::new(move || {
+            Box::new(Recomposer::new(move || {
+                let st = NewChannelState::new();
+                NewChannelButton(&st, live, None);
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let (mut mods, mut props) = (Vec::new(), Vec::new());
+        for m in batch.iter() {
+            match m {
+                Mutation::SetModifier { modifier, .. } => mods.push(format!("{modifier:?}")),
+                Mutation::SetProp { property, value, .. } => props.push(format!("{property:?}={value:?}")),
+                _ => {}
+            }
+        }
+        (mods, props)
+    }
+
+    #[test]
+    fn fr_l12_new_channel_button_keeps_full_opacity_in_demo_mode() {
+        let _guard = crate::services::test_guard();
+        for live in [false, true] {
+            let (mods, _) = sent(live);
+            assert!(!mods.is_empty(), "the button sends its ring");
+            assert!(!mods.iter().any(|m| m.starts_with("Alpha(")), "live={live}: the button is dimmed: {mods:?}");
+        }
+        let src = include_str!("new_channel.rs");
+        let src = &src[..src.find("mod review_tests {").unwrap()];
+        let button = &src[src.find("pub fn NewChannelButton(").unwrap()..];
+        let button = &button[..button.find("\n}\n").unwrap()];
+        assert!(!button.contains(".alpha("));
+        // `.icon-btn.sm`: 32 px, `surface`, a 1 px `line` border, a `text-2` glyph.
+        assert!(button.contains(".size(H_CTL, H_CTL)"));
+        assert!(button.contains(".background(paint(p.surface))"));
+        assert!(button.contains(".border(1.0, paint(p.line))"));
+        assert!(button.contains("NavIcon(super::shell::ICON_PLUS_SVG, p.text_2.to_argb(), 16.0);"));
+    }
+
+    #[test]
+    fn fr_l12_new_channel_button_says_why_in_demo_mode() {
+        let _guard = crate::services::test_guard();
+        let (_, demo) = sent(false);
+        let name = format!("AccessibleName=String({:?})", format!("새 채널, {DEMO_NO_CREATE}"));
+        assert!(demo.contains(&name), "the demo name carries the reason: {demo:?}");
+        assert_eq!(NEW_CHANNEL_DEMO_LABEL, format!("새 채널, {DEMO_NO_CREATE}"));
+        let (_, live) = sent(true);
+        assert!(live.contains(&"AccessibleName=String(\"새 채널\")".to_string()), "{live:?}");
+        // The ring is the control (compose-rust#429, #673): one clickable box, no button over it.
+        for live in [false, true] {
+            let (mods, props) = sent(live);
+            assert_eq!(props.iter().filter(|p| p.starts_with("OnClick=")).count(), 1, "{props:?}");
+            assert!(mods.iter().any(|m| m.starts_with("Semantics") && m.contains("Button")), "{mods:?}");
+            assert_eq!(mods.iter().filter(|m| m.starts_with("PressFeedback")).count(), 1, "{mods:?}");
+        }
+        let src = include_str!("new_channel.rs").split("mod review_tests {").next().unwrap();
+        assert!(!src.contains(&["cu::", "Button("].concat()), "no toolkit button over the ring");
     }
 }

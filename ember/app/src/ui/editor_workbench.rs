@@ -107,8 +107,6 @@ pub struct Shared {
 // WidgetView accepts a function without props and owns a separate tree. Share signals between
 // the trees until WidgetView supports props and flex stretch sizing (dioxus-compose #160).
 thread_local! { static DOUBLE_SHIFT: RefCell<super::editor::DoubleShift> = RefCell::new(super::editor::DoubleShift::default()); }
-// v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately): tells a double-click from two `onclick`s.
-thread_local! { static DOUBLE_CLICK: RefCell<super::editor::DoubleClick> = RefCell::new(super::editor::DoubleClick::default()); }
 
 /// Milliseconds on a clock that only moves forward, for telling two Shift presses apart.
 pub(crate) fn now_ms() -> u64 {
@@ -360,10 +358,21 @@ fn editor_pane() -> Element {
     let click_s = s.clone(); let click_uri = uri.clone();
     let fold_s = s.clone(); let fold_uri = uri.clone();
     let selection_s = s.clone(); let selection_uri = uri;
+    let key_s = s.clone(); let pointer_s = s.clone();
     rsx! { CodeEditor {
         key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
         text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), folds: crate::ui::editor::folds(&doc.folds), tab_width: Some(doc.tab_width),
         gutter_decorations,
+        // FR-L31.27: the mockup's code type, row pitch and line number column (`editor.css:2`, `:71`).
+        font_size: Some(crate::ui::fonts::CODE_FONT_SIZE), line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT),
+        gutter_min_width: Some(crate::ui::fonts::CODE_GUTTER_MIN_WIDTH), gutter_padding: Some(crate::ui::fonts::CODE_GUTTER_PADDING), text_inset: Some(crate::ui::fonts::CODE_TEXT_INSET),
+        colors: crate::ui::fonts::CODE_EDITOR_COLORS,
+        // FR-L31.13: the language chords from the focused code (compose-rust#554), Cmd/Ctrl+click to a
+        // definition (compose-rust#555) and the caret a list opens under (compose-rust#553).
+        on_key_preview: move |e: compose_rust::KeyEvent| crate::ui::editor_language::view::code_key(&key_s, &e),
+        pointer_kinds: Some(compose_rust::PointerKinds::DOWN),
+        on_code_pointer: move |e: compose_rust::code::CodePointer| crate::ui::editor_language::view::code_pointer(&pointer_s, &e),
+        on_caret_rect: move |e: compose_rust::code::CaretRect| crate::ui::editor_language::view::set_caret_rect(e.rect),
         on_change: move |e: compose_rust::code::CodeChange| { keep_edited_tab(&change_s, &change_uri.path); change_s.editor_versions.borrow_mut().insert(generation, e.version); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); crate::ui::editor_states::view::edited(&change_s, &change_uri.path); },
         on_save: move |e: compose_rust::code::SaveRequest| { if !crate::ui::editor_states::view::manual_save_allowed(&save_s, &save_uri.path) { return; } let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
@@ -385,7 +394,7 @@ pub mod page {
     use super::{
         base_name, editor_pane, is_webview_tab, join_path, now_ms, position_text, send, shared,
         webview_handle_from_tab, webview_pane_for_tab, webview_tab_path, workbench, BridgeAction,
-        HostCommand, PendingGoto, Shared, DOUBLE_CLICK, DOUBLE_SHIFT,
+        HostCommand, PendingGoto, Shared, DOUBLE_SHIFT,
     };
     use crate::ui::editor::{
         action_for_key, agent_status_text, apply_action, tooltip_text, Side, Stripes, ToolWindow,
@@ -763,11 +772,27 @@ pub mod page {
             crate::ui::palette::Payload::ExtensionCommand(id) => {
                 s.host.send(HostCommand::ExecuteCommand(id));
             }
+            // The ⋯ menu's own rows (FR-L31.38) are the window's, not an extension's.
+            crate::ui::palette::Payload::EditorMenu(cmd) => run_menu_command(s, cmd),
             payload @ (crate::ui::palette::Payload::SetEol(_)
             | crate::ui::palette::Payload::EncodingAction(_)
             | crate::ui::palette::Payload::SetEncoding { .. }
             | crate::ui::palette::Payload::SetLanguage(_)
             | crate::ui::palette::Payload::Cancel) => choose_format_item(s, payload),
+        }
+    }
+
+    /// Does a ⋯ menu row chosen in the palette, as the menu's own item does (FR-L31.38).
+    fn run_menu_command(s: &Shared, cmd: crate::ui::editor_menu::MenuCommand) {
+        use crate::ui::editor_menu::MenuCommand;
+        match cmd {
+            MenuCommand::Keymap(k) => {
+                let mut keymap_sig = s.keymap;
+                keymap_sig.set(k);
+                crate::services::services().ui.update_prefs(|p| p.keymap = k);
+            }
+            MenuCommand::AutoSave(mode) => crate::ui::editor_states::view::set_auto_save(mode),
+            MenuCommand::CloseEditor => crate::services::services().ui.close_editor(),
         }
     }
 
@@ -844,7 +869,10 @@ pub mod page {
                 let ranked = rank(&effective_query, &items);
                 (std::borrow::Cow::Owned(items), ranked, None)
             } else {
-                let items = items_for_workbench(mode, keymap, Os::current(), &s.folder, &files, &ext_commands, &recent);
+                let mut items = items_for_workbench(mode, keymap, Os::current(), &s.folder, &files, &ext_commands, &recent);
+                if matches!(mode, crate::ui::palette::Mode::Commands | crate::ui::palette::Mode::Everything) {
+                    items.to_mut().extend(crate::ui::editor_menu::palette_items(keymap, crate::ui::editor_states::view::auto_save()));
+                }
                 let ranked = rank(file_q, &items);
                 (items, ranked, suffix)
             }
@@ -872,17 +900,15 @@ pub mod page {
             .filter(|r| items[r.index].enabled)
             .map(|r| apply_line_suffix(items[r.index].payload.clone(), line_suffix));
         let count = shown.len();
-        let backdrop_s = s.clone();
         let key_s = s.clone();
         rsx! {
-            // `grid-row` and `grid-column` keep both in the top bar's cell: placed automatically they
-            // took an implicit row of the page grid and pushed the page down one gap (design review A6).
-            div { style: "position:fixed; grid-row:1; grid-column:1; left:0; top:0; right:0; bottom:0; z-index:39;", onclick: move |_| close_palette(&backdrop_s) }
-            div { class: "ed-menu", role: "dialog", "aria-label": "명령 팔레트",
-                style: "position:fixed; grid-row:1; grid-column:1; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);",
-                div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
-                    {icon("search")}
-                    input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
+            // FR-L31.29: the list hangs under the find pill (`.ed-findbox` in the top bar is its
+            // containing block, `.ed-pal` in page.css places it), and the query row is a row of the
+            // popover with a line under it, not a second framed field inside the frame.
+            div { class: "ed-menu ed-pal", role: "dialog", "aria-label": "명령 팔레트",
+                div { class: "ed-palq",
+                    {icon_tone("search", 16, "muted")}
+                    input {
                         "aria-label": "{crate::ui::palette::search_label(mode)}", placeholder: "{hint_text}", value: "{raw_text}", autofocus: true,
                         oninput: move |event| {
                             // Only a changed query moves the highlight back to the top, so an input event that
@@ -913,7 +939,7 @@ pub mod page {
                 if crate::ui::palette::lists_files(mode) && index_capped {
                     div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일이 많아 일부만 표시합니다." }
                 }
-                div { style: "max-height:320px; overflow:auto;", role: "listbox",
+                div { class: "ed-pall", role: "listbox",
                     if shown.is_empty() { div { style: "padding:var(--sp3); color:var(--muted);", "{crate::ui::palette::empty_text(mode, index_running)}" } }
                     if win_start > 0 {
                         div { class: "ed-tn", role: "option", "aria-label": "위 항목 더 보기", style: "--d:0; height:34px; color:var(--muted);",
@@ -1102,7 +1128,7 @@ pub mod page {
         rsx! {
             div { class: "ed-tsub", role: "search", "aria-label": "문서에서 찾기", style: "flex-wrap:wrap;",
                 div { class: "ed-find", style: "width:220px; height:28px;",
-                    {icon("search")}
+                    {icon_tone("search", 16, "muted")}
                     input {
                         key: "find-query-{focus_seq}",
                         style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
@@ -1233,6 +1259,12 @@ pub mod page {
 
     pub(super) fn workbench_page() -> Element {
         let s = shared();
+        // FR-L33.1 (#875): the window's safe area is 0 until the renderer first reports it, which
+        // can be after the first render. Read through the hook, the report renders the page again,
+        // also while nothing else does (the workspace trust prompt is up); read from the toolkit
+        // state at render, the top bar kept the 0 inset and the logo sat under the traffic lights.
+        let window_safe = dioxus_compose::use_window_safe_area();
+        let leading = crate::ui::safe_area::safe_area_from_toolkit(window_safe.top, window_safe.leading, window_safe.trailing).leading;
         let _ = *s.revision.read();
         let (error, updates, edit_errors, gone, renamed) = {
             let mut state = s.host.state.lock().unwrap();
@@ -1279,6 +1311,8 @@ pub mod page {
             if let ember_editor::SessionUpdate::Closed { uri } = &update { s.uris.borrow_mut().remove(&uri.path); }
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.open_errors.borrow_mut().remove(&uri.path); crate::ui::editor_scm::view::open_settled(&uri.path); }
             if let ember_editor::SessionUpdate::Saved { uri } = &update { saved_paths.push(uri.path.clone()); }
+            // Hot exit (FR-L31.6a): the disk text of a restored buffer, or its failed open.
+            crate::editor_backup::view::on_update(&s, &update);
             let action = s.bridge.borrow_mut().apply(update);
             match action {
                 BridgeAction::Resync(uri) => { s.host.send(HostCommand::Resync(uri)); }
@@ -1326,6 +1360,8 @@ pub mod page {
         // Reconnect, auto-save and compare follow the updates (FR-L31.6).
         let now_current = s.tabs.read().current_path().map(str::to_owned);
         crate::ui::editor_states::view::after_updates(&s, now_current.as_deref());
+        // Hot exit (FR-L31.6a): put the backup's buffers back once, then keep the backup current.
+        crate::editor_backup::view::after_updates(&s);
         // The document of an open working-tree diff stays open in the session (FR-L31.10).
         crate::ui::editor_scm::view::sync_diff_document(&s);
         if widget_edits {
@@ -1358,7 +1394,13 @@ pub mod page {
             let mut menu_open = s.menu_open;
             menu_open.set(false);
         }
-        let em_shown = crate::ui::editor_menu::menu_shown(*s.menu_open.read(), modal);
+        // FR-L31.36: the ⋯ menu belongs to the tab strip, so it closes with the last tab.
+        if paths.is_empty() && *s.menu_open.peek() {
+            let mut menu_open = s.menu_open;
+            menu_open.set(false);
+        }
+        let em_shown = !paths.is_empty() && crate::ui::editor_menu::menu_shown(*s.menu_open.read(), modal);
+        let palette_scrim_s = s.clone();
         let (agent_state, project_branch) = project_status(&s.project);
         // The branch git/status returned; the project row's until the first answer.
         let branch = s.scm.branch_line().unwrap_or(project_branch);
@@ -1384,15 +1426,11 @@ pub mod page {
         // closed column is 0 wide and the areas stay as the stylesheet has them.
         let maximized = has_bottom && *s.bottom_max.read();
         let grid = if maximized { crate::ui::editor::editor_grid_style_maximized() } else { crate::ui::editor::editor_grid_style(has_left, has_bottom) };
-        // macOS opens the window FullSize (the page starts at the top and the top bar is the title
-        // strip), so the page is the window's height; elsewhere the native chrome stays and the
-        // page keeps its 76px allowance. TODO(#320): the height is fixed at launch. v0.0.7: #467
-        // fixed (`with_report_size`); workaround kept until checked on a display (the page has to
-        // follow the reported height in the dioxus-compose window).
-        let height = crate::ui::editor::editor_page_height(cfg!(target_os = "macos"));
-        let ed_style = format!("width:100vw; height:{height}; {grid}");
+        // The page is the viewport on every system, and the viewport follows the window's content
+        // box on every dp change, so growing and shrinking both lay the page out again.
+        let ed_style = format!("{} {grid}", crate::ui::editor::editor_page_size_style());
+        let error_style = format!("{} grid-column:1 / -1;", crate::ui::editor::editor_error_padding(cfg!(target_os = "macos"), window_safe.top));
         rsx! {
-            // TODO(#320): shrinking the window does not reflow this page; growing does.
             div { class: "{ed_class}", "data-theme": if dark { "dark" } else { "light" }, tabindex: "-1", style: "{ed_style}",
                 onkeydown: move |event| {
                     let m = event.modifiers();
@@ -1455,14 +1493,11 @@ pub mod page {
                     }
                 },
                 if let Some(error) = error {
-                    div { style: "padding:20px; grid-column:1 / -1; padding-top:76px;", "{error}" button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" } }
+                    div { style: "{error_style}", "{error}" button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" } }
                 } else {
-                    {top_bar(&s, &branch, keymap)}
+                    {top_bar(&s, &branch, keymap, leading)}
                     div { class: "ed-rail",
                         {stripe_column(&s, sel, keymap, Strip::Left)}
-                        // The line above the bottom group (`.ed-stripe-b` border-top): drawn as its own
-                        // element, because the HTML path does not draw a border with side margins (A13).
-                        div { class: "ed-stripe-sep", role: "separator" }
                         {stripe_column(&s, sel, keymap, Strip::Bottom)}
                     }
                     if let (Some(w), false) = (sel.selected(Side::Left), maximized) {
@@ -1481,18 +1516,25 @@ pub mod page {
                         } else {
                             {side_note(w, "ed-left")}
                         }
+                    } else {
+                        // FR-L31.26 (#874): an element that takes no grid cell, not a placeholder.
+                        div { class: "ed-none" }
                     }
                     section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
-                        onmounted: move |event| crate::ui::editor_language::view::mount_editor_area(event.data()),
                         {crate::ui::workspace_trust::view::banner(&s)}
-                        {tab_strip(&s, &paths, &dirty, current.as_deref())}
+                        // FR-L31.36: no tab strip while no tab is open, as the mockup's empty editor
+                        // (`editor.js:81`), so the empty state takes the whole panel. The ⋯ of the strip
+                        // goes with it; its commands stay in quick open.
+                        if paths.is_empty() { div { class: "ed-none" } } else { {tab_strip(&s, &paths, &dirty, current.as_deref())} }
                         if let Some((menu_path, x, y)) = s.tab_menu.read().clone() { {tab_context_menu(&s, &menu_path, x, y)} }
                         if let Some(path) = current.as_deref().filter(|p| !settings_shown && !is_webview_tab(p)) {
                             {breadcrumbs(&s, path)}
                         }
                         {crate::ui::editor_states::view::banners(&s, current.as_deref())}
                         if *s.find.open.read() && active.is_some() && !diff_shown && !conflict_shown && !compare_shown { {find_bar(&s)} }
+                        // FR-L31.13: the editor pane's box, which a list at the caret is kept inside.
                         div { style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
+                            onmounted: move |event| crate::ui::editor_language::view::set_pane_mount(event.data()),
                             if conflict_shown { {crate::ui::editor_scm::view::conflict_pane(&s)} }
                             else if diff_shown { {crate::ui::editor_scm::view::diff_pane(&s)} }
                             else if compare_shown { {crate::ui::editor_states::view::compare_pane(&s)} }
@@ -1500,7 +1542,9 @@ pub mod page {
                             else if let Some(pane) = current.as_deref().and_then(|p| webview_pane_for_tab(&s, p)) {
                                 {webview_pane_view(&s, &pane)}
                             }
-                            else if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
+                            // FR-L31.27: the mockup's 8px above the first line (`editor.css:68`). The code editor has no
+                            // content padding, so the room is left above its box, in the panel's own `surface`.
+                            else if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:calc(100% - {crate::ui::fonts::CODE_TOP_PADDING_CSS}); margin-top:{crate::ui::fonts::CODE_TOP_PADDING_CSS};" } }
                             else if let Some(error) = current.as_ref().and_then(|p| open_error.clone().map(|e| (p.clone(), e))) {
                                 div { class: "ed-empty", role: "alert",
                                     b { "{crate::ui::editor::display_name(base_name(&error.0))} 파일을 열 수 없습니다" }
@@ -1533,13 +1577,26 @@ pub mod page {
                     {stripe_column(&s, sel, keymap, Strip::Right)}
                     if let Some(w) = sel.selected(Side::Bottom) {
                         {bottom_window(&s, w)}
+                    } else {
+                        div { class: "ed-none" }
                     }
-                    if em_shown { {menu(&s, keymap)} }
-                    if *s.palette_open.read() { {palette_sheet(&s, keymap)} }
-                    if let Some(request) = s.close_confirm.read().clone() { {close_confirm_sheet(&s, &request)} }
-                    {crate::ui::workspace_trust::view::prompt(&s)}
-                    {crate::ui::editor_notifications::view::layer(&s)}
-                    {crate::ui::editor_language::view::overlay(&s)}
+                    // FR-L31.26 (#874): the overlays are all `position:fixed`, but a closed one is a
+                    // placeholder (a comment node), which the HTML layout places as a grid item. Seven
+                    // of them made two implicit rows and 16 px of gaps under the status bar, so they sit
+                    // in one box that takes no room (`.ed-layers`); a fixed box is drawn from the root.
+                    div { class: "ed-layers",
+                        if em_shown { {menu(&s, keymap)} }
+                        // FR-L31.29: the palette's scrim. A click outside the list closes it; the list
+                        // itself is drawn under the find pill, from the top bar.
+                        if *s.palette_open.read() {
+                            div { style: "position:fixed; left:0; top:0; right:0; bottom:0; z-index:39;", "data-ed": "palette-scrim",
+                                onclick: move |_| close_palette(&palette_scrim_s) }
+                        }
+                        if let Some(request) = s.close_confirm.read().clone() { {close_confirm_sheet(&s, &request)} }
+                        {crate::ui::workspace_trust::view::prompt(&s)}
+                        {crate::ui::editor_notifications::view::layer(&s)}
+                        {crate::ui::editor_language::view::overlay(&s)}
+                    }
                     {status_bar(&s, &agent_state, &branch, current.as_deref().filter(|_| active.is_some()), line, col, active.as_ref().map_or(4, |d| d.tab_width))}
                 }
             }
@@ -1547,8 +1604,7 @@ pub mod page {
     }
 
     /// A mockup icon as an image: the HTML path draws SVG through `img`, which cannot take
-    /// `currentColor`, so the stroke is the text colour of the light palette.
-    // TODO(editor-redesign step 4): tint per theme once the dark palette is switched on.
+    /// `currentColor`, so the stroke is the palette's `--text-2`, the colour of an icon button.
     pub(crate) fn icon(name: &str) -> Element {
         icon_px(name, 16)
     }
@@ -1559,7 +1615,17 @@ pub mod page {
         rsx! { img { class: "i", src: "icon:{name}{dark}", width: "{px}", height: "{px}" } }
     }
 
-    fn top_bar(s: &Shared, branch: &str, keymap: Keymap) -> Element {
+    /// A mockup icon in the colour editor.css gives its place (`editor_icons::icon_stroke`):
+    /// `muted`, `green` or `text`. An empty tone is the plain icon.
+    pub(crate) fn icon_tone(name: &str, px: u32, tone: &str) -> Element {
+        if tone.is_empty() {
+            return icon_px(name, px);
+        }
+        let dark = if super::ICON_DARK.with(|d| d.get()) { "@dark" } else { "" };
+        rsx! { img { class: "i", src: "icon:{name}.{tone}{dark}", width: "{px}", height: "{px}" } }
+    }
+
+    fn top_bar(s: &Shared, branch: &str, keymap: Keymap, leading: f32) -> Element {
         let mut theme = s.theme;
         let theme_pref = *s.theme.read();
         let theme_title = format!("테마: {}", theme_pref.label());
@@ -1572,22 +1638,29 @@ pub mod page {
         let (runcfg_s, run_s, stop_s, ask_s) = (s.clone(), s.clone(), s.clone(), s.clone());
         let mut stripes = s.stripes;
         let project_tip = tooltip_text("프로젝트 창", &keymap.hint(Action::Project, Os::current()));
-        // The traffic lights float over the top bar's left end under FullSize.
-        let strip_pad = crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), crate::ui::safe_area::safe_area().leading);
+        // The traffic lights float over the top bar's left end under FullSize. `leading` is the
+        // page's hook reading (FR-L33.1), so a later report renders this again.
+        let strip_pad = crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), leading);
         rsx! {
             header { class: "ed-top", style: "{strip_pad}",
                 img { class: "logo logo-img", src: "icon:mark", width: "28", height: "28", alt: "Ember" }
-                button { class: "ed-pj", title: "{project_tip}", "aria-label": "{project_tip}", onclick: move |_| stripes.write().toggle(ToolWindow::Project), "{name}" {icon_px("chev-dn", 12)} }
-                button { class: "ed-pj", title: "브랜치", "aria-label": "브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon("git")} "{branch}" {icon_px("chev-dn", 12)} }
+                button { class: "ed-pj", title: "{project_tip}", "aria-label": "{project_tip}", onclick: move |_| stripes.write().toggle(ToolWindow::Project), "{name}" {icon_tone("chev-dn", 12, "muted")} }
+                button { class: "ed-pj", title: "브랜치", "aria-label": "브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon_tone("git", 16, "text")} "{branch}" {icon_tone("chev-dn", 12, "muted")} }
                 div { class: "spacer" }
+                // FR-L31.29: the pill and the quick open list it opens share one box, so the list is
+                // placed against the pill. The conditional child sits inside the box, where its
+                // placeholder takes no room (dioxus-compose#266: in the bar it would be a flex item).
+                div { class: "ed-findbox",
                 button { class: "ed-find", title: "{find}", "aria-label": "{find}", onclick: move |_| run_action(&find_s, Action::Find),
-                    {icon("search")}
+                    {icon_tone("search", 16, "muted")}
                     span { class: "hide-md", "{crate::ui::editor::FIND_PILL_LABEL}" }
                     kbd { class: "ed-sc", "{find_hint}" }
                 }
+                    if *s.palette_open.read() { {palette_sheet(s, keymap)} } else { div { class: "ed-none" } }
+                }
                 div { class: "ed-runcfg",
-                    button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| crate::ui::editor_tasks::view::open(&runcfg_s), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
-                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| { if let Some(blocked) = crate::ui::workspace_trust::view::blocked(&run_s, crate::ui::workspace_trust::Restricted::Run) { notice(blocked); } else { crate::ui::editor_tasks::view::run_default(&run_s); } }, {icon("play")} }
+                    button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| crate::ui::editor_tasks::view::open(&runcfg_s), {icon_tone("play", 16, "text")} "실행 구성" {icon_tone("chev-dn", 12, "muted")} }
+                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| { if let Some(blocked) = crate::ui::workspace_trust::view::blocked(&run_s, crate::ui::workspace_trust::Restricted::Run) { notice(blocked); } else { crate::ui::editor_tasks::view::run_default(&run_s); } }, {icon_tone("play", 16, "green")} }
                     button { class: "ed-ib", title: "중지", "aria-label": "중지", onclick: move |_| crate::ui::editor_tasks::view::stop(&stop_s), {icon("pause")} }
                 }
                 // The mockup's order (`editor.js:75-76`): run configuration, run, stop, ask agent, theme.
@@ -1607,8 +1680,9 @@ pub mod page {
     fn menu(s: &Shared, keymap: Keymap) -> Element {
         use crate::ui::editor_menu::{self as em, Submenu};
         let os = Os::current();
-        // The current tab's items (FR-L31.5) head the menu. They stand in for the right-click menu.
-        // v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
+        // The current tab's items (FR-L31.5) head the menu. A tab's right-click opens its own menu
+        // (`oncontextmenu`, compose-rust#417); this group is where Shift+F10 on the tab strip leads.
+        // TODO(#673): open the tab's own menu at the tab from the keyboard and drop this group.
         let current_tab = s.tabs.read().current_path().map(str::to_owned);
         let tab_items = current_tab.as_deref().map(|p| crate::ui::editor::tab_menu_items(&s.tabs.read(), p)).unwrap_or_default();
         let tab_label = current_tab.as_deref().map(|p| format!("탭: {}", crate::ui::editor::display_name(base_name(p)))).unwrap_or_default();
@@ -1673,8 +1747,8 @@ pub mod page {
                                 }
                             }
                         }
-                        // The language features are in the menu too: a key pressed while the code has the focus may not reach the page.
-                        // TODO(compose-rust#554): the chords alone are enough once the editor previews keys.
+                        // The language features are in the menu too, as Code-OSS's editor menu has them; their
+                        // chords also reach them from the focused code (`on_key_preview`, compose-rust#554).
                         for (action, label, hint) in crate::ui::editor_language::MENU {
                             {
                                 let s = s.clone();
@@ -1702,7 +1776,7 @@ pub mod page {
                                         keymap_sig.set(k);
                                         crate::services::services().ui.update_prefs(|p| p.keymap = k);
                                     },
-                                        span { class: "ed-mchk", if selected { {icon_px("check", 14)} } }
+                                        span { class: "ed-mchk", if selected { {icon_tone("check", 14, "text")} } }
                                         span { class: "spacer", "{k.label()}" }
                                         span { class: "ed-msc", "{hint}" }
                                     }
@@ -1786,7 +1860,7 @@ pub mod page {
                 if w == ToolWindow::Notifications { crate::ui::editor_notifications::view::toggle_center(&center_s); }
                 else if w.side() == Side::Right { notice(crate::ui::editor_actions::tool_window_notice(w)); } else { stripes.write().toggle(w); }
                 if matches!(w, ToolWindow::Commit | ToolWindow::Git) && stripes.read().is_selected(w) { scm_s.scm.refresh(); }
-            }, {icon(icon_name(w))} }
+            }, {icon_tone(icon_name(w), 16, if selected { "text" } else { "" })} }
         }
     }
 
@@ -1970,7 +2044,7 @@ pub mod page {
                     let icon_name = crate::ui::editor::tree_prompt_icon(&other);
                     rsx! {
                         div { class: "ed-tn", style: "--d:0;",
-                            {icon_px(icon_name, 15)}
+                            {icon_tone(icon_name, 15, "muted")}
                             {field}
                         }
                     }
@@ -2080,7 +2154,6 @@ pub mod page {
                             {
                                 match entry {
                                     TreeMenuEntry::Sep => rsx! { div { key: "sep{i}", class: "ed-msep" } },
-                                    TreeMenuEntry::Heading(h) => rsx! { div { key: "h{i}", class: "ed-mlab", "{h}" } },
                                     TreeMenuEntry::Item(item, enabled) => {
                                         let mut run = run_tree_item.clone();
                                         let hint = item.hint(mac);
@@ -2149,9 +2222,8 @@ pub mod page {
                         if !crate::ui::editor::tree_handles_key(prompt.read().as_ref()) {
                             return;
                         }
-                        // Shift+F10 stands in for right-click. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick).
-                        // compose-rust#100: v0.0.6 sent only Enter as a key event (#832); recheck on v0.0.7
-                        // whether Shift+F10 now reaches this branch.
+                        // Shift+F10 or the context-menu key opens the context menu from the keyboard, as in
+                        // Code-OSS, beside right-click (compose-rust#417, #100, #717; #832).
                         {
                             let m = event.modifiers();
                             if crate::ui::editor::tab_menu_key(&key_name(&event.key()), m.contains(Modifiers::CONTROL), m.contains(Modifiers::SHIFT), m.contains(Modifiers::ALT), m.contains(Modifiers::META)) {
@@ -2320,7 +2392,7 @@ pub mod page {
                                 tree_drag_src.set(None);
                             }
                         },
-                        {icon_px("chev-dn", 12)} {icon_px("folder", 15)} span { class: "ellipsis", b { "{root_name}" } }
+                        {icon_tone("chev-dn", 12, "muted")} {icon_tone("folder", 15, "muted")} span { class: "ellipsis", b { "{root_name}" } }
                     }
                     if let Some(badge) = clip_badge {
                         div { class: "ed-tn", style: "--d:0; padding:0 var(--sp2); background:var(--surface-2);",
@@ -2459,13 +2531,9 @@ pub mod page {
                                         if was_open { expanded.write().remove(&path); }
                                         else { expanded.write().insert(path.clone()); host.send(HostCommand::List(path.clone())); }
                                     } else {
-                                        // A single click opens the preview tab; a double-click keeps it (FR-L31.5).
+                                        // A single click opens the preview tab; a double-click (`ondoubleclick`,
+                                        // compose-rust#417) keeps it (FR-L31.5).
                                         open_preview(&preview_s, &path);
-                                        // Two clicks within 500 ms stand in for `ondoubleclick`. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
-                                        if DOUBLE_CLICK.with(|d| d.borrow_mut().click(&format!("tree:{path}"), now_ms())) {
-                                            let mut tabs = preview_s.tabs;
-                                            tabs.write().keep_open(&path);
-                                        }
                                         record_recent_file(&mut recent_files, &path);
                                     }
                                 },
@@ -2488,8 +2556,8 @@ pub mod page {
                                     crate::ui::editor_tree_menu::open(crate::ui::editor_tree_menu::TreeMenuAt::Pointer { x: at.x, y: at.y });
                                     *ctx_revision.write() += 1;
                                 },
-                                if is_dir { if row.open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} } } else { span { class: "chev-sp" } }
-                                if is_dir { {icon_px("folder", 15)} } else { {icon_px("file", 15)} }
+                                if is_dir { if row.open { {icon_tone("chev-dn", 12, "muted")} } else { {icon_tone("chev", 12, "muted")} } } else { span { class: "chev-sp" } }
+                                if is_dir { {icon_tone("folder", 15, "muted")} } else { {icon_tone("file", 15, "muted")} }
                                 if rename_at == Some(row_idx) {
                                     {prompt_inline.take()}
                                 } else {
@@ -2534,8 +2602,8 @@ pub mod page {
                     }
                     let key_str = key_name(&event.key());
                     let m = event.modifiers();
-                    // Shift+F10 / ContextMenu opens the ⋯ menu, which holds the current tab's items, while
-                    // the right-click menu cannot open. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
+                    // Shift+F10 / ContextMenu opens the ⋯ menu, which holds the current tab's items; a
+                    // right-click opens the tab's own menu (compose-rust#417). TODO(#673): open that one here.
                     if crate::ui::editor::tab_menu_key(
                         &key_str,
                         m.contains(Modifiers::CONTROL),
@@ -2634,10 +2702,6 @@ pub mod page {
                             onclick: move |_| {
                                 scm.close_diff();
                                 tabs.write().activate(&path);
-                                // Two clicks within 500 ms stand in for `ondoubleclick`. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
-                                if DOUBLE_CLICK.with(|d| d.borrow_mut().click(&format!("tab:{path}"), now_ms())) {
-                                    tabs.write().keep_open(&path);
-                                }
                                 record_recent_file(&mut recent_files, &path);
                                 if let Some(handle) = webview_handle_from_tab(&path) {
                                     host.send(HostCommand::Webview(ember_editor::webview::WebviewEvent::ViewState {
@@ -2841,7 +2905,7 @@ pub mod page {
         let last = segments.len().saturating_sub(1);
         rsx! { div { class: "ed-crumbs", role: "navigation", "aria-label": "경로",
             for (i, seg) in segments.iter().enumerate() {
-                if i > 0 { {icon_px("chev", 11)} }
+                if i > 0 { {icon_tone("chev", 11, "muted")} }
                 span { key: "{i}", class: if i == last { "cur" } else { "" }, "{seg}" }
             }
             {crate::ui::editor_language::view::symbol_crumbs(s, path)}
@@ -2858,8 +2922,8 @@ pub mod page {
 
     /// Fits the PTY to the panel on every render (FR-L31.20, #334): the panel's size from the last
     /// layout, debounced, to [`TerminalHandle::resize`]. A held-back size asks for one more render.
-    // TODO(dioxus-compose#207): dioxus-compose sends no `onresize` (its `convert_resize_data` is "not sent"), so a size
-    // change is seen on the next render (panel drag, output, the wake below), not by an observer.
+    /// The panel's `onresize` (dioxus-compose#207) asks for a render when its box changes size, as
+    /// xterm's fit addon follows a `ResizeObserver`, so a window or sash resize is seen at once.
     fn fit_terminal(s: &Shared, handle: &TerminalHandle) {
         use futures_util::FutureExt;
         let rect = TERM_MOUNT.with(|m| {
@@ -2948,14 +3012,6 @@ pub mod page {
     /// The strip for one [`terms::StripView`]. The + sits outside the scrolling tab list, after it,
     /// so it stays visible in every state as in Code-OSS (#799); inside the scrolling list the
     /// renderer drew it only while a rename field was open.
-    /// A terminal tab's width in px from its label (`.ed-tsub>button`: 12 px text, 12 px padding each
-    /// side, 1 px border, 14 px icon, 18 px buttons with -6 px end margin, 6 px gaps), at most 240.
-    pub(super) fn tab_width(label: &str, on: bool) -> u32 {
-        let text: u32 = label.chars().map(|c| if c.is_ascii() { 7 } else { 12 }).sum();
-        let buttons = if on { 2 * (6 + 18) } else { 6 + 18 } - 6;
-        (2 + 24 + 14 + 6 + text + buttons).min(240)
-    }
-
     pub(super) fn strip_of(view: Option<terms::StripView>, bump: impl Fn() + Copy + 'static) -> Element {
         let (tabs, active, renaming, error) = match view {
             Some(v) => (v.tabs, v.active, v.renaming, v.error),
@@ -2982,12 +3038,8 @@ pub mod page {
                             let (sel, ren, del, f2, pen) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
                             rsx! {
                                 button { key: "{id}", class: if on { "on" } else { "" }, role: "tab", "aria-selected": if on { "true" } else { "false" }, title: "{label}",
-                                    // TODO(dioxus-compose#227): no max-content width, so an inactive tab
-                                    // collapsed to its padding in the scrolling list; its width is set here.
-                                    style: "flex:none; width:{tab_width(&label, on)}px;",
                                     onclick: move |_| { terms::select(&sel); bump(); },
-                                    // F2 and the pencil button rename until a real double-click arrives.
-                                    // v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
+                                    // A double-click (compose-rust#417), F2 and the pencil button rename.
                                     ondoubleclick: move |_| { terms::begin_rename(&ren); bump(); },
                                     onkeydown: move |event| {
                                         let m = event.modifiers();
@@ -2999,7 +3051,7 @@ pub mod page {
                                             bump();
                                         }
                                     },
-                                    {icon_px("code", 14)} "{label}"
+                                    {icon_tone("code", 14, if on { "text" } else { "" })} "{label}"
                                     if on {
                                         span { class: "ed-ib", role: "button", title: "이름 바꾸기", "aria-label": "이름 바꾸기: {label}", tabindex: "-1",
                                             onclick: move |event| { event.stop_propagation(); terms::begin_rename(&pen); bump(); },
@@ -3026,7 +3078,8 @@ pub mod page {
 
     fn terminal_body(s: &Shared) -> Element {
         if !can_attach(&s.server_url, &s.computer) {
-            return rsx! { div { class: "ed-term", role: "log", "aria-label": "터미널 출력", style: "color:var(--muted);", "터미널은 서버에 연결했을 때만 사용할 수 있습니다. 이 창에는 서버 주소나 컴퓨터가 없습니다." } };
+            // FR-L31.34: a notice is prose in the UI face (`.ed-note`); only terminal output is mono.
+            return rsx! { div { class: "ed-note", role: "log", "aria-label": "터미널 출력", "터미널은 서버에 연결했을 때만 사용할 수 있습니다. 이 창에는 서버 주소나 컴퓨터가 없습니다." } };
         }
         let handle = terminal_handle(s);
         let strip = terminal_strip(s);
@@ -3036,7 +3089,7 @@ pub mod page {
                 Some(terms::Load::Ready) => "열린 터미널이 없습니다. +를 눌러 새 터미널을 엽니다.".to_string(),
                 _ => "터미널 목록을 불러오는 중입니다.".to_string(),
             };
-            return rsx! { {strip} div { class: "ed-term", role: "log", "aria-label": "터미널 출력", style: "color:var(--muted);", "{text}" } };
+            return rsx! { {strip} div { class: "ed-note", role: "log", "aria-label": "터미널 출력", "{text}" } };
         };
         fit_terminal(s, &handle);
         let view = panel_view(&handle.snapshot());
@@ -3050,6 +3103,10 @@ pub mod page {
             {strip}
             div { class: "ed-term", role: "log", "aria-label": "터미널 출력", tabindex: "0", style: "outline:none;",
                 onmounted: move |event| TERM_MOUNT.with(|m| *m.borrow_mut() = Some(event.data())),
+                onresize: move |_| {
+                    let mut revision = revision;
+                    *revision.write() += 1;
+                },
                 // FR-L31.21: paste chord and IME composition (`crate::terminal_input`).
                 onkeydown: move |event| {
                     let m = event.modifiers();
@@ -3060,11 +3117,12 @@ pub mod page {
                     if crate::terminal_input::is_paste_chord(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META)) {
                         event.stop_propagation();
                         event.prevent_default();
-                        // v0.0.7: #546 fixed (`compose_rust::clipboard::read_text`); workaround kept
-                        // until checked on a display (the read has to answer inside the dioxus-compose
-                        // window). Then read the clipboard, ask with `needs_multiline_warning` and send
-                        // `paste_bytes(text, state.bracketed_paste)`. Until then the chord only says why
-                        // nothing is pasted.
+                        // TODO(#673): `compose_rust::clipboard::read_text` (compose-rust#546) is in the pin
+                        // and answers on the HTML path (dioxus-compose's own Cmd+V uses it), but a
+                        // multi-line paste must first ask (`needs_multiline_warning`, Code-OSS's
+                        // dialog) and the window has no confirmation for it yet. Then read the
+                        // clipboard and send `paste_bytes(text, state.bracketed_paste)`; until then the
+                        // chord only says why nothing is pasted.
                         notice(crate::terminal_input::PASTE_UNAVAILABLE);
                         return;
                     }
@@ -3104,17 +3162,12 @@ pub mod page {
                     div { class: "tl", style: "padding-top:var(--sp2); color:var(--muted);", "{notice}" }
                 }
                 if offer_reconnect {
-                    // TODO(dioxus-compose#175): the button sits in a flex row of its own because directly under
-                    // the block-level panel the renderer leaves out the second glyph of each word
-                    // ("다시 연결" draws as "다 연"). Drop the wrapper once that is fixed.
-                    div { style: "display:flex; margin-top:var(--sp2);",
-                        button { class: "ed-pj", style: "border:1px solid var(--line);",
-                            onclick: move |_| {
-                                terms::reattach_active();
-                                let mut revision = revision;
-                                *revision.write() += 1;
-                            }, "다시 연결" }
-                    }
+                    button { class: "ed-pj", style: "border:1px solid var(--line); margin-top:var(--sp2);",
+                        onclick: move |_| {
+                            terms::reattach_active();
+                            let mut revision = revision;
+                            *revision.write() += 1;
+                        }, "다시 연결" }
                 }
             }
         }
@@ -3125,7 +3178,7 @@ pub mod page {
         use ember_editor::widget::Severity;
         let mut tabs = s.tabs;
         if rows.is_empty() {
-            return rsx! { div { class: "ed-term", style: "color:var(--muted);", "문제가 없습니다." } };
+            return rsx! { div { class: "ed-note", role: "status", "문제가 없습니다." } };
         }
         let limit = *s.problems_limit.read();
         let (visible_rows, overflow) = crate::ui::editor::paginate_problems(&rows, limit);
@@ -3227,7 +3280,9 @@ pub mod page {
 
         rsx! {
             div { class: "ed-tsub", style: "display:flex; align-items:center; gap:var(--sp2); padding:var(--sp1) var(--sp2);",
-                div { role: "group", "aria-label": "출력 채널", style: "display:flex; gap:var(--sp1); align-items:center; overflow-x:auto;",
+                // FR-L31.35: the channels are the mockup's 30px pills (`.ed-btabs button`, `editor.css:89-91`),
+                // the shown one on the `ink` fill, as the tabs of the window above them.
+                div { class: "ed-btabs", role: "group", "aria-label": "출력 채널",
                     for (id, label) in all_channels {
                         {
                             let is_on = id == active_id;
@@ -3237,7 +3292,7 @@ pub mod page {
                             rsx! {
                                 button {
                                     key: "{id}",
-                                    class: if is_on { "ed-pj on" } else { "ed-pj" },
+                                    class: if is_on { "on" } else { "" },
                                     "aria-pressed": "{is_on}",
                                     onclick: move |_| {
                                         sel.set(cid.clone());
@@ -3267,10 +3322,13 @@ pub mod page {
                     "지우기"
                 }
             }
-            div { class: "ed-term", role: "log", "aria-label": "출력 로그", style: "flex:1; overflow-y:auto; padding:var(--sp2); font-family:var(--font-mono); white-space:pre-wrap; outline:none;",
-                if text.trim().is_empty() {
-                    div { style: "color:var(--muted);", "출력이 없습니다." }
-                } else {
+            // FR-L31.34: the empty note is prose (`.ed-note`); a channel's text is a log in the mono
+            // face of `.ed-term` (the old inline `var(--font-mono)` named no token, so the log fell
+            // back to the UI face).
+            if text.trim().is_empty() {
+                div { class: "ed-note", role: "log", "aria-label": "출력 로그", "출력이 없습니다." }
+            } else {
+                div { class: "ed-term", role: "log", "aria-label": "출력 로그", style: "white-space:pre-wrap; outline:none;",
                     for (i, line) in text.lines().enumerate() {
                         div { key: "{i}", class: "tl", "{line}" }
                     }
@@ -3330,7 +3388,7 @@ pub mod page {
                 } else if w == ToolWindow::Run {
                     {crate::ui::editor_tasks::view::body(s)}
                 } else {
-                    div { class: "ed-term", style: "color:var(--muted);", "{body}" }
+                    div { class: "ed-note", role: "status", "{body}" }
                 }
             }
         }

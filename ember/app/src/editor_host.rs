@@ -332,7 +332,8 @@ impl EditorHost {
         // Extensions the user disabled on this computer are scanned but not run (FR-L31.14).
         let disabled_extensions = crate::services::services().ui.prefs.get_untracked().disabled_extensions_for(&target.computer);
         crate::services::services().rt.spawn(async move {
-            if target.endpoint.trim().is_empty() {
+            // A relay route alone is enough: the OSE is reached through the server (FR-N9.1).
+            if target.endpoint.trim().is_empty() && target.relay.trim().is_empty() {
                 shared.lock().unwrap().error = HostState::missing_endpoint().error;
                 *revision.write() += 1;
                 return;
@@ -343,7 +344,9 @@ impl EditorHost {
             let mut attempt = 0u32;
             loop {
                 attempt += 1;
-                let mut config = SessionConfig::new(target.endpoint.clone(), target.folder.clone());
+                // The endpoint names the OSE's host in its requests; through the relay without one, `localhost`.
+                let host = if target.endpoint.trim().is_empty() { "localhost".to_owned() } else { target.endpoint.clone() };
+                let mut config = SessionConfig::new(host, target.folder.clone());
                 config.connection_token = (!target.token.is_empty()).then(|| target.token.clone());
                 config.app_language = "ko".into();
                 // The answer given since the window opened holds across a reconnect (FR-L31.18, FR-L31.6).
@@ -356,7 +359,20 @@ impl EditorHost {
                 config.user_settings = user_layer;
                 config.user_files = user_files.paths();
                 config.server_settings = true;
-                let (session, mut updates) = match EditorSession::connect_tcp(config).await {
+                // With a relay path every socket goes through the server's relay route, over the transport or
+                // HTTP as the app reaches the server (FR-N9.1); direct TCP only without one (the demo endpoint).
+                let connected = if target.relay.trim().is_empty() {
+                    EditorSession::connect_tcp(config).await
+                } else {
+                    let reach = crate::editor_reach::reach_for(&target.server_url);
+                    let relay = target.relay.clone();
+                    EditorSession::connect(config, move || {
+                        let (reach, relay) = (reach.clone(), relay.clone());
+                        async move { crate::editor_reach::dial(&reach, &relay).await }
+                    })
+                    .await
+                };
+                let (session, mut updates) = match connected {
                     Ok(pair) => pair,
                     Err(error) => {
                         if attempt == 1 {

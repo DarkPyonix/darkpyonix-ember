@@ -642,7 +642,7 @@ pub mod view {
 
     use super::{installed_rows, needs_restart, result_rows, InstalledRow, Op, ResultRow, NO_COMPUTER_NOTE, RESTART_NOTE};
     use crate::editor_host::HostCommand;
-    use crate::ui::editor_workbench::page::{icon, icon_px};
+    use crate::ui::editor_workbench::page::{icon, icon_px, icon_tone};
     use crate::ui::editor_workbench::Shared;
 
     #[derive(Clone, Copy)]
@@ -666,19 +666,19 @@ pub mod view {
 
     const FIELD: &str = "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;";
     const BOX: &str = "width:auto; height:30px; cursor:text;";
-    // #798: a row never grows past the panel (ellipsis drawing: dioxus-compose#184). The name and meta lines end in an ellipsis, the
+    // #798: a row never grows past the panel. The name and meta lines end in an ellipsis, the
     // description wraps, the version and the buttons keep their size, so 제거 and 설치 stay visible at any width.
     const ROW: &str = "display:flex; flex-direction:column; gap:2px; padding:var(--sp2) var(--sp2) var(--sp2) var(--sp3); width:100%; min-width:0; max-width:100%; overflow:hidden; box-sizing:border-box;";
     const LINE: &str = "display:flex; align-items:center; gap:var(--sp2); width:100%; min-width:0; max-width:100%; overflow:hidden;";
-    const NAME: &str = "font-weight:var(--fw-medium); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; flex:0 1 auto; display:block;";
+    const NAME: &str = "font-weight:var(--fw-medium); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; flex:0 1 auto;";
     const VERSION: &str = "color:var(--muted); font-size:var(--fs-xs); flex:none;";
-    const META: &str = "color:var(--muted); font-size:var(--fs-xs); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; width:100%; min-width:0; max-width:100%;";
+    const META: &str = "color:var(--muted); font-size:var(--fs-xs); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; width:100%; min-width:0; max-width:100%;";
     /// The buttons get a line of their own at the row's end, so a long name never pushes them out
     /// of the panel (#798: on the name line 제거 was cut off in the docked panel; beside the
     /// publisher, the renderer gave the publisher no width). A leading `.spacer` right-aligns them,
     /// as elsewhere in the editor: the renderer honoured justify-content on some rows only (#833).
     const ACTIONS: &str = "display:flex; align-items:center; gap:var(--sp2); width:100%;";
-    const DESCRIPTION: &str = "color:var(--text-2); font-size:var(--fs-xs); white-space:normal; overflow-wrap:anywhere; word-break:break-word; display:block; width:100%; min-width:0; max-width:100%;";
+    const DESCRIPTION: &str = "color:var(--text-2); font-size:var(--fs-xs); white-space:normal; overflow-wrap:anywhere; word-break:break-word; width:100%; min-width:0; max-width:100%;";
     /// The two lists scroll down, never sideways (#798).
     const LIST: &str = "overflow-x:hidden;";
     const ACTION: &str = "border:1px solid var(--line); height:24px; padding:0 var(--sp2); font-size:var(--fs-xs); flex:none;";
@@ -796,7 +796,7 @@ pub mod view {
                 }
                 div { role: "search", "aria-label": "확장 검색", style: "display:flex; flex-direction:column; gap:var(--sp1); padding:var(--sp2) var(--sp2) var(--sp1); flex:none;",
                     div { class: "ed-find", style: "{BOX}",
-                        {icon("search")}
+                        {icon_tone("search", 16, "muted")}
                         input { style: "{FIELD}", "aria-label": "Open VSX에서 확장 검색", placeholder: "Open VSX에서 확장 검색", value: "{query}", autofocus: true,
                             oninput: move |event| input_s.search(&event.value(), true),
                             onkeydown: move |event| {
@@ -868,7 +868,7 @@ pub mod view {
                                     show_builtin.set(!builtin_open);
                                 }
                             },
-                            if builtin_open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} }
+                            if builtin_open { {icon_tone("chev-dn", 12, "muted")} } else { {icon_tone("chev", 12, "muted")} }
                             span { "기본 제공" }
                             div { class: "spacer" }
                             span { class: "ed-sc", "aria-hidden": "true", "{builtin_count}" }
@@ -905,9 +905,12 @@ pub mod view {
             for style in [ROW, LINE, META, DESCRIPTION, ACTIONS] {
                 assert!(style.contains("width:100%"), "bounded by the panel, not by its text: {style}");
             }
+            // dioxus-compose#184 (PR #194): the renderer draws the ellipsis of a flex item or a block
+            // as CSS does, so no `display:block` stand-in is set (a flex item is blockified anyway).
             for style in [NAME, META, DESCRIPTION] {
-                assert!(style.contains("display:block"), "ellipsis and wrapping need a block box (dioxus-compose#184): {style}");
+                assert!(!style.contains("display:block"), "no block box stand-in: {style}");
             }
+            assert!(!include_str!("editor_extensions.rs").contains(concat!("dioxus-compose#", "184).")));
             assert!(LIST.contains("overflow-x:hidden"), "the lists never scroll sideways");
             assert!(!ACTIONS.contains("justify-content"), "a leading .spacer right-aligns the buttons, not justify-content (#833)");
         }

@@ -86,7 +86,7 @@ pub(crate) fn check_relay(base: &str) -> Result<(), ClientError> {
 /// Installs the ring provider as rustls' process default, once. reqwest and tokio-tungstenite
 /// both build their rustls client config from that default; installing it explicitly keeps the
 /// TLS stack working even if another dependency also enables a second rustls provider.
-fn ensure_tls_provider() {
+pub(crate) fn ensure_tls_provider() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -1045,7 +1045,7 @@ fn is_peer_base(base: &str) -> bool {
 }
 
 /// A `peer:<id>` base without a transport `Api` is never dialed as a URL.
-fn refuse_peer_base(base: &str) -> Result<(), ClientError> {
+pub(crate) fn refuse_peer_base(base: &str) -> Result<(), ClientError> {
     if is_peer_base(base) {
         tracing::warn!("terminal relay: {base} is a peer, and no transport is open to it");
         return Err(ClientError::Refused(crate::device_link::UNREACHABLE));

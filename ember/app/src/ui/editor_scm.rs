@@ -315,6 +315,80 @@ pub fn diff_editor_model(base: &str, working: &str) -> DiffEditorModel {
     DiffEditorModel { alignment: align_working_rows(base, working), markers: crate::ui::editor::compute_line_diffs(base, working) }
 }
 
+/// One row of the editable diff's read-only base side, in the order the editor beside it draws its
+/// rows: a working-tree line, or a removed base line opposite the editor's view zone (compose-rust#543).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseRow {
+    /// The working-tree line at this index (from zero), with the base line beside it. `rule` is set
+    /// when base lines were removed above the first line, where no view zone can go.
+    Line { index: usize, kind: RowKind, base: Option<(u32, String)>, rule: Vec<(u32, String)> },
+    /// A removed base line (1-based number, text), drawn as a row of its own.
+    Removed(u32, String),
+}
+
+/// The base side's rows (FR-L31.10): every working-tree row, with the base lines removed above it as
+/// rows of their own and the ones removed at the end after the last. A view zone follows a line, so
+/// lines removed above the first line have no zone and stay a rule on that row.
+pub fn base_rows(alignment: &WorkingAlignment) -> Vec<BaseRow> {
+    let mut out = Vec::with_capacity(alignment.rows.len());
+    for (index, row) in alignment.rows.iter().enumerate() {
+        let rule = if index == 0 { row.deleted_above.clone() } else { Vec::new() };
+        if index > 0 {
+            out.extend(row.deleted_above.iter().map(|(no, text)| BaseRow::Removed(*no, text.clone())));
+        }
+        out.push(BaseRow::Line { index, kind: row.kind, base: row.base.clone(), rule });
+    }
+    out.extend(alignment.deleted_at_end.iter().map(|(no, text)| BaseRow::Removed(*no, text.clone())));
+    out
+}
+
+/// The editor's view zones opposite the removed base lines (compose-rust#543): one zone after the
+/// working-tree line above them, as many rows high as lines were removed, so both sides keep the
+/// same rows. Nothing goes above the first line (see [`base_rows`]).
+pub fn diff_view_zones(alignment: &WorkingAlignment) -> compose_rust::code::ViewZones {
+    use compose_rust::code::{ViewZone, ViewZones};
+    let mut zones: Vec<ViewZone> = alignment
+        .rows
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, row)| !row.deleted_above.is_empty())
+        .map(|(index, row)| ViewZone::new(index as u32 - 1, row.deleted_above.len() as f32))
+        .collect();
+    if !alignment.deleted_at_end.is_empty() && !alignment.rows.is_empty() {
+        zones.push(ViewZone::new(alignment.rows.len() as u32 - 1, alignment.deleted_at_end.len() as f32));
+    }
+    ViewZones::new(zones)
+}
+
+/// How far the editable diff's editor is scrolled, which the base side follows by pixels
+/// (compose-rust#544: `on_code_scrolled` and `on_code_metrics`, both in physical pixels).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DiffScroll {
+    pub offset_px: f64,
+    /// One row's height; 0 until the editor reported it.
+    pub row_px: f64,
+}
+
+impl DiffScroll {
+    /// The rows above the top of the view, with a fraction, in the unit both sides share. Dividing
+    /// by the reported row height leaves the screen's scale out, so the base side multiplies it by
+    /// its own `--code-lh`.
+    pub fn rows(&self) -> f64 {
+        if self.row_px > 0.0 {
+            (self.offset_px / self.row_px).max(0.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// The first base row to draw and how far, as a fraction of a row, it sits above the top.
+    pub fn first_row(&self) -> (usize, f64) {
+        let rows = self.rows();
+        (rows.floor() as usize, rows.fract())
+    }
+}
+
 /// What becomes of a document the diff opened, once the diff no longer shows it (FR-L31.10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffDocRelease {
@@ -460,15 +534,28 @@ pub fn letter_label(letter: char) -> &'static str {
     }
 }
 
-/// The colour token of a status letter.
+/// The colour token of a status letter, the mockup's map (`vcs.js:19` `VCS_ST`, FR-L31.39):
+/// modified orange, added green, deleted red, renamed blue. Untracked joins added, copied joins
+/// renamed, a conflict and any other change take the modified orange, and a type change is grey.
 pub fn letter_color(letter: char) -> &'static str {
     match letter {
         'A' | 'U' => "var(--c-green)",
         'D' => "var(--c-red)",
-        'R' | 'C' => "var(--c-sky)",
-        '!' => "var(--c-orange)",
+        'R' | 'C' => "var(--c-blue)",
         'T' => "var(--muted)",
-        _ => "var(--c-blue)",
+        _ => "var(--c-orange)",
+    }
+}
+
+/// The tone class of a status letter's badge (`.ed-scm-st`, FR-L31.32): the soft pair of the
+/// colour [`letter_color`] gives the letter, as the mockup's `.vcs-st` pairs them (`vcs.css:73-77`).
+pub fn letter_tone(letter: char) -> &'static str {
+    match letter {
+        'A' | 'U' => "green",
+        'D' => "red",
+        'R' | 'C' => "blue",
+        'T' => "grey",
+        _ => "orange",
     }
 }
 
@@ -545,6 +632,23 @@ pub fn branch_name(status: &GitStatus) -> String {
         "(detached)" => "분리된 HEAD".to_string(),
         "" => "브랜치 알 수 없음".to_string(),
         b => b.to_string(),
+    }
+}
+
+/// What the 커밋 window's commit button says (FR-L31.33): the branch, set in mono, and the words
+/// after it. The mockup's button names the branch (`vcs.js:72` "<b>branch</b>에 커밋"); while git is
+/// busy, when the commit amends, or when no branch is known (detached HEAD, no status yet) the
+/// button says only what it does.
+pub fn commit_button_label(busy: bool, amend: bool, status: Option<&GitStatus>) -> (Option<String>, &'static str) {
+    if busy {
+        return (None, "작업하는 중…");
+    }
+    if amend {
+        return (None, "이전 커밋 수정");
+    }
+    match status.map(|s| s.branch.trim()) {
+        Some(branch) if !branch.is_empty() && branch != "(detached)" => (Some(branch.to_string()), "에 커밋"),
+        _ => (None, "커밋"),
     }
 }
 
@@ -770,8 +874,8 @@ pub struct ScmState {
     pub armed_discard: Option<(String, u64)>,
     pub conflict: Option<(String, ConflictLoad, ConflictStep)>,
     pub side_by_side: bool,
-    /// The first and last line the editable diff's editor shows, which the base side follows.
-    pub diff_lines: (u32, u32),
+    /// How far the editable diff's editor is scrolled, which the base side follows by pixels.
+    pub diff_scroll: DiffScroll,
     seq: u64,
     diff_seq: u64,
 }
@@ -792,7 +896,7 @@ impl ScmState {
             armed_discard: None,
             conflict: None,
             side_by_side: false,
-            diff_lines: (0, 0),
+            diff_scroll: DiffScroll::default(),
             seq: 0,
             diff_seq: 0,
         }
@@ -825,7 +929,9 @@ impl ScmState {
         self.diff_seq += 1;
         let again = self.diff.take().filter(|d| d.path == path && d.staged == staged);
         if again.is_none() {
-            self.diff_lines = (0, 0);
+            // A new diff starts at its top; the row height stays, because an editor that is kept
+            // reports it only when it changes.
+            self.diff_scroll.offset_px = 0.0;
         }
         let (view, staging, base) = match again {
             Some(d) => (d.view, d.staging, d.base),
@@ -943,9 +1049,17 @@ impl Scm {
         self.with(|s| s.diff.as_mut().filter(|d| d.editable()).and_then(|d| d.base_for(doc_text, dirty)))
     }
 
-    /// The editable diff's editor shows lines `first` to `last`: the base side follows.
-    pub fn set_diff_lines(&self, first: u32, last: u32) {
-        let changed = self.with(|s| std::mem::replace(&mut s.diff_lines, (first, last)) != (first, last));
+    /// The editable diff's editor is scrolled `offset_px` down (`on_code_scrolled`): the base side follows.
+    pub fn set_diff_scroll(&self, offset_px: f64) {
+        let changed = self.with(|s| std::mem::replace(&mut s.diff_scroll.offset_px, offset_px) != offset_px);
+        if changed {
+            Self::redraw(self.revision);
+        }
+    }
+
+    /// The editable diff's editor draws its rows `row_px` high (`on_code_metrics`).
+    pub fn set_diff_row_px(&self, row_px: f64) {
+        let changed = self.with(|s| std::mem::replace(&mut s.diff_scroll.row_px, row_px) != row_px);
         if changed {
             Self::redraw(self.revision);
         }
@@ -1475,12 +1589,12 @@ pub mod view {
     use dioxus_compose::html::prelude::*;
 
     use super::{
-        branch_name, groups, letter_color, letter_label, side_by_side_rows, upstream_text, Entry, Group,
+        branch_name, groups, letter_label, letter_tone, side_by_side_rows, upstream_text, Entry, Group,
         DIFF_LINE_CAP, DiffView,
     };
     use crate::editor_host::HostCommand;
     use crate::ui::editor::{base_name, Side, ToolWindow};
-    use crate::ui::editor_workbench::page::{icon, icon_px};
+    use crate::ui::editor_workbench::page::{icon, icon_px, icon_tone};
     use crate::ui::editor_workbench::Shared;
     use crate::ui::vcs::{ConflictChoice, ConflictLoad, ConflictStep, LineKind, RemoteAction};
 
@@ -1590,16 +1704,15 @@ pub mod view {
         out
     }
 
-    /// Rows of the base side drawn from the editor's first visible line, enough to fill the pane.
-    // v0.0.7: #544 fixed (`CodeMetrics`, `CodeScrolled` and `Batch::set_scroll_offset`);
-    // workaround kept until checked on a display (dioxus-compose's `CodeEditor` has to expose the
-    // `on_code_metrics` and `on_code_scrolled` handlers first). Until then the base side follows the
-    // editor's first visible line and draws 20 px rows on the assumption that this is the line height.
+    /// Rows of the base side drawn from the editor's scroll position, enough to fill the pane.
     const BASE_ROWS_SHOWN: usize = 400;
 
-    /// The editable diff (FR-L31.10): the base read-only on the left, one row per working-tree line
-    /// so it lines up with the editor, and the file's document in an editor on the right.
-    fn editable_body(s: &Shared, abs: &str, model: Option<super::DiffEditorModel>, first_line: u32) -> Element {
+    /// The editable diff (FR-L31.10): the base read-only on the left, its rows in the order the
+    /// editor beside it draws them (removed base lines opposite the editor's view zones,
+    /// compose-rust#543), and the file's document in an editor on the right. The base side follows
+    /// the editor by pixels (compose-rust#544): the reported offset over the reported row height,
+    /// times its own `--code-lh` (22 px, FR-L31.27), so the screen's scale drops out.
+    fn editable_body(s: &Shared, abs: &str, model: Option<super::DiffEditorModel>, scroll: super::DiffScroll) -> Element {
         let Some(model) = model else {
             let text = match s.open_errors.borrow().get(abs) {
                 Some(error) => format!("파일을 열 수 없습니다: {error}"),
@@ -1607,40 +1720,41 @@ pub mod view {
             };
             return rsx! { div { class: "ed-empty", role: "status", p { "{text}" } } };
         };
-        let rows = model.alignment.rows;
-        let start = (first_line as usize).min(rows.len());
-        let end = (start + BASE_ROWS_SHOWN).min(rows.len());
-        let at_end = end == rows.len();
-        let tail_title = deleted_lines_title(&model.alignment.deleted_at_end);
-        let shown: Vec<(usize, super::WorkingRow)> = rows.into_iter().enumerate().skip(start).take(end - start).collect();
+        let rows = super::base_rows(&model.alignment);
+        let (first, fraction) = scroll.first_row();
+        let start = first.min(rows.len());
+        let shift = format!("margin-top:calc(var(--code-lh) * -{fraction:.4});");
+        let shown: Vec<(usize, super::BaseRow)> = rows.into_iter().enumerate().skip(start).take(BASE_ROWS_SHOWN).collect();
         rsx! {
             div { style: "flex:1; min-height:0; min-width:0; display:flex;",
-                div { style: "flex:1; min-width:0; overflow:hidden; font-family:var(--mono); font-size:var(--fs-sm); border-right:1px solid var(--line);", role: "region", "aria-label": "기준 (읽기 전용)",
-                    for (ri, row) in shown {
-                        {
-                            let (bg, sign) = match row.kind {
-                                super::RowKind::Same => ("", " "),
-                                super::RowKind::Changed => ("background:var(--c-red-soft);", "-"),
-                                super::RowKind::Added => ("background:var(--surface-2);", " "),
-                            };
-                            let (no, text) = row.base.map(|(n, t)| (n.to_string(), t)).unwrap_or_default();
-                            // TODO(compose-rust#543): removed lines are a red rule and a hover list here,
-                            // because the editor cannot hold blank rows opposite them; give them rows
-                            // of their own once the toolkit has view zones.
-                            let mark = if row.deleted_above.is_empty() { "" } else { "box-shadow:inset 0 2px 0 var(--c-red);" };
-                            let title = deleted_lines_title(&row.deleted_above);
-                            rsx! {
-                                div { key: "base-{ri}", title: "{title}", style: "display:flex; white-space:pre; height:20px; line-height:20px; {bg} {mark}",
-                                    span { style: "width:40px; flex:none; text-align:right; padding-right:6px; color:var(--muted);", "{no}" }
-                                    span { style: "width:14px; flex:none; text-align:center;", "{sign}" }
-                                    span { style: "flex:1; overflow:hidden; text-overflow:ellipsis;", "{text}" }
+                div { style: "flex:1; min-width:0; overflow:hidden; font-family:var(--mono); font-size:var(--code-fs); border-right:1px solid var(--line);", role: "region", "aria-label": "기준 (읽기 전용)",
+                    div { style: "{shift}",
+                        for (ri, row) in shown {
+                            {
+                                let (bg, sign, no, text, mark, title) = match row {
+                                    super::BaseRow::Line { kind, base, rule, .. } => {
+                                        let (bg, sign) = match kind {
+                                            super::RowKind::Same => ("", " "),
+                                            super::RowKind::Changed => ("background:var(--c-red-soft);", "-"),
+                                            super::RowKind::Added => ("background:var(--surface-2);", " "),
+                                        };
+                                        let (no, text) = base.map(|(n, t)| (n.to_string(), t)).unwrap_or_default();
+                                        // TODO(compose-rust, unfiled: no view zone above a code editor's first line):
+                                        // base lines removed above the first line stay a red rule and a hover list.
+                                        let mark = if rule.is_empty() { "" } else { "box-shadow:inset 0 2px 0 var(--c-red);" };
+                                        (bg, sign, no, text, mark, deleted_lines_title(&rule))
+                                    }
+                                    super::BaseRow::Removed(no, text) => ("background:var(--c-red-soft);", "-", no.to_string(), text, "", String::new()),
+                                };
+                                rsx! {
+                                    div { key: "base-{ri}", title: "{title}", style: "display:flex; white-space:pre; height:var(--code-lh); line-height:var(--code-lh); {bg} {mark}",
+                                        span { style: "width:40px; flex:none; text-align:right; padding-right:6px; color:var(--muted);", "{no}" }
+                                        span { style: "width:14px; flex:none; text-align:center;", "{sign}" }
+                                        span { style: "flex:1; overflow:hidden; text-overflow:ellipsis;", "{text}" }
+                                    }
                                 }
                             }
                         }
-                    }
-                    // TODO(compose-rust#543): the lines removed at the end, as a rule until view zones.
-                    if at_end && !tail_title.is_empty() {
-                        div { title: "{tail_title}", style: "height:4px; box-shadow:inset 0 2px 0 var(--c-red);" }
                     }
                 }
                 WidgetView { app: super::diff_editor_view::diff_editor, style: "flex:1; min-width:0; height:100%;" }
@@ -1687,13 +1801,7 @@ pub mod view {
         let commit_hint = if cfg!(target_os = "macos") { "\u{2318}Enter" } else { "Ctrl+Enter" };
         let commit_title = format!("커밋 ({commit_hint})");
         let (input_s, key_s, click_s, amend_s) = (s.clone(), s.clone(), s.clone(), s.clone());
-        let commit_btn_text = if busy {
-            "작업하는 중…"
-        } else if st.amend {
-            "이전 커밋 수정"
-        } else {
-            "커밋"
-        };
+        let (commit_branch, commit_btn_text) = super::commit_button_label(busy, st.amend, st.load.status());
         rsx! {
             section { class: "ed-tw ed-left", "aria-label": "커밋",
                 {header(s, "커밋")}
@@ -1716,20 +1824,25 @@ pub mod view {
                     }
                     div { style: "display:flex; align-items:center; gap:6px; font-size:var(--fs-xs); color:var(--text-2); cursor:pointer;",
                         onclick: move |_| amend_s.scm.toggle_amend(),
-                        input {
-                            r#type: "checkbox",
-                            checked: st.amend,
-                            "aria-label": "이전 커밋 수정",
+                        // FR-L31.32: the mockup's square check (`vcs.css:68-70`), ink when on. The row
+                        // around it takes the click, so the box has no handler of its own.
+                        button { class: if st.amend { "ed-scm-cb on" } else { "ed-scm-cb" }, role: "checkbox", "aria-checked": "{st.amend}", "aria-label": "이전 커밋 수정",
+                            if st.amend { {icon_px("check-w", 12)} }
                         }
                         span { "이전 커밋 수정 (amend)" }
                     }
-                    button { class: "ed-pj", title: "{commit_title}", "aria-label": "{commit_title}", disabled: busy,
-                        style: "justify-content:center; background:var(--ink); color:var(--ink-text); height:30px;",
+                    // FR-L31.33: the mockup's commit button (`vcs.css:80-82`): at least 40px, 14/500, the
+                    // branch in mono, the icon in the fill's own text colour.
+                    button { class: "ed-pj ed-scm-commit", title: "{commit_title}", "aria-label": "{commit_title}", disabled: busy,
                         onclick: move |_| click_s.scm.commit(),
-                        {icon_px("check", 14)} "{commit_btn_text}"
+                        {icon_px("commit-w", 16)}
+                        span {
+                            if let Some(branch) = &commit_branch { b { "{branch}" } }
+                            "{commit_btn_text}"
+                        }
                     }
                 }
-                div { class: "ed-tree", role: "list", "aria-label": "변경된 파일",
+                div { class: "ed-tree ed-scm-list", role: "list", "aria-label": "변경된 파일",
                     if let Some(text) = st.load.note() { {note(&text)} }
                     if let Some(g) = g {
                         if g.is_empty() {
@@ -1755,13 +1868,13 @@ pub mod view {
             _ => ("모두 스테이지", "plus"),
         };
         rsx! {
-            div { key: "{group.title()}", role: "group", "aria-label": "{group.title()} {count}개",
-                div { class: "ed-tn", style: "--d:0; cursor:default; color:var(--text-2); font-size:var(--fs-xs); font-weight:var(--fw-semibold);",
+            div { key: "{group.title()}", class: "ed-scm-group", role: "group", "aria-label": "{group.title()} {count}개",
+                div { class: "ed-tn ed-scm-head", style: "--d:0; cursor:default; color:var(--text-2); font-size:var(--fs-xs); font-weight:var(--fw-semibold);",
                     "{group.title()}"
                     span { style: "margin-left:var(--sp1); padding:0 6px; border-radius:var(--pill); background:var(--surface-2); color:var(--text-2);", "{count}" }
                     div { class: "spacer" }
                     if count > 0 && group != Group::Conflicts {
-                        button { class: "ed-ib", style: "width:22px; height:22px;", title: "{all_title}", "aria-label": "{all_title}", disabled: busy,
+                        button { class: "ed-ib", style: "width:20px; height:20px; flex:none; margin-right:26px;", title: "{all_title}", "aria-label": "{all_title}", disabled: busy,
                             onclick: move |_| { if group == Group::Staged { all_s.scm.unstage(&all) } else { all_s.scm.stage(&all) } },
                             {icon_px(all_icon, 13)} }
                     }
@@ -1780,9 +1893,9 @@ pub mod view {
         let name = base_name(&e.path).to_string();
         let dir = dir_of(&e.path).to_string();
         let label = letter_label(e.letter);
-        let color = letter_color(e.letter);
+        let tone = letter_tone(e.letter);
         let row_label = if dir.is_empty() { format!("{name}, {label}") } else { format!("{name}, {label}, {dir}") };
-        let class = if selected { "ed-tn sel" } else { "ed-tn" };
+        let class = if selected { "ed-tn sel ed-scm-row" } else { "ed-tn ed-scm-row" };
         let group = e.group;
         let deleted = e.letter == 'D';
         let (diff_s, key_diff_s, open_s, op_s, discard_s) = (s.clone(), s.clone(), s.clone(), s.clone(), s.clone());
@@ -1818,7 +1931,10 @@ pub mod view {
         let (letter_s, letter_path) = (s.clone(), e.path.clone());
 
         rsx! {
-            div { key: "{group.title()}:{e.path}", class, role: "listitem", "aria-label": "{row_label}", title: "{tip}", tabindex: "0", style: "--d:1; gap:3px; padding-right:var(--sp2);",
+            // FR-L31.32: the row fills the window's width (`.ed-scm-row`), the name and folder take
+            // the room the fixed columns leave, and every column keeps its place down the list: a
+            // row without an action draws an empty slot where the action would be.
+            div { key: "{group.title()}:{e.path}", class, role: "listitem", "aria-label": "{row_label}", title: "{tip}", tabindex: "0", style: "--d:1;",
                 onkeydown: move |event| {
                     if matches!(event.key(), Key::Enter) || matches!(event.key(), Key::Character(ref c) if c == " ") {
                         event.stop_propagation();
@@ -1826,15 +1942,22 @@ pub mod view {
                         open_row_diff(&key_diff_s, &key_diff_path);
                     }
                 },
-                div { style: "display:flex; align-items:center; gap:3px; flex:1; min-width:0; align-self:stretch;",
+                div { class: "ed-scm-name",
                     onclick: move |_| open_row_diff(&diff_s, &diff_path),
-                    {icon_px("file", 15)}
-                    span { style: "overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; min-width:20px;", "{name}" }
-                    if !dir.is_empty() { span { style: "color:var(--muted); font-size:var(--fs-2xs); overflow:hidden; text-overflow:ellipsis; flex:1 2 0px; min-width:0;", "{dir}" } }
+                    {icon_tone("file", 15, "muted")}
+                    span { class: "fn", "{name}" }
+                    if !dir.is_empty() { span { class: "dir", "{dir}" } } else { span { class: "dir" } }
                 }
                 if !deleted {
                     button { class: "ed-ib", style: "width:20px; height:20px; flex:none;", title: "파일 열기: {name}", "aria-label": "파일 열기: {name}",
                         onclick: move |event| { event.stop_propagation(); open_file(&open_s, &open_path); }, {icon_px("file", 13)} }
+                } else {
+                    span { class: "ed-scm-slot" }
+                }
+                // A staged or conflicted row has no discard either: its slot keeps the open column in
+                // one place across the groups.
+                if group != Group::Changes || e.letter == 'U' {
+                    span { class: "ed-scm-slot" }
                 }
                 if group == Group::Changes && e.letter != 'U' {
                     button { class: "ed-ib", style: if is_armed { "width:20px; height:20px; flex:none; color:var(--c-red);" } else { "width:20px; height:20px; flex:none;" },
@@ -1851,8 +1974,10 @@ pub mod view {
                             event.stop_propagation();
                             if group == Group::Staged { op_s.scm.unstage(&op_entry) } else { op_s.scm.stage(&op_entry) }
                         }, {icon_px(op_icon, 13)} }
+                } else {
+                    span { class: "ed-scm-slot" }
                 }
-                span { style: "width:14px; flex:none; text-align:center; font-family:var(--mono); font-size:var(--fs-xs); font-weight:var(--fw-semibold); color:{color}; align-self:stretch; display:flex; align-items:center; justify-content:center;", title: "{label}",
+                span { class: "ed-scm-st {tone}", title: "{label}",
                     onclick: move |_| open_row_diff(&letter_s, &letter_path), "{e.letter}" }
             }
         }
@@ -1877,7 +2002,7 @@ pub mod view {
                             let pull_label = if status.behind > 0 { format!("Pull {}", status.behind) } else { "Pull".to_string() };
                             let push_label = if status.ahead > 0 { format!("Push {}", status.ahead) } else { "Push".to_string() };
                             rsx! {
-                                div { class: "ed-tn", style: "--d:0; cursor:default; font-weight:var(--fw-semibold);", {icon_px("git", 15)} "{branch_name(&status)}" }
+                                div { class: "ed-tn", style: "--d:0; cursor:default; font-weight:var(--fw-semibold);", {icon_tone("git", 15, "muted")} "{branch_name(&status)}" }
                                 {note(&upstream_text(&status))}
                                 div { style: "display:flex; gap:var(--sp1); padding:var(--sp1) var(--sp3);",
                                     button { class: "ed-pj", style: "flex:1; justify-content:center; border:1px solid var(--line); height:26px; font-size:var(--fs-xs);",
@@ -1929,7 +2054,7 @@ pub mod view {
                                             branch_key_s.scm.checkout(&b_key_str);
                                         }
                                     },
-                                    if current { {icon_px("check", 13)} } else { span { class: "chev-sp" } }
+                                    if current { {icon_tone("check", 13, "muted")} } else { span { class: "chev-sp" } }
                                     "{b}"
                                 } }
                             }
@@ -1945,7 +2070,7 @@ pub mod view {
     /// with old and new line numbers.
     pub fn diff_pane(s: &Shared) -> Element {
         let snapshot = s.scm.snapshot();
-        let first_line = snapshot.diff_lines.0;
+        let scroll = snapshot.diff_scroll;
         let Some(d) = snapshot.diff else { return rsx! {} };
         let title = d.title();
         let (open_s, close_s, side_s, stage_sel_s) = (s.clone(), s.clone(), s.clone(), s.clone());
@@ -1990,7 +2115,7 @@ pub mod view {
                     button { class: "ed-ib", title: "차이 닫기", "aria-label": "차이 닫기", onclick: move |_| close_s.scm.close_diff(), {icon("close")} }
                 }
                 if d.editable() {
-                    {editable_body(s, &abs, model, first_line)}
+                    {editable_body(s, &abs, model, scroll)}
                 } else if let Some(text) = d.view.note() {
                     div { class: "ed-empty", role: "status", p { "{text}" } }
                 } else if let DiffView::Ready(fd) = &d.view {
@@ -2222,12 +2347,23 @@ pub mod diff_editor_view {
             *current = (*current).max(doc.version);
             *current
         };
-        // TODO(compose-rust#542): the change shows as gutter bars only; tint the added and changed
-        // lines once the toolkit has whole-line background decorations.
-        let gutter_decorations = match s.scm.diff_base(&doc.text, doc.dirty) {
-            Some(base) => crate::ui::editor::diff_gutter_decorations(version, &super::diff_editor_model(&base, &doc.text).markers),
-            None => compose_rust::code::GutterDecorations::default(),
+        // compose-rust#542: the added and changed lines are tinted with `Decoration::line_background`
+        // beside their gutter bars.
+        // compose-rust#543: blank rows opposite the removed base lines, so the base side can draw them.
+        let (markers, view_zones) = match s.scm.diff_base(&doc.text, doc.dirty) {
+            Some(base) => {
+                let model = super::diff_editor_model(&base, &doc.text);
+                let zones = super::diff_view_zones(&model.alignment);
+                (model.markers, zones)
+            }
+            None => (Vec::new(), compose_rust::code::ViewZones::default()),
         };
+        let gutter_decorations = if markers.is_empty() {
+            compose_rust::code::GutterDecorations::default()
+        } else {
+            crate::ui::editor::diff_gutter_decorations(version, &markers)
+        };
+        let decorations = crate::ui::editor::with_diff_line_tints(compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), version, &markers);
         let change_s = s.clone();
         let change_uri = uri.clone();
         let save_s = s.clone();
@@ -2239,10 +2375,15 @@ pub mod diff_editor_view {
         let selection_s = s.clone();
         let selection_uri = uri;
         let range_s = s.clone();
+        let metrics_s = s.clone();
         rsx! { CodeEditor {
             key: "diff-{generation}", width: Some(box_w), height: Some(box_h), handle,
-            text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), tab_width: Some(doc.tab_width),
-            gutter_decorations,
+            text: doc.text, decorations, syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), tab_width: Some(doc.tab_width),
+            gutter_decorations, view_zones,
+            // FR-L31.27: the same code type, row pitch and line number column as the file's editor.
+            font_size: Some(crate::ui::fonts::CODE_FONT_SIZE), line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT),
+            gutter_min_width: Some(crate::ui::fonts::CODE_GUTTER_MIN_WIDTH), gutter_padding: Some(crate::ui::fonts::CODE_GUTTER_PADDING), text_inset: Some(crate::ui::fonts::CODE_TEXT_INSET),
+            colors: crate::ui::fonts::CODE_EDITOR_COLORS,
             on_change: move |e: compose_rust::code::CodeChange| {
                 change_s.editor_versions.borrow_mut().insert(generation, e.version);
                 let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text);
@@ -2268,9 +2409,9 @@ pub mod diff_editor_view {
                 let event = selection_s.bridge.borrow().on_selection_changed(&selection_uri, e.version, pos(e.anchor), pos(e.active));
                 send(&selection_s, event);
             },
-            // Lines only: the base side cannot follow a partial-line scroll. v0.0.7: #544 fixed;
-            // workaround kept until checked on a display (dioxus-compose has to forward `CodeScrolled`).
-            on_visible_range_change: move |e: compose_rust::code::VisibleRange| range_s.scm.set_diff_lines(e.first_line, e.last_line),
+            // compose-rust#544: the base side follows by pixels, the offset over the row height.
+            on_code_metrics: move |e: compose_rust::code::CodeMetrics| metrics_s.scm.set_diff_row_px(e.line_height_px),
+            on_code_scrolled: move |e: compose_rust::code::CodeScroll| range_s.scm.set_diff_scroll(e.offset_px),
         } }
     }
 }
@@ -2697,13 +2838,13 @@ mod tests {
     fn fr_l31_10_reading_the_same_diff_again_keeps_it_editable() {
         let mut st = ScmState::new(true);
         open_working_diff(&mut st);
-        st.diff_lines = (12, 40);
+        st.diff_scroll = DiffScroll { offset_px: 240.0, row_px: 44.0 };
         st.begin_diff("a.rs", false, Some("/w/a.rs".into()));
         assert!(st.diff.as_ref().unwrap().editable());
-        assert_eq!(st.diff_lines, (12, 40));
+        assert_eq!(st.diff_scroll, DiffScroll { offset_px: 240.0, row_px: 44.0 });
         st.begin_diff("b.rs", false, Some("/w/a.rs".into()));
         assert_eq!(st.diff.as_ref().unwrap().view, DiffView::Loading);
-        assert_eq!(st.diff_lines, (0, 0));
+        assert_eq!(st.diff_scroll, DiffScroll { offset_px: 0.0, row_px: 44.0 }, "a new diff starts at its top");
     }
 
     #[test]
@@ -2790,5 +2931,66 @@ mod tests {
         bridge.apply(SessionUpdate::Opened { uri: uri.clone(), generation: 5, text: "x".into(), language_id: "rust".into(), tab_width: 4 });
         let (u, generation, event) = bridge.on_save_requested(&uri, 4).unwrap();
         assert_eq!((u, generation, event), (uri, 5, WidgetEvent::CodeSaveRequested { version: 4 }));
+    }
+
+    #[test]
+    fn fr_l31_10_the_editable_diff_sends_the_line_tints() {
+        let source = include_str!("editor_scm.rs");
+        let view = &source[source.find("pub mod diff_editor_view").unwrap()..source.find("#[cfg(test)]\nmod tests").unwrap()];
+        assert!(view.contains("with_diff_line_tints("), "compose-rust#542: added and changed lines are tinted");
+        assert!(view.contains("decorations, syntax_spans"), "the tinted list is the one the editor gets");
+        assert!(!view.contains(concat!("TODO(compose-rust#", "542")), "the gutter-only stand-in is gone");
+    }
+
+    #[test]
+    fn fr_l31_10_removed_lines_take_rows_opposite_view_zones() {
+        // "b" removed between "a" and "c", "e" removed at the end, "z" removed above the first line.
+        let a = align_working_rows("z\na\nb\nc\nd\ne", "a\nc\nd");
+        let rows = base_rows(&a);
+        let line = |index: usize, no: u32, text: &str, rule: &[(u32, &str)]| BaseRow::Line {
+            index,
+            kind: RowKind::Same,
+            base: Some((no, text.to_string())),
+            rule: rule.iter().map(|(n, t)| (*n, t.to_string())).collect(),
+        };
+        assert_eq!(
+            rows,
+            vec![
+                line(0, 2, "a", &[(1, "z")]),
+                BaseRow::Removed(3, "b".into()),
+                line(1, 4, "c", &[]),
+                line(2, 5, "d", &[]),
+                BaseRow::Removed(6, "e".into()),
+            ]
+        );
+        let zones = diff_view_zones(&a).zones();
+        let placed: Vec<(u32, f32)> = zones.iter().map(|z| (z.after_line, z.height_lines)).collect();
+        assert_eq!(placed, vec![(0, 1.0), (2, 1.0)], "a zone after the line above each removed run, none above the first line");
+        // Both sides hold the same number of rows below the first line.
+        let editor_rows = a.rows.len() as f32 + zones.iter().map(|z| z.height_lines).sum::<f32>();
+        assert_eq!(rows.len() as f32, editor_rows);
+        assert!(diff_view_zones(&align_working_rows("a\nb", "a\nb")).is_empty(), "no change sends no zones");
+    }
+
+    #[test]
+    fn fr_l31_10_the_base_side_follows_the_editor_by_pixels() {
+        assert_eq!(DiffScroll::default().first_row(), (0, 0.0), "nothing moves before the row height is known");
+        assert_eq!(DiffScroll { offset_px: 300.0, row_px: 0.0 }.first_row(), (0, 0.0));
+        // 44 physical pixels a row (22 sp at scale 2): 3.5 rows down.
+        assert_eq!(DiffScroll { offset_px: 154.0, row_px: 44.0 }.first_row(), (3, 0.5));
+        assert_eq!(DiffScroll { offset_px: -10.0, row_px: 44.0 }.first_row(), (0, 0.0));
+    }
+
+    #[test]
+    fn fr_l31_10_the_editable_diff_sends_zones_and_follows_the_pixel_scroll() {
+        let source = include_str!("editor_scm.rs");
+        let view = &source[source.find("pub mod diff_editor_view").unwrap()..source.find("#[cfg(test)]\nmod tests").unwrap()];
+        assert!(view.contains("diff_view_zones(&model.alignment)") && view.contains("gutter_decorations, view_zones,"), "compose-rust#543");
+        assert!(view.contains("on_code_metrics:") && view.contains("set_diff_row_px("), "compose-rust#544: the row height");
+        assert!(view.contains("on_code_scrolled:") && view.contains("set_diff_scroll("), "compose-rust#544: the offset");
+        assert!(!view.contains("set_diff_lines"), "the base side no longer follows whole lines");
+        let body = &source[source.find("fn editable_body(").unwrap()..source.find("/// Shows the Git window").unwrap()];
+        assert!(body.contains("base_rows(&model.alignment)") && body.contains("scroll.first_row()"));
+        assert!(!body.contains(concat!("TODO(compose-rust#", "543")), "removed lines are rows, not a rule");
     }
 }

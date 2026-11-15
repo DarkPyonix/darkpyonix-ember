@@ -11,6 +11,7 @@
 //! - [`bridge`]: client changes → UI signals.
 //! - [`model`]: pure view models (tested).
 //! - [`owner_claim`]: the owner-presence claim at start (FR-S12, #842).
+//! - [`self_update`]: the Velopack startup hook and the update check (NFR-R2, #880).
 //! - [`ui`]: the screens.
 
 pub mod android;
@@ -19,11 +20,15 @@ pub mod config;
 pub mod demo;
 pub mod device_link;
 pub mod export;
+pub mod fs_watch;
+pub mod editor_backup;
 pub mod editor_host;
+pub mod editor_reach;
 pub mod ide;
 pub mod model;
 pub mod owner_claim;
 pub mod prefs;
+pub mod self_update;
 pub mod server;
 pub mod services;
 pub mod terminal_input;
@@ -200,8 +205,8 @@ fn server_choice_from_env(prefs: &prefs::Prefs) -> Result<Option<device_link::Pe
 fn open_window() {
     if let Some(target) = ide::parse_editor_args(std::env::args()) {
         // Separate IDE window (FR-L31): `--editor <project> <folder>` opens the editor as its own
-        // HTML-mode window in its own process until dioxus-compose#152 (the `window` element on a
-        // shared host) lands.
+        // HTML-mode window in its own process. The `Window` element (dioxus-compose#152) is in the
+        // pin; an HTML page under the shell's Compose root waits for dioxus-compose#161.
         // `EMBER_CR_SIZE=1100x400` opens a check window of that size beside the owner's.
         let (w, h): (u16, u16) = std::env::var("EMBER_CR_SIZE")
             .ok()
@@ -226,6 +231,7 @@ fn open_window() {
         // shell. `EMBER_CR_SHELL` still overrides the initial theme preference when set.
         bridge::start_shared();
         start_owner_claim();
+        start_self_update();
         let pref = ui::cr::shell::requested().unwrap_or_else(|| services().initial_prefs.theme);
         ui::cr::shell::launch(pref);
     }
@@ -246,6 +252,18 @@ fn start_owner_claim() {
         let hooks = Arc::new(AppClaimHooks { api: api.clone(), server: s.server.clone() });
         owner_claim::install(owner_claim::spawn(s.rt.handle(), endpoint, hooks, owner_claim::Backoff::default()));
     }
+}
+
+/// The update check (NFR-R2, #880): once at start of the main shell process, on the
+/// runtime's blocking pool. The separate editor window (`--editor`) never checks. A build
+/// Velopack did not install shows that in 설정 and checks nothing.
+fn start_self_update() {
+    let feed = self_update::feed_from_env();
+    let backend = self_update::open_backend(&feed);
+    tracing::info!(?feed, installed = backend.is_some(), "self-update");
+    self_update::start(services().rt.handle(), backend, |state| {
+        ui::coexist::shared_ui().self_update.set(state.clone());
+    });
 }
 
 /// The claim's key goes to both HTTP clients of the app; its state goes to the screens.
@@ -272,6 +290,8 @@ impl owner_claim::ClaimHooks for AppClaimHooks {
 
 /// Flush the current state before the process exits or the window loop returns.
 pub(crate) fn shutdown() -> i32 {
+    // The unsaved buffers of an editor window first (hot exit, FR-L31.6a): nothing else here needs them.
+    editor_backup::flush_on_exit();
     let s = services();
     let _guard = services::prefs_write_lock();
     let prefs = s.ui.prefs.get_untracked();

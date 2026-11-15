@@ -14,7 +14,7 @@
 //! empty and nothing here is sample data.
 
 use ember_client::wire::{
-    self, NewSchedule, Schedule, SchedulePatch, ScheduleKind, ScheduleRun, ScheduleTarget,
+    self, EventOn, NewSchedule, Schedule, SchedulePatch, ScheduleKind, ScheduleRun, ScheduleTarget,
 };
 
 use super::home::{
@@ -355,6 +355,23 @@ pub fn weekday_bar_radius(w: f32, h: f32) -> f32 {
     (w / 2.0).min(h / 2.0).max(0.0)
 }
 
+/// The gap between a weekday bar's failed and successful parts (`.bar { gap: 2px }`).
+pub const WEEKDAY_BAR_GAP: f32 = 2.0;
+
+/// `(fail_h, gap, ok_h)` of one joined weekday bar `h` dp high (mockup `.bar`: one pill,
+/// `overflow: hidden`, the failed part on top of the successful part, 2 dp apart). The parts
+/// add up to `h`; the gap is there only when the day has both (FR-L25, #848).
+pub fn weekday_bar_parts(h: f32, ok: usize, fail: usize) -> (f32, f32, f32) {
+    let total = ok + fail;
+    if total == 0 || h <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let gap = if ok > 0 && fail > 0 { WEEKDAY_BAR_GAP.min(h) } else { 0.0 };
+    let room = (h - gap).max(0.0);
+    let fail_h = room * fail as f32 / total as f32;
+    (fail_h, gap, room - fail_h)
+}
+
 impl RunStatus {
     pub fn label(self) -> &'static str {
         match self {
@@ -485,13 +502,15 @@ pub enum FormLayout {
     Sheet,
 }
 
-/// The inline form's fields go two to a row from this field width (mockup `.form`, a two-column
-/// grid), and one to a row below it (FR-L25, #848).
-pub const FORM_TWO_COLUMNS_FROM: f32 = 480.0;
+/// The form's fields go two to a row from this field width (mockup `.form`, a two-column grid
+/// at every width: about 133 per column at 390), and one to a row below it, so a column never
+/// gets narrower than about 122 (FR-L25, #848, #596).
+pub const FORM_TWO_COLUMNS_FROM: f32 = 260.0;
 
-/// Whether the form lays its fields out in two columns: inline and wide enough.
-pub fn form_two_columns(layout: FormLayout, field_w: f32) -> bool {
-    layout == FormLayout::Inline && field_w >= FORM_TWO_COLUMNS_FROM
+/// Whether the form lays its fields out in two columns: wide enough, inline or in the phone's
+/// sheet alike, as the mockup's 390 form pairs 프로젝트/트리거 in selects (#596).
+pub fn form_two_columns(_layout: FormLayout, field_w: f32) -> bool {
+    field_w >= FORM_TWO_COLUMNS_FROM
 }
 
 /// The form's rows, each one or two fields, in `FORM_FIELDS` order. In two columns the mockup's
@@ -645,6 +664,64 @@ pub fn when_big_max_lines(trigger: Trigger) -> u32 {
 
 const DEFAULT_CRON: &str = "0 9 * * *";
 
+/// Parses an event-routine input (`owner/name`, `owner/name#branch`, or a pasted
+/// `github.com/owner/name(.git)` URL with optional `#branch`) into `(repository, branch)`.
+/// The ` (branch)` display form is not accepted as input (FR-L23, FR-L25, #759).
+pub fn parse_ci_event(text: &str) -> Option<(String, Option<String>)> {
+    let t = text.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let (repo_raw, branch) = match t.split_once('#') {
+        Some((r, b)) => {
+            let b = b.trim();
+            if b.is_empty() || b.contains('#') || b.chars().any(char::is_whitespace) {
+                return None;
+            }
+            (r, Some(b.to_string()))
+        }
+        None => (t, None),
+    };
+    let r = repo_raw.trim().trim_end_matches('/');
+    let r = r
+        .strip_prefix("https://")
+        .or_else(|| r.strip_prefix("http://"))
+        .unwrap_or(r);
+    let r = r.strip_prefix("github.com/").unwrap_or(r);
+    let r = r.strip_suffix(".git").unwrap_or(r);
+    let mut parts = r.split('/');
+    let (owner, name) = (parts.next()?, parts.next()?);
+    let ok = |p: &str| {
+        !p.is_empty()
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    (parts.next().is_none() && ok(owner) && ok(name))
+        .then(|| (format!("{owner}/{name}"), branch))
+}
+
+/// Converts a routine's stored event display string (`CI 실패 시 · owner/name` or
+/// `CI 실패 시 · owner/name (branch)`) back into the edit form's input shape (`owner/name` or
+/// `owner/name#branch`), leaving any other string unchanged.
+pub fn event_field_text(cron: &str) -> String {
+    let t = cron.trim();
+    let Some(rest) = t.strip_prefix("CI 실패 시 · ") else {
+        return cron.to_string();
+    };
+    let rest = rest.trim();
+    if let Some((repo, branch)) = rest
+        .strip_suffix(')')
+        .and_then(|s| s.rsplit_once(" ("))
+    {
+        let repo = repo.trim();
+        let branch = branch.trim();
+        if !repo.is_empty() && !branch.is_empty() {
+            return format!("{repo}#{branch}");
+        }
+    }
+    rest.to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormDraft {
     pub name: String,
@@ -659,6 +736,7 @@ pub enum FormError {
     NameEmpty,
     ScheduleInvalid,
     EventEmpty,
+    EventInvalid,
     PromptEmpty,
 }
 
@@ -668,6 +746,9 @@ impl FormError {
             FormError::NameEmpty => "이름을 입력하셔야 합니다",
             FormError::ScheduleInvalid => "일정이 올바른 cron 형식이 아닙니다",
             FormError::EventEmpty => "이벤트 설명을 입력하셔야 합니다",
+            FormError::EventInvalid => {
+                "저장소는 owner/name 또는 owner/name#branch 형식으로 입력하셔야 합니다"
+            }
             FormError::PromptEmpty => "프롬프트를 입력하셔야 합니다",
         }
     }
@@ -695,7 +776,10 @@ impl FormDraft {
         FormDraft {
             name: r.name.clone(),
             trigger: r.trigger,
-            cron: r.cron.clone(),
+            cron: match r.trigger {
+                Trigger::Time => r.cron.clone(),
+                Trigger::Event => event_field_text(&r.cron),
+            },
             prompt: r.prompt.clone(),
             sel: r.sel.clone(),
         }
@@ -718,13 +802,28 @@ impl FormDraft {
 
     /// The problems that block saving, in field order. Empty: the draft can be saved.
     pub fn errors(&self) -> Vec<FormError> {
+        self.errors_with_initial(None)
+    }
+
+    /// The problems that block saving when editing `initial` (if `Some`), in field order.
+    /// Leaving an existing non-empty event schedule unchanged does not block saving a name or
+    /// prompt edit even if its stored repository string is not `owner/name` (#759).
+    pub fn errors_with_initial(&self, initial: Option<&FormDraft>) -> Vec<FormError> {
         let mut out = Vec::new();
         if self.name.trim().is_empty() {
             out.push(FormError::NameEmpty);
         }
+        let unchanged_event = initial.is_some_and(|i| {
+            i.trigger == Trigger::Event
+                && self.trigger == Trigger::Event
+                && i.cron.trim() == self.cron.trim()
+        });
         match self.trigger {
             Trigger::Time if !cron_valid(self.cron.trim()) => out.push(FormError::ScheduleInvalid),
             Trigger::Event if self.cron.trim().is_empty() => out.push(FormError::EventEmpty),
+            Trigger::Event if !unchanged_event && parse_ci_event(&self.cron).is_none() => {
+                out.push(FormError::EventInvalid)
+            }
             _ => {}
         }
         if self.prompt.trim().is_empty() {
@@ -733,13 +832,24 @@ impl FormDraft {
         out
     }
 
-    /// The routine to store. Text is trimmed.
+    /// The routine to store. Text is trimmed, and valid event inputs format as [`kind_text`].
     pub fn into_routine(&self, id: &str, enabled: bool) -> Routine {
+        let cron = match self.trigger {
+            Trigger::Time => self.cron.trim().into(),
+            Trigger::Event => match parse_ci_event(&self.cron) {
+                Some((repository, branch)) => kind_text(&ScheduleKind::Event {
+                    on: EventOn::CiFailed,
+                    repository,
+                    branch,
+                }),
+                None => self.cron.trim().into(),
+            },
+        };
         Routine {
             id: id.into(),
             name: self.name.trim().into(),
             trigger: self.trigger,
-            cron: self.cron.trim().into(),
+            cron,
             prompt: self.prompt.trim().into(),
             enabled,
             sel: self.sel.clone(),
@@ -1012,7 +1122,10 @@ pub fn schedule_to_routine(s: &Schedule) -> Routine {
     Routine {
         id: s.id.clone(),
         name,
-        trigger: Trigger::Time,
+        trigger: match &s.kind {
+            ScheduleKind::Event { .. } => Trigger::Event,
+            _ => Trigger::Time,
+        },
         cron: kind_text(&s.kind),
         prompt: s.prompt.clone(),
         enabled: !s.paused,
@@ -1035,8 +1148,29 @@ pub fn schedule_to_entry(s: &Schedule, runs: &[ScheduleRun]) -> Entry {
     }
 }
 
-/// The create body for a time routine. Cron is read in UTC (no time-zone source yet); each run
-/// starts a session titled with the routine's name, in `cwd`.
+/// Builds the server `ScheduleKind` from a form draft (cron in UTC for [`Trigger::Time`], or
+/// `ci_failed` for [`Trigger::Event`]).
+pub fn draft_schedule_kind(d: &FormDraft) -> ScheduleKind {
+    match d.trigger {
+        Trigger::Time => ScheduleKind::Cron {
+            expr: d.cron.trim().to_string(),
+            tz: "UTC".to_string(),
+        },
+        Trigger::Event => {
+            let (repository, branch) =
+                parse_ci_event(&d.cron).unwrap_or_else(|| (d.cron.trim().to_string(), None));
+            ScheduleKind::Event {
+                on: EventOn::CiFailed,
+                repository,
+                branch,
+            }
+        }
+    }
+}
+
+/// The create body for a routine. Cron is read in UTC (no time-zone source yet); event routines
+/// watch `ci_failed` on the parsed repository and optional branch; each run starts a session
+/// titled with the routine's name, in `cwd`.
 pub fn new_schedule(d: &FormDraft, cwd: &str) -> NewSchedule {
     NewSchedule {
         project: d.sel.project.clone(),
@@ -1045,10 +1179,7 @@ pub fn new_schedule(d: &FormDraft, cwd: &str) -> NewSchedule {
         computer: d.sel.computer.clone(),
         cwd: Some(cwd.to_string()),
         prompt: d.prompt.trim().to_string(),
-        kind: ScheduleKind::Cron {
-            expr: d.cron.trim().to_string(),
-            tz: "UTC".to_string(),
-        },
+        kind: draft_schedule_kind(d),
         target: ScheduleTarget::New {
             title: Some(d.name.trim().to_string()),
         },
@@ -1068,10 +1199,7 @@ pub fn schedule_patch(d: &FormDraft) -> SchedulePatch {
             title: Some(d.name.trim().to_string()),
         }),
         prompt: Some(d.prompt.trim().to_string()),
-        kind: Some(ScheduleKind::Cron {
-            expr: d.cron.trim().to_string(),
-            tz: "UTC".to_string(),
-        }),
+        kind: Some(draft_schedule_kind(d)),
         catch_up: None,
     }
 }
@@ -1086,9 +1214,9 @@ pub fn changes_frozen_fields(d: &FormDraft, old: &Routine) -> bool {
 /// Shown while the server cannot be reached.
 pub const OFFLINE_NOTE: &str =
     "서버에 연결되지 않아 루틴이 이 앱을 실행하는 동안만 이 기기에 보관됩니다";
-/// Shown when routines that only this device keeps are listed beside the server's.
+/// Shown when routines that only this device keeps are listed beside the server's (or in sample mode).
 pub const LOCAL_NOTE: &str =
-    "이벤트 루틴은 서버가 지원하지 않아 이 앱을 실행하는 동안만 이 기기에 보관됩니다";
+    "이 기기에만 있는 루틴은 이 앱을 실행하는 동안만 보관됩니다";
 pub const RUN_NOTICE: &str = "서버에 연결되지 않아 지금 실행할 수 없습니다";
 pub const NO_CWD_NOTICE: &str =
     "이 프로젝트의 작업 폴더를 알 수 없습니다. 프로젝트에서 세션을 한 번 시작하셔야 합니다";
@@ -1100,8 +1228,10 @@ pub const NO_CWD_NOTICE: &str =
 pub fn changed_patch(d: &FormDraft, old: &Routine) -> SchedulePatch {
     let name = d.name.trim();
     let prompt = d.prompt.trim();
-    let cron = d.cron.trim();
-    let schedule_changed = d.trigger != old.trigger || cron != old.cron.trim();
+    let kind = draft_schedule_kind(d);
+    let initial_cron = FormDraft::from_routine(old).cron;
+    let schedule_changed = d.trigger != old.trigger
+        || (d.cron.trim() != initial_cron.trim() && kind_text(&kind) != old.cron.trim());
     let cont = old.continue_session.is_some();
     SchedulePatch {
         project: (!cont && d.sel.project != old.sel.project).then(|| d.sel.project.clone()),
@@ -1114,10 +1244,7 @@ pub fn changed_patch(d: &FormDraft, old: &Routine) -> SchedulePatch {
             title: Some(name.to_string()),
         }),
         prompt: (prompt != old.prompt.trim()).then(|| prompt.to_string()),
-        kind: schedule_changed.then(|| ScheduleKind::Cron {
-            expr: cron.to_string(),
-            tz: "UTC".to_string(),
-        }),
+        kind: schedule_changed.then_some(kind),
         catch_up: None,
     }
 }
@@ -1171,10 +1298,20 @@ pub struct RunRowText {
     pub opens_session: bool,
 }
 
-/// The run tile's second line when the run has a session, and when it has none. The mockup
-/// names the member; a run carries only its session id, so the line says what the tile opens.
+/// The run tile's second line when the run's session is not known to the client, and when the
+/// run has none. A known session names its member (`run_tile_sub`).
 pub const RUN_TILE_SESSION: &str = "세션";
 pub const RUN_TILE_NO_SESSION: &str = "세션 없음";
+
+/// The run tile's second line (`.runtile` `mname(session)`): the member whose session the run
+/// is, when the client knows that session, else what the tile opens (#848, review r3).
+pub fn run_tile_sub(r: &Run, member: Option<&str>) -> String {
+    match (&r.session, member.map(str::trim).filter(|m| !m.is_empty())) {
+        (None, _) => RUN_TILE_NO_SESSION.to_string(),
+        (Some(_), Some(m)) => m.to_string(),
+        (Some(_), None) => RUN_TILE_SESSION.to_string(),
+    }
+}
 
 pub fn run_row_text(r: &Run, now: Minutes, simulated: bool) -> RunRowText {
     RunRowText {
@@ -1626,6 +1763,8 @@ mod tests {
             "the cron text is replaced"
         );
         e.cron = "PR이 열릴 때".into();
+        assert_eq!(e.errors(), [FormError::EventInvalid]);
+        e.cron = "DarkPyonix/darkpyonix-ember#develop".into();
         assert!(e.errors().is_empty());
         let back = e.with_trigger(Trigger::Time);
         assert_eq!(back.cron, "0 9 * * *");
@@ -1642,6 +1781,7 @@ mod tests {
             FormError::NameEmpty,
             FormError::ScheduleInvalid,
             FormError::EventEmpty,
+            FormError::EventInvalid,
             FormError::PromptEmpty,
         ] {
             assert!(e.message().ends_with("니다"), "{}", e.message());
@@ -2010,6 +2150,7 @@ mod tests {
             FormError::NameEmpty,
             FormError::ScheduleInvalid,
             FormError::EventEmpty,
+            FormError::EventInvalid,
             FormError::PromptEmpty,
         ] {
             strings.push(e.message().into());
@@ -2270,8 +2411,11 @@ mod tests {
     #[test]
     fn fr_l25_form_pairs_fields_in_two_columns_when_inline_and_wide() {
         assert!(form_two_columns(FormLayout::Inline, 686.0));
-        assert!(!form_two_columns(FormLayout::Inline, 400.0));
-        assert!(!form_two_columns(FormLayout::Sheet, 720.0));
+        assert!(form_two_columns(FormLayout::Inline, 400.0));
+        // The phone's sheet (390 less 20 on each side) pairs them too, as the mockup's 390 form.
+        assert!(form_two_columns(FormLayout::Sheet, 350.0));
+        assert!(!form_two_columns(FormLayout::Sheet, 240.0));
+        assert!(!form_two_columns(FormLayout::Inline, 250.0));
         let one: Vec<FormField> = form_rows(false).into_iter().flatten().collect();
         let two: Vec<FormField> = form_rows(true).into_iter().flatten().collect();
         assert_eq!(one, FORM_FIELDS.to_vec());
@@ -2305,5 +2449,169 @@ mod tests {
         assert_eq!(weekday_bar_radius(24.0, 100.0), 12.0);
         assert_eq!(weekday_bar_radius(24.0, 10.0), 5.0);
         assert_eq!(weekday_bar_radius(24.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn fr_l25_weekday_bar_joins_failures_on_top_of_successes() {
+        // `.bar` stacks its parts with `gap: 2px` inside one pill (review r3: two separate
+        // pills with a dot on top).
+        assert_eq!(WEEKDAY_BAR_GAP, 2.0);
+        let (fail, gap, ok) = weekday_bar_parts(102.0, 3, 1);
+        assert_eq!(gap, 2.0);
+        assert_eq!(fail, 25.0);
+        assert_eq!(ok, 75.0);
+        assert_eq!(fail + gap + ok, 102.0, "the parts fill the bar exactly");
+        assert_eq!(weekday_bar_parts(50.0, 4, 0), (0.0, 0.0, 50.0), "no gap without failures");
+        assert_eq!(weekday_bar_parts(50.0, 0, 2), (50.0, 0.0, 0.0), "all failed is all orange");
+        assert_eq!(weekday_bar_parts(0.0, 1, 1), (0.0, 0.0, 0.0));
+        assert_eq!(weekday_bar_parts(40.0, 0, 0), (0.0, 0.0, 0.0));
+        let (f, g, o) = weekday_bar_parts(1.0, 1, 1);
+        assert!(f >= 0.0 && o >= 0.0 && f + g + o <= 1.0 + f32::EPSILON, "a tiny bar never overflows");
+    }
+
+    #[test]
+    fn fr_l25_run_tile_names_the_member_when_the_session_is_known() {
+        let with = Run { at: 0, status: RunStatus::Done, session: Some("s1".into()) };
+        assert_eq!(run_tile_sub(&with, Some("ember-구현")), "ember-구현");
+        assert_eq!(run_tile_sub(&with, Some("  ")), RUN_TILE_SESSION, "a blank name falls back");
+        assert_eq!(run_tile_sub(&with, None), RUN_TILE_SESSION);
+        let without = Run { session: None, ..with };
+        assert_eq!(run_tile_sub(&without, Some("ember-구현")), RUN_TILE_NO_SESSION);
+    }
+
+    #[test]
+    fn fr_l23_ci_event_parses_one_input_shape_and_strips_github_urls() {
+        assert_eq!(
+            parse_ci_event("DarkPyonix/darkpyonix-ember"),
+            Some(("DarkPyonix/darkpyonix-ember".into(), None))
+        );
+        assert_eq!(
+            parse_ci_event("  DarkPyonix/darkpyonix-ember#develop  "),
+            Some((
+                "DarkPyonix/darkpyonix-ember".into(),
+                Some("develop".into())
+            ))
+        );
+        assert_eq!(
+            parse_ci_event("github.com/DarkPyonix/darkpyonix-ember#feat/ci"),
+            Some((
+                "DarkPyonix/darkpyonix-ember".into(),
+                Some("feat/ci".into())
+            ))
+        );
+        assert_eq!(
+            parse_ci_event("https://github.com/DarkPyonix/darkpyonix-ember.git/#main"),
+            Some(("DarkPyonix/darkpyonix-ember".into(), Some("main".into())))
+        );
+        assert_eq!(
+            parse_ci_event("http://github.com/owner/repo/"),
+            Some(("owner/repo".into(), None))
+        );
+        // The ` (branch)` display form is not accepted as input.
+        assert_eq!(parse_ci_event("owner/repo (develop)"), None);
+        assert_eq!(parse_ci_event(""), None);
+        assert_eq!(parse_ci_event("owner"), None);
+        assert_eq!(parse_ci_event("owner/repo/extra"), None);
+        assert_eq!(parse_ci_event("owner/repo#"), None);
+        assert_eq!(parse_ci_event("owner/repo#a#b"), None);
+        assert_eq!(parse_ci_event("owner/repo#bad branch"), None);
+    }
+
+    #[test]
+    fn fr_l23_ci_event_routine_round_trips_between_server_and_form() {
+        let ev_kind = ScheduleKind::Event {
+            on: EventOn::CiFailed,
+            repository: "DarkPyonix/darkpyonix-ember".into(),
+            branch: Some("develop".into()),
+        };
+        let mut s = schedule(ev_kind.clone(), false);
+        s.target = ScheduleTarget::New {
+            title: Some("CI 고치기".into()),
+        };
+        s.next_run_at = None;
+        let r = schedule_to_routine(&s);
+        assert_eq!(r.trigger, Trigger::Event);
+        assert_eq!(r.cron, "CI 실패 시 · DarkPyonix/darkpyonix-ember (develop)");
+        assert_eq!(
+            schedule_line(&r),
+            "CI 실패 시 · DarkPyonix/darkpyonix-ember (develop)"
+        );
+
+        let d = FormDraft::from_routine(&r);
+        assert_eq!(d.trigger, Trigger::Event);
+        assert_eq!(d.cron, "DarkPyonix/darkpyonix-ember#develop");
+        assert!(d.errors().is_empty());
+        assert!(
+            patch_is_empty(&changed_patch(&d, &r)),
+            "unedited event routine produces an empty patch"
+        );
+
+        let created = new_schedule(&d, "/w/ember");
+        assert_eq!(created.kind, ev_kind);
+        assert_eq!(schedule_patch(&d).kind, Some(ev_kind));
+
+        let mut d_no_branch = d.clone();
+        d_no_branch.cron = "https://github.com/DarkPyonix/darkpyonix-ember".into();
+        let p = changed_patch(&d_no_branch, &r);
+        assert_eq!(
+            p.kind,
+            Some(ScheduleKind::Event {
+                on: EventOn::CiFailed,
+                repository: "DarkPyonix/darkpyonix-ember".into(),
+                branch: None,
+            })
+        );
+        let stored = d_no_branch.into_routine("r-ev", true);
+        assert_eq!(stored.cron, "CI 실패 시 · DarkPyonix/darkpyonix-ember");
+        assert_eq!(
+            FormDraft::from_routine(&stored).cron,
+            "DarkPyonix/darkpyonix-ember"
+        );
+    }
+
+    #[test]
+    fn fr_l25_existing_event_routine_with_non_repo_schedule_allows_name_only_edit() {
+        let mut s = schedule(
+            ScheduleKind::Event {
+                on: EventOn::CiFailed,
+                repository: "legacy-repo".into(),
+                branch: None,
+            },
+            false,
+        );
+        s.target = ScheduleTarget::New {
+            title: Some("PR 리뷰".into()),
+        };
+        s.next_run_at = None;
+        let r = schedule_to_routine(&s);
+        let initial = FormDraft::from_routine(&r);
+        assert_eq!(initial.cron, "legacy-repo");
+        assert_eq!(initial.errors(), vec![FormError::EventInvalid]);
+        assert!(
+            initial.errors_with_initial(Some(&initial)).is_empty(),
+            "unchanged event schedule from an existing routine does not block saving"
+        );
+
+        let mut edited = initial.clone();
+        edited.name = "PR 리뷰 2".into();
+        assert!(edited.errors_with_initial(Some(&initial)).is_empty());
+        let p = changed_patch(&edited, &r);
+        assert_eq!(
+            p.target,
+            Some(ScheduleTarget::New {
+                title: Some("PR 리뷰 2".into())
+            })
+        );
+        assert_eq!(p.kind, None, "unchanged event schedule is omitted from PATCH");
+
+        // Changing the event field to another invalid value still requires owner/name.
+        edited.cron = "still-bad".into();
+        assert_eq!(
+            edited.errors_with_initial(Some(&initial)),
+            vec![FormError::EventInvalid]
+        );
+
+        // LOCAL_NOTE does not claim a sample-mode device routine was made offline.
+        assert!(!LOCAL_NOTE.contains("오프라인"));
     }
 }

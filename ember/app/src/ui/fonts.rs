@@ -9,6 +9,7 @@
 
 use std::sync::OnceLock;
 
+use compose_rust::schema::OverlayTokens;
 use compose_rust::{asset, AssetKind, ColorRole, ColorScheme, DesignSystem, FontStack, Palette, Theme, TypeRole};
 
 /// One bundled face: its file name under `assets/fonts/` and its bytes.
@@ -113,21 +114,60 @@ const APP_PALETTE: Palette = Palette::new()
 /// The editor window's palette: the app palette with the code panel as `surface`
 /// (`editor.css:52` `.ed-main` and `:71` `.ed-no`). Cupertino's code editor fills its panel
 /// and gutter with `Background`, so the separate editor process (FR-L31), whose page paints
-/// its own `--bg` in CSS, gives that role `surface`. The current line stays the toolkit's
-/// (Cupertino draws it as `Primary` at 8%; there is no role for it, the mockup's is
-/// `surface-2`, `editor.css:70`), a toolkit gap reported with the design review.
+/// its own `--bg` in CSS, gives that role `surface`. The current line is set on the editor
+/// itself ([`CODE_EDITOR_COLORS`], FR-L31.28), not here: Cupertino draws it as `Primary` at 8%.
 const EDITOR_PALETTE: Palette = APP_PALETTE.with(ColorRole::Background, LIGHT.surface, DARK.surface);
+
+/// The code type of the editor window (FR-L31.27): `editor.css:2` `--code-fs:13px` on a
+/// `--code-lh:22px` pitch, in sp for the code editor's `font_size` and `line_height`.
+pub const CODE_FONT_SIZE: f32 = 13.0;
+pub const CODE_LINE_HEIGHT: f32 = 22.0;
+/// The line number column (FR-L31.27): `editor.css:71` `.ed-no` is 56px wide with the number
+/// right-aligned `--sp3` (12px) from its right edge. The toolkit draws a number right-aligned
+/// in its column, so the column's least width and its side padding carry both values.
+pub const CODE_GUTTER_MIN_WIDTH: f32 = 56.0;
+pub const CODE_GUTTER_PADDING: f32 = 12.0;
+/// The room between the gutter and the text (FR-L31.27). The mockup's text starts 72px in: the
+/// 56px number column, then the 4px change marker and its 12px margin (`editor.css:73`), kept
+/// on every line. The toolkit adds its own 16dp change column and a fold column one row wide
+/// only where a file has them, and this inset after them, so no inset gives 72dp on a file
+/// with change bars and 78dp on one with folds; a fixed text start is a toolkit gap.
+pub const CODE_TEXT_INSET: f32 = 0.0;
+/// The room above the first line (FR-L31.27): `editor.css:68` `.ed-code{padding:var(--sp2) 0}`.
+/// The code editor has no content padding, so the page leaves it above the widget's box.
+pub const CODE_TOP_PADDING_CSS: &str = "var(--sp2)";
+
+/// The colours of the code editor's own parts (FR-L31.27): line numbers in `muted`
+/// (`editor.css:71`), the caret line's number in `text` (`editor.css:72`). A part is a role of
+/// the palette, and the palette has no role that is `muted` by name, so the number takes
+/// `SyntaxComment`, which this palette sets to `muted` (`.t-com`, `editor.css:77`).
+pub const CODE_EDITOR_COLORS: compose_rust::code::CodeEditorColors = compose_rust::code::CodeEditorColors::new()
+    .line_number(ColorRole::SyntaxComment)
+    .current_line_number(ColorRole::OnSurface)
+    // FR-L31.28: the caret line's band is `surface-2` (`editor.css:70` `.ed-ln.cur`), which the
+    // palette gives `SurfaceVariant`. A part named here is drawn opaque, not as a wash.
+    .current_line(ColorRole::SurfaceVariant);
 
 /// The Ember palette's value for a role in one scheme (tests and the capture checks read it).
 pub fn palette_color(role: ColorRole, scheme: ColorScheme) -> Option<compose_rust::Color> {
     APP_PALETTE.get(role, scheme)
 }
 
+/// The toast's elevation in dp: the mockup's `.toast` casts `--shadow-lg` (`0 10px 32px`).
+pub const TOAST_ELEVATION: u16 = 12;
+
+/// The overlay tokens the app sets: only the toast's shadow and its pill corner (`.toast`
+/// `border-radius:var(--pill)`). A message is not a node and takes no Modifier, so its shadow
+/// is an overlay token (compose-rust#446, v0.0.9); every other token is 0, the design system's.
+pub const APP_OVERLAY: OverlayTokens =
+    OverlayTokens::new().toast_elevation(TOAST_ELEVATION).toast_corner_radius(999);
+
 /// The toolkit theme the app launches with: the prose roles in Inter and Pretendard, `Mono`
 /// in JetBrains Mono.
 pub fn app_theme(scheme: ColorScheme) -> Theme {
     Theme::unified(DesignSystem::Cupertino)
         .with_palette(&APP_PALETTE)
+        .with_overlay_tokens(&APP_OVERLAY)
         .with_color_scheme(scheme)
         .with_default_font(app_font())
         .with_font(TypeRole::Mono, mono_font())
@@ -153,6 +193,17 @@ mod tests {
         assert_eq!(palette.get(ColorRole::Surface, ColorScheme::Dark), Some(DARK.surface));
         assert_eq!(palette.get(ColorRole::OnSurface, ColorScheme::Light), Some(LIGHT.text));
         assert_eq!(palette.get(ColorRole::OnSurface, ColorScheme::Dark), Some(DARK.text));
+    }
+
+    #[test]
+    fn fr_l9_app_theme_gives_the_toast_its_shadow_and_pill_corner() {
+        // compose-rust#446: the toast's shadow and corner are overlay tokens; the rest stay 0.
+        let overlay = app_theme(ColorScheme::Dark).overlay.expect("overlay tokens");
+        assert_eq!(overlay.toast_elevation, TOAST_ELEVATION);
+        assert_eq!(overlay.toast_corner_radius, 999);
+        let rest = OverlayTokens { toast_elevation: 0, toast_corner_radius: 0, ..*overlay };
+        assert_eq!(rest, OverlayTokens::new());
+        assert!(editor_theme(ColorScheme::Light).overlay.is_some());
     }
 
     fn hex(role: ColorRole, scheme: ColorScheme) -> u32 {
@@ -209,6 +260,68 @@ mod tests {
             assert_eq!(editor.get(ColorRole::Background, scheme), Some(surface));
             assert_eq!(app.get(ColorRole::Background, scheme), Some(bg));
             assert_eq!(editor.get(ColorRole::SyntaxKeyword, scheme), app.get(ColorRole::SyntaxKeyword, scheme));
+        }
+    }
+
+    /// The value of the custom property `name` in the mockup's `.ed` rule, in px.
+    fn ed_px(name: &str) -> f32 {
+        let css = include_str!("../../assets/editor/editor.css");
+        let at = css.find(&format!("{name}:")).unwrap_or_else(|| panic!("{name} in editor.css")) + name.len() + 1;
+        let end = at + css[at..].find("px").expect("a px value");
+        css[at..end].parse().expect("a number")
+    }
+
+    /// FR-L31.27 (design review E1, #895): the code type, the row pitch and the line number
+    /// column are the mockup's (`editor.css:2`, `:68`, `:71`), and both code editors take them.
+    #[test]
+    fn fr_l31_27_code_metrics_and_line_numbers_are_the_mockups() {
+        assert_eq!(CODE_FONT_SIZE, ed_px("--code-fs"));
+        assert_eq!(CODE_LINE_HEIGHT, ed_px("--code-lh"));
+        let css = include_str!("../../assets/editor/editor.css");
+        assert!(css.contains(".ed-no{width:56px;flex:none;text-align:right;padding-right:var(--sp3);color:var(--muted)"), "the mockup's number column");
+        assert_eq!(CODE_GUTTER_MIN_WIDTH, 56.0);
+        // `--sp3` is 12px (`style.css:19`).
+        assert!(include_str!("../../assets/editor/style.css").contains("--sp3:12px"));
+        assert_eq!(CODE_GUTTER_PADDING, 12.0);
+        assert!(css.contains(".ed-code{flex:1;overflow:auto;font:var(--code-fs)/var(--code-lh) var(--mono);padding:var(--sp2) 0"), "the mockup's top padding");
+        assert_eq!(CODE_TOP_PADDING_CSS, "var(--sp2)");
+        // Line numbers `muted`, the caret line's number `text`, in both schemes.
+        assert_eq!(CODE_EDITOR_COLORS.line_number, Some(ColorRole::SyntaxComment));
+        assert_eq!(CODE_EDITOR_COLORS.current_line_number, Some(ColorRole::OnSurface));
+        for scheme in [ColorScheme::Light, ColorScheme::Dark] {
+            let palette = editor_theme(scheme).palette.expect("editor palette");
+            let (muted, text) = if scheme == ColorScheme::Light { (LIGHT.muted, LIGHT.text) } else { (DARK.muted, DARK.text) };
+            assert_eq!(palette.get(ColorRole::SyntaxComment, scheme), Some(muted));
+            assert_eq!(palette.get(ColorRole::OnSurface, scheme), Some(text));
+        }
+        // Both code editors (the file's and the diff's working-tree side) are given the values.
+        for (file, source) in [("editor_workbench.rs", include_str!("editor_workbench.rs")), ("editor_scm.rs", include_str!("editor_scm.rs"))] {
+            for prop in [
+                "font_size: Some(crate::ui::fonts::CODE_FONT_SIZE)",
+                "line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT)",
+                "gutter_min_width: Some(crate::ui::fonts::CODE_GUTTER_MIN_WIDTH)",
+                "gutter_padding: Some(crate::ui::fonts::CODE_GUTTER_PADDING)",
+                "text_inset: Some(crate::ui::fonts::CODE_TEXT_INSET)",
+                "colors: crate::ui::fonts::CODE_EDITOR_COLORS",
+            ] {
+                assert!(source.contains(prop), "{file} passes `{prop}` to its CodeEditor");
+            }
+        }
+        assert!(
+            include_str!("editor_workbench.rs").contains("margin-top:{crate::ui::fonts::CODE_TOP_PADDING_CSS}"),
+            "the page leaves the top padding above the code editor's box"
+        );
+    }
+
+    /// FR-L31.28 (design review E2, #895): the caret line's band is the mockup's `surface-2`
+    /// (`editor.css:70`; `style.css:3` `#f7f6f2`, `:28` `#252523`), not the toolkit's accent wash.
+    #[test]
+    fn fr_l31_28_the_current_line_is_surface_2() {
+        assert!(include_str!("../../assets/editor/editor.css").contains(".ed-ln.cur{background:var(--surface-2)}"));
+        let role = CODE_EDITOR_COLORS.current_line.expect("the editor names its current line colour");
+        for (scheme, rgb) in [(ColorScheme::Light, 0xf7f6f2), (ColorScheme::Dark, 0x252523)] {
+            let colour = editor_theme(scheme).palette.expect("editor palette").get(role, scheme).expect("the role has a value");
+            assert_eq!(colour.to_argb() & 0x00ff_ffff, rgb, "{scheme:?}");
         }
     }
 

@@ -34,16 +34,13 @@ pub const PEER_MIGRATION: &str = "
 ALTER TABLE computers ADD COLUMN peer_json TEXT;
 ";
 
-/// Migration for FR-C2c (#633): extracted transport peer id column with a partial UNIQUE index,
+/// Migration for FR-C2c (#633, #640): extracted transport peer id column with a partial UNIQUE index,
 /// so duplicate peer ids are refused by an O(log n) index lookup and enforced by SQLite.
+/// Backfilling parses `peer_json` via [`crate::computers::backfill_peer_ids`] so unparsable or
+/// non-canonical rows are skipped and pre-existing duplicate peer ids are logged rather than
+/// aborting the migration.
 pub const PEER_ID_UNIQUE_MIGRATION: &str = "
 ALTER TABLE computers ADD COLUMN peer_id TEXT;
-UPDATE computers
-SET peer_id = lower(json_extract(peer_json, '$.peer'))
-WHERE peer_json IS NOT NULL
-  AND json_valid(peer_json)
-  AND typeof(json_extract(peer_json, '$.peer')) = 'text'
-  AND length(json_extract(peer_json, '$.peer')) = 64;
 CREATE UNIQUE INDEX IF NOT EXISTS computers_peer_id_idx
 ON computers(peer_id)
 WHERE peer_id IS NOT NULL;

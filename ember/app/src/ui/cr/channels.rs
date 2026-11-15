@@ -19,16 +19,17 @@ use compose_rust::runtime::{
 };
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, IconRole, SpaceRole};
+use compose_rust::{Alignment, SpaceRole};
 
 pub use crate::ui::channels::{
     bubble_side, compact_shows_room, draft_after_send, empty_text, SendState, feed, filter_chips, group_rooms, last_seq,
     me_id, merge_messages, message_from, room_from, rooms_from, rooms_snapshot, split_view,
     time_label, BubbleView, FeedItem, ListFilter, Load, Member, Message, Room, RoomRow, Section,
-    should_mark_read, Side,
+    should_mark_read, Side, room_head_shows_project, room_title_max, LIST_HEAD_PAD_BOTTOM, LIST_HEAD_PAD_SIDE,
+    LIST_HEAD_PAD_TOP, LIST_PANE_INSET, ROOM_HEAD_H, ROOM_HEAD_ICON, ROOM_HEAD_PAD, ROOM_ROW_GAP, ROOM_ROW_PAD_H,
 };
 use super::components::{
-    pill_colors, AppButton, ButtonKind, EmberField, FieldOptions, FilterChip, Label, Pill, PillTone, SearchField,
+    pill_colors, AppButton, ButtonKind, EmberField, FieldOptions, Label, Pill, PillTone, SearchField,
 };
 use super::theme::*;
 use super::notice;
@@ -37,6 +38,12 @@ use crate::ui::project::{display_name, harness_tone};
 /// The shell's "a detail view is open" flag; `None` in unit tests without services.
 fn detail_state() -> Option<MutableState<bool>> {
     crate::services::try_services().map(|s| s.ui.detail_open.clone())
+}
+
+/// Whether an open room closes because the detail flag was cleared: only on a phone, where the
+/// room fills the screen while the flag is set (FR-L28, #885). `None`: no services (unit tests).
+pub fn room_closed_by_back(split: bool, room_open: bool, detail_open: Option<bool>) -> bool {
+    !split && room_open && detail_open == Some(false)
 }
 
 /// The list panel's width (`.split`): 340 above 1279 dp, 280 up to 1279, 260 up to 900.
@@ -243,6 +250,11 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
     });
     let window = crate::ui::window_size::current_window_size();
     let split = split_view(window.class);
+    // The system back clears the shell's detail flag (`BackStep::CloseDetail`); on a phone the
+    // open room closes with it, so the list and the tab bar come back together (FR-L28, #885).
+    if room_closed_by_back(split, open.get().is_some(), detail_state().map(|d| d.get())) {
+        open.set(None);
+    }
     // Side by side with nothing open, the first listed room is shown (FR-L12, #509); the
     // compact layout keeps the list first.
     let order: Vec<String> = Vec::new();
@@ -324,65 +336,117 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
     let sections = group_rooms(rooms, order, &current);
     let chips = filter_chips(rooms, order);
     let selected = current_room;
-    cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-        // Header: the title at 15 px and a round "+" (new channel).
+    // `.listpane`: the whole pane on `surface-2` (review CH3; it was the page's `bg`, so in dark
+    // the list read as part of the page). Rows run edge to edge; the title row, the search field
+    // and the segments carry their own side insets (CH4, #630).
+    // On a phone the list is the page itself: on `surface-2` it left a band of `bg` above it
+    // (the window's top inset) and around the tab bar (captures channels-list-390, 2026-11-15).
+    let pane = if narrow { p.bg } else { p.surface_2 };
+    cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height().background(paint(pane))).content(|| {
+        // `.ph`: 16 above and at the sides, 8 below; the title 18/600 and the 32 dp "+".
+        cu::Spacer().modifier(Modifier::new().height(LIST_HEAD_PAD_TOP));
         cu::Row()
             .alignment(Alignment::CenterStart)
-            .modifier(Modifier::new().fill_max_width().height(56.0))
+            .modifier(Modifier::new().fill_max_width().height(H_CTL))
             .content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[3]));
+                cu::Spacer().modifier(Modifier::new().width(LIST_HEAD_PAD_SIDE));
                 Label("채널", list_title_size(), Weight::Semibold, None, Some(1));
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                 // FR-T10, #499: the button opens the 새 채널 sheet; in demo it says why not.
                 super::new_channel::NewChannelButton(new_ch, live, current.project.clone());
-                cu::Spacer().modifier(Modifier::new().width(SP[3]));
+                cu::Spacer().modifier(Modifier::new().width(LIST_HEAD_PAD_SIDE));
             });
-        cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-        cu::Column().space_role(SpaceRole::Sm).modifier(Modifier::new().fill_max_width().fill_max_height().padding(SP[2])).content(|| {
-            // v0.0.7: #376 and #374 fixed (`TextField::text`); workaround kept until checked on a
-            // display (a controlled value must not move the caret), so the field is uncontrolled.
-            // `.searchbox{display:none}` up to 900 dp: no search field on a phone.
-            if !narrow {
-                let query = filter.clone();
+        cu::Spacer().modifier(Modifier::new().height(LIST_HEAD_PAD_BOTTOM));
+        // v0.0.7: #376 and #374 fixed (`TextField::text`); workaround kept until checked on a
+        // display (a controlled value must not move the caret), so the field is uncontrolled.
+        // `.searchbox{display:none}` up to 900 dp: no search field on a phone. Its margin is
+        // `0 12 8`.
+        if !narrow {
+            let query = filter.clone();
+            ListInset(|| {
                 SearchField("채널, 메시지 검색", H_BTN, move |v| {
                     let mut f = query.get_untracked();
                     f.query = v;
                     query.set(f);
                 });
-            }
-            cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
-                for c in chips.iter() {
-                    let (filter, c2) = (filter.clone(), c.clone());
-                    let text = c.as_ref().map(|x| display_name(x)).unwrap_or_else(|| "전체".to_string());
-                    FilterChip(&text, *c == current.project, move || {
-                        let mut f = filter.get_untracked();
-                        f.project = c2.clone();
-                        filter.set(f);
-                    });
-                    cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                }
             });
-            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(|| {
-                if let Load::Failed(why) = load {
-                    // Rooms stay on screen through a failed refresh; the reason is told once.
-                    let _ = why;
-                    Label("채널을 불러오지 못했습니다. 잠시 뒤 다시 시도합니다.", Fs::Sm, Weight::Regular, Some(paint(p.red.strong)), None);
+            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+        }
+        // `.seg.scrollx` with `padding: 0 12 8`: bordered segments 8 apart (CH5).
+        cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL)).content(|| {
+            cu::Spacer().modifier(Modifier::new().width(LIST_PANE_INSET));
+            for (i, c) in chips.iter().enumerate() {
+                if i > 0 {
+                    cu::Spacer().modifier(Modifier::new().width(SP[1]));
                 }
-                if sections.is_empty() && *load == Load::Ready {
-                    Label(&empty_text(&Load::Ready, 0).unwrap_or_default(), Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
-                }
-                // The mockup list is flat, one row per room, newest first; the project is a chip.
-                cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
-                    for s in sections.iter() {
-                        for r in s.rooms.iter() {
-                            let members = rooms.iter().find(|x| x.id == r.id).map(|x| x.members.clone()).unwrap_or_default();
-                            RoomItem(r, &s.project, &members, selected.as_deref() == Some(r.id.as_str()), open, feed.clone());
-                        }
-                    }
+                let (filter, c2) = (filter.clone(), c.clone());
+                let text = c.as_ref().map(|x| display_name(x)).unwrap_or_else(|| "전체".to_string());
+                SegChip(&text, *c == current.project, move || {
+                    let mut f = filter.get_untracked();
+                    f.project = c2.clone();
+                    filter.set(f);
                 });
+            }
+            cu::Spacer().modifier(Modifier::new().width(LIST_PANE_INSET));
+        });
+        cu::Spacer().modifier(Modifier::new().height(SP[1]));
+        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(|| {
+            if let Load::Failed(why) = load {
+                // Rooms stay on screen through a failed refresh; the reason is told once.
+                let _ = why;
+                ListInset(|| {
+                    Label("채널을 불러오지 못했습니다. 잠시 뒤 다시 시도합니다.", Fs::Sm, Weight::Regular, Some(paint(p.red.strong)), None);
+                });
+            }
+            if sections.is_empty() && *load == Load::Ready {
+                ListInset(|| {
+                    Label(&empty_text(&Load::Ready, 0).unwrap_or_default(), Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
+                });
+            }
+            // The mockup list is flat, one row per room, newest first; the project is a chip.
+            cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+                for s in sections.iter() {
+                    for r in s.rooms.iter() {
+                        let members = rooms.iter().find(|x| x.id == r.id).map(|x| x.members.clone()).unwrap_or_default();
+                        RoomItem(r, &s.project, &members, selected.as_deref() == Some(r.id.as_str()), open, feed.clone());
+                    }
+                }
             });
         });
     });
+}
+
+/// The list pane's content inset: 12 in from each side (`margin: 0 var(--sp3)`).
+fn ListInset(content: impl FnOnce()) {
+    cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+        cu::Spacer().modifier(Modifier::new().width(LIST_PANE_INSET));
+        cu::Column().modifier(Modifier::new().weight(1.0)).content(content);
+        cu::Spacer().modifier(Modifier::new().width(LIST_PANE_INSET));
+    });
+}
+
+/// A filter segment (`.seg button`): 32 high, a pill, 13/500, `surface` on a 1 dp `line` border
+/// with `text-2`, or `ink` with `ink-text` when chosen (review CH5: borderless soft chips).
+pub fn SegChip(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let (bg, border, fg) = super::routines::seg_colors(selected, p);
+    super::components::Clickable(
+        Modifier::new()
+            .height(H_CTL)
+            .background(paint(bg))
+            .border(1.0, paint(border))
+            .shape_role(compose_rust::ShapeRole::Full)
+            .selected(selected),
+        Alignment::Center,
+        on_click,
+        || {
+            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                Label(text, Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            });
+        },
+    );
 }
 
 const ROOM_PULSE_SVG: &str = include_str!("../../../assets/nav/room-pulse.svg");
@@ -422,8 +486,11 @@ fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, o
     let detail = detail_state();
     let unread = row.unread;
     let fill = if selected { paint(p.sel) } else { paint(compose_rust::Color::argb(0)) };
+    // Edge to edge of the pane with square corners (`.room-item.on { background: var(--sel) }`,
+    // review CH4). The toolkit's padding is uniform, so the 10 goes all round and a 6 dp spacer
+    // at each end makes the mockup's 16 at the sides (#630).
     super::components::Clickable(
-        Modifier::new().fill_max_width().background(fill).corner_radius(CORNER_SM).padding(ROOM_ROW_PAD_V),
+        Modifier::new().fill_max_width().background(fill).padding(ROOM_ROW_PAD_V),
         Alignment::CenterStart,
         move || {
             if let Some(d) = &detail {
@@ -438,10 +505,14 @@ fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, o
             open.set(Some(id.clone()));
         },
         || {
-            cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                // Row = 44 icon + 2 x 10 padding = 64 high. The list already insets the row, so the
-                // side gap is the 10 of the padding (the capture showed a 6 spacer pushed the icon to 22+).
+            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                // Row = 44 icon + 2 x 10 padding = 64 high. The row runs edge to edge, so a 6 dp
+                // spacer at each end puts the icon 16 in, at the list title's 16 (#630); 12
+                // between the icon, the text and the time (`.room-item { gap: var(--sp3) }`).
+                let side = ROOM_ROW_PAD_H - ROOM_ROW_PAD_V;
+                cu::Spacer().modifier(Modifier::new().width(side));
                 RoomIcon(&row.id, project, ROOM_ICON);
+                cu::Spacer().modifier(Modifier::new().width(ROOM_ROW_GAP));
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                     cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).content(|| {
                         Label(&row.name, Fs::Md, Weight::Medium, Some(paint(p.text)), Some(1));
@@ -450,12 +521,14 @@ fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, o
                     let last = if row.last_text.is_empty() { "메시지가 없습니다".to_string() } else { row.last_text.clone() };
                     Label(&last, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                 });
+                cu::Spacer().modifier(Modifier::new().width(ROOM_ROW_GAP));
                 cu::Column().alignment(Alignment::CenterEnd).content(|| {
                     Label(&time, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                     if row.unread > 0 {
                         super::shell::RedBadge(row.unread as usize);
                     }
                 });
+                cu::Spacer().modifier(Modifier::new().width(side));
             });
         },
     );
@@ -468,30 +541,31 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
     let owner = super::channel_owner::OwnerState::new(&room.id);
     // `.room{background:var(--room)}`: the room is on `--surface`, not the page.
     cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height().background(paint(p.surface))).content(|| {
-        // `.topbar`: the room mark, the name with the member count and the project, round
-        // buttons at the right, a 1 px line below.
+        // `.topbar` on one line (review CH7): 20 in, the 30 dp room mark, the name at 14/600, the
+        // member count, "• project" 12/500 `text-2` (not at 560 dp and below, `.hide-sm`), then
+        // the round buttons right after the title (`.topbar > * { flex: none }`), 8 apart.
+        let width = crate::ui::window_size::current_window_size().width_dp;
+        let title = super::home::fit_label(&room.name, room_title_max(width), Fs::Md.size());
         cu::Row()
-            .space_role(SpaceRole::Sm)
+            .spacing(SP[1])
             .alignment(Alignment::CenterStart)
-            .modifier(Modifier::new().fill_max_width().height(56.0))
+            .modifier(Modifier::new().fill_max_width().height(ROOM_HEAD_H))
             .content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[3]));
+                cu::Spacer().modifier(Modifier::new().width(ROOM_HEAD_PAD - SP[1]));
                 if show_back {
-                    // The visible label "목록" names the back button.
-                    AppButton("목록", Some(IconRole::Back), ButtonKind::Default, true, true, false, on_back);
+                    // `.icon-btn.sm.backbtn`: an icon-only 32 px square named 뒤로 (review CH8).
+                    super::components::BackButton(on_back);
                 }
-                RoomIcon(&room.id, &room.project, 36.0);
-                cu::Column().content(|| {
-                    cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).content(|| {
-                        Label(&room.name, Fs::Md, Weight::Semibold, None, Some(1));
-                        Label(&room.members.len().to_string(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    });
-                    cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).content(|| {
+                RoomIcon(&room.id, &room.project, ROOM_HEAD_ICON);
+                Label(&title, Fs::Md, Weight::Semibold, None, Some(1));
+                Label(&room.members.len().to_string(), Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+                if room_head_shows_project(width) {
+                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[0]).content(|| {
                         super::compat::Dot(crate::model::Tone::Neutral);
-                        Label(&display_name(&room.project), Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                        let project = super::home::fit_label(&display_name(&room.project), 160.0, Fs::Xs.size());
+                        Label(&project, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
                     });
-                });
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                }
                 // The members button opens the owner sheet (FR-T14, FR-T15, FR-T17), named "멤버"
                 // (compose-rust v0.0.7, #429). The more glyph does nothing yet, so it is hidden
                 // from assistive technology.
@@ -522,7 +596,7 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                         )
                         .content(|| super::shell::NavIcon(svg, p.text_2.to_argb(), 16.0));
                 }
-                cu::Spacer().modifier(Modifier::new().width(SP[3]));
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
             });
         cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
         cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(|| {
@@ -900,10 +974,190 @@ mod tests {
     }
 
     #[test]
+    fn fr_l28_the_system_back_closes_a_phone_room() {
+        assert!(room_closed_by_back(false, true, Some(false)));
+        assert!(!room_closed_by_back(false, true, Some(true)), "the room is still the detail view");
+        assert!(!room_closed_by_back(true, true, Some(false)), "side by side the room stays");
+        assert!(!room_closed_by_back(false, false, Some(false)));
+        assert!(!room_closed_by_back(false, true, None));
+    }
+
+    #[test]
     fn fr_l12_sample_rooms_feed_dividers_and_sides() {
         let rooms = sample_rooms();
         let items = feed(&rooms[0], "me", 0);
         assert!(items.iter().any(|i| matches!(i, FeedItem::Divider(_))));
         assert!(items.iter().any(|i| matches!(i, FeedItem::Bubble(b) if b.side == Side::Right)));
+    }
+}
+
+/// Review rows CH3 to CH7 (#894) and the #603 review follow-ups (#630): what the list pane and
+/// the room header send to the toolkit.
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use compose_rust::protocol::{decode_batch, Mutation};
+    use compose_rust::{Host, Recomposer};
+
+    #[derive(Debug)]
+    struct Node {
+        id: u32,
+        parent: Option<u32>,
+        mods: Vec<String>,
+        props: Vec<String>,
+    }
+
+    fn nodes_of(content: fn()) -> Vec<Node> {
+        let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let mut nodes: Vec<Node> = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::Create { node_id, .. } => {
+                    nodes.push(Node { id: *node_id, parent: None, mods: Vec::new(), props: Vec::new() })
+                }
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.parent = Some(*parent_id);
+                    }
+                }
+                Mutation::SetModifier { node_id, modifier, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.mods.push(format!("{modifier:?}"));
+                    }
+                }
+                Mutation::SetProp { node_id, property, value } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.props.push(format!("{property:?}={value:?}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        nodes
+    }
+
+    fn node<'a>(nodes: &'a [Node], id: u32) -> &'a Node {
+        nodes.iter().find(|n| n.id == id).expect("node")
+    }
+
+    fn children<'a>(nodes: &'a [Node], parent: u32) -> Vec<&'a Node> {
+        nodes.iter().filter(|n| n.parent == Some(parent)).collect()
+    }
+
+    fn text<'a>(nodes: &'a [Node], t: &str) -> &'a Node {
+        let want = format!("Text=String({t:?})");
+        nodes.iter().find(|n| n.props.contains(&want)).unwrap_or_else(|| panic!("no text {t}"))
+    }
+
+    fn ancestors(nodes: &[Node], id: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut cur = node(nodes, id).parent;
+        while let Some(p) = cur {
+            out.push(p);
+            cur = nodes.iter().find(|n| n.id == p).and_then(|n| n.parent);
+        }
+        out
+    }
+
+    fn bg(c: compose_rust::Color) -> String {
+        format!("{:?}", compose_rust::schema::Modifier::Background(paint(c)))
+    }
+
+    fn selected_row() {
+        let open = remember(|| mutable_state_of(None::<String>));
+        let rooms = sample_rooms();
+        let sections = group_rooms(&rooms, &[], &ListFilter::default());
+        RoomItem(&sections[0].rooms[0], &sections[0].project, &[], true, &open, None);
+    }
+
+    /// CH4 and #630: the chosen row runs edge to edge with square corners, and its icon sits
+    /// 10 + 6 = 16 in, the list title's inset.
+    #[test]
+    fn ch4_selected_row_is_full_bleed_with_the_icon_16_in() {
+        let _guard = crate::services::test_guard();
+        let nodes = nodes_of(selected_row);
+        let p = ember_theme().palette;
+        let row = nodes.iter().find(|n| n.mods.contains(&bg(p.sel))).expect("the sel row");
+        assert!(row.mods.iter().any(|m| m == "Padding(10.0)"), "{row:?}");
+        assert!(
+            !row.mods.iter().any(|m| m.starts_with("Shape") || m.contains("Corner")),
+            "no rounded inset row: {row:?}"
+        );
+        let inner = children(&nodes, row.id);
+        assert_eq!(inner.len(), 1);
+        let parts = children(&nodes, inner[0].id);
+        assert!(parts[0].mods.iter().any(|m| m == "Width(6.0)"), "6 dp before the icon: {:?}", parts[0]);
+        assert!(parts.last().unwrap().mods.iter().any(|m| m == "Width(6.0)"), "6 dp after the time");
+    }
+
+    fn one_chip() {
+        SegChip("ember", false, || {});
+    }
+
+    /// CH5: a filter segment is `surface` on a 1 dp `line` border, 32 high, 13/500 `text-2`.
+    #[test]
+    fn ch5_filter_segments_are_bordered() {
+        let _guard = crate::services::test_guard();
+        let nodes = nodes_of(one_chip);
+        let p = ember_theme().palette;
+        let border = format!("{:?}", compose_rust::schema::Modifier::Border { width: 1.0, paint: paint(p.line) });
+        let chip = nodes.iter().find(|n| n.mods.contains(&border)).expect("a bordered chip");
+        assert!(chip.mods.contains(&bg(p.surface)), "{chip:?}");
+        assert!(chip.mods.iter().any(|m| m == &format!("Height({:?})", H_CTL)));
+        let label = text(&nodes, "ember");
+        assert!(ancestors(&nodes, label.id).contains(&chip.id));
+        let src = include_str!("channels.rs");
+        let list = src.split("fn RoomList(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(list.contains("SegChip(&text,"), "the list uses the bordered segment");
+        assert!(!list.contains("FilterChip("));
+    }
+
+    fn sample_screen() {
+        ChannelsScreenWith(sample_rooms());
+    }
+
+    /// CH3: the list pane is on `surface-2`, around the title.
+    #[test]
+    fn ch3_list_pane_is_on_surface_2() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let nodes = nodes_of(sample_screen);
+        let p = ember_theme().palette;
+        let title = text(&nodes, "채널");
+        let up = ancestors(&nodes, title.id);
+        // The test window is the narrow one (no size reported), where the list is the page
+        // and stays on `bg`; beside the room the pane is on `surface-2`.
+        let on = |c| up.iter().any(|id| nodes.iter().any(|n| n.id == *id && n.mods.contains(&bg(c))));
+        assert!(on(p.bg) && !on(p.surface_2), "the narrow list is on the page background");
+        let src = include_str!("channels.rs");
+        let list = src.split("fn RoomList(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(list.contains("let pane = if narrow { p.bg } else { p.surface_2 };"));
+        assert!(list.contains(".background(paint(pane))"));
+    }
+
+    fn sample_room() {
+        let rooms = sample_rooms();
+        RoomView(&rooms[0], false, None, || {});
+    }
+
+    /// CH7: the room header is one 56 dp line: mark, name, count and project side by side, the
+    /// buttons right after them and the leftover width at the end.
+    #[test]
+    fn ch7_room_header_is_one_line_with_the_buttons_after_the_title() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let nodes = nodes_of(sample_room);
+        let rooms = sample_rooms();
+        let name = text(&nodes, &rooms[0].name);
+        let head = node(&nodes, name.parent.expect("the name has a row"));
+        assert!(head.mods.iter().any(|m| m == "Height(56.0)"), "{head:?}");
+        let count = text(&nodes, &rooms[0].members.len().to_string());
+        assert_eq!(count.parent, Some(head.id), "the count is on the name's line");
+        let kids = children(&nodes, head.id);
+        let last = kids.last().unwrap();
+        assert!(last.mods.iter().any(|m| m == "Weight(1.0)"), "the leftover width is at the end: {last:?}");
+        let name_at = kids.iter().position(|n| n.id == name.id).unwrap();
+        assert!(kids[name_at..].iter().all(|n| !n.mods.iter().any(|m| m == "Weight(1.0)") || n.id == last.id));
     }
 }

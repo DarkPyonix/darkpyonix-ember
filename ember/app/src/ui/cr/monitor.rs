@@ -21,13 +21,15 @@ pub use crate::ui::monitor::{
     SortState,
 };
 use crate::ui::monitor::{
-    bar_fraction, bar_max, card_view, meter_fraction, empty_text, health_score, process_footer, ram_badge, score_tone,
+    bar_fraction, bar_max, card_view, hero_parts, meter_fraction, empty_text, health_score, process_footer, ram_badge, score_tone,
+    CORE_BARS_GAP, CORE_BARS_H, CORE_BAR_ALPHA, CORE_BAR_RADIUS,
     score_word, status_line, storage_line, CardView, FanMode, FeedStatus, FAN_MODE_AVAILABLE, FAN_MODE_REASON, POLL_SECS,
     TOP_PROCESSES,
 };
 use super::characters::{Character, CharState};
 use super::components::{
-    AppButton, ButtonKind, EmberCard, EmberSheetSized, Label, Pill, PillTone, SHEET_WIDTH_MONITOR,
+    Choice, ChoiceButton, EmberCard, EmberSheetSized, Label, Pill, PillTone, SHEET_WIDTH_MONITOR,
+    WrapLabel,
 };
 use super::theme::*;
 use crate::ui::coexist::shared_ui;
@@ -116,7 +118,11 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
     let title = chip.map(|c| c.name.clone()).unwrap_or_else(|| "컴퓨터".to_string());
     let window = crate::ui::window_size::current_window_size();
     let columns = mon_columns(window.width_dp);
-    let body_height = super::components::sheet_body_max_height(window.width_dp, window.height_dp, true, 60.0).min(1200.0);
+    // The header (60), the 1 dp line under it and, where the sheet is the whole window, the
+    // strip above it (FR-L33).
+    let top_inset = super::components::full_screen_sheet_top_inset(window.width_dp, true, crate::ui::safe_area::safe_area());
+    let body_height = super::components::sheet_body_max_height(window.width_dp, window.height_dp, true, MON_CHROME_H + top_inset).min(1200.0);
+    let scroll_pad = mon_scroll_pad(window.width_dp);
     let state = chip.map(|c| reach_pill(c.reachability));
 
     // The state pill sits in the header, beside the close button (`.mon-state`).
@@ -130,7 +136,7 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
         cu::ScrollColumn()
             .modifier(Modifier::new().fill_max_width().height(body_height).background(paint(p.bg)))
             .content(|| {
-                cu::Column().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+                cu::Column().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width().padding(scroll_pad)).content(|| {
                     let Some(c) = chip else {
                         cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().height(240.0)).content(|| {
                             Label("컴퓨터를 찾을 수 없습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -165,6 +171,17 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
                 });
             });
     });
+}
+
+/// What the monitor sheet draws above its scrolling body: the 60 dp header and the 1 dp line
+/// under it. The body was sized for the header alone, so it ran 1 dp past the dialog's edge
+/// (review sf A: the 1440 footer note was cut at the dialog's bottom edge).
+pub const MON_CHROME_H: f32 = 60.0 + 1.0;
+
+/// The scrolling body's padding, the room under the last line when it is scrolled into view:
+/// `.mon-scroll{padding:var(--sp5)}` (20), 16 at 560 and below (`.mon-scroll{padding:var(--sp4)}`).
+pub fn mon_scroll_pad(width_dp: f32) -> f32 {
+    if width_dp <= 560.0 { 16.0 } else { 20.0 }
 }
 
 /// `.mon-off`: a red soft banner with the notice, for a computer that is not online.
@@ -209,20 +226,31 @@ fn FailureNotice(detail: &str) {
 }
 
 /// The metric cards: the status card first, then CPU, GPU, memory, temperature, disk, network
-/// and fans, `columns` to a row (`.mon-grid`). Cards are 200 high in a grid (`.mon-card`
-/// `min-height: 200px`) and as high as their content in one column.
+/// and fans, `columns` to a row (`.mon-grid`). In a grid a row is at least 200 high (`.mon-card`
+/// `min-height: 200px`) and as high as its tallest card, and every card in it fills that height;
+/// in one column a card is as high as its content (`min-height:0`). A fixed 200 cut the 상태
+/// card's last line at 1440 (review r6).
 fn Grid(columns: usize, c: &ComputerChip, feed: &MonitorFeed, online: bool) {
     let cards: Vec<Card> = std::iter::once(Card::Status)
         .chain(Metric::ALL.iter().copied().map(Card::Metric))
         .collect();
-    let height = card_height(columns);
+    let min = card_min_height(columns);
+    let fill = min.is_some();
     for chunk in cards.chunks(columns) {
-        cu::Row().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width()).content(|| {
+        cu::Row().space_role(SpaceRole::Md).equal_height(fill).modifier(Modifier::new().fill_max_width()).content(|| {
             for card in chunk.iter().copied() {
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| match card {
-                    Card::Status => StatusCard(c, feed, online, height),
-                    Card::Metric(Metric::Fans) => FanCard(height),
-                    Card::Metric(m) => MetricCard(m, card_view(m, feed), empty_text(m, online, feed.status()), meter_fraction(m, feed), height),
+                let cell = Modifier::new().weight(1.0);
+                // A Box stacks the card on a zero-width floor as high as the card minimum, so
+                // the cell is max(200, its card) and the row takes its tallest cell.
+                cu::Box().modifier(if fill { cell.fill_max_height() } else { cell }).content(|| {
+                    if let Some(h) = min {
+                        cu::Spacer().modifier(Modifier::new().width(0.0).height(h));
+                    }
+                    match card {
+                        Card::Status => StatusCard(c, feed, online, fill),
+                        Card::Metric(Metric::Fans) => FanCard(fill),
+                        Card::Metric(m) => MetricCard(m, card_view(m, feed), empty_text(m, online, feed.status()), meter_fraction(m, feed), fill),
+                    }
                 });
             }
             for _ in chunk.len()..columns {
@@ -250,27 +278,25 @@ fn metric_icon(m: Metric) -> &'static str {
     }
 }
 
-/// The inner height of a card: 200 less the card padding in a grid, free in one column.
-pub fn card_height(columns: usize) -> Option<f32> {
-    (columns > 1).then_some(200.0 - 2.0 * PAD_CARD_V)
+/// A card's minimum height: 200 in a grid (`.mon-card{min-height:200px}`), none in one column.
+pub fn card_min_height(columns: usize) -> Option<f32> {
+    (columns > 1).then_some(200.0)
 }
 
 /// `.mon-card`: a 16 px icon, a 13 px semibold `--text-2` label and an optional badge on the
-/// right (`.mon-badge`).
-fn MonCard(icon: &'static str, label: &str, badge: Option<(&str, PillTone)>, height: Option<f32>, body: impl FnOnce()) {
+/// right (`.mon-badge`). With `fill` the card takes its grid row's height.
+fn MonCard(icon: &'static str, label: &str, badge: Option<(&str, PillTone)>, fill: bool, body: impl FnOnce()) {
     let p = ember_theme().palette;
-    EmberCard(false, true, None, None, None, || {
+    super::components::EmberCardSized(false, true, fill, None, None, None, || {
         let m = Modifier::new().fill_max_width();
-        let m = match height {
-            Some(h) => m.height(h),
-            None => m,
-        };
         cu::Column().spacing(SP[2]).modifier(m).content(|| {
             cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).modifier(Modifier::new().fill_max_width()).content(|| {
                 super::shell::NavIcon(icon, p.muted.to_argb(), 16.0);
-                // TODO(compose-rust#443): no overflow_wrap on Text, so a long label clips with an ellipsis.
-                Label(label, Fs::Sm, Weight::Semibold, Some(paint(p.text_2)), Some(1));
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                // A long label wraps to a second line, breaking a long token inside itself
+                // (compose-rust#443, v0.0.8), instead of clipping with an ellipsis.
+                cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
+                    WrapLabel(label, Fs::Sm, Weight::Semibold, Some(paint(p.text_2)), Some(2));
+                });
                 if let Some((text, tone)) = badge {
                     Pill(text, tone, true);
                 }
@@ -283,13 +309,13 @@ fn MonCard(icon: &'static str, label: &str, badge: Option<(&str, PillTone)>, hei
 /// The status card (`.mon-score`): the health score with its word, the main disk's free space,
 /// the score ring in its tone, the RAM badge, and the assigned projects. Without a score the
 /// card says why over an empty track (FR-L21, #389).
-fn StatusCard(c: &ComputerChip, feed: &MonitorFeed, online: bool, height: Option<f32>) {
+fn StatusCard(c: &ComputerChip, feed: &MonitorFeed, online: bool, fill: bool) {
     let p = ember_theme().palette;
     let latest = feed.latest();
     let score = latest.and_then(health_score);
     let badge = latest.and_then(ram_badge);
     let storage = latest.and_then(storage_line);
-    MonCard(super::shell::ICON_GAUGE_SVG, "상태", badge.as_deref().map(|b| (b, PillTone::Grey)), height, || {
+    MonCard(super::shell::ICON_GAUGE_SVG, "상태", badge.as_deref().map(|b| (b, PillTone::Grey)), fill, || {
         cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Column().spacing(4.0).modifier(Modifier::new().weight(1.0)).content(|| {
                 match score {
@@ -332,10 +358,12 @@ fn StatusCard(c: &ComputerChip, feed: &MonitorFeed, online: bool, height: Option
 
 /// The fan card: the speed stays 준비 중입니다 and the mode control (자동, 냉각, 최대) is shown
 /// disabled with the reason, because the node neither reports fans nor sets a mode
-/// (FR-X7, TODO(#389)). TODO(compose-rust#473): no radio role or checked state on the buttons.
-fn FanCard(height: Option<f32>) {
+/// (FR-X7, TODO(#389)). The mode buttons are radio buttons to assistive technology, with 자동
+/// checked (`Choice::Radio`, compose-rust#473, v0.0.9). `Row::radio_group` (#545) moves focus
+/// between toolkit `RadioButton`s only, so the row does not claim it for pill buttons.
+fn FanCard(fill: bool) {
     let p = ember_theme().palette;
-    MonCard(metric_icon(Metric::Fans), Metric::Fans.title(), None, height, || {
+    MonCard(metric_icon(Metric::Fans), Metric::Fans.title(), None, fill, || {
         cu::Row().alignment(Alignment::BottomStart).space_role(SpaceRole::Xs).content(|| {
             Label("-", Fs::Xl4, Weight::Semibold, Some(paint(p.muted)), Some(1));
             Label("RPM", Fs::Lg, Weight::Medium, Some(paint(p.muted)), Some(1));
@@ -343,37 +371,51 @@ fn FanCard(height: Option<f32>) {
         });
         cu::Row().space_role(SpaceRole::Xs).modifier(Modifier::new().fill_max_width()).content(|| {
             for mode in FanMode::ALL {
-                let kind = if mode == FanMode::Auto { ButtonKind::Primary } else { ButtonKind::Default };
-                AppButton(mode.label(), None, kind, true, FAN_MODE_AVAILABLE, false, || {});
+                ChoiceButton(mode.label(), Choice::Radio, mode == FanMode::Auto, true, FAN_MODE_AVAILABLE, || {});
             }
         });
         Label(FAN_MODE_REASON, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
     });
 }
 
-fn MetricCard(metric: Metric, view: Option<CardView>, empty: &str, meter: Option<f32>, height: Option<f32>) {
+fn MetricCard(metric: Metric, view: Option<CardView>, empty: &str, meter: Option<f32>, fill: bool) {
     let p = ember_theme().palette;
-    MonCard(metric_icon(metric), metric.title(), None, height, || match view.as_ref() {
+    MonCard(metric_icon(metric), metric.title(), None, fill, || match view.as_ref() {
         Some(v) => {
-            Label(&v.headline, Fs::Xl4, Weight::Semibold, None, Some(1));
-            for line in v.lines.iter().take(4) {
-                Label(line, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
-            }
+            HeroValue(&v.headline);
             Bars(metric, &v.bars);
             if let Some(f) = meter {
                 Meter(f);
+            }
+            // `.mon-f`: the card's footer lines, 12 `muted`, under the chart (review M2).
+            for line in v.lines.iter().take(4) {
+                Label(line, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             }
         }
         None => Label(empty, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(3)),
     });
 }
 
-/// One value against a track: the track in surface-2, the fill in the accent, both rounded.
+/// `.mon-big`: the number at 40/600 and its unit at 15/500 `muted` beside it, bottoms aligned,
+/// 4 apart; whole numbers for a percent or a temperature (`hero_parts`, review M1).
+fn HeroValue(headline: &str) {
+    let p = ember_theme().palette;
+    let (number, unit) = hero_parts(headline);
+    cu::Row().alignment(Alignment::BottomStart).spacing(SP[0]).content(|| {
+        Label(&number, Fs::Xl4, Weight::Semibold, None, Some(1));
+        if !unit.is_empty() {
+            Label(&unit, Fs::Lg, Weight::Medium, Some(paint(p.muted)), Some(1));
+        }
+    });
+}
+
+/// One value against a track (`.mon-bar`): the track in `track`, the fill in the accent, both
+/// rounded.
 fn Meter(fraction: f32) {
     let p = ember_theme().palette;
     let f = bar_fraction(fraction, 1.0);
     cu::Row()
-        .modifier(Modifier::new().fill_max_width().height(8.0).background(paint(p.surface_2)).corner_radius(4.0).clip(true))
+        .modifier(Modifier::new().fill_max_width().height(8.0).background(paint(p.track)).corner_radius(4.0).clip(true))
         .content(move || {
             if f > 0.0 {
                 cu::Spacer().modifier(Modifier::new().weight(f).height(8.0).background(paint(p.blue.strong)).corner_radius(4.0));
@@ -384,18 +426,27 @@ fn Meter(fraction: f32) {
         });
 }
 
-/// A row of thin bars, one per core (CPU) or per recent sample, drawn from the bottom.
+/// A row of thin bars drawn from the bottom: the CPU's cores as the mockup's `.mon-cores` (44
+/// high, 3 apart, green with 2 dp top corners at 85 percent; review M2), the recent samples of
+/// the other cards 32 high in blue.
 fn Bars(metric: Metric, bars: &[f32]) {
     if bars.is_empty() {
         return;
     }
     let p = ember_theme().palette;
     let max = bar_max(metric, bars);
-    const H: f32 = 32.0;
-    cu::Row().alignment(Alignment::BottomStart).spacing(2.0).modifier(Modifier::new().fill_max_width().height(H)).content(|| {
+    let cores = metric == Metric::Cpu;
+    let (h_all, gap, tone) = if cores { (CORE_BARS_H, CORE_BARS_GAP, p.green.strong) } else { (32.0, 2.0, p.blue.strong) };
+    cu::Row().alignment(Alignment::BottomStart).spacing(gap).modifier(Modifier::new().fill_max_width().height(h_all)).content(|| {
         for v in bars.iter().copied() {
-            let h = (bar_fraction(v, max) * H).max(1.0);
-            cu::Spacer().modifier(Modifier::new().weight(1.0).height(h).background(paint(p.blue.strong)));
+            let h = (bar_fraction(v, max) * h_all).max(1.0);
+            let bar = Modifier::new().weight(1.0).height(h).background(paint(tone));
+            let bar = if cores {
+                bar.corner_radii([CORE_BAR_RADIUS, CORE_BAR_RADIUS, 0.0, 0.0]).alpha(CORE_BAR_ALPHA)
+            } else {
+                bar
+            };
+            cu::Spacer().modifier(bar);
         }
     });
 }
@@ -566,6 +617,115 @@ mod tests {
         }
     }
 
+    /// What the monitor sheet sends before its title after a window report at `width` with the
+    /// safe area `top` x `leading`.
+    fn monitor_head_after_report(width: f32, top: f32, leading: f32) -> String {
+        let text = monitor_after_report(width, 844.0, top, leading);
+        // The delta may not resend the title node; what precedes it, when it is resent.
+        match text.find("이 컴퓨터") {
+            Some(title) => text[..title].to_string(),
+            None => text,
+        }
+    }
+
+    /// Everything the monitor sheet sends after a window report of `width` x `height` with the
+    /// safe area `top` x `leading`.
+    fn monitor_after_report(width: f32, height: f32, top: f32, leading: f32) -> String {
+        use compose_rust::protocol::HostEvent;
+        use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
+        compose_rust::window::reset_window_size();
+        let c = ComputerChip { name: "이 컴퓨터".into(), ..chip() };
+        let mut host = Host::new(move || {
+            let c = c.clone();
+            Box::new(Recomposer::new(move || MonitorSheet(Some(&c), &[], || {})))
+        });
+        host.rebuild().expect("rebuild");
+        let payload = EventPayload::WindowSizeChanged {
+            width_dp: width,
+            height_dp: height,
+            class: WindowSizeClass::from_width_dp(width),
+            height_class: WindowHeightClass::from_height_dp(height),
+            safe_area_top: top,
+            safe_area_leading: leading,
+            safe_area_trailing: 0.0,
+        };
+        let (bytes, _) = host.dispatch(HostEvent { node_id: 0, handler_id: 0, payload }).expect("dispatch");
+        let text: String = compose_rust::protocol::decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")).collect();
+        compose_rust::window::reset_window_size();
+        text
+    }
+
+    #[test]
+    fn fr_l33_the_monitor_dialog_starts_below_the_window_buttons() {
+        // Review sf: from 561 up (and at 1440) the monitor dialog filled the window less 16 above
+        // and below, so its header sat under the traffic lights. A dialog now leaves the lights'
+        // strip above and below; centred, its top edge is below the strip.
+        use crate::ui::safe_area::{current_platform, safe_area_for, Platform, SafeArea};
+        use super::super::components::dialog_max_height;
+        let lights = safe_area_for(Platform::MacOs, SafeArea { top: 66.0, leading: 98.0, trailing: 0.0 });
+        assert_eq!(dialog_max_height(900.0, lights), 768.0, "66 above and below");
+        assert_eq!(dialog_max_height(900.0, SafeArea::default()), 868.0, "16 above and below with no report");
+        assert_eq!(dialog_max_height(844.0, SafeArea { top: 8.0, leading: 40.0, trailing: 0.0 }), 812.0, "never under 16");
+        assert_eq!(dialog_max_height(844.0, SafeArea { top: 32.0, leading: 0.0, trailing: 138.0 }), 812.0, "a trailing caption covers no leading strip");
+        let _guard = crate::services::test_guard();
+        // The body is the dialog less its 60 header and the 1 dp line under it:
+        // 900 - 2 x 66 - 61 = 707 with the lights, 900 - 32 - 61 = 807 with a zero report.
+        for width in [561.0, 1440.0] {
+            let sent = monitor_after_report(width, 900.0, 66.0, 98.0);
+            if current_platform() == Platform::MacOs {
+                assert!(sent.contains("Height(707.0)") && !sent.contains("Height(807.0)"), "the dialog below the lights at {width}: {sent}");
+            }
+            let sent = monitor_after_report(width, 900.0, 0.0, 0.0);
+            assert!(sent.contains("Height(807.0)") && !sent.contains("Height(707.0)"), "no change with a zero safe area at {width}: {sent}");
+        }
+    }
+
+    #[test]
+    fn fr_l33_the_full_screen_monitor_header_starts_below_the_window_buttons() {
+        // Review ba D: at 390 the computer monitor (and the project screen's computer sheet,
+        // the same `MonitorSheet`) put "이 컴퓨터" under the macOS traffic lights.
+        use crate::ui::safe_area::{current_platform, safe_area_for, Platform, SafeArea};
+        use super::super::components::full_screen_sheet_top_inset;
+        // The pure rule names macOS, so it holds on every OS CI runs (as `cr/shell.rs` does).
+        let lights = safe_area_for(Platform::MacOs, SafeArea { top: 28.0, leading: 72.0, trailing: 0.0 });
+        assert_eq!(full_screen_sheet_top_inset(390.0, true, lights), 28.0);
+        assert_eq!(full_screen_sheet_top_inset(560.0, true, lights), 28.0, "full screen up to 560");
+        assert_eq!(full_screen_sheet_top_inset(561.0, true, lights), 0.0, "a dialog from 561");
+        assert_eq!(full_screen_sheet_top_inset(390.0, false, lights), 0.0, "a bottom sheet clears them");
+        assert_eq!(full_screen_sheet_top_inset(390.0, true, SafeArea::default()), 0.0, "nothing to clear");
+        let _guard = crate::services::test_guard();
+        // An odd footprint (31) so no other height in the sheet can stand in for the strip.
+        // The composed sheet reads this platform's safe area: macOS passes the report through,
+        // Linux and Windows have no lights at the leading edge and reserve nothing.
+        let head = monitor_head_after_report(390.0, 31.0, 72.0);
+        if current_platform() == Platform::MacOs {
+            assert!(head.contains("Height(31.0)"), "the 31 strip before the title: {head}");
+        } else {
+            assert!(!head.contains("Height(31.0)"), "no strip off macOS: {head}");
+        }
+        let head = monitor_head_after_report(390.0, 0.0, 0.0);
+        assert!(!head.contains("Height(31.0)") && !head.contains("Height(28.0)"), "no strip with a zero safe area: {head}");
+    }
+
+    #[test]
+    fn fr_l21_the_monitor_body_ends_at_the_dialog_edge_with_the_mockup_padding() {
+        // Review sf A: at 1440 the footer note under the process table was cut at the dialog's
+        // bottom edge. The body is sized for the header and its line (61), so it ends at the
+        // dialog's edge, and the scroll keeps the mockup's padding under the last line.
+        assert_eq!(MON_CHROME_H, 61.0);
+        assert_eq!(mon_scroll_pad(1440.0), 20.0);
+        assert_eq!(mon_scroll_pad(561.0), 20.0);
+        assert_eq!(mon_scroll_pad(560.0), 16.0);
+        assert_eq!(mon_scroll_pad(390.0), 16.0);
+        let _guard = crate::services::test_guard();
+        let wide = monitor_after_report(1440.0, 900.0, 0.0, 0.0);
+        assert!(wide.contains("Height(807.0)") && wide.contains("Padding(20.0)"), "{wide}");
+        let phone = monitor_after_report(390.0, 844.0, 0.0, 0.0);
+        // The report only sends what changed: the phone keeps the 16 it started with, so no
+        // Padding(20.0) is sent, and the body is the window less the 61 dp chrome.
+        assert!(phone.contains("Height(783.0)") && !phone.contains("Padding(20.0)"), "{phone}");
+    }
+
     #[test]
     fn fr_l21_a_missing_computer_says_so() {
         let _guard = crate::services::test_guard();
@@ -609,7 +769,9 @@ mod tests {
             Grid(1, &chip(), &live_feed(), true);
         }
         let text = composed_text(ui);
-        for want in ["25.0%", "50.0%", "스왑 1.0 GB / 4.0 GB", "60.0%", "2.0 KB/s", "GPU를 읽을 수 없습니다", "프로세스 321개 실행 중입니다", "준비 중입니다"] {
+        // The big value is split into the number and its unit, a percent as a whole number
+        // (`hero_parts`, review M1), so each is its own quoted text.
+        for want in ["\"25\"", "\"50\"", "스왑 1.0 GB / 4.0 GB", "\"60\"", "\"2.0\"", "KB/s", "GPU를 읽을 수 없습니다", "프로세스 321개 실행 중입니다", "준비 중입니다"] {
             assert!(text.contains(want), "missing {want}");
         }
     }
@@ -719,9 +881,91 @@ mod tests {
 
     #[test]
     fn fr_l21_health_cards_are_200_high_in_a_grid_and_free_in_one_column() {
-        assert_eq!(card_height(1), None);
-        assert_eq!(card_height(2), Some(200.0 - 2.0 * PAD_CARD_V));
-        assert_eq!(card_height(4), Some(200.0 - 2.0 * PAD_CARD_V));
+        assert_eq!(card_min_height(1), None);
+        assert_eq!(card_min_height(2), Some(200.0));
+        assert_eq!(card_min_height(4), Some(200.0));
+    }
+
+    #[test]
+    fn fr_l21_a_grid_row_is_at_least_200_and_grows_with_its_tallest_card() {
+        // Review r6: the 상태 card at 1440 was a fixed 200 and cut its last line; `.mon-card`
+        // is `min-height:200px` in a grid row that stretches its cards.
+        use compose_rust::protocol::{decode_batch, Mutation};
+        use compose_rust::{Host, Recomposer};
+        let _guard = crate::services::test_guard();
+        fn ui() {
+            Grid(4, &chip(), &MonitorFeed::default(), true);
+        }
+        let mut host = Host::new(|| Box::new(Recomposer::new(ui)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let all: String = batch.iter().map(|m| format!("{m:?}")).collect();
+        assert!(!all.contains(&format!("Height({:?})", 200.0 - 2.0 * PAD_CARD_V)), "no fixed inner height");
+        // Every card of the two rows (4 + 4 cards) stands on the 200 floor in an equal-height row.
+        let floors = batch
+            .iter()
+            .filter(|m| matches!(m, Mutation::SetModifier { modifier, .. } if format!("{modifier:?}") == "Height(200.0)"))
+            .count();
+        assert_eq!(floors, 8, "{all}");
+        let production = include_str!("monitor.rs").split("#[cfg(test)]").next().unwrap();
+        let grid = production.split("fn Grid(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(grid.contains(".equal_height(fill)"), "{grid}");
+        assert!(grid.contains("cell.fill_max_height()"), "{grid}");
+        let card = production.split("fn MonCard(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(card.contains("EmberCardSized(false, true, fill,"), "{card}");
+        assert!(!card.contains(".height(h)"), "{card}");
+    }
+
+    fn cpu_card() {
+        let view = CardView { headline: "23.1%".into(), lines: vec!["코어 8개".into()], bars: vec![50.0, 100.0] };
+        MetricCard(Metric::Cpu, Some(view), "", None, false);
+    }
+
+    /// Review M1, M2: the big value is the whole number with its unit beside it in a smaller
+    /// muted label, and the cores are green bars with rounded tops, 44 high.
+    #[test]
+    fn m1_m2_cpu_card_splits_the_number_and_draws_green_core_bars() {
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+        use compose_rust::PropertyKind;
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(cpu_card)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let texts: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { property: PropertyKind::Text, value: PropertyValue::String(s), .. } => Some(s.to_string()),
+                Mutation::SetText { text, .. } => Some(text.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&"23".to_string()), "{texts:?}");
+        assert!(texts.contains(&"%".to_string()), "{texts:?}");
+        assert!(!texts.contains(&"23.1%".to_string()), "no one-label value with a decimal");
+        let p = ember_theme().palette;
+        let green = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.green.strong)));
+        let mods_of = |id: u32| -> Vec<String> {
+            batch
+                .iter()
+                .filter_map(|m| match m {
+                    Mutation::SetModifier { node_id, modifier, .. } if *node_id == id => Some(format!("{modifier:?}")),
+                    _ => None,
+                })
+                .collect()
+        };
+        let bars: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { node_id, modifier, .. } if format!("{modifier:?}") == green => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bars.len(), 2, "one green bar per core");
+        for id in bars {
+            let mods = mods_of(id);
+            assert!(mods.iter().any(|m| m == "Alpha(0.85)"), "{mods:?}");
+            assert!(mods.iter().any(|m| m.starts_with("CornerEach") || m.starts_with("Shape")), "rounded top: {mods:?}");
+        }
+        let all: String = batch.iter().map(|m| format!("{m:?}")).collect();
+        assert!(all.contains("Height(44.0)"), "the core row is 44 high");
     }
 
     #[test]
@@ -729,7 +973,7 @@ mod tests {
         use compose_rust::protocol::{Mutation, PropertyValue};
         use compose_rust::PropertyKind;
         let _guard = crate::services::test_guard();
-        let mut host = Host::new(|| Box::new(Recomposer::new(|| FanCard(None))));
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| FanCard(false))));
         let batch = compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode");
         let text: String = batch.iter().map(|m| format!("{m:?}")).collect();
         assert!(text.contains(FAN_MODE_REASON));
@@ -746,11 +990,22 @@ mod tests {
                     _ => None,
                 })
                 .unwrap_or_else(|| panic!("no button named {}", mode.label()));
-            let enabled = batch.iter().find_map(|m| match m {
-                Mutation::SetProp { node_id, property: PropertyKind::Enabled, value: PropertyValue::Bool(b) } if *node_id == node => Some(*b),
-                _ => None,
-            });
-            assert_eq!(enabled, Some(false), "{} must be disabled", mode.label());
+            // The choice is Ember's pill (review r5): a disabled one has no click handler on its
+            // label or any node above it.
+            let parent = |id: u32| {
+                batch.iter().find_map(|m| match m {
+                    Mutation::Insert { parent_id, node_id, .. } if *node_id == id => Some(*parent_id),
+                    _ => None,
+                })
+            };
+            let clickable = |id: u32| {
+                batch.iter().any(|m| matches!(m, Mutation::SetProp { node_id, property: PropertyKind::OnClick, .. } if *node_id == id))
+            };
+            let mut at = Some(node);
+            while let Some(id) = at {
+                assert!(!clickable(id), "{} must be disabled", mode.label());
+                at = parent(id);
+            }
         }
     }
 }

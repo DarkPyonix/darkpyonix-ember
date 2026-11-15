@@ -6,21 +6,26 @@
 //! what the window shows ([`LanguageState`], filled on the host's runtime from the session's
 //! updates) and draws it ([`view`]).
 //!
-//! The lists are drawn as a sheet over the window, like the command palette, and not as a popup at
-//! the caret: the `CodeEditor` widget does not say where the caret is on screen and keeps every key
-//! to itself while it has the focus (see `docs/design/EDITOR-PARITY.md`, row "Language features").
-//! So a list opens on its command (Ctrl+Space, F12, Shift+F12, F2, Ctrl/Cmd+.), takes the focus,
-//! and is filtered by typing in its own field.
+//! The pinned toolkit (compose-rust v0.0.10, dioxus-compose f0e5b9f5) gives the code editor what
+//! these need, and the window uses it:
+//! * compose-rust#553: a list opens at the caret the editor reports (`on_caret_rect`,
+//!   [`view::set_caret_rect`]) inside the editor pane ([`popup_placement`]), and falls back to the sheet over the window, like the command
+//!   palette, until the editor has reported one.
+//! * compose-rust#554: the chords are taken from the focused code (`on_key_preview`,
+//!   [`code_key_action`]) and consumed, so F12, F2, Ctrl+Space and the rest work while typing.
+//! * compose-rust#555: Cmd (macOS) or Ctrl (elsewhere) and a click on a name goes to its
+//!   definition (`on_code_pointer` with `pointer_kinds`, [`pointer_definition`]).
 //!
-//! The stand-ins and the toolkit issue each waits for:
-//! * TODO(compose-rust#553): sheets and a bottom strip instead of popups at the caret (no caret or
-//!   position rectangle from `CodeEditor`).
-//! * TODO(compose-rust#554): the editor menu carries every command, because a chord pressed while
-//!   the code has the focus may not reach the page, and a list cannot take Up, Down, Enter, Tab and
-//!   Escape from the editor (no key preview; related compose-rust#100).
-//! * TODO(compose-rust#555): no Cmd/Ctrl+click to a definition (no pointer press with modifiers and
-//!   position from `CodeEditor`; also compose-rust#417).
-//! * TODO(compose-rust#556): a snippet is inserted as plain text (no snippet session).
+//! What is left, and why:
+//! * TODO(#673): a list takes the focus and is filtered in its own field. Keeping the focus in the
+//!   code means filtering by the word at the caret and routing Up, Down, Enter, Tab and Escape from
+//!   `on_key_preview` to the list; the toolkit has both, the change is the window's own.
+//! * TODO(#673): the parameter hint stays at the bottom of the editor area (#800). It sits inside
+//!   `.ed-main`, whose place in the window the page does not know, and a box fixed to the window
+//!   at the caret is the layout #800 moved away from; anchoring it waits for a display check.
+//! * TODO(#673): a snippet is inserted as plain text. `CodeEditorHandle::insert_snippet` is in the
+//!   pin, but the session hands the window an `ember_editor::WidgetCommand::EditCode` with the
+//!   expanded text, so `ember/editor` has to carry the snippet first.
 
 use std::collections::HashMap;
 
@@ -45,7 +50,7 @@ pub enum LangAction {
 /// The Code-OSS chord for a language feature, the same on every system: F12 definition, Shift+F12
 /// references, F2 rename, Ctrl+Space suggestions, Ctrl+Shift+Space (or Cmd+Shift+Space) parameter
 /// hints, Ctrl+. (or Cmd+.) quick fix. Format document is in the keymap table (`Action::Format`).
-// TODO(compose-rust#554): these reach the page only when the key is not kept by the focused code.
+// The page's key handler and the code editor's `on_key_preview` ([`code_key_action`]) both use it.
 pub fn action_for_key(key: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> Option<LangAction> {
     let primary = ctrl != meta;
     match key {
@@ -56,6 +61,29 @@ pub fn action_for_key(key: &str, ctrl: bool, shift: bool, alt: bool, meta: bool)
         "." if primary && !shift && !alt => Some(LangAction::QuickFix),
         _ => None,
     }
+}
+
+/// The chord a key offered by the focused code editor (`on_key_preview`, compose-rust#554) asks for.
+/// `text` is the DOM key string the event carries; F2 and F12 are named keys and are read from `key`.
+pub fn code_key_action(key: compose_rust::Key, text: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> Option<LangAction> {
+    let name = match key {
+        compose_rust::Key::F2 => "F2",
+        compose_rust::Key::F12 => "F12",
+        _ => text,
+    };
+    action_for_key(name, ctrl, shift, alt, meta)
+}
+
+/// Where a press in the code goes to a definition (compose-rust#555): a primary-button `Down` with
+/// Cmd on macOS or Ctrl elsewhere, as Code-OSS does, over a character of the text.
+pub fn pointer_definition(pointer: &compose_rust::code::CodePointer, mac: bool) -> Option<WidgetPos> {
+    let event = &pointer.event;
+    let primary = if mac { event.meta_key() && !event.ctrl_key() } else { event.ctrl_key() && !event.meta_key() };
+    let down = event.kind() == compose_rust::PointerKind::Down && event.button() == compose_rust::pointer_button::PRIMARY;
+    if !(down && primary && !event.alt_key() && !event.shift_key()) {
+        return None;
+    }
+    pointer.position.map(|p| WidgetPos::new(p.line, p.column))
 }
 
 /// The language features in the editor menu: the action, its name and its chord.
@@ -407,54 +435,82 @@ impl LanguageState {
     }
 }
 
-/// The parameter hint's box (#800), sized in Rust because dioxus-compose's layout does not honour
-/// `width:max-content` (the text got zero width and stacked one glyph per line).
-// TODO(dioxus-compose#227): `max-content` / `fit-content` widths are not honoured; size in CSS once they are.
+/// The parameter hint's box (#800): shrink-to-fit at the editor area's bottom left, so it is as wide
+/// as its text and wraps only past the area less the margins. dioxus-compose sizes an absolutely
+/// positioned box with an auto width shrink-to-fit against the room its insets leave
+/// (dioxus-compose#227, PR #251), so nothing is measured in Rust.
+/// The list as a sheet over the window, like the command palette: before the editor reported a caret.
+pub const SHEET_STYLE: &str = "position:fixed; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);";
+
+/// The editor pane's box in the window's px (its left, top, width and height), as the page laid it
+/// out: the room a list that belongs to the caret is kept inside.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaneBox {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// A list's width and the most its rows take, as `popup` draws them.
+const LIST_WIDTH: f32 = 440.0;
+const LIST_ROWS_MAX: f32 = 320.0;
+/// One row's height, and what the title and the query row above the rows take.
+const LIST_ROW: f32 = 34.0;
+const LIST_CHROME: f32 = 76.0;
+/// The gap between the caret line and the list, and the list and the pane's edge.
+const LIST_GAP: f32 = 2.0;
+const PANE_MARGIN: f32 = 4.0;
+
+/// Where a list opens and how tall its rows may grow.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Placement {
+    pub style: String,
+    pub rows_max: f32,
+}
+
+/// Where a list opens (compose-rust#553), as Code-OSS's suggest widget does: under the caret line
+/// when it fits inside the editor pane, else above it, else on the side with more room with its rows
+/// cut to that room, so it never covers the bottom panel. The caret and the pane are in the window's
+/// px. With no caret, no pane, or a caret outside the pane (scrolled away), it is the sheet, because
+/// a list placed from a caret nobody sees floats unattached. `rows` is how many rows it shows.
+pub fn popup_placement(caret: Option<compose_rust::code::CodeRect>, pane: Option<PaneBox>, rows: usize) -> Placement {
+    let sheet = Placement { style: SHEET_STYLE.to_string(), rows_max: LIST_ROWS_MAX };
+    let (Some(caret), Some(pane)) = (caret, pane) else { return sheet };
+    let (top, bottom) = (pane.y, pane.y + pane.height);
+    let visible = caret.y >= top && caret.bottom() <= bottom && caret.x >= pane.x && caret.x <= pane.x + pane.width;
+    if !visible || pane.width <= 0.0 || pane.height <= 0.0 {
+        return sheet;
+    }
+    let rows_h = (rows.max(1) as f32 * LIST_ROW).min(LIST_ROWS_MAX);
+    let height = LIST_CHROME + rows_h;
+    let below = bottom - PANE_MARGIN - (caret.bottom() + LIST_GAP);
+    let above = (caret.y - LIST_GAP) - (top + PANE_MARGIN);
+    let width = LIST_WIDTH.min(pane.width - 2.0 * PANE_MARGIN).max(0.0);
+    let left = caret.x.min(pane.x + pane.width - PANE_MARGIN - width).max(pane.x + PANE_MARGIN);
+    let frame = format!("position:fixed; z-index:40; left:{left:.0}px; width:{width:.0}px; right:auto; padding:var(--sp1);");
+    let (open_below, room) = if below >= height {
+        (true, height)
+    } else if above >= height {
+        (false, height)
+    } else {
+        (below >= above, below.max(above))
+    };
+    let rows_max = (rows_h - (height - room)).clamp(0.0, LIST_ROWS_MAX);
+    let style = if open_below {
+        format!("{frame} top:{:.0}px; bottom:auto;", caret.bottom() + LIST_GAP)
+    } else {
+        // Anchored by its bottom edge, so a shorter list still sits right above the caret line.
+        format!("{frame} top:auto; bottom:calc(100vh - {:.0}px);", caret.y - LIST_GAP)
+    };
+    Placement { style, rows_max }
+}
+
 pub mod hint_box {
-    /// The advance of one column of the 13 px mono font, and its line height.
-    pub const ADVANCE: f32 = 7.8;
-    pub const LINE_H: f32 = 20.0;
-    /// Padding 8 x 12, a 1 px border, the gap and the close button.
-    pub const PAD_X: f32 = 12.0;
-    pub const PAD_Y: f32 = 8.0;
-    pub const BORDER: f32 = 1.0;
-    pub const GAP: f32 = 8.0;
-    pub const CLOSE_W: f32 = 28.0;
-    /// "외 N개" beside the signature when there are several.
-    pub const MORE_W: f32 = 52.0;
-    /// The margin to the editor area's edges.
-    pub const MARGIN: f32 = 12.0;
-    /// The editor area's width before its first layout is known.
-    pub const FALLBACK_AREA_W: f32 = 600.0;
-
-    /// Columns the text takes: a wide (CJK, Hangul) character takes two.
-    pub fn columns(text: &str) -> usize {
-        text.chars().map(|c| if (c as u32) >= 0x1100 { 2 } else { 1 }).sum()
-    }
-
-    /// The box's width and height, the text's width, and its line count: the text on one line while
-    /// it fits the area less the margins, else wrapped at that cap.
-    pub fn size(text_columns: usize, more: bool, area_w: f32) -> (f32, f32, f32, usize) {
-        let extra = 2.0 * (PAD_X + BORDER) + GAP + CLOSE_W + if more { GAP + MORE_W } else { 0.0 };
-        let text_w = (text_columns.max(1) as f32 * ADVANCE).ceil();
-        let cap = (area_w - 2.0 * MARGIN).max(extra + 10.0 * ADVANCE);
-        let width = (text_w + extra).min(cap);
-        let text_cap = width - extra;
-        let cols_per_line = ((text_cap / ADVANCE).floor() as usize).max(1);
-        let lines = text_columns.max(1).div_ceil(cols_per_line);
-        let height = lines as f32 * LINE_H + 2.0 * (PAD_Y + BORDER);
-        (width, height, text_cap, lines)
-    }
-
-    /// The box's style: anchored at the editor area's bottom left, above the code, below the drawer.
-    pub fn style(width: f32, height: f32) -> String {
-        format!("position:absolute; z-index:15; left:{MARGIN}px; bottom:{MARGIN}px; width:{width}px; height:{height}px; box-sizing:border-box; padding:{PAD_Y}px {PAD_X}px; display:flex; align-items:center; gap:{GAP}px; background:var(--surface); border:{BORDER}px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow-lg);")
-    }
-
-    /// The text's style: its own width, wrapped anywhere only past it.
-    pub fn text_style(text_w: f32) -> String {
-        format!("flex:none; width:{text_w}px; font-family:var(--mono); font-size:13px; line-height:{LINE_H}px; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--muted);")
-    }
+    /// The box: anchored at the editor area's bottom left, above the code, below the drawer.
+    pub const STYLE: &str = "position:absolute; z-index:15; left:12px; bottom:12px; max-width:calc(100% - 24px); box-sizing:border-box; padding:8px 12px; display:flex; align-items:center; gap:8px; background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow-lg);";
+    /// The text: one line while it fits, wrapped anywhere past that.
+    pub const TEXT_STYLE: &str = "flex:0 1 auto; min-width:0; font-family:var(--mono); font-size:13px; line-height:20px; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--muted);";
 }
 
 pub mod view {
@@ -473,7 +529,7 @@ pub mod view {
 
     use super::{rows, signature_parts, symbol_names, LangAction, LanguageState, Sheet};
     use crate::editor_host::HostCommand;
-    use crate::ui::editor_workbench::page::{icon, icon_px};
+    use crate::ui::editor_workbench::page::{icon, icon_tone};
     use crate::ui::editor_workbench::Shared;
     use crate::ui::find::Match;
 
@@ -494,6 +550,56 @@ pub mod view {
         static SYMBOLS_FOR: RefCell<Option<String>> = const { RefCell::new(None) };
         /// The capture hook ran (it opens its sample once).
         static SAMPLE_SHOWN: Cell<bool> = const { Cell::new(false) };
+        /// Where the code editor last drew its caret, in the window's dp (compose-rust#553).
+        static CARET_RECT: Cell<Option<compose_rust::code::CodeRect>> = const { Cell::new(None) };
+        /// The element the editor pane is drawn in, whose box a list is kept inside.
+        static PANE_MOUNT: RefCell<Option<std::rc::Rc<dioxus_elements::MountedData>>> = const { RefCell::new(None) };
+    }
+
+    /// The code editor's `on_caret_rect`: kept for the next list to open under it. Nothing is
+    /// redrawn, because a list is placed when it opens.
+    pub fn set_caret_rect(rect: compose_rust::code::CodeRect) {
+        CARET_RECT.with(|cell| cell.set(Some(rect)));
+    }
+
+    /// The editor pane's element (its `onmounted`): a list is kept inside the box it was last laid out in.
+    pub fn set_pane_mount(mounted: std::rc::Rc<dioxus_elements::MountedData>) {
+        PANE_MOUNT.with(|cell| *cell.borrow_mut() = Some(mounted));
+    }
+
+    /// The editor pane's box from the last layout, or None before it was laid out.
+    fn pane_box() -> Option<super::PaneBox> {
+        use futures_util::FutureExt;
+        PANE_MOUNT.with(|cell| {
+            let r = cell.borrow().as_ref()?.get_client_rect().now_or_never()?.ok()?;
+            let pane = super::PaneBox { x: r.origin.x as f32, y: r.origin.y as f32, width: r.size.width as f32, height: r.size.height as f32 };
+            (pane.width > 0.0 && pane.height > 0.0).then_some(pane)
+        })
+    }
+
+    /// The code editor's `on_key_preview` (compose-rust#554): a language chord runs its feature and
+    /// the key is kept from the editor, and Escape closes the parameter hint when one is open. Any
+    /// other key goes on to the editor.
+    pub fn code_key(s: &Shared, event: &compose_rust::KeyEvent) {
+        if event.key() == compose_rust::Key::Escape && dismiss_hint(s) {
+            event.consume();
+            return;
+        }
+        let action = super::code_key_action(event.key(), event.text(), event.ctrl_key(), event.shift_key(), event.alt_key(), event.meta_key());
+        if let Some(action) = action {
+            event.consume();
+            run(s, action);
+        }
+    }
+
+    /// The code editor's `on_code_pointer` (compose-rust#555): Cmd or Ctrl and a click on a name asks
+    /// for its definition there, and the press does not move the caret.
+    pub fn code_pointer(s: &Shared, pointer: &compose_rust::code::CodePointer) {
+        let mac = crate::ui::keymap::Os::current() == crate::ui::keymap::Os::Mac;
+        let Some(pos) = super::pointer_definition(pointer, mac) else { return };
+        let Some(uri) = current(s) else { return };
+        pointer.event.consume();
+        send(s, LanguageRequest::Definition { uri, pos: Some(pos) });
     }
 
     fn ui() -> Ui {
@@ -534,7 +640,6 @@ pub mod view {
     }
 
     /// Start a language feature at the caret of the active file.
-    // TODO(compose-rust#555): Cmd/Ctrl+click on a name should start `Definition` at the pointer.
     pub fn run(s: &Shared, action: LangAction) {
         let Some(uri) = current(s) else {
             notice("열린 파일이 없습니다");
@@ -612,8 +717,9 @@ pub mod view {
         };
         rsx! {
             for (i, name) in names.iter().enumerate() {
-                {icon_px("chev", 11)}
-                span { key: "sym{i}", "{name}" }
+                {icon_tone("chev", 11, "muted")}
+                // The mockup's symbol crumb (`.ed-crumbs .fn`): `--text-2` in the code font.
+                span { key: "sym{i}", class: "fn", "{name}" }
             }
         }
     }
@@ -676,19 +782,15 @@ pub mod view {
 
     /// The parameter hint: the signature with the parameter being typed set off. It sits at the
     /// bottom of the editor area because the widget does not say where the caret is on screen.
-    // TODO(compose-rust#553): anchor the hint above the caret.
+    // TODO(#673): anchor the hint above the caret (see the module notes).
     fn hint(s: &Shared, help: &ember_editor::language::SignatureHelp) -> Element {
         use super::hint_box;
         let Some((before, active, after)) = signature_parts(help) else { return rsx! {} };
         let count = help.signatures.len();
         let close_s = s.clone();
-        let cols = hint_box::columns(&before) + hint_box::columns(&active) + hint_box::columns(&after);
-        let (w, h, text_w, _) = hint_box::size(cols, count > 1, editor_area_width());
-        let style = hint_box::style(w, h);
-        let text_style = hint_box::text_style(text_w);
         rsx! {
-            div { role: "status", "aria-label": "매개변수 정보", style: "{style}",
-                code { style: "{text_style}",
+            div { role: "status", "aria-label": "매개변수 정보", style: hint_box::STYLE,
+                code { style: hint_box::TEXT_STYLE,
                     "{before}"
                     span { style: "font-weight:var(--fw-semibold); color:var(--text);", "{active}" }
                     "{after}"
@@ -697,30 +799,6 @@ pub mod view {
                 button { class: "ed-ib", style: "flex:none;", title: "닫기", "aria-label": "매개변수 정보 닫기", onclick: move |_| { dismiss_hint(&close_s); }, {icon("close")} }
             }
         }
-    }
-
-    thread_local! {
-        /// The editor area (`.ed-main`), to read its laid-out width for the hint (#800).
-        static EDITOR_AREA: RefCell<Option<std::rc::Rc<dioxus_compose::html::prelude::dioxus_elements::MountedData>>> = const { RefCell::new(None) };
-    }
-
-    /// Keep the editor area's element (its `onmounted`).
-    pub fn mount_editor_area(data: std::rc::Rc<dioxus_compose::html::prelude::dioxus_elements::MountedData>) {
-        EDITOR_AREA.with(|m| *m.borrow_mut() = Some(data));
-    }
-
-    /// The editor area's width from the last layout.
-    // TODO(dioxus-compose#207): no resize event, so a new width is seen on the next render.
-    fn editor_area_width() -> f32 {
-        use futures_util::FutureExt;
-        EDITOR_AREA
-            .with(|m| {
-                let m = m.borrow();
-                let r = m.as_ref()?.get_client_rect().now_or_never()?.ok()?;
-                Some(r.size.width as f32)
-            })
-            .filter(|w| *w > 0.0)
-            .unwrap_or(super::hint_box::FALLBACK_AREA_W)
     }
 
     /// The parameter hint inside the editor area (`.ed-main`, positioned), when no sheet is open: it
@@ -737,10 +815,9 @@ pub mod view {
         }
     }
 
-    /// The sheet over the window, when there is one to show.
-    // TODO(compose-rust#553): draw the lists as popups at the caret.
-    // TODO(compose-rust#554): keep the focus in the code and take the list's keys from the editor,
-    // so the lists can open while typing.
+    /// The list over the window, when there is one to show: under the caret once the editor has
+    /// reported it (compose-rust#553), else as a sheet like the command palette.
+    // TODO(#673): keep the focus in the code and take the list's keys from `on_key_preview`.
     pub fn overlay(s: &Shared) -> Element {
         capture_hook(s);
         let ui = ui();
@@ -771,14 +848,17 @@ pub mod view {
         let count = shown.len();
         let (title, placeholder, loading) = (sheet.title(), sheet.placeholder(), sheet.loading());
         let (scrim_s, key_s) = (s.clone(), s.clone());
+        let rows_drawn = if is_rename { 0 } else if loading { count + 1 } else { count.max(1) };
+        let placement = super::popup_placement(CARET_RECT.with(|cell| cell.get()), pane_box(), rows_drawn);
         rsx! {
             div { style: "position:fixed; left:0; top:0; right:0; bottom:0; z-index:39;", onclick: move |_| cancel(&scrim_s) }
             div { class: "ed-menu", role: "dialog", "aria-label": "{title}",
-                style: "position:fixed; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);",
+                style: "{placement.style}",
                 div { style: "padding:var(--sp1) var(--sp3) 0; color:var(--muted); font-size:var(--fs-xs);", "{title}" }
-                div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
-                    {icon(if is_rename { "edit" } else { "search" })}
-                    input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
+                // FR-L31.29: the query row is a row of the popover, not a framed field inside the frame.
+                div { class: "ed-palq", style: "margin:var(--sp1) calc(var(--sp1) * -1) var(--sp1);",
+                    {icon_tone(if is_rename { "edit" } else { "search" }, 16, "muted")}
+                    input {
                         "aria-label": "{title}", placeholder: "{placeholder}", value: "{text}", autofocus: true,
                         oninput: move |event| { query.set(event.value()); sel.set(0); },
                         onkeydown: move |event| {
@@ -804,7 +884,7 @@ pub mod view {
                 if is_rename {
                     div { style: "padding:var(--sp1) var(--sp3) var(--sp2); color:var(--muted); font-size:var(--fs-xs);", "Enter로 바꾸고 Esc로 취소합니다. 열려 있지 않은 파일은 바로 저장됩니다." }
                 } else {
-                    div { style: "max-height:320px; overflow:auto;", role: "listbox",
+                    div { style: "max-height:{placement.rows_max:.0}px; overflow:auto;", role: "listbox",
                         if shown.is_empty() && !loading { div { style: "padding:var(--sp3); color:var(--muted);", "일치하는 항목이 없습니다" } }
                         for (row_at, row) in shown.iter().enumerate() {
                             {
@@ -833,33 +913,26 @@ pub mod view {
 mod tests {
     #[test]
     fn fr_l31_13_parameter_hint_sizes_to_its_text_within_the_editor_area() {
-        // #800: the hint was fixed to the window, then stacked one glyph per line; its width is now set in px.
+        // #800: the hint was fixed to the window, then stacked one glyph per line, then sized in Rust
+        // from an estimated advance. dioxus-compose#227 (PR #251) sizes an absolute box with an auto
+        // width shrink-to-fit, so the stylesheet alone sizes it.
         use super::hint_box::*;
-        let sig = "fn add(a: i32, b: i32) -> i32";
-        let cols = columns(sig);
-        assert_eq!(cols, sig.len());
-        // Fits: one line, as wide as the text plus padding, border, gap and close button.
-        let (w, h, text_w, lines) = size(cols, false, 1000.0);
-        assert_eq!(lines, 1);
-        assert_eq!(text_w, (cols as f32 * ADVANCE).ceil());
-        assert_eq!(w, text_w + 2.0 * (PAD_X + BORDER) + GAP + CLOSE_W);
-        assert_eq!(h, LINE_H + 2.0 * (PAD_Y + BORDER));
-        // Wider than the area: capped at the area less the margins, wrapped onto more lines.
-        let long = cols * 10;
-        let (w, h, _, lines) = size(long, true, 500.0);
-        assert_eq!(w, 500.0 - 2.0 * MARGIN);
-        assert!(lines > 1 && h == lines as f32 * LINE_H + 2.0 * (PAD_Y + BORDER));
-        // Hangul takes two columns.
-        assert_eq!(columns("가a"), 3);
-        let style = style(300.0, 38.0);
-        assert!(style.contains("position:absolute;") && style.contains("width:300px;") && style.contains("bottom:12px;"));
-        assert!(!style.contains("max-content") && !style.contains("fixed") && !style.contains("top:"));
+        assert!(STYLE.contains("position:absolute;") && STYLE.contains("left:12px;") && STYLE.contains("bottom:12px;"));
+        assert!(STYLE.contains("max-width:calc(100% - 24px);"), "the hint stops at the area less the margins");
+        assert!(!STYLE.replace("max-width:", "").contains("width:"), "no width is fixed: {STYLE}");
+        assert!(!STYLE.contains("height:") && !STYLE.contains("fixed") && !STYLE.contains("top:"));
+        assert!(TEXT_STYLE.contains("min-width:0;") && !TEXT_STYLE.replace("min-width:", "").contains("width:"), "{TEXT_STYLE}");
+        let src = include_str!("editor_language.rs");
+        let production = &src[..src.find("#[cfg(test)]").expect("tests")];
+        assert!(!production.contains(concat!("TODO(dioxus-compose#", "227)")), "the hint width workaround is gone");
+        assert!(!production.contains(concat!("TODO(dioxus-compose#", "207)")), "no width is read, so no resize stand-in is left");
+        assert!(!production.contains(concat!("fn editor_area", "_width")), "the area's width is not measured");
         let page = include_str!("editor_workbench.rs");
         let main = page.find(r#"section { class: "ed-main""#).expect("editor area");
         let hint = page.find("editor_language::view::hint_in_editor(&s)").expect("hint call");
         let right = page.find("stripe_column(&s, sel, keymap, Strip::Right)").expect("right stripe");
         assert!(main < hint && hint < right, "the hint is drawn inside the editor area");
-        assert!(page.contains("editor_language::view::mount_editor_area(event.data())"), "the editor area's width is not measured");
+        assert!(!page.contains(concat!("mount_editor", "_area(")), "the editor area is not measured for the hint");
     }
 
     use super::*;
@@ -1068,5 +1141,103 @@ mod tests {
         }
         assert!(matches!(LanguageState::sample("rename", &u), Some(Sheet::Rename { .. })));
         assert!(LanguageState::sample("nothing", &u).is_none());
+    }
+
+    // #477: a symbol crumb is the mockup's `<span class="fn">`, which editor.css sets in `--text-2`
+    // and the code font; without the class it was a muted path segment.
+    #[test]
+    fn fr_l31_symbol_crumbs_carry_the_mockup_fn_class() {
+        let src = include_str!("editor_language.rs");
+        let production = &src[..src.find("#[cfg(test)]").expect("tests")];
+        assert!(production.contains("span { key: \"sym{i}\", class: \"fn\", \"{name}\" }"), "a symbol crumb lost its fn class");
+        let css = include_str!("../../assets/editor/editor.css");
+        assert!(css.contains(".ed-crumbs .fn{color:var(--text-2);font-family:var(--mono)}"), "editor.css no longer styles .ed-crumbs .fn");
+    }
+
+    #[test]
+    fn fr_l31_13_the_focused_code_offers_the_chords() {
+        use compose_rust::Key;
+        // compose-rust#554: F2 and F12 are named keys, the rest come as their DOM key string.
+        assert_eq!(code_key_action(Key::F12, "F12", false, false, false, false), Some(LangAction::Definition));
+        assert_eq!(code_key_action(Key::F12, "", false, true, false, false), Some(LangAction::References));
+        assert_eq!(code_key_action(Key::F2, "", false, false, false, false), Some(LangAction::Rename));
+        assert_eq!(code_key_action(Key::Other, " ", true, false, false, false), Some(LangAction::Suggest));
+        assert_eq!(code_key_action(Key::Other, ".", false, false, false, true), Some(LangAction::QuickFix));
+        assert_eq!(code_key_action(Key::Other, "a", false, false, false, false), None, "typing goes to the editor");
+        assert_eq!(code_key_action(Key::Enter, "Enter", false, false, false, false), None);
+    }
+
+    #[test]
+    fn fr_l31_13_cmd_or_ctrl_click_goes_to_the_definition() {
+        use compose_rust::code::{CodePointer, Position};
+        use compose_rust::{pointer_button, PointerEvent, PointerKind, PointerType, WheelDeltaMode};
+        // Modifier bits as the wire carries them: shift 1, ctrl 2, alt 4, meta 8.
+        let press = |kind: PointerKind, button: u32, modifiers: u32, at: Option<Position>| CodePointer {
+            event: PointerEvent::new(kind, 1, PointerType::Mouse, 0.0, 0.0, button, button, modifiers, 1, 0.0, 0.0, WheelDeltaMode::Pixel, 0),
+            position: at,
+        };
+        let at = Some(Position::new(4, 7));
+        let primary = pointer_button::PRIMARY;
+        assert_eq!(pointer_definition(&press(PointerKind::Down, primary, 8, at), true), Some(WidgetPos::new(4, 7)), "Cmd+click on macOS");
+        assert_eq!(pointer_definition(&press(PointerKind::Down, primary, 2, at), false), Some(WidgetPos::new(4, 7)), "Ctrl+click elsewhere");
+        assert_eq!(pointer_definition(&press(PointerKind::Down, primary, 2, at), true), None, "Ctrl+click on macOS is the context menu");
+        assert_eq!(pointer_definition(&press(PointerKind::Down, primary, 0, at), false), None, "a plain click moves the caret");
+        assert_eq!(pointer_definition(&press(PointerKind::Down, primary, 2 | 1, at), false), None);
+        assert_eq!(pointer_definition(&press(PointerKind::Up, primary, 2, at), false), None);
+        assert_eq!(pointer_definition(&press(PointerKind::Down, pointer_button::SECONDARY, 2, at), false), None);
+        assert_eq!(pointer_definition(&press(PointerKind::Down, primary, 2, None), false), None, "over the gutter");
+    }
+
+    #[test]
+    fn fr_l31_13_a_list_opens_under_the_caret() {
+        use compose_rust::code::CodeRect;
+        // The editor pane: 800 x 600 at (200, 100), so its bottom is at 700.
+        let pane = Some(PaneBox { x: 200.0, y: 100.0, width: 800.0, height: 600.0 });
+        let sheet = Placement { style: SHEET_STYLE.to_string(), rows_max: 320.0 };
+        assert_eq!(popup_placement(None, pane, 5), sheet, "before the editor reports a caret, the sheet");
+        assert_eq!(popup_placement(Some(CodeRect::new(300.0, 120.0, 2.0, 22.0)), None, 5), sheet, "no pane box, the sheet");
+
+        // Below: 5 rows (76 + 170 = 246 px) fit under a caret on the first lines.
+        let below = popup_placement(Some(CodeRect::new(300.0, 120.0, 2.0, 22.0)), pane, 5);
+        assert!(below.style.contains("top:144px;") && below.style.contains("left:300px;") && below.style.contains("width:440px;"), "{below:?}");
+        assert_eq!(below.rows_max, 170.0);
+
+        // Above: the caret line ends at 680, 16 px over the pane's bottom; the list ends 2 px over the line.
+        let above = popup_placement(Some(CodeRect::new(900.0, 658.0, 2.0, 22.0)), pane, 5);
+        assert!(above.style.contains("top:auto;") && above.style.contains("bottom:calc(100vh - 656px);"), "{above:?}");
+        assert!(above.style.contains("left:556px;"), "kept inside the pane's right edge: {above:?}");
+        assert_eq!(above.rows_max, 170.0);
+
+        // Clamped: a 200 px pane fits neither side; the side with more room, with the rows cut to it.
+        let short = Some(PaneBox { x: 200.0, y: 100.0, width: 800.0, height: 200.0 });
+        let clamped = popup_placement(Some(CodeRect::new(300.0, 130.0, 2.0, 22.0)), short, 20);
+        let room = 300.0 - 4.0 - 154.0; // the pane's bottom less the margin, less the line's bottom and gap
+        assert!(clamped.style.contains("top:154px;"), "{clamped:?}");
+        assert_eq!(clamped.rows_max, room - 76.0, "the list ends inside the pane, not over the bottom panel");
+        let high = popup_placement(Some(CodeRect::new(300.0, 250.0, 2.0, 22.0)), short, 20);
+        assert!(high.style.contains("bottom:calc(100vh - 248px);"), "{high:?}");
+        assert_eq!(high.rows_max, (248.0 - 104.0) - 76.0);
+
+        // Caret off screen: scrolled above the pane, below it, or out to the side.
+        for caret in [CodeRect::new(300.0, 60.0, 2.0, 22.0), CodeRect::new(300.0, 690.0, 2.0, 22.0), CodeRect::new(-40.0, 300.0, 2.0, 22.0)] {
+            assert_eq!(popup_placement(Some(caret), pane, 5), sheet, "{caret:?}");
+        }
+    }
+
+    #[test]
+    fn fr_l31_13_the_code_editor_takes_keys_pointer_and_caret() {
+        let page = include_str!("editor_workbench.rs");
+        let pane = &page[page.find("fn editor_pane()").unwrap()..page.find("pub mod page {").unwrap()];
+        assert!(pane.contains("on_key_preview:") && pane.contains("editor_language::view::code_key("), "compose-rust#554");
+        assert!(pane.contains("pointer_kinds: Some(compose_rust::PointerKinds::DOWN)") && pane.contains("editor_language::view::code_pointer("), "compose-rust#555");
+        assert!(pane.contains("on_caret_rect:") && pane.contains("editor_language::view::set_caret_rect("), "compose-rust#553");
+        let src = include_str!("editor_language.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(production.contains("popup_placement(CARET_RECT.with(|cell| cell.get()), pane_box()"), "the list is placed from the caret and the pane");
+        assert!(page.contains("editor_language::view::set_pane_mount("), "the pane's box is known");
+        for issue in ["553", "554", "555"] {
+            assert!(!production.contains(&format!("TODO(compose-rust#{issue}")), "#{issue} is in use");
+            assert!(!page.contains(&format!("TODO(compose-rust#{issue}")), "#{issue} is in use");
+        }
     }
 }

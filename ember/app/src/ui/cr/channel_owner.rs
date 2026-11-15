@@ -16,11 +16,9 @@ use compose_rust::{Alignment, SpaceRole};
 use ember_client::channels::{CreatedInvite, Guest, GuestDoorState, Invite};
 
 use super::components::{
-    AppButton, ButtonKind, copy_notice, EmberField, EmberSheet, FieldOptions, FilterChip, Label, Pill, PillTone, SheetFooter, COPY_LABEL,
+    AppButton, ButtonKind, copy_notice, Choice, ChoiceButton, ChoiceRow, EmberField, EmberSheet, FieldOptions, Label, Pill, PillTone, SheetFooter, COPY_LABEL,
 };
-use super::home::text_px;
 use super::notice;
-use super::project::wrap_lines;
 use super::theme::*;
 use crate::ui::channel_owner::{
     capped_note, clears_sheet_state, create_label, create_runs, door_status, error_message, guest_rows, invite_rows,
@@ -376,8 +374,22 @@ pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bo
         let st = st.clone();
         move || st.close()
     };
+    // FR-L32.1 (#878): the sheet is as tall as its content. A weighted body asked the dialog for
+    // the whole window, so the one-line body without a server filled it. Without a server, and in
+    // the bottom sheet (which scrolls taller content itself), the body is a plain column; with a
+    // server the dialog's body scrolls at the room left by the header and footer.
+    // TODO(compose-rust#778, after v0.0.10): cap that body instead of fixing it.
+    let w = crate::ui::window_size::current_window_size();
+    let plain = !live || super::components::sheet_wraps_content(w.width_dp);
+    let body_h = super::components::sheet_body_max_height(
+        w.width_dp,
+        w.height_dp,
+        false,
+        super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H,
+    )
+    .min(900.0);
     EmberSheet(&format!("{channel_name} 멤버/게스트"), st.open.get(), close.clone(), None, || {
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(|| {
+        let body = || {
             cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
                 if !live {
                     Label("서버에 연결되어 있지 않아 초대와 게스트를 관리할 수 없습니다", Fs::Sm, Weight::Regular, Some(paint(ember_theme().palette.muted)), None);
@@ -387,7 +399,12 @@ pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bo
                 InviteList(channel, st);
                 GuestList(channel, st);
             });
-        });
+        };
+        if plain {
+            cu::Column().modifier(Modifier::new().fill_max_width()).content(body);
+        } else {
+            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_h)).content(body);
+        }
         SheetFooter(|| {
             AppButton("닫기", None, ButtonKind::Default, true, true, false, close.clone());
         });
@@ -398,36 +415,13 @@ fn Heading(text: &str) {
     Label(text, Fs::Md, Weight::Semibold, None, Some(1));
 }
 
-/// Width of one hour chip: the 12 px label between two `SP[2]` paddings. `text_px` runs short of
-/// the rendered Korean glyphs (the 390 dp capture clipped `168시간`), so the label gets 30 percent.
-fn hour_chip_width(h: u32) -> f32 {
-    2.0 * SP[2] + 1.3 * text_px(&format!("{h}시간"), Fs::Sm.size())
-}
-
-/// Rows the hour chips pack into, as indices of `choices`, in `avail` dp (chips wrap, never clip).
-pub fn hour_chip_rows(choices: &[u32], avail: f32) -> Vec<Vec<usize>> {
-    let widths: Vec<f32> = choices.iter().map(|h| hour_chip_width(*h)).collect();
-    wrap_lines(&widths, SP[0], avail)
-}
-
-/// The room the chips have: the sheet's width (bottom sheet: the window) less its padding.
-fn chip_avail() -> f32 {
-    let w = crate::ui::window_size::current_window_size().width_dp;
-    let sheet = if w > 0.0 { w.min(760.0) } else { 760.0 };
-    sheet - 2.0 * SP[4]
-}
-
+/// The hour choices (초대 and 허용 시간): the mockup's `.seg` choices like every other few-value
+/// choice, wrapping when they do not fit (FR-L10.2, review r5: they were grey filter chips).
 fn HourChips(choices: &[u32], current: u32, on_pick: impl Fn(u32) + Clone + 'static) {
-    let rows = hour_chip_rows(choices, chip_avail());
-    cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
-        for row in rows {
-            cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                for i in row {
-                    let h = choices[i];
-                    let pick = on_pick.clone();
-                    FilterChip(&format!("{h}시간"), h == current, move || pick(h));
-                }
-            });
+    ChoiceRow(|| {
+        for &h in choices {
+            let pick = on_pick.clone();
+            ChoiceButton(&format!("{h}시간"), Choice::Radio, h == current, true, true, move || pick(h));
         }
     });
 }
@@ -470,8 +464,8 @@ fn InviteSection(channel: &str, st: &OwnerState) {
     }
     if let Some(c) = created.filter(|_| status.can_copy()) {
         // A read-only look: the field starts with the link, enabled so it can be selected and
-        // copied with Cmd+C / Ctrl+C. The toolkit has no read_only flag, so typing into it changes
-        // only what is drawn, never the link. 복사 puts the link on the clipboard through the
+        // copied with Cmd+C / Ctrl+C. TODO(compose-rust, unfiled: TextField has no read-only flag):
+        // typing into it changes only what is drawn, never the link. 복사 puts the link on the clipboard through the
         // toolkit (compose-rust v0.0.7, #471); the link is never logged.
         EmberField(FieldOptions { fill_max_width: true, text: Some(c.link.clone()), ..Default::default() });
         let link = c.link.clone();
@@ -650,6 +644,21 @@ mod tests {
     use super::*;
     use compose_rust::{Host, Recomposer};
 
+    #[test]
+    fn fr_l32_1_members_sheet_body_is_content_height() {
+        // #878: the one-line body without a server filled the 1440 window (y 0..900), because
+        // the scrolling body took the dialog's remaining height by weight.
+        let src = include_str!("channel_owner.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        let sheet = &production[production.find("pub fn MembersSheet(").unwrap()..];
+        let sheet = &sheet[..sheet.find("\n}\n").unwrap()];
+        assert!(!sheet.contains(".weight(1.0)"), "{sheet}");
+        assert!(sheet.contains("let plain = !live || super::components::sheet_wraps_content(w.width_dp);"));
+        assert!(sheet.contains("if plain {\n            cu::Column().modifier(Modifier::new().fill_max_width()).content(body);"));
+        assert!(sheet.contains("cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_h)).content(body);"));
+        assert!(sheet.contains("super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H"));
+    }
+
     fn text_of(content: fn()) -> String {
         let mut host = Host::new(move || Box::new(Recomposer::new(content)));
         let batch = compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode");
@@ -662,17 +671,37 @@ mod tests {
         MembersSheet("c1", "전체", &st, false);
     }
 
+    fn hour_choices() {
+        HourChips(&ALLOW_PRESETS, ALLOW_PRESETS[1], |_| {});
+    }
+
     #[test]
-    fn fr_t14_allowance_chips_wrap_to_a_second_row_at_390() {
-        let avail = 390.0 - 2.0 * SP[4];
-        let rows = hour_chip_rows(&ALLOW_PRESETS, avail);
-        assert!(rows.len() >= 2, "{rows:?}");
-        assert_eq!(rows.concat(), vec![0, 1, 2, 3, 4]);
-        for row in &rows {
-            let w: f32 = row.iter().map(|i| hour_chip_width(ALLOW_PRESETS[*i])).sum::<f32>() + SP[0] * (row.len() - 1) as f32;
-            assert!(w <= avail, "{row:?} {w}");
-        }
-        assert_eq!(hour_chip_rows(&ALLOW_PRESETS, 760.0 - 2.0 * SP[4]).len(), 1);
+    fn fr_l10_2_choice_hours_are_seg_choices_in_a_wrapping_row() {
+        // Review r5: the members sheet's 1시간, 8시간, ... were grey filled chips (#f7f6f2, no
+        // line); they are `.seg` choices now and wrap at 390 by the toolkit's own measure.
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+        use compose_rust::{PropertyKind, WidgetKind};
+        let mut host = Host::new(|| Box::new(Recomposer::new(hour_choices)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let flow = batch.iter().filter(|m| matches!(m, Mutation::Create { widget: WidgetKind::FlowRow, .. })).count();
+        assert_eq!(flow, 1, "one wrapping row");
+        let clicks = batch
+            .iter()
+            .filter(|m| matches!(m, Mutation::SetProp { property: PropertyKind::OnClick, value: PropertyValue::Integer(_), .. }))
+            .count();
+        assert_eq!(clicks, ALLOW_PRESETS.len(), "each hour is one clickable choice");
+        let mods: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { modifier, .. } => Some(format!("{modifier:?}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(mods.iter().filter(|m| *m == "Height(32.0)").count(), ALLOW_PRESETS.len(), "32 px `.seg` buttons: {mods:?}");
+        assert!(mods.iter().filter(|m| m.starts_with("Border")).count() >= ALLOW_PRESETS.len(), "a 1 px line on each: {mods:?}");
+        let src = include_str!("channel_owner.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(!production.contains("FilterChip("), "no grey filter chips left");
     }
 
     #[test]

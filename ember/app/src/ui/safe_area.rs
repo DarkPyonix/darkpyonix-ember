@@ -64,8 +64,16 @@ pub fn toolkit_safe_area() -> SafeArea {
 
 /// The safe area of the window the caller is composed in.
 pub fn safe_area() -> SafeArea {
+    let a = toolkit_safe_area();
+    safe_area_from_toolkit(a.top, a.leading, a.trailing)
+}
+
+/// The safe area on this platform for a toolkit report. The editor page (dioxus) reads the report
+/// through `dioxus_compose::use_window_safe_area`, which renders the page again when it changes
+/// (FR-L33.1, #875); a compose-rust screen reads it through [`safe_area`].
+pub fn safe_area_from_toolkit(top: f32, leading: f32, trailing: f32) -> SafeArea {
     let platform = current_platform();
-    let toolkit = if platform == Platform::MacOs { toolkit_safe_area() } else { SafeArea::default() };
+    let toolkit = if platform == Platform::MacOs { SafeArea { top, leading, trailing } } else { SafeArea::default() };
     safe_area_for(platform, toolkit)
 }
 
@@ -156,5 +164,28 @@ mod tests {
         let win = safe_area_for(Platform::Windows, LIGHTS);
         assert_eq!(top_reservation(win, ShellMode::BottomTabs), TopReservation::default());
         assert_eq!(top_reservation(win, ShellMode::Sidebar), TopReservation::default());
+    }
+
+    #[test]
+    fn fr_l33_2_full_screen_reserves_nothing_in_any_layout() {
+        // In macOS full screen the lights are hidden and the toolkit reports zeros (#409).
+        let full_screen = safe_area_for(Platform::MacOs, SafeArea::default());
+        let windowed = safe_area_for(Platform::MacOs, LIGHTS);
+        let table = [
+            (ShellMode::Sidebar, TopReservation { sidebar_inset: 28.0, content_strip: 0.0 }),
+            (ShellMode::Rail, TopReservation { sidebar_inset: 28.0, content_strip: 0.0 }),
+            (ShellMode::BottomTabs, TopReservation { sidebar_inset: 0.0, content_strip: 28.0 }),
+        ];
+        for (mode, with_lights) in table {
+            assert_eq!(top_reservation(windowed, mode), with_lights, "{mode:?} beside the lights");
+            assert_eq!(top_reservation(full_screen, mode), TopReservation::default(), "{mode:?} in full screen");
+        }
+        assert_eq!(sidebar_top_inset(full_screen), 0.0);
+        assert_eq!(title_strip_height(full_screen, true), 0.0);
+        // A strip height with no buttons beside it (a report with only `top`) reserves nothing
+        // either: there is nothing at the left edge to clear.
+        let top_only = SafeArea { top: 28.0, leading: 0.0, trailing: 0.0 };
+        assert_eq!(top_reservation(top_only, ShellMode::Sidebar), TopReservation::default());
+        assert_eq!(top_reservation(top_only, ShellMode::BottomTabs), TopReservation::default());
     }
 }

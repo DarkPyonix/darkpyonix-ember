@@ -1,0 +1,1442 @@
+//! Manages local OSE server processes for editor launches.
+//!
+//! The manager lives in this crate because two programs run it (SPEC FR-W4a, #896): `ember-node`
+//! for the projects of its computer ([`OseManager::for_node`], routes in [`crate::ose_api`]), and
+//! `ember-server` for the projects of the server's own machine (it re-exports this module as
+//! `ember_server::ose`). `ember-server` depends on this crate, not the reverse.
+//!
+//! Each computer has its own OSE data dir, `<data root>/<computer id>`, passed as
+//! `--server-data-dir` to every OSE started for it and to every extension install, so an
+//! extension is installed once per computer and shared by that computer's folders (SPEC
+//! FR-W4, #459). On the server the data root is `EMBER_OSE_DATA_DIR`, else `<runtime dir>/ose-data`,
+//! where the runtime dir is the data dir's sibling ([`runtime_dir`], FR-A11):
+//! `~/.ember-runtime/ose-data` by default. On a node it is `<EMBER_OSE_DATA_DIR>/node`, else
+//! `<state dir>/ose-data`, and the computer id is always [`LOCAL_COMPUTER`]. The `node` segment
+//! keeps a node and a server that share one `EMBER_OSE_DATA_DIR` apart ([`node_data_root_from`]).
+//! **Unknown:** how several OSE processes behave on one shared data dir (no lock or race
+//! documentation was found), so nothing here claims it is safe.
+
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// How an editor reaches one OSE: the loopback endpoint, the relay path of the server route that
+/// carries it, and the placeholder token (never the real one).
+#[derive(Clone, serde::Serialize, PartialEq)]
+pub struct EmberOseConnection {
+    pub endpoint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
+    pub connection_token: String,
+}
+
+impl std::fmt::Debug for EmberOseConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmberOseConnection")
+            .field("endpoint", &self.endpoint)
+            .field("relay", &self.relay)
+            .field("connection_token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// One started or reused OSE: its opaque id and how to reach it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OseLaunch {
+    /// 32 hex characters, the `{launch_id}` of the relay routes.
+    pub launch_id: String,
+    pub connection: EmberOseConnection,
+}
+
+/// The message of a start refused because there is no OSE binary.
+pub const NOT_INSTALLED: &str = "OSE server binary is not installed";
+
+/// The runtime dir for the server's `data_dir`: its sibling `<name>-runtime` (SPEC FR-A11). The
+/// server's `runtime_dir` module re-exports it and holds the migration.
+pub fn runtime_dir(data_dir: &Path) -> PathBuf {
+    let name = data_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "ember".into());
+    let parent = data_dir.parent().map(Path::to_path_buf).unwrap_or_default();
+    parent.join(format!("{name}-runtime"))
+}
+
+struct Process {
+    child: Option<Child>,
+    launch_id: String,
+    address: SocketAddr,
+    real_token: String,
+    placeholder: String,
+    connection: EmberOseConnection,
+    active_relays: Arc<AtomicUsize>,
+    /// Removed when the entry goes away (child exited, manager dropped, start failed).
+    _token_file: Option<TokenFile>,
+}
+
+/// Target and credentials resolved for one active OSE relay stream (`FR-W4`, `#458`, `#461`).
+pub struct RelayTarget {
+    pub address: SocketAddr,
+    pub real_token: String,
+    pub placeholder: String,
+    pub idle_timeout: Duration,
+    _permit: RelayPermit,
+}
+
+/// RAII guard for one active OSE relay stream: decrements the per-launch and per-server counters on drop.
+struct RelayPermit {
+    launch: Arc<AtomicUsize>,
+    server: Arc<AtomicUsize>,
+}
+
+impl Drop for RelayPermit {
+    fn drop(&mut self) {
+        self.launch.fetch_sub(1, Ordering::SeqCst);
+        self.server.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Why a relay stream could not be opened before the WebSocket upgrade.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RelayLookupError {
+    /// 404: no live launch with this `(computer_id, launch_id)`.
+    NotFound,
+    /// 429: per-launch or per-server relay concurrency limit reached.
+    TooManyRelays,
+}
+
+/// The connection token file of one OSE process. The file is deleted on drop.
+struct TokenFile(PathBuf);
+
+impl Drop for TokenFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Writes `token` to `<tokens dir>/<first 16 hex of SHA-256 of the folder>.token`, mode 0600
+/// from creation (`create_new`), without a trailing newline. A stale file at the path is removed
+/// first; a directory there is refused. The token never exists with wider permissions.
+fn write_token_file(tokens_dir: &Path, folder: &Path, token: &str) -> std::io::Result<TokenFile> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Error, ErrorKind, Write};
+    // The tokens dir and its parent (the computer dir) hold or lead to a secret: they are
+    // hardened, not just created (#521).
+    if let Some(parent) = tokens_dir.parent() {
+        secure_token_dir(parent)?;
+    }
+    secure_token_dir(tokens_dir)?;
+    let digest = Sha256::digest(folder.as_os_str().as_encoded_bytes());
+    let name: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    let path = tokens_dir.join(format!("{name}.token"));
+    match std::fs::symlink_metadata(&path) {
+        Ok(md) if md.is_dir() => {
+            return Err(Error::new(ErrorKind::InvalidInput, format!("{} is a directory", path.display())));
+        }
+        Ok(_) => std::fs::remove_file(&path)?,
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    let guard = TokenFile(path);
+    file.write_all(token.as_bytes())?;
+    Ok(guard)
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// The id of the computer this server runs on.
+pub const LOCAL_COMPUTER: &str = "local";
+/// Longest wait for one `--install-extension` run.
+pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// The most captured output returned for one install (stdout then stderr).
+pub const OUTPUT_CAP: usize = 16 * 1024;
+/// Default idle timeout for one relayed OSE connection (`FR-W4`, `#458`).
+pub const RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Maximum concurrent relays per OSE launch (`FR-W4`, `#458`).
+pub const MAX_RELAYS_PER_LAUNCH: usize = 16;
+/// Maximum concurrent relays across the server (`FR-W4`, `#458`).
+pub const MAX_RELAYS_PER_SERVER: usize = 64;
+
+/// The server CLI flags this module passes. `--server-data-dir`, `--install-extension` and
+/// `--extensions-dir` are documented in `ember/ose/README.md` and used by `ember/ose/smoke.sh`.
+/// `--accept-server-license-terms` is used by every start and by smoke.sh's install step.
+const FLAG_DATA_DIR: &str = "--server-data-dir";
+const FLAG_EXTENSIONS_DIR: &str = "--extensions-dir";
+const FLAG_INSTALL: &str = "--install-extension";
+/// `--uninstall-extension <publisher.name>` (SPEC FR-L31.14, #446). The flag is in Code-OSS
+/// 1.139.1 `src/vs/server/node/serverEnvironmentService.ts` (`'uninstall-extension'`), handled by
+/// `ExtensionManagementCLI.uninstallExtensions`. UNVERIFIED against a real `dpx-ose-server` run.
+const FLAG_UNINSTALL: &str = "--uninstall-extension";
+/// `--file-watcher-polling <ms>` (upstream `serverEnvironmentService.ts`): the OSE's recursive
+/// watcher polls at this interval instead of waiting for native file events
+/// (`remoteFileSystemProviderServer.ts` `getRecursiveWatcherOptions`).
+const FLAG_WATCHER_POLLING: &str = "--file-watcher-polling";
+/// Polling interval for a project on a network share, in milliseconds: Code-OSS's own default
+/// when polling is on (`src/vs/platform/files/common/diskFileSystemProvider.ts` L119, 5000).
+pub const NETWORK_WATCH_POLL_MS: u32 = 5000;
+
+/// The watcher flags of an OSE for a project folder on a `kind` filesystem (SPEC FR-L31.24,
+/// #789). A local disk, wherever it is mounted, uses native file events and gets no flag. Only a
+/// real network filesystem is polled, because native events do not report what another machine
+/// changes on a share.
+pub fn watcher_args(kind: crate::fs_kind::FsKind) -> Vec<String> {
+    match kind {
+        crate::fs_kind::FsKind::Local => Vec::new(),
+        crate::fs_kind::FsKind::Network => vec![FLAG_WATCHER_POLLING.to_string(), NETWORK_WATCH_POLL_MS.to_string()],
+    }
+}
+
+/// UNVERIFIED: `--list-extensions` is not documented or used anywhere in this repository, so no
+/// list route exists. Kept as the one place the flag would be named.
+#[allow(dead_code)]
+const FLAG_LIST_UNVERIFIED: &str = "--list-extensions";
+
+/// Owns one server per (computer, local project folder).
+pub struct OseManager {
+    binary: Option<PathBuf>,
+    /// `Err` when no root can be resolved (no override and no HOME): every use answers the message.
+    data_root: Result<PathBuf, String>,
+    install_timeout: Duration,
+    relay_idle_timeout: Duration,
+    max_relays_per_launch: usize,
+    max_relays_per_server: usize,
+    active_relays: Arc<AtomicUsize>,
+    installing: Arc<Mutex<HashSet<String>>>,
+    processes: Arc<Mutex<HashMap<(String, PathBuf), Process>>>,
+    terminal_env: TerminalEnv,
+    /// The thread that drops the entries of exited children. `None` for a manager that can start
+    /// nothing ([`OseManager::disabled`]). It ends by itself once the manager is dropped.
+    _reaper: Option<std::thread::JoinHandle<()>>,
+}
+
+/// What the terminals of an OSE window need to reach persistent sessions (SPEC FR-P5, #26).
+/// **[provisional]** VS Code runs tasks through `terminal.integrated.automationProfile` =
+/// `ember-term`, and its terminals inherit the OSE server's environment, so:
+/// - `ember_term_dir` (the folder holding `ember-term`) goes first on the child's `PATH`;
+/// - for the local computer, `local_node_state_dir` becomes `EMBER_NODE_STATE_DIR`, whose
+///   `local.json` the built-in node writes at start, so `ember-term` finds that node. No token is
+///   put in the environment.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TerminalEnv {
+    pub ember_term_dir: Option<PathBuf>,
+    pub local_node_state_dir: Option<PathBuf>,
+}
+
+impl TerminalEnv {
+    /// The variables to set on the OSE child of `computer_id`, given the child's `PATH` from
+    /// the allowlist (`base_path`). Pure, for tests.
+    pub fn vars(&self, computer_id: &str, base_path: Option<&std::ffi::OsStr>) -> Vec<(String, std::ffi::OsString)> {
+        let mut out = Vec::new();
+        if let Some(dir) = &self.ember_term_dir {
+            let mut parts = vec![dir.clone()];
+            if let Some(p) = base_path {
+                parts.extend(std::env::split_paths(p).filter(|x| x != dir));
+            }
+            if let Ok(joined) = std::env::join_paths(parts) {
+                out.push(("PATH".to_string(), joined));
+            }
+        }
+        if computer_id == LOCAL_COMPUTER {
+            if let Some(dir) = &self.local_node_state_dir {
+                out.push(("EMBER_NODE_STATE_DIR".to_string(), dir.clone().into_os_string()));
+            }
+        }
+        out
+    }
+}
+
+/// Where `ember-term` is: `EMBER_TERM_BIN` (a file), else next to the server binary (`exe`).
+/// `None` leaves `PATH` as it is (an `ember-term` already on it still works).
+pub fn find_ember_term_dir(env_bin: Option<std::ffi::OsString>, exe: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(p) = env_bin.filter(|v| !v.is_empty()).map(PathBuf::from) {
+        return p.is_file().then(|| p.parent().map(Path::to_path_buf)).flatten();
+    }
+    let dir = exe?.parent()?.to_path_buf();
+    dir.join("ember-term").is_file().then_some(dir)
+}
+
+/// Why an install did not happen.
+#[derive(Debug, PartialEq)]
+pub enum InstallError {
+    /// 400
+    Bad(String),
+    /// 503
+    NotInstalled,
+    /// 409
+    Busy,
+    /// 502: the command ran and failed or timed out; `output` is what it printed.
+    Failed { message: String, output: String },
+    /// 500
+    Io(String),
+}
+
+/// True for an id that is safe as one path segment: only `[A-Za-z0-9._-]`, not empty, no `..`,
+/// not `.`, at most 64 bytes.
+pub fn valid_computer_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id != "."
+        && !id.contains("..")
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+fn slug_ok(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b[0].is_ascii_alphanumeric()
+        && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'-')
+}
+
+/// Checks `publisher.name` (`^[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z0-9][A-Za-z0-9-]*$`, at most 128 bytes) and an
+/// optional `major.minor.patch[-+suffix]` version, and returns the argument for
+/// `--install-extension` (`publisher.name` or `publisher.name@version`). Paths, URLs and
+/// anything starting with `-` fail the pattern.
+pub fn extension_spec(id: &str, version: Option<&str>) -> Result<String, String> {
+    let ok_id = id.len() <= 128
+        && matches!(id.split_once('.'), Some((p, n)) if slug_ok(p) && slug_ok(n));
+    if !ok_id {
+        return Err("extension id must look like publisher.name (letters, digits, '-')".into());
+    }
+    let Some(v) = version else { return Ok(id.to_string()) };
+    let (core, rest) = match v.find(['-', '+']) {
+        Some(i) => (&v[..i], Some(&v[i + 1..])),
+        None => (v, None),
+    };
+    let nums: Vec<&str> = core.split('.').collect();
+    let nums_ok = nums.len() == 3
+        && nums.iter().all(|n| !n.is_empty() && n.len() <= 9 && n.bytes().all(|b| b.is_ascii_digit()));
+    let rest_ok = rest.map_or(true, |r| {
+        !r.is_empty() && r.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    });
+    if v.len() > 64 || !nums_ok || !rest_ok {
+        return Err("version must look like 1.2.3 or 1.2.3-pre.1".into());
+    }
+    Ok(format!("{id}@{v}"))
+}
+
+/// The OSE data root from the environment values (kept pure so tests need no env). With no
+/// `EMBER_OSE_DATA_DIR`, no `EMBER_DATA_DIR` and no usable HOME it is an error: a relative path
+/// under the working directory is never used.
+pub fn data_root_from(
+    ose_dir: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    let non_empty = |p: Option<PathBuf>| p.filter(|p| !p.as_os_str().is_empty());
+    if let Some(p) = non_empty(ose_dir) {
+        return Ok(p);
+    }
+    let base = match non_empty(data_dir) {
+        Some(d) => d,
+        None => non_empty(home)
+            .ok_or_else(|| {
+                "cannot resolve the OSE data dir: set EMBER_OSE_DATA_DIR or EMBER_DATA_DIR, or HOME".to_string()
+            })?
+            .join(".ember"),
+    };
+    Ok(runtime_dir(&base).join("ose-data"))
+}
+
+fn default_data_root() -> Result<PathBuf, String> {
+    data_root_from(
+        std::env::var_os("EMBER_OSE_DATA_DIR").map(PathBuf::from),
+        std::env::var_os("EMBER_DATA_DIR").map(PathBuf::from),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+}
+
+/// `\\?\C:\x` -> `C:\x` and `\\?\UNC\server\share\x` -> `\\server\share\x`; any other path is
+/// unchanged. Pure and platform independent so it is tested everywhere.
+pub fn strip_verbatim_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    match path.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_string(),
+        _ => path.to_string(),
+    }
+}
+
+/// The spelling of an existing directory handed to the OSE. On Windows it is the long form:
+/// libuv's fs-event aborts the OSE when a watched directory is named by its 8.3 short form
+/// (`C:\Users\RUNNER~1`, FR-W4a, #83). `canonicalize` expands short names (the node has no
+/// `windows-sys` dependency for `GetLongPathNameW`); its `\\?\` prefix is stripped. Only the
+/// spelling changes: on failure the path is returned as it is. Elsewhere the identity.
+pub fn long_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    if let Ok(long) = path.canonicalize() {
+        if let Some(s) = long.to_str() {
+            return PathBuf::from(strip_verbatim_prefix(s));
+        }
+    }
+    path.to_path_buf()
+}
+
+/// Makes `path` (and missing parents) with mode 0700 and returns it ready for use.
+///
+/// A symlink at `path` is refused, as is anything that is not a directory. A directory that
+/// already exists is used as it is: its mode is NOT changed (it may be a directory the user chose
+/// with `EMBER_OSE_DATA_DIR`, even a shared one), a warning is logged when group or others can
+/// access it, and it must be owned by the current user. Only a directory this call creates is
+/// set to 0700.
+fn make_private_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::{Error, ErrorKind};
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+        match std::fs::symlink_metadata(path) {
+            Ok(md) => {
+                if md.file_type().is_symlink() {
+                    return Err(Error::new(ErrorKind::PermissionDenied, format!("{} is a symlink", path.display())));
+                }
+                if !md.is_dir() {
+                    return Err(Error::new(ErrorKind::InvalidInput, format!("{} is not a directory", path.display())));
+                }
+                // SAFETY: geteuid takes no arguments and cannot fail.
+                if md.uid() != unsafe { libc::geteuid() } {
+                    return Err(Error::new(
+                        ErrorKind::PermissionDenied,
+                        format!("{} is not owned by the current user", path.display()),
+                    ));
+                }
+                if md.permissions().mode() & 0o077 != 0 {
+                    tracing::warn!(
+                        path = %path.display(),
+                        mode = format!("{:o}", md.permissions().mode() & 0o777),
+                        "OSE data dir is accessible to group or others; its mode is left unchanged"
+                    );
+                }
+                Ok(())
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path)?;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            }
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+    }
+}
+
+/// Makes `path` a directory only this user can use, for a directory that holds or leads to a
+/// connection token file (the tokens dir and the computer dir above it).
+///
+/// Created with 0700 when missing. A symlink, a non-directory or a directory owned by another
+/// user is refused. An existing directory that group or others can WRITE (`mode & 0o022`) is
+/// refused with `token directory <path> is writable by others; fix the permissions`: another user
+/// could delete and replace the 0600 token file before the OSE reads it. An existing directory
+/// with only group/other read or search bits (`0o055`) is tightened to 0700, because we own it and
+/// a token file lives there; this is logged at warn. The shared data root above is not touched
+/// here (see [`make_private_dir`]).
+fn secure_token_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::{Error, ErrorKind};
+        use std::os::fd::FromRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // Open the directory itself, never through a symlink at its place, and check and chmod
+        // the opened handle (fstat, fchmod), so a symlink swapped in after the check cannot
+        // redirect the chmod (#534). ACLs are not inspected.
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains NUL"))?;
+        // SAFETY: `c` is a valid NUL-terminated path; the flags take no extra argument.
+        let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd < 0 {
+            let e = Error::last_os_error();
+            return match e.raw_os_error() {
+                Some(libc::ENOENT) => make_private_dir(path),
+                Some(libc::ELOOP) => Err(Error::new(ErrorKind::PermissionDenied, format!("{} is a symlink", path.display()))),
+                Some(libc::ENOTDIR) => match std::fs::symlink_metadata(path) {
+                    Ok(md) if md.file_type().is_symlink() => {
+                        Err(Error::new(ErrorKind::PermissionDenied, format!("{} is a symlink", path.display())))
+                    }
+                    _ => Err(Error::new(ErrorKind::InvalidInput, format!("{} is not a directory", path.display()))),
+                },
+                _ => Err(e),
+            };
+        }
+        // SAFETY: `fd` is a fresh descriptor owned here.
+        let dir = unsafe { std::fs::File::from_raw_fd(fd) };
+        let md = dir.metadata()?;
+        // SAFETY: geteuid takes no arguments and cannot fail.
+        if md.uid() != unsafe { libc::geteuid() } {
+            return Err(Error::new(
+                ErrorKind::PermissionDenied,
+                format!("{} is not owned by the current user", path.display()),
+            ));
+        }
+        let mode = md.permissions().mode() & 0o777;
+        if mode & 0o022 != 0 {
+            return Err(Error::new(
+                ErrorKind::PermissionDenied,
+                format!("token directory {} is writable by others; fix the permissions", path.display()),
+            ));
+        }
+        if mode & 0o077 != 0 {
+            tracing::warn!(
+                path = %path.display(),
+                mode = format!("{mode:o}"),
+                "token directory is readable by group or others; tightening it to 0700"
+            );
+            dir.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        make_private_dir(path)
+    }
+}
+
+/// The variables an OSE child gets from the server's environment. Everything else (server tokens,
+/// other secrets) is dropped. `ember/ose/smoke.sh` and `regress.sh` set no variable of their own
+/// and call the launcher with the caller's environment, so nothing beyond this list is known to
+/// be needed. More names come only from [`PASSTHROUGH_VAR`] (#471).
+const ENV_ALLOWLIST: [&str; 6] = ["HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "USER"];
+
+/// Added on Windows (#83, D49): Node needs `SystemRoot` for sockets and crypto, and the user and
+/// temp folders come from these instead of `HOME` and `TMPDIR`.
+const WINDOWS_ENV_ALLOWLIST: [&str; 9] =
+    ["SystemRoot", "SystemDrive", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "PATHEXT", "COMSPEC"];
+
+/// The variables an OSE child keeps from the parent, before any passthrough.
+pub fn env_allowlist(windows: bool) -> Vec<&'static str> {
+    let mut names = ENV_ALLOWLIST.to_vec();
+    if windows {
+        names.extend(WINDOWS_ENV_ALLOWLIST);
+    }
+    names
+}
+
+/// The launcher's file name in `bin/`: `dpx-ose-server`, or `dpx-ose-server.cmd` on Windows.
+pub fn launcher_name(windows: bool) -> &'static str {
+    if windows { "dpx-ose-server.cmd" } else { "dpx-ose-server" }
+}
+
+/// The launcher of the unpacked build at `root`.
+pub fn launcher_in(root: &Path, windows: bool) -> PathBuf {
+    root.join("bin").join(launcher_name(windows))
+}
+
+/// The program and leading arguments that run `binary`. A `.cmd` or `.bat` launcher (Windows,
+/// #83, D49) is replaced by what it runs, `<root>/node.exe <root>/out/server-main.js`, so no
+/// `cmd.exe` sits between the node and the server: killing the child kills the server, and the
+/// arguments are not re-quoted by `cmd.exe`. Any other launcher runs as is. Pure: no file is read.
+pub fn launch_program(binary: &Path) -> (PathBuf, Vec<std::ffi::OsString>) {
+    let is_batch = binary
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+    match binary.parent().and_then(Path::parent) {
+        Some(root) if is_batch => {
+            (root.join("node.exe"), vec![root.join("out").join("server-main.js").into_os_string()])
+        }
+        _ => (binary.to_path_buf(), Vec::new()),
+    }
+}
+
+/// Owner configuration (server environment, never a request field): a comma-separated list of
+/// extra variable NAMES passed to the OSE children, default empty, for example
+/// `HTTPS_PROXY,NO_PROXY,SSL_CERT_FILE` (FR-W4, #471). **[provisional]**
+pub const PASSTHROUGH_VAR: &str = "EMBER_OSE_ENV_PASSTHROUGH";
+
+/// The proxy variables that conventionally exist in lower case too; only these may be listed in
+/// lower case.
+const LOWER_CASE_PROXY: [&str; 4] = ["http_proxy", "https_proxy", "no_proxy", "all_proxy"];
+
+/// Whether `name` may be passed through: `[A-Z_][A-Z0-9_]*`, or a lower-case proxy name.
+pub fn valid_passthrough_name(name: &str) -> bool {
+    if LOWER_CASE_PROXY.contains(&name) {
+        return true;
+    }
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_uppercase() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Parses the passthrough list. Empty entries are skipped; invalid names are returned apart so
+/// the caller can log them, and are never passed.
+pub fn parse_passthrough(raw: &str) -> (Vec<String>, Vec<String>) {
+    let (mut ok, mut bad) = (Vec::new(), Vec::new());
+    for name in raw.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        if valid_passthrough_name(name) {
+            if !ok.iter().any(|n: &String| n == name) {
+                ok.push(name.to_string());
+            }
+        } else {
+            bad.push(name.to_string());
+        }
+    }
+    (ok, bad)
+}
+
+/// The environment of an OSE child: the allowlist plus the valid passthrough names, each taken
+/// from `lookup` when set.
+pub fn ose_env(
+    passthrough: Option<&str>,
+    lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Vec<(String, std::ffi::OsString)> {
+    let mut names: Vec<String> = env_allowlist(cfg!(windows)).iter().map(|s| s.to_string()).collect();
+    if let Some(raw) = passthrough {
+        let (ok, bad) = parse_passthrough(raw);
+        for name in bad {
+            tracing::warn!(name = %name, "{PASSTHROUGH_VAR}: invalid variable name ignored");
+        }
+        for name in ok {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names.into_iter().filter_map(|n| lookup(&n).map(|v| (n, v))).collect()
+}
+
+/// A command for the OSE binary with a cleared environment plus [`ose_env`].
+fn ose_command(binary: &Path) -> Command {
+    let passthrough = std::env::var(PASSTHROUGH_VAR).ok();
+    ose_command_with(binary, passthrough.as_deref(), |k| std::env::var_os(k))
+}
+
+fn ose_command_with(
+    binary: &Path,
+    passthrough: Option<&str>,
+    lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Command {
+    let (program, leading) = launch_program(binary);
+    let mut cmd = Command::new(program);
+    cmd.args(leading);
+    cmd.env_clear();
+    for (key, value) in ose_env(passthrough, lookup) {
+        cmd.env(key, value);
+    }
+    cmd
+}
+
+/// Kills a child and everything in its process group (the child leads its own group, see
+/// `process_group(0)` at the spawn), then reaps it. On Windows only the child itself is killed
+/// (`node.exe`, see [`launch_program`]); its own children, such as the extension host, are not
+/// (no job object yet, #83).
+fn kill_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        // SAFETY: killpg takes plain integers; a stale group id at worst fails with ESRCH.
+        unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Removes the computer from the busy set when dropped.
+struct BusyGuard {
+    set: Arc<Mutex<HashSet<String>>>,
+    id: String,
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.set.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+    }
+}
+
+/// Reads a pipe to its end on a thread, keeping at most `OUTPUT_CAP` bytes.
+fn capture<R: Read + Send + 'static>(mut r: R) -> (Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>) {
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let done = Arc::new(AtomicBool::new(false));
+    let (b, d) = (buf.clone(), done.clone());
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        while let Ok(n) = r.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            let mut b = b.lock().unwrap_or_else(|e| e.into_inner());
+            let room = OUTPUT_CAP.saturating_sub(b.len());
+            b.extend_from_slice(&chunk[..n.min(room)]);
+        }
+        d.store(true, Ordering::SeqCst);
+    });
+    (buf, done)
+}
+
+fn collect(parts: &[(Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>)], wait: bool) -> String {
+    if wait {
+        let until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < until && !parts.iter().all(|(_, d)| d.load(Ordering::SeqCst)) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let mut all = Vec::new();
+    for (b, _) in parts {
+        all.extend_from_slice(&b.lock().unwrap_or_else(|e| e.into_inner()));
+    }
+    let mut text = String::from_utf8_lossy(&all).into_owned();
+    if text.len() > OUTPUT_CAP {
+        let mut end = OUTPUT_CAP;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
+}
+
+impl Default for OseManager {
+    fn default() -> Self {
+        Self::new(server_binary())
+    }
+}
+
+impl OseManager {
+    pub fn new(binary: Option<PathBuf>) -> Self {
+        Self::with_root(binary, default_data_root())
+    }
+
+    pub fn with_data_root(binary: Option<PathBuf>, data_root: PathBuf) -> Self {
+        Self::with_root(binary, Ok(data_root))
+    }
+
+    /// The manager of an `ember-node` daemon (SPEC FR-W4a): the binary is found as on the server
+    /// (`EMBER_OSE_SERVER`, else the newest `~/.local/share/dpx-ose-*`), the data root is
+    /// `<EMBER_OSE_DATA_DIR>/node`, else `<state dir>/ose-data` ([`node_data_root_from`]). Without
+    /// either, every start answers why.
+    pub fn for_node(state_dir: Option<&Path>) -> Self {
+        let root = node_data_root_from(std::env::var_os("EMBER_OSE_DATA_DIR").map(PathBuf::from), state_dir);
+        Self::with_root(server_binary(), root)
+    }
+
+    /// A manager that starts nothing: no binary and no data root. A node built without an OSE
+    /// manager (the server's in-process local node, tests) uses it, so its `/ide` routes answer
+    /// 503 instead of starting a second OSE beside the server's own. It never has a child to
+    /// reap, so it starts no reaper thread (every `Node::new` builds one of these).
+    pub fn disabled() -> Self {
+        Self::build(None, Err("the OSE is not enabled on this node".to_string()), false)
+    }
+
+    fn with_root(binary: Option<PathBuf>, data_root: Result<PathBuf, String>) -> Self {
+        Self::build(binary, data_root, true)
+    }
+
+    /// `reap`: start the thread that drops the entry of a child that exited, once a second, until
+    /// the manager is dropped.
+    fn build(binary: Option<PathBuf>, data_root: Result<PathBuf, String>, reap: bool) -> Self {
+        let processes: Arc<Mutex<HashMap<(String, PathBuf), Process>>> = Arc::new(Mutex::new(HashMap::new()));
+        let reaper = reap.then(|| {
+            let weak = Arc::downgrade(&processes);
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(1));
+                let Some(processes) = weak.upgrade() else { break };
+                let mut processes = processes.lock().unwrap_or_else(|e| e.into_inner());
+                processes.retain(|_, process| match &mut process.child {
+                    Some(child) => matches!(child.try_wait(), Ok(None)),
+                    None => true,
+                });
+            })
+        });
+        Self {
+            _reaper: reaper,
+            binary,
+            data_root,
+            install_timeout: INSTALL_TIMEOUT,
+            relay_idle_timeout: RELAY_IDLE_TIMEOUT,
+            max_relays_per_launch: MAX_RELAYS_PER_LAUNCH,
+            max_relays_per_server: MAX_RELAYS_PER_SERVER,
+            active_relays: Arc::new(AtomicUsize::new(0)),
+            installing: Arc::new(Mutex::new(HashSet::new())),
+            processes,
+            terminal_env: TerminalEnv::default(),
+        }
+    }
+
+    /// Sets what OSE windows' terminals need for persistent sessions ([`TerminalEnv`], #26).
+    pub fn with_terminal_env(mut self, env: TerminalEnv) -> Self {
+        self.terminal_env = env;
+        self
+    }
+
+    /// Overrides the install timeout (tests).
+    pub fn with_install_timeout(mut self, timeout: Duration) -> Self {
+        self.install_timeout = timeout;
+        self
+    }
+
+    /// Overrides the relay idle timeout (tests).
+    pub fn with_relay_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.relay_idle_timeout = timeout;
+        self
+    }
+
+    /// Overrides the per-launch and per-server relay concurrency limits (tests).
+    pub fn with_relay_limits(mut self, per_launch: usize, per_server: usize) -> Self {
+        self.max_relays_per_launch = per_launch;
+        self.max_relays_per_server = per_server;
+        self
+    }
+
+    /// Registers an existing OSE TCP listener for `(computer_id, folder)` without spawning a
+    /// child process (used by relay integration tests).
+    pub fn register_launch_for_test(
+        &self,
+        computer_id: &str,
+        folder: &Path,
+        address: SocketAddr,
+        real_token: &str,
+    ) -> EmberOseConnection {
+        let launch_id = uuid::Uuid::new_v4().simple().to_string();
+        let mut placeholder = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        while placeholder == real_token {
+            placeholder = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        }
+        let relay = format!("/api/computers/{computer_id}/ide/relay/{launch_id}");
+        let connection = EmberOseConnection {
+            endpoint: format!("http://{address}"),
+            relay: Some(relay),
+            connection_token: placeholder.clone(),
+        };
+        let folder = folder.canonicalize().unwrap_or_else(|_| folder.to_path_buf());
+        let key = (computer_id.to_string(), folder);
+        let mut processes = self.processes.lock().unwrap_or_else(|e| e.into_inner());
+        processes.insert(
+            key,
+            Process {
+                child: None,
+                launch_id,
+                address,
+                real_token: real_token.to_string(),
+                placeholder,
+                connection: connection.clone(),
+                active_relays: Arc::new(AtomicUsize::new(0)),
+                _token_file: None,
+            },
+        );
+        connection
+    }
+
+    /// Resolves `(computer_id, launch_id)` and acquires a concurrency permit for one relay stream.
+    pub fn open_relay(&self, computer_id: &str, launch_id: &str) -> Result<RelayTarget, RelayLookupError> {
+        let mut processes = self.processes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut found = None;
+        for ((comp, _), p) in processes.iter_mut() {
+            if comp == computer_id
+                && p.launch_id == launch_id
+                && match &mut p.child {
+                    Some(c) => matches!(c.try_wait(), Ok(None)),
+                    None => true,
+                }
+            {
+                found = Some(p);
+                break;
+            }
+        }
+        let Some(process) = found else {
+            return Err(RelayLookupError::NotFound);
+        };
+        let launch_active = process.active_relays.load(Ordering::SeqCst);
+        let server_active = self.active_relays.load(Ordering::SeqCst);
+        if launch_active >= self.max_relays_per_launch || server_active >= self.max_relays_per_server {
+            return Err(RelayLookupError::TooManyRelays);
+        }
+        process.active_relays.fetch_add(1, Ordering::SeqCst);
+        self.active_relays.fetch_add(1, Ordering::SeqCst);
+        let permit = RelayPermit {
+            launch: process.active_relays.clone(),
+            server: self.active_relays.clone(),
+        };
+        Ok(RelayTarget {
+            address: process.address,
+            real_token: process.real_token.clone(),
+            placeholder: process.placeholder.clone(),
+            idle_timeout: self.relay_idle_timeout,
+            _permit: permit,
+        })
+    }
+
+    /// Removes the `*.token` files a killed server left behind (#521): every regular file named
+    /// `<hex>.token` in `<data root>/<computer id>/tokens/`. Call it once at startup, before any OSE
+    /// start: a SIGKILL skips the [`TokenFile`] drop, so the dead token stays on disk until the
+    /// same folder starts again. Symlinks and directories are left alone, a missing root is not an
+    /// error, and an OSE of ANOTHER server sharing the same data root loses its file too (it read
+    /// the file at its start, see FR-W4). Returns how many files were removed.
+    pub fn sweep_stale_tokens(&self) -> usize {
+        let Ok(root) = self.data_root() else { return 0 };
+        let Ok(computers) = std::fs::read_dir(root) else { return 0 };
+        let mut removed = 0;
+        for computer in computers.flatten() {
+            let name = computer.file_name();
+            if !valid_computer_id(&name.to_string_lossy()) {
+                continue;
+            }
+            let tokens = computer.path().join("tokens");
+            match std::fs::symlink_metadata(&tokens) {
+                Ok(md) if md.is_dir() => {}
+                _ => continue,
+            }
+            let Ok(files) = std::fs::read_dir(&tokens) else { continue };
+            for file in files.flatten() {
+                let path = file.path();
+                let is_token = path.extension().is_some_and(|e| e == "token")
+                    && path.file_stem().is_some_and(|s| {
+                        let s = s.to_string_lossy();
+                        !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit())
+                    });
+                let regular = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file());
+                if is_token && regular && std::fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+        if removed > 0 {
+            tracing::info!(removed, "removed stale OSE token files left by an earlier server");
+        }
+        removed
+    }
+
+    pub fn data_root(&self) -> Result<&Path, String> {
+        self.data_root.as_deref().map_err(|e| e.clone())
+    }
+
+    /// `<data root>/<computer id>`, created with mode 0700. The id is validated first, so a
+    /// request value can never leave the root.
+    pub fn computer_data_dir(&self, computer_id: &str) -> Result<PathBuf, String> {
+        if !valid_computer_id(computer_id) {
+            return Err(format!("invalid computer id: {computer_id:?}"));
+        }
+        let root = self.data_root()?;
+        make_private_dir(root).map_err(|e| format!("cannot create OSE data root: {e}"))?;
+        let dir = root.join(computer_id);
+        make_private_dir(&dir).map_err(|e| format!("cannot create OSE data dir: {e}"))?;
+        Ok(long_path(&dir))
+    }
+
+    fn dir_args(dir: &Path) -> Vec<std::ffi::OsString> {
+        vec![
+            FLAG_DATA_DIR.into(),
+            dir.as_os_str().to_owned(),
+            FLAG_EXTENSIONS_DIR.into(),
+            dir.join("extensions").into_os_string(),
+        ]
+    }
+
+    /// Runs `<binary> --install-extension <id>[@version]` against the computer's data dir. No
+    /// shell; the arguments are separate argv entries; one install at a time per computer; the
+    /// child runs with a cleared environment (allowlist only) in its own process group, which is
+    /// killed on timeout. A server shutdown or panic does not kill a running install (TODO follow-up). Blocking: call from `spawn_blocking`.
+    pub fn install_extension(
+        &self,
+        computer_id: &str,
+        id: &str,
+        version: Option<&str>,
+    ) -> Result<String, InstallError> {
+        if !valid_computer_id(computer_id) {
+            return Err(InstallError::Bad(format!("invalid computer id: {computer_id:?}")));
+        }
+        let spec = extension_spec(id, version).map_err(InstallError::Bad)?;
+        self.run_extension_command(computer_id, FLAG_INSTALL, &spec, "install")
+    }
+
+    /// Runs `<binary> --uninstall-extension <id>` against the computer's data dir, with the rules
+    /// of [`OseManager::install_extension`] (SPEC FR-L31.14): the same id pattern (no version), no
+    /// shell, one extension command per computer at a time, the timeout and the cleared
+    /// environment. Blocking: call from `spawn_blocking`.
+    pub fn uninstall_extension(&self, computer_id: &str, id: &str) -> Result<String, InstallError> {
+        if !valid_computer_id(computer_id) {
+            return Err(InstallError::Bad(format!("invalid computer id: {computer_id:?}")));
+        }
+        let spec = extension_spec(id, None).map_err(InstallError::Bad)?;
+        self.run_extension_command(computer_id, FLAG_UNINSTALL, &spec, "uninstall")
+    }
+
+    /// One extension management run of the OSE binary: `<binary> <flag> <spec> <dir args>`. The
+    /// caller has validated `computer_id` and `spec`; `what` names the run in error messages.
+    fn run_extension_command(
+        &self,
+        computer_id: &str,
+        flag: &str,
+        spec: &str,
+        what: &str,
+    ) -> Result<String, InstallError> {
+        let binary = self.binary.as_ref().filter(|p| p.is_file()).ok_or(InstallError::NotInstalled)?;
+        {
+            let mut busy = self.installing.lock().unwrap_or_else(|e| e.into_inner());
+            if !busy.insert(computer_id.to_string()) {
+                return Err(InstallError::Busy);
+            }
+        }
+        let _guard = BusyGuard { set: self.installing.clone(), id: computer_id.to_string() };
+        let dir = self.computer_data_dir(computer_id).map_err(InstallError::Io)?;
+        let mut command = ose_command(binary);
+        command
+            .arg(flag)
+            .arg(spec)
+            .args(Self::dir_args(&dir))
+            .arg("--accept-server-license-terms")
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        // Own process group, so a timeout kills a launcher's children too.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = command.spawn().map_err(|e| InstallError::Io(format!("cannot start OSE server: {e}")))?;
+        let parts = [capture(child.stdout.take().expect("piped")), capture(child.stderr.take().expect("piped"))];
+        let deadline = Instant::now() + self.install_timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let output = collect(&parts, true);
+                    return if status.success() {
+                        Ok(output)
+                    } else {
+                        Err(InstallError::Failed { message: format!("{what} failed: {status}"), output })
+                    };
+                }
+                Ok(None) if Instant::now() >= deadline => {
+                    kill_tree(&mut child);
+                    let output = collect(&parts, false);
+                    return Err(InstallError::Failed {
+                        message: format!("{what} timed out after {}s", self.install_timeout.as_secs_f32()),
+                        output,
+                    });
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                Err(e) => {
+                    kill_tree(&mut child);
+                    return Err(InstallError::Io(format!("cannot wait for the OSE server: {e}")));
+                }
+            }
+        }
+    }
+
+    /// The local computer's server for `folder`.
+    pub fn connection(&self, folder: &Path) -> Result<EmberOseConnection, String> {
+        self.connection_for(LOCAL_COMPUTER, folder)
+    }
+
+    /// The server of `computer_id` for `folder`, started with that computer's data dir.
+    pub fn connection_for(&self, computer_id: &str, folder: &Path) -> Result<EmberOseConnection, String> {
+        self.launch_for(computer_id, folder).map(|launch| launch.connection)
+    }
+
+    /// Like [`OseManager::connection_for`], with the launch id beside the connection (the node's
+    /// `POST /ide/ose` answers it, SPEC FR-W4b). A missing binary is the error [`NOT_INSTALLED`].
+    /// Blocking for up to 10 s while a new OSE starts: call from `spawn_blocking`.
+    pub fn launch_for(&self, computer_id: &str, folder: &Path) -> Result<OseLaunch, String> {
+        let folder = folder.canonicalize().map_err(|e| format!("cannot open project folder: {e}"))?;
+        let key = (computer_id.to_string(), folder.clone());
+        let mut processes = self.processes.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(process) = processes.get_mut(&key) {
+            let alive = match &mut process.child {
+                Some(child) => matches!(child.try_wait(), Ok(None)),
+                None => true,
+            };
+            if alive {
+                return Ok(OseLaunch { launch_id: process.launch_id.clone(), connection: process.connection.clone() });
+            }
+        }
+        processes.remove(&key);
+        let binary = self.binary.as_ref().filter(|p| p.is_file()).ok_or_else(|| NOT_INSTALLED.to_string())?;
+        let data_dir = self.computer_data_dir(computer_id)?;
+        let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("cannot allocate OSE port: {e}"))?;
+        let address = listener.local_addr().map_err(|e| format!("cannot read OSE port: {e}"))?;
+        drop(listener);
+        let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        let mut placeholder = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        while placeholder == token {
+            placeholder = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        }
+        let launch_id = uuid::Uuid::new_v4().simple().to_string();
+        let token_file = write_token_file(&data_dir.join("tokens"), &folder, &token)
+            .map_err(|e| format!("cannot write the OSE token file: {e}"))?;
+        let mut command = ose_command(binary);
+        let base_path = command.get_envs().find(|(k, _)| k.to_str() == Some("PATH")).and_then(|(_, v)| v.map(|v| v.to_os_string()));
+        for (key, value) in self.terminal_env.vars(computer_id, base_path.as_deref()) {
+            command.env(key, value);
+        }
+        let child = command
+            .args(["--host", "127.0.0.1", "--port", &address.port().to_string(), "--connection-token-file"])
+            .arg(&token_file.0)
+            .args(["--accept-server-license-terms", "--telemetry-level", "off"])
+            .args(Self::dir_args(&data_dir))
+            .args(watcher_args(crate::fs_kind::fs_kind(&folder)))
+            .current_dir(long_path(&folder))
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+            .spawn().map_err(|e| format!("cannot start OSE server: {e}"))?;
+        let connection = EmberOseConnection {
+            endpoint: format!("http://{address}"),
+            relay: Some(format!("/api/computers/{computer_id}/ide/relay/{launch_id}")),
+            connection_token: placeholder.clone(),
+        };
+        let launch = OseLaunch { launch_id: launch_id.clone(), connection: connection.clone() };
+        let mut process = Process {
+            child: Some(child),
+            launch_id,
+            address,
+            real_token: token,
+            placeholder,
+            connection: connection.clone(),
+            active_relays: Arc::new(AtomicUsize::new(0)),
+            _token_file: Some(token_file),
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(child) = &mut process.child {
+                if let Ok(Some(status)) = child.try_wait() {
+                    return Err(format!("OSE server exited during startup: {status}"));
+                }
+            }
+            if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() { break; }
+            if Instant::now() >= deadline { return Err("OSE server did not start in time".into()); }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        processes.insert(key, process);
+        Ok(launch)
+    }
+}
+
+/// The segment a node adds under an `EMBER_OSE_DATA_DIR` override.
+pub const NODE_DATA_SEGMENT: &str = "node";
+
+/// The OSE data root of a node from its inputs (kept pure so tests need no env): the override
+/// (`EMBER_OSE_DATA_DIR`) with [`NODE_DATA_SEGMENT`] under it, else `<state dir>/ose-data`. With
+/// neither it is an error: a relative path under the working directory is never used.
+///
+/// The segment is there because a server on the same machine reads the same variable and uses
+/// the root itself ([`data_root_from`]): without it both would keep their token files in
+/// `<root>/local/tokens`, and each start-up [`OseManager::sweep_stale_tokens`] would delete the
+/// live files of the other. The server's sweep looks only at `<root>/<computer id>/tokens`, so it
+/// never reaches `<root>/node/local/tokens`; registry computer ids are UUIDs, never `node`.
+pub fn node_data_root_from(ose_dir: Option<PathBuf>, state_dir: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(p) = ose_dir.filter(|p| !p.as_os_str().is_empty()) {
+        return Ok(p.join(NODE_DATA_SEGMENT));
+    }
+    state_dir
+        .map(|d| d.join("ose-data"))
+        .ok_or_else(|| "cannot resolve the OSE data dir: set EMBER_OSE_DATA_DIR or EMBER_NODE_STATE_DIR".to_string())
+}
+
+fn server_binary() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("EMBER_OSE_SERVER").filter(|v| !v.is_empty()) {
+        return Some(path.into());
+    }
+    // Windows (#83): unpacked builds live under %LOCALAPPDATA%, as ~/.local/share elsewhere.
+    let share = if cfg!(windows) {
+        PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+    } else {
+        PathBuf::from(std::env::var_os("HOME")?).join(".local/share")
+    };
+    let mut candidates: Vec<_> = std::fs::read_dir(share).ok()?.flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("dpx-ose-"))
+        .map(|e| launcher_in(&e.path(), cfg!(windows))).filter(|p| p.is_file()).collect();
+    candidates.sort();
+    candidates.pop()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fr_w4_windows_strip_verbatim_prefix() {
+        use super::strip_verbatim_prefix as s;
+        assert_eq!(s(r"\\?\C:\Users\Long Name\x"), r"C:\Users\Long Name\x");
+        assert_eq!(s(r"\\?\UNC\server\share\x"), r"\\server\share\x");
+        assert_eq!(s(r"C:\Users\x"), r"C:\Users\x");
+        assert_eq!(s(r"\\server\share\x"), r"\\server\share\x");
+        assert_eq!(s(r"\\?\Volume{abc}\x"), r"\\?\Volume{abc}\x");
+        assert_eq!(s("/home/u/x"), "/home/u/x");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn fr_w4_windows_long_path_is_the_identity_elsewhere() {
+        let p = std::path::Path::new("/no/such/dir/../x");
+        assert_eq!(super::long_path(p), p.to_path_buf());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fr_w4_windows_long_path_expands_a_short_name() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetShortPathNameW(long: *const u16, short: *mut u16, len: u32) -> u32;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp_long = super::long_path(tmp.path());
+        let dir = tmp_long.join("Long Directory Name");
+        std::fs::create_dir(&dir).unwrap();
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut buf = vec![0u16; 1024];
+        // SAFETY: `wide` is NUL-terminated and `buf` holds `buf.len()` u16s.
+        let n = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) } as usize;
+        assert!(n > 0 && n < buf.len(), "GetShortPathNameW failed");
+        let short = std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf[..n]));
+        if short == dir {
+            println!("8.3 names are disabled on this volume; skipping");
+            return;
+        }
+        assert_eq!(super::long_path(&short), dir);
+    }
+
+    use super::*;
+
+    /// FR-W4a (#896): a node keeps its OSE data under its state dir unless the owner names another.
+    #[test]
+    fn fr_w4a_node_data_root_is_the_override_or_under_the_state_dir() {
+        let state = Path::new("/home/u/.ember/node");
+        assert_eq!(node_data_root_from(None, Some(state)), Ok(PathBuf::from("/home/u/.ember/node/ose-data")));
+        assert_eq!(node_data_root_from(Some("/srv/ose".into()), Some(state)), Ok(PathBuf::from("/srv/ose/node")));
+        assert_eq!(node_data_root_from(Some("/srv/ose".into()), None), Ok(PathBuf::from("/srv/ose/node")));
+        assert_eq!(node_data_root_from(Some(PathBuf::new()), Some(state)), Ok(PathBuf::from("/home/u/.ember/node/ose-data")));
+        assert!(node_data_root_from(None, None).is_err());
+    }
+
+    /// FR-W4a (#896): a manager that is not enabled starts nothing and says the binary is missing.
+    #[test]
+    fn fr_w4a_disabled_manager_has_no_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = OseManager::disabled();
+        assert_eq!(m.launch_for(LOCAL_COMPUTER, dir.path()), Err(NOT_INSTALLED.to_string()));
+        assert_eq!(m.install_extension(LOCAL_COMPUTER, "a.b", None), Err(InstallError::NotInstalled));
+        assert!(m.data_root().is_err());
+        // No child can exist, so there is nothing to reap: no thread per `Node::new`.
+        assert!(m._reaper.is_none(), "a disabled manager started a reaper thread");
+        assert!(OseManager::with_data_root(None, dir.path().join("d"))._reaper.is_some());
+    }
+
+    /// FR-W4a (#896): a server and a node that share one `EMBER_OSE_DATA_DIR` keep their token
+    /// files in different directories, and the start-up sweep of one leaves the other's alone.
+    #[test]
+    fn fr_w4a_node_and_server_token_dirs_differ_under_one_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        let server_root = data_root_from(Some(shared.clone()), None, None).unwrap();
+        let node_root = node_data_root_from(Some(shared.clone()), Some(Path::new("/state"))).unwrap();
+        assert_eq!(server_root, shared);
+        assert_eq!(node_root, shared.join("node"));
+        let server_tokens = server_root.join(LOCAL_COMPUTER).join("tokens");
+        let node_tokens = node_root.join(LOCAL_COMPUTER).join("tokens");
+        assert_ne!(server_tokens, node_tokens);
+
+        let server = OseManager::with_root(None, Ok(server_root));
+        let node = OseManager::with_root(None, Ok(node_root));
+        let folder = Path::new("/work/project");
+        let server_file = write_token_file(&server_tokens, folder, "server-token").unwrap();
+        let node_file = write_token_file(&node_tokens, folder, "node-token").unwrap();
+        assert_ne!(server_file.0, node_file.0, "the same folder must not share a token file");
+
+        // The server's sweep removes its own stale file and does not reach the node's.
+        assert_eq!(server.sweep_stale_tokens(), 1);
+        assert!(!server_file.0.exists());
+        assert_eq!(std::fs::read_to_string(&node_file.0).unwrap(), "node-token");
+
+        // The node's sweep removes only the node's.
+        let server_file = write_token_file(&server_tokens, folder, "server-token").unwrap();
+        assert_eq!(node.sweep_stale_tokens(), 1);
+        assert!(!node_file.0.exists());
+        assert_eq!(std::fs::read_to_string(&server_file.0).unwrap(), "server-token");
+    }
+
+    #[test]
+    fn fr_l31_24_only_a_network_share_makes_the_ose_poll() {
+        use crate::fs_kind::FsKind;
+        assert!(watcher_args(FsKind::Local).is_empty());
+        assert_eq!(watcher_args(FsKind::Network), ["--file-watcher-polling", "5000"]);
+    }
+
+    fn fake_env(k: &str) -> Option<std::ffi::OsString> {
+        match k {
+            "HOME" => Some("/home/u".into()),
+            "HTTPS_PROXY" => Some("http://proxy:3128".into()),
+            "https_proxy" => Some("http://lower:3128".into()),
+            "NO_PROXY" => Some("localhost".into()),
+            "SECRET_TOKEN" => Some("s3cret".into()),
+            _ => None,
+        }
+    }
+
+    fn envs(cmd: &Command) -> Vec<(String, Option<String>)> {
+        cmd.get_envs()
+            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
+            .collect()
+    }
+
+    /// FR-P5 (#26): ember-term's folder goes first on the OSE child's PATH (once), and only the
+    /// local computer's child learns the built-in node's state dir. No token is set.
+    #[test]
+    #[cfg(unix)]
+    fn fr_p5_ose_child_gets_ember_term_on_path_and_the_local_node_state_dir() {
+        let te = TerminalEnv {
+            ember_term_dir: Some(PathBuf::from("/opt/ember/bin")),
+            local_node_state_dir: Some(PathBuf::from("/home/u/.ember/local-node")),
+        };
+        let base = std::ffi::OsString::from("/usr/bin:/opt/ember/bin:/bin");
+        let v = te.vars(LOCAL_COMPUTER, Some(&base));
+        assert_eq!(v, vec![
+            ("PATH".to_string(), "/opt/ember/bin:/usr/bin:/bin".into()),
+            ("EMBER_NODE_STATE_DIR".to_string(), "/home/u/.ember/local-node".into()),
+        ]);
+        assert!(!v.iter().any(|(k, _)| k.contains("TOKEN")), "{v:?}");
+        let v = te.vars("pi", None);
+        assert_eq!(v, vec![("PATH".to_string(), "/opt/ember/bin".into())]);
+        assert!(TerminalEnv::default().vars(LOCAL_COMPUTER, Some(&base)).is_empty());
+    }
+
+    /// FR-P5 (#26): the command line of an OSE child carries the terminal variables on top of
+    /// the allowlist.
+    #[test]
+    #[cfg(unix)]
+    fn fr_p5_ose_command_env_has_ember_term_path() {
+        let lookup = |k: &str| match k {
+            "PATH" => Some(std::ffi::OsString::from("/usr/bin")),
+            "HOME" => Some("/home/u".into()),
+            _ => None,
+        };
+        let mut cmd = ose_command_with(Path::new("/bin/true"), None, lookup);
+        let base = cmd.get_envs().find(|(k, _)| k.to_str() == Some("PATH")).and_then(|(_, v)| v.map(|v| v.to_os_string()));
+        let te = TerminalEnv { ember_term_dir: Some("/x/bin".into()), local_node_state_dir: Some("/s".into()) };
+        for (k, v) in te.vars(LOCAL_COMPUTER, base.as_deref()) {
+            cmd.env(k, v);
+        }
+        let e = envs(&cmd);
+        assert!(e.contains(&("PATH".into(), Some("/x/bin:/usr/bin".into()))), "{e:?}");
+        assert!(e.contains(&("EMBER_NODE_STATE_DIR".into(), Some("/s".into()))), "{e:?}");
+    }
+
+    #[test]
+    fn fr_p5_find_ember_term_dir() {
+        let d = tempfile::tempdir().unwrap();
+        let bin = d.path().join("ember-term");
+        std::fs::write(&bin, b"").unwrap();
+        assert_eq!(find_ember_term_dir(Some(bin.clone().into()), None), Some(d.path().to_path_buf()));
+        assert_eq!(find_ember_term_dir(Some(d.path().join("nope").into()), None), None);
+        assert_eq!(find_ember_term_dir(None, Some(d.path().join("ember-server"))), Some(d.path().to_path_buf()));
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(find_ember_term_dir(None, Some(empty.path().join("ember-server"))), None);
+    }
+
+    /// FR-W4 (#471): a listed variable reaches the child, an unlisted one does not.
+    #[test]
+    fn fr_w4_ose_env_passthrough_listed_arrives_unlisted_does_not() {
+        let cmd = ose_command_with(Path::new("/bin/true"), Some("HTTPS_PROXY, https_proxy,NO_PROXY"), fake_env);
+        let e = envs(&cmd);
+        assert!(e.contains(&("HTTPS_PROXY".into(), Some("http://proxy:3128".into()))), "{e:?}");
+        assert!(e.contains(&("https_proxy".into(), Some("http://lower:3128".into()))), "{e:?}");
+        assert!(e.contains(&("NO_PROXY".into(), Some("localhost".into()))), "{e:?}");
+        assert!(e.contains(&("HOME".into(), Some("/home/u".into()))), "{e:?}");
+        assert!(!e.iter().any(|(k, _)| k == "SECRET_TOKEN"), "{e:?}");
+        // Without the setting only the allowlist passes.
+        let e = envs(&ose_command_with(Path::new("/bin/true"), None, fake_env));
+        assert!(!e.iter().any(|(k, _)| k == "HTTPS_PROXY"), "{e:?}");
+        let e = envs(&ose_command_with(Path::new("/bin/true"), Some(""), fake_env));
+        assert_eq!(e, vec![("HOME".to_string(), Some("/home/u".to_string()))]);
+    }
+
+    /// FR-W4 (#471): names are validated; an invalid one is ignored, never passed.
+    #[test]
+    fn fr_w4_ose_env_passthrough_names_are_validated() {
+        for ok in ["HTTP_PROXY", "SSL_CERT_FILE", "_X", "XDG_RUNTIME_DIR", "http_proxy", "no_proxy", "all_proxy"] {
+            assert!(valid_passthrough_name(ok), "{ok}");
+        }
+        for bad in ["", "1ABC", "A=B", "HTTPS_PROXY=x", "lower", "Mixed", "A-B", "A B", "ÄBC", "secret_token"] {
+            assert!(!valid_passthrough_name(bad), "{bad}");
+        }
+        let (ok, bad) = parse_passthrough("HTTPS_PROXY,,A=B, SECRET_token ,HTTPS_PROXY");
+        assert_eq!(ok, vec!["HTTPS_PROXY".to_string()]);
+        assert_eq!(bad, vec!["A=B".to_string(), "SECRET_token".to_string()]);
+        // `A=B` must not smuggle a value through.
+        let e = envs(&ose_command_with(Path::new("/bin/true"), Some("HTTPS_PROXY=evil,SECRET_TOKEN=x"), fake_env));
+        assert!(!e.iter().any(|(k, _)| k.contains('=') || k == "SECRET_TOKEN"), "{e:?}");
+    }
+
+    /// FR-W4: the per-computer busy flag is released on every path out of an install, including
+    /// a panic. (A dropped HTTP future does not cancel the blocking task: `spawn_blocking` keeps
+    /// running to its end, and the guard drops there.)
+    #[test]
+    fn fr_w4_ose_data_dir_busy_guard_releases_on_panic_and_drop() {
+        let set = Arc::new(Mutex::new(HashSet::new()));
+        set.lock().unwrap().insert("local".to_string());
+        let s = set.clone();
+        let result = std::panic::catch_unwind(move || {
+            let _guard = BusyGuard { set: s, id: "local".into() };
+            panic!("install blew up");
+        });
+        assert!(result.is_err());
+        assert!(set.lock().unwrap_or_else(|e| e.into_inner()).is_empty(), "guard must release on panic");
+        set.lock().unwrap_or_else(|e| e.into_inner()).insert("local".to_string());
+        drop(BusyGuard { set: set.clone(), id: "local".into() });
+        assert!(set.lock().unwrap().is_empty());
+    }
+
+    /// FR-W4 Windows (#83, D49): the launcher in an unpacked build is `bin/dpx-ose-server` on
+    /// Linux and macOS and `bin/dpx-ose-server.cmd` on Windows.
+    #[test]
+    fn fr_w4_win_launcher_name_per_os() {
+        assert_eq!(launcher_name(false), "dpx-ose-server");
+        assert_eq!(launcher_name(true), "dpx-ose-server.cmd");
+        let root = Path::new("/opt/dpx-ose-1.0.0-linux-x64");
+        assert_eq!(launcher_in(root, false), root.join("bin").join("dpx-ose-server"));
+        assert_eq!(launcher_in(root, true), root.join("bin").join("dpx-ose-server.cmd"));
+    }
+
+    /// FR-W4 Windows (#83, D49): a `.cmd` launcher is not spawned through `cmd.exe`; the program
+    /// is the bundled `node.exe` and the first argument `out/server-main.js`, which is what the
+    /// upstream `.cmd` runs. The shell launcher runs as is.
+    #[test]
+    fn fr_w4_win_cmd_launcher_runs_the_bundled_node() {
+        let root = PathBuf::from("C:/ose/dpx-ose-1.0.0-windows-x64");
+        for name in ["dpx-ose-server.cmd", "DPX-OSE-SERVER.CMD", "dpx-ose-server.bat"] {
+            let (program, args) = launch_program(&root.join("bin").join(name));
+            assert_eq!(program, root.join("node.exe"), "{name}");
+            assert_eq!(args, vec![root.join("out").join("server-main.js").into_os_string()], "{name}");
+        }
+        let unix = Path::new("/opt/ose/bin/dpx-ose-server");
+        let (program, args) = launch_program(unix);
+        assert_eq!(program, unix);
+        assert!(args.is_empty());
+    }
+
+    /// FR-W4 Windows (#83, D49): the child's command line starts with the server script, then the
+    /// caller's flags.
+    #[test]
+    fn fr_w4_win_command_puts_the_server_script_first() {
+        let root = PathBuf::from("C:/ose/x");
+        let cmd = ose_command_with(&root.join("bin/dpx-ose-server.cmd"), None, fake_env);
+        assert_eq!(Path::new(cmd.get_program()), root.join("node.exe"));
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_os_string()).collect();
+        assert_eq!(args, vec![root.join("out").join("server-main.js").into_os_string()]);
+    }
+
+    /// FR-W4 Windows (#83, D49): the cleared environment keeps what Node needs on Windows
+    /// (without `SystemRoot` sockets and crypto fail); the Unix list is unchanged.
+    #[test]
+    fn fr_w4_win_env_allowlist_adds_the_windows_names() {
+        let unix = env_allowlist(false);
+        assert_eq!(unix, ENV_ALLOWLIST.to_vec());
+        let win = env_allowlist(true);
+        for name in ["SystemRoot", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "PATHEXT", "COMSPEC"] {
+            assert!(win.contains(&name), "{name}");
+        }
+        for name in ENV_ALLOWLIST {
+            assert!(win.contains(&name), "{name}");
+        }
+    }
+}

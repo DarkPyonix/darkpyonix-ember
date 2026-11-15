@@ -10,12 +10,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmberOseConnection {
     pub endpoint: String,
+    /// The server's relay route to this OSE (`/api/computers/{computer}/ide/relay/{launch_id}`,
+    /// FR-W4), below the server's base URL. The editor reaches the OSE through it when it is set
+    /// (FR-N9.1); an older server or the demo leaves it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
     pub connection_token: String,
 }
 
 impl std::fmt::Debug for EmberOseConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EmberOseConnection").field("endpoint", &self.endpoint)
+        f.debug_struct("EmberOseConnection").field("endpoint", &self.endpoint).field("relay", &self.relay)
             .field("connection_token", &"[REDACTED]").finish()
     }
 }
@@ -58,6 +63,32 @@ mod ide_launch_tests {
         let launch: EmberLaunch = serde_json::from_value(serde_json::json!({"session": "s"})).unwrap();
         assert!(launch.ose.is_none());
         assert!(serde_json::to_value(&launch).unwrap().get("ose").is_none());
+    }
+
+    #[test]
+    fn fr_n9_connection_carries_the_relay_path_when_the_server_sends_one() {
+        let value = serde_json::json!({
+            "session": "s",
+            "ose": {
+                "endpoint": "http://127.0.0.1:9000",
+                "relay": "/api/computers/local/ide/relay/abc",
+                "connection_token": "placeholder"
+            }
+        });
+        let launch: EmberLaunch = serde_json::from_value(value.clone()).unwrap();
+        let ose = launch.ose.as_ref().unwrap();
+        assert_eq!(ose.relay.as_deref(), Some("/api/computers/local/ide/relay/abc"));
+        assert!(format!("{ose:?}").contains("/api/computers/local/ide/relay/abc"));
+        assert!(!format!("{ose:?}").contains("placeholder"));
+        assert_eq!(serde_json::to_value(&launch).unwrap()["ose"]["relay"], "/api/computers/local/ide/relay/abc");
+
+        // Without it (an older server, the demo) the field is absent and stays absent.
+        let older: EmberLaunch = serde_json::from_value(serde_json::json!({
+            "session": "s", "ose": { "endpoint": "http://127.0.0.1:9000", "connection_token": "t" }
+        }))
+        .unwrap();
+        assert_eq!(older.ose.as_ref().unwrap().relay, None);
+        assert!(serde_json::to_value(&older).unwrap()["ose"].get("relay").is_none());
     }
 }
 

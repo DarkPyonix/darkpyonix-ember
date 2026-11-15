@@ -87,11 +87,13 @@ pub enum ChannelError {
     BadRequest(String),
     #[error("{0}")]
     Forbidden(String),
+    #[error("{0}")]
+    Conflict(String),
     /// A mention names no member agent (FR-T13); carries the names.
     #[error("not a member of this channel: {}", .0.join(", "))]
     NotAMember(Vec<String>),
-    /// A refusal with its own machine code: `invalid_name` (400), `rate_limited` and
-    /// `quota_exceeded` (429).
+    /// A refusal with its own machine code: `invalid_name` (400), `name_taken` (409),
+    /// `rate_limited` and `quota_exceeded` (429).
     #[error("{1}")]
     Coded(&'static str, String),
     #[error(transparent)]
@@ -394,6 +396,12 @@ impl Store {
         if name.is_empty() {
             return Err(ChannelError::BadRequest("channel name must not be empty".into()));
         }
+        if name.chars().count() > invites::MAX_NAME_CHARS {
+            return Err(ChannelError::Coded(
+                "invalid_name",
+                format!("channel name must be at most {} characters", invites::MAX_NAME_CHARS),
+            ));
+        }
         // A channel name is placed in headers an agent reads (FR-T17): no control, format or
         // line-separator character, so it cannot carry a line break or a marker.
         if name.chars().any(invites::is_forbidden_name_char) {
@@ -409,6 +417,24 @@ impl Store {
         {
             let mut conn = self.conn();
             let tx = conn.transaction()?;
+            let lower = name.to_lowercase();
+            let mut taken = lower == DEFAULT_NAME.to_lowercase();
+            if !taken {
+                let mut stmt = tx.prepare("SELECT name FROM channels WHERE project = ?1")?;
+                let rows = stmt.query_map(params![new.project], |r| r.get::<_, String>(0))?;
+                for row in rows {
+                    if row?.trim().to_lowercase() == lower {
+                        taken = true;
+                        break;
+                    }
+                }
+            }
+            if taken {
+                return Err(ChannelError::Coded(
+                    "name_taken",
+                    format!("channel {:?} already exists in project {:?}", name, new.project),
+                ));
+            }
             for sid in &new.agents {
                 let project: Option<String> = tx
                     .query_row("SELECT project FROM sessions WHERE id = ?1", params![sid], |r| r.get(0))

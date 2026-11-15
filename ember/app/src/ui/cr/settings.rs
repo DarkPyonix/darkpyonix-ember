@@ -1,6 +1,7 @@
 //! compose-rust settings sheet (#220 phase 8): theme preference (FR-L28), editor keymap and
 //! shortcut reference (FR-L30), remembered default IDE target (FR-L7), archived-session
-//! visibility (FR-L9), this device on the transport (FR-N9), and server/data paths.
+//! visibility (FR-L9), this device on the transport (FR-N9), updates (NFR-R2), and server/data
+//! paths.
 
 #![allow(non_snake_case)]
 
@@ -10,7 +11,7 @@ use compose_rust::ui::Modifier;
 use compose_rust::{Alignment, ShapeRole, TypeRole};
 
 use super::components::{
-    AppButton, ButtonKind, Clickable, EmberSheet, FilterChip, InsetPanel, Label, Pill, PillTone,
+    AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRow, Clickable, EmberSheet, InsetPanel, Label, Pill, PillTone,
     SheetFooter, Txt,
 };
 use super::theme::*;
@@ -108,10 +109,10 @@ pub fn SettingsContent() {
         .content(|| {
             // 1. Theme preference (FR-L28)
             SectionBlock("화면 테마", "앱 전체의 색상 모드를 선택합니다.", || {
-                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                ChoiceRow(|| {
                     for pref in [ThemePref::System, ThemePref::Light, ThemePref::Dark] {
                         let u = ui.clone();
-                        FilterChip(pref.label(), current_theme == pref, move || {
+                        ChoiceButton(pref.label(), Choice::Radio, current_theme == pref, true, true, move || {
                             u.set_theme_pref(pref);
                         });
                     }
@@ -125,14 +126,19 @@ pub fn SettingsContent() {
                 "에디터 단축키",
                 "Ember 에디터의 기본 단축키 체계를 선택합니다.",
                 || {
-                    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
-                        for km in Keymap::ALL {
-                            let u = ui.clone();
-                            FilterChip(km.label(), current_keymap == km, move || {
-                                u.update_prefs(|pr| pr.keymap = km);
+                    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                        // The choices wrap in the room the table button leaves: a zero width
+                        // keeps a weighted child from asking for its whole line first.
+                        cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
+                            ChoiceRow(|| {
+                                for km in Keymap::ALL {
+                                    let u = ui.clone();
+                                    ChoiceButton(km.label(), Choice::Radio, current_keymap == km, true, true, move || {
+                                        u.update_prefs(|pr| pr.keymap = km);
+                                    });
+                                }
                             });
-                        }
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                        });
                         let toggle = shortcuts_open.clone();
                         let is_open = shortcuts_open.get();
                         AppButton(
@@ -159,12 +165,12 @@ pub fn SettingsContent() {
                 "기본 IDE",
                 "프로젝트나 세션에서 IDE 열기를 눌렀을 때 기본으로 실행할 대상입니다.",
                 || {
-                    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                    ChoiceRow(|| {
                         for (key, label) in IDE_CHOICES {
                             let u = ui.clone();
                             let selected = current_ide.as_deref() == key;
                             let next = key.map(str::to_string);
-                            FilterChip(label, selected, move || {
+                            ChoiceButton(label, Choice::Radio, selected, true, true, move || {
                                 let v = next.clone();
                                 u.update_prefs(|pr| pr.ide_target = v);
                             });
@@ -235,7 +241,16 @@ pub fn SettingsContent() {
 
             cu::Separator(Some(paint(p.line)));
 
-            // 7. Connection & local storage info
+            // 7. Updates of the installed app (NFR-R2, #880)
+            SectionBlock(
+                super::self_update::TITLE,
+                super::self_update::SUBTITLE,
+                super::self_update::SelfUpdateSection,
+            );
+
+            cu::Separator(Some(paint(p.line)));
+
+            // 8. Connection & local storage info
             SectionBlock("연결 및 저장소", "현재 연결된 메인 서버 주소와 로컬 데이터 폴더입니다.", || {
                 InsetPanel(true, || {
                     cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -410,6 +425,40 @@ mod tests {
             p.keymap = Keymap::VsCode;
             p.ide_target = None;
         });
+    }
+
+    #[test]
+    fn nfr_r2_settings_show_the_version_and_the_update_state() {
+        use crate::self_update::UpdateState;
+        let _guard = crate::services::test_guard();
+        let ui = shared_ui();
+        let before = ui.self_update.get_untracked();
+        ui.self_update.set(UpdateState::NotInstalled);
+
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                SettingsSheet(true, || {});
+            }))
+        });
+        let raw = host.rebuild().expect("rebuild").to_vec();
+        let all = texts(&decode_batch(&raw).expect("decode"));
+        for want in [
+            "업데이트",
+            "현재 버전",
+            env!("CARGO_PKG_VERSION"),
+            "업데이트 확인",
+            "설치 프로그램으로 설치한 앱이 아니므로 업데이트를 확인하지 않습니다.",
+        ] {
+            assert!(all.iter().any(|t| t == want), "missing {want}: {all:?}");
+        }
+        assert!(!all.iter().any(|t| t == "업데이트 후 다시 시작"), "no restart without a downloaded update");
+
+        ui.self_update.set(UpdateState::Ready("9.9.9".into()));
+        let next = texts(&decode_batch(host.render_frame(16_000_000).expect("render")).expect("decode"));
+        assert!(next.iter().any(|t| t == "업데이트 후 다시 시작"), "{next:?}");
+        assert!(next.iter().any(|t| t == "새 버전 9.9.9을(를) 내려받았습니다. 다시 시작하면 적용됩니다."), "{next:?}");
+
+        ui.self_update.set(before);
     }
 
     /// Find the `Clickable` ancestor of the `Text` node carrying `label` and return its

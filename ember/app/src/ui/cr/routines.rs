@@ -19,22 +19,23 @@ use compose_rust::runtime::{
 use crate::ui::window_size::current_window_size;
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, Color, DrawList, IconRole, Paint, ShapeRole};
+use compose_rust::{Alignment, ButtonVariant, Color, DrawList, IconRole, ShapeRole};
 
 use ember_client::api::ApiError;
 
 pub use crate::ui::routines::{
     apply_server_run_started, begin_demo_run, changed_patch, demo_run_allowed,
-    demo_session_title, finish_demo_run, has_running_remote_run, patch_is_empty,
+    demo_session_title, draft_schedule_kind, event_field_text, finish_demo_run, has_running_remote_run,
+    parse_ci_event, patch_is_empty,
     resolve_run_session_id, rollback_optimistic_run, run_is_simulated, run_now_busy, DEMO_RUN_BUSY, DEMO_RUN_DONE,
     DEMO_RUN_MS, DEMO_RUN_STARTED, DEMO_SESSION_PREFIX, REMOTE_RUN_POLL_MS,
     REMOTE_RUN_STARTED, SAMPLE_FLAG,
-    not_saved_sentence, run_row_text, unsaved_fields,
+    not_saved_sentence, run_row_text, run_tile_sub, unsaved_fields,
     ago, big_time, civil_from_days, cron_valid, days_from_civil,
     describe_cron, filter_projects, format_next, group_by_project, kind_text, kpis,
     last_run_text, minutes_at, ms_to_minutes, name_from_prompt, new_schedule, next_run,
     overall_success, pane_mode, run_from_server, schedule_line, schedule_patch,
-    schedule_to_entry, schedule_to_routine, success_percent, weekday, weekday_bar_radius,
+    schedule_to_entry, schedule_to_routine, success_percent, weekday, weekday_bar_parts, weekday_bar_radius,
     weekday_bars, weekday_card_height, weekday_chart_size, DayBar,
     Entry, FormDraft, FormError, FormField, Leave, LeaveDecision, leave_decision, routine_form_dirty,
     ROUTINE_DISCARD_QUESTION, FormLayout, Group, FORM_FIELDS, form_layout, form_rows, form_two_columns,
@@ -46,8 +47,8 @@ use crate::ui::home::{
     model_catalog, modes_for, project_options, DEFAULT_PROJECT, Harness, Selection,
 };
 use super::components::{
-    pill_colors, pill_metrics, AppButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
-    CloseButton, FieldOptions, Label, MonoLabel, Pill, PillTone, Select, SheetFooter,
+    pill_colors, pill_metrics, pressable, AppButton, BackButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
+    ChoiceRow, CloseButton, DataNamedOverlay, FieldOptions, Label, MonoLabel, NamedClickable, NamedDisabled, NamedSelect, Pill, PillTone, SheetFooter,
 };
 use super::characters::{CharState, Character};
 use super::compat::Spinner;
@@ -953,7 +954,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                 panel_ref.set(Panel::View);
                 return;
             }
-            if editing.is_none() && draft.trigger == Trigger::Time && with_remote(|r| remote_schedule_allowed(sample_mode(), r.online)) {
+            if editing.is_none() && with_remote(|r| remote_schedule_allowed(sample_mode(), r.online)) {
                 let cwd = try_services().and_then(|svc| {
                     svc.client.read(|s| crate::model::latest_cwd(s, &draft.sel.project))
                 });
@@ -1099,20 +1100,19 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                         let rl_new = request_leave.clone();
                         RoutineHeader(compact, move || {
                             if compact {
-                                cu::Box()
-                                    .modifier(
-                                        Modifier::new()
-                                            .width(52.0)
-                                            .height(40.0)
-                                            .background(paint(p.ink))
-                                            .border(1.0, paint(p.ink))
-                                            .shape_role(ShapeRole::Full),
-                                    )
-                                    .alignment(Alignment::Center)
-                                    .content(move || {
-                                        NavIcon(super::shell::ICON_PLUS_SVG, p.ink_text.to_argb(), 18.0);
-                                        FocusOverlay("새 루틴", move || rl_new(Leave::NewForm));
-                                    });
+                                // The painted pill is the control (compose-rust#429).
+                                NamedClickable(
+                                    "새 루틴",
+                                    Modifier::new()
+                                        .width(52.0)
+                                        .height(40.0)
+                                        .background(paint(p.ink))
+                                        .border(1.0, paint(p.ink))
+                                        .shape_role(ShapeRole::Full),
+                                    Alignment::Center,
+                                    move || rl_new(Leave::NewForm),
+                                    move || NavIcon(super::shell::ICON_PLUS_SVG, p.ink_text.to_argb(), 18.0),
+                                );
                             } else {
                                 let label = "새 루틴";
                                 let btn_w = (18.0 + 12.0 + super::home::text_px(label, Fs::Sm.size()) + 36.0)
@@ -1122,14 +1122,17 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                     .icon(IconRole::Add)
                                     .variant(ButtonVariant::Text)
                                     .color(paint(p.ink_text))
-                                    .modifier(
+                                    // Not `AppButton`: that sets the 14/500 label and no
+                                    // width, which changes this pill; it still sends the
+                                    // shared press values (FR-L34.5, #250).
+                                    .modifier(pressable(
                                         Modifier::new()
                                             .width(btn_w)
                                             .height(40.0)
                                             .background(paint(p.ink))
                                             .border(1.0, paint(p.ink))
                                             .shape_role(ShapeRole::Full),
-                                    )
+                                    ))
                                     .on_click(move || rl_new(Leave::NewForm));
                             }
                         });
@@ -1366,35 +1369,8 @@ fn RoutineHeader(compact: bool, trailing: impl FnOnce()) {
     );
 }
 
-// v0.0.7: #425 and #429 fixed (`Button::content`, `Modifier::label`); workaround kept until
-// checked on a display (moving each painted row into a `Button` content slot changes its press
-// feedback and padding). The overlay names itself with `accessible_name` (owned), never
-// `Modifier::label`: a routine name is data, and the toolkit keeps every label for good (#455).
-/// An accessible invisible button overlay for a painted row or pill.
-/// Gives assistive tech the item's label and provides keyboard focus and click handling.
-fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
-    NamedOverlay(label, true, on_click);
-}
-
-/// The one direct button behind both overlays: invisible text, the whole box to click.
-fn NamedOverlay(label: &str, enabled: bool, on_click: impl FnMut() + 'static) {
-    cu::Button(label)
-        .accessible_name(label)
-        .enabled(enabled)
-        .variant(ButtonVariant::Text)
-        .color(Paint::Literal(Color::argb(0)))
-        .modifier(Modifier::new().fill_max_size())
-        .on_click(on_click);
-}
-
 /// What 지금 실행 reads while its routine has a run in progress.
 pub const RUN_NOW_BUSY_LABEL: &str = "실행 중";
-
-/// The invisible overlay of a control that cannot act now: named, focusable by assistive tech as
-/// a disabled button, and never clickable.
-fn DisabledOverlay(label: &str) {
-    NamedOverlay(label, false, || {});
-}
 
 /// The header's 지금 실행. While a run is in progress it is disabled, reads 실행 중 and has a
 /// spinner beside it, as a CI "run" button does while its job runs (FR-L25, #494).
@@ -1430,26 +1406,26 @@ pub fn glyph_button_width(label: &str) -> f32 {
 /// A 32 dp pill with a line glyph before its label (the mockup's 편집 with a pencil and 지금
 /// 실행 with a play glyph, design review R2, #848). `AppButton` takes only a toolkit
 /// `IconRole`, which has no pencil and no play, so the pill is drawn here with the mockup's SVG
-/// and one named overlay makes the whole pill the button.
+/// and the pill itself is the button, named by its label (`NamedClickable`, compose-rust#429).
 fn GlyphButton(label: &'static str, svg: &'static str, primary: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (fill, border, text) = if primary { (p.ink, p.ink, p.ink_text) } else { (p.surface, p.line, p.text) };
-    cu::Box()
-        .modifier(
-            Modifier::new()
-                .size(glyph_button_width(label), H_CTL)
-                .background(paint(fill))
-                .border(1.0, paint(border))
-                .shape_role(ShapeRole::Full),
-        )
-        .alignment(Alignment::Center)
-        .content(move || {
+    NamedClickable(
+        label,
+        Modifier::new()
+            .size(glyph_button_width(label), H_CTL)
+            .background(paint(fill))
+            .border(1.0, paint(border))
+            .shape_role(ShapeRole::Full),
+        Alignment::Center,
+        on_click,
+        move || {
             cu::Row().alignment(Alignment::CenterStart).spacing(GLYPH_BUTTON_GAP).content(|| {
                 NavIcon(svg, text.to_argb(), GLYPH_BUTTON_ICON);
                 Label(label, GLYPH_BUTTON_FS, Weight::Medium, Some(paint(text)), Some(1));
             });
-            FocusOverlay(label, on_click);
-        });
+        },
+    );
 }
 
 /// The detail's schedule line (`.rt-sched`, 15/500 `text-2`) with the cron in a mono chip after
@@ -1517,46 +1493,9 @@ pub fn seg_colors(selected: bool, p: &Palette) -> (Color, Color, Color) {
     }
 }
 
-/// A segment's width, erring wide: its label at `SEG_FS` with a Latin character at 0.62 em
-/// (the measure-style `text_px` uses 0.55) and a Hangul syllable at one em, 12 on each side,
-/// the 1 dp border twice and 4 to spare, at least 44.
-pub fn seg_width(text: &str) -> f32 {
-    let em = SEG_FS.size();
-    let advance: f32 = text.chars().map(|c| if c.is_ascii() { 0.62 * em } else { em }).sum();
-    (advance + 2.0 * 12.0 + 2.0 + 4.0).ceil().max(44.0)
-}
-
-/// What a line of segments may fill: the row's width less one gap, so a line that the estimate
-/// gets slightly wrong still does not touch the edge.
-pub fn seg_line_room(avail: f32) -> f32 {
-    (avail - SP[1]).max(0.0)
-}
-
-/// The segments of a choice row packed into lines no wider than `avail`, as the mockup's `.seg`
-/// wraps (`flex-wrap: wrap`, `gap: 8px`), so every option and the chosen one stay in view.
-/// v0.0.7: #521 fixed (`FlowRow`); workaround kept until checked on a display (the toolkit's
-/// line breaking must match the mockup's `gap: 8px` wrap at 390 and 1440), so the packing is by
-/// estimated width. Each line
-/// holds indices into `labels`, in order; a segment wider than `avail` gets a line of its own.
-pub fn seg_lines<S: AsRef<str>>(labels: &[S], avail: f32) -> Vec<Vec<usize>> {
-    let avail = seg_line_room(avail);
-    let mut lines: Vec<Vec<usize>> = Vec::new();
-    let mut used = 0.0_f32;
-    for (i, l) in labels.iter().enumerate() {
-        let w = seg_width(l.as_ref());
-        match lines.last_mut() {
-            Some(line) if used + SP[1] + w <= avail => {
-                line.push(i);
-                used += SP[1] + w;
-            }
-            _ => {
-                lines.push(vec![i]);
-                used = w;
-            }
-        }
-    }
-    lines
-}
+/// The space at each side of a segment's label (`.seg button{padding:0 12px}`). A segment takes
+/// the width of its label and these two; the toolkit's `FlowRow` measures it there.
+pub const SEG_PAD_X: f32 = 12.0;
 
 /// The fields' width in the 390 phone's sheet: the window less the sheet's 20 on each side.
 pub const NARROW_SHEET_FIELD_W: f32 = 390.0 - 2.0 * SP[4];
@@ -1576,23 +1515,19 @@ pub fn form_field_width(window_w: f32, panel_w: f32, layout: FormLayout) -> f32 
     .max(0.0)
 }
 
-/// Choice segments in wrapped lines (`seg_lines`): `labels[i]` is chosen when `selected(i)`,
-/// and a tap calls `on_pick(i)`.
+/// Choice segments that wrap as the mockup's `.seg` does (`flex-wrap: wrap`, `gap: 8px`), so
+/// every option and the chosen one stay in view: `labels[i]` is chosen when `selected(i)`, and a
+/// tap calls `on_pick(i)`. The toolkit's `FlowRow` breaks the lines at each segment's real width
+/// (compose-rust#521, `components::ChoiceRow`); the lines were packed by an estimated width.
 fn SegChoices(
     labels: &[String],
-    avail: f32,
     selected: impl Fn(usize) -> bool,
     on_pick: impl Fn(usize) + Clone + 'static,
 ) {
-    let lines = seg_lines(labels, avail);
-    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-        for line in &lines {
-            cu::Row().spacing(SP[1]).content(|| {
-                for &i in line {
-                    let pick = on_pick.clone();
-                    FilterSegButton(&labels[i], selected(i), move || pick(i));
-                }
-            });
+    ChoiceRow(|| {
+        for (i, label) in labels.iter().enumerate() {
+            let pick = on_pick.clone();
+            FilterSegButton(label, selected(i), move || pick(i));
         }
     });
 }
@@ -1606,11 +1541,9 @@ fn SegChoices(
 fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (bg, border, fg) = seg_colors(selected, p);
-    let width = seg_width(text);
     cu::Box()
         .modifier(
             Modifier::new()
-                .width(width)
                 .height(H_CTL)
                 .background(paint(bg))
                 .border(1.0, paint(border))
@@ -1618,8 +1551,13 @@ fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static)
         )
         .alignment(Alignment::Center)
         .content(move || {
-            Label(text, SEG_FS, Weight::Medium, Some(paint(fg)), Some(1));
-            FocusOverlay(text, on_click);
+            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SEG_PAD_X));
+                Label(text, SEG_FS, Weight::Medium, Some(paint(fg)), Some(1));
+                cu::Spacer().modifier(Modifier::new().width(SEG_PAD_X));
+            });
+            // A project's name is data, so the button over the pill carries it.
+            DataNamedOverlay(text, true, None, on_click);
         });
 }
 
@@ -1652,23 +1590,8 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
     let ring_cmd = ring.build();
 
     let (chart_w, chart_h, chart_gap) = weekday_chart_size(compact);
-    let totals: Vec<usize> = bars.iter().map(|b| b.ok + b.fail).collect();
-    let mut chart = DrawList::builder().rect(paint(p.line), 0.0, chart_h, chart_w, 1.0, 0.0);
-    for (b, (x, y, w, h)) in bars.iter().zip(bar_rects(&totals, chart_w, chart_h, chart_gap)) {
-        if h <= 0.0 {
-            continue;
-        }
-        let total = (b.ok + b.fail) as f32;
-        let fail_h = h * b.fail as f32 / total;
-        let r = weekday_bar_radius(w, h);
-        chart = chart.round_rect(paint(p.blue.strong), x, y + fail_h, w, h - fail_h, r, 0.0);
-        if fail_h > 0.0 {
-            chart = chart.round_rect(paint(p.orange.strong), x, y, w, fail_h, r, 0.0);
-        }
-    }
-    let chart_cmd = chart.build();
     let card_h = weekday_card_height(compact);
-    let busy = totals.iter().any(|t| *t > 0);
+    let busy = bars.iter().any(|b| b.ok + b.fail > 0);
 
     let kpis_content = move || {
         // The two KPI rows sit together at the top of the card (`.rt-topwrap .kpis` row gap
@@ -1689,7 +1612,7 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
     };
 
     let hero_content = move || {
-        HeroCardContent(&ring_cmd, rate, &chart_cmd, &bars, busy, chart_w, chart_h, card_h);
+        HeroCardContent(&ring_cmd, rate, &bars, busy, (chart_w, chart_h, chart_gap), card_h);
     };
 
     if width_dp > 1279.0 {
@@ -1708,14 +1631,13 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
 fn HeroCardContent(
     ring_cmd: &DrawList,
     rate: Option<u32>,
-    chart_cmd: &DrawList,
     bars: &[DayBar; 7],
     busy: bool,
-    chart_w: f32,
-    chart_h: f32,
+    chart: (f32, f32, f32),
     card_h: f32,
 ) {
     let p = ember_theme().palette;
+    let (chart_w, chart_h, chart_gap) = chart;
     cu::Row()
         .spacing(SP[3])
         .alignment(Alignment::CenterStart)
@@ -1756,7 +1678,7 @@ fn HeroCardContent(
             cu::Column().spacing(SP[0]).modifier(Modifier::new().width(chart_w)).content(|| {
                 Label("요일별 실행", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 cu::Spacer().modifier(Modifier::new().height(SP[0]));
-                cu::Canvas(chart_cmd.clone()).modifier(Modifier::new().size(chart_w, chart_h + 1.0));
+                WeekdayBars(bars, chart_w, chart_h, chart_gap);
                 cu::Row().modifier(Modifier::new().width(chart_w).height(24.0)).content(|| {
                     for b in bars {
                         cu::Column().modifier(Modifier::new().weight(1.0)).alignment(Alignment::Center).content(|| {
@@ -1774,6 +1696,55 @@ fn HeroCardContent(
         });
 }
 
+/// The weekday bars as the mockup's `.bars2`: one pill per day clipped to its shape (`.bar
+/// { border-radius: pill; overflow: hidden }`), the failed part on top of the successful part
+/// 2 dp apart, so a day reads as one joined bar. A Canvas drew the two parts as separate pills,
+/// a failed part shorter than the bar's width as a dot (review r3, #848). A 1 dp `line`
+/// baseline closes the chart, as before.
+pub fn WeekdayBars(bars: &[DayBar; 7], chart_w: f32, chart_h: f32, chart_gap: f32) {
+    let p = ember_theme().palette;
+    let totals: Vec<usize> = bars.iter().map(|b| b.ok + b.fail).collect();
+    let rects = bar_rects(&totals, chart_w, chart_h, chart_gap);
+    cu::Column().modifier(Modifier::new().size(chart_w, chart_h + 1.0)).content(|| {
+        cu::Row().spacing(chart_gap).modifier(Modifier::new().size(chart_w, chart_h)).content(|| {
+            for (b, &(_, _, w, h)) in bars.iter().zip(rects.iter()) {
+                cu::Box()
+                    .modifier(Modifier::new().size(w, chart_h))
+                    .alignment(Alignment::BottomCenter)
+                    .content(|| {
+                        if h <= 0.0 {
+                            return;
+                        }
+                        let (fail_h, gap_h, ok_h) = weekday_bar_parts(h, b.ok, b.fail);
+                        cu::Column()
+                            .modifier(
+                                Modifier::new()
+                                    .size(w, h)
+                                    .corner_radius(weekday_bar_radius(w, h))
+                                    .clip(true),
+                            )
+                            .content(|| {
+                                if fail_h > 0.0 {
+                                    cu::Box().modifier(
+                                        Modifier::new().fill_max_width().height(fail_h).background(paint(p.orange.strong)),
+                                    );
+                                }
+                                if gap_h > 0.0 {
+                                    cu::Spacer().modifier(Modifier::new().height(gap_h));
+                                }
+                                if ok_h > 0.0 {
+                                    cu::Box().modifier(
+                                        Modifier::new().fill_max_width().height(ok_h).background(paint(p.blue.strong)),
+                                    );
+                                }
+                            });
+                    });
+            }
+        });
+        cu::Spacer().modifier(Modifier::new().width(chart_w).height(1.0).background(paint(p.line)));
+    });
+}
+
 /// A routine KPI number: `.kpi .v` 28/400 (`style.css:110`, `routines.css:64`), design review B5.
 pub const ROUTINE_KPI_WEIGHT: Weight = Weight::Regular;
 /// The gap between the two KPI rows (`.rt-topwrap .kpis` gap `--sp4`).
@@ -1781,8 +1752,9 @@ pub const ROUTINE_KPI_ROW_GAP: f32 = 16.0;
 /// The detail pane's title: 15/600 (`DESIGN.md` 6.5), design review B5.
 pub const ROUTINE_DETAIL_TITLE: (Fs, Weight) = (Fs::Lg, Weight::Semibold);
 
-// TODO(compose-rust#443): `Text` has no `overflow_wrap`, so a KPI label stays on one line with
-// `max_lines(Some(1))` instead of being allowed to wrap in a narrow column.
+/// A KPI. Its label stays on one line with an ellipsis (#248: 지금 실행 중 and 이번 주 실행 must
+/// not wrap mid-phrase in a narrow column); that is a design choice, not a toolkit gap, so
+/// compose-rust#443's `overflow_wrap` does not change it.
 fn RoutineKpiView(kpi: &RoutineKpi, index: usize) {
     let p = ember_theme().palette;
     cu::Column().modifier(Modifier::new().weight(1.0)).spacing(SP[0]).content(|| {
@@ -1923,7 +1895,8 @@ fn RoutineRow(
     let row_border = if selected { p.ink } else { p.line };
     let row_alpha = if routine_enabled { 1.0 } else { 0.6 };
 
-    // Accessible focusable row container using toolkit Button
+    // The row is named by its routine (data), so a clear button under its content carries the
+    // name and the click (`DataNamedOverlay`); the switch above it keeps its own.
     cu::Box()
         .modifier(
             Modifier::new()
@@ -1935,7 +1908,7 @@ fn RoutineRow(
                 .alpha(row_alpha),
         )
         .content(move || {
-            FocusOverlay(&routine_name, move || on_open(open_id.clone()));
+            DataNamedOverlay(&routine_name, true, None, move || on_open(open_id.clone()));
             cu::Column()
                 .spacing(SP[1])
                 .modifier(
@@ -2102,27 +2075,24 @@ fn DetailPane(
         cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
             // Header: Topbar with bottom border
             if layout == DetailHeader::Icons {
-                let back_cmd = DrawList::builder()
-                    .line(paint(p.text_2), 20.0, 16.0, 11.0, 16.0, 2.0)
-                    .line(paint(p.text_2), 16.0, 11.0, 11.0, 16.0, 2.0)
-                    .line(paint(p.text_2), 16.0, 21.0, 11.0, 16.0, 2.0)
-                    .build();
+                // `.topbar.rt-dh` on a phone: 56 high, 20 in from each side, and the shared
+                // `.icon-btn.sm.backbtn` (a 32 dp bordered rounded square named 뒤로), where a bare
+                // drawn arrow stood (review r7, routines-detail-390).
                 let on_back_fn = on_back;
                 let toggle_fn = on_toggle_c;
                 let edit_fn = on_edit_c;
                 let run_fn = on_run_c;
                 cu::Row()
                     .alignment(Alignment::CenterStart)
-                    .spacing(SP[1])
-                    .modifier(Modifier::new().fill_max_width().height(DETAIL_HEADER_H).padding(PAD_ROW_V))
+                    .modifier(Modifier::new().fill_max_width().height(DETAIL_HEADER_H))
                     .content(move || {
-                        cu::Box()
-                            .modifier(Modifier::new().size(32.0, 32.0))
-                            .alignment(Alignment::Center)
-                            .content(move || {
-                                cu::Canvas(back_cmd).modifier(Modifier::new().size(32.0, 32.0));
-                                FocusOverlay("목록", move || on_back_fn());
-                            });
+                    cu::Spacer().modifier(Modifier::new().width(TOPBAR_PAD_X));
+                    cu::Row()
+                    .alignment(Alignment::CenterStart)
+                    .spacing(SP[1])
+                    .modifier(Modifier::new().weight(1.0))
+                    .content(move || {
+                        BackButton(move || on_back_fn());
                         cu::Column()
                             .modifier(Modifier::new().weight(1.0))
                             .alignment(Alignment::CenterStart)
@@ -2131,40 +2101,40 @@ fn DetailPane(
                             });
                         TriggerPill(routine_trigger, true);
                         RoutineSwitch(&routine_name_c, routine_enabled, move |v| toggle_fn(toggle_id_c.clone(), v));
-                        cu::Box()
-                            .modifier(
-                                Modifier::new()
-                                    .size(32.0, 32.0)
-                                    .background(paint(p.surface))
-                                    .border(1.0, paint(p.line))
-                                    .corner_radius(CORNER_SM),
-                            )
-                            .alignment(Alignment::Center)
-                            .content(move || {
-                                NavIcon(ICON_EDIT_SVG, p.text_2.to_argb(), 16.0);
-                                FocusOverlay("편집", move || edit_fn(edit_id_c.clone()));
-                            });
+                        // Each 32 dp square is the control itself (compose-rust#429).
+                        NamedClickable(
+                            "편집",
+                            Modifier::new()
+                                .size(32.0, 32.0)
+                                .background(paint(p.surface))
+                                .border(1.0, paint(p.line))
+                                .corner_radius(CORNER_SM),
+                            Alignment::Center,
+                            move || edit_fn(edit_id_c.clone()),
+                            move || NavIcon(ICON_EDIT_SVG, p.text_2.to_argb(), 16.0),
+                        );
                         // Busy: the muted fill of a disabled primary button (`button_style_for`)
                         // with a spinner in place of the play glyph.
                         let run_fill = if busy { p.muted } else { p.ink };
-                        cu::Box()
-                            .modifier(
-                                Modifier::new()
-                                    .size(32.0, 32.0)
-                                    .background(paint(run_fill))
-                                    .border(1.0, paint(run_fill))
-                                    .corner_radius(CORNER_SM),
-                            )
-                            .alignment(Alignment::Center)
-                            .content(move || {
-                                if busy {
-                                    Spinner(14.0);
-                                    DisabledOverlay(RUN_NOW_BUSY_LABEL);
-                                } else {
-                                    NavIcon(ICON_PLAY_SVG, p.ink_text.to_argb(), 16.0);
-                                    FocusOverlay("지금 실행", move || run_fn(run_id_c.clone()));
-                                }
-                            });
+                        let run_box = Modifier::new()
+                            .size(32.0, 32.0)
+                            .background(paint(run_fill))
+                            .border(1.0, paint(run_fill))
+                            .corner_radius(CORNER_SM);
+                        if busy {
+                            // Named and disabled to assistive technology, with no click.
+                            NamedDisabled(RUN_NOW_BUSY_LABEL, run_box, Alignment::Center, || Spinner(14.0));
+                        } else {
+                            NamedClickable(
+                                "지금 실행",
+                                run_box,
+                                Alignment::Center,
+                                move || run_fn(run_id_c.clone()),
+                                move || NavIcon(ICON_PLAY_SVG, p.ink_text.to_argb(), 16.0),
+                            );
+                        }
+                    });
+                    cu::Spacer().modifier(Modifier::new().width(TOPBAR_PAD_X));
                     });
             } else if layout == DetailHeader::Stacked {
                 // Narrow panel (768): the title and pill on top, the actions on their own row,
@@ -2246,36 +2216,24 @@ fn DetailPane(
 
                     // Inset cards: 3 cards in one row on wide, 2x2 grid on narrow so the run
                     // history below stays visible above the fold on 390 dp phone screens.
+                    // Every tile in a row is as high as the tallest (`.rdetail` grid `stretch`;
+                    // review r3: uneven tiles at 390 and 1440).
                     if tile_cols < 3 {
                         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                            cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                    KeyValue("프로젝트", &project_name, "");
-                                });
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                    AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project);
-                                });
+                            TileRow(move || {
+                                TileCell(move || KeyValue("프로젝트", &project_name, ""));
+                                TileCell(move || AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project));
                             });
-                            cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                    KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다");
-                                });
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                    KeyValue("권한 모드", &mode_label, "");
-                                });
+                            TileRow(move || {
+                                TileCell(move || KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다"));
+                                TileCell(move || KeyValue("권한 모드", &mode_label, ""));
                             });
                         });
                     } else {
-                        cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                            cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                KeyValue("프로젝트", &project_name, "");
-                            });
-                            cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project);
-                            });
-                            cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다");
-                            });
+                        TileRow(move || {
+                            TileCell(move || KeyValue("프로젝트", &project_name, ""));
+                            TileCell(move || AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project));
+                            TileCell(move || KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다"));
                         });
                     }
                     // The inset pads 12 16 itself (`.inset`); no second padding inside it.
@@ -2312,13 +2270,47 @@ fn DetailPane(
     });
 }
 
+/// A row of detail tiles: each tile as high as the row's tallest (`equal_height`), the mockup's
+/// grid `align-items: stretch` (review r3, #848).
+fn TileRow(content: impl FnOnce()) {
+    cu::Row().spacing(SP[2]).equal_height(true).modifier(Modifier::new().fill_max_width()).content(content);
+}
+
+/// One cell of a `TileRow`: a share of the width and the row's whole height.
+fn TileCell(content: impl FnOnce()) {
+    cu::Box().modifier(Modifier::new().weight(1.0).fill_max_height()).content(content);
+}
+
+/// The detail tile's inset (`.inset`: `surface-2`, `corner-md`, 12 16 padding), filling the
+/// height its `TileCell` gives it. The shared `InsetPanel` keeps its content's height, so a
+/// short tile stood shorter than its neighbour.
+fn TileInset(content: impl FnOnce()) {
+    let p = ember_theme().palette;
+    cu::Box()
+        .modifier(
+            Modifier::new()
+                .fill_max_width()
+                .fill_max_height()
+                .background(paint(p.surface_2))
+                .corner_radius(CORNER_MD)
+                .padding(PAD_ROW_V),
+        )
+        .content(|| {
+            cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(content);
+                cu::Spacer().modifier(Modifier::new().width(SP[0]));
+            });
+        });
+}
+
 fn KeyValue(title: &str, value: &str, sub: &str) {
     let p = ember_theme().palette;
     let t = title.to_string();
     let v = value.to_string();
     let s = sub.to_string();
     // The inset pads 12 16 itself (`.inset`); a second padding inside doubled it (#494).
-    InsetPanel(true, move || {
+    TileInset(move || {
         cu::Column()
             .spacing(SP[0])
             .modifier(Modifier::new().fill_max_width())
@@ -2337,7 +2329,7 @@ fn KeyValue(title: &str, value: &str, sub: &str) {
 fn AgentKeyValue(agent: &'static str, label: &str, sub: &str, project: &str) {
     let p = ember_theme().palette;
     let (v, s, proj) = (label.to_string(), sub.to_string(), project.to_string());
-    InsetPanel(true, move || {
+    TileInset(move || {
         cu::Column()
             .spacing(SP[0])
             .modifier(Modifier::new().fill_max_width())
@@ -2364,6 +2356,23 @@ pub fn run_char_state(s: RunStatus) -> CharState {
     }
 }
 
+/// The member a run's session belongs to, named as the project screen names it (team name,
+/// else `<project>-<harness>`), when the client knows the session (`mname` in the mockup).
+pub fn run_member_name(session: &str) -> Option<String> {
+    let svc = try_services()?;
+    let id = resolve_run_session_id(session, demo_active());
+    svc.client.read(|s| {
+        let v = s.session(&id)?;
+        let team = s.team_for_session(&id);
+        Some(crate::ui::project::member_name(
+            team.and_then(|t| t.member(&id)).map(|m| m.name.as_str()),
+            &v.record.project,
+            &v.record.agent,
+            &v.record.title,
+        ))
+    })
+}
+
 /// One `.runtile` (R3, #848): the harness's character, the run's time over the session line,
 /// and the status pill, on `surface-2`. The whole tile opens the run's session (세션 열기).
 fn RunTile(run: &Run, now: Minutes, simulated: bool, agent: &'static str, project: &str) {
@@ -2371,43 +2380,48 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool, agent: &'static str, projec
     let tone = status_tone(run.status);
     let session = run.session.clone();
     let row = run_row_text(run, now, simulated);
+    let sub = run_tile_sub(run, run.session.as_deref().and_then(run_member_name).as_deref());
     let state = run_char_state(run.status);
     let name = Harness::from_kind(agent).map(|h| h.label()).unwrap_or(agent);
     let project = project.to_string();
-    cu::Box()
-        .modifier(
-            Modifier::new()
-                .fill_max_width()
-                .height(RUN_TILE_H)
-                .background(paint(p.surface_2))
-                .corner_radius(CORNER_MD),
-        )
-        .alignment(Alignment::CenterStart)
-        .content(move || {
-            cu::Row()
-                .alignment(Alignment::CenterStart)
-                .spacing(RUN_TILE_PAD)
-                .modifier(Modifier::new().fill_max_width().padding(RUN_TILE_PAD))
-                .content(|| {
-                    Character(agent, false, RUN_TILE_AVATAR, name, &project, state, None);
-                    cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                        Label(&row.when, Fs::Xs, Weight::Semibold, None, Some(1));
-                        Label(row.sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    });
-                    Pill(row.status, tone, true);
-                    if let Some(flag) = row.flag {
-                        Pill(flag, PillTone::Grey, true);
-                    }
+    let tile = Modifier::new()
+        .fill_max_width()
+        .height(RUN_TILE_H)
+        .background(paint(p.surface_2))
+        .corner_radius(CORNER_MD);
+    let content = move || {
+        cu::Row()
+            .alignment(Alignment::CenterStart)
+            .spacing(RUN_TILE_PAD)
+            .modifier(Modifier::new().fill_max_width().padding(RUN_TILE_PAD))
+            .content(|| {
+                Character(agent, false, RUN_TILE_AVATAR, name, &project, state, None);
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label(&row.when, Fs::Xs, Weight::Semibold, None, Some(1));
+                    Label(&sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 });
-            if let Some(id) = session {
-                FocusOverlay(OPEN_SESSION_LABEL, move || {
-                    if let Some(svc) = try_services() {
-                        let target = resolve_run_session_id(&id, demo_active());
-                        svc.ui.open_conversation(&target);
-                    }
-                });
-            }
-        });
+                Pill(row.status, tone, true);
+                if let Some(flag) = row.flag {
+                    Pill(flag, PillTone::Grey, true);
+                }
+            });
+    };
+    // A tile with a session is the control itself, named 세션 열기 (compose-rust#429); one
+    // without a session is a plain box.
+    match session {
+        Some(id) => {
+            let open = move || {
+                if let Some(svc) = try_services() {
+                    let target = resolve_run_session_id(&id, demo_active());
+                    svc.ui.open_conversation(&target);
+                }
+            };
+            NamedClickable(OPEN_SESSION_LABEL, tile, Alignment::CenterStart, open, content);
+        }
+        None => {
+            cu::Box().modifier(tile).alignment(Alignment::CenterStart).content(content);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2435,11 +2449,12 @@ struct FormCtx {
 fn form_save_handler(
     draft: MutableState<FormDraft>,
     tried: MutableState<bool>,
+    initial: Option<FormDraft>,
     mut on_save: impl FnMut(FormDraft) + 'static,
 ) -> impl FnMut() + 'static {
     move || {
         let cur = draft.get();
-        if cur.errors().is_empty() {
+        if cur.errors_with_initial(initial.as_ref()).is_empty() {
             on_save(cur);
         } else {
             tried.set(true);
@@ -2447,7 +2462,7 @@ fn form_save_handler(
     }
 }
 
-fn RoutineForm(
+pub(super) fn RoutineForm(
     initial: FormDraft,
     editing: Option<String>,
     _server: bool,
@@ -2481,7 +2496,15 @@ fn RoutineForm(
     if layout == FormLayout::Inline {
         // The detail area: a card with the title, 취소 and 저장 in its header, then the fields
         // in the page's own scroll (mockup v8: the form replaces the detail panel).
-        let (close, save) = (on_close.clone(), form_save_handler(ctx.draft.clone(), ctx.tried.clone(), on_save.clone()));
+        let (close, save) = (
+            on_close.clone(),
+            form_save_handler(
+                ctx.draft.clone(),
+                ctx.tried.clone(),
+                ctx.editing.then(|| ctx.initial.clone()),
+                on_save.clone(),
+            ),
+        );
         let mut close_x = on_close.clone();
         EmberCard(false, true, None, Some(0.0), None, move || {
             cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
@@ -2503,7 +2526,7 @@ fn RoutineForm(
                 // The first error also sits under the header buttons once a save was tried, so
                 // it is seen without scrolling to the end of the form.
                 if ctx.tried.get() {
-                    if let Some(e) = ctx.draft.get().errors().first() {
+                    if let Some(e) = ctx.draft.get().errors_with_initial(ctx.editing.then_some(&ctx.initial)).first() {
                         cu::Column().modifier(Modifier::new().fill_max_width().padding(16.0)).content(|| {
                             Label(e.message(), Fs::Sm, Weight::Medium, Some(paint(p.red.strong)), Some(2));
                         });
@@ -2538,7 +2561,20 @@ fn RoutineForm(
         SheetFooter(move || {
             let mut close = on_close.clone();
             AppButton("취소", None, ButtonKind::Default, true, true, false, move || close());
-            AppButton("저장", None, ButtonKind::Primary, true, true, false, form_save_handler(ctx.draft.clone(), ctx.tried.clone(), on_save.clone()));
+            AppButton(
+                "저장",
+                None,
+                ButtonKind::Primary,
+                true,
+                true,
+                false,
+                form_save_handler(
+                    ctx.draft.clone(),
+                    ctx.tried.clone(),
+                    ctx.editing.then(|| ctx.initial.clone()),
+                    on_save.clone(),
+                ),
+            );
         });
     });
 }
@@ -2551,7 +2587,7 @@ fn FormFields(ctx: &FormCtx) {
     let editing = ctx.editing;
     let agents = live_agents();
     let d = draft.get();
-    let errors = d.errors();
+    let errors = d.errors_with_initial(editing.then_some(initial));
     let mut project_choices = project_options(&ctx.projects);
     if !project_choices.contains(&d.sel.project) {
         project_choices.push(d.sel.project.clone());
@@ -2605,13 +2641,13 @@ fn FormFields(ctx: &FormCtx) {
                 let (sel_proj, names) = (draft.clone(), project_choices.clone());
                 if pick {
                     let at = project_choices.iter().position(|n| *n == d.sel.project).unwrap_or(0);
-                    Select(&project_choices[at], &project_choices, at, w, move |i| {
+                    NamedSelect("프로젝트", &project_choices[at], &project_choices, at, w, move |i| {
                         let n = names[i].clone();
                         sel_proj.update(|d| d.sel.project = n);
                     });
                     return;
                 }
-                SegChoices(&project_choices, w, |i| d.sel.project == project_choices[i], move |i| {
+                SegChoices(&project_choices, |i| d.sel.project == project_choices[i], move |i| {
                     let n = names[i].clone();
                     sel_proj.update(|d| d.sel.project = n);
                 });
@@ -2622,13 +2658,13 @@ fn FormFields(ctx: &FormCtx) {
                 let sel_trig = draft.clone();
                 if pick {
                     let at = Trigger::ALL.iter().position(|t| *t == d.trigger).unwrap_or(0);
-                    Select(&labels[at], &labels, at, w, move |i| {
+                    NamedSelect("트리거", &labels[at], &labels, at, w, move |i| {
                         let t = Trigger::ALL[i];
                         sel_trig.update(|d| *d = d.with_trigger(t));
                     });
                     return;
                 }
-                SegChoices(&labels, w, |i| d.trigger == Trigger::ALL[i], move |i| {
+                SegChoices(&labels, |i| d.trigger == Trigger::ALL[i], move |i| {
                     let t = Trigger::ALL[i];
                     sel_trig.update(|d| *d = d.with_trigger(t));
                 });
@@ -2646,7 +2682,7 @@ fn FormFields(ctx: &FormCtx) {
                 } else if d.trigger == Trigger::Time {
                     "0 9 * * *".to_string()
                 } else {
-                    "예: PR이 열릴 때".to_string()
+                    "예: owner/repo#develop".to_string()
                 };
                 EmberField(FieldOptions {
                     fill_max_width: true,
@@ -2661,7 +2697,7 @@ fn FormFields(ctx: &FormCtx) {
             FormField::Model => {
                 FormLabel("하네스 · 모델 · 추론 강도");
                 let (pick, choices) = (draft.clone(), models.clone());
-                Select(&model_labels[model_at.min(model_labels.len().saturating_sub(1))], &model_labels, model_at, 320.0, move |i| {
+                NamedSelect("하네스 · 모델 · 추론 강도", &model_labels[model_at.min(model_labels.len().saturating_sub(1))], &model_labels, model_at, 320.0, move |i| {
                     if let Some(o) = choices.get(i).copied() {
                         pick.update(|d| {
                             d.sel = d.sel.with_harness(o.harness).with_option(o);
@@ -2673,7 +2709,7 @@ fn FormFields(ctx: &FormCtx) {
             FormField::Mode => {
                 FormLabel("권한 모드");
                 let (pick, choices) = (draft.clone(), modes.clone());
-                Select(&mode_labels[mode_at], &mode_labels, mode_at, 300.0, move |i| {
+                NamedSelect("권한 모드", &mode_labels[mode_at], &mode_labels, mode_at, 300.0, move |i| {
                     if let Some(m) = choices.get(i).copied() {
                         pick.update(|d| d.sel = d.sel.with_mode(m));
                     }
@@ -2688,7 +2724,7 @@ fn FormFields(ctx: &FormCtx) {
                     .chain(ctx.computers.iter().map(|(_, name)| name.clone()))
                     .collect();
                 let (sel_c, pick_ids) = (draft.clone(), ids.clone());
-                SegChoices(&labels, w, |i| d.sel.computer == ids[i], move |i| {
+                SegChoices(&labels, |i| d.sel.computer == ids[i], move |i| {
                     let c = pick_ids[i].clone();
                     sel_c.update(|d| d.sel.computer = c);
                 });
@@ -3330,48 +3366,56 @@ mod tests {
         }
     }
 
-    /// At 390 the 프로젝트 segments wrap onto more lines instead of scrolling, so every option
-    /// and the chosen one are in view; no line is wider than the sheet's fields (#493).
+    /// The form's choice segments wrap in the toolkit's `FlowRow` (compose-rust#521, #673): each
+    /// segment is measured at its own width, so no estimate packs the lines. The screen still
+    /// hands the fields' width down for the two-column form (#493).
     #[test]
-    fn fr_l25_form_segments_wrap_to_the_field_width() {
-        let projects = ["기본 프로젝트", "demo-project", "second-project", "ember"];
-        let phone = form_field_width(390.0, 0.0, FormLayout::Sheet);
-        assert_eq!(phone, 350.0);
-        let (content, _) = content_at(1440.0);
-        let wide = form_field_width(1440.0, detail_panel_width(1440.0, content, false), FormLayout::Inline);
-        for avail in [phone, wide] {
-            let lines = seg_lines(&projects, avail);
-            let flat: Vec<usize> = lines.iter().flatten().copied().collect();
-            assert_eq!(flat, vec![0, 1, 2, 3], "every option once, in order, at {avail}");
-            for line in &lines {
-                let w: f32 = line.iter().map(|&i| seg_width(projects[i])).sum::<f32>()
-                    + SP[1] * (line.len() as f32 - 1.0);
-                assert!(w <= avail, "a line of {w} fits {avail}");
-            }
-        }
-        assert!(seg_lines(&projects, phone).len() >= 2, "the phone wraps");
-        // The 390 sheet: 기본 프로젝트 and demo-project share a line; second-project and the
-        // chosen ember go below, so ember is in view (r3 capture of #720 had all on one line).
-        assert_eq!(seg_lines(&projects, phone), vec![vec![0, 1], vec![2, 3]]);
-        for line in seg_lines(&projects, phone) {
-            let w: f32 = line.iter().map(|&i| seg_width(projects[i])).sum::<f32>() + SP[1] * (line.len() as f32 - 1.0);
-            assert!(w <= phone - SP[1], "a 390 line of {w} keeps a gap from the sheet's edge");
-        }
+    fn fr_l25_form_segments_wrap_in_a_flow_row() {
+        let _guard = crate::services::test_guard();
+        assert_eq!(form_field_width(390.0, 0.0, FormLayout::Sheet), 350.0);
         assert_eq!(
             form_field_width(0.0, 0.0, FormLayout::Sheet),
             NARROW_SHEET_FIELD_W,
-            "an unknown window packs against the 390 sheet"
+            "an unknown window takes the 390 sheet's width"
         );
-        assert_eq!(seg_lines(&projects, NARROW_SHEET_FIELD_W), vec![vec![0, 1], vec![2, 3]]);
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let labels: Vec<String> = ["기본 프로젝트", "demo-project", "second-project", "ember"].iter().map(|s| s.to_string()).collect();
+                SegChoices(&labels, |i| i == 3, |_| {});
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let flow: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create { node_id, widget: WidgetKind::FlowRow } => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(flow.len(), 1, "one wrapping row");
+        let segments = batch.iter().filter(|m| matches!(m, Mutation::Insert { parent_id, .. } if *parent_id == flow[0])).count();
+        assert_eq!(segments, 4, "every option is a child of the wrapping row, in one group");
+        let mods: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { modifier, .. } => Some(format!("{modifier:?}")),
+                _ => None,
+            })
+            .collect();
+        assert!(!mods.iter().any(|m| m.starts_with("Width(") && m != "Width(12.0)"), "a segment sends no width of its own: {mods:?}");
+        assert_eq!(mods.iter().filter(|m| *m == "Width(12.0)").count(), 8, "12 at each side of each label");
+        let all: String = batch.iter().map(|m| format!("{m:?}")).collect();
+        assert!(all.contains("HorizontalSpacing") && all.contains("VerticalSpacing"), "8 between segments and between lines: {all}");
         // The screen works the width out before the sheet opens and hands it down.
         let src = include_str!("routines.rs");
         let fields = src.split("fn FormFields(").nth(1).unwrap().split("\nfn FormLabel(").next().unwrap();
         assert!(!fields.contains("current_window_size()"), "the fields never read the window inside the sheet");
         assert!(src.contains("let form_w_sheet = form_field_width(window.width_dp, panel_w, FormLayout::Sheet);"));
         assert!(src.contains("            form_w_sheet,\n            &form_draft,"), "the sheet gets the screen's width");
-        assert_eq!(seg_lines(&projects, wide).len(), 1, "the wide inline form keeps one line");
-        // A segment wider than the room still gets its own line rather than vanishing.
-        assert_eq!(seg_lines(&["a-very-long-project-name-indeed"], 100.0), vec![vec![0]]);
+        let production = src.split("#[cfg(test)]").next().unwrap();
+        for gone in [["fn seg", "_lines"].concat(), ["fn seg", "_width"].concat(), ["fn seg_line", "_room"].concat()] {
+            assert!(!production.contains(&gone), "{gone}: the estimate is gone");
+        }
     }
 
     #[test]
@@ -3477,7 +3521,7 @@ mod tests {
         let src = include_str!("routines.rs");
         let kv = src.split("fn KeyValue(").nth(1).unwrap().split("\n}\n").next().unwrap();
         let tile = src.split("fn RunTile(").nth(1).unwrap().split("\n}\n").next().unwrap();
-        assert!(kv.contains("InsetPanel(true"), "KeyValue sits in an inset");
+        assert!(kv.contains("TileInset(move ||"), "KeyValue sits in an inset");
         assert!(!kv.contains(".padding("), "KeyValue adds no padding inside the inset's own");
         // The run tile is the mockup's `.runtile`: 10 padding on `surface-2`, not an inset (#848).
         assert!(tile.contains(".height(RUN_TILE_H)"));
@@ -3499,7 +3543,8 @@ mod tests {
     #[test]
     fn fr_l25_detail_inset_panel_fills_its_width() {
         let src = include_str!("components.rs");
-        let inset = src.split("pub fn InsetPanel(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        // `InsetPanel` hands its arguments to `InsetPanelSized`, which builds the row (#886).
+        let inset = src.split("pub fn InsetPanelSized(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(inset.contains("cu::Row().modifier(Modifier::new().fill_max_width_if(fill_max_width))"));
         assert!(inset.contains("cu::Column().modifier(Modifier::new().weight(1.0)).content(content)"));
     }
@@ -3545,6 +3590,8 @@ mod tests {
         let mut e = d.with_trigger(Trigger::Event);
         assert_eq!(e.errors(), [FormError::EventEmpty]);
         e.cron = "PR이 열릴 때".into();
+        assert_eq!(e.errors(), [FormError::EventInvalid]);
+        e.cron = "DarkPyonix/darkpyonix-ember#develop".into();
         assert!(e.errors().is_empty());
         let back = e.with_trigger(Trigger::Time);
         assert_eq!(back.cron, "0 9 * * *");
@@ -3557,6 +3604,7 @@ mod tests {
             FormError::NameEmpty,
             FormError::ScheduleInvalid,
             FormError::EventEmpty,
+            FormError::EventInvalid,
             FormError::PromptEmpty,
         ] {
             assert!(e.message().ends_with("니다"), "{}", e.message());
@@ -3879,11 +3927,13 @@ mod tests {
         compose_rust::window::reset_window_size();
         let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreenWith(sample_entries(), true))));
         let mutations = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
-        let button_count = mutations
+        // A control is a toolkit button or a painted box that takes the click itself
+        // (compose-rust#429): both carry `OnClick`.
+        let control_count = mutations
             .iter()
-            .filter(|m| matches!(m, Mutation::Create { widget: WidgetKind::Button, .. }))
+            .filter(|m| matches!(m, Mutation::SetProp { property: PropertyKind::OnClick, .. }))
             .count();
-        assert!(button_count >= 10, "expected accessible button widgets in tree, found {button_count}");
+        assert!(control_count >= 10, "expected accessible controls in tree, found {control_count}");
         compose_rust::window::reset_window_size();
     }
 
@@ -3910,6 +3960,7 @@ mod tests {
             FormError::NameEmpty,
             FormError::ScheduleInvalid,
             FormError::EventEmpty,
+            FormError::EventInvalid,
             FormError::PromptEmpty,
         ] {
             strings.push(e.message().into());
@@ -3936,54 +3987,55 @@ mod tests {
     }
 
     #[test]
-    fn focus_overlay_emits_button_with_text_and_fill_max_size() {
+    fn a_fixed_name_sits_on_the_painted_box_and_a_routine_name_on_a_matched_button() {
+        // compose-rust#429, #431 (#673): the screen's overlay functions are gone. 편집, 지금 실행,
+        // 새 루틴 and 세션 열기 are painted boxes that are the control; a row named by its
+        // routine keeps `components::DataNamedOverlay`, which takes its box's bounds and no more.
         let _guard = crate::services::test_guard();
         compose_rust::window::reset_window_size();
-        let mut host = Host::new(|| {
-            Box::new(Recomposer::new(|| {
-                cu::Box().content(|| {
-                    FocusOverlay("테스트 행", || {});
-                });
-            }))
-        });
-        let mutations = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
-        let has_button = mutations.iter().any(|m| match m {
-            Mutation::Create {
-                widget: WidgetKind::Button,
-                ..
-            } => true,
-            _ => false,
-        });
-        assert!(has_button, "expected Button widget");
+        fn composed(content: fn()) -> Vec<(u32, String, Vec<String>, Vec<String>)> {
+            let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let mut nodes: Vec<(u32, String, Vec<String>, Vec<String>)> = Vec::new();
+            for m in batch.iter() {
+                match m {
+                    Mutation::Create { node_id, widget } => nodes.push((*node_id, format!("{widget:?}"), Vec::new(), Vec::new())),
+                    Mutation::SetModifier { node_id, modifier, .. } => {
+                        if let Some(n) = nodes.iter_mut().find(|n| n.0 == *node_id) {
+                            n.2.push(format!("{modifier:?}"));
+                        }
+                    }
+                    Mutation::SetProp { node_id, property, value } => {
+                        if let Some(n) = nodes.iter_mut().find(|n| n.0 == *node_id) {
+                            n.3.push(format!("{property:?}={value:?}"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            nodes
+        }
+        // (The glyph and the fill are not the header's pair, which a source check counts.)
+        let nodes = composed(|| GlyphButton("편집", ICON_PLAY_SVG, true, || {}));
+        assert!(!nodes.iter().any(|n| n.1 == "Button"), "no button over the pill");
+        let pill = nodes.iter().find(|n| n.3.iter().any(|p| p == "AccessibleName=String(\"편집\")")).expect("the named pill");
+        assert_eq!(pill.1, "Box");
+        assert!(pill.3.iter().any(|p| p.starts_with("OnClick=")), "{:?}", pill.3);
+        assert!(pill.2.iter().any(|m| m.starts_with("Semantics") && m.contains("Button")), "{:?}", pill.2);
+        assert_eq!(pill.2.iter().filter(|m| m.starts_with("PressFeedback")).count(), 1, "{:?}", pill.2);
+        assert!(pill.2.iter().any(|m| *m == format!("Height({H_CTL:?})")) && pill.2.iter().any(|m| m.starts_with("Background")), "{:?}", pill.2);
 
-        let has_text = mutations.iter().any(|m| match m {
-            Mutation::SetProp {
-                property,
-                value: PropertyValue::String(s),
-                ..
-            } => *property == PropertyKind::Text && *s == "테스트 행",
-            _ => false,
-        });
-        assert!(has_text, "expected text prop matching label");
+        let nodes = composed(|| FilterSegButton("ember", true, || {}));
+        let over = nodes.iter().find(|n| n.1 == "Button").expect("the button over a pill named from data");
+        assert!(over.3.iter().any(|p| p == "Text=String(\"ember\")") && over.3.iter().any(|p| p == "AccessibleName=String(\"ember\")"), "{:?}", over.3);
+        assert!(over.2.iter().any(|m| m == "MatchParentSize") && !over.2.iter().any(|m| m.starts_with("FillMax")), "{:?}", over.2);
 
-        let has_fill_width = mutations.iter().any(|m| match m {
-            Mutation::SetModifier {
-                modifier: compose_rust::Modifier::FillMaxWidth,
-                ..
-            } => true,
-            _ => false,
-        });
-        let has_fill_height = mutations.iter().any(|m| match m {
-            Mutation::SetModifier {
-                modifier: compose_rust::Modifier::FillMaxHeight,
-                ..
-            } => true,
-            _ => false,
-        });
-        assert!(
-            has_fill_width && has_fill_height,
-            "expected fill_max_size modifier"
-        );
+        let production = include_str!("routines.rs").split("#[cfg(test)]").next().unwrap().to_string();
+        for gone in [["Focus", "Overlay("].concat(), ["Named", "Overlay("].concat(), ["Disabled", "Overlay("].concat()] {
+            // `DataNamedOverlay(` (compose-rust#831) is the kept overlay, not the old one.
+            assert!(!production.replace("DataNamedOverlay(", "").contains(&gone), "{gone} is gone");
+        }
+        assert!(production.contains("NamedDisabled(RUN_NOW_BUSY_LABEL, run_box"), "the busy square is named and disabled, with no click");
         compose_rust::window::reset_window_size();
     }
 
@@ -4346,7 +4398,7 @@ mod tests {
         let mut scan = |batch: &[Mutation<'_>]| {
             for m in batch {
                 match m {
-                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
                         texts.insert(*node_id, s.to_string());
                     }
                     Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
@@ -4414,7 +4466,7 @@ mod tests {
         let mut scan = |batch: &[Mutation<'_>]| {
             for m in batch {
                 match m {
-                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
                         texts.insert(*node_id, s.to_string());
                     }
                     Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
@@ -4483,8 +4535,14 @@ mod tests {
         fn scan(&mut self, batch: &[Mutation<'_>]) {
             for m in batch {
                 match m {
-                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                    // A painted control carries its name as `AccessibleName` (compose-rust#429).
+                    Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
                         self.texts.insert(*node_id, s.to_string());
+                    }
+                    Mutation::SetModifier { node_id, modifier: compose_rust::Modifier::Semantics { state, .. }, .. } => {
+                        if (*state >> compose_rust::schema::SEMANTICS_DISABLED_SHIFT) & 3 == 2 {
+                            self.enabled.insert(*node_id, false);
+                        }
                     }
                     Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
                         self.clickables.insert(*node_id, *h as u64);
@@ -4793,6 +4851,195 @@ mod design_review_tests {
         assert!(!source().contains(".max(174.0)"));
     }
 
+    // ---- a node tree of what a composable sends, for the checks below ----------------------
+
+    use compose_rust::protocol::{decode_batch, Mutation};
+    use compose_rust::{Host, Recomposer};
+
+    #[derive(Debug)]
+    struct Node {
+        id: u32,
+        parent: Option<u32>,
+        mods: Vec<String>,
+        props: Vec<String>,
+    }
+
+    fn nodes_of(content: fn()) -> Vec<Node> {
+        let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let mut nodes: Vec<Node> = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::Create { node_id, .. } => {
+                    nodes.push(Node { id: *node_id, parent: None, mods: Vec::new(), props: Vec::new() })
+                }
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.parent = Some(*parent_id);
+                    }
+                }
+                Mutation::SetModifier { node_id, modifier, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.mods.push(format!("{modifier:?}"));
+                    }
+                }
+                Mutation::SetProp { node_id, property, value } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.props.push(format!("{property:?}={value:?}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        nodes
+    }
+
+    fn children<'a>(nodes: &'a [Node], parent: &Node) -> Vec<&'a Node> {
+        nodes.iter().filter(|n| n.parent == Some(parent.id)).collect()
+    }
+
+    fn has_mod(n: &Node, m: &str) -> bool {
+        n.mods.iter().any(|x| x == m)
+    }
+
+    fn day(ok: usize, fail: usize) -> DayBar {
+        DayBar { label: "월", ok, fail, today: false }
+    }
+
+    fn sample_weekday_bars() {
+        let bars = [day(3, 1), day(0, 0), day(4, 0), day(0, 2), day(1, 1), day(2, 0), day(1, 0)];
+        let (w, h, g) = weekday_chart_size(false);
+        WeekdayBars(&bars, w, h, g);
+    }
+
+    /// Review r3 (#848): a day's bar is one pill clipped to its shape, orange on top of blue
+    /// 2 dp apart, not two separately rounded pills drawn on a Canvas.
+    #[test]
+    fn design_r3_weekday_bars_are_joined_clipped_pills() {
+        let _guard = crate::services::test_guard();
+        let nodes = nodes_of(sample_weekday_bars);
+        let p = ember_theme().palette;
+        let orange = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.orange.strong)));
+        let blue = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.blue.strong)));
+        let bars: Vec<&Node> = nodes.iter().filter(|n| has_mod(n, "Clip(true)")).collect();
+        assert_eq!(bars.len(), 6, "one clipped bar per day with runs: {bars:?}");
+        let src = source();
+        let chart = src.split("pub fn WeekdayBars(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(!chart.contains("round_rect"), "no separately rounded parts");
+        assert!(chart.contains(".corner_radius(weekday_bar_radius(w, h))"));
+        // The 3-ok-1-fail day: orange part, the 2 dp gap, then the blue part, in that order.
+        let parts = children(&nodes, bars[0]);
+        assert_eq!(parts.len(), 3, "{parts:?}");
+        assert!(parts[0].mods.contains(&orange), "{:?}", parts[0]);
+        assert!(has_mod(parts[1], "Height(2.0)"), "{:?}", parts[1]);
+        assert!(parts[2].mods.contains(&blue), "{:?}", parts[2]);
+        // The all-success day has only a blue part, the all-failed day only an orange one.
+        let ok_only = children(&nodes, bars[1]);
+        assert_eq!(ok_only.len(), 1);
+        assert!(ok_only[0].mods.contains(&blue));
+        let fail_only = children(&nodes, bars[2]);
+        assert_eq!(fail_only.len(), 1);
+        assert!(fail_only[0].mods.contains(&orange));
+    }
+
+    fn sample_run_tile() {
+        let run = Run { at: 0, status: RunStatus::Done, session: Some("s9".into()) };
+        RunTile(&run, 0, false, "claude-code", "ember");
+    }
+
+    /// Review r3 (#848): the run tile's second line names the session's member, as the
+    /// mockup's `mname(session)`, not "세션" on every run.
+    #[test]
+    fn design_r3_run_tile_names_the_member() {
+        let _guard = crate::services::test_guard();
+        let svc = crate::services::test_services();
+        svc.reset_demo();
+        let want = run_member_name("s9").expect("the demo knows demo-s9");
+        assert_ne!(want, crate::ui::routines::RUN_TILE_SESSION);
+        let nodes = nodes_of(sample_run_tile);
+        let text = |t: &str| format!("Text=String({t:?})");
+        assert!(nodes.iter().any(|n| n.props.contains(&text(&want))), "the tile shows {want}");
+        assert!(
+            !nodes.iter().any(|n| n.props.contains(&text(crate::ui::routines::RUN_TILE_SESSION))),
+            "no bare 세션 line when the member is known"
+        );
+        assert_eq!(run_member_name("no-such-session"), None);
+    }
+
+    fn sample_tile_row() {
+        TileRow(|| {
+            TileCell(|| KeyValue("프로젝트", "ember", ""));
+            TileCell(|| KeyValue("컴퓨터 · 프로필", "이 서버", "프로필은 하네스를 따릅니다"));
+        });
+    }
+
+    /// Review r3 (#848): the detail tiles of a row are equally high (the mockup's grid
+    /// stretches them); at 390 프로젝트 stood shorter than 에이전트, 권한 모드 than 컴퓨터.
+    #[test]
+    fn design_r3_detail_tiles_in_a_row_are_equally_high() {
+        let _guard = crate::services::test_guard();
+        let nodes = nodes_of(sample_tile_row);
+        let rows: Vec<&Node> = nodes.iter().filter(|n| n.props.iter().any(|p| p == "Collapsible=Bool(true)")).collect();
+        assert_eq!(rows.len(), 1, "one equal-height row");
+        let cells = children(&nodes, rows[0]);
+        assert_eq!(cells.len(), 2);
+        for cell in &cells {
+            assert!(has_mod(cell, "Weight(1.0)") && has_mod(cell, "FillMaxHeight"), "{cell:?}");
+            let inset = children(&nodes, cell);
+            assert_eq!(inset.len(), 1);
+            assert!(has_mod(inset[0], "FillMaxHeight"), "the inset fills the cell: {:?}", inset[0]);
+        }
+        let src = source();
+        assert!(!src.contains("cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {\n                                    KeyValue("));
+    }
+
+    fn sample_sheet_form() {
+        let ctx = FormCtx {
+            field_w: NARROW_SHEET_FIELD_W,
+            draft: remember(|| mutable_state_of(FormDraft::new("ember"))),
+            tried: remember(|| mutable_state_of(false)),
+            initial: FormDraft::new("ember"),
+            editing: false,
+            computers: Vec::new(),
+            projects: vec!["ember".to_string(), "second-project".to_string()],
+            layout: FormLayout::Sheet,
+        };
+        FormFields(&ctx);
+    }
+
+    /// #596 (3), (4): the 390 sheet pairs 프로젝트 and 트리거 in one row, as the mockup's 390
+    /// form (`routines-edit-390-light`), instead of one field and wrapped chips per row.
+    #[test]
+    fn issue_596_phone_sheet_pairs_project_and_trigger() {
+        let _guard = crate::services::test_guard();
+        let nodes = nodes_of(sample_sheet_form);
+        let parent_of = |id: Option<u32>| id.and_then(|id| nodes.iter().find(|n| n.id == id)).and_then(|n| n.parent);
+        let label = |text: &str| -> Option<u32> {
+            let want = format!("Text=String({text:?})");
+            Some(nodes.iter().find(|n| n.props.contains(&want)).unwrap_or_else(|| panic!("no {text}")).id)
+        };
+        for (a, b) in [("프로젝트", "트리거"), ("일정 설명", "cron")] {
+            let (la, lb) = (label(a), label(b));
+            // Each field has a column of its own, and the two columns share one row.
+            assert_ne!(parent_of(la), parent_of(lb), "{a} and {b} sit in their own columns");
+            let (ra, rb) = (parent_of(parent_of(la)), parent_of(parent_of(lb)));
+            assert!(ra.is_some(), "{a} has a row");
+            assert_eq!(ra, rb, "{a} and {b} share a row");
+        }
+    }
+
+    /// #596 (6): every select of the routine form is named by its field label for assistive
+    /// technology (`NamedSelect`, compose-rust#460 fixed in v0.0.7), not only by its value.
+    #[test]
+    fn issue_596_form_selects_are_named_by_their_label() {
+        let src = source();
+        let fields = src.split("fn FormFields(").nth(1).unwrap().split("\nfn FormLabel(").next().unwrap();
+        for name in ["프로젝트", "트리거", "하네스 · 모델 · 추론 강도", "권한 모드"] {
+            assert!(fields.contains(&format!("NamedSelect(\"{name}\", &")), "{name}");
+        }
+        assert!(!fields.contains("                Select(&") && !fields.contains("                    Select(&"), "no unnamed select");
+    }
+
     /// R2: 편집 has a pencil and 지금 실행 a play glyph, 13/500, in every header layout.
     #[test]
     fn design_r2_detail_buttons_carry_glyphs() {
@@ -4820,7 +5067,7 @@ mod design_review_tests {
         let src = source();
         let tile = src.split("fn RunTile(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(tile.contains("Character("));
-        assert!(tile.contains("FocusOverlay(OPEN_SESSION_LABEL"));
+        assert!(tile.contains("NamedClickable(OPEN_SESSION_LABEL"), "the tile itself is the control");
         assert!(!tile.contains("AppButton("), "no separate 세션 열기 button");
         assert!(src.contains("for pair in entry.runs.chunks(cols)"));
     }
@@ -4841,7 +5088,8 @@ mod design_review_tests {
     #[test]
     fn design_r5_agent_tile_has_the_character() {
         let src = source();
-        assert_eq!(src.matches("AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project);").count(), 2);
+        // Each call sits in a `TileCell` since the tiles in a row share one height (#848).
+        assert_eq!(src.matches("TileCell(move || AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project));").count(), 2);
         let kv = src.split("fn AgentKeyValue(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(kv.contains("Character(agent, false, 20.0"));
     }

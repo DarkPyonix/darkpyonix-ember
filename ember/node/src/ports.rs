@@ -108,10 +108,7 @@ pub fn parse_proc_net_tcp(text: &str, v6: bool) -> Vec<ProcListener> {
 /// 127.0.0.0/8 and ::1 are `Loopback`, the unspecified address is `Any`, everything else `Lan`.
 /// An IPv4-mapped IPv6 address is classified as its IPv4 address.
 pub fn classify(ip: IpAddr) -> PortScope {
-    let ip = match ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
-        v4 => v4,
-    };
+    let ip = unmapped(ip);
     if ip.is_unspecified() {
         PortScope::Any
     } else if ip.is_loopback() {
@@ -119,6 +116,22 @@ pub fn classify(ip: IpAddr) -> PortScope {
     } else {
         PortScope::Lan
     }
+}
+
+/// An IPv4-mapped IPv6 address as its IPv4 address; any other address unchanged.
+fn unmapped(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
+        v4 => v4,
+    }
+}
+
+/// The address a socket is bound to, when it is one specific address: a port bound to it does
+/// not answer on any other address, loopback included (FR-L18, #519). `None` for the
+/// unspecified address, which answers on every address of the machine.
+pub fn bound_address(ip: IpAddr) -> Option<String> {
+    let ip = unmapped(ip);
+    (!ip.is_unspecified()).then(|| ip.to_string())
 }
 
 /// Keep only the listeners whose inode is held by an allowed pid (`inode_pid`: inode to pid).
@@ -209,8 +222,11 @@ pub fn owned_pids(
 }
 
 fn dedupe_sorted(mut v: Vec<ListeningPort>) -> Vec<ListeningPort> {
-    v.sort_by(|a, b| (a.port, a.scope as u8, &a.owner.id).cmp(&(b.port, b.scope as u8, &b.owner.id)));
-    v.dedup_by(|a, b| a.port == b.port && a.scope == b.scope && a.owner == b.owner);
+    v.sort_by(|a, b| {
+        (a.port, a.scope as u8, &a.address, &a.owner.id).cmp(&(b.port, b.scope as u8, &b.address, &b.owner.id))
+    });
+    // Two specific addresses on one port are two rows: each answers on its own address only.
+    v.dedup_by(|a, b| a.port == b.port && a.scope == b.scope && a.address == b.address && a.owner == b.owner);
     v
 }
 
@@ -227,6 +243,7 @@ fn from_proc(
                 scope: classify(l.ip),
                 process: o.name.clone(),
                 owner: o.owner.clone(),
+                address: bound_address(l.ip),
             })
         })
         .collect();
@@ -244,6 +261,7 @@ fn from_lsof(listeners: Vec<LsofListener>, owned: &HashMap<u32, Owned>) -> Vec<L
                 scope: l.ip.map(classify).unwrap_or(PortScope::Any),
                 process: if o.name.is_empty() { l.command.clone() } else { o.name.clone() },
                 owner: o.owner.clone(),
+                address: l.ip.and_then(bound_address),
             })
         })
         .collect();
@@ -514,5 +532,57 @@ mod tests {
         assert_eq!(ports[0].port, 3000);
         assert_eq!(ports[0].scope, PortScope::Loopback);
         assert_eq!(ports[0].process, "node");
+        assert_eq!(ports[0].address.as_deref(), Some("127.0.0.1"), "the bound address (FR-L18, #519)");
+    }
+
+    // ---- The bound address (FR-L18, #519) ----------------------------------------------------
+
+    #[test]
+    fn fr_p7_bound_address_is_the_specific_address_only() {
+        let a = |t: &str| bound_address(t.parse().unwrap());
+        assert_eq!(a("192.168.0.10").as_deref(), Some("192.168.0.10"));
+        assert_eq!(a("127.0.0.2").as_deref(), Some("127.0.0.2"));
+        assert_eq!(a("::1").as_deref(), Some("::1"));
+        assert_eq!(a("fd00::2").as_deref(), Some("fd00::2"));
+        assert_eq!(a("::ffff:10.0.0.2").as_deref(), Some("10.0.0.2"), "IPv4-mapped reads as IPv4");
+        assert_eq!(a("0.0.0.0"), None, "every address: nothing specific to report");
+        assert_eq!(a("::"), None);
+    }
+
+    #[test]
+    fn fr_p7_bound_address_lsof_rows_carry_it_and_two_binds_of_one_port_stay_apart() {
+        let owned = HashMap::from([(
+            501u32,
+            Owned { owner: PortOwner { kind: PortOwnerKind::Term, id: "t".into() }, name: "node".into() },
+        )]);
+        let text = "p501\ncnode\nn192.168.0.10:3000\nn10.8.0.5:3000\nn*:8080\nn10.8.0.5:3000\n";
+        let ports = from_lsof(parse_lsof(text), &owned);
+        let got: Vec<_> = ports.iter().map(|p| (p.port, p.scope, p.address.as_deref())).collect();
+        assert_eq!(
+            got,
+            vec![
+                (3000, PortScope::Lan, Some("10.8.0.5")),
+                (3000, PortScope::Lan, Some("192.168.0.10")),
+                (8080, PortScope::Any, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn fr_p7_bound_address_is_absent_from_the_wire_for_every_address_binds() {
+        let any = ListeningPort {
+            port: 8080,
+            scope: PortScope::Any,
+            process: "n".into(),
+            owner: PortOwner { kind: PortOwnerKind::Job, id: "j".into() },
+            address: None,
+        };
+        let v = serde_json::to_value(&any).unwrap();
+        assert!(v.get("address").is_none(), "{v}");
+        // An older node's row (no address) still reads.
+        let old: ListeningPort = serde_json::from_value(v).unwrap();
+        assert_eq!(old.address, None);
+        let lan = ListeningPort { address: Some("192.168.0.10".into()), scope: PortScope::Lan, ..any };
+        assert_eq!(serde_json::to_value(&lan).unwrap()["address"], "192.168.0.10");
     }
 }

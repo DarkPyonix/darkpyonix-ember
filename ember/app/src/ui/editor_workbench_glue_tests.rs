@@ -38,6 +38,7 @@ fn target() -> EditorTarget {
         token: String::new(),
         server_url: String::new(),
         computer: String::new(),
+        relay: String::new(),
     }
 }
 
@@ -92,6 +93,15 @@ impl Page {
 
     /// The page opened on `folder`, with one file, `a.rs`, listed under it.
     fn open_at(folder: &str) -> Page {
+        Page::open_with(folder, None)
+    }
+
+    /// The page with the editor's own stylesheets (`page::config`), so it can be laid out.
+    fn open_styled() -> Page {
+        Page::open_with(ROOT, Some(super::page::config()))
+    }
+
+    fn open_with(folder: &str, config: Option<dioxus_compose::html::HtmlConfig>) -> Page {
         FOLDER.with(|f| *f.borrow_mut() = folder.to_string());
         let (host, commands) = EditorHost::fake();
         {
@@ -103,7 +113,10 @@ impl Page {
             );
         }
         FAKE.with(|f| *f.borrow_mut() = Some(host));
-        let mut dom = HtmlDom::new(app);
+        let mut dom = match config {
+            Some(config) => HtmlDom::with_config(app, config),
+            None => HtmlDom::new(app),
+        };
         dom.render();
         Page { dom, commands }
     }
@@ -295,9 +308,9 @@ fn fr_l31_leaving_an_empty_new_name_field_closes_it_and_a_typed_name_stays() {
 }
 
 // FR-L31 (#832, #827 rule 2): Shift+F10 or the context-menu key on a focused tree row opens the
-// tree's context menu with the row's items, as in Code-OSS. This pins Ember's side of the key
-// path; on the v0.0.6 pin the renderer sends only Enter (compose-rust#100), so a real run does not
-// reach this handler yet.
+// tree's context menu with the row's items, as in Code-OSS, beside right-click (compose-rust#417).
+// This pins Ember's side of the key path; compose-rust#100 and #717 are in the v0.0.10 pin, and a
+// real run reaching this handler is not yet checked on a display.
 #[test]
 fn fr_l31_shift_f10_and_the_context_menu_key_on_a_tree_row_open_its_context_menu() {
     let _guard = crate::services::test_guard();
@@ -338,6 +351,26 @@ fn fr_l31_shift_f10_and_the_context_menu_key_on_a_tree_row_open_its_context_menu
     page.dom.key_down(row, Key::F10, Code::F10, Modifiers::empty());
     page.dom.render();
     assert_eq!(crate::ui::editor_tree_menu::open_menu(), None);
+}
+
+// FR-L31.5 (compose-rust#417, #673): the tree row and the tab keep a preview on the real
+// `ondoubleclick` and open their menus on `oncontextmenu`; two `onclick`s within 500 ms no longer
+// stand in for a double-click.
+#[test]
+fn fr_l31_5_double_click_and_right_click_are_the_real_events() {
+    let page = include_str!("editor_workbench.rs");
+    let production = &page[..page.find("#[cfg(test)]").unwrap_or(page.len())];
+    assert!(!production.contains(concat!("DOUBLE", "_CLICK")), "the 500 ms stand-in is gone");
+    let editor = include_str!("editor.rs");
+    assert!(!editor.contains(concat!("pub struct Double", "Click")) && !editor.contains(concat!("DOUBLE_CLICK", "_MS")));
+    let tree = &production[production.find(r#"role: "treeitem", "aria-label": "{row_label}""#).expect("tree row")..];
+    let tree = &tree[..tree.find("chev-sp").expect("row content")];
+    assert!(tree.contains("ondoubleclick:") && tree.contains("keep_open(&keep_path)"), "a double-click keeps the preview");
+    assert!(tree.contains("oncontextmenu:") && tree.contains("TreeMenuAt::Pointer"), "a right-click opens the context menu");
+    let tab = &production[production.find(r#"role: "tab", "aria-selected": "{selected}""#).expect("editor tab")..];
+    let tab = &tab[..tab.find("onkeydown:").expect("tab keys")];
+    assert!(tab.contains("ondoubleclick:") && tab.contains("oncontextmenu:") && tab.contains("tab_menu.set(Some("));
+    assert!(!tab[..tab.find("ondoubleclick:").unwrap()].contains("keep_open"), "a single click does not keep the tab");
 }
 
 // FR-L31.9 (#781): 파일 열기 on a change row of the 커밋 window. The window's status and repository
@@ -563,4 +596,439 @@ fn fr_e8_extension_webview_panel_lifecycle_and_messaging() {
     assert!(page.find_where("the webview tab after close", |id| {
         page.attr(id, "title").as_deref() == Some("ember-webview:wv-md")
     }).is_none(), "webview tab removed after close");
+}
+
+// FR-L31.26 (#874): the status bar is --sbh (32 px) high and its bottom edge is the page's bottom
+// edge, as in the mockup (`editor.html`: the bar's top line at y 868 of a 900 px window). On
+// v0.0.10 the window showed 16 px of page under the bar. This lays the page out with its own
+// stylesheets and no renderer, so it tells the two possible causes apart: when it fails, the
+// grid itself leaves room under the bar (the message lists the page's grid items and their
+// boxes); when it passes and the window still shows the band, the page is laid out in a viewport
+// 16 px shorter than the window, which is the renderer's or dioxus-compose's island size.
+#[test]
+fn fr_l31_26_the_status_bar_is_32_high_and_flush_with_the_page_bottom() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    page.click_row();
+    page.deliver(opened(3));
+    let ed = page.find("class", "ed").expect("the page grid (.ed) with the tree and the bottom window open");
+    let bar = page.find("aria-label", "상태 표시줄").expect("the status bar");
+    let _ = page.dom.layout(1440.0, 900.0, 1.0);
+    let list = page.dom.display_list().expect("laid out");
+    let ed_rect = list.get(ed).expect("the page draws its background").rect;
+    let bar_rect = list.get(bar).expect("the status bar draws its line").rect;
+    let doc = page.dom.document();
+    let items: Vec<String> = doc
+        .get_node(ed)
+        .map(|n| n.children.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| {
+            let node = doc.get_node(id)?;
+            let rect = list.get(id).map(|e| format!("{:?}", e.rect)).unwrap_or_else(|| "no box".into());
+            // A text or comment child is a grid item too (an anonymous one), so it is listed.
+            let tag = match node.element_data() {
+                Some(e) if node.is_anonymous() => format!("anonymous {}", e.name.local),
+                Some(e) => format!("{}.{}", e.name.local, page.attr(id, "class").unwrap_or_default()),
+                None if node.is_text_node() => format!("text {:?}", node.text_data().map(|t| t.content.clone()).unwrap_or_default()),
+                None => "comment or other".to_string(),
+            };
+            Some(format!("{tag} {rect}"))
+        })
+        .collect();
+    // The boxes the grid places (comments are not among them; anonymous blocks are).
+    let laid: Vec<String> = doc
+        .get_node(ed)
+        .and_then(|n| n.layout_children.borrow().clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| {
+            let node = doc.get_node(id)?;
+            let name = node.element_data().map(|e| format!("{}{}.{}", if node.is_anonymous() { "anonymous " } else { "" }, e.name.local, page.attr(id, "class").unwrap_or_default()));
+            let l = node.final_layout;
+            Some(format!("{} at {},{} {}x{}", name.unwrap_or_else(|| "text".into()), l.location.x, l.location.y, l.size.width, l.size.height))
+        })
+        .collect();
+    let items = format!("{items:#?}; grid items {laid:#?}");
+    let close = |a: f32, b: f32| (a - b).abs() < 0.5;
+    assert!(close(bar_rect.height, 32.0), "bar {bar_rect:?}; items {items}");
+    assert!(
+        close(bar_rect.y + bar_rect.height, ed_rect.y + ed_rect.height),
+        "the bar ends at {} but the page at {}; page {ed_rect:?}; items {items}",
+        bar_rect.y + bar_rect.height,
+        ed_rect.y + ed_rect.height,
+    );
+    assert!(close(ed_rect.y + ed_rect.height, 900.0), "the page fills the viewport: {ed_rect:?}");
+}
+
+/// The page grid's and the status bar's boxes, as `(x, y, width, height)`, with the page laid out
+/// in a `width` by `height` viewport.
+fn page_and_bar_boxes(page: &mut Page, ed: NodeId, bar: NodeId, width: f32, height: f32) -> ((f32, f32, f32, f32), (f32, f32, f32, f32)) {
+    let _ = page.dom.layout(width, height, 1.0);
+    let list = page.dom.display_list().expect("laid out");
+    let e = list.get(ed).expect("the page draws its background").rect;
+    let b = list.get(bar).expect("the status bar draws its line").rect;
+    ((e.x, e.y, e.width, e.height), (b.x, b.y, b.width, b.height))
+}
+
+// #301, #320: the page is the viewport, so it follows the window when it grows and when it
+// shrinks. The window's sizes are those of #320 (1280x820 opened, 1500x900 grown, 1000x620
+// shrunk); at each one the page grid is exactly the viewport and the status bar ends at its
+// bottom edge and spans its width. No renderer is attached: this is the page's own layout, given
+// the viewport the HTML runtime takes from the window's content box.
+#[test]
+fn fr_l31_37_the_page_follows_the_viewport_when_it_grows_and_when_it_shrinks() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    page.click_row();
+    page.deliver(opened(3));
+    let ed = page.find("class", "ed").expect("the page grid (.ed) with the tree and the bottom window open");
+    let bar = page.find("aria-label", "상태 표시줄").expect("the status bar");
+    let close = |a: f32, b: f32| (a - b).abs() < 0.5;
+    for (width, height) in [(1280.0_f32, 820.0_f32), (1500.0, 900.0), (1000.0, 620.0), (1280.0, 820.0)] {
+        let (e, b) = page_and_bar_boxes(&mut page, ed, bar, width, height);
+        assert!(close(e.0, 0.0) && close(e.1, 0.0), "at {width}x{height} the page starts at {},{}", e.0, e.1);
+        assert!(close(e.2, width), "at {width}x{height} the page is {} wide", e.2);
+        assert!(close(e.3, height), "at {width}x{height} the page is {} high", e.3);
+        assert!(close(b.1 + b.3, height), "at {width}x{height} the status bar ends at {}", b.1 + b.3);
+        assert!(close(b.0, 0.0) && close(b.2, width), "at {width}x{height} the status bar spans {} from {}", b.2, b.0);
+    }
+}
+
+impl Page {
+    /// The border boxes (x, y, width, height) of `nodes` with the page laid out at 1440x900.
+    fn boxes(&mut self, nodes: &[(&str, NodeId)]) -> Vec<(f32, f32, f32, f32)> {
+        let _ = self.dom.layout(1440.0, 900.0, 1.0);
+        let list = self.dom.display_list().expect("laid out");
+        nodes
+            .iter()
+            .map(|(what, id)| {
+                let r = list.get(*id).unwrap_or_else(|| panic!("{what} has no box")).rect;
+                (r.x, r.y, r.width, r.height)
+            })
+            .collect()
+    }
+
+    fn parent(&self, node: NodeId) -> Option<NodeId> {
+        self.dom.document().get_node(node).and_then(|n| n.parent)
+    }
+
+    fn has_class(&self, node: NodeId, class: &str) -> bool {
+        self.attr(node, "class").is_some_and(|c| c.split_whitespace().any(|c| c == class))
+    }
+}
+
+fn near(a: f32, b: f32) -> bool {
+    (a - b).abs() < 0.75
+}
+
+// FR-L31.29 (#895, design review E4): quick open hangs under the find pill, ending at the pill's
+// right edge, and its query row is a row of the popover, not a second framed field.
+#[test]
+fn fr_l31_29_quick_open_hangs_under_the_find_pill_in_one_frame() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    let pill = page.find("class", "ed-find").expect("the find pill");
+    page.dom.click_node(pill);
+    page.dom.render();
+    let list = page
+        .find_where("the quick open list", |id| page.attr(id, "role").as_deref() == Some("dialog"))
+        .expect("the find pill opens quick open");
+    // `find` panics on two matches, so this also says the popover holds no framed `.ed-find` field.
+    let pill = page.find("class", "ed-find").expect("the find pill, the only framed field");
+    let query = page.find("class", "ed-palq").expect("the query row");
+    assert_eq!(page.parent(query), Some(list), "the query row is a row of the popover");
+    assert_eq!(page.parent(list), page.parent(pill), "the list is placed against the pill's box");
+    let b = page.boxes(&[("the find pill", pill), ("the quick open list", list), ("the query row", query)]);
+    let (pill, list, query) = (b[0], b[1], b[2]);
+    assert!(near(pill.2, 300.0), "the pill keeps its 300px: {pill:?}");
+    assert!(near(list.0 + list.2, pill.0 + pill.2), "the list ends at the pill's right edge: list {list:?}, pill {pill:?}");
+    let gap = list.1 - (pill.1 + pill.3);
+    assert!((0.0..=8.0).contains(&gap), "the list starts right under the pill: list {list:?}, pill {pill:?}");
+    assert!(near(list.2, 560.0), "the list is 560px wide at 1440: {list:?}");
+    assert!(near(query.2, list.2 - 2.0), "the query row spans the popover inside its border: query {query:?}, list {list:?}");
+}
+
+impl Page {
+    /// Every element in the page that `matches`, in document order.
+    fn all_where(&self, matches: impl Fn(NodeId) -> bool) -> Vec<NodeId> {
+        let mut found: Vec<NodeId> = self.connected().into_iter().filter(|&id| matches(id)).collect();
+        found.sort();
+        found
+    }
+}
+
+fn file_change(path: &str, index: char, worktree: char) -> ember_client::api::GitFile {
+    ember_client::api::GitFile { path: path.into(), old_path: None, index, worktree }
+}
+
+// FR-L31.32 (#895, design review E7): a row of the 커밋 window is as wide as the window, the status
+// letter is a 20px badge at the row's right end, and the action icons keep their columns whether a
+// row has one, two or three of them. The group's action sits over the rows' stage column.
+#[test]
+fn fr_l31_32_commit_rows_fill_the_window_and_their_columns_line_up() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    page.show_changes(
+        ROOT,
+        "",
+        vec![
+            // Modified: open, discard, stage. Deleted: no open. Untracked: no discard.
+            file_change("ember/server/src/api/vcs.rs", '.', 'M'),
+            file_change("ember/server/src/legacy.rs", '.', 'D'),
+            file_change("docs/GIT.md", '?', '?'),
+        ],
+    );
+    let list = page.find("aria-label", "변경된 파일").expect("the list");
+    let rows = page.all_where(|id| page.has_class(id, "ed-scm-row"));
+    let badges = page.all_where(|id| page.has_class(id, "ed-scm-st"));
+    let stages = page.all_where(|id| page.attr(id, "aria-label").is_some_and(|l| l.starts_with("스테이지: ")));
+    let opens = page.all_where(|id| page.attr(id, "aria-label").is_some_and(|l| l.starts_with("파일 열기: ")));
+    let discards = page.all_where(|id| page.attr(id, "aria-label").is_some_and(|l| l.starts_with("변경 사항 취소: ")));
+    let all = page.find("aria-label", "모두 스테이지").expect("the group's action");
+    assert_eq!((rows.len(), badges.len(), stages.len(), opens.len(), discards.len()), (3, 3, 3, 2, 2));
+
+    let named = |what: &'static str, ids: &[NodeId]| -> Vec<(&'static str, NodeId)> { ids.iter().map(|&id| (what, id)).collect() };
+    let list_box = page.boxes(&[("the list", list)])[0];
+    let row_boxes = page.boxes(&named("a row", &rows));
+    let badge_boxes = page.boxes(&named("a badge", &badges));
+    let stage_boxes = page.boxes(&named("a stage button", &stages));
+    let open_boxes = page.boxes(&named("an open button", &opens));
+    let discard_boxes = page.boxes(&named("a discard button", &discards));
+    let all_box = page.boxes(&[("the group's action", all)])[0];
+
+    // `.ed-tree` pads its rows by `--sp2` (8px) on each side.
+    for row in &row_boxes {
+        assert!(near(row.0, list_box.0 + 8.0) && near(row.2, list_box.2 - 16.0), "a row fills the list: row {row:?}, list {list_box:?}");
+    }
+    let right = row_boxes[0].0 + row_boxes[0].2;
+    for badge in &badge_boxes {
+        assert!(near(badge.2, 20.0) && near(badge.3, 20.0), "a 20px badge: {badge:?}");
+        assert!(near(badge.0 + badge.2, right - 8.0), "the badge ends 8px inside the row: badge {badge:?}, row right {right}");
+    }
+    for (what, column) in [("stage", &stage_boxes), ("open", &open_boxes), ("discard", &discard_boxes)] {
+        assert!(column.iter().all(|b| near(b.0, column[0].0) && near(b.2, 20.0)), "the {what} icons share one column: {column:?}");
+    }
+    // From the right: badge, stage, discard, open.
+    assert!(stage_boxes[0].0 < badge_boxes[0].0 && discard_boxes[0].0 < stage_boxes[0].0 && open_boxes[0].0 < discard_boxes[0].0);
+    assert!(near(all_box.0, stage_boxes[0].0), "the group's action is over the stage column: {all_box:?}, {stage_boxes:?}");
+}
+
+// FR-L31.32: a badge's tone is the soft pair of the letter's colour, and each tone has its rule.
+#[test]
+fn fr_l31_32_status_badges_take_the_soft_pair_of_the_letters_colour() {
+    use crate::ui::editor_scm::{letter_color, letter_tone};
+    let css = include_str!("../../assets/editor/page.css");
+    for letter in ['M', 'A', 'D', 'R', 'C', 'T', 'U', '!'] {
+        let tone = letter_tone(letter);
+        if tone == "grey" {
+            assert_eq!(letter_color(letter), "var(--muted)");
+            assert!(css.contains(".ed-scm-st.grey{background:var(--c-grey-soft);color:var(--text-2)}"));
+        } else {
+            assert_eq!(letter_color(letter), format!("var(--c-{tone})"), "{letter}");
+            assert!(css.contains(&format!(".ed-scm-st.{tone}{{background:var(--c-{tone}-soft);color:var(--c-{tone})}}")), "{letter}");
+        }
+    }
+    // The amend check is the mockup's square (`vcs.css:68-69`), not a native control.
+    assert!(css.contains(".ed-scm-cb{width:18px;height:18px;flex:none;border:1.5px solid var(--c-grey);border-radius:5px;"));
+    assert!(css.contains(".ed-scm-cb.on{background:var(--ink);border-color:var(--ink)}"));
+    let scm = include_str!("editor_scm.rs");
+    assert!(scm.contains(r#"role: "checkbox", "aria-checked": "{st.amend}", "aria-label": "이전 커밋 수정","#));
+    assert!(!scm.contains(r#"r#type: "checkbox""#));
+}
+
+// FR-L31.39: every letter takes the mockup's pair (`vcs.js:19` `VCS_ST`): M orange, A green,
+// D red, R blue; untracked (U, git's `?`) joins A, C joins R, a conflict joins M.
+#[test]
+fn fr_l31_39_status_badges_follow_the_mockups_map() {
+    use crate::ui::editor_scm::{letter_color, letter_tone};
+    for (letter, tone) in [('M', "orange"), ('A', "green"), ('D', "red"), ('R', "blue"), ('C', "blue"), ('U', "green"), ('!', "orange")] {
+        assert_eq!(letter_tone(letter), tone, "{letter}");
+        assert_eq!(letter_color(letter), format!("var(--c-{tone})"), "{letter}");
+    }
+}
+
+// FR-L31.33 (#895, design review E8): the commit button is the mockup's: at least 40px high across
+// the window, 14/500 with the branch in mono, and its icon in the fill's text colour.
+#[test]
+fn fr_l31_33_the_commit_button_is_40_high_and_names_the_branch() {
+    use crate::ui::editor_scm::commit_button_label;
+    let status = |branch: &str| ember_client::api::GitStatus { branch: branch.into(), ..ember_client::api::GitStatus::default() };
+    assert_eq!(commit_button_label(false, false, Some(&status("feat/git-api"))), (Some("feat/git-api".to_string()), "에 커밋"));
+    assert_eq!(commit_button_label(false, false, Some(&status("(detached)"))), (None, "커밋"));
+    assert_eq!(commit_button_label(false, false, None), (None, "커밋"));
+    assert_eq!(commit_button_label(false, true, Some(&status("main"))), (None, "이전 커밋 수정"));
+    assert_eq!(commit_button_label(true, true, Some(&status("main"))), (None, "작업하는 중…"));
+
+    let css = include_str!("../../assets/editor/page.css");
+    assert!(css.contains("min-height:var(--h-btn);padding:8px 16px;background:var(--ink);color:var(--ink-text);font-size:var(--fs-md);font-weight:var(--fw-medium);"));
+    assert!(css.contains(".ed-scm-commit b{font-family:var(--mono);font-size:var(--fs-sm);font-weight:var(--fw-medium)}"));
+    assert!(include_str!("../../assets/editor/style.css").contains("--h-btn:40px"));
+
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    page.show_changes(ROOT, "", vec![change("a.rs")]);
+    let button = page
+        .find_where("the commit button", |id| page.has_class(id, "ed-scm-commit"))
+        .expect("the commit button");
+    assert!(page.attr(button, "aria-label").is_some_and(|l| l.starts_with("커밋 (")));
+    assert!(page.dom.document().get_node(button).is_some_and(|n| n.text_content() == "main에 커밋"), "the branch, then the words");
+    let icon = page.dom.document().get_node(button).map(|n| n.children.clone()).unwrap_or_default().into_iter().find_map(|id| page.attr(id, "src"));
+    assert!(icon.is_some_and(|src| src.starts_with("icon:commit-w")), "the icon is drawn in the fill's text colour");
+    let message = page.find("aria-label", "커밋 메시지").expect("the message box");
+    let b = page.boxes(&[("the commit button", button), ("the message box", message)]);
+    assert!(near(b[0].3, 40.0), "40px high on one line: {:?}", b[0]);
+    assert!(near(b[0].0, b[1].0) && near(b[0].2, b[1].2), "as wide as the message box: {b:?}");
+}
+
+impl Page {
+    /// Clicks the bottom tool window's tab whose label starts with `label`.
+    fn show_bottom_tab(&mut self, label: &str) {
+        let tab = self
+            .find_where(&format!("the bottom tab {label}"), |id| {
+                self.attr(id, "role").as_deref() == Some("tab")
+                    && self.dom.document().get_node(id).is_some_and(|n| n.text_content().starts_with(label))
+                    && self.parent(id).is_some_and(|p| self.has_class(p, "ed-btabs"))
+            })
+            .unwrap_or_else(|| panic!("the bottom tab {label}"));
+        self.dom.click_node(tab);
+        self.dom.render();
+    }
+
+    /// The text of the one notice (`.ed-note`) in the bottom tool window.
+    fn bottom_note(&self) -> String {
+        let note = self
+            .find_where("the bottom window's notice", |id| self.has_class(id, "ed-note"))
+            .expect("a notice in the bottom window");
+        assert!(!self.has_class(note, "ed-term"), "a notice is not terminal text");
+        self.dom.document().get_node(note).map(|n| n.text_content()).unwrap_or_default()
+    }
+}
+
+// FR-L31.34 (#895, design review E9): the notices of the bottom tool window are prose in the UI
+// face (`.ed-note`), all four the same; the mono terminal body is for output only.
+#[test]
+fn fr_l31_34_tool_window_notices_are_prose_not_terminal_text() {
+    let css = include_str!("../../assets/editor/page.css");
+    assert!(css.contains(".ed-note{flex:1;overflow:auto;min-height:0;padding:var(--sp3) var(--sp4);font:var(--fw-regular) var(--fs-sm)/var(--lh-sm) var(--font);color:var(--muted)}"));
+    assert!(include_str!("../../assets/editor/editor.css").contains(".ed-term{flex:1;overflow:auto;padding:var(--sp3) var(--sp4);font:var(--code-fs)/var(--code-lh) var(--mono);"));
+    for (file, source) in [("editor_workbench.rs", include_str!("editor_workbench.rs")), ("editor_tasks.rs", include_str!("editor_tasks.rs"))] {
+        assert!(!source.contains(r#"class: "ed-term", style: "color:var(--muted);""#), "{file}: a muted note in the terminal class");
+        assert!(!source.contains(r#"class: "ed-term", style: "flex:1; color:var(--muted);""#), "{file}: a muted note in the terminal class");
+        assert!(!source.contains("font-family:var(--font-mono)"), "{file}: a font token that does not exist");
+    }
+
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    // No server address in this window: the terminal says so.
+    assert!(page.bottom_note().starts_with("터미널은 서버에 연결했을 때만"));
+    page.show_bottom_tab("문제");
+    assert_eq!(page.bottom_note(), "문제가 없습니다.");
+    page.show_bottom_tab("출력");
+    assert_eq!(page.bottom_note(), "출력이 없습니다.");
+}
+
+// FR-L31.35 (#895, design review E10): 출력's channels are 30px pills, the shown one filled, by the
+// mockup's bottom-tab rule.
+#[test]
+fn fr_l31_35_output_channels_are_30px_pills() {
+    let css = include_str!("../../assets/editor/editor.css");
+    assert!(css.contains(".ed-btabs button{height:30px;padding:0 var(--sp3);border:0;border-radius:var(--pill);background:none;"));
+    assert!(css.contains(".ed-btabs button.on{background:var(--ink);color:var(--ink-text)}"));
+
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    page.show_bottom_tab("출력");
+    let group = page.find("aria-label", "출력 채널").expect("the channel switch");
+    assert!(page.has_class(group, "ed-btabs"), "the channels take the bottom tabs' rule");
+    let channels = page.all_where(|id| page.parent(id) == Some(group) && page.attr(id, "aria-pressed").is_some());
+    assert_eq!(channels.len(), 1, "워크벤치 alone until an extension opens a channel");
+    let workbench = channels[0];
+    assert_eq!(page.attr(workbench, "aria-pressed").as_deref(), Some("true"));
+    assert!(page.has_class(workbench, "on") && !page.has_class(workbench, "ed-pj"));
+    let _ = page.dom.layout(1440.0, 900.0, 1.0);
+    let list = page.dom.display_list().expect("laid out");
+    let entry = list.get(workbench).expect("the channel's box");
+    assert!(near(entry.rect.height, 30.0), "30px high: {:?}", entry.rect);
+    assert!(entry.background.is_some() && entry.radii.is_some(), "the shown channel is a filled pill");
+}
+
+// FR-L31.36 (#895, design review E11): with no tab open the editor panel has no tab strip (and no
+// ⋯ button or divider), and the empty state starts at the panel's top; the strip is back with the
+// first tab.
+#[test]
+fn fr_l31_36_the_editor_has_no_tab_strip_while_no_tab_is_open() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    // A trusted folder, so no restricted-mode banner sits above the empty state.
+    page.host().state.lock().unwrap().trust = crate::ui::workspace_trust::TrustState { trusted: true, prompt: false, banner_dismissed: false };
+    page.redraw();
+    assert!(page.find("aria-label", "열린 파일").is_none(), "no tab strip");
+    assert!(page.find("title", "탭 메뉴").is_none(), "no ⋯ button");
+    assert!(page.text().contains("열린 파일이 없습니다"));
+    let main = page.find("aria-label", "편집기").expect("the editor panel");
+    let empty = page.find("class", "ed-empty").expect("the empty state");
+    let b = page.boxes(&[("the editor panel", main), ("the empty state", empty)]);
+    // The panel has a 1px border; the empty state fills what is inside it.
+    assert!(near(b[1].1, b[0].1 + 1.0), "the empty state starts at the panel's top: {b:?}");
+    assert!(near(b[1].3, b[0].3 - 2.0), "and fills the panel: {b:?}");
+
+    page.click_row();
+    page.deliver(opened(1));
+    let strip = page.find("aria-label", "열린 파일").expect("the tab strip, with a tab open");
+    assert_eq!(page.attr(strip, "role").as_deref(), Some("tablist"));
+    assert!(page.find("title", "탭 메뉴").is_some(), "the ⋯ button is back");
+    assert!(page.current_tab_is(FILE));
+}
+
+#[compose_rust::runtime::Composable]
+fn toolkit_probe() {
+    compose_rust::ui::Text("probe".to_string());
+}
+
+// FR-L33.1 (#875): the window's safe area reaches the toolkit after the page's first render. The
+// report renders the page again, so the top bar takes the traffic lights' inset, also while the
+// workspace trust prompt is up and nothing else renders the page.
+#[test]
+fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
+    use compose_rust::protocol::HostEvent;
+    use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
+    use crate::ui::safe_area::{current_platform, safe_area_for, SafeArea};
+    let _guard = crate::services::test_guard();
+    // A toolkit Host resets the window's measurement when it is made, so it comes first.
+    let mut toolkit = compose_rust::Host::new(|| Box::new(compose_rust::Recomposer::new(toolkit_probe)));
+    toolkit.rebuild().expect("rebuild");
+    let mut page = Page::open();
+    page.host().state.lock().unwrap().trust = crate::ui::workspace_trust::TrustState { trusted: false, prompt: true, banner_dismissed: false };
+    page.redraw();
+    assert!(page.find("aria-label", crate::ui::workspace_trust::PROMPT_TITLE).is_some(), "the trust prompt is up");
+    let top = page.find("class", "ed-top").expect("the top bar");
+    let before = page.attr(top, "style").unwrap_or_default();
+    assert_eq!(before, crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), 0.0), "nothing reported yet");
+
+    let lights = SafeArea { top: 28.0, leading: 78.0, trailing: 0.0 };
+    toolkit
+        .dispatch(HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: 1440.0,
+                height_dp: 900.0,
+                class: WindowSizeClass::from_width_dp(1440.0),
+                height_class: WindowHeightClass::from_height_dp(900.0),
+                safe_area_top: lights.top,
+                safe_area_leading: lights.leading,
+                safe_area_trailing: lights.trailing,
+            },
+        })
+        .expect("dispatch");
+    // The report woke the page; nothing else asks it to render.
+    page.dom.virtual_dom_mut().process_events();
+    page.dom.render();
+    let top = page.find("class", "ed-top").expect("the top bar");
+    let after = page.attr(top, "style").unwrap_or_default();
+    let expected = crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), safe_area_for(current_platform(), lights).leading);
+    assert_eq!(after, expected, "the top bar follows the reported safe area with the prompt up");
+    assert!(page.find("aria-label", crate::ui::workspace_trust::PROMPT_TITLE).is_some(), "the prompt is still up");
+    compose_rust::window::reset_window_size();
 }

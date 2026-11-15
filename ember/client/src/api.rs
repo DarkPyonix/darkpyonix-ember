@@ -1855,6 +1855,11 @@ pub struct ListeningPort {
     pub process: String,
     #[serde(default)]
     pub owner: PortOwner,
+    /// The address the socket is bound to, when it is one specific address: the port answers
+    /// on that address only (FR-L18, #519). Absent for a port bound to every address and from
+    /// older nodes.
+    #[serde(default)]
+    pub address: Option<String>,
 }
 
 /// `GET /api/computers/{id}/ports` answer.
@@ -2055,6 +2060,21 @@ mod ports_tests {
         assert_eq!(serde_json::from_value::<Ports>(json!({})).unwrap(), Ports::default());
         let off: Ports = serde_json::from_value(json!({"ports": [], "supported": false})).unwrap();
         assert!(!off.supported);
+    }
+
+    /// FR-L18 (#519): the bound address of a port, absent from an older node and for a port
+    /// bound to every address.
+    #[test]
+    fn fr_p7_bound_address_reads_when_present() {
+        let p: Ports = serde_json::from_value(json!({
+            "ports": [
+                {"port": 3000, "scope": "lan", "process": "node", "owner": {"kind": "job", "id": "j1"}, "address": "192.168.0.10"},
+                {"port": 8080, "scope": "any", "process": "python3", "owner": {"kind": "term", "id": "t1"}}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(p.ports[0].address.as_deref(), Some("192.168.0.10"));
+        assert_eq!(p.ports[1].address, None);
     }
 }
 

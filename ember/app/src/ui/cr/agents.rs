@@ -33,7 +33,7 @@ pub use crate::ui::agents::{
 };
 use super::components::{
     AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRowFit, EmberCard, EmberField, FieldOptions, InsetPanel,
-    DataNamedOverlay, InsetPanelSized, Label, NameThenPill, NamedClickable, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu,
+    DataNamedOverlay, InsetPanelSized, Label, NameThenPillLines, NamedClickable, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu,
 };
 use super::theme::*;
 use crate::server::{Account, ChatGptAccount};
@@ -2088,7 +2088,7 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, 
                             // measured first).
                             if is_def {
                                 cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                                    NameThenPill(m.name, Fs::Md, Weight::Medium, None, SP[1], || Pill("기본", PillTone::Blue, true));
+                                    NameThenPillLines(m.name, Fs::Md, Weight::Medium, None, false, MODEL_TEXT_LINES, SP[1], || Pill("기본", PillTone::Blue, true));
                                 });
                             } else {
                                 Label(m.name, Fs::Md, Weight::Medium, None, Some(MODEL_TEXT_LINES));
@@ -3695,10 +3695,10 @@ mod tests {
             let n = text_node(&nodes, t);
             assert!(n.props.iter().any(|p| p == "MaxLines=Integer(2)"), "{t}: {:?}", n.props);
         }
-        // The default model's name and its 기본 badge go through NameThenPill, so the badge keeps
+        // The default model's name and its 기본 badge go through NameThenPillLines (two lines), so the badge keeps
         // its own width right after the name.
         let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
-        assert!(production.contains("NameThenPill(m.name, Fs::Md, Weight::Medium, None, SP[1], || Pill(\"기본\", PillTone::Blue, true));"));
+        assert!(production.contains("NameThenPillLines(m.name, Fs::Md, Weight::Medium, None, false, MODEL_TEXT_LINES, SP[1], || Pill(\"기본\", PillTone::Blue, true));"));
         assert!(production.contains("Label(m.note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(MODEL_TEXT_LINES));"));
     }
 

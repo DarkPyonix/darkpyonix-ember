@@ -1293,6 +1293,12 @@ pub fn NameThenPill(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, ga
 /// command, `.cmd code`, review st B): the measuring copy and the visible name both use the
 /// face, so the measured width is the drawn one.
 pub fn NameThenPillFace(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, mono: bool, gap: f32, pill: impl FnOnce()) {
+    NameThenPillLines(name, fs, weight, color, mono, 1, gap, pill);
+}
+
+/// [`NameThenPillFace`] whose name may wrap to `lines` lines when it does not fit beside the
+/// pill (a model name in the 1280 model table, FR-L20b, #886), instead of ending in "...".
+pub fn NameThenPillLines(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, mono: bool, lines: u32, gap: f32, pill: impl FnOnce()) {
     let room = compose_rust::runtime::remember_node_size();
     let natural = compose_rust::runtime::remember_node_size();
     let pill_size = compose_rust::runtime::remember_node_size();
@@ -1333,7 +1339,7 @@ pub fn NameThenPillFace(name: &str, fs: Fs, weight: Weight, color: Option<Paint>
                     if mono {
                         MonoLine(name, fs, weight, color);
                     } else {
-                        Label(name, fs, weight, color, Some(1));
+                        Label(name, fs, weight, color, Some(lines));
                     }
                 });
                 cu::Spacer().modifier(Modifier::new().width(gap));

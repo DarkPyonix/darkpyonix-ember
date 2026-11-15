@@ -103,6 +103,15 @@ if [ "${TARGET%%-*}" = windows ]; then
   # Git Bash: use /d/a/... paths, so tar does not read "D:" as a remote host and cp, mv work.
   WORK="$(cygpath -u "$WORK")"
   OUT="$(cygpath -u "$OUT")"
+  # The win32 gulp task removes node.exe's signature with signtool.exe, which ships in the
+  # Windows SDK and is not on PATH under Git Bash (first run: "spawn signtool.exe ENOENT").
+  if ! command -v signtool.exe >/dev/null 2>&1; then
+    kits="$(cygpath -u "${ProgramFiles_x86:-${PROGRAMFILES_X86:-C:\\Program Files (x86)}}")/Windows Kits/10/bin"
+    signtool_dir="$(ls -d "$kits"/10.*/x64 2>/dev/null | sort -V | while read -r d; do [ -f "$d/signtool.exe" ] && echo "$d"; done | tail -n 1)"
+    [ -n "$signtool_dir" ] || die "signtool.exe not found under $kits (the Windows SDK is required)"
+    PATH="$signtool_dir:$PATH"
+    export PATH
+  fi
 fi
 # Native node modules (node-pty, spdlog, ...) are compiled for the build machine, so the target
 # must match the host. Cross builds need upstream's sysroot setup, which this script does not do.

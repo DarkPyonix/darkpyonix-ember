@@ -110,7 +110,7 @@ jobs:
           name: dpx-ember-${{ matrix.target }}
           path: dist/*
           # 0 keeps the repository default for a tag run; a dry run's files go after 3 days.
-          retention-days: ${{ github.event_name == 'workflow_dispatch' && 3 || 0 }}
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && '3' || '' }}
 
   client:
     # TODO(compose-rust): the packagers live in compose-rust #505 (#115 macOS .app/.dmg in
@@ -252,7 +252,7 @@ jobs:
           name: dpx-ember-app-${{ matrix.target }}
           path: dist/*
           # 0 keeps the repository default for a tag run; a dry run's files go after 3 days.
-          retention-days: ${{ github.event_name == 'workflow_dispatch' && 3 || 0 }}
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && '3' || '' }}
 
   publish:
     name: Publish the release

@@ -65,7 +65,11 @@ impl Actions {
 
     fn finish_with(&self, what: &'static str, task: impl std::future::Future<Output = Result<String, ember_client::api::ApiError>> + Send + 'static, mut on_success: impl FnMut() + Send + 'static) {
         let reload = self.reload.clone();
+        // FR-W4d: no watch refresh while the call runs; a success reloads by itself.
+        let project = self.project.clone();
+        crate::ui::vcs_watch::call_started(&project);
         crate::services::run_shared(task, move |result| {
+            crate::ui::vcs_watch::call_ended(&project, result.is_ok());
             notice::post(match result {
                 Ok(text) => {
                     on_success();
@@ -109,7 +113,10 @@ impl Actions {
             return;
         }
         let (project, reload) = (self.project.clone(), self.reload.clone());
+        let held = project.clone();
+        crate::ui::vcs_watch::call_started(&held);
         crate::services::run_shared(async move { run_stash_push(&project, "", false).await }, move |result| {
+            crate::ui::vcs_watch::call_ended(&held, result.is_ok());
             match result {
                 Ok(()) => {
                     notice::post("스태시를 만들었습니다".to_string());
@@ -5177,6 +5184,7 @@ pub fn VcsScreen() {
             crate::services::run_shared(async move { load_from(fetch_snapshot(&project).await) }, move |result| load_effect.set(result));
         }
     });
+    crate::ui::vcs_watch::watch_and_refresh(current.as_deref(), &load);
     let state = load.get();
     VcsScreenWithLoad(state, boxes, current, reload, false, None);
 }
@@ -5667,6 +5675,7 @@ pub fn VcsSheet(project_id: &str, open: bool, on_close: impl FnMut() + Clone + '
             crate::services::run_shared(async move { load_from(fetch_snapshot(&project_effect).await) }, move |result| load_effect.set(result));
         }
     });
+    crate::ui::vcs_watch::watch_and_refresh(Some(project_id), &load);
     // Re-read on every composition, so a later frame with a real size corrects the first one.
     let window = current_window_size();
     let (win_w, win_h) = vcs_sheet_window(window.width_dp, window.height_dp);

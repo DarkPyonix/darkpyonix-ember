@@ -2032,14 +2032,15 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, 
                 if !phone {
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
                         cu::Box().modifier(Modifier::new().width(28.0)).content(|| {
-                            Label("기본", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
+                            Label("기본", Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(1));
                         });
                         cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
-                            Label("모델", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
+                            Label("모델", Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(1));
                         });
-                        Label(MODEL_PLANS_HEADER, Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
-                        cu::Box().modifier(Modifier::new().width(MODEL_SWITCH_COL)).alignment(Alignment::CenterEnd).content(|| {
-                            Label("목록에 표시", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
+                        Label(MODEL_PLANS_HEADER, Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(1));
+                        // The mockup's header span wraps in its 36 px cell: 목록에 over 표시, left aligned.
+                        cu::Box().modifier(Modifier::new().width(MODEL_SWITCH_COL)).alignment(Alignment::CenterStart).content(|| {
+                            Label(MODEL_SWITCH_HEADER, Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(2));
                         });
                     });
                 }
@@ -2127,8 +2128,11 @@ pub const MODEL_PLANS_HEADER: &str = "플랜별 사용 (Ember 참고 목록)";
 /// The lines a model's name and note may take in the table: two, as the mockup's wrapping
 /// `.ag-mn` column shows them at 1280, where two model cards share a row (#886).
 pub const MODEL_TEXT_LINES: u32 = 2;
-/// The switch column: wide enough for its 목록에 표시 header.
-const MODEL_SWITCH_COL: f32 = 60.0;
+/// The switch column: `.ag-mhead`/`.ag-mrow` `grid-template-columns: 28px minmax(0,1fr) auto 36px`,
+/// as wide as the 36 px switch (#886). Its header wraps to two lines, as the mockup's does.
+const MODEL_SWITCH_COL: f32 = 36.0;
+/// The switch column's header (`agents.js` `.ag-mhead`).
+const MODEL_SWITCH_HEADER: &str = "목록에 표시";
 
 /// Below 560 dp the model table hides its header and puts the plans under the note.
 pub fn model_table_phone(width_dp: f32) -> bool {
@@ -3677,6 +3681,16 @@ mod tests {
         // The grid's 12 dp column gap (`.ag-mrow{gap:var(--sp3)}`) and the header shown above 560.
         assert!(holder.props.iter().any(|p| p.starts_with("Spacing=") && p.contains("12.0")), "{:?}", holder.props);
         assert!(model_table_phone(560.0) && !model_table_phone(561.0));
+    }
+
+    #[test]
+    fn fr_l20_model_switch_column_is_the_mockups_36() {
+        // #886: `.ag-mrow` ends in a 36 px column; ours was 60. The header wraps in it.
+        assert_eq!(MODEL_SWITCH_COL, 36.0);
+        let src = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
+        assert_eq!(src.matches("Modifier::new().width(MODEL_SWITCH_COL)").count(), 2, "header and rows share the column");
+        assert!(src.contains("Label(MODEL_SWITCH_HEADER, Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(2))"));
+        assert!(super::super::home::text_px("목록에", Fs::Xs2.size()) <= MODEL_SWITCH_COL, "the first line fits the column");
     }
 
     #[test]

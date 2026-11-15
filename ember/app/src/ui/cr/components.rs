@@ -1752,10 +1752,11 @@ pub(crate) fn sheet_body_max_height(window_width_dp: f32, window_height_dp: f32,
 
 /// The 32 px round close button of a sheet header, with the mockup's line icon.
 /// Its accessible name is "닫기" (compose-rust v0.0.7, #460).
-/// v0.0.7: #476 fixed (containers take `on_key_down`, and `Batch::request_focus` exists);
-/// workaround kept until checked on a display (FR-L32, #502: that Escape reaches the modal's
-/// `on_dismiss`). Ember passes the same close callback (guarded where a guard exists) to the
-/// modal's `on_dismiss`, so Escape closes every sheet once the renderer delivers it.
+/// compose-rust v0.0.10 registers every open `Dialog`, `Sheet` and `Popover` on
+/// `OverlayFocusStack` and delivers Escape to the top-most open modal's `on_dismiss`
+/// (FR-L32, #502; not yet verified on a display). Ember passes the same close callback
+/// (guarded where a guard exists) to the modal's `on_dismiss`, so Escape closes every sheet
+/// and dialog, top-most first.
 pub fn CloseButton(on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     NamedClickable(
@@ -3049,15 +3050,24 @@ mod tests {
     fn fr_l32_every_modal_wires_dismiss_and_settings_keeps_its_guard() {
         // Escape, the scrim and the close button share one callback, so a modal without
         // on_dismiss could never close on Escape, and a guarded sheet must pass its guard.
-        for (name, src) in [
-            ("components.rs", include_str!("components.rs")),
-            ("session.rs", include_str!("session.rs")),
-            ("vcs.rs", include_str!("vcs.rs")),
-        ] {
-            let lines: Vec<&str> = src.lines().collect();
+        use std::fs;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/cr");
+        for entry in fs::read_dir(dir).expect("cr sources") {
+            let path = entry.expect("source entry").path();
+            if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_str().unwrap().to_string();
+            let src = fs::read_to_string(&path).expect("source text");
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            let lines: Vec<&str> = production.lines().collect();
             for (i, l) in lines.iter().enumerate() {
                 let t = l.trim_start();
-                if (t.starts_with("cu::Dialog(") || t.starts_with("cu::Sheet(")) && !t.starts_with("//") {
+                if (t.starts_with("cu::Dialog(")
+                    || t.starts_with("cu::Sheet(")
+                    || t.starts_with("cu::Popover("))
+                    && !t.starts_with("//")
+                {
                     let near = lines[i..(i + 24).min(lines.len())].join("\n");
                     assert!(near.contains(".on_dismiss("), "{name}:{} modal without on_dismiss", i + 1);
                 }
@@ -3611,5 +3621,675 @@ mod tests {
             host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch");
             assert_eq!(CLICKS.load(Ordering::SeqCst), i + 1, "the click on row {i} reached its closure");
         }
+    }
+
+    // ---- FR-L32 (#502): Escape closes every sheet and dialog, top-most first ----------------
+
+    struct ModalNode {
+        id: u32,
+        widget: String,
+        parent: Option<u32>,
+        index: u32,
+        open: bool,
+        on_dismiss: Option<u64>,
+        on_click: Option<u64>,
+        text: Option<String>,
+    }
+
+    struct ModalHost {
+        host: Host,
+        nodes: std::collections::HashMap<u32, ModalNode>,
+    }
+
+    impl ModalHost {
+        fn new(f: impl Fn() + Send + Sync + 'static) -> Self {
+            let f = std::sync::Arc::new(f);
+            let host = Host::new(move || {
+                let f = f.clone();
+                Box::new(Recomposer::new(move || f()))
+            });
+            let mut mh = ModalHost {
+                host,
+                nodes: std::collections::HashMap::new(),
+            };
+            let bytes = mh.host.rebuild().expect("rebuild").to_vec();
+            mh.apply(&bytes);
+            mh
+        }
+
+        fn apply(&mut self, bytes: &[u8]) {
+            for m in decode_batch(bytes).expect("decode") {
+                match m {
+                    Mutation::Create { node_id, widget } => {
+                        self.nodes.insert(
+                            node_id,
+                            ModalNode {
+                                id: node_id,
+                                widget: format!("{widget:?}"),
+                                parent: None,
+                                index: 0,
+                                open: false,
+                                on_dismiss: None,
+                                on_click: None,
+                                text: None,
+                            },
+                        );
+                    }
+                    Mutation::Insert { parent_id, node_id, index } => {
+                        if let Some(n) = self.nodes.get_mut(&node_id) {
+                            n.parent = Some(parent_id);
+                            n.index = index;
+                        }
+                    }
+                    Mutation::Remove { node_id } => {
+                        self.remove_subtree(node_id);
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::Open, value: PropertyValue::Bool(b) } => {
+                        if let Some(n) = self.nodes.get_mut(&node_id) {
+                            n.open = b;
+                        }
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::OnDismiss, value: PropertyValue::Integer(h) } => {
+                        if let Some(n) = self.nodes.get_mut(&node_id) {
+                            n.on_dismiss = Some(h as u64);
+                        }
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                        if let Some(n) = self.nodes.get_mut(&node_id) {
+                            n.on_click = Some(h as u64);
+                        }
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        if let Some(n) = self.nodes.get_mut(&node_id) {
+                            n.text = Some(s.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn remove_subtree(&mut self, root: u32) {
+            let children: Vec<u32> = self
+                .nodes
+                .values()
+                .filter(|n| n.parent == Some(root))
+                .map(|n| n.id)
+                .collect();
+            for c in children {
+                self.remove_subtree(c);
+            }
+            self.nodes.remove(&root);
+        }
+
+        fn walk(&self, parent: Option<u32>, out: &mut Vec<u32>) {
+            let mut kids: Vec<&ModalNode> = self
+                .nodes
+                .values()
+                .filter(|n| match parent {
+                    Some(p) => n.parent == Some(p),
+                    None => n.parent.is_none() || n.parent.is_some_and(|p| !self.nodes.contains_key(&p)),
+                })
+                .collect();
+            kids.sort_by_key(|n| (n.index, n.id));
+            for k in kids {
+                out.push(k.id);
+                self.walk(Some(k.id), out);
+            }
+        }
+
+        /// Open modal nodes in composition order (`OverlayFocusStack` order in the renderer).
+        fn open_modals(&self) -> Vec<(u32, String, u64)> {
+            let mut order = Vec::new();
+            self.walk(None, &mut order);
+            order
+                .into_iter()
+                .filter_map(|id| {
+                    let n = self.nodes.get(&id)?;
+                    if matches!(n.widget.as_str(), "Dialog" | "Sheet" | "Popover") && n.open {
+                        let h = n.on_dismiss.unwrap_or_else(|| panic!("open {} without OnDismiss", n.widget));
+                        Some((n.id, n.widget.clone(), h))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+
+        /// Simulates pressing Escape: `OverlayFocusStack.handleEscape` takes the last (top-most)
+        /// open overlay and invokes its `on_dismiss`.
+        fn press_escape(&mut self) -> String {
+            let (node_id, widget, handler_id) = self
+                .open_modals()
+                .pop()
+                .expect("at least one open modal when pressing Escape");
+            let (bytes, _) = self
+                .host
+                .dispatch(HostEvent {
+                    node_id,
+                    handler_id,
+                    payload: EventPayload::Clicked,
+                })
+                .expect("dispatch Escape dismiss");
+            let bytes = bytes.to_vec();
+            self.apply(&bytes);
+            widget
+        }
+
+        fn rebuild(&mut self) {
+            let bytes = self.host.rebuild().expect("rebuild").to_vec();
+            self.apply(&bytes);
+        }
+
+        fn click_text(&mut self, label: &str) {
+            let mut order = Vec::new();
+            self.walk(None, &mut order);
+            let mut found = None;
+            for id in order.into_iter().filter(|id| self.nodes.get(id).and_then(|n| n.text.as_deref()) == Some(label)) {
+                let mut cur = Some(id);
+                while let Some(nid) = cur {
+                    let Some(n) = self.nodes.get(&nid) else { break };
+                    if let Some(h) = n.on_click {
+                        found = Some((nid, h));
+                        break;
+                    }
+                    cur = n.parent;
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+            let (node_id, handler_id) = found.unwrap_or_else(|| panic!("no clickable text {label}"));
+            let (bytes, _) = self
+                .host
+                .dispatch(HostEvent {
+                    node_id,
+                    handler_id,
+                    payload: EventPayload::Clicked,
+                })
+                .expect("click");
+            let bytes = bytes.to_vec();
+            self.apply(&bytes);
+        }
+    }
+
+    #[test]
+    fn fr_l32_escape_closes_every_sheet_and_dialog_kind() {
+        use compose_rust::runtime::{mutable_state_of, remember};
+        let _guard = crate::services::test_guard();
+        let ui = crate::ui::coexist::shared_ui();
+
+        // 1. EmberSheet at desktop width (Dialog) and phone width (Sheet), plus Monitor full-screen (Dialog) and headerless sheet.
+        for (w, h, monitor, title, expected_widget) in [
+            (1440.0, 900.0, false, "시트", "Dialog"),
+            (390.0, 844.0, false, "시트", "Sheet"),
+            (390.0, 844.0, true, "모니터", "Dialog"),
+            (1440.0, 900.0, false, "", "Dialog"),
+        ] {
+            crate::ui::window_size::set_opened_for_test(Some((w, h)));
+            let mut mh = ModalHost::new(move || {
+                let open = remember(|| mutable_state_of(true));
+                let close = open.clone();
+                EmberSheetSized(title, open.get(), SHEET_WIDTH_DEFAULT, monitor, move || close.set(false), None, || {});
+            });
+            assert_eq!(mh.open_modals().len(), 1, "{w}x{h} monitor={monitor} title={title}");
+            assert_eq!(mh.press_escape(), expected_widget);
+            assert!(mh.open_modals().is_empty());
+        }
+
+        // 2. OptionSheet, Select / NamedSelect, and PopoverMenu (Drop Popover, Mode Popover at 1440, Mode Sheet at 390).
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        {
+            let mut mh = ModalHost::new(|| {
+                let open = remember(|| mutable_state_of(true));
+                let close = open.clone();
+                let opts = vec!["하나".to_string(), "둘".to_string()];
+                OptionSheet(open.get(), &opts, Some(0), 200.0, move || close.set(false), |_| {});
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            assert_eq!(mh.press_escape(), "Dialog");
+            assert!(mh.open_modals().is_empty());
+        }
+        {
+            let mut mh = ModalHost::new(|| {
+                let opts = vec!["Claude Code".to_string(), "Codex".to_string()];
+                NamedSelect("하네스", &opts[0], &opts, 0, 200.0, |_| {});
+            });
+            assert!(mh.open_modals().is_empty());
+            mh.click_text("Claude Code");
+            assert_eq!(mh.open_modals().len(), 1);
+            assert_eq!(mh.press_escape(), "Dialog");
+            assert!(mh.open_modals().is_empty());
+        }
+        for (w, h, kind, expected_widget) in [
+            (1440.0, 900.0, PopKind::Drop, "Popover"),
+            (1440.0, 900.0, PopKind::Mode, "Popover"),
+            (390.0, 844.0, PopKind::Mode, "Sheet"),
+        ] {
+            crate::ui::window_size::set_opened_for_test(Some((w, h)));
+            let mut mh = ModalHost::new(move || {
+                let open = remember(|| mutable_state_of(true));
+                let close = open.clone();
+                let rows = pop_sample_rows();
+                PopoverMenu(
+                    open.get(),
+                    PopMenu { name: "메뉴", kind, head: "어느 IDE로 열까요", sub: None, rows: &rows, align: compose_rust::PopoverAlign::End },
+                    move || close.set(false),
+                    |_| {},
+                    || Label("열기", Fs::Sm, Weight::Medium, None, Some(1)),
+                    None,
+                );
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            assert_eq!(mh.press_escape(), expected_widget);
+            assert!(mh.open_modals().is_empty());
+        }
+
+        // 3. SettingsSheet ("설정"), NewSessionDialog ("새 세션"), and OwnerClaimSheet ("소유자 확인").
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        {
+            let mut mh = ModalHost::new(|| {
+                let open = remember(|| mutable_state_of(true));
+                let close = open.clone();
+                crate::ui::cr::settings::SettingsSheet(open.get(), move || close.set(false));
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+        }
+        {
+            ui.open_new_session(None);
+            let mut mh = ModalHost::new(crate::ui::cr::new_session::NewSessionDialog);
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+            assert!(ui.new_session.get_untracked().is_none());
+        }
+        {
+            ui.owner_claim.set(crate::owner_claim::ClaimView {
+                state: crate::owner_claim::ClaimState::NeedCode { holders: 0 },
+                generation: 1,
+            });
+            ui.owner_claim_dismissed.set(None);
+            let mut mh = ModalHost::new(crate::ui::cr::owner_claim::OwnerClaimSheet);
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+            ui.owner_claim.set(crate::owner_claim::ClaimView::default());
+            ui.owner_claim_dismissed.set(None);
+        }
+
+        // 4. Project screen sheets: "새 프로젝트", "{name} 설정", "컴퓨터 추가" (AddComputerSheet), and computer "상태" (MonitorSheet).
+        let (boxes, chips) = crate::services::services().client.read(|s| {
+            let b = crate::ui::project::project_boxes(s);
+            let c = crate::ui::project::computer_chips(s, &b);
+            (b, c)
+        });
+        let first_proj = boxes.first().expect("demo project").id.clone();
+        let first_chip = chips.first().expect("demo computer").id.clone();
+        for kind in ["new_project", "settings", "add_computer", "monitor"] {
+            let (boxes, chips) = (boxes.clone(), chips.clone());
+            let (first_proj, first_chip) = (first_proj.clone(), first_chip.clone());
+            let mut mh = ModalHost::new(move || {
+                let st = remember(|| {
+                    let st = crate::ui::cr::project::Ui::new(&boxes, &chips);
+                    match kind {
+                        "new_project" => st.new_project.set(true),
+                        "settings" => st.settings.set(Some(first_proj.clone())),
+                        "add_computer" => st.add.open.set(true),
+                        "monitor" => st.computer.set(Some(first_chip.clone())),
+                        _ => {}
+                    }
+                    st
+                });
+                crate::ui::cr::project::Sheets(&boxes, &chips, &st, crate::ui::coexist::shared_ui());
+            });
+            assert_eq!(mh.open_modals().len(), 1, "project sheet {kind}");
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty(), "project sheet {kind} closed on Escape");
+        }
+
+        // 5. Channel sheets: NewChannelSheet ("새 채널") and MembersSheet ("{name} 멤버/게스트").
+        {
+            let mut mh = ModalHost::new(|| {
+                let st = crate::ui::cr::new_channel::NewChannelState::new();
+                let init = remember(|| mutable_state_of(false));
+                if !init.get_untracked() {
+                    init.set(true);
+                    st.open.set(true);
+                }
+                let open_room = remember(|| mutable_state_of(None::<String>));
+                crate::ui::cr::new_channel::NewChannelSheet(&st, &[], None, &open_room);
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+        }
+        {
+            let mut mh = ModalHost::new(|| {
+                let st = crate::ui::cr::channel_owner::OwnerState::new("c1");
+                let init = remember(|| mutable_state_of(false));
+                if !init.get_untracked() {
+                    init.set(true);
+                    st.open.set(true);
+                }
+                crate::ui::cr::channel_owner::MembersSheet("c1", "전체", &st, false);
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+        }
+
+        // 6. Files sheets: SendSheet ("파일 보내기") and ShareSheet (headerless share sheet).
+        {
+            let mut mh = ModalHost::new(|| {
+                let st = remember(|| {
+                    let s = crate::ui::cr::files::State::new();
+                    s.sheet.set(Some(crate::ui::files::SendDraft::default()));
+                    s
+                });
+                crate::ui::cr::files::SendSheet(&st, &[], &[], true, false, 1440.0);
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+        }
+        {
+            let mut mh = ModalHost::new(|| {
+                let open = remember(|| mutable_state_of(true));
+                crate::ui::cr::files::ShareSheet(&open, &[], &[], true, false);
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+        }
+
+        // 7. Routines sheet: RoutineForm in FormLayout::Sheet ("새 루틴").
+        {
+            let mut mh = ModalHost::new(|| {
+                let open = remember(|| mutable_state_of(true));
+                let draft = remember(|| mutable_state_of(crate::ui::routines::FormDraft::new("ember")));
+                if open.get() {
+                    let close = open.clone();
+                    crate::ui::cr::routines::RoutineForm(
+                        crate::ui::routines::FormDraft::new("ember"),
+                        None,
+                        false,
+                        &[],
+                        &["ember".to_string()],
+                        crate::ui::routines::FormLayout::Sheet,
+                        520.0,
+                        &draft,
+                        |_| {},
+                        move || close.set(false),
+                    );
+                }
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+        }
+
+        // 8. Session sheets: NewMemberSheet ("새 팀원", Dialog at 1440 and Sheet at 390), VcsSheet ("버전 관리"), and "세션 정보" sheet.
+        for (w, h, expected_widget) in [(1440.0, 900.0, "Dialog"), (390.0, 844.0, "Sheet")] {
+            crate::ui::window_size::set_opened_for_test(Some((w, h)));
+            let fp = first_proj.clone();
+            let mut mh = ModalHost::new(move || {
+                let open = remember(|| mutable_state_of(true));
+                let close = open.clone();
+                crate::ui::cr::session::NewMemberSheet(&fp, open.get(), move || close.set(false));
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            assert_eq!(mh.press_escape(), expected_widget);
+            assert!(mh.open_modals().is_empty());
+        }
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        {
+            let fp = first_proj.clone();
+            let mut mh = ModalHost::new(move || {
+                let open = remember(|| mutable_state_of(true));
+                let close = open.clone();
+                crate::ui::cr::vcs::VcsSheet(&fp, open.get(), move || close.set(false));
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+        }
+        {
+            // SingleView at compact width opens "세션 정보" sheet when EMBER_CR_SESSION_INFO=1.
+            crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+            unsafe {
+                std::env::set_var("EMBER_CR_SESSION_INFO", "1");
+            }
+            let mut mh = ModalHost::new(|| {
+                crate::ui::cr::session::SingleView("demo-s1", None, || {});
+            });
+            unsafe {
+                std::env::remove_var("EMBER_CR_SESSION_INFO");
+            }
+            assert_eq!(mh.open_modals().len(), 1, "SingleView info sheet open at compact width");
+            assert_eq!(mh.press_escape(), "Sheet");
+            assert!(mh.open_modals().is_empty());
+        }
+
+        // 9. Agents sheet: AddAccountSheet ("계정 추가", guarded while Busy).
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        {
+            use std::sync::{Arc, Mutex};
+            let state_cell: Arc<Mutex<Option<compose_rust::runtime::MutableState<crate::ui::agents::AddAccount>>>> =
+                Arc::new(Mutex::new(None));
+            let sc = state_cell.clone();
+            let mut mh = ModalHost::new(move || {
+                let add = remember(|| {
+                    let mut a = crate::ui::agents::AddAccount::closed();
+                    a.open = true;
+                    a.phase = crate::ui::agents::AddPhase::Busy;
+                    mutable_state_of(a)
+                });
+                *sc.lock().unwrap() = Some(add.clone());
+                crate::ui::cr::agents::AddAccountSheet(&add, true);
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            // Escape while Busy is ignored so an in-flight account creation is not dropped.
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 1, "AddAccountSheet stays open while Busy");
+            state_cell.lock().unwrap().as_ref().unwrap().update(|a| a.phase = crate::ui::agents::AddPhase::Form);
+            mh.rebuild();
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty(), "AddAccountSheet closes on Escape once not Busy");
+        }
+
+        // 10. Home model picker sheet (at 390) and model picker popover (at 1440).
+        for (w, h, compact, expected_widget) in [(390.0, 844.0, true, "Sheet"), (1440.0, 900.0, false, "Popover")] {
+            crate::ui::window_size::set_opened_for_test(Some((w, h)));
+            let mut mh = ModalHost::new(move || {
+                let c = remember(|| {
+                    let c = crate::ui::cr::home::Composer::new();
+                    c.open.set(Some(crate::ui::cr::home::Pick::Model));
+                    c
+                });
+                let ui = crate::ui::coexist::shared_ui();
+                let sel = c.selection.get();
+                if compact {
+                    c.lists(ui);
+                } else {
+                    let close = c.open.clone();
+                    c.model_popover(ui, &sel, None, || {}, move || close.set(None));
+                }
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            assert_eq!(mh.press_escape(), expected_widget);
+            assert!(mh.open_modals().is_empty());
+        }
+
+        // 11. Launcher row OptionSheet and "세션 이름 변경" sheet.
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        {
+            let row = crate::services::services()
+                .client
+                .read(|s| crate::model::recent_sessions(s, &crate::model::RowContext { account_labels: &Default::default() }, 1))
+                .into_iter()
+                .next()
+                .expect("demo session row");
+            let mut mh = ModalHost::new(move || {
+                crate::ui::cr::launcher::SessionRowWith(&row, true);
+            });
+            assert_eq!(mh.open_modals().len(), 1, "row OptionSheet starts open");
+            // Clicking "이름 변경" closes the OptionSheet and opens the "세션 이름 변경" EmberSheet.
+            mh.click_text("이름 변경");
+            assert_eq!(mh.open_modals().len(), 1, "rename sheet is now open");
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty(), "Escape closes the rename sheet");
+        }
+        crate::ui::window_size::set_opened_for_test(None);
+    }
+
+    #[test]
+    fn fr_l32_escape_closes_topmost_sheet_or_dialog_first() {
+        use compose_rust::runtime::{mutable_state_of, remember};
+        use std::sync::{Arc, Mutex};
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+
+        // 1. Stacked sheets in shell order: "더보기" -> "설정" -> "새 세션" -> "소유자 확인".
+        // Escape closes the top-most one each time until none remain.
+        {
+            let ui = crate::ui::coexist::shared_ui();
+            ui.open_new_session(None);
+            ui.owner_claim.set(crate::owner_claim::ClaimView {
+                state: crate::owner_claim::ClaimState::NeedCode { holders: 0 },
+                generation: 1,
+            });
+            ui.owner_claim_dismissed.set(None);
+            let more_cell = Arc::new(Mutex::new(None));
+            let settings_cell = Arc::new(Mutex::new(None));
+            let (mc, sc) = (more_cell.clone(), settings_cell.clone());
+            let mut mh = ModalHost::new(move || {
+                let more = remember(|| mutable_state_of(true));
+                let settings = remember(|| mutable_state_of(true));
+                *mc.lock().unwrap() = Some(more.clone());
+                *sc.lock().unwrap() = Some(settings.clone());
+                let close_more = more.clone();
+                EmberSheet("더보기", more.get(), move || close_more.set(false), None, || {});
+                let close_settings = settings.clone();
+                crate::ui::cr::settings::SettingsSheet(settings.get(), move || close_settings.set(false));
+                crate::ui::cr::new_session::NewSessionDialog();
+                crate::ui::cr::owner_claim::OwnerClaimSheet();
+            });
+            assert_eq!(mh.open_modals().len(), 4, "all four shell modals open");
+            // 1st Escape: closes top-most ("소유자 확인").
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 3);
+            assert!(ui.owner_claim_dismissed.get_untracked().is_some(), "owner claim dismissed first");
+            assert!(ui.new_session.get_untracked().is_some(), "new session still open");
+            // 2nd Escape: closes "새 세션".
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 2);
+            assert!(ui.new_session.get_untracked().is_none(), "new session closed second");
+            assert!(settings_cell.lock().unwrap().as_ref().unwrap().get_untracked(), "settings still open");
+            // 3rd Escape: closes "설정".
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 1);
+            assert!(!settings_cell.lock().unwrap().as_ref().unwrap().get_untracked(), "settings closed third");
+            assert!(more_cell.lock().unwrap().as_ref().unwrap().get_untracked(), "more still open");
+            // 4th Escape: closes "더보기".
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+            assert!(!more_cell.lock().unwrap().as_ref().unwrap().get_untracked(), "more closed fourth");
+            ui.owner_claim.set(crate::owner_claim::ClaimView::default());
+            ui.owner_claim_dismissed.set(None);
+        }
+
+        // 2. Inner Select (OptionSheet) or branch_menu opened inside a parent sheet:
+        // first Escape closes only the inner OptionSheet / branch_menu; second Escape closes the parent sheet.
+        {
+            // Select opened inside "새 세션" (NewSessionDialog).
+            let ui = crate::ui::coexist::shared_ui();
+            ui.open_new_session(None);
+            let mut mh = ModalHost::new(crate::ui::cr::new_session::NewSessionDialog);
+            assert_eq!(mh.open_modals().len(), 1, "only NewSessionDialog open");
+            mh.click_text("claude-code");
+            assert_eq!(mh.open_modals().len(), 2, "NewSessionDialog + Select OptionSheet open");
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 1, "1st Escape closed only the Select OptionSheet");
+            assert!(ui.new_session.get_untracked().is_some(), "NewSessionDialog remains open");
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty(), "2nd Escape closed NewSessionDialog");
+            assert!(ui.new_session.get_untracked().is_none());
+        }
+        {
+            // NamedSelect (OptionSheet) opened inside RoutineForm sheet ("새 루틴").
+            let mut mh = ModalHost::new(|| {
+                let open = remember(|| mutable_state_of(true));
+                let draft = remember(|| mutable_state_of(crate::ui::routines::FormDraft::new("ember")));
+                if open.get() {
+                    let close = open.clone();
+                    crate::ui::cr::routines::RoutineForm(
+                        crate::ui::routines::FormDraft::new("ember"),
+                        None,
+                        false,
+                        &[],
+                        &["ember".to_string()],
+                        crate::ui::routines::FormLayout::Sheet,
+                        520.0,
+                        &draft,
+                        |_| {},
+                        move || close.set(false),
+                    );
+                }
+            });
+            let shown = crate::ui::home::default_mode(crate::ui::home::Harness::ClaudeCode).label();
+            assert_eq!(mh.open_modals().len(), 1, "only RoutineForm sheet open");
+            mh.click_text(shown);
+            assert_eq!(mh.open_modals().len(), 2, "RoutineForm sheet + NamedSelect OptionSheet open");
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 1, "1st Escape closed only NamedSelect OptionSheet");
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty(), "2nd Escape closed RoutineForm sheet");
+        }
+
+        // 3. Dirty form sheets ("새 프로젝트" and "새 채널") with unsaved-changes confirmation sheet ("변경 사항"):
+        // 1st Escape on the dirty form opens "변경 사항" on top (2 open modals);
+        // 2nd Escape dismisses the top-most "변경 사항" sheet, keeping the dirty form open.
+        {
+            let (boxes, chips) = crate::services::services().client.read(|s| {
+                let b = crate::ui::project::project_boxes(s);
+                let c = crate::ui::project::computer_chips(s, &b);
+                (b, c)
+            });
+            let mut mh = ModalHost::new(move || {
+                let st = remember(|| {
+                    let st = crate::ui::cr::project::Ui::new(&boxes, &chips);
+                    st.new_project.set(true);
+                    st.new_draft.update(|d| d.name = "작성 중인 프로젝트".to_string());
+                    st
+                });
+                crate::ui::cr::project::Sheets(&boxes, &chips, &st, crate::ui::coexist::shared_ui());
+            });
+            assert_eq!(mh.open_modals().len(), 1, "dirty 새 프로젝트 sheet open");
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 2, "1st Escape opens 변경 사항 confirm sheet on top");
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 1, "2nd Escape closes top-most 변경 사항 sheet and keeps 새 프로젝트 open");
+        }
+        {
+            let mut mh = ModalHost::new(|| {
+                let st = crate::ui::cr::new_channel::NewChannelState::new();
+                let init = remember(|| mutable_state_of(false));
+                if !init.get_untracked() {
+                    init.set(true);
+                    st.start(None);
+                    st.draft.update(|d| d.name = "작성-중".to_string());
+                }
+                let open_room = remember(|| mutable_state_of(None::<String>));
+                crate::ui::cr::new_channel::NewChannelSheet(&st, &[], None, &open_room);
+            });
+            assert_eq!(mh.open_modals().len(), 1, "dirty 새 채널 sheet open");
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 2, "1st Escape opens 변경 사항 confirm sheet on top");
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 1, "2nd Escape closes top-most 변경 사항 sheet and keeps 새 채널 open");
+        }
+        crate::ui::window_size::set_opened_for_test(None);
     }
 }

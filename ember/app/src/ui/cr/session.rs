@@ -4164,7 +4164,7 @@ fn ToolbarBtn(
 }
 
 /// New member sheet (`#snew` in mockup `session.js` lines 386-395).
-fn NewMemberSheet(
+pub(super) fn NewMemberSheet(
     project: &str,
     open: bool,
     on_close: impl FnMut() + Clone + Send + 'static,
@@ -4190,8 +4190,17 @@ fn NewMemberSheet(
     let comp_opts = vec!["mac-mini".to_string(), "mac-studio".to_string(), "이 컴퓨터".to_string()];
     let c_idx = comp_idx.get();
 
-    let close_hdr = on_close.clone();
-    let close_f = on_close.clone();
+    let close_guarded = {
+        let b = busy.clone();
+        let mut cl = on_close.clone();
+        move || {
+            if !b.get_untracked() {
+                cl();
+            }
+        }
+    };
+    let close_hdr = close_guarded.clone();
+    let close_f = close_guarded.clone();
     let create_cb = {
         let ui = ui.clone();
         let proj_c = proj_owned.clone();
@@ -4554,12 +4563,12 @@ fn NewMemberSheet(
     if is_compact {
         cu::Sheet(true)
             .modifier(modifier.fill_max_width())
-            .on_dismiss(on_close)
+            .on_dismiss(close_guarded)
             .content(body);
     } else {
         cu::Dialog(true)
             .modifier(modifier.width(758.0))
-            .on_dismiss(on_close)
+            .on_dismiss(close_guarded)
             .content(body);
     }
 }

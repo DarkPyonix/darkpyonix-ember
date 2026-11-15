@@ -1797,7 +1797,7 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
 /// Pick a harness and a label, create the account on the server, show the login command it
 /// returns and let the owner ask whether the login happened. There is no login window: the
 /// login runs on the server's machine (INTENT E3). Demo mode shows a sample and calls nothing.
-fn AddAccountSheet(add: &MutableState<crate::ui::agents::AddAccount>, example: bool) {
+pub(super) fn AddAccountSheet(add: &MutableState<crate::ui::agents::AddAccount>, example: bool) {
     use crate::ui::agents::{add_account_kinds, AddAccount, AddPhase};
     let theme = ember_theme();
     let p = theme.palette;
@@ -1807,6 +1807,14 @@ fn AddAccountSheet(add: &MutableState<crate::ui::agents::AddAccount>, example: b
         move || a.set(AddAccount::closed())
     };
     let busy = cur.phase == AddPhase::Busy;
+    let dismiss = {
+        let close = close.clone();
+        move || {
+            if !busy {
+                close();
+            }
+        }
+    };
     cu::Dialog(cur.open)
         .modifier(
             with_shadows(Modifier::new(), theme.shadow_lg())
@@ -1816,7 +1824,7 @@ fn AddAccountSheet(add: &MutableState<crate::ui::agents::AddAccount>, example: b
                 .corner_radius(CORNER_MD)
                 .padding(SP[3]),
         )
-        .on_dismiss(close.clone())
+        .on_dismiss(dismiss)
         .content(|| {
             cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
                 Label("계정 추가", Fs::Lg, Weight::Semibold, None, Some(1));
@@ -1885,7 +1893,7 @@ fn AddAccountSheet(add: &MutableState<crate::ui::agents::AddAccount>, example: b
                     cu::Row().spacing(SP[2]).content(|| {
                         let a = add.clone();
                         AppButton("만들기", None, ButtonKind::Primary, true, cur.can_create(), false, move || create_account(&a, example));
-                        AppButton("닫기", None, ButtonKind::Default, true, true, false, close.clone());
+                        AppButton("닫기", None, ButtonKind::Default, true, !busy, false, close.clone());
                     });
                 }
             });

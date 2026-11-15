@@ -35,6 +35,7 @@ pub mod exec;
 pub mod exec_server;
 pub mod fs;
 pub mod fs_kind;
+pub mod fs_watch;
 pub mod git;
 pub mod git_conflict;
 pub mod hub;

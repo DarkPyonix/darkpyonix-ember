@@ -117,6 +117,10 @@ struct Inner {
     /// Serialises writes so a hash precondition and the rename that follows it are atomic with
     /// respect to other writes through this daemon.
     write_lock: tokio::sync::Mutex<()>,
+    /// Bounds of `GET /fs/watch` (`FR-W4d`).
+    watch_limits: crate::fs_watch::WatchLimits,
+    /// Watches held by all watch sockets together.
+    watch_total: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Daemon state; cheap to clone.
@@ -150,6 +154,8 @@ impl Node {
             transfers,
             ose,
             write_lock: tokio::sync::Mutex::new(()),
+            watch_limits: crate::fs_watch::WatchLimits::default(),
+            watch_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })))
     }
 
@@ -172,6 +178,20 @@ impl Node {
 
     pub fn transfers(&self) -> &Arc<crate::transfers::Receiver> {
         &self.0.transfers
+    }
+
+    /// The same node with other watch bounds (`FR-W4d`). Call it before the node is cloned.
+    pub fn with_watch_limits(mut self, limits: crate::fs_watch::WatchLimits) -> Self {
+        Arc::get_mut(&mut self.0).expect("with_watch_limits before the node is shared").watch_limits = limits;
+        self
+    }
+
+    pub fn watch_limits(&self) -> &crate::fs_watch::WatchLimits {
+        &self.0.watch_limits
+    }
+
+    pub(crate) fn watch_total(&self) -> &Arc<std::sync::atomic::AtomicUsize> {
+        &self.0.watch_total
     }
 
     pub fn egress_policy(&self) -> &Arc<crate::egress::EgressPolicy> {
@@ -206,6 +226,8 @@ pub fn router(node: Node) -> Router {
         .route("/fs/pwrite", post(pwrite))
         .route("/fs/glob", post(glob))
         .route("/fs/grep", post(grep))
+        // FR-W4d: file watching as a WebSocket.
+        .route("/fs/watch", get(crate::fs_watch::ws))
         // FR-G5: history route.
         .route("/git/log", post(git_log_handler))
         .route("/git/blame", post(git_blame_handler))

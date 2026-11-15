@@ -1880,20 +1880,6 @@ mod fr_l31_tabs {
     }
 
     #[test]
-    fn fr_l31_tabs_two_clicks_on_one_target_within_500_ms_are_a_double_click() {
-        use ember_app::ui::editor::{DoubleClick, DOUBLE_CLICK_MS};
-        assert_eq!(DOUBLE_CLICK_MS, 500);
-        let mut d = DoubleClick::default();
-        assert!(!d.click("tab:a", 1_000));
-        assert!(d.click("tab:a", 1_500), "the second click at 500 ms is a double-click");
-        assert!(!d.click("tab:a", 1_600), "the pair is used up: a third click starts over");
-        assert!(!d.click("tab:a", 2_101), "501 ms later is too slow");
-        assert!(!d.click("tab:b", 2_200), "another target is not a double-click");
-        assert!(!d.click("tab:a", 2_300));
-        assert!(d.click("tab:a", 2_400));
-    }
-
-    #[test]
     fn fr_l31_tabs_shift_f10_and_the_context_menu_key_open_the_tab_menu() {
         use ember_app::ui::editor::tab_menu_key;
         assert!(tab_menu_key("F10", false, true, false, false));
@@ -2042,10 +2028,10 @@ mod design_placement {
         }
         assert!(tree.contains("oncontextmenu: move |event| {"), "rows do not open the context menu");
         assert!(tree.contains("TreeMenuAt::Pointer { x: at.x, y: at.y }"));
-        // Stand-in openers until right-click is checked on a display (compose-rust#417 is fixed in
-        // v0.0.7 and dioxus-compose f0e5b9f5 forwards it).
+        // Shift+F10 and the context-menu key are Code-OSS's keyboard route beside right-click
+        // (compose-rust#417, in the pin), not a stand-in.
         assert!(tree.contains("TreeMenuAt::Keyboard"), "no Shift+F10 opener");
-        assert!(tree.contains("v0.0.7: #417 fixed; workaround kept until checked on a display"));
+        assert!(!tree.contains("v0.0.7: #417 fixed; workaround kept until checked on a display"), "the stand-in note is gone");
     }
 
     #[test]

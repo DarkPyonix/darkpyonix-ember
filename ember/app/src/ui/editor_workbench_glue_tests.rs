@@ -308,9 +308,9 @@ fn fr_l31_leaving_an_empty_new_name_field_closes_it_and_a_typed_name_stays() {
 }
 
 // FR-L31 (#832, #827 rule 2): Shift+F10 or the context-menu key on a focused tree row opens the
-// tree's context menu with the row's items, as in Code-OSS. This pins Ember's side of the key
-// path; compose-rust#100 and #717 are in the v0.0.10 pin, and a real run reaching this handler is
-// not yet checked on a display.
+// tree's context menu with the row's items, as in Code-OSS, beside right-click (compose-rust#417).
+// This pins Ember's side of the key path; compose-rust#100 and #717 are in the v0.0.10 pin, and a
+// real run reaching this handler is not yet checked on a display.
 #[test]
 fn fr_l31_shift_f10_and_the_context_menu_key_on_a_tree_row_open_its_context_menu() {
     let _guard = crate::services::test_guard();
@@ -351,6 +351,26 @@ fn fr_l31_shift_f10_and_the_context_menu_key_on_a_tree_row_open_its_context_menu
     page.dom.key_down(row, Key::F10, Code::F10, Modifiers::empty());
     page.dom.render();
     assert_eq!(crate::ui::editor_tree_menu::open_menu(), None);
+}
+
+// FR-L31.5 (compose-rust#417, #673): the tree row and the tab keep a preview on the real
+// `ondoubleclick` and open their menus on `oncontextmenu`; two `onclick`s within 500 ms no longer
+// stand in for a double-click.
+#[test]
+fn fr_l31_5_double_click_and_right_click_are_the_real_events() {
+    let page = include_str!("editor_workbench.rs");
+    let production = &page[..page.find("#[cfg(test)]").unwrap_or(page.len())];
+    assert!(!production.contains(concat!("DOUBLE", "_CLICK")), "the 500 ms stand-in is gone");
+    let editor = include_str!("editor.rs");
+    assert!(!editor.contains(concat!("pub struct Double", "Click")) && !editor.contains(concat!("DOUBLE_CLICK", "_MS")));
+    let tree = &production[production.find(r#"role: "treeitem", "aria-label": "{row_label}""#).expect("tree row")..];
+    let tree = &tree[..tree.find("chev-sp").expect("row content")];
+    assert!(tree.contains("ondoubleclick:") && tree.contains("keep_open(&keep_path)"), "a double-click keeps the preview");
+    assert!(tree.contains("oncontextmenu:") && tree.contains("TreeMenuAt::Pointer"), "a right-click opens the context menu");
+    let tab = &production[production.find(r#"role: "tab", "aria-selected": "{selected}""#).expect("editor tab")..];
+    let tab = &tab[..tab.find("onkeydown:").expect("tab keys")];
+    assert!(tab.contains("ondoubleclick:") && tab.contains("oncontextmenu:") && tab.contains("tab_menu.set(Some("));
+    assert!(!tab[..tab.find("ondoubleclick:").unwrap()].contains("keep_open"), "a single click does not keep the tab");
 }
 
 // FR-L31.9 (#781): 파일 열기 on a change row of the 커밋 window. The window's status and repository

@@ -360,6 +360,7 @@ fn editor_pane() -> Element {
     let click_s = s.clone(); let click_uri = uri.clone();
     let fold_s = s.clone(); let fold_uri = uri.clone();
     let selection_s = s.clone(); let selection_uri = uri;
+    let key_s = s.clone(); let pointer_s = s.clone();
     rsx! { CodeEditor {
         key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
         text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), folds: crate::ui::editor::folds(&doc.folds), tab_width: Some(doc.tab_width),
@@ -368,6 +369,12 @@ fn editor_pane() -> Element {
         font_size: Some(crate::ui::fonts::CODE_FONT_SIZE), line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT),
         gutter_min_width: Some(crate::ui::fonts::CODE_GUTTER_MIN_WIDTH), gutter_padding: Some(crate::ui::fonts::CODE_GUTTER_PADDING), text_inset: Some(crate::ui::fonts::CODE_TEXT_INSET),
         colors: crate::ui::fonts::CODE_EDITOR_COLORS,
+        // FR-L31.13: the language chords from the focused code (compose-rust#554), Cmd/Ctrl+click to a
+        // definition (compose-rust#555) and the caret a list opens under (compose-rust#553).
+        on_key_preview: move |e: compose_rust::KeyEvent| crate::ui::editor_language::view::code_key(&key_s, &e),
+        pointer_kinds: Some(compose_rust::PointerKinds::DOWN),
+        on_code_pointer: move |e: compose_rust::code::CodePointer| crate::ui::editor_language::view::code_pointer(&pointer_s, &e),
+        on_caret_rect: move |e: compose_rust::code::CaretRect| crate::ui::editor_language::view::set_caret_rect(e.rect),
         on_change: move |e: compose_rust::code::CodeChange| { keep_edited_tab(&change_s, &change_uri.path); change_s.editor_versions.borrow_mut().insert(generation, e.version); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); crate::ui::editor_states::view::edited(&change_s, &change_uri.path); },
         on_save: move |e: compose_rust::code::SaveRequest| { if !crate::ui::editor_states::view::manual_save_allowed(&save_s, &save_uri.path) { return; } let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
@@ -1739,8 +1746,8 @@ pub mod page {
                                 }
                             }
                         }
-                        // The language features are in the menu too: a key pressed while the code has the focus may not reach the page.
-                        // TODO(compose-rust#554, in v0.0.10): the chords alone are enough once the editor takes `on_key_preview`.
+                        // The language features are in the menu too, as Code-OSS's editor menu has them; their
+                        // chords also reach them from the focused code (`on_key_preview`, compose-rust#554).
                         for (action, label, hint) in crate::ui::editor_language::MENU {
                             {
                                 let s = s.clone();

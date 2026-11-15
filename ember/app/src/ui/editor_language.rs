@@ -6,26 +6,26 @@
 //! what the window shows ([`LanguageState`], filled on the host's runtime from the session's
 //! updates) and draws it ([`view`]).
 //!
-//! The lists are drawn as a sheet over the window, like the command palette, and not as a popup at
-//! the caret: the `CodeEditor` widget does not say where the caret is on screen and keeps every key
-//! to itself while it has the focus (see `docs/design/EDITOR-PARITY.md`, row "Language features").
-//! So a list opens on its command (Ctrl+Space, F12, Shift+F12, F2, Ctrl/Cmd+.), takes the focus,
-//! and is filtered by typing in its own field.
+//! The pinned toolkit (compose-rust v0.0.10, dioxus-compose f0e5b9f5) gives the code editor what
+//! these need, and the window uses it:
+//! * compose-rust#553: a list opens under the caret the editor reports (`on_caret_rect`,
+//!   [`view::set_caret_rect`]), and falls back to the sheet over the window, like the command
+//!   palette, until the editor has reported one.
+//! * compose-rust#554: the chords are taken from the focused code (`on_key_preview`,
+//!   [`code_key_action`]) and consumed, so F12, F2, Ctrl+Space and the rest work while typing.
+//! * compose-rust#555: Cmd (macOS) or Ctrl (elsewhere) and a click on a name goes to its
+//!   definition (`on_code_pointer` with `pointer_kinds`, [`pointer_definition`]).
 //!
-//! The stand-ins and the toolkit issue each waits for. compose-rust v0.0.9 has #553, #554 and #555,
-//! v0.0.10 has #556, and the pinned dioxus-compose (f0e5b9f5) forwards them (`CodeEditor`
-//! `on_caret_rect`, `on_key_preview`, `on_code_pointer` with `pointer_kinds`,
-//! `CodeEditorHandle::query_position_rect` and `insert_snippet`). Moving onto them is a change of
-//! its own that needs a display check (#673):
-//! * TODO(compose-rust#553, in v0.0.10): sheets and a bottom strip instead of popups at the caret (`on_caret_rect`
-//!   and `query_position_rect` place them).
-//! * TODO(compose-rust#554, in v0.0.10): the editor menu carries every command, because a chord pressed while
-//!   the code has the focus may not reach the page, and a list cannot take Up, Down, Enter, Tab and
-//!   Escape from the editor (`on_key_preview` takes them; related compose-rust#100).
-//! * TODO(compose-rust#555, in v0.0.10): no Cmd/Ctrl+click to a definition (`on_code_pointer` gives the press
-//!   with its modifiers and the position under it; also compose-rust#417).
-//! * TODO(compose-rust#556, in v0.0.10): a snippet is inserted as plain text
-//!   (`CodeEditorHandle::insert_snippet` opens its tab stops).
+//! What is left, and why:
+//! * TODO(#673): a list takes the focus and is filtered in its own field. Keeping the focus in the
+//!   code means filtering by the word at the caret and routing Up, Down, Enter, Tab and Escape from
+//!   `on_key_preview` to the list; the toolkit has both, the change is the window's own.
+//! * TODO(#673): the parameter hint stays at the bottom of the editor area (#800). It sits inside
+//!   `.ed-main`, whose place in the window the page does not know, and a box fixed to the window
+//!   at the caret is the layout #800 moved away from; anchoring it waits for a display check.
+//! * TODO(#673): a snippet is inserted as plain text. `CodeEditorHandle::insert_snippet` is in the
+//!   pin, but the session hands the window an `ember_editor::WidgetCommand::EditCode` with the
+//!   expanded text, so `ember/editor` has to carry the snippet first.
 
 use std::collections::HashMap;
 
@@ -50,7 +50,7 @@ pub enum LangAction {
 /// The Code-OSS chord for a language feature, the same on every system: F12 definition, Shift+F12
 /// references, F2 rename, Ctrl+Space suggestions, Ctrl+Shift+Space (or Cmd+Shift+Space) parameter
 /// hints, Ctrl+. (or Cmd+.) quick fix. Format document is in the keymap table (`Action::Format`).
-// TODO(compose-rust#554, in v0.0.10): these reach the page only when the key is not kept by the focused code.
+// The page's key handler and the code editor's `on_key_preview` ([`code_key_action`]) both use it.
 pub fn action_for_key(key: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> Option<LangAction> {
     let primary = ctrl != meta;
     match key {
@@ -61,6 +61,29 @@ pub fn action_for_key(key: &str, ctrl: bool, shift: bool, alt: bool, meta: bool)
         "." if primary && !shift && !alt => Some(LangAction::QuickFix),
         _ => None,
     }
+}
+
+/// The chord a key offered by the focused code editor (`on_key_preview`, compose-rust#554) asks for.
+/// `text` is the DOM key string the event carries; F2 and F12 are named keys and are read from `key`.
+pub fn code_key_action(key: compose_rust::Key, text: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> Option<LangAction> {
+    let name = match key {
+        compose_rust::Key::F2 => "F2",
+        compose_rust::Key::F12 => "F12",
+        _ => text,
+    };
+    action_for_key(name, ctrl, shift, alt, meta)
+}
+
+/// Where a press in the code goes to a definition (compose-rust#555): a primary-button `Down` with
+/// Cmd on macOS or Ctrl elsewhere, as Code-OSS does, over a character of the text.
+pub fn pointer_definition(pointer: &compose_rust::code::CodePointer, mac: bool) -> Option<WidgetPos> {
+    let event = &pointer.event;
+    let primary = if mac { event.meta_key() && !event.ctrl_key() } else { event.ctrl_key() && !event.meta_key() };
+    let down = event.kind() == compose_rust::PointerKind::Down && event.button() == compose_rust::pointer_button::PRIMARY;
+    if !(down && primary && !event.alt_key() && !event.shift_key()) {
+        return None;
+    }
+    pointer.position.map(|p| WidgetPos::new(p.line, p.column))
 }
 
 /// The language features in the editor menu: the action, its name and its chord.
@@ -416,6 +439,20 @@ impl LanguageState {
 /// as its text and wraps only past the area less the margins. dioxus-compose sizes an absolutely
 /// positioned box with an auto width shrink-to-fit against the room its insets leave
 /// (dioxus-compose#227, PR #251), so nothing is measured in Rust.
+/// The list as a sheet over the window, like the command palette: before the editor reported a caret.
+pub const SHEET_STYLE: &str = "position:fixed; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);";
+
+/// Where a list opens (compose-rust#553): 2 px under the caret the code editor reported, in the
+/// window's dp, which is the page's px. It keeps 12 px from the window's right edge and room for its
+/// rows above the bottom; with no caret yet it is the sheet.
+pub fn popup_style(caret: Option<compose_rust::code::CodeRect>) -> String {
+    let Some(rect) = caret else { return SHEET_STYLE.to_string() };
+    let (x, y) = (rect.x.max(0.0), (rect.bottom() + 2.0).max(0.0));
+    format!(
+        "position:fixed; z-index:40; left:max(12px, min({x:.0}px, calc(100vw - min(440px, calc(100vw - 24px)) - 12px))); top:max(12px, min({y:.0}px, calc(100vh - 380px))); width:min(440px, calc(100vw - 24px)); right:auto; padding:var(--sp1);"
+    )
+}
+
 pub mod hint_box {
     /// The box: anchored at the editor area's bottom left, above the code, below the drawer.
     pub const STYLE: &str = "position:absolute; z-index:15; left:12px; bottom:12px; max-width:calc(100% - 24px); box-sizing:border-box; padding:8px 12px; display:flex; align-items:center; gap:8px; background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow-lg);";
@@ -460,6 +497,39 @@ pub mod view {
         static SYMBOLS_FOR: RefCell<Option<String>> = const { RefCell::new(None) };
         /// The capture hook ran (it opens its sample once).
         static SAMPLE_SHOWN: Cell<bool> = const { Cell::new(false) };
+        /// Where the code editor last drew its caret, in the window's dp (compose-rust#553).
+        static CARET_RECT: Cell<Option<compose_rust::code::CodeRect>> = const { Cell::new(None) };
+    }
+
+    /// The code editor's `on_caret_rect`: kept for the next list to open under it. Nothing is
+    /// redrawn, because a list is placed when it opens.
+    pub fn set_caret_rect(rect: compose_rust::code::CodeRect) {
+        CARET_RECT.with(|cell| cell.set(Some(rect)));
+    }
+
+    /// The code editor's `on_key_preview` (compose-rust#554): a language chord runs its feature and
+    /// the key is kept from the editor, and Escape closes the parameter hint when one is open. Any
+    /// other key goes on to the editor.
+    pub fn code_key(s: &Shared, event: &compose_rust::KeyEvent) {
+        if event.key() == compose_rust::Key::Escape && dismiss_hint(s) {
+            event.consume();
+            return;
+        }
+        let action = super::code_key_action(event.key(), event.text(), event.ctrl_key(), event.shift_key(), event.alt_key(), event.meta_key());
+        if let Some(action) = action {
+            event.consume();
+            run(s, action);
+        }
+    }
+
+    /// The code editor's `on_code_pointer` (compose-rust#555): Cmd or Ctrl and a click on a name asks
+    /// for its definition there, and the press does not move the caret.
+    pub fn code_pointer(s: &Shared, pointer: &compose_rust::code::CodePointer) {
+        let mac = crate::ui::keymap::Os::current() == crate::ui::keymap::Os::Mac;
+        let Some(pos) = super::pointer_definition(pointer, mac) else { return };
+        let Some(uri) = current(s) else { return };
+        pointer.event.consume();
+        send(s, LanguageRequest::Definition { uri, pos: Some(pos) });
     }
 
     fn ui() -> Ui {
@@ -500,7 +570,6 @@ pub mod view {
     }
 
     /// Start a language feature at the caret of the active file.
-    // TODO(compose-rust#555, in v0.0.10): Cmd/Ctrl+click on a name should start `Definition` at the pointer.
     pub fn run(s: &Shared, action: LangAction) {
         let Some(uri) = current(s) else {
             notice("열린 파일이 없습니다");
@@ -643,7 +712,7 @@ pub mod view {
 
     /// The parameter hint: the signature with the parameter being typed set off. It sits at the
     /// bottom of the editor area because the widget does not say where the caret is on screen.
-    // TODO(compose-rust#553, in v0.0.10): anchor the hint above the caret.
+    // TODO(#673): anchor the hint above the caret (see the module notes).
     fn hint(s: &Shared, help: &ember_editor::language::SignatureHelp) -> Element {
         use super::hint_box;
         let Some((before, active, after)) = signature_parts(help) else { return rsx! {} };
@@ -676,10 +745,9 @@ pub mod view {
         }
     }
 
-    /// The sheet over the window, when there is one to show.
-    // TODO(compose-rust#553, in v0.0.10): draw the lists as popups at the caret.
-    // TODO(compose-rust#554, in v0.0.10): keep the focus in the code and take the list's keys from the editor,
-    // so the lists can open while typing.
+    /// The list over the window, when there is one to show: under the caret once the editor has
+    /// reported it (compose-rust#553), else as a sheet like the command palette.
+    // TODO(#673): keep the focus in the code and take the list's keys from `on_key_preview`.
     pub fn overlay(s: &Shared) -> Element {
         capture_hook(s);
         let ui = ui();
@@ -713,7 +781,7 @@ pub mod view {
         rsx! {
             div { style: "position:fixed; left:0; top:0; right:0; bottom:0; z-index:39;", onclick: move |_| cancel(&scrim_s) }
             div { class: "ed-menu", role: "dialog", "aria-label": "{title}",
-                style: "position:fixed; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);",
+                style: "{super::popup_style(CARET_RECT.with(|cell| cell.get()))}",
                 div { style: "padding:var(--sp1) var(--sp3) 0; color:var(--muted); font-size:var(--fs-xs);", "{title}" }
                 // FR-L31.29: the query row is a row of the popover, not a framed field inside the frame.
                 div { class: "ed-palq", style: "margin:var(--sp1) calc(var(--sp1) * -1) var(--sp1);",
@@ -1012,5 +1080,66 @@ mod tests {
         assert!(production.contains("span { key: \"sym{i}\", class: \"fn\", \"{name}\" }"), "a symbol crumb lost its fn class");
         let css = include_str!("../../assets/editor/editor.css");
         assert!(css.contains(".ed-crumbs .fn{color:var(--text-2);font-family:var(--mono)}"), "editor.css no longer styles .ed-crumbs .fn");
+    }
+
+    #[test]
+    fn fr_l31_13_the_focused_code_offers_the_chords() {
+        use compose_rust::Key;
+        // compose-rust#554: F2 and F12 are named keys, the rest come as their DOM key string.
+        assert_eq!(code_key_action(Key::F12, "F12", false, false, false, false), Some(LangAction::Definition));
+        assert_eq!(code_key_action(Key::F12, "", false, true, false, false), Some(LangAction::References));
+        assert_eq!(code_key_action(Key::F2, "", false, false, false, false), Some(LangAction::Rename));
+        assert_eq!(code_key_action(Key::Other, " ", true, false, false, false), Some(LangAction::Suggest));
+        assert_eq!(code_key_action(Key::Other, ".", false, false, false, true), Some(LangAction::QuickFix));
+        assert_eq!(code_key_action(Key::Other, "a", false, false, false, false), None, "typing goes to the editor");
+        assert_eq!(code_key_action(Key::Enter, "Enter", false, false, false, false), None);
+    }
+
+    #[test]
+    fn fr_l31_13_cmd_or_ctrl_click_goes_to_the_definition() {
+        use compose_rust::code::{CodePointer, Position};
+        use compose_rust::{pointer_button, PointerEvent, PointerKind, PointerType, WheelDeltaMode};
+        // Modifier bits as the wire carries them: shift 1, ctrl 2, alt 4, meta 8.
+        let press = |kind: PointerKind, button: u32, modifiers: u32, at: Option<Position>| CodePointer {
+            event: PointerEvent::new(kind, 1, PointerType::Mouse, 0.0, 0.0, button, button, modifiers, 1, 0.0, 0.0, WheelDeltaMode::Pixel, 0),
+            position: at,
+        };
+        let at = Some(Position::new(4, 7));
+        let primary = pointer_button::PRIMARY;
+        assert_eq!(pointer_definition(&press(PointerKind::Down, primary, 8, at), true), Some(WidgetPos::new(4, 7)), "Cmd+click on macOS");
+        assert_eq!(pointer_definition(&press(PointerKind::Down, primary, 2, at), false), Some(WidgetPos::new(4, 7)), "Ctrl+click elsewhere");
+        assert_eq!(pointer_definition(&press(PointerKind::Down, primary, 2, at), true), None, "Ctrl+click on macOS is the context menu");
+        assert_eq!(pointer_definition(&press(PointerKind::Down, primary, 0, at), false), None, "a plain click moves the caret");
+        assert_eq!(pointer_definition(&press(PointerKind::Down, primary, 2 | 1, at), false), None);
+        assert_eq!(pointer_definition(&press(PointerKind::Up, primary, 2, at), false), None);
+        assert_eq!(pointer_definition(&press(PointerKind::Down, pointer_button::SECONDARY, 2, at), false), None);
+        assert_eq!(pointer_definition(&press(PointerKind::Down, primary, 2, None), false), None, "over the gutter");
+    }
+
+    #[test]
+    fn fr_l31_13_a_list_opens_under_the_caret() {
+        use compose_rust::code::CodeRect;
+        assert_eq!(popup_style(None), SHEET_STYLE, "before the editor reports a caret, the sheet");
+        let style = popup_style(Some(CodeRect::new(300.0, 120.0, 2.0, 22.0)));
+        assert!(style.contains("position:fixed;") && style.contains("min(300px,") && style.contains("min(144px,"), "{style}");
+        assert!(style.contains("calc(100vw - min(440px, calc(100vw - 24px)) - 12px)"), "kept inside the window: {style}");
+        let off = popup_style(Some(CodeRect::new(-40.0, -30.0, 2.0, 22.0)));
+        assert!(off.contains("min(0px,") && off.contains("max(12px,"), "{off}");
+    }
+
+    #[test]
+    fn fr_l31_13_the_code_editor_takes_keys_pointer_and_caret() {
+        let page = include_str!("editor_workbench.rs");
+        let pane = &page[page.find("fn editor_pane()").unwrap()..page.find("pub mod page {").unwrap()];
+        assert!(pane.contains("on_key_preview:") && pane.contains("editor_language::view::code_key("), "compose-rust#554");
+        assert!(pane.contains("pointer_kinds: Some(compose_rust::PointerKinds::DOWN)") && pane.contains("editor_language::view::code_pointer("), "compose-rust#555");
+        assert!(pane.contains("on_caret_rect:") && pane.contains("editor_language::view::set_caret_rect("), "compose-rust#553");
+        let src = include_str!("editor_language.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(production.contains("popup_style(CARET_RECT"), "the list is placed from the caret");
+        for issue in ["553", "554", "555"] {
+            assert!(!production.contains(&format!("TODO(compose-rust#{issue}")), "#{issue} is in use");
+            assert!(!page.contains(&format!("TODO(compose-rust#{issue}")), "#{issue} is in use");
+        }
     }
 }

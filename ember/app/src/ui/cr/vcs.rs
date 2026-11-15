@@ -53,7 +53,7 @@ pub fn open_for_project_cr(ui: &SharedUi, project: &str) {
 }
 
 #[derive(Clone)]
-struct Actions {
+pub(super) struct Actions {
     project: String,
     reload: MutableState<u64>,
 }
@@ -590,7 +590,7 @@ pub fn repo_menu_rows(projects: &[(String, String)], chosen: Option<usize>) -> V
 /// look, under the control and lined up with its start, a bottom sheet with the menu's own head
 /// at 560 and below. The mockup draws a native `<select>` here (`#vcsProj`), which looks
 /// different on every OS; Ember shows one look everywhere, as the Home project chip does.
-fn RepoMenu(open: MutableState<bool>, name: &str, projects: &[(String, String)], chosen: Option<usize>, mut on_pick: impl FnMut(String) + Clone + 'static) {
+pub(super) fn RepoMenu(open: MutableState<bool>, name: &str, projects: &[(String, String)], chosen: Option<usize>, mut on_pick: impl FnMut(String) + Clone + 'static) {
     let rows = repo_menu_rows(projects, chosen);
     let head = repo_menu_head(name);
     let is_open = open.get();
@@ -842,7 +842,7 @@ fn BranchPopRow(name: &str, current: bool, on_click: impl FnMut() + 'static) {
 /// line, a new-branch field with 만들기. A row switches to that branch and closes the box;
 /// Escape and a press outside close it. The content is composed only while the box is open.
 /// Not built: who made a branch and when on each row (the snapshot lists names only).
-fn BranchMenu(open: MutableState<bool>, text: &str, branches: &[String], current: Option<&str>, has: bool, actions: Option<Actions>) {
+pub(super) fn BranchMenu(open: MutableState<bool>, text: &str, branches: &[String], current: Option<&str>, has: bool, actions: Option<Actions>) {
     let theme = ember_theme();
     let p = theme.palette;
     let query = remember(|| mutable_state_of(String::new()));
@@ -4216,7 +4216,7 @@ pub fn base_menu_rows(names: &[String], chosen: Option<usize>) -> Vec<PopRow> {
 /// (`기준: branch`); a bottom sheet with that head at 560 and below. The mockup draws a native
 /// `<select>` (`#vcsBase`). The button keeps its full width, is disabled without branches and
 /// says whether the menu is open.
-fn BaseMenu(open: MutableState<bool>, text: &str, names: &[String], chosen: Option<usize>, base: MutableState<Option<String>>) {
+pub(super) fn BaseMenu(open: MutableState<bool>, text: &str, names: &[String], chosen: Option<usize>, base: MutableState<Option<String>>) {
     let rows = base_menu_rows(names, chosen);
     let is_open = open.get();
     let (dismiss, toggle) = (open.clone(), open.clone());

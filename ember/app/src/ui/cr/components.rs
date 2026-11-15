@@ -4231,6 +4231,64 @@ mod tests {
     }
 
     #[test]
+    fn fr_l32_escape_closes_the_plain_sheet_menus_and_the_vcs_pickers() {
+        // The phone menus of FR-L10.4 (#888): `PopoverMenuWith` with `plain_sheet` (session
+        // model and project menus, 저장소 and 기준 pickers) and the 브랜치 popover take part in
+        // the same Escape stack as every other menu.
+        use compose_rust::runtime::{mutable_state_of, remember};
+        let _guard = crate::services::test_guard();
+        for (w, h, expected_widget) in [(390.0, 844.0, "Sheet"), (1440.0, 900.0, "Popover")] {
+            crate::ui::window_size::set_opened_for_test(Some((w, h)));
+            let mut mh = ModalHost::new(move || {
+                let open = remember(|| mutable_state_of(true));
+                let close = open.clone();
+                let rows = pop_sample_rows();
+                PopoverMenuWith(
+                    open.get(),
+                    PopMenu { name: "메뉴", kind: PopKind::Mode, head: "모델", sub: None, rows: &rows, align: compose_rust::PopoverAlign::Start },
+                    PopExtra { plain_sheet: true, ..Default::default() },
+                    move || close.set(false),
+                    |_| {},
+                    || Label("열기", Fs::Sm, Weight::Medium, None, Some(1)),
+                    None,
+                );
+            });
+            assert_eq!(mh.open_modals().len(), 1, "plain sheet menu at {w}");
+            assert_eq!(mh.press_escape(), expected_widget);
+            assert!(mh.open_modals().is_empty());
+
+            let mut mh = ModalHost::new(|| {
+                let open = remember(|| mutable_state_of(true));
+                let projects = vec![("p1".to_string(), "demo-project".to_string())];
+                crate::ui::cr::vcs::RepoMenu(open, "demo-project", &projects, Some(0), |_| {});
+            });
+            assert_eq!(mh.open_modals().len(), 1, "저장소 at {w}");
+            assert_eq!(mh.press_escape(), expected_widget);
+            assert!(mh.open_modals().is_empty());
+
+            let mut mh = ModalHost::new(|| {
+                let open = remember(|| mutable_state_of(true));
+                let base = remember(|| mutable_state_of(None::<String>));
+                let names = vec!["main".to_string(), "develop".to_string()];
+                crate::ui::cr::vcs::BaseMenu(open, "main", &names, Some(0), base);
+            });
+            assert_eq!(mh.open_modals().len(), 1, "기준 at {w}");
+            assert_eq!(mh.press_escape(), expected_widget);
+            assert!(mh.open_modals().is_empty());
+
+            let mut mh = ModalHost::new(|| {
+                let open = remember(|| mutable_state_of(true));
+                let branches = vec!["main".to_string(), "feat/git-api".to_string()];
+                crate::ui::cr::vcs::BranchMenu(open, "feat/git-api", &branches, Some("feat/git-api"), true, None);
+            });
+            assert_eq!(mh.open_modals().len(), 1, "브랜치 at {w}");
+            assert_eq!(mh.press_escape(), "Popover");
+            assert!(mh.open_modals().is_empty());
+        }
+        crate::ui::window_size::set_opened_for_test(None);
+    }
+
+    #[test]
     fn fr_l32_escape_closes_every_sheet_and_dialog_kind() {
         use compose_rust::runtime::{mutable_state_of, remember};
         let _guard = crate::services::test_guard();

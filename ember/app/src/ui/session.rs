@@ -2520,15 +2520,15 @@ mod tests {
     #[test]
     fn fr_l10_4_web_menu_subtitle_is_the_computer_and_its_address() {
         // Mockup `webMenu`: `esc(s.computer)+' · '+ip`.
-        let remote = ComputerHost { local: false, host: Some("192.168.0.10".into()) };
+        let remote = ComputerHost { host: Some("192.168.0.10".into()), ..Default::default() };
         assert_eq!(web_menu_subtitle(Some("mac-mini"), &remote).as_deref(), Some("mac-mini \u{b7} 192.168.0.10"));
-        let local = ComputerHost { local: true, host: None };
+        let local = ComputerHost { local: true, ..Default::default() };
         assert_eq!(web_menu_subtitle(Some("이 컴퓨터"), &local).as_deref(), Some("이 컴퓨터 \u{b7} 127.0.0.1"));
         let unknown = ComputerHost::default();
         assert_eq!(web_menu_subtitle(Some("studio"), &unknown).as_deref(), Some("studio"));
         assert_eq!(web_menu_subtitle(Some("  "), &remote).as_deref(), Some("192.168.0.10"));
         assert_eq!(web_menu_subtitle(None, &unknown), None);
-        let v6 = ComputerHost { local: false, host: Some("fe80::1".into()) };
+        let v6 = ComputerHost { host: Some("fe80::1".into()), ..Default::default() };
         assert_eq!(web_menu_subtitle(Some("a"), &v6).as_deref(), Some("a \u{b7} [fe80::1]"));
     }
 

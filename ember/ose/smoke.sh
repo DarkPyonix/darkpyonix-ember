@@ -37,6 +37,14 @@ case "$(uname -s)" in
 esac
 
 tmp="$(mktemp -d)"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    # mktemp answers under %TEMP%, which on a runner is an 8.3 short path (C:\Users\RUNNER~1\...).
+    # The server's file watcher (libuv fs-event) aborts on a short path ("Assertion failed:
+    # !_wcsnicmp(filename, dir, dirlen)"), so the data directory is given by its long name.
+    tmp="$(cygpath -u "$(cygpath -w -l "$tmp")")"
+    ;;
+esac
 pid=""
 cleanup() { [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; wait 2>/dev/null || true; rm -rf "$tmp"; }
 trap cleanup EXIT

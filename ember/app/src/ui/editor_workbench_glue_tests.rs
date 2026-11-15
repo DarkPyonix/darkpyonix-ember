@@ -1038,7 +1038,7 @@ fn toolkit_probe() {
 fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
     use compose_rust::protocol::HostEvent;
     use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
-    use crate::ui::safe_area::{current_platform, safe_area_for, SafeArea};
+    use crate::ui::safe_area::SafeArea;
     let _guard = crate::services::test_guard();
     // A toolkit Host resets the window's measurement when it is made, so it comes first.
     let mut toolkit = compose_rust::Host::new(|| Box::new(compose_rust::Recomposer::new(toolkit_probe)));
@@ -1049,7 +1049,7 @@ fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
     assert!(page.find("aria-label", crate::ui::workspace_trust::PROMPT_TITLE).is_some(), "the trust prompt is up");
     let top = page.find("class", "ed-top").expect("the top bar");
     let before = page.attr(top, "style").unwrap_or_default();
-    assert_eq!(before, crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), 0.0), "nothing reported yet");
+    assert_eq!(before, crate::ui::editor::editor_strip_padding(0.0, 0.0), "nothing reported yet");
 
     let lights = SafeArea { top: 28.0, leading: 78.0, trailing: 0.0 };
     toolkit
@@ -1072,7 +1072,7 @@ fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
     page.dom.render();
     let top = page.find("class", "ed-top").expect("the top bar");
     let after = page.attr(top, "style").unwrap_or_default();
-    let expected = crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), safe_area_for(current_platform(), lights).leading);
+    let expected = crate::ui::editor::editor_strip_padding(lights.leading, lights.trailing);
     assert_eq!(after, expected, "the top bar follows the reported safe area with the prompt up");
     assert!(page.find("aria-label", crate::ui::workspace_trust::PROMPT_TITLE).is_some(), "the prompt is still up");
     compose_rust::window::reset_window_size();

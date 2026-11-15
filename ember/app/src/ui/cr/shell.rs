@@ -9,10 +9,9 @@
 //! Content: the screens are still on dioxus-compose, so the content area shows a placeholder
 //! per menu until each screen lands in its phase.
 //!
-//! TODO(#213, #204): the macOS full-size title bar and safe area, and the Windows caption
-//! buttons' 138 dp, wait for the toolkit's caption inset (compose-rust and dioxus-compose issues
-//! of the same name). The Windows strip below reserves the width meanwhile, as the Dioxus shell
-//! does.
+//! The window controls' strip (macOS traffic lights, Windows caption buttons, a Linux desktop's
+//! own) is reserved from the toolkit's reported safe area on every system (FR-L33,
+//! `safe_area::top_reservation`).
 
 #![allow(non_snake_case)]
 
@@ -619,7 +618,7 @@ pub fn shell() {
     let active = active_menu(&route, ui.menu.get());
     let screen = screen_for(&route, active);
     let mode = current_mode(collapsed.get());
-    let strip = crate::ui::safe_area::top_reservation(crate::ui::safe_area::safe_area(), mode).content_strip;
+    let strip = crate::ui::safe_area::top_reservation(crate::ui::safe_area::safe_area(), mode);
     let counts = ui.with_rows_no_previews(|st, _| {
         let cards = model::project_cards(st);
         NavCounts {
@@ -631,23 +630,19 @@ pub fn shell() {
 
     let content = || {
         cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width().fill_max_height()).content(|| {
-            let platform = crate::ui::safe_area::current_platform();
-            if platform == crate::ui::safe_area::Platform::Windows && crate::ui::safe_area::scene_draws_caption(platform) {
-                // Windows caption strip, where the scene draws the caption buttons: an empty drag
-                // region, then the 138 dp they cover at the trailing edge.
+            // The strip the reported window controls cover above the content (FR-L33): a
+            // leading set where the content touches the left edge (bottom tabs), a trailing set
+            // (Windows caption, a Linux desktop's own) always, its width kept clear at the right.
+            // Computed in `shell`, beside `mode`, so one read of the window size drives both.
+            if strip.content_strip > 0.0 {
                 cu::Row()
-                    .modifier(Modifier::new().fill_max_width().height(WINDOWS_CAPTION_HEIGHT_DP))
+                    .modifier(Modifier::new().fill_max_width().height(strip.content_strip))
                     .content(|| {
                         cu::Spacer().modifier(Modifier::new().weight(1.0));
-                        cu::Spacer().modifier(Modifier::new().width(caption_reserved_width(true)));
+                        if strip.trailing > 0.0 {
+                            cu::Spacer().modifier(Modifier::new().width(strip.trailing));
+                        }
                     });
-            }
-            // macOS without a sidebar or rail (bottom tabs): the content touches the left edge,
-            // where the traffic lights float, so every screen starts below them (FR-L33). The
-            // reservation is computed in `shell`, beside `mode`, so one read of the window size
-            // drives both.
-            if strip > 0.0 {
-                cu::Spacer().modifier(Modifier::new().fill_max_width().height(strip));
             }
             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width()).content(|| {
                 // TODO(#220 phases 4-7): each screen replaces its placeholder as it moves.

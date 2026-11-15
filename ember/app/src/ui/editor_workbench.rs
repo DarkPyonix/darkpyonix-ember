@@ -1270,7 +1270,7 @@ pub mod page {
         // also while nothing else does (the workspace trust prompt is up); read from the toolkit
         // state at render, the top bar kept the 0 inset and the logo sat under the traffic lights.
         let window_safe = dioxus_compose::use_window_safe_area();
-        let leading = crate::ui::safe_area::safe_area_from_toolkit(window_safe.top, window_safe.leading, window_safe.trailing).leading;
+        let safe = crate::ui::safe_area::safe_area_from_toolkit(window_safe.top, window_safe.leading, window_safe.trailing);
         let _ = *s.revision.read();
         let (error, updates, edit_errors, gone, renamed) = {
             let mut state = s.host.state.lock().unwrap();
@@ -1435,7 +1435,7 @@ pub mod page {
         // The page is the viewport on every system, and the viewport follows the window's content
         // box on every dp change, so growing and shrinking both lay the page out again.
         let ed_style = format!("{} {grid}", crate::ui::editor::editor_page_size_style());
-        let error_style = format!("{} grid-column:1 / -1;", crate::ui::editor::editor_error_padding(cfg!(target_os = "macos"), window_safe.top));
+        let error_style = format!("{} grid-column:1 / -1;", crate::ui::editor::editor_error_padding(safe.top));
         rsx! {
             div { class: "{ed_class}", "data-theme": if dark { "dark" } else { "light" }, tabindex: "-1", style: "{ed_style}",
                 onkeydown: move |event| {
@@ -1501,7 +1501,7 @@ pub mod page {
                 if let Some(error) = error {
                     div { style: "{error_style}", "{error}" button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" } }
                 } else {
-                    {top_bar(&s, &branch, keymap, leading)}
+                    {top_bar(&s, &branch, keymap, safe)}
                     div { class: "ed-rail",
                         {stripe_column(&s, sel, keymap, Strip::Left)}
                         {stripe_column(&s, sel, keymap, Strip::Bottom)}
@@ -1631,7 +1631,7 @@ pub mod page {
         rsx! { img { class: "i", src: "icon:{name}.{tone}{dark}", width: "{px}", height: "{px}" } }
     }
 
-    fn top_bar(s: &Shared, branch: &str, keymap: Keymap, leading: f32) -> Element {
+    fn top_bar(s: &Shared, branch: &str, keymap: Keymap, safe: crate::ui::safe_area::SafeArea) -> Element {
         let mut theme = s.theme;
         let theme_pref = *s.theme.read();
         let theme_title = format!("테마: {}", theme_pref.label());
@@ -1646,7 +1646,7 @@ pub mod page {
         let project_tip = tooltip_text("프로젝트 창", &keymap.hint(Action::Project, Os::current()));
         // The traffic lights float over the top bar's left end under FullSize. `leading` is the
         // page's hook reading (FR-L33.1), so a later report renders this again.
-        let strip_pad = crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), leading);
+        let strip_pad = crate::ui::editor::editor_strip_padding(safe.leading, safe.trailing);
         rsx! {
             header { class: "ed-top", style: "{strip_pad}",
                 img { class: "logo logo-img", src: "icon:mark", width: "28", height: "28", alt: "Ember" }

@@ -778,19 +778,26 @@ pub fn editor_page_size_style() -> &'static str {
     "width:100vw; height:100vh;"
 }
 
-/// The padding of the page's error message, which is drawn with no top bar above it. Under
-/// FullSize the window controls float over the page's top, so the message starts below the
-/// title strip the window reports (`strip_top`, 0 until the first report); otherwise the native
-/// title bar is outside the page and only the message's own 20px is kept.
-pub fn editor_error_padding(full_size: bool, strip_top: f32) -> String {
-    let top = if full_size { 20.0 + strip_top.max(0.0) } else { 20.0 };
+/// The padding of the page's error message, which is drawn with no top bar above it. The
+/// message starts below the title strip the window reports (`strip_top`, 0 until the first
+/// report and where the window manager draws the title bar) on every system (FR-L33).
+pub fn editor_error_padding(strip_top: f32) -> String {
+    let top = 20.0 + strip_top.max(0.0);
     format!("padding:20px; padding-top:{top}px;")
 }
 
-/// The top bar's left padding past the window controls: under FullSize the traffic lights float
-/// over its left end, so it starts after their footprint; otherwise nothing is added.
-pub fn editor_strip_padding(full_size: bool, leading: f32) -> String {
-    if full_size { format!("padding-left:{leading}px;") } else { String::new() }
+/// The top bar's padding past the window controls, exactly as the window reports them on every
+/// system (FR-L33): the leading set (macOS traffic lights) at the left, the trailing set (Windows
+/// caption buttons, a Linux desktop's own) at the right. Nothing for a zero edge.
+pub fn editor_strip_padding(leading: f32, trailing: f32) -> String {
+    let mut s = String::new();
+    if leading > 0.0 {
+        s.push_str(&format!("padding-left:{leading}px;"));
+    }
+    if trailing > 0.0 {
+        s.push_str(&format!("padding-right:{trailing}px;"));
+    }
+    s
 }
 
 /// The page grid while the bottom tool window is maximized (the mockup's `.ed.max`): the editor row

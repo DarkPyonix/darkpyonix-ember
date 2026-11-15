@@ -47,7 +47,7 @@ use crate::ui::home::{
 };
 use super::components::{
     pill_colors, pill_metrics, pressable, AppButton, BackButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
-    CloseButton, DataNamedOverlay, FieldOptions, Label, MonoLabel, NamedClickable, NamedDisabled, NamedSelect, Pill, PillTone, SheetFooter,
+    ChoiceRow, CloseButton, DataNamedOverlay, FieldOptions, Label, MonoLabel, NamedClickable, NamedDisabled, NamedSelect, Pill, PillTone, SheetFooter,
 };
 use super::characters::{CharState, Character};
 use super::compat::Spinner;
@@ -1492,46 +1492,9 @@ pub fn seg_colors(selected: bool, p: &Palette) -> (Color, Color, Color) {
     }
 }
 
-/// A segment's width, erring wide: its label at `SEG_FS` with a Latin character at 0.62 em
-/// (the measure-style `text_px` uses 0.55) and a Hangul syllable at one em, 12 on each side,
-/// the 1 dp border twice and 4 to spare, at least 44.
-pub fn seg_width(text: &str) -> f32 {
-    let em = SEG_FS.size();
-    let advance: f32 = text.chars().map(|c| if c.is_ascii() { 0.62 * em } else { em }).sum();
-    (advance + 2.0 * 12.0 + 2.0 + 4.0).ceil().max(44.0)
-}
-
-/// What a line of segments may fill: the row's width less one gap, so a line that the estimate
-/// gets slightly wrong still does not touch the edge.
-pub fn seg_line_room(avail: f32) -> f32 {
-    (avail - SP[1]).max(0.0)
-}
-
-/// The segments of a choice row packed into lines no wider than `avail`, as the mockup's `.seg`
-/// wraps (`flex-wrap: wrap`, `gap: 8px`), so every option and the chosen one stay in view.
-/// v0.0.7: #521 fixed (`FlowRow`); workaround kept until checked on a display (the toolkit's
-/// line breaking must match the mockup's `gap: 8px` wrap at 390 and 1440), so the packing is by
-/// estimated width. Each line
-/// holds indices into `labels`, in order; a segment wider than `avail` gets a line of its own.
-pub fn seg_lines<S: AsRef<str>>(labels: &[S], avail: f32) -> Vec<Vec<usize>> {
-    let avail = seg_line_room(avail);
-    let mut lines: Vec<Vec<usize>> = Vec::new();
-    let mut used = 0.0_f32;
-    for (i, l) in labels.iter().enumerate() {
-        let w = seg_width(l.as_ref());
-        match lines.last_mut() {
-            Some(line) if used + SP[1] + w <= avail => {
-                line.push(i);
-                used += SP[1] + w;
-            }
-            _ => {
-                lines.push(vec![i]);
-                used = w;
-            }
-        }
-    }
-    lines
-}
+/// The space at each side of a segment's label (`.seg button{padding:0 12px}`). A segment takes
+/// the width of its label and these two; the toolkit's `FlowRow` measures it there.
+pub const SEG_PAD_X: f32 = 12.0;
 
 /// The fields' width in the 390 phone's sheet: the window less the sheet's 20 on each side.
 pub const NARROW_SHEET_FIELD_W: f32 = 390.0 - 2.0 * SP[4];
@@ -1551,23 +1514,19 @@ pub fn form_field_width(window_w: f32, panel_w: f32, layout: FormLayout) -> f32 
     .max(0.0)
 }
 
-/// Choice segments in wrapped lines (`seg_lines`): `labels[i]` is chosen when `selected(i)`,
-/// and a tap calls `on_pick(i)`.
+/// Choice segments that wrap as the mockup's `.seg` does (`flex-wrap: wrap`, `gap: 8px`), so
+/// every option and the chosen one stay in view: `labels[i]` is chosen when `selected(i)`, and a
+/// tap calls `on_pick(i)`. The toolkit's `FlowRow` breaks the lines at each segment's real width
+/// (compose-rust#521, `components::ChoiceRow`); the lines were packed by an estimated width.
 fn SegChoices(
     labels: &[String],
-    avail: f32,
     selected: impl Fn(usize) -> bool,
     on_pick: impl Fn(usize) + Clone + 'static,
 ) {
-    let lines = seg_lines(labels, avail);
-    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-        for line in &lines {
-            cu::Row().spacing(SP[1]).content(|| {
-                for &i in line {
-                    let pick = on_pick.clone();
-                    FilterSegButton(&labels[i], selected(i), move || pick(i));
-                }
-            });
+    ChoiceRow(|| {
+        for (i, label) in labels.iter().enumerate() {
+            let pick = on_pick.clone();
+            FilterSegButton(label, selected(i), move || pick(i));
         }
     });
 }
@@ -1581,11 +1540,9 @@ fn SegChoices(
 fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (bg, border, fg) = seg_colors(selected, p);
-    let width = seg_width(text);
     cu::Box()
         .modifier(
             Modifier::new()
-                .width(width)
                 .height(H_CTL)
                 .background(paint(bg))
                 .border(1.0, paint(border))
@@ -1593,7 +1550,11 @@ fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static)
         )
         .alignment(Alignment::Center)
         .content(move || {
-            Label(text, SEG_FS, Weight::Medium, Some(paint(fg)), Some(1));
+            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SEG_PAD_X));
+                Label(text, SEG_FS, Weight::Medium, Some(paint(fg)), Some(1));
+                cu::Spacer().modifier(Modifier::new().width(SEG_PAD_X));
+            });
             // A project's name is data, so the button over the pill carries it.
             DataNamedOverlay(text, true, None, on_click);
         });
@@ -2663,7 +2624,7 @@ fn FormFields(ctx: &FormCtx) {
                     });
                     return;
                 }
-                SegChoices(&project_choices, w, |i| d.sel.project == project_choices[i], move |i| {
+                SegChoices(&project_choices, |i| d.sel.project == project_choices[i], move |i| {
                     let n = names[i].clone();
                     sel_proj.update(|d| d.sel.project = n);
                 });
@@ -2680,7 +2641,7 @@ fn FormFields(ctx: &FormCtx) {
                     });
                     return;
                 }
-                SegChoices(&labels, w, |i| d.trigger == Trigger::ALL[i], move |i| {
+                SegChoices(&labels, |i| d.trigger == Trigger::ALL[i], move |i| {
                     let t = Trigger::ALL[i];
                     sel_trig.update(|d| *d = d.with_trigger(t));
                 });
@@ -2740,7 +2701,7 @@ fn FormFields(ctx: &FormCtx) {
                     .chain(ctx.computers.iter().map(|(_, name)| name.clone()))
                     .collect();
                 let (sel_c, pick_ids) = (draft.clone(), ids.clone());
-                SegChoices(&labels, w, |i| d.sel.computer == ids[i], move |i| {
+                SegChoices(&labels, |i| d.sel.computer == ids[i], move |i| {
                     let c = pick_ids[i].clone();
                     sel_c.update(|d| d.sel.computer = c);
                 });
@@ -3382,48 +3343,56 @@ mod tests {
         }
     }
 
-    /// At 390 the 프로젝트 segments wrap onto more lines instead of scrolling, so every option
-    /// and the chosen one are in view; no line is wider than the sheet's fields (#493).
+    /// The form's choice segments wrap in the toolkit's `FlowRow` (compose-rust#521, #673): each
+    /// segment is measured at its own width, so no estimate packs the lines. The screen still
+    /// hands the fields' width down for the two-column form (#493).
     #[test]
-    fn fr_l25_form_segments_wrap_to_the_field_width() {
-        let projects = ["기본 프로젝트", "demo-project", "second-project", "ember"];
-        let phone = form_field_width(390.0, 0.0, FormLayout::Sheet);
-        assert_eq!(phone, 350.0);
-        let (content, _) = content_at(1440.0);
-        let wide = form_field_width(1440.0, detail_panel_width(1440.0, content, false), FormLayout::Inline);
-        for avail in [phone, wide] {
-            let lines = seg_lines(&projects, avail);
-            let flat: Vec<usize> = lines.iter().flatten().copied().collect();
-            assert_eq!(flat, vec![0, 1, 2, 3], "every option once, in order, at {avail}");
-            for line in &lines {
-                let w: f32 = line.iter().map(|&i| seg_width(projects[i])).sum::<f32>()
-                    + SP[1] * (line.len() as f32 - 1.0);
-                assert!(w <= avail, "a line of {w} fits {avail}");
-            }
-        }
-        assert!(seg_lines(&projects, phone).len() >= 2, "the phone wraps");
-        // The 390 sheet: 기본 프로젝트 and demo-project share a line; second-project and the
-        // chosen ember go below, so ember is in view (r3 capture of #720 had all on one line).
-        assert_eq!(seg_lines(&projects, phone), vec![vec![0, 1], vec![2, 3]]);
-        for line in seg_lines(&projects, phone) {
-            let w: f32 = line.iter().map(|&i| seg_width(projects[i])).sum::<f32>() + SP[1] * (line.len() as f32 - 1.0);
-            assert!(w <= phone - SP[1], "a 390 line of {w} keeps a gap from the sheet's edge");
-        }
+    fn fr_l25_form_segments_wrap_in_a_flow_row() {
+        let _guard = crate::services::test_guard();
+        assert_eq!(form_field_width(390.0, 0.0, FormLayout::Sheet), 350.0);
         assert_eq!(
             form_field_width(0.0, 0.0, FormLayout::Sheet),
             NARROW_SHEET_FIELD_W,
-            "an unknown window packs against the 390 sheet"
+            "an unknown window takes the 390 sheet's width"
         );
-        assert_eq!(seg_lines(&projects, NARROW_SHEET_FIELD_W), vec![vec![0, 1], vec![2, 3]]);
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let labels: Vec<String> = ["기본 프로젝트", "demo-project", "second-project", "ember"].iter().map(|s| s.to_string()).collect();
+                SegChoices(&labels, |i| i == 3, |_| {});
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let flow: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create { node_id, widget: WidgetKind::FlowRow } => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(flow.len(), 1, "one wrapping row");
+        let segments = batch.iter().filter(|m| matches!(m, Mutation::Insert { parent_id, .. } if *parent_id == flow[0])).count();
+        assert_eq!(segments, 4, "every option is a child of the wrapping row, in one group");
+        let mods: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { modifier, .. } => Some(format!("{modifier:?}")),
+                _ => None,
+            })
+            .collect();
+        assert!(!mods.iter().any(|m| m.starts_with("Width(") && m != "Width(12.0)"), "a segment sends no width of its own: {mods:?}");
+        assert_eq!(mods.iter().filter(|m| *m == "Width(12.0)").count(), 8, "12 at each side of each label");
+        let all: String = batch.iter().map(|m| format!("{m:?}")).collect();
+        assert!(all.contains("HorizontalSpacing") && all.contains("VerticalSpacing"), "8 between segments and between lines: {all}");
         // The screen works the width out before the sheet opens and hands it down.
         let src = include_str!("routines.rs");
         let fields = src.split("fn FormFields(").nth(1).unwrap().split("\nfn FormLabel(").next().unwrap();
         assert!(!fields.contains("current_window_size()"), "the fields never read the window inside the sheet");
         assert!(src.contains("let form_w_sheet = form_field_width(window.width_dp, panel_w, FormLayout::Sheet);"));
         assert!(src.contains("            form_w_sheet,\n            &form_draft,"), "the sheet gets the screen's width");
-        assert_eq!(seg_lines(&projects, wide).len(), 1, "the wide inline form keeps one line");
-        // A segment wider than the room still gets its own line rather than vanishing.
-        assert_eq!(seg_lines(&["a-very-long-project-name-indeed"], 100.0), vec![vec![0]]);
+        let production = src.split("#[cfg(test)]").next().unwrap();
+        for gone in [["fn seg", "_lines"].concat(), ["fn seg", "_width"].concat(), ["fn seg_line", "_room"].concat()] {
+            assert!(!production.contains(&gone), "{gone}: the estimate is gone");
+        }
     }
 
     #[test]

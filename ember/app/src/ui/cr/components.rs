@@ -956,6 +956,9 @@ pub struct FieldOptions {
     pub on_focus_gained: Option<Box<dyn FnMut()>>,
     pub on_focus_lost: Option<Box<dyn FnMut()>>,
     pub on_key_down: Option<Box<dyn FnMut(KeyEvent)>>,
+    /// Binds the field to a focus handle, so `handle.request()` puts the caret in it
+    /// (compose-rust#410, `TextField::focus_handle`).
+    pub focus: Option<cu::FocusHandle>,
 }
 
 /// The type step of a field's text and placeholder when no role is named (style.css `.field`).
@@ -1161,6 +1164,9 @@ fn FieldNode(o: FieldOptions, modifier: Modifier) {
     }
     if let Some(h) = o.on_key_down {
         f = f.on_key_down(h);
+    }
+    if let Some(h) = &o.focus {
+        f = f.focus_handle(h);
     }
     drop(f);
 }
@@ -2033,6 +2039,12 @@ pub fn search_field_offset() -> f32 {
 /// `text`); workaround kept until checked on a display (the bare field inside Ember's own pill
 /// must be compared with the mockup before the frame moves onto the field).
 pub fn SearchField(placeholder: &str, height: f32, on_change: impl FnMut(String) + 'static) {
+    SearchFieldFocus(placeholder, height, None, on_change);
+}
+
+/// [`SearchField`] bound to a focus handle: a search row that opens on a tap asks for the focus
+/// through it, so the user types at once (compose-rust#410).
+pub fn SearchFieldFocus(placeholder: &str, height: f32, focus: Option<cu::FocusHandle>, on_change: impl FnMut(String) + 'static) {
     let p = ember_theme().palette;
     let placeholder = placeholder.to_string();
     let on_change = std::rc::Rc::new(std::cell::RefCell::new(Some(on_change)));
@@ -2063,6 +2075,7 @@ pub fn SearchField(placeholder: &str, height: f32, on_change: impl FnMut(String)
                 weight: Some(1.0),
                 placeholder: placeholder.clone(),
                 on_value_change: on_change.borrow_mut().take().map(|f| Box::new(f) as Box<dyn FnMut(String)>),
+                focus: focus.clone(),
                 ..Default::default()
             });
             // `.searchbox` padding 0 16: typed text stops short of the round end.

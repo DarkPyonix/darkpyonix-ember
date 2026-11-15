@@ -27,9 +27,13 @@ pub use crate::ui::files::{
     path_label, percent, progress_line, send_blocker, sendable_devices, transfer_service,
     offer_card_shown, user_actions, visible_offers, Answer, Device, DeviceKind, Direction, FilesKpi, FilesModel,
     HistoryEntry, HistoryResult, Offer, PathKind, Presence, ReceivedFile, SendDraft, SendTarget,
-    Transfer, TransferAction, TransferService, TransferState, FILE_PICKER_AVAILABLE, FILE_PICK_REASON,
+    Transfer, TransferAction, TransferService, TransferState, FILE_DIALOG_TITLE, FILE_PICKER_AVAILABLE, FILE_PICK_REASON, PickOutcome, pick_outcome,
     FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE, clean_member_name, demo_files, is_demo,
 };
+/// Whether the share sheet picks files itself. It does not yet: its file card only says what is
+/// chosen, and the tray's 파일 고르기 opens the dialog.
+const SHARE_SHEET_PICKS_FILES: bool = false;
+
 use crate::ui::files::{choose_target, chip_avail, chip_label, chip_rows, chip_text_max_for, chip_width_est, files_line, fit_chip_text, send_state_at, server_status, share_tap_at, tile_tap_notice};
 use super::compat::Banner;
 use crate::model::Tone;
@@ -802,7 +806,21 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                                 files: vec![demo_files()[0].to_string()],
                             }));
                         } else {
-                            notice::post(FILE_PICK_UNAVAILABLE);
+                            // The platform's own dialog (compose-rust#483). Its one answer
+                            // arrives later on the UI thread and decides what the sheet does.
+                            let s = s.clone();
+                            compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show(move |result| {
+                                let outcome = match result {
+                                    compose_rust::FileDialogResult::Chosen { paths, .. } => pick_outcome(Some(paths), true),
+                                    compose_rust::FileDialogResult::Cancelled => pick_outcome(None, true),
+                                    compose_rust::FileDialogResult::Unavailable => pick_outcome(None, false),
+                                };
+                                match outcome {
+                                    PickOutcome::Draft(draft) => s.set(Some(draft)),
+                                    PickOutcome::Nothing => {}
+                                    PickOutcome::Say(why) => notice::post(why),
+                                }
+                            });
                         }
                     });
                     if !can_pick {
@@ -1585,10 +1603,12 @@ fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMemb
     let room = super::components::sheet_body_max_height(window.width_dp, window.height_dp, false, 0.0);
     let rows = share_devices(devices);
     let agents = share_agents(members);
-    let (file_title, file_why) = share_file_card(&[], FILE_PICKER_AVAILABLE);
+    // The share sheet has no file step of its own (TODO(#673): open the file dialog from its file
+    // card), so it reads as it did before the tray's 파일 고르기 took the dialog.
+    let (file_title, file_why) = share_file_card(&[], SHARE_SHEET_PICKS_FILES);
     let tap = {
         let (devices, o) = (devices.to_vec(), open.clone());
-        move |target: SendTarget| match share_tap_at(&target, &devices, &[], FILE_PICKER_AVAILABLE, ready, lost) {
+        move |target: SendTarget| match share_tap_at(&target, &devices, &[], SHARE_SHEET_PICKS_FILES, ready, lost) {
             ShareTap::Blocked(why) => notice::post(why),
             ShareTap::Send(SendTarget::Device(id)) => match transfer_service().send(&id, Vec::new()) {
                 Ok(()) => o.set(false),
@@ -2162,6 +2182,25 @@ mod tests {
         assert_eq!(SHARE_SHEET_WIDTH, 400.0);
         assert_eq!(super::super::components::sheet_width(1440.0, SHARE_SHEET_WIDTH), 400.0);
         assert_eq!(super::super::components::sheet_width(390.0, SHARE_SHEET_WIDTH), 390.0);
+    }
+
+    #[test]
+    fn fr_l27_5_the_tray_button_opens_the_platform_file_dialog() {
+        // compose-rust#483 (#673): outside the demo 파일 고르기 asks for the platform's dialog and
+        // its one answer goes through `pick_outcome` (tested in `ui/files.rs`).
+        let production = include_str!("files.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show(move |result| {"));
+        for arm in [
+            "compose_rust::FileDialogResult::Chosen { paths, .. } => pick_outcome(Some(paths), true),",
+            "compose_rust::FileDialogResult::Cancelled => pick_outcome(None, true),",
+            "compose_rust::FileDialogResult::Unavailable => pick_outcome(None, false),",
+            "PickOutcome::Draft(draft) => s.set(Some(draft)),",
+            "PickOutcome::Say(why) => notice::post(why),",
+        ] {
+            assert!(production.contains(arm), "{arm}");
+        }
+        assert!(production.contains("let can_pick = FILE_PICKER_AVAILABLE || demo;"), "the button is off where there is no dialog");
+        assert!(!SHARE_SHEET_PICKS_FILES);
     }
 
     #[test]

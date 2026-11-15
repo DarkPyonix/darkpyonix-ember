@@ -312,6 +312,23 @@ pub fn trend_days(load: &Load<UsageSummary>, window: usize) -> Vec<(String, u64)
     s.days[start..].iter().map(|d| (d.day.clone(), d.total_tokens)).collect()
 }
 
+/// The day of the trend plot under a pointer at `x` dp from the plot's left edge: the plot is
+/// `width` wide and holds `days` bars side by side with `gap` between, as `home::bar_rects` lays
+/// them out. A pointer over the gap after a bar counts for that bar, so the choice does not
+/// flicker between bars; one outside the plot, or a plot with no day, gives none (FR-L23.1).
+pub fn trend_day_at(x: f32, days: usize, width: f32, gap: f32) -> Option<usize> {
+    if days == 0 || !(0.0..=width).contains(&x) || width <= 0.0 {
+        return None;
+    }
+    let bar_w = ((width - gap * (days as f32 - 1.0)) / days as f32).max(1.0);
+    Some(((x / (bar_w + gap)).floor() as usize).min(days - 1))
+}
+
+/// The line under the plot for the day the pointer is over: its date and its tokens (FR-L23.1).
+pub fn trend_day_line(day: &str, tokens: u64) -> String {
+    format!("{day} 토큰 {} ({UTC_NOTE})", format_compact(tokens))
+}
+
 /// Each day's `cost_usd` in the window, oldest first, aligned with [`trend_days`]; `None` where
 /// the server sent no cost.
 pub fn trend_costs(load: &Load<UsageSummary>, window: usize) -> Vec<Option<f64>> {
@@ -851,5 +868,21 @@ mod tests {
     fn fr_u7_legend_dot_matches_the_bar_hatch() {
         // The dot and the bars read the same step and alpha (FR-L23, #509 review).
         assert_eq!(legend_hatch_style(), (5.0, 0xff));
+    }
+    #[test]
+    fn fr_l23_1_the_trend_plot_names_the_day_under_the_pointer() {
+        // 7 bars in 400 dp, 6 apart: each bar is (400 - 36) / 7 = 52 wide, a step of 58.
+        assert_eq!(trend_day_at(0.0, 7, 400.0, 6.0), Some(0));
+        assert_eq!(trend_day_at(51.9, 7, 400.0, 6.0), Some(0));
+        assert_eq!(trend_day_at(55.0, 7, 400.0, 6.0), Some(0), "the gap after a bar is that bar's");
+        assert_eq!(trend_day_at(58.0, 7, 400.0, 6.0), Some(1));
+        assert_eq!(trend_day_at(399.0, 7, 400.0, 6.0), Some(6));
+        assert_eq!(trend_day_at(400.0, 7, 400.0, 6.0), Some(6), "the right edge is the last day");
+        assert_eq!(trend_day_at(-1.0, 7, 400.0, 6.0), None);
+        assert_eq!(trend_day_at(401.0, 7, 400.0, 6.0), None);
+        assert_eq!(trend_day_at(10.0, 0, 400.0, 6.0), None);
+        assert_eq!(trend_day_at(10.0, 7, 0.0, 6.0), None);
+        assert_eq!(trend_day_line("11-14", 1_234), format!("11-14 토큰 {} ({UTC_NOTE})", format_compact(1_234)));
+        assert!(trend_day_line("11-14", 0).ends_with("니다") || trend_day_line("11-14", 0).contains(UTC_NOTE));
     }
 }

@@ -1685,7 +1685,8 @@ fn CommitBox(
                 ButtonKind::Primary,
                 false,
                 can_commit,
-                true,
+                // On the compact row the button keeps its own width beside the summary.
+                !folded,
                 move || {
                     if let Some((actions, snap, staging)) = &commit {
                         let needs_confirm = amend_state.get() && amend_warning(snap).is_some();
@@ -7381,6 +7382,7 @@ mod tests {
         let shared_row = nodes.iter().find(|n| n.widget == "Row" && summary_up.contains(&n.id) && up(&nodes, button).contains(&n.id)).expect("summary and button share a row");
         assert!(!scrolls_above.iter().any(|sc| up(&nodes, shared_row).contains(&sc.id)));
         assert!(nodes.iter().any(|n| n.props.iter().any(|x| x.contains(compact_toggle_label(true)))), "the toggle is sent");
+        assert!(!button.mods.iter().any(|m| m == "FillMaxWidth"), "the compact button does not take the summary's width: {:?}", button.mods);
         // The page and the wide sheet: the commit box stays in the changes card.
         compose_rust::window::reset_window_size();
         let _ = vcs_sheet_window(1440.0, 900.0);

@@ -1711,6 +1711,12 @@ pub(crate) fn sheet_wraps_content(window_width_dp: f32) -> bool {
     sheet_presentation(window_width_dp, false) == SheetPresentation::Bottom
 }
 
+/// Whether a sheet is the whole window at this width (FR-L32.1, FR-L33): the one boundary every
+/// full-screen geometry asks, so a sheet's own width, height and strip agree with its presentation.
+pub(crate) fn sheet_is_full_screen(window_width_dp: f32, monitor: bool) -> bool {
+    sheet_presentation(window_width_dp, monitor) == SheetPresentation::FullScreen
+}
+
 /// The strip a full-screen sheet leaves above its header for the window's own buttons (FR-L33):
 /// where the sheet is the whole window (the monitor presentation at 560 and below) it starts at
 /// the window's top edge, under the macOS traffic lights, so it reserves the height they cover,
@@ -1719,7 +1725,7 @@ pub(crate) fn sheet_wraps_content(window_width_dp: f32) -> bool {
 /// full screen, FR-L33.2). [`EmberSheetSized`] sends it before the shared header; a sheet with no
 /// shared title draws its own header and reserves the same strip through it (`vcs_sheet_top_inset`).
 pub(crate) fn full_screen_sheet_top_inset(window_width_dp: f32, monitor: bool, area: crate::ui::safe_area::SafeArea) -> f32 {
-    if sheet_presentation(window_width_dp, monitor) == SheetPresentation::FullScreen {
+    if sheet_is_full_screen(window_width_dp, monitor) {
         crate::ui::safe_area::title_strip_height(area, true)
     } else {
         0.0

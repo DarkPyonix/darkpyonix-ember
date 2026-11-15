@@ -27,6 +27,7 @@ use ember_client::{LauncherStatus, State};
 use crate::model::status_rank;
 use crate::ui::characters::CharStyle;
 use crate::ui::components::PillTone;
+use crate::ui::routines::{format_next, last_run_text, next_run, schedule_to_entry, Entry, Minutes, RunStatus, Trigger};
 
 
 // ---------------------------------------------------------------------------------------------
@@ -374,11 +375,22 @@ pub fn project_boxes(state: &State) -> Vec<ProjectBox> {
     project_boxes_with_archived(state, false)
 }
 
+/// Appended to the name of an archived project where archived items are shown (FR-L26, #327).
+pub const ARCHIVED_MARK: &str = "(보관됨)";
+
+/// Whether the server holds `name` as archived (FR-L26). An unknown project is not archived.
+pub fn project_archived(state: &State, name: &str) -> bool {
+    state.project(name).is_some_and(|p| p.archived)
+}
+
 /// All projects as boxes, including archived sessions when `show_archived` is true (FR-L9).
+/// An archived project (FR-L26, #327) is listed only then, with [`ARCHIVED_MARK`] after its
+/// name: the server keeps listing it and the client hides it.
 pub fn project_boxes_with_archived(state: &State, show_archived: bool) -> Vec<ProjectBox> {
     let mut out: Vec<(i64, ProjectBox)> = state
         .projects()
         .into_iter()
+        .filter(|p| show_archived || !project_archived(state, &p.name))
         .map(|p| {
             let mut seen = false;
             let mut members: Vec<Member> = p
@@ -395,7 +407,11 @@ pub fn project_boxes_with_archived(state: &State, show_archived: bool) -> Vec<Pr
                 .max_by_key(|s| status_rank(*s));
             let b = ProjectBox {
                 id: p.name.clone(),
-                name: display_name(&p.name),
+                name: if project_archived(state, &p.name) {
+                    format!("{} {ARCHIVED_MARK}", display_name(&p.name))
+                } else {
+                    display_name(&p.name)
+                },
                 running: count(LauncherStatus::Running),
                 waiting: count(LauncherStatus::WaitingForApproval),
                 computers: state.project_computers(&p.name).to_vec(),
@@ -485,9 +501,10 @@ pub enum SettingsPart {
 }
 
 /// Whether the main server can save a part today: computer assignment (FR-L4) and, through
-/// `PATCH /api/projects/{name}`, name, repository and branch, new member defaults and character
-/// style (FR-L26). The rest is shown disabled with an explanation.
-/// TODO(#384): leader, archive and delete (server answers 400 `not_yet`).
+/// `PATCH /api/projects/{name}`, name, repository and branch, new member defaults, character
+/// style and the archived flag, and `DELETE /api/projects/{name}` (FR-L26, #327). The rest is
+/// shown disabled with an explanation.
+/// TODO(#384): the leader (server answers 400 `not_yet`, owner decision open).
 pub fn part_supported(part: SettingsPart) -> bool {
     matches!(
         part,
@@ -497,6 +514,8 @@ pub fn part_supported(part: SettingsPart) -> bool {
             | SettingsPart::CharacterStyle
             | SettingsPart::MemberDefaults
             | SettingsPart::ProfileOverride
+            | SettingsPart::Archive
+            | SettingsPart::Delete
     )
 }
 
@@ -536,19 +555,111 @@ pub struct DangerRow {
     pub button: &'static str,
 }
 
-/// The danger zone's rows as the mockup: 프로젝트 보관 then 프로젝트 삭제, each with what it does.
-/// The delete note counts the members the client knows; routines are left out because the
-/// client has no per-project routine list (the mockup counts them too).
+/// The danger zone's rows as the mockup: 프로젝트 보관 then 프로젝트 삭제, each with what it does,
+/// for a project that is not archived and whose delete button is not armed.
 pub fn danger_rows(project_id: &str, members: usize) -> [DangerRow; 2] {
-    let delete_note = if is_default_project(project_id) {
-        "기본 프로젝트는 지울 수 없습니다.".to_string()
+    danger_rows_for(project_id, members, false, false)
+}
+
+/// The danger zone's rows (FR-L26, #327). An archived project offers 보관 해제. The delete note
+/// follows the server, which deletes only an empty project and refuses any other (#384): it
+/// counts the members the client knows and never promises a cascade. While the delete button is
+/// armed (`delete_armed`) it reads 정말 삭제합니다 and the note says what the second tap does.
+pub fn danger_rows_for(project_id: &str, members: usize, archived: bool, delete_armed: bool) -> [DangerRow; 2] {
+    let default_project = is_default_project(project_id);
+    let archive = if archived {
+        DangerRow {
+            part: SettingsPart::Archive,
+            title: "프로젝트 보관 해제",
+            note: "보관된 프로젝트입니다. 해제하면 목록에 다시 나타납니다.".to_string(),
+            button: "보관 해제",
+        }
     } else {
-        format!("팀원 {members}명의 대화가 함께 지워집니다.")
+        DangerRow { part: SettingsPart::Archive, title: "프로젝트 보관", note: "세션과 기록은 남고 목록에서 숨겨집니다.".to_string(), button: "보관" }
     };
-    [
-        DangerRow { part: SettingsPart::Archive, title: "프로젝트 보관", note: "세션과 기록은 남고 목록에서 숨겨집니다.".to_string(), button: "보관" },
-        DangerRow { part: SettingsPart::Delete, title: "프로젝트 삭제", note: delete_note, button: "삭제" },
-    ]
+    let armed = delete_armed && !default_project;
+    let delete_note = if default_project {
+        "기본 프로젝트는 지울 수 없습니다.".to_string()
+    } else if armed {
+        "한 번 더 누르면 프로젝트를 지웁니다. 되돌릴 수 없습니다.".to_string()
+    } else if members > 0 {
+        format!("팀원 {members}명의 세션이 남아 있습니다. 비어 있는 프로젝트만 지울 수 있습니다.")
+    } else {
+        "비어 있는 프로젝트만 지울 수 있습니다. 지우면 되돌릴 수 없습니다.".to_string()
+    };
+    let delete = DangerRow {
+        part: SettingsPart::Delete,
+        title: "프로젝트 삭제",
+        note: delete_note,
+        button: if armed { "정말 삭제합니다" } else { "삭제" },
+    };
+    [archive, delete]
+}
+
+/// The line under the danger zone's title.
+pub fn danger_hint(project_id: &str) -> &'static str {
+    if is_default_project(project_id) {
+        "되돌리기 어려운 작업입니다. 기본 프로젝트는 보관하거나 지울 수 없습니다"
+    } else {
+        "되돌리기 어려운 작업입니다. 삭제는 한 번 더 눌러 확인합니다"
+    }
+}
+
+/// The patch of the 보관 or 보관 해제 button: the flag flipped and nothing else, so unsaved form
+/// changes are not sent with it.
+pub fn archive_patch(archived_now: bool) -> ProjectPatch {
+    ProjectPatch { archived: Some(!archived_now), ..Default::default() }
+}
+
+/// What a tap on 프로젝트 삭제 does (FR-L26, #327). Deleting cannot be undone, so it asks twice
+/// with the rule of the other destructive buttons (`ui::vcs::delete_tap`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteStep {
+    /// The first tap, or a tap after the question ran out: arm and show 정말 삭제합니다.
+    Arm,
+    /// Too soon after arming for the question to have been read (a double click): nothing.
+    Wait,
+    /// The second tap: delete.
+    Delete,
+}
+
+/// `armed_at` is the time (ms) of the tap that armed the button, `None` when it is not armed.
+pub fn delete_step(armed_at: Option<i64>, now: i64) -> DeleteStep {
+    use crate::ui::vcs::{delete_tap, DeleteTap};
+    match delete_tap(armed_at.map(|at| (0, at)), 0, now) {
+        DeleteTap::Arm | DeleteTap::Expired => DeleteStep::Arm,
+        DeleteTap::Wait => DeleteStep::Wait,
+        DeleteTap::Confirm => DeleteStep::Delete,
+    }
+}
+
+/// Whether the delete button shows its question at `now`.
+pub fn delete_armed(armed_at: Option<i64>, now: i64) -> bool {
+    crate::ui::vcs::armed_label_visible(armed_at.map(|at| (0, at)), 0, now)
+}
+
+/// The sentence a failed delete shows. Never the server's raw text.
+pub fn delete_error_message(status: Option<u16>, code: Option<&str>) -> &'static str {
+    match (status, code) {
+        (Some(409), Some("project_not_empty")) => {
+            "프로젝트에 세션, 채널, 루틴 또는 팀이 남아 있어 지울 수 없습니다. 먼저 옮기거나 지운 뒤 다시 시도해 주세요"
+        }
+        (Some(403), Some("protected_project")) => "기본 프로젝트는 지울 수 없습니다",
+        (Some(404), _) => "프로젝트를 찾지 못했습니다",
+        (Some(400), Some("not_yet")) | (Some(405), _) => "이 서버는 프로젝트 삭제를 아직 지원하지 않습니다. 서버를 업데이트해 주세요",
+        _ => "프로젝트를 지우지 못했습니다. 잠시 뒤에 다시 시도해 주세요",
+    }
+}
+
+/// True for a 403 `owner_required` (FR-S12): the failure goes to the notice, which opens the
+/// owner sheet, instead of a sentence in the settings sheet.
+pub fn is_owner_refusal(status: Option<u16>, code: Option<&str>) -> bool {
+    status == Some(403) && code == Some("owner_required")
+}
+
+/// The open project view after `removed` was deleted: closed when it showed that project.
+pub fn full_after_removal(full: Option<&str>, removed: &str) -> Option<String> {
+    full.filter(|f| *f != removed).map(str::to_string)
 }
 
 /// Columns of the leader choice (`.ps-leads`): 3, 2 at 900 dp and below, 1 at 560 and below.
@@ -801,8 +912,11 @@ pub fn patch_error_message(status: Option<u16>, code: Option<&str>, patch: &Proj
         && patch.default_branch.is_none()
         && patch.member_defaults.is_none()
         && patch.character_style.is_none();
+    let archive = patch.archived.is_some();
     match (status, code) {
         (Some(409), Some("name_taken")) => "이미 있는 이름입니다",
+        (Some(403), Some("protected_project")) if archive => "기본 프로젝트는 보관할 수 없습니다",
+        (Some(400), Some("not_yet")) if archive => "이 서버는 프로젝트 보관을 아직 지원하지 않습니다. 서버를 업데이트해 주세요",
         (Some(403), Some("protected_project")) => "기본 프로젝트의 이름은 바꿀 수 없습니다",
         (Some(400), Some("invalid_field")) if !account_only => "입력한 값을 서버가 받아들이지 않았습니다. 내용을 확인하십시오.",
         (Some(400), Some("invalid_field")) => "선택한 계정을 쓸 수 없습니다. 다시 고르십시오.",
@@ -974,6 +1088,133 @@ impl NewProjectDraft {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// The project page's 루틴 tile (FR-L26, #327)
+// It lives here, not in `routines.rs`, and only reads that module's types.
+// ---------------------------------------------------------------------------------------------
+
+/// The tile's state of an event routine: it has no next run, it waits for its event.
+pub const TILE_EVENT_WAITING: &str = "이벤트 대기";
+/// Rows the project page's 루틴 tile lists; the rest is counted.
+pub const TILE_MAX_ROWS: usize = 3;
+pub const TILE_LOADING: &str = "루틴을 불러오는 중입니다";
+pub const TILE_FAILED: &str = "루틴을 불러오지 못했습니다";
+pub const TILE_EMPTY: &str = "이 프로젝트에는 루틴이 없습니다";
+
+/// What the project page knows of its project's routines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TileLoad {
+    /// Asked, not answered yet.
+    Loading,
+    /// The list call failed.
+    Failed,
+    /// The server's schedules of the project, each with its newest run.
+    Loaded(Vec<Entry>),
+}
+
+/// One routine of the tile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TileRow {
+    pub id: String,
+    pub name: String,
+    /// "다음 실행 오늘 09:00", [`TILE_EVENT_WAITING`], or that it is off.
+    pub when: String,
+    /// "완료 · 3시간 전" or "실행 기록 없음".
+    pub last: String,
+}
+
+/// The project page's 루틴 tile as text. Loading, a failed call and an empty project each have a
+/// sentence in `summary` and no rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRoutineTile {
+    pub summary: String,
+    pub rows: Vec<TileRow>,
+    /// "외 2개" when more than [`TILE_MAX_ROWS`] routines exist.
+    pub more: Option<String>,
+}
+
+impl ProjectRoutineTile {
+    /// The tile's lines, top to bottom: the summary, one line per row, then the rest count.
+    pub fn lines(&self) -> Vec<String> {
+        let mut out = vec![self.summary.clone()];
+        out.extend(self.rows.iter().map(|r| format!("{} · {} · {}", r.name, r.when, r.last)));
+        out.extend(self.more.clone());
+        out
+    }
+}
+
+/// When a routine runs next, as its state: off, waiting for its event, or the next run.
+pub fn routine_state_text(e: &Entry, now: Minutes) -> String {
+    let r = &e.routine;
+    if !r.enabled {
+        return "꺼져 있습니다".to_string();
+    }
+    match r.trigger {
+        Trigger::Event => TILE_EVENT_WAITING.to_string(),
+        Trigger::Time => match e.next_at.or_else(|| next_run(&r.cron, now)) {
+            Some(t) => format!("다음 실행 {}", format_next(t, now)),
+            None => "다음 실행 없음".to_string(),
+        },
+    }
+}
+
+fn same_project(a: &str, b: &str) -> bool {
+    a == b || (is_default_project(a) && is_default_project(b))
+}
+
+/// The tile for `project`: how many routines it has, how many are on and how many last ended
+/// in failure, then the first [`TILE_MAX_ROWS`] with next run and last result.
+pub fn project_routine_tile(load: &TileLoad, project: &str, now: Minutes) -> ProjectRoutineTile {
+    let sentence = |text: &str| ProjectRoutineTile { summary: text.to_string(), rows: Vec::new(), more: None };
+    let entries: Vec<&Entry> = match load {
+        TileLoad::Loading => return sentence(TILE_LOADING),
+        TileLoad::Failed => return sentence(TILE_FAILED),
+        TileLoad::Loaded(all) => all.iter().filter(|e| same_project(&e.routine.sel.project, project)).collect(),
+    };
+    if entries.is_empty() {
+        return sentence(TILE_EMPTY);
+    }
+    let on = entries.iter().filter(|e| e.routine.enabled).count();
+    let failed = entries
+        .iter()
+        .filter(|e| e.runs.first().is_some_and(|r| r.status == RunStatus::Failed))
+        .count();
+    let mut summary = format!("루틴 {}개 · 켜짐 {on}개", entries.len());
+    if failed > 0 {
+        summary.push_str(&format!(" · 최근 실패 {failed}개"));
+    }
+    let rows = entries
+        .iter()
+        .take(TILE_MAX_ROWS)
+        .map(|e| TileRow {
+            id: e.routine.id.clone(),
+            name: e.routine.name.clone(),
+            when: routine_state_text(e, now),
+            last: last_run_text(&e.runs, now),
+        })
+        .collect();
+    let rest = entries.len().saturating_sub(TILE_MAX_ROWS);
+    ProjectRoutineTile { summary, rows, more: (rest > 0).then(|| format!("외 {rest}개")) }
+}
+
+/// One project's schedules, each with its newest run, for the tile. A failed list is
+/// [`TileLoad::Failed`]; a failed run list leaves that routine without a last result.
+pub async fn load_project_tile(api: &ember_client::api::Api, project: &str) -> TileLoad {
+    let list = match api.schedules(Some(project)).await {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!("loading the project's routines failed: {e}");
+            return TileLoad::Failed;
+        }
+    };
+    let mut out = Vec::with_capacity(list.len());
+    for s in &list {
+        let runs = api.schedule_runs(&s.id, Some(1)).await.unwrap_or_default();
+        out.push(schedule_to_entry(s, &runs));
+    }
+    TileLoad::Loaded(out)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -991,7 +1232,10 @@ mod tests {
         assert_eq!((archive.title, archive.button), ("프로젝트 보관", "보관"));
         assert_eq!(archive.note, "세션과 기록은 남고 목록에서 숨겨집니다.");
         assert_eq!((delete.title, delete.button), ("프로젝트 삭제", "삭제"));
-        assert_eq!(delete.note, "팀원 3명의 대화가 함께 지워집니다.");
+        // The server refuses a project that still holds records (#384), so the row never
+        // promises a cascade.
+        assert!(delete.note.contains("팀원 3명") && delete.note.contains("비어 있는 프로젝트만"), "{}", delete.note);
+        assert!(!delete.note.contains("함께 지워집니다"));
         let [_, d] = super::danger_rows(super::DEFAULT_PROJECT_ID, 3);
         assert_eq!(d.note, "기본 프로젝트는 지울 수 없습니다.");
     }
@@ -1352,7 +1596,7 @@ mod tests {
 
     // FR-L26: only what the server supports is enabled; the rest says the server cannot yet.
     #[test]
-    fn fr_l26_the_server_saves_metadata_and_profile_override_but_not_leader_archive_or_delete() {
+    fn fr_l26_the_server_saves_metadata_profile_override_archive_and_delete_but_not_the_leader() {
         for part in [
             SettingsPart::Computers,
             SettingsPart::Name,
@@ -1360,14 +1604,14 @@ mod tests {
             SettingsPart::CharacterStyle,
             SettingsPart::MemberDefaults,
             SettingsPart::ProfileOverride,
+            SettingsPart::Archive,
+            SettingsPart::Delete,
         ] {
             assert!(part_supported(part), "{part:?}");
         }
         for part in [
             SettingsPart::Leader,
             SettingsPart::Links,
-            SettingsPart::Archive,
-            SettingsPart::Delete,
         ] {
             assert!(!part_supported(part), "{part:?}");
         }
@@ -1692,5 +1936,224 @@ mod tests {
         assert_eq!(SettingsGuard::new(false, NewProjectDraft::default().is_blank()).on_close(), CloseAction::Close);
         assert_eq!(SettingsGuard::new(false, np_draft("x", "", "", "").is_blank()).on_close(), CloseAction::Confirm);
         assert_eq!(SettingsGuard::new(true, false).on_close(), CloseAction::Ignore);
+    }
+
+    // ---- archive and delete (FR-L26, #327) ---------------------------------------------------
+
+    #[test]
+    fn fr_l26_archive_and_delete_are_live_but_never_in_the_default_project() {
+        assert!(danger_allowed("ember", SettingsPart::Archive) && danger_allowed("ember", SettingsPart::Delete));
+        assert!(!danger_allowed(DEFAULT_PROJECT_ID, SettingsPart::Archive));
+        assert!(!danger_allowed(DEFAULT_PROJECT_NAME, SettingsPart::Delete));
+        assert!(!part_supported(SettingsPart::Leader), "the leader waits for an owner decision (#384)");
+        assert!(danger_hint("ember").contains("한 번 더"), "the hint says delete asks twice");
+        assert!(danger_hint(DEFAULT_PROJECT_ID).contains("기본 프로젝트"));
+    }
+
+    #[test]
+    fn fr_l26_archive_patch_flips_the_flag_and_sends_nothing_else() {
+        assert_eq!(archive_patch(false), ProjectPatch { archived: Some(true), ..Default::default() });
+        assert_eq!(archive_patch(true), ProjectPatch { archived: Some(false), ..Default::default() });
+        assert_eq!(serde_json::to_value(archive_patch(false)).unwrap(), serde_json::json!({ "archived": true }));
+    }
+
+    #[test]
+    fn fr_l26_an_archived_project_offers_restore() {
+        let [archive, _] = danger_rows_for("ember", 0, true, false);
+        assert_eq!((archive.title, archive.button), ("프로젝트 보관 해제", "보관 해제"));
+        assert!(archive.note.contains("다시 나타납니다"), "{}", archive.note);
+        let [archive, _] = danger_rows_for("ember", 0, false, false);
+        assert_eq!((archive.title, archive.button), ("프로젝트 보관", "보관"));
+    }
+
+    #[test]
+    fn fr_l26_delete_row_follows_the_server_rule_and_the_armed_state() {
+        let [_, d] = danger_rows_for("ember", 0, false, false);
+        assert_eq!(d.button, "삭제");
+        assert!(d.note.contains("비어 있는 프로젝트만"), "{}", d.note);
+        let [_, d] = danger_rows_for("ember", 2, false, false);
+        assert!(d.note.contains("팀원 2명"), "{}", d.note);
+        let [_, armed] = danger_rows_for("ember", 0, false, true);
+        assert_eq!(armed.button, "정말 삭제합니다");
+        assert!(armed.note.contains("되돌릴 수 없습니다"), "{}", armed.note);
+        // 기본 프로젝트 never shows the armed question.
+        let [_, d] = danger_rows_for(DEFAULT_PROJECT_ID, 0, false, true);
+        assert_eq!((d.button, d.note.as_str()), ("삭제", "기본 프로젝트는 지울 수 없습니다."));
+    }
+
+    #[test]
+    fn fr_l26_a_single_tap_never_deletes() {
+        const T0: i64 = 1_000_000;
+        // The first tap only arms.
+        assert_eq!(delete_step(None, T0), DeleteStep::Arm);
+        assert!(!delete_armed(None, T0));
+        // A double click: the second tap comes before the question could be read.
+        assert_eq!(delete_step(Some(T0), T0), DeleteStep::Wait);
+        assert_eq!(delete_step(Some(T0), T0 + 599), DeleteStep::Wait);
+        // The second tap counts from 600 ms to 4 s after the first.
+        assert_eq!(delete_step(Some(T0), T0 + 600), DeleteStep::Delete);
+        assert_eq!(delete_step(Some(T0), T0 + 3999), DeleteStep::Delete);
+        // Later the question is gone, so the tap arms again.
+        assert_eq!(delete_step(Some(T0), T0 + 4000), DeleteStep::Arm);
+        assert!(delete_armed(Some(T0), T0 + 100));
+        assert!(!delete_armed(Some(T0), T0 + 4000));
+        // Whatever the time of one tap from the unarmed state, nothing is deleted.
+        for now in [0, 1, T0, i64::MAX / 2] {
+            assert_ne!(delete_step(None, now), DeleteStep::Delete);
+        }
+    }
+
+    #[test]
+    fn fr_l26_delete_and_archive_failures_read_as_fixed_sentences() {
+        assert!(delete_error_message(Some(409), Some("project_not_empty")).contains("남아 있어 지울 수 없습니다"));
+        assert_eq!(delete_error_message(Some(403), Some("protected_project")), "기본 프로젝트는 지울 수 없습니다");
+        assert_eq!(delete_error_message(Some(404), Some("not_found")), "프로젝트를 찾지 못했습니다");
+        for (st, code) in [(Some(400), Some("not_yet")), (Some(405), None)] {
+            assert!(delete_error_message(st, code).contains("아직 지원하지 않습니다"), "{st:?} {code:?}");
+        }
+        for (st, code) in [(None, None), (Some(500), Some("internal"))] {
+            let m = delete_error_message(st, code);
+            assert!(m.starts_with("프로젝트를 지우지 못했습니다") && !m.contains("500"), "{m}");
+        }
+        let archive = archive_patch(false);
+        assert_eq!(patch_error_message(Some(403), Some("protected_project"), &archive), "기본 프로젝트는 보관할 수 없습니다");
+        assert!(patch_error_message(Some(400), Some("not_yet"), &archive).contains("아직 지원하지 않습니다"));
+        // A rename refusal keeps its own sentence.
+        assert_eq!(
+            patch_error_message(Some(403), Some("protected_project"), &ProjectPatch::default()),
+            "기본 프로젝트의 이름은 바꿀 수 없습니다"
+        );
+        // A missing owner key goes to the notice, which opens the owner sheet (FR-S12).
+        assert!(is_owner_refusal(Some(403), Some("owner_required")));
+        assert!(!is_owner_refusal(Some(403), Some("protected_project")));
+        assert!(!is_owner_refusal(Some(409), Some("owner_required")));
+    }
+
+    #[test]
+    fn fr_l26_an_archived_project_is_hidden_until_archived_items_are_shown() {
+        use ember_client::Input;
+        let mut state = State::default();
+        state.apply(Input::ProjectsLoaded(vec![
+            Project { name: "live".into(), ..Default::default() },
+            Project { name: "old".into(), archived: true, ..Default::default() },
+        ]));
+        let names = |show: bool| -> Vec<(String, String)> {
+            project_boxes_with_archived(&state, show).into_iter().map(|b| (b.id, b.name)).collect()
+        };
+        assert_eq!(names(false), [("live".to_string(), "live".to_string())]);
+        let shown = names(true);
+        assert_eq!(shown.len(), 2);
+        assert!(shown.contains(&("old".to_string(), "old (보관됨)".to_string())), "{shown:?}");
+        assert!(project_archived(&state, "old"));
+        assert!(!project_archived(&state, "live"));
+        assert!(!project_archived(&state, "missing"));
+    }
+
+    #[test]
+    fn fr_l26_the_open_view_closes_when_its_project_goes_away() {
+        assert_eq!(full_after_removal(Some("old"), "old"), None);
+        assert_eq!(full_after_removal(Some("live"), "old"), Some("live".to_string()));
+        assert_eq!(full_after_removal(None, "old"), None);
+    }
+
+    // ---- the project page's 루틴 tile (FR-L26, #327) ------------------------------------------
+
+    use crate::ui::routines::{Routine, Run};
+
+    fn at(y: i64, mo: u32, d: u32, h: u32, mi: u32) -> Minutes {
+        crate::ui::routines::minutes_at(y, mo, d, h, mi)
+    }
+
+    fn routine(id: &str, name: &str, project: &str, cron: &str) -> Routine {
+        Routine {
+            id: id.into(),
+            name: name.into(),
+            trigger: Trigger::Time,
+            cron: cron.into(),
+            prompt: "CI 실패를 요약합니다".into(),
+            enabled: true,
+            sel: crate::ui::home::Selection { project: project.into(), ..crate::ui::home::Selection::initial() },
+            continue_session: None,
+        }
+    }
+
+    fn run(at: Minutes, status: RunStatus) -> Run {
+        Run { at, status, session: None }
+    }
+
+    fn entry(r: Routine, runs: Vec<Run>) -> Entry {
+        Entry { routine: r, runs, next_at: None }
+    }
+
+    #[test]
+    fn fr_l26_routine_tile_says_loading_failed_and_empty() {
+        let now = at(2026, 10, 25, 8, 0);
+        assert_eq!(project_routine_tile(&TileLoad::Loading, "ember", now).lines(), [TILE_LOADING]);
+        assert_eq!(project_routine_tile(&TileLoad::Failed, "ember", now).lines(), [TILE_FAILED]);
+        assert_eq!(project_routine_tile(&TileLoad::Loaded(Vec::new()), "ember", now).lines(), [TILE_EMPTY]);
+        // Another project's routine is not this project's.
+        let other = entry(routine("1", "요약", "other", "0 9 * * *"), Vec::new());
+        let tile = project_routine_tile(&TileLoad::Loaded(vec![other]), "ember", now);
+        assert!(tile.rows.is_empty());
+        assert_eq!(tile.lines(), [TILE_EMPTY]);
+    }
+
+    #[test]
+    fn fr_l26_routine_tile_counts_and_lists_next_run_and_last_result() {
+        let now = at(2026, 10, 25, 8, 0);
+        let next = at(2026, 10, 25, 9, 0);
+        let done = vec![run(now - 180, RunStatus::Done)];
+        let mut daily = entry(routine("1", "아침 요약", "ember", "0 9 * * *"), done.clone());
+        daily.next_at = Some(next);
+        let mut off = entry(routine("2", "주간 정리", "ember", "0 9 * * 1"), Vec::new());
+        off.routine.enabled = false;
+        let mut waiting = routine("3", "CI 고치기", "ember", "o/r@main");
+        waiting.trigger = Trigger::Event;
+        let waiting = entry(waiting, vec![run(now - 5, RunStatus::Failed)]);
+
+        let tile = project_routine_tile(&TileLoad::Loaded(vec![daily, off, waiting]), "ember", now);
+        assert_eq!(tile.summary, "루틴 3개 · 켜짐 2개 · 최근 실패 1개");
+        assert_eq!(tile.rows.len(), 3);
+        assert_eq!(tile.rows[0].name, "아침 요약");
+        assert_eq!(tile.rows[0].when, format!("다음 실행 {}", format_next(next, now)));
+        assert_eq!(tile.rows[0].last, last_run_text(&done, now));
+        assert_eq!(tile.rows[1].when, "꺼져 있습니다");
+        assert_eq!(tile.rows[1].last, "실행 기록 없음");
+        assert_eq!(tile.rows[2].when, TILE_EVENT_WAITING, "an event routine has no next run, it waits");
+        assert!(tile.rows[2].last.starts_with("실패"), "{}", tile.rows[2].last);
+        assert_eq!(tile.more, None);
+        let lines = tile.lines();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], tile.summary);
+        assert_eq!(lines[1], format!("아침 요약 · {} · {}", tile.rows[0].when, tile.rows[0].last));
+    }
+
+    #[test]
+    fn fr_l26_routine_tile_without_a_failure_does_not_mention_one() {
+        let now = at(2026, 10, 25, 8, 0);
+        let one = entry(routine("1", "요약", "ember", "0 9 * * *"), vec![run(now - 60, RunStatus::Done)]);
+        let tile = project_routine_tile(&TileLoad::Loaded(vec![one]), "ember", now);
+        assert_eq!(tile.summary, "루틴 1개 · 켜짐 1개");
+    }
+
+    #[test]
+    fn fr_l26_routine_tile_shows_three_rows_and_counts_the_rest() {
+        let now = at(2026, 10, 25, 8, 0);
+        let all: Vec<Entry> = (1..=5)
+            .map(|n| entry(routine(&n.to_string(), &format!("루틴 {n}"), "ember", "0 9 * * *"), Vec::new()))
+            .collect();
+        let tile = project_routine_tile(&TileLoad::Loaded(all), "ember", now);
+        assert_eq!(tile.summary, "루틴 5개 · 켜짐 5개");
+        assert_eq!(tile.rows.len(), TILE_MAX_ROWS);
+        assert_eq!(tile.more.as_deref(), Some("외 2개"));
+        assert_eq!(tile.lines().len(), 1 + TILE_MAX_ROWS + 1);
+    }
+
+    #[test]
+    fn fr_l26_routine_tile_matches_the_default_project_by_id_or_name() {
+        let now = at(2026, 10, 25, 8, 0);
+        let one = entry(routine("1", "요약", crate::ui::home::DEFAULT_PROJECT, "0 9 * * *"), Vec::new());
+        let tile = project_routine_tile(&TileLoad::Loaded(vec![one]), DEFAULT_PROJECT_ID, now);
+        assert_eq!(tile.rows.len(), 1);
     }
 }

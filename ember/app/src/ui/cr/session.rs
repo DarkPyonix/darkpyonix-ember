@@ -4072,6 +4072,7 @@ fn WebMenu(open: bool, load: &WebPagesLoad, on_dismiss: impl FnMut() + Clone + '
             description: w.detail.clone(),
             badge: w.detected.then(|| ("감지됨".to_string(), PillTone::Green)),
             mono: w.mono,
+            spinner: w.loading,
             ..Default::default()
         })
         .collect();
@@ -4091,6 +4092,14 @@ fn WebMenu(open: bool, load: &WebPagesLoad, on_dismiss: impl FnMut() + Clone + '
             WebTap::Open(url) => {
                 if crate::ide::open_external(&url).is_err() {
                     notice::post("브라우저를 열지 못했습니다");
+                }
+            }
+            // An address that is a guess: open it, and say it may not open (FR-L18, #519).
+            WebTap::OpenSaying(url, text) => {
+                if crate::ide::open_external(&url).is_err() {
+                    notice::post("브라우저를 열지 못했습니다");
+                } else {
+                    notice::post(text);
                 }
             }
             WebTap::Say(text) => notice::post(text),
@@ -4678,7 +4687,7 @@ pub fn SessionScreen(focus: Option<String>) {
             web_pages.set(WebPagesLoad::Loading);
             let done = web_pages.clone();
             if services().demo.is_some() {
-                let host = ComputerHost { local: false, host: Some(crate::demo::DEMO_HOST.to_string()) };
+                let host = ComputerHost { host: Some(crate::demo::DEMO_HOST.to_string()), ..Default::default() };
                 done.set(web_pages_from(Ok(crate::demo::ports()), &host));
                 return;
             }
@@ -4689,13 +4698,17 @@ pub fn SessionScreen(focus: Option<String>) {
             run_shared(
                 async move {
                     let c = services().server.session_computer(&sid).await.map_err(|e| e.to_string())?;
-                    let host = computer_host(c.computer.local, "", &services().config.server_url);
+                    let host = computer_host(&c.computer, &services().config.server_url);
                     let ports = services().client.api().computer_ports(&c.computer.id).await.map_err(|e| e.to_string())?;
                     Ok::<_, String>((ports, host))
                 },
                 move |r: Result<(ember_client::api::Ports, ComputerHost), String>| match r {
                     Ok((ports, host)) => done.set(web_pages_from(Ok(ports), &host)),
-                    Err(e) => done.set(web_pages_from(Err(e), &ComputerHost::default())),
+                    Err(e) => {
+                        // The list shows one fixed sentence; the cause goes to the log only.
+                        tracing::debug!("web page list: {e}");
+                        done.set(web_pages_from(Err(e), &ComputerHost::default()));
+                    }
                 },
             );
         }

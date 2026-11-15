@@ -248,4 +248,19 @@ mod tests {
         assert!(!c.allows(&Method::POST, "/api/computers/local/terms"));
         assert!(!c.allows(&Method::GET, "/api/projects"));
     }
+
+    /// FR-L18 (#519): a computer's `address` is on the computer list and on a session's
+    /// computer. A `chat_only` device reaches neither; `read_only` reads both (it already read
+    /// `url`) and can change neither.
+    #[test]
+    fn fr_l18_computer_address_routes_are_closed_to_chat_only() {
+        for path in ["/api/computers", "/api/computers/c1", "/api/sessions/s1/computer"] {
+            assert!(!Scope::ChatOnly.allows(&Method::GET, path), "{path}");
+            assert!(Scope::ReadOnly.allows(&Method::GET, path), "{path}");
+        }
+        for s in [Scope::ChatOnly, Scope::ReadOnly] {
+            assert!(!s.allows(&Method::PUT, "/api/sessions/s1/computer"), "{}", s.as_str());
+            assert!(!s.allows(&Method::POST, "/api/computers"), "{}", s.as_str());
+        }
+    }
 }

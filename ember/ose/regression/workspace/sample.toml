@@ -1,0 +1,4 @@
+title = "regress"
+
+[table]
+answer = 42

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Download the newest OSE build for this machine from the `ose` GitHub Actions workflow and
-# unpack it. Prints the server launcher path (…/bin/dpx-ose-server) on stdout, nothing else, so:
+# unpack it. Prints the server launcher path (…/bin/dpx-ose-server, on Windows
+# …/bin/dpx-ose-server.cmd) on stdout, nothing else, so:
 #
 #   export EMBER_OSE_SERVER="$(ember/editor-conn/scripts/fetch-ose-artifact.sh)"
 #   cargo test --manifest-path ember/editor-conn/Cargo.toml --test live_ose -- --ignored --nocapture
@@ -24,7 +25,8 @@
 #   OSE_BRANCH      only runs on this branch (default: any)
 #   OSE_RUN_ID      use this run instead of searching
 #   OSE_RELEASE     a release tag (ose-v...): use the published release, not a workflow run
-#   OSE_TARGET      linux-x64 | linux-arm64 | darwin-arm64 | darwin-x64 (default: this machine)
+#   OSE_TARGET      linux-x64 | linux-arm64 | darwin-arm64 | darwin-x64 | windows-x64
+#                   (default: this machine; Windows under Git Bash, #83)
 #   OSE_CACHE_DIR   where to unpack (default: <repo>/.scratch/ose)
 #   OSE_FORCE=1     download again even if this run is already unpacked
 set -euo pipefail
@@ -38,7 +40,8 @@ if [ -z "${OSE_TARGET:-}" ]; then
   case "$(uname -s)" in
     Darwin) os=darwin ;;
     Linux) os=linux ;;
-    *) die "unsupported OS $(uname -s) (OSE targets: linux-x64, linux-arm64, darwin-arm64, darwin-x64)" ;;
+    MINGW* | MSYS* | CYGWIN*) os=windows ;;
+    *) die "unsupported OS $(uname -s) (OSE targets: linux-x64, linux-arm64, darwin-arm64, darwin-x64, windows-x64)" ;;
   esac
   case "$(uname -m)" in
     arm64 | aarch64) arch=arm64 ;;
@@ -87,7 +90,16 @@ repo_root="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 cache="${OSE_CACHE_DIR:-$repo_root/.scratch/ose}"
 dest="$cache/$run-$OSE_TARGET"
 
-find_server() { find "$dest" -mindepth 3 -maxdepth 3 -path '*/bin/dpx-ose-server' -type f 2>/dev/null | head -n 1; }
+launcher=dpx-ose-server
+tar_local=()
+case "$OSE_TARGET" in
+  windows-*)
+    launcher=dpx-ose-server.cmd
+    # GNU tar in Git Bash reads a drive letter as a remote host without --force-local.
+    case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) tar_local=(--force-local) ;; esac
+    ;;
+esac
+find_server() { find "$dest" -mindepth 3 -maxdepth 3 -path "*/bin/$launcher" -type f 2>/dev/null | head -n 1; }
 
 if [ "${OSE_FORCE:-0}" != 1 ] && [ -n "$(find_server)" ]; then
   log "already unpacked in $dest"
@@ -116,13 +128,16 @@ else
     fi
   fi
 
-  tar -xzf "$tarball" -C "$dest"
+  tar ${tar_local[@]+"${tar_local[@]}"} -xzf "$tarball" -C "$dest"
   rm -rf "$dest/download"
 fi
 
 server="$(find_server)"
-[ -n "$server" ] || die "unpacked, but no */bin/dpx-ose-server under $dest"
-[ -x "$server" ] || die "$server is not executable"
+[ -n "$server" ] || die "unpacked, but no */bin/$launcher under $dest"
+case "$OSE_TARGET" in
+  windows-*) ;; # a .cmd has no execute bit to check
+  *) [ -x "$server" ] || die "$server is not executable" ;;
+esac
 log "$(cat "$(dirname "$(dirname "$server")")/product.json" 2>/dev/null \
   | sed -n 's/^[[:space:]]*"commit":[[:space:]]*"\([0-9a-f]*\)".*/commit \1/p' | head -n 1)"
 echo "$server"

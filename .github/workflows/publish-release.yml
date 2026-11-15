@@ -183,9 +183,9 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Compress-Archive ember/app/target/release/ember-app.exe "dist/ember-app-${{ needs.version.outputs.tag }}-${{ matrix.target }}.zip"
           # MSIX stays unsigned (FR-22.6 criterion 4); the install guide explains how to trust it.
-          cargo run --release --manifest-path compose-rust/scripts/packager-windows/Cargo.toml -- \
-            --project ember/app --exe ember/app/target/release/ember-app.exe \
-            --version "${{ needs.version.outputs.tag }}" --out dist
+          # One line: this step is PowerShell, where a trailing backslash does not continue a line.
+          cargo run --release --manifest-path compose-rust/scripts/packager-windows/Cargo.toml -- --project ember/app --exe ember/app/target/release/ember-app.exe --version "${{ needs.version.outputs.tag }}" --out dist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Package the client (Linux .AppImage)
         if: runner.os == 'Linux'
         env:
@@ -195,6 +195,7 @@ jobs:
           compose-rust/scripts/packager-linux/appimage.sh \
             --dioxus-toml ember/app/Dioxus.toml --exec ember-app \
             --payload ember/app/target/release/ember-app \
+            --icon ember/app/assets/brand/app-icon.svg \
             --version "${TAG#v}" --out-dir dist
       # Velopack (NFR-R2, #880). vpk is a .NET tool; package-velopack.py needs Python 3.11+.
       - uses: actions/setup-python@v5

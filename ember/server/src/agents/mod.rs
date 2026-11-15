@@ -191,9 +191,11 @@ pub struct StartRequest {
     /// (`EMBER_SESSION_MEM_LIMIT_MB`), else no limit. Set by `Sessions::ensure_live` from
     /// `Sessions::set_mem_limit_mb`; a start-config hook may override it.
     pub mem_limit_mb: Option<u64>,
-    /// Tools the harness may call without asking, each one exact tool name (never a pattern).
-    /// Claude Code only, passed as `--allowedTools`: without the rule a call to an MCP tool is
-    /// denied in `-p` mode (measured, FR-T12). Other adapters ignore it.
+    /// Tools the harness may call without asking, each one exact tool name (never a pattern), in
+    /// the form `mcp__<server>__<tool>`. Claude Code gets them as `--allowedTools`: without the
+    /// rule a call to an MCP tool is denied in `-p` mode (measured, FR-T12). Codex gets
+    /// `mcp_servers.<server>.tools.<tool>.approval_mode="approve"` for a server this request
+    /// registers. Other adapters ignore it: their approval flow asks the person.
     pub allowed_tools: Vec<String>,
 }
 
@@ -357,6 +359,20 @@ pub trait AgentAdapter: Send + Sync {
     /// The events behind output lines drained from a surviving agent (FR-S8).
     fn translate_drained(&self, _lines: &[String]) -> Vec<AgentEvent> {
         Vec::new()
+    }
+
+    /// Whether [`AgentAdapter::translate_drained_after`] compares the drained lines with what
+    /// the store holds (FR-S8, #310). Default: no, and then the store is not read for the drain.
+    fn drain_reads_stored(&self) -> bool {
+        false
+    }
+
+    /// [`AgentAdapter::translate_drained`] with the tool calls and tool results already stored
+    /// for the turn in flight (oldest first; empty unless [`AgentAdapter::drain_reads_stored`]),
+    /// so an adapter can leave out what the store already holds (FR-S8, #310).
+    /// Default: the stored events are not looked at.
+    fn translate_drained_after(&self, lines: &[String], _stored: &[AgentEvent]) -> Vec<AgentEvent> {
+        self.translate_drained(lines)
     }
 
     /// Start (or resume) the agent. Events are sent on `events` until the process exits.

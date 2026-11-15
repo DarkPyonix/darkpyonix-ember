@@ -106,7 +106,9 @@ pub struct LetifyConfig {
     /// and the observed public address.
     pub advertise: Vec<SocketAddr>,
     /// The rendezvous channel. `None` uses the hub's pkarr mailbox when a hub or
-    /// [`LetifyConfig::pkarr`] is configured, and otherwise no rendezvous (so no relayed path).
+    /// [`LetifyConfig::pkarr`] is configured, and otherwise no rendezvous: then the only relayed
+    /// path is to the relay's own peer, the main server, which waits there for each device it
+    /// allows (SPEC `FR-N9`, #898).
     pub signal: Option<Arc<dyn SignalChannel>>,
     /// The pkarr directory. `None` uses [`TransportConfig::hub`] over HTTP.
     pub pkarr: Option<Arc<dyn PkarrStore>>,
@@ -126,8 +128,15 @@ pub struct LetifyConfig {
     /// How long one dial of one candidate path may take before it is retried. A relayed dial
     /// includes the rendezvous round trip.
     pub dial_timeout: Duration,
-    /// How long [`crate::Transport::connect`] tries all candidate paths before it gives up.
+    /// How long [`crate::Transport::connect`] tries all candidate paths before it gives up. A
+    /// dial whose only path is the standing request at the main server's relay gives up after
+    /// 8 s when this is longer (SPEC `FR-N9`).
     pub connect_timeout: Duration,
+    /// With the relay role: the most peers (devices and registered computers) this endpoint
+    /// keeps a standing request for at its own relay (SPEC `FR-N9`, #898). A peer allowed beyond
+    /// it is queued until a slot frees. The default, 48, is also the most: the relay lets one
+    /// client hold 64 waiting requests. Tests lower it.
+    pub standing_requests: usize,
 }
 
 impl Default for LetifyConfig {
@@ -149,6 +158,7 @@ impl Default for LetifyConfig {
             fast_window: Duration::from_secs(30),
             dial_timeout: Duration::from_secs(8),
             connect_timeout: Duration::from_secs(20),
+            standing_requests: 48,
         }
     }
 }

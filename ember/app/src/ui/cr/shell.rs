@@ -982,6 +982,56 @@ mod tests {
         compose_rust::window::reset_window_size();
     }
 
+    /// What the shell reserves for the traffic lights, read as the shell reads it: the toolkit's
+    /// safe area through the composition and the layout from the window's width. The platform is
+    /// named so the macOS table is checked on every system the tests run on.
+    #[Composable]
+    fn reservation_probe() {
+        use crate::ui::safe_area::{safe_area_for, toolkit_safe_area, top_reservation, Platform};
+        let r = top_reservation(safe_area_for(Platform::MacOs, toolkit_safe_area()), current_mode(false));
+        Label(&format!("inset {} strip {}", r.sidebar_inset, r.content_strip), Fs::Md, Weight::Regular, None, None);
+    }
+
+    #[test]
+    fn fr_l33_2_the_reservation_follows_a_safe_area_that_goes_to_zero_and_comes_back() {
+        // #409: entering macOS full screen hides the lights and the renderer reports a zero safe
+        // area; leaving it reports the footprint again. Each report changes what is composed.
+        use compose_rust::protocol::{decode_batch, HostEvent};
+        use compose_rust::{EventPayload, Host, Recomposer, WindowHeightClass, WindowSizeClass};
+        compose_rust::window::reset_window_size();
+        crate::ui::window_size::set_opened_for_test(None);
+        let mut host = Host::new(|| Box::new(Recomposer::new(reservation_probe)));
+        let first = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        assert!(has_text(&first, "inset 0 strip 0"), "nothing reported yet");
+        let mut report = |width: f32, top: f32, leading: f32| {
+            let event = HostEvent {
+                node_id: 0,
+                handler_id: 0,
+                payload: EventPayload::WindowSizeChanged {
+                    width_dp: width,
+                    height_dp: 900.0,
+                    class: WindowSizeClass::from_width_dp(width),
+                    height_class: WindowHeightClass::from_height_dp(900.0),
+                    safe_area_top: top,
+                    safe_area_leading: leading,
+                    safe_area_trailing: 0.0,
+                },
+            };
+            let (bytes, _) = host.dispatch(event).expect("dispatch");
+            decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")).collect::<String>()
+        };
+        // Windowed at 1440: the sidebar starts below the lights.
+        assert!(report(1440.0, 28.0, 78.0).contains("inset 28 strip 0"));
+        // Full screen: the same size class, a zero safe area alone.
+        assert!(report(1440.0, 0.0, 0.0).contains("inset 0 strip 0"));
+        // Back to a window.
+        assert!(report(1440.0, 28.0, 78.0).contains("inset 28 strip 0"));
+        // The bottom-tabs layout: a strip above the content, gone in full screen.
+        assert!(report(390.0, 28.0, 78.0).contains("inset 0 strip 28"));
+        assert!(report(390.0, 0.0, 0.0).contains("inset 0 strip 0"));
+        compose_rust::window::reset_window_size();
+    }
+
     #[test]
     fn fr_l12_the_shell_content_column_has_fill_max_width_in_the_bottom_tabs_layout() {
         // In the 390 bottom-tabs layout width is the cross axis of the content column, which a
@@ -1066,6 +1116,143 @@ mod tests {
     fn phone_menu_probe() {
         let open = remember(|| mutable_state_of(true));
         PhoneMenu(open, || {});
+    }
+
+    /// The click handlers a batch sets, in the order the composition sent them.
+    fn click_handlers(batch: &[compose_rust::protocol::Mutation<'_>]) -> Vec<(u32, u64)> {
+        use compose_rust::protocol::{Mutation, PropertyValue};
+        use compose_rust::PropertyKind;
+        batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                    Some((*node_id, *h as u64))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The position in `handlers` of the clickable container the text `want` sits in.
+    fn handler_index_of_text(
+        batch: &[compose_rust::protocol::Mutation<'_>],
+        handlers: &[(u32, u64)],
+        want: &str,
+    ) -> Option<usize> {
+        use compose_rust::protocol::{Mutation, PropertyValue};
+        use compose_rust::PropertyKind;
+        use std::collections::HashMap;
+        let mut parents = HashMap::new();
+        let mut labels = Vec::new();
+        for mutation in batch {
+            match mutation {
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    parents.insert(*node_id, *parent_id);
+                }
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } if *s == want => {
+                    labels.push(*node_id);
+                }
+                _ => {}
+            }
+        }
+        labels.into_iter().find_map(|label| {
+            let mut node = label;
+            loop {
+                if let Some(index) = handlers.iter().position(|(id, _)| *id == node) {
+                    return Some(index);
+                }
+                node = *parents.get(&node)?;
+            }
+        })
+    }
+
+    #[test]
+    fn fr_l10_5_every_sidebar_and_rail_nav_row_click_changes_the_menu() {
+        // #242: the rows were dead while they were built on a pointer subscription. Each menu's
+        // row is clicked as the renderer clicks it, in the sidebar and in the icon-only rail
+        // (located by the row's position among the sidebar's handlers).
+        use compose_rust::protocol::{decode_batch, HostEvent};
+        use compose_rust::{EventPayload, Host, Recomposer};
+
+        let _guard = crate::services::test_guard();
+        let ui = shared_ui();
+        let menu_before = ui.menu.get_untracked();
+        for menu in NavMenu::ALL {
+            let other = if menu == NavMenu::Home { NavMenu::Files } else { NavMenu::Home };
+
+            let mut sidebar = Host::new(|| Box::new(Recomposer::new(sidebar_probe)));
+            let (handlers, index) = {
+                let batch = decode_batch(sidebar.rebuild().expect("rebuild sidebar")).expect("decode sidebar");
+                let handlers = click_handlers(&batch);
+                let index = handler_index_of_text(&batch, &handlers, menu.label());
+                (handlers, index)
+            };
+            let index = index.unwrap_or_else(|| panic!("the sidebar row {} is clickable", menu.label()));
+            ui.go(Route::Projects);
+            ui.set_menu(other);
+            let (node_id, handler_id) = handlers[index];
+            sidebar.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click sidebar row");
+            assert_eq!(ui.menu.get_untracked(), menu, "the sidebar row {} changes the menu", menu.label());
+
+            let mut rail = Host::new(|| Box::new(Recomposer::new(rail_probe)));
+            let rail_handlers = {
+                let batch = decode_batch(rail.rebuild().expect("rebuild rail")).expect("decode rail");
+                click_handlers(&batch)
+            };
+            assert_eq!(rail_handlers.len(), handlers.len(), "the rail has the sidebar's rows");
+            ui.go(Route::Projects);
+            ui.set_menu(other);
+            let (node_id, handler_id) = rail_handlers[index];
+            rail.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click rail item");
+            assert_eq!(ui.menu.get_untracked(), menu, "the rail item {} changes the menu", menu.label());
+        }
+        // 프로젝트 also leaves a conversation for the project list (the issue's completion check).
+        ui.open_conversation("demo-s1");
+        let mut sidebar = Host::new(|| Box::new(Recomposer::new(sidebar_probe)));
+        let (handlers, index) = {
+            let batch = decode_batch(sidebar.rebuild().expect("rebuild sidebar")).expect("decode sidebar");
+            let handlers = click_handlers(&batch);
+            let index = handler_index_of_text(&batch, &handlers, NavMenu::Projects.label());
+            (handlers, index)
+        };
+        let (node_id, handler_id) = handlers[index.expect("the 프로젝트 row")];
+        sidebar.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click 프로젝트");
+        assert_eq!(ui.route.get_untracked(), Route::Projects);
+        assert_eq!(ui.menu.get_untracked(), NavMenu::Projects);
+        ui.go(Route::Projects);
+        ui.set_menu(menu_before);
+    }
+
+    #[test]
+    fn fr_l10_5_the_phone_menu_search_row_click_opens_search() {
+        use compose_rust::protocol::{decode_batch, HostEvent};
+        use compose_rust::{EventPayload, Host, Recomposer};
+
+        let _guard = crate::services::test_guard();
+        let ui = shared_ui();
+        let mut host = Host::new(|| Box::new(Recomposer::new(phone_menu_probe)));
+        let (handlers, index) = {
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let handlers = click_handlers(&batch);
+            let index = handler_index_of_text(&batch, &handlers, "검색");
+            (handlers, index)
+        };
+        ui.go(Route::Projects);
+        let (node_id, handler_id) = handlers[index.expect("the phone menu 검색 row is clickable")];
+        host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click 검색");
+        assert_eq!(ui.route.get_untracked(), Route::Search);
+        ui.go(Route::Projects);
+    }
+
+    #[test]
+    fn fr_l10_5_no_cr_screen_subscribes_a_click_to_pointer_events() {
+        // The shell's rows go through `Clickable` (the container's `on_click`), never through a
+        // pointer subscription, which compose-rust v0.0.4 did not deliver (#242).
+        let src = include_str!("shell.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains(".on_pointer("), "a shell row must not be built on on_pointer");
+        assert!(!production.contains(".on_click("), "shell rows go through components::Clickable");
+        assert!(production.contains("Clickable("));
     }
 
     #[test]

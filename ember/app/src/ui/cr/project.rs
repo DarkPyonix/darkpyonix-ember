@@ -20,7 +20,7 @@ use ember_client::wire::Project;
 use ember_client::LauncherStatus;
 
 pub use crate::ui::project::{
-    agent_options, build_patch, deck_avatars, deck_names, DECK_AVATARS, DECK_NAMES, strip_arrows_visible, strip_scroll_target, chip_line, computer_chips, danger_allowed, danger_rows, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
+    agent_options, build_patch, deck_avatars, deck_names, DECK_AVATARS, DECK_NAMES, strip_arrow_enabled, strip_arrows_visible, strip_scroll_target, chip_line, computer_chips, danger_allowed, danger_rows, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
     is_default_project, leader_choice_visible, part_supported, project_boxes, project_boxes_with_archived,
     reach_pill, status_pill, validate_settings, visible_tiles, ComputerChip, Member, MemberFilter,
     effective_style, follow_rename, override_harnesses, override_label, override_options, pick_override, AccountsState, CloseAction, SettingsGuard, DISCARD_QUESTION,
@@ -30,7 +30,7 @@ use super::characters::{CharState, Character, StylePicker};
 use crate::ui::characters::CharStyle;
 use super::components::{
     AppButton, ButtonKind, Clickable, NamedClickable, EmberField, EmberSheet, FieldOptions, FilterChip,
-    IconButton, Label, OptionSheet, Pill, PillTone, SearchField, Select, SheetFooter,
+    IconButton, Label, Pill, PillTone, PopKind, PopMenu, PopoverMenu, SearchField, Select, SheetFooter,
 };
 use super::home::{content_width, fit_label, ring_image, text_px, Cols, Part};
 use super::notice;
@@ -273,13 +273,15 @@ pub fn ProjectScreen() {
 /// The page header: the title and subtitle, and the actions at the right; on a phone the actions
 /// are a row below the title (and the title leaves room for the menu button at the top right).
 pub fn Header(title: &str, sub: &str, compact: bool, trailing: impl FnOnce()) {
-    HeaderGap(title, sub, compact, compact, 0.0, trailing)
+    HeaderGap(title, sub, compact, compact, 0.0, false, trailing)
 }
 
 /// [`Header`] with `gap` dp between the title and the subtitle, and the actions stacked below
 /// the title when `stacked` (a phone, or a tablet in the mockup's files header); `compact` is the
-/// phone: the smaller title and the room for the menu button.
-pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32, trailing: impl FnOnce()) {
+/// phone: the smaller title and the room for the menu button. `end` puts the stacked actions at
+/// the row's right end (the files header on a phone, review row F6: in the mockup the subtitle
+/// fills the line, so `.spacer{flex:1}` wraps with the buttons and pushes them right).
+pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32, end: bool, trailing: impl FnOnce()) {
     let p = ember_theme().palette;
     // On a phone only the title line leaves room for the menu button; the subtitle runs the
     // whole width under it (#878: it wrapped at x 284 of a row that ends at x 374).
@@ -305,7 +307,14 @@ pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32,
     if stacked {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().modifier(Modifier::new().fill_max_width()).content(titles);
-            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(trailing);
+            if end {
+                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    trailing();
+                });
+            } else {
+                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(trailing);
+            }
         });
     } else {
         cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -453,13 +462,14 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
         return;
     }
     let scroll = compose_rust::ui::remember_scroll_state();
+    // TODO(compose-rust#818): `ScrollState` has no viewport size, so the step is taken from the
+    // window's content width, which is wider than the strip between its arrows.
     let viewport = content_width(crate::ui::window_size::current_window_size().width_dp, SP[6]);
-    let (offset, max) = (scroll.offset(), scroll.max_offset());
-    let arrows = strip_arrows_visible(max);
+    // Only the overflow is read here; each arrow reads the offset itself (#671).
+    let arrows = strip_arrows_visible(scroll.max_offset());
     cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(64.0)).content(|| {
         if arrows {
-            let s = scroll.clone();
-            StripArrow(ICON_ARROW_LEFT_SVG, offset > 0.0, move || s.animate_scroll_to(strip_scroll_target(offset, viewport, max + viewport, -1.0)));
+            StripArrow(ICON_ARROW_LEFT_SVG, super::a11y::SCROLL_LEFT, -1.0, &scroll, viewport);
         }
         cu::ScrollRow().scroll_state(&scroll).modifier(Modifier::new().weight(1.0).height(64.0)).content(|| {
             for c in chips {
@@ -468,7 +478,8 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
                 cu::Spacer().modifier(Modifier::new().width(SP[1]));
             }
             // The hub's devices, registered with the node's token (FR-X7, #490).
-            // TODO(compose-rust, #671): no dashed border or stroke-dash API, so the add chip keeps a solid 1 px border.
+            // TODO(compose-rust#817): `Modifier::border` has no stroke dash, so the add chip keeps a
+            // solid 1 px border (`.cchip.add{border-style:dashed}`).
             let add = Modifier::new().height(56.0).border(1.0, paint(p.line)).corner_radius(CORNER_MD);
             let ui = st.add.clone();
             Clickable(add, Alignment::CenterStart, move || ui.show(), || {
@@ -481,8 +492,7 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
             });
         });
         if arrows {
-            let s = scroll.clone();
-            StripArrow(ICON_ARROW_RIGHT_SVG, offset < max, move || s.animate_scroll_to(strip_scroll_target(offset, viewport, max + viewport, 1.0)));
+            StripArrow(ICON_ARROW_RIGHT_SVG, super::a11y::SCROLL_RIGHT, 1.0, &scroll, viewport);
         }
     });
 }
@@ -490,17 +500,23 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
 const ICON_ARROW_LEFT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>"#;
 const ICON_ARROW_RIGHT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>"#;
 
-/// A scroll arrow of the computer strip. Dimmed and inert at the end it points to.
-/// TODO(compose-rust, #671): no label modifier for icon-only controls, so this control has no accessible name.
-fn StripArrow(svg: &'static str, enabled: bool, mut on_click: impl FnMut() + 'static) {
+/// A scroll arrow of the computer strip, pointing in `dir` (-1 or 1) and named `label` for
+/// assistive technology (`Modifier::label`, #671). Dimmed, inert and reported disabled at the end
+/// it points to: it reads the strip's `ScrollState` here, so a scroll composes it again, and a
+/// press reads the offset again and never a value kept from composition.
+fn StripArrow(svg: &'static str, label: &'static str, dir: f32, scroll: &cu::ScrollState, viewport: f32) {
     let p = ember_theme().palette;
+    let enabled = strip_arrow_enabled(scroll.offset(), scroll.max_offset(), dir);
     let color = if enabled { p.text_2 } else { p.line };
-    Clickable(
-        Modifier::new().size(H_CTL, H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
+    let s = scroll.clone();
+    NamedClickable(
+        label,
+        Modifier::new().size(H_CTL, H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full).disabled(!enabled),
         Alignment::Center,
         move || {
-            if enabled {
-                on_click()
+            let (offset, max) = (s.offset(), s.max_offset());
+            if strip_arrow_enabled(offset, max, dir) {
+                s.animate_scroll_to(strip_scroll_target(offset, viewport, max + viewport, dir));
             }
         },
         move || {
@@ -922,9 +938,11 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
     // `EMBER_CR_IDE_MENU=1` opens the chooser at the start, for review captures.
     let open = remember_with_key(key.clone(), || mutable_state_of(std::env::var("EMBER_CR_IDE_MENU").as_deref() == Ok("1")));
     let ide = remember_with_key(key.clone(), || mutable_state_of(None::<Result<IdeLaunch, String>>));
+    let computer = remember_with_key(key.clone(), || mutable_state_of(None::<String>));
     let started = remember_with_key(key, || mutable_state_of(false));
     if let (Some(sid), false) = (session.clone(), started.get_untracked()) {
         started.set(true);
+        crate::ui::cr::session::load_session_computer(sid.clone(), computer.clone());
         if services().demo.is_some() {
             let (project, cwd) = services()
                 .client
@@ -941,31 +959,51 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
     }
     let remembered = ui.prefs.get().ide_target.as_deref().and_then(IdeKind::from_key);
     let choices = crate::ui::session::ide_choices(remembered);
-    let labels: Vec<String> = choices.iter().map(|c| c.label.to_string()).collect();
     let has_session = session.is_some();
-    cu::Box().content(|| {
-        cu::Row().alignment(Alignment::Center).spacing(4.0).content(|| {
-            let (o, ui_btn, ide_btn) = (open.clone(), ui.clone(), ide.clone());
-            AppButton(if compact { "IDE" } else { "IDE 열기" }, Some(IconRole::Forward), ButtonKind::Default, false, true, false, move || {
-                if !has_session {
-                    notice::post("세션이 없어 IDE를 열 수 없습니다");
-                } else {
-                    crate::ui::cr::session::ide_main_click(remembered, &o, |kind| {
-                        launch_ide(&ui_btn, kind, ide_btn.get_untracked())
-                    });
-                }
-            });
-            if has_session {
-                crate::ui::cr::session::IdeChevron(open.clone(), false);
-            }
-        });
-        let (close, ui2, ide2) = (open.clone(), ui.clone(), ide.clone());
-        OptionSheet(open.get(), &labels, None, 220.0, move || close.set(false), move |i| {
+    let cwd = session
+        .as_ref()
+        .and_then(|sid| services().client.read(|s| s.session(sid).map(|v| v.record.cwd.clone())))
+        .unwrap_or_default();
+    // `computer:~/project` (mockup `ideMenu`), not the raw folder (review r8).
+    let ide_sub = crate::ui::session::ide_menu_subtitle(computer.get().as_deref(), &cwd);
+    let rows = crate::ui::cr::session::ide_pop_rows(&choices, remembered);
+    let (close, ui2, ide2) = (open.clone(), ui.clone(), ide.clone());
+    // The chooser hangs from the IDE button, lined up with its end (FR-L10.4, #888, review P10).
+    PopoverMenu(
+        open.get(),
+        PopMenu {
+            name: super::a11y::IDE_PICKER,
+            kind: PopKind::Drop,
+            head: crate::ui::session::IDE_MENU_HEAD,
+            sub: ide_sub.as_deref(),
+            rows: &rows,
+            align: compose_rust::PopoverAlign::End,
+        },
+        move || close.set(false),
+        move |i| {
             if let Some(c) = choices.get(i) {
                 launch_ide(&ui2, c.kind, ide2.get_untracked());
             }
-        });
-    });
+        },
+        || {
+            cu::Row().alignment(Alignment::Center).spacing(4.0).content(|| {
+                let (o, ui_btn, ide_btn) = (open.clone(), ui.clone(), ide.clone());
+                AppButton(if compact { "IDE" } else { "IDE 열기" }, Some(IconRole::Forward), ButtonKind::Default, false, true, false, move || {
+                    if !has_session {
+                        notice::post("세션이 없어 IDE를 열 수 없습니다");
+                    } else {
+                        crate::ui::cr::session::ide_main_click(remembered, &o, |kind| {
+                            launch_ide(&ui_btn, kind, ide_btn.get_untracked())
+                        });
+                    }
+                });
+                if has_session {
+                    crate::ui::cr::session::IdeChevronSized(open.clone(), false, H_BTN);
+                }
+            });
+        },
+        None,
+    );
 }
 
 /// `.strip`: members, waiting, running and the week's tokens, with the pinned sessions as chips.
@@ -1156,7 +1194,8 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
             + if d.is_blank() { 0 } else { errors.len() }
             + usize::from(st.new_failure.get().is_some());
         let new_columns = super::characters::style_picker_columns(new_window.width_dp);
-        let new_body_fits = new_project_body_estimate(new_columns, notes) <= new_body_height;
+        let new_stacked = new_project_fields_stacked(new_window.width_dp);
+        let new_body_fits = new_project_body_estimate(new_columns, new_stacked, notes) <= new_body_height;
         let new_scroll = cu::remember_scroll_state();
         let review_end = new_sheet_review_end();
         // `.sheet-acts`: 취소 and 만들기 (small) before the close button, 4 apart, as the project
@@ -1201,11 +1240,13 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
                     };
                     let (s1, s2, s3) = (submit.clone(), submit.clone(), submit);
                     Section(NEW_SEC_BASIC.0, NEW_SEC_BASIC.1, true, || {
+                        // `.ps-grid`: 이름 across both columns, then 저장소 and 기본 브랜치 side by
+                        // side 16 apart; one column at 560 px and below. Rows are 12 apart.
                         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
                             FieldRow("이름", || {
                                 EmberField(FieldOptions {
                                     fill_max_width: true,
-                                    placeholder: "프로젝트 이름".to_string(),
+                                    placeholder: NEW_NAME_HINT.to_string(),
                                     on_value_change: Some(Box::new(move |v| {
                                         f1.set(None);
                                         d1.update(|s| s.name = v)
@@ -1214,36 +1255,43 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
                                     ..Default::default()
                                 });
                             });
-                            cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                                    FieldRow("저장소", || {
-                                        EmberField(FieldOptions {
-                                            fill_max_width: true,
-                                            placeholder: "github.com/...".to_string(),
-                                            on_value_change: Some(Box::new(move |v| {
-                                        f2.set(None);
-                                        d2.update(|s| s.repo = v)
-                                    })),
-                                    on_submit: Some(Box::new(s2)),
-                                            ..Default::default()
-                                        });
+                            let repo_field = move || {
+                                FieldRow("저장소", || {
+                                    EmberField(FieldOptions {
+                                        fill_max_width: true,
+                                        placeholder: "github.com/...".to_string(),
+                                        on_value_change: Some(Box::new(move |v| {
+                                            f2.set(None);
+                                            d2.update(|s| s.repo = v)
+                                        })),
+                                        on_submit: Some(Box::new(s2)),
+                                        ..Default::default()
                                     });
                                 });
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                                    FieldRow("기본 브랜치", || {
-                                        EmberField(FieldOptions {
-                                            fill_max_width: true,
-                                            placeholder: "develop".to_string(),
-                                            on_value_change: Some(Box::new(move |v| {
-                                        f3.set(None);
-                                        d3.update(|s| s.branch = v)
-                                    })),
-                                    on_submit: Some(Box::new(s3)),
-                                            ..Default::default()
-                                        });
+                            };
+                            let branch_field = move || {
+                                FieldRow("기본 브랜치", || {
+                                    EmberField(FieldOptions {
+                                        fill_max_width: true,
+                                        placeholder: "develop".to_string(),
+                                        on_value_change: Some(Box::new(move |v| {
+                                            f3.set(None);
+                                            d3.update(|s| s.branch = v)
+                                        })),
+                                        on_submit: Some(Box::new(s3)),
+                                        ..Default::default()
                                     });
                                 });
-                            });
+                            };
+                            if new_stacked {
+                                repo_field();
+                                branch_field();
+                            } else {
+                                cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+                                    cu::Column().modifier(Modifier::new().weight(1.0)).content(repo_field);
+                                    cu::Column().modifier(Modifier::new().weight(1.0)).content(branch_field);
+                                });
+                            }
                             if d.branch.trim().is_empty() {
                                 Label(&format!("비워 두면 {}을 씁니다", NewProjectDraft::DEFAULT_BRANCH), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                             }
@@ -1342,17 +1390,29 @@ pub const NEW_SEC_BASIC: (&str, &str) = ("기본", "프로젝트 이름과 저�
 pub const NEW_SEC_STYLE: (&str, &str) =
     ("팀 캐릭터", "이 프로젝트의 팀원이 모두 이 모양으로 보입니다. 나중에 설정에서 바꿀 수 있습니다");
 
+/// The 이름 field's hint (`project.js` projNew `placeholder`).
+pub const NEW_NAME_HINT: &str = "예: darkpyonix-docs";
+
+/// Whether 저장소 and 기본 브랜치 sit under each other: `.ps-grid` is one column at a window
+/// 560 dp wide or narrower (`@media (max-width:560px)`), two above. A window that has not
+/// reported its width counts as wide.
+pub fn new_project_fields_stacked(window_width_dp: f32) -> bool {
+    window_width_dp > 0.0 && window_width_dp <= 560.0
+}
+
 /// How tall the new-project body is, from its rows (FR-L26.1): 20 px padding top and bottom;
 /// the 기본 section (the 22 px title, the 18 px hint, then 이름 and the 저장소/기본 브랜치 row,
-/// each a 12/18 label, 4 and a 40 px field, 12 apart; 8 between the section's rows); 16; the
+/// or 저장소 and 기본 브랜치 as rows of their own when `stacked`, each a 12/18 label, 4 and a
+/// 40 px field, 12 apart; 8 between the section's rows); 16; the
 /// 팀 캐릭터 section (its rule, 8, the title, a two-line hint and the picker for `columns`, 8
 /// apart); each of `notes` (the branch hint, errors, the failure) at two lines and 16 above.
 /// An estimate, not a measurement: TODO(compose-rust#778) a body capped at the room would make
 /// it unnecessary.
-pub(crate) fn new_project_body_estimate(columns: usize, notes: usize) -> f32 {
+pub(crate) fn new_project_body_estimate(columns: usize, stacked: bool, notes: usize) -> f32 {
     let field_row = 18.0 + 4.0 + H_BTN;
     let note = SP[3] + 2.0 * 18.0;
-    let basic = 22.0 + SP[1] + 18.0 + SP[1] + field_row + SP[2] + field_row;
+    let field_rows = if stacked { 3.0 } else { 2.0 };
+    let basic = 22.0 + SP[1] + 18.0 + SP[1] + field_rows * field_row + (field_rows - 1.0) * SP[2];
     let style = 1.0 + SP[1] + SP[1] + SP[1] + 22.0 + SP[1] + 2.0 * 18.0 + SP[1] + super::characters::style_picker_height(columns);
     SP[4] * 2.0 + basic + SP[3] + style + notes as f32 * note
 }
@@ -1919,6 +1979,18 @@ fn DangerRowView(row: &crate::ui::project::DangerRow, enabled: bool, on_click: i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l10_4_project_ide_chooser_hangs_from_the_ide_button() {
+        let src = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        let ide = src.split("fn IdeMenu(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(ide.contains("PopoverMenu(") && ide.contains("PopKind::Drop") && ide.contains("PopoverAlign::End"));
+        assert!(ide.contains("IDE_MENU_HEAD") && ide.contains("ide_pop_rows(&choices, remembered)"));
+        // The chevron stands as high as the 40 dp button, so the menu hangs 6 below both.
+        assert!(ide.contains("IdeChevronSized(open.clone(), false, H_BTN)"));
+        assert_eq!(H_BTN, 40.0);
+        assert!(!src.contains("OptionSheet("), "no centred option sheet is left on the project screen");
+    }
     use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
     use compose_rust::{Host, Recomposer};
 
@@ -2007,6 +2079,40 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn fr_l26_strip_arrows_are_named_for_assistive_technology() {
+        // #671: `Modifier::label` sends the name as the node's accessible name.
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let scroll = cu::remember_scroll_state();
+                StripArrow(ICON_ARROW_LEFT_SVG, crate::ui::cr::a11y::SCROLL_LEFT, -1.0, &scroll, 500.0);
+                StripArrow(ICON_ARROW_RIGHT_SVG, crate::ui::cr::a11y::SCROLL_RIGHT, 1.0, &scroll, 500.0);
+            }))
+        });
+        let all = texts(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+        for want in ["왼쪽으로 스크롤", "오른쪽으로 스크롤"] {
+            assert!(all.iter().any(|t| t == want), "missing the name {want}: {all:?}");
+        }
+    }
+
+    #[test]
+    fn fr_l26_strip_arrow_state_comes_from_the_scroll_state() {
+        let src = include_str!("project.rs");
+        let src = &src[..src.find("#[cfg(test)]").unwrap()];
+        let arrow = &src[src.find("fn StripArrow(").unwrap()..];
+        let arrow = &arrow[..arrow.find("\n}\n").unwrap()];
+        // The arrow reads the state itself, at composition and again at the press.
+        assert!(arrow.contains("let enabled = strip_arrow_enabled(scroll.offset(), scroll.max_offset(), dir);"));
+        assert!(arrow.contains("let (offset, max) = (s.offset(), s.max_offset());"));
+        assert!(arrow.contains(".disabled(!enabled)"));
+        let strip = &src[src.find("fn ComputerStrip(").unwrap()..src.find("fn StripArrow(").unwrap()];
+        assert!(!strip.contains("scroll.offset()"), "the strip keeps no offset from composition");
+        // The open toolkit gaps cite their compose-rust issues.
+        assert!(strip.contains("TODO(compose-rust#817)") && strip.contains("TODO(compose-rust#818)"));
+        assert!(!strip.contains("TODO(compose-rust, #671)") && !arrow.contains("TODO("));
     }
 
     #[test]
@@ -2216,6 +2322,70 @@ mod tests {
         assert!(style < style_hint, "{texts:?}");
     }
 
+    /// The new-project sheet at a window size: each node's widget and parent, and each text's node.
+    fn new_project_tree(size: Option<(f32, f32)>) -> (std::collections::HashMap<u32, (String, Option<u32>)>, Vec<(String, u32)>) {
+        crate::ui::window_size::set_opened_for_test(size);
+        let mut host = Host::new(|| Box::new(Recomposer::new(new_project_sheet_open)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        crate::ui::window_size::set_opened_for_test(None);
+        let mut nodes = std::collections::HashMap::new();
+        let mut texts = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::Create { node_id, widget } => {
+                    nodes.insert(*node_id, (format!("{widget:?}"), None));
+                }
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    if let Some(n) = nodes.get_mut(node_id) {
+                        n.1 = Some(*parent_id);
+                    }
+                }
+                Mutation::SetProp { node_id, value: PropertyValue::String(t), .. } => texts.push((t.to_string(), *node_id)),
+                _ => {}
+            }
+        }
+        (nodes, texts)
+    }
+
+    /// The widget of the nearest node that holds both texts.
+    fn nearest_shared(nodes: &std::collections::HashMap<u32, (String, Option<u32>)>, texts: &[(String, u32)], a: &str, b: &str) -> String {
+        let chain = |want: &str| {
+            let mut at = texts.iter().find(|(t, _)| t == want).map(|(_, id)| *id);
+            assert!(at.is_some(), "no {want}: {texts:?}");
+            let mut out = Vec::new();
+            while let Some(id) = at {
+                out.push(id);
+                at = nodes.get(&id).and_then(|n| n.1);
+            }
+            out
+        };
+        let (ca, cb) = (chain(a), chain(b));
+        let shared = ca.iter().find(|id| cb.contains(id)).expect("one tree");
+        nodes[shared].0.clone()
+    }
+
+    #[test]
+    fn fr_l26_1_new_project_fields_stack_at_560_and_below() {
+        // `.ps-grid`: two columns, one at 560 px and below. At 390 the app kept 저장소 and
+        // 기본 브랜치 side by side (r7 capture `project-sheet-new-390`), the mockup stacks them.
+        assert!(!new_project_fields_stacked(1440.0));
+        assert!(!new_project_fields_stacked(561.0));
+        assert!(new_project_fields_stacked(560.0));
+        assert!(new_project_fields_stacked(390.0));
+        assert!(!new_project_fields_stacked(0.0), "an unreported width is not a phone");
+        let _guard = crate::services::test_guard();
+        let (nodes, texts) = new_project_tree(Some((1440.0, 900.0)));
+        assert_eq!(nearest_shared(&nodes, &texts, "저장소", "기본 브랜치"), "Row", "side by side at 1440");
+        assert_eq!(nearest_shared(&nodes, &texts, "이름", "저장소"), "Column");
+        assert!(texts.iter().any(|(t, _)| t == NEW_NAME_HINT), "the mockup's name hint: {texts:?}");
+        assert_eq!(NEW_NAME_HINT, "예: darkpyonix-docs");
+        let (nodes, texts) = new_project_tree(Some((390.0, 844.0)));
+        assert_eq!(nearest_shared(&nodes, &texts, "저장소", "기본 브랜치"), "Column", "stacked at 390");
+        for want in ["이름", "저장소", "기본 브랜치", "github.com/...", "develop"] {
+            assert!(texts.iter().any(|(t, _)| t == want), "{want}: {texts:?}");
+        }
+    }
+
     #[test]
     fn fr_l32_1_add_computer_takes_its_content_height_in_the_bottom_sheet() {
         // #876: at 390 the sheet started at y 127 with its content ending at y 465, because the
@@ -2249,17 +2419,19 @@ mod tests {
         let room = |w: f32, h: f32| sheet_body_max_height(w, h, false, SHEET_HEADER_CHROME_H).min(900.0);
         // 40; 기본: 22 + 8 + 18 + 8 + 62 + 12 + 62; 16; 팀 캐릭터: 1 + 8 + 8 + 8 + 22 + 8 + 36 + 8
         // and the picker (two rows of 162 and 8).
-        assert_eq!(new_project_body_estimate(3, 0), 40.0 + 192.0 + 16.0 + 99.0 + 332.0);
-        assert_eq!(new_project_body_estimate(3, 1) - new_project_body_estimate(3, 0), 52.0);
+        assert_eq!(new_project_body_estimate(3, false, 0), 40.0 + 192.0 + 16.0 + 99.0 + 332.0);
+        // Stacked: one more 62 px field row and its 12 px gap.
+        assert_eq!(new_project_body_estimate(3, true, 0) - new_project_body_estimate(3, false, 0), 74.0);
+        assert_eq!(new_project_body_estimate(3, false, 1) - new_project_body_estimate(3, false, 0), 52.0);
         // 1440 x 900: three columns, the body fits with room for two notes (#878: a fixed
         // body left about 170 px blank above the footer).
         assert_eq!(style_picker_columns(1440.0), 3);
         assert_eq!(room(1440.0, 900.0), 900.0 - 32.0 - 61.0);
-        assert!(new_project_body_estimate(3, 2) <= room(1440.0, 900.0));
+        assert!(new_project_body_estimate(3, false, 2) <= room(1440.0, 900.0));
         // 390 x 844: two columns of three rows do not fit the 85 percent sheet; it scrolls at a
         // fixed height so the footer stays on screen (FR-L32.1).
         assert_eq!(style_picker_columns(390.0), 2);
-        assert!(new_project_body_estimate(2, 1) > room(390.0, 844.0));
+        assert!(new_project_body_estimate(2, true, 1) > room(390.0, 844.0));
         let body = new_project_sheet_source();
         assert!(body.contains("if new_body_fits {\n                cu::Column().modifier(Modifier::new().fill_max_width()).content(new_body);"), "{body}");
     }
@@ -2300,6 +2472,55 @@ mod design_review_tests {
         assert!(room < sub);
         assert!(head.contains("cu::Row().modifier(Modifier::new().fill_max_width()).content(titles);"));
         assert!(!head.contains("width(PHONE_MENU_ROOM)"), "no spacer beside the whole column");
+    }
+
+    #[test]
+    fn fr_l27_7_phone_header_buttons_sit_at_the_right() {
+        // Review row F6: mockup x 213..374 of a 390 window, the app drew them at x 16..144.
+        let src = source();
+        let head = &src[src.find("pub fn HeaderGap(").unwrap()..];
+        let head = &head[..head.find("\n}\n").unwrap()];
+        let at_end = head.find("if end {").expect("the end branch");
+        let spacer = head[at_end..].find("cu::Spacer().modifier(Modifier::new().weight(1.0));").expect("a spacer before the actions");
+        let actions = head[at_end..].find("trailing();").expect("the actions");
+        assert!(spacer < actions, "the spacer comes first, so the actions end at the right edge");
+        // Only the files screen on a phone asks for it; `Header` keeps the left.
+        assert!(src.contains("HeaderGap(title, sub, compact, compact, 0.0, false, trailing)"));
+        let files = include_str!("files.rs");
+        assert!(files.contains("compact, w <= 900.0, 6.0, compact, || {"));
+    }
+
+    /// The right-aligned form composes and sends the same texts as the left one. Where the
+    /// actions land is a layout result, so a capture checks it (files, 390).
+    #[test]
+    fn fr_l27_7_end_header_still_sends_title_subtitle_and_actions() {
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+        use compose_rust::{Host, Recomposer};
+        let _guard = crate::services::test_guard();
+        let texts = |end: bool| -> Vec<String> {
+            let mut host = Host::new(move || {
+                Box::new(Recomposer::new(move || {
+                    HeaderGap("파일", "설명", true, true, 6.0, end, || {
+                        Label("ACTION", Fs::Sm, Weight::Medium, None, Some(1));
+                    });
+                }))
+            });
+            decode_batch(host.rebuild().expect("rebuild"))
+                .expect("decode")
+                .iter()
+                .filter_map(|m| match m {
+                    Mutation::SetProp { value: PropertyValue::String(s), .. } => Some(s.to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Both forms still send the title, the subtitle and the actions.
+        for end in [false, true] {
+            let all = texts(end);
+            for want in ["파일", "설명", "ACTION"] {
+                assert!(all.iter().any(|t| t == want), "end={end} lost {want}: {all:?}");
+            }
+        }
     }
 
     #[test]

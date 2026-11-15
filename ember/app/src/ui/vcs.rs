@@ -1726,9 +1726,9 @@ pub fn commit_action_key(sha: &str, action: CommitAction) -> usize {
 pub fn commit_action_branch_line(_action: CommitAction, branch: &str) -> String {
     let branch = branch.trim();
     if branch.is_empty() {
-        "현재 브랜치에 새 커밋을 만듭니다".to_string()
+        "현재 브랜치에 새 커밋을 만듭니다 (터미널에서 다른 git 작업을 동시에 시작하지 마세요)".to_string()
     } else {
-        format!("현재 브랜치 {branch}에 새 커밋을 만듭니다")
+        format!("현재 브랜치 {branch}에 새 커밋을 만듭니다 (터미널에서 다른 git 작업을 동시에 시작하지 마세요)")
     }
 }
 
@@ -6143,8 +6143,14 @@ mod commit_detail_tests {
 
     #[test]
     fn fr_g15_the_armed_action_names_the_branch_that_gets_the_commit() {
-        assert_eq!(commit_action_branch_line(CommitAction::Revert, "develop"), "현재 브랜치 develop에 새 커밋을 만듭니다");
-        assert_eq!(commit_action_branch_line(CommitAction::CherryPick, " "), "현재 브랜치에 새 커밋을 만듭니다");
+        assert_eq!(
+            commit_action_branch_line(CommitAction::Revert, "develop"),
+            "현재 브랜치 develop에 새 커밋을 만듭니다 (터미널에서 다른 git 작업을 동시에 시작하지 마세요)"
+        );
+        assert_eq!(
+            commit_action_branch_line(CommitAction::CherryPick, " "),
+            "현재 브랜치에 새 커밋을 만듭니다 (터미널에서 다른 git 작업을 동시에 시작하지 마세요)"
+        );
         assert_eq!(commit_applied_notice(CommitAction::CherryPick, "feat/x", "1234567890"), "feat/x에 새 커밋 1234567을 만들었습니다");
     }
 

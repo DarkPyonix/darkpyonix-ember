@@ -53,8 +53,8 @@ use super::characters::{CharState, Character};
 use super::compat::Spinner;
 use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
-    AppButton, BackButton, ButtonKind, Clickable, CloseButton, NamedClickable, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
-    FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, SearchField, Select, SheetFooter, Txt,
+    AppButton, BackButton, ButtonKind, Clickable, CloseButton, NamedClickable, NameThenPill, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
+    FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu, SearchField, Select, SheetFooter, Txt,
     SEARCH_FIELD_H_COMPACT,
 };
 use super::conversation::{ConversationView, ICON_SEND_SVG, ICON_TERMINAL_SVG, TranscriptRow, tail_start_index};
@@ -95,7 +95,7 @@ const MODEL_LOCKED: &str = "실행 중인 세션의 모델은 바꿀 수 없습�
 const NO_SESSION: &str = "세션이 없습니다";
 const TIMELINE_TITLE: &str = "에이전트 간 통신";
 use crate::ui::session::{
-    ComputerHost, WebPagesLoad, WebTap, computer_host, timeline_summary, web_menu_lines, web_pages_from, web_tap,
+    ComputerHost, WebPagesLoad, WebTap, computer_host, timeline_summary, web_pages_from, web_tap,
 };
 
 const POPUP_W: f32 = 280.0;
@@ -339,12 +339,19 @@ pub fn ModelChip(session: &str, compact_label: bool) {
     });
 }
 
-/// The permission mode chip of a composer (`.pickchip.modechip`).
+/// The permission mode chip of a composer (`.pickchip.modechip`). It opens the permission
+/// picker as a popover under the chip (FR-L16, FR-L10.4, #888, mockup `.mp-pop.mp-mode`): the
+/// "권한 모드 · harness" head, then one row per mode with its shield (a warning triangle in red on
+/// bypass), title, description and a check on the current one; at 560 and below a bottom sheet.
+/// A running session can switch only between ask and bypass; the other rows carry a 준비 중입니다
+/// pill and say so when tapped. `EMBER_CR_SESSION_MENU=mode` opens it at start, for captures.
 pub fn ModeChip(session: &str, _compact_label: bool) {
     let ui = shared_ui().clone();
     let p = ember_theme().palette;
     let sid = session.to_string();
-    let mode_menu = remember_with_key(format!("{sid}:mode"), || mutable_state_of(false));
+    let mode_menu = remember_with_key(format!("{sid}:mode"), || {
+        mutable_state_of(std::env::var("EMBER_CR_SESSION_MENU").as_deref() == Ok("mode"))
+    });
 
     let (agent, approve_all) = {
         let _ = ui.live.launcher.get();
@@ -369,79 +376,89 @@ pub fn ModeChip(session: &str, _compact_label: bool) {
     } else {
         (p.surface_2, p.text_2)
     };
+    let now = current_mode(approve_all);
+    let pop_rows: Vec<PopRow> = rows
+        .iter()
+        .map(|(m, settable)| PopRow {
+            icon: Some(if m.is_bypass() { super::home::ICON_WARN } else { ICON_SHIELD_SVG }),
+            title: m.label().to_string(),
+            description: Some(m.description().to_string()),
+            badge: (!*settable).then(|| (SOON.to_string(), PillTone::Grey)),
+            chosen: *m == now,
+            danger: m.is_bypass(),
+            ..Default::default()
+        })
+        .collect();
+    let head = crate::ui::home::Harness::from_kind(&agent)
+        .map(crate::ui::home::mode_header)
+        .unwrap_or_else(|| format!("권한 모드 \u{b7} {agent}"));
 
-    cu::Box().content(|| {
-        let md = mode_menu.clone();
-        Clickable(
-            Modifier::new()
-                .height(30.0)
-                .background(paint(bg))
-                .shape_role(ShapeRole::Full),
-            Alignment::Center,
-            move || md.set(true),
-            move || {
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .spacing(5.0)
-                    .content(|| {
-                        cu::Spacer().modifier(Modifier::new().width(4.0));
-                        NavIcon(ICON_SHIELD_SVG, fg.to_argb(), 13.0);
-                        Label(
-                            mode_text,
-                            Fs::Xs,
-                            Weight::Medium,
-                            Some(paint(fg)),
-                            Some(1),
-                        );
-                        NavIcon(ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 12.0);
-                        cu::Spacer().modifier(Modifier::new().width(4.0));
-                    });
-            },
-        );
-
-        let mode_labels: Vec<String> = rows
-            .iter()
-            .map(|(m, settable)| {
-                if *settable {
-                    m.label().to_string()
-                } else {
-                    format!("{} ({SOON})", m.label())
-                }
-            })
-            .collect();
-        let chosen = rows
-            .iter()
-            .position(|(m, _)| *m == current_mode(approve_all));
-        let md_d = mode_menu.clone();
-        let sid_m = sid.clone();
-        let rows_c = rows.clone();
-        OptionSheet(
-            mode_menu.get(),
-            &mode_labels,
-            chosen,
-            POPUP_W,
-            move || md_d.set(false),
-            move |idx| {
-                let Some((m, settable)) = rows_c.get(idx).copied() else {
-                    return;
-                };
-                if !settable {
-                    notice::post(SOON);
-                    return;
-                }
-                let s_id = sid_m.clone();
-                let enable = m.is_bypass();
-                run_shared(
-                    async move { services().set_approve_all(&s_id, enable).await },
-                    |r| {
-                        if let Err(e) = r {
-                            notice::post(format!("모드를 바꾸지 못했습니다: {e}"));
-                        }
-                    },
-                );
-            },
-        );
-    });
+    let md_d = mode_menu.clone();
+    let sid_m = sid.clone();
+    let rows_c = rows.clone();
+    let md = mode_menu.clone();
+    let expanded = mode_menu.get();
+    PopoverMenu(
+        mode_menu.get(),
+        PopMenu {
+            name: super::a11y::MODE_PICKER,
+            kind: PopKind::Mode,
+            head: &head,
+            sub: None,
+            rows: &pop_rows,
+            align: compose_rust::PopoverAlign::Start,
+        },
+        move || md_d.set(false),
+        move |idx| {
+            let Some((m, settable)) = rows_c.get(idx).copied() else {
+                return;
+            };
+            if !settable {
+                notice::post(SOON);
+                return;
+            }
+            let s_id = sid_m.clone();
+            let enable = m.is_bypass();
+            run_shared(
+                async move { services().set_approve_all(&s_id, enable).await },
+                |r| {
+                    if let Err(e) = r {
+                        notice::post(format!("모드를 바꾸지 못했습니다: {e}"));
+                    }
+                },
+            );
+        },
+        move || {
+            Clickable(
+                Modifier::new()
+                    .height(30.0)
+                    .background(paint(bg))
+                    .shape_role(ShapeRole::Full)
+                    .expanded(expanded),
+                Alignment::Center,
+                move || md.set(!md.get_untracked()),
+                move || {
+                    cu::Row()
+                        .alignment(Alignment::CenterStart)
+                        .spacing(5.0)
+                        .content(|| {
+                            cu::Spacer().modifier(Modifier::new().width(4.0));
+                            NavIcon(ICON_SHIELD_SVG, fg.to_argb(), 13.0);
+                            Label(
+                                mode_text,
+                                Fs::Xs,
+                                Weight::Medium,
+                                Some(paint(fg)),
+                                Some(1),
+                            );
+                            NavIcon(ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 12.0);
+                            cu::Spacer().modifier(Modifier::new().width(4.0));
+                        });
+                },
+            );
+        },
+        None,
+    );
 }
 
 /// The model and mode chips of a composer (FR-L15, FR-L16).
@@ -505,14 +522,20 @@ pub fn ide_split_style(p: &Palette) -> IdeSplitStyle {
 /// Its accessible name is "다른 IDE 선택" (compose-rust v0.0.7, #460), and it says whether the
 /// chooser is open. Touch target 26x32, under 44 px: #323.
 pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
+    IdeChevronSized(open, on_ink, 32.0);
+}
+
+/// [`IdeChevron`] `height` high, to stand as high as the button beside it: the project header's
+/// 40 dp 열기 button, so its menu hangs 6 below both (review r8: 10 below the 32 chevron).
+pub fn IdeChevronSized(open: MutableState<bool>, on_ink: bool, height: f32) {
     let p = ember_theme().palette;
     let (tint, m) = if on_ink {
-        (ide_split_style(p).ink.to_argb(), Modifier::new().size(26.0, 32.0))
+        (ide_split_style(p).ink.to_argb(), Modifier::new().size(26.0, height))
     } else {
         (
             p.text_2.to_argb(),
             Modifier::new()
-                .size(26.0, 32.0)
+                .size(26.0, height)
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
                 .shape_role(ShapeRole::Full),
@@ -527,7 +550,44 @@ pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
     );
 }
 
-/// "IDE 열기" split button with the three-entry chooser (`.idesplit`, FR-L7).
+/// The IDE menu's rows (session and project): the code glyph, the name, what the client does
+/// with it, and the fill and check on the current IDE ([`crate::ui::session::current_ide`]: Ember
+/// when none is remembered).
+pub fn ide_pop_rows(choices: &[crate::ui::session::IdeChoice], remembered: Option<IdeKind>) -> Vec<PopRow> {
+    let current = crate::ui::session::current_ide(remembered);
+    choices
+        .iter()
+        .map(|c| PopRow {
+            icon: Some(ICON_CODE_SVG),
+            title: c.label.to_string(),
+            description: Some(crate::ui::session::ide_description(c.kind).to_string()),
+            chosen: c.kind == current,
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// Reads the name of the session's computer into `into` (the demo's own computer in the demo),
+/// for the IDE menu's `computer:~/project` line. A failed read leaves it unset.
+pub(crate) fn load_session_computer(session: String, into: MutableState<Option<String>>) {
+    if services().demo.is_some() {
+        into.set(Some("mac-mini".to_string()));
+        return;
+    }
+    run_shared(
+        async move { services().server.session_computer(&session).await.map_err(|e| e.to_string()) },
+        move |r: Result<CurrentComputer, String>| {
+            if let Ok(c) = r {
+                into.set(Some(c.computer.name));
+            }
+        },
+    );
+}
+
+/// "IDE 열기" split button with the three-entry chooser (`.idesplit`, FR-L7), a menu under the
+/// split button (FR-L10.4, #888, mockup `ideMenu`): "어느 IDE로 열까요" over the session's folder,
+/// one row per IDE with the code glyph, its name, what it does and a check on the remembered one.
+/// Not built: the VS Code runtime switch and the OSE pill (no runtime preference exists).
 pub fn IdeMenu(session: &str) {
     let ui = shared_ui().clone();
     let window = current_window_size();
@@ -537,14 +597,20 @@ pub fn IdeMenu(session: &str) {
     let ide = remember_with_key(sid.clone(), || {
         mutable_state_of(None::<Result<IdeLaunch, String>>)
     });
-    let open = remember_with_key(sid.clone(), || mutable_state_of(false));
+    // `EMBER_CR_SESSION_MENU=ide` opens the chooser at start, for captures.
+    let open = remember_with_key(sid.clone(), || {
+        mutable_state_of(std::env::var("EMBER_CR_SESSION_MENU").as_deref() == Ok("ide"))
+    });
     let is_phone = window.width_dp <= 560.0;
     let show_cur = window.width_dp >= 1280.0;
 
+    let computer = remember_with_key(sid.clone(), || mutable_state_of(None::<String>));
     {
         let sid_load = sid.clone();
         let ide_load = ide.clone();
+        let computer_load = computer.clone();
         launched_effect(sid.clone(), move || async move {
+            load_session_computer(sid_load.clone(), computer_load);
             if services().demo.is_some() {
                 let (project, cwd) = services()
                     .client
@@ -580,108 +646,121 @@ pub fn IdeMenu(session: &str) {
     let choices = ide_choices(remembered);
     let cur_label = remembered.map(ide_label);
 
-    cu::Box().content(|| {
-        let o = open.clone();
-        let o_main = open.clone();
-        let ui_main = ui.clone();
-        let launch_main = ide.get();
-        if is_phone {
-            let o_chev = open.clone();
-            cu::Row()
-                .alignment(Alignment::Center)
-                .spacing(4.0)
-                .content(move || {
-                    IdeChevron(o_chev, false);
-                    Clickable(
+    let cwd = services()
+        .client
+        .read(|s| s.session(&sid).map(|v| v.record.cwd.clone()))
+        .unwrap_or_default();
+    // `computer:~/project` (mockup `ideMenu`), not the raw folder (review r8).
+    let ide_sub = crate::ui::session::ide_menu_subtitle(computer.get().as_deref(), &cwd);
+    let rows = ide_pop_rows(&choices, remembered);
+    let o_d = open.clone();
+    let choices_c = choices.clone();
+    let ui_c = ui.clone();
+    let launch_now = ide.get();
+    // The menu hangs from the whole split button, lined up with its end (`.sdrop{right:0}`).
+    PopoverMenu(
+        open.get(),
+        PopMenu {
+            name: super::a11y::IDE_PICKER,
+            kind: PopKind::Drop,
+            head: crate::ui::session::IDE_MENU_HEAD,
+            sub: ide_sub.as_deref(),
+            rows: &rows,
+            align: compose_rust::PopoverAlign::End,
+        },
+        move || o_d.set(false),
+        move |idx| {
+            if let Some(c) = choices_c.get(idx) {
+                launch_ide_shared(&ui_c, c.kind, launch_now.clone());
+            }
+        },
+        move || {
+            let o = open.clone();
+            let o_main = open.clone();
+            let ui_main = ui.clone();
+            let launch_main = ide.get();
+            if is_phone {
+                let o_chev = open.clone();
+                cu::Row()
+                    .alignment(Alignment::Center)
+                    .spacing(4.0)
+                    .content(move || {
+                        IdeChevron(o_chev, false);
+                        Clickable(
+                            Modifier::new()
+                                .size(32.0, 32.0)
+                                .background(paint(split.fill))
+                                .border(1.0, paint(split.border))
+                                .shape_role(ShapeRole::Full),
+                            Alignment::Center,
+                            move || {
+                                ide_main_click(remembered, &o, |kind| {
+                                    launch_ide_shared(&ui_main, kind, launch_main.clone())
+                                })
+                            },
+                            || NavIcon(ICON_CODE_SVG, split.ink.to_argb(), 15.0),
+                        );
+                    });
+            } else {
+                cu::Row()
+                    .alignment(Alignment::Center)
+                    .modifier(
                         Modifier::new()
-                            .size(32.0, 32.0)
+                            .height(32.0)
                             .background(paint(split.fill))
                             .border(1.0, paint(split.border))
                             .shape_role(ShapeRole::Full),
-                        Alignment::Center,
-                        move || {
-                            ide_main_click(remembered, &o, |kind| {
-                                launch_ide_shared(&ui_main, kind, launch_main.clone())
-                            })
-                        },
-                        || NavIcon(ICON_CODE_SVG, split.ink.to_argb(), 15.0),
-                    );
-                });
-        } else {
-            cu::Row()
-                .alignment(Alignment::Center)
-                .modifier(
-                    Modifier::new()
-                        .height(32.0)
-                        .background(paint(split.fill))
-                        .border(1.0, paint(split.border))
-                        .shape_role(ShapeRole::Full),
-                )
-                .content(move || {
-                    Clickable(
-                        Modifier::new().fill_max_height(),
-                        Alignment::Center,
-                        move || {
-                            ide_main_click(remembered, &o_main, |kind| {
-                                launch_ide_shared(&ui_main, kind, launch_main.clone())
-                            })
-                        },
-                        move || {
-                            cu::Row()
-                                .alignment(Alignment::CenterStart)
-                                .spacing(6.0)
-                                .content(|| {
-                                    cu::Spacer().modifier(Modifier::new().width(6.0));
-                                    NavIcon(ICON_CODE_SVG, split.ink.to_argb(), 15.0);
-                                    Label(
-                                        "IDE 열기",
-                                        Fs::Sm,
-                                        Weight::Medium,
-                                        Some(paint(split.ink)),
-                                        Some(1),
-                                    );
-                                    if show_cur {
-                                        if let Some(cur_label) = cur_label {
-                                            Label(
-                                                cur_label,
-                                                Fs::Xs,
-                                                Weight::Regular,
-                                                Some(paint(split.ink)),
-                                                Some(1),
-                                            );
+                    )
+                    .content(move || {
+                        Clickable(
+                            Modifier::new().fill_max_height(),
+                            Alignment::Center,
+                            move || {
+                                ide_main_click(remembered, &o_main, |kind| {
+                                    launch_ide_shared(&ui_main, kind, launch_main.clone())
+                                })
+                            },
+                            move || {
+                                cu::Row()
+                                    .alignment(Alignment::CenterStart)
+                                    .spacing(6.0)
+                                    .content(|| {
+                                        cu::Spacer().modifier(Modifier::new().width(6.0));
+                                        NavIcon(ICON_CODE_SVG, split.ink.to_argb(), 15.0);
+                                        Label(
+                                            "IDE 열기",
+                                            Fs::Sm,
+                                            Weight::Medium,
+                                            Some(paint(split.ink)),
+                                            Some(1),
+                                        );
+                                        if show_cur {
+                                            if let Some(cur_label) = cur_label {
+                                                Label(
+                                                    cur_label,
+                                                    Fs::Xs,
+                                                    Weight::Regular,
+                                                    Some(paint(split.ink)),
+                                                    Some(1),
+                                                );
+                                            }
                                         }
-                                    }
-                                    cu::Spacer().modifier(Modifier::new().width(4.0));
-                                });
-                        },
-                    );
-                    cu::Box().modifier(
-                        Modifier::new()
-                            .size(1.0, 18.0)
-                            .background(paint(split.divider)),
-                    );
-                    IdeChevron(o, true);
-                });
-        }
+                                        cu::Spacer().modifier(Modifier::new().width(4.0));
+                                    });
+                            },
+                        );
+                        cu::Box().modifier(
+                            Modifier::new()
+                                .size(1.0, 18.0)
+                                .background(paint(split.divider)),
+                        );
+                        IdeChevron(o, true);
+                    });
+            }
 
-        let labels: Vec<String> = choices.iter().map(|c| c.label.to_string()).collect();
-        let o_d = open.clone();
-        let choices_c = choices.clone();
-        let ui_c = ui.clone();
-        let launch_now = ide.get();
-        OptionSheet(
-            open.get(),
-            &labels,
-            remembered.map(|_| 0),
-            POPUP_W,
-            move || o_d.set(false),
-            move |idx| {
-                if let Some(c) = choices_c.get(idx) {
-                    launch_ide_shared(&ui_c, c.kind, launch_now.clone());
-                }
-            },
-        );
-    });
+        },
+        None,
+    );
 }
 
 fn status_dot_color(s: LauncherStatus, p: &Palette) -> Color {
@@ -2488,19 +2567,19 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
                                             CharState::from_status(m.status),
                                             None,
                                         );
-                                        // The name takes the room left with an ellipsis, so
-                                        // the status pill and the panel button keep theirs (a
-                                        // long name pushed the button past the edge at 390).
-                                        cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
-                                            Label(
-                                                &m.accessible_name(),
-                                                Fs::Md,
-                                                Weight::Semibold,
-                                                Some(paint(p.text)),
-                                                Some(1),
-                                            );
-                                        });
-                                        Pill(st_txt, st_tone.into(), true);
+                                        // The status pill sits right after the name, as the
+                                        // mockup's; a long name is cut with an ellipsis so the
+                                        // pill and the panel button keep their room (a long name
+                                        // pushed the button past the edge at 390; review r8: a
+                                        // name filling the row pushed the pill to the far end).
+                                        NameThenPill(
+                                            &m.accessible_name(),
+                                            Fs::Md,
+                                            Weight::Semibold,
+                                            Some(paint(p.text)),
+                                            SP[1],
+                                            || Pill(st_txt, st_tone.into(), true),
+                                        );
                                     } else {
                                         cu::Spacer().modifier(Modifier::new().weight(1.0));
                                     }
@@ -3977,11 +4056,59 @@ fn ViewSeg(
 /// review B6); the label is the tooltip and the accessible name.
 pub const SESSION_HEADER_LABELS: bool = false;
 
+/// The 웹 페이지 button and its menu (FR-P7, FR-L10.4, #888, mockup `webMenu`): the globe with a
+/// chevron (`.btn.sm` with `I("globe")` and `.chev`, review SE3), and under it, lined up with its
+/// end, "웹 페이지 열기" and one row per listening port: the address in the mono face, the process
+/// (and why a port cannot be opened) below, and a green 감지됨 pill on a port that opens. A tap
+/// opens the address in the browser or says why it cannot. Not built: the member character on a
+/// row (ports carry no member), the computer subtitle (the list is read without its name), the
+/// port field and the tunnel hint (no direct-port open).
+fn WebMenu(open: bool, load: &WebPagesLoad, on_dismiss: impl FnMut() + Clone + 'static, on_open: impl FnMut() + 'static) {
+    let items = crate::ui::session::web_menu_items(load);
+    let rows: Vec<PopRow> = items
+        .iter()
+        .map(|w| PopRow {
+            title: w.title.clone(),
+            description: w.detail.clone(),
+            badge: w.detected.then(|| ("감지됨".to_string(), PillTone::Green)),
+            mono: w.mono,
+            ..Default::default()
+        })
+        .collect();
+    let load_now = load.clone();
+    PopoverMenu(
+        open,
+        PopMenu {
+            name: super::a11y::WEB_MENU,
+            kind: PopKind::Drop,
+            head: crate::ui::session::WEB_MENU_HEAD,
+            sub: None,
+            rows: &rows,
+            align: compose_rust::PopoverAlign::End,
+        },
+        on_dismiss,
+        move |idx| match web_tap(&load_now, idx) {
+            WebTap::Open(url) => {
+                if crate::ide::open_external(&url).is_err() {
+                    notice::post("브라우저를 열지 못했습니다");
+                }
+            }
+            WebTap::Say(text) => notice::post(text),
+            WebTap::Nothing => {}
+        },
+        move || ToolbarBtn(ICON_GLOBE_SVG, "웹 페이지", SESSION_HEADER_LABELS, true, Some(open), on_open),
+        None,
+    );
+}
+
+/// A header action: a named button (`label` is its name and its tooltip), and, when it opens a
+/// menu, whether that menu is open (`expanded`, FR-L10.4).
 fn ToolbarBtn(
     icon_svg: &'static str,
-    label: &str,
+    label: &'static str,
     show_label: bool,
     chevron: bool,
+    expanded: Option<bool>,
     on_click: impl FnMut() + 'static,
 ) {
     let p = ember_theme().palette;
@@ -3999,11 +4126,16 @@ fn ToolbarBtn(
             .border(1.0, paint(p.line))
             .shape_role(ShapeRole::Full)
     };
-    // The label is the tooltip (`title` in the mockup). v0.0.7: #417 fixed (pointer events reach
-    // the app); kept as is until checked on a display that the toolkit `Tooltip` shows on hover.
-    // Assistive technology reads it now.
+    // The label is the tooltip (`title` in the mockup) and the button's name. The tooltip sits
+    // inside the button: around it, the toolkit's `Tooltip` box carries the text as its own
+    // description and macOS read the control as static text (review r8; compose-rust
+    // `renderer/desktop/src/renderer/HostOverlay.kt` `HostTooltip`).
     let tip = lbl.clone();
-    cu::Tooltip(tip).content(move || Clickable(m, Alignment::Center, on_click, move || {
+    let m = match expanded {
+        Some(open) => m.expanded(open),
+        None => m,
+    };
+    NamedClickable(label, m, Alignment::Center, on_click, move || cu::Tooltip(tip).content(move || {
         if show_label || chevron {
             cu::Row()
                 .alignment(Alignment::CenterStart)
@@ -4834,12 +4966,13 @@ pub fn SessionScreen(focus: Option<String>) {
                                         // Icon-only 32 px buttons with tooltips at every width, as the
                                         // mockup's `.sesshead` (owner placement rule 2026-11-13, rule 6).
                                         let nm = new_member_open.clone();
-                                        ToolbarBtn(ICON_PLUS_SVG, "새 팀원", SESSION_HEADER_LABELS, false, move || nm.set(true));
+                                        ToolbarBtn(ICON_PLUS_SVG, "새 팀원", SESSION_HEADER_LABELS, false, None, move || nm.set(true));
                                         let vo = vcs_open.clone();
-                                        ToolbarBtn(ICON_GIT_SVG, "버전 관리", SESSION_HEADER_LABELS, false, move || vo.set(true));
+                                        ToolbarBtn(ICON_GIT_SVG, "버전 관리", SESSION_HEADER_LABELS, false, None, move || vo.set(true));
                                         let wm = open_web_menu.clone();
+                                        let wm_d = web_menu.clone();
                                         #[allow(clippy::redundant_closure)]
-                                        ToolbarBtn(ICON_GLOBE_SVG, "웹 페이지", SESSION_HEADER_LABELS, false, move || wm());
+                                        WebMenu(web_menu.get(), &web_pages.get(), move || wm_d.set(false), move || wm());
                                     }
                                     if let Some(t) = target.clone() {
                                         IdeMenu(&t);
@@ -4989,29 +5122,6 @@ pub fn SessionScreen(focus: Option<String>) {
                 super::vcs::VcsSheet(&current, vcs_open.get(), move || vo_d.set(false));
             }
 
-            // Web pages OptionSheet
-            {
-                let load_now = web_pages.get();
-                let web_opts = web_menu_lines(&load_now);
-                let wm_d = web_menu.clone();
-                OptionSheet(
-                    web_menu.get(),
-                    &web_opts,
-                    None,
-                    320.0,
-                    move || wm_d.set(false),
-                    move |idx| match web_tap(&load_now, idx) {
-                        WebTap::Open(url) => {
-                            if crate::ide::open_external(&url).is_err() {
-                                notice::post("브라우저를 열지 못했습니다");
-                            }
-                        }
-                        WebTap::Say(text) => notice::post(text),
-                        WebTap::Nothing => {}
-                    },
-                );
-            }
-
             // Project picker OptionSheet
             let proj_labels: Vec<String> = boxes.iter().map(|b| display_name(&b.id)).collect();
             let chosen_proj = boxes.iter().position(|b| b.id == current);
@@ -5047,12 +5157,90 @@ mod tests {
         assert!(!head.contains("ICON_MORE_H_SVG"));
         // Owner placement rule 2026-11-13 (rule 6): icon only at every width.
         assert!(!super::SESSION_HEADER_LABELS);
-        assert_eq!(head.matches(", SESSION_HEADER_LABELS, false, move ||").count(), 3);
+        assert_eq!(head.matches(", SESSION_HEADER_LABELS, false, None, move ||").count(), 2);
         assert!(!head.contains("show_btn_lbl"));
-        for icon in ["ICON_PLUS_SVG", "ICON_GIT_SVG", "ICON_GLOBE_SVG", "IdeMenu(&t)"] {
+        // The globe is the 웹 페이지 menu's control, a split with a chevron (review SE3, #888).
+        let web = src.split("fn WebMenu(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(web.contains("ToolbarBtn(ICON_GLOBE_SVG, \"웹 페이지\", SESSION_HEADER_LABELS, true, Some(open), on_open)"));
+        for icon in ["ICON_PLUS_SVG", "ICON_GIT_SVG", "WebMenu(", "IdeMenu(&t)"] {
             assert!(head.contains(icon), "{icon}");
         }
         assert!(!src.contains("more_menu"));
+    }
+
+    fn globe_semantics(expanded: Option<bool>) -> Vec<String> {
+        use compose_rust::protocol::{decode_batch, Mutation};
+        use compose_rust::{Host, Recomposer};
+        thread_local!(static EXPANDED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) });
+        EXPANDED.with(|e| e.set(expanded));
+        fn globe() {
+            ToolbarBtn(ICON_GLOBE_SVG, "웹 페이지", false, true, EXPANDED.with(|e| e.get()), || {});
+        }
+        let mut host = Host::new(|| Box::new(Recomposer::new(globe)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { modifier, .. } => Some(format!("{modifier:?}")),
+                Mutation::SetProp { property, value, .. } => Some(format!("{property:?}={value:?}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fr_l10_4_the_globe_is_a_named_button_that_says_whether_its_menu_is_open() {
+        let _guard = crate::services::test_guard();
+        let (closed, open, plain) = (globe_semantics(Some(false)), globe_semantics(Some(true)), globe_semantics(None));
+        let sem = |all: &[String]| all.iter().find(|m| m.starts_with("Semantics")).cloned().expect("semantics");
+        assert!(sem(&closed).contains("Button"), "{closed:?}");
+        assert!(closed.iter().any(|p| p.contains("웹 페이지") && !p.starts_with("Text=")), "named: {closed:?}");
+        // Collapsed, expanded and (for a plain action) neither are three different states.
+        assert_ne!(sem(&closed), sem(&open));
+        assert_ne!(sem(&closed), sem(&plain));
+        assert_ne!(sem(&open), sem(&plain));
+    }
+
+    #[test]
+    fn fr_l10_4_the_ide_menu_always_marks_the_current_ide() {
+        use crate::ide::IdeKind;
+        use crate::ui::session::{current_ide, ide_choices};
+        // A fresh profile: Ember's own editor is the current one (mockup `on = s.ide || "ember"`).
+        assert_eq!(current_ide(None), IdeKind::Ember);
+        let rows = ide_pop_rows(&ide_choices(None), None);
+        let chosen: Vec<&str> = rows.iter().filter(|r| r.chosen).map(|r| r.title.as_str()).collect();
+        assert_eq!(chosen, ["Ember 에디터"]);
+        // A remembered IDE is first and the only one marked.
+        let rows = ide_pop_rows(&ide_choices(Some(IdeKind::VsCode)), Some(IdeKind::VsCode));
+        assert_eq!((rows[0].title.as_str(), rows[0].chosen), ("VS Code", true));
+        assert_eq!(rows.iter().filter(|r| r.chosen).count(), 1);
+        // Both IDE menus build their rows here.
+        let project = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(project.contains("crate::ui::cr::session::ide_pop_rows(&choices, remembered)"));
+    }
+
+    #[test]
+    fn fr_l10_4_session_pickers_hang_from_their_controls() {
+        let src = include_str!("session.rs").split("mod tests {").next().unwrap();
+        let body = |name: &str| -> String {
+            let rest = src.split(&format!("fn {name}(")).nth(1).unwrap_or_else(|| panic!("no fn {name}"));
+            rest.split("\nfn ").next().unwrap().split("\npub fn ").next().unwrap().to_string()
+        };
+        let mode = body("ModeChip");
+        assert!(mode.contains("PopoverMenu(") && mode.contains("PopKind::Mode"), "the permission chip opens a popover");
+        assert!(mode.contains("super::home::ICON_WARN") && mode.contains("danger: m.is_bypass()"), "bypass is the red warning row");
+        assert!(mode.contains(".expanded(expanded)"), "the chip says whether the menu is open");
+        let ide = body("IdeMenu");
+        assert!(ide.contains("PopoverMenu(") && ide.contains("PopKind::Drop") && ide.contains("PopoverAlign::End"));
+        assert!(ide.contains("IDE_MENU_HEAD") && ide.contains("ide_pop_rows(&choices, remembered)"));
+        let web = body("WebMenu");
+        assert!(web.contains("PopoverMenu(") && web.contains("WEB_MENU_HEAD") && web.contains("PillTone::Green"));
+        // The globe is a named button that says whether its menu is open (review r8).
+        assert!(web.contains("ToolbarBtn(ICON_GLOBE_SVG, \"웹 페이지\", SESSION_HEADER_LABELS, true, Some(open), on_open)"), "{web}");
+        for b in [&mode, &ide, &web] {
+            assert!(!b.contains("OptionSheet("), "no centred option sheet is left in {b:.40}");
+        }
+        assert!(!src.contains("// Web pages OptionSheet"));
     }
 
     #[test]

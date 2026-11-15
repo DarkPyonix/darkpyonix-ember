@@ -1,0 +1,52 @@
+{
+  "id": 3,
+  "result": {
+    "data": [
+      {
+        "name": "ember-channels",
+        "runtimeStatus": null,
+        "pluginId": null,
+        "httpOrigin": null,
+        "serverInfo": {
+          "name": "ember-channels",
+          "title": null,
+          "version": "0",
+          "description": null,
+          "icons": null,
+          "websiteUrl": null
+        },
+        "serverCapabilities": {
+          "tools": {}
+        },
+        "toolListMeta": null,
+        "tools": {
+          "channel_post": {
+            "name": "channel_post",
+            "description": "probe",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "channel": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "channel",
+                "text"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "toolsError": null,
+        "resources": [],
+        "resourceTemplates": [],
+        "authStatus": "unsupported"
+      }
+    ],
+    "nextCursor": null
+  }
+}

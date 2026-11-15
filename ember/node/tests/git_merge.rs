@@ -135,6 +135,9 @@ async fn fr_g17_commit_after_resolving_makes_a_two_parent_merge_commit() {
     let head = conflicting_merge(&repo);
     let feat = git(&repo, &["rev-parse", "feat/x"]);
     call(&client, &base, "resolve", json!({"repo": repo, "path": "a", "content": "1\nboth\n3\n"})).await;
+    // Git's default merge commit includes any other staged changes in the index (noted in the UI by MERGE_COMMIT_NOTE).
+    std::fs::write(repo.join("extra"), "staged alongside\n").unwrap();
+    git(&repo, &["add", "extra"]);
     let (status, v) = call(&client, &base, "merge/commit", json!({"repo": repo, "confirm": true})).await;
     assert_eq!(status, 200, "{v}");
     let new_sha = v["new_sha"].as_str().unwrap().to_owned();
@@ -142,6 +145,7 @@ async fn fr_g17_commit_after_resolving_makes_a_two_parent_merge_commit() {
     assert_eq!(git(&repo, &["rev-list", "--parents", "-n", "1", "HEAD"]), format!("{new_sha} {head} {feat}"));
     assert!(!repo.join(".git/MERGE_HEAD").exists());
     assert_eq!(git(&repo, &["status", "--porcelain"]), "");
+    assert_eq!(git(&repo, &["show", "HEAD:extra"]), "staged alongside");
     let (_, s) = call(&client, &base, "merge", json!({"repo": repo})).await;
     assert_eq!(s["in_progress"], false);
 }

@@ -212,10 +212,12 @@ pub const CROWN_ID: &str = "id=\"crown\"";
 // Seed
 // ---------------------------------------------------------------------------------------------
 
-/// FNV-1a over the UTF-8 bytes.
+/// FNV-1a over the UTF-16 code units, as the mockup's `hash` (`chars.js`, `charCodeAt`): a
+/// Korean name then seeds the same drawing as in the mockup (review row CR2). ASCII names hash
+/// as they did over UTF-8 bytes.
 pub fn seed_hash(s: &str) -> u32 {
     let mut h: u32 = 2166136261;
-    for b in s.bytes() {
+    for b in s.encode_utf16() {
         h ^= u32::from(b);
         h = h.wrapping_mul(16777619);
     }
@@ -599,6 +601,8 @@ pub fn svg(spec: &CharSpec) -> String {
     let face;
     let mut extra = String::new();
     let top;
+    // Where a failed body is squashed from: the bottom of the body (the ring's top for 키링).
+    let pivot_y: f32;
     match spec.style {
         CharStyle::Malang => {
             let bp = blob_path(&t, cx, cy, rad);
@@ -612,6 +616,7 @@ pub fn svg(spec: &CharSpec) -> String {
             ));
             face = eyes(&t, cx, cy - 2.0, c.ink, st, false);
             top = cy - rad * t.h;
+            pivot_y = cy + rad * t.h;
         }
         CharStyle::Mongle => {
             let kinds: [&str; 3] = match fam {
@@ -632,6 +637,7 @@ pub fn svg(spec: &CharSpec) -> String {
                 mouth(st)
             );
             top = if kind == "star" { 22.0 } else { 24.0 };
+            pivot_y = 80.0;
         }
         CharStyle::Crew => {
             let bw = 40.0 + t.k * 10.0;
@@ -693,6 +699,7 @@ pub fn svg(spec: &CharSpec) -> String {
                 extra.push_str(&prop_svg(pk, 50.0, by, bw / 2.0 * 0.95, c.ink, &c.acc));
             }
             top = by;
+            pivot_y = leg_y + 10.0;
         }
         CharStyle::Pocket => {
             let kd = (t.k * 4.0) as usize % 4;
@@ -709,6 +716,12 @@ pub fn svg(spec: &CharSpec) -> String {
             t.eye_y = 0.0;
             face = eyes(&t, 50.0, if kd == 0 { 66.0 } else { 62.0 }, c.ink, st, true);
             let dp = [Prop::Bow, Prop::Beret, Prop::Phones, Prop::Tie][kd];
+            pivot_y = match kd {
+                0 => 83.0,
+                1 => 80.0,
+                2 => 82.0,
+                _ => 86.0,
+            };
             let pt = match kd {
                 2 => 34.0,
                 0 => 30.0,
@@ -737,6 +750,7 @@ pub fn svg(spec: &CharSpec) -> String {
             }
             face = fc;
             top = 32.0;
+            pivot_y = 85.0;
         }
         CharStyle::Keyring => {
             let bp = blob_path(&t, cx, cy + 4.0, rad * 0.86);
@@ -748,6 +762,7 @@ pub fn svg(spec: &CharSpec) -> String {
                 f(btop + 1.0)
             ));
             top = btop;
+            pivot_y = 7.0;
         }
     }
     extra.push_str(&state_mark(st, spec.dark));
@@ -758,9 +773,57 @@ pub fn svg(spec: &CharSpec) -> String {
             extra.push_str(&crown(50.0, top));
         }
     }
+    // `.ec-bd`: the body group. A failed member is drawn as `chars.css:18` (review row CR1).
+    let group = if st == CharState::Fail {
+        let inner = fail_tint(&format!("{body}<g transform=\"translate(0 3)\">{face}</g>{extra}"));
+        let pose = if spec.style == CharStyle::Keyring { FAIL_SWING } else { FAIL_SQUASH };
+        let y = f(pivot_y);
+        format!("<g transform=\"translate(50 {y}) {pose} translate(-50 -{y})\">{inner}</g>")
+    } else {
+        format!("{body}{face}{extra}")
+    };
     format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\" width=\"100\" height=\"100\"><ellipse cx=\"50\" cy=\"93\" rx=\"20\" ry=\"3\" fill=\"#000000\" opacity=\"0.08\"/>{body}{face}{extra}</svg>"
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\" width=\"100\" height=\"100\"><ellipse cx=\"50\" cy=\"93\" rx=\"20\" ry=\"3\" fill=\"#000000\" opacity=\"0.08\"/>{group}</svg>"
     )
+}
+
+/// `.ec-s-fail .ec-bd{transform:scale(1.12,.8)}` (`chars.css:18`), from the body's bottom centre.
+const FAIL_SQUASH: &str = "scale(1.12 0.8)";
+/// `.ec-swing.ec-s-fail .ec-bd{transform:rotate(8deg) scale(1,.9)}` (`chars.css:24`), from the
+/// ring's top.
+const FAIL_SWING: &str = "rotate(8) scale(1 0.9)";
+
+/// `filter:saturate(.35) brightness(.97)` (`chars.css:18`) on one sRGB colour: the CSS saturate
+/// matrix keeps the luminance (0.213, 0.715, 0.072) and scales the distance from it.
+fn fail_tone(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+    let (r, g, b) = (f32::from(r), f32::from(g), f32::from(b));
+    let lum = 0.213 * r + 0.715 * g + 0.072 * b;
+    let q = |v: f32| ((lum + (v - lum) * 0.35) * 0.97).round().clamp(0.0, 255.0) as u8;
+    (q(r), q(g), q(b))
+}
+
+/// Every `#rrggbb` of `doc` through [`fail_tone`]: the filter covers the whole body group, so
+/// the face, the props and the highlights dim with the fill.
+fn fail_tint(doc: &str) -> String {
+    let mut out = String::with_capacity(doc.len());
+    let mut rest = doc;
+    while let Some(i) = rest.find('#') {
+        out.push_str(&rest[..i]);
+        let hex = rest.get(i + 1..i + 7).filter(|h| h.bytes().all(|c| c.is_ascii_hexdigit()));
+        match hex.and_then(|h| u32::from_str_radix(h, 16).ok()) {
+            Some(v) => {
+                let (r, g, b) = fail_tone((v >> 16) as u8, (v >> 8) as u8, v as u8);
+                let _ = write!(out, "#{r:02x}{g:02x}{b:02x}");
+                rest = &rest[i + 7..];
+            }
+            None => {
+                out.push('#');
+                rest = &rest[i + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -849,6 +912,17 @@ pub fn state_label(s: CharState) -> &'static str {
         CharState::Done => "완료",
         CharState::Idle => "유휴",
     }
+}
+
+/// The page content's greatest width: `.wrapx{max-width:1180px}` less its 16 px sides.
+pub const PAGE_MAX_W: f32 = 1148.0;
+/// The lead paragraph's greatest width (`.lead{max-width:820px}`).
+pub const LEAD_MAX_W: f32 = 820.0;
+
+/// The page content's width in `room_dp` of room: all of it, up to [`PAGE_MAX_W`] (review row
+/// CR3: the cells stretched with the window).
+pub fn page_width(room_dp: f32) -> f32 {
+    room_dp.min(PAGE_MAX_W)
 }
 
 /// Columns of the team preview: 9, 5 up to 1000 dp, 3 up to 560 dp (mockup media queries).
@@ -1057,6 +1131,81 @@ mod tests {
             dark: false,
             pin: None,
         }
+    }
+
+    #[test]
+    fn fr_l22_seed_hash_reads_utf16_code_units_as_the_mockup() {
+        // Values of `chars.js` `hash(name + "|" + harness)`.
+        assert_eq!(seed_hash("ember-리더|claude"), 0x8261_266f);
+        assert_eq!(seed_hash("core-구현|claude"), 0x410b_adc5);
+        assert_eq!(seed_hash("core-구현|codex"), 0x6223_b5ba);
+        assert_eq!(seed_hash("core-구현|gemini"), 0x45a5_ed90);
+        // ASCII is the same under both readings.
+        assert_eq!(seed_hash("ember|claude"), 0xb55a_4042);
+    }
+
+    #[test]
+    fn fr_l22_seed_draws_the_mockup_catalog_shapes() {
+        // Review row CR2, mockup `characters-default-1440-light.png`: the 포켓 row is a rabbit
+        // for "ember-리더", a cloud with a beret for Claude "core-구현", a rabbit for Codex and
+        // a cloud for Gemini; the Gemini 몽글 is a droplet and the Claude 몽글 is round.
+        const BUNNY: &str = "M38 46 C34 30";
+        const CLOUD: &str = "M30 80 C14 80";
+        const DROP: &str = "M50 20c9 13";
+        const ROUND: &str = "M50 24c16 0";
+        const EGG: &str = "M50 20c14 0";
+        const PILL: &str = "M26 46a24 24";
+        assert!(svg(&spec(CharStyle::Pocket, "ember-리더", "claude")).contains(BUNNY));
+        assert!(svg(&spec(CharStyle::Pocket, "core-구현", "claude")).contains(CLOUD));
+        assert!(svg(&spec(CharStyle::Pocket, "core-구현", "codex")).contains(BUNNY));
+        assert!(svg(&spec(CharStyle::Pocket, "core-구현", "gemini")).contains(CLOUD));
+        assert!(svg(&spec(CharStyle::Mongle, "ember-리더", "claude")).contains(EGG));
+        assert!(svg(&spec(CharStyle::Mongle, "core-구현", "claude")).contains(ROUND));
+        assert!(svg(&spec(CharStyle::Mongle, "core-구현", "codex")).contains(PILL));
+        assert!(svg(&spec(CharStyle::Mongle, "core-구현", "gemini")).contains(DROP));
+        // The Claude "core-구현" is the ochre end of the family (hue 33.5 of 20..34), not pink.
+        let hue = body_hue("core-구현", "claude");
+        assert!((hue - 33.5).abs() < 0.2, "{hue}");
+        let hue = body_hue("ember-리더", "claude");
+        assert!((hue - 23.2).abs() < 0.2, "{hue}");
+    }
+
+    #[test]
+    fn fr_l22_fail_tone_is_the_mockup_filter() {
+        // saturate(.35) then brightness(.97): white dims, a grey stays grey, an orange greys.
+        assert_eq!(fail_tone(255, 255, 255), (247, 247, 247));
+        assert_eq!(fail_tone(100, 100, 100), (97, 97, 97));
+        assert_eq!(fail_tone(200, 100, 50), (142, 108, 91));
+        assert_eq!(fail_tint("fill=\"#c86432\" x=\"#\" y=\"#12\""), "fill=\"#8e6c5b\" x=\"#\" y=\"#12\"");
+    }
+
+    #[test]
+    fn fr_l22_fail_body_is_desaturated_and_squashed() {
+        // Review row CR1: the app kept the full colour and the standing pose.
+        for style in CharStyle::ALL {
+            let mut s = spec(style, "ember-리더", "claude");
+            let idle = svg(&s);
+            s.state = CharState::Fail;
+            let fail = svg(&s);
+            let c = palette(&traits("ember-리더", Family::Claude), Family::Claude, false);
+            assert!(idle.contains(&c.fill), "{style:?}: the idle body has the seeded fill");
+            assert!(!fail.contains(&c.fill), "{style:?}: the failed body keeps the full colour");
+            assert!(fail.contains(&fail_tint(&c.fill)), "{style:?}: the failed fill is the filtered one");
+            // The face sits 3 px lower inside the squashed group.
+            assert!(fail.contains("<g transform=\"translate(0 3)\">"), "{style:?}");
+            if style == CharStyle::Keyring {
+                assert!(fail.contains("<g transform=\"translate(50 7.00) rotate(8) scale(1 0.9) translate(-50 -7.00)\">"), "{fail}");
+            } else {
+                assert!(fail.contains(") scale(1.12 0.8) translate(-50 -"), "{style:?}: {fail}");
+            }
+            assert!(!idle.contains("scale("), "{style:?}: only a failed body is squashed");
+            // The ground shadow is outside the body group: not tinted.
+            assert!(fail.contains("fill=\"#000000\" opacity=\"0.08\"/><g transform="), "{style:?}");
+        }
+        // 몽글 is squashed from y 80, the bottom of its body.
+        let mut s = spec(CharStyle::Mongle, "ember-리더", "claude");
+        s.state = CharState::Fail;
+        assert!(svg(&s).contains("<g transform=\"translate(50 80.00) scale(1.12 0.8) translate(-50 -80.00)\">"));
     }
 
     // FR-L22: the same name always gives the same character.
@@ -1293,6 +1442,16 @@ mod tests {
         assert!(seen.len() >= 4, "pins should give mostly different shapes, got {}", seen.len());
         a.pin = None;
         assert_eq!(auto, svg(&a));
+    }
+
+    #[test]
+    fn fr_l22_page_width_is_capped_at_the_mockup_wrap() {
+        assert_eq!(PAGE_MAX_W, 1180.0 - 2.0 * 16.0);
+        assert_eq!(LEAD_MAX_W, 820.0);
+        // A 1440 window with the sidebar leaves about 1166: capped. A narrow room is used whole.
+        assert_eq!(page_width(1166.0), 1148.0);
+        assert_eq!(page_width(1148.0), 1148.0);
+        assert_eq!(page_width(700.0), 700.0);
     }
 
     #[test]

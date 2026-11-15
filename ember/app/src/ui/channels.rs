@@ -489,6 +489,44 @@ pub fn avatar_kind(is_agent: bool, harness: &str) -> AvatarKind {
     }
 }
 
+/// The list pane's geometry from the mockup (`.listpane`, `.room-item`, review CH4, #630): a room
+/// row runs edge to edge of the pane with 10 above and below and 16 at the sides, 12 between the
+/// icon, the text and the time; the search field and the filter segments sit 12 in from the
+/// sides; the title row (`.ph`) has 16 above and at the sides and 8 below.
+pub const ROOM_ROW_PAD_H: f32 = 16.0;
+pub const ROOM_ROW_GAP: f32 = 12.0;
+pub const LIST_PANE_INSET: f32 = 12.0;
+pub const LIST_HEAD_PAD_TOP: f32 = 16.0;
+pub const LIST_HEAD_PAD_SIDE: f32 = 16.0;
+pub const LIST_HEAD_PAD_BOTTOM: f32 = 8.0;
+/// The room header's height and side padding (`.topbar`: 56 high, `padding: 0 var(--sp5)`).
+pub const ROOM_HEAD_H: f32 = 56.0;
+pub const ROOM_HEAD_PAD: f32 = 20.0;
+/// The room mark in the room header (`roomIcon(room, 30)`).
+pub const ROOM_HEAD_ICON: f32 = 30.0;
+
+/// Whether the room header names the project (`.ch-proj.hide-sm`: not at 560 px and below).
+pub fn room_head_shows_project(width_dp: f32) -> bool {
+    width_dp > 560.0
+}
+
+/// How wide the room's name may run in the header before it ends in an ellipsis. The mockup's
+/// header keeps the buttons right after the title (`.topbar > * { flex: none }`), so the name
+/// gets a cap instead of the leftover width: on a phone what the back button, the mark, the
+/// count, the two buttons and the gaps leave (230 dp), else 160 up to 1279 dp and 240 above.
+/// An unknown window (0 before the first frame) takes the wide cap, so no name is cut for a frame.
+pub fn room_title_max(width_dp: f32) -> f32 {
+    if width_dp <= 0.0 {
+        240.0
+    } else if width_dp <= 560.0 {
+        (width_dp - 230.0).max(60.0)
+    } else if width_dp <= 1279.0 {
+        160.0
+    } else {
+        240.0
+    }
+}
+
 /// What a compact window shows: the room when one is open, the list otherwise.
 pub fn compact_shows_room(open: &Option<String>) -> bool {
     open.is_some()
@@ -512,6 +550,8 @@ pub struct AgentChoice {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DraftError {
     EmptyName,
+    /// More than [`MAX_CHANNEL_NAME_CHARS`] Unicode scalar values after trimming (`invalid_name`).
+    TooLong,
     /// A control, format or line-separator character, which the server refuses (`invalid_name`).
     BadChar,
     /// A channel of that name exists in the project.
@@ -523,12 +563,20 @@ impl DraftError {
     pub fn text(self) -> &'static str {
         match self {
             DraftError::EmptyName => "채널 이름을 입력해 주세요",
+            DraftError::TooLong => "채널 이름은 64자 이하여야 합니다",
             DraftError::BadChar => "채널 이름에 쓸 수 없는 문자가 있습니다",
             DraftError::Taken => TAKEN_TEXT,
             DraftError::NoProject => "프로젝트를 선택해 주세요",
         }
     }
 }
+
+/// The server's `MAX_NAME_CHARS` (`ember/server/src/channels/invites.rs`): at most 64 Unicode
+/// scalar values after trimming (FR-T10).
+pub const MAX_CHANNEL_NAME_CHARS: usize = 64;
+
+/// The name of every project's default channel (`ember_server::channels::DEFAULT_NAME`).
+pub const DEFAULT_CHANNEL_NAME: &str = "전체";
 
 /// The sentence for a name that is already used.
 pub const TAKEN_TEXT: &str = "이미 있는 채널 이름입니다";
@@ -602,11 +650,15 @@ impl NewChannelDraft {
     }
 
     /// The first reason the draft cannot be created. `rooms` are the existing channels, to catch a
-    /// name that is taken in the project (compared trimmed and ignoring case).
+    /// name that is taken in the project (compared trimmed and ignoring case, including the
+    /// project's default channel `전체`).
     pub fn problem(&self, rooms: &[Room]) -> Option<DraftError> {
         let name = self.name.trim();
         if name.is_empty() {
             return Some(DraftError::EmptyName);
+        }
+        if name.chars().count() > MAX_CHANNEL_NAME_CHARS {
+            return Some(DraftError::TooLong);
         }
         if name.chars().any(is_forbidden_name_char) {
             return Some(DraftError::BadChar);
@@ -615,7 +667,9 @@ impl NewChannelDraft {
             return Some(DraftError::NoProject);
         }
         let lower = name.to_lowercase();
-        if rooms.iter().any(|r| r.project == self.project && r.name.trim().to_lowercase() == lower) {
+        if lower == DEFAULT_CHANNEL_NAME
+            || rooms.iter().any(|r| r.project == self.project && r.name.trim().to_lowercase() == lower)
+        {
             return Some(DraftError::Taken);
         }
         None
@@ -956,6 +1010,20 @@ mod layout_tests {
     use super::*;
 
     #[test]
+    fn fr_l12_list_pane_and_room_head_follow_the_mockup() {
+        assert_eq!((ROOM_ROW_PAD_H, ROOM_ROW_GAP, LIST_PANE_INSET), (16.0, 12.0, 12.0));
+        assert_eq!((LIST_HEAD_PAD_TOP, LIST_HEAD_PAD_SIDE, LIST_HEAD_PAD_BOTTOM), (16.0, 16.0, 8.0));
+        assert_eq!((ROOM_HEAD_H, ROOM_HEAD_PAD, ROOM_HEAD_ICON), (56.0, 20.0, 30.0));
+        assert!(room_head_shows_project(1440.0));
+        assert!(!room_head_shows_project(390.0));
+        assert_eq!(room_title_max(390.0), 160.0);
+        assert_eq!(room_title_max(1024.0), 160.0);
+        assert_eq!(room_title_max(1440.0), 240.0);
+        assert_eq!(room_title_max(0.0), 240.0, "before the first frame no name is cut");
+        assert_eq!(room_title_max(200.0), 60.0);
+    }
+
+    #[test]
     fn fr_l12_compact_switches_between_list_and_room_and_wider_windows_split() {
         assert!(!split_view(WindowSizeClass::Compact));
         assert!(split_view(WindowSizeClass::Medium));
@@ -1139,6 +1207,13 @@ mod layout_tests {
             d.name = bad.into();
             assert_eq!(d.problem(&[]), Some(DraftError::BadChar), "{bad:?}");
         }
+        d.name = "가".repeat(MAX_CHANNEL_NAME_CHARS);
+        assert!(d.is_valid(&[]), "64 characters is allowed");
+        d.name = format!("  {}  ", "가".repeat(MAX_CHANNEL_NAME_CHARS));
+        assert!(d.is_valid(&[]), "surrounding whitespace is trimmed before counting");
+        d.name = "가".repeat(MAX_CHANNEL_NAME_CHARS + 1);
+        assert_eq!(d.problem(&[]), Some(DraftError::TooLong));
+        assert_eq!(DraftError::TooLong.text(), "채널 이름은 64자 이하여야 합니다");
         d.name = "리뷰 방 2".into();
         assert!(d.is_valid(&[]));
     }
@@ -1150,6 +1225,8 @@ mod layout_tests {
         d.name = " review ".into();
         assert_eq!(d.problem(&rooms), Some(DraftError::Taken));
         assert_eq!(DraftError::Taken.text(), "이미 있는 채널 이름입니다");
+        d.name = " 전체 ".into();
+        assert_eq!(d.problem(&[]), Some(DraftError::Taken), "the default channel name is always taken");
         d.name = "ideas".into();
         assert!(d.is_valid(&rooms), "the same name in another project is fine");
     }

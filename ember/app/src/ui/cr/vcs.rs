@@ -1204,7 +1204,7 @@ pub fn section_pills_scroll(width_dp: f32) -> bool {
 }
 
 fn SectionPillsAtWidth(active: Section, width: f32, on_pick: impl FnMut(Section) + Clone + 'static) {
-    SectionPillsWithCounts(active, width, &|_| None, on_pick);
+    SectionPillsWithCounts(active, width, width, &|_| None, on_pick);
 }
 
 /// The width a section pill is drawn at, estimated from its text (13 dp Hangul, 7.5 dp digits at
@@ -1288,7 +1288,7 @@ fn SectionPill(sec: Section, on: bool, count: Option<usize>, on_click: impl FnMu
 /// The section pills with each section's count (FR-L19): the mockup's `.vcs-navi` as a row of
 /// pills, each with its icon and count, the current one white under a shadow. They were the
 /// composer's grey `PickChip`s with a name only (reviews r7 and r8, #878).
-fn SectionPillsWithCounts(active: Section, width: f32, count_of: &dyn Fn(Section) -> Option<usize>, on_pick: impl FnMut(Section) + Clone + 'static) {
+fn SectionPillsWithCounts(active: Section, width: f32, view_w: f32, count_of: &dyn Fn(Section) -> Option<usize>, on_pick: impl FnMut(Section) + Clone + 'static) {
     let pills = || {
         cu::Row().spacing(SP[0] + 2.0).alignment(Alignment::CenterStart).content(|| {
             for sec in Section::ALL {
@@ -1302,13 +1302,16 @@ fn SectionPillsWithCounts(active: Section, width: f32, count_of: &dyn Fn(Section
         // The current pill is scrolled into view when it changes (#878: at 800 the row ends inside
         // 충돌, so picking it, or opening the page on it, left it cut at the edge).
         let counts: Vec<Option<usize>> = Section::ALL.iter().map(|s| count_of(*s)).collect();
-        let to = section_pills_reveal(active, width, &counts);
+        let to = section_pills_reveal(active, view_w, &counts);
         let scroll = cu::remember_scroll_state();
-        let seen = remember(|| mutable_state_of(None::<Section>));
-        if seen.get_untracked() != Some(active) {
+        // Sent again when the row's scroll range changes: the Renderer clamps to the range it
+        // knows, and on the first frame the row is not measured yet (r12 capture: 충돌 cut at 800).
+        let range = scroll.max_offset().round() as i32;
+        let seen = remember(|| mutable_state_of(None::<(Section, i32)>));
+        if seen.get_untracked() != Some((active, range)) {
             let target = scroll.clone();
             compose_rust::runtime::side_effect(move || {
-                seen.set(Some(active));
+                seen.set(Some((active, range)));
                 target.scroll_to(to);
             });
         }
@@ -5394,9 +5397,19 @@ fn VcsScreenWithLoad(
                             let sec_for_pills = sec_state.clone();
                             let (stashes, prs, branches, team) = (stash_count.get(), pr_count.get(), branch_count.get(), team_count.get());
                             let pill_snap = snap.as_ref();
+                            // The row is as wide as the page less the shell's navigation, which
+                            // `section_width` leaves in (r12 capture: 충돌 cut at 800, 664 dp row).
+                            let nav = if sheet { 0.0 } else {
+                                match super::shell::current_mode(false) {
+                                    crate::ui::shell::ShellMode::BottomTabs => 0.0,
+                                    crate::ui::shell::ShellMode::Rail => super::theme::RAIL_W,
+                                    crate::ui::shell::ShellMode::Sidebar => crate::ui::theme::SIDE_W,
+                                }
+                            };
                             SectionPillsWithCounts(
                                 sec,
                                 section_width,
+                                (section_width - nav).max(0.0),
                                 &|s| shown_section_count(s, pill_snap, sample, stashes, prs, branches, team),
                                 move |s| sec_for_pills.set(s),
                             );
@@ -7415,7 +7428,7 @@ mod tests {
             Section::Stash => Some(0),
             _ => None,
         };
-        SectionPillsWithCounts(Section::Changes, 358.0, &count, |_| {});
+        SectionPillsWithCounts(Section::Changes, 358.0, 358.0, &count, |_| {});
     }
 
     #[test]
@@ -7812,8 +7825,10 @@ mod tests {
         // The scrolling row is moved with the toolkit's scroll state, once per change of section.
         let src = include_str!("vcs.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap()];
-        assert!(production.contains("let to = section_pills_reveal(active, width, &counts);"));
+        assert!(production.contains("let to = section_pills_reveal(active, view_w, &counts);"));
+        assert!(production.contains("(section_width - nav).max(0.0),"), "the row's width leaves out the shell's navigation");
         assert!(production.contains("target.scroll_to(to);"));
+        assert!(production.contains("seen.set(Some((active, range)));"), "sent again once the row's range is measured");
         assert!(production.contains("cu::ScrollRow().scroll_state(&scroll).modifier(Modifier::new().fill_max_width()).content(pills);"));
     }
 

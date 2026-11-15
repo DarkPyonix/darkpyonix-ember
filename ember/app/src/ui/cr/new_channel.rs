@@ -11,10 +11,10 @@
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, Color, ShapeRole};
+use compose_rust::{Alignment, ShapeRole};
 
 use super::channels::Feed;
-use super::components::{AppButton, ButtonKind, EmberField, EmberSheet, FieldOptions, FilterChip, Label, SheetFooter};
+use super::components::{AppButton, ButtonKind, EmberField, EmberSheet, FieldOptions, FilterChip, Label, NamedClickable, SheetFooter};
 use super::notice;
 use super::theme::*;
 use crate::ui::channels::{
@@ -124,11 +124,15 @@ fn all_sessions() -> Vec<ember_client::wire::SessionRecord> {
         .unwrap_or_default()
 }
 
+/// The demo name of the list header's `+`: 새 채널 and [`DEMO_NO_CREATE`], written out because a
+/// name on a container is one of a fixed set (`components::NamedClickable`). A test keeps the
+/// two in step.
+pub const NEW_CHANNEL_DEMO_LABEL: &str = "새 채널, 데모에서는 채널을 만들 수 없습니다";
+
 /// The round `+` of the list header. `live` is false in demo mode and for review captures: a tap
-/// then says why nothing is created. The overlay button gives it the accessible name and focus,
-/// set with `accessible_name` (compose-rust v0.0.7, #429). v0.0.7: #425 fixed
-/// (`Button::content`); workaround kept until checked on a display (the `+` glyph inside a
-/// `Button` content slot must keep the 32 px ring).
+/// then says why nothing is created. The ring itself is the control: a clickable container named
+/// with `Modifier::label` (compose-rust#429, `components::NamedClickable`), so the press and the
+/// focus ring follow the 32 px circle.
 ///
 /// The button is the mockup's `.icon-btn.sm` at full opacity in every mode (review row CH6,
 /// #894): it is never disabled, so it is not dimmed; in demo mode the toast and the accessible
@@ -136,31 +140,26 @@ fn all_sessions() -> Vec<ember_client::wire::SessionRecord> {
 pub fn NewChannelButton(st: &NewChannelState, live: bool, filter: Option<String>) {
     let p = ember_theme().palette;
     let st = st.clone();
-    let label = if live { "새 채널".to_string() } else { format!("새 채널, {DEMO_NO_CREATE}") };
-    cu::Box()
-        .alignment(Alignment::Center)
-        .modifier(
-            Modifier::new()
-                .size(H_CTL, H_CTL)
-                .background(paint(p.surface))
-                .border(1.0, paint(p.line))
-                .shape_role(ShapeRole::Full),
-        )
-        .content(|| {
+    let label = if live { "새 채널" } else { NEW_CHANNEL_DEMO_LABEL };
+    NamedClickable(
+        label,
+        Modifier::new()
+            .size(H_CTL, H_CTL)
+            .background(paint(p.surface))
+            .border(1.0, paint(p.line))
+            .shape_role(ShapeRole::Full),
+        Alignment::Center,
+        move || {
+            if live {
+                st.start(filter.as_deref());
+            } else {
+                notice::post(DEMO_NO_CREATE);
+            }
+        },
+        move || {
             super::shell::NavIcon(super::shell::ICON_PLUS_SVG, p.text_2.to_argb(), 16.0);
-            cu::Button(&label)
-                .accessible_name(&label)
-                .variant(ButtonVariant::Text)
-                .color(compose_rust::Paint::Literal(Color::argb(0)))
-                .modifier(Modifier::new().fill_max_size())
-                .on_click(move || {
-                    if live {
-                        st.start(filter.as_deref());
-                    } else {
-                        notice::post(DEMO_NO_CREATE);
-                    }
-                });
-        });
+        },
+    );
 }
 
 /// Sends the draft. On success the list is read again, the new room opens and the sheet closes;
@@ -390,7 +389,17 @@ mod review_tests {
         let (_, demo) = sent(false);
         let name = format!("AccessibleName=String({:?})", format!("새 채널, {DEMO_NO_CREATE}"));
         assert!(demo.contains(&name), "the demo name carries the reason: {demo:?}");
+        assert_eq!(NEW_CHANNEL_DEMO_LABEL, format!("새 채널, {DEMO_NO_CREATE}"));
         let (_, live) = sent(true);
         assert!(live.contains(&"AccessibleName=String(\"새 채널\")".to_string()), "{live:?}");
+        // The ring is the control (compose-rust#429, #673): one clickable box, no button over it.
+        for live in [false, true] {
+            let (mods, props) = sent(live);
+            assert_eq!(props.iter().filter(|p| p.starts_with("OnClick=")).count(), 1, "{props:?}");
+            assert!(mods.iter().any(|m| m.starts_with("Semantics") && m.contains("Button")), "{mods:?}");
+            assert_eq!(mods.iter().filter(|m| m.starts_with("PressFeedback")).count(), 1, "{mods:?}");
+        }
+        let src = include_str!("new_channel.rs").split("mod review_tests {").next().unwrap();
+        assert!(!src.contains(&["cu::", "Button("].concat()), "no toolkit button over the ring");
     }
 }

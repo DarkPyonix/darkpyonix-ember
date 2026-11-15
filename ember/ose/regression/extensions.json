@@ -1,16 +1,31 @@
 {
-  "_todo": "TODO(owner, #84): confirm this list. It is a provisional guess at popular Open VSX extensions. Versions were read from open-vsx.org on 2026-11-15 as the newest release (not pre-release) whose engines.vscode accepts Code-OSS 1.139; no run has installed them yet.",
+  "_todo": "Approved by the leader on 2026-11-15 (#84): five extensions covering two language servers, the most used language extension, a debugger and a webview panel. Versions of the first three were read from open-vsx.org on 2026-11-15 and are not yet proven by a run; debugpy and git-graph are pinned from their first resolving run (the run prints the installed version). Deeper checks (webview, debug session): #929.",
   "_fields": "id: publisher.name on Open VSX. version: the exact version installed (id@version), or null to take the newest one the OSE accepts (the run prints it; pin it afterwards). open: a file of workspace/ whose language triggers the extension, or null when it activates at startup.",
   "extensions": [
-    {"id": "redhat.vscode-yaml", "version": "2.0.0", "open": "sample.yaml"},
-    {"id": "esbenp.prettier-vscode", "version": "12.4.0", "open": "sample.js"},
-    {"id": "dbaeumer.vscode-eslint", "version": "3.0.34", "open": "sample.js"},
-    {"id": "ms-python.python", "version": "2026.4.0", "open": "sample.py"},
-    {"id": "rust-lang.rust-analyzer", "version": null, "open": "src/main.rs"},
-    {"id": "golang.Go", "version": "0.58.0", "open": "sample.go"},
-    {"id": "vscodevim.vim", "version": "1.32.4", "open": null},
-    {"id": "eamodio.gitlens", "version": null, "open": null},
-    {"id": "tamasfe.even-better-toml", "version": "0.21.2", "open": "sample.toml"},
-    {"id": "redhat.java", "version": "1.58.0", "open": "Sample.java"}
+    {
+      "id": "redhat.vscode-yaml",
+      "version": "2.0.0",
+      "open": "sample.yaml"
+    },
+    {
+      "id": "dbaeumer.vscode-eslint",
+      "version": "3.0.34",
+      "open": "sample.js"
+    },
+    {
+      "id": "ms-python.python",
+      "version": "2026.4.0",
+      "open": "sample.py"
+    },
+    {
+      "id": "ms-python.debugpy",
+      "version": null,
+      "open": "sample.py"
+    },
+    {
+      "id": "mhutchie.git-graph",
+      "version": null,
+      "open": null
+    }
   ]
 }

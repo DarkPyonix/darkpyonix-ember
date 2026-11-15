@@ -673,12 +673,6 @@ pub fn leader_cols(width_dp: f32) -> usize {
     }
 }
 
-/// The width of a computer check chip (`.ps-check`): 12 px padding each side, the 16 px box,
-/// the name and the 8 px status dot, 8 px apart.
-pub fn computer_check_width(name: &str) -> f32 {
-    let text: f32 = name.chars().map(|c| if c.is_ascii() { 0.55 } else { 1.0 }).sum::<f32>() * 13.0;
-    12.0 + 16.0 + 8.0 + text + 8.0 + 8.0 + 12.0
-}
 
 /// Whether 저장 can do anything: the server saves project metadata (FR-L26).
 pub const SETTINGS_SAVE_AVAILABLE: bool = true;
@@ -1248,11 +1242,6 @@ mod tests {
         assert_eq!(super::leader_cols(390.0), 1);
     }
 
-    #[test]
-    fn fr_l26_computer_check_width_grows_with_the_name() {
-        assert!(super::computer_check_width("mac-mini-long-name") > super::computer_check_width("mac"));
-        assert!(super::computer_check_width("") >= 64.0);
-    }
 
     #[test]
     fn fr_l22_disabled_characters_link_says_why() {

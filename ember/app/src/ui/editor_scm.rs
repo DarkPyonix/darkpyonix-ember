@@ -1622,9 +1622,9 @@ pub mod view {
 
     /// Rows of the base side drawn from the editor's first visible line, enough to fill the pane.
     // v0.0.7: #544 fixed (`CodeMetrics`, `CodeScrolled` and `Batch::set_scroll_offset`), and
-    // dioxus-compose's v0.0.9 move gives `CodeEditor` `on_code_metrics` (`CodeMetrics`),
+    // the pinned dioxus-compose (f0e5b9f5) gives `CodeEditor` `on_code_metrics` (`CodeMetrics`),
     // `on_code_scrolled` (`CodeScroll`) and `CodeEditorHandle::set_scroll_offset`; workaround kept
-    // until Ember pins that dioxus-compose and the pixel sync is checked on a display (#673). Until
+    // until the pixel sync is checked on a display (#673). Until
     // then the base side follows the editor's first visible line and draws its rows at `--code-lh`
     // (22 px), the row height the editor is given (FR-L31.27).
     const BASE_ROWS_SHOWN: usize = 400;
@@ -1656,9 +1656,9 @@ pub mod view {
                                 super::RowKind::Added => ("background:var(--surface-2);", " "),
                             };
                             let (no, text) = row.base.map(|(n, t)| (n.to_string(), t)).unwrap_or_default();
-                            // TODO(compose-rust#543): removed lines are a red rule and a hover list here,
+                            // TODO(compose-rust#543, in v0.0.10): removed lines are a red rule and a hover list here,
                             // because the editor cannot hold blank rows opposite them; give them rows
-                            // of their own once the toolkit has view zones.
+                            // of their own with `CodeEditor` `view_zones`, after a display check.
                             let mark = if row.deleted_above.is_empty() { "" } else { "box-shadow:inset 0 2px 0 var(--c-red);" };
                             let title = deleted_lines_title(&row.deleted_above);
                             rsx! {
@@ -1670,7 +1670,7 @@ pub mod view {
                             }
                         }
                     }
-                    // TODO(compose-rust#543): the lines removed at the end, as a rule until view zones.
+                    // TODO(compose-rust#543, in v0.0.10): the lines removed at the end, as a rule until view zones.
                     if at_end && !tail_title.is_empty() {
                         div { title: "{tail_title}", style: "height:4px; box-shadow:inset 0 2px 0 var(--c-red);" }
                     }
@@ -2265,8 +2265,8 @@ pub mod diff_editor_view {
             *current = (*current).max(doc.version);
             *current
         };
-        // TODO(compose-rust#542): the change shows as gutter bars only; tint the added and changed
-        // lines once the toolkit has whole-line background decorations.
+        // TODO(compose-rust#542, in v0.0.10): the change shows as gutter bars only; tint the added
+        // and changed lines with `Decoration::line_background`, after a display check.
         let gutter_decorations = match s.scm.diff_base(&doc.text, doc.dirty) {
             Some(base) => crate::ui::editor::diff_gutter_decorations(version, &super::diff_editor_model(&base, &doc.text).markers),
             None => compose_rust::code::GutterDecorations::default(),
@@ -2316,8 +2316,8 @@ pub mod diff_editor_view {
                 send(&selection_s, event);
             },
             // Lines only: the base side cannot follow a partial-line scroll. v0.0.7: #544 fixed;
-            // workaround kept until Ember pins dioxus-compose's v0.0.9 move, which forwards
-            // `CodeScrolled` as `on_code_scrolled`, and it is checked on a display.
+            // workaround kept until checked on a display (the pinned dioxus-compose, f0e5b9f5,
+            // forwards `CodeScrolled` as `on_code_scrolled`).
             on_visible_range_change: move |e: compose_rust::code::VisibleRange| range_s.scm.set_diff_lines(e.first_line, e.last_line),
         } }
     }

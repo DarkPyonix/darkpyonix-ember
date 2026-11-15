@@ -2,7 +2,8 @@
 //! approval card text (#536). The compose-rust view in `ui/cr/conversation.rs` only draws them.
 //!
 //! Mockup `session.js`: an edit shows the file name, a green `+N` and a red `-N` pill and the
-//! changed lines; an approval shows the command only, titled `<컴퓨터>에서 명령을 실행할까요?`.
+//! changed lines (no context lines, no pill for a count of zero); an approval shows the command
+//! only, titled `<컴퓨터>에서 명령을 실행할까요?`, and folds into one row once it is resolved.
 
 use serde_json::Value;
 
@@ -37,6 +38,21 @@ pub struct FileDiff {
 
 /// The most changed lines a card draws; the pills still count all of them.
 pub const MAX_DIFF_LINES: usize = 40;
+
+/// The changed lines of a file change, in order, without the context around them. The mockup's
+/// edit card (`session.js` `m.diff`) lists only `+` and `-` lines, so the card draws these.
+pub fn changed_lines(d: &FileDiff) -> Vec<&DiffLine> {
+    d.lines.iter().filter(|l| !matches!(l, DiffLine::Context(_))).collect()
+}
+
+/// The count pills of a file-change card: the green `+N` and the red `-N`. A count of zero has
+/// no pill (an edit that only adds lines read `+6 -0`), unless nothing changed at all, which
+/// reads `+0`.
+pub fn count_pills(added: usize, removed: usize) -> (Option<String>, Option<String>) {
+    let plus = (added > 0 || removed == 0).then(|| format!("+{added}"));
+    let minus = (removed > 0).then(|| format!("-{removed}"));
+    (plus, minus)
+}
 
 fn base_name(path: &str) -> String {
     let p = path.trim();
@@ -325,6 +341,19 @@ mod tests {
         assert_eq!((d.added, d.removed), (2, 0));
         assert_eq!(file_diff("Bash", &json!({"command": "ls"}), "a\nb"), None);
         assert_eq!(parse_unified_diff("just text\n+ not a diff"), None);
+    }
+
+    #[test]
+    fn fr_l5_card_lists_changed_lines_only_and_hides_a_zero_count() {
+        let out = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,3 @@\n fn main() {\n-    old();\n+    new();\n }\n";
+        let d = parse_unified_diff(out).unwrap();
+        assert_eq!(d.lines.len(), 4, "the model keeps the context");
+        let shown: Vec<String> = changed_lines(&d).into_iter().map(DiffLine::shown).collect();
+        assert_eq!(shown, vec!["-    old();".to_string(), "+    new();".to_string()]);
+        assert_eq!(count_pills(6, 0), (Some("+6".into()), None));
+        assert_eq!(count_pills(0, 3), (None, Some("-3".into())));
+        assert_eq!(count_pills(2, 1), (Some("+2".into()), Some("-1".into())));
+        assert_eq!(count_pills(0, 0), (Some("+0".into()), None));
     }
 
     #[test]

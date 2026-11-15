@@ -1,15 +1,20 @@
 {
   "_todo": "TODO(owner, #84): the first real run on an OSE build fills this in. 'pass' = must activate; 'known-fail' = tracked failure, with a 'reason'. Every entry is an unverified 'pass' today.",
   "results": {
-    "redhat.vscode-yaml": {"expect": "pass"},
-    "esbenp.prettier-vscode": {"expect": "pass"},
-    "dbaeumer.vscode-eslint": {"expect": "pass"},
-    "ms-python.python": {"expect": "pass"},
-    "rust-lang.rust-analyzer": {"expect": "pass"},
-    "golang.Go": {"expect": "pass"},
-    "vscodevim.vim": {"expect": "pass"},
-    "eamodio.gitlens": {"expect": "pass"},
-    "tamasfe.even-better-toml": {"expect": "pass"},
-    "redhat.java": {"expect": "pass"}
+    "redhat.vscode-yaml": {
+      "expect": "pass"
+    },
+    "dbaeumer.vscode-eslint": {
+      "expect": "pass"
+    },
+    "ms-python.python": {
+      "expect": "pass"
+    },
+    "ms-python.debugpy": {
+      "expect": "pass"
+    },
+    "mhutchie.git-graph": {
+      "expect": "pass"
+    }
   }
 }

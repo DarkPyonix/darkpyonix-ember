@@ -1968,10 +1968,30 @@ mod design_chrome {
         assert!(PAGE.contains("span { class: \"hide-md\", \"{crate::ui::editor::FIND_PILL_LABEL}\" }"));
     }
 
+    /// FR-L31.30 (#895, design review E5): a preview tab's label is upright, as every tab's in the
+    /// mockup (`editor.css:54-56`), and no rule of the page sets a tab label in italics.
+    #[test]
+    fn fr_l31_30_a_preview_tab_keeps_the_mockups_upright_label() {
+        let css = compact_css();
+        assert!(css.contains(".ed-tab{position:relative;display:flex;align-items:center;gap:6px;height:30px;"));
+        assert!(!css.contains(".ed-tab.preview>.ellipsis{font-style:italic}"));
+        let tab_rules: Vec<&str> = css.split('}').filter(|rule| rule.contains(".ed-tab") && rule.contains("font-style")).collect();
+        assert!(tab_rules.is_empty(), "{tab_rules:?}");
+        // The class stays, so the tab is still told apart in the markup.
+        assert_eq!(ember_app::ui::editor::tab_class_with(true, false, false, true), "ed-tab on preview");
+    }
+
     #[test]
     fn design_a6_palette_overlay_takes_no_grid_row() {
-        assert!(PAGE.contains("style: \"position:fixed; grid-row:1; grid-column:1; left:0; top:0; right:0; bottom:0; z-index:39;\""));
-        assert!(PAGE.contains("style: \"position:fixed; grid-row:1; grid-column:1; z-index:40; top:60px;"));
+        // FR-L31.26 put the overlays in `.ed-layers`, so the palette's scrim needs no grid placement,
+        // and FR-L31.29 hangs its list under the find pill (`.ed-pal`), outside the page grid.
+        assert!(PAGE.contains("style: \"position:fixed; left:0; top:0; right:0; bottom:0; z-index:39;\", \"data-ed\": \"palette-scrim\","));
+        assert!(PAGE.contains("div { class: \"ed-menu ed-pal\", role: \"dialog\", \"aria-label\": \"명령 팔레트\","));
+        let css = compact_css();
+        assert!(css.contains(".ed-menu.ed-pal{position:absolute;z-index:40;top:calc(100%+6px);right:0;left:auto;"));
+        // The box itself is the stacking context above the islands (a positioned box with `z-index:auto`
+        // is painted as one unit in tree order, under the later editor island).
+        assert!(css.contains(".ed-findbox{position:relative;z-index:40;display:flex;min-width:0}"));
         assert!(ember_app::ui::editor_menu::menu_style().contains("grid-row:1; grid-column:1;"));
     }
 

@@ -1232,6 +1232,7 @@ pub fn name_then_pill_width(room: f32, natural: f32, pill: f32, gap: f32) -> Opt
 ///
 /// TODO(compose-rust#778, after v0.0.10): the measuring below goes when the pin has a weight that
 /// leaves a child its own size.
+///
 /// The toolkit has no weight that leaves a child its own size (Compose `weight(fill = false)`)
 /// and no maximum width: a weighted child fills its share, and unweighted ones are measured
 /// first, in order, each with what the ones before it left (compose-rust

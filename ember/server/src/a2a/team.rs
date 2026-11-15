@@ -642,7 +642,7 @@ fn valid_name(name: &str) -> Result<(), A2aError> {
 fn session_error(e: SessionError) -> A2aError {
     match e {
         SessionError::NotFound(id) => A2aError::NotFound(format!("session {id} not found")),
-        SessionError::AgentUnavailable(_) | SessionError::Account(_) => {
+        SessionError::AgentUnavailable(_) | SessionError::Account(_) | SessionError::Busy(_) => {
             A2aError::BadRequest(format!("{e:#}"))
         }
         SessionError::Other(e) => A2aError::Other(e),

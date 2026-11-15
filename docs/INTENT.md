@@ -999,7 +999,7 @@ Anything a scope does not list is refused, so a route added later is closed to s
 
 **Why.** Running the OSE on the node puts `remoteFilesystem`, native file watching (`fs.watch`), language servers and extension hosts on the same machine and filesystem as the project and the node's persistent terminals (`§P`), while the server relay keeps authentication, device revocation (`FR-N3`) and the guest-door exclusion (`FR-T14`) at one boundary.
 
-**Status.** Specified (`FR-W4a` to `FR-W4c`, Draft; issue #457). Local server OSE and its relay are in #458/#459/#461; node OSE routes and server-to-node relay follow this spec.
+**Status.** Specified (`FR-W4a` to `FR-W4c`, Draft; issue #457). Local server OSE and its relay are in #458/#459/#461; node OSE routes and server-to-node relay follow this spec. Update of 2026-11-15 *[provisional]* (#896): the node routes and the server-to-node relay are written, not yet compiled or run. The node runs the server's `OseManager` itself (the code moved to `ember/node/src/ose.rs`; `ember-server` re-exports it, because the server depends on the node crate and not the reverse), so its data dir is `<state_dir>/ose-data/local`. `POST /ide/ose` answers `{launch_id, endpoint, connection_token}` with the placeholder as `connection_token` (not `{launch_id, port}` as the bullet above says), and the placeholder is replaced inside one client message (`FR-N9.1`). Rejected: a copy of the manager in `ember-node`, because two copies of the token file and relay rules would drift. Not verified: a real Code-OSS runtime on a node, and a second computer.
 
 ### D43: Hot exit in the Ember 에디터 window writes its backup while the window is open
 

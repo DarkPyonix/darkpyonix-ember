@@ -557,7 +557,7 @@ pub mod view {
                         button { class: "ed-ib", title: "작업 다시 읽기", "aria-label": "작업 다시 읽기", onclick: move |_| { reload_s.host.send(HostCommand::LoadTasks); }, {icon("refresh")} }
                     }
                     if let Some(m) = message {
-                        div { style: "padding:var(--sp2); color:var(--muted); white-space:pre-wrap;", "{m}" }
+                        div { class: "ed-note", role: "status", style: "flex:none; padding:var(--sp2); white-space:pre-wrap;", "{m}" }
                     }
                     for (i, t) in list.into_iter().enumerate() {
                         {
@@ -587,7 +587,7 @@ pub mod view {
 
     fn run_output(s: &Shared, run_state: Option<(String, TerminalHandle)>) -> Element {
         let Some((label, handle)) = run_state else {
-            return rsx! { div { class: "ed-term", style: "flex:1; color:var(--muted);", "작업을 실행하면 프로젝트의 컴퓨터에서 새 터미널로 실행되고 출력이 이곳에 표시됩니다." } };
+            return rsx! { div { class: "ed-note", role: "status", "작업을 실행하면 프로젝트의 컴퓨터에서 새 터미널로 실행되고 출력이 이곳에 표시됩니다." } };
         };
         let state = handle.snapshot();
         let lines = state.lines.clone();

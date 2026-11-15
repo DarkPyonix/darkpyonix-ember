@@ -1534,6 +1534,16 @@ pub fn sheet_pane_height(body_h: f32, pad: f32) -> f32 {
     (body_h - 2.0 * pad - VCS_BAR_EST_H).max(0.0)
 }
 
+/// What the wide page draws above its panes: the 32 gutter, the title block, the three-column
+/// bar and the gaps between them (246 in the ba captures at 1024 x 800).
+pub const VCS_PAGE_ABOVE_PANES: f32 = 246.0;
+
+/// The height of the panes on the bounded wide page, from the window height: less what is above
+/// them and the bottom gutter. An estimate, as [`sheet_pane_height`].
+pub fn page_pane_height(window_h: f32, pad: f32) -> f32 {
+    (window_h - VCS_PAGE_ABOVE_PANES - pad).max(0.0)
+}
+
 /// [`FilesTree`] no taller than `cap`: a longer tree scrolls inside that height.
 fn FilesTreeCapped(
     diffs: &[FileDiff],
@@ -1750,8 +1760,12 @@ fn CommitBox(
     body: &MutableState<String>,
     amend: &MutableState<bool>,
     commit: Option<(Actions, RepoSnapshot, MutableState<Staging>)>,
+    compact: bool,
 ) {
     let p = ember_theme().palette;
+    // Compact: the summary and the button on one row, 설명 and amend behind a toggle.
+    let expanded = remember(|| mutable_state_of(false));
+    let folded = compact && !expanded.get();
     let sum_state = summary.clone();
     let body_state = body.clone();
     let amend_state = amend.clone();
@@ -1776,10 +1790,12 @@ fn CommitBox(
         .content(move || {
             let s_state = sum_state.clone();
             let s_armed = armed.clone();
-            key((field_generation.get(), 0_u8), || {
+            let sum_show = sum_state.clone();
+            let gen0 = field_generation.get();
+            let mut summary_field = Some(move || key((gen0, 0_u8), || {
                 EmberField(FieldOptions {
                     fill_max_width: true,
-                    text: Some(sum_state.get()),
+                    text: Some(s_state.get()),
                     placeholder: "요약 (필수) 예: Feat: Wire shim".to_string(),
                     type_role: Some(VCS_FIELD_ROLE),
                     on_value_change: Some(Box::new(move |v| {
@@ -1788,10 +1804,13 @@ fn CommitBox(
                     })),
                     ..Default::default()
                 });
-            });
+            }));
+            let sum_state = sum_show;
 
             let b_state = body_state.clone();
             let b_armed = armed.clone();
+            if !folded {
+            if let Some(f) = summary_field.take() { f(); }
             key((field_generation.get(), 1_u8), || {
                 EmberField(FieldOptions {
                     fill_max_width: true,
@@ -1820,18 +1839,20 @@ fn CommitBox(
                 });
                 Label("마지막 커밋 수정 (amend)", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
             });
+            }
             if let Some(text) = warning {
                 Label(text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
             }
 
             let click_armed = armed.clone();
-            AppButton(
+            let button = move || AppButton(
                 &amend_button_label(&commit_label(&branch_name, staged_files), warning, is_armed),
                 Some(IconRole::Check),
                 ButtonKind::Primary,
                 false,
                 can_commit,
-                true,
+                // On the compact row the button keeps its own width beside the summary.
+                !folded,
                 move || {
                     if let Some((actions, snap, staging)) = &commit {
                         let needs_confirm = amend_state.get() && amend_warning(snap).is_some();
@@ -1860,13 +1881,52 @@ fn CommitBox(
                 },
             );
 
+            if folded {
+                cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(SP[1]).content(move || {
+                    cu::Box().modifier(Modifier::new().weight(1.0)).content(move || { if let Some(f) = summary_field { f(); } });
+                    button();
+                });
+            } else {
+                button();
+            }
             let note_text = if can_commit {
                 "선택한 변경 사항을 커밋합니다".to_string()
             } else {
                 "요약과 스테이징한 파일이 필요합니다".to_string()
             };
-            Label(&note_text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
+            if compact {
+                cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                    cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
+                        Label(&note_text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                    });
+                    let toggle = expanded.clone();
+                    AppButton(compact_toggle_label(folded), None, ButtonKind::Default, true, true, false, move || toggle.set(!toggle.get()));
+                });
+            } else {
+                Label(&note_text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
+            }
         });
+}
+
+/// The compact commit box's toggle (`CommitBox` with `compact`).
+pub fn compact_toggle_label(folded: bool) -> &'static str {
+    if folded { "설명 \u{b7} amend" } else { "접기" }
+}
+
+/// The commit box drawn whole (12 + 40 + 64 + 32 + 40 + 18 + 12, 8 apart) and compact (the
+/// summary and the button on one 40 row, then the note and the toggle on a 32 row).
+pub const VCS_COMMIT_BOX_COMPACT_H: f32 = 2.0 * 12.0 + 40.0 + 32.0 + 8.0;
+/// The sheet's one column above the changes card: the two-row bar (236 in the ba captures),
+/// the pills (36) and the gaps (16, 12).
+pub const VCS_SHEET_ONE_COLUMN_ABOVE: f32 = 236.0 + 16.0 + 36.0 + 12.0;
+/// The tree rows the one-column sheet keeps on screen above its footer (review ba fix round).
+pub const VCS_SHEET_MIN_TREE_ROOM: f32 = 110.0;
+
+/// Whether the one-column sheet's footer is the compact commit box: when the whole box would
+/// leave the files tree less than [`VCS_SHEET_MIN_TREE_ROOM`] on screen.
+pub fn sheet_footer_compact(body_h: f32, pad: f32) -> bool {
+    let room = body_h - 2.0 * pad - VCS_SHEET_ONE_COLUMN_ABOVE - VCS_FILES_HEAD_H - (VCS_COMMIT_BOX_EST_H + 2.0 * pad);
+    room < VCS_SHEET_MIN_TREE_ROOM
 }
 
 fn CommitPane(
@@ -1876,9 +1936,10 @@ fn CommitPane(
     body: &MutableState<String>,
     amend: &MutableState<bool>,
     commit: Option<(Actions, RepoSnapshot, MutableState<Staging>)>,
+    compact: bool,
 ) {
     VcsCard(move || {
-        CommitBox(branch, staged_files, summary, body, amend, commit);
+        CommitBox(branch, staged_files, summary, body, amend, commit, compact);
     });
 }
 
@@ -1889,25 +1950,56 @@ pub fn ChangesPane(
     tab: Option<PaneTab>,
     on_tab: impl FnMut(PaneTab) + Clone + 'static,
 ) {
-    ChangesPaneWithActions(snap, layout, tab, on_tab, None, diff_pane_width(current_window_size().width_dp, layout), 320.0, None);
+    ChangesPaneWithActions(snap, layout, tab, on_tab, None, diff_pane_width(current_window_size().width_dp, layout), 320.0, None, None, false);
 }
 
-fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<PaneTab>, on_tab: impl FnMut(PaneTab) + Clone + 'static, actions: Option<Actions>, diff_width: f32, files_w: f32, pane_h: Option<f32>) {
-    let p = ember_theme().palette;
-    let diffs = snap.changes.clone();
-    let staging_key = (actions.as_ref().map(|a| (a.project.clone(), a.reload.get())), snap.branch.clone(), snap.staged.clone(), diffs.clone());
+/// The commit box's state (staging, summary, description, amend), kept where both the changes
+/// card and a commit box drawn outside it (the sheet's one-column footer) can reach it.
+#[derive(Clone)]
+struct CommitDraft {
+    staging: MutableState<Staging>,
+    summary: MutableState<String>,
+    body: MutableState<String>,
+    amend: MutableState<bool>,
+}
+
+/// Remembers a [`CommitDraft`] for `snap` (empty without one); `scope` is the project and the
+/// reload count, so a reload or another project starts the staging again.
+fn commit_draft(snap: Option<&RepoSnapshot>, scope: Option<(String, u64)>) -> CommitDraft {
+    let diffs = snap.map(|s| s.changes.clone()).unwrap_or_default();
+    let staged = snap.map(|s| s.staged.clone()).unwrap_or_default();
+    let staging_key = (scope, snap.map(|s| s.branch.clone()), staged.clone(), diffs.clone());
     let staging = remember_with_key(staging_key, || {
         let mut state = Staging::new(&diffs, false);
-        for diff in &diffs { if snap.staged.contains(&diff.path) { state.toggle_file(diff); } }
+        for diff in &diffs { if staged.contains(&diff.path) { state.toggle_file(diff); } }
         mutable_state_of(state)
     });
+    let summary = remember(|| mutable_state_of(String::new()));
+    let body = remember(|| mutable_state_of(String::new()));
+    let amend = remember(|| mutable_state_of(false));
+    CommitDraft { staging, summary, body, amend }
+}
+
+/// The sheet's one-column layout draws the commit box under the scrolling body, outside it, so
+/// the box is whole at any sheet height and the scroll ends above it (review ba: at 800 x 800
+/// the bar in two rows left the changes card 326 of the 300 its header and commit box need, and
+/// the sheet's bottom edge cut the summary field).
+pub fn sheet_commit_footer(sheet: bool, layout: PaneLayout, sec: Section, has_snapshot: bool) -> bool {
+    sheet && layout == PaneLayout::Stacked && sec == Section::Changes && has_snapshot
+}
+
+fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<PaneTab>, on_tab: impl FnMut(PaneTab) + Clone + 'static, actions: Option<Actions>, diff_width: f32, files_w: f32, pane_h: Option<f32>, draft: Option<CommitDraft>, commit_outside: bool) {
+    let p = ember_theme().palette;
+    let diffs = snap.changes.clone();
+    let draft = draft.unwrap_or_else(|| commit_draft(Some(snap), actions.as_ref().map(|a| (a.project.clone(), a.reload.get()))));
+    let staging = draft.staging.clone();
     let stash_actions = actions.clone();
     let commit = actions.map(|a| (a, snap.clone(), staging.clone()));
     let folded = remember(|| mutable_state_of(BTreeSet::<String>::new()));
     let selected = remember(|| mutable_state_of(0usize));
-    let summary = remember(|| mutable_state_of(String::new()));
-    let body = remember(|| mutable_state_of(String::new()));
-    let amend = remember(|| mutable_state_of(false));
+    let summary = draft.summary.clone();
+    let body = draft.body.clone();
+    let amend = draft.amend.clone();
 
     let sel = selected.get().min(diffs.len().saturating_sub(1));
     let staged_files = staging.get().staged_files(&diffs);
@@ -1952,7 +2044,7 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
                                 cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                                 FilesTreeCapped(&d_files, &st_files, &fold_files, &sel_files, on_tab_files, tree_cap(VCS_TREE_MAX_H, pane_h));
                                 cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-                                CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files, commit.clone());
+                                CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files, commit.clone(), false);
                             });
                         });
                     });
@@ -1980,8 +2072,11 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
                         FilesHeader(stash_actions.clone(), diffs_len, &all_checks, &st_files, &d_files);
                         cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                         FilesTreeCapped(&d_files, &st_files, &fold_files, &sel_files, on_tab_files, tree_cap(VCS_TREE_MAX_H_STACKED, None));
-                        cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-                        CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files, commit.clone());
+                        // In the sheet the commit box is the footer under the scroll instead.
+                        if !commit_outside {
+                            cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                            CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files, commit.clone(), false);
+                        }
                     });
                 });
                 DiffPane(&diffs, sel, &staging, diff_width);
@@ -1999,7 +2094,10 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
                 PaneTabs(Section::Changes, tab, move |t| on_tab_pick(t));
                 match tab.unwrap_or(PaneTab::Files) {
                     PaneTab::Diff => DiffPane(&diffs, sel, &staging, diff_width),
-                    PaneTab::Commit => CommitPane(&snap.branch, staged_files, &summary, &body, &amend, commit.clone()),
+                    PaneTab::Commit => {
+                        CommitPane(&snap.branch, staged_files, &summary, &body, &amend, commit.clone(), false);
+                        cu::Spacer().modifier(Modifier::new().height(super::routines::compact_bottom_clearance()));
+                    }
                     _ => {
                         VcsCard(move || {
                             cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
@@ -2035,6 +2133,8 @@ fn SectionContent(
     diff_width: f32,
     files_w: f32,
     pane_h: Option<f32>,
+    draft: Option<CommitDraft>,
+    commit_outside: bool,
 ) {
     match (snap, sec) {
         (Some(s), Section::Changes) => {
@@ -2048,6 +2148,8 @@ fn SectionContent(
                 diff_width,
                 files_w,
                 pane_h,
+                draft,
+                commit_outside,
             );
         }
         (Some(s), Section::Conflicts) => ConflictsPane(&s.conflicts, actions, layout),
@@ -5084,7 +5186,12 @@ fn VcsScreenWithLoad(
     let pad = frame.map_or_else(|| vcs_page_pad(compact), |f| f.pad);
     let files_w = frame.map_or(320.0, |f| f.files_w);
     // The height of the two panes, known in the sheet only (its body height is set outright).
-    let pane_h = sheet_ctl.as_ref().and_then(|c| c.body_h).map(|h| sheet_pane_height(h, pad));
+    // On the bounded wide page it is the window under the bar (review ba: at 1024 x 800 the
+    // 360 tree put the commit button below the fold).
+    let pane_h = match sheet_ctl.as_ref() {
+        Some(c) => c.body_h.map(|h| sheet_pane_height(h, pad)),
+        None => (wide && window.height_dp > 100.0).then(|| page_pane_height(window.height_dp, pad)),
+    };
     let content_width = (sheet_ctl.as_ref().map_or(window.width_dp, |c| c.sheet_w) - 2.0 * pad).max(0.0);
     let nav_w = if sheet { VCS_SHEET_RAIL_W + SP[3] } else { 200.0 + SP[3] };
     let section_width = (content_width - if wide { nav_w } else { 0.0 }).max(0.0);
@@ -5116,6 +5223,12 @@ fn VcsScreenWithLoad(
 
     let sec = section.get();
     let active_tab = effective_tab(sec, tab.get());
+    // The commit box's state lives here, so the sheet's footer and the changes card share it.
+    let draft_scope = current.clone().filter(|_| !sample && crate::services::try_services().is_some()).map(|id| (id, reload.get()));
+    let draft = commit_draft(snap.as_ref(), draft_scope);
+    let footer = project.is_some() && sheet_commit_footer(sheet, layout, sec, snap.is_some());
+    let footer_compact = sheet_ctl.as_ref().and_then(|c| c.body_h).is_some_and(|h| sheet_footer_compact(h, pad));
+    let footer_actions = project.as_ref().filter(|_| !sample).and_then(|pr| crate::services::try_services().map(|_| Actions { project: pr.id.clone(), reload: reload.clone() }));
 
     let body = || {
         // The sheet's header carries the title and the summary line (FR-L18.1), so the sheet
@@ -5190,7 +5303,7 @@ fn VcsScreenWithLoad(
                                 });
                             }
                             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
-                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone(), selected_pr.clone(), Some(sec_state.clone()), diff_width, files_w, pane_h);
+                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone(), selected_pr.clone(), Some(sec_state.clone()), diff_width, files_w, pane_h, Some(draft.clone()), footer);
                             });
                         });
                     } else {
@@ -5209,7 +5322,7 @@ fn VcsScreenWithLoad(
                                 let tab_state = tab.clone();
                                 PaneTabs(sec, active_tab, move |t| tab_state.set(t));
                             }
-                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone(), selected_pr.clone(), Some(sec_state.clone()), diff_width, files_w, pane_h);
+                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone(), selected_pr.clone(), Some(sec_state.clone()), diff_width, files_w, pane_h, Some(draft.clone()), footer);
                         });
                     }
                 } else {
@@ -5225,11 +5338,31 @@ fn VcsScreenWithLoad(
             // Wide: a bounded page, so the section list and the panes can fill its height.
             cu::Column().modifier(outer.padding(pad)).spacing(SP[3]).content(body);
         } else {
+            if footer {
+                // The sheet's one column: the body scrolls above the commit box, which stays
+                // whole at the bottom (`sheet_commit_footer`).
+                let fd = draft.clone();
+                let fsnap = snap.clone();
+                let factions = footer_actions.clone();
+                cu::Column().modifier(outer).content(move || {
+                    cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(|| {
+                        cu::Column().modifier(Modifier::new().fill_max_width().padding(pad)).spacing(SP[3]).content(body);
+                    });
+                    cu::Box().modifier(Modifier::new().fill_max_width().padding(pad)).content(move || {
+                        if let Some(s) = fsnap.as_ref() {
+                            let staged_files = fd.staging.get().staged_files(&s.changes);
+                            let commit = factions.clone().map(|a| (a, s.clone(), fd.staging.clone()));
+                            CommitPane(&s.branch, staged_files, &fd.summary, &fd.body, &fd.amend, commit, footer_compact);
+                        }
+                    });
+                });
+            } else {
             cu::Box().modifier(outer).content(|| {
                 cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
                     cu::Column().modifier(Modifier::new().fill_max_width().padding(pad)).spacing(SP[3]).content(body);
                 });
             });
+            }
         }
     };
     match sheet_ctl {
@@ -6271,7 +6404,7 @@ mod tests {
         let summary = remember(|| mutable_state_of(String::new()));
         let body = remember(|| mutable_state_of(String::new()));
         let amend = remember(|| mutable_state_of(false));
-        CommitBox("main", 1, &summary, &body, &amend, None);
+        CommitBox("main", 1, &summary, &body, &amend, None, false);
     }
 
     #[compose_rust::runtime::Composable]
@@ -7774,6 +7907,71 @@ mod tests {
         let reload = remember(|| mutable_state_of(0_u64));
         let ctl = VcsSheetCtl { window_w: 1440.0, sheet_w: vcs_sheet_width(1440.0), top_inset: 0.0, body_h: Some(vcs_sheet_body_height(1440.0, 900.0)), on_close: std::rc::Rc::new(std::cell::RefCell::new(|| {})) };
         VcsScreenWithLoad(Load::Ready(sample_snapshot()), sample_projects(), Some("ember".into()), reload, true, Some(ctl));
+    }
+
+    #[compose_rust::runtime::Composable]
+    fn open_vcs_sheet_800_sample() {
+        let reload = remember(|| mutable_state_of(0_u64));
+        let ctl = VcsSheetCtl { window_w: 800.0, sheet_w: vcs_sheet_width(800.0), top_inset: 0.0, body_h: Some(vcs_sheet_body_height(800.0, 800.0)), on_close: std::rc::Rc::new(std::cell::RefCell::new(|| {})) };
+        VcsScreenWithLoad(Load::Ready(sample_snapshot()), sample_projects(), Some("ember".into()), reload, true, Some(ctl));
+    }
+
+    #[test]
+    fn fr_l19_the_one_column_sheet_keeps_the_commit_box_whole_under_the_scroll() {
+        // Review ba: at 800 x 800 the sheet's bottom edge cut the summary field and the tree.
+        // Where the sheet uses one column, the commit box sits under the scrolling body.
+        assert_eq!(vcs_sheet_frame(vcs_sheet_width(800.0), 800.0).layout, PaneLayout::Stacked);
+        assert!(sheet_commit_footer(true, PaneLayout::Stacked, Section::Changes, true));
+        assert!(!sheet_commit_footer(false, PaneLayout::Stacked, Section::Changes, true), "the page keeps one scroll");
+        assert!(!sheet_commit_footer(true, PaneLayout::Two, Section::Changes, true), "1440 and 1024 keep the card");
+        assert!(!sheet_commit_footer(true, PaneLayout::Tabs, Section::Changes, true), "the phone has its 커밋 tab");
+        assert!(!sheet_commit_footer(true, PaneLayout::Stacked, Section::History, true));
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let _ = vcs_sheet_window(800.0, 800.0);
+        let nodes = nodes_of(open_vcs_sheet_800_sample);
+        let summaries: Vec<&N> = nodes.iter().filter(|n| n.props.iter().any(|x| x.contains("요약 (필수) 예: Feat: Wire shim"))).collect();
+        assert_eq!(summaries.len(), 1, "one commit box");
+        let summary_up = up(&nodes, summaries[0]);
+        let scrolls_above: Vec<&N> = nodes.iter().filter(|n| summary_up.contains(&n.id) && n.widget == "ScrollColumn").collect();
+        assert!(scrolls_above.is_empty(), "the commit box is outside every scroll");
+        let header = nodes.iter().find(|n| n.props.iter().any(|x| x.starts_with("Text=String(\"변경 파일 "))).expect("the files header");
+        let body_scroll = nodes
+            .iter()
+            .find(|n| up(&nodes, header).contains(&n.id) && n.widget == "ScrollColumn" && n.mods.iter().any(|m| m.starts_with("Weight(1.0")))
+            .expect("the body scrolls in the height the footer leaves");
+        let footer_col = nodes.iter().find(|n| n.id == body_scroll.parent.unwrap()).unwrap();
+        assert!(summary_up.contains(&footer_col.id), "the footer is the scroll's sibling in one column");
+        // Fix round: at 800 x 800 the whole box left no tree row on screen, so the footer is
+        // the compact box (summary and button on one row, 설명 and amend behind a toggle).
+        let body_h = vcs_sheet_body_height(800.0, 800.0);
+        assert!(sheet_footer_compact(body_h, 16.0));
+        assert!(!sheet_footer_compact(vcs_sheet_body_height(800.0, 1200.0), 16.0), "a tall sheet keeps the whole box");
+        let tree_room = body_h - 2.0 * 16.0 - VCS_SHEET_ONE_COLUMN_ABOVE - VCS_FILES_HEAD_H - (VCS_COMMIT_BOX_COMPACT_H + 2.0 * 16.0);
+        assert!(tree_room >= VCS_SHEET_MIN_TREE_ROOM, "three rows show above the compact footer: {tree_room}");
+        assert!(!nodes.iter().any(|n| n.props.iter().any(|x| x.contains("설명 (선택)"))), "설명 is folded");
+        assert!(!nodes.iter().any(|n| n.props.iter().any(|x| x.contains("마지막 커밋 수정"))), "amend is folded");
+        let button = nodes.iter().find(|n| n.props.iter().any(|x| x.contains("에 커밋"))).expect("the commit button");
+        let shared_row = nodes.iter().find(|n| n.widget == "Row" && summary_up.contains(&n.id) && up(&nodes, button).contains(&n.id)).expect("summary and button share a row");
+        assert!(!scrolls_above.iter().any(|sc| up(&nodes, shared_row).contains(&sc.id)));
+        assert!(nodes.iter().any(|n| n.props.iter().any(|x| x.contains(compact_toggle_label(true)))), "the toggle is sent");
+        assert!(!button.mods.iter().any(|m| m == "FillMaxWidth"), "the compact button does not take the summary's width: {:?}", button.mods);
+        // The page and the wide sheet: the commit box stays in the changes card.
+        compose_rust::window::reset_window_size();
+        let _ = vcs_sheet_window(1440.0, 900.0);
+        let wide = nodes_of(open_vcs_sheet_sample);
+        assert_eq!(wide.iter().filter(|n| n.props.iter().any(|x| x.contains("요약 (필수) 예: Feat: Wire shim"))).count(), 1);
+    }
+
+    #[test]
+    fn fr_l19_the_wide_page_tree_leaves_the_commit_box_on_screen() {
+        // Review ba follow-up: at 1024 x 800 the page's 360 tree put the commit button below
+        // the fold. The panes start 246 down and end 32 above the window's bottom.
+        assert_eq!(page_pane_height(800.0, 32.0), 522.0);
+        assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(page_pane_height(800.0, 32.0))), 222.0);
+        assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(page_pane_height(900.0, 32.0))), 322.0);
+        let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("None => (wide && window.height_dp > 100.0).then(|| page_pane_height(window.height_dp, pad)),"));
     }
 
     #[compose_rust::runtime::Composable]

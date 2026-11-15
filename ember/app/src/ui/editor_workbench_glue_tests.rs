@@ -817,13 +817,14 @@ fn fr_l31_32_status_badges_take_the_soft_pair_of_the_letters_colour() {
     assert!(!scm.contains(r#"r#type: "checkbox""#));
 }
 
-// FR-L31.39: R (and C) take the mockup's blue pair (`vcs.js:19`), not the faint sky one.
+// FR-L31.39: every letter takes the mockup's pair (`vcs.js:19` `VCS_ST`): M orange, A green,
+// D red, R blue; untracked (U, git's `?`) joins A, C joins R, a conflict joins M.
 #[test]
-fn fr_l31_39_renamed_badge_is_the_mockups_blue_pair() {
+fn fr_l31_39_status_badges_follow_the_mockups_map() {
     use crate::ui::editor_scm::{letter_color, letter_tone};
-    for letter in ['R', 'C'] {
-        assert_eq!(letter_tone(letter), "blue", "{letter}");
-        assert_eq!(letter_color(letter), "var(--c-blue)", "{letter}");
+    for (letter, tone) in [('M', "orange"), ('A', "green"), ('D', "red"), ('R', "blue"), ('C', "blue"), ('U', "green"), ('!', "orange")] {
+        assert_eq!(letter_tone(letter), tone, "{letter}");
+        assert_eq!(letter_color(letter), format!("var(--c-{tone})"), "{letter}");
     }
 }
 

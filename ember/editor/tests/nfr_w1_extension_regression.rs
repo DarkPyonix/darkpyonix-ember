@@ -1,6 +1,6 @@
 //! NFR-W1 (#84): the extension regression list, and the client that makes a real OSE activate it.
 //!
-//! Two tests:
+//! The tests:
 //!
 //! * `nfr_w1_regression_data_is_consistent` runs everywhere. It reads
 //!   `ember/ose/regression/extensions.json` and `expected.json` and checks what
@@ -18,14 +18,25 @@
 //! ember/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
 //! ```
 //!
+//! * `nfr_w1_deep_checks` is the deep client (#929), run by the same command when the harness has
+//!   `OSE_REGRESS_MODE=deep` (the activation client skips itself then, and this test skips itself
+//!   otherwise). For every entry with a `deep` check it makes that check through the session and
+//!   writes `{"deep": pass|fail|not-run, "reason"}` to `$OSE_REGRESS_DEEP/<id>.json`; the harness
+//!   compares those with `expected.json`. The webview check runs the view command, waits for the
+//!   panel and its HTML, reports the page shown and ready, sends the entry's message and waits for
+//!   the answer. The debug check is not built (the client has no debug service, #445): it reports
+//!   `not-run`, and `not-run: no python3` when the machine has no `python3`.
+//!
 //! Environment the harness sets: `OSE_REGRESS_ADDR` (`127.0.0.1:<port>` of the running server),
-//! `OSE_REGRESS_WS` (a copy of `regression/workspace/` on the server's machine). Optional:
+//! `OSE_REGRESS_WS` (a copy of `regression/workspace/` on the server's machine), `OSE_REGRESS_MODE`
+//! (`activation` or `deep`), `OSE_REGRESS_DEEP` (the folder for deep results). Optional:
 //! `OSE_REGRESS_SETTLE` (seconds to stay connected after the last open, default 30).
 
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+use ember_editor::webview::{WebviewEvent, WebviewKind, WebviewMessage, WebviewUpdate};
 use ember_editor::{EditorSession, SessionConfig, SessionUpdate};
 use serde_json::{json, Value};
 
@@ -83,6 +94,62 @@ fn valid_version(v: &str) -> bool {
 fn relative_inside(path: &str) -> bool {
     let p = Path::new(path);
     !path.is_empty() && p.components().all(|c| matches!(c, Component::Normal(_)))
+}
+
+/// The `deep` field of an entry (#929).
+#[derive(Debug, Clone, PartialEq)]
+enum DeepCheck {
+    /// Run `command`, wait for its panel and HTML, send `send`, wait for a message whose `command` is `reply`.
+    Webview { command: String, send: Value, reply: String },
+    /// Debug `program` (relative to the workspace) with a breakpoint at 1-based `line`.
+    Debug { program: String, line: u32 },
+}
+
+impl DeepCheck {
+    fn from_json(v: &Value) -> Result<Self, String> {
+        let text = |key: &str| v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
+        match v.get("check").and_then(Value::as_str) {
+            Some("webview") => Ok(Self::Webview {
+                command: text("command").ok_or("webview: `command` is the view command id")?,
+                send: v.get("send").filter(|s| s.is_object()).cloned().ok_or("webview: `send` is the JSON object sent to the panel")?,
+                reply: text("reply").ok_or("webview: `reply` is the `command` of the expected answer")?,
+            }),
+            Some("debug") => {
+                let program = text("program").filter(|p| relative_inside(p)).ok_or("debug: `program` is a relative path inside the workspace")?;
+                let line = v.get("line").and_then(Value::as_u64).filter(|l| *l >= 1 && *l <= u64::from(u32::MAX));
+                Ok(Self::Debug { program, line: line.ok_or("debug: `line` is a 1-based line number")? as u32 })
+            }
+            other => Err(format!("`check` is webview or debug, got {other:?}")),
+        }
+    }
+}
+
+/// Whether a message from the extension to its page is the expected answer: a JSON object whose
+/// `command` is `reply` (Git Graph's `ResponseMessage` shape).
+fn reply_matches(json_text: &str, reply: &str) -> bool {
+    serde_json::from_str::<Value>(json_text).ok().and_then(|v| v.get("command").and_then(Value::as_str).map(|c| c == reply)).unwrap_or(false)
+}
+
+/// One deep check's outcome, as `regress.py compare-deep` reads it from `<OSE_REGRESS_DEEP>/<id>.json`.
+#[derive(Debug, Clone, PartialEq)]
+struct DeepResult {
+    status: &'static str,
+    reason: String,
+}
+
+impl DeepResult {
+    fn pass(reason: impl Into<String>) -> Self {
+        Self { status: "pass", reason: reason.into() }
+    }
+    fn fail(reason: impl Into<String>) -> Self {
+        Self { status: "fail", reason: reason.into() }
+    }
+    fn not_run(reason: impl Into<String>) -> Self {
+        Self { status: "not-run", reason: reason.into() }
+    }
+    fn to_json(&self) -> Value {
+        json!({"deep": self.status, "reason": self.reason})
+    }
 }
 
 #[test]
@@ -192,6 +259,10 @@ async fn nfr_w1_regression_client() {
         eprintln!("[regress-client] OSE_REGRESS_ADDR or OSE_REGRESS_WS not set; skipping");
         return;
     };
+    if std::env::var("OSE_REGRESS_MODE").as_deref() == Ok("deep") {
+        eprintln!("[regress-client] OSE_REGRESS_MODE=deep: the deep client runs instead; skipping");
+        return;
+    }
     let settle = std::env::var("OSE_REGRESS_SETTLE").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(30);
     // The server resolves symlinks in what it reports (macOS `/var` is `/private/var`).
     let ws = std::fs::canonicalize(&ws).unwrap_or_else(|e| panic!("OSE_REGRESS_WS {}: {e}", ws.display()));
@@ -270,4 +341,157 @@ async fn nfr_w1_regression_client() {
     session.shutdown().await;
     assert!(!lost, "the connection to the OSE was lost before the settle time ended; the log comparison would not be trustworthy");
     println!("[regress-client] done after {settle} s of settle time");
+}
+
+/// What the editor client still needs before the debug check can run (#445). Kept in one place so
+/// the reason in `deep.json` and the README list stay the same.
+const DEBUG_NOT_BUILT: &str = "the Ember editor client has no debug service yet: MainThreadDebugService \
+($registerDebugTypes, $registerDebugConfigurationProvider, $registerDebugAdapterDescriptorFactory, $acceptDAMessage) \
+gets default replies and ExtHostDebugService ($resolveDebugConfiguration, $startDASession, $sendDAMessage, $stopDASession) \
+is never called, so no DAP request reaches debugpy (#445)";
+
+fn has_python3() -> bool {
+    std::process::Command::new("python3").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Wait for a webview update matching `pick`, returning what `pick` returns. Commands that the
+/// extension host has not registered come back as `RunCommand` or `CommandFailed` and end the wait.
+async fn wait_webview<T>(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<SessionUpdate>,
+    secs: u64,
+    mut pick: impl FnMut(&WebviewUpdate) -> Option<T>,
+) -> Result<T, String> {
+    let until = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        match tokio::time::timeout_at(until, rx.recv()).await {
+            Err(_) => return Err(format!("nothing within {secs} s")),
+            Ok(None) => return Err("session ended".into()),
+            Ok(Some(SessionUpdate::ConnectionLost { reason })) => return Err(format!("connection lost: {reason}")),
+            Ok(Some(SessionUpdate::RunCommand { command })) => return Err(format!("unregistered command {}", command.id)),
+            Ok(Some(SessionUpdate::CommandFailed { id, error })) => return Err(format!("command {id} failed: {error}")),
+            Ok(Some(SessionUpdate::Webview(u))) => {
+                if let Some(t) = pick(&u) {
+                    return Ok(t);
+                }
+            }
+            Ok(Some(_)) => {}
+        }
+    }
+}
+
+/// The webview check: the view command opens a panel, its HTML arrives, and one message goes to
+/// the extension and one comes back.
+async fn webview_check(
+    session: &EditorSession,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<SessionUpdate>,
+    command: &str,
+    send: &Value,
+    reply: &str,
+) -> DeepResult {
+    // The extension registers its command while it activates; until then the session hands the
+    // command to the window (`RunCommand`). Try again for up to a minute.
+    let mut handle = None;
+    let mut last = String::new();
+    for attempt in 1..=12 {
+        if let Err(e) = session.execute_command(command, Vec::new()) {
+            return DeepResult::fail(format!("{command} not sent: {e}"));
+        }
+        let created = wait_webview(rx, 20, |u| match u {
+            WebviewUpdate::Created { handle, kind: WebviewKind::Panel { view_type }, .. } => Some((handle.clone(), view_type.clone())),
+            _ => None,
+        })
+        .await;
+        match created {
+            Ok((h, view_type)) => {
+                println!("[regress-deep] {command}: panel {view_type} ({h}) after {attempt} attempt(s)");
+                handle = Some(h);
+                break;
+            }
+            Err(e) if e.starts_with("connection lost") || e == "session ended" => return DeepResult::fail(e),
+            Err(e) => {
+                last = e;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+    let Some(handle) = handle else { return DeepResult::fail(format!("{command} opened no webview panel: {last}")) };
+
+    let html = match wait_webview(rx, 60, |u| match u {
+        WebviewUpdate::Html { handle: h, html, .. } if *h == handle => Some(html.clone()),
+        _ => None,
+    })
+    .await
+    {
+        Ok(html) if !html.trim().is_empty() => html,
+        Ok(_) => return DeepResult::fail("the panel's HTML is empty"),
+        Err(e) => return DeepResult::fail(format!("no HTML for the panel: {e}")),
+    };
+    println!("[regress-deep] {command}: {} bytes of HTML", html.len());
+
+    // Play the page: shown and active, ready, then the page's own first request.
+    let events = [
+        WebviewEvent::ViewState { handle: handle.clone(), visible: true, active: true, position: 0 },
+        WebviewEvent::Ready { handle: handle.clone() },
+        WebviewEvent::Message { handle: handle.clone(), message: WebviewMessage::text(send.to_string()) },
+    ];
+    for event in events {
+        if let Err(e) = session.webview(event) {
+            return DeepResult::fail(format!("webview event not sent: {e}"));
+        }
+    }
+    match wait_webview(rx, 60, |u| match u {
+        WebviewUpdate::Post { handle: h, message } if *h == handle && reply_matches(&message.json, reply) => Some(message.json.len()),
+        _ => None,
+    })
+    .await
+    {
+        Ok(len) => DeepResult::pass(format!("{} bytes of HTML; {reply} answered with {len} bytes", html.len())),
+        Err(e) => DeepResult::fail(format!("HTML arrived, but no {reply} answer to {send}: {e}")),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "the deep client of ember/ose/regress.sh (OSE_REGRESS_MODE=deep): needs OSE_REGRESS_ADDR and OSE_REGRESS_WS"]
+async fn nfr_w1_deep_checks() {
+    if std::env::var("OSE_REGRESS_MODE").as_deref() != Ok("deep") {
+        eprintln!("[regress-deep] OSE_REGRESS_MODE is not deep; skipping");
+        return;
+    }
+    let (Some(addr), Some(ws)) = (std::env::var("OSE_REGRESS_ADDR").ok(), std::env::var_os("OSE_REGRESS_WS").map(PathBuf::from)) else {
+        eprintln!("[regress-deep] OSE_REGRESS_ADDR or OSE_REGRESS_WS not set; skipping");
+        return;
+    };
+    let out = std::env::var_os("OSE_REGRESS_DEEP").map(PathBuf::from);
+    let ws = std::fs::canonicalize(&ws).unwrap_or_else(|e| panic!("OSE_REGRESS_WS {}: {e}", ws.display()));
+    let checks: Vec<(String, DeepCheck)> = entries()
+        .into_iter()
+        .filter_map(|e| e.deep.as_ref().map(|d| (e.id.clone(), DeepCheck::from_json(d).unwrap_or_else(|p| panic!("{}: {p}", e.id)))))
+        .collect();
+
+    let config = SessionConfig::new(addr.clone(), ws.to_str().expect("a UTF-8 workspace path"));
+    let (session, mut rx) = tokio::time::timeout(Duration::from_secs(180), EditorSession::connect_tcp(config))
+        .await
+        .expect("connect timed out")
+        .unwrap_or_else(|e| panic!("connect to {addr}: {e}"));
+    println!("[regress-deep] connected to {addr}, workspace {}", ws.display());
+
+    for (id, check) in &checks {
+        let result = match check {
+            DeepCheck::Webview { command, send, reply } => webview_check(&session, &mut rx, command, send, reply).await,
+            // Python is the runner's (the check needs an interpreter for debugpy's adapter and the
+            // program); without it the check cannot run at all.
+            DeepCheck::Debug { .. } if !has_python3() => DeepResult::not_run("no python3"),
+            DeepCheck::Debug { program, line } => {
+                let _ = (program, line);
+                DeepResult::not_run(DEBUG_NOT_BUILT)
+            }
+        };
+        println!("[regress-deep] {id}: {} ({})", result.status, result.reason);
+        if let Some(dir) = &out {
+            std::fs::create_dir_all(dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
+            let file = dir.join(format!("{}.json", id.to_lowercase()));
+            std::fs::write(&file, format!("{}\n", result.to_json())).unwrap_or_else(|e| panic!("write {}: {e}", file.display()));
+        }
+    }
+    session.shutdown().await;
 }

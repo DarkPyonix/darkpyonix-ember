@@ -6,14 +6,21 @@
                                              exit 1 on a regression; ids listed in
                                              install-failed.txt (one per line) count as
                                              install-failed; merged.json gets the final statuses
+  regress.py compare-deep <expected.json> <deep-dir> [<install-failed.txt>] [<deep.json>]
+                                             the deep run (#929): <deep-dir> holds one <id>.json
+                                             {"deep": pass|fail|not-run, "reason"} per check the
+                                             client made; exit 1 when a check expected to pass
+                                             failed; deep.json gets the final results
   regress.py ids <extensions.json>           print one extension id per line
   regress.py specs <extensions.json>         print one "id id@version" pair per line (the second
                                              word is what --install-extension takes; it is the
                                              bare id when no version is pinned)
   regress.py --self-test                     offline check of the parsing and comparison
 
-extensions.json entries are {"id", "version", "open"} (SPEC NFR-W1); a bare "publisher.name"
-string is still read as an unpinned entry with nothing to open.
+extensions.json entries are {"id", "version", "open", "deep"} (SPEC NFR-W1); a bare
+"publisher.name" string is still read as an unpinned entry with nothing to open. "deep" is an
+optional deeper check (#929): {"check": "webview", "command", "send", "reply"} or
+{"check": "debug", "program", "line"}.
 
 Status values: activated, failed, not-activated, install-failed.
 "activated" means the extension host logged the start of the activation and no failure for it;
@@ -47,7 +54,74 @@ def entries(doc):
     for e in doc["extensions"]:
         if isinstance(e, str):
             e = {"id": e}
-        out.append({"id": e["id"], "version": e.get("version"), "open": e.get("open")})
+        out.append({"id": e["id"], "version": e.get("version"), "open": e.get("open"), "deep": e.get("deep")})
+    return out
+
+
+DEEP_EXPECT = ("pass", "known-fail", "not-built")
+
+
+def deep_problem(deep, in_workspace):
+    """What is wrong with a `deep` entry, or "" (in_workspace(rel) says whether the file exists)."""
+    check = deep.get("check")
+    if check == "webview":
+        if not isinstance(deep.get("command"), str) or not deep["command"]:
+            return "webview: `command` is the view command id"
+        if not isinstance(deep.get("send"), dict):
+            return "webview: `send` is the JSON object sent to the panel"
+        if not isinstance(deep.get("reply"), str) or not deep["reply"]:
+            return "webview: `reply` is the `command` of the expected answer"
+        return ""
+    if check == "debug":
+        prog, line = deep.get("program"), deep.get("line")
+        if not isinstance(prog, str) or not prog or os.path.isabs(prog) or ".." in prog.split("/"):
+            return "debug: `program` is a relative path inside workspace/"
+        if not isinstance(line, int) or isinstance(line, bool) or line < 1:
+            return "debug: `line` is a 1-based line number"
+        if not in_workspace(prog):
+            return f"debug: workspace/{prog} missing"
+        return ""
+    return f"`check` is webview or debug, got {check!r}"
+
+
+def compare_deep(expected, results, install_failed=()):
+    """Return (failures, warnings, final). expected: {id: {"deep": {"expect", "reason"}}, ...};
+    results: {id lower: {"deep": pass|fail|not-run, "reason"}}. Only entries with a deep check count."""
+    fails, warns, final = [], [], {}
+    failed_installs = {i.lower() for i in install_failed}
+    for ext, spec in sorted(expected.items(), key=lambda kv: kv[0].lower()):
+        if "deep" not in spec:
+            continue
+        key = ext.lower()
+        if key in failed_installs:
+            got = {"deep": "fail", "reason": "not installed"}
+        else:
+            got = results.get(key) or {"deep": "not-run", "reason": "the client wrote no result"}
+        got = {"deep": got.get("deep", "not-run"), "reason": got.get("reason", "")}
+        final[key] = got
+        want = spec["deep"].get("expect", "pass")
+        status, reason = got["deep"], got["reason"]
+        if status == "not-run":
+            warns.append(f"{key}: deep check not-run: {reason}")
+        elif want == "pass" and status != "pass":
+            fails.append(f"{key}: deep check expected to pass, got {status}: {reason}")
+        elif want != "pass" and status == "pass":
+            warns.append(f"{key}: deep check is {want} but passes; update expected.json")
+    return fails, warns, final
+
+
+def read_deep_dir(path):
+    """{id lower: result} from the <id>.json files the deep client wrote."""
+    out = {}
+    if not path or not os.path.isdir(path):
+        return out
+    for name in sorted(os.listdir(path)):
+        if name.endswith(".json"):
+            try:
+                with open(os.path.join(path, name)) as f:
+                    out[name[:-5].lower()] = json.load(f)
+            except (OSError, ValueError) as e:
+                out[name[:-5].lower()] = {"deep": "fail", "reason": f"unreadable result: {e}"}
     return out
 
 
@@ -168,6 +242,20 @@ def main(a):
                     if res.get(k) != "failed":
                         res[k] = v
         print(json.dumps(res, indent=1, sort_keys=True))
+    elif a[:1] == ["compare-deep"]:
+        exp = json.load(open(a[1]))["results"]
+        install_failed = []
+        if len(a) > 3 and os.path.isfile(a[3]):
+            with open(a[3]) as f:
+                install_failed = [line.strip() for line in f if line.strip()]
+        fails, warns, final = compare_deep(exp, read_deep_dir(a[2]), install_failed)
+        if len(a) > 4:
+            with open(a[4], "w") as f:
+                json.dump(final, f, indent=1, sort_keys=True)
+                f.write("\n")
+        for w in warns: print("warn:", w)
+        for x in fails: print("FAIL:", x)
+        sys.exit(1 if fails else 0)
     elif a[:1] == ["ids"]:
         print("\n".join(e["id"] for e in entries(json.load(open(a[1])))))
     elif a[:1] == ["specs"]:

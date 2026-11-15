@@ -4,7 +4,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 
-use super::git_commit::{cut_chars, failure_message, run_k, strip_controls, GitCommitActionResponse, GENERIC_FAILURE, NO_HOOKS};
+use super::git_commit::{clip_log, cut_chars, failure_message, run_k, strip_controls, GitCommitActionResponse, GENERIC_FAILURE, NO_HOOKS};
 use super::{conflicts, message, open, run, GitError, GitRepoRequest};
 use crate::policy::PathPolicy;
 
@@ -112,7 +112,7 @@ pub async fn abort(policy: &PathPolicy, r: &GitMergeActionRequest) -> Result<Git
     }
     let out = run(&dir, &[NO_HOOKS[0], NO_HOOKS[1], "merge", "--abort"], None).await?;
     if out.code != 0 {
-        tracing::debug!(git_text = %message(&out), "git merge --abort failed");
+        tracing::debug!(git_text = %clip_log(&message(&out)), "git merge --abort failed");
         return Err(GitError::Conflict(ABORT_FAILED.into()));
     }
     Ok(GitMergeAborted { ok: true })
@@ -131,7 +131,7 @@ pub async fn commit(policy: &PathPolicy, r: &GitMergeActionRequest) -> Result<Gi
     let out = run(&dir, &[NO_HOOKS[0], NO_HOOKS[1], "commit", "--no-edit"], None).await?;
     if out.code != 0 {
         let combined = format!("{}\n{}", out.stderr.trim(), out.stdout.trim());
-        tracing::debug!(git_text = %combined.trim(), "git merge commit failed");
+        tracing::debug!(git_text = %clip_log(&combined), "git merge commit failed");
         return Err(GitError::Conflict(failure_message(&combined).to_owned()));
     }
     let head = run_k(&dir, &["rev-parse", "HEAD"], GENERIC_FAILURE).await?;

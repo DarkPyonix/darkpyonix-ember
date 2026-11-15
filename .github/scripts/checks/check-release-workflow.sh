@@ -34,7 +34,15 @@ for ch in osx-arm64 win-x64 linux-x64 linux-arm64; do need "channel: $ch" "Velop
 need 'dist/\*-Setup\.exe' 'release must upload Setup.exe'
 need 'dist/\*\.nupkg' 'release must upload the .nupkg files'
 need 'dist/releases\.\*\.json' 'release must upload releases.<channel>.json'
-for s in .github/scripts/release/check-tag-version.sh .github/scripts/release/pack-velopack.sh; do
+# Dry run (#880, leader 2026-11-15): a manual dispatch packs without publishing; only a v* tag push
+# reaches the publish job, and the summary checks every expected file.
+need 'workflow_dispatch:' 'dry run (workflow_dispatch) missing'
+need "if: \\$\\{\\{ github\\.event_name == 'push' && startsWith\\(github\\.ref, 'refs/tags/v'\\)" 'publish job must run only on a v* tag push'
+need 'name: Dry run summary' 'dry run summary job missing'
+need 'release/dry-run-summary\.sh' 'dry run summary script missing'
+[ "$(grep -c 'contents: write' "$f")" = 1 ] || { echo "error: $f: only the publish job may have contents: write" >&2; fail=1; }
+for s in .github/scripts/release/check-tag-version.sh .github/scripts/release/pack-velopack.sh \
+         .github/scripts/release/dry-run-summary.sh; do
     [ -f "$s" ] || { echo "error: $s missing" >&2; fail=1; }
 done
 grep -q 'scripts/package-velopack\.py' .github/scripts/release/pack-velopack.sh 2>/dev/null \

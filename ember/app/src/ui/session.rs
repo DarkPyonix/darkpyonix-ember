@@ -225,6 +225,10 @@ pub struct WebPage {
     pub url: Option<String>,
     pub note: Option<&'static str>,
     pub unverified: bool,
+    /// The address shown (`url`, or `:port` when it cannot be opened).
+    pub address: String,
+    /// The listening process, empty when the node did not name it.
+    pub process: String,
 }
 
 /// The state of the 웹 페이지 list.
@@ -388,11 +392,11 @@ pub fn web_pages_from(
         };
         let note = if unverified { Some(WEB_UNVERIFIED) } else { note };
         let shown = url.clone().unwrap_or_else(|| format!(":{port}"));
-        let mut label = if lp.process.is_empty() { shown } else { format!("{shown} ({})", lp.process) };
+        let mut label = if lp.process.is_empty() { shown.clone() } else { format!("{shown} ({})", lp.process) };
         if unverified {
             label = format!("{label} · {WEB_UNVERIFIED_MARK}");
         }
-        rows.push((port, WebPage { label, url, note, unverified }));
+        rows.push((port, WebPage { label, url, note, unverified, address: shown, process: lp.process.clone() }));
     }
     rows.sort_by(|a, b| (a.0, &a.1.url, &a.1.label).cmp(&(b.0, &b.1.url, &b.1.label)));
     rows.dedup_by(|b, a| a.0 == b.0 && a.1.url == b.1.url);
@@ -415,6 +419,47 @@ pub fn web_menu_lines(load: &WebPagesLoad) -> Vec<String> {
         WebPagesLoad::Empty => vec![WEB_EMPTY.to_string()],
         WebPagesLoad::Unsupported => vec![WEB_UNSUPPORTED.to_string()],
         WebPagesLoad::Failed(e) => vec![e.clone()],
+    }
+}
+
+/// The head of the 웹 페이지 menu (mockup `webMenu` `.sdrop-h b`).
+pub const WEB_MENU_HEAD: &str = "웹 페이지 열기";
+
+/// One row of the 웹 페이지 menu (FR-L10.4, #888): the address in the mono face, the process and
+/// why it cannot be opened below it, and whether it opens (the green 감지됨 pill). `loading` marks
+/// the loading row, drawn with the app's spinner (FR-L18, #519).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebMenuItem {
+    pub title: String,
+    pub detail: Option<String>,
+    pub detected: bool,
+    pub mono: bool,
+    pub loading: bool,
+}
+
+/// The menu's rows, in the order of [`web_menu_lines`], so [`web_tap`] answers for row `idx`.
+/// A row whose address is a guess has "추정 주소" at the end of its line.
+pub fn web_menu_items(load: &WebPagesLoad) -> Vec<WebMenuItem> {
+    match load {
+        WebPagesLoad::Ready(pages) => pages
+            .iter()
+            .map(|w| {
+                let parts: Vec<&str> = [w.process.as_str(), w.note.unwrap_or("")].into_iter().filter(|t| !t.is_empty()).collect();
+                let title =
+                    if w.unverified { format!("{} \u{b7} {WEB_UNVERIFIED_MARK}", w.address) } else { w.address.clone() };
+                WebMenuItem {
+                    title,
+                    detail: (!parts.is_empty()).then(|| parts.join(" \u{b7} ")),
+                    detected: w.url.is_some(),
+                    mono: true,
+                    loading: false,
+                }
+            })
+            .collect(),
+        other => web_menu_lines(other)
+            .into_iter()
+            .map(|title| WebMenuItem { title, detail: None, detected: false, mono: false, loading: matches!(other, WebPagesLoad::Loading) })
+            .collect(),
     }
 }
 
@@ -801,6 +846,70 @@ fn ide_label(kind: IdeKind) -> &'static str {
         IdeKind::VsCode => "VS Code",
         IdeKind::Gateway => "JetBrains Gateway",
     }
+}
+
+/// The head of the IDE menu (mockup `ideMenu` `.sdrop-h b`).
+pub const IDE_MENU_HEAD: &str = "어느 IDE로 열까요";
+
+/// A session folder as the IDE menu shows it: a folder under a home directory (`/Users/<name>/`,
+/// `/home/<name>/`, `/root/`, `C:\Users\<name>\`) starts at `~`, as the mockup's `~/project`;
+/// any other absolute folder is cut to its last part after an ellipsis, so the line does not
+/// spend its width on mount points. The home is recognised by its form, because the client does
+/// not know the home directory of the session's computer.
+pub fn ide_menu_folder(cwd: &str) -> String {
+    let path = cwd.trim().replace('\\', "/");
+    let path = path.trim_end_matches('/');
+    if path.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    let under_home = |skip: usize| {
+        let rest = parts[skip..].join("/");
+        if rest.is_empty() { "~".to_string() } else { format!("~/{rest}") }
+    };
+    match parts.as_slice() {
+        ["", "Users" | "home", _, ..] => under_home(3),
+        ["", "root", ..] => under_home(2),
+        [drive, "Users", _, ..] if drive.ends_with(':') => under_home(3),
+        _ => match parts.last() {
+            Some(last) if parts.len() > 2 => format!("\u{2026}/{last}"),
+            _ => path.to_string(),
+        },
+    }
+}
+
+/// The line under the IDE menu's head (mockup `ideMenu` `.sdrop-h span`, `computer:~/project`):
+/// the session's computer and its folder. Without a computer name (not read yet) the folder
+/// alone; without a folder nothing. Review r8 found the raw folder
+/// (`/Volumes/macMini/darkpyonix/darkpyonix-ember/.scrat...`) there.
+pub fn ide_menu_subtitle(computer: Option<&str>, cwd: &str) -> Option<String> {
+    let folder = ide_menu_folder(cwd);
+    if folder.is_empty() {
+        return None;
+    }
+    Some(match computer.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(c) => format!("{c}:{folder}"),
+        None => folder,
+    })
+}
+
+/// The line under an IDE's name in the menu: what this client does with it (FR-L7, FR-L10.4).
+/// The mockup's wording is kept where the client does the same: the Ember editor opens its own
+/// window, VS Code opens the server's web IDE address in the browser, and Gateway gets a
+/// `jetbrains-gateway://` link through the OS (`crate::ide::plan`).
+pub fn ide_description(kind: IdeKind) -> &'static str {
+    match kind {
+        IdeKind::Ember => "Ember 자체 에디터 창으로 엽니다",
+        IdeKind::VsCode => "그 컴퓨터의 웹 IDE를 브라우저로 엽니다",
+        IdeKind::Gateway => "JetBrains Gateway에 열기 링크를 보냅니다",
+    }
+}
+
+/// The IDE the menu marks as current: the remembered one, else Ember's own editor, which the
+/// mockup names on the button and checks in the menu before anything is chosen (`ideMenu`,
+/// `on = s.ide || "ember"`; review r8: a fresh profile showed no current row).
+pub fn current_ide(remembered: Option<IdeKind>) -> IdeKind {
+    remembered.unwrap_or(IdeKind::Ember)
 }
 
 /// Exactly the three IDEs of D32, the remembered one first.
@@ -1946,6 +2055,44 @@ mod tests {
         assert!(kinds.contains(&IdeKind::Ember) && kinds.contains(&IdeKind::VsCode));
     }
 
+    #[test]
+    fn fr_l10_4_ide_menu_subtitle_is_the_computer_and_the_folder_from_home() {
+        // Review r8: the raw folder stood under the head, where the mockup has `computer:~/project`.
+        assert_eq!(ide_menu_folder("/Users/brew/work/ember"), "~/work/ember");
+        assert_eq!(ide_menu_folder("/home/dev/ember/"), "~/ember");
+        assert_eq!(ide_menu_folder("/Users/brew"), "~");
+        assert_eq!(ide_menu_folder("/root/ember"), "~/ember");
+        assert_eq!(ide_menu_folder("C:\\Users\\dev\\ember"), "~/ember");
+        // Outside a home the last part only, never the mount points.
+        assert_eq!(ide_menu_folder("/Volumes/macMini/darkpyonix/darkpyonix-ember/.scratch/demo-project"), "\u{2026}/demo-project");
+        assert_eq!(ide_menu_folder("/srv"), "/srv");
+        assert_eq!(ide_menu_folder("project"), "project");
+        assert_eq!(ide_menu_folder("  "), "");
+        assert_eq!(ide_menu_subtitle(Some("mac-mini"), "/Users/brew/ember").as_deref(), Some("mac-mini:~/ember"));
+        assert_eq!(ide_menu_subtitle(Some("gpu-box"), "/data/repos/ember").as_deref(), Some("gpu-box:\u{2026}/ember"));
+        // The computer's name is read from the server; until it arrives the folder stands alone.
+        assert_eq!(ide_menu_subtitle(None, "/Users/brew/ember").as_deref(), Some("~/ember"));
+        assert_eq!(ide_menu_subtitle(Some(" "), "/Users/brew/ember").as_deref(), Some("~/ember"));
+        assert_eq!(ide_menu_subtitle(Some("mac-mini"), ""), None);
+        for (file, src) in [("cr/session.rs", include_str!("cr/session.rs")), ("cr/project.rs", include_str!("cr/project.rs"))] {
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            assert!(production.contains("sub: ide_sub.as_deref(),"), "{file}");
+            assert!(!production.contains("sub: (!cwd.is_empty()).then_some(cwd.as_str()),"), "{file}: the raw folder");
+            assert!(production.contains("load_session_computer("), "{file}");
+        }
+    }
+
+    #[test]
+    fn fr_l10_4_ide_menu_head_and_one_honest_line_per_ide() {
+        assert_eq!(IDE_MENU_HEAD, "어느 IDE로 열까요");
+        for k in IdeKind::ALL {
+            assert!(!ide_description(k).is_empty(), "{k:?}");
+        }
+        // What each one does in this client, not the mockup's wording where the client differs.
+        assert_eq!(ide_description(IdeKind::VsCode), "그 컴퓨터의 웹 IDE를 브라우저로 엽니다");
+        assert_eq!(ide_description(IdeKind::Gateway), "JetBrains Gateway에 열기 링크를 보냅니다");
+    }
+
     // ---- FR-L18: panes, tabs and the reorder menu --------------------------------------------
 
     #[test]
@@ -2349,6 +2496,26 @@ mod tests {
             web_tap(&WebPagesLoad::Unsupported, 0),
             WebTap::Say("이 컴퓨터는 포트 목록을 지원하지 않습니다".into())
         );
+    }
+
+    #[test]
+    fn fr_l10_4_web_menu_rows_split_the_address_from_the_process_and_mark_detected_ones() {
+        use ember_client::api::PortScope::*;
+        assert_eq!(WEB_MENU_HEAD, "웹 페이지 열기");
+        let load = web_pages_from(Ok(ports_of(vec![lp(3000, Lan, "node"), lp(5173, Loopback, "vite")])), &remote("h"));
+        let rows = web_menu_items(&load);
+        assert_eq!(rows[0], WebMenuItem { title: "http://h:3000".into(), detail: Some("node".into()), detected: true, mono: true, loading: false });
+        assert_eq!(
+            rows[1],
+            WebMenuItem { title: ":5173".into(), detail: Some("vite \u{b7} 이 컴퓨터 안에서만 열 수 있습니다".into()), detected: false, mono: true, loading: false }
+        );
+        // A state line is one plain row, so a tap still says it.
+        assert_eq!(
+            web_menu_items(&WebPagesLoad::Empty),
+            [WebMenuItem { title: "열려 있는 웹 포트가 없습니다".into(), detail: None, detected: false, mono: false, loading: false }]
+        );
+        assert_eq!(web_menu_items(&WebPagesLoad::Loading).len(), web_menu_lines(&WebPagesLoad::Loading).len());
+        assert!(web_menu_items(&WebPagesLoad::Loading)[0].loading, "the loading row carries the spinner");
     }
 
     #[test]

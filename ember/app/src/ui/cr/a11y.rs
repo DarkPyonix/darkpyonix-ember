@@ -27,14 +27,27 @@ pub const SESSION_MENU: &str = "세션 메뉴";
 pub const OPEN_SCREEN: &str = "화면 열기";
 /// The back button of a phone detail view (`.icon-btn.sm.backbtn`, #885).
 pub const BACK: &str = "뒤로";
+/// The scroll arrows of the project screen's computer strip (FR-L26, #671).
+pub const SCROLL_LEFT: &str = "왼쪽으로 스크롤";
+pub const SCROLL_RIGHT: &str = "오른쪽으로 스크롤";
+
+/// The names of the option popovers, the mockup's `aria-label`s where it has one (FR-L10.4,
+/// #888). `components::PopoverMenu` gives the box this name.
+pub const MODE_PICKER: &str = "권한 모드 선택";
+pub const IDE_PICKER: &str = "IDE 고르기";
+pub const WEB_MENU: &str = "웹 페이지 열기";
+pub const PROJECT_PICKER: &str = "프로젝트 선택";
+pub const COMPUTER_PICKER: &str = "컴퓨터 선택";
+pub const MODEL_PICKER: &str = "하네스와 모델 선택";
+pub const ACCOUNT_PICKER: &str = "계정 선택";
 
 /// The reviewed Korean names of the icon-only controls outside the nav menus (those take
 /// `NavMenu::label`).
-pub fn rail_labels() -> [&'static str; 19] {
+pub fn rail_labels() -> [&'static str; 21] {
     [
         THEME, SETTINGS, PLATFORM, MENU, NEW_CHANNEL, MEMBERS, MORE, ATTACH, EMOJI,
         VERSION_CONTROL, PROJECT_SETTINGS, OPEN_SESSION, CLOSE, SEND, SHARE, OTHER_IDE,
-        SESSION_MENU, OPEN_SCREEN, BACK,
+        SESSION_MENU, OPEN_SCREEN, BACK, SCROLL_LEFT, SCROLL_RIGHT,
     ]
 }
 

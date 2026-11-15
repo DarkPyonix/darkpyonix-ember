@@ -1530,6 +1530,14 @@ pub fn tree_cap(max: f32, pane_h: Option<f32>) -> f32 {
     }
 }
 
+/// The height a scrolling tree is given inside `cap`: its top padding and as many whole rows as
+/// fit, so at rest the box under it starts where a row ends instead of cutting one in half
+/// (review r10, the 1024 sheet). At least one row.
+pub fn tree_view_height(cap: f32) -> f32 {
+    let rows = ((cap - VCS_TREE_PAD) / VCS_TREE_ROW_H).floor().max(1.0);
+    VCS_TREE_PAD + rows * VCS_TREE_ROW_H
+}
+
 /// The height of the panes under the bar in the sheet's two-pane layout, from the body height
 /// under the sheet header: less the body's padding and the bar. An estimate (notes above the
 /// panes are not counted).
@@ -1559,7 +1567,7 @@ fn FilesTreeCapped(
     let paths: Vec<String> = diffs.iter().map(|d| d.path.clone()).collect();
     let rows = build_tree(&paths, &folded.get()).len();
     if !diffs.is_empty() && tree_height(rows) > cap {
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(cap)).content(|| {
+        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(tree_view_height(cap))).content(|| {
             FilesTree(diffs, staging, folded, selected, on_tab);
         });
     } else {
@@ -4224,6 +4232,13 @@ pub fn base_menu_rows(names: &[String], chosen: Option<usize>) -> Vec<PopRow> {
         .collect()
 }
 
+/// The 기준 menu's checked row: the chosen base, or with none chosen the current branch, as the
+/// mockup's `#vcsBase` selects the `<option>` of `r.branch` (#888: 기준: 현재 브랜치 named no row,
+/// so the menu showed nothing chosen).
+pub fn base_menu_chosen(names: &[String], base: Option<&str>, current: Option<&str>) -> Option<usize> {
+    names.iter().position(|n| Some(n.as_str()) == base.or(current))
+}
+
 /// The 기준 button of 새 브랜치 and its menu (FR-L10.4, #888): the shared menu in the
 /// permission-mode look under the button, lined up with its start, headed by what is chosen
 /// (`기준: branch`); a bottom sheet with that head at 560 and below. The mockup draws a native
@@ -4294,7 +4309,8 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
         Some(b) => format!("기준: {b}"),
         None => "기준: 현재 브랜치".to_string(),
     };
-    let chosen_base = base.get().and_then(|b| names.iter().position(|n| *n == b));
+    let current_name = if let BranchLoad::Ready(list) = &current { list.iter().find(|b| b.current).map(|b| b.name.clone()) } else { None };
+    let chosen_base = base_menu_chosen(&names, base.get().as_deref(), current_name.as_deref());
 
     let creator = {
         let (actions, name, generation, base, base_menu) = (actions.clone(), name.clone(), generation.clone(), base.clone(), base_menu.clone());
@@ -5973,6 +5989,20 @@ mod tests {
     }
 
     #[test]
+    fn fr_l10_4_base_menu_checks_the_current_branch_until_one_is_chosen() {
+        let names: Vec<String> = ["main", "develop", "feat/x"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(base_menu_chosen(&names, None, Some("develop")), Some(1), "기준: 현재 브랜치 is the current branch's row");
+        assert_eq!(base_menu_chosen(&names, Some("feat/x"), Some("develop")), Some(2), "a chosen base wins");
+        assert_eq!(base_menu_chosen(&names, None, None), None);
+        assert_eq!(base_menu_chosen(&names, Some("gone"), Some("develop")), None, "a base no longer listed checks nothing");
+        let rows = base_menu_rows(&names, base_menu_chosen(&names, None, Some("develop")));
+        assert_eq!(rows.iter().filter(|r| r.chosen).map(|r| r.title.as_str()).collect::<Vec<_>>(), ["develop"]);
+        let src = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        let pane = src.split("fn BranchesPane(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(pane.contains("base_menu_chosen(&names, base.get().as_deref(), current_name.as_deref())"));
+    }
+
+    #[test]
     fn fr_l10_4_base_menu_is_the_shared_menu_under_its_button() {
         // The mockup's `#vcsBase` is a native select; it was a centred `OptionSheet`.
         let _guard = crate::services::test_guard();
@@ -7386,6 +7416,25 @@ mod tests {
     }
 
     #[test]
+    fn fr_l19_a_scrolling_tree_shows_whole_rows_at_rest() {
+        // Review r10: in the 1024 sheet the commit box's top cut a tree row in half. The
+        // scrolling tree is its top padding and whole rows, so the rule under it meets a row end.
+        for cap in [VCS_TREE_MIN_H, 218.0, 260.0, 281.0, 318.0, VCS_TREE_MAX_H] {
+            let h = tree_view_height(cap);
+            assert!(h <= cap && cap - h < VCS_TREE_ROW_H, "{cap}: {h}");
+            let rows = (h - VCS_TREE_PAD) / VCS_TREE_ROW_H;
+            assert_eq!(rows, rows.round(), "{cap}: whole rows");
+        }
+        assert_eq!(tree_view_height(281.0), 280.0);
+        assert_eq!(tree_view_height(VCS_TREE_MAX_H), 348.0);
+        assert_eq!(tree_view_height(VCS_TREE_MIN_H), 110.0);
+        assert_eq!(tree_view_height(10.0), VCS_TREE_PAD + VCS_TREE_ROW_H, "at least one row");
+        let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        let capped = production.split("fn FilesTreeCapped(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(capped.contains(".height(tree_view_height(cap))"), "the scroll box is sent the snapped height");
+    }
+
+    #[test]
     fn fr_l19_the_commit_box_is_in_the_changes_card_and_the_tree_leaves_it_room() {
         // Review r8: a separate commit card 16 below a 10-row tree put the commit button below
         // the fold at 1440. `.vcs-files` is one card: header, `.vcs-tree{max-height:360px}`,
@@ -7426,7 +7475,7 @@ mod tests {
         assert!(nodes.iter().filter(|n| n.mods.iter().any(|m| m == "Height(34.0)")).count() >= rows);
         if tree_height(rows) > 281.0 {
             assert!(
-                nodes.iter().any(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m.starts_with("Height(281.0") || m.starts_with("Height(280.99"))),
+                nodes.iter().any(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m == "Height(280.0)")),
                 "the tree scrolls inside its cap"
             );
         }
@@ -7483,7 +7532,7 @@ mod tests {
         assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(585.0)), 281.0);
         let tree = nodes
             .iter()
-            .find(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m == "Height(281.0)"))
+            .find(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m == "Height(280.0)"))
             .expect("the tree scrolls inside its cap");
         let row = with_text(&nodes, "f13.rs");
         assert!(up(&nodes, row).contains(&tree.id), "the last file row is inside the scrolling tree");

@@ -1844,11 +1844,14 @@ pub(super) fn SettingsSheet(
                             Label("팀원이 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1));
                         }
                         let cols = crate::ui::project::leader_cols(window.width_dp);
+                        let review = if cfg!(debug_assertions) { std::env::var("EMBER_CR_LEADER").ok() } else { None };
                         cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                             for row in b.members.chunks(cols) {
                                 cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                                     for m in row {
-                                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| LeaderOption(m, &b.id));
+                                        let mut m = m.clone();
+                                        m.leader = review_leader(review.as_deref(), &b.members, &m);
+                                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| LeaderOption(&m, &b.id));
                                     }
                                     for _ in row.len()..cols {
                                         cu::Spacer().modifier(Modifier::new().weight(1.0));
@@ -1942,6 +1945,17 @@ fn ComputerCheck(c: &ComputerChip, on: bool, project: String) {
             super::home::Dot(dot);
             cu::Spacer().modifier(Modifier::new().width(SP[1]));
         });
+}
+
+/// Review captures only (`EMBER_CR_LEADER`, debug builds): which card shows as chosen. Unset
+/// keeps the server's leader; `first` marks the first member; any other value marks the member of
+/// that name. It proves the chosen card's `sel` background, which the demo (no leader) never shows.
+fn review_leader(value: Option<&str>, members: &[Member], m: &Member) -> bool {
+    match value {
+        None | Some("") => m.leader,
+        Some("first") => members.first().map_or(false, |f| f.session_id == m.session_id),
+        Some(name) => m.name == name,
+    }
 }
 
 /// `.ps-lead`: a radio mark, the member's name and task. Read only: the server does not take a
@@ -2072,6 +2086,19 @@ mod tests {
             assert_eq!(card_on_sel, leader, "only the chosen card is on sel");
         }
         assert_eq!(LEADER_AVATAR, 30.0);
+    }
+
+    #[test]
+    fn fr_l26_2_review_env_picks_the_chosen_leader_card() {
+        let mut a = member("a", LauncherStatus::Running);
+        a.leader = true;
+        let b = member("b", LauncherStatus::Running);
+        let all = vec![a.clone(), b.clone()];
+        assert!(review_leader(None, &all, &a) && !review_leader(None, &all, &b), "unset keeps the server's leader");
+        assert!(review_leader(Some("first"), &all, &a) && !review_leader(Some("first"), &all, &b));
+        assert!(!review_leader(Some("m-b"), &all, &a) && review_leader(Some("m-b"), &all, &b), "by name");
+        let production = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("if cfg!(debug_assertions) { std::env::var(\"EMBER_CR_LEADER\")"), "debug builds only");
     }
 
     #[test]

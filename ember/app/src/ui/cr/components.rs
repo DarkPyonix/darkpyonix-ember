@@ -1821,6 +1821,27 @@ pub(crate) fn sheet_wraps_content(window_width_dp: f32) -> bool {
     sheet_presentation(window_width_dp, false) == SheetPresentation::Bottom
 }
 
+/// Whether a sheet is the whole window at this width (FR-L32.1, FR-L33): the one boundary every
+/// full-screen geometry asks, so a sheet's own width, height and strip agree with its presentation.
+pub(crate) fn sheet_is_full_screen(window_width_dp: f32, monitor: bool) -> bool {
+    sheet_presentation(window_width_dp, monitor) == SheetPresentation::FullScreen
+}
+
+/// The strip a full-screen sheet leaves above its header for the window's own buttons (FR-L33):
+/// where the sheet is the whole window (the monitor presentation at 560 and below) it starts at
+/// the window's top edge, under the macOS traffic lights, so it reserves the height they cover,
+/// as the bottom-tab shell does above every screen (`safe_area::title_strip_height`). A bottom
+/// sheet or a dialog sits clear of them and reserves nothing, and so does a zero report (macOS
+/// full screen, FR-L33.2). [`EmberSheetSized`] sends it before the shared header; a sheet with no
+/// shared title draws its own header and reserves the same strip through it (`vcs_sheet_top_inset`).
+pub(crate) fn full_screen_sheet_top_inset(window_width_dp: f32, monitor: bool, area: crate::ui::safe_area::SafeArea) -> f32 {
+    if sheet_is_full_screen(window_width_dp, monitor) {
+        crate::ui::safe_area::title_strip_height(area, true)
+    } else {
+        0.0
+    }
+}
+
 /// The sheet header and the separator under it (`SheetHeader` and `cu::Separator`), FR-L32.1.
 pub(crate) const SHEET_HEADER_CHROME_H: f32 = SHEET_HEADER_H + 1.0;
 
@@ -1831,14 +1852,24 @@ pub(crate) const SHEET_FOOTER_H: f32 = 1.0 + SP[2] + H_CTL + SP[4];
 pub(crate) const SHEET_BOTTOM_MAX_FRACTION: f32 = 0.85;
 
 /// The tallest a sheet may be (`.sheet` in the mockup): 85 percent of the window for a bottom
-/// sheet, the whole window for the full-screen monitor, and the window less 32 dp for a dialog.
+/// sheet, the whole window for the full-screen monitor, and for a dialog the window less 32 dp,
+/// or less the traffic lights' strip above and below where there is one ([`dialog_max_height`]).
 pub(crate) fn sheet_max_height(window_width_dp: f32, window_height_dp: f32, monitor: bool) -> f32 {
     let h = window_height_dp.max(0.0);
     match sheet_presentation(window_width_dp, monitor) {
         SheetPresentation::Bottom => h * SHEET_BOTTOM_MAX_FRACTION,
         SheetPresentation::FullScreen => h,
-        SheetPresentation::Dialog => (h - 32.0).max(0.0),
+        SheetPresentation::Dialog => dialog_max_height(h, crate::ui::safe_area::safe_area()),
     }
+}
+
+/// The tallest a centred dialog may be (FR-L33): the window less 16 dp above and below, and,
+/// where the window's own buttons cover a top strip (the macOS traffic lights), less that strip
+/// above and below, so the dialog's top edge and its header stay below the strip (review sf: the
+/// monitor dialog at 561 and 1440 put "이 컴퓨터" under the lights). A zero report changes nothing.
+pub(crate) fn dialog_max_height(window_height_dp: f32, area: crate::ui::safe_area::SafeArea) -> f32 {
+    let margin = crate::ui::safe_area::title_strip_height(area, true).max(16.0);
+    (window_height_dp.max(0.0) - 2.0 * margin).max(0.0)
 }
 
 /// The body height used while the window height is unknown (not yet reported).
@@ -1940,19 +1971,26 @@ pub fn EmberSheetSized(
     // the dimmed page. The full-screen monitor has none (`border:0` at 560 px and below).
     let framed = modifier.border(1.0, paint(theme.palette.line));
     let dismiss = on_dismiss.clone();
+    let window = crate::ui::window_size::current_window_size();
+    let presentation = sheet_presentation(window.width_dp, monitor);
+    let top_inset = full_screen_sheet_top_inset(window.width_dp, monitor, crate::ui::safe_area::safe_area());
+    let strip_bg = theme.palette.surface;
     // An empty title draws no header: the share sheet is the mockup's `.fl-share`, which has
     // none and puts its close button in its first card (FR-L27.7).
     let body = move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
             if !title.is_empty() {
+                if top_inset > 0.0 {
+                    // FR-L33: the full-screen sheet's header starts below the traffic lights
+                    // (review ba D: "이 컴퓨터" sat under them at 390).
+                    cu::Spacer().modifier(Modifier::new().fill_max_width().height(top_inset).background(paint(strip_bg)));
+                }
                 SheetHeader(title, dismiss, actions);
                 cu::Separator(Some(paint(theme.palette.line)));
             }
             content();
         });
     };
-    let window = crate::ui::window_size::current_window_size();
-    let presentation = sheet_presentation(window.width_dp, monitor);
     if presentation == SheetPresentation::Bottom {
         // compose-rust#445 (v0.0.9): the sheet is as tall as its content up to 85 percent of the
         // window, and taller content scrolls inside it, so a short sheet wraps its content.

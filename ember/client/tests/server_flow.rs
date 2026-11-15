@@ -318,3 +318,43 @@ async fn metadata_and_assignment_reach_a_second_client_by_push() {
     // (it answered 501 before the fork was implemented).
     assert_eq!(two.api().fork_session(&id, None).await.unwrap_err().status(), Some(409));
 }
+
+/// FR-L26 (#327): what the app's danger zone relies on. Archive keeps the project in the list
+/// with `archived: true` (the app hides it), a project that still holds a session is refused
+/// with 409 `project_not_empty` and stays, and an empty project is dropped from the state.
+#[tokio::test]
+async fn fr_l26_archive_and_delete_through_the_client() {
+    let (_s, url) = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let c = Client::new(config(&url, &dir.path().join("c.json"))).await.unwrap();
+
+    c.api().create_project("empty").await.unwrap();
+    c.load_projects().await.unwrap();
+    let archive = wire::ProjectPatch { archived: Some(true), ..Default::default() };
+    assert!(c.patch_project("empty", &archive).await.unwrap().archived);
+    assert!(c.read(|st| st.project("empty").is_some_and(|p| p.archived)), "the state takes the answer at once");
+    let listed = c.api().projects().await.unwrap();
+    assert!(listed.iter().any(|p| p.name == "empty" && p.archived), "the server still lists it");
+    let restore = wire::ProjectPatch { archived: Some(false), ..Default::default() };
+    assert!(!c.patch_project("empty", &restore).await.unwrap().archived);
+    assert!(c.read(|st| st.project("empty").is_some_and(|p| !p.archived)));
+
+    c.create_session(&NewSession {
+        project: "busy".into(),
+        agent: "scripted".into(),
+        cwd: std::env::temp_dir().to_string_lossy().into(),
+        model: None,
+        title: None,
+    })
+    .await
+    .unwrap();
+    c.load_projects().await.unwrap();
+    let refused = c.delete_project("busy").await.unwrap_err();
+    assert_eq!((refused.status(), refused.code()), (Some(409), Some("project_not_empty")));
+    assert!(c.read(|st| st.project("busy").is_some()), "a refused delete drops nothing");
+
+    c.delete_project("empty").await.unwrap();
+    assert!(c.read(|st| st.project("empty").is_none()));
+    let gone = c.delete_project("empty").await.unwrap_err();
+    assert_eq!((gone.status(), gone.code()), (Some(404), Some("not_found")));
+}

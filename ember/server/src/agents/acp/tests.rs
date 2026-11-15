@@ -1235,3 +1235,50 @@ async fn fr_a10_probe_a_missing_command_is_spawn_failed_quickly_and_never_still_
     );
     assert!(began.elapsed() < Duration::from_secs(1), "no window wait and no busy retry: {:?}", began.elapsed());
 }
+
+// ---- FR-T12 (#380 c): the `channel_post` MCP tool for an ACP session ----
+
+/// The `session/new` request of the Agent Client Protocol with the channel server, written from
+/// the protocol (https://agentclientprotocol.com/protocol/session-setup): `McpServerStdio` is
+/// `{name, command, args, env: [{name, value}]}`.
+const SESSION_NEW_CHANNEL: &str = include_str!("../../../tests/fixtures/acp/session_new_channel_post.json");
+
+fn channel_server(token: &str) -> McpServer {
+    McpServer {
+        name: "ember-channels".into(),
+        command: "/opt/ember/ember-a2a".into(),
+        args: vec!["mcp".into()],
+        startup_timeout_secs: Some(10),
+        env: vec![
+            ("EMBER_URL".into(), "http://127.0.0.1:8740".into()),
+            ("EMBER_RUNTIME_TOKEN".into(), token.into()),
+        ],
+    }
+}
+
+#[test]
+fn fr_t12_acp_mcp_servers_param_is_the_protocol_shape_with_the_session_credentials_only() {
+    let fixture: Value = serde_json::from_str(SESSION_NEW_CHANNEL).unwrap();
+    assert_eq!(fixture["method"], "session/new");
+    let want = &fixture["params"]["mcpServers"];
+    assert_eq!(&mcp_servers_param(&[channel_server("<runtime token>")]), want);
+    // Exactly the protocol's four fields and the two variables: no timeout, no extra key.
+    let entry = want[0].as_object().unwrap();
+    let mut keys: Vec<&str> = entry.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["args", "command", "env", "name"]);
+    assert_eq!(want[0]["env"].as_array().unwrap().len(), 2);
+    assert_eq!(mcp_servers_param(&[]), json!([]));
+}
+
+#[tokio::test]
+async fn fr_t12_acp_channel_server_reaches_session_new() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = setup(dir.path());
+    s.mcp_servers = vec![channel_server("tok-SECRET")];
+    let (mut run, mut rx) = start(FakeOptions::default(), s).await.unwrap();
+    next(&mut rx).await;
+    let events = turn(&mut run, &mut rx, "mcp?", ApprovalDecision::AllowOnce).await;
+    assert_eq!(last_message(&events), "mcp=ember-channels");
+    run.shutdown().await.unwrap();
+}

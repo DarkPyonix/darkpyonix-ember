@@ -165,4 +165,27 @@ mod tests {
         assert_eq!(top_reservation(win, ShellMode::BottomTabs), TopReservation::default());
         assert_eq!(top_reservation(win, ShellMode::Sidebar), TopReservation::default());
     }
+
+    #[test]
+    fn fr_l33_2_full_screen_reserves_nothing_in_any_layout() {
+        // In macOS full screen the lights are hidden and the toolkit reports zeros (#409).
+        let full_screen = safe_area_for(Platform::MacOs, SafeArea::default());
+        let windowed = safe_area_for(Platform::MacOs, LIGHTS);
+        let table = [
+            (ShellMode::Sidebar, TopReservation { sidebar_inset: 28.0, content_strip: 0.0 }),
+            (ShellMode::Rail, TopReservation { sidebar_inset: 28.0, content_strip: 0.0 }),
+            (ShellMode::BottomTabs, TopReservation { sidebar_inset: 0.0, content_strip: 28.0 }),
+        ];
+        for (mode, with_lights) in table {
+            assert_eq!(top_reservation(windowed, mode), with_lights, "{mode:?} beside the lights");
+            assert_eq!(top_reservation(full_screen, mode), TopReservation::default(), "{mode:?} in full screen");
+        }
+        assert_eq!(sidebar_top_inset(full_screen), 0.0);
+        assert_eq!(title_strip_height(full_screen, true), 0.0);
+        // A strip height with no buttons beside it (a report with only `top`) reserves nothing
+        // either: there is nothing at the left edge to clear.
+        let top_only = SafeArea { top: 28.0, leading: 0.0, trailing: 0.0 };
+        assert_eq!(top_reservation(top_only, ShellMode::Sidebar), TopReservation::default());
+        assert_eq!(top_reservation(top_only, ShellMode::BottomTabs), TopReservation::default());
+    }
 }

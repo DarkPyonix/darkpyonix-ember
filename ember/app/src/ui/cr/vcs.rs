@@ -2097,10 +2097,7 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
                 PaneTabs(Section::Changes, tab, move |t| on_tab_pick(t));
                 match tab.unwrap_or(PaneTab::Files) {
                     PaneTab::Diff => DiffPane(&diffs, sel, &staging, diff_width),
-                    PaneTab::Commit => {
-                        CommitPane(&snap.branch, staged_files, &summary, &body, &amend, commit.clone(), false);
-                        cu::Spacer().modifier(Modifier::new().height(super::routines::compact_bottom_clearance()));
-                    }
+                    PaneTab::Commit => CommitPane(&snap.branch, staged_files, &summary, &body, &amend, commit.clone(), false),
                     _ => {
                         VcsCard(move || {
                             cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
@@ -7971,8 +7968,10 @@ mod tests {
         // Review ba follow-up: at 1024 x 800 the page's 360 tree put the commit button below
         // the fold. The panes start 246 down and end 32 above the window's bottom.
         assert_eq!(page_pane_height(800.0, 32.0), 522.0);
-        assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(page_pane_height(800.0, 32.0))), 222.0);
-        assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(page_pane_height(900.0, 32.0))), 322.0);
+        // The files header row is 52 with the stash button and its note (FR-L10.4, #888), 4 more
+        // than the 48 this was first written for.
+        assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(page_pane_height(800.0, 32.0))), 218.0);
+        assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(page_pane_height(900.0, 32.0))), 318.0);
         let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
         assert!(production.contains("None => (wide && window.height_dp > 100.0).then(|| page_pane_height(window.height_dp, pad)),"));
     }

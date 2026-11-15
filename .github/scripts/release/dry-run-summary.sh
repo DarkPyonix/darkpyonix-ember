@@ -5,7 +5,8 @@
 #
 # Usage: dry-run-summary.sh <dir> <tag> <client: true|false>
 #   <dir> holds one folder per workflow artifact, as actions/download-artifact writes them:
-#   dpx-ember-<target>/ (server and node tarballs) and dpx-ember-app-<target>/ (client).
+#   dpx-ember-<target>/ (server and node tarballs) and dpx-ember-app-<target>/ (client, with
+#   android-arm64 for the APK).
 set -euo pipefail
 
 dir="${1:?usage: dry-run-summary.sh <dir> <tag> <client>}"
@@ -54,6 +55,10 @@ windows-x86_64 win-x64 *-Setup.exe ember-app-$tag-windows-x86_64.zip
 linux-x86_64 linux-x64 *.AppImage
 linux-aarch64 linux-arm64 *.AppImage
 LIST
+    # Android (no Velopack channel): one APK for arm64-v8a and its checksum.
+    apk="ember-app-$tag-android-arm64.apk"
+    has dpx-ember-app-android-arm64 "$apk" "Android APK $apk"
+    has dpx-ember-app-android-arm64 "$apk.sha256" "Android APK checksum $apk.sha256"
 fi
 
 if [ "$missing" -gt 0 ]; then

@@ -2995,7 +2995,9 @@ mod tests {
         let mode = composer_chip_width(2, PermMode::Ask.label());
         let shares: Vec<f32> = tree.weight.values().copied().filter(|w| *w > 1.0).collect();
         assert_eq!(shares.len(), 4, "one share per chip: {shares:?}");
-        assert!(shares.contains(&model) && shares.contains(&mode), "{shares:?} against {model} and {mode}");
+        // A share is the chip's frame plus the part of its label the line has room for.
+        assert!(shares.iter().all(|w| *w > 48.0 && *w < model), "{shares:?} against {model}");
+        assert!(shares.iter().any(|w| *w > 70.0 && *w < mode), "{shares:?} against {mode}");
         // A chip with a share is zero wide, so the share and not its label decides its width.
         assert!(tree.width.values().filter(|w| **w == 0.0).count() >= 4);
     }

@@ -642,7 +642,7 @@ pub mod view {
 
     use super::{installed_rows, needs_restart, result_rows, InstalledRow, Op, ResultRow, NO_COMPUTER_NOTE, RESTART_NOTE};
     use crate::editor_host::HostCommand;
-    use crate::ui::editor_workbench::page::{icon, icon_px};
+    use crate::ui::editor_workbench::page::{icon, icon_px, icon_tone};
     use crate::ui::editor_workbench::Shared;
 
     #[derive(Clone, Copy)]
@@ -796,7 +796,7 @@ pub mod view {
                 }
                 div { role: "search", "aria-label": "확장 검색", style: "display:flex; flex-direction:column; gap:var(--sp1); padding:var(--sp2) var(--sp2) var(--sp1); flex:none;",
                     div { class: "ed-find", style: "{BOX}",
-                        {icon("search")}
+                        {icon_tone("search", 16, "muted")}
                         input { style: "{FIELD}", "aria-label": "Open VSX에서 확장 검색", placeholder: "Open VSX에서 확장 검색", value: "{query}", autofocus: true,
                             oninput: move |event| input_s.search(&event.value(), true),
                             onkeydown: move |event| {
@@ -868,7 +868,7 @@ pub mod view {
                                     show_builtin.set(!builtin_open);
                                 }
                             },
-                            if builtin_open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} }
+                            if builtin_open { {icon_tone("chev-dn", 12, "muted")} } else { {icon_tone("chev", 12, "muted")} }
                             span { "기본 제공" }
                             div { class: "spacer" }
                             span { class: "ed-sc", "aria-hidden": "true", "{builtin_count}" }

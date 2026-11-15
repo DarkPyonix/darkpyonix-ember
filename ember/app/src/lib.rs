@@ -20,6 +20,7 @@ pub mod config;
 pub mod demo;
 pub mod device_link;
 pub mod export;
+pub mod editor_backup;
 pub mod editor_host;
 pub mod editor_reach;
 pub mod ide;
@@ -288,6 +289,8 @@ impl owner_claim::ClaimHooks for AppClaimHooks {
 
 /// Flush the current state before the process exits or the window loop returns.
 pub(crate) fn shutdown() -> i32 {
+    // The unsaved buffers of an editor window first (hot exit, FR-L31.6a): nothing else here needs them.
+    editor_backup::flush_on_exit();
     let s = services();
     let _guard = services::prefs_write_lock();
     let prefs = s.ui.prefs.get_untracked();

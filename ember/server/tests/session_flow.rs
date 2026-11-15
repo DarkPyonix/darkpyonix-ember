@@ -1095,3 +1095,58 @@ async fn fr_a5_a_withdrawn_approval_leaves_the_feed_while_the_turn_runs() {
         AgentEvent::ApprovalResolved { .. } | AgentEvent::TurnEnded { .. }
     )));
 }
+
+/// FR-A5 (#683): with two prompts pending, resolving or withdrawing one keeps the session in
+/// `WaitingForApproval` until the last pending prompt (approval or question) is resolved or
+/// withdrawn; and a late answer from a previous turn never turns a new turn's `WaitingForApproval`
+/// into `Running`.
+#[test]
+fn fr_a5_status_stays_waiting_while_another_prompt_remains_and_survives_a_late_answer() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .create_session("core", AgentKind::Scripted, "/tmp", None, "status-test")
+        .unwrap()
+        .id;
+
+    let (_, st) = store.append(&id, &AgentEvent::UserMessage { text: "go".into() }).unwrap();
+    assert_eq!(st, SessionStatus::Running);
+    let (_, st) = store.append(&id, &colour_question()).unwrap();
+    assert_eq!(st, SessionStatus::WaitingForApproval);
+    let (_, st) = store.append(&id, &approval("a1", "Bash", false)).unwrap();
+    assert_eq!(st, SessionStatus::WaitingForApproval);
+
+    // Answering the question while approval `a1` still waits keeps the session waiting.
+    let (_, st) = store
+        .append(&id, &AgentEvent::QuestionAnswered { question_id: "r1".into(), answers: vec![] })
+        .unwrap();
+    assert_eq!(st, SessionStatus::WaitingForApproval);
+
+    // Asking a second approval `a2`, then withdrawing `a1`, still leaves `a2` pending.
+    let (_, st) = store.append(&id, &approval("a2", "Write", false)).unwrap();
+    assert_eq!(st, SessionStatus::WaitingForApproval);
+    let (_, st) = store.append(&id, &withdrawn("a1")).unwrap();
+    assert_eq!(st, SessionStatus::WaitingForApproval);
+
+    // Resolving the last pending prompt `a2` finally moves the session to Running.
+    let (_, st) = store
+        .append(&id, &AgentEvent::ApprovalResolved { approval_id: "a2".into(), decision: ApprovalDecision::AllowOnce })
+        .unwrap();
+    assert_eq!(st, SessionStatus::Running);
+
+    // End the turn, start a new turn with a pending approval `a3`, then receive a late
+    // QuestionAnswered from the previous turn (`old-q`): the session stays WaitingForApproval.
+    let (_, st) = store
+        .append(&id, &AgentEvent::TurnEnded { outcome: TurnOutcome::Interrupted })
+        .unwrap();
+    assert_eq!(st, SessionStatus::Finished);
+    let (_, st) = store.append(&id, &AgentEvent::UserMessage { text: "next".into() }).unwrap();
+    assert_eq!(st, SessionStatus::Running);
+    let (_, st) = store.append(&id, &approval("a3", "Bash", false)).unwrap();
+    assert_eq!(st, SessionStatus::WaitingForApproval);
+    let (_, st) = store
+        .append(&id, &AgentEvent::QuestionAnswered { question_id: "old-q".into(), answers: vec![] })
+        .unwrap();
+    assert_eq!(st, SessionStatus::WaitingForApproval);
+    let (_, st) = store.append(&id, &withdrawn("old-q")).unwrap();
+    assert_eq!(st, SessionStatus::WaitingForApproval);
+}

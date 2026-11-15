@@ -50,7 +50,7 @@ use crate::ui::Route;
 
 use super::compat::{Badge, Banner, CodeText, MessageText, Spinner, StatusIndicator};
 use super::components::{
-    AppButton, BackButton, ButtonKind, Clickable, EmberCard, EmberField, FieldOptions, IconButton, Label,
+    AppButton, BackButton, ButtonKind, Clickable, EmberCard, EmberField, FieldOptions, IconButton, Label, NameThenPill,
     OptionSheet, Pill, PillTone, Txt,
 };
 use super::ko;
@@ -2182,7 +2182,17 @@ pub fn TeamPanel(session: &str) {
                                 } else {
                                     r.name.clone()
                                 };
-                                Label(
+                                let sub = if r.ended {
+                                    format!("{} \u{00b7} 종료됨", r.agent)
+                                } else {
+                                    format!("{} \u{00b7} {}", r.agent, r.status)
+                                };
+                                // The name is the only part that gives way: an unweighted
+                                // name was measured first and took the whole row at 390, so
+                                // 열기 and 종료 got no width and the agent text was drawn over
+                                // the name (review r8 fix round). The agent and status text
+                                // follows the name at its own width, as the header's pill.
+                                NameThenPill(
                                     &name_label,
                                     Fs::Md,
                                     if r.this {
@@ -2191,14 +2201,7 @@ pub fn TeamPanel(session: &str) {
                                         Weight::Regular
                                     },
                                     None,
-                                    Some(1),
-                                );
-                                let sub = if r.ended {
-                                    format!("{} \u{00b7} 종료됨", r.agent)
-                                } else {
-                                    format!("{} \u{00b7} {}", r.agent, r.status)
-                                };
-                                cu::Box().modifier(Modifier::new().weight(1.0)).content(
+                                    SP[1],
                                     move || {
                                         Label(
                                             &sub,

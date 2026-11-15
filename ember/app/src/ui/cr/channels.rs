@@ -339,7 +339,10 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
     // `.listpane`: the whole pane on `surface-2` (review CH3; it was the page's `bg`, so in dark
     // the list read as part of the page). Rows run edge to edge; the title row, the search field
     // and the segments carry their own side insets (CH4, #630).
-    cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height().background(paint(p.surface_2))).content(|| {
+    // On a phone the list is the page itself: on `surface-2` it left a band of `bg` above it
+    // (the window's top inset) and around the tab bar (captures channels-list-390, 2026-11-15).
+    let pane = if narrow { p.bg } else { p.surface_2 };
+    cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height().background(paint(pane))).content(|| {
         // `.ph`: 16 above and at the sides, 8 below; the title 18/600 and the 32 dp "+".
         cu::Spacer().modifier(Modifier::new().height(LIST_HEAD_PAD_TOP));
         cu::Row()
@@ -1123,10 +1126,14 @@ mod review_tests {
         let p = ember_theme().palette;
         let title = text(&nodes, "채널");
         let up = ancestors(&nodes, title.id);
-        assert!(
-            up.iter().any(|id| node(&nodes, *id).mods.contains(&bg(p.surface_2))),
-            "the title sits on the surface-2 pane"
-        );
+        // The test window is the narrow one (no size reported), where the list is the page
+        // and stays on `bg`; beside the room the pane is on `surface-2`.
+        let on = |c| up.iter().any(|id| nodes.iter().any(|n| n.id == *id && n.mods.contains(&bg(c))));
+        assert!(on(p.bg) && !on(p.surface_2), "the narrow list is on the page background");
+        let src = include_str!("channels.rs");
+        let list = src.split("fn RoomList(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(list.contains("let pane = if narrow { p.bg } else { p.surface_2 };"));
+        assert!(list.contains(".background(paint(pane))"));
     }
 
     fn sample_room() {

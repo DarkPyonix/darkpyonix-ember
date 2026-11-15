@@ -638,8 +638,40 @@ fn fr_l31_26_the_status_bar_is_32_high_and_flush_with_the_page_bottom() {
         bar_rect.y + bar_rect.height,
         ed_rect.y + ed_rect.height,
     );
-    if cfg!(target_os = "macos") {
-        assert!(close(ed_rect.y + ed_rect.height, 900.0), "the FullSize page fills the window: {ed_rect:?}");
+    assert!(close(ed_rect.y + ed_rect.height, 900.0), "the page fills the viewport: {ed_rect:?}");
+}
+
+/// The page grid's and the status bar's boxes, as `(x, y, width, height)`, with the page laid out
+/// in a `width` by `height` viewport.
+fn page_and_bar_boxes(page: &mut Page, ed: NodeId, bar: NodeId, width: f32, height: f32) -> ((f32, f32, f32, f32), (f32, f32, f32, f32)) {
+    let _ = page.dom.layout(width, height, 1.0);
+    let list = page.dom.display_list().expect("laid out");
+    let e = list.get(ed).expect("the page draws its background").rect;
+    let b = list.get(bar).expect("the status bar draws its line").rect;
+    ((e.x, e.y, e.width, e.height), (b.x, b.y, b.width, b.height))
+}
+
+// #301, #320: the page is the viewport, so it follows the window when it grows and when it
+// shrinks. The window's sizes are those of #320 (1280x820 opened, 1500x900 grown, 1000x620
+// shrunk); at each one the page grid is exactly the viewport and the status bar ends at its
+// bottom edge and spans its width. No renderer is attached: this is the page's own layout, given
+// the viewport the HTML runtime takes from the window's content box.
+#[test]
+fn fr_l31_37_the_page_follows_the_viewport_when_it_grows_and_when_it_shrinks() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    page.click_row();
+    page.deliver(opened(3));
+    let ed = page.find("class", "ed").expect("the page grid (.ed) with the tree and the bottom window open");
+    let bar = page.find("aria-label", "상태 표시줄").expect("the status bar");
+    let close = |a: f32, b: f32| (a - b).abs() < 0.5;
+    for (width, height) in [(1280.0_f32, 820.0_f32), (1500.0, 900.0), (1000.0, 620.0), (1280.0, 820.0)] {
+        let (e, b) = page_and_bar_boxes(&mut page, ed, bar, width, height);
+        assert!(close(e.0, 0.0) && close(e.1, 0.0), "at {width}x{height} the page starts at {},{}", e.0, e.1);
+        assert!(close(e.2, width), "at {width}x{height} the page is {} wide", e.2);
+        assert!(close(e.3, height), "at {width}x{height} the page is {} high", e.3);
+        assert!(close(b.1 + b.3, height), "at {width}x{height} the status bar ends at {}", b.1 + b.3);
+        assert!(close(b.0, 0.0) && close(b.2, width), "at {width}x{height} the status bar spans {} from {}", b.2, b.0);
     }
 }
 

@@ -801,6 +801,8 @@ pub const BRANCH_POP_EMPTY: &str = "일치하는 브랜치가 없습니다";
 /// The new-branch field's placeholder and its button (mockup `.vcs-popfoot`).
 pub const BRANCH_POP_NEW: &str = "feat/새-브랜치";
 pub const BRANCH_POP_CREATE: &str = "만들기";
+/// The new-branch field's name for assistive technology; its placeholder is an example.
+pub const BRANCH_POP_NEW_NAME: &str = "새 브랜치 이름";
 
 /// One row of the branch popover (`.vcs-poprow`): 40 high, padded 10, the check on the current
 /// branch and the branch glyph on the others, the name in the mono face at 12; the current row
@@ -934,6 +936,7 @@ fn BranchMenu(open: MutableState<bool>, text: &str, branches: &[String], current
                             text: Some(new_branch.get()),
                             placeholder: BRANCH_POP_NEW.to_string(),
                             type_role: Some(VCS_FIELD_ROLE),
+                            label: Some(BRANCH_POP_NEW_NAME),
                             on_value_change: Some(Box::new(move |v| value.set(v))),
                             ..Default::default()
                         });
@@ -7447,7 +7450,7 @@ mod tests {
 
     #[compose_rust::runtime::Composable]
     fn changes_two_pane_probe() {
-        ChangesPaneWithActions(&long_snapshot(), PaneLayout::Two, None, |_| {}, None, 600.0, 320.0, Some(585.0));
+        ChangesPaneWithActions(&long_snapshot(), PaneLayout::Two, None, |_| {}, None, 600.0, 320.0, Some(585.0), None, false);
     }
 
     #[test]

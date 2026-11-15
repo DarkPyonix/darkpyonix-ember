@@ -673,7 +673,10 @@ pub fn pop_anchor_weight(weight: Option<f32>, modifier: Modifier) -> Modifier {
 }
 
 /// The body of a [`PopExtra::plain_sheet`]: the head and the padded rows of the popover box,
-/// named as the box is, with no title bar above it.
+/// with no title bar above it. The column itself says nothing to assistive technology: named
+/// as a menu, the macOS tree turned it into one static text (`value=menu`) and dropped every
+/// row under it at 390 (review st, A FAIL 1), so the rows sit straight in the sheet as the old
+/// option sheet's did, each a named menu item that says whether it is the current one.
 fn PopPlainSheetBody(
     menu: &PopMenu<'_>,
     m: &PopMetrics,
@@ -681,7 +684,7 @@ fn PopPlainSheetBody(
     on_dismiss: impl FnMut() + Clone + 'static,
     on_choose: impl FnMut(usize) + Clone + 'static,
 ) {
-    cu::Column().modifier(Modifier::new().fill_max_width().role(Role::Menu).label(menu.name)).content(|| {
+    cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
         if !menu.head.is_empty() {
             PopHead(menu.kind, menu.head, menu.sub, m);
         }
@@ -726,15 +729,17 @@ fn PopRowView(r: &PopRow, kind: PopKind, m: &PopMetrics, on_click: impl FnMut() 
                 cu::Column().spacing(2.0).modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
                     cu::Spacer().modifier(Modifier::new().height(m.row_pad.0 - 2.0));
                     cu::Row().spacing(6.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                        // With a badge the title is zero wide and weighted, so a long title is cut
-                        // and the badge keeps its own width at the row's end (the session model
-                        // menu's one row squeezed 준비 중 to 준비... before).
+                        // With a badge the title is zero wide and weighted, so the badge keeps its
+                        // own width at the row's end (the session model menu's one row squeezed
+                        // 준비 중 to 준비... before), and the title wraps to a second line rather
+                        // than being cut (review st, A FAIL 2: "실행 중인 세션의 모델은 바꿀 수..."
+                        // in the 340 wide menu).
                         let title_mod = if r.badge.is_some() { Modifier::new().width(0.0).weight(1.0) } else { Modifier::new() };
                         cu::Box().modifier(title_mod).content(|| {
                             if r.mono {
                                 MonoLabel(&r.title, Fs::Xs, Weight::Regular, Some(paint(title_c)));
                             } else {
-                                Label(&r.title, Fs::Md, Weight::Semibold, Some(paint(title_c)), Some(1));
+                                Label(&r.title, Fs::Md, Weight::Semibold, Some(paint(title_c)), Some(pop_title_lines(r)));
                             }
                         });
                         if let Some((text, tone)) = &r.badge {
@@ -754,6 +759,12 @@ fn PopRowView(r: &PopRow, kind: PopKind, m: &PopMetrics, on_click: impl FnMut() 
             });
         },
     );
+}
+
+/// How many lines a row's title may take: two beside a badge, where the title has only what the
+/// badge leaves, one otherwise.
+pub fn pop_title_lines(r: &PopRow) -> u32 {
+    if r.badge.is_some() { 2 } else { 1 }
 }
 
 /// `.sdrop-f`: 4 above, a line, then the caller's controls padded 10.
@@ -943,6 +954,10 @@ pub struct FieldOptions {
     /// Binds the field to a focus handle, so `handle.request()` puts the caret in it
     /// (compose-rust#410, `TextField::focus_handle`).
     pub focus: Option<cu::FocusHandle>,
+    /// The field's name for assistive technology when the placeholder is an example rather than
+    /// a name (the branch menu's `feat/새-브랜치` is "새 브랜치 이름"). `&'static str` for the
+    /// reason [`NamedClickable`] gives.
+    pub label: Option<&'static str>,
 }
 
 /// The type step of a field's text and placeholder when no role is named (style.css `.field`).
@@ -1109,6 +1124,10 @@ fn OneLineHintField(o: FieldOptions) {
 fn FieldNode(o: FieldOptions, modifier: Modifier) {
     // compose-rust#444 (v0.0.8): the placeholder and the typed text break Korean only at spaces,
     // and a long token such as a path or a URL breaks inside itself rather than clipping.
+    let modifier = match o.label {
+        Some(name) => modifier.label(name),
+        None => modifier,
+    };
     let mut f = cu::TextField()
         .modifier(modifier)
         .word_break(WordBreak::KeepAll)
@@ -1429,8 +1448,10 @@ pub fn AppButton(
                 .shape_role(ShapeRole::Full),
         ))
         .on_click(on_click);
+    // With an icon the renderer draws the text beside the glyph and the button itself had no
+    // name (review st, E: the branch menu's 만들기 was `AXButton desc=` with a separate text).
     if let Some(i) = icon {
-        b = b.icon(i);
+        b = b.icon(i).accessible_name(text);
     }
     drop(b);
 }
@@ -3695,6 +3716,84 @@ mod tests {
         assert!(!is_under(&nodes, text_node(&nodes, "IDE 버튼"), sheet.id), "the control stays on the page");
         let pop = the(&drop, "Popover");
         assert!(pop.mods.iter().any(|m| m == "Width(366.0)"), "{:?}", pop.mods);
+    }
+
+    fn plain_sheet_menu() {
+        let rows = pop_sample_rows();
+        PopoverMenuWith(
+            true,
+            PopMenu { name: "IDE 고르기", kind: PopKind::Mode, head: "어느 IDE로 열까요", sub: None, rows: &rows, align: compose_rust::PopoverAlign::Start },
+            PopExtra { plain_sheet: true, ..Default::default() },
+            || {},
+            |_| {},
+            || Label("IDE 버튼", Fs::Sm, Weight::Medium, None, Some(1)),
+            None,
+        );
+    }
+
+    #[test]
+    fn fr_l10_4_plain_sheet_rows_are_named_menu_items_with_their_selected_state() {
+        // Review st, A FAIL 1: at 390 the sheet's column was a named menu, which macOS turned
+        // into one static text (`value=menu`) with no rows under it. The rows now sit in the
+        // sheet with nothing between them that names itself, each a menu item named by its title.
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+        let nodes = emitted_nodes(plain_sheet_menu);
+        crate::ui::window_size::set_opened_for_test(None);
+        let sheet = the(&nodes, "Sheet");
+        let rows: Vec<&EmittedNode> = nodes
+            .iter()
+            .filter(|n| is_under(&nodes, n, sheet.id) && n.props.iter().any(|p| p.starts_with("OnClick=")))
+            .collect();
+        assert_eq!(rows.len(), 3, "one pressable row per option");
+        let sem = |n: &EmittedNode| n.mods.iter().find(|m| m.starts_with("Semantics")).cloned();
+        let row_sem: Vec<String> = rows.iter().map(|r| sem(r).expect("row semantics")).collect();
+        assert!(row_sem.iter().all(|m| m.contains("MenuItem")), "{row_sem:?}");
+        assert_ne!(row_sem[1], row_sem[0], "the current row says it is selected");
+        assert_eq!(row_sem[0], row_sem[2], "the others do not");
+        // Each row's name is its title, the only text of the row's title line.
+        for (row, title) in rows.iter().zip(["Ember 에디터", "VS Code", "JetBrains Gateway"]) {
+            assert!(is_under(&nodes, text_node(&nodes, title), row.id), "{title} names its row");
+        }
+        // Nothing between the sheet and a row names itself or claims a role: a named node there
+        // is what swallowed the rows.
+        for row in &rows {
+            let mut at = row.parent;
+            while let Some(id) = at {
+                if id == sheet.id {
+                    break;
+                }
+                let n = nodes.iter().find(|n| n.id == id).expect("ancestor");
+                assert!(sem(n).is_none(), "ancestor {} says {:?}", n.widget, sem(n));
+                assert!(!n.props.iter().any(|p| p.starts_with("AccessibleName")), "ancestor {} is named: {:?}", n.widget, n.props);
+                at = n.parent;
+            }
+        }
+    }
+
+    #[test]
+    fn fr_l10_4_a_title_beside_a_badge_takes_two_lines() {
+        // Review st, A FAIL 2: the model menu's one row was cut at 1440 and 800.
+        let rows = pop_sample_rows();
+        assert_eq!(pop_title_lines(&rows[1]), 2, "beside a badge");
+        assert_eq!(pop_title_lines(&rows[0]), 1);
+        let src = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(src.contains("Some(paint(title_c)), Some(pop_title_lines(r)))"));
+    }
+
+    #[test]
+    fn fr_l10_4_an_icon_button_is_named_by_its_text_and_a_field_by_its_label() {
+        // Review st, E: the branch menu's 만들기 had an empty name and its field was named by
+        // its placeholder.
+        let nodes = emitted_nodes(|| AppButton("만들기", Some(IconRole::Add), ButtonKind::Default, true, true, false, || {}));
+        let button = the(&nodes, "Button");
+        assert!(button.props.iter().any(|p| p.starts_with("AccessibleName") && p.contains("만들기")), "{:?}", button.props);
+        let field = emitted_nodes(|| EmberField(FieldOptions { placeholder: "feat/새-브랜치".into(), label: Some("새 브랜치 이름"), ..Default::default() }));
+        let text_field = the(&field, "TextField");
+        let named = text_field.props.iter().chain(text_field.mods.iter()).any(|p| p.contains("새 브랜치 이름"));
+        assert!(named, "props {:?} mods {:?}", text_field.props, text_field.mods);
+        let vcs = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(vcs.contains("label: Some(BRANCH_POP_NEW_NAME)") && vcs.contains("BRANCH_POP_NEW_NAME: &str = \"새 브랜치 이름\""));
     }
 
     #[test]

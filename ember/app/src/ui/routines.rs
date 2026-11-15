@@ -355,6 +355,23 @@ pub fn weekday_bar_radius(w: f32, h: f32) -> f32 {
     (w / 2.0).min(h / 2.0).max(0.0)
 }
 
+/// The gap between a weekday bar's failed and successful parts (`.bar { gap: 2px }`).
+pub const WEEKDAY_BAR_GAP: f32 = 2.0;
+
+/// `(fail_h, gap, ok_h)` of one joined weekday bar `h` dp high (mockup `.bar`: one pill,
+/// `overflow: hidden`, the failed part on top of the successful part, 2 dp apart). The parts
+/// add up to `h`; the gap is there only when the day has both (FR-L25, #848).
+pub fn weekday_bar_parts(h: f32, ok: usize, fail: usize) -> (f32, f32, f32) {
+    let total = ok + fail;
+    if total == 0 || h <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let gap = if ok > 0 && fail > 0 { WEEKDAY_BAR_GAP.min(h) } else { 0.0 };
+    let room = (h - gap).max(0.0);
+    let fail_h = room * fail as f32 / total as f32;
+    (fail_h, gap, room - fail_h)
+}
+
 impl RunStatus {
     pub fn label(self) -> &'static str {
         match self {
@@ -485,13 +502,15 @@ pub enum FormLayout {
     Sheet,
 }
 
-/// The inline form's fields go two to a row from this field width (mockup `.form`, a two-column
-/// grid), and one to a row below it (FR-L25, #848).
-pub const FORM_TWO_COLUMNS_FROM: f32 = 480.0;
+/// The form's fields go two to a row from this field width (mockup `.form`, a two-column grid
+/// at every width: about 133 per column at 390), and one to a row below it, so a column never
+/// gets narrower than about 122 (FR-L25, #848, #596).
+pub const FORM_TWO_COLUMNS_FROM: f32 = 260.0;
 
-/// Whether the form lays its fields out in two columns: inline and wide enough.
-pub fn form_two_columns(layout: FormLayout, field_w: f32) -> bool {
-    layout == FormLayout::Inline && field_w >= FORM_TWO_COLUMNS_FROM
+/// Whether the form lays its fields out in two columns: wide enough, inline or in the phone's
+/// sheet alike, as the mockup's 390 form pairs 프로젝트/트리거 in selects (#596).
+pub fn form_two_columns(_layout: FormLayout, field_w: f32) -> bool {
+    field_w >= FORM_TWO_COLUMNS_FROM
 }
 
 /// The form's rows, each one or two fields, in `FORM_FIELDS` order. In two columns the mockup's
@@ -783,14 +802,26 @@ impl FormDraft {
 
     /// The problems that block saving, in field order. Empty: the draft can be saved.
     pub fn errors(&self) -> Vec<FormError> {
+        self.errors_with_initial(None)
+    }
+
+    /// The problems that block saving when editing `initial` (if `Some`), in field order.
+    /// Leaving an existing non-empty event schedule unchanged does not block saving a name or
+    /// prompt edit even if its stored repository string is not `owner/name` (#759).
+    pub fn errors_with_initial(&self, initial: Option<&FormDraft>) -> Vec<FormError> {
         let mut out = Vec::new();
         if self.name.trim().is_empty() {
             out.push(FormError::NameEmpty);
         }
+        let unchanged_event = initial.is_some_and(|i| {
+            i.trigger == Trigger::Event
+                && self.trigger == Trigger::Event
+                && i.cron.trim() == self.cron.trim()
+        });
         match self.trigger {
             Trigger::Time if !cron_valid(self.cron.trim()) => out.push(FormError::ScheduleInvalid),
             Trigger::Event if self.cron.trim().is_empty() => out.push(FormError::EventEmpty),
-            Trigger::Event if parse_ci_event(&self.cron).is_none() => {
+            Trigger::Event if !unchanged_event && parse_ci_event(&self.cron).is_none() => {
                 out.push(FormError::EventInvalid)
             }
             _ => {}
@@ -1183,9 +1214,9 @@ pub fn changes_frozen_fields(d: &FormDraft, old: &Routine) -> bool {
 /// Shown while the server cannot be reached.
 pub const OFFLINE_NOTE: &str =
     "서버에 연결되지 않아 루틴이 이 앱을 실행하는 동안만 이 기기에 보관됩니다";
-/// Shown when routines that only this device keeps are listed beside the server's.
+/// Shown when routines that only this device keeps are listed beside the server's (or in sample mode).
 pub const LOCAL_NOTE: &str =
-    "오프라인일 때 만든 루틴은 이 앱을 실행하는 동안만 이 기기에 보관됩니다";
+    "이 기기에만 있는 루틴은 이 앱을 실행하는 동안만 보관됩니다";
 pub const RUN_NOTICE: &str = "서버에 연결되지 않아 지금 실행할 수 없습니다";
 pub const NO_CWD_NOTICE: &str =
     "이 프로젝트의 작업 폴더를 알 수 없습니다. 프로젝트에서 세션을 한 번 시작하셔야 합니다";
@@ -1198,7 +1229,9 @@ pub fn changed_patch(d: &FormDraft, old: &Routine) -> SchedulePatch {
     let name = d.name.trim();
     let prompt = d.prompt.trim();
     let kind = draft_schedule_kind(d);
-    let schedule_changed = d.trigger != old.trigger || kind_text(&kind) != old.cron.trim();
+    let initial_cron = FormDraft::from_routine(old).cron;
+    let schedule_changed = d.trigger != old.trigger
+        || (d.cron.trim() != initial_cron.trim() && kind_text(&kind) != old.cron.trim());
     let cont = old.continue_session.is_some();
     SchedulePatch {
         project: (!cont && d.sel.project != old.sel.project).then(|| d.sel.project.clone()),
@@ -1265,10 +1298,20 @@ pub struct RunRowText {
     pub opens_session: bool,
 }
 
-/// The run tile's second line when the run has a session, and when it has none. The mockup
-/// names the member; a run carries only its session id, so the line says what the tile opens.
+/// The run tile's second line when the run's session is not known to the client, and when the
+/// run has none. A known session names its member (`run_tile_sub`).
 pub const RUN_TILE_SESSION: &str = "세션";
 pub const RUN_TILE_NO_SESSION: &str = "세션 없음";
+
+/// The run tile's second line (`.runtile` `mname(session)`): the member whose session the run
+/// is, when the client knows that session, else what the tile opens (#848, review r3).
+pub fn run_tile_sub(r: &Run, member: Option<&str>) -> String {
+    match (&r.session, member.map(str::trim).filter(|m| !m.is_empty())) {
+        (None, _) => RUN_TILE_NO_SESSION.to_string(),
+        (Some(_), Some(m)) => m.to_string(),
+        (Some(_), None) => RUN_TILE_SESSION.to_string(),
+    }
+}
 
 pub fn run_row_text(r: &Run, now: Minutes, simulated: bool) -> RunRowText {
     RunRowText {
@@ -2368,8 +2411,11 @@ mod tests {
     #[test]
     fn fr_l25_form_pairs_fields_in_two_columns_when_inline_and_wide() {
         assert!(form_two_columns(FormLayout::Inline, 686.0));
-        assert!(!form_two_columns(FormLayout::Inline, 400.0));
-        assert!(!form_two_columns(FormLayout::Sheet, 720.0));
+        assert!(form_two_columns(FormLayout::Inline, 400.0));
+        // The phone's sheet (390 less 20 on each side) pairs them too, as the mockup's 390 form.
+        assert!(form_two_columns(FormLayout::Sheet, 350.0));
+        assert!(!form_two_columns(FormLayout::Sheet, 240.0));
+        assert!(!form_two_columns(FormLayout::Inline, 250.0));
         let one: Vec<FormField> = form_rows(false).into_iter().flatten().collect();
         let two: Vec<FormField> = form_rows(true).into_iter().flatten().collect();
         assert_eq!(one, FORM_FIELDS.to_vec());
@@ -2403,6 +2449,34 @@ mod tests {
         assert_eq!(weekday_bar_radius(24.0, 100.0), 12.0);
         assert_eq!(weekday_bar_radius(24.0, 10.0), 5.0);
         assert_eq!(weekday_bar_radius(24.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn fr_l25_weekday_bar_joins_failures_on_top_of_successes() {
+        // `.bar` stacks its parts with `gap: 2px` inside one pill (review r3: two separate
+        // pills with a dot on top).
+        assert_eq!(WEEKDAY_BAR_GAP, 2.0);
+        let (fail, gap, ok) = weekday_bar_parts(102.0, 3, 1);
+        assert_eq!(gap, 2.0);
+        assert_eq!(fail, 25.0);
+        assert_eq!(ok, 75.0);
+        assert_eq!(fail + gap + ok, 102.0, "the parts fill the bar exactly");
+        assert_eq!(weekday_bar_parts(50.0, 4, 0), (0.0, 0.0, 50.0), "no gap without failures");
+        assert_eq!(weekday_bar_parts(50.0, 0, 2), (50.0, 0.0, 0.0), "all failed is all orange");
+        assert_eq!(weekday_bar_parts(0.0, 1, 1), (0.0, 0.0, 0.0));
+        assert_eq!(weekday_bar_parts(40.0, 0, 0), (0.0, 0.0, 0.0));
+        let (f, g, o) = weekday_bar_parts(1.0, 1, 1);
+        assert!(f >= 0.0 && o >= 0.0 && f + g + o <= 1.0 + f32::EPSILON, "a tiny bar never overflows");
+    }
+
+    #[test]
+    fn fr_l25_run_tile_names_the_member_when_the_session_is_known() {
+        let with = Run { at: 0, status: RunStatus::Done, session: Some("s1".into()) };
+        assert_eq!(run_tile_sub(&with, Some("ember-구현")), "ember-구현");
+        assert_eq!(run_tile_sub(&with, Some("  ")), RUN_TILE_SESSION, "a blank name falls back");
+        assert_eq!(run_tile_sub(&with, None), RUN_TILE_SESSION);
+        let without = Run { session: None, ..with };
+        assert_eq!(run_tile_sub(&without, Some("ember-구현")), RUN_TILE_NO_SESSION);
     }
 
     #[test]
@@ -2493,5 +2567,51 @@ mod tests {
             FormDraft::from_routine(&stored).cron,
             "DarkPyonix/darkpyonix-ember"
         );
+    }
+
+    #[test]
+    fn fr_l25_existing_event_routine_with_non_repo_schedule_allows_name_only_edit() {
+        let mut s = schedule(
+            ScheduleKind::Event {
+                on: EventOn::CiFailed,
+                repository: "legacy-repo".into(),
+                branch: None,
+            },
+            false,
+        );
+        s.target = ScheduleTarget::New {
+            title: Some("PR 리뷰".into()),
+        };
+        s.next_run_at = None;
+        let r = schedule_to_routine(&s);
+        let initial = FormDraft::from_routine(&r);
+        assert_eq!(initial.cron, "legacy-repo");
+        assert_eq!(initial.errors(), vec![FormError::EventInvalid]);
+        assert!(
+            initial.errors_with_initial(Some(&initial)).is_empty(),
+            "unchanged event schedule from an existing routine does not block saving"
+        );
+
+        let mut edited = initial.clone();
+        edited.name = "PR 리뷰 2".into();
+        assert!(edited.errors_with_initial(Some(&initial)).is_empty());
+        let p = changed_patch(&edited, &r);
+        assert_eq!(
+            p.target,
+            Some(ScheduleTarget::New {
+                title: Some("PR 리뷰 2".into())
+            })
+        );
+        assert_eq!(p.kind, None, "unchanged event schedule is omitted from PATCH");
+
+        // Changing the event field to another invalid value still requires owner/name.
+        edited.cron = "still-bad".into();
+        assert_eq!(
+            edited.errors_with_initial(Some(&initial)),
+            vec![FormError::EventInvalid]
+        );
+
+        // LOCAL_NOTE does not claim a sample-mode device routine was made offline.
+        assert!(!LOCAL_NOTE.contains("오프라인"));
     }
 }

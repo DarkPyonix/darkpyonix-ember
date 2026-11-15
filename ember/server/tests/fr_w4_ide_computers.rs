@@ -39,7 +39,9 @@ fn fx() -> Fx {
         .unwrap()
         .id;
     let registry = Registry::new(store);
-    let node = registry.insert("studio", "http://studio.local:8741", "tok").unwrap();
+    // No node listens there: since FR-W4c (#896) the Ember target of a registered computer asks
+    // its node, and a loopback port that refuses at once keeps these tests fast.
+    let node = registry.insert("studio", "http://127.0.0.1:1", "tok").unwrap();
     let computers = Computers::new(registry, default_connector());
     Fx { sessions, computers, session, node_id: node.id }
 }
@@ -154,13 +156,27 @@ async fn fr_l7_fr_w4_unknown_computer_is_404() {
 }
 
 #[tokio::test]
-async fn fr_l7_fr_w4_node_computer_ember_target_stays_unavailable() {
+async fn fr_l7_fr_w4_node_computer_ember_target_is_unavailable_when_its_node_is_unreachable() {
     let f = fx();
     let (_, v) = get_with(&f, cfg(NO_ENV), true, &format!("?computer={}", f.node_id)).await;
     let ember = target(&v, "ember");
     assert_eq!(ember["available"], false);
-    assert_eq!(ember["reason"], "OSE server is only available on the local computer");
+    // FR-W4c (#896): the launch comes from the computer's node, and this one does not answer.
+    assert!(ember["reason"].as_str().unwrap().starts_with("node unreachable"), "{ember}");
     assert!(ember["launch"].get("ose").is_none());
+}
+
+/// A computer known only from `EMBER_IDE_COMPUTERS` has no node to ask: the old answer stays.
+#[tokio::test]
+async fn fr_l7_fr_w4_env_only_non_local_computer_has_no_ose() {
+    let f = fx();
+    let c = r#"{"default_computer":"local","computers":{"local":{"local":true},
+        "lab":{"ide_url":"http://lab:8890"}}}"#;
+    let (status, v) = get_with(&f, cfg(c), true, "?computer=lab").await;
+    assert_eq!(status, StatusCode::OK);
+    let ember = target(&v, "ember");
+    assert_eq!(ember["available"], false);
+    assert_eq!(ember["reason"], "OSE server is only available on the local computer");
 }
 
 #[tokio::test]

@@ -718,7 +718,7 @@ impl Sessions {
     /// tool, input, needs_person)` (FR-S8). `needs_person` is the stored flag of the request, so a
     /// rejoined adapter keeps the safety net for a tool the CLI marked as needing a person.
     fn pending_approvals(&self, id: &str) -> anyhow::Result<Vec<(String, String, serde_json::Value, bool)>> {
-        let events: Vec<AgentEvent> = self.store.events_after(id, 0)?.into_iter().map(|e| e.event).collect();
+        let events = self.store.current_turn_prompt_events(id)?;
         Ok(pending_approvals_of(events))
     }
 
@@ -726,8 +726,8 @@ impl Sessions {
     /// `(question id, questions)`, oldest first (FR-A5).
     pub fn pending_questions(&self, id: &str) -> anyhow::Result<Vec<(String, Vec<Question>)>> {
         let mut pending: Vec<(String, Vec<Question>)> = Vec::new();
-        for e in self.store.events_after(id, 0)? {
-            match e.event {
+        for event in self.store.current_turn_prompt_events(id)? {
+            match event {
                 AgentEvent::QuestionAsked { question_id, questions } => pending.push((question_id, questions)),
                 AgentEvent::QuestionAnswered { question_id, .. } | AgentEvent::PromptWithdrawn { prompt_id: question_id } => {
                     pending.retain(|(p, _)| *p != question_id)
@@ -1004,8 +1004,8 @@ impl Sessions {
         self.record(id, &AgentEvent::Notice { message: message.into() })?;
         if enabled {
             let mut pending: Vec<(String, Option<&'static str>)> = Vec::new();
-            for e in self.store.events_after(id, 0)? {
-                match e.event {
+            for event in self.store.current_turn_prompt_events(id)? {
+                match event {
                     AgentEvent::ApprovalRequested { approval_id, tool, needs_person, .. } => {
                         // A question is never answered by the mode (FR-A5, one policy table).
                         let policy = approval_policy(&tool, needs_person);

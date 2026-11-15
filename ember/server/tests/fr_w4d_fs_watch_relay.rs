@@ -199,7 +199,9 @@ async fn fr_w4d_relay_full_device_works_and_a_revoke_ends_both_sockets() {
     let (server_t, devices) = scoped(&net, &f);
     let t = net.transport();
     devices.add(t.peer_id(), "laptop").unwrap();
-    let mut ws = device_ws(&Dialer::new(t.clone()), &server_t, &format!("/api/computers/{}/fs/watch", f.cid))
+    // The dialer lives as long as the socket: dropping it ends its connections.
+    let dialer = Dialer::new(t.clone());
+    let mut ws = device_ws(&dialer, &server_t, &format!("/api/computers/{}/fs/watch", f.cid))
         .await
         .expect("a full device opens the watch socket");
     send(&mut ws, json!({ "op": "watch", "id": 1, "path": f.root, "recursive": true })).await;

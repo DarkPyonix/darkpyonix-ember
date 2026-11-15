@@ -615,30 +615,8 @@ pub fn tab_menu_items(tabs: &EditorTabs, path: &str) -> Vec<(TabMenuItem, bool)>
     items
 }
 
-/// Two clicks on the same target within this many milliseconds are a double-click (FR-L31.5).
-pub const DOUBLE_CLICK_MS: u64 = 500;
-
-/// Tells a double-click from two clicks out of `onclick` alone. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose f0e5b9f5 forwards compose-rust's pointer events as oncontextmenu and ondoubleclick).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DoubleClick {
-    last: Option<(String, u64)>,
-}
-
-impl DoubleClick {
-    /// A click on `target` at `now_ms`. Returns true when it is the second click on the same target within
-    /// [`DOUBLE_CLICK_MS`]; that pair is used up, so a third click starts over.
-    pub fn click(&mut self, target: &str, now_ms: u64) -> bool {
-        let double = self
-            .last
-            .as_ref()
-            .is_some_and(|(t, at)| t == target && now_ms.saturating_sub(*at) <= DOUBLE_CLICK_MS);
-        self.last = if double { None } else { Some((target.to_string(), now_ms)) };
-        double
-    }
-}
-
 /// Whether a key on the focused tab strip opens the tab menu: Shift+F10 or the ContextMenu key, as in
-/// Code-OSS. The key and the ⋯ menu stand in for the right-click menu. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose f0e5b9f5 forwards compose-rust's pointer events as oncontextmenu and ondoubleclick).
+/// Code-OSS, beside the right-click menu (`oncontextmenu`, compose-rust#417).
 pub fn tab_menu_key(key: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool {
     match key {
         "F10" => shift && !ctrl && !alt && !meta,

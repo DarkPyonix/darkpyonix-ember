@@ -107,8 +107,6 @@ pub struct Shared {
 // WidgetView accepts a function without props and owns a separate tree. Share signals between
 // the trees until WidgetView supports props and flex stretch sizing (dioxus-compose #160).
 thread_local! { static DOUBLE_SHIFT: RefCell<super::editor::DoubleShift> = RefCell::new(super::editor::DoubleShift::default()); }
-// v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose f0e5b9f5 forwards compose-rust's pointer events as oncontextmenu and ondoubleclick): tells a double-click from two `onclick`s.
-thread_local! { static DOUBLE_CLICK: RefCell<super::editor::DoubleClick> = RefCell::new(super::editor::DoubleClick::default()); }
 
 /// Milliseconds on a clock that only moves forward, for telling two Shift presses apart.
 pub(crate) fn now_ms() -> u64 {
@@ -396,7 +394,7 @@ pub mod page {
     use super::{
         base_name, editor_pane, is_webview_tab, join_path, now_ms, position_text, send, shared,
         webview_handle_from_tab, webview_pane_for_tab, webview_tab_path, workbench, BridgeAction,
-        HostCommand, PendingGoto, Shared, DOUBLE_CLICK, DOUBLE_SHIFT,
+        HostCommand, PendingGoto, Shared, DOUBLE_SHIFT,
     };
     use crate::ui::editor::{
         action_for_key, agent_status_text, apply_action, tooltip_text, Side, Stripes, ToolWindow,
@@ -1680,8 +1678,9 @@ pub mod page {
     fn menu(s: &Shared, keymap: Keymap) -> Element {
         use crate::ui::editor_menu::{self as em, Submenu};
         let os = Os::current();
-        // The current tab's items (FR-L31.5) head the menu. They stand in for the right-click menu.
-        // v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose f0e5b9f5 forwards compose-rust's pointer events as oncontextmenu and ondoubleclick).
+        // The current tab's items (FR-L31.5) head the menu. A tab's right-click opens its own menu
+        // (`oncontextmenu`, compose-rust#417); this group is where Shift+F10 on the tab strip leads.
+        // TODO(#673): open the tab's own menu at the tab from the keyboard and drop this group.
         let current_tab = s.tabs.read().current_path().map(str::to_owned);
         let tab_items = current_tab.as_deref().map(|p| crate::ui::editor::tab_menu_items(&s.tabs.read(), p)).unwrap_or_default();
         let tab_label = current_tab.as_deref().map(|p| format!("탭: {}", crate::ui::editor::display_name(base_name(p)))).unwrap_or_default();
@@ -2153,7 +2152,6 @@ pub mod page {
                             {
                                 match entry {
                                     TreeMenuEntry::Sep => rsx! { div { key: "sep{i}", class: "ed-msep" } },
-                                    TreeMenuEntry::Heading(h) => rsx! { div { key: "h{i}", class: "ed-mlab", "{h}" } },
                                     TreeMenuEntry::Item(item, enabled) => {
                                         let mut run = run_tree_item.clone();
                                         let hint = item.hint(mac);
@@ -2222,9 +2220,8 @@ pub mod page {
                         if !crate::ui::editor::tree_handles_key(prompt.read().as_ref()) {
                             return;
                         }
-                        // Shift+F10 stands in for right-click. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose f0e5b9f5 forwards compose-rust's pointer events as oncontextmenu and ondoubleclick).
-                        // compose-rust#100 and #717 are in the v0.0.10 pin (#832); whether Shift+F10 reaches
-                        // this branch needs a display check.
+                        // Shift+F10 or the context-menu key opens the context menu from the keyboard, as in
+                        // Code-OSS, beside right-click (compose-rust#417, #100, #717; #832).
                         {
                             let m = event.modifiers();
                             if crate::ui::editor::tab_menu_key(&key_name(&event.key()), m.contains(Modifiers::CONTROL), m.contains(Modifiers::SHIFT), m.contains(Modifiers::ALT), m.contains(Modifiers::META)) {
@@ -2532,13 +2529,9 @@ pub mod page {
                                         if was_open { expanded.write().remove(&path); }
                                         else { expanded.write().insert(path.clone()); host.send(HostCommand::List(path.clone())); }
                                     } else {
-                                        // A single click opens the preview tab; a double-click keeps it (FR-L31.5).
+                                        // A single click opens the preview tab; a double-click (`ondoubleclick`,
+                                        // compose-rust#417) keeps it (FR-L31.5).
                                         open_preview(&preview_s, &path);
-                                        // Two clicks within 500 ms stand in for `ondoubleclick`. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose f0e5b9f5 forwards compose-rust's pointer events as oncontextmenu and ondoubleclick).
-                                        if DOUBLE_CLICK.with(|d| d.borrow_mut().click(&format!("tree:{path}"), now_ms())) {
-                                            let mut tabs = preview_s.tabs;
-                                            tabs.write().keep_open(&path);
-                                        }
                                         record_recent_file(&mut recent_files, &path);
                                     }
                                 },
@@ -2607,8 +2600,8 @@ pub mod page {
                     }
                     let key_str = key_name(&event.key());
                     let m = event.modifiers();
-                    // Shift+F10 / ContextMenu opens the ⋯ menu, which holds the current tab's items, while
-                    // the right-click menu cannot open. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose f0e5b9f5 forwards compose-rust's pointer events as oncontextmenu and ondoubleclick).
+                    // Shift+F10 / ContextMenu opens the ⋯ menu, which holds the current tab's items; a
+                    // right-click opens the tab's own menu (compose-rust#417). TODO(#673): open that one here.
                     if crate::ui::editor::tab_menu_key(
                         &key_str,
                         m.contains(Modifiers::CONTROL),
@@ -2707,10 +2700,6 @@ pub mod page {
                             onclick: move |_| {
                                 scm.close_diff();
                                 tabs.write().activate(&path);
-                                // Two clicks within 500 ms stand in for `ondoubleclick`. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose f0e5b9f5 forwards compose-rust's pointer events as oncontextmenu and ondoubleclick).
-                                if DOUBLE_CLICK.with(|d| d.borrow_mut().click(&format!("tab:{path}"), now_ms())) {
-                                    tabs.write().keep_open(&path);
-                                }
                                 record_recent_file(&mut recent_files, &path);
                                 if let Some(handle) = webview_handle_from_tab(&path) {
                                     host.send(HostCommand::Webview(ember_editor::webview::WebviewEvent::ViewState {
@@ -3048,8 +3037,7 @@ pub mod page {
                             rsx! {
                                 button { key: "{id}", class: if on { "on" } else { "" }, role: "tab", "aria-selected": if on { "true" } else { "false" }, title: "{label}",
                                     onclick: move |_| { terms::select(&sel); bump(); },
-                                    // F2 and the pencil button rename until a real double-click arrives.
-                                    // v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose f0e5b9f5 forwards compose-rust's pointer events as oncontextmenu and ondoubleclick).
+                                    // A double-click (compose-rust#417), F2 and the pencil button rename.
                                     ondoubleclick: move |_| { terms::begin_rename(&ren); bump(); },
                                     onkeydown: move |event| {
                                         let m = event.modifiers();

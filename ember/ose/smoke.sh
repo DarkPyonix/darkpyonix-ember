@@ -22,6 +22,9 @@ ext="${OSE_SMOKE_EXTENSION:-redhat.vscode-yaml}"
 timeout_s="${OSE_SMOKE_TIMEOUT:-120}"
 
 py=python3; command -v python3 >/dev/null || py=python
+# Read and write UTF-8 everywhere: on Windows Python's default is the ANSI code page, and the
+# Open VSX answers are UTF-8 ("'charmap' codec can't decode byte 0x9d").
+export PYTHONUTF8=1
 name="$("$py" -c 'import json,sys;print(json.load(open(sys.argv[1]))["serverApplicationName"])' "$dir/product.json" | tr -d '\r')"
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)

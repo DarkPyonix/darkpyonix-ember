@@ -50,7 +50,7 @@ if [ "$client" = "true" ]; then
         for g in ${globs[@]+"${globs[@]}"}; do has "$d" "$g" "client output for $target"; done
     done <<LIST
 macos-arm64 osx-arm64 *.dmg ember-app-$tag-macos-arm64.dmg ember-app-$tag-macos-arm64.app.zip
-windows-x86_64 win-x64 *-Setup.exe ember-app-$tag-windows-x86_64.zip *.msix
+windows-x86_64 win-x64 *-Setup.exe ember-app-$tag-windows-x86_64.zip
 linux-x86_64 linux-x64 *.AppImage
 linux-aarch64 linux-arm64 *.AppImage
 LIST

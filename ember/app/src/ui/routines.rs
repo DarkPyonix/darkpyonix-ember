@@ -14,7 +14,7 @@
 //! empty and nothing here is sample data.
 
 use ember_client::wire::{
-    self, NewSchedule, Schedule, SchedulePatch, ScheduleKind, ScheduleRun, ScheduleTarget,
+    self, EventOn, NewSchedule, Schedule, SchedulePatch, ScheduleKind, ScheduleRun, ScheduleTarget,
 };
 
 use super::home::{
@@ -664,6 +664,64 @@ pub fn when_big_max_lines(trigger: Trigger) -> u32 {
 
 const DEFAULT_CRON: &str = "0 9 * * *";
 
+/// Parses an event-routine input (`owner/name`, `owner/name#branch`, or a pasted
+/// `github.com/owner/name(.git)` URL with optional `#branch`) into `(repository, branch)`.
+/// The ` (branch)` display form is not accepted as input (FR-L23, FR-L25, #759).
+pub fn parse_ci_event(text: &str) -> Option<(String, Option<String>)> {
+    let t = text.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let (repo_raw, branch) = match t.split_once('#') {
+        Some((r, b)) => {
+            let b = b.trim();
+            if b.is_empty() || b.contains('#') || b.chars().any(char::is_whitespace) {
+                return None;
+            }
+            (r, Some(b.to_string()))
+        }
+        None => (t, None),
+    };
+    let r = repo_raw.trim().trim_end_matches('/');
+    let r = r
+        .strip_prefix("https://")
+        .or_else(|| r.strip_prefix("http://"))
+        .unwrap_or(r);
+    let r = r.strip_prefix("github.com/").unwrap_or(r);
+    let r = r.strip_suffix(".git").unwrap_or(r);
+    let mut parts = r.split('/');
+    let (owner, name) = (parts.next()?, parts.next()?);
+    let ok = |p: &str| {
+        !p.is_empty()
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    (parts.next().is_none() && ok(owner) && ok(name))
+        .then(|| (format!("{owner}/{name}"), branch))
+}
+
+/// Converts a routine's stored event display string (`CI 실패 시 · owner/name` or
+/// `CI 실패 시 · owner/name (branch)`) back into the edit form's input shape (`owner/name` or
+/// `owner/name#branch`), leaving any other string unchanged.
+pub fn event_field_text(cron: &str) -> String {
+    let t = cron.trim();
+    let Some(rest) = t.strip_prefix("CI 실패 시 · ") else {
+        return cron.to_string();
+    };
+    let rest = rest.trim();
+    if let Some((repo, branch)) = rest
+        .strip_suffix(')')
+        .and_then(|s| s.rsplit_once(" ("))
+    {
+        let repo = repo.trim();
+        let branch = branch.trim();
+        if !repo.is_empty() && !branch.is_empty() {
+            return format!("{repo}#{branch}");
+        }
+    }
+    rest.to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormDraft {
     pub name: String,
@@ -678,6 +736,7 @@ pub enum FormError {
     NameEmpty,
     ScheduleInvalid,
     EventEmpty,
+    EventInvalid,
     PromptEmpty,
 }
 
@@ -687,6 +746,9 @@ impl FormError {
             FormError::NameEmpty => "이름을 입력하셔야 합니다",
             FormError::ScheduleInvalid => "일정이 올바른 cron 형식이 아닙니다",
             FormError::EventEmpty => "이벤트 설명을 입력하셔야 합니다",
+            FormError::EventInvalid => {
+                "저장소는 owner/name 또는 owner/name#branch 형식으로 입력하셔야 합니다"
+            }
             FormError::PromptEmpty => "프롬프트를 입력하셔야 합니다",
         }
     }
@@ -714,7 +776,10 @@ impl FormDraft {
         FormDraft {
             name: r.name.clone(),
             trigger: r.trigger,
-            cron: r.cron.clone(),
+            cron: match r.trigger {
+                Trigger::Time => r.cron.clone(),
+                Trigger::Event => event_field_text(&r.cron),
+            },
             prompt: r.prompt.clone(),
             sel: r.sel.clone(),
         }
@@ -744,6 +809,9 @@ impl FormDraft {
         match self.trigger {
             Trigger::Time if !cron_valid(self.cron.trim()) => out.push(FormError::ScheduleInvalid),
             Trigger::Event if self.cron.trim().is_empty() => out.push(FormError::EventEmpty),
+            Trigger::Event if parse_ci_event(&self.cron).is_none() => {
+                out.push(FormError::EventInvalid)
+            }
             _ => {}
         }
         if self.prompt.trim().is_empty() {
@@ -752,13 +820,24 @@ impl FormDraft {
         out
     }
 
-    /// The routine to store. Text is trimmed.
+    /// The routine to store. Text is trimmed, and valid event inputs format as [`kind_text`].
     pub fn into_routine(&self, id: &str, enabled: bool) -> Routine {
+        let cron = match self.trigger {
+            Trigger::Time => self.cron.trim().into(),
+            Trigger::Event => match parse_ci_event(&self.cron) {
+                Some((repository, branch)) => kind_text(&ScheduleKind::Event {
+                    on: EventOn::CiFailed,
+                    repository,
+                    branch,
+                }),
+                None => self.cron.trim().into(),
+            },
+        };
         Routine {
             id: id.into(),
             name: self.name.trim().into(),
             trigger: self.trigger,
-            cron: self.cron.trim().into(),
+            cron,
             prompt: self.prompt.trim().into(),
             enabled,
             sel: self.sel.clone(),
@@ -1031,7 +1110,10 @@ pub fn schedule_to_routine(s: &Schedule) -> Routine {
     Routine {
         id: s.id.clone(),
         name,
-        trigger: Trigger::Time,
+        trigger: match &s.kind {
+            ScheduleKind::Event { .. } => Trigger::Event,
+            _ => Trigger::Time,
+        },
         cron: kind_text(&s.kind),
         prompt: s.prompt.clone(),
         enabled: !s.paused,
@@ -1054,8 +1136,29 @@ pub fn schedule_to_entry(s: &Schedule, runs: &[ScheduleRun]) -> Entry {
     }
 }
 
-/// The create body for a time routine. Cron is read in UTC (no time-zone source yet); each run
-/// starts a session titled with the routine's name, in `cwd`.
+/// Builds the server `ScheduleKind` from a form draft (cron in UTC for [`Trigger::Time`], or
+/// `ci_failed` for [`Trigger::Event`]).
+pub fn draft_schedule_kind(d: &FormDraft) -> ScheduleKind {
+    match d.trigger {
+        Trigger::Time => ScheduleKind::Cron {
+            expr: d.cron.trim().to_string(),
+            tz: "UTC".to_string(),
+        },
+        Trigger::Event => {
+            let (repository, branch) =
+                parse_ci_event(&d.cron).unwrap_or_else(|| (d.cron.trim().to_string(), None));
+            ScheduleKind::Event {
+                on: EventOn::CiFailed,
+                repository,
+                branch,
+            }
+        }
+    }
+}
+
+/// The create body for a routine. Cron is read in UTC (no time-zone source yet); event routines
+/// watch `ci_failed` on the parsed repository and optional branch; each run starts a session
+/// titled with the routine's name, in `cwd`.
 pub fn new_schedule(d: &FormDraft, cwd: &str) -> NewSchedule {
     NewSchedule {
         project: d.sel.project.clone(),
@@ -1064,10 +1167,7 @@ pub fn new_schedule(d: &FormDraft, cwd: &str) -> NewSchedule {
         computer: d.sel.computer.clone(),
         cwd: Some(cwd.to_string()),
         prompt: d.prompt.trim().to_string(),
-        kind: ScheduleKind::Cron {
-            expr: d.cron.trim().to_string(),
-            tz: "UTC".to_string(),
-        },
+        kind: draft_schedule_kind(d),
         target: ScheduleTarget::New {
             title: Some(d.name.trim().to_string()),
         },
@@ -1087,10 +1187,7 @@ pub fn schedule_patch(d: &FormDraft) -> SchedulePatch {
             title: Some(d.name.trim().to_string()),
         }),
         prompt: Some(d.prompt.trim().to_string()),
-        kind: Some(ScheduleKind::Cron {
-            expr: d.cron.trim().to_string(),
-            tz: "UTC".to_string(),
-        }),
+        kind: Some(draft_schedule_kind(d)),
         catch_up: None,
     }
 }
@@ -1107,7 +1204,7 @@ pub const OFFLINE_NOTE: &str =
     "서버에 연결되지 않아 루틴이 이 앱을 실행하는 동안만 이 기기에 보관됩니다";
 /// Shown when routines that only this device keeps are listed beside the server's.
 pub const LOCAL_NOTE: &str =
-    "이벤트 루틴은 서버가 지원하지 않아 이 앱을 실행하는 동안만 이 기기에 보관됩니다";
+    "오프라인일 때 만든 루틴은 이 앱을 실행하는 동안만 이 기기에 보관됩니다";
 pub const RUN_NOTICE: &str = "서버에 연결되지 않아 지금 실행할 수 없습니다";
 pub const NO_CWD_NOTICE: &str =
     "이 프로젝트의 작업 폴더를 알 수 없습니다. 프로젝트에서 세션을 한 번 시작하셔야 합니다";
@@ -1119,8 +1216,8 @@ pub const NO_CWD_NOTICE: &str =
 pub fn changed_patch(d: &FormDraft, old: &Routine) -> SchedulePatch {
     let name = d.name.trim();
     let prompt = d.prompt.trim();
-    let cron = d.cron.trim();
-    let schedule_changed = d.trigger != old.trigger || cron != old.cron.trim();
+    let kind = draft_schedule_kind(d);
+    let schedule_changed = d.trigger != old.trigger || kind_text(&kind) != old.cron.trim();
     let cont = old.continue_session.is_some();
     SchedulePatch {
         project: (!cont && d.sel.project != old.sel.project).then(|| d.sel.project.clone()),
@@ -1133,10 +1230,7 @@ pub fn changed_patch(d: &FormDraft, old: &Routine) -> SchedulePatch {
             title: Some(name.to_string()),
         }),
         prompt: (prompt != old.prompt.trim()).then(|| prompt.to_string()),
-        kind: schedule_changed.then(|| ScheduleKind::Cron {
-            expr: cron.to_string(),
-            tz: "UTC".to_string(),
-        }),
+        kind: schedule_changed.then_some(kind),
         catch_up: None,
     }
 }
@@ -1655,6 +1749,8 @@ mod tests {
             "the cron text is replaced"
         );
         e.cron = "PR이 열릴 때".into();
+        assert_eq!(e.errors(), [FormError::EventInvalid]);
+        e.cron = "DarkPyonix/darkpyonix-ember#develop".into();
         assert!(e.errors().is_empty());
         let back = e.with_trigger(Trigger::Time);
         assert_eq!(back.cron, "0 9 * * *");
@@ -1671,6 +1767,7 @@ mod tests {
             FormError::NameEmpty,
             FormError::ScheduleInvalid,
             FormError::EventEmpty,
+            FormError::EventInvalid,
             FormError::PromptEmpty,
         ] {
             assert!(e.message().ends_with("니다"), "{}", e.message());
@@ -2039,6 +2136,7 @@ mod tests {
             FormError::NameEmpty,
             FormError::ScheduleInvalid,
             FormError::EventEmpty,
+            FormError::EventInvalid,
             FormError::PromptEmpty,
         ] {
             strings.push(e.message().into());
@@ -2365,5 +2463,95 @@ mod tests {
         assert_eq!(run_tile_sub(&with, None), RUN_TILE_SESSION);
         let without = Run { session: None, ..with };
         assert_eq!(run_tile_sub(&without, Some("ember-구현")), RUN_TILE_NO_SESSION);
+    }
+
+    #[test]
+    fn fr_l23_ci_event_parses_one_input_shape_and_strips_github_urls() {
+        assert_eq!(
+            parse_ci_event("DarkPyonix/darkpyonix-ember"),
+            Some(("DarkPyonix/darkpyonix-ember".into(), None))
+        );
+        assert_eq!(
+            parse_ci_event("  DarkPyonix/darkpyonix-ember#develop  "),
+            Some((
+                "DarkPyonix/darkpyonix-ember".into(),
+                Some("develop".into())
+            ))
+        );
+        assert_eq!(
+            parse_ci_event("github.com/DarkPyonix/darkpyonix-ember#feat/ci"),
+            Some((
+                "DarkPyonix/darkpyonix-ember".into(),
+                Some("feat/ci".into())
+            ))
+        );
+        assert_eq!(
+            parse_ci_event("https://github.com/DarkPyonix/darkpyonix-ember.git/#main"),
+            Some(("DarkPyonix/darkpyonix-ember".into(), Some("main".into())))
+        );
+        assert_eq!(
+            parse_ci_event("http://github.com/owner/repo/"),
+            Some(("owner/repo".into(), None))
+        );
+        // The ` (branch)` display form is not accepted as input.
+        assert_eq!(parse_ci_event("owner/repo (develop)"), None);
+        assert_eq!(parse_ci_event(""), None);
+        assert_eq!(parse_ci_event("owner"), None);
+        assert_eq!(parse_ci_event("owner/repo/extra"), None);
+        assert_eq!(parse_ci_event("owner/repo#"), None);
+        assert_eq!(parse_ci_event("owner/repo#a#b"), None);
+        assert_eq!(parse_ci_event("owner/repo#bad branch"), None);
+    }
+
+    #[test]
+    fn fr_l23_ci_event_routine_round_trips_between_server_and_form() {
+        let ev_kind = ScheduleKind::Event {
+            on: EventOn::CiFailed,
+            repository: "DarkPyonix/darkpyonix-ember".into(),
+            branch: Some("develop".into()),
+        };
+        let mut s = schedule(ev_kind.clone(), false);
+        s.target = ScheduleTarget::New {
+            title: Some("CI 고치기".into()),
+        };
+        s.next_run_at = None;
+        let r = schedule_to_routine(&s);
+        assert_eq!(r.trigger, Trigger::Event);
+        assert_eq!(r.cron, "CI 실패 시 · DarkPyonix/darkpyonix-ember (develop)");
+        assert_eq!(
+            schedule_line(&r),
+            "CI 실패 시 · DarkPyonix/darkpyonix-ember (develop)"
+        );
+
+        let d = FormDraft::from_routine(&r);
+        assert_eq!(d.trigger, Trigger::Event);
+        assert_eq!(d.cron, "DarkPyonix/darkpyonix-ember#develop");
+        assert!(d.errors().is_empty());
+        assert!(
+            patch_is_empty(&changed_patch(&d, &r)),
+            "unedited event routine produces an empty patch"
+        );
+
+        let created = new_schedule(&d, "/w/ember");
+        assert_eq!(created.kind, ev_kind);
+        assert_eq!(schedule_patch(&d).kind, Some(ev_kind));
+
+        let mut d_no_branch = d.clone();
+        d_no_branch.cron = "https://github.com/DarkPyonix/darkpyonix-ember".into();
+        let p = changed_patch(&d_no_branch, &r);
+        assert_eq!(
+            p.kind,
+            Some(ScheduleKind::Event {
+                on: EventOn::CiFailed,
+                repository: "DarkPyonix/darkpyonix-ember".into(),
+                branch: None,
+            })
+        );
+        let stored = d_no_branch.into_routine("r-ev", true);
+        assert_eq!(stored.cron, "CI 실패 시 · DarkPyonix/darkpyonix-ember");
+        assert_eq!(
+            FormDraft::from_routine(&stored).cron,
+            "DarkPyonix/darkpyonix-ember"
+        );
     }
 }

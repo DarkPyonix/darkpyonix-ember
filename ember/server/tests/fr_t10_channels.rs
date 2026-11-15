@@ -264,3 +264,52 @@ async fn fr_t10_read_of_an_unknown_channel_is_404() {
     assert_eq!(st, StatusCode::NOT_FOUND);
     assert_eq!(e["code"], "not_found");
 }
+
+#[tokio::test]
+async fn fr_t10_channel_name_length_and_uniqueness_per_project() {
+    let (store, _, _, _) = fixture();
+    let app = app(&store);
+
+    // 64 Unicode scalar values after trimming is accepted; 65 is refused with 400 invalid_name.
+    let ok_name = "가".repeat(64);
+    let (st, c) = call(
+        &app,
+        "POST",
+        "/api/channels",
+        Some(json!({"project": "core", "name": format!("  {ok_name}  ")})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(c["name"], ok_name);
+
+    let too_long = "가".repeat(65);
+    let (st, e) = call(&app, "POST", "/api/channels", Some(json!({"project": "core", "name": too_long}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(e["code"], "invalid_name");
+
+    // Control, format and line-separator characters are refused with 400 invalid_name.
+    for bad in ["a\nb", "a\u{200B}b", "a\u{2028}b"] {
+        let (st, e) = call(&app, "POST", "/api/channels", Some(json!({"project": "core", "name": bad}))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad:?}");
+        assert_eq!(e["code"], "invalid_name", "{bad:?}");
+    }
+
+    // The default channel name ("전체") is reserved in every project even before GET /api/channels
+    // creates the default row.
+    let (st, e) = call(&app, "POST", "/api/channels", Some(json!({"project": "core", "name": " 전체 "}))).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(e["code"], "name_taken");
+
+    // A duplicate within the same project (ignoring case and outer whitespace) is 409 name_taken.
+    let (st, _) = call(&app, "POST", "/api/channels", Some(json!({"project": "core", "name": "Review"}))).await;
+    assert_eq!(st, StatusCode::CREATED);
+    let (st, e) = call(&app, "POST", "/api/channels", Some(json!({"project": "core", "name": " review "}))).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(e["code"], "name_taken");
+
+    // Another project may still use the same name.
+    let (st, c2) = call(&app, "POST", "/api/channels", Some(json!({"project": "web", "name": "review"}))).await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(c2["project"], "web");
+    assert_eq!(c2["name"], "review");
+}

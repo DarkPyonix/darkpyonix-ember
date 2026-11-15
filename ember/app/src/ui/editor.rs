@@ -153,7 +153,7 @@ struct Tab {
     /// Pinned (Code-OSS "sticky"): kept at the front of the strip and skipped by close others, close to the
     /// right and close all.
     pinned: bool,
-    /// A preview tab (Code-OSS "preview editor"): drawn in italics, replaced by the next preview open, made
+    /// A preview tab (Code-OSS "preview editor"): drawn upright like any tab (FR-L31.30), replaced by the next preview open, made
     /// permanent by an edit, a double-click, pinning or an explicit open.
     preview: bool,
 }
@@ -549,7 +549,8 @@ impl EditorTabs {
 }
 
 /// The CSS class of a tab with its pinned and preview marks (Ember additions to the mockup's `ed-tab`:
-/// `.pinned` draws the pin in place of the close button, `.preview` sets the name in italics).
+/// `.pinned` draws the pin in place of the close button; `.preview` marks the tab and has no rule of
+/// its own, because an italic label is cut on the HTML path, FR-L31.30).
 pub fn tab_class_with(active: bool, modified: bool, pinned: bool, preview: bool) -> String {
     let mut class = tab_class(active, modified).to_string();
     if pinned {

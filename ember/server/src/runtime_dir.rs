@@ -10,17 +10,14 @@
 //! the runtime dir. It is idempotent: an entry already moved is skipped, and when both places hold
 //! one the data dir copy is left alone with a warning (nothing is merged or deleted).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The entries moved from the data dir to the runtime dir.
 pub const MOVED: &[&str] = &["agy", "ose-data"];
 
-/// The runtime dir for `data_dir`: its sibling `<name>-runtime`.
-pub fn runtime_dir(data_dir: &Path) -> PathBuf {
-    let name = data_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "ember".into());
-    let parent = data_dir.parent().map(Path::to_path_buf).unwrap_or_default();
-    parent.join(format!("{name}-runtime"))
-}
+/// The runtime dir for `data_dir`: its sibling `<name>-runtime`. The rule lives beside the OSE
+/// manager, which `ember-node` runs too (#896).
+pub use ember_node::ose::runtime_dir;
 
 /// What [`migrate`] did with one entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +83,7 @@ pub fn migrate_logged(data_dir: &Path, runtime: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn fr_a11_runtime_dir_is_the_data_dir_sibling() {

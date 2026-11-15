@@ -25,7 +25,8 @@ use ember_client::api::ApiError;
 
 pub use crate::ui::routines::{
     apply_server_run_started, begin_demo_run, changed_patch, demo_run_allowed,
-    demo_session_title, finish_demo_run, has_running_remote_run, patch_is_empty,
+    demo_session_title, draft_schedule_kind, event_field_text, finish_demo_run, has_running_remote_run,
+    parse_ci_event, patch_is_empty,
     resolve_run_session_id, rollback_optimistic_run, run_is_simulated, run_now_busy, DEMO_RUN_BUSY, DEMO_RUN_DONE,
     DEMO_RUN_MS, DEMO_RUN_STARTED, DEMO_SESSION_PREFIX, REMOTE_RUN_POLL_MS,
     REMOTE_RUN_STARTED, SAMPLE_FLAG,
@@ -953,7 +954,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                 panel_ref.set(Panel::View);
                 return;
             }
-            if editing.is_none() && draft.trigger == Trigger::Time && with_remote(|r| remote_schedule_allowed(sample_mode(), r.online)) {
+            if editing.is_none() && with_remote(|r| remote_schedule_allowed(sample_mode(), r.online)) {
                 let cwd = try_services().and_then(|svc| {
                     svc.client.read(|s| crate::model::latest_cwd(s, &draft.sel.project))
                 });
@@ -2719,7 +2720,7 @@ fn FormFields(ctx: &FormCtx) {
                 } else if d.trigger == Trigger::Time {
                     "0 9 * * *".to_string()
                 } else {
-                    "예: PR이 열릴 때".to_string()
+                    "예: owner/repo#develop".to_string()
                 };
                 EmberField(FieldOptions {
                     fill_max_width: true,
@@ -3619,6 +3620,8 @@ mod tests {
         let mut e = d.with_trigger(Trigger::Event);
         assert_eq!(e.errors(), [FormError::EventEmpty]);
         e.cron = "PR이 열릴 때".into();
+        assert_eq!(e.errors(), [FormError::EventInvalid]);
+        e.cron = "DarkPyonix/darkpyonix-ember#develop".into();
         assert!(e.errors().is_empty());
         let back = e.with_trigger(Trigger::Time);
         assert_eq!(back.cron, "0 9 * * *");
@@ -3631,6 +3634,7 @@ mod tests {
             FormError::NameEmpty,
             FormError::ScheduleInvalid,
             FormError::EventEmpty,
+            FormError::EventInvalid,
             FormError::PromptEmpty,
         ] {
             assert!(e.message().ends_with("니다"), "{}", e.message());
@@ -3984,6 +3988,7 @@ mod tests {
             FormError::NameEmpty,
             FormError::ScheduleInvalid,
             FormError::EventEmpty,
+            FormError::EventInvalid,
             FormError::PromptEmpty,
         ] {
             strings.push(e.message().into());

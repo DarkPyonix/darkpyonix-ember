@@ -550,6 +550,8 @@ pub struct AgentChoice {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DraftError {
     EmptyName,
+    /// More than [`MAX_CHANNEL_NAME_CHARS`] Unicode scalar values after trimming (`invalid_name`).
+    TooLong,
     /// A control, format or line-separator character, which the server refuses (`invalid_name`).
     BadChar,
     /// A channel of that name exists in the project.
@@ -561,12 +563,20 @@ impl DraftError {
     pub fn text(self) -> &'static str {
         match self {
             DraftError::EmptyName => "채널 이름을 입력해 주세요",
+            DraftError::TooLong => "채널 이름은 64자 이하여야 합니다",
             DraftError::BadChar => "채널 이름에 쓸 수 없는 문자가 있습니다",
             DraftError::Taken => TAKEN_TEXT,
             DraftError::NoProject => "프로젝트를 선택해 주세요",
         }
     }
 }
+
+/// The server's `MAX_NAME_CHARS` (`ember/server/src/channels/invites.rs`): at most 64 Unicode
+/// scalar values after trimming (FR-T10).
+pub const MAX_CHANNEL_NAME_CHARS: usize = 64;
+
+/// The name of every project's default channel (`ember_server::channels::DEFAULT_NAME`).
+pub const DEFAULT_CHANNEL_NAME: &str = "전체";
 
 /// The sentence for a name that is already used.
 pub const TAKEN_TEXT: &str = "이미 있는 채널 이름입니다";
@@ -640,11 +650,15 @@ impl NewChannelDraft {
     }
 
     /// The first reason the draft cannot be created. `rooms` are the existing channels, to catch a
-    /// name that is taken in the project (compared trimmed and ignoring case).
+    /// name that is taken in the project (compared trimmed and ignoring case, including the
+    /// project's default channel `전체`).
     pub fn problem(&self, rooms: &[Room]) -> Option<DraftError> {
         let name = self.name.trim();
         if name.is_empty() {
             return Some(DraftError::EmptyName);
+        }
+        if name.chars().count() > MAX_CHANNEL_NAME_CHARS {
+            return Some(DraftError::TooLong);
         }
         if name.chars().any(is_forbidden_name_char) {
             return Some(DraftError::BadChar);
@@ -653,7 +667,9 @@ impl NewChannelDraft {
             return Some(DraftError::NoProject);
         }
         let lower = name.to_lowercase();
-        if rooms.iter().any(|r| r.project == self.project && r.name.trim().to_lowercase() == lower) {
+        if lower == DEFAULT_CHANNEL_NAME
+            || rooms.iter().any(|r| r.project == self.project && r.name.trim().to_lowercase() == lower)
+        {
             return Some(DraftError::Taken);
         }
         None
@@ -1191,6 +1207,13 @@ mod layout_tests {
             d.name = bad.into();
             assert_eq!(d.problem(&[]), Some(DraftError::BadChar), "{bad:?}");
         }
+        d.name = "가".repeat(MAX_CHANNEL_NAME_CHARS);
+        assert!(d.is_valid(&[]), "64 characters is allowed");
+        d.name = format!("  {}  ", "가".repeat(MAX_CHANNEL_NAME_CHARS));
+        assert!(d.is_valid(&[]), "surrounding whitespace is trimmed before counting");
+        d.name = "가".repeat(MAX_CHANNEL_NAME_CHARS + 1);
+        assert_eq!(d.problem(&[]), Some(DraftError::TooLong));
+        assert_eq!(DraftError::TooLong.text(), "채널 이름은 64자 이하여야 합니다");
         d.name = "리뷰 방 2".into();
         assert!(d.is_valid(&[]));
     }
@@ -1202,6 +1225,8 @@ mod layout_tests {
         d.name = " review ".into();
         assert_eq!(d.problem(&rooms), Some(DraftError::Taken));
         assert_eq!(DraftError::Taken.text(), "이미 있는 채널 이름입니다");
+        d.name = " 전체 ".into();
+        assert_eq!(d.problem(&[]), Some(DraftError::Taken), "the default channel name is always taken");
         d.name = "ideas".into();
         assert!(d.is_valid(&rooms), "the same name in another project is fine");
     }

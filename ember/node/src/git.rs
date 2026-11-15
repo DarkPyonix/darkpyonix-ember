@@ -7,8 +7,10 @@
 //! (empty index, diverged pull, patch that does not apply) answers [`GitError::Conflict`] with
 //! git's own message, and malformed input answers [`GitError::Bad`]. Messages are Korean with
 //! git's text after them as detail. `fetch`, `pull` and `push` stop after
-//! [`network_timeout`] ([`GitError::Timeout`]); output beyond [`max_output`] is
-//! [`GitError::TooLarge`].
+//! [`network_timeout`] ([`GitError::Timeout`]), local git commands that run the user's hooks
+//! (`commit`, `pull_merge`) stop after [`hook_timeout`] ([`GitError::Timeout`]), and other local
+//! git commands stop after [`local_timeout`] ([`GitError::Timeout`]); output beyond
+//! [`max_output`] is [`GitError::TooLarge`].
 
 
 #[path = "git_blame.rs"]
@@ -180,7 +182,7 @@ pub enum GitError {
     NotFound(String),
     #[error("{0}")]
     Internal(String),
-    /// A network operation did not finish in time (504).
+    /// A git operation did not finish in time (504).
     #[error("{0}")]
     Timeout(String),
     /// The output exceeded [`max_output`] (413).
@@ -190,9 +192,46 @@ pub enum GitError {
 
 /// Default deadline for `fetch`, `pull` and `push`.
 pub const NETWORK_TIMEOUT_SECS: u64 = 60;
+/// Default deadline for local git commands (state-changing ops, index lock waits).
+pub const LOCAL_TIMEOUT_SECS: u64 = 30;
+/// Default deadline for local git commands that run the user's hooks (`commit`, `pull_merge`).
+pub const HOOK_TIMEOUT_SECS: u64 = 600;
+/// Default grace period between `SIGTERM` and `SIGKILL` when a local git command times out.
+pub const KILL_GRACE_SECS: u64 = 5;
 /// Default cap on the stdout of one git command (8 MiB).
 pub const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Copy)]
+pub(super) enum Deadline {
+    Local(Duration),
+    Network(Duration),
+}
+
+impl Deadline {
+    fn duration(self) -> Duration {
+        match self {
+            Deadline::Local(d) | Deadline::Network(d) => d,
+        }
+    }
+
+    fn timeout_error(self, leftover_index_lock: bool) -> GitError {
+        match self {
+            Deadline::Local(d) if leftover_index_lock => GitError::Timeout(format!(
+                "git 작업이 {}초 안에 끝나지 않아 중단했습니다 (.git/index.lock 잠금 파일이 남아 있습니다. 다른 git 작업이 끝났는지 확인한 뒤 직접 정리하세요).",
+                d.as_secs()
+            )),
+            Deadline::Local(d) => GitError::Timeout(format!(
+                "git 작업이 {}초 안에 끝나지 않아 중단했습니다 (GPG 서명 입력 대기나 잠금을 확인하세요).",
+                d.as_secs()
+            )),
+            Deadline::Network(d) => GitError::Timeout(format!(
+                "원격 저장소가 {}초 안에 응답하지 않아 중단했습니다 (네트워크 연결이나 인증 대기를 확인하세요).",
+                d.as_secs()
+            )),
+        }
+    }
+}
 
 /// The network deadline: `EMBER_GIT_NETWORK_TIMEOUT_SECS` if set to a positive number (tests),
 /// else [`NETWORK_TIMEOUT_SECS`].
@@ -202,6 +241,47 @@ pub fn network_timeout() -> Duration {
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(NETWORK_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+/// The local deadline: `EMBER_GIT_LOCAL_TIMEOUT_SECS` if set to a positive number (tests),
+/// else [`LOCAL_TIMEOUT_SECS`].
+pub fn local_timeout() -> Duration {
+    let secs = std::env::var("EMBER_GIT_LOCAL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(LOCAL_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+/// The hook deadline for local git commands that run the user's hooks (`commit`, `pull_merge`):
+/// `EMBER_GIT_HOOK_TIMEOUT_SECS` if set to a positive number (tests), else [`HOOK_TIMEOUT_SECS`].
+pub fn hook_timeout() -> Duration {
+    let secs = std::env::var("EMBER_GIT_HOOK_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(HOOK_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+/// The grace period between `SIGTERM` and `SIGKILL` when a local git command times out:
+/// `EMBER_GIT_KILL_GRACE_MS` (milliseconds) or `EMBER_GIT_KILL_GRACE_SECS` if set to a positive
+/// number (tests), else [`KILL_GRACE_SECS`].
+pub fn kill_grace() -> Duration {
+    if let Some(ms) = std::env::var("EMBER_GIT_KILL_GRACE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+    {
+        return Duration::from_millis(ms);
+    }
+    let secs = std::env::var("EMBER_GIT_KILL_GRACE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(KILL_GRACE_SECS);
     Duration::from_secs(secs)
 }
 
@@ -239,12 +319,17 @@ async fn read_capped<R: AsyncRead + Unpin>(mut r: R, cap: usize) -> (Vec<u8>, bo
 }
 
 async fn run(repo: &Path, args: &[&str], stdin: Option<&str>) -> Result<Out, GitError> {
-    run_with(repo, args, stdin, None).await
+    run_with(repo, args, stdin, Some(Deadline::Local(local_timeout()))).await
+}
+
+/// Run a local git command that runs the user's hooks (`commit`, `pull_merge`) under [`hook_timeout`].
+async fn run_hook(repo: &Path, args: &[&str], stdin: Option<&str>) -> Result<Out, GitError> {
+    run_with(repo, args, stdin, Some(Deadline::Local(hook_timeout()))).await
 }
 
 /// Run git with a deadline (network operations).
 async fn run_net(repo: &Path, args: &[&str]) -> Result<Out, GitError> {
-    run_with(repo, args, None, Some(network_timeout())).await
+    run_with(repo, args, None, Some(Deadline::Network(network_timeout()))).await
 }
 
 /// The `core.sshCommand` git would use here (repository, then global config), if any.
@@ -266,7 +351,7 @@ fn batch_ssh_command(configured: Option<&str>) -> String {
     format!("{} -o BatchMode=yes", configured.unwrap_or("ssh"))
 }
 
-async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Option<Duration>) -> Result<Out, GitError> {
+async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Option<Deadline>) -> Result<Out, GitError> {
     let mut cmd = tokio::process::Command::new("git");
     // Non-ASCII paths stay raw (not octal-quoted), pathspecs are literal (`a[1].txt`, `*.rs`),
     // and nothing may wait for a person: no terminal, credential or ssh prompt. The user's own
@@ -297,31 +382,74 @@ async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Opt
     // Network operations never ask for an ssh password. GIT_SSH_COMMAND outranks the user's
     // `core.sshCommand` (keys, proxy jump), so when the variable is unset the configured command
     // is read and kept, with BatchMode appended.
-    if deadline.is_some() && std::env::var_os("GIT_SSH_COMMAND").is_none() {
+    if matches!(deadline, Some(Deadline::Network(_))) && std::env::var_os("GIT_SSH_COMMAND").is_none() {
         cmd.env("GIT_SSH_COMMAND", batch_ssh_command(configured_ssh_command(repo).await.as_deref()));
     }
-    exec_cmd(cmd, "git", stdin, deadline).await
+    exec_cmd(cmd, "git", stdin, deadline, Some(repo)).await
 }
 
-/// SIGKILL every process of the group led by `pid` (see `process_group(0)` in [`exec_cmd`]).
+/// Send `sig` to every process of the group led by `pid` (see `process_group(0)` in [`exec_cmd`]).
 #[cfg(unix)]
-fn kill_group(pid: Option<u32>) {
+fn signal_group(pid: Option<u32>, sig: libc::c_int) {
     if let Some(pid) = pid {
         // SAFETY: plain signal delivery to a process group id this function's caller created.
         unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
+            libc::kill(-(pid as i32), sig);
         }
     }
+}
+
+#[cfg(unix)]
+fn group_alive(pid: Option<u32>) -> bool {
+    let Some(pid) = pid else { return false };
+    // SAFETY: signal 0 checks whether any non-zombie process remains in the group.
+    unsafe { libc::kill(-(pid as i32), 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn group_alive(_pid: Option<u32>) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn term_group(pid: Option<u32>) {
+    signal_group(pid, libc::SIGTERM);
+}
+
+#[cfg(not(unix))]
+fn term_group(_pid: Option<u32>) {}
+
+#[cfg(unix)]
+fn kill_group(pid: Option<u32>) {
+    signal_group(pid, libc::SIGKILL);
 }
 
 #[cfg(not(unix))]
 fn kill_group(_pid: Option<u32>) {}
 
+/// Whether `.git/index.lock` (or a worktree's `index.lock` via a `.git` file) is present in `repo`.
+fn index_lock_exists(repo: &Path) -> bool {
+    let dot_git = repo.join(".git");
+    if dot_git.join("index.lock").exists() {
+        return true;
+    }
+    if let Ok(text) = std::fs::read_to_string(&dot_git) {
+        if let Some(rest) = text.trim().strip_prefix("gitdir:") {
+            let gitdir = Path::new(rest.trim());
+            let resolved = if gitdir.is_absolute() { gitdir.to_path_buf() } else { repo.join(gitdir) };
+            if resolved.join("index.lock").exists() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Spawn a prepared command with piped output, the stdout cap and an optional deadline. Shared
 /// by git and the `gh` runner of FR-G8.
-async fn exec_cmd(mut cmd: tokio::process::Command, what: &str, stdin: Option<&str>, deadline: Option<Duration>) -> Result<Out, GitError> {
-    // A deadline marks a network command: it runs in its own process group, so a timeout or the
-    // output cap can end the whole tree (git, ssh, credential helpers), not only git.
+async fn exec_cmd(mut cmd: tokio::process::Command, what: &str, stdin: Option<&str>, deadline: Option<Deadline>, repo: Option<&Path>) -> Result<Out, GitError> {
+    // A command with a deadline runs in its own process group, so a timeout or the output cap can
+    // end the whole tree (git, ssh, credential helpers, gpg and pinentry), not only git.
     #[cfg(unix)]
     if deadline.is_some() {
         cmd.process_group(0);
@@ -362,15 +490,26 @@ async fn exec_cmd(mut cmd: tokio::process::Command, what: &str, stdin: Option<&s
     };
     match deadline {
         None => work.await,
-        Some(d) => match tokio::time::timeout(d, work).await {
+        Some(d) => match tokio::time::timeout(d.duration(), work).await {
             Ok(r) => r,
             Err(_) => {
-                kill_group(group);
-                let _ = child.kill().await;
-                Err(GitError::Timeout(format!(
-                    "원격 저장소가 {}초 안에 응답하지 않아 중단했습니다 (네트워크 연결이나 인증 대기를 확인하세요).",
-                    d.as_secs()
-                )))
+                // Send SIGTERM first so git's signal handler can remove `.git/index.lock`;
+                // wait up to the grace period for both git and every child in its process group
+                // to exit, then escalate to SIGKILL if anything is still running.
+                term_group(group);
+                let grace_wait = async {
+                    let _ = child.wait().await;
+                    while group_alive(group) {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                };
+                if tokio::time::timeout(kill_grace(), grace_wait).await.is_err() {
+                    kill_group(group);
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                }
+                let leftover_lock = matches!(d, Deadline::Local(_)) && repo.is_some_and(index_lock_exists);
+                Err(d.timeout_error(leftover_lock))
             }
         },
     }
@@ -380,6 +519,10 @@ async fn exec_cmd(mut cmd: tokio::process::Command, what: &str, stdin: Option<&s
 /// message and git's own text as detail.
 async fn run_ok(repo: &Path, args: &[&str], stdin: Option<&str>) -> Result<Out, GitError> {
     finish(run(repo, args, stdin).await?)
+}
+
+async fn run_hook_ok(repo: &Path, args: &[&str], stdin: Option<&str>) -> Result<Out, GitError> {
+    finish(run_hook(repo, args, stdin).await?)
 }
 
 async fn run_net_ok(repo: &Path, args: &[&str]) -> Result<Out, GitError> {
@@ -723,7 +866,7 @@ pub async fn commit(policy: &PathPolicy, r: &GitCommitRequest) -> Result<GitComm
     if r.amend {
         args.push("--amend");
     }
-    run_ok(&dir, &args, Some(&msg)).await?;
+    run_hook_ok(&dir, &args, Some(&msg)).await?;
     let sha = run_ok(&dir, &["rev-parse", "HEAD"], None).await?;
     Ok(GitCommitResponse { sha: sha.stdout.trim().to_string() })
 }
@@ -834,7 +977,7 @@ pub async fn pull_fetch(policy: &PathPolicy, r: &GitRemoteRequest) -> Result<Git
 pub async fn pull_merge(policy: &PathPolicy, r: &GitRepoRequest) -> Result<GitOutput, GitError> {
     let dir = open(policy, &r.repo).await?;
     require_branch(&dir).await?;
-    run_ok(&dir, &["merge", "--ff-only", "@{u}"], None).await.map(|o| combined(&o))
+    run_hook_ok(&dir, &["merge", "--ff-only", "@{u}"], None).await.map(|o| combined(&o))
 }
 
 /// Fast-forward only: a diverged branch is refused with a Korean message and git's text. This

@@ -118,7 +118,9 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
     let title = chip.map(|c| c.name.clone()).unwrap_or_else(|| "컴퓨터".to_string());
     let window = crate::ui::window_size::current_window_size();
     let columns = mon_columns(window.width_dp);
-    let body_height = super::components::sheet_body_max_height(window.width_dp, window.height_dp, true, 60.0).min(1200.0);
+    // The header (60) and, where the sheet is the whole window, the strip above it (FR-L33).
+    let top_inset = super::components::full_screen_sheet_top_inset(window.width_dp, true, crate::ui::safe_area::safe_area());
+    let body_height = super::components::sheet_body_max_height(window.width_dp, window.height_dp, true, 60.0 + top_inset).min(1200.0);
     let state = chip.map(|c| reach_pill(c.reachability));
 
     // The state pill sits in the header, beside the close button (`.mon-state`).
@@ -600,6 +602,96 @@ mod tests {
         for want in ["맥미니", "오프라인", "연결이 끊겼습니다", "이름 (0)", SOON, "상태"] {
             assert!(text.contains(want), "missing {want}");
         }
+    }
+
+    /// What the monitor sheet sends before its title after a window report at `width` with the
+    /// safe area `top` x `leading`.
+    fn monitor_head_after_report(width: f32, top: f32, leading: f32) -> String {
+        let text = monitor_after_report(width, 844.0, top, leading);
+        // The delta may not resend the title node; what precedes it, when it is resent.
+        match text.find("이 컴퓨터") {
+            Some(title) => text[..title].to_string(),
+            None => text,
+        }
+    }
+
+    /// Everything the monitor sheet sends after a window report of `width` x `height` with the
+    /// safe area `top` x `leading`.
+    fn monitor_after_report(width: f32, height: f32, top: f32, leading: f32) -> String {
+        use compose_rust::protocol::HostEvent;
+        use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
+        compose_rust::window::reset_window_size();
+        let c = ComputerChip { name: "이 컴퓨터".into(), ..chip() };
+        let mut host = Host::new(move || {
+            let c = c.clone();
+            Box::new(Recomposer::new(move || MonitorSheet(Some(&c), &[], || {})))
+        });
+        host.rebuild().expect("rebuild");
+        let payload = EventPayload::WindowSizeChanged {
+            width_dp: width,
+            height_dp: height,
+            class: WindowSizeClass::from_width_dp(width),
+            height_class: WindowHeightClass::from_height_dp(height),
+            safe_area_top: top,
+            safe_area_leading: leading,
+            safe_area_trailing: 0.0,
+        };
+        let (bytes, _) = host.dispatch(HostEvent { node_id: 0, handler_id: 0, payload }).expect("dispatch");
+        let text: String = compose_rust::protocol::decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")).collect();
+        compose_rust::window::reset_window_size();
+        text
+    }
+
+    #[test]
+    fn fr_l33_the_monitor_dialog_starts_below_the_window_buttons() {
+        // Review sf: from 561 up (and at 1440) the monitor dialog filled the window less 16 above
+        // and below, so its header sat under the traffic lights. A dialog now leaves the lights'
+        // strip above and below; centred, its top edge is below the strip.
+        use crate::ui::safe_area::{current_platform, safe_area_for, Platform, SafeArea};
+        use super::super::components::dialog_max_height;
+        let lights = safe_area_for(Platform::MacOs, SafeArea { top: 66.0, leading: 98.0, trailing: 0.0 });
+        assert_eq!(dialog_max_height(900.0, lights), 768.0, "66 above and below");
+        assert_eq!(dialog_max_height(900.0, SafeArea::default()), 868.0, "16 above and below with no report");
+        assert_eq!(dialog_max_height(844.0, SafeArea { top: 8.0, leading: 40.0, trailing: 0.0 }), 812.0, "never under 16");
+        assert_eq!(dialog_max_height(844.0, SafeArea { top: 32.0, leading: 0.0, trailing: 138.0 }), 812.0, "a trailing caption covers no leading strip");
+        let _guard = crate::services::test_guard();
+        // The body is the dialog less its 60 header: 900 - 2 x 66 - 60 = 708 with the lights,
+        // 900 - 32 - 60 = 808 with a zero report.
+        for width in [561.0, 1440.0] {
+            let sent = monitor_after_report(width, 900.0, 66.0, 98.0);
+            if current_platform() == Platform::MacOs {
+                assert!(sent.contains("Height(708.0)") && !sent.contains("Height(808.0)"), "the dialog below the lights at {width}: {sent}");
+            }
+            let sent = monitor_after_report(width, 900.0, 0.0, 0.0);
+            assert!(sent.contains("Height(808.0)") && !sent.contains("Height(708.0)"), "no change with a zero safe area at {width}: {sent}");
+        }
+    }
+
+    #[test]
+    fn fr_l33_the_full_screen_monitor_header_starts_below_the_window_buttons() {
+        // Review ba D: at 390 the computer monitor (and the project screen's computer sheet,
+        // the same `MonitorSheet`) put "이 컴퓨터" under the macOS traffic lights.
+        use crate::ui::safe_area::{current_platform, safe_area_for, Platform, SafeArea};
+        use super::super::components::full_screen_sheet_top_inset;
+        // The pure rule names macOS, so it holds on every OS CI runs (as `cr/shell.rs` does).
+        let lights = safe_area_for(Platform::MacOs, SafeArea { top: 28.0, leading: 72.0, trailing: 0.0 });
+        assert_eq!(full_screen_sheet_top_inset(390.0, true, lights), 28.0);
+        assert_eq!(full_screen_sheet_top_inset(560.0, true, lights), 28.0, "full screen up to 560");
+        assert_eq!(full_screen_sheet_top_inset(561.0, true, lights), 0.0, "a dialog from 561");
+        assert_eq!(full_screen_sheet_top_inset(390.0, false, lights), 0.0, "a bottom sheet clears them");
+        assert_eq!(full_screen_sheet_top_inset(390.0, true, SafeArea::default()), 0.0, "nothing to clear");
+        let _guard = crate::services::test_guard();
+        // An odd footprint (31) so no other height in the sheet can stand in for the strip.
+        // The composed sheet reads this platform's safe area: macOS passes the report through,
+        // Linux and Windows have no lights at the leading edge and reserve nothing.
+        let head = monitor_head_after_report(390.0, 31.0, 72.0);
+        if current_platform() == Platform::MacOs {
+            assert!(head.contains("Height(31.0)"), "the 31 strip before the title: {head}");
+        } else {
+            assert!(!head.contains("Height(31.0)"), "no strip off macOS: {head}");
+        }
+        let head = monitor_head_after_report(390.0, 0.0, 0.0);
+        assert!(!head.contains("Height(31.0)") && !head.contains("Height(28.0)"), "no strip with a zero safe area: {head}");
     }
 
     #[test]

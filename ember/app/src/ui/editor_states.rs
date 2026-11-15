@@ -730,6 +730,18 @@ pub mod view {
         }
     }
 
+    /// The current 자동 저장 mode, for the palette's rows (FR-L31.38).
+    pub fn auto_save() -> AutoSave {
+        *ui().auto_save.read()
+    }
+
+    /// Choose a 자동 저장 mode, as the submenu does, and save it per device.
+    pub fn set_auto_save(mode: AutoSave) {
+        let mut sig = ui().auto_save;
+        sig.set(mode);
+        crate::services::services().ui.update_prefs(|p| p.auto_save = mode);
+    }
+
     /// The 자동 저장 submenu of the ⋯ menu (#795), saved per device like the keymap.
     pub fn menu_items(s: &Shared) -> Element {
         let current = *ui().auto_save.read();
@@ -737,13 +749,11 @@ pub mod view {
             for mode in AutoSave::ALL {
                 {
                     let mut menu_open = s.menu_open;
-                    let mut sig = ui().auto_save;
                     let selected = mode == current;
                     rsx! {
                         button { key: "{mode.setting()}", role: "menuitemradio", "aria-checked": "{selected}", onclick: move |_| {
                             menu_open.set(false);
-                            sig.set(mode);
-                            crate::services::services().ui.update_prefs(|p| p.auto_save = mode);
+                            set_auto_save(mode);
                         },
                             span { class: "ed-mchk", if selected { {icon_tone("check", 14, "text")} } }
                             span { class: "spacer", "{mode.label()}" }

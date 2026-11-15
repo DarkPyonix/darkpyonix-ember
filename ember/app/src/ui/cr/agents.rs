@@ -33,7 +33,7 @@ pub use crate::ui::agents::{
 };
 use super::components::{
     AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRowFit, EmberCard, EmberField, FieldOptions, InsetPanel,
-    DataNamedOverlay, InsetPanelSized, Label, NamedClickable, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu,
+    DataNamedOverlay, InsetPanelSized, Label, NameThenPillLines, NamedClickable, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu,
 };
 use super::theme::*;
 use crate::server::{Account, ChatGptAccount};
@@ -2032,14 +2032,15 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, 
                 if !phone {
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
                         cu::Box().modifier(Modifier::new().width(28.0)).content(|| {
-                            Label("기본", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
+                            Label("기본", Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(1));
                         });
                         cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
-                            Label("모델", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
+                            Label("모델", Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(1));
                         });
-                        Label(MODEL_PLANS_HEADER, Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
-                        cu::Box().modifier(Modifier::new().width(MODEL_SWITCH_COL)).alignment(Alignment::CenterEnd).content(|| {
-                            Label("목록에 표시", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
+                        Label(MODEL_PLANS_HEADER, Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(1));
+                        // The mockup's header span wraps in its 36 px cell: 목록에 over 표시, left aligned.
+                        cu::Box().modifier(Modifier::new().width(MODEL_SWITCH_COL)).alignment(Alignment::CenterStart).content(|| {
+                            Label(MODEL_SWITCH_HEADER, Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(2));
                         });
                     });
                 }
@@ -2081,15 +2082,20 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, 
                             });
                         });
                         cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
-                            // `.ag-mn b`: the name, then the blue 기본 badge right after it.
-                            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                                Label(m.name, Fs::Md, Weight::Medium, None, Some(1));
-                                if is_def {
-                                    Pill("기본", PillTone::Blue, true);
-                                }
-                            });
+                            // `.ag-mn b`: the name, then the blue 기본 badge right after it. The
+                            // mockup's name and note wrap in their `minmax(0,1fr)` column instead of
+                            // ending in "..." (#886: at 1280 `GPT-5 Cod...`, `가장 깊게 생각...`), and
+                            // the badge keeps its own width (it was squeezed to a blob beside a name
+                            // measured first).
+                            if is_def {
+                                cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                                    NameThenPillLines(m.name, Fs::Md, Weight::Medium, None, false, MODEL_TEXT_LINES, SP[1], || Pill("기본", PillTone::Blue, true));
+                                });
+                            } else {
+                                Label(m.name, Fs::Md, Weight::Medium, None, Some(MODEL_TEXT_LINES));
+                            }
                             cu::Spacer().modifier(Modifier::new().height(2.0));
-                            Label(m.note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            Label(m.note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(MODEL_TEXT_LINES));
                             if phone {
                                 cu::Spacer().modifier(Modifier::new().height(SP[0]));
                                 plans();
@@ -2119,8 +2125,14 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, 
 /// The plans column header. The marks are Ember's own reference list, not server data, and the
 /// column says so (SPEC FR-L20); the mockup's shorter 플랜별 사용 does not.
 pub const MODEL_PLANS_HEADER: &str = "플랜별 사용 (Ember 참고 목록)";
-/// The switch column: wide enough for its 목록에 표시 header.
-const MODEL_SWITCH_COL: f32 = 60.0;
+/// The lines a model's name and note may take in the table: two, as the mockup's wrapping
+/// `.ag-mn` column shows them at 1280, where two model cards share a row (#886).
+pub const MODEL_TEXT_LINES: u32 = 2;
+/// The switch column: `.ag-mhead`/`.ag-mrow` `grid-template-columns: 28px minmax(0,1fr) auto 36px`,
+/// as wide as the 36 px switch (#886). Its header wraps to two lines, as the mockup's does.
+const MODEL_SWITCH_COL: f32 = 36.0;
+/// The switch column's header (`agents.js` `.ag-mhead`).
+const MODEL_SWITCH_HEADER: &str = "목록에 표시";
 
 /// Below 560 dp the model table hides its header and puts the plans under the note.
 pub fn model_table_phone(width_dp: f32) -> bool {
@@ -3669,6 +3681,39 @@ mod tests {
         // The grid's 12 dp column gap (`.ag-mrow{gap:var(--sp3)}`) and the header shown above 560.
         assert!(holder.props.iter().any(|p| p.starts_with("Spacing=") && p.contains("12.0")), "{:?}", holder.props);
         assert!(model_table_phone(560.0) && !model_table_phone(561.0));
+    }
+
+    #[test]
+    fn fr_l20_model_switch_column_is_the_mockups_36() {
+        // #886: `.ag-mrow` ends in a 36 px column; ours was 60. The header wraps in it.
+        assert_eq!(MODEL_SWITCH_COL, 36.0);
+        let src = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
+        assert_eq!(src.matches("Modifier::new().width(MODEL_SWITCH_COL)").count(), 2, "header and rows share the column");
+        assert!(src.contains("Label(MODEL_SWITCH_HEADER, Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(2))"));
+        assert!(super::super::home::text_px("목록에", Fs::Xs2.size()) <= MODEL_SWITCH_COL, "the first line fits the column");
+    }
+
+    #[test]
+    fn fr_l20_model_names_and_notes_wrap_at_1280_instead_of_ending_in_an_ellipsis() {
+        // #886, review ba: at 1280 two model cards share a row and the names and notes ended in
+        // "..." (`GPT-5 Cod...`); the mockup's `.ag-mn` column wraps them.
+        crate::ui::window_size::set_opened_for_test(Some((1280.0, 800.0)));
+        let nodes = nodes_of(|| {
+            let st = remember(|| mutable_state_of(LocalStore::default()));
+            ModelCard(AgentHarness::Codex, &st, false, true);
+        });
+        crate::ui::window_size::set_opened_for_test(None);
+        assert_eq!(MODEL_TEXT_LINES, 2);
+        // GPT-5 Codex is not the default, so its name is a plain label.
+        for t in ["GPT-5 Codex", "긴 코딩 작업에 맞춥니다"] {
+            let n = text_node(&nodes, t);
+            assert!(n.props.iter().any(|p| p == "MaxLines=Integer(2)"), "{t}: {:?}", n.props);
+        }
+        // The default model's name and its 기본 badge go through NameThenPillLines (two lines), so the badge keeps
+        // its own width right after the name.
+        let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("NameThenPillLines(m.name, Fs::Md, Weight::Medium, None, false, MODEL_TEXT_LINES, SP[1], || Pill(\"기본\", PillTone::Blue, true));"));
+        assert!(production.contains("Label(m.note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(MODEL_TEXT_LINES));"));
     }
 
     #[test]

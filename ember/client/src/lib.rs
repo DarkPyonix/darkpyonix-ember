@@ -20,6 +20,7 @@ pub mod cache;
 pub mod channels;
 pub mod owner;
 pub mod client;
+pub mod fs_watch;
 pub mod push;
 pub mod state;
 pub mod token;

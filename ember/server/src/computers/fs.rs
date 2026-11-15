@@ -16,6 +16,7 @@
 //! | POST   | `/api/computers/{id}/fs/remove`   | `POST /fs/remove` (204) |
 //! | POST   | `/api/computers/{id}/fs/rename`   | `POST /fs/rename` (204) |
 //! | POST   | `/api/computers/{id}/fs/symlink`  | `POST /fs/symlink` |
+//! | GET (WS) | `/api/computers/{id}/fs/watch`  | `GET /fs/watch` (`FR-W4d`, [`super::fs_watch`]) |
 //!
 //! The request body is the node's (`ember_node::proto`: `PathRequest`, `ReadRequest`,
 //! `GlobRequest`, `GrepRequest`, `WriteRequest`, `MkdirRequest`, `RemoveRequest`,
@@ -154,9 +155,11 @@ pub fn router_with(computers: Arc<Computers>, limits: FsLimits) -> Router {
     Router::new()
         .route("/api/computers/{id}/fs/{op}", post(relay))
         .layer(DefaultBodyLimit::disable())
-        .with_state(state)
+        .with_state(state.clone())
         .merge(writes)
         .merge(namespace)
+        // FR-W4d: the watch socket, with its own socket limit (not the operation semaphore).
+        .merge(super::fs_watch::router(state.computers))
 }
 
 /// The `limit` actually sent to the node.

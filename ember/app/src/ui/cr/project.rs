@@ -1844,11 +1844,14 @@ pub(super) fn SettingsSheet(
                             Label("팀원이 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1));
                         }
                         let cols = crate::ui::project::leader_cols(window.width_dp);
+                        let review = if cfg!(debug_assertions) { std::env::var("EMBER_CR_LEADER").ok() } else { None };
                         cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                             for row in b.members.chunks(cols) {
                                 cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                                     for m in row {
-                                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| LeaderOption(m));
+                                        let mut m = m.clone();
+                                        m.leader = review_leader(review.as_deref(), &b.members, &m);
+                                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| LeaderOption(&m, &b.id));
                                     }
                                     for _ in row.len()..cols {
                                         cu::Spacer().modifier(Modifier::new().weight(1.0));
@@ -1944,19 +1947,38 @@ fn ComputerCheck(c: &ComputerChip, on: bool, project: String) {
         });
 }
 
+/// Review captures only (`EMBER_CR_LEADER`, debug builds): which card shows as chosen. Unset
+/// keeps the server's leader; `first` marks the first member; any other value marks the member of
+/// that name. It proves the chosen card's `sel` background, which the demo (no leader) never shows.
+fn review_leader(value: Option<&str>, members: &[Member], m: &Member) -> bool {
+    match value {
+        None | Some("") => m.leader,
+        Some("first") => members.first().map_or(false, |f| f.session_id == m.session_id),
+        Some(name) => m.name == name,
+    }
+}
+
 /// `.ps-lead`: a radio mark, the member's name and task. Read only: the server does not take a
 /// leader yet (TODO(#384)), so the mark shows the current leader and does not react.
-fn LeaderOption(m: &Member) {
+/// The member's character on a leader card (`bot(s,30)` in the mockup's `.ps-lead`).
+pub const LEADER_AVATAR: f32 = 30.0;
+
+fn LeaderOption(m: &Member, project_id: &str) {
     let p = ember_theme().palette;
+    // `.ps-lead:has(input:checked)`: the chosen card is on `sel` with an `ink` border.
+    let card = Modifier::new().fill_max_width().padding(10.0).border(1.0, paint(if m.leader { p.ink } else { p.line })).corner_radius(CORNER_MD);
+    let card = if m.leader { card.background(paint(p.sel)) } else { card };
     cu::Row()
         .spacing(10.0)
         .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().fill_max_width().padding(10.0).border(1.0, paint(if m.leader { p.ink } else { p.line })).corner_radius(CORNER_MD))
+        .modifier(card)
         .content(|| {
             // The toolkit's radio button in the mockup's colours and size (compose-rust#545),
             // named by its member. It takes no `on_change`: the Host owns the value, so a press
             // changes nothing until the server takes a leader (TODO(#384)).
             cu::RadioButton(m.leader).ring_color(paint(p.text_2)).dot_color(paint(p.ink)).size(16.0).accessible_name(m.name.as_str());
+            // The member's character, 30 dp, between the mark and the name (review st F).
+            Character(&m.agent, m.leader, LEADER_AVATAR, &m.name, project_id, CharState::from_status(m.status), None);
             cu::Column().spacing(2.0).modifier(Modifier::new().weight(1.0)).content(|| {
                 Label(&m.name, Fs::Sm, Weight::Semibold, None, Some(1));
                 Label(&m.task, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
@@ -2024,6 +2046,62 @@ mod tests {
     }
 
     #[test]
+    fn fr_l26_a_leader_card_carries_the_member_character() {
+        // Review st F: the mockup's `.ps-lead` cards draw the member (`bot(s,30)`) between the
+        // radio and the name; ours had none. The chosen card is on `sel`.
+        let _guard = crate::services::test_guard();
+        // (widget, node id, modifiers), the widget as its debug name.
+        let sent = |leader: bool| -> Vec<(String, u32, Vec<String>)> {
+            let mut host = Host::new(move || {
+                Box::new(Recomposer::new(move || {
+                    let mut m = member("a", LauncherStatus::Running);
+                    m.leader = leader;
+                    LeaderOption(&m, "p");
+                }))
+            });
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let mut nodes: Vec<(String, u32, Vec<String>)> = Vec::new();
+            for m in batch.iter() {
+                match m {
+                    Mutation::Create { node_id, widget } => nodes.push((format!("{widget:?}"), *node_id, Vec::new())),
+                    Mutation::SetModifier { node_id, modifier, .. } => {
+                        if let Some(n) = nodes.iter_mut().find(|n| n.1 == *node_id) {
+                            n.2.push(format!("{modifier:?}"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            nodes
+        };
+        let p = ember_theme().palette;
+        let sel = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.sel)));
+        for leader in [true, false] {
+            let nodes = sent(leader);
+            let radio = nodes.iter().position(|n| n.0 == "RadioButton").expect("radio");
+            let image = nodes.iter().position(|n| n.0 == "Image").expect("the member's character");
+            assert!(image > radio, "the character follows the radio");
+            assert!(nodes[image].2.iter().any(|m| m.contains("30.0")), "30 dp: {:?}", nodes[image].2);
+            let card_on_sel = nodes.iter().any(|n| n.0 == "Row" && n.2.contains(&sel));
+            assert_eq!(card_on_sel, leader, "only the chosen card is on sel");
+        }
+        assert_eq!(LEADER_AVATAR, 30.0);
+    }
+
+    #[test]
+    fn fr_l26_2_review_env_picks_the_chosen_leader_card() {
+        let mut a = member("a", LauncherStatus::Running);
+        a.leader = true;
+        let b = member("b", LauncherStatus::Running);
+        let all = vec![a.clone(), b.clone()];
+        assert!(review_leader(None, &all, &a) && !review_leader(None, &all, &b), "unset keeps the server's leader");
+        assert!(review_leader(Some("first"), &all, &a) && !review_leader(Some("first"), &all, &b));
+        assert!(!review_leader(Some("m-b"), &all, &a) && review_leader(Some("m-b"), &all, &b), "by name");
+        let production = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("if cfg!(debug_assertions) { std::env::var(\"EMBER_CR_LEADER\")"), "debug builds only");
+    }
+
+    #[test]
     fn the_leader_mark_is_the_toolkit_radio_and_the_opened_search_row_asks_for_focus() {
         // compose-rust#545 (#673): `.ps-lead` draws the toolkit `RadioButton` in the mockup's
         // colours and size, in place of a ring with a filled centre. The Host owns its value.
@@ -2033,7 +2111,7 @@ mod tests {
                 Box::new(Recomposer::new(move || {
                     let mut m = member("a", LauncherStatus::Running);
                     m.leader = leader;
-                    LeaderOption(&m);
+                    LeaderOption(&m, "p");
                 }))
             });
             let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");

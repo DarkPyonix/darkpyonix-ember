@@ -1530,6 +1530,14 @@ pub fn tree_cap(max: f32, pane_h: Option<f32>) -> f32 {
     }
 }
 
+/// The height a scrolling tree is given inside `cap`: its top padding and as many whole rows as
+/// fit, so at rest the box under it starts where a row ends instead of cutting one in half
+/// (review r10, the 1024 sheet). At least one row.
+pub fn tree_view_height(cap: f32) -> f32 {
+    let rows = ((cap - VCS_TREE_PAD) / VCS_TREE_ROW_H).floor().max(1.0);
+    VCS_TREE_PAD + rows * VCS_TREE_ROW_H
+}
+
 /// The height of the panes under the bar in the sheet's two-pane layout, from the body height
 /// under the sheet header: less the body's padding and the bar. An estimate (notes above the
 /// panes are not counted).
@@ -1559,7 +1567,7 @@ fn FilesTreeCapped(
     let paths: Vec<String> = diffs.iter().map(|d| d.path.clone()).collect();
     let rows = build_tree(&paths, &folded.get()).len();
     if !diffs.is_empty() && tree_height(rows) > cap {
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(cap)).content(|| {
+        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(tree_view_height(cap))).content(|| {
             FilesTree(diffs, staging, folded, selected, on_tab);
         });
     } else {
@@ -1983,12 +1991,25 @@ fn commit_draft(snap: Option<&RepoSnapshot>, scope: Option<(String, u64)>) -> Co
     CommitDraft { staging, summary, body, amend }
 }
 
-/// The sheet's one-column layout draws the commit box under the scrolling body, outside it, so
-/// the box is whole at any sheet height and the scroll ends above it (review ba: at 800 x 800
-/// the bar in two rows left the changes card 326 of the 300 its header and commit box need, and
-/// the sheet's bottom edge cut the summary field).
-pub fn sheet_commit_footer(sheet: bool, layout: PaneLayout, sec: Section, has_snapshot: bool) -> bool {
-    sheet && layout == PaneLayout::Stacked && sec == Section::Changes && has_snapshot
+/// The one-column layout draws the commit box under the scrolling body, outside it, so the box
+/// is whole at any height and the scroll ends above it (review ba: at 800 x 800 the bar in two
+/// rows left the sheet's changes card 326 of the 300 its header and commit box need, and the
+/// sheet's bottom edge cut the summary field). The page in one column does the same (#878: at
+/// 800 x 800 the page's commit button sat below the fold, under one page scroll), so the sheet
+/// and the page commit from the same place. `sheet` no longer decides it.
+pub fn sheet_commit_footer(_sheet: bool, layout: PaneLayout, sec: Section, has_snapshot: bool) -> bool {
+    layout == PaneLayout::Stacked && sec == Section::Changes && has_snapshot
+}
+
+/// What the page draws above its body in one column: the 버전 관리 title (`Fs::Xl3`, 36), the
+/// 4 gap, the subtitle line (20) and the 12 gap before the bar. An estimate, as
+/// [`VCS_PAGE_ABOVE_PANES`].
+pub const VCS_PAGE_TITLE_BLOCK_H: f32 = 36.0 + 4.0 + 20.0 + 12.0;
+
+/// The height [`sheet_footer_compact`] reads for the page in one column: the window less the
+/// title block, which the sheet draws in its header instead.
+pub fn page_footer_body_h(window_h: f32) -> f32 {
+    (window_h - VCS_PAGE_TITLE_BLOCK_H).max(0.0)
 }
 
 fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<PaneTab>, on_tab: impl FnMut(PaneTab) + Clone + 'static, actions: Option<Actions>, diff_width: f32, files_w: f32, pane_h: Option<f32>, draft: Option<CommitDraft>, commit_outside: bool) {
@@ -4211,6 +4232,13 @@ pub fn base_menu_rows(names: &[String], chosen: Option<usize>) -> Vec<PopRow> {
         .collect()
 }
 
+/// The 기준 menu's checked row: the chosen base, or with none chosen the current branch, as the
+/// mockup's `#vcsBase` selects the `<option>` of `r.branch` (#888: 기준: 현재 브랜치 named no row,
+/// so the menu showed nothing chosen).
+pub fn base_menu_chosen(names: &[String], base: Option<&str>, current: Option<&str>) -> Option<usize> {
+    names.iter().position(|n| Some(n.as_str()) == base.or(current))
+}
+
 /// The 기준 button of 새 브랜치 and its menu (FR-L10.4, #888): the shared menu in the
 /// permission-mode look under the button, lined up with its start, headed by what is chosen
 /// (`기준: branch`); a bottom sheet with that head at 560 and below. The mockup draws a native
@@ -4281,7 +4309,8 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
         Some(b) => format!("기준: {b}"),
         None => "기준: 현재 브랜치".to_string(),
     };
-    let chosen_base = base.get().and_then(|b| names.iter().position(|n| *n == b));
+    let current_name = if let BranchLoad::Ready(list) = &current { list.iter().find(|b| b.current).map(|b| b.name.clone()) } else { None };
+    let chosen_base = base_menu_chosen(&names, base.get().as_deref(), current_name.as_deref());
 
     let creator = {
         let (actions, name, generation, base, base_menu) = (actions.clone(), name.clone(), generation.clone(), base.clone(), base_menu.clone());
@@ -5227,7 +5256,11 @@ fn VcsScreenWithLoad(
     let draft_scope = current.clone().filter(|_| !sample && crate::services::try_services().is_some()).map(|id| (id, reload.get()));
     let draft = commit_draft(snap.as_ref(), draft_scope);
     let footer = project.is_some() && sheet_commit_footer(sheet, layout, sec, snap.is_some());
-    let footer_compact = sheet_ctl.as_ref().and_then(|c| c.body_h).is_some_and(|h| sheet_footer_compact(h, pad));
+    let footer_body_h = match sheet_ctl.as_ref() {
+        Some(c) => c.body_h,
+        None => (window.height_dp > 100.0).then(|| page_footer_body_h(window.height_dp)),
+    };
+    let footer_compact = footer_body_h.is_some_and(|h| sheet_footer_compact(h, pad));
     let footer_actions = project.as_ref().filter(|_| !sample).and_then(|pr| crate::services::try_services().map(|_| Actions { project: pr.id.clone(), reload: reload.clone() }));
 
     let body = || {
@@ -5339,8 +5372,8 @@ fn VcsScreenWithLoad(
             cu::Column().modifier(outer.padding(pad)).spacing(SP[3]).content(body);
         } else {
             if footer {
-                // The sheet's one column: the body scrolls above the commit box, which stays
-                // whole at the bottom (`sheet_commit_footer`).
+                // One column, in the sheet and on the page: the body scrolls above the commit
+                // box, which stays whole at the bottom (`sheet_commit_footer`).
                 let fd = draft.clone();
                 let fsnap = snap.clone();
                 let factions = footer_actions.clone();
@@ -5953,6 +5986,20 @@ mod tests {
         let base = remember(|| mutable_state_of(Some("develop".to_string())));
         let names = vec!["main".to_string(), "develop".to_string()];
         BaseMenu(state, "기준: develop", &names, Some(1), base);
+    }
+
+    #[test]
+    fn fr_l10_4_base_menu_checks_the_current_branch_until_one_is_chosen() {
+        let names: Vec<String> = ["main", "develop", "feat/x"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(base_menu_chosen(&names, None, Some("develop")), Some(1), "기준: 현재 브랜치 is the current branch's row");
+        assert_eq!(base_menu_chosen(&names, Some("feat/x"), Some("develop")), Some(2), "a chosen base wins");
+        assert_eq!(base_menu_chosen(&names, None, None), None);
+        assert_eq!(base_menu_chosen(&names, Some("gone"), Some("develop")), None, "a base no longer listed checks nothing");
+        let rows = base_menu_rows(&names, base_menu_chosen(&names, None, Some("develop")));
+        assert_eq!(rows.iter().filter(|r| r.chosen).map(|r| r.title.as_str()).collect::<Vec<_>>(), ["develop"]);
+        let src = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        let pane = src.split("fn BranchesPane(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(pane.contains("base_menu_chosen(&names, base.get().as_deref(), current_name.as_deref())"));
     }
 
     #[test]
@@ -7369,6 +7416,25 @@ mod tests {
     }
 
     #[test]
+    fn fr_l19_a_scrolling_tree_shows_whole_rows_at_rest() {
+        // Review r10: in the 1024 sheet the commit box's top cut a tree row in half. The
+        // scrolling tree is its top padding and whole rows, so the rule under it meets a row end.
+        for cap in [VCS_TREE_MIN_H, 218.0, 260.0, 281.0, 318.0, VCS_TREE_MAX_H] {
+            let h = tree_view_height(cap);
+            assert!(h <= cap && cap - h < VCS_TREE_ROW_H, "{cap}: {h}");
+            let rows = (h - VCS_TREE_PAD) / VCS_TREE_ROW_H;
+            assert_eq!(rows, rows.round(), "{cap}: whole rows");
+        }
+        assert_eq!(tree_view_height(281.0), 280.0);
+        assert_eq!(tree_view_height(VCS_TREE_MAX_H), 348.0);
+        assert_eq!(tree_view_height(VCS_TREE_MIN_H), 110.0);
+        assert_eq!(tree_view_height(10.0), VCS_TREE_PAD + VCS_TREE_ROW_H, "at least one row");
+        let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        let capped = production.split("fn FilesTreeCapped(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(capped.contains(".height(tree_view_height(cap))"), "the scroll box is sent the snapped height");
+    }
+
+    #[test]
     fn fr_l19_the_commit_box_is_in_the_changes_card_and_the_tree_leaves_it_room() {
         // Review r8: a separate commit card 16 below a 10-row tree put the commit button below
         // the fold at 1440. `.vcs-files` is one card: header, `.vcs-tree{max-height:360px}`,
@@ -7409,7 +7475,7 @@ mod tests {
         assert!(nodes.iter().filter(|n| n.mods.iter().any(|m| m == "Height(34.0)")).count() >= rows);
         if tree_height(rows) > 281.0 {
             assert!(
-                nodes.iter().any(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m.starts_with("Height(281.0") || m.starts_with("Height(280.99"))),
+                nodes.iter().any(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m == "Height(280.0)")),
                 "the tree scrolls inside its cap"
             );
         }
@@ -7466,7 +7532,7 @@ mod tests {
         assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(585.0)), 281.0);
         let tree = nodes
             .iter()
-            .find(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m == "Height(281.0)"))
+            .find(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m == "Height(280.0)"))
             .expect("the tree scrolls inside its cap");
         let row = with_text(&nodes, "f13.rs");
         assert!(up(&nodes, row).contains(&tree.id), "the last file row is inside the scrolling tree");
@@ -7936,7 +8002,7 @@ mod tests {
         // Where the sheet uses one column, the commit box sits under the scrolling body.
         assert_eq!(vcs_sheet_frame(vcs_sheet_width(800.0), 800.0).layout, PaneLayout::Stacked);
         assert!(sheet_commit_footer(true, PaneLayout::Stacked, Section::Changes, true));
-        assert!(!sheet_commit_footer(false, PaneLayout::Stacked, Section::Changes, true), "the page keeps one scroll");
+        assert!(sheet_commit_footer(false, PaneLayout::Stacked, Section::Changes, true), "the page in one column pins it too (#878)");
         assert!(!sheet_commit_footer(true, PaneLayout::Two, Section::Changes, true), "1440 and 1024 keep the card");
         assert!(!sheet_commit_footer(true, PaneLayout::Tabs, Section::Changes, true), "the phone has its 커밋 tab");
         assert!(!sheet_commit_footer(true, PaneLayout::Stacked, Section::History, true));
@@ -7975,6 +8041,40 @@ mod tests {
         let _ = vcs_sheet_window(1440.0, 900.0);
         let wide = nodes_of(open_vcs_sheet_sample);
         assert_eq!(wide.iter().filter(|n| n.props.iter().any(|x| x.contains("요약 (필수) 예: Feat: Wire shim"))).count(), 1);
+    }
+
+    #[compose_rust::runtime::Composable]
+    fn open_vcs_page_sample() {
+        let reload = remember(|| mutable_state_of(0_u64));
+        VcsScreenWithLoad(Load::Ready(sample_snapshot()), sample_projects(), Some("ember".into()), reload, true, None);
+    }
+
+    #[test]
+    fn fr_l19_the_one_column_page_pins_the_commit_box_under_its_scroll() {
+        // #878, review ba: on the 버전 관리 page at 800 x 800 (one column, one page scroll) the
+        // commit button was below the fold. The page in one column now draws the commit box
+        // under the scrolling body, as the one-column sheet does, compact when the whole box
+        // would leave the tree no room.
+        assert_eq!(page_footer_body_h(800.0), 728.0);
+        assert!(sheet_footer_compact(page_footer_body_h(800.0), 32.0), "800 high: the compact box");
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        crate::ui::window_size::set_opened_for_test(Some((800.0, 800.0)));
+        let nodes = nodes_of(open_vcs_page_sample);
+        crate::ui::window_size::set_opened_for_test(None);
+        let summaries: Vec<&N> = nodes.iter().filter(|n| n.props.iter().any(|x| x.contains("요약 (필수) 예: Feat: Wire shim"))).collect();
+        assert_eq!(summaries.len(), 1, "one commit box");
+        let summary_up = up(&nodes, summaries[0]);
+        assert!(!nodes.iter().any(|n| summary_up.contains(&n.id) && n.widget == "ScrollColumn"), "the commit box is outside every scroll");
+        let header = nodes.iter().find(|n| n.props.iter().any(|x| x.starts_with("Text=String(\"변경 파일 "))).expect("the files header");
+        let body_scroll = nodes
+            .iter()
+            .find(|n| up(&nodes, header).contains(&n.id) && n.widget == "ScrollColumn" && n.mods.iter().any(|m| m.starts_with("Weight(1.0")))
+            .expect("the page body scrolls in the height the footer leaves");
+        let footer_col = nodes.iter().find(|n| n.id == body_scroll.parent.unwrap()).unwrap();
+        assert!(summary_up.contains(&footer_col.id), "the footer is the scroll's sibling");
+        let button = nodes.iter().find(|n| n.props.iter().any(|x| x.contains("에 커밋"))).expect("the commit button");
+        assert!(up(&nodes, button).contains(&footer_col.id), "the commit button is in the footer");
     }
 
     #[test]

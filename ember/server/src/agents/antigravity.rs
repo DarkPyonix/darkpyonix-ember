@@ -2073,8 +2073,7 @@ mod tests {
         let post = call(
             "call_mcp_tool",
             3,
-            json!({ "ServerName": "ember-channels", "ToolName": "channel_post",
-                    "Arguments": { "channel": "chan1", "text": "hello" } }),
+            json!({ "ServerName": "ember-channels", "ToolName": "channel_post" }),
         );
         let b = broker.clone();
         let p = post.clone();

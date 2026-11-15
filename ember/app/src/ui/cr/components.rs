@@ -443,6 +443,8 @@ pub struct PopRow {
     pub danger: bool,
     /// The title is an address, set in the mono face at 12 (`.sdrop-i .mono`).
     pub mono: bool,
+    /// The row is a loading line: the app's spinner sits where the icon goes (FR-L18, #519).
+    pub spinner: bool,
 }
 
 /// What a [`PopoverMenu`] shows.
@@ -692,7 +694,10 @@ fn PopRowView(r: &PopRow, kind: PopKind, m: &PopMetrics, on_click: impl FnMut() 
             cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                 // The side padding, and the row's minimum height.
                 cu::Spacer().modifier(Modifier::new().width(m.row_pad.1).height(m.row_min_h));
-                if let Some(svg) = r.icon {
+                if r.spinner {
+                    super::compat::Spinner(12.0);
+                    cu::Spacer().modifier(Modifier::new().width(m.row_gap));
+                } else if let Some(svg) = r.icon {
                     super::shell::NavIcon(svg, icon_c.to_argb(), 16.0);
                     cu::Spacer().modifier(Modifier::new().width(m.row_gap));
                 }

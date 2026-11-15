@@ -10,9 +10,8 @@
 //! compose-rust can register an app palette per colour role (`compose_rust::Palette`), but
 //! the Ember tokens (surface-2, hover, sel, the soft accents) have no role, so the tokens stay
 //! plain constants passed as `Paint::Literal`.
-//! v0.0.7: #374 fixed (`Text::font` and `TextField::font` take a `FontRefs` stack); workaround
-//! kept until checked on a display (the Inter and Pretendard files of #216 are not bundled yet,
-//! so the theme still sets one face per `TypeRole`).
+//! The fonts are the toolkit theme's: `ui::fonts::app_theme` sets the bundled Inter and
+//! Pretendard stack for the prose roles and JetBrains Mono for `Mono` (compose-rust#374, #216).
 //! Layered card and sheet shadow tokens follow the mockup (#214).
 
 use compose_rust::{Color, Paint};

@@ -30,6 +30,8 @@ pub const BACK: &str = "뒤로";
 /// The scroll arrows of the project screen's computer strip (FR-L26, #671).
 pub const SCROLL_LEFT: &str = "왼쪽으로 스크롤";
 pub const SCROLL_RIGHT: &str = "오른쪽으로 스크롤";
+/// The project list's search button at 900 dp and below: it opens the 팀원 검색 row (FR-L26).
+pub const OPEN_MEMBER_SEARCH: &str = "팀원 검색 열기";
 
 /// The names of the option popovers, the mockup's `aria-label`s where it has one (FR-L10.4,
 /// #888). `components::PopoverMenu` gives the box this name.

@@ -15,7 +15,7 @@
 use compose_rust::ui as cu;
 use compose_rust::ui::{Modifier, Role};
 use compose_rust::{
-    Alignment, ButtonVariant, Color, ColorRole, FontRef, FontRefs, GenericFamily, IconRole,
+    Alignment, ButtonVariant, Color, ColorRole, IconRole,
     KeyEvent, OverflowWrap, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole, WordBreak,
 };
 
@@ -26,30 +26,9 @@ use super::theme::Palette;
 // Fonts
 // ---------------------------------------------------------------------------------------------
 
-/// The font stack for prose (`--font`): Inter, then Apple SD Gothic Neo and Noto Sans KR for
-/// Hangul, then the system UI face. The toolkit resolves installed families by name; it has no
-/// way to bundle a font file yet, so Inter applies where it is installed.
-/// v0.0.7: #374 fixed (`Text::font` and `TextField::font` exist); workaround kept until checked on
-/// a display (wiring this stack into `Label` and `Txt` changes every label's face, and Inter and
-/// Pretendard are not bundled yet, #216), so nothing calls this yet.
-#[allow(dead_code)]
-pub fn font_refs(mono: bool) -> FontRefs {
-    if mono {
-        FontRefs::new([
-            FontRef::System("JetBrains Mono".into()),
-            FontRef::System("SF Mono".into()),
-            FontRef::System("Menlo".into()),
-            FontRef::Generic(GenericFamily::Monospace),
-        ])
-    } else {
-        FontRefs::new([
-            FontRef::System("Inter".into()),
-            FontRef::System("Apple SD Gothic Neo".into()),
-            FontRef::System("Noto Sans KR".into()),
-            FontRef::Generic(GenericFamily::SystemUi),
-        ])
-    }
-}
+// The prose and mono font stacks are the toolkit theme's: `ui::fonts::app_theme` registers the
+// bundled Inter, Pretendard and JetBrains Mono faces and sets them for every `TypeRole`
+// (compose-rust#374, Ember #216), so `Label` and `Txt` name no font of their own.
 
 /// The app palette colour standing in for a toolkit colour role, so a screen that still names
 /// a role draws the mockup's tokens in both schemes.
@@ -890,8 +869,7 @@ pub fn Txt(
     };
     let mut t = cu::Text(text).word_break(WordBreak::KeepAll);
     if mono {
-        // The theme's monospace face. v0.0.7: #374 fixed (`Text::font`); the bundled font stack
-        // waits for the fonts themselves (#216), see `font_refs`.
+        // The theme's monospace face: the bundled JetBrains Mono stack (`ui::fonts::mono_font`).
         t = t.type_role(TypeRole::Mono);
     }
     let mut t = t
@@ -2559,11 +2537,14 @@ mod tests {
     }
 
     #[test]
-    fn font_stack_names_inter_then_korean() {
-        let refs = font_refs(false).refs();
-        assert_eq!(refs[0], FontRef::System("Inter".into()));
-        assert_eq!(refs[1], FontRef::System("Apple SD Gothic Neo".into()));
-        assert!(font_refs(true).refs().contains(&FontRef::Generic(GenericFamily::Monospace)));
+    fn the_font_stack_is_the_themes_and_no_screen_helper_names_one() {
+        // compose-rust#374, Ember #216 (#673): the unused stand-in stack is gone; the theme
+        // carries the bundled faces (`ui::fonts`, tested there).
+        let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains(&["fn font", "_refs"].concat()));
+        assert!(!production.contains(&["Apple SD", " Gothic Neo"].concat()), "no system face is named");
+        let theme = crate::ui::fonts::app_theme(compose_rust::ColorScheme::Light);
+        assert_eq!(theme.design_system, compose_rust::DesignSystem::Cupertino);
     }
 
     #[test]

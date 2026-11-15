@@ -357,6 +357,9 @@ pub fn search_field_visible(w: f32, open: bool) -> bool {
     w > 900.0 || open
 }
 
+/// The side of the header's search glyph (the mockup's 18 px icon in a 40 px `.icon-btn`).
+pub const SEARCH_GLYPH: f32 = 18.0;
+
 /// Whether the search icon button is drawn: only at 900 dp and below (the mockup hides it above).
 pub fn search_icon_visible(w: f32) -> bool {
     w <= 900.0
@@ -377,14 +380,26 @@ fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
     if search_icon_visible(w) {
         let o = st.search_open.clone();
         let q = st.query.clone();
-        // v0.0.7: #428 and #429 fixed (`accessible_name`, `Modifier::expanded`); workaround kept
-        // until checked on a display (`IconButton` takes a toolkit glyph and no name yet, see
-        // components.rs), so the name "팀원 검색 열기" and the expanded state are not set.
-        IconButton(IconRole::Search, false, move || {
-            let (open, query) = toggle_search(o.get_untracked(), &q.get_untracked());
-            o.set(open);
-            q.set(query);
-        });
+        // The app's own search glyph in the 40 px ring (`.icon-btn`), named 팀원 검색 열기, and
+        // it says whether the search row it opens is open (compose-rust#428, #429). It was the
+        // toolkit glyph with no name and no state.
+        let p = ember_theme().palette;
+        NamedClickable(
+            super::a11y::OPEN_MEMBER_SEARCH,
+            Modifier::new()
+                .size(H_BTN, H_BTN)
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .shape_role(ShapeRole::Full)
+                .expanded(st.search_open.get()),
+            Alignment::Center,
+            move || {
+                let (open, query) = toggle_search(o.get_untracked(), &q.get_untracked());
+                o.set(open);
+                q.set(query);
+            },
+            move || NavIcon(shell::ICON_SEARCH_SVG, p.text_2.to_argb(), SEARCH_GLYPH),
+        );
     }
     let n = st.new_project.clone();
     // Enabled in the demo only: it makes a local project there (#218).
@@ -578,9 +593,8 @@ fn TeamDonut(members: &[Member], size: f32) {
 
 /// `.pbox`: the header (ring, name and repository, actions, stats) and, below a rule, the
 /// full-width `surface-2` team area.
-/// v0.0.7: #392 fixed (`Modifier::corner_radii` and `clip`); workaround kept until checked on a
-/// display (the team area is a rounded box over the card's bottom corners, so its top corners are
-/// rounded too, until the card clips it).
+/// The team area is square at the top, under the rule, and takes the card's radius at the bottom
+/// (`Modifier::corner_radii`, compose-rust#392); it was a box rounded at all four corners.
 fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
     let p = ember_theme().palette;
     let expanded = st.expanded.get().contains(&b.id);
@@ -618,7 +632,7 @@ fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
                 });
                 cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                 cu::Box()
-                    .modifier(Modifier::new().fill_max_width().background(paint(p.surface_2)).corner_radius(CORNER_XL).padding(SP[3]))
+                    .modifier(Modifier::new().fill_max_width().background(paint(p.surface_2)).corner_radii([0.0, 0.0, CORNER_XL, CORNER_XL]).padding(SP[3]))
                     .content(|| {
                         cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                             if total == 0 {
@@ -1998,6 +2012,16 @@ mod tests {
     }
 
     #[test]
+    fn the_team_area_is_square_under_the_rule_and_round_at_the_cards_bottom() {
+        // compose-rust#392 (#673): per-corner radii, `[top_start, top_end, bottom_end, bottom_start]`.
+        let production = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        let view = production.split("fn ProjectBoxView(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(view.contains(".background(paint(p.surface_2)).corner_radii([0.0, 0.0, CORNER_XL, CORNER_XL]).padding(SP[3])"));
+        assert!(!view.contains(".background(paint(p.surface_2)).corner_radius(CORNER_XL)"));
+        assert_eq!(CORNER_XL, 24.0);
+    }
+
+    #[test]
     fn fr_l1_the_grid_follows_the_mockup_breakpoints() {
         assert_eq!((grid_cols(1440.0), grid_cols(1024.0), grid_cols(768.0), grid_cols(390.0)), (3, 2, 1, 1));
         assert_eq!((team_cols(768.0), team_cols(390.0)), (2, 1));
@@ -2198,6 +2222,10 @@ mod tests {
         });
         assert!(has_placeholder, "expected inline filter field at 1440dp");
         assert!(!has_search_icon, "no search icon button above 900dp");
+        let has_search_button = batch.iter().any(|m| {
+            matches!(m, Mutation::SetProp { value: PropertyValue::String(s), .. } if *s == crate::ui::cr::a11y::OPEN_MEMBER_SEARCH)
+        });
+        assert!(!has_search_button, "no named search button above 900dp");
         compose_rust::window::reset_window_size();
     }
 
@@ -2208,6 +2236,20 @@ mod tests {
         assert!(!search_field_visible(800.0, false));
         assert!(search_field_visible(800.0, true));
         assert!(search_field_visible(1440.0, false));
+    }
+
+    #[test]
+    fn fr_l26_the_header_search_button_is_named_and_says_whether_its_row_is_open() {
+        // compose-rust#428, #429 (#673): Ember's SVG in the ring, a fixed Korean name and the
+        // expanded state, in place of the unnamed toolkit glyph.
+        let production = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        let actions = production.split("fn ListActions(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(actions.contains("super::a11y::OPEN_MEMBER_SEARCH,"));
+        assert!(actions.contains(".expanded(st.search_open.get()),"));
+        assert!(actions.contains("NavIcon(shell::ICON_SEARCH_SVG, p.text_2.to_argb(), SEARCH_GLYPH)"));
+        assert!(!actions.contains("IconRole::Search"), "no toolkit glyph is left");
+        assert_eq!(crate::ui::cr::a11y::OPEN_MEMBER_SEARCH, "팀원 검색 열기");
+        assert_eq!((H_BTN, SEARCH_GLYPH), (40.0, 18.0));
     }
 
     #[test]

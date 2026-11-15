@@ -204,6 +204,9 @@ pub struct ClaudeConfigSources {
     pub codex_home: Option<PathBuf>,
     /// Codex configuration files outside the user's home.
     pub codex_system: Vec<PathBuf>,
+    /// Codex managed preference locations ([`codex_managed_locations`]); presence alone makes
+    /// the channel tool unverified (FR-T12).
+    pub codex_managed: Vec<PathBuf>,
 }
 
 impl ClaudeConfigSources {
@@ -220,6 +223,7 @@ impl ClaudeConfigSources {
                 PathBuf::from("/etc/codex/config.toml"),
                 PathBuf::from("/etc/codex/managed_config.toml"),
             ],
+            codex_managed: codex_managed_locations(),
         }
     }
 }
@@ -238,6 +242,122 @@ const KIND_CODEX_SYSTEM: &str = "system config.toml";
 const KIND_AGY_USER: &str = "user mcp_config.json";
 const KIND_AGY_PROJECT: &str = "project .agents/mcp_config.json";
 const REASON_TAKEN: &str = "a server with this name is already configured";
+const KIND_CODEX_PROFILE: &str = "profile <name>.config.toml";
+const KIND_CODEX_PLUGIN: &str = "plugin .mcp.json or plugin.json";
+const KIND_CODEX_MANAGED: &str = "managed preferences";
+/// Logged when a Codex session gets the server without its auto-approval (FR-T12).
+const REASON_UNVERIFIED: &str =
+    "a Codex configuration layer the name check does not read is present, so the server name is unverified and the call is asked";
+
+/// A Codex configuration layer that [`codex_channel_name_taken`] does not read (FR-T12). While
+/// one may exist, which `ember-channels` entry wins is unknown, so `channel_post` is not
+/// auto-approved. `unreadable` is true when the location could not be checked (fail closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnreadLayer {
+    pub kind: &'static str,
+    pub unreadable: bool,
+}
+
+/// Where [`codex_unread_layer`] looks. Plain paths, so tests use a temp dir.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodexLayerPaths {
+    /// Directories whose `*.config.toml` files other than `config.toml` are profile layers.
+    pub profile_dirs: Vec<PathBuf>,
+    /// Plugin roots searched for `.mcp.json` and `plugin.json`, up to three levels deep.
+    pub plugin_roots: Vec<PathBuf>,
+    /// Managed preference files or directories.
+    pub managed: Vec<PathBuf>,
+}
+
+/// How deep below a plugin root the search for `.mcp.json` and `plugin.json` goes.
+const PLUGIN_DEPTH: usize = 3;
+
+/// The first Codex layer of `paths` that is present or cannot be checked. Presence only: no file
+/// is opened or parsed. A missing location is fine; any other error counts as present.
+pub fn codex_unread_layer(paths: &CodexLayerPaths) -> Option<UnreadLayer> {
+    use std::io::ErrorKind::NotFound;
+    let found = |kind| Some(UnreadLayer { kind, unreadable: false });
+    let unreadable = |kind| Some(UnreadLayer { kind, unreadable: true });
+    for dir in &paths.profile_dirs {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == NotFound => continue,
+            Err(_) => return unreadable(KIND_CODEX_PROFILE),
+        };
+        for entry in entries {
+            let Ok(entry) = entry else { return unreadable(KIND_CODEX_PROFILE) };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".config.toml") && name != "config.toml" {
+                return found(KIND_CODEX_PROFILE);
+            }
+        }
+    }
+    /// `Ok(true)` when `dir` holds a plugin file within `depth` levels. Symlinks are not followed.
+    fn plugin_file(dir: &Path, depth: usize) -> Result<bool, ()> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => return Err(()),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|_| ())?;
+            let name = entry.file_name();
+            if name == ".mcp.json" || name == "plugin.json" {
+                return Ok(true);
+            }
+            let ty = entry.file_type().map_err(|_| ())?;
+            if ty.is_dir() && depth > 1 && plugin_file(&entry.path(), depth - 1)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    for root in &paths.plugin_roots {
+        match plugin_file(root, PLUGIN_DEPTH) {
+            Ok(true) => return found(KIND_CODEX_PLUGIN),
+            Ok(false) => {}
+            Err(()) => return unreadable(KIND_CODEX_PLUGIN),
+        }
+    }
+    for path in &paths.managed {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => return found(KIND_CODEX_MANAGED),
+            Err(e) if e.kind() == NotFound => {}
+            Err(_) => return unreadable(KIND_CODEX_MANAGED),
+        }
+    }
+    None
+}
+
+/// The locations [`codex_unread_layer`] checks for a session whose Codex home is `codex_home`:
+/// the profile files and the plugins under it, and the `managed` locations.
+pub fn codex_layer_paths(codex_home: Option<&Path>, managed: &[PathBuf]) -> CodexLayerPaths {
+    CodexLayerPaths {
+        profile_dirs: codex_home.map(Path::to_path_buf).into_iter().collect(),
+        plugin_roots: codex_home.map(|h| h.join("plugins")).into_iter().collect(),
+        managed: managed.to_vec(),
+    }
+}
+
+/// Codex's managed preference locations on this OS: on macOS the `com.openai.codex` preference
+/// files (machine-wide managed, per-user managed and machine-wide), on Windows
+/// `%ProgramData%\OpenAI\Codex`, elsewhere none (the `/etc/codex` files are read by the name
+/// check). The exact locations Codex reads are NOT MEASURED.
+pub fn codex_managed_locations() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if cfg!(target_os = "macos") {
+        let managed = PathBuf::from("/Library/Managed Preferences");
+        out.push(managed.join("com.openai.codex.plist"));
+        if let Some(user) = std::env::var_os("USER").filter(|u| !u.is_empty()) {
+            out.push(managed.join(user).join("com.openai.codex.plist"));
+        }
+        out.push(PathBuf::from("/Library/Preferences/com.openai.codex.plist"));
+    } else if cfg!(windows) {
+        let base = std::env::var_os("ProgramData").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+        out.push(base.join("OpenAI").join("Codex"));
+    }
+    out
+}
 
 /// The closed set of reasons a configuration file could not be checked. Static on purpose:
 /// nothing read from a file reaches a log line or a notice.
@@ -716,10 +836,14 @@ impl A2a {
         let (Some(url), Some(token)) = (env_value("EMBER_URL"), env_value("EMBER_RUNTIME_TOKEN")) else {
             return;
         };
+        let sources = self.claude_sources.lock().unwrap().clone();
+        let codex_home = env_value("CODEX_HOME")
+            .map(PathBuf::from)
+            .or(sources.codex_home.clone())
+            .or(sources.home.as_ref().map(|h| h.join(".codex")));
         let check = if req.mcp_servers.iter().any(|s| s.name == CHANNEL_MCP_SERVER) {
             NameCheck::Taken { kind: KIND_REQUEST }
         } else {
-            let sources = self.claude_sources.lock().unwrap().clone();
             match harness {
                 ToolHarness::Claude => {
                     let config_dir =
@@ -727,10 +851,6 @@ impl A2a {
                     channel_server_name_taken(&req.cwd, sources.home.as_deref(), config_dir.as_deref(), &sources.managed)
                 }
                 ToolHarness::Codex => {
-                    let codex_home = env_value("CODEX_HOME")
-                        .map(PathBuf::from)
-                        .or(sources.codex_home.clone())
-                        .or(sources.home.as_ref().map(|h| h.join(".codex")));
                     codex_channel_name_taken(&req.cwd, codex_home.as_deref(), &sources.codex_system)
                 }
                 ToolHarness::Antigravity => agy_channel_name_taken(&req.cwd, sources.home.as_deref()),
@@ -779,7 +899,17 @@ impl A2a {
             startup_timeout_secs: Some(10),
             env: vec![("EMBER_URL".to_string(), url), ("EMBER_RUNTIME_TOKEN".to_string(), token)],
         });
-        if harness.allow_rule() && !req.allowed_tools.iter().any(|t| t == CHANNEL_POST_TOOL) {
+        // A Codex layer the name check does not read may define its own `ember-channels`: the call
+        // is then asked (the Codex adapter puts the unverified note on that card), never
+        // auto-approved.
+        let unread = match harness {
+            ToolHarness::Codex => codex_unread_layer(&codex_layer_paths(codex_home.as_deref(), &sources.codex_managed)),
+            _ => None,
+        };
+        if let Some(layer) = unread {
+            tracing::warn!(session = %rec.id, source = layer.kind, unreadable = layer.unreadable, "not auto-approving {CHANNEL_POST_TOOL}: {REASON_UNVERIFIED}");
+            req.allowed_tools.retain(|t| t != CHANNEL_POST_TOOL);
+        } else if harness.allow_rule() && !req.allowed_tools.iter().any(|t| t == CHANNEL_POST_TOOL) {
             req.allowed_tools.push(CHANNEL_POST_TOOL.to_string());
         }
     }
@@ -2379,5 +2509,144 @@ mod channel_tool_tests {
             unsure_notice("user config", "unreadable"),
             "The channel tool was not registered because the Claude Code configuration (user config) could not be checked (unreadable); replies use the ember-a2a command."
         );
+    }
+
+    // ---- Codex layers the name check does not read ----
+
+    fn layer_paths(home: &Path, managed: &[PathBuf]) -> CodexLayerPaths {
+        codex_layer_paths(Some(home), managed)
+    }
+
+    #[test]
+    fn fr_t12_codex_layer_detection_finds_nothing_without_a_layer() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("codex-home");
+        assert_eq!(codex_unread_layer(&layer_paths(&home, &[])), None, "no CODEX_HOME at all");
+        put(&home.join("config.toml"), "model = \"x\"\n");
+        put(&home.join("plugins/p/README.md"), "");
+        put(&home.join("notes.toml"), "");
+        assert_eq!(codex_unread_layer(&layer_paths(&home, &[d.path().join("absent.plist")])), None);
+        assert_eq!(codex_unread_layer(&CodexLayerPaths::default()), None);
+    }
+
+    #[test]
+    fn fr_t12_codex_layer_detection_sees_each_kind_by_presence() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("codex-home");
+        put(&home.join("config.toml"), "");
+        put(&home.join("work.config.toml"), "not even toml [[[");
+        assert_eq!(
+            codex_unread_layer(&layer_paths(&home, &[])),
+            Some(UnreadLayer { kind: KIND_CODEX_PROFILE, unreadable: false })
+        );
+        std::fs::remove_file(home.join("work.config.toml")).unwrap();
+        for file in ["plugins/one/.mcp.json", "plugins/one/.codex-plugin/plugin.json"] {
+            put(&home.join(file), "garbage");
+            assert_eq!(
+                codex_unread_layer(&layer_paths(&home, &[])),
+                Some(UnreadLayer { kind: KIND_CODEX_PLUGIN, unreadable: false }),
+                "{file}"
+            );
+            std::fs::remove_file(home.join(file)).unwrap();
+        }
+        // Deeper than three levels is not looked at.
+        put(&home.join("plugins/a/b/c/d/.mcp.json"), "");
+        assert_eq!(codex_unread_layer(&layer_paths(&home, &[])), None);
+        let plist = d.path().join("Managed Preferences/com.openai.codex.plist");
+        put(&plist, "");
+        assert_eq!(
+            codex_unread_layer(&layer_paths(&home, &[plist.clone()])),
+            Some(UnreadLayer { kind: KIND_CODEX_MANAGED, unreadable: false })
+        );
+        // A managed directory counts as well.
+        let dir = d.path().join("ProgramData/OpenAI/Codex");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(
+            codex_unread_layer(&layer_paths(&home, &[dir])),
+            Some(UnreadLayer { kind: KIND_CODEX_MANAGED, unreadable: false })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_t12_codex_layer_detection_fails_closed_on_a_location_it_cannot_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        // CODEX_HOME is a file: it cannot be listed.
+        let home = d.path().join("codex-home");
+        put(&home, "");
+        assert_eq!(
+            codex_unread_layer(&layer_paths(&home, &[])),
+            Some(UnreadLayer { kind: KIND_CODEX_PROFILE, unreadable: true })
+        );
+        // A plugin directory that cannot be listed (root can list it anyway, so skip then).
+        let home = d.path().join("codex-home2");
+        let locked = home.join("plugins/locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_err() {
+            assert_eq!(
+                codex_unread_layer(&layer_paths(&home, &[])),
+                Some(UnreadLayer { kind: KIND_CODEX_PLUGIN, unreadable: true })
+            );
+        }
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A managed path whose parent is a file cannot be judged.
+        let file = d.path().join("prefs");
+        put(&file, "");
+        assert_eq!(
+            codex_unread_layer(&layer_paths(&home, &[file.join("com.openai.codex.plist")])),
+            Some(UnreadLayer { kind: KIND_CODEX_MANAGED, unreadable: true })
+        );
+    }
+
+    #[test]
+    fn fr_t12_codex_layer_locations_follow_the_platform() {
+        let home = Path::new("/h/.codex");
+        let p = codex_layer_paths(Some(home), &[PathBuf::from("/m")]);
+        assert_eq!(p.profile_dirs, [home.to_path_buf()]);
+        assert_eq!(p.plugin_roots, [home.join("plugins")]);
+        assert_eq!(p.managed, [PathBuf::from("/m")]);
+        assert_eq!(codex_layer_paths(None, &[]), CodexLayerPaths::default());
+        let real = codex_managed_locations();
+        if cfg!(target_os = "macos") {
+            assert!(real.contains(&PathBuf::from("/Library/Managed Preferences/com.openai.codex.plist")));
+            assert!(real.contains(&PathBuf::from("/Library/Preferences/com.openai.codex.plist")));
+        } else if !cfg!(windows) {
+            assert!(real.is_empty());
+        }
+    }
+
+    #[test]
+    fn fr_t12_codex_layer_present_registers_the_server_without_the_auto_approval() {
+        let d = tempfile::tempdir().unwrap();
+        let a = world(Some(CLI));
+        set_sources(&a, d.path());
+        put(&d.path().join(".codex/work.config.toml"), "");
+        let r = rec(&a, AgentKind::Codex);
+        let mut req = request(&a, &r);
+        a.channel_tool_config(&r, &mut req);
+        assert_eq!(req.mcp_servers.len(), 1, "the server is still registered");
+        assert!(req.allowed_tools.is_empty(), "but not auto-approved");
+        let args = crate::agents::codex::app_server_args(&req);
+        assert!(!args.iter().any(|x| x.contains("approval_mode")), "{args:?}");
+        assert_eq!(a.channel_reply(&r), ChannelReply::McpTool);
+        // The managed preferences alone do the same.
+        std::fs::remove_file(d.path().join(".codex/work.config.toml")).unwrap();
+        let plist = d.path().join("com.openai.codex.plist");
+        put(&plist, "");
+        a.claude_sources.lock().unwrap().codex_managed = vec![plist.clone()];
+        let mut req = request(&a, &r);
+        a.channel_tool_config(&r, &mut req);
+        assert!(req.allowed_tools.is_empty());
+        // Without any layer the one approval is back, exactly once.
+        std::fs::remove_file(&plist).unwrap();
+        let mut req = request(&a, &r);
+        a.channel_tool_config(&r, &mut req);
+        let approvals: Vec<String> = crate::agents::codex::app_server_args(&req)
+            .into_iter()
+            .filter(|x| x.contains("approval_mode"))
+            .collect();
+        assert_eq!(approvals, ["mcp_servers.ember-channels.tools.channel_post.approval_mode=\"approve\""]);
     }
 }

@@ -1876,6 +1876,7 @@ pub fn TranscriptRow(
             let in_flight = answering.get().contains(&approval_id);
             // The command (or file, or a one-line summary) only, never raw JSON (#536).
             let words = tool_card::approval_text(computer, &tool, &input);
+            let offer_always = tool_card::offers_allow_always(&input);
             let (title, body) = (words.title.clone(), words.body.clone());
             let answer = {
                 let sid = sid.clone();
@@ -1967,11 +1968,15 @@ pub fn TranscriptRow(
                                                     a1(ApprovalDecision::AllowOnce);
                                                 }
                                             });
-                                            ApprovalButton(tool_card::ALLOW_ALWAYS, false, false, move || {
-                                                if !in_flight {
-                                                    a2(ApprovalDecision::AllowAlways);
-                                                }
-                                            });
+                                            // FR-T12 (#380): no 항상 허용 when the server marks
+                                            // the request `allow_always: false`.
+                                            if offer_always {
+                                                ApprovalButton(tool_card::ALLOW_ALWAYS, false, false, move || {
+                                                    if !in_flight {
+                                                        a2(ApprovalDecision::AllowAlways);
+                                                    }
+                                                });
+                                            }
                                             ApprovalButton(tool_card::DENY, false, true, move || {
                                                 if !in_flight {
                                                     a3(ApprovalDecision::Deny);
@@ -2599,6 +2604,31 @@ mod tests {
         assert!(card.mods.iter().any(|m| m == "Padding(10.0)"), "{:?}", card.mods);
         assert_eq!(approve_pad(false), (14.0, 16.0));
         assert_eq!(approve_pad(true), (10.0, 12.0));
+    }
+
+    fn pending_once_only_row() {
+        let item = TranscriptItem::Approval {
+            seq: 2,
+            approval_id: "a2".into(),
+            tool: "mcp__ember-channels__channel_post".into(),
+            input: serde_json::json!({"note": "서버 이름을 확인하지 못했습니다.", "allow_always": false}),
+            state: ApprovalState::Pending,
+        };
+        row_of(item, Some("mac-mini"), false);
+    }
+
+    #[test]
+    fn fr_t12_card_without_allow_always_sends_once_and_deny_only() {
+        // FR-T12 (#380) on this branch's card (FR-L5): `allow_always: false` draws 허용 and
+        // 거부 in the FlowRow and no 항상 허용; the server note is the body.
+        let _guard = crate::services::test_guard();
+        let nodes = emitted(pending_once_only_row);
+        assert!(nodes.iter().any(|n| n.widget == "FlowRow"));
+        assert!(has_text(&nodes, tool_card::ALLOW_ONCE) && has_text(&nodes, tool_card::DENY));
+        assert!(!has_text(&nodes, tool_card::ALLOW_ALWAYS), "no always button");
+        assert!(has_text(&nodes, "서버 이름을 확인하지 못했습니다."), "the note is the body");
+        // The default card still offers all three.
+        assert!(has_text(&emitted(pending_row), tool_card::ALLOW_ALWAYS));
     }
 
     #[Composable]

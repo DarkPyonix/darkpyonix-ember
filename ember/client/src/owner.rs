@@ -72,6 +72,8 @@ pub const OWNER_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/mcp"),
     ("DELETE", "/api/mcp/{id}"),
     ("PATCH", "/api/mcp/{id}"),
+    ("DELETE", "/api/projects/{name}"),
+    ("PATCH", "/api/projects/{name}"),
     ("POST", "/api/providers"),
     ("DELETE", "/api/providers/{id}"),
     ("POST", "/api/server-token/rotate"),
@@ -416,6 +418,20 @@ mod tests {
         assert!(!owner_route(&Method::GET, "/api/accounts"));
         assert!(!owner_route(&Method::POST, "/api/devices/"));
         assert!(!owner_route(&Method::POST, "/api/sessions//approvals/a1"));
+    }
+
+    /// Project edit (archive included) and delete carry the key (leader, 2026-11-15, #384).
+    #[test]
+    fn fr_s12_project_patch_and_delete_carry_the_key() {
+        for name in ["acme", "my%20app", "%ED%95%9C%EA%B8%80"] {
+            let path = format!("/api/projects/{name}");
+            assert!(owner_route(&Method::PATCH, &path), "PATCH {path}");
+            assert!(owner_route(&Method::DELETE, &path), "DELETE {path}");
+            assert!(!owner_route(&Method::GET, &path), "GET {path}");
+        }
+        assert!(!owner_route(&Method::GET, "/api/projects"));
+        assert!(!owner_route(&Method::POST, "/api/projects"));
+        assert!(!owner_route(&Method::PUT, "/api/projects/acme/computers/c1"));
     }
 
     #[test]

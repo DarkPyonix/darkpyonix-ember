@@ -176,9 +176,9 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("PATCH", "/api/mcp/{id}", Owner),
     ("GET", "/api/projects", Token),
     ("POST", "/api/projects", Token),
-    ("DELETE", "/api/projects/{name}", Token),
+    ("DELETE", "/api/projects/{name}", Owner),
     ("GET", "/api/projects/{name}", Token),
-    ("PATCH", "/api/projects/{name}", Token),
+    ("PATCH", "/api/projects/{name}", Owner),
     ("DELETE", "/api/projects/{name}/computers/{computer_id}", Token),
     ("PUT", "/api/projects/{name}/computers/{computer_id}", Token),
     ("POST", "/api/projects/{name}/git/{*op}", Token),
@@ -330,6 +330,21 @@ mod tests {
         ] {
             assert!(!owner_route(&m, p), "{m} {p}");
         }
+    }
+
+    /// Project edit (archive included) and delete are owner routes (leader, 2026-11-15, #384);
+    /// create, read, computer assign and git stay on the token.
+    #[test]
+    fn fr_s12_project_patch_and_delete_are_owner_routes() {
+        assert!(owner_route(&Method::PATCH, "/api/projects/acme"));
+        assert!(owner_route(&Method::DELETE, "/api/projects/acme"));
+        assert!(owner_route(&Method::PATCH, "/api/projects/my%20app"));
+        assert!(!owner_route(&Method::GET, "/api/projects/acme"));
+        assert!(!owner_route(&Method::GET, "/api/projects"));
+        assert!(!owner_route(&Method::POST, "/api/projects"));
+        assert!(!owner_route(&Method::PUT, "/api/projects/acme/computers/c1"));
+        assert!(!owner_route(&Method::DELETE, "/api/projects/acme/computers/c1"));
+        assert!(!owner_route(&Method::POST, "/api/projects/acme/git/status"));
     }
 
     #[test]

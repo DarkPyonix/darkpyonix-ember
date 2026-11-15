@@ -66,10 +66,7 @@ impl Actions {
     fn finish_with(&self, what: &'static str, task: impl std::future::Future<Output = Result<String, ember_client::api::ApiError>> + Send + 'static, mut on_success: impl FnMut() + Send + 'static) {
         let reload = self.reload.clone();
         // FR-W4d: no watch refresh while the call runs; a success reloads by itself.
-        let project = self.project.clone();
-        crate::ui::vcs_watch::call_started(&project);
-        crate::services::run_shared(task, move |result| {
-            crate::ui::vcs_watch::call_ended(&project, result.is_ok());
+        crate::services::run_shared(crate::ui::vcs_watch::guarded_ok(&self.project, task), move |result| {
             notice::post(match result {
                 Ok(text) => {
                     on_success();
@@ -113,10 +110,7 @@ impl Actions {
             return;
         }
         let (project, reload) = (self.project.clone(), self.reload.clone());
-        let held = project.clone();
-        crate::ui::vcs_watch::call_started(&held);
-        crate::services::run_shared(async move { run_stash_push(&project, "", false).await }, move |result| {
-            crate::ui::vcs_watch::call_ended(&held, result.is_ok());
+        crate::services::run_shared(crate::ui::vcs_watch::guarded_ok(&project.clone(), async move { run_stash_push(&project, "", false).await }), move |result| {
             match result {
                 Ok(()) => {
                     notice::post("스태시를 만들었습니다".to_string());
@@ -2273,12 +2267,12 @@ fn ConflictsPane(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
                     mbusy.set(true);
                     let (name, mbusy, mlocal, generation, reload, armed) = (a.project.clone(), mbusy.clone(), mlocal.clone(), generation.clone(), a.reload.clone(), armed.clone());
                     crate::services::run_shared(
-                        async move {
+                        crate::ui::vcs_watch::guarded(&name.clone(), async move {
                             match action {
                                 MergeAction::Abort => run_merge_abort(&name).await,
                                 MergeAction::Commit => run_merge_commit(&name).await,
                             }
-                        },
+                        }, merge_answer_reloads),
                         move |result| {
                             let result_for_reload = result.clone();
                             match result {
@@ -2647,7 +2641,7 @@ fn ConflictActions(
             };
             busy.set(true);
             let (name, target, busy, open, step, reload) = (a.project.clone(), path.clone(), busy.clone(), open.clone(), step.clone(), a.reload.clone());
-            crate::services::run_shared(async move { run_resolve(&name, &target, &text).await }, move |result| {
+            crate::services::run_shared(crate::ui::vcs_watch::guarded_ok(&name.clone(), async move { run_resolve(&name, &target, &text).await }), move |result| {
                 match &result {
                     Ok(()) => {
                         notice::post("충돌을 해결했습니다".to_string());
@@ -3095,12 +3089,12 @@ fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool, branch
                     busy.set(true);
                     let (busy, reload, branch) = (busy.clone(), a.reload.clone(), branch.clone());
                     crate::services::run_shared(
-                        async move {
+                        crate::ui::vcs_watch::guarded(&a.project.clone(), async move {
                             match action {
                                 CommitAction::Revert => run_commit_revert(&a.project, &sha, &branch).await,
                                 CommitAction::CherryPick => run_commit_cherry_pick(&a.project, &sha, &branch).await,
                             }
-                        },
+                        }, |r: &Result<String, String>| r.as_ref().map_or_else(|line| commit_failure_reloads_snapshot(line), |_| true)),
                         move |result| {
                             match result {
                                 Ok(line) => {
@@ -3152,7 +3146,7 @@ fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool, branch
             }
             busy.set(true);
             let (busy, reload, name, name_gen, form_open) = (busy.clone(), a.reload.clone(), name.clone(), name_gen.clone(), form_open.clone());
-            crate::services::run_shared(async move { run_branch_from(&a.project, &branch, &sha).await }, move |result| {
+            crate::services::run_shared(crate::ui::vcs_watch::guarded_ok(&a.project.clone(), async move { run_branch_from(&a.project, &branch, &sha).await }), move |result| {
                 match result {
                     Ok(line) => {
                         notice::post(line);
@@ -3892,7 +3886,7 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
                     };
                     busy.set(true);
                     let (busy, retry, head, method, del) = (busy.clone(), retry.clone(), head_sha.clone(), merge_method.get(), delete_branch.get());
-                    crate::services::run_shared(async move { run_pr_merge(&a.project, number, method, del, &head).await }, move |result| {
+                    crate::services::run_shared(crate::ui::vcs_watch::guarded(&a.project.clone(), async move { run_pr_merge(&a.project, number, method, del, &head).await }, |_| false), move |result| {
                         match result {
                             Ok(line) => {
                                 notice::post(line);
@@ -4403,9 +4397,9 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
                                 busy.set(true);
                                 last.set(Some(now));
                                 let (project, reload, busy, target) = (a.project.clone(), a.reload.clone(), busy.clone(), target.clone());
-                                crate::services::run_shared(async move {
+                                crate::services::run_shared(crate::ui::vcs_watch::guarded_ok(&project.clone(), async move {
                                     git_call::<Value>(&project, "checkout", json!({"branch": target})).await
-                                }, move |result| {
+                                }), move |result| {
                                     match result {
                                         Ok(_) => { notice::post("브랜치를 전환했습니다".to_string()); reload.set(reload.get() + 1); }
                                         Err(e) => notice::post(failure_text("브랜치 전환을 ", &e)),
@@ -4949,7 +4943,7 @@ fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layou
             let Some(a) = actions.clone() else { return };
             busy.set(true);
             let (name, busy, armed, local, reload) = (a.project.clone(), busy.clone(), armed.clone(), local.clone(), a.reload.clone());
-            crate::services::run_shared(async move { run_stash_action(&name, action, index).await }, move |result| {
+            crate::services::run_shared(crate::ui::vcs_watch::guarded_ok(&name.clone(), async move { run_stash_action(&name, action, index).await }), move |result| {
                 notice::post(stash_action_notice(action, &result));
                 if result.is_ok() {
                     local.set(local.get() + 1);
@@ -4968,7 +4962,7 @@ fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layou
             busy.set(true);
             let (name, text, with_untracked) = (a.project.clone(), message.get(), untracked.get());
             let (busy, local, message, generation, reload) = (busy.clone(), local.clone(), message.clone(), generation.clone(), a.reload.clone());
-            crate::services::run_shared(async move { run_stash_push(&name, &text, with_untracked).await }, move |result| {
+            crate::services::run_shared(crate::ui::vcs_watch::guarded_ok(&name.clone(), async move { run_stash_push(&name, &text, with_untracked).await }), move |result| {
                 match &result {
                     Ok(()) => {
                         notice::post("스태시를 만들었습니다".to_string());

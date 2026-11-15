@@ -128,6 +128,37 @@ CREATE TABLE IF NOT EXISTS harness_settings (
 );
 ";
 
+/// Partial index over prompt and turn-end events per session (`idx_events_prompt_turn`), so
+/// resolving a prompt or reading pending prompts walks only the current turn's prompt rows instead
+/// of scanning the session's full event history (#909).
+pub(crate) const PROMPT_EVENTS_INDEX_MIGRATION: &str = "
+CREATE INDEX IF NOT EXISTS idx_events_prompt_turn
+ON events (session_id, seq DESC)
+WHERE json_extract(event, '$.kind') IN (
+    'turn_ended',
+    'approval_requested',
+    'approval_resolved',
+    'question_asked',
+    'question_answered',
+    'prompt_withdrawn'
+);
+";
+
+/// Query returning only prompt and turn-end events for a session, newest first (`idx_events_prompt_turn`).
+const CURRENT_TURN_PROMPT_EVENTS_SQL: &str = "
+SELECT event FROM events
+WHERE session_id = ?1
+  AND json_extract(event, '$.kind') IN (
+      'turn_ended',
+      'approval_requested',
+      'approval_resolved',
+      'question_asked',
+      'question_answered',
+      'prompt_withdrawn'
+  )
+ORDER BY seq DESC
+";
+
 /// Migrations, in order: entry `i` brings `PRAGMA user_version` from `i` to `i + 1`. Each runs in
 /// its own transaction together with the version bump. Append only; never edit a shipped entry.
 const MIGRATIONS: &[&str] = &[
@@ -163,6 +194,7 @@ const MIGRATIONS: &[&str] = &[
     crate::projects::schema::CHARACTER_OVERRIDES_MIGRATION,
     crate::schedules::schema::EVENTS_MIGRATION,
     crate::devices::schema::SCOPE_MIGRATION,
+    PROMPT_EVENTS_INDEX_MIGRATION,
 ];
 
 /// The position of a registered migration (tests locate migrations by position, never by length).
@@ -231,6 +263,30 @@ fn parse_status(s: &str) -> SessionStatus {
         "failed" => SessionStatus::Failed,
         _ => SessionStatus::Idle,
     }
+}
+
+/// Prompt events (`ApprovalRequested`, `ApprovalResolved`, `QuestionAsked`, `QuestionAnswered`,
+/// `PromptWithdrawn`) of `session_id` since the latest `TurnEnded`, in chronological order (#909).
+/// Also returns the number of database rows fetched before stopping at `TurnEnded`.
+fn current_turn_prompt_events_conn(
+    conn: &Connection,
+    session_id: &str,
+) -> anyhow::Result<(Vec<AgentEvent>, usize)> {
+    let mut stmt = conn.prepare(CURRENT_TURN_PROMPT_EVENTS_SQL)?;
+    let mut rows = stmt.query(params![session_id])?;
+    let mut events_rev = Vec::new();
+    let mut rows_read = 0usize;
+    while let Some(row) = rows.next()? {
+        rows_read += 1;
+        let json: String = row.get(0)?;
+        let ev: AgentEvent = serde_json::from_str(&json)?;
+        if matches!(ev, AgentEvent::TurnEnded { .. }) {
+            break;
+        }
+        events_rev.push(ev);
+    }
+    events_rev.reverse();
+    Ok((events_rev, rows_read))
 }
 
 impl Store {
@@ -378,11 +434,7 @@ impl Store {
                 | AgentEvent::QuestionAnswered { .. }
                 | AgentEvent::PromptWithdrawn { .. }
         ) {
-            let mut stmt = tx.prepare("SELECT event FROM events WHERE session_id = ?1 ORDER BY seq")?;
-            let mut prior: Vec<AgentEvent> = stmt
-                .query_map(params![session_id], |r| r.get::<_, String>(0))?
-                .filter_map(|r| r.ok().and_then(|s| serde_json::from_str(&s).ok()))
-                .collect();
+            let (mut prior, _) = current_turn_prompt_events_conn(&tx, session_id)?;
             prior.push(event.clone());
             crate::events::has_pending_prompts(&prior)
         } else {
@@ -405,6 +457,14 @@ impl Store {
         }
         tx.commit()?;
         Ok((StoredEvent { session_id: session_id.to_string(), seq, at, event: event.clone() }, status))
+    }
+
+    /// Prompt events of `session_id` since the latest `TurnEnded`, oldest first (#909). Uses
+    /// `idx_events_prompt_turn` (`ORDER BY seq DESC`), stopping at the first `TurnEnded` row so
+    /// resolving a question or reading pending prompts never scans the session's full event history.
+    pub fn current_turn_prompt_events(&self, session_id: &str) -> anyhow::Result<Vec<AgentEvent>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(current_turn_prompt_events_conn(&conn, session_id)?.0)
     }
 
     /// Events with `seq > after`, oldest first.
@@ -838,5 +898,185 @@ mod tests {
         store.append(&s.id, &AgentEvent::UserMessage { text: "hi".into() }).unwrap();
         assert_eq!(store.reset_live_statuses().unwrap(), 1);
         assert_eq!(store.session(&s.id).unwrap().unwrap().status, SessionStatus::Idle);
+    }
+
+    /// FR-A5 (#909): resolving a question or checking pending prompts uses `idx_events_prompt_turn`
+    /// (`ORDER BY seq DESC` stopping at the first `TurnEnded`), reading only the current turn's
+    /// prompt rows plus at most one `TurnEnded` row instead of scanning the session's full history.
+    #[test]
+    fn fr_a5_current_turn_prompt_events_uses_partial_index_and_reads_only_the_current_turn() {
+        use crate::events::{ApprovalDecision, Question, QuestionOption, TurnOutcome};
+
+        let store = Store::open_in_memory().unwrap();
+        let s = store.create_session("p", AgentKind::Scripted, "/tmp", None, "long").unwrap();
+        let id = s.id.clone();
+
+        // Confirm SQLite's query planner uses the partial index `idx_events_prompt_turn`.
+        {
+            let conn = store.conn();
+            let mut stmt = conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {CURRENT_TURN_PROMPT_EVENTS_SQL}"))
+                .unwrap();
+            let details: Vec<String> = stmt
+                .query_map(params![id.as_str()], |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert!(
+                details.iter().any(|d| d.contains("idx_events_prompt_turn")),
+                "expected idx_events_prompt_turn in query plan, got {details:?}"
+            );
+        }
+
+        // First turn with no `TurnEnded` yet: all prompt events in the turn are returned in order.
+        let q1 = AgentEvent::QuestionAsked {
+            question_id: "q-early".into(),
+            questions: vec![Question {
+                id: "q0".into(),
+                header: Some("Pick".into()),
+                text: "Which?".into(),
+                options: vec![QuestionOption { label: "A".into(), description: None }],
+                multi_select: false,
+                allow_other: false,
+                secret: false,
+            }],
+        };
+        store.append(&id, &AgentEvent::UserMessage { text: "start".into() }).unwrap();
+        store.append(&id, &q1).unwrap();
+        let (early_events, early_rows) = {
+            let conn = store.conn();
+            current_turn_prompt_events_conn(&conn, &id).unwrap()
+        };
+        assert_eq!(early_events, vec![q1]);
+        assert_eq!(early_rows, 1, "user_message is not in the partial index");
+
+        // Now populate 10,000 events across 50 completed turns (1 KiB payload per delta).
+        let payload = "x".repeat(1024);
+        {
+            let mut conn = store.conn();
+            let tx = conn.transaction().unwrap();
+            tx.execute("DELETE FROM events WHERE session_id = ?1", params![id]).unwrap();
+            for seq in 1..=10_000i64 {
+                let ev = if seq % 200 == 0 {
+                    serde_json::to_string(&AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }).unwrap()
+                } else if seq % 200 == 50 {
+                    serde_json::to_string(&AgentEvent::ApprovalRequested {
+                        approval_id: format!("old-{seq}"),
+                        tool: "Bash".into(),
+                        input: serde_json::json!({}),
+                        needs_person: false,
+                    })
+                    .unwrap()
+                } else {
+                    serde_json::to_string(&AgentEvent::AssistantDelta { text: payload.clone() }).unwrap()
+                };
+                tx.execute(
+                    "INSERT INTO events (session_id, seq, at, event) VALUES (?1, ?2, ?3, ?4)",
+                    params![id, seq, seq, ev],
+                )
+                .unwrap();
+            }
+            tx.execute("UPDATE sessions SET last_seq = 10000, status = 'finished' WHERE id = ?1", params![id])
+                .unwrap();
+            tx.commit().unwrap();
+        }
+
+        // Start turn 51: 1 user message, 100 deltas, 1 question, 1 approval.
+        store.append(&id, &AgentEvent::UserMessage { text: "turn 51".into() }).unwrap();
+        for _ in 0..100 {
+            store.append(&id, &AgentEvent::AssistantDelta { text: payload.clone() }).unwrap();
+        }
+        let q_current = AgentEvent::QuestionAsked {
+            question_id: "q1".into(),
+            questions: vec![Question {
+                id: "q0".into(),
+                header: Some("Pick".into()),
+                text: "Which?".into(),
+                options: vec![QuestionOption { label: "A".into(), description: None }],
+                multi_select: false,
+                allow_other: false,
+                secret: false,
+            }],
+        };
+        let a_current = AgentEvent::ApprovalRequested {
+            approval_id: "a1".into(),
+            tool: "Bash".into(),
+            input: serde_json::json!({}),
+            needs_person: false,
+        };
+        store.append(&id, &q_current).unwrap();
+        let (_, st) = store.append(&id, &a_current).unwrap();
+        assert_eq!(st, SessionStatus::WaitingForApproval);
+
+        let t0 = std::time::Instant::now();
+        let (prompt_events, rows_read) = {
+            let conn = store.conn();
+            current_turn_prompt_events_conn(&conn, &id).unwrap()
+        };
+        let lookup_us = t0.elapsed().as_micros();
+        assert_eq!(prompt_events, vec![q_current, a_current]);
+        assert_eq!(
+            rows_read, 3,
+            "must read only the 2 current-turn prompts + 1 previous TurnEnded row (not 10,103 rows)"
+        );
+
+        let t1 = std::time::Instant::now();
+        let (_, st) = store
+            .append(&id, &AgentEvent::QuestionAnswered { question_id: "q1".into(), answers: vec![] })
+            .unwrap();
+        let append_q_us = t1.elapsed().as_micros();
+        assert_eq!(st, SessionStatus::WaitingForApproval, "a1 is still pending");
+
+        let (_, st) = store
+            .append(
+                &id,
+                &AgentEvent::ApprovalResolved { approval_id: "a1".into(), decision: ApprovalDecision::AllowOnce },
+            )
+            .unwrap();
+        assert_eq!(st, SessionStatus::Running, "all prompts in turn 51 resolved");
+        eprintln!(
+            "AFTER_FIX: prompt_events_rows_read={} lookup_us={} append_question_answered_us={}",
+            rows_read, lookup_us, append_q_us
+        );
+    }
+
+    /// FR-A5 (#909): an existing database from before `PROMPT_EVENTS_INDEX_MIGRATION` gains
+    /// `idx_events_prompt_turn` on upgrade and indexes its existing prompt and `turn_ended` rows.
+    #[test]
+    fn fr_a5_old_database_gains_prompt_events_partial_index() {
+        use crate::events::TurnOutcome;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ember.db");
+        let before = migration_position(PROMPT_EVENTS_INDEX_MIGRATION).unwrap();
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            migrate_up_to(&mut conn, before).unwrap();
+            conn.execute_batch(
+                "INSERT INTO projects (name, created_at) VALUES ('p', 1);
+                 INSERT INTO sessions (id, project, agent, cwd, status, title, created_at, updated_at, last_seq)
+                 VALUES ('s1', 'p', 'claude-code', '/tmp', 'waiting_for_approval', 'T', 1, 3, 3);
+                 INSERT INTO events (session_id, seq, at, event) VALUES
+                    ('s1', 1, 1, '{\"kind\":\"approval_requested\",\"approval_id\":\"old\",\"tool\":\"Bash\",\"input\":{}}'),
+                    ('s1', 2, 2, '{\"kind\":\"turn_ended\",\"outcome\":\"completed\"}'),
+                    ('s1', 3, 3, '{\"kind\":\"question_asked\",\"question_id\":\"q1\",\"questions\":[]}');",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        let events = store.current_turn_prompt_events("s1").unwrap();
+        assert_eq!(
+            events,
+            vec![AgentEvent::QuestionAsked { question_id: "q1".into(), questions: vec![] }]
+        );
+        let (_, st) = store
+            .append("s1", &AgentEvent::QuestionAnswered { question_id: "q1".into(), answers: vec![] })
+            .unwrap();
+        assert_eq!(st, SessionStatus::Running);
+        let (_, st) = store
+            .append("s1", &AgentEvent::TurnEnded { outcome: TurnOutcome::Completed })
+            .unwrap();
+        assert_eq!(st, SessionStatus::Finished);
     }
 }

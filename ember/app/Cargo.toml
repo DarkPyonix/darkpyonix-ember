@@ -1,6 +1,6 @@
 [package]
 name = "ember-app"
-version = "0.1.0"
+version = "0.1.1"
 # dioxus-compose is edition 2024 / Rust 1.88 (f0e5b9f5); this crate follows it.
 edition = "2024"
 rust-version = "1.88"

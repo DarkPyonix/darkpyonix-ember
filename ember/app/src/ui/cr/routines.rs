@@ -30,12 +30,12 @@ pub use crate::ui::routines::{
     resolve_run_session_id, rollback_optimistic_run, run_is_simulated, run_now_busy, DEMO_RUN_BUSY, DEMO_RUN_DONE,
     DEMO_RUN_MS, DEMO_RUN_STARTED, DEMO_SESSION_PREFIX, REMOTE_RUN_POLL_MS,
     REMOTE_RUN_STARTED, SAMPLE_FLAG,
-    not_saved_sentence, run_row_text, unsaved_fields,
+    not_saved_sentence, run_row_text, run_tile_sub, unsaved_fields,
     ago, big_time, civil_from_days, cron_valid, days_from_civil,
     describe_cron, filter_projects, format_next, group_by_project, kind_text, kpis,
     last_run_text, minutes_at, ms_to_minutes, name_from_prompt, new_schedule, next_run,
     overall_success, pane_mode, run_from_server, schedule_line, schedule_patch,
-    schedule_to_entry, schedule_to_routine, success_percent, weekday, weekday_bar_radius,
+    schedule_to_entry, schedule_to_routine, success_percent, weekday, weekday_bar_parts, weekday_bar_radius,
     weekday_bars, weekday_card_height, weekday_chart_size, DayBar,
     Entry, FormDraft, FormError, FormField, Leave, LeaveDecision, leave_decision, routine_form_dirty,
     ROUTINE_DISCARD_QUESTION, FormLayout, Group, FORM_FIELDS, form_layout, form_rows, form_two_columns,
@@ -48,7 +48,7 @@ use crate::ui::home::{
 };
 use super::components::{
     pill_colors, pill_metrics, AppButton, BackButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
-    CloseButton, FieldOptions, Label, MonoLabel, Pill, PillTone, Select, SheetFooter,
+    CloseButton, FieldOptions, Label, MonoLabel, NamedSelect, Pill, PillTone, SheetFooter,
 };
 use super::characters::{CharState, Character};
 use super::compat::Spinner;
@@ -1653,23 +1653,8 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
     let ring_cmd = ring.build();
 
     let (chart_w, chart_h, chart_gap) = weekday_chart_size(compact);
-    let totals: Vec<usize> = bars.iter().map(|b| b.ok + b.fail).collect();
-    let mut chart = DrawList::builder().rect(paint(p.line), 0.0, chart_h, chart_w, 1.0, 0.0);
-    for (b, (x, y, w, h)) in bars.iter().zip(bar_rects(&totals, chart_w, chart_h, chart_gap)) {
-        if h <= 0.0 {
-            continue;
-        }
-        let total = (b.ok + b.fail) as f32;
-        let fail_h = h * b.fail as f32 / total;
-        let r = weekday_bar_radius(w, h);
-        chart = chart.round_rect(paint(p.blue.strong), x, y + fail_h, w, h - fail_h, r, 0.0);
-        if fail_h > 0.0 {
-            chart = chart.round_rect(paint(p.orange.strong), x, y, w, fail_h, r, 0.0);
-        }
-    }
-    let chart_cmd = chart.build();
     let card_h = weekday_card_height(compact);
-    let busy = totals.iter().any(|t| *t > 0);
+    let busy = bars.iter().any(|b| b.ok + b.fail > 0);
 
     let kpis_content = move || {
         // The two KPI rows sit together at the top of the card (`.rt-topwrap .kpis` row gap
@@ -1690,7 +1675,7 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
     };
 
     let hero_content = move || {
-        HeroCardContent(&ring_cmd, rate, &chart_cmd, &bars, busy, chart_w, chart_h, card_h);
+        HeroCardContent(&ring_cmd, rate, &bars, busy, (chart_w, chart_h, chart_gap), card_h);
     };
 
     if width_dp > 1279.0 {
@@ -1709,14 +1694,13 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
 fn HeroCardContent(
     ring_cmd: &DrawList,
     rate: Option<u32>,
-    chart_cmd: &DrawList,
     bars: &[DayBar; 7],
     busy: bool,
-    chart_w: f32,
-    chart_h: f32,
+    chart: (f32, f32, f32),
     card_h: f32,
 ) {
     let p = ember_theme().palette;
+    let (chart_w, chart_h, chart_gap) = chart;
     cu::Row()
         .spacing(SP[3])
         .alignment(Alignment::CenterStart)
@@ -1757,7 +1741,7 @@ fn HeroCardContent(
             cu::Column().spacing(SP[0]).modifier(Modifier::new().width(chart_w)).content(|| {
                 Label("요일별 실행", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 cu::Spacer().modifier(Modifier::new().height(SP[0]));
-                cu::Canvas(chart_cmd.clone()).modifier(Modifier::new().size(chart_w, chart_h + 1.0));
+                WeekdayBars(bars, chart_w, chart_h, chart_gap);
                 cu::Row().modifier(Modifier::new().width(chart_w).height(24.0)).content(|| {
                     for b in bars {
                         cu::Column().modifier(Modifier::new().weight(1.0)).alignment(Alignment::Center).content(|| {
@@ -1773,6 +1757,55 @@ fn HeroCardContent(
                 });
             });
         });
+}
+
+/// The weekday bars as the mockup's `.bars2`: one pill per day clipped to its shape (`.bar
+/// { border-radius: pill; overflow: hidden }`), the failed part on top of the successful part
+/// 2 dp apart, so a day reads as one joined bar. A Canvas drew the two parts as separate pills,
+/// a failed part shorter than the bar's width as a dot (review r3, #848). A 1 dp `line`
+/// baseline closes the chart, as before.
+pub fn WeekdayBars(bars: &[DayBar; 7], chart_w: f32, chart_h: f32, chart_gap: f32) {
+    let p = ember_theme().palette;
+    let totals: Vec<usize> = bars.iter().map(|b| b.ok + b.fail).collect();
+    let rects = bar_rects(&totals, chart_w, chart_h, chart_gap);
+    cu::Column().modifier(Modifier::new().size(chart_w, chart_h + 1.0)).content(|| {
+        cu::Row().spacing(chart_gap).modifier(Modifier::new().size(chart_w, chart_h)).content(|| {
+            for (b, &(_, _, w, h)) in bars.iter().zip(rects.iter()) {
+                cu::Box()
+                    .modifier(Modifier::new().size(w, chart_h))
+                    .alignment(Alignment::BottomCenter)
+                    .content(|| {
+                        if h <= 0.0 {
+                            return;
+                        }
+                        let (fail_h, gap_h, ok_h) = weekday_bar_parts(h, b.ok, b.fail);
+                        cu::Column()
+                            .modifier(
+                                Modifier::new()
+                                    .size(w, h)
+                                    .corner_radius(weekday_bar_radius(w, h))
+                                    .clip(true),
+                            )
+                            .content(|| {
+                                if fail_h > 0.0 {
+                                    cu::Box().modifier(
+                                        Modifier::new().fill_max_width().height(fail_h).background(paint(p.orange.strong)),
+                                    );
+                                }
+                                if gap_h > 0.0 {
+                                    cu::Spacer().modifier(Modifier::new().height(gap_h));
+                                }
+                                if ok_h > 0.0 {
+                                    cu::Box().modifier(
+                                        Modifier::new().fill_max_width().height(ok_h).background(paint(p.blue.strong)),
+                                    );
+                                }
+                            });
+                    });
+            }
+        });
+        cu::Spacer().modifier(Modifier::new().width(chart_w).height(1.0).background(paint(p.line)));
+    });
 }
 
 /// A routine KPI number: `.kpi .v` 28/400 (`style.css:110`, `routines.css:64`), design review B5.
@@ -2247,36 +2280,24 @@ fn DetailPane(
 
                     // Inset cards: 3 cards in one row on wide, 2x2 grid on narrow so the run
                     // history below stays visible above the fold on 390 dp phone screens.
+                    // Every tile in a row is as high as the tallest (`.rdetail` grid `stretch`;
+                    // review r3: uneven tiles at 390 and 1440).
                     if tile_cols < 3 {
                         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                            cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                    KeyValue("프로젝트", &project_name, "");
-                                });
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                    AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project);
-                                });
+                            TileRow(move || {
+                                TileCell(move || KeyValue("프로젝트", &project_name, ""));
+                                TileCell(move || AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project));
                             });
-                            cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                    KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다");
-                                });
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                    KeyValue("권한 모드", &mode_label, "");
-                                });
+                            TileRow(move || {
+                                TileCell(move || KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다"));
+                                TileCell(move || KeyValue("권한 모드", &mode_label, ""));
                             });
                         });
                     } else {
-                        cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                            cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                KeyValue("프로젝트", &project_name, "");
-                            });
-                            cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project);
-                            });
-                            cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                                KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다");
-                            });
+                        TileRow(move || {
+                            TileCell(move || KeyValue("프로젝트", &project_name, ""));
+                            TileCell(move || AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project));
+                            TileCell(move || KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다"));
                         });
                     }
                     // The inset pads 12 16 itself (`.inset`); no second padding inside it.
@@ -2313,13 +2334,47 @@ fn DetailPane(
     });
 }
 
+/// A row of detail tiles: each tile as high as the row's tallest (`equal_height`), the mockup's
+/// grid `align-items: stretch` (review r3, #848).
+fn TileRow(content: impl FnOnce()) {
+    cu::Row().spacing(SP[2]).equal_height(true).modifier(Modifier::new().fill_max_width()).content(content);
+}
+
+/// One cell of a `TileRow`: a share of the width and the row's whole height.
+fn TileCell(content: impl FnOnce()) {
+    cu::Box().modifier(Modifier::new().weight(1.0).fill_max_height()).content(content);
+}
+
+/// The detail tile's inset (`.inset`: `surface-2`, `corner-md`, 12 16 padding), filling the
+/// height its `TileCell` gives it. The shared `InsetPanel` keeps its content's height, so a
+/// short tile stood shorter than its neighbour.
+fn TileInset(content: impl FnOnce()) {
+    let p = ember_theme().palette;
+    cu::Box()
+        .modifier(
+            Modifier::new()
+                .fill_max_width()
+                .fill_max_height()
+                .background(paint(p.surface_2))
+                .corner_radius(CORNER_MD)
+                .padding(PAD_ROW_V),
+        )
+        .content(|| {
+            cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(content);
+                cu::Spacer().modifier(Modifier::new().width(SP[0]));
+            });
+        });
+}
+
 fn KeyValue(title: &str, value: &str, sub: &str) {
     let p = ember_theme().palette;
     let t = title.to_string();
     let v = value.to_string();
     let s = sub.to_string();
     // The inset pads 12 16 itself (`.inset`); a second padding inside doubled it (#494).
-    InsetPanel(true, move || {
+    TileInset(move || {
         cu::Column()
             .spacing(SP[0])
             .modifier(Modifier::new().fill_max_width())
@@ -2338,7 +2393,7 @@ fn KeyValue(title: &str, value: &str, sub: &str) {
 fn AgentKeyValue(agent: &'static str, label: &str, sub: &str, project: &str) {
     let p = ember_theme().palette;
     let (v, s, proj) = (label.to_string(), sub.to_string(), project.to_string());
-    InsetPanel(true, move || {
+    TileInset(move || {
         cu::Column()
             .spacing(SP[0])
             .modifier(Modifier::new().fill_max_width())
@@ -2365,6 +2420,23 @@ pub fn run_char_state(s: RunStatus) -> CharState {
     }
 }
 
+/// The member a run's session belongs to, named as the project screen names it (team name,
+/// else `<project>-<harness>`), when the client knows the session (`mname` in the mockup).
+pub fn run_member_name(session: &str) -> Option<String> {
+    let svc = try_services()?;
+    let id = resolve_run_session_id(session, demo_active());
+    svc.client.read(|s| {
+        let v = s.session(&id)?;
+        let team = s.team_for_session(&id);
+        Some(crate::ui::project::member_name(
+            team.and_then(|t| t.member(&id)).map(|m| m.name.as_str()),
+            &v.record.project,
+            &v.record.agent,
+            &v.record.title,
+        ))
+    })
+}
+
 /// One `.runtile` (R3, #848): the harness's character, the run's time over the session line,
 /// and the status pill, on `surface-2`. The whole tile opens the run's session (세션 열기).
 fn RunTile(run: &Run, now: Minutes, simulated: bool, agent: &'static str, project: &str) {
@@ -2372,6 +2444,7 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool, agent: &'static str, projec
     let tone = status_tone(run.status);
     let session = run.session.clone();
     let row = run_row_text(run, now, simulated);
+    let sub = run_tile_sub(run, run.session.as_deref().and_then(run_member_name).as_deref());
     let state = run_char_state(run.status);
     let name = Harness::from_kind(agent).map(|h| h.label()).unwrap_or(agent);
     let project = project.to_string();
@@ -2393,7 +2466,7 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool, agent: &'static str, projec
                     Character(agent, false, RUN_TILE_AVATAR, name, &project, state, None);
                     cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                         Label(&row.when, Fs::Xs, Weight::Semibold, None, Some(1));
-                        Label(row.sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        Label(&sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                     });
                     Pill(row.status, tone, true);
                     if let Some(flag) = row.flag {
@@ -2436,11 +2509,12 @@ struct FormCtx {
 fn form_save_handler(
     draft: MutableState<FormDraft>,
     tried: MutableState<bool>,
+    initial: Option<FormDraft>,
     mut on_save: impl FnMut(FormDraft) + 'static,
 ) -> impl FnMut() + 'static {
     move || {
         let cur = draft.get();
-        if cur.errors().is_empty() {
+        if cur.errors_with_initial(initial.as_ref()).is_empty() {
             on_save(cur);
         } else {
             tried.set(true);
@@ -2482,7 +2556,15 @@ fn RoutineForm(
     if layout == FormLayout::Inline {
         // The detail area: a card with the title, 취소 and 저장 in its header, then the fields
         // in the page's own scroll (mockup v8: the form replaces the detail panel).
-        let (close, save) = (on_close.clone(), form_save_handler(ctx.draft.clone(), ctx.tried.clone(), on_save.clone()));
+        let (close, save) = (
+            on_close.clone(),
+            form_save_handler(
+                ctx.draft.clone(),
+                ctx.tried.clone(),
+                ctx.editing.then(|| ctx.initial.clone()),
+                on_save.clone(),
+            ),
+        );
         let mut close_x = on_close.clone();
         EmberCard(false, true, None, Some(0.0), None, move || {
             cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
@@ -2504,7 +2586,7 @@ fn RoutineForm(
                 // The first error also sits under the header buttons once a save was tried, so
                 // it is seen without scrolling to the end of the form.
                 if ctx.tried.get() {
-                    if let Some(e) = ctx.draft.get().errors().first() {
+                    if let Some(e) = ctx.draft.get().errors_with_initial(ctx.editing.then_some(&ctx.initial)).first() {
                         cu::Column().modifier(Modifier::new().fill_max_width().padding(16.0)).content(|| {
                             Label(e.message(), Fs::Sm, Weight::Medium, Some(paint(p.red.strong)), Some(2));
                         });
@@ -2539,7 +2621,20 @@ fn RoutineForm(
         SheetFooter(move || {
             let mut close = on_close.clone();
             AppButton("취소", None, ButtonKind::Default, true, true, false, move || close());
-            AppButton("저장", None, ButtonKind::Primary, true, true, false, form_save_handler(ctx.draft.clone(), ctx.tried.clone(), on_save.clone()));
+            AppButton(
+                "저장",
+                None,
+                ButtonKind::Primary,
+                true,
+                true,
+                false,
+                form_save_handler(
+                    ctx.draft.clone(),
+                    ctx.tried.clone(),
+                    ctx.editing.then(|| ctx.initial.clone()),
+                    on_save.clone(),
+                ),
+            );
         });
     });
 }
@@ -2552,7 +2647,7 @@ fn FormFields(ctx: &FormCtx) {
     let editing = ctx.editing;
     let agents = live_agents();
     let d = draft.get();
-    let errors = d.errors();
+    let errors = d.errors_with_initial(editing.then_some(initial));
     let mut project_choices = project_options(&ctx.projects);
     if !project_choices.contains(&d.sel.project) {
         project_choices.push(d.sel.project.clone());
@@ -2606,7 +2701,7 @@ fn FormFields(ctx: &FormCtx) {
                 let (sel_proj, names) = (draft.clone(), project_choices.clone());
                 if pick {
                     let at = project_choices.iter().position(|n| *n == d.sel.project).unwrap_or(0);
-                    Select(&project_choices[at], &project_choices, at, w, move |i| {
+                    NamedSelect("프로젝트", &project_choices[at], &project_choices, at, w, move |i| {
                         let n = names[i].clone();
                         sel_proj.update(|d| d.sel.project = n);
                     });
@@ -2623,7 +2718,7 @@ fn FormFields(ctx: &FormCtx) {
                 let sel_trig = draft.clone();
                 if pick {
                     let at = Trigger::ALL.iter().position(|t| *t == d.trigger).unwrap_or(0);
-                    Select(&labels[at], &labels, at, w, move |i| {
+                    NamedSelect("트리거", &labels[at], &labels, at, w, move |i| {
                         let t = Trigger::ALL[i];
                         sel_trig.update(|d| *d = d.with_trigger(t));
                     });
@@ -2662,7 +2757,7 @@ fn FormFields(ctx: &FormCtx) {
             FormField::Model => {
                 FormLabel("하네스 · 모델 · 추론 강도");
                 let (pick, choices) = (draft.clone(), models.clone());
-                Select(&model_labels[model_at.min(model_labels.len().saturating_sub(1))], &model_labels, model_at, 320.0, move |i| {
+                NamedSelect("하네스 · 모델 · 추론 강도", &model_labels[model_at.min(model_labels.len().saturating_sub(1))], &model_labels, model_at, 320.0, move |i| {
                     if let Some(o) = choices.get(i).copied() {
                         pick.update(|d| {
                             d.sel = d.sel.with_harness(o.harness).with_option(o);
@@ -2674,7 +2769,7 @@ fn FormFields(ctx: &FormCtx) {
             FormField::Mode => {
                 FormLabel("권한 모드");
                 let (pick, choices) = (draft.clone(), modes.clone());
-                Select(&mode_labels[mode_at], &mode_labels, mode_at, 300.0, move |i| {
+                NamedSelect("권한 모드", &mode_labels[mode_at], &mode_labels, mode_at, 300.0, move |i| {
                     if let Some(m) = choices.get(i).copied() {
                         pick.update(|d| d.sel = d.sel.with_mode(m));
                     }
@@ -3478,7 +3573,7 @@ mod tests {
         let src = include_str!("routines.rs");
         let kv = src.split("fn KeyValue(").nth(1).unwrap().split("\n}\n").next().unwrap();
         let tile = src.split("fn RunTile(").nth(1).unwrap().split("\n}\n").next().unwrap();
-        assert!(kv.contains("InsetPanel(true"), "KeyValue sits in an inset");
+        assert!(kv.contains("TileInset(move ||"), "KeyValue sits in an inset");
         assert!(!kv.contains(".padding("), "KeyValue adds no padding inside the inset's own");
         // The run tile is the mockup's `.runtile`: 10 padding on `surface-2`, not an inset (#848).
         assert!(tile.contains(".height(RUN_TILE_H)"));
@@ -3500,7 +3595,8 @@ mod tests {
     #[test]
     fn fr_l25_detail_inset_panel_fills_its_width() {
         let src = include_str!("components.rs");
-        let inset = src.split("pub fn InsetPanel(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        // `InsetPanel` hands its arguments to `InsetPanelSized`, which builds the row (#886).
+        let inset = src.split("pub fn InsetPanelSized(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(inset.contains("cu::Row().modifier(Modifier::new().fill_max_width_if(fill_max_width))"));
         assert!(inset.contains("cu::Column().modifier(Modifier::new().weight(1.0)).content(content)"));
     }
@@ -4798,6 +4894,195 @@ mod design_review_tests {
         assert!(!source().contains(".max(174.0)"));
     }
 
+    // ---- a node tree of what a composable sends, for the checks below ----------------------
+
+    use compose_rust::protocol::{decode_batch, Mutation};
+    use compose_rust::{Host, Recomposer};
+
+    #[derive(Debug)]
+    struct Node {
+        id: u32,
+        parent: Option<u32>,
+        mods: Vec<String>,
+        props: Vec<String>,
+    }
+
+    fn nodes_of(content: fn()) -> Vec<Node> {
+        let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let mut nodes: Vec<Node> = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::Create { node_id, .. } => {
+                    nodes.push(Node { id: *node_id, parent: None, mods: Vec::new(), props: Vec::new() })
+                }
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.parent = Some(*parent_id);
+                    }
+                }
+                Mutation::SetModifier { node_id, modifier, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.mods.push(format!("{modifier:?}"));
+                    }
+                }
+                Mutation::SetProp { node_id, property, value } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                        n.props.push(format!("{property:?}={value:?}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        nodes
+    }
+
+    fn children<'a>(nodes: &'a [Node], parent: &Node) -> Vec<&'a Node> {
+        nodes.iter().filter(|n| n.parent == Some(parent.id)).collect()
+    }
+
+    fn has_mod(n: &Node, m: &str) -> bool {
+        n.mods.iter().any(|x| x == m)
+    }
+
+    fn day(ok: usize, fail: usize) -> DayBar {
+        DayBar { label: "월", ok, fail, today: false }
+    }
+
+    fn sample_weekday_bars() {
+        let bars = [day(3, 1), day(0, 0), day(4, 0), day(0, 2), day(1, 1), day(2, 0), day(1, 0)];
+        let (w, h, g) = weekday_chart_size(false);
+        WeekdayBars(&bars, w, h, g);
+    }
+
+    /// Review r3 (#848): a day's bar is one pill clipped to its shape, orange on top of blue
+    /// 2 dp apart, not two separately rounded pills drawn on a Canvas.
+    #[test]
+    fn design_r3_weekday_bars_are_joined_clipped_pills() {
+        let _guard = crate::services::test_guard();
+        let nodes = nodes_of(sample_weekday_bars);
+        let p = ember_theme().palette;
+        let orange = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.orange.strong)));
+        let blue = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.blue.strong)));
+        let bars: Vec<&Node> = nodes.iter().filter(|n| has_mod(n, "Clip(true)")).collect();
+        assert_eq!(bars.len(), 6, "one clipped bar per day with runs: {bars:?}");
+        let src = source();
+        let chart = src.split("pub fn WeekdayBars(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(!chart.contains("round_rect"), "no separately rounded parts");
+        assert!(chart.contains(".corner_radius(weekday_bar_radius(w, h))"));
+        // The 3-ok-1-fail day: orange part, the 2 dp gap, then the blue part, in that order.
+        let parts = children(&nodes, bars[0]);
+        assert_eq!(parts.len(), 3, "{parts:?}");
+        assert!(parts[0].mods.contains(&orange), "{:?}", parts[0]);
+        assert!(has_mod(parts[1], "Height(2.0)"), "{:?}", parts[1]);
+        assert!(parts[2].mods.contains(&blue), "{:?}", parts[2]);
+        // The all-success day has only a blue part, the all-failed day only an orange one.
+        let ok_only = children(&nodes, bars[1]);
+        assert_eq!(ok_only.len(), 1);
+        assert!(ok_only[0].mods.contains(&blue));
+        let fail_only = children(&nodes, bars[2]);
+        assert_eq!(fail_only.len(), 1);
+        assert!(fail_only[0].mods.contains(&orange));
+    }
+
+    fn sample_run_tile() {
+        let run = Run { at: 0, status: RunStatus::Done, session: Some("s9".into()) };
+        RunTile(&run, 0, false, "claude-code", "ember");
+    }
+
+    /// Review r3 (#848): the run tile's second line names the session's member, as the
+    /// mockup's `mname(session)`, not "세션" on every run.
+    #[test]
+    fn design_r3_run_tile_names_the_member() {
+        let _guard = crate::services::test_guard();
+        let svc = crate::services::test_services();
+        svc.reset_demo();
+        let want = run_member_name("s9").expect("the demo knows demo-s9");
+        assert_ne!(want, crate::ui::routines::RUN_TILE_SESSION);
+        let nodes = nodes_of(sample_run_tile);
+        let text = |t: &str| format!("Text=String({t:?})");
+        assert!(nodes.iter().any(|n| n.props.contains(&text(&want))), "the tile shows {want}");
+        assert!(
+            !nodes.iter().any(|n| n.props.contains(&text(crate::ui::routines::RUN_TILE_SESSION))),
+            "no bare 세션 line when the member is known"
+        );
+        assert_eq!(run_member_name("no-such-session"), None);
+    }
+
+    fn sample_tile_row() {
+        TileRow(|| {
+            TileCell(|| KeyValue("프로젝트", "ember", ""));
+            TileCell(|| KeyValue("컴퓨터 · 프로필", "이 서버", "프로필은 하네스를 따릅니다"));
+        });
+    }
+
+    /// Review r3 (#848): the detail tiles of a row are equally high (the mockup's grid
+    /// stretches them); at 390 프로젝트 stood shorter than 에이전트, 권한 모드 than 컴퓨터.
+    #[test]
+    fn design_r3_detail_tiles_in_a_row_are_equally_high() {
+        let _guard = crate::services::test_guard();
+        let nodes = nodes_of(sample_tile_row);
+        let rows: Vec<&Node> = nodes.iter().filter(|n| n.props.iter().any(|p| p == "Collapsible=Bool(true)")).collect();
+        assert_eq!(rows.len(), 1, "one equal-height row");
+        let cells = children(&nodes, rows[0]);
+        assert_eq!(cells.len(), 2);
+        for cell in &cells {
+            assert!(has_mod(cell, "Weight(1.0)") && has_mod(cell, "FillMaxHeight"), "{cell:?}");
+            let inset = children(&nodes, cell);
+            assert_eq!(inset.len(), 1);
+            assert!(has_mod(inset[0], "FillMaxHeight"), "the inset fills the cell: {:?}", inset[0]);
+        }
+        let src = source();
+        assert!(!src.contains("cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {\n                                    KeyValue("));
+    }
+
+    fn sample_sheet_form() {
+        let ctx = FormCtx {
+            field_w: NARROW_SHEET_FIELD_W,
+            draft: remember(|| mutable_state_of(FormDraft::new("ember"))),
+            tried: remember(|| mutable_state_of(false)),
+            initial: FormDraft::new("ember"),
+            editing: false,
+            computers: Vec::new(),
+            projects: vec!["ember".to_string(), "second-project".to_string()],
+            layout: FormLayout::Sheet,
+        };
+        FormFields(&ctx);
+    }
+
+    /// #596 (3), (4): the 390 sheet pairs 프로젝트 and 트리거 in one row, as the mockup's 390
+    /// form (`routines-edit-390-light`), instead of one field and wrapped chips per row.
+    #[test]
+    fn issue_596_phone_sheet_pairs_project_and_trigger() {
+        let _guard = crate::services::test_guard();
+        let nodes = nodes_of(sample_sheet_form);
+        let parent_of = |id: Option<u32>| id.and_then(|id| nodes.iter().find(|n| n.id == id)).and_then(|n| n.parent);
+        let label = |text: &str| -> Option<u32> {
+            let want = format!("Text=String({text:?})");
+            Some(nodes.iter().find(|n| n.props.contains(&want)).unwrap_or_else(|| panic!("no {text}")).id)
+        };
+        for (a, b) in [("프로젝트", "트리거"), ("일정 설명", "cron")] {
+            let (la, lb) = (label(a), label(b));
+            // Each field has a column of its own, and the two columns share one row.
+            assert_ne!(parent_of(la), parent_of(lb), "{a} and {b} sit in their own columns");
+            let (ra, rb) = (parent_of(parent_of(la)), parent_of(parent_of(lb)));
+            assert!(ra.is_some(), "{a} has a row");
+            assert_eq!(ra, rb, "{a} and {b} share a row");
+        }
+    }
+
+    /// #596 (6): every select of the routine form is named by its field label for assistive
+    /// technology (`NamedSelect`, compose-rust#460 fixed in v0.0.7), not only by its value.
+    #[test]
+    fn issue_596_form_selects_are_named_by_their_label() {
+        let src = source();
+        let fields = src.split("fn FormFields(").nth(1).unwrap().split("\nfn FormLabel(").next().unwrap();
+        for name in ["프로젝트", "트리거", "하네스 · 모델 · 추론 강도", "권한 모드"] {
+            assert!(fields.contains(&format!("NamedSelect(\"{name}\", &")), "{name}");
+        }
+        assert!(!fields.contains("                Select(&") && !fields.contains("                    Select(&"), "no unnamed select");
+    }
+
     /// R2: 편집 has a pencil and 지금 실행 a play glyph, 13/500, in every header layout.
     #[test]
     fn design_r2_detail_buttons_carry_glyphs() {
@@ -4846,7 +5131,8 @@ mod design_review_tests {
     #[test]
     fn design_r5_agent_tile_has_the_character() {
         let src = source();
-        assert_eq!(src.matches("AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project);").count(), 2);
+        // Each call sits in a `TileCell` since the tiles in a row share one height (#848).
+        assert_eq!(src.matches("TileCell(move || AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project));").count(), 2);
         let kv = src.split("fn AgentKeyValue(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(kv.contains("Character(agent, false, 20.0"));
     }

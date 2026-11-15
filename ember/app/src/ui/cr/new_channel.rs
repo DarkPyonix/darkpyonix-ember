@@ -128,12 +128,15 @@ fn all_sessions() -> Vec<ember_client::wire::SessionRecord> {
 /// then says why nothing is created. The overlay button gives it the accessible name and focus,
 /// set with `accessible_name` (compose-rust v0.0.7, #429). v0.0.7: #425 fixed
 /// (`Button::content`); workaround kept until checked on a display (the `+` glyph inside a
-/// `Button` content slot must keep the 32 px ring and the demo dimming).
+/// `Button` content slot must keep the 32 px ring).
+///
+/// The button is the mockup's `.icon-btn.sm` at full opacity in every mode (review row CH6,
+/// #894): it is never disabled, so it is not dimmed; in demo mode the toast and the accessible
+/// name say why nothing is created.
 pub fn NewChannelButton(st: &NewChannelState, live: bool, filter: Option<String>) {
     let p = ember_theme().palette;
     let st = st.clone();
     let label = if live { "새 채널".to_string() } else { format!("새 채널, {DEMO_NO_CREATE}") };
-    let alpha = if live { 1.0 } else { 0.4 };
     cu::Box()
         .alignment(Alignment::Center)
         .modifier(
@@ -141,8 +144,7 @@ pub fn NewChannelButton(st: &NewChannelState, live: bool, filter: Option<String>
                 .size(H_CTL, H_CTL)
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
-                .shape_role(ShapeRole::Full)
-                .alpha(alpha),
+                .shape_role(ShapeRole::Full),
         )
         .content(|| {
             super::shell::NavIcon(super::shell::ICON_PLUS_SVG, p.text_2.to_argb(), 16.0);
@@ -332,5 +334,63 @@ pub fn NewChannelSheet(st: &NewChannelState, rooms: &[Room], feed: Option<Feed>,
                 AppButton("닫기", None, ButtonKind::Primary, true, true, false, move || s.close());
             });
         });
+    }
+}
+
+/// Review row CH6 (#894): what the list header's "+" sends to the toolkit.
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use compose_rust::protocol::{decode_batch, Mutation};
+    use compose_rust::{Host, Recomposer};
+
+    /// Every modifier and property the button sends, as debug text.
+    fn sent(live: bool) -> (Vec<String>, Vec<String>) {
+        let mut host = Host::new(move || {
+            Box::new(Recomposer::new(move || {
+                let st = NewChannelState::new();
+                NewChannelButton(&st, live, None);
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let (mut mods, mut props) = (Vec::new(), Vec::new());
+        for m in batch.iter() {
+            match m {
+                Mutation::SetModifier { modifier, .. } => mods.push(format!("{modifier:?}")),
+                Mutation::SetProp { property, value, .. } => props.push(format!("{property:?}={value:?}")),
+                _ => {}
+            }
+        }
+        (mods, props)
+    }
+
+    #[test]
+    fn fr_l12_new_channel_button_keeps_full_opacity_in_demo_mode() {
+        let _guard = crate::services::test_guard();
+        for live in [false, true] {
+            let (mods, _) = sent(live);
+            assert!(!mods.is_empty(), "the button sends its ring");
+            assert!(!mods.iter().any(|m| m.starts_with("Alpha(")), "live={live}: the button is dimmed: {mods:?}");
+        }
+        let src = include_str!("new_channel.rs");
+        let src = &src[..src.find("mod review_tests {").unwrap()];
+        let button = &src[src.find("pub fn NewChannelButton(").unwrap()..];
+        let button = &button[..button.find("\n}\n").unwrap()];
+        assert!(!button.contains(".alpha("));
+        // `.icon-btn.sm`: 32 px, `surface`, a 1 px `line` border, a `text-2` glyph.
+        assert!(button.contains(".size(H_CTL, H_CTL)"));
+        assert!(button.contains(".background(paint(p.surface))"));
+        assert!(button.contains(".border(1.0, paint(p.line))"));
+        assert!(button.contains("NavIcon(super::shell::ICON_PLUS_SVG, p.text_2.to_argb(), 16.0);"));
+    }
+
+    #[test]
+    fn fr_l12_new_channel_button_says_why_in_demo_mode() {
+        let _guard = crate::services::test_guard();
+        let (_, demo) = sent(false);
+        let name = format!("AccessibleName=String({:?})", format!("새 채널, {DEMO_NO_CREATE}"));
+        assert!(demo.contains(&name), "the demo name carries the reason: {demo:?}");
+        let (_, live) = sent(true);
+        assert!(live.contains(&"AccessibleName=String(\"새 채널\")".to_string()), "{live:?}");
     }
 }

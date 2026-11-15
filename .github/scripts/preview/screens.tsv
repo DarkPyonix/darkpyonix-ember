@@ -1,0 +1,37 @@
+# Screen table for side-by-side.sh (FR-L37, #222). Tab separated, one row per client screen.
+# Columns: name, app route (EMBER_CR_ROUTE), extra app env (space separated), mockup page with
+# its hash, mockup localStorage (key=value pairs joined by ';'), mockup action (JavaScript run
+# after load). A lone '-' means none. A '-' in the mockup page column means the mockup has no
+# state with a deterministic entry for that screen: the app is captured alone and no pair is made.
+home	home	-	home.html	-	-
+project-list	project	-	project.html	-	-
+project-detail	project-detail	-	project.html#ember	-	-
+project-sheet-new	project	EMBER_CR_PROJECT_SHEET=new	project.html	-	document.querySelector('[data-act=pnew]').click()
+project-sheet-settings	project	EMBER_CR_PROJECT_SHEET=settings	project.html	-	document.querySelector('[data-psettings]').click()
+sessions-multi	session	EMBER_CR_SESSION_VIEW=multi	conversation.html#p:ember	ember-mock-view:ember=multi	-
+sessions-single	session	EMBER_CR_SESSION_VIEW=single	conversation.html#p:ember	ember-mock-view:ember=single	-
+sessions-status	session	EMBER_CR_SESSION_VIEW=status	conversation.html#p:ember	ember-mock-view:ember=status	-
+conversation-single	conversation	EMBER_CR_SESSION_VIEW=single	conversation.html#s1	-	-
+channels-list	channels	-	channels.html	-	-
+channels-room	channels	EMBER_CR_ROOM=0	channels.html#r1	-	-
+vcs-changes	vcs	EMBER_CR_VCS_SECTION=changes	vcs.html#ember/changes	-	-
+vcs-history	vcs	EMBER_CR_VCS_SECTION=history	vcs.html#ember/history	-	-
+vcs-branches	vcs	EMBER_CR_VCS_SECTION=branches	vcs.html#ember/branches	-	-
+vcs-prs	vcs	EMBER_CR_VCS_SECTION=prs	vcs.html#ember/prs	-	-
+vcs-stash	vcs	EMBER_CR_VCS_SECTION=stash	vcs.html#ember/stash	-	-
+vcs-conflict	vcs	EMBER_CR_VCS_SECTION=conflict	vcs.html#ember/conflict	-	-
+vcs-team	vcs	EMBER_CR_VCS_SECTION=team	vcs.html#ember/team	-	-
+vcs-pr-detail	vcs	EMBER_CR_VCS_SECTION=prs EMBER_CR_VCS_PR=412	vcs.html#ember/prs	-	document.querySelector('[data-vcs=prsel]').click()
+agents-harness	agents	EMBER_CR_AGENTS_SECTION=harness	agents.html#harness	-	-
+agents-models	agents	EMBER_CR_AGENTS_SECTION=models	agents.html#models	-	-
+agents-profiles	agents	EMBER_CR_AGENTS_SECTION=profiles	agents.html#profiles	-	-
+agents-network	agents	EMBER_CR_AGENTS_SECTION=network	agents.html#network	-	-
+agents-usage	agents	EMBER_CR_AGENTS_SECTION=usage	agents.html#usage	-	-
+files	files	-	files.html	-	-
+files-share	files	EMBER_CR_FILES_SHEET=share	files.html	-	document.querySelector('[data-act=fshare]').click()
+routines	routines	-	routines.html	-	-
+routines-detail	routines	EMBER_CR_ROUTINE=0	routines.html#rt1	-	-
+monitor	monitor	-	project.html#ember	-	Ember.monitor.open('mac-mini')
+characters	characters	-	characters.html	-	-
+search	search	-	-	-	-
+new-session	new-session	-	-	-	-

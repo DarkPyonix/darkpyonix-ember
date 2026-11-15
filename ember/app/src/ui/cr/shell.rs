@@ -631,8 +631,9 @@ pub fn shell() {
 
     let content = || {
         cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width().fill_max_height()).content(|| {
-            if cfg!(target_os = "windows") {
-                // Caption strip: an empty drag region, then the width the caption buttons cover.
+            if crate::ui::safe_area::scene_draws_caption(crate::ui::safe_area::current_platform()) {
+                // Caption strip, only where the scene draws the caption buttons: an empty drag
+                // region, then the width they cover. Under `System` the caption is the OS's.
                 cu::Row()
                     .modifier(Modifier::new().fill_max_width().height(WINDOWS_CAPTION_HEIGHT_DP))
                     .content(|| {
@@ -779,16 +780,16 @@ fn requested_size() -> (u16, u16) {
         .unwrap_or((1440, 900))
 }
 
-/// On macOS the window opens with content under the traffic lights (FR-L33, compose-rust
-/// v0.0.6 `Chrome::FullSize`); other systems keep their chrome. Every window asks for a size
+/// Every Ember window takes the same per-system chrome (FR-L33, `safe_area::chrome_for`): macOS
+/// `FullSize` with content under the traffic lights, Windows and Linux the system's own caption
+/// with its real buttons. Every window asks for a size
 /// report on each whole-dp change (compose-rust v0.0.7, #479), because the screens lay out from
 /// `width_dp` and `height_dp`, not only from the size class.
 pub fn window_chrome(window: Window) -> Window {
     let window = window.with_report_size(true);
-    if cfg!(target_os = "macos") {
-        window.with_chrome(compose_rust::schema::Chrome::FullSize)
-    } else {
-        window
+    match crate::ui::safe_area::chrome_for(crate::ui::safe_area::current_platform()) {
+        Some(chrome) => window.with_chrome(chrome),
+        None => window,
     }
 }
 

@@ -5169,7 +5169,7 @@ fn VcsScreenWithLoad(
             let project_name = boxes.iter().find(|b| Some(&b.id) == current.as_ref()).map(|b| b.name.clone()).unwrap_or_default();
             let prs = if sample { Some(sample_pr_count()) } else { pr_count.get() };
             let subtitle = vcs_sheet_subtitle(snap.as_ref(), prs);
-            let phone = ctl.window_w <= VCS_SHEET_PHONE_DP;
+            let phone = vcs_sheet_full_window(ctl.window_w);
             cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
                 if ctl.top_inset > 0.0 {
                     // `.svcs-box{padding-top:env(safe-area-inset-top)}` on a phone: the header
@@ -5222,7 +5222,7 @@ pub struct VcsSheetFrame {
 }
 
 pub fn vcs_sheet_frame(sheet_w: f32, window_w: f32) -> VcsSheetFrame {
-    let phone = window_w <= VCS_SHEET_PHONE_DP;
+    let phone = vcs_sheet_full_window(window_w);
     let pad = if phone { SP[2] } else { SP[3] };
     let rail = sheet_w - 2.0 * pad > 760.0;
     let layout = if phone {
@@ -5235,13 +5235,13 @@ pub fn vcs_sheet_frame(sheet_w: f32, window_w: f32) -> VcsSheetFrame {
     VcsSheetFrame { pad, rail, layout, files_w: 260.0 }
 }
 
-/// The strip the full-screen sheet leaves above its header for the window's own buttons: on a
-/// phone-wide window (below 560, where the sheet is the whole window) the height the macOS
-/// traffic lights cover, as the shell's bottom-tab layout leaves above every screen
-/// (`safe_area::title_strip_height`, FR-L33); none on a wider window, where the sheet floats in
-/// the middle, clear of them.
+/// The strip the full-screen sheet leaves above its header for the window's own buttons: the
+/// shared rule for every full-screen sheet (`full_screen_sheet_top_inset`, FR-L33). The sheet is
+/// a monitor-presented `EmberSheetSized`, the whole window up to 560 inclusive, so it reserves
+/// the height the macOS traffic lights cover there and none on a wider window, where the sheet
+/// floats in the middle, clear of them.
 pub fn vcs_sheet_top_inset(window_w: f32, area: crate::ui::safe_area::SafeArea) -> f32 {
-    if window_w < VCS_SHEET_PHONE_DP { crate::ui::safe_area::title_strip_height(area, true) } else { 0.0 }
+    super::components::full_screen_sheet_top_inset(window_w, true, area)
 }
 
 /// The sheet header's title (`.vcs-mhead b`).
@@ -5364,8 +5364,12 @@ fn shown_section_count(
     })
 }
 
-/// Below this window width the sheet is full screen (`.svcs-box` at 560 px, session.css).
-const VCS_SHEET_PHONE_DP: f32 = 560.0;
+/// Whether the sheet is the whole window (`.svcs-box` at 560 px and below, session.css): the shared
+/// sheet's own boundary for a monitor-presented sheet, so the width, the body height, the header
+/// and the strip all change at the same width as the presentation does (FR-L18, FR-L33).
+fn vcs_sheet_full_window(window_width_dp: f32) -> bool {
+    super::components::sheet_is_full_screen(window_width_dp, true)
+}
 /// The window size assumed while none has been reported (0 dp in the first frame).
 const VCS_SHEET_DEFAULT_WINDOW: (f32, f32) = (1024.0, 720.0);
 /// Header (60 dp) plus its separator (1 dp).
@@ -5389,9 +5393,9 @@ fn vcs_sheet_window(width_dp: f32, height_dp: f32) -> (f32, f32) {
 }
 
 /// The sheet width: 90 percent of the window capped at the monitor width, the whole window
-/// below 560 dp (mockup `.svcs-box`: 90vw, 100vw on a phone).
+/// up to 560 dp (mockup `.svcs-box`: 90vw, 100vw on a phone).
 fn vcs_sheet_width(window_width_dp: f32) -> f32 {
-    if window_width_dp < VCS_SHEET_PHONE_DP {
+    if vcs_sheet_full_window(window_width_dp) {
         window_width_dp
     } else {
         (window_width_dp * 0.9).min(super::components::SHEET_WIDTH_MONITOR)
@@ -5402,7 +5406,7 @@ fn vcs_sheet_width(window_width_dp: f32) -> f32 {
 /// window on a phone. A zero or tiny size is treated as unknown and falls back to 1024 x 720.
 fn vcs_sheet_body_height(width_dp: f32, height_dp: f32) -> f32 {
     let (w, h) = if width_dp > 100.0 && height_dp > 100.0 { (width_dp, height_dp) } else { VCS_SHEET_DEFAULT_WINDOW };
-    let total = if w < VCS_SHEET_PHONE_DP { h } else { h * 0.9 };
+    let total = if vcs_sheet_full_window(w) { h } else { h * 0.9 };
     (total - VCS_SHEET_CHROME_H).max(0.0)
 }
 
@@ -7266,7 +7270,7 @@ mod tests {
     #[test]
     fn fr_l18_vcs_sheet_width_is_ninety_percent_capped() {
         assert_eq!(vcs_sheet_width(1024.0), 1024.0 * 0.9);
-        assert_eq!(vcs_sheet_width(560.0), 504.0);
+        assert_eq!(vcs_sheet_width(561.0), 561.0 * 0.9);
         assert_eq!(vcs_sheet_width(1440.0), 1296.0);
         assert_eq!(vcs_sheet_width(2400.0), super::super::components::SHEET_WIDTH_MONITOR);
     }
@@ -7292,6 +7296,16 @@ mod tests {
         assert_eq!(vcs_sheet_body_height(390.0, 844.0), 844.0 - 61.0);
         // Full screen: the shared sheet takes the whole window for a monitor-style sheet at <= 560.
         assert_eq!(super::super::components::sheet_max_height(390.0, 844.0, true), 844.0);
+    }
+
+    #[test]
+    fn fr_l18_vcs_sheet_geometry_changes_where_the_presentation_does() {
+        // `sheet_presentation` makes a monitor sheet the whole window up to 560 inclusive.
+        assert_eq!(vcs_sheet_width(560.0), 560.0, "the whole window at 560");
+        assert_eq!(vcs_sheet_body_height(560.0, 844.0), 844.0 - 61.0);
+        assert_eq!(vcs_sheet_width(561.0), 561.0 * 0.9, "floating from 561");
+        assert_eq!(vcs_sheet_body_height(561.0, 844.0), 844.0 * 0.9 - 61.0);
+        assert!(vcs_sheet_frame(560.0, 560.0).pad < vcs_sheet_frame(vcs_sheet_width(561.0), 561.0).pad, "the phone padding at 560 only");
     }
 
     #[test]
@@ -7415,7 +7429,8 @@ mod tests {
         let lights = SafeArea { top: 28.0, leading: 72.0, trailing: 0.0 };
         assert_eq!(vcs_sheet_top_inset(390.0, lights), 28.0);
         assert_eq!(vcs_sheet_top_inset(559.0, lights), 28.0);
-        assert_eq!(vcs_sheet_top_inset(560.0, lights), 0.0, "the sheet floats from 560");
+        assert_eq!(vcs_sheet_top_inset(560.0, lights), 28.0, "the whole window up to 560, as `sheet_presentation`");
+        assert_eq!(vcs_sheet_top_inset(561.0, lights), 0.0, "the sheet floats from 561");
         assert_eq!(vcs_sheet_top_inset(1440.0, lights), 0.0);
         assert_eq!(vcs_sheet_top_inset(390.0, SafeArea::default()), 0.0, "nothing to clear");
         let _guard = crate::services::test_guard();

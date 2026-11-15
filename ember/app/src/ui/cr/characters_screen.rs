@@ -24,8 +24,8 @@ use super::theme::*;
 use crate::services::{run_shared, services};
 use crate::ui::characters::{
     apply_character_override, build_character_override, characters_project, editor_save_needed, effective_character_overrides,
-    harness_label, state_label, style_apply_needed, supports_pin, team_cols, team_preview, updated_character_overrides,
-    with_topic, EDITOR_HARNESSES, EDITOR_ROLES, SILHOUETTES,
+    harness_label, page_width, state_label, style_apply_needed, supports_pin, team_cols, team_preview, updated_character_overrides,
+    with_topic, EDITOR_HARNESSES, EDITOR_ROLES, LEAD_MAX_W, PAGE_MAX_W, SILHOUETTES,
 };
 use crate::ui::coexist::shared_ui;
 use crate::ui::project::{effective_style, patch_error_message};
@@ -318,8 +318,13 @@ pub fn CharactersScreen() {
         }
     }
 
+    // `.wrapx`: the content is at most 1148 dp wide and centred; a narrower room is used whole.
+    let room = super::home::content_width(width, SP[4]);
+    let page_w = page_width(room);
+    let page = if room > PAGE_MAX_W { Modifier::new().width(page_w) } else { Modifier::new().fill_max_width() };
     cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-        cu::Column().spacing(SP[5]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+        cu::Column().alignment(Alignment::TopCenter).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+        cu::Column().spacing(SP[5]).modifier(page).content(|| {
             if start == CaptureStart::Top {
                 // Back to where it was opened from; no sidebar entry (D26).
                 cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -332,7 +337,10 @@ pub fn CharactersScreen() {
                 });
                 cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                     Label("팀 캐릭터", if compact { Fs::Xl } else { Fs::Xl2 }, Weight::Regular, None, Some(1));
-                    Label(LEAD, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                    // `.lead{max-width:820px}`.
+                    cu::Column().modifier(Modifier::new().width(LEAD_MAX_W.min(page_w))).content(|| {
+                        Label(LEAD, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                    });
                     let sub = match &project {
                         Some(n) => format!("{n} 프로젝트의 스타일은 {}입니다.", current.label()),
                         None => "프로젝트가 아직 없어 기본 스타일로 보여 드립니다.".to_string(),
@@ -627,6 +635,7 @@ pub fn CharactersScreen() {
                 }
             });
         });
+        });
     });
 }
 
@@ -810,6 +819,21 @@ mod tests {
         }
         // The editor's style select follows the team style until it is picked on its own.
         assert!(last.iter().any(|(_, t)| t == "포켓"), "the editor style did not change to 포켓: {last:?}");
+    }
+
+    #[test]
+    fn fr_l22_page_width_caps_the_content_and_the_lead() {
+        // Review row CR3: `.wrapx` and `.lead` of `characters.html`.
+        let src = include_str!("characters_screen.rs");
+        let src = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(src.contains("let page_w = page_width(room);"));
+        assert!(src.contains("let page = if room > PAGE_MAX_W { Modifier::new().width(page_w) } else { Modifier::new().fill_max_width() };"));
+        assert!(src.contains("cu::Column().alignment(Alignment::TopCenter).modifier(Modifier::new().fill_max_width().padding(SP[4]))"));
+        assert!(src.contains("cu::Column().spacing(SP[5]).modifier(page).content(|| {"));
+        assert!(src.contains("Modifier::new().width(LEAD_MAX_W.min(page_w))"));
+        // The screen still composes with the cap in place.
+        let _guard = crate::services::test_guard();
+        assert!(rendered().contains("팀 캐릭터"));
     }
 
     #[test]

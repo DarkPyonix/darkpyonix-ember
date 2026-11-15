@@ -17,7 +17,9 @@ pub mod egress_proxy;
 pub mod enrol_door;
 pub mod events;
 pub mod fork;
-pub mod fs_kind;
+/// Local disk or network share (SPEC FR-L31.24): the code is `ember_node::fs_kind`, which the OSE
+/// manager uses on both sides (#896).
+pub use ember_node::fs_kind;
 pub mod guest_door;
 pub mod history;
 pub mod mcp;

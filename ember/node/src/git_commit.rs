@@ -12,6 +12,8 @@ use crate::policy::PathPolicy;
 pub const MAX_FILES: usize = 500;
 /// Characters of the commit message body kept.
 pub const MAX_BODY_CHARS: usize = 20000;
+/// Characters of git's own text kept in a debug log line.
+pub const MAX_LOG_CHARS: usize = 500;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GitCommitShowRequest {
@@ -168,6 +170,15 @@ pub(super) fn cut_chars(text: &str, max: usize) -> String {
     }
 }
 
+/// Cap git's own output before logging it at `debug`.
+pub(super) fn clip_log(text: &str) -> String {
+    let trimmed = text.trim();
+    match trimmed.char_indices().nth(MAX_LOG_CHARS) {
+        Some((at, _)) => format!("{}...", &trimmed[..at]),
+        None => trimmed.to_owned(),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Operations
 
@@ -230,8 +241,9 @@ pub(super) async fn run_k(dir: &Path, args: &[&str], too_big: &str) -> Result<Ou
         return Err(GitError::TooLarge(too_big.to_owned()));
     }
     if o.code != 0 {
-        tracing::debug!(git_text = %message(&o), "git call failed");
-        return Err(GitError::Conflict(failure_message(&message(&o)).to_owned()));
+        let msg = message(&o);
+        tracing::debug!(git_text = %clip_log(&msg), "git call failed");
+        return Err(GitError::Conflict(failure_message(&msg).to_owned()));
     }
     Ok(o)
 }
@@ -328,15 +340,15 @@ async fn act(policy: &PathPolicy, r: &GitCommitActionRequest, action: Action) ->
     let out = run(&dir, &args, None).await?;
     if out.code != 0 {
         let combined = format!("{}\n{}", out.stderr.trim(), out.stdout.trim());
-        tracing::debug!(git_text = %combined.trim(), verb, "git operation failed");
+        tracing::debug!(git_text = %clip_log(&combined), verb, "git operation failed");
         let msg = failure_message(&combined);
         // Abort only an operation this call started: the pre-check made sure none was there
         // before, so a leftover state now is ours. A failure before it started (a lock, say)
-        // leaves nothing to abort.
-        if in_progress(&dir).await.unwrap_or(true) {
+        // leaves nothing to abort, and a probe error never triggers a blind `--abort`.
+        if in_progress(&dir).await.unwrap_or(false) {
             let abort = run(&dir, &[NO_HOOKS[0], NO_HOOKS[1], verb, "--abort"], None).await?;
             if abort.code != 0 {
-                tracing::debug!(git_text = %message(&abort), verb, "git abort failed");
+                tracing::debug!(git_text = %clip_log(&message(&abort)), verb, "git abort failed");
             }
             return Err(abort_outcome(abort.code, msg));
         }
@@ -346,7 +358,7 @@ async fn act(policy: &PathPolicy, r: &GitCommitActionRequest, action: Action) ->
         if now.code == 0 && now.stdout.trim() == before {
             let reset = run(&dir, &["reset", "--hard", "-q", &before], None).await?;
             if reset.code != 0 {
-                tracing::debug!(git_text = %message(&reset), verb, "git reset after failure failed");
+                tracing::debug!(git_text = %clip_log(&message(&reset)), verb, "git reset after failure failed");
             }
         }
         return Err(GitError::Conflict(msg.to_owned()));
@@ -448,5 +460,14 @@ mod tests {
     fn fr_g14_control_characters_are_stripped() {
         assert_eq!(strip_controls("a\x1b[31mb\x07c\r\nd\te\u{7f}", true), "a[31mbc\nd\te");
         assert_eq!(strip_controls("x\ny\tz\x00", false), "xyz");
+    }
+
+    #[test]
+    fn fr_g15_debug_log_text_is_capped_at_character_boundary() {
+        let long = "가".repeat(MAX_LOG_CHARS + 50);
+        let clipped = clip_log(&long);
+        assert_eq!(clipped.chars().count(), MAX_LOG_CHARS + 3);
+        assert!(clipped.ends_with("..."));
+        assert_eq!(clip_log("  short\n "), "short");
     }
 }

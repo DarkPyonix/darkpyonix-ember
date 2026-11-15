@@ -1087,6 +1087,16 @@ pub fn default_chips(accounts: &[AccountInfo], default_ids: &[String], store: &L
     DefaultChips { harness, model: harness.and(store.default_model.clone()), account }
 }
 
+/// The chips with the account picked in the demo (or the sample) in place of the server's
+/// default: the demo calls no server, so the pick shows on this screen only, as the harness pick
+/// does (review r8: the account chip stayed 아직 정하지 않았습니다 after a pick).
+pub fn with_local_account(mut chips: DefaultChips, picked: Option<String>) -> DefaultChips {
+    if picked.is_some() {
+        chips.account = picked;
+    }
+    chips
+}
+
 fn mark(text: String, example: bool) -> String {
     if example { format!("{text} ({EXAMPLE_MARK})") } else { text }
 }
@@ -2132,6 +2142,18 @@ mod tests {
         let chips = default_chips(&[], &[], &chosen);
         assert_eq!(harness_chip_text(&chips, |_, m| m.to_uppercase(), false), "Codex · GPT-5");
         assert_eq!(harness_chip_text(&chips, |_, m| m.to_uppercase(), true), "Codex · GPT-5 (예시)");
+    }
+
+    #[test]
+    fn fr_l20_a_demo_account_pick_shows_on_the_chip() {
+        let chips = default_chips(&[], &[], &LocalStore::new());
+        assert_eq!(with_local_account(chips.clone(), None), chips, "no pick, the server's answer");
+        let picked = with_local_account(chips, Some("Claude Max".into()));
+        assert_eq!(picked.account.as_deref(), Some("Claude Max"));
+        assert_eq!(account_chip_text(&picked, 5, true), format!("Claude Max ({EXAMPLE_MARK})"));
+        let src = include_str!("cr/agents.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(src.contains("crate::ui::agents::with_local_account(chips, local_account.get())"));
+        assert!(src.contains("picked.set(labels.get(i).cloned());"));
     }
 
     #[test]

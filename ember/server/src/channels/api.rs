@@ -179,6 +179,8 @@ impl IntoResponse for ChannelError {
             ChannelError::Coded(code, _) => {
                 let status = if matches!(*code, "rate_limited" | "quota_exceeded") {
                     StatusCode::TOO_MANY_REQUESTS
+                } else if *code == "name_taken" {
+                    StatusCode::CONFLICT
                 } else {
                     StatusCode::BAD_REQUEST
                 };

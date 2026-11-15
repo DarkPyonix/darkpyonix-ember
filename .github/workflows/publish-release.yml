@@ -161,6 +161,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libxext-dev libgl1-mesa-dev libfontconfig1-dev libfreetype-dev
       - name: Build ember-app
         run: cd ember/app && cargo build --release --locked
+      # Windows' default main-thread stack is 1 MiB and the renderer overflowed it in v0.1.0 (#880).
+      - name: The main thread stack is 16 MiB (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: python .github/scripts/checks/pe-stack-reserve.py ember/app/target/release/ember-app.exe --min-bytes 16777216
       - uses: actions/checkout@v5
         with:
           repository: DarkPyonix/compose-rust

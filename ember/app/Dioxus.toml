@@ -20,6 +20,9 @@ bundle_name = "Ember"
 
 # What compose-rust's Linux packager needs beyond dx's own keys (the AppImage's AppStream
 # file). The licence is this repository's (LICENSE, Cargo.toml).
+[linux]
+categories = ["Development"]
+
 [linux.store]
 license = "Apache-2.0"
 homepage = "https://github.com/DarkPyonix/darkpyonix-ember"

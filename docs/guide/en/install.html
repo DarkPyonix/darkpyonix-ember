@@ -98,7 +98,7 @@ tar -xzf ember-server-v0.1.0-macos-arm64.tar.gz</code></pre>
       <li>Open the downloaded file. Android asks first: allow installs from that app (the browser or the file manager) in the screen it opens, go back, and choose Install.</li>
       <li>Or, from a computer with <code>adb</code>: <code>adb install ember-app-&lt;tag&gt;-android-arm64.apk</code>.</li>
     </ol>
-    <p>The release notes say how the APK is signed. Until the project has a release key, it is <strong>debug-signed</strong> with a key that changes with every release, so a newer APK does not install over an older one: uninstall Ember first. Uninstalling deletes the app's data, including its device key, so the phone gets a new peer id and has to be allowed on the server again (<a href="#server-outside">A device outside your network</a>).</p>
+    <p>The release notes say how the APK is signed. Until the project has a release key, it is <strong>debug-signed</strong> with a key that is not kept from one release to the next, so a newer APK does not install over an older one: uninstall Ember first. Uninstalling deletes the app's data, including its device key, so the phone gets a new peer id and has to be allowed on the server again (<a href="#server-outside">A device outside your network</a>).</p>
 
     <h2 id="checkout">Get the code</h2>
     <p>

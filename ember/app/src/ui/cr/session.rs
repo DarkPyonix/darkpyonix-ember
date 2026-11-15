@@ -5353,6 +5353,7 @@ mod tests {
         let boxes = services().client.read(|s| project_boxes(s));
         let current = boxes.first().map(|b| b.id.clone()).unwrap_or_default();
         let rows = project_switch_rows(&boxes, &current);
+        assert!(!boxes.is_empty(), "the demo has projects, so the rows below are checked");
         assert_eq!(rows.len(), boxes.len());
         assert_eq!(rows.iter().filter(|r| r.chosen).count(), usize::from(!boxes.is_empty()));
         assert!(rows.iter().all(|r| r.icon.is_some() && r.description.as_deref().is_some_and(|d| d.starts_with("팀원 "))));

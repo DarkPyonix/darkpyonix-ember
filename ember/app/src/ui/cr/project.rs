@@ -11,10 +11,10 @@
 
 #![allow(non_snake_case)]
 
-use compose_rust::runtime::{mutable_state_of, remember, remember_with_key, MutableState};
+use compose_rust::runtime::{launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, IconRole, ShapeRole};
+use compose_rust::{Alignment, IconRole, ShapeRole};
 
 use ember_client::wire::Project;
 use ember_client::LauncherStatus;
@@ -30,7 +30,7 @@ use super::characters::{CharState, Character, StylePicker};
 use crate::ui::characters::CharStyle;
 use super::components::{
     AppButton, ButtonKind, Clickable, NamedClickable, EmberField, EmberSheet, FieldOptions, FilterChip,
-    IconButton, Label, Pill, PillTone, PopKind, PopMenu, PopoverMenu, SearchField, Select, SheetFooter,
+    IconButton, InkIconButton, Label, Pill, PillTone, PopKind, PopMenu, PopoverMenu, SearchField, SearchFieldFocus, Select, SheetFooter,
 };
 use super::home::{content_width, fit_label, ring_image, text_px, Cols, Part};
 use super::notice;
@@ -359,6 +359,9 @@ pub fn search_field_visible(w: f32, open: bool) -> bool {
     w > 900.0 || open
 }
 
+/// The side of the header's search glyph (the mockup's 18 px icon in a 40 px `.icon-btn`).
+pub const SEARCH_GLYPH: f32 = 18.0;
+
 /// Whether the search icon button is drawn: only at 900 dp and below (the mockup hides it above).
 pub fn search_icon_visible(w: f32) -> bool {
     w <= 900.0
@@ -379,14 +382,26 @@ fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
     if search_icon_visible(w) {
         let o = st.search_open.clone();
         let q = st.query.clone();
-        // v0.0.7: #428 and #429 fixed (`accessible_name`, `Modifier::expanded`); workaround kept
-        // until checked on a display (`IconButton` takes a toolkit glyph and no name yet, see
-        // components.rs), so the name "팀원 검색 열기" and the expanded state are not set.
-        IconButton(IconRole::Search, false, move || {
-            let (open, query) = toggle_search(o.get_untracked(), &q.get_untracked());
-            o.set(open);
-            q.set(query);
-        });
+        // The app's own search glyph in the 40 px ring (`.icon-btn`), named 팀원 검색 열기, and
+        // it says whether the search row it opens is open (compose-rust#428, #429). It was the
+        // toolkit glyph with no name and no state.
+        let p = ember_theme().palette;
+        NamedClickable(
+            super::a11y::OPEN_MEMBER_SEARCH,
+            Modifier::new()
+                .size(H_BTN, H_BTN)
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .shape_role(ShapeRole::Full)
+                .expanded(st.search_open.get()),
+            Alignment::Center,
+            move || {
+                let (open, query) = toggle_search(o.get_untracked(), &q.get_untracked());
+                o.set(open);
+                q.set(query);
+            },
+            move || NavIcon(shell::ICON_SEARCH_SVG, p.text_2.to_argb(), SEARCH_GLYPH),
+        );
     }
     let n = st.new_project.clone();
     // Enabled in the demo only: it makes a local project there (#218).
@@ -409,17 +424,11 @@ fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
 
 /// 새 팀원: a primary button; a 40 px ink circle on a phone.
 fn NewMemberButton(ui: &SharedUi, project: Option<String>, w: f32) {
-    let p = ember_theme().palette;
     let u = ui.clone();
     if w > 560.0 {
         AppButton("새 팀원", Some(IconRole::Add), ButtonKind::Primary, false, true, false, move || u.open_new_session(project.clone()));
     } else {
-        cu::Button("")
-            .icon(IconRole::Add)
-            .variant(ButtonVariant::Text)
-            .color(paint(p.ink_text))
-            .modifier(Modifier::new().size(H_BTN, H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full))
-            .on_click(move || u.open_new_session(project.clone()));
+        InkIconButton(IconRole::Add, move || u.open_new_session(project.clone()));
     }
 }
 
@@ -429,12 +438,16 @@ fn Grid(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi, w:
     let shown: Vec<&ProjectBox> = boxes.iter().filter(|b| box_matches(b, &query)).collect();
     Header("프로젝트", "프로젝트를 누르면 세션으로 들어가 팀원들의 대화를 함께 봅니다.", w <= 560.0, || ListActions(st, ui, w));
     if w <= 900.0 && search_field_visible(w, st.search_open.get()) {
-        // TODO: focus the field on open (compose-rust#410 `FocusHandle` and
-        // `Batch::request_focus`, in v0.0.7; not wired yet).
+        // The row is drawn only while the search icon has it open, so composing it is the
+        // opening: the field takes the focus then (compose-rust#410). The request runs as an
+        // effect, after the batch that creates the field's node; one made earlier is dropped.
         let q = st.query.clone();
-        cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
-            SearchField("팀원 검색", H_BTN, move |v| q.set(v));
+        let focus = cu::use_focus_handle();
+        let field = focus.clone();
+        cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+            SearchFieldFocus("팀원 검색", H_BTN, Some(field), move |v| q.set(v));
         });
+        launched_effect((), move || async move { focus.request() });
     }
     ComputerStrip(chips, st);
     if shown.is_empty() {
@@ -582,9 +595,8 @@ fn TeamDonut(members: &[Member], size: f32) {
 
 /// `.pbox`: the header (ring, name and repository, actions, stats) and, below a rule, the
 /// full-width `surface-2` team area.
-/// v0.0.7: #392 fixed (`Modifier::corner_radii` and `clip`); workaround kept until checked on a
-/// display (the team area is a rounded box over the card's bottom corners, so its top corners are
-/// rounded too, until the card clips it).
+/// The team area is square at the top, under the rule, and takes the card's radius at the bottom
+/// (`Modifier::corner_radii`, compose-rust#392); it was a box rounded at all four corners.
 fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
     let p = ember_theme().palette;
     let expanded = st.expanded.get().contains(&b.id);
@@ -622,7 +634,7 @@ fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
                 });
                 cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                 cu::Box()
-                    .modifier(Modifier::new().fill_max_width().background(paint(p.surface_2)).corner_radius(CORNER_XL).padding(SP[3]))
+                    .modifier(Modifier::new().fill_max_width().background(paint(p.surface_2)).corner_radii([0.0, 0.0, CORNER_XL, CORNER_XL]).padding(SP[3]))
                     .content(|| {
                         cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                             if total == 0 {
@@ -1179,7 +1191,7 @@ pub(super) fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: 
         // FR-L32.1 (#876, #878): 취소/만들기 sit in the header as the mockup's `.sheet-acts`
         // (`project.js` projNew), so the body leaves room for the header only and the buttons
         // never fall below a scrolling body at 390.
-        // TODO(compose-rust#778): cap the body at this height instead of fixing it.
+        // TODO(compose-rust#778, after v0.0.10): cap the body at this height instead of fixing it.
         let new_window = crate::ui::window_size::current_window_size();
         let new_body_height = super::components::sheet_body_max_height(
             new_window.width_dp,
@@ -1406,7 +1418,7 @@ pub fn new_project_fields_stacked(window_width_dp: f32) -> bool {
 /// 40 px field, 12 apart; 8 between the section's rows); 16; the
 /// 팀 캐릭터 section (its rule, 8, the title, a two-line hint and the picker for `columns`, 8
 /// apart); each of `notes` (the branch hint, errors, the failure) at two lines and 16 above.
-/// An estimate, not a measurement: TODO(compose-rust#778) a body capped at the room would make
+/// An estimate, not a measurement: TODO(compose-rust#778, after v0.0.10) a body capped at the room would make
 /// it unnecessary.
 pub(crate) fn new_project_body_estimate(columns: usize, stacked: bool, notes: usize) -> f32 {
     let field_row = 18.0 + 4.0 + H_BTN;
@@ -1737,18 +1749,12 @@ pub(super) fn SettingsSheet(
                     // `.ps-chips` of `.ps-check`: a check box, the computer's icon, its name and
                     // the status dot, wrapping. Ticking assigns at once (FR-L4), as before.
                     // TODO(FR-X7): one icon for every kind, because node does not report the kind.
-                    // v0.0.7: #521 fixed (`FlowRow`); workaround kept until checked on a display
-                    // (the toolkit's wrap must match the mockup), so lines are cut by estimated width.
-                    let avail = window.width_dp.min(760.0) - 2.0 * SP[4];
-                    let widths: Vec<f32> = chips.iter().map(|c| crate::ui::project::computer_check_width(&c.name) + 26.0).collect();
-                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        for line in wrap_lines(&widths, SP[1], avail) {
-                            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
-                                for k in line {
-                                    let c = &chips[k];
-                                    ComputerCheck(c, b.computers.contains(&c.id), b.id.clone());
-                                }
-                            });
+                    // The toolkit's `FlowRow` breaks the lines at each chip's real width, 8 apart
+                    // along a line and between lines (compose-rust#521); they were cut by an
+                    // estimated width.
+                    cu::FlowRow().horizontal_spacing(SP[1]).vertical_spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        for c in chips.iter() {
+                            ComputerCheck(c, b.computers.contains(&c.id), b.id.clone());
                         }
                     });
                 });
@@ -1947,12 +1953,10 @@ fn LeaderOption(m: &Member) {
         .alignment(Alignment::CenterStart)
         .modifier(Modifier::new().fill_max_width().padding(10.0).border(1.0, paint(if m.leader { p.ink } else { p.line })).corner_radius(CORNER_MD))
         .content(|| {
-            // TODO(compose-rust#545): no RadioButton; a ring with a filled centre stands in.
-            cu::Box().alignment(Alignment::Center).modifier(Modifier::new().size(16.0, 16.0).border(1.5, paint(p.text_2)).shape_role(ShapeRole::Full)).content(|| {
-                if m.leader {
-                    cu::Spacer().modifier(Modifier::new().size(8.0, 8.0).background(paint(p.ink)).shape_role(ShapeRole::Full));
-                }
-            });
+            // The toolkit's radio button in the mockup's colours and size (compose-rust#545),
+            // named by its member. It takes no `on_change`: the Host owns the value, so a press
+            // changes nothing until the server takes a leader (TODO(#384)).
+            cu::RadioButton(m.leader).ring_color(paint(p.text_2)).dot_color(paint(p.ink)).size(16.0).accessible_name(m.name.as_str());
             cu::Column().spacing(2.0).modifier(Modifier::new().weight(1.0)).content(|| {
                 Label(&m.name, Fs::Sm, Weight::Semibold, None, Some(1));
                 Label(&m.task, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
@@ -2017,6 +2021,78 @@ mod tests {
             leader: false,
             updated_at: 0,
         }
+    }
+
+    #[test]
+    fn the_leader_mark_is_the_toolkit_radio_and_the_opened_search_row_asks_for_focus() {
+        // compose-rust#545 (#673): `.ps-lead` draws the toolkit `RadioButton` in the mockup's
+        // colours and size, in place of a ring with a filled centre. The Host owns its value.
+        let _guard = crate::services::test_guard();
+        let sent = |leader: bool| -> Vec<String> {
+            let mut host = Host::new(move || {
+                Box::new(Recomposer::new(move || {
+                    let mut m = member("a", LauncherStatus::Running);
+                    m.leader = leader;
+                    LeaderOption(&m);
+                }))
+            });
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let radio = batch
+                .iter()
+                .find_map(|m| match m {
+                    Mutation::Create { node_id, widget: compose_rust::WidgetKind::RadioButton } => Some(*node_id),
+                    _ => None,
+                })
+                .expect("a toolkit radio button");
+            batch
+                .iter()
+                .filter_map(|m| match m {
+                    Mutation::SetProp { node_id, property, value } if *node_id == radio => Some(format!("{property:?}={value:?}")),
+                    _ => None,
+                })
+                .collect()
+        };
+        let (on, off) = (sent(true), sent(false));
+        assert!(on.iter().any(|p| p == "Checked=Bool(true)"), "{on:?}");
+        assert!(off.iter().any(|p| p == "Checked=Bool(false)"), "{off:?}");
+        for props in [&on, &off] {
+            assert!(props.iter().any(|p| p == "AccessibleName=String(\"m-a\")"), "named by its member: {props:?}");
+            assert!(props.iter().any(|p| p.starts_with("ContainerColor=")), "the ring colour: {props:?}");
+            assert!(props.iter().any(|p| p.starts_with("CheckColor=")), "the dot colour: {props:?}");
+            assert!(props.iter().any(|p| p.starts_with("ControlSize=")), "16 dp: {props:?}");
+        }
+        let production = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        let lead = production.split("fn LeaderOption(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(lead.contains("cu::RadioButton(m.leader).ring_color(paint(p.text_2)).dot_color(paint(p.ink)).size(16.0)"));
+        assert!(!lead.contains(".border(1.5") && !lead.contains(".on_change("), "no drawn ring is left, and the mark is read only");
+
+        // compose-rust#410 (#673): the search row that the icon opens binds its field to a focus
+        // handle and asks for the focus from an effect, once the field's node exists.
+        let grid = production.split("fn Grid(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(grid.contains("let focus = cu::use_focus_handle();"));
+        assert!(grid.contains("SearchFieldFocus(\"팀원 검색\", H_BTN, Some(field), move |v| q.set(v));"));
+        assert!(grid.contains("launched_effect((), move || async move { focus.request() });"));
+        let field = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(field.contains("f = f.focus_handle(h);"), "EmberField hands the handle to the toolkit field");
+    }
+
+    #[test]
+    fn the_settings_sheet_wraps_its_computer_checks_in_a_flow_row() {
+        // compose-rust#521 (#673): no estimated chip width packs the lines.
+        let production = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("cu::FlowRow().horizontal_spacing(SP[1]).vertical_spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {\n                        for c in chips.iter() {\n                            ComputerCheck(c, b.computers.contains(&c.id), b.id.clone());"));
+        assert!(!production.contains(&["computer_check", "_width"].concat()));
+        assert!(!include_str!("../project.rs").contains(&["fn computer_check", "_width"].concat()), "the estimate is gone from the model too");
+    }
+
+    #[test]
+    fn the_team_area_is_square_under_the_rule_and_round_at_the_cards_bottom() {
+        // compose-rust#392 (#673): per-corner radii, `[top_start, top_end, bottom_end, bottom_start]`.
+        let production = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        let view = production.split("fn ProjectBoxView(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(view.contains(".background(paint(p.surface_2)).corner_radii([0.0, 0.0, CORNER_XL, CORNER_XL]).padding(SP[3])"));
+        assert!(!view.contains(".background(paint(p.surface_2)).corner_radius(CORNER_XL)"));
+        assert_eq!(CORNER_XL, 24.0);
     }
 
     #[test]
@@ -2220,6 +2296,10 @@ mod tests {
         });
         assert!(has_placeholder, "expected inline filter field at 1440dp");
         assert!(!has_search_icon, "no search icon button above 900dp");
+        let has_search_button = batch.iter().any(|m| {
+            matches!(m, Mutation::SetProp { value: PropertyValue::String(s), .. } if *s == crate::ui::cr::a11y::OPEN_MEMBER_SEARCH)
+        });
+        assert!(!has_search_button, "no named search button above 900dp");
         compose_rust::window::reset_window_size();
     }
 
@@ -2230,6 +2310,20 @@ mod tests {
         assert!(!search_field_visible(800.0, false));
         assert!(search_field_visible(800.0, true));
         assert!(search_field_visible(1440.0, false));
+    }
+
+    #[test]
+    fn fr_l26_the_header_search_button_is_named_and_says_whether_its_row_is_open() {
+        // compose-rust#428, #429 (#673): Ember's SVG in the ring, a fixed Korean name and the
+        // expanded state, in place of the unnamed toolkit glyph.
+        let production = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        let actions = production.split("fn ListActions(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(actions.contains("super::a11y::OPEN_MEMBER_SEARCH,"));
+        assert!(actions.contains(".expanded(st.search_open.get()),"));
+        assert!(actions.contains("NavIcon(shell::ICON_SEARCH_SVG, p.text_2.to_argb(), SEARCH_GLYPH)"));
+        assert!(!actions.contains("IconRole::Search"), "no toolkit glyph is left");
+        assert_eq!(crate::ui::cr::a11y::OPEN_MEMBER_SEARCH, "팀원 검색 열기");
+        assert_eq!((H_BTN, SEARCH_GLYPH), (40.0, 18.0));
     }
 
     #[test]
@@ -2279,7 +2373,7 @@ mod tests {
         let sheet = &production[production.find("let new_body_height").unwrap()..production.find("EmberSheet(\"새 프로젝트\"").unwrap()];
         assert!(sheet.contains("super::components::SHEET_HEADER_CHROME_H,\n        )"), "{sheet}");
         assert!(!sheet.contains("SHEET_FOOTER_H"), "{sheet}");
-        assert!(production.contains("TODO(compose-rust#778)"));
+        assert!(production.contains("TODO(compose-rust#778, after v0.0.10)"));
         let body = new_project_sheet_source();
         assert!(body.starts_with("EmberSheet(\"새 프로젝트\", st.new_project.get(), request_close.clone(), Some(&mut new_actions),"), "{body}");
         assert!(!body.contains("SheetFooter("), "{body}");
@@ -2400,7 +2494,7 @@ mod tests {
         assert!(!bottom.contains(".height("), "{bottom}");
         assert!(!bottom.contains("ScrollColumn"), "{bottom}");
         assert!(sheet.contains("super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H"));
-        assert!(sheet.contains("TODO(compose-rust#778)"));
+        assert!(sheet.contains("TODO(compose-rust#778, after v0.0.10)"));
     }
 
     #[test]

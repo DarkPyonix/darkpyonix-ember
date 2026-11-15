@@ -18,7 +18,7 @@ use compose_rust::drawing::DrawList;
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, Color, IconRole, ShapeRole};
+use compose_rust::{Alignment, Color, IconRole, ShapeRole};
 use ember_client::state::Reachability;
 use ember_client::wire::DetectedAgent;
 
@@ -33,7 +33,7 @@ pub use crate::ui::agents::{
 };
 use super::components::{
     AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRowFit, EmberCard, EmberField, FieldOptions, InsetPanel,
-    InsetPanelSized, Label, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu,
+    DataNamedOverlay, InsetPanelSized, Label, NamedClickable, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu,
 };
 use super::theme::*;
 use crate::server::{Account, ChatGptAccount};
@@ -448,16 +448,17 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
                         (Color::argb(0), p.text_2)
                     };
                     let mut on_pick = on_pick.clone();
-                    cu::Box()
-                        .modifier(
-                            Modifier::new()
-                                .width(200.0)
-                                .height(H_BTN)
-                                .background(paint(bg))
-                                .corner_radius(CORNER_SM),
-                        )
-                        .alignment(Alignment::CenterStart)
-                        .content(move || {
+                    // The painted row is the control (`NamedClickable`, compose-rust#429).
+                    NamedClickable(
+                        x.label(),
+                        Modifier::new()
+                            .width(200.0)
+                            .height(H_BTN)
+                            .background(paint(bg))
+                            .corner_radius(CORNER_SM),
+                        Alignment::CenterStart,
+                        move || on_pick(x),
+                        move || {
                             cu::Row().alignment(Alignment::CenterStart).content(|| {
                                 cu::Spacer().modifier(Modifier::new().width(12.0));
                                 super::shell::NavIcon(section_svg(x), fg.to_argb(), 18.0);
@@ -465,8 +466,8 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
                                 Label(x.label(), Fs::Md, Weight::Medium, Some(paint(fg)), Some(1));
                                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                             });
-                            FocusOverlay(x.label(), move || on_pick(x));
-                        });
+                        },
+                    );
                 }
             });
         }
@@ -481,16 +482,17 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
                             (p.surface, p.text_2, p.line)
                         };
                         let mut on_pick = on_pick.clone();
-                        cu::Box()
-                            .modifier(
-                                Modifier::new()
-                                    .height(H_CTL)
-                                    .background(paint(bg))
-                                    .border(1.0, paint(border))
-                                    .shape_role(ShapeRole::Full),
-                            )
-                            .alignment(Alignment::Center)
-                            .content(move || {
+                        // The pill is the control and takes the width of its icon and label.
+                        NamedClickable(
+                            x.label(),
+                            Modifier::new()
+                                .height(H_CTL)
+                                .background(paint(bg))
+                                .border(1.0, paint(border))
+                                .shape_role(ShapeRole::Full),
+                            Alignment::Center,
+                            move || on_pick(x),
+                            move || {
                                 cu::Row().alignment(Alignment::CenterStart).content(|| {
                                     cu::Spacer().modifier(Modifier::new().width(12.0));
                                     super::shell::NavIcon(section_svg(x), fg.to_argb(), 16.0);
@@ -498,8 +500,8 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
                                     Label(x.label(), Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
                                     cu::Spacer().modifier(Modifier::new().width(12.0));
                                 });
-                                FocusOverlay(x.label(), move || on_pick(x));
-                            });
+                            },
+                        );
                     }
                 });
             });
@@ -553,53 +555,20 @@ fn ModelRadio(label: &str, selected: bool, mut on_click: impl FnMut() + 'static)
         .modifier(Modifier::new().size(20.0, 20.0))
         .content(move || {
             cu::Canvas(draw).modifier(Modifier::new().size(20.0, 20.0));
-            FocusOverlay(&radio_label, move || on_click());
+            DataNamedOverlay(&radio_label, true, None, move || on_click());
         });
 }
 
-// v0.0.7: #425 and #429 fixed (`Button::content`, `Modifier::label`); workaround kept until
-// checked on a display (moving each painted row into a `Button` content slot changes its press
-// feedback and padding). The overlay names itself with `accessible_name` (owned), never
-// `Modifier::label`, so a name built from data (a profile, a model) never fills the toolkit's
-// label table (#455).
-/// An accessible invisible button overlay for a painted row, chip, or pill.
-/// Gives assistive tech the item's label and provides keyboard focus and click handling.
-fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
-    FocusOverlayEnabled(label, true, on_click);
-}
-
-fn FocusOverlayEnabled(label: &str, enabled: bool, on_click: impl FnMut() + 'static) {
-    FocusOverlayWith(label, enabled, None, on_click);
-}
-
-/// The overlay button; `expanded` says whether the menu it opens is open (FR-L10.4).
-fn FocusOverlayWith(label: &str, enabled: bool, expanded: Option<bool>, on_click: impl FnMut() + 'static) {
-    let m = Modifier::new().fill_max_size();
-    let m = match expanded {
-        Some(open) => m.expanded(open),
-        None => m,
-    };
-    cu::Button(label)
-        .accessible_name(label)
-        .enabled(enabled)
-        .variant(ButtonVariant::Text)
-        .color(compose_rust::Paint::Literal(Color::argb(0)))
-        .modifier(m)
-        .on_click(on_click);
-}
-
-// TODO(compose-rust#431): the FocusOverlay is a `fill_max_size` Button, and the toolkit has no
-// parent-sized modifier for an overlay, so a chip without a width takes the rest of the row and
-// squeezes the hint beside it to one word per line. compose-rust v0.0.7 (#427) stops the
-// squeeze at a word, not at the overlay: checked on a display 2026-11-13, so the width stays fixed.
-/// A selectable chip matching the mockup's .field.ag-sel: wide enough for the label,
-/// with a 1-line label and an accessible FocusOverlay.
+/// A selectable chip matching the mockup's .field.ag-sel: as wide as its one-line label and the
+/// 14 px at each side. It had a fixed 200 while the button over it was `fill_max_size`, which made
+/// a chip without a width take the rest of the row; the button takes the chip's bounds now
+/// (`match_parent_size`, compose-rust#431). Its name can be data (a profile), so that button
+/// carries it.
 fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     cu::Box()
         .modifier(
             Modifier::new()
-                .width(200.0)
                 .height(H_CTL)
                 .background(paint(p.surface_2))
                 .shape_role(ShapeRole::Full),
@@ -611,13 +580,13 @@ fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
                 Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
                 cu::Spacer().modifier(Modifier::new().width(14.0));
             });
-            FocusOverlay(text, on_click);
+            DataNamedOverlay(text, true, None, on_click);
         });
 }
 
-// TODO(compose-rust#431): as for `SelectChip`, the `fill_max_size` overlay makes a pill without
-// a width take the rest of the row, so the width is estimated with `text_px` and fixed.
-/// A picker pill matching mockup's .pickchip: full pill shape, icon + label, sized to its content.
+/// A picker pill matching mockup's .pickchip: full pill shape, icon + label, sized by its content
+/// (12 px, the icon and 8, the label, 12). Its width was a `text_px` estimate for the reason
+/// [`SelectChip`] gives, and goes with it (compose-rust#431).
 fn ModelPickerPill(text: &str, svg: Option<&'static str>, on_click: impl FnMut() + 'static) {
     MenuPickerPill(text, svg, None, on_click);
 }
@@ -625,15 +594,9 @@ fn ModelPickerPill(text: &str, svg: Option<&'static str>, on_click: impl FnMut()
 /// [`ModelPickerPill`] as the control of a [`PopoverMenu`], saying whether the menu is open.
 fn MenuPickerPill(text: &str, svg: Option<&'static str>, expanded: Option<bool>, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    let width = 12.0
-        + if svg.is_some() { 16.0 + 8.0 } else { 0.0 }
-        + super::home::text_px(text, Fs::Sm.size())
-        + 12.0
-        + 8.0;
     cu::Box()
         .modifier(
             Modifier::new()
-                .width(width.max(72.0))
                 .height(H_CTL)
                 .background(paint(p.surface_2))
                 .shape_role(ShapeRole::Full),
@@ -649,7 +612,7 @@ fn MenuPickerPill(text: &str, svg: Option<&'static str>, expanded: Option<bool>,
                 Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
                 cu::Spacer().modifier(Modifier::new().width(12.0));
             });
-            FocusOverlayWith(text, true, expanded, on_click);
+            DataNamedOverlay(text, true, expanded, on_click);
         });
 }
 
@@ -849,7 +812,7 @@ fn HeadedCard(head: impl FnOnce(), body: impl FnOnce()) {
             cu::Spacer().modifier(Modifier::new().height(PAD_CARD_V));
             cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                 cu::Spacer().modifier(Modifier::new().width(PAD_CARD_H));
-                // A strut: the toolkit has no minimum height (TODO(compose-rust#778)).
+                // A strut: TODO(compose-rust, unfiled: Modifier has no minimum height; #778 caps a height).
                 cu::Spacer().modifier(Modifier::new().height(CARD_HEAD_CONTENT_MIN_H));
                 cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().weight(1.0)).content(head);
                 cu::Spacer().modifier(Modifier::new().width(PAD_CARD_H));
@@ -3591,6 +3554,60 @@ mod tests {
         assert!(!open.is_empty() && !closed.is_empty(), "{open} {closed}");
         assert_ne!(open, closed);
         assert_ne!(closed, plain, "a chip that opens no menu says neither");
+    }
+
+    #[test]
+    fn section_rows_are_the_named_controls_and_data_named_chips_keep_a_matched_button() {
+        // compose-rust#429, #431 (#673): the screen's own overlay functions are gone. A section
+        // row or pill is the control itself; a chip or radio named from data (a profile, a model)
+        // keeps `components::DataNamedOverlay`, which takes its box's bounds and no more.
+        let _guard = crate::services::test_guard();
+        for shape in [NavShape::Side, NavShape::Pills] {
+            let nodes = match shape {
+                NavShape::Side => nodes_of(|| SectionNav(Section::Harness, NavShape::Side, |_| {})),
+                NavShape::Pills => nodes_of(|| SectionNav(Section::Harness, NavShape::Pills, |_| {})),
+            };
+            assert!(!nodes.iter().any(|n| n.widget == "Button"), "{shape:?}: no button over a row");
+            for x in Section::ALL {
+                let want = format!("AccessibleName=String({:?})", x.label());
+                let row = nodes.iter().find(|n| n.props.contains(&want)).unwrap_or_else(|| panic!("{shape:?}: {}", x.label()));
+                assert_eq!(row.widget, "Box");
+                assert!(row.props.iter().any(|p| p.starts_with("OnClick=")), "{:?}", row.props);
+                assert!(row.mods.iter().any(|m| m.starts_with("Semantics") && m.contains("Button")), "{:?}", row.mods);
+                assert_eq!(row.mods.iter().filter(|m| m.starts_with("PressFeedback")).count(), 1, "{:?}", row.mods);
+                assert!(row.mods.iter().any(|m| m.starts_with("Background")), "the painted box takes the press: {:?}", row.mods);
+            }
+        }
+        let radio = nodes_of(|| ModelRadio("Opus 기본 모델로 선택", true, || {}));
+        let over = radio.iter().find(|n| n.widget == "Button").expect("the radio's button");
+        assert!(over.props.iter().any(|p| p == "AccessibleName=String(\"Opus 기본 모델로 선택\")"), "{:?}", over.props);
+        assert!(over.mods.iter().any(|m| m == "MatchParentSize") && !over.mods.iter().any(|m| m.starts_with("FillMax")), "{:?}", over.mods);
+        let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains(&["Focus", "Overlay"].concat()), "no overlay function of its own");
+        assert!(!production.contains(&["cu::", "Button("].concat()), "no direct toolkit button");
+    }
+
+    #[test]
+    fn chips_and_picker_pills_send_no_width_of_their_own() {
+        // compose-rust#431 (#673): the fixed 200 and the `text_px` estimate are gone; the box
+        // sends a height and takes the width of its row of spacers and label.
+        let _guard = crate::services::test_guard();
+        for nodes in [
+            nodes_of(|| SelectChip("자동", || {})),
+            nodes_of(|| ModelPickerPill("아직 정하지 않았습니다", Some(ICON_USER_SVG), || {})),
+            nodes_of(|| ModelPickerPill("+ 계정", None, || {})),
+        ] {
+            let over = nodes.iter().find(|n| n.widget == "Button").expect("the chip's button");
+            let chip = nodes.iter().find(|n| Some(n.id) == over.parent).expect("the chip");
+            assert!(chip.mods.iter().any(|m| *m == format!("Height({H_CTL:?})")), "{:?}", chip.mods);
+            assert!(!chip.mods.iter().any(|m| m.starts_with("Width(") || m.starts_with("Size(") || m.starts_with("FillMax")), "{:?}", chip.mods);
+            assert!(over.mods.iter().any(|m| m == "MatchParentSize"), "{:?}", over.mods);
+        }
+        let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
+        for f in ["fn SelectChip(", "fn MenuPickerPill("] {
+            let body = production.split(f).nth(1).unwrap().split("\nfn ").next().unwrap();
+            assert!(!body.contains(".width(200.0)") && !body.contains("text_px("), "{f}");
+        }
     }
 
     #[test]

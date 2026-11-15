@@ -425,6 +425,25 @@ pub fn web_menu_lines(load: &WebPagesLoad) -> Vec<String> {
 /// The head of the 웹 페이지 menu (mockup `webMenu` `.sdrop-h b`).
 pub const WEB_MENU_HEAD: &str = "웹 페이지 열기";
 
+/// The line under the 웹 페이지 menu's head (mockup `webMenu` `.sdrop-h span`, `computer · ip`):
+/// the session's computer and the host its ports are served on. A local computer's host is
+/// this machine's loopback; a host that is not known is left out, and so is a name that was
+/// not read. Nothing when neither is known.
+pub fn web_menu_subtitle(computer: Option<&str>, host: &ComputerHost) -> Option<String> {
+    let name = computer.map(str::trim).filter(|c| !c.is_empty());
+    let addr = match (&host.host, host.local) {
+        (Some(h), _) => Some(web_host_text(h)),
+        (None, true) => Some("127.0.0.1".to_string()),
+        (None, false) => None,
+    };
+    match (name, addr) {
+        (Some(n), Some(a)) => Some(format!("{n} \u{b7} {a}")),
+        (Some(n), None) => Some(n.to_string()),
+        (None, Some(a)) => Some(a),
+        (None, None) => None,
+    }
+}
+
 /// One row of the 웹 페이지 menu (FR-L10.4, #888): the address in the mono face, the process and
 /// why it cannot be opened below it, and whether it opens (the green 감지됨 pill). `loading` marks
 /// the loading row, drawn with the app's spinner (FR-L18, #519).
@@ -2496,6 +2515,21 @@ mod tests {
             web_tap(&WebPagesLoad::Unsupported, 0),
             WebTap::Say("이 컴퓨터는 포트 목록을 지원하지 않습니다".into())
         );
+    }
+
+    #[test]
+    fn fr_l10_4_web_menu_subtitle_is_the_computer_and_its_address() {
+        // Mockup `webMenu`: `esc(s.computer)+' · '+ip`.
+        let remote = ComputerHost { host: Some("192.168.0.10".into()), ..Default::default() };
+        assert_eq!(web_menu_subtitle(Some("mac-mini"), &remote).as_deref(), Some("mac-mini \u{b7} 192.168.0.10"));
+        let local = ComputerHost { local: true, ..Default::default() };
+        assert_eq!(web_menu_subtitle(Some("이 컴퓨터"), &local).as_deref(), Some("이 컴퓨터 \u{b7} 127.0.0.1"));
+        let unknown = ComputerHost::default();
+        assert_eq!(web_menu_subtitle(Some("studio"), &unknown).as_deref(), Some("studio"));
+        assert_eq!(web_menu_subtitle(Some("  "), &remote).as_deref(), Some("192.168.0.10"));
+        assert_eq!(web_menu_subtitle(None, &unknown), None);
+        let v6 = ComputerHost { host: Some("fe80::1".into()), ..Default::default() };
+        assert_eq!(web_menu_subtitle(Some("a"), &v6).as_deref(), Some("a \u{b7} [fe80::1]"));
     }
 
     #[test]

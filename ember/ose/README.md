@@ -120,8 +120,56 @@ The live checks ran once on all four targets (run 43670763653) with the earlier 
 has not run yet, so every `expected.json` entry is an unverified `pass` and the step does not
 fail the job. `ms-python.debugpy` and `mhutchie.git-graph` have no pinned version: their first
 resolving run prints the version to pin. The check is "installed and activated without a failure
-line"; opening a webview and starting a debug session are issue #929. Results are compared with
-our own previous OSE release, not with another vendor's build.
+line". Results are compared with our own previous OSE release, not with another vendor's build.
+
+### Deep checks (#929)
+
+A second run, `OSE_REGRESS_MODE=deep`, makes the deeper check of every entry with a `deep` field,
+through the same client command (`nfr_w1_deep_checks` runs, the activation client skips itself).
+The workspace copy is made a git repository with one commit first, so Git Graph shows its full
+page. Each check writes `pass`, `fail` or `not-run` with a reason to `OSE_REGRESS_DEEP/<id>.json`;
+`regress.py compare-deep` compares them with `deep.expect` in `expected.json` and writes
+`deep.json`. Only a `fail` where `pass` is expected fails the run; `not-run` prints a warning.
+
+```sh
+OSE_REGRESS_MODE=deep OSE_REGRESS_OUT=.scratch/regress-deep ember/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
+```
+
+- **Webview** (`mhutchie.git-graph`, written, not yet run): the client runs `git-graph.view`
+  (retried while the extension registers it), waits for `$createWebviewPanel` and `$setHtml`,
+  reports the page shown (`$onDidChangeWebviewPanelViewStates`) and ready, sends
+  `{"command":"loadRepos","check":false}` with `$onMessage` and waits for a `$postMessage` whose
+  `command` is `loadRepos` (Git Graph's `respondLoadRepos`, `src/gitGraphView.ts`).
+- **Debug** (`ms-python.debugpy`, not built): reports `not-run`, or `not-run: no python3` when the
+  machine has no `python3` (the check needs one for debugpy's adapter and the program). The
+  editor client answers every `MainThreadDebugService` call with a default reply and never calls
+  `ExtHostDebugService` (#445). What one session of `sample.py` with a breakpoint on line 2 needs,
+  as the workbench does it at 1.139.1:
+  1. Record what the extension host registers: `$registerDebugTypes(types)`,
+     `$registerDebugConfigurationProvider(type, triggerKind, hasProvide, hasResolve, hasResolve2, handle)`,
+     `$registerDebugAdapterDescriptorFactory(type, handle)` (and their `$unregister*`).
+  2. Resolve the configuration `{type: "debugpy", request: "launch", program, console: "internalConsole", stopOnEntry: false}`
+     through the provider's handle: `$resolveDebugConfiguration(handle, folder, config, token)`,
+     `$substituteVariables(folder, config)`, then
+     `$resolveDebugConfigurationWithSubstitutedVariables(handle, folder, config, token)`.
+  3. Start the adapter: `$startDASession(adapterHandle, IDebugSessionFullDto {id, type, name, parent, folderUri, configuration})`
+     (the extension host asks the descriptor factory itself), then `$acceptDebugSessionStarted(session)`.
+  4. Speak DAP through `$sendDAMessage(adapterHandle, message)` and receive `$acceptDAMessage(adapterHandle, message)`
+     (and `$acceptDAError`, `$acceptDAExit`): `initialize`, `launch`, wait for the `initialized`
+     event, `setBreakpoints` (source `sample.py`, line 2), `configurationDone`, wait for the
+     `stopped` event, `threads`, `stackTrace` (the top frame is `answer` at line 2), `disconnect`,
+     then `$stopDASession(adapterHandle)` and `$acceptDebugSessionTerminated(session)`.
+     A `runInTerminal` reverse request would need `$runInTerminal`; `internalConsole` avoids it.
+     Unverified: whether debugpy's resolver finds an interpreter through `ms-python.python` with
+     no workbench UI, or needs `"python": "<path of python3>"` in the configuration.
+
+  Shapes: [`extHost.protocol.ts`](https://github.com/microsoft/vscode/blob/1.139.1/src/vs/workbench/api/common/extHost.protocol.ts)
+  (`MainThreadDebugServiceShape` L2271, `ExtHostDebugServiceShape` L3320, the breakpoint and
+  session DTOs L3241-3318), [`extHostDebugService.ts`](https://github.com/microsoft/vscode/blob/1.139.1/src/vs/workbench/api/common/extHostDebugService.ts)
+  (`$startDASession` L597, `$sendDAMessage` L697) and
+  [`mainThreadDebugService.ts`](https://github.com/microsoft/vscode/blob/1.139.1/src/vs/workbench/api/browser/mainThreadDebugService.ts)
+  (the resolve calls L197-295, the adapter L508-517). Actor ids: `MainThreadDebugService` 14,
+  `ExtHostDebugService` 92 (`ember/editor-conn/src/rpc_ids.rs`).
 
 What the run does not show: behaviour after activation (a language server answering, a formatter
 formatting), an activation that starts and never finishes, and a comparison with the same

@@ -1265,4 +1265,58 @@ mod tests {
         drop(BusyGuard { set: set.clone(), id: "local".into() });
         assert!(set.lock().unwrap().is_empty());
     }
+
+    /// FR-W4 Windows (#83, D49): the launcher in an unpacked build is `bin/dpx-ose-server` on
+    /// Linux and macOS and `bin/dpx-ose-server.cmd` on Windows.
+    #[test]
+    fn fr_w4_win_launcher_name_per_os() {
+        assert_eq!(launcher_name(false), "dpx-ose-server");
+        assert_eq!(launcher_name(true), "dpx-ose-server.cmd");
+        let root = Path::new("/opt/dpx-ose-1.0.0-linux-x64");
+        assert_eq!(launcher_in(root, false), root.join("bin").join("dpx-ose-server"));
+        assert_eq!(launcher_in(root, true), root.join("bin").join("dpx-ose-server.cmd"));
+    }
+
+    /// FR-W4 Windows (#83, D49): a `.cmd` launcher is not spawned through `cmd.exe`; the program
+    /// is the bundled `node.exe` and the first argument `out/server-main.js`, which is what the
+    /// upstream `.cmd` runs. The shell launcher runs as is.
+    #[test]
+    fn fr_w4_win_cmd_launcher_runs_the_bundled_node() {
+        let root = PathBuf::from("C:/ose/dpx-ose-1.0.0-windows-x64");
+        for name in ["dpx-ose-server.cmd", "DPX-OSE-SERVER.CMD", "dpx-ose-server.bat"] {
+            let (program, args) = launch_program(&root.join("bin").join(name));
+            assert_eq!(program, root.join("node.exe"), "{name}");
+            assert_eq!(args, vec![root.join("out").join("server-main.js").into_os_string()], "{name}");
+        }
+        let unix = Path::new("/opt/ose/bin/dpx-ose-server");
+        let (program, args) = launch_program(unix);
+        assert_eq!(program, unix);
+        assert!(args.is_empty());
+    }
+
+    /// FR-W4 Windows (#83, D49): the child's command line starts with the server script, then the
+    /// caller's flags.
+    #[test]
+    fn fr_w4_win_command_puts_the_server_script_first() {
+        let root = PathBuf::from("C:/ose/x");
+        let cmd = ose_command_with(&root.join("bin/dpx-ose-server.cmd"), None, fake_env);
+        assert_eq!(Path::new(cmd.get_program()), root.join("node.exe"));
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_os_string()).collect();
+        assert_eq!(args, vec![root.join("out").join("server-main.js").into_os_string()]);
+    }
+
+    /// FR-W4 Windows (#83, D49): the cleared environment keeps what Node needs on Windows
+    /// (without `SystemRoot` sockets and crypto fail); the Unix list is unchanged.
+    #[test]
+    fn fr_w4_win_env_allowlist_adds_the_windows_names() {
+        let unix = env_allowlist(false);
+        assert_eq!(unix, ENV_ALLOWLIST.to_vec());
+        let win = env_allowlist(true);
+        for name in ["SystemRoot", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "PATHEXT", "COMSPEC"] {
+            assert!(win.contains(&name), "{name}");
+        }
+        for name in ENV_ALLOWLIST {
+            assert!(win.contains(&name), "{name}");
+        }
+    }
 }

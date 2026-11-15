@@ -4232,6 +4232,13 @@ pub fn base_menu_rows(names: &[String], chosen: Option<usize>) -> Vec<PopRow> {
         .collect()
 }
 
+/// The 기준 menu's checked row: the chosen base, or with none chosen the current branch, as the
+/// mockup's `#vcsBase` selects the `<option>` of `r.branch` (#888: 기준: 현재 브랜치 named no row,
+/// so the menu showed nothing chosen).
+pub fn base_menu_chosen(names: &[String], base: Option<&str>, current: Option<&str>) -> Option<usize> {
+    names.iter().position(|n| Some(n.as_str()) == base.or(current))
+}
+
 /// The 기준 button of 새 브랜치 and its menu (FR-L10.4, #888): the shared menu in the
 /// permission-mode look under the button, lined up with its start, headed by what is chosen
 /// (`기준: branch`); a bottom sheet with that head at 560 and below. The mockup draws a native
@@ -4302,7 +4309,8 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
         Some(b) => format!("기준: {b}"),
         None => "기준: 현재 브랜치".to_string(),
     };
-    let chosen_base = base.get().and_then(|b| names.iter().position(|n| *n == b));
+    let current_name = if let BranchLoad::Ready(list) = &current { list.iter().find(|b| b.current).map(|b| b.name.clone()) } else { None };
+    let chosen_base = base_menu_chosen(&names, base.get().as_deref(), current_name.as_deref());
 
     let creator = {
         let (actions, name, generation, base, base_menu) = (actions.clone(), name.clone(), generation.clone(), base.clone(), base_menu.clone());
@@ -5978,6 +5986,20 @@ mod tests {
         let base = remember(|| mutable_state_of(Some("develop".to_string())));
         let names = vec!["main".to_string(), "develop".to_string()];
         BaseMenu(state, "기준: develop", &names, Some(1), base);
+    }
+
+    #[test]
+    fn fr_l10_4_base_menu_checks_the_current_branch_until_one_is_chosen() {
+        let names: Vec<String> = ["main", "develop", "feat/x"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(base_menu_chosen(&names, None, Some("develop")), Some(1), "기준: 현재 브랜치 is the current branch's row");
+        assert_eq!(base_menu_chosen(&names, Some("feat/x"), Some("develop")), Some(2), "a chosen base wins");
+        assert_eq!(base_menu_chosen(&names, None, None), None);
+        assert_eq!(base_menu_chosen(&names, Some("gone"), Some("develop")), None, "a base no longer listed checks nothing");
+        let rows = base_menu_rows(&names, base_menu_chosen(&names, None, Some("develop")));
+        assert_eq!(rows.iter().filter(|r| r.chosen).map(|r| r.title.as_str()).collect::<Vec<_>>(), ["develop"]);
+        let src = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        let pane = src.split("fn BranchesPane(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(pane.contains("base_menu_chosen(&names, base.get().as_deref(), current_name.as_deref())"));
     }
 
     #[test]

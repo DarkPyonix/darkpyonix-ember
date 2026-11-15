@@ -199,8 +199,12 @@ fn NewSessionForm(preset: &str) {
     let can_start = can_start(busy.get(), &effective_project, &cwd_value, &agent_value);
 
     let close = {
-        let open = ui.new_session.clone();
-        move || open.set(None)
+        let (open, busy) = (ui.new_session.clone(), busy.clone());
+        move || {
+            if !busy.get_untracked() {
+                open.set(None);
+            }
+        }
     };
 
     let start = {
@@ -360,7 +364,7 @@ fn NewSessionForm(preset: &str) {
             if busy.get() {
                 cu::IndeterminateProgressIndicator().circular(true).modifier(Modifier::new().size(18.0, 18.0));
             }
-            AppButton("취소", None, ButtonKind::Default, true, true, false, close.clone());
+            AppButton("취소", None, ButtonKind::Default, true, !busy.get(), false, close.clone());
             AppButton("만들기", None, ButtonKind::Primary, true, can_start, false, start);
         });
     });

@@ -146,7 +146,7 @@ WHERE json_extract(event, '$.kind') IN (
 
 /// Query returning only prompt and turn-end events for a session, newest first (`idx_events_prompt_turn`).
 const CURRENT_TURN_PROMPT_EVENTS_SQL: &str = "
-SELECT event FROM events
+SELECT seq, json_extract(event, '$.kind'), event FROM events
 WHERE session_id = ?1
   AND json_extract(event, '$.kind') IN (
       'turn_ended',
@@ -268,6 +268,11 @@ fn parse_status(s: &str) -> SessionStatus {
 /// Prompt events (`ApprovalRequested`, `ApprovalResolved`, `QuestionAsked`, `QuestionAnswered`,
 /// `PromptWithdrawn`) of `session_id` since the latest `TurnEnded`, in chronological order (#909).
 /// Also returns the number of database rows fetched before stopping at `TurnEnded`.
+///
+/// The walk stops as soon as `json_extract(event, '$.kind')` is `'turn_ended'`, even if that
+/// `turn_ended` row's payload does not deserialize as [`AgentEvent`]. Any prompt row in the current
+/// turn that fails to deserialize is skipped with a `tracing::warn!` naming only `session_id` and
+/// `seq` (never the event payload), so one unreadable row never traps the session in waiting.
 fn current_turn_prompt_events_conn(
     conn: &Connection,
     session_id: &str,
@@ -278,12 +283,22 @@ fn current_turn_prompt_events_conn(
     let mut rows_read = 0usize;
     while let Some(row) = rows.next()? {
         rows_read += 1;
-        let json: String = row.get(0)?;
-        let ev: AgentEvent = serde_json::from_str(&json)?;
-        if matches!(ev, AgentEvent::TurnEnded { .. }) {
+        let seq: i64 = row.get(0)?;
+        let kind: Option<String> = row.get(1)?;
+        if kind.as_deref() == Some("turn_ended") {
             break;
         }
-        events_rev.push(ev);
+        let json: String = row.get(2)?;
+        match serde_json::from_str::<AgentEvent>(&json) {
+            Ok(ev) => events_rev.push(ev),
+            Err(err) => {
+                tracing::warn!(
+                    session = %session_id,
+                    seq,
+                    "skipping unreadable stored prompt event: {err}"
+                );
+            }
+        }
     }
     events_rev.reverse();
     Ok((events_rev, rows_read))
@@ -1078,5 +1093,68 @@ mod tests {
             .append("s1", &AgentEvent::TurnEnded { outcome: TurnOutcome::Completed })
             .unwrap();
         assert_eq!(st, SessionStatus::Finished);
+    }
+
+    /// FR-A5 (#909): a damaged prompt row in the current turn is skipped with a warning rather than
+    /// failing `current_turn_prompt_events` or `Store::append`, and a damaged `turn_ended` row whose
+    /// `json_extract(event, '$.kind')` is `'turn_ended'` still stops the walk so earlier turns'
+    /// unresolved prompts never leak into the current turn.
+    #[test]
+    fn fr_a5_damaged_prompt_row_is_skipped_and_damaged_turn_ended_row_still_ends_walk() {
+        use crate::events::ApprovalDecision;
+
+        let store = Store::open_in_memory().unwrap();
+        let s = store.create_session("p", AgentKind::Scripted, "/tmp", None, "damaged").unwrap();
+        let id = s.id.clone();
+
+        {
+            let conn = store.conn();
+            // seq 1: an unresolved approval from an earlier turn.
+            // seq 2: a damaged `turn_ended` row (`kind` is `"turn_ended"`, but `outcome` is invalid
+            //        for `AgentEvent::TurnEnded` deserialization). Must still stop the walk!
+            // seq 3: a damaged `question_asked` row in the current turn (`questions` is not an array).
+            //        Must be skipped without failing!
+            // seq 4: a valid `approval_requested` row in the current turn.
+            conn.execute_batch(&format!(
+                "INSERT INTO events (session_id, seq, at, event) VALUES
+                    ('{id}', 1, 1, '{{\"kind\":\"approval_requested\",\"approval_id\":\"stale-turn-1\",\"tool\":\"Bash\",\"input\":{{}}}}'),
+                    ('{id}', 2, 2, '{{\"kind\":\"turn_ended\",\"outcome\":\"not-a-valid-outcome\"}}'),
+                    ('{id}', 3, 3, '{{\"kind\":\"question_asked\",\"question_id\":\"broken-q\",\"questions\":\"not-an-array\"}}'),
+                    ('{id}', 4, 4, '{{\"kind\":\"approval_requested\",\"approval_id\":\"a-valid\",\"tool\":\"Bash\",\"input\":{{}}}}');
+                 UPDATE sessions SET last_seq = 4, status = 'waiting_for_approval' WHERE id = '{id}';"
+            ))
+            .unwrap();
+        }
+
+        // 1. `current_turn_prompt_events` skips seq 3, stops at seq 2 (damaged `turn_ended`), and
+        //    returns only seq 4 (`a-valid`), reading 3 rows (seq 4, seq 3, seq 2).
+        let (events, rows_read) = {
+            let conn = store.conn();
+            current_turn_prompt_events_conn(&conn, &id).unwrap()
+        };
+        assert_eq!(rows_read, 3, "walk must stop at damaged turn_ended row (seq 2) without reading seq 1");
+        assert_eq!(
+            events,
+            vec![AgentEvent::ApprovalRequested {
+                approval_id: "a-valid".into(),
+                tool: "Bash".into(),
+                input: serde_json::json!({}),
+                needs_person: false,
+            }]
+        );
+
+        // 2. Resolving `a-valid` via `Store::append` succeeds (neither failing on seq 3 nor blocked
+        //    by `stale-turn-1` from before the damaged `turn_ended` at seq 2) and transitions the
+        //    session back to `Running`.
+        let (_, st) = store
+            .append(
+                &id,
+                &AgentEvent::ApprovalResolved {
+                    approval_id: "a-valid".into(),
+                    decision: ApprovalDecision::AllowOnce,
+                },
+            )
+            .unwrap();
+        assert_eq!(st, SessionStatus::Running);
     }
 }

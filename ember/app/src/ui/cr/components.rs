@@ -725,12 +725,18 @@ fn PopRowView(r: &PopRow, kind: PopKind, m: &PopMetrics, on_click: impl FnMut() 
                 // Zero wide and weighted, so a long description wraps instead of widening the row.
                 cu::Column().spacing(2.0).modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
                     cu::Spacer().modifier(Modifier::new().height(m.row_pad.0 - 2.0));
-                    cu::Row().spacing(6.0).alignment(Alignment::CenterStart).content(|| {
-                        if r.mono {
-                            MonoLabel(&r.title, Fs::Xs, Weight::Regular, Some(paint(title_c)));
-                        } else {
-                            Label(&r.title, Fs::Md, Weight::Semibold, Some(paint(title_c)), Some(1));
-                        }
+                    cu::Row().spacing(6.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                        // With a badge the title is zero wide and weighted, so a long title is cut
+                        // and the badge keeps its own width at the row's end (the session model
+                        // menu's one row squeezed 준비 중 to 준비... before).
+                        let title_mod = if r.badge.is_some() { Modifier::new().width(0.0).weight(1.0) } else { Modifier::new() };
+                        cu::Box().modifier(title_mod).content(|| {
+                            if r.mono {
+                                MonoLabel(&r.title, Fs::Xs, Weight::Regular, Some(paint(title_c)));
+                            } else {
+                                Label(&r.title, Fs::Md, Weight::Semibold, Some(paint(title_c)), Some(1));
+                            }
+                        });
                         if let Some((text, tone)) = &r.badge {
                             Pill(text, *tone, true);
                         }

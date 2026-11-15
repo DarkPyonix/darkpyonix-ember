@@ -362,6 +362,33 @@ fn default_data_root() -> Result<PathBuf, String> {
     )
 }
 
+/// `\\?\C:\x` -> `C:\x` and `\\?\UNC\server\share\x` -> `\\server\share\x`; any other path is
+/// unchanged. Pure and platform independent so it is tested everywhere.
+pub fn strip_verbatim_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    match path.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_string(),
+        _ => path.to_string(),
+    }
+}
+
+/// The spelling of an existing directory handed to the OSE. On Windows it is the long form:
+/// libuv's fs-event aborts the OSE when a watched directory is named by its 8.3 short form
+/// (`C:\Users\RUNNER~1`, FR-W4a, #83). `canonicalize` expands short names (the node has no
+/// `windows-sys` dependency for `GetLongPathNameW`); its `\\?\` prefix is stripped. Only the
+/// spelling changes: on failure the path is returned as it is. Elsewhere the identity.
+pub fn long_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    if let Ok(long) = path.canonicalize() {
+        if let Some(s) = long.to_str() {
+            return PathBuf::from(strip_verbatim_prefix(s));
+        }
+    }
+    path.to_path_buf()
+}
+
 /// Makes `path` (and missing parents) with mode 0700 and returns it ready for use.
 ///
 /// A symlink at `path` is refused, as is anything that is not a directory. A directory that
@@ -901,7 +928,7 @@ impl OseManager {
         make_private_dir(root).map_err(|e| format!("cannot create OSE data root: {e}"))?;
         let dir = root.join(computer_id);
         make_private_dir(&dir).map_err(|e| format!("cannot create OSE data dir: {e}"))?;
-        Ok(dir)
+        Ok(long_path(&dir))
     }
 
     fn dir_args(dir: &Path) -> Vec<std::ffi::OsString> {
@@ -1051,7 +1078,7 @@ impl OseManager {
             .args(["--accept-server-license-terms", "--telemetry-level", "off"])
             .args(Self::dir_args(&data_dir))
             .args(watcher_args(crate::fs_kind::fs_kind(&folder)))
-            .current_dir(&folder)
+            .current_dir(long_path(&folder))
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
             .spawn().map_err(|e| format!("cannot start OSE server: {e}"))?;
         let connection = EmberOseConnection {
@@ -1126,6 +1153,49 @@ fn server_binary() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_w4_windows_strip_verbatim_prefix() {
+        use super::strip_verbatim_prefix as s;
+        assert_eq!(s(r"\\?\C:\Users\Long Name\x"), r"C:\Users\Long Name\x");
+        assert_eq!(s(r"\\?\UNC\server\share\x"), r"\\server\share\x");
+        assert_eq!(s(r"C:\Users\x"), r"C:\Users\x");
+        assert_eq!(s(r"\\server\share\x"), r"\\server\share\x");
+        assert_eq!(s(r"\\?\Volume{abc}\x"), r"\\?\Volume{abc}\x");
+        assert_eq!(s("/home/u/x"), "/home/u/x");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn fr_w4_windows_long_path_is_the_identity_elsewhere() {
+        let p = std::path::Path::new("/no/such/dir/../x");
+        assert_eq!(super::long_path(p), p.to_path_buf());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fr_w4_windows_long_path_expands_a_short_name() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetShortPathNameW(long: *const u16, short: *mut u16, len: u32) -> u32;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp_long = super::long_path(tmp.path());
+        let dir = tmp_long.join("Long Directory Name");
+        std::fs::create_dir(&dir).unwrap();
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut buf = vec![0u16; 1024];
+        // SAFETY: `wide` is NUL-terminated and `buf` holds `buf.len()` u16s.
+        let n = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) } as usize;
+        assert!(n > 0 && n < buf.len(), "GetShortPathNameW failed");
+        let short = std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf[..n]));
+        if short == dir {
+            println!("8.3 names are disabled on this volume; skipping");
+            return;
+        }
+        assert_eq!(super::long_path(&short), dir);
+    }
+
     use super::*;
 
     /// FR-W4a (#896): a node keeps its OSE data under its state dir unless the owner names another.

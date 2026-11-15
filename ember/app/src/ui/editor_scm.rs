@@ -465,7 +465,6 @@ pub fn letter_color(letter: char) -> &'static str {
     match letter {
         'A' | 'U' => "var(--c-green)",
         'D' => "var(--c-red)",
-        'R' | 'C' => "var(--c-sky)",
         '!' => "var(--c-orange)",
         'T' => "var(--muted)",
         _ => "var(--c-blue)",
@@ -478,7 +477,6 @@ pub fn letter_tone(letter: char) -> &'static str {
     match letter {
         'A' | 'U' => "green",
         'D' => "red",
-        'R' | 'C' => "sky",
         '!' => "orange",
         'T' => "grey",
         _ => "blue",

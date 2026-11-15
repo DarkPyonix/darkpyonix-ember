@@ -817,6 +817,16 @@ fn fr_l31_32_status_badges_take_the_soft_pair_of_the_letters_colour() {
     assert!(!scm.contains(r#"r#type: "checkbox""#));
 }
 
+// FR-L31.39: R (and C) take the mockup's blue pair (`vcs.js:19`), not the faint sky one.
+#[test]
+fn fr_l31_39_renamed_badge_is_the_mockups_blue_pair() {
+    use crate::ui::editor_scm::{letter_color, letter_tone};
+    for letter in ['R', 'C'] {
+        assert_eq!(letter_tone(letter), "blue", "{letter}");
+        assert_eq!(letter_color(letter), "var(--c-blue)", "{letter}");
+    }
+}
+
 // FR-L31.33 (#895, design review E8): the commit button is the mockup's: at least 40px high across
 // the window, 14/500 with the branch in mono, and its icon in the fill's text colour.
 #[test]

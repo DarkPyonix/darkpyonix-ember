@@ -90,8 +90,6 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.product.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
-    # The Windows leg has never run: it does not fail the run until its first green build (#83).
-    continue-on-error: ${{ matrix.target == 'windows-x64' }}
     timeout-minutes: 240
     defaults:
       run:
@@ -253,8 +251,6 @@ jobs:
     # Open VSX search and install (#83, docs/SPEC.md FR-W4 acceptance, Windows).
     if: ${{ !cancelled() && needs.product.result == 'success' && needs.product.outputs.windows == 'true' && github.event_name != 'pull_request' }}
     runs-on: windows-2022
-    # Not blocking until its first green run (#83).
-    continue-on-error: true
     timeout-minutes: 30
     defaults:
       run:

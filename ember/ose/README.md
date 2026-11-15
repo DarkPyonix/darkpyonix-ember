@@ -32,7 +32,7 @@ checks the result, so it is safe anywhere.
 | `linux-arm64` | `ubuntu-22.04-arm` | Raspberry Pi 4/5 on a **64-bit** OS (Raspberry Pi OS Bookworm, glibc 2.36) |
 | `darwin-arm64` | `macos-15` | Apple silicon |
 | `darwin-x64` | `macos-15-intel` | Intel Mac |
-| `windows-x64` | `windows-2022` | Windows 10 and later, x64; launcher `bin/dpx-ose-server.cmd` (#83, written, not yet run in CI) |
+| `windows-x64` | `windows-2022` | Windows 10 and later, x64; launcher `bin/dpx-ose-server.cmd` (#83; built and smoke-tested in CI run 43692860054) |
 
 Each build produces `dpx-ose-<tag>-<target>.tar.gz` and its `.sha256`. The archive is
 self-contained: it bundles the Node runtime pinned in upstream `remote/.npmrc`, so the host does

@@ -94,7 +94,10 @@ impl IntoResponse for ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };
-        (code, Json(json!({ "error": format!("{:#}", self.0) }))).into_response()
+        // FR-L18 (#519): a transport error may quote a URL with a user name and password. The
+        // query stays: hub errors name the `/link?code=` page the user must open.
+        let error = crate::computers::strip_userinfo_in_text(&format!("{:#}", self.0));
+        (code, Json(json!({ "error": error }))).into_response()
     }
 }
 

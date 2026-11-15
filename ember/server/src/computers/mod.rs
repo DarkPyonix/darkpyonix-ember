@@ -87,6 +87,9 @@ pub struct Computer {
     pub id: String,
     pub name: String,
     /// `http://host:port` of the node API; empty when the node is addressed by [`Computer::peer`].
+    /// Kept whole in memory and on disk for node calls; serialised through [`url_for_clients`]
+    /// (FR-L18, #519), so no answer or event that carries a `Computer` echoes credentials.
+    #[serde(serialize_with = "serialize_url_for_clients")]
     pub url: String,
     /// The node's transport address, for a node reached over the transport (`FR-N1`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -151,6 +154,64 @@ pub fn url_for_clients(url: &str) -> String {
         Some((scheme, authority, path)) => format!("{scheme}{authority}{path}"),
         None => url.to_string(),
     }
+}
+
+fn serialize_url_for_clients<S: serde::Serializer>(url: &str, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&url_for_clients(url))
+}
+
+/// `text` with every `http(s)://` or `ws(s)://` URL in it passed through [`url_for_clients`],
+/// for error texts and log lines that may quote a node URL (a transport error names the URL
+/// it failed on).
+pub fn strip_urls_in_text(text: &str) -> String {
+    rewrite_urls_in_text(text, url_for_clients)
+}
+
+/// `text` with the user name and password removed from every `http(s)://` or `ws(s)://` URL
+/// in it, query and fragment kept. For hub errors: they quote hub pages the user must open,
+/// such as `/link?code=...`, whose query carries no credential but is needed (FR-L18, #519).
+pub fn strip_userinfo_in_text(text: &str) -> String {
+    rewrite_urls_in_text(text, |url| match url.find("://") {
+        Some(i) => {
+            let (scheme, rest) = url.split_at(i + 3);
+            let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            let authority = rest[..end].rsplit('@').next().unwrap_or("");
+            format!("{scheme}{authority}{}", &rest[end..])
+        }
+        None => url.to_string(),
+    })
+}
+
+fn rewrite_urls_in_text(text: &str, clean: impl Fn(&str) -> String) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = ["http://", "https://", "ws://", "wss://"]
+        .iter()
+        .filter_map(|p| rest.find(p))
+        .min()
+    {
+        // A scheme that is the tail of a longer word (`xhttp://`) is left alone.
+        let starts_word = rest[..i].chars().next_back().map_or(true, |c| !c.is_ascii_alphanumeric());
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, ')' | '"' | '\'' | '>' | ',' | ';'))
+            .unwrap_or(tail.len());
+        let token = &tail[..end];
+        if !starts_word {
+            out.push_str(token);
+        } else if let Some(ws) = token.strip_prefix("ws") {
+            // Strip as http(s) and put the ws scheme back.
+            let cleaned = clean(&format!("http{ws}"));
+            out.push_str("ws");
+            out.push_str(cleaned.strip_prefix("http").unwrap_or(&cleaned));
+        } else {
+            out.push_str(&clean(token));
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// What clients see for a computer, including [`LOCAL`].
@@ -1166,7 +1227,7 @@ impl Computers {
         if with_env {
             match tokio::time::timeout(ENV_TIMEOUT, api.env()).await {
                 Ok(Ok(env)) => status.env = Some(env),
-                Ok(Err(e)) => status.error = Some(format!("env: {e:#}")),
+                Ok(Err(e)) => status.error = Some(strip_urls_in_text(&format!("env: {e:#}"))),
                 Err(_) => status.error = Some("env timed out".into()),
             }
         }
@@ -1565,6 +1626,7 @@ impl crate::browser::EgressResolver for Computers {
 }
 
 fn unreachable_status(computer: ComputerView, error: String) -> ComputerStatus {
+    let error = strip_urls_in_text(&error);
     ComputerStatus { computer, reachable: Some(false), error: Some(error), version: None, env: None }
 }
 
@@ -1584,6 +1646,27 @@ pub fn find_shim() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l18_serialised_computer_and_error_texts_carry_no_url_credentials() {
+        let raw = "http://user:pass@host:8741/?q=1#frag";
+        let c = Computer { id: "c".into(), name: "n".into(), url: raw.into(), token: "t".into(), created_at: 0, peer: None };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"url\":\"http://host:8741/\""), "{json}");
+        for bad in ["user", "pass", "q=1", "frag"] {
+            assert!(!json.contains(bad), "{bad}: {json}");
+        }
+        assert_eq!(c.url, raw, "the record keeps the whole URL");
+        assert_eq!(
+            strip_urls_in_text(&format!("error sending request for url ({raw}): refused; ws://u:p@h:1/events?after=3")),
+            "error sending request for url (http://host:8741/): refused; ws://h:1/events"
+        );
+        assert_eq!(strip_urls_in_text("no url here"), "no url here");
+        assert_eq!(
+            strip_userinfo_in_text("open http://u:p@hub:1/link?code=AB#x"),
+            "open http://hub:1/link?code=AB#x"
+        );
+    }
+
     use super::*;
     use std::collections::BTreeMap;
 

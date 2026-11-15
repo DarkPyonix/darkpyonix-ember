@@ -1,8 +1,9 @@
 # DarkPyonix OSE: Code-OSS (MIT) VS Code web server, renamed and pointed at Open VSX.
 # See ember/ose/README.md. Builds run here, never on a developer machine.
 #
-#   called by ci.yml (the leader dispatches it) -> product + 4-target build matrix + smoke test,
+#   called by ci.yml (the leader dispatches it) -> product + 5-target build matrix + smoke test,
 #                       artifacts uploaded, then the live checks on each target's own runner type
+#                       (Linux and macOS) and a smoke of the downloaded archive on Windows (#83)
 #   tag ose-v*       -> all of the above; publish-ose.yml then releases this run's artifacts
 #
 # Live checks (SPEC FR-W4 acceptance step 4, NFR-W1; #83, #84): the archive this run built is
@@ -32,6 +33,8 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       node: ${{ steps.version.outputs.node }}
       matrix: ${{ steps.matrix.outputs.matrix }}
+      live_matrix: ${{ steps.matrix.outputs.live_matrix }}
+      windows: ${{ steps.matrix.outputs.windows }}
     steps:
       - uses: actions/checkout@v5
       - id: version
@@ -50,14 +53,20 @@ jobs:
         # Debian 12 / Raspberry Pi OS Bookworm (glibc 2.36); building on 24.04 would not.
         # linux-arm64 = Raspberry Pi 4/5 with a 64-bit OS; ubuntu-22.04-arm is free for public
         # repos only. macos-15-intel is GitHub's last Intel macOS image (until Aug 2027).
+        # windows-x64 builds natively on windows-2022 (Visual Studio 2022 build tools, as upstream's
+        # win32 pipeline uses; #83, docs/INTENT.md D49). The live tests are Unix only, so
+        # live_matrix leaves Windows out and the "Smoke (windows-x64)" job checks it instead.
         run: |
           all='[{"target":"linux-x64","runner":"ubuntu-22.04"},
                 {"target":"linux-arm64","runner":"ubuntu-22.04-arm"},
                 {"target":"darwin-arm64","runner":"macos-15"},
-                {"target":"darwin-x64","runner":"macos-15-intel"}]'
-          echo "matrix=$(jq -c --arg t "${TARGETS:-}" \
-            '{include: [.[] | select(. as $e | $t == "" or ($t | split(",") | map(gsub("\\s";"")) | index($e.target) != null))]}' <<< "$all")" \
-            >> "$GITHUB_OUTPUT"
+                {"target":"darwin-x64","runner":"macos-15-intel"},
+                {"target":"windows-x64","runner":"windows-2022"}]'
+          picked="$(jq -c --arg t "${TARGETS:-}" \
+            '[.[] | select(. as $e | $t == "" or ($t | split(",") | map(gsub("\\s";"")) | index($e.target) != null))]' <<< "$all")"
+          echo "matrix=$(jq -c '{include: .}' <<< "$picked")" >> "$GITHUB_OUTPUT"
+          echo "live_matrix=$(jq -c '{include: [.[] | select(.target | startswith("windows") | not)]}' <<< "$picked")" >> "$GITHUB_OUTPUT"
+          echo "windows=$(jq -r 'any(.[]; .target == "windows-x64")' <<< "$picked")" >> "$GITHUB_OUTPUT"
       - name: Apply overrides and check (Open VSX, telemetry off, no MS marketplace)
         run: ember/ose/build.sh --product-only
       - name: Check default extensions are staged (FR-W6)
@@ -80,12 +89,22 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.product.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
+    # The Windows leg has never run: it does not fail the run until its first green build (#83).
+    continue-on-error: ${{ matrix.target == 'windows-x64' }}
     timeout-minutes: 240
+    defaults:
+      run:
+        # Git Bash on Windows, so build.sh runs unchanged on every target (#83).
+        shell: bash
     env:
       CI: "true"
       OSE_WORK_DIR: ${{ github.workspace }}/ember/ose/.work
       OSE_OUT_DIR: ${{ github.workspace }}/ember/ose/dist
     steps:
+      - name: Allow long paths (Windows)
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
+
       - uses: actions/checkout@v5
 
       - name: Free disk space (Linux)
@@ -115,7 +134,7 @@ jobs:
       - name: Cache npm downloads
         uses: actions/cache@v4
         with:
-          path: ~/.npm
+          path: ${{ runner.os == 'Windows' && '~/AppData/Local/npm-cache' || '~/.npm' }}
           key: ose-npm-${{ matrix.target }}-${{ needs.product.outputs.tag }}
           restore-keys: ose-npm-${{ matrix.target }}-
 
@@ -149,10 +168,10 @@ jobs:
     needs: [product, build]
     # Each target is checked even when another target's build failed: a missing archive fails
     # only its own leg, at the download step.
-    if: ${{ !cancelled() && needs.product.result == 'success' && github.event_name != 'pull_request' }}
+    if: ${{ !cancelled() && needs.product.result == 'success' && github.event_name != 'pull_request' && needs.product.outputs.live_matrix != '{"include":[]}' }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.product.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.product.outputs.live_matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
@@ -212,3 +231,49 @@ jobs:
           path: ${{ runner.temp }}/regress-out
           if-no-files-found: ignore
           retention-days: 14
+
+  smoke-windows:
+    name: Smoke (windows-x64)
+    needs: [product, build]
+    # The live tests are Unix only (process groups, pkill), so Windows gets the smoke test of the
+    # downloaded archive instead: checksum, unpack with the tar.exe Windows ships, start, /version,
+    # Open VSX search and install (#83, docs/SPEC.md FR-W4 acceptance, Windows).
+    if: ${{ !cancelled() && needs.product.result == 'success' && needs.product.outputs.windows == 'true' && github.event_name != 'pull_request' }}
+    runs-on: windows-2022
+    # Not blocking until its first green run (#83).
+    continue-on-error: true
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: dpx-ose-windows-x64
+          path: ose-download
+
+      - name: Verify the checksum
+        working-directory: ose-download
+        run: sha256sum -c ./*.sha256
+
+      - name: Unpack with the Windows tar.exe
+        id: ose
+        shell: pwsh
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'ose'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $archive = Get-ChildItem ose-download -Filter 'dpx-ose-*-windows-x64.tar.gz' | Select-Object -First 1
+          & "$env:SystemRoot\System32\tar.exe" -xzf $archive.FullName -C $dest
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $dir = Get-ChildItem $dest -Directory -Filter 'dpx-ose-*-windows-x64' | Select-Object -First 1
+          if (-not (Test-Path (Join-Path $dir.FullName 'bin\dpx-ose-server.cmd'))) { throw 'no bin\dpx-ose-server.cmd' }
+          "dir=$($dir.FullName)" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+
+      - name: Smoke test (start, /version, Open VSX search and install)
+        run: ember/ose/smoke.sh "$(cygpath -u '${{ steps.ose.outputs.dir }}')"

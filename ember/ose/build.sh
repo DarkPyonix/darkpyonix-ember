@@ -2,7 +2,7 @@
 # Build DarkPyonix OSE: the Code-OSS (MIT) VS Code web server ("REH web"), renamed and pointed at
 # Open VSX, packaged as a self-contained tar.gz (it bundles its own Node).
 #
-#   ember/ose/build.sh [--target linux-x64|linux-arm64|darwin-arm64|darwin-x64] [--tag <code-oss tag>]
+#   ember/ose/build.sh [--target linux-x64|linux-arm64|darwin-arm64|darwin-x64|windows-x64] [--tag <code-oss tag>]
 #                [--work <dir>] [--out <dir>] [--skip-install] [--smoke]
 #   ember/ose/build.sh --product-only      # cheap: fetch only product.json, apply overrides, check
 #
@@ -19,6 +19,9 @@
 #               .build/extensions/copilot -> gulp vscode-reh-web-<platform>-<arch>-min-ci
 #   5. package  dpx-ose-<tag>-<target>.tar.gz + .sha256, product check on the packaged output
 #   6. smoke    (--smoke) ember/ose/smoke.sh on the packaged server
+#
+# Windows (windows-x64, #83, docs/INTENT.md D49): the same script under Git Bash on a Windows
+# runner; the gulp platform is win32 and the launcher is bin/dpx-ose-server.cmd.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -77,22 +80,39 @@ fi
 # --- target -------------------------------------------------------------------------------
 host_target() {
   local os arch
-  case "$(uname -s)" in Linux) os=linux ;; Darwin) os=darwin ;; *) die "unsupported OS $(uname -s)" ;; esac
+  case "$(uname -s)" in
+    Linux) os=linux ;; Darwin) os=darwin ;;
+    MINGW*|MSYS*|CYGWIN*) os=windows ;;
+    *) die "unsupported OS $(uname -s)" ;;
+  esac
   case "$(uname -m)" in x86_64|amd64) arch=x64 ;; arm64|aarch64) arch=arm64 ;; *) die "unsupported arch $(uname -m)" ;; esac
   echo "$os-$arch"
 }
 [ -n "$TARGET" ] || TARGET="$(host_target)"
 case "$TARGET" in
-  linux-x64|linux-arm64|darwin-arm64|darwin-x64) ;;
-  *) die "unsupported target $TARGET (linux-x64, linux-arm64, darwin-arm64, darwin-x64)" ;;
+  linux-x64|linux-arm64|darwin-arm64|darwin-x64|windows-x64) ;;
+  *) die "unsupported target $TARGET (linux-x64, linux-arm64, darwin-arm64, darwin-x64, windows-x64)" ;;
 esac
+# Code-OSS names the Windows platform win32 (gulp vscode-reh-web-win32-x64-min-ci, upstream
+# build/azure-pipelines/win32/steps/product-build-win32-compile.yml).
+WINDOWS=0
+GULP_TARGET="$TARGET"
+if [ "${TARGET%%-*}" = windows ]; then
+  WINDOWS=1
+  GULP_TARGET="win32-${TARGET#windows-}"
+  # Git Bash: use /d/a/... paths, so tar does not read "D:" as a remote host and cp, mv work.
+  WORK="$(cygpath -u "$WORK")"
+  OUT="$(cygpath -u "$OUT")"
+fi
 # Native node modules (node-pty, spdlog, ...) are compiled for the build machine, so the target
 # must match the host. Cross builds need upstream's sysroot setup, which this script does not do.
 [ "$TARGET" = "$(host_target)" ] || die "target $TARGET does not match this host ($(host_target)); build on a matching runner"
 
-for tool in git jq node npm python3 tar; do
+for tool in git jq node npm tar; do
   command -v "$tool" >/dev/null || die "$tool is required"
 done
+# setup-python on Windows provides python, not python3.
+command -v python3 >/dev/null || command -v python >/dev/null || die "python3 is required"
 
 SRC="$WORK/vscode"
 NAME="dpx-ose-$TAG-$TARGET"
@@ -107,7 +127,9 @@ else
   rm -rf "$WORK/.build-cache"
   [ -d "$SRC/.build" ] && mv "$SRC/.build" "$WORK/.build-cache"
   rm -rf "$SRC"
-  git clone --depth 1 --branch "$TAG" https://github.com/microsoft/vscode.git "$SRC"
+  # core.longpaths: the tree has paths beyond Windows' 260 characters (harmless elsewhere).
+  git -c core.longpaths=true clone --depth 1 --branch "$TAG" https://github.com/microsoft/vscode.git "$SRC"
+  git -C "$SRC" config core.longpaths true
   if [ -d "$WORK/.build-cache" ]; then mv "$WORK/.build-cache" "$SRC/.build"; fi
 fi
 COMMIT="$(git -C "$SRC" rev-parse HEAD)"
@@ -189,13 +211,19 @@ log "gulp compile-copilot-extension-build"
 (cd "$SRC" && npm run gulp compile-copilot-extension-build)
 log "stage Copilot SDK"
 stage_copilot_sdk
-log "gulp vscode-reh-web-$TARGET-min-ci"
-(cd "$SRC" && npm run gulp "vscode-reh-web-$TARGET-min-ci")
+log "gulp vscode-reh-web-$GULP_TARGET-min-ci"
+(cd "$SRC" && npm run gulp "vscode-reh-web-$GULP_TARGET-min-ci")
 
-BUILT="$WORK/vscode-reh-web-$TARGET"
+BUILT="$WORK/vscode-reh-web-$GULP_TARGET"
 [ -d "$BUILT" ] || die "expected build output at $BUILT"
-SERVER_BIN="bin/$(jq -r .serverApplicationName "$SRC/product.json")"
-[ -x "$BUILT/$SERVER_BIN" ] || die "server launcher $SERVER_BIN missing from the build"
+SERVER_BIN="bin/$(jq -r .serverApplicationName "$SRC/product.json" | tr -d '\r')"
+if [ "$WINDOWS" = 1 ]; then
+  SERVER_BIN="$SERVER_BIN.cmd"
+  [ -f "$BUILT/$SERVER_BIN" ] && [ -f "$BUILT/node.exe" ] && [ -f "$BUILT/out/server-main.js" ] \
+    || die "server launcher $SERVER_BIN, node.exe or out/server-main.js missing from the build"
+else
+  [ -x "$BUILT/$SERVER_BIN" ] || die "server launcher $SERVER_BIN missing from the build"
+fi
 
 # --- 5. package ----------------------------------------------------------------------------------
 log "package $NAME"
@@ -211,7 +239,9 @@ jq -n --arg tag "$TAG" --arg commit "$COMMIT" --arg target "$TARGET" \
 cp "$here/README.md" "$WORK/$NAME/OSE-README.md"
 
 tarball="$OUT/$NAME.tar.gz"
-tar -C "$WORK" -czf "$tarball" "$NAME"
+# --force-local: GNU tar in Git Bash would read a drive letter as a remote host.
+tar_local=(); [ "$WINDOWS" = 1 ] && tar_local=(--force-local)
+tar ${tar_local[@]+"${tar_local[@]}"} -C "$WORK" -czf "$tarball" "$NAME"
 if command -v sha256sum >/dev/null; then
   (cd "$OUT" && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
 else

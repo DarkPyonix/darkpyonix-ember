@@ -96,12 +96,12 @@ jobs:
     # scripts/packager-windows/Cargo.toml); the Velopack formats (Setup.exe, .msi, .pkg, .deb,
     # .rpm, Flatpak) are spec only (FR-22.6).
     # Velopack (NFR-R1, NFR-R2, #880): .github/scripts/release/pack-velopack.sh calls
-    # compose-rust's scripts/package-velopack.py (branch feat/4-velopack-macos-linux until it
-    # lands on develop) for Setup.exe, the Velopack .dmg and .AppImage, the .nupkg files and
-    # releases.<channel>.json, one channel per OS and architecture.
-    # Set COMPOSE_RUST_REF to a pinned commit and the variable EMBER_CLIENT_RELEASE to "true"
-    # once #505 lands on compose-rust develop ([OWNER ACTION REQUIRED] for tag push and
-    # external distribution).
+    # compose-rust's scripts/package-velopack.py (on compose-rust develop since
+    # DarkPyonix/compose-rust#777) for Setup.exe, the Velopack .dmg and .AppImage, the .nupkg
+    # files and releases.<channel>.json, one channel per OS and architecture.
+    # COMPOSE_RUST_REF is pinned to the commit that landed the Velopack packager; move it when a
+    # newer packager is needed. The job runs once the variable EMBER_CLIENT_RELEASE is "true"
+    # ([OWNER ACTION REQUIRED] for that variable, the tag push and external distribution).
     name: Client app (${{ matrix.target }})
     needs: version
     if: vars.EMBER_CLIENT_RELEASE == 'true'
@@ -119,8 +119,8 @@ jobs:
       CARGO_BUILD_JOBS: "2"
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
-      # Not pinned yet: tracks compose-rust develop (see the TODO above).
-      COMPOSE_RUST_REF: develop
+      # compose-rust develop at the merge of DarkPyonix/compose-rust#777 (Velopack packager).
+      COMPOSE_RUST_REF: 10590ba75945dd3ed24c06cab4dba75b55699e09
       # Matches the velopack crate in ember/app/Cargo.toml.
       VPK_VERSION: "1.2.161"
     steps:

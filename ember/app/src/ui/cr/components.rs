@@ -871,6 +871,23 @@ pub fn MonoLabel(text: &str, fs: Fs, weight: Weight, color: Option<Paint>) {
     );
 }
 
+/// One line in the mono face, cut with an ellipsis (the visible name of [`NameThenPillFace`]).
+fn MonoLine(text: &str, fs: Fs, weight: Weight, color: Option<Paint>) {
+    let color = color.unwrap_or_else(|| paint(ember_theme().palette.text));
+    drop(
+        cu::Text(text)
+            .word_break(WordBreak::KeepAll)
+            .type_role(TypeRole::Mono)
+            .font_size(fs.size())
+            .line_height(fs.line_height())
+            .font_weight(weight.value())
+            .letter_spacing(fs.letter_spacing())
+            .color(color)
+            .max_lines(1)
+            .overflow(TextOverflow::Ellipsis),
+    );
+}
+
 /// Text for screens that still name a toolkit type role: the role maps to a step of the scale,
 /// and a role colour maps to its token in the current scheme.
 pub fn Txt(
@@ -1269,6 +1286,19 @@ pub fn name_then_pill_width(room: f32, natural: f32, pill: f32, gap: f32) -> Opt
 /// its own width and the name is cut to the remainder. The gap is a spacer of its own, not row
 /// spacing, so the trailing spacer costs no second gap.
 pub fn NameThenPill(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, gap: f32, pill: impl FnOnce()) {
+    NameThenPillFace(name, fs, weight, color, false, gap, pill);
+}
+
+/// [`NameThenPill`] with the name in the mono face when `mono` is true (a resolved approval's
+/// command, `.cmd code`, review st B): the measuring copy and the visible name both use the
+/// face, so the measured width is the drawn one.
+pub fn NameThenPillFace(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, mono: bool, gap: f32, pill: impl FnOnce()) {
+    NameThenPillLines(name, fs, weight, color, mono, 1, gap, pill);
+}
+
+/// [`NameThenPillFace`] whose name may wrap to `lines` lines when it does not fit beside the
+/// pill (a model name in the 1280 model table, FR-L20b, #886), instead of ending in "...".
+pub fn NameThenPillLines(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, mono: bool, lines: u32, gap: f32, pill: impl FnOnce()) {
     let room = compose_rust::runtime::remember_node_size();
     let natural = compose_rust::runtime::remember_node_size();
     let pill_size = compose_rust::runtime::remember_node_size();
@@ -1286,9 +1316,10 @@ pub fn NameThenPill(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, ga
                 cu::Box().modifier(Modifier::new().observe_size_every_dp(natural.token())).content(|| {
                     // The measuring copy: the name's own font, clear ink, out of the
                     // accessibility tree (a `hidden` container still exposes its text).
+                    let copy = cu::Text(name).word_break(WordBreak::KeepAll);
+                    let copy = if mono { copy.type_role(TypeRole::Mono) } else { copy };
                     drop(
-                        cu::Text(name)
-                            .word_break(WordBreak::KeepAll)
+                        copy
                             .font_size(fs.size())
                             .line_height(fs.line_height())
                             .font_weight(weight.value())
@@ -1305,7 +1336,11 @@ pub fn NameThenPill(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, ga
                     None => Modifier::new().weight(1.0).width(0.0),
                 };
                 cu::Box().alignment(Alignment::CenterStart).modifier(name_box).content(|| {
-                    Label(name, fs, weight, color, Some(1));
+                    if mono {
+                        MonoLine(name, fs, weight, color);
+                    } else {
+                        Label(name, fs, weight, color, Some(lines));
+                    }
                 });
                 cu::Spacer().modifier(Modifier::new().width(gap));
                 // No weight and no width: the pill is as wide as its content, always.

@@ -118,9 +118,11 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
     let title = chip.map(|c| c.name.clone()).unwrap_or_else(|| "컴퓨터".to_string());
     let window = crate::ui::window_size::current_window_size();
     let columns = mon_columns(window.width_dp);
-    // The header (60) and, where the sheet is the whole window, the strip above it (FR-L33).
+    // The header (60), the 1 dp line under it and, where the sheet is the whole window, the
+    // strip above it (FR-L33).
     let top_inset = super::components::full_screen_sheet_top_inset(window.width_dp, true, crate::ui::safe_area::safe_area());
-    let body_height = super::components::sheet_body_max_height(window.width_dp, window.height_dp, true, 60.0 + top_inset).min(1200.0);
+    let body_height = super::components::sheet_body_max_height(window.width_dp, window.height_dp, true, MON_CHROME_H + top_inset).min(1200.0);
+    let scroll_pad = mon_scroll_pad(window.width_dp);
     let state = chip.map(|c| reach_pill(c.reachability));
 
     // The state pill sits in the header, beside the close button (`.mon-state`).
@@ -134,7 +136,7 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
         cu::ScrollColumn()
             .modifier(Modifier::new().fill_max_width().height(body_height).background(paint(p.bg)))
             .content(|| {
-                cu::Column().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+                cu::Column().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width().padding(scroll_pad)).content(|| {
                     let Some(c) = chip else {
                         cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().height(240.0)).content(|| {
                             Label("컴퓨터를 찾을 수 없습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -169,6 +171,17 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
                 });
             });
     });
+}
+
+/// What the monitor sheet draws above its scrolling body: the 60 dp header and the 1 dp line
+/// under it. The body was sized for the header alone, so it ran 1 dp past the dialog's edge
+/// (review sf A: the 1440 footer note was cut at the dialog's bottom edge).
+pub const MON_CHROME_H: f32 = 60.0 + 1.0;
+
+/// The scrolling body's padding, the room under the last line when it is scrolled into view:
+/// `.mon-scroll{padding:var(--sp5)}` (20), 16 at 560 and below (`.mon-scroll{padding:var(--sp4)}`).
+pub fn mon_scroll_pad(width_dp: f32) -> f32 {
+    if width_dp <= 560.0 { 16.0 } else { 20.0 }
 }
 
 /// `.mon-off`: a red soft banner with the notice, for a computer that is not online.
@@ -655,15 +668,15 @@ mod tests {
         assert_eq!(dialog_max_height(844.0, SafeArea { top: 8.0, leading: 40.0, trailing: 0.0 }), 812.0, "never under 16");
         assert_eq!(dialog_max_height(844.0, SafeArea { top: 32.0, leading: 0.0, trailing: 138.0 }), 812.0, "a trailing caption covers no leading strip");
         let _guard = crate::services::test_guard();
-        // The body is the dialog less its 60 header: 900 - 2 x 66 - 60 = 708 with the lights,
-        // 900 - 32 - 60 = 808 with a zero report.
+        // The body is the dialog less its 60 header and the 1 dp line under it:
+        // 900 - 2 x 66 - 61 = 707 with the lights, 900 - 32 - 61 = 807 with a zero report.
         for width in [561.0, 1440.0] {
             let sent = monitor_after_report(width, 900.0, 66.0, 98.0);
             if current_platform() == Platform::MacOs {
-                assert!(sent.contains("Height(708.0)") && !sent.contains("Height(808.0)"), "the dialog below the lights at {width}: {sent}");
+                assert!(sent.contains("Height(707.0)") && !sent.contains("Height(807.0)"), "the dialog below the lights at {width}: {sent}");
             }
             let sent = monitor_after_report(width, 900.0, 0.0, 0.0);
-            assert!(sent.contains("Height(808.0)") && !sent.contains("Height(708.0)"), "no change with a zero safe area at {width}: {sent}");
+            assert!(sent.contains("Height(807.0)") && !sent.contains("Height(707.0)"), "no change with a zero safe area at {width}: {sent}");
         }
     }
 
@@ -692,6 +705,25 @@ mod tests {
         }
         let head = monitor_head_after_report(390.0, 0.0, 0.0);
         assert!(!head.contains("Height(31.0)") && !head.contains("Height(28.0)"), "no strip with a zero safe area: {head}");
+    }
+
+    #[test]
+    fn fr_l21_the_monitor_body_ends_at_the_dialog_edge_with_the_mockup_padding() {
+        // Review sf A: at 1440 the footer note under the process table was cut at the dialog's
+        // bottom edge. The body is sized for the header and its line (61), so it ends at the
+        // dialog's edge, and the scroll keeps the mockup's padding under the last line.
+        assert_eq!(MON_CHROME_H, 61.0);
+        assert_eq!(mon_scroll_pad(1440.0), 20.0);
+        assert_eq!(mon_scroll_pad(561.0), 20.0);
+        assert_eq!(mon_scroll_pad(560.0), 16.0);
+        assert_eq!(mon_scroll_pad(390.0), 16.0);
+        let _guard = crate::services::test_guard();
+        let wide = monitor_after_report(1440.0, 900.0, 0.0, 0.0);
+        assert!(wide.contains("Height(807.0)") && wide.contains("Padding(20.0)"), "{wide}");
+        let phone = monitor_after_report(390.0, 844.0, 0.0, 0.0);
+        // The report only sends what changed: the phone keeps the 16 it started with, so no
+        // Padding(20.0) is sent, and the body is the window less the 61 dp chrome.
+        assert!(phone.contains("Height(783.0)") && !phone.contains("Padding(20.0)"), "{phone}");
     }
 
     #[test]

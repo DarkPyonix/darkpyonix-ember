@@ -56,7 +56,9 @@ impl IntoResponse for ApiError {
             ComputerError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ComputerError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (code, Json(json!({ "error": format!("{:#}", self.0) }))).into_response()
+        // FR-L18 (#519): a transport error may quote the node URL it failed on.
+        let error = super::strip_urls_in_text(&format!("{:#}", self.0));
+        (code, Json(json!({ "error": error }))).into_response()
     }
 }
 
